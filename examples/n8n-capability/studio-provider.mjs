@@ -6,10 +6,6 @@ import { n8nWorkflowSha256, n8nResultSha256 } from '../../packages/cli/dist/sema
 
 /** The operator owns provisioning. Neither this API key nor credential data reaches a KA or browser. */
 export function createStudioProvider({ repository, config, graphId, owner, headerCredential, credentials, fetchImpl = fetch }) {
-  const { db } = repository;
-  db.exec(`CREATE TABLE IF NOT EXISTS studio_saved_native (
-    ka_ref TEXT PRIMARY KEY, compiled_json TEXT NOT NULL, published_json TEXT NOT NULL,
-    withdrawn INTEGER NOT NULL DEFAULT 0);`);
   const error = message => Object.assign(new Error(message), { status: 409, code: 'INVALID_WORKFLOW' });
   async function api(path, method = 'GET', body) {
     const installation = config.n8nNative;
@@ -87,10 +83,9 @@ export function createStudioProvider({ repository, config, graphId, owner, heade
     const native = await api('/workflows/' + compiled.grant.workflowId);
     const published = native.activeVersion ? { ...native.activeVersion, settings: native.settings } : native;
     if (!native.active || n8nWorkflowSha256(published) !== compiled.grant.workflowSha256) throw error('Saved native revision is unavailable.');
-    db.prepare('INSERT INTO studio_saved_native (ka_ref,compiled_json,published_json) VALUES (?,?,?) ON CONFLICT(ka_ref) DO NOTHING')
-      .run(compiled.kaRef, JSON.stringify({ definition: compiled.definition, grant: compiled.grant, mode: compiled.mode, kaRef: compiled.kaRef }), JSON.stringify(published));
+    repository.mcp.recordSavedNative(compiled, published);
   }
   const timerEvents = options => nativeTimerEvents(api, { ...options, graphId, owner });
   const executionInput = options => readNativeExecutionInput(api, options);
-  return { db, api, recordSavedNative, provision, setPublished, installGrant, timerEvents, executionInput };
+  return { api, recordSavedNative, provision, setPublished, installGrant, timerEvents, executionInput };
 }

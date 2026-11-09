@@ -113,12 +113,13 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
   try {
     if (nosStudioSession && repository?.hasActiveWorkflows())
       throw new Error('Deactivate legacy schedules before adopting Studio state for an account.');
-    studio = repository ? createStudioService({ graphId, owner, client, repository, provider, dkg: dkgComponentStore(repository.db), exportTokenFile,
+    const dkg = repository ? dkgComponentStore(repository.db) : undefined;
+    studio = repository ? createStudioService({ graphId, owner, client, repository, provider, dkg, exportTokenFile,
       listCapabilities: async () => [...await list(), ...await listPrograms()],
       loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner) }) : null;
     const mcpFlags = studioMcpFlags();
     if (mcpFlags.enabled && (!nosStudioSession || !provider)) throw new Error('Studio MCP requires an authenticated account companion.');
-    mcp = mcpFlags.enabled ? createStudioMcpService({ provider, installation: config.n8nNative, accountId: nosStudioSession.accountId }) : null;
+    mcp = mcpFlags.enabled ? createStudioMcpService({ repository, provider, dkg, installation: config.n8nNative, accountId: nosStudioSession.accountId }) : null;
     mcpHttp = mcp ? createStudioMcpHttp({ service: mcp, session: nosStudioSession, agentEnabled: mcpFlags.agentEnabled }) : null;
     commitAccountBinding?.();
   } catch (error) { studio?.stop(); repository?.close(); throw error; }

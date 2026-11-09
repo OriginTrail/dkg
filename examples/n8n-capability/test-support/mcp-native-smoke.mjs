@@ -17,6 +17,7 @@ const { component } = await import('../component-registry.mjs');
 const { createStudioRepository } = await import('../studio-repository.mjs');
 const { createStudioProvider } = await import('../studio-provider.mjs');
 const { createStudioMcpService } = await import('../studio-mcp-service.mjs');
+const { dkgComponentStore } = await import('../dkg-components.mjs');
 const { createStudioMcpHttp } = await import('../studio-mcp-http.mjs');
 const { createStudioNativeRunner } = await import('../studio-native-runner.mjs');
 const { loadNosStudioSession } = await import('../nos-studio-session.mjs');
@@ -68,7 +69,7 @@ try {
   await provider.recordSavedNative(compiled);
   // n8n publication returns before local webhook registration settles.
   await delay(1500);
-  service = createStudioMcpService({ provider, accountId: profile.accountId, profile,
+  service = createStudioMcpService({ repository, provider, dkg: dkgComponentStore(repository.db, undefined, undefined, profile), accountId: profile.accountId, profile,
     runner: createStudioNativeRunner(provider, installation, (url, options) => { posts++; return fetch(url, options); }) });
   const secret = randomBytes(32).toString('hex'), secretFile = join(state, 'smoke-service-key'), sessionFile = join(state, 'smoke-session.json');
   writeFileSync(secretFile, secret, { mode: 0o600 });

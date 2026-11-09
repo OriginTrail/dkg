@@ -1,6 +1,7 @@
 import { mkdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { createStudioMcpRepository } from './studio-mcp-repository.mjs';
 
 const invalid = message => { throw Object.assign(new Error(message), { status: 409, code: 'INVALID_WORKFLOW' }); };
 /** Saved revisions and event identities belong to Studio, independently of the executor. */
@@ -12,6 +13,7 @@ export function createStudioRepository(state) {
     grant_json TEXT, activation_json TEXT, event_key TEXT, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS events (provider_id TEXT NOT NULL, execution_id TEXT NOT NULL,
     ka_ref TEXT NOT NULL, invocation_id TEXT NOT NULL, input_json TEXT, receipt_json TEXT, PRIMARY KEY(provider_id,execution_id));`);
+  let mcp;
   db.exec('BEGIN IMMEDIATE');
   try {
     const columns = db.prepare('PRAGMA table_info(workflows)').all();
@@ -23,6 +25,7 @@ export function createStudioRepository(state) {
       db.prepare('UPDATE workflows SET executor=?,requires_export=?,grant_json=? WHERE ka_ref=?').run(
         program ? 'dkg-program' : 'native-n8n', grant.requiresExportAuthorization ? 1 : 0, program ? null : saved.grant_json, saved.ka_ref);
     }
+    mcp = createStudioMcpRepository(db);
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); db.close(); throw error; }
   const row = ref => db.prepare('SELECT * FROM workflows WHERE ka_ref=?').get(ref);
@@ -100,7 +103,7 @@ export function createStudioRepository(state) {
     if (result.changes !== 1) invalid('The reserved event identity or completed receipt changed.');
     return receipt;
   }
-  return { db, row, ensure, saved, nativeRevision, beginNativeCreate, nativeCreated, nativeGranted, activation, setActivation, reserveEvent, completeEvent,
+  return { db, mcp, row, ensure, saved, nativeRevision, beginNativeCreate, nativeCreated, nativeGranted, activation, setActivation, reserveEvent, completeEvent,
     nativeWorkflow: providerId => db.prepare('SELECT ka_ref FROM workflows WHERE provider_id=?').get(providerId),
     hasActiveWorkflows: () => db.prepare('SELECT activation_json FROM workflows WHERE activation_json IS NOT NULL').all().some(r => JSON.parse(r.activation_json).active),
     eventWorkflow: key => db.prepare('SELECT * FROM workflows WHERE event_key=?').get(key),

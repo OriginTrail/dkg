@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { n8nWorkflowSha256, n8nPinnedExecutionMatches } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { collectN8nExecutionResult } from '../../packages/cli/dist/semantic-runtime-n8n-results.js';
-import { fail } from './studio-mcp-contract.mjs';
+import { fail, hash, nativeInputDigest } from './studio-mcp-contract.mjs';
+import { recordedNativeExecutionInput } from './studio-native-execution.mjs';
 
 /** Native transport only: no Program upload, approval, invocation or execution receipt. */
 export function createStudioNativeRunner(provider, installation, send = fetch) {
@@ -42,8 +43,14 @@ export function createStudioNativeRunner(provider, installation, send = fetch) {
     const published = { ...workflow.published, versionId: saved.version_id };
     if (!['success', 'error', 'canceled', 'crashed'].includes(execution.status)
       || !n8nPinnedExecutionMatches(published, execution, workflow.grant, saved.version_id)) throw fail('STUDIO_NATIVE_UNCONFIRMED');
-    const received = execution.data?.resultData?.runData?.['Receive input']?.[0]?.data?.main?.[0]?.[0]?.json?.body;
-    if (received?.invocationId !== runKey) throw fail('STUDIO_NATIVE_UNCONFIRMED');
+    try {
+      // Terminal inspection requires completed Receive input evidence. A pending
+      // stack alone suffices only for running callbacks, not terminal attribution.
+      if (execution.data?.resultData?.runData?.['Receive input'] === undefined) throw fail('STUDIO_NATIVE_UNCONFIRMED');
+      const received = recordedNativeExecutionInput(execution);
+      if (received.invocationId !== runKey || !hash(saved.input_sha256)
+        || nativeInputDigest(received.input) !== saved.input_sha256) throw fail('STUDIO_NATIVE_UNCONFIRMED');
+    } catch { throw fail('STUDIO_NATIVE_UNCONFIRMED'); }
     if (execution.status !== 'success') return { status: 'failed' };
     try {
       const result = collectN8nExecutionResult(workflow.grant, execution);

@@ -13,6 +13,7 @@ const { compileStudio } = await import('./studio-definition.mjs');
 const { createStudioRepository } = await import('./studio-repository.mjs');
 const { createStudioProvider } = await import('./studio-provider.mjs');
 const { createStudioMcpService } = await import('./studio-mcp-service.mjs');
+const { dkgComponentStore } = await import('./dkg-components.mjs');
 const { handleDkgComponentCallback } = await import('./bridge.mjs');
 
 test('shared callback preserves MCP routing and does not fall back after an MCP rejection', async t => {
@@ -47,17 +48,16 @@ test('native DKG callback uses the admitted pins, typed profile and full agent a
   const published = { ...compiled.workflow, id: 'native-read', versionId: 'v1', active: true };
   const repository = createStudioRepository(state);
   const provider = createStudioProvider({ repository, config: { n8nNative: { workflows: [] } }, graphId: 'test', owner: '0x' + 'a'.repeat(40) });
-  t.after(() => { if (provider.db.isOpen) repository.close(); });
+  t.after(() => { if (repository.db.isOpen) repository.close(); });
   const runKey = '123e4567-e89b-42d3-a456-426614174088';
   let inputEvidence;
   provider.api = async path => path.startsWith('/workflows') ? published : { id: '42', workflowId: 'native-read', workflowVersionId: 'v1', status: 'running', workflowData: published,
     data: inputEvidence };
   // Test fixture installs the same durable saved record that a completed owner save writes.
-  provider.db.prepare('INSERT INTO studio_saved_native (ka_ref,compiled_json,published_json) VALUES (?,?,?)')
-    .run(compiled.kaRef, JSON.stringify(compiled), JSON.stringify(published));
+  repository.mcp.recordSavedNative(compiled, published);
   const actor = { id: 'owner', role: 'owner', accountId: 'account-test', startedBy: 'agent:a', agentVersion: 'v1', toolDigest: 'd'.repeat(64), approvalDecisionId: 'decision-1' };
   let earlyCallback;
-  const s = createStudioMcpService({ provider, accountId: actor.accountId, profile,
+  const s = createStudioMcpService({ repository, provider, dkg: dkgComponentStore(repository.db, undefined, undefined, profile), accountId: actor.accountId, profile,
     runner: { async prepare() { return 'v1'; }, async dispatch(_workflow, invocationId, input) {
       inputEvidence = { executionData: { nodeExecutionStack: [{ node: { name: 'Receive input' },
         data: { main: [[{ json: { body: { invocationId, input } } }]] } }] } };
@@ -83,12 +83,20 @@ test('native DKG callback uses the admitted pins, typed profile and full agent a
   await assert.rejects(s.dkgComponent(callback), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
   inputEvidence = admittedEvidence;
   await s.dkgComponent(callback); assert.equal(calls.length, 1);
+  const completedInput = { data: structuredClone(admittedEvidence.executionData.nodeExecutionStack[0].data) };
+  inputEvidence = { resultData: { runData: { 'Receive input': [completedInput] } } };
+  await s.dkgComponent(callback); assert.equal(calls.length, 1); // The same decoder accepts saved progress.
+  inputEvidence.executionData = structuredClone(admittedEvidence.executionData);
+  inputEvidence.executionData.nodeExecutionStack[0].data.main[0][0].json.body.input.itemsJson = '[{"sample":"conflicting"}]';
+  await assert.rejects(s.dkgComponent(callback), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
+  inputEvidence.executionData = structuredClone(admittedEvidence.executionData);
+  await s.dkgComponent(callback); assert.equal(calls.length, 1);
   inputEvidence = { resultData: { runData: { 'Receive input': [{ data: { main: [[{ json: { body: { invocationId: 'foreign-run' } } }]] } }] } } };
   await assert.rejects(s.dkgComponent(callback), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
   inputEvidence = undefined;
-  provider.db.prepare("UPDATE studio_tool_runs SET execution_id=NULL, status='unconfirmed'").run();
+  repository.db.prepare("UPDATE studio_tool_runs SET execution_id=NULL, status='unconfirmed'").run();
   await assert.rejects(s.dkgComponent(callback), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
-  provider.db.prepare("UPDATE studio_tool_runs SET execution_id='42', status='running'").run();
+  repository.db.prepare("UPDATE studio_tool_runs SET execution_id='42', status='running'").run();
   const revision = profile.revision;
   profile.revision = 'f'.repeat(64);
   await assert.rejects(s.dkgComponent(callback));
@@ -102,7 +110,8 @@ test('native DKG callback uses the admitted pins, typed profile and full agent a
   const reopenedRepository = createStudioRepository(state);
   const reopened = createStudioProvider({ repository: reopenedRepository, config: { n8nNative: { workflows: [] } }, graphId: 'test', owner: '0x' + 'a'.repeat(40) });
   t.after(() => reopenedRepository.close());
-  const restored = createStudioMcpService({ provider: reopened, accountId: actor.accountId, profile,
+  const restored = createStudioMcpService({ repository: reopenedRepository, provider: reopened,
+    dkg: dkgComponentStore(reopenedRepository.db, undefined, undefined, profile), accountId: actor.accountId, profile,
     runner: { async inspect() { return { status: 'succeeded', output: { secret: 'retained' } }; } } });
   assert.equal(restored.list(owner).length, 0);
   await assert.rejects(restored.run({ ...input, runKey: 'new-run' }, actor), { code: 'STUDIO_WORKFLOW_WITHDRAWN' });

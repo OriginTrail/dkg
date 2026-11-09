@@ -142,7 +142,7 @@ no fallback that drops agent identity or retries under the owner's manual path.
 ## Durability and capacity
 
 `studio_tool_runs` is a native admission/checkpoint journal in the existing
-account-bound SQLite database. It stores pins, request digest, actor correlation,
+account-bound SQLite database. It stores pins, digests of the request and normalized input, actor correlation,
 state and native acknowledgement; **no plaintext arguments or output**. It is
 not an additional authority, receipt engine or scheduler. The DKG journal and
 n8n continue retaining execution values under their existing policy.
@@ -152,6 +152,20 @@ account, including across workers/restarts. The owner's Test/manual run does not
 consume this slot. A new agent request reconciles an acknowledged prior run first;
 only verified native terminal evidence releases capacity. Caller timeout, process
 restart and the n8n 50-second setting do not release it by themselves.
+
+The Studio repository owns both the saved native snapshots and the admission
+journal, including migrations, withdrawal, reservation conflicts and checkpoint
+updates. The provider handles native transport; the MCP service uses the injected
+repository and DKG component journal.
+
+Before dispatch, the admission stores `input_sha256` for the complete normalized
+wire input. Terminal inspection uses the same recorded-input decoder as DKG
+callbacks, requires a unique completed `Receive input` record, and compares its
+input digest and invocation identity with admission. Missing, changed, duplicate
+or conflicting input evidence cannot return output or release the slot, including
+for failed native executions. Existing rows migrate with a null digest: it is
+never reconstructed from a retry or untrusted execution evidence. Such active
+legacy runs remain held for operator reconciliation.
 
 Reservation and an uncertain state are durable before POST. A duplicate matching
 run key reads the same run; changed arguments, pins or authority conflict. No
@@ -202,8 +216,9 @@ node --test examples/n8n-capability/studio-mcp*.test.mjs
 Tests use private temporary SQLite databases, a loopback HTTP native-provider
 fixture and an explicit fictional read profile. They cover pins, authority
 headers, read-only rejection, changed arguments, concurrent reservation, restart,
-unknown acknowledgement, actual terminal release, owner/agent slot separation,
-withdrawal, bounded outputs and agent attribution on DKG callbacks.
+unknown acknowledgement, exact input verification before terminal release,
+legacy digest migration, owner/agent slot separation, withdrawal, bounded outputs
+and agent attribution on DKG callbacks.
 
 ### Native n8n callback regression
 

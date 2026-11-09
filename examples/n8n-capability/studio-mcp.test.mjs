@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { createStudioRepository } from './studio-repository.mjs';
 import { createStudioProvider } from './studio-provider.mjs';
 import { compileStudio, normalizeStudio } from './studio-definition.mjs';
@@ -12,7 +13,7 @@ import { createStudioMcpService } from './studio-mcp-service.mjs';
 import { createStudioMcpHttp, studioMcpFlags } from './studio-mcp-http.mjs';
 import { createStudioNativeRunner } from './studio-native-runner.mjs';
 import { loadNosStudioSession } from './nos-studio-session.mjs';
-import { readOnlyDefinition } from './studio-mcp-contract.mjs';
+import { canonical, readOnlyDefinition, runInput } from './studio-mcp-contract.mjs';
 import { componentRegistry, component } from './component-registry.mjs';
 import { createNosNodeClient } from './nos-node-transport.mjs';
 
@@ -34,8 +35,8 @@ async function fixture(t, runner) {
   open(); t.after(() => repository.close());
   await provider.recordSavedNative(compiled);
   const input = (runKey = 'run-one') => ({ kaRef: compiled.kaRef, workflowSha256: compiled.grant.workflowSha256, runKey, arguments: { value: 'sensitive-input' } });
-  const service = () => createStudioMcpService({ provider, installation: config.n8nNative, accountId: owner.accountId, profile: null, ...(runner ? { runner } : {}) });
-  return { state, compiled, published, config, input, get provider() { return provider; }, service,
+  const service = () => createStudioMcpService({ repository, provider, installation: config.n8nNative, accountId: owner.accountId, profile: null, ...(runner ? { runner } : {}) });
+  return { state, compiled, published, config, input, get repository() { return repository; }, get provider() { return provider; }, service,
     restart() { repository.close(); open(); return service(); } };
 }
 function controllable() {
@@ -44,6 +45,29 @@ function controllable() {
     runner: { async prepare() { if (badPin) throw Error('changed pin'); return 'v1'; },
       async dispatch() { count++; if (loseAck) throw Error('lost acknowledgement'); return String(count); },
       async inspect() { return { status, ...(status === 'succeeded' ? { output: { items: [{ result: 'private-output' }], ports: {} } } : {}) }; } } };
+}
+async function nativeFixture(t) {
+  const f = await fixture(t), state = { posts: 0, execution: null };
+  const runner = createStudioNativeRunner({ api: async path => path.startsWith('/workflows') ? f.published : structuredClone(state.execution) },
+    f.config.n8nNative, async (_url, options) => {
+      const body = JSON.parse(options.body); state.posts++;
+      const observer = createStudioRepository(f.state);
+      try {
+        const admitted = observer.mcp.run(owner.accountId, body.invocationId);
+        assert.equal(admitted.status, 'unconfirmed');
+        assert.equal(admitted.version_id, 'v1');
+        assert.equal(admitted.execution_id, null);
+        assert.equal(admitted.input_sha256, createHash('sha256').update(canonical(body.input)).digest('hex'));
+      } finally { observer.close(); }
+      state.execution = { id: '42', workflowId: f.compiled.grant.workflowId, workflowVersionId: 'v1', status: 'running', workflowData: f.published,
+        data: { resultData: { runData: {
+          'Receive input': [{ data: { main: [[{ json: { body } }]] } }],
+          [f.compiled.grant.result.nodes[0]]: [{ data: { main: [[{ json: { value: 'private-output' } }]] } }],
+        } } } };
+      return Response.json({ executionId: '42' });
+    });
+  return { f, state, service: () => createStudioMcpService({ repository: f.repository, provider: f.provider,
+    accountId: owner.accountId, profile: null, runner }) };
 }
 test('saved pins and scalar arguments are mandatory; failed preflight cannot execute', async t => {
   const c = controllable(), f = await fixture(t, c.runner), s = f.service(), pin = { kaRef: f.input().kaRef, workflowSha256: f.input().workflowSha256 };
@@ -76,7 +100,7 @@ test('timeout and restart retain one account slot; repeat is inspection, owner T
   assert.deepEqual(done.output.items, [{ result: 'private-output' }]);
   assert.equal((await s.run(f.input('second'), actor)).status, 'succeeded');
   assert.equal(c.count, 3);
-  const rows = JSON.stringify(f.provider.db.prepare('SELECT * FROM studio_tool_runs').all());
+  const rows = JSON.stringify(f.repository.db.prepare('SELECT * FROM studio_tool_runs').all());
   assert.doesNotMatch(rows, /sensitive-input|private-output/);
 });
 test('lost acknowledgement is never redispatched or released by a new service instance', async t => {
@@ -91,12 +115,23 @@ test('lost acknowledgement is never redispatched or released by a new service in
   assert.equal(c.count, 1);
 });
 test('cross-worker reservation wins once, and failed native completion releases capacity', async t => {
-  const c = controllable(), f = await fixture(t, c.runner), a = f.service(), b = f.service();
+  const c = controllable(), f = await fixture(t, c.runner), a = f.service();
+  const other = createStudioRepository(f.state); t.after(() => other.close());
+  const b = createStudioMcpService({ repository: other, provider: f.provider, accountId: owner.accountId, profile: null, runner: c.runner });
   const results = await Promise.allSettled([a.run(f.input('one'), actor), b.run(f.input('two'), actor)]);
   assert.equal(results.filter(r => r.status === 'fulfilled').length, 1); assert.equal(c.count, 1);
   c.status = 'failed';
   assert.equal((await b.run(f.input('three'), actor)).status, 'failed');
   assert.equal(c.count, 2);
+});
+test('two repository connections reserve a matching run only once', async t => {
+  const c = controllable(), f = await fixture(t, c.runner), a = f.service();
+  const other = createStudioRepository(f.state); t.after(() => other.close());
+  const b = createStudioMcpService({ repository: other, provider: f.provider, accountId: owner.accountId, profile: null, runner: c.runner });
+  await Promise.all([a.run(f.input(), actor), b.run(f.input(), actor)]);
+  assert.equal(c.count, 1);
+  await assert.rejects(b.run({ ...f.input(), arguments: { value: 'different' } }, actor), { code: 'STUDIO_RUN_KEY_CONFLICT' });
+  assert.equal((await b.readRun({ runKey: 'run-one' }, actor)).status, 'running');
 });
 test('read-only admission uses an explicit list; no HTTP, file, wait, loop, subworkflow or Program', () => {
   const unsupported = componentRegistry.filter(d => ['Integrations', 'Files', 'Events'].includes(d.category)
@@ -121,6 +156,20 @@ test('withdrawal suppresses retained output but still reconciles terminal capaci
   const result = await s.readRun({ runKey: 'run-one' }, actor);
   assert.equal(result.status, 'succeeded'); assert.equal(result.output, undefined);
 });
+test('withdrawal and immutable saved snapshots survive repeat save and repository reopen', async t => {
+  const c = controllable(), f = await fixture(t, c.runner), s = f.service();
+  const pin = { kaRef: f.input().kaRef, workflowSha256: f.input().workflowSha256 };
+  s.withdraw(pin, owner);
+  const before = f.repository.mcp.savedNative(pin.kaRef);
+  await f.provider.recordSavedNative(f.compiled);
+  assert.deepEqual(f.repository.mcp.savedNative(pin.kaRef), before);
+  const reopened = f.restart();
+  assert.deepEqual(f.repository.mcp.savedNative(pin.kaRef), before);
+  assert.equal(reopened.list(owner).length, 0);
+  assert.equal(reopened.get(pin, owner).approved, false);
+  await assert.rejects(reopened.run(f.input(), actor), { code: 'STUDIO_WORKFLOW_WITHDRAWN' });
+  assert.equal(c.count, 0);
+});
 test('native HTTP dispatch checks acknowledgement and verifies exact execution/version/run identity', async t => {
   const f = await fixture(t), { compiled, published } = f;
   let count = 0, execution;
@@ -138,21 +187,29 @@ test('native HTTP dispatch checks acknowledgement and verifies exact execution/v
   // Exercise the real preflight through admission: a changed published digest
   // must fail before the HTTP webhook is posted.
   published.nodes[0].parameters.unreviewed = true;
-  const service = createStudioMcpService({ provider: f.provider, installation: f.config.n8nNative,
+  const service = createStudioMcpService({ repository: f.repository, provider: f.provider, installation: f.config.n8nNative,
     accountId: owner.accountId, profile: null, runner });
   assert.equal((await service.run(f.input('changed-native'), actor)).status, 'failed');
   assert.equal(count, 0);
   delete published.nodes[0].parameters.unreviewed;
-  assert.equal(await runner.dispatch(workflow, 'native-run', { itemsJson: '[{}]' }), '42');
-  const checkpoint = { execution_id: '42', version_id: 'v1' };
+  const input = runInput(f.input('native-run'), workflow, null);
+  assert.equal(await runner.dispatch(workflow, 'native-run', input), '42');
+  const checkpoint = { execution_id: '42', version_id: 'v1', input_sha256: createHash('sha256').update(canonical(input)).digest('hex') };
   execution = { id: '42', workflowId: 'native-one', status: 'running' };
   assert.equal((await runner.inspect(workflow, checkpoint, 'native-run')).status, 'running');
   execution = { id: '42', workflowId: 'native-one', workflowVersionId: 'v1', status: 'success', workflowData: published,
     data: { resultData: { runData: {
-      'Receive input': [{ data: { main: [[{ json: { body: { invocationId: 'native-run' } } }]] } }],
+      'Receive input': [{ data: { main: [[{ json: { body: { invocationId: 'native-run', input } } }]] } }],
       [compiled.grant.result.nodes[0]]: [{ data: { main: [[{ json: { answer: 42 } }]] } }],
     } } } };
   assert.deepEqual((await runner.inspect(workflow, checkpoint, 'native-run')).output.items, [{ answer: 42 }]);
+  const received = execution.data.resultData.runData['Receive input'][0].data.main[0][0].json.body;
+  for (const invalid of [undefined, { ...input, itemsJson: '[{"value":"another-input"}]' },
+    { ...input, paramsJson: '{}' }, { ...input, executionId: 'other' }]) {
+    received.input = invalid;
+    await assert.rejects(runner.inspect(workflow, checkpoint, 'native-run'), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
+  }
+  received.input = input;
   await assert.rejects(runner.inspect(workflow, checkpoint, 'wrong-run'));
   execution.workflowVersionId = 'v2'; await assert.rejects(runner.inspect(workflow, checkpoint, 'native-run'));
   execution.workflowVersionId = 'v1';
@@ -164,6 +221,66 @@ test('native HTTP dispatch checks acknowledgement and verifies exact execution/v
   assert.equal((await runner.inspect(workflow, checkpoint, 'native-run')).status, 'failed');
   assert.equal(count, 1);
 });
+for (const status of ['success', 'error', 'canceled', 'crashed']) test(`native ${status} requires exact unique admitted input after restart before releasing capacity`, async t => {
+  const { f, state, service } = await nativeFixture(t);
+  let s = service();
+  assert.equal((await s.run(f.input(), actor)).status, 'running');
+  assert.equal(f.provider.db, undefined); // Persistence belongs to the injected repository.
+  const admitted = f.repository.mcp.run(owner.accountId, 'run-one');
+  f.restart(); s = service();
+  assert.deepEqual(f.repository.mcp.run(owner.accountId, 'run-one'), admitted);
+  state.execution.status = status;
+  const original = structuredClone(state.execution);
+  const received = e => e.data.resultData.runData['Receive input'][0].data.main[0][0].json.body;
+  const pending = e => ({ node: { name: 'Receive input' }, data: { main: [[{ json: { body: structuredClone(received(e)) } }]] } });
+  for (const [name, change] of [
+    ['missing input', e => { delete received(e).input; }],
+    ['changed arguments', e => { received(e).input.itemsJson = '[{"value":"other"}]'; }],
+    ['changed parameters', e => { received(e).input.paramsJson = '{}'; }],
+    ['changed execution input', e => { received(e).input.executionId = '42'; }],
+    ['unexpected input field', e => { received(e).input.unexpected = true; }],
+    ['foreign invocation', e => { received(e).invocationId = 'other-run'; }],
+    ['duplicate Receive input task', e => { e.data.resultData.runData['Receive input'].push(structuredClone(e.data.resultData.runData['Receive input'][0])); }],
+    ['duplicate Receive input item', e => { const items = e.data.resultData.runData['Receive input'][0].data.main[0]; items.push(structuredClone(items[0])); }],
+    ['conflicting pending input', e => { e.data.executionData = { nodeExecutionStack: [pending(e)] };
+      e.data.executionData.nodeExecutionStack[0].data.main[0][0].json.body.input.itemsJson = '[{"value":"other"}]'; }],
+    ['pending-only terminal input', e => { e.data.executionData = { nodeExecutionStack: [pending(e)] }; delete e.data.resultData.runData['Receive input']; }],
+  ]) {
+    state.execution = structuredClone(original); change(state.execution);
+    const result = await s.readRun({ runKey: 'run-one' }, actor);
+    assert.equal(result.status, 'running', name);
+    assert.equal(result.output, undefined, name);
+    await assert.rejects(s.run(f.input('second'), actor), { code: 'STUDIO_BUSY' }, name);
+    assert.equal(state.posts, 1, name);
+  }
+  state.execution = original;
+  // Both representations may coexist only if they prove the same input.
+  state.execution.data.executionData = { nodeExecutionStack: [pending(original)] };
+  const result = await s.readRun({ runKey: 'run-one' }, actor);
+  assert.equal(result.status, status === 'success' ? 'succeeded' : 'failed');
+  assert.deepEqual(result.output?.items, status === 'success' ? [{ value: 'private-output' }] : undefined);
+  assert.equal((await s.run(f.input('second'), actor)).status, 'running');
+  assert.equal(state.posts, 2);
+});
+
+test('migration never invents an admitted input digest for legacy runs or releases their slot', async t => {
+  const { f, state, service } = await nativeFixture(t);
+  let s = service();
+  assert.equal((await s.run(f.input(), actor)).status, 'running');
+  f.repository.db.exec('ALTER TABLE studio_tool_runs DROP COLUMN input_sha256');
+  const before = f.repository.mcp.run(owner.accountId, 'run-one');
+  f.restart(); s = service();
+  const { input_sha256, ...after } = f.repository.mcp.run(owner.accountId, 'run-one');
+  assert.equal(input_sha256, null);
+  assert.deepEqual(after, before);
+  state.execution.status = 'success';
+  assert.equal((await s.readRun({ runKey: 'run-one' }, actor)).output, undefined);
+  assert.equal((await s.run(f.input(), actor)).status, 'running');
+  assert.equal(f.repository.mcp.run(owner.accountId, 'run-one').input_sha256, null);
+  await assert.rejects(s.run(f.input('second'), actor), { code: 'STUDIO_BUSY' });
+  assert.equal(state.posts, 1);
+});
+
 test('HTTP MCP authenticates before dispatch, rejects browser/bearer/forged authority, and supports run lookup', async t => {
   const c = controllable(), f = await fixture(t, c.runner), service = f.service();
   const secret = 'fixture-service-secret'.repeat(3), secretFile = join(f.state, 'service-key');
