@@ -131,6 +131,19 @@ describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
       expect(useTabsStore.getState().activeTabId).toBe('dashboard');
     });
 
+    it('turns nothing on from routing a deep link with ?marketplace: only the app\'s start-up does', () => {
+      localStorage.removeItem('dkg-marketplace-enabled');
+      window.history.replaceState({}, '', '/ui/marketplace/plans?marketplace');
+      try {
+        const ref = { current: '' };
+        mountAtPath('/marketplace/plans', ref);
+        expect(useTabsStore.getState().activeTabId).toBe('dashboard');
+        expect(localStorage.getItem('dkg-marketplace-enabled')).toBeNull();
+      } finally {
+        window.history.replaceState({}, '', '/');
+      }
+    });
+
     it('opens a marketplace deep link once the section is enabled', () => {
       localStorage.setItem('dkg-marketplace-enabled', '1');
       try {
