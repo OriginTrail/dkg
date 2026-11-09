@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
+import type { ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
 import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { handleKaShareAsyncEnqueue } from '../src/daemon/routes/knowledge-assets-async-share.js';
@@ -27,6 +28,8 @@ type AgentReads = {
   listContextGraphs: () => Promise<unknown[]>;
   contextGraphHasLocalContent?: (id: string) => Promise<boolean>;
   contextGraphExists?: (id: string) => Promise<boolean>;
+  probeContextGraphWritePreflight?: (id: string) => Promise<ContextGraphWritePreflightProbe>;
+  validateWriteTargetDuringStoreOutage?: (id: string) => Promise<boolean>;
 };
 
 /** A graph row whose writability read fails with `failure`. */
@@ -100,13 +103,13 @@ describe('store pressure in the preflight follow-up reads, at both async admissi
     baseUrl = `http://127.0.0.1:${addr.port}`;
   }
 
-  async function post(verbPath: string) {
+  async function post(verbPath: string, contextGraphId = CG) {
     const res = await fetch(`${baseUrl}/api/knowledge-assets/${NAME}/${verbPath}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contextGraphId: CG }),
+      body: JSON.stringify({ contextGraphId }),
     });
-    return { status: res.status, retryAfter: res.headers.get('retry-after'), body: await res.json().catch(() => null) as any };
+    return { status: res.status, operationId: res.headers.get('x-dkg-operation-id'), retryAfter: res.headers.get('retry-after'), body: await res.json().catch(() => null) as any };
   }
 
   /** The server records on `close`, which can land just after the client has read the answer. */
@@ -189,6 +192,29 @@ describe('store pressure in the preflight follow-up reads, at both async admissi
       } else {
         expect(answer.body).not.toHaveProperty('jobCreated');
       }
+      expect(resolveIntent).not.toHaveBeenCalled();
+      expect(enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['unavailable', 'incomplete'] as const)(
+    'proves canonical async-publish %s preflight created no job without catalog enumeration',
+    async (kind) => {
+      const canonicalId = '0x1111111111111111111111111111111111111111/cg';
+      const listContextGraphs = vi.fn(async () => []);
+      const probeContextGraphWritePreflight = vi.fn(async () => {
+        if (kind === 'unavailable') throw new Error('exact probe unavailable');
+        return { contextGraphId: canonicalId, storeAvailable: true } as ContextGraphWritePreflightProbe;
+      });
+      const validateWriteTargetDuringStoreOutage = vi.fn(async () => false);
+      await start({ listContextGraphs, probeContextGraphWritePreflight, validateWriteTargetDuringStoreOutage });
+      const answer = await post('vm/publish-async', canonicalId);
+      expect(answer.status).toBe(503);
+      expect(answer.body).toEqual({ code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE',
+        error: expect.any(String), jobCreated: false, retryable: true });
+      expect(answer.operationId).toEqual(expect.any(String));
+      expect(probeContextGraphWritePreflight).toHaveBeenCalledTimes(1);
+      expect(listContextGraphs).not.toHaveBeenCalled();
       expect(resolveIntent).not.toHaveBeenCalled();
       expect(enqueue).not.toHaveBeenCalled();
     },
