@@ -4,7 +4,7 @@
 // token's) and keeps its secret in memory, never in storage; the node's own
 // token never goes to the gateway, and one playground key per browser is live. Under each answer, what it cost and who served it; at the soft
 // ceiling, the fork inline: top up, or wait for the next epoch.
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { copy, type CopyKey } from '../copy.generated.js';
 import { isMarketplaceError, marketplaceApi, marketplaceGateway, needsNodeAdmin, type ChatRequest } from '../api/client.js';
 import type { Budget, CatalogAnswer, Served } from '../api/types.js';
@@ -92,7 +92,12 @@ const TRY_AGAIN = new Set(['budget_busy', 'gateway_busy']);
  */
 interface SendError { copyKey: CopyKey; code: string; outcome: 'uncharged' | 'busy' | 'unknown'; retryAfter: number | null }
 
-interface Msg { role: 'user' | 'assistant'; content: string; served?: Served; error?: SendError }
+/**
+ * A turn of the chat. A user turn that got no answer (refused, cut short by a
+ * fork, or of unknown outcome) stays on show with what came of it, but no later
+ * request carries it: one the gateway refused would be refused again with it.
+ */
+interface Msg { id: number; role: 'user' | 'assistant'; content: string; served?: Served; error?: SendError; unanswered?: boolean }
 type Fork = { kind: 'ceiling'; serviceId: string; nextEpochAt: number | null } | { kind: 'fund'; serviceId: string } | { kind: 'ending'; seconds: number | null };
 
 /** What a budget has for calls: its value left, less what the node holds. */
@@ -105,6 +110,7 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
   const [serviceId, setServiceId] = useState<string>('');
   const [input, setInput] = useState('');
   const [msgs, setMsgs] = useState<Msg[]>([]);
+  const turns = useRef(0);
   const [fork, setFork] = useState<Fork | null>(null);
   const [busy, setBusy] = useState(false);
   const [keyErr, setKeyErr] = useState<unknown>(null);
@@ -122,10 +128,13 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
   const send = async () => {
     if (sendDisabledKey || busy || !selected || !current) return;
     const content = input.trim();
-    const history = msgs.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content }));
+    // Only answered turns go out again: the answers, and the prompts they answered.
+    const history = msgs.filter((m) => !m.error && !m.unanswered).map((m) => ({ role: m.role, content: m.content }));
     const request: ChatRequest = { model: selected.serviceId, messages: [...history, { role: 'user', content }] };
     setBusy(true); setFork(null); setKeyErr(null);
-    setMsgs((m) => [...m, { role: 'user', content }]);
+    const turn = ++turns.current;
+    const unanswered = (m: Msg[]) => m.map((x) => (x.id === turn ? { ...x, unanswered: true } : x));
+    setMsgs((m) => [...m, { id: turn, role: 'user', content }]);
     setInput('');
     // Whether a call has gone to the gateway whose outcome a failure would leave open: until one has, nothing can be charged.
     let called = false;
@@ -154,9 +163,10 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
       }
       const served = answer.marketplace;
       setLeft((l) => ({ ...l, [served.serviceId]: served.budgetLeft }));
-      setMsgs((m) => [...m, { role: 'assistant', content: answer.choices[0]?.message.content ?? '', served }]);
+      setMsgs((m) => [...m, { id: ++turns.current, role: 'assistant', content: answer.choices[0]?.message.content ?? '', served }]);
     } catch (err) {
-      if (needsNodeAdmin(err)) { setKeyErr(err); setMsgs((m) => m.slice(0, -1)); setInput(content); return; }
+      if (needsNodeAdmin(err)) { setKeyErr(err); setMsgs((m) => m.filter((x) => x.id !== turn)); setInput(content); return; }
+      setMsgs(unanswered);
       if (isMarketplaceError(err) && err.code === 'soft_ceiling') {
         setFork({ kind: 'ceiling', serviceId: selected.serviceId, nextEpochAt: err.extra.fork?.nextEpochAt ?? err.extra.nextEpochAt ?? null });
         if (err.extra.left !== undefined) setLeft((l) => ({ ...l, [selected.serviceId]: err.extra.left! }));
@@ -175,7 +185,7 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
       const d = describeError(err);
       const uncharged = !called || (isMarketplaceError(err) && REFUSED_BEFORE_CALL.has(err.code));
       const outcome = isMarketplaceError(err) && TRY_AGAIN.has(err.code) ? 'busy' : uncharged ? 'uncharged' : 'unknown';
-      setMsgs((m) => [...m, { role: 'assistant', content: '', error: { copyKey: d.copyKey, code: d.code ?? 'Error', outcome, retryAfter: d.retryAfter } }]);
+      setMsgs((m) => [...m, { id: ++turns.current, role: 'assistant', content: '', error: { copyKey: d.copyKey, code: d.code ?? 'Error', outcome, retryAfter: d.retryAfter } }]);
     } finally {
       setBusy(false);
     }
@@ -228,8 +238,8 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
       </div>
       <div className="mkt-chat">
         {msgs.length === 0 && <div className="mkt-muted mkt-xs" data-copy="play.empty.chat">{copy('play.empty.chat')}</div>}
-        {msgs.map((m, i) => (
-          <div key={i}>
+        {msgs.map((m) => (
+          <div key={m.id}>
             {m.error ? (
               <div className="mkt-bubble assistant error" role="alert" data-testid="mkt-error-bubble" data-code={m.error.code} data-outcome={m.error.outcome}>
                 {m.error.outcome === 'busy' && (
@@ -242,7 +252,7 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
               </div>
             ) : (
               <>
-                <div className={`mkt-bubble ${m.role}`} data-copy="_data">{m.content}</div>
+                <div className={`mkt-bubble ${m.role}`} data-copy="_data" data-unanswered={m.unanswered ? 'true' : undefined}>{m.content}</div>
                 {m.served && (
                   <div className="mkt-muted mkt-xs" data-copy="play.servedby" data-testid="mkt-served">
                     {copy('play.servedby', { seller: sellerName(m.served.seller), units: fmtCount(m.served.units), trac: fmtTrac(m.served.value), left: fmtTrac(m.served.budgetLeft) })}

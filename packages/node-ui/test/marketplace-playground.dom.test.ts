@@ -225,6 +225,37 @@ describe('marketplace playground key', () => {
     ]);
   });
 
+  it('sends no later request with a prompt the gateway refused, and still shows it with its error', async () => {
+    const sent: Array<Array<{ role: string; content: string }>> = [];
+    const fixture = fixtureFetch('active');
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/v1/chat/completions')) {
+        const { messages } = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+        sent.push(messages);
+        // A message over what a seller takes is refused before anyone is called.
+        if (messages.some((m) => m.content.length > 1_000)) {
+          return Promise.resolve(new Response(JSON.stringify({ error: { code: 'request_too_large', message: 'the call is larger than a seller takes', type: 'marketplace' } }), { status: 413 }));
+        }
+      }
+      return fixture(input, init);
+    });
+    const c = await openPlayground();
+    const long = `${'a long prompt '.repeat(100)}end`;
+    await type(byTestId(c, 'mkt-play-input'), long);
+    await click(byTestId(c, 'mkt-play-send'));
+    await waitForText(c, 'The message is larger than a seller takes — nothing was charged');
+    await send(c, 'short');
+    expect(sent.at(-1)).toEqual([{ role: 'user', content: 'short' }]);
+    // An answered turn goes out again with the next one; the refused one never does.
+    await type(byTestId(c, 'mkt-play-input'), 'again');
+    await click(byTestId(c, 'mkt-play-send'));
+    await waitUntilAnswers(c, 2);
+    expect(sent.at(-1)?.map((m) => m.content)).toEqual(['short', expect.stringContaining('A knowledge graph links facts'), 'again']);
+    // The refused prompt is still on show, with its error beside it.
+    expect(c.querySelector('[data-unanswered="true"]')?.textContent).toBe(long);
+    expect(byTestId(c, 'mkt-error-bubble')?.getAttribute('data-code')).toBe('request_too_large');
+  });
+
   it('keeps one key for the page: a second send makes no new key', async () => {
     const calls = recordCalls();
     const c = await openPlayground();
