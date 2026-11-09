@@ -155,24 +155,29 @@ export type ReadStatus<T> =
 /** A read: its status, and the same as `data` (the last good answer), `err` (the latest failure) and whether one is on its way. */
 export interface Loaded<T> { status: ReadStatus<T>; data: T | null; err: unknown; loading: boolean; reload: () => void }
 
-/** Load once on mount, keep the last good answer through a failed reload. */
+/**
+ * Load once on mount, keep the last good answer through a failed reload. A
+ * reload while a read is on its way reads again at once: the read before may
+ * answer from before what the reload was asked for (a write that landed
+ * since), so only the latest read asked for is kept.
+ */
 export function useLoad<T>(load: () => Promise<T>): Loaded<T> {
   const [status, setStatus] = useState<ReadStatus<T>>({ state: 'unresolved' });
   const [loading, setLoading] = useState(true);
-  const inflight = useRef(false);
+  const latest = useRef(0);
   const alive = useRef(true);
   const loadRef = useRef(load);
   loadRef.current = load;
   const reload = useCallback(() => {
-    if (inflight.current) return;
-    inflight.current = true;
+    const read = ++latest.current;
+    const current = () => alive.current && read === latest.current;
     setLoading(true);
     loadRef.current()
-      .then((value) => { if (alive.current) setStatus({ state: 'resolved', value }); })
+      .then((value) => { if (current()) setStatus({ state: 'resolved', value }); })
       .catch((err: unknown) => {
-        if (alive.current) setStatus((s) => ({ state: 'failed', err, stale: s.state === 'resolved' ? s.value : s.state === 'failed' ? s.stale : null }));
+        if (current()) setStatus((s) => ({ state: 'failed', err, stale: s.state === 'resolved' ? s.value : s.state === 'failed' ? s.stale : null }));
       })
-      .finally(() => { inflight.current = false; if (alive.current) setLoading(false); });
+      .finally(() => { if (current()) setLoading(false); });
   }, []);
   useEffect(() => { alive.current = true; reload(); return () => { alive.current = false; }; }, [reload]);
   const data = status.state === 'resolved' ? status.value : status.state === 'failed' ? status.stale : null;
