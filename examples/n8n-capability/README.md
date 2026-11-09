@@ -251,6 +251,9 @@ unpublication remains pending in the Studio repository and is retried by polling
 or an explicit deactivation retry, including after restart. Changed native pins
 keep cleanup pending until the pinned revision is restored; they never restore
 local event authority. A new activation must finish pending cleanup first.
+Activation commits compare the durable lifecycle revision, so a request awaiting
+inspection cannot overwrite a later revocation. Delegated webhook and timer events
+recheck that same revision immediately before invocation and reconciliation.
 Google event activation requires the operator export key; its fingerprint, not
 the key, is persisted. Event inputs/results and native workflow IDs are journalled
 in the private `studio.sqlite` database for recovery across service restarts.

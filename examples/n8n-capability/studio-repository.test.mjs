@@ -31,6 +31,7 @@ test('migrates legacy executor metadata without changing native grants, revision
         assert.equal(repository.row('native').grant_json, native);
         assert.equal(repository.row('native').activation_json, '{"active":true,"count":5}');
         assert.equal(repository.row('native').event_key, 'retained-key');
+        assert.equal(repository.row('native').activation_revision, 0);
         assert.equal(repository.db.prepare('SELECT invocation_id FROM events').get().invocation_id, 'same-invocation');
         assert.equal(repository.list().length, 2);
         assert.throws(() => repository.saved('native', 'dkg-program', false), /executor changed/);
@@ -69,6 +70,32 @@ test('event reservations share one quota across connections and retain identity,
   } finally { first.close(); second.close(); rmSync(state, { recursive: true, force: true }); }
 });
 
+
+test('activation revisions fence stale commits across connections and survive reopen without changing event quotas', () => {
+  const state = mkdtempSync(join(tmpdir(), 'studio-activation-'));
+  const first = createStudioRepository(state); let second = createStudioRepository(state);
+  try {
+    first.ensure({ kaRef: 'flow', workflowName: 'Event workflow' });
+    first.db.prepare('UPDATE workflows SET provider_id=? WHERE ka_ref=?').run('native', 'flow');
+    const initial = first.row('flow').activation_revision;
+    first.setActivation('flow', { active: true, activationId: 'first', count: 0, expiresAt: Date.now() + 60000 }, 'first-key', initial);
+    const revision = first.row('flow').activation_revision;
+    first.reserveEvent({ kaRef: 'flow', providerId: 'native', executionId: '1', invocationId: 'event-1' }, () => {});
+    assert.equal(second.row('flow').activation_revision, revision);
+    assert.equal(second.activation('flow').count, 1);
+    second.deactivate('flow', 'revoked', true);
+    second.completeUnpublication('flow', 'revoked');
+    const revoked = second.row('flow');
+    assert.throws(() => first.setActivation('flow', { active: true, activationId: 'stale', count: 0 }, 'stale-key', revision), /activation changed/);
+    assert.equal(first.deactivate('flow', 'stale-poll', true, revision), false);
+    assert.deepEqual(first.row('flow'), revoked);
+    assert.equal(first.pendingEvents('flow').length, 1);
+    second.close(); second = createStudioRepository(state);
+    assert.deepEqual(second.row('flow'), revoked);
+    second.setActivation('flow', { active: true, activationId: 'new', count: 0 }, 'new-key', revoked.activation_revision);
+    assert.equal(first.row('flow').activation_revision, revoked.activation_revision + 1);
+  } finally { first.close(); second.close(); rmSync(state, { recursive: true, force: true }); }
+});
 
 test('native provisioning survives reopen and never replaces a create, identity or granted revision', () => {
   const state = mkdtempSync(join(tmpdir(), 'studio-provisioning-'));
