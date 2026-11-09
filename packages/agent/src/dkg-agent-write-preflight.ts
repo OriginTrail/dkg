@@ -68,7 +68,7 @@ const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
 const ONTOLOGY_GRAPH = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
 const AGENTS_GRAPH = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
 
-/** The ontology graph, the agents graph and any `_meta` graph: where the probe reads policy, curator and allowlist from. */
+/** The ontology graph, the agents graph and any `_meta` graph: where the probe reads its declaration, policy, curator and allowlist from. */
 function isPreflightPolicyGraph(graph: string): boolean {
   const iri = graph.startsWith('<') && graph.endsWith('>') ? graph.slice(1, -1) : graph;
   // An adapter may rewrite an unsafe graph name into a real graph, so it cannot be ruled out.

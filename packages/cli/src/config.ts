@@ -6,11 +6,7 @@ import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { configFileSources, parseConfigText } from './config-file-source.js';
-import type {
-  DKGAgentConfig,
-  SyncAdmissionConfig,
-  SyncContextGraphPriorityConfig,
-} from '@origintrail-official/dkg-agent';
+import type { DKGAgentConfig, SyncAdmissionConfig, SyncContextGraphPriorityConfig } from '@origintrail-official/dkg-agent';
 // The config loader must stay off the agent package ROOT at runtime: that entry
 // loads the whole agent runtime (libp2p, sync lanes, the process-wide
 // `sync-global` backpressure registration) into every config-only command, and
@@ -763,6 +759,7 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
   logging?: LoggingConfig;
   /** Cross-agent query access policy for inbound query-remote requests. */
   queryAccess?: QueryAccessConfig;
+  marketplace?: { enabled?: boolean; seller?: { enabled?: boolean }; [setting: string]: unknown }; // OT-RFC-27; packages/marketplace reads it.
   autoUpdate?: AutoUpdateConfig;
   /**
    * Field-merged over network/<env>.json#chain by resolveChainConfig().

@@ -49,13 +49,9 @@ import type { RandomSamplingReadContextReader } from './random-sampling-read-con
 import type { ContextGraphLiveAuthority } from './chain-adapter.js';
 import type { RandomSamplingAvailability } from './random-sampling-availability.js';
 import { emptyRpcUsageWindow, type RpcUsageWindow } from './rpc-usage.js';
-import {
-  NoEligibleContextGraphError,
-  NoEligibleKnowledgeCollectionError,
-  MerkleRootMismatchError,
-  ChallengeNoLongerActiveError,
-} from './chain-adapter.js';
+import { NoEligibleContextGraphError, NoEligibleKnowledgeCollectionError, MerkleRootMismatchError, ChallengeNoLongerActiveError } from './chain-adapter.js';
 import { ethers } from 'ethers';
+import { MockMarketplaceMethods } from './mock-adapter-marketplace.js';
 import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
 import {
   isNonexistentContextGraphStorageRevert,
@@ -208,8 +204,9 @@ function applyV10UpdateContext(
 /**
  * In-memory mock chain adapter for off-chain development.
  * Implements both V9 (UAL-based) and V8 (legacy KC) interfaces.
+ * Its base class models the marketplace (mock-adapter-marketplace.ts).
  */
-export class MockChainAdapter implements ChainAdapter {
+export class MockChainAdapter extends MockMarketplaceMethods implements ChainAdapter {
   readonly chainType = 'evm' as const;
   readonly chainId: string;
   readonly signerAddress: string;
@@ -266,6 +263,7 @@ export class MockChainAdapter implements ChainAdapter {
     signerAddress = MOCK_DEFAULT_SIGNER,
     options: Readonly<MockChainAdapterOptions> = {},
   ) {
+    super();
     this.chainId = chainId;
     this.signerAddress = signerAddress;
     this.allowedPublisherAddresses = new Set([ethers.getAddress(signerAddress).toLowerCase()]);
@@ -2311,7 +2309,7 @@ export class MockChainAdapter implements ChainAdapter {
     this.events.push({ type, blockNumber: this.nextBlock, data });
   }
 
-  private txResult(success: boolean): TxResult {
+  protected txResult(success: boolean): TxResult {
     const blockNumber = this.nextBlock;
     const txIndex = this.txIndexInBlock++;
     const hash = `0x${blockNumber.toString(16).padStart(64, '0')}${txIndex.toString(16).padStart(4, '0')}`;
