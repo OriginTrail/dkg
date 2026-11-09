@@ -161,6 +161,7 @@ describe("the ledger's journal", () => {
     await appendFile(journalFile(), [
       JSON.stringify({ type: 'served', requestDigest: ethers.id('no request') }),
       JSON.stringify({ type: 'sent', batchId: 'b', epoch: 1, at: 1, hash: ethers.id('tx'), wallet: SELLER.address, nonce: null, digests: 'not a list' }),
+      JSON.stringify({ type: 'sent', batchId: 'c', epoch: 1, at: 1, hash: ethers.id('tx'), wallet: SELLER.address, nonce: 0, digests: [], signedTx: 7 }),
       '',
     ].join('\n'));
     const restarted = sellerWith();
@@ -169,9 +170,9 @@ describe("the ledger's journal", () => {
     expect(restarted.ledger.stateOf(digest)).toBe('served');
     expect(restarted.ledger.pendingBatches()).toEqual([]);
     const [copy] = await asideOf('seller-ledger.jsonl');
-    expect((await readFile(copy!, 'utf8')).trim().split('\n')).toHaveLength(3);
+    expect((await readFile(copy!, 'utf8')).trim().split('\n')).toHaveLength(4);
     expect(await readFile(journalFile(), 'utf8')).toBe(good);
-    expect(logs).toEqual([expect.stringMatching(/2 entries of the seller's ledger .* left out; the journal as it was is at .*seller-ledger\.jsonl\.bad-/)]);
+    expect(logs).toEqual([expect.stringMatching(/3 entries of the seller's ledger .* left out; the journal as it was is at .*seller-ledger\.jsonl\.bad-/)]);
     // Landing goes on.
     clock += 31;
     restarted.lander.landNow();

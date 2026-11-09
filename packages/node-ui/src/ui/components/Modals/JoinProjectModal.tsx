@@ -593,7 +593,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
           {pending && (
             <div style={{
-              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 12,
+              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 'var(--font-size-label)',
               background: 'rgba(59, 130, 246, 0.08)', border: '1px solid rgba(59, 130, 246, 0.25)',
               color: 'var(--accent-primary, #3b82f6)',
             }}>
@@ -603,7 +603,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
           {approved && (
             <div style={{
-              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 12,
+              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 'var(--font-size-label)',
               background: 'rgba(34, 197, 94, 0.08)', border: '1px solid rgba(34, 197, 94, 0.25)',
               color: 'var(--accent-green)',
             }}>
@@ -613,7 +613,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
           {rejected && (
             <div style={{
-              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 12,
+              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 'var(--font-size-label)',
               background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.25)',
               color: 'var(--accent-warning, #f59e0b)',
             }}>
@@ -633,7 +633,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
               autoFocus
               rows={3}
               disabled={sending || pending || approved}
-              style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-caption)' }}
               aria-label="Context graph invite code"
               autoComplete="off"
               spellCheck={false}
@@ -642,7 +642,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
           {intent.kind === 'publicSubscribe' && (
             <label style={{
-              display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12,
+              display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 'var(--font-size-label)',
               color: 'var(--text-secondary)', cursor: sending ? 'default' : 'pointer',
             }}>
               <input
