@@ -156,6 +156,34 @@ test('withdrawal suppresses retained output but still reconciles terminal capaci
   const result = await s.readRun({ runKey: 'run-one' }, actor);
   assert.equal(result.status, 'succeeded'); assert.equal(result.output, undefined);
 });
+test('withdrawal during pending readback suppresses output and steps while durably releasing capacity', async t => {
+  const c = controllable(), f = await fixture(t, c.runner), s = f.service();
+  assert.equal((await s.run(f.input(), actor)).status, 'running');
+  const other = createStudioRepository(f.state); t.after(() => other.close());
+  const withdrawing = createStudioMcpService({ repository: other, provider: f.provider,
+    accountId: owner.accountId, profile: null, runner: c.runner });
+  const started = Promise.withResolvers(), inspection = Promise.withResolvers();
+  c.runner.inspect = async () => { started.resolve(); return inspection.promise; };
+  const pending = s.readRun({ runKey: 'run-one' }, actor);
+  await started.promise;
+  assert.equal(other.mcp.activeAgentRun(owner.accountId).run_key, 'run-one');
+  withdrawing.withdraw({ kaRef: f.input().kaRef, workflowSha256: f.input().workflowSha256 }, owner);
+  inspection.resolve({ status: 'succeeded', output: { items: [{ result: 'private-output' }], ports: {} },
+    steps: [{ output: { result: 'private-step-output' } }] });
+  const result = await pending;
+  assert.equal(result.status, 'succeeded');
+  assert.equal(Object.hasOwn(result, 'output'), false);
+  assert.equal(Object.hasOwn(result, 'steps'), false);
+  assert.equal(other.mcp.run(owner.accountId, 'run-one').status, 'succeeded');
+  assert.equal(other.mcp.activeAgentRun(owner.accountId), undefined);
+  const reopened = f.restart();
+  const retained = await reopened.readRun({ runKey: 'run-one' }, actor);
+  assert.equal(retained.status, 'succeeded');
+  assert.equal(Object.hasOwn(retained, 'output'), false);
+  assert.equal(Object.hasOwn(retained, 'steps'), false);
+  assert.equal(f.repository.mcp.activeAgentRun(owner.accountId), undefined);
+  assert.equal(c.count, 1);
+});
 test('withdrawal and immutable saved snapshots survive repeat save and repository reopen', async t => {
   const c = controllable(), f = await fixture(t, c.runner), s = f.service();
   const pin = { kaRef: f.input().kaRef, workflowSha256: f.input().workflowSha256 };

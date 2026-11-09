@@ -64,7 +64,10 @@ export function createStudioMcpService({ repository, provider, installation, acc
     catch { return summary(r); } // No expiry/timer can release a possibly running execution.
     if (['succeeded', 'failed'].includes(observed.status)) update(value.runKey, observed.status);
     r = row(value.runKey);
-    return { ...summary(r), ...(!workflow.withdrawn && observed.status === 'succeeded' ? { output: observed.output, ...(observed.steps ? { steps: observed.steps } : {}) } : {}) };
+    // Withdrawal can commit while native inspection is pending. Reconcile the
+    // terminal slot above, but recheck authority before exposing any results.
+    const withdrawn = saved(r.ka_ref).withdrawn;
+    return { ...summary(r), ...(!withdrawn && observed.status === 'succeeded' ? { output: observed.output, ...(observed.steps ? { steps: observed.steps } : {}) } : {}) };
   }
   async function run(value, actor) {
     actorCheck(actor);
