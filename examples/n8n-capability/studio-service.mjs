@@ -1,8 +1,9 @@
+import { studioExecutionPlan, prepareStudioExecution } from './studio-execution-plan.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { component, normalizeComponentInput } from './component-registry.mjs';
 import { component as componentV1, normalizeComponentInput as normalizeComponentInputV1 } from './component-registry-v1.mjs';
-import { normalizeStudio, readStudio, studioProgramSource, validateStudioCapabilities } from './studio-definition.mjs';
+import { normalizeStudio, readStudio, validateStudioCapabilities } from './studio-definition.mjs';
 import { workflowUuid } from './workflow-definition.mjs';
 import { n8nObservationScope, n8nExecutionMatches } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { programWorkflowReceipt } from './program-workflow-receipt.mjs';
@@ -13,25 +14,28 @@ const eventUuid = (ref, id) => { const b = createHash('sha256').update(ref + ':'
   const h = b.toString('hex'); return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`; };
 
 export function createStudioService({ graphId, owner, client, provider, listCapabilities, loadOutputs, exportTokenFile }) {
+  const repository = provider.repository;
   const saving = new Map(); let polling = false, stopped = false;
   async function approved(kaRef, sourceHash) {
     try { const a = await client.programs.getApproval({ graphId, operationIri: kaRef }); return a.binding.enabled && a.binding.program.sourceHash === sourceHash; }
     catch (e) { if (e.status === 404) return false; throw e; }
   }
-  const activation = ref => { const row = provider.row(ref); return row?.activation_json ? JSON.parse(row.activation_json) : { active: false }; };
+  const activation = ref => { const row = repository.row(ref); return row?.activation_json ? JSON.parse(row.activation_json) : { active: false }; };
   async function get(kaRef, sourceHash) {
-    if (typeof kaRef !== 'string' || !provider.row(kaRef)?.grant_json) throw reject('Unknown saved graph.');
+    if (typeof kaRef !== 'string' || !repository.row(kaRef)?.executor) throw reject('Unknown saved graph.');
     const source = await client.programs.getSource({ graphId, programIri: kaRef, programLayer: 'wm' });
     const compiled = readStudio(source.source);
     if (compiled.kaRef !== kaRef || sourceHash && sourceHash !== source.sourceHash) throw reject('The saved graph revision changed.');
-    return { compiled, source, workflow: { definition: compiled.definition, kaRef, sourceHash: source.sourceHash, graphId,
+    const plan = studioExecutionPlan(compiled, graphId);
+    if (repository.row(kaRef).executor !== plan.kind) throw reject('The saved workflow executor changed.');
+    return { compiled, plan, source, workflow: { definition: compiled.definition, kaRef, sourceHash: source.sourceHash, graphId,
       mode: compiled.mode, approved: await approved(kaRef, source.sourceHash),
-      requiresExportAuthorization: compiled.requiresExportAuthorization || !!JSON.parse(provider.row(kaRef).grant_json).requiresExportAuthorization,
+      requiresExportAuthorization: compiled.requiresExportAuthorization || !!repository.row(kaRef).requires_export,
       activation: (({ active, count, expiresAt }) => ({ active, count, expiresAt }))(activation(kaRef)), readbackVerified: true } };
   }
   async function list() {
     const workflows = [];
-    for (const row of provider.db.prepare('SELECT ka_ref FROM workflows WHERE grant_json IS NOT NULL ORDER BY created_at DESC LIMIT 24').all()) {
+    for (const row of repository.list()) {
       try { workflows.push((await get(row.ka_ref)).workflow); } catch (e) { if (!['PROGRAM_NOT_FOUND', 'INVALID_WORKFLOW'].includes(e.code)) throw e; }
     }
     return workflows;
@@ -45,38 +49,32 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     if (needsExport()) authorize();
     const key = JSON.stringify(definition); if (saving.has(key)) return saving.get(key);
     const pending = (async () => {
-      const compiled = await provider.provision(definition), sourceText = studioProgramSource(compiled);
-      // Native wrappers invoke one pinned tool; only DKG executors invoke child Programs.
-      const nativeOnly = compiled.executor !== 'dkg';
+      const { compiled, plan } = await prepareStudioExecution(definition, graphId, provider.provision);
+      repository.ensure(compiled);
+      const sourceText = plan.upload.source;
       const sourceHash = createHash('sha256').update(sourceText).digest('hex');
       let source;
       try { source = await client.programs.getSource({ graphId, programIri: compiled.kaRef, programLayer: 'wm' }); }
       catch (e) { if (e.code !== 'PROGRAM_NOT_FOUND') throw e; }
       if (!source) {
         await client.programs.upload({ graphId, programIri: compiled.kaRef, name: 'studio-' + sourceHash.slice(0, 24), label: definition.name,
-          language: 'typescript-v1', version: '1.0.0', source: sourceText, requiredTools: compiled.executor === 'dkg' ? [] : ['urn:dkg:tool:n8n'],
-          permittedPrograms: nativeOnly ? [] : [...new Set(definition.nodes.map(n => n.kaRef))],
-          ...(compiled.executor === 'dkg' ? {} : { requestedPermissions: { graphId, n8n: compiled.grant } }) });
+          language: 'typescript-v1', version: '1.0.0', ...plan.upload });
         source = await client.programs.getSource({ graphId, programIri: compiled.kaRef, programLayer: 'wm' });
       }
       if (source.sourceHash !== sourceHash || source.source !== sourceText) throw reject('The graph source differs from its saved revision.');
       capabilities = (await listCapabilities()).filter(c => !c.retired);
       validateStudioCapabilities(definition, capabilities);
       if (compiled.requiresExportAuthorization || needsExport()) authorize();
-      if (compiled.executor === 'dkg') provider.db.prepare('UPDATE workflows SET grant_json=? WHERE ka_ref=?')
-        .run(JSON.stringify({ ...compiled.grant, requiresExportAuthorization: needsExport() }), compiled.kaRef);
       if (!await approved(compiled.kaRef, sourceHash)) await client.programs.approve({ graphId, operationIri: compiled.kaRef,
-        program: reference(source, graphId), allowedCallers: [owner], ...(compiled.executor === 'dkg' ? {} : { n8n: compiled.grant }),
-        typescript: { children: nativeOnly ? [] : [...new Map(definition.nodes.map(n => [n.kaRef, { graphId,
-          operationIri: n.componentId === 'run-program' ? n.params.operationIri : n.kaRef }])).values()],
-        maxCalls: compiled.executor === 'dkg' ? 256 : 16, maxConcurrency: 1, timeoutMs: 60000 } });
+        program: reference(source, graphId), allowedCallers: [owner], ...plan.approval });
+      repository.saved(compiled.kaRef, plan.kind, compiled.requiresExportAuthorization || needsExport());
       return (await get(compiled.kaRef, sourceHash)).workflow;
     })();
     saving.set(key, pending); try { return await pending; } finally { saving.delete(key); }
   }
   async function run(value, authorize) {
     if (!value || Object.keys(value).some(k => !['kaRef', 'sourceHash', 'itemsJson', 'invocationId'].includes(k))) throw reject('Invalid graph invocation.');
-    const invocationId = workflowUuid(value.invocationId), { compiled, workflow } = await get(value.kaRef, value.sourceHash);
+    const invocationId = workflowUuid(value.invocationId), { compiled, plan, workflow } = await get(value.kaRef, value.sourceHash);
     if (!workflow.approved) throw reject('This graph is not approved.');
     if (compiled.mode === 'schedule' && !activation(workflow.kaRef).active) throw reject('Activate this Schedule workflow before running it.');
     const capabilities = await listCapabilities();
@@ -90,12 +88,12 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     let result;
     try { result = await invoke(); }
     catch (error) {
-      if (error.code !== 'INVOCATION_REQUIRES_RECONCILIATION' || compiled.executor === 'dkg') throw error;
+      if (error.code !== 'INVOCATION_REQUIRES_RECONCILIATION' || plan.kind === 'dkg-program') throw error;
       // Reconcile the durable acknowledgement under the same invocation, once.
       result = await invoke();
     }
     if (!isDeepStrictEqual(await loadOutputs(result.executionIri), result.rawOutputs)) throw new Error('The DKG receipt readback differs.');
-    if (compiled.executor === 'dkg') return { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, invocationId, executionIri: result.executionIri,
+    if (plan.kind === 'dkg-program') return { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, invocationId, executionIri: result.executionIri,
       ...await programWorkflowReceipt(compiled, result, input, loadOutputs) };
     const output = result.outputs[0];
     if (output?.kind !== 'n8n-result' || output.workflowSha256 !== compiled.grant.workflowSha256 || !output.output || typeof output.output.traceJson !== 'string') throw new Error('Native graph evidence is incomplete.');
@@ -126,39 +124,39 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
       if (workflow.requiresExportAuthorization) authorize();
       const a = { active: true, activationId, startedAt: Date.now(), expiresAt: Date.now() + 30 * 60 * 1000, count: 0,
         ...(workflow.requiresExportAuthorization ? { exportFingerprint: provider.fingerprint(exportTokenFile) } : {}) };
-      provider.db.prepare('UPDATE workflows SET activation_json=?,event_key=? WHERE ka_ref=?').run(JSON.stringify(a), randomUUID(), workflow.kaRef);
+      repository.db.prepare('UPDATE workflows SET activation_json=?,event_key=? WHERE ka_ref=?').run(JSON.stringify(a), randomUUID(), workflow.kaRef);
       if (compiled.mode === 'schedule') await provider.setPublished(workflow.kaRef, true);
     } else {
       if (compiled.mode === 'schedule') await provider.setPublished(workflow.kaRef, false);
-      provider.db.prepare('UPDATE workflows SET activation_json=?,event_key=NULL WHERE ka_ref=?').run(JSON.stringify({ active: false, activationId }), workflow.kaRef);
+      repository.db.prepare('UPDATE workflows SET activation_json=?,event_key=NULL WHERE ka_ref=?').run(JSON.stringify({ active: false, activationId }), workflow.kaRef);
     }
     return (await get(workflow.kaRef)).workflow;
   }
   async function event(key, value) {
     if (!value || Object.keys(value).some(k => !['invocationId', 'items'].includes(k))) throw reject('Supply an event identity and items.');
-    const row = provider.db.prepare('SELECT * FROM workflows WHERE event_key=?').get(key);
+    const row = repository.db.prepare('SELECT * FROM workflows WHERE event_key=?').get(key);
     if (!row) throw reject('Inactive event endpoint.');
     const { compiled, workflow } = await get(row.ka_ref);
     if (compiled.mode !== 'webhook') throw reject('This endpoint is not a webhook.');
     if (!workflow.approved) throw reject('Event workflow approval changed.');
     validateStudioCapabilities(compiled.definition, await listCapabilities());
     const invocationId = workflowUuid(value.invocationId), itemsJson = JSON.stringify(value.items);
-    const previous = provider.db.prepare('SELECT * FROM events WHERE provider_id=? AND execution_id=?').get(row.provider_id, invocationId);
+    const previous = repository.db.prepare('SELECT * FROM events WHERE provider_id=? AND execution_id=?').get(row.provider_id, invocationId);
     if (previous && previous.input_json !== itemsJson) throw reject('This event identity already belongs to different input.');
     eventAuthorized(row.ka_ref, compiled, !!previous);
     if (previous?.receipt_json) return JSON.parse(previous.receipt_json);
     if (!previous) {
       const a = activation(row.ka_ref); a.count++;
-      provider.db.prepare('INSERT INTO events (provider_id,execution_id,ka_ref,invocation_id,input_json) VALUES (?,?,?,?,?)').run(row.provider_id, invocationId, row.ka_ref, invocationId, itemsJson);
-      provider.db.prepare('UPDATE workflows SET activation_json=? WHERE ka_ref=?').run(JSON.stringify(a), row.ka_ref);
+      repository.db.prepare('INSERT INTO events (provider_id,execution_id,ka_ref,invocation_id,input_json) VALUES (?,?,?,?,?)').run(row.provider_id, invocationId, row.ka_ref, invocationId, itemsJson);
+      repository.db.prepare('UPDATE workflows SET activation_json=? WHERE ka_ref=?').run(JSON.stringify(a), row.ka_ref);
     }
     const receipt = await run({ kaRef: row.ka_ref, sourceHash: workflow.sourceHash, itemsJson, invocationId }, () => eventAuthorized(row.ka_ref, compiled, true));
-    provider.db.prepare('UPDATE events SET receipt_json=? WHERE provider_id=? AND execution_id=?').run(JSON.stringify(receipt), row.provider_id, invocationId);
+    repository.db.prepare('UPDATE events SET receipt_json=? WHERE provider_id=? AND execution_id=?').run(JSON.stringify(receipt), row.provider_id, invocationId);
     return receipt;
   }
   async function history(ref, mayDiscloseEvent) {
     const { compiled, workflow } = await get(ref);
-    const row = provider.row(ref), a = activation(ref);
+    const row = repository.row(ref), a = activation(ref);
     let disclose = false;
     if (row.event_key && workflow.approved && a.active && a.expiresAt > Date.now() && mayDiscloseEvent) {
       const capabilities = await listCapabilities();
@@ -168,13 +166,13 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     }
     return { activation: { active: !!a.active && a.expiresAt > Date.now() && a.count < 5, count: a.count ?? 0, expiresAt: a.expiresAt },
       ...(disclose ? { eventPath: '/spike/ka/events/' + row.event_key } : {}),
-      executions: provider.db.prepare('SELECT invocation_id,execution_id,receipt_json FROM events WHERE ka_ref=? ORDER BY rowid DESC LIMIT 20').all(ref)
+      executions: repository.db.prepare('SELECT invocation_id,execution_id,receipt_json FROM events WHERE ka_ref=? ORDER BY rowid DESC LIMIT 20').all(ref)
         .map(r => ({ invocationId: r.invocation_id, triggerExecutionId: r.execution_id, receipt: r.receipt_json ? JSON.parse(r.receipt_json) : null })) };
   }
   async function poll() {
     if (polling || stopped) return; polling = true;
     try {
-      for (const row of provider.db.prepare('SELECT * FROM workflows WHERE activation_json IS NOT NULL').all()) {
+      for (const row of repository.db.prepare('SELECT * FROM workflows WHERE activation_json IS NOT NULL').all()) {
         const a = activation(row.ka_ref); if (!a.active) continue;
         let compiled, workflow;
         try {
@@ -189,7 +187,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
         const native = await provider.api('/workflows/' + row.provider_id);
         const published = { ...native.activeVersion, settings: native.settings };
         const executions = await provider.api('/executions?limit=20&workflowId=' + encodeURIComponent(row.provider_id));
-        const reserved = provider.db.prepare('SELECT execution_id FROM events WHERE ka_ref=? AND receipt_json IS NULL').all(row.ka_ref);
+        const reserved = repository.db.prepare('SELECT execution_id FROM events WHERE ka_ref=? AND receipt_json IS NULL').all(row.ka_ref);
         const candidates = new Map(executions.data.map(e => [String(e.id), e]));
         // Pending identities must remain inspectable even after leaving the last page.
         for (const pending of reserved) if (!candidates.has(pending.execution_id)) {
@@ -202,7 +200,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
           const scope = n8nObservationScope(graphId, owner, row.provider_id) + ' trigger';
           const runs = detail.data?.resultData?.runData?.[scope];
           if (!Array.isArray(runs) || !runs.length || !n8nExecutionMatches(published, detail.workflowData)) continue;
-          const old = provider.db.prepare('SELECT * FROM events WHERE provider_id=? AND execution_id=?').get(row.provider_id, String(e.id));
+          const old = repository.db.prepare('SELECT * FROM events WHERE provider_id=? AND execution_id=?').get(row.provider_id, String(e.id));
           if (old?.receipt_json) continue;
           const invocationId = old?.invocation_id ?? eventUuid(row.ka_ref, String(e.id));
           if (!old) {
@@ -210,8 +208,8 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
             if (activation(row.ka_ref).count >= 5) continue;
             eventAuthorized(row.ka_ref, compiled);
             const current = activation(row.ka_ref); current.count++;
-            provider.db.prepare('INSERT INTO events (provider_id,execution_id,ka_ref,invocation_id) VALUES (?,?,?,?)').run(row.provider_id, String(e.id), row.ka_ref, invocationId);
-            provider.db.prepare('UPDATE workflows SET activation_json=? WHERE ka_ref=?').run(JSON.stringify(current), row.ka_ref);
+            repository.db.prepare('INSERT INTO events (provider_id,execution_id,ka_ref,invocation_id) VALUES (?,?,?,?)').run(row.provider_id, String(e.id), row.ka_ref, invocationId);
+            repository.db.prepare('UPDATE workflows SET activation_json=? WHERE ka_ref=?').run(JSON.stringify(current), row.ka_ref);
           }
           const items = runs.at(-1).data.main[0].map(item => item.json);
           try {
@@ -219,7 +217,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
               const active = activation(row.ka_ref); if (!active.active || active.expiresAt < Date.now()
                 || compiled.requiresExportAuthorization && active.exportFingerprint !== provider.fingerprint(exportTokenFile)) throw reject('Event authorization expired.');
             });
-            provider.db.prepare('UPDATE events SET receipt_json=? WHERE provider_id=? AND execution_id=?').run(JSON.stringify(receipt), row.provider_id, String(e.id));
+            repository.db.prepare('UPDATE events SET receipt_json=? WHERE provider_id=? AND execution_id=?').run(JSON.stringify(receipt), row.provider_id, String(e.id));
           } catch { /* Retain this exact invocation for the next reconciliation poll. */ }
         }
       }

@@ -1,3 +1,4 @@
+import { normalizeComponentInputSource } from './guest-sources/component-v1.mjs';
 import { createHash } from 'node:crypto';
 import { component, normalizeComponentInput, componentContract } from './component-registry-v1.mjs';
 import { componentPiece, nativeNode, editNode, wire, expression, nativeLiteral } from './component-workflows-v1.mjs';
@@ -103,7 +104,7 @@ export function compileStudio(value, { graphId, owner, headerCredential, credent
     piece.entries = [];
     if (!['schedule', 'webhook'].includes(n.componentId)) {
       for (let i = 0; i < (descriptor.inputs ?? 1); i++) {
-        const guard = editNode(name + ' check ' + i, `(() => { const input = $input.all().map(i => i.json); (${normalizeComponentInput.toString()})(${nativeLiteral(descriptor)}, { itemsJson: JSON.stringify(input), paramsJson: ${nativeLiteral(JSON.stringify(n.params))}, executionId: '' }); return $json; })()`);
+        const guard = editNode(name + ' check ' + i, `(() => { const input = $input.all().map(i => i.json); (${normalizeComponentInputSource})(${nativeLiteral(descriptor)}, { itemsJson: JSON.stringify(input), paramsJson: ${nativeLiteral(JSON.stringify(n.params))}, executionId: '' }); return $json; })()`);
         nodes.push(guard); wire(connections, guard.name, piece.entry, 0, i); piece.entries.push(guard.name);
       }
     } else piece.entries = [piece.entry];
@@ -142,7 +143,7 @@ export function studioProgramSource(compiled, grant = compiled.grant) {
   const root = compiled.definition.nodes.find(n => n.id === compiled.definition.entryId);
   const descriptor = { ...component(root.componentId), ...(compiled.mode === 'schedule' ? { mode: 'action' } : {}) };
   return marker + Buffer.from(JSON.stringify(metadata)).toString('base64') + '\n'
-    + `import { invoke_tool } from '@origintrail-official/dkg-graph-computer/program';\nconst normalize = ${normalizeComponentInput.toString()};\n`
+    + `import { invoke_tool } from '@origintrail-official/dkg-graph-computer/program';\nconst normalize = ${normalizeComponentInputSource};\n`
     + `export function run(input: unknown) { const value = normalize(${JSON.stringify(descriptor)}, input); if (value.paramsJson !== ${JSON.stringify(JSON.stringify(root.params))} || value.executionId) throw new Error('Use the saved workflow parameters.'); return invoke_tool('urn:dkg:tool:n8n', value); }\n`;
 }
 

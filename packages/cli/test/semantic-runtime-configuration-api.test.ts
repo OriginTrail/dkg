@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -10,7 +9,7 @@ import { join } from 'node:path';
 import { DKGAgent, signAgentDelegation } from '@origintrail-official/dkg-agent';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { SemanticRuntimeStore, type SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
+import { SemanticRuntimeStore, ProgramTraceRecorder, readProgramTrace, readProgramCallHistory, type SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
 import { ethers } from 'ethers';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -579,12 +578,9 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       id: 'program', componentId: 'run-program', kaRef: f.program.programIri, sourceHash: f.program.sourceHash,
       params: { operationIri: f.operation.operationIri, version: '1.0.0', inputMode: 'each-item', inputMapping: { value: '{{ $json.incoming.amount }}', factor: 3 } }, x: 40, y: 80,
     }], edges: [] };
-    // Generate in the same native ESM context as the PoC server: Vite rewrites imported
-    // identifiers inside functions that the compiler deliberately embeds with toString().
-    const generated = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e',
-      `import { readFileSync } from 'node:fs'; import { compileStudio, studioProgramSource } from ${JSON.stringify(new URL('../../../examples/n8n-capability/studio-definition.mjs', import.meta.url).href)};
-       const compiled = compileStudio(JSON.parse(readFileSync(0, 'utf8'))); console.log(JSON.stringify({ source: studioProgramSource(compiled), params: compiled.ordered[0].params }));`],
-    { input: JSON.stringify(definition), encoding: 'utf8', maxBuffer: 262144 }));
+    const { compileStudio, studioProgramSource } = await import('../../../examples/n8n-capability/studio-definition.mjs');
+    const compiled = compileStudio(definition);
+    const generated = { source: studioProgramSource(compiled), params: compiled.ordered[0].params };
     const parent = await f.manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', requiredTools: [],
       permittedPrograms: [f.program.programIri], source: generated.source });
     const operation = { graphId: graph, operationIri: 'urn:test:studio-run-program' };
@@ -716,18 +712,20 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     } finally { vi.unstubAllGlobals(); }
   });
 
-  it.each(['complete', 'oversized', 'loop-terminal', 'declared-child', 'new-call', 'missing-acknowledgement', 'revoke', 'expire', 'epoch'])('reconciles native results without dispatching new work (%s)', async mode => {
+  it.each(['complete', 'oversized', 'escaped-envelope', 'restart-before-callback', 'loop-terminal', 'declared-child', 'mixed-child', 'new-call', 'missing-acknowledgement', 'revoke', 'expire', 'epoch'])('reconciles native results without dispatching new work (%s)', async mode => {
     const extraCall = mode === 'new-call';
     const n8nTool = 'urn:dkg:tool:n8n', workflowId = 'native-inspection';
     const definition = { versionId: 'published-native-1', nodes: [{ id: 'component', name: 'Component',
       type: 'n8n-nodes-base.set', typeVersion: 3.4, parameters: { hidden: 'reviewed' } }],
       connections: {}, settings: { executionOrder: 'v1' } };
+    if (mode === 'escaped-envelope') for (let i = 0; i < 8; i++) definition.nodes.push({ ...definition.nodes[0]!, id: 'trace' + i, name: 'Trace' + i });
     const string = { type: 'string', maxLength: 8192 };
     const outputSchema = { type: 'object', additionalProperties: false, required: ['ok', 'itemsJson', 'portsJson', 'error'],
-      properties: { ok: { type: 'boolean' }, itemsJson: string, portsJson: string, error: string } };
+      properties: { ok: { type: 'boolean' }, itemsJson: string, portsJson: string, error: string, ...(mode === 'escaped-envelope' ? { traceJson: string } : {}) } };
     const inputSchema = { type: 'object', additionalProperties: false, required: ['text'], properties: { text: string } };
     const n8n = { toolIri: n8nTool, workflowId, workflowSha256: n8nWorkflowSha256(definition), inputSchema, outputSchema,
-      result: { nodes: ['Component'], ...(mode === 'loop-terminal' ? { sinks: [{ node: 'Component', port: 1, name: 'terminal false' }] } : {}) } };
+      result: { nodes: ['Component'], ...(mode === 'escaped-envelope' ? { traceNodes: Array.from({ length: 8 }, (_, i) => 'Trace' + i) } : {}),
+        ...(mode === 'loop-terminal' ? { sinks: [{ node: 'Component', port: 1, name: 'terminal false' }] } : {}) } };
     const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
       export async function run(input: unknown) {
         const value = await invoke_tool('${n8nTool}', input);
@@ -750,18 +748,21 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       if (interrupted) throw new Error('interrupted-after-durable-ack');
       const snapshot = structuredClone(definition); snapshot.nodes[0]!.parameters = {} as any;
       const runs = mode === 'loop-terminal' ? [1, 2].map(value => ({ data: { main: [[], [{ json: { value } }]] } }))
-        : [{ data: { main: [Array.from({ length: mode === 'oversized' ? 201 : 1 }, () => ({ json: { value: 12 } }))] } }];
+        : [{ data: { main: [Array.from({ length: mode === 'oversized' ? 201 : 1 }, () => ({ json: { value: mode === 'escaped-envelope' ? '\\'.repeat(4000) : 12 } }))] } }];
       return Response.json({ id: '42', workflowId, workflowVersionId: definition.versionId, status: 'success', workflowData: snapshot,
         data: { resultData: { runData: { Component: runs } } } });
     }));
     try {
       let overrides = {};
-      if (mode === 'declared-child') {
+      if (['declared-child', 'mixed-child'].includes(mode)) {
         const child = await f.manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', requiredTools: [], source: 'export function run() { return 42; }' });
         const childOperation = { graphId: graph, operationIri: 'urn:child:declared-only' };
         await f.manager.programs.approve({ ...childOperation, program: child, allowedCallers: [caller], typescript: { children: [] } });
         const saved = await f.manager.programs.getSource(f.program);
-        const program = await f.manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', source: saved.source,
+        const source = mode === 'mixed-child'
+          ? `import { invoke_tool, invoke_program } from '${toolApi}'; export async function run(input: unknown) {
+              await invoke_program('${child.programIri}', []); return invoke_tool('${n8nTool}', input); }` : saved.source;
+        const program = await f.manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', source,
           requiredTools: [n8nTool], permittedPrograms: [child.programIri], requestedPermissions: { graphId: graph, n8n } });
         overrides = { program, typescript: { children: [childOperation] } };
       }
@@ -773,7 +774,29 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       const oldRuntime = f.target.runtime!;
       await oldRuntime.stop(); runtimes.delete(oldRuntime); f.target.runtime = null;
       await f.target.boot(true);
+      if (mode === 'restart-before-callback') {
+        const runtime = f.target.runtime!;
+        const execute = vi.spyOn(runtime.typescript!, 'execute').mockRejectedValueOnce(new Error('stopped-before-first-callback'));
+        await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'TYPESCRIPT_EXECUTION_FAILED' });
+        execute.mockRestore();
+        const executionIri = `urn:sr:execution:${prepared.invocationId}`;
+        expect(readProgramTrace(runtime.store, executionIri)?.calls).toEqual([]);
+        expect(readProgramCallHistory(runtime.store, executionIri)).toHaveLength(1);
+        // The runner has durably written a fresh, empty trace. Restarting must
+        // still recover the original acknowledged effect, without another POST.
+        await restartNode(f.target);
+      }
       await expect(f.client.programs.invoke({ ...prepared, inputs: [{ text: 'changed' }] })).rejects.toMatchObject({ code: 'INVOCATION_LAYER_CONFLICT' });
+      if (mode === 'mixed-child') {
+        // An empty later diagnostic attempt must not hide the earlier child call.
+        const executionIri = `urn:sr:execution:${prepared.invocationId}`;
+        f.target.runtime!.store.setExecutionStatus(executionIri, 'active');
+        new ProgramTraceRecorder(f.target.runtime!.store, executionIri);
+        await restartNode(f.target);
+        await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_NOT_RETRYABLE' });
+        expect(dispatches).toBe(1);
+        return;
+      }
       if (mode === 'missing-acknowledgement') {
         await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_NOT_RETRYABLE' });
         expect(dispatches).toBe(1);
@@ -795,7 +818,8 @@ describe('TypeScript direct tools through shared authorization and effects', () 
         await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
       } else {
         const result = await f.client.programs.invoke(prepared);
-        expect(result.outputs).toMatchObject([{ n8nExecutionId: '42', output: mode === 'oversized'
+        expect(result.outputs).toMatchObject([{ n8nExecutionId: '42', output: mode === 'escaped-envelope'
+          ? { ok: false, itemsJson: '[]', error: expect.stringContaining('complete result') } : mode === 'oversized'
           ? { ok: false, itemsJson: '[]', error: expect.stringContaining('twenty records') }
           : { ok: true, itemsJson: mode === 'loop-terminal' ? '[{"value":1},{"value":2}]' : '[{"value":12}]' } }]);
         expect(await f.client.programs.invoke(prepared)).toEqual(result);

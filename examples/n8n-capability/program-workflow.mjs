@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { component, componentValidationSource } from './component-registry.mjs';
-import { programRecords } from './program-block.mjs';
+import { programRecordsSource, runProgramStepsSource } from './guest-sources/program-v1.mjs';
 
 export const PROGRAM_STUDIO_MARKER = '// nos-program-studio-v1:';
 const fail = message => { throw Object.assign(new Error(message), { code: 'INVALID_WORKFLOW', status: 400 }); };
@@ -35,7 +35,7 @@ export function compileProgramWorkflow(definition) {
   const revision = createHash('sha256').update(JSON.stringify({ compiler: 'program-v1', definition })).digest('hex');
   return { definition, ordered, kaRef: `urn:demo:nos:studio:${definition.id}:${revision.slice(0, 20)}`,
     workflowName: 'nOS Program workflow ' + revision, mode: 'action', executor: 'dkg',
-    grant: { kind: 'program-workflow-v1' }, requiresExportAuthorization: definition.nodes.some(n => component(n.componentId).writes) };
+    requiresExportAuthorization: definition.nodes.some(n => component(n.componentId).writes) };
 }
 
 /** Compiled with static child declarations; invoke_program retains caller identity and host-selected child IDs. */
@@ -80,7 +80,7 @@ export function programWorkflowSource(compiled) {
   const nodes = compiled.ordered.map(node => ({ ...node, descriptor: component(node.componentId) }));
   return PROGRAM_STUDIO_MARKER + Buffer.from(JSON.stringify(compiled.definition)).toString('base64') + '\n'
     + `import { invoke_program } from '@origintrail-official/dkg-graph-computer/program';\n${componentValidationSource()}`
-    + `const records = ${programRecords.toString()};\nconst execute = ${runProgramSteps.toString()};\n`
+    + `const records = ${programRecordsSource};\nconst execute = ${runProgramStepsSource};\n`
     + `export function run(input: any) { return execute(input, ${JSON.stringify(nodes)}, invoke_program, normalize, resolveComponentValue, records); }\n`;
 }
 

@@ -3,7 +3,7 @@ import { recoverTerminalExecutionReceipt } from './semantic-runtime-terminal-rec
 import { createHash } from 'node:crypto';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { canonicalizeJson, type CanonicalJsonValue } from '@origintrail-official/dkg-core';
-import { ProgramTraceRecorder, readProgramTrace, hashCanonicalPlan, type SemanticRuntimeConfig, type SemanticProgramBinding, type SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
+import { ProgramTraceRecorder, readProgramTrace, readProgramCallHistory, hashCanonicalPlan, type SemanticRuntimeConfig, type SemanticProgramBinding, type SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
 import { canonicalProgramInputs } from './semantic-runtime-bound-invocation.js';
 import { assertExecutionCapabilityAuthorized } from './semantic-runtime-invocation-policy.js';
 import { programBindingDigest } from './semantic-runtime-program-bindings.js';
@@ -23,8 +23,8 @@ function nativeContinuationEffects(store: SemanticRuntimeStore, executionIri: st
   if (!grant?.result) return null;
   // Declared child pins are also used by native Studio wrappers. Only actual
   // native tool calls may be inspected; a mixed execution remains held.
-  const trace = readProgramTrace(store, executionIri);
-  if (!trace?.calls.length || trace.calls.some(call => call.kind !== 'tool' || call.target !== grant.toolIri)) return null;
+  const calls = readProgramCallHistory(store, executionIri);
+  if (!calls.length || calls.some(call => call.kind !== 'tool' || call.target !== grant.toolIri)) return null;
   const effects = store.effectsForExecution(executionIri);
   if (!effects.length || !effects.some(e => ['unknown', 'reconciling', 'manual_review_required'].includes(e.state))) return null;
   for (const effect of effects) {
