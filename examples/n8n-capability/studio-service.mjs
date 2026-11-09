@@ -73,10 +73,9 @@ export function createStudioService({ graphId, owner, client, repository, provid
       if (requiresExportAuthorization) authorize();
       if (!await approved(compiled.kaRef, sourceHash)) await client.programs.approve({ graphId, operationIri: compiled.kaRef,
         program: reference(source, graphId), allowedCallers: [owner], ...plan.approval });
-      repository.saved(compiled.kaRef, plan.kind, requiresExportAuthorization);
-      const saved = (await get(compiled.kaRef, sourceHash)).workflow;
-      await provider?.recordSavedNative?.(compiled);
-      return saved;
+      const published = plan.kind === 'native-n8n' ? await native().savedNativeSnapshot(compiled) : undefined;
+      repository.completeSave(compiled, plan.kind, requiresExportAuthorization, published);
+      return (await get(compiled.kaRef, sourceHash)).workflow;
     })();
     saving.set(key, pending); try { return await pending; } finally { saving.delete(key); }
   }

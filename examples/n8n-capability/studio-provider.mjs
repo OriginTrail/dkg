@@ -77,16 +77,15 @@ export function createStudioProvider({ repository, config, graphId, owner, heade
     if (n8nWorkflowSha256(native.activeVersion ? { ...native.activeVersion, settings: native.settings } : native) !== grant.workflowSha256) throw error('The native graph revision changed.');
     if (!!native.active !== active) await api('/workflows/' + saved.providerId + (active ? '/publish' : '/unpublish'), 'POST', {});
   }
-  // Record only after the owner's complete save succeeds. Failed provisioning is
-  // not a saved/approved workflow. Existing installations must save once again.
-  async function recordSavedNative(compiled) {
+  // Fetch and verify remotely; the repository commits this snapshot with save completion.
+  async function savedNativeSnapshot(compiled) {
     if (compiled.executor === 'dkg' || ['schedule', 'webhook'].includes(compiled.mode)) return;
     const native = await api('/workflows/' + compiled.grant.workflowId);
     const published = native.activeVersion ? { ...native.activeVersion, settings: native.settings } : native;
     if (!native.active || n8nWorkflowSha256(published) !== compiled.grant.workflowSha256) throw error('Saved native revision is unavailable.');
-    repository.mcp.recordSavedNative(compiled, published);
+    return published;
   }
   const timerEvents = options => nativeTimerEvents(api, { ...options, graphId, owner });
   const executionInput = options => readNativeExecutionInput(api, options);
-  return { api, recordSavedNative, provision, setPublished, installGrant, timerEvents, executionInput };
+  return { api, savedNativeSnapshot, provision, setPublished, installGrant, timerEvents, executionInput };
 }

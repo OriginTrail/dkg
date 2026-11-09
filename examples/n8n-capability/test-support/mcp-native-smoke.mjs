@@ -66,7 +66,7 @@ try {
     id: 'read', componentId: descriptor.id, kaRef: 'urn:demo:n8n:component:dkg-read:smoke', sourceHash: 'a'.repeat(64), x: 0, y: 0,
     params: Object.fromEntries(Object.entries(descriptor.parameters).map(([key, p]) => [key, p.default])),
   }] });
-  await provider.recordSavedNative(compiled);
+  repository.completeSave(compiled, 'native-n8n', false, await provider.savedNativeSnapshot(compiled));
   // n8n publication returns before local webhook registration settles.
   await delay(1500);
   service = createStudioMcpService({ repository, provider, dkg: dkgComponentStore(repository.db, undefined, undefined, profile), accountId: profile.accountId, profile,

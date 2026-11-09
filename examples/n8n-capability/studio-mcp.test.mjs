@@ -33,7 +33,10 @@ async function fixture(t, runner) {
   let provider, repository;
   const open = () => { repository = createStudioRepository(state); return provider = createStudioProvider({ repository, config, graphId: 'test', owner: '0x' + 'a'.repeat(40), fetchImpl: async () => Response.json(published) }); };
   open(); t.after(() => repository.close());
-  await provider.recordSavedNative(compiled);
+  repository.ensure(compiled);
+  repository.nativeCreated(compiled.kaRef, compiled.grant.workflowId);
+  repository.nativeGranted(compiled.kaRef, compiled.grant);
+  repository.completeSave(compiled, 'native-n8n', false, await provider.savedNativeSnapshot(compiled));
   const input = (runKey = 'run-one') => ({ kaRef: compiled.kaRef, workflowSha256: compiled.grant.workflowSha256, runKey, arguments: { value: 'sensitive-input' } });
   const service = () => createStudioMcpService({ repository, provider, installation: config.n8nNative, accountId: owner.accountId, profile: null, ...(runner ? { runner } : {}) });
   return { state, compiled, published, config, input, get repository() { return repository; }, get provider() { return provider; }, service,
@@ -188,7 +191,7 @@ test('withdrawal and immutable saved snapshots survive repeat save and repositor
   const pin = { kaRef: f.input().kaRef, workflowSha256: f.input().workflowSha256 };
   s.withdraw(pin, owner);
   const before = f.repository.mcp.savedNative(pin.kaRef);
-  await f.provider.recordSavedNative(f.compiled);
+  f.repository.completeSave(f.compiled, 'native-n8n', false, await f.provider.savedNativeSnapshot(f.compiled));
   assert.deepEqual(f.repository.mcp.savedNative(pin.kaRef), before);
   const reopened = f.restart();
   assert.deepEqual(f.repository.mcp.savedNative(pin.kaRef), before);
