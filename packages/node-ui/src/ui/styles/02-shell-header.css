@@ -405,6 +405,9 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
   .v10-panel-scrim { position: absolute; inset: 0; z-index: 39; border: 0; padding: 0; background: var(--scrim); }
   .v10-app-body > .v10-panel-left { left: 0; }
   .v10-app-body > .v10-panel-right { right: 0; }
+  /* A closed panel stays mounted so it keeps its state; it just isn't shown. */
+  .v10-app-body > .v10-panel-left[hidden],
+  .v10-app-body > .v10-panel-right[hidden] { display: none; }
   /* The drag-to-resize handles are pointless at this width and, with the
      panels floated, would otherwise sit in the flow as orphan slivers.
      Hiding the handle does not remove access to anything — the panel is

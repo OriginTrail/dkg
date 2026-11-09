@@ -53,8 +53,8 @@ test.beforeEach(async ({ page }) => { await mockQuietNode(page); });
 test.describe('narrow screen (860px and below)', () => {
   test('both side panels start closed, even when the desktop layout has them open', async ({ page }) => {
     await open(page, NARROW, { leftCollapsed: false, rightCollapsed: false });
-    await expect(left(page)).toHaveCount(0);
-    await expect(right(page)).toHaveCount(0);
+    await expect(left(page)).toBeHidden();
+    await expect(right(page)).toBeHidden();
     await expect(scrim(page)).toHaveCount(0);
     // The centre takes the full width.
     const box = await centre(page).boundingBox();
@@ -65,7 +65,7 @@ test.describe('narrow screen (860px and below)', () => {
     await open(page, NARROW);
     await sidebarButton(page).click();
     await expect(left(page)).toBeVisible();
-    await expect(right(page)).toHaveCount(0);
+    await expect(right(page)).toBeHidden();
     await expect(scrim(page)).toBeVisible();
     await expect(sidebarButton(page)).toHaveClass(/active-toggle/);
     // The drawer floats: the centre keeps its full width underneath it.
@@ -74,12 +74,12 @@ test.describe('narrow screen (860px and below)', () => {
 
     await agentPanelButton(page).click();
     await expect(right(page)).toBeVisible();
-    await expect(left(page)).toHaveCount(0);
+    await expect(left(page)).toBeHidden();
     await expect(sidebarButton(page)).not.toHaveClass(/active-toggle/);
 
     // The same button closes its own panel.
     await agentPanelButton(page).click();
-    await expect(right(page)).toHaveCount(0);
+    await expect(right(page)).toBeHidden();
     await expect(scrim(page)).toHaveCount(0);
   });
 
@@ -93,7 +93,7 @@ test.describe('narrow screen (860px and below)', () => {
       const scrimBox = (await scrim(page).boundingBox())!;
       const x = panelBox.x > scrimBox.x + 1 ? 10 : scrimBox.width - 10;
       await scrim(page).click({ position: { x, y: scrimBox.height / 2 } });
-      await expect(panel(page)).toHaveCount(0);
+      await expect(panel(page)).toBeHidden();
       await expect(scrim(page)).toHaveCount(0);
     }
   });
@@ -103,7 +103,7 @@ test.describe('narrow screen (860px and below)', () => {
     await sidebarButton(page).click();
     await left(page).getByRole('button', { name: /^Settings$/ }).click();
     await expect(page).toHaveURL(/\/ui\/settings$/);
-    await expect(left(page)).toHaveCount(0);
+    await expect(left(page)).toBeHidden();
     await expect(scrim(page)).toHaveCount(0);
 
     // Back and forward count as going somewhere too.
@@ -111,7 +111,7 @@ test.describe('narrow screen (860px and below)', () => {
     await expect(right(page)).toBeVisible();
     await page.goBack();
     await expect(page).toHaveURL(/\/ui\/$/);
-    await expect(right(page)).toHaveCount(0);
+    await expect(right(page)).toBeHidden();
   });
 
   for (const [dialog, button] of [
@@ -129,7 +129,7 @@ test.describe('narrow screen (860px and below)', () => {
 
       // The dialog navigates before its last step. The panel closes; the dialog stays.
       await navigateTo(page, '/ui/settings');
-      await expect(left(page)).toHaveCount(0);
+      await expect(left(page)).toBeHidden();
       await expect(shown).toBeVisible();
       await expect(field).toHaveValue('Typed before the panel closed');
 
@@ -145,6 +145,34 @@ test.describe('narrow screen (860px and below)', () => {
       await expect(page.getByRole('dialog')).toHaveCount(0);
     });
   }
+
+  test('closing a panel hides it without unmounting, so a chat draft or form survives', async ({ page }) => {
+    // Mark each panel's element: a remount would replace it and drop the mark,
+    // along with any state inside (an unsent message, queued files).
+    const mark = (panel: typeof left) => panel(page).evaluate((el) => { (el as any).__kept = true; });
+    const kept = (panel: typeof left) => panel(page).evaluate((el) => (el as any).__kept === true);
+
+    await open(page, DESKTOP, { leftCollapsed: false, rightCollapsed: false });
+    await mark(left);
+    await mark(right);
+
+    await page.setViewportSize(NARROW);
+    await expect(left(page)).toBeHidden();
+    await expect(right(page)).toBeHidden();
+    expect(await kept(left)).toBe(true);
+    expect(await kept(right)).toBe(true);
+
+    // Opening one panel closes the other without unmounting it.
+    await agentPanelButton(page).click();
+    await sidebarButton(page).click();
+    await expect(right(page)).toBeHidden();
+    expect(await kept(right)).toBe(true);
+
+    await page.setViewportSize(DESKTOP);
+    await expect(right(page)).toBeVisible();
+    expect(await kept(left)).toBe(true);
+    expect(await kept(right)).toBe(true);
+  });
 });
 
 test.describe('back to desktop', () => {
@@ -152,16 +180,16 @@ test.describe('back to desktop', () => {
     const saved = { leftCollapsed: false, rightCollapsed: true, leftWidth: 260, rightWidth: 380 };
     await open(page, DESKTOP, saved);
     await expect(left(page)).toBeVisible();
-    await expect(right(page)).toHaveCount(0);
+    await expect(right(page)).toBeHidden();
 
     await page.setViewportSize(NARROW);
-    await expect(left(page)).toHaveCount(0);
+    await expect(left(page)).toBeHidden();
     await agentPanelButton(page).click();
     await expect(right(page)).toBeVisible();
 
     await page.setViewportSize(DESKTOP);
     await expect(left(page)).toBeVisible();
-    await expect(right(page)).toHaveCount(0);
+    await expect(right(page)).toBeHidden();
     await expect(scrim(page)).toHaveCount(0);
     expect((await left(page).boundingBox())!.width).toBe(260);
     expect(await savedLayout(page)).toMatchObject(saved);
@@ -170,7 +198,7 @@ test.describe('back to desktop', () => {
     await agentPanelButton(page).click();
     await expect(right(page)).toBeVisible();
     await page.setViewportSize(NARROW);
-    await expect(right(page)).toHaveCount(0);
+    await expect(right(page)).toBeHidden();
     await page.setViewportSize(DESKTOP);
     await expect(left(page)).toBeVisible();
     await expect(right(page)).toBeVisible();
@@ -179,7 +207,7 @@ test.describe('back to desktop', () => {
   test('the resize handles drag the side panels, and the new widths are saved', async ({ page }) => {
     // Left starts closed so its handle mounts after the shell does.
     await open(page, DESKTOP, { leftCollapsed: true, rightCollapsed: false, leftWidth: 240, rightWidth: 360 });
-    await expect(left(page)).toHaveCount(0);
+    await expect(left(page)).toBeHidden();
     await sidebarButton(page).click();
     await expect(left(page)).toBeVisible();
 
@@ -229,7 +257,7 @@ test.describe('narrow centre content (under 560px wide)', () => {
 
     // Closing a panel gives the centre its room back.
     await agentPanelButton(page).click();
-    await expect(right(page)).toHaveCount(0);
+    await expect(right(page)).toBeHidden();
     expect((await centre(page).boundingBox())!.width).toBeGreaterThanOrEqual(560);
     await expect(centre(page)).not.toHaveAttribute('data-narrow');
     expect(await tracks(page)).toBe(3);
