@@ -33,16 +33,16 @@ import {
   encodeMessage,
   SIGNER_TTL_MS,
   UNREACHABLE_MS,
-  hashOffer,
+  hashServiceOffer,
   receiptFromWire,
   serviceIdOf,
-  signOffer,
+  signServiceOffer,
   type Connector,
   type AccessKey,
   type GatewayAnswer,
   type GatewayDeps,
-  type Offer,
   type ServeResponse,
+  type ServiceOffer,
 } from '../src/index.js';
 
 const NODE = new ethers.Wallet(`0x${'22'.repeat(32)}`);
@@ -59,7 +59,7 @@ let router: Router;
 let gateway: Gateway;
 let gatewayDeps: GatewayDeps;
 let keys: AccessKeys;
-let offers: Offer[];
+let offers: ServiceOffer[];
 let tamper: ((answer: ServeResponse) => ServeResponse) | undefined;
 let reachable: boolean;
 let DOMAIN: MarketplaceDomain | undefined;
@@ -82,9 +82,9 @@ async function setUp(value = 10n ** 6n, models: string[] = [MODEL]): Promise<voi
   await seller.load();
   await seller.tick();
   const domain = (await chain.getMarketplaceContracts()).requestDomain;
-  offers = await Promise.all(models.map((m) => signOffer(chain, NODE.address, domain, {
-    seller: seller.gate.identityId, serviceId: serviceIdOf(m), serviceClass: 1, unit: 'token', pricePerUnit: PRICE, epoch, capacity: null,
-    model: m, provenance: 'upstream-claimed', peerId: 'seller-peer', signedAt: 1,
+  offers = await Promise.all(models.map((m) => signServiceOffer(chain, NODE.address, domain, {
+    seller: seller.gate.identityId, serviceId: serviceIdOf(m), serviceClass: 1, unit: 'token', model: m, provenance: 'upstream-claimed',
+    capacity: null, peerId: 'seller-peer', pricePerUnit: PRICE, priceEpoch: epoch, validUntilEpoch: epoch + 12, withdrawn: false, signedAt: 1,
   })));
   router = new Router({
     chain,
@@ -314,19 +314,20 @@ describe('the router', () => {
   /** Each seller's operational wallet, made at runtime; the chain below maps it to the seller. */
   const wallets = new Map<bigint, ethers.HDNodeWallet>();
   const walletOf = (seller: bigint) => wallets.get(seller) ?? wallets.set(seller, ethers.Wallet.createRandom()).get(seller)!;
-  /** An offer of `seller` in epoch 1, naming `peer-<seller>`, signed at 1 by the seller's wallet. */
-  const offer = (seller: bigint, price: bigint, over: { epoch?: number; by?: ethers.HDNodeWallet; peerId?: string; signedAt?: number } = {}): Offer => {
+  /** An offer of `seller` from epoch 1 on, naming `peer-<seller>`, signed at 1 by the seller's wallet. */
+  const offer = (seller: bigint, price: bigint, over: { epoch?: number; by?: ethers.HDNodeWallet; peerId?: string; signedAt?: number } = {}): ServiceOffer => {
     const unsigned = {
-      seller, serviceId: SERVICE, serviceClass: 1, unit: 'token' as const, pricePerUnit: price, epoch: over.epoch ?? 1, capacity: null,
-      model: MODEL, provenance: 'upstream-claimed' as const, peerId: over.peerId ?? `peer-${seller}`, signedAt: over.signedAt ?? 1,
+      seller, serviceId: SERVICE, serviceClass: 1, unit: 'token' as const, model: MODEL, provenance: 'upstream-claimed' as const, capacity: null,
+      peerId: over.peerId ?? `peer-${seller}`, pricePerUnit: price, priceEpoch: over.epoch ?? 1, validUntilEpoch: 12, withdrawn: false,
+      signedAt: over.signedAt ?? 1,
     };
-    return { ...unsigned, signature: (over.by ?? walletOf(seller)).signingKey.sign(hashOffer(domain, unsigned)).serialized };
+    return { ...unsigned, signature: (over.by ?? walletOf(seller)).signingKey.sign(hashServiceOffer(domain, unsigned)).serialized };
   };
   let clock: number;
   let quoted: string[];
   /** The epoch the sellers quote for. */
   let quotedEpoch: number;
-  let list: Offer[];
+  let list: ServiceOffer[];
   /** The wallets the chain was asked about, in order; while `chainDown`, every read fails. */
   let identityReads: string[];
   let chainDown: boolean;
@@ -433,7 +434,8 @@ describe('the router', () => {
   });
 
   it("asks again right after an epoch's boundary, while the last epoch's quote is within its five minutes", async () => {
-    list = [offer(2n, 20n), offer(2n, 20n, { epoch: 2 })];
+    // One offer prices both epochs.
+    list = [offer(2n, 20n)];
     const router = routerWith();
     expect(await router.pick(SERVICE, 1, 100n)).toEqual({ seller: 2n, peerId: 'peer-2', pricePerUnit: 20n });
     // A minute on, the next epoch starts: the quote for epoch 1 is kept for epoch 1 only.

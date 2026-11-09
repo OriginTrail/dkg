@@ -26,8 +26,8 @@ import {
   Router,
   decodeMessage,
   encodeMessage,
-  offersFromBindings,
-  offersQuery,
+  serviceOffersFromBindings,
+  serviceOffersQuery,
   NO_FX,
   resolveFx,
   resolveMarketplaceConfig,
@@ -109,15 +109,15 @@ export interface MarketplaceGatewayOptions {
 
 /**
  * The buyer's gateway: its router reads offers from the Marketplace Context
- * Graph, which the node subscribes to once the graph admits it, keeps those
- * their sellers signed, and reaches sellers over the messenger. Its job runs
- * as often as the buyer's.
+ * Graph's Verifiable Memory alone, which the node subscribes to once the graph
+ * admits it, keeps those their sellers signed, and reaches sellers over the
+ * messenger. Its job runs as often as the buyer's.
  */
 export async function startMarketplaceGateway(options: MarketplaceGatewayOptions): Promise<Gateway> {
   const { agent, buyer, dataDir } = options;
   const contextGraphId = (options.config.marketplace as MarketplaceConfig | undefined)?.contextGraphId;
-  const offers = async (epochs: number[]) => contextGraphId
-    ? offersFromBindings((await agent.query(offersQuery(epochs), { contextGraphId, graphSuffix: '_shared_memory' })).bindings as Record<string, unknown>[])
+  const offers = async () => contextGraphId
+    ? serviceOffersFromBindings((await agent.query(serviceOffersQuery(), { contextGraphId, view: 'verifiable-memory' })).bindings as Record<string, unknown>[])
     : [];
   const router = new Router({
     chain: buyer.chain,

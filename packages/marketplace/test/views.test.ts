@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
-import { BUYER_GRANT_TYPES, MockChainAdapter, marketplaceChainOf, subscriptionIdOf, type MarketplaceChainAdapter } from '@origintrail-official/dkg-chain';
+import { BUYER_GRANT_TYPES, MockChainAdapter, SERVICE_CLASS_QUERY, marketplaceChainOf, subscriptionIdOf, type MarketplaceChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   Buyer,
   BuyerStore,
@@ -74,13 +74,21 @@ describe('subscriptions and dry runs', () => {
     });
     expect(s!.sessionKey).toBe(await buyer.store.sessionKeyAddress(s!.subscriptionId));
     expect(s!.budgets).toEqual([{
-      budgetIndex: 0, serviceId: A,
+      budgetIndex: 0, serviceId: A, serviceClass: 'inference',
       value: String(100n * TRAC), valueTrac: '100.0',
       maxPricePerUnit: String(10n ** 9n), maxPricePerUnitTrac: '0.000000001',
       used: '0', usedTrac: '0.0', held: '0', heldTrac: '0.0',
       left: String(100n * TRAC), leftTrac: '100.0',
       softCeiling: String(95n * TRAC), softCeilingTrac: '95.0',
     }]);
+  });
+
+  it("names each budget's class as the chain stored it: a query budget comes back as query", async () => {
+    const { epoch } = await chain.getEpochTimes();
+    const B = `0x${'0b'.repeat(32)}`;
+    await buyer.fund({ epoch, source: { kind: 'wallet' }, services: [...plan().services, { serviceId: B, serviceClass: SERVICE_CLASS_QUERY, value: TRAC, maxPricePerUnit: 10n ** 9n }] });
+    const { subscriptions } = await subscriptionsView(buyer, [epoch]);
+    expect(subscriptions[0]!.budgets.map((b) => [b.serviceId, b.serviceClass])).toEqual([[A, 'inference'], [B, 'query']]);
   });
 
   it('shows a dry run, with the account discount and the refusal', async () => {
