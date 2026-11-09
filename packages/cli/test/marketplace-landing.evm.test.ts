@@ -87,8 +87,8 @@ async function sellerOf(key: string, opts: { landing?: Partial<LandingSettings>;
   return seller;
 }
 
-/** Serve `n` calls with nonces from `from`, each allowed `maxUnits`. */
-async function serve(seller: Seller, n: number, from = 0, maxUnits = 100n): Promise<void> {
+/** Serve `n` calls of `body` with nonces from `from`, each allowed `maxUnits`. */
+async function serve(seller: Seller, n: number, from = 0, maxUnits = 100n, body = BODY): Promise<void> {
   await provider().send('evm_mine', []);
   const { now } = await buyerChain.getEpochTimes();
   for (let i = 0; i < n; i++) {
@@ -96,7 +96,7 @@ async function serve(seller: Seller, n: number, from = 0, maxUnits = 100n): Prom
       subscriptionId, serviceId: SERVICE, seller: seller.gate.identityId, nonce: BigInt(from + i), pricePerUnit: PRICE,
       maxUnits, maxValueWei: maxUnits * PRICE, issuedAt: now, expiry: now + 600,
     };
-    const answer = await seller.serve({ request: requestToWire(request), signature: signServiceRequest(session.privateKey, domain, request), body: BODY });
+    const answer = await seller.serve({ request: requestToWire(request), signature: signServiceRequest(session.privateKey, domain, request), body });
     expect(answer.ok, JSON.stringify(answer)).toBe(true);
   }
 }
@@ -205,20 +205,22 @@ describe('landing on Hardhat', () => {
   });
 
   it('counts the receipts of two sellers over one budget in the order they landed', async () => {
-    // A budget of 30,000 wei; each seller serves two calls of 10,000.
-    await fund(HARDHAT_KEYS.EXTRA2, 30_000n);
+    // A budget of 36,000 wei; each seller serves two calls of 10,000, each allowed 26 units: a one-byte
+    // prompt's bound of 25 and a unit of output. Each seller's second call still fits what it sees left.
+    await fund(HARDHAT_KEYS.EXTRA2, 36_000n);
     const first = await sellerOf(HARDHAT_KEYS.CORE_OP);
     const second = await sellerOf(HARDHAT_KEYS.REC1_OP);
     expect(second.gate).toMatchObject({ open: true });
     await giveScore(first.gate.identityId);
     await giveScore(second.gate.identityId);
-    await serve(first, 2, 0, 10n);
-    await serve(second, 2, 0, 10n);
+    const short = { messages: [{ role: 'user' as const, content: 'q' }], max_tokens: 1 };
+    await serve(first, 2, 0, 26n, short);
+    await serve(second, 2, 0, 26n, short);
     await travelBy(31);
     second.lander.landNow();
     expect(await second.lander.tick()).toMatchObject({ sent: [{ items: 2, value: 20_000n, counted: 20_000n }] });
     first.lander.landNow();
-    expect(await first.lander.tick()).toMatchObject({ sent: [{ items: 2, value: 20_000n, counted: 10_000n }] });
+    expect(await first.lander.tick()).toMatchObject({ sent: [{ items: 2, value: 20_000n, counted: 16_000n }] });
     expect(await buyerChain.budgetLeft(subscriptionId, 0)).toBe(0n);
   });
 

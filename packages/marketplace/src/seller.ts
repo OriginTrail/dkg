@@ -22,7 +22,10 @@
  *   and counts as shared once its share returns.
  * - **Each call** is checked, cheapest check first, then
  *   served by the service's backend, cut to the units the request allows, and
- *   its receipt signed by an operational wallet. The call, its result and its
+ *   its receipt signed by an operational wallet. A request whose units cannot
+ *   cover its input's bound from its size (`inputUnitsBound`) and a unit of
+ *   output is refused before the backend runs: the backend does no work the
+ *   request cannot pay for. The call, its result and its
  *   receipt are in the ledger before the answer goes back; if that write fails,
  *   the answer is an error and no result. A repeat of a call already served
  *   gets the stored answer. Calls on one subscription run one at a time, so a
@@ -61,6 +64,7 @@ import { SellerLedger, type ServedCall } from './ledger.js';
 import { offerQuads, signOffer, type OfferQuad } from './offers.js';
 import {
   WireError,
+  inputUnitsBound,
   quoteRequestFromWire,
   receiptToWire,
   refusal,
@@ -357,6 +361,8 @@ export class Seller {
     deadline: AbortSignal,
   ): Promise<ServeResponse> {
     const unitCap = minBig(request.maxUnits, request.maxValueWei / request.pricePerUnit);
+    // The input's units at most, from its size: a request that cannot pay for them and a unit of output is refused before its backend runs.
+    if (inputUnitsBound(call.body.messages) >= unitCap) return refusal('UnitsTooFew');
     let completion;
     try {
       completion = await service.connector.complete({

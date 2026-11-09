@@ -143,6 +143,24 @@ export function refusal(code: ServeErrorCode, message?: string): ServeRefusal {
   return { ok: false, code, retry: SERVE_ERRORS[code], ...(message ? { message } : {}) };
 }
 
+// ------------------------------------------------------------------- units
+
+/** Units allowed per message for the chat template, and per call. */
+const UNITS_PER_MESSAGE = 8;
+const UNITS_PER_CALL = 16;
+
+/**
+ * The most units a call's input can count: each message's UTF-8 bytes, which
+ * a tokenizer never exceeds, and an allowance per message and per call for the
+ * chat template. A buyer's `maxUnits` covers it and the output it allows. A
+ * seller refuses a request whose units do not cover it and one unit of output
+ * (`UnitsTooFew`) before its backend runs, so an input the request cannot pay
+ * for is never sent to the backend.
+ */
+export function inputUnitsBound(messages: readonly ChatMessage[]): bigint {
+  return BigInt(messages.reduce((n, m) => n + Buffer.byteLength(m.content, 'utf8') + UNITS_PER_MESSAGE, UNITS_PER_CALL));
+}
+
 // ------------------------------------------------------------------ results
 
 /** The bytes a receipt commits to: the completion's text, as UTF-8. Seller and buyer both use this. */

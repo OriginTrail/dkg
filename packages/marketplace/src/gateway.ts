@@ -61,6 +61,7 @@ import {
   decodeMessage,
   encodeMessage,
   inferenceBodyFromWire,
+  inputUnitsBound,
   receiptFromWire,
   requestToWire,
   resultCommitmentOf,
@@ -74,9 +75,6 @@ import {
 const SOFT_CEILING_PERCENT = 95n;
 /** How long a request may wait for its seller. */
 const REQUEST_LIFETIME_SECONDS = 600;
-/** Units allowed per message for the chat template, and per call. */
-const UNITS_PER_MESSAGE = 8;
-const UNITS_PER_CALL = 16;
 const DEFAULT_MAX_TOKENS = 512;
 
 export interface GatewayAnswer {
@@ -565,8 +563,7 @@ export class Gateway {
   }
 }
 
-/** The most units a call can take: its input's UTF-8 bytes, an allowance per message and per call, and `max_tokens`. */
+/** The most units a call can take: its input's bound (`inputUnitsBound`) and `max_tokens`. */
 export function unitsBound(body: InferenceBody): bigint {
-  const input = body.messages.reduce((n, m) => n + ethers.toUtf8Bytes(m.content).length + UNITS_PER_MESSAGE, UNITS_PER_CALL);
-  return BigInt(input + body.max_tokens);
+  return inputUnitsBound(body.messages) + BigInt(body.max_tokens);
 }

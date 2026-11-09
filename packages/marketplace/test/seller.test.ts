@@ -27,6 +27,7 @@ import {
   Seller,
   UpstreamError,
   cutTo,
+  inputUnitsBound,
   offerSignerOf,
   offerSubject,
   offersFromBindings,
@@ -333,11 +334,30 @@ describe('a call', () => {
     expect(cut.result.content).toBe('abcde');
     expect(receiptFromWire(cut.receipt)).toMatchObject({ units: 60n, valueWei: 600n, resultCommitment: resultCommitmentOf('abcde') });
     // A value cap lower than its units allow cuts too.
-    const capped = await seller.serve(wire(await requestFor(id, { nonce: 1n, maxUnits: 1_000n, maxValueWei: 300n }))) as ServeAnswer;
-    expect(receiptFromWire(capped.receipt).units).toBe(30n);
+    const capped = await seller.serve(wire(await requestFor(id, { nonce: 1n, maxUnits: 1_000n, maxValueWei: 500n }))) as ServeAnswer;
+    expect(receiptFromWire(capped.receipt).units).toBe(50n);
     backend.next = { content: 'x', promptTokens: 60, completionTokens: 1 };
     expect(codeOf(await seller.serve(wire(await requestFor(id, { nonce: 2n, maxUnits: 60n }))))).toBe('UnitsTooFew');
     expect(cutTo('héllo wörld', 10, 5)).toBe('héllo');
+  });
+
+  it('never runs its backend for a signed request whose units cannot cover its input', async () => {
+    const id = await fund();
+    // A large prompt, and one unit at the price: valid, signed and funded, and again with each new nonce.
+    const large = { messages: [{ role: 'user' as const, content: 'x'.repeat(64 * 1024) }], max_tokens: 1 };
+    for (const nonce of [0n, 1n, 2n]) {
+      expect(codeOf(await seller.serve(wire(await requestFor(id, { nonce, maxUnits: 1n, maxValueWei: PRICE }), SESSION, large)))).toBe('UnitsTooFew');
+    }
+    expect(backend.calls).toBe(0);
+    // Its bound is 42 units: 18 bytes and an allowance of 8 for the message and 16 for the call. One unit more is served.
+    expect(inputUnitsBound(BODY.messages)).toBe(42n);
+    expect(codeOf(await seller.serve(wire(await requestFor(id, { nonce: 3n, maxUnits: 42n }))))).toBe('UnitsTooFew');
+    expect(codeOf(await seller.serve(wire(await requestFor(id, { nonce: 4n, maxUnits: 1_000n, maxValueWei: 42n * PRICE }))))).toBe('UnitsTooFew');
+    expect(backend.calls).toBe(0);
+    expect(codeOf(await seller.serve(wire(await requestFor(id, { nonce: 5n, maxUnits: 43n }))))).toBe('ok');
+    expect(backend.calls).toBe(1);
+    // Nothing was kept for the calls refused.
+    expect(seller.ledger.inState('served').map((c) => c.request.nonce)).toEqual(['5']);
   });
 
   it('refuses in the order of the checks', async () => {

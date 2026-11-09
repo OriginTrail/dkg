@@ -22,6 +22,7 @@ import {
   decodeMessage,
   encodeMessage,
   inferenceBodyFromWire,
+  inputUnitsBound,
   offerQuads,
   offerSignerOf,
   offersFromBindings,
@@ -56,6 +57,9 @@ describe('the wire', () => {
       expect(() => inferenceBodyFromWire(bad)).toThrow(WireError);
     }
     expect(() => quoteRequestFromWire({ services: Array(33).fill(request.serviceId) })).toThrow(/at most 32/);
+    // An input's bound: its UTF-8 bytes, 8 a message and 16 a call; a lone surrogate counts as the replacement it is sent as.
+    expect(inputUnitsBound([{ role: 'system', content: 'é' }, { role: 'user', content: '' }])).toBe(2n + 8n + 8n + 16n);
+    expect(inputUnitsBound([{ role: 'user', content: JSON.parse('"\\ud800"') as string }])).toBe(3n + 8n + 16n);
     expect(decodeMessage(encodeMessage({ a: '1' }))).toEqual({ a: '1' });
     expect(() => decodeMessage(new Uint8Array([0x7b]))).toThrow(WireError);
     const receipt = { requestDigest: request.subscriptionId, resultCommitment: request.serviceId, units: 3n, valueWei: 30n, completedAt: 5 };
