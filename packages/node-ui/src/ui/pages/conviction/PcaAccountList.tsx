@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useId, useState } from 'react';
 import { HealthChip, RetryButton, formatExpiryShort, formatPcaTrac, truncateAddress } from '../../components/Pca/index.js';
 import type { ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
 import type { DiscoveredPca } from '../../hooks/useDiscoveredPcas.js';
@@ -151,6 +151,45 @@ function FoundRow({ item, nowSec, onAdd }: { item: DiscoveredPca; nowSec: number
   );
 }
 
+/** "Already have a PCA?": the PCA ID goes straight into the Get added check. */
+function CheckById({ onCheck }: { onCheck: (id: string) => void }) {
+  const [value, setValue] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const errorId = useId();
+  const submit = () => {
+    const id = value.trim().replace(/^#/, '');
+    if (!/^\d+$/.test(id)) {
+      setError('Enter the PCA ID as a number.');
+      return;
+    }
+    setError(null);
+    setValue('');
+    onCheck(id);
+  };
+  return (
+    <>
+      <div className="v10-pca-overview-cta-group">
+        <input
+          type="text"
+          className="v10-form-input ds-input ds-sm"
+          data-testid="pca-check-input"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+          placeholder="PCA ID (for example 7)"
+          aria-label="PCA ID to check"
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? errorId : undefined}
+        />
+        <button type="button" className="v10-pca-card-btn ds-btn ds-sm" data-testid="pca-check-submit" onClick={submit}>
+          Check
+        </button>
+      </div>
+      {error && <p id={errorId} className="v10-pca-crux-error" role="alert">{error}</p>}
+    </>
+  );
+}
+
 /** One list for every PCA this node knows about, whoever owns it. */
 export function PcaAccountList({
   accounts,
@@ -162,6 +201,7 @@ export function PcaAccountList({
   onRemove,
   onRetry,
   onAddFound,
+  onCheckId,
   readingWallet,
   nowSec = Math.floor(Date.now() / 1000),
 }: {
@@ -174,6 +214,8 @@ export function PcaAccountList({
   onRemove: (id: string) => void;
   onRetry: () => void;
   onAddFound: (id: string) => void;
+  /** Opens Get added with this PCA ID already checked. */
+  onCheckId: (id: string) => void;
   /** The full address of the wallet being read; shown shortened, in full on hover. */
   readingWallet: string | null;
   nowSec?: number;
@@ -187,12 +229,8 @@ export function PcaAccountList({
     <section className="v10-pca-section" data-testid="pca-list">
       <div className="v10-pca-section-head">
         <h3 className="v10-pca-section-title">{hasRows || loading ? 'PCAs' : 'Already have a PCA?'}</h3>
+        <CheckById onCheck={onCheckId} />
       </div>
-      {!hasRows && !loading && (
-        <p className="v10-pca-overview-caveat" data-testid="pca-list-empty">
-          If a PCA owner approved this node’s wallets, check it with Get added. If you own a PCA, connect its owner wallet below.
-        </p>
-      )}
       {loading && !hasRows && <div className="card ds-card v10-pca-card v10-pca-card-skeleton" aria-hidden="true" />}
       {hasRows && (
         <div className="ds-table-scroll"><table className="data-table v10-pca-list">

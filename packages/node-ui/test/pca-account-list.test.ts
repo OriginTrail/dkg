@@ -37,6 +37,7 @@ const handlers = {
   onRemove: vi.fn(),
   onRetry: vi.fn(),
   onAddFound: vi.fn(),
+  onCheckId: vi.fn(),
 };
 
 async function renderList(accounts: PcaListAccount[], over: Record<string, unknown> = {}) {
@@ -135,11 +136,32 @@ describe('PcaAccountList', () => {
     expect(row.textContent).not.toContain('10%');
   });
 
-  it('with no PCAs, points to Get added and Connect wallet instead of an ID field', async () => {
+  it('with no PCAs, asks whether you already have one and offers the ID check beside it', async () => {
     const c = await renderList([]);
     expect(c.textContent).toContain('Already have a PCA?');
-    expect(c.querySelector('[data-testid="pca-list-empty"]')?.textContent).toMatch(/Get added.*connect its owner wallet/);
-    expect(c.querySelector('input')).toBeNull();
+    expect(c.querySelector('[data-testid="pca-check-input"]')).toBeTruthy();
+    expect(c.querySelector('[data-testid="pca-check-submit"]')?.textContent).toBe('Check');
     expect(c.querySelector('table')).toBeNull();
+  });
+
+  it('Check sends the typed PCA ID on, and says what is wrong with anything else', async () => {
+    const c = await renderList([]);
+    const input = c.querySelector('[data-testid="pca-check-input"]') as HTMLInputElement;
+    const type = async (v: string) => act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, v);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const press = async () => act(async () => {
+      (c.querySelector('[data-testid="pca-check-submit"]') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await type('abc');
+    await press();
+    expect(c.querySelector('[role="alert"]')?.textContent).toBe('Enter the PCA ID as a number.');
+    expect(input.getAttribute('aria-invalid')).toBe('true');
+    expect(handlers.onCheckId).not.toHaveBeenCalled();
+    await type('#7');
+    await press();
+    expect(handlers.onCheckId).toHaveBeenCalledWith('7');
+    expect(c.querySelector('[role="alert"]')).toBeNull();
   });
 });

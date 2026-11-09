@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useFetch } from '../../hooks.js';
 import { fetchWalletsBalances, fetchPca, pcaAgentAccount, describePcaError } from '../../api.js';
 import { formatEth, formatEthTooltip } from '../../lib/formatEth.js';
@@ -80,7 +80,14 @@ function summaryTone(rows: ProbeRow[]): 'success' | 'warning' | 'danger' {
  * testnet-only), and track approval against the owner-provided PCA id. Ready =
  * ≥1 wallet approved AND gas-funded → publish.
  */
-export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
+export function GetSponsoredPanel({
+  onClose,
+  initialAccountId,
+}: {
+  onClose: () => void;
+  /** A PCA ID entered on the Overview: pre-filled and checked once the wallets load. */
+  initialAccountId?: string;
+}) {
   const { data: wb, loading: walletsLoading, error: walletsError, refresh: refreshWallets } = useFetch(fetchWalletsBalances, [], 0);
   const wallets = wb?.wallets ?? [];
   const balances = wb?.balances ?? [];
@@ -112,7 +119,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
     0,
   );
 
-  const [sponsorId, setSponsorId] = useState('');
+  const [sponsorId, setSponsorId] = useState(initialAccountId ?? '');
   const [checking, setChecking] = useState(false);
   const [probeError, setProbeError] = useState<string | null>(null);
   const [probeRetryable, setProbeRetryable] = useState(false);
@@ -124,8 +131,8 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
     return e != null && Number(e) > 0;
   };
 
-  const check = async () => {
-    const id = sponsorId.trim();
+  const check = async (idToCheck?: string) => {
+    const id = (idToCheck ?? sponsorId).trim();
     if (!/^\d+$/.test(id)) { setProbeError('Enter the PCA ID as a number.'); return; }
     setChecking(true);
     setProbeError(null);
@@ -172,6 +179,23 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
       setChecking(false);
     }
   };
+
+  // An ID entered on the Overview is checked as soon as this node's wallets are known.
+  const autoChecked = useRef(false);
+  useEffect(() => {
+    if (!initialAccountId || autoChecked.current || walletsLoading || wallets.length === 0) return;
+    autoChecked.current = true;
+    void check(initialAccountId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialAccountId, walletsLoading, walletsKey]);
+  // Bring that first result into view: it sits below the wallets to share.
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const scrolledToResult = useRef(false);
+  useEffect(() => {
+    if (!autoChecked.current || scrolledToResult.current || (!probed && !probeError)) return;
+    scrolledToResult.current = true;
+    resultsRef.current?.scrollIntoView?.({ block: 'start' });
+  }, [probed, probeError]);
 
   const approvedCount = probed?.rows.filter((r) => r.coverage.registered === true).length ?? 0;
   // N1: Ready requires actual COVERAGE (spendable PCA), not bare registration.
@@ -275,10 +299,11 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
               placeholder="PCA ID from owner (e.g. 7)"
               aria-label="PCA ID from owner"
             />
-            <button type="button" className="v10-pca-card-btn primary ds-btn ds-primary" onClick={check} disabled={checking}>
+            <button type="button" className="v10-pca-card-btn primary ds-btn ds-primary" onClick={() => void check()} disabled={checking}>
               {checking ? 'Checking…' : 'Check approval'}
             </button>
           </div>
+          <div ref={resultsRef} aria-hidden="true" />
           {probeError && (
             <div className="v10-pca-retry-block">
               <p className="v10-modal-error ds-card-nested" role="alert">{probeError}</p>

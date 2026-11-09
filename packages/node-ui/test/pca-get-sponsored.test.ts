@@ -100,6 +100,28 @@ describe('GetSponsoredPanel', () => {
     await unmount();
   });
 
+  it('checks a PCA ID passed in from the Overview as soon as the wallets load', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0, W1],
+      balances: [
+        { address: W0, eth: '0.08', trac: '0', symbol: 'TRAC' },
+        { address: W1, eth: '0', trac: '0', symbol: 'TRAC' },
+      ],
+      chainId: '84532',
+      rpcUrl: null,
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => ({
+      ...makePcaSnapshot({ accountId: '7' }),
+      probedKey: key ? { key, registered: key.toLowerCase() === W0.toLowerCase() } : undefined,
+    }));
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn(), initialAccountId: '7' }));
+    // No typing or clicking: the ID is pre-filled and checked once.
+    await waitForText(container, 'Approved on PCA #7: 1 of 2 wallets');
+    expect((container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement).value).toBe('7');
+    expect(mocks.fetchPca.mock.calls.filter(([id]) => id === '7')).toHaveLength(2);
+    await unmount();
+  });
+
   it('tracks approval against the PCA id from the owner (N of M)', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue({
       wallets: [W0, W1],

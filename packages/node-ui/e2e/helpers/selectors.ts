@@ -280,7 +280,8 @@ export const sel = {
     recheckBtn: '[data-testid="pca-recheck-btn"]',
     // S7 role-adaptive landing + S1 overview
     landing: '[data-testid="pca-landing"]',
-    listEmpty: '[data-testid="pca-list-empty"]',           // S1 empty list: points to Get added and Connect wallet
+    checkInput: '[data-testid="pca-check-input"]',         // S1 "Already have a PCA?" ID field (opens the Get added check)
+    checkSubmit: '[data-testid="pca-check-submit"]',
     accountCard: '[data-testid="pca-account-row"]',         // S1 PCA list row
     healthChip: '[data-testid="pca-health-chip"]',          // HealthChip
     tierLadder: '[data-testid="pca-tier-ladder"]',          // DiscountTierLadder

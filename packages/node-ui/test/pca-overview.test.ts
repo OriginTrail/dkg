@@ -218,7 +218,7 @@ describe('ConvictionOverview — S1 discovery', () => {
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
     await waitForText(container, 'Your publishing discount');
     expect(container.querySelector('[data-testid="pca-list"]')?.textContent).not.toContain('Add by ID');
-    expect(container.querySelector('[data-testid="pca-list-empty"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="pca-check-input"]')).toBeTruthy();
     expect(container.querySelectorAll('[role="tab"]')).toHaveLength(0);
     await unmount();
   });

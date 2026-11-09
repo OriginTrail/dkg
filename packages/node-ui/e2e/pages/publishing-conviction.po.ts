@@ -24,7 +24,8 @@ export class PublishingConvictionPage {
   readonly unavailable: Locator;
   readonly recheckBtn: Locator;
   readonly landing: Locator;
-  readonly listEmpty: Locator;
+  readonly checkInput: Locator;
+  readonly checkSubmit: Locator;
   readonly accountCard: Locator;
   readonly healthChip: Locator;
   readonly tierLadder: Locator;
@@ -59,7 +60,8 @@ export class PublishingConvictionPage {
     this.unavailable = page.locator(sel.conviction.unavailable);
     this.recheckBtn = page.locator(sel.conviction.recheckBtn);
     this.landing = page.locator(sel.conviction.landing);
-    this.listEmpty = page.locator(sel.conviction.listEmpty);
+    this.checkInput = page.locator(sel.conviction.checkInput);
+    this.checkSubmit = page.locator(sel.conviction.checkSubmit);
     this.accountCard = page.locator(sel.conviction.accountCard);
     this.healthChip = page.locator(sel.conviction.healthChip);
     this.tierLadder = page.locator(sel.conviction.tierLadder);
@@ -103,8 +105,8 @@ export class PublishingConvictionPage {
     return this.unavailable.isVisible().catch(() => false);
   }
 
-  /** Track a known PCA by accountId. The UI has no typed-ID field on the
-   *  Overview (PCAs arrive by discovery or Get added), so this seeds the id into
+  /** Track a known PCA by accountId. The Overview's ID field only checks
+   *  approval (it adds the PCA when a wallet is approved), so this seeds the id into
    *  the PCA store's saved list, under the same scoped key the app uses
    *  (`dkg-pca:<chainId>:<nft>:<token>`), then reloads the Overview. */
   async trackAccount(accountId: string) {

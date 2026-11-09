@@ -23,6 +23,8 @@
   flex: 1 1 320px;
   min-width: 0;
 }
+/* "Already have a PCA?": the ID field keeps its natural width, so Check stays beside it. */
+.v10-pca-section-head .v10-form-input { width: auto; }
 .v10-pca-section-head > .v10-pca-overview-cta-group {
   flex: 0 0 auto;
   justify-content: flex-end;

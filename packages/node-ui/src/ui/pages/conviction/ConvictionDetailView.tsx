@@ -104,9 +104,9 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
     : access.mode === 'wallet'
     ? `Your connected wallet is the PCA owner wallet, so you can change PCA #${accountId}.`
     : ownerInPool
-    ? `Only the PCA owner wallet (${owner}) can change PCA #${accountId}. It’s one of this node’s wallets, but not the one the node signs with.`
+    ? `Only the PCA owner wallet (${owner}) can change PCA #${accountId}. It’s one of this node’s operational wallets, but the node signs PCA changes only with its primary operational wallet.`
     : connectedWallet
-    ? `Only the PCA owner wallet (${owner}) can change PCA #${accountId}. Your connected wallet isn’t it.`
+    ? `You’re connected with a different wallet. Only the PCA owner wallet (${owner}) can change PCA #${accountId}.`
     : `Only the PCA owner wallet (${owner}) can change PCA #${accountId}.`;
 
   return (

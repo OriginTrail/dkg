@@ -103,6 +103,8 @@ export function ConvictionOverview() {
   const [createOpen, setCreateOpen] = useState(false);
   const [approve, setApprove] = useState<{ accountId: string; mode: 'self' | 'sponsor'; selfCoverage?: boolean } | null>(null);
   const [sponsoredOpen, setSponsoredOpen] = useState(false);
+  // Set when "Already have a PCA?" opens Get added with an ID to check right away.
+  const [sponsoredCheckId, setSponsoredCheckId] = useState<string | null>(null);
 
   const enhancedAccounts = useMemo<PcaListAccount[]>(
     () =>
@@ -324,6 +326,7 @@ export function ConvictionOverview() {
         onRemove={untrackAccount}
         onRetry={() => refresh()}
         onAddFound={trackAccount}
+        onCheckId={(id) => { setSponsoredCheckId(id); setSponsoredOpen(true); }}
         readingWallet={connectedWalletPcas.loading && connectedWallet ? connectedWallet : null}
       />
 
@@ -347,7 +350,12 @@ export function ConvictionOverview() {
           onClose={() => { setApprove(null); refresh(); }}
         />
       )}
-      {sponsoredOpen && <GetSponsoredPanel onClose={() => { setSponsoredOpen(false); refresh(); }} />}
+      {sponsoredOpen && (
+        <GetSponsoredPanel
+          initialAccountId={sponsoredCheckId ?? undefined}
+          onClose={() => { setSponsoredOpen(false); setSponsoredCheckId(null); refresh(); }}
+        />
+      )}
     </div>
   );
 }

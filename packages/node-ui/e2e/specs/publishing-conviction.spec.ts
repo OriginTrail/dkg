@@ -83,13 +83,13 @@ test.describe('Publisher Conviction tab (PCA) — P0', () => {
     await page.screenshot({ path: `${SHOT_DIR}/503-gate.png`, fullPage: true });
   });
 
-  test('S1: core overview shows the owner Create-PCA affordance + the empty-list pointer', async ({ conviction, page }) => {
+  test('S1: core overview shows the owner Create-PCA affordance + the PCA ID check', async ({ conviction, page }) => {
     await conviction.open();
     // A fresh CORE node owns no PCAs → the role-adaptive landing (S7) leads with
-    // the owner Create-PCA CTA, and the empty list points to Get added and
-    // Connect wallet. Read-only, deterministic on an empty node.
+    // the owner Create-PCA CTA, and "Already have a PCA?" offers the ID check.
+    // Read-only, deterministic on an empty node.
     await expect(conviction.createBtn).toBeVisible();          // core/owner-capable
-    await expect(conviction.listEmpty.first()).toBeVisible();  // S1 empty list
+    await expect(conviction.checkInput.first()).toBeVisible(); // S1 ID check
     await page.screenshot({ path: `${SHOT_DIR}/s1-core-overview.png`, fullPage: true });
   });
 
