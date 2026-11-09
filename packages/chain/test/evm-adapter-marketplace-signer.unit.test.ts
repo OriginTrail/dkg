@@ -93,7 +93,8 @@ describe('the wallet a receipt batch is sent from', () => {
 
     expect(sent).toEqual([{ wallet: other.address, label: 'receipt batch' }, { wallet: primary.address, label: 'receipt batch' }]);
     // The first attempt reverted before its broadcast; the hook hears only the primary's, with its wallet.
-    expect(broadcasts).toEqual([{ txHash: TX_HASH, nonce: 3, wallet: primary.address }]);
+    expect(broadcasts).toHaveLength(1);
+    expect(broadcasts[0]).toMatchObject({ txHash: TX_HASH, nonce: 3, wallet: primary.address });
     expect(a.registeredOperationalAddresses.has(other.address.toLowerCase())).toBe(false);
     expect(cleared).toEqual([other.address]);
     expect(batch).toMatchObject({

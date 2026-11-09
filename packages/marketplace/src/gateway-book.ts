@@ -33,7 +33,7 @@ export interface HeldReceipt {
   keyId: string;
   request: ServiceRequestWire;
   signature: string;
-  /** The seller's receipt; none on an open call. */
+  /** The seller's receipt: as decoded once checked, as its seller sent it when refused, none on an open call. */
   receipt?: ReceiptWire;
   receiptSignature?: string;
   state: 'held' | 'refused' | 'open';

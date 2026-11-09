@@ -2679,45 +2679,47 @@ export class MockChainAdapter extends MockMarketplaceMethods implements ChainAda
     }
   }
 
-  async getKnowledgeAssetUpdateContext(kaId: bigint): Promise<KnowledgeAssetUpdateContext> {
+  private collectionOf(kaId: bigint): MockKnowledgeCollection {
     const entry = this.collections.get(kaId);
     if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return { ...entry.updateContext };
+    return entry;
+  }
+
+  async getKnowledgeAssetUpdateContext(kaId: bigint): Promise<KnowledgeAssetUpdateContext> {
+    return { ...this.collectionOf(kaId).updateContext };
+  }
+
+  /** Charged as the contract charges an extension, at an ask of 1 wei per KiB and epoch; refused once the asset expired. */
+  async extendKnowledgeAssetLifetime(kaId: bigint, epochs: number) {
+    const context = this.collectionOf(kaId).updateContext;
+    if (this.rsEpoch > context.endEpoch) throw new Error(`Mock: Knowledge Asset ${kaId} expired at epoch ${context.endEpoch}`);
+    const tokenAmount = (context.byteSize * BigInt(epochs)) / 1024n || 1n;
+    Object.assign(context, { endEpoch: context.endEpoch + BigInt(epochs), tokenAmount: context.tokenAmount + tokenAmount });
+    return { ...this.txResult(true), tokenAmount, endEpoch: Number(context.endEpoch) };
   }
 
   async getMerkleLeafCount(kaId: bigint): Promise<number> {
-    const entry = this.collections.get(kaId);
-    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.updateContext.merkleLeafCount;
+    return this.collectionOf(kaId).updateContext.merkleLeafCount;
   }
 
   async getCatalogRoot(kaId: bigint): Promise<Uint8Array> {
-    const entry = this.collections.get(kaId);
-    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.catalogRoot;
+    return this.collectionOf(kaId).catalogRoot;
   }
 
   async getCatalogLeafCount(kaId: bigint): Promise<number> {
-    const entry = this.collections.get(kaId);
-    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.catalogLeafCount;
+    return this.collectionOf(kaId).catalogLeafCount;
   }
 
   async getLatestMerkleRootPublisher(kaId: bigint): Promise<string> {
-    const entry = this.collections.get(kaId);
-    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.publisherAddress;
+    return this.collectionOf(kaId).publisherAddress;
   }
 
   async getLatestMerkleRootAuthor(kaId: bigint): Promise<string> {
-    const entry = this.collections.get(kaId);
-    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.authorAddress;
+    return this.collectionOf(kaId).authorAddress;
   }
 
   async getKAContextGraphId(kaId: bigint): Promise<bigint> {
-    const entry = this.collections.get(kaId);
-    return entry?.cgId ?? 0n;
+    return this.collections.get(kaId)?.cgId ?? 0n;
   }
 
   /**

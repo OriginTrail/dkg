@@ -13,11 +13,11 @@
   margin: 0 0 4px 0;
 }
 .v10-memstack-sub {
-  font-size: 12px; color: var(--text-tertiary);
+  font-size: var(--font-size-label); color: var(--text-tertiary);
   margin: 0;
 }
 .v10-memstack-empty {
-  font-size: 12px; color: var(--text-tertiary);
+  font-size: var(--font-size-label); color: var(--text-tertiary);
   padding: 40px 0;
   text-align: center;
   border: 1px dashed var(--border-subtle);
@@ -35,13 +35,13 @@
 }
 .v10-memstack-colhead {
   display: flex; align-items: center; gap: 6px;
-  font-size: 11px; font-weight: 700;
+  font-size: var(--font-size-caption); font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.06em;
   padding: 4px 0;
   border-bottom: 1px solid var(--border-subtle);
 }
 .v10-memstack-colhead.project { border-bottom: none; }
-.v10-memstack-colhead-icon { font-size: 14px; line-height: 1; }
+.v10-memstack-colhead-icon { font-size: var(--font-size-body); line-height: 1; }
 .v10-memstack-colhead-title { color: inherit; }
 .v10-memstack-colhead-desc {
   margin-left: auto;
@@ -49,7 +49,7 @@
   text-transform: none;
   letter-spacing: 0;
   color: var(--text-ghost);
-  font-size: 10px;
+  font-size: var(--font-size-meta);
 }
 .v10-memstack-row {
   display: grid;
@@ -66,7 +66,7 @@
   display: flex; align-items: center; gap: 8px;
   padding: 0; background: none; border: none;
   color: var(--text-primary);
-  font-size: 13px; font-weight: 600;
+  font-size: var(--font-size-ui); font-weight: 600;
   cursor: pointer; text-align: left;
   font-family: var(--font-sans);
   transition: color 0.15s;
@@ -82,7 +82,7 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .v10-memstack-project-desc {
-  font-size: 11px; color: var(--text-tertiary);
+  font-size: var(--font-size-caption); color: var(--text-tertiary);
   margin-top: 4px;
   line-height: 1.45;
   max-height: 3em;
@@ -90,7 +90,7 @@
 }
 .v10-memstack-project-status {
   margin-top: 6px;
-  font-size: 10px; color: var(--text-ghost);
+  font-size: var(--font-size-meta); color: var(--text-ghost);
   font-style: italic;
 }
 .v10-memstack-project-status.error { color: var(--accent-red, #ef4444); }
@@ -118,7 +118,7 @@
   line-height: 1;
 }
 .v10-memstack-cell-n-lbl {
-  font-size: 10px;
+  font-size: var(--font-size-meta);
   color: var(--text-tertiary);
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -126,11 +126,11 @@
 .v10-memstack-cell-sep { color: var(--text-ghost); margin: 0 2px; }
 .v10-memstack-cell-t {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--font-size-label);
   color: var(--text-secondary);
 }
 .v10-memstack-cell-t-lbl {
-  font-size: 9px;
+  font-size: var(--font-size-micro);
   color: var(--text-ghost);
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -142,7 +142,7 @@
 }
 .v10-memstack-cell-recent-item {
   display: flex; align-items: center; gap: 6px;
-  font-size: 11px; color: var(--text-secondary);
+  font-size: var(--font-size-caption); color: var(--text-secondary);
   padding: 2px 0;
 }
 .v10-memstack-cell-recent-bullet {
@@ -156,12 +156,12 @@
 }
 .v10-memstack-cell-recent-time {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--font-size-micro);
   color: var(--text-ghost);
   white-space: nowrap;
 }
 .v10-memstack-cell-empty-hint {
-  font-size: 10px; color: var(--text-ghost);
+  font-size: var(--font-size-meta); color: var(--text-ghost);
   font-style: italic;
   padding: 4px 0;
   flex: 1;
@@ -173,7 +173,7 @@
   border: 1px solid color-mix(in srgb, var(--cell-color, #64748b) 30%, var(--border-subtle));
   border-radius: 6px;
   color: var(--cell-color, var(--text-secondary));
-  font-size: 10px; font-weight: 700;
+  font-size: var(--font-size-meta); font-weight: 700;
   letter-spacing: 0.04em;
   cursor: pointer;
   font-family: var(--font-sans);
@@ -202,15 +202,15 @@
   display: flex; align-items: center; gap: 8px;
 }
 .v10-vm-identity-glyph {
-  font-size: 14px; color: #22c55e; line-height: 1;
+  font-size: var(--font-size-body); color: #22c55e; line-height: 1;
 }
 .v10-vm-identity-title {
-  font-size: 12px; font-weight: 700; color: var(--text-primary);
+  font-size: var(--font-size-label); font-weight: 700; color: var(--text-primary);
   letter-spacing: 0.01em;
 }
 .v10-vm-identity-badge {
   margin-left: auto;
-  font-size: 9px; font-weight: 700;
+  font-size: var(--font-size-micro); font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.08em;
   padding: 2px 7px;
   border-radius: 10px;
@@ -221,12 +221,12 @@
 .v10-vm-identity-row {
   display: flex; align-items: center; gap: 6px;
   flex-wrap: wrap;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   color: var(--text-secondary);
   padding: 2px 0;
 }
 .v10-vm-identity-lbl {
-  font-size: 9px; font-weight: 700;
+  font-size: var(--font-size-micro); font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--text-tertiary);
   min-width: 56px;
@@ -240,15 +240,15 @@
   white-space: nowrap;
 }
 .v10-vm-identity-val.mono {
-  font-family: var(--font-mono); font-size: 11px;
+  font-family: var(--font-mono); font-size: var(--font-size-caption);
 }
 .v10-vm-identity-wallet {
   color: var(--text-tertiary);
-  font-size: 10px;
+  font-size: var(--font-size-meta);
 }
 .v10-vm-identity-opid {
   color: var(--text-tertiary);
-  font-size: 10px;
+  font-size: var(--font-size-meta);
 }
 .v10-vm-identity-copy {
   padding: 1px 6px;
@@ -256,7 +256,7 @@
   border: 1px solid var(--border-subtle);
   border-radius: 4px;
   color: var(--text-tertiary);
-  font-size: 10px;
+  font-size: var(--font-size-meta);
   cursor: pointer;
   font-family: var(--font-sans);
   transition: border-color 0.15s, color 0.15s;
@@ -272,11 +272,11 @@
   gap: 6px;
   margin-top: 6px;
   padding-left: 18px;  /* line up under the title, past the dot */
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   color: var(--text-tertiary);
 }
 .v10-ka-event-attribution-prefix {
-  font-size: 10px;
+  font-size: var(--font-size-meta);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   font-weight: 700;
@@ -291,7 +291,7 @@
   flex-shrink: 0;
 }
 .v10-ka-header-author-label {
-  font-size: 9px; font-weight: 700;
+  font-size: var(--font-size-micro); font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--text-tertiary);
 }
@@ -323,7 +323,7 @@
   flex-shrink: 0;
 }
 .v10-project-strip-name {
-  font-size: 13px; font-weight: 600;
+  font-size: var(--font-size-ui); font-weight: 600;
   color: var(--text-primary);
   background: none; border: none; padding: 0;
   cursor: pointer;
@@ -338,17 +338,17 @@
 }
 .v10-project-strip-sep {
   color: var(--text-ghost);
-  font-size: 14px;
+  font-size: var(--font-size-body);
   font-weight: 400;
 }
 .v10-project-strip-sg {
   display: inline-flex; align-items: center; gap: 5px;
-  font-size: 12px; font-weight: 600;
+  font-size: var(--font-size-label); font-weight: 600;
   color: var(--text-secondary);
 }
-.v10-project-strip-sg-icon { font-size: 13px; line-height: 1; }
+.v10-project-strip-sg-icon { font-size: var(--font-size-ui); line-height: 1; }
 .v10-project-strip-desc {
-  font-size: 12px; color: var(--text-secondary);
+  font-size: var(--font-size-label); color: var(--text-secondary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   margin-left: 14px;
   max-width: 720px;
@@ -379,7 +379,7 @@
   border-radius: 8px;
   background: var(--surface-2, transparent);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-size-label);
   font-weight: 600;
   cursor: pointer;
   transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
@@ -396,7 +396,7 @@
 .v10-primer-kicker {
   margin: 0 0 8px;
   color: var(--text-tertiary);
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   font-weight: 700;
   text-transform: uppercase;
 }
@@ -411,7 +411,7 @@
   max-width: 720px;
   margin: 10px 0 0;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--font-size-body);
   line-height: 1.6;
 }
 .v10-primer-pipeline {
@@ -428,7 +428,7 @@
   border-radius: 8px;
   border: 1px solid var(--border-default);
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: var(--font-size-ui);
   font-weight: 700;
   text-align: center;
 }
@@ -463,13 +463,13 @@
 .v10-primer-section h2 {
   margin: 0 0 6px;
   color: var(--text-primary);
-  font-size: 15px;
+  font-size: var(--font-size-body-lg);
   font-weight: 750;
 }
 .v10-primer-section p {
   margin: 0;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-ui);
   line-height: 1.55;
 }
 
