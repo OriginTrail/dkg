@@ -162,6 +162,7 @@ export const COPY: Record<string, string> = {
   "off.absent.title": "The marketplace isn't available on this node",
   "off.absent.body": "This node answers no marketplace routes: it needs a node version that includes the marketplace.",
   "err.generic": "Something went wrong — the node did not say what",
+  "err.unreadable": "The node answered, but its answer could not be read",
   "err.off": "The marketplace is off on this node",
   "err.admin": "This needs the node-admin token",
   "err.notfound": "The node has no such route — it may run an older version",

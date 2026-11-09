@@ -126,6 +126,8 @@ type FirstSend =
   | 'answer'
   /** The node takes the key, but its answer never comes back; the transaction lands at `land()`. */
   | 'lose'
+  /** The node takes the key and the transaction lands, but the answer stops partway through its body. */
+  | 'cut'
   /** This answer comes back instead, from in front of the node or as its refusal, and the key is not taken. */
   | (() => Response);
 
@@ -193,10 +195,11 @@ function topUpNode() {
       if (taken) return taken.body === raw ? new Response(await taken.answer, { status: 200 }) : refusal(409, 'IdempotencyKeyReused');
       const how = control.first.shift() ?? 'answer';
       if (typeof how === 'function') return how();
-      const answer = how === 'answer' ? commit(input, init) : new Promise<string>((resolve) => { onTheirWay.push(() => { void commit(input, init).then(resolve); }); });
+      const answer = how === 'lose' ? new Promise<string>((resolve) => { onTheirWay.push(() => { void commit(input, init).then(resolve); }); }) : commit(input, init);
       keys.set(key, { body: raw, answer });
       if (how === 'lose') throw new TypeError('Failed to fetch');
-      return new Response(await answer, { status: 200 });
+      const text = await answer;
+      return new Response(how === 'cut' ? text.slice(0, Math.floor(text.length / 2)) : text, { status: 200 });
     }
     if (method === 'GET' && url.startsWith('/api/marketplace/subscriptions')) {
       if (control.holdChecks && toppedUp) await new Promise<void>((resolve) => held.push(resolve));
@@ -407,6 +410,28 @@ describe('marketplace Plans', () => {
     expect(sent).toHaveLength(2);
     expect(sent[1].body).toEqual(sent[0].body);
     expect(node.landings).toBe(1);
+  });
+
+  it('keeps a top-up whose answer is cut off waiting for the node, and Retry sends it again with its key', async () => {
+    const node = topUpNode();
+    node.first.push('cut');
+    const c = await topUpLlama();
+    await click(byTestId(c, 'mkt-topup-confirm'));
+    // The transaction landed, but an answer that cannot be read says nothing: the outcome stays unknown.
+    await waitForText(c, 'The budget holds 1 TRAC, up from 0.5: it shows the top-up.');
+    expect(byTestId(c, 'mkt-topup')?.getAttribute('data-phase')).toBe('unknown');
+    expect(byTestId(c, 'mkt-topup-sent')).toBeNull();
+    expect(byTestId(c, 'mkt-topup-confirm')).toBeNull();
+    expect(byTestId(c, 'mkt-topup-unsure')?.querySelector('[data-code="UnreadableAnswer"]')).toBeTruthy();
+    expect(sessionStorage.length).toBe(1);
+    await click(byTestId(c, 'mkt-topup-retry'));
+    await waitForText(c, 'llama-3.1-8b-instruct topped up · tx 0xc2c2…c2c2');
+    const sent = topUps(node.requests);
+    expect(sent).toHaveLength(2);
+    expect(keyOf(sent[0])).toMatch(UUID_V4);
+    expect(sent[1].body).toEqual(sent[0].body);
+    expect(node.landings).toBe(1);
+    expect(sessionStorage.length).toBe(0);
   });
 
   const silentOnTheKey: Array<[string, () => Response]> = [

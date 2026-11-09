@@ -15,6 +15,7 @@ const CODE_COPY: Record<string, string> = {
   MarketplaceAbsent: 'err.notfound',
   NodeAdminRequired: 'err.admin',
   Offline: 'err.offline',
+  UnreadableAnswer: 'err.unreadable',
   NotFound: 'err.notfound',
   Unauthorized: 'err.unauthorized',
   InvalidRequest: 'err.invalid',

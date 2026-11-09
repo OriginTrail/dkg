@@ -135,6 +135,21 @@ describe('marketplace API client', () => {
     vi.stubGlobal('fetch', async () => { throw new TypeError('Failed to fetch'); });
     await expect(marketplaceApi.funding()).rejects.toMatchObject({ status: 0, code: 'Offline', retryable: true });
   });
+
+  it('takes a success whose body cannot be read for no answer, and a refusal without a readable body for what its status says', async () => {
+    // The body stops partway, or the connection drops while it comes.
+    const cut = () => new Response('{"txHash":"0xc2c2', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    const dropped = () => ({ ok: true, status: 200, headers: new Headers(), json: () => Promise.reject(new TypeError('network error')) }) as unknown as Response;
+    const topUp = { services: [{ serviceId: FIXTURE_IDS.llama8b, serviceClass: 'inference' as const, value: '1', maxPricePerUnit: '1' }], idempotencyKey: '0f8fad5b-d9cb-469f-a165-70867728950e' };
+    for (const answer of [cut, dropped]) {
+      vi.stubGlobal('fetch', async () => answer());
+      await expect(marketplaceApi.topUp(`0x${'98'.repeat(32)}`, topUp)).rejects.toMatchObject({ status: 200, code: 'UnreadableAnswer', retryable: true });
+      await expect(marketplaceGateway.models(FIXTURE_SECRET)).rejects.toMatchObject({ status: 200, code: 'UnreadableAnswer' });
+      vi.unstubAllGlobals();
+    }
+    vi.stubGlobal('fetch', async () => new Response('<html>Bad Gateway</html>', { status: 502 }));
+    await expect(marketplaceApi.funding()).rejects.toMatchObject({ status: 502, code: 'HTTP_502', retryable: true });
+  });
 });
 
 describe('marketplace fixture node', () => {
