@@ -19,6 +19,7 @@ test('topology keeps weighted runners, bounded supporting concurrency and utilit
   assert.equal(COVERAGE_JOBS['tornado-core']['http-utils'], 1);
   assert.equal(COVERAGE_JOBS['tornado-core']['rdf-utils'], 1);
   assert.equal(COVERAGE_JOBS['kosava-supporting']['kafka-source'], 1);
+  assert.equal(COVERAGE_JOBS['kosava-supporting'].marketplace, 1);
 });
 test('every executable topology lane has explicit inventory semantics', () => {
   for (const { job } of Object.values(CI_LANE_TOPOLOGY)) {

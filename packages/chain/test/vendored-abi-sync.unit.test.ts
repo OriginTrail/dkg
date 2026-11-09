@@ -77,6 +77,17 @@ describe('the custom-error decoder is built from every vendored ABI', () => {
     ['StakingV10', 'NodeAlreadyInShardingTable(uint72 identityId)', [7n]],
     ['ConvictionStakingStorage', 'NodeExpiryQueueFull(uint72 identityId, uint256 pending, uint256 maxPending)', [7n, 64n, 64n]],
     ['ShardingTable', 'ShardingTableIsFull(uint72 nodesCount, uint16 sizeLimit)', [500n, 500n]],
+    // The marketplace (OT-RFC-27): a receipt batch, a funding and an account's opt-in.
+    ['QueryInferenceSettlement', 'NoNodeScore(uint72 identityId, uint256 epoch)', [7n, 663n]],
+    ['QueryInferenceSettlement', 'ReceiptFault(uint256 groupIndex, uint256 itemIndex, uint8 fault)', [0n, 3n, 6n]],
+    ['QueryInferenceSettlement', 'GroupFault(uint256 groupIndex, uint8 fault)', [1n, 3n]],
+    ['QueryInferenceSettlement', 'BatchOutOfBounds(uint256 groupCount, uint256 itemCount)', [33n, 300n]],
+    ['ServiceSubscriptions', 'EmissionAlreadyScheduled(uint256 accountId)', [5n]],
+    ['ServiceSubscriptions', 'LimitExceeded(string name, uint256 limit, uint256 attempted)', ['maxCostPerEpoch', 10n, 11n]],
+    ['ServiceSubscriptions', 'GrantEndsBeforeSubscription(uint256 accountId, address buyer, uint40 expiresAt, uint40 startsAt)', [5n, '0x00000000000000000000000000000000000000B1', 100n, 200n]],
+    ['ServiceSubscriptions', 'SubscriptionAlreadyFunded(bytes32 subscriptionId)', [`0x${'ab'.repeat(32)}`]],
+    ['ServiceSubscriptions', 'ServiceFundingPausedTreasuryWired(address treasury)', ['0x00000000000000000000000000000000000000b2']],
+    ['QueryInferenceStorage', 'EpochEnded(uint256 epoch, uint256 currentEpoch)', [663n, 664n]],
   ] as const)('%s reverts decode %s', (_contract, signature, args) => {
     const iface = new Interface([`error ${signature}`]);
     const fragment = iface.fragments[0] as ErrorFragment;

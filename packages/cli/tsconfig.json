@@ -16,6 +16,7 @@
     { "path": "../semantic-runtime" },
     { "path": "../adapter-openclaw" },
     { "path": "../local-llm" },
+    { "path": "../marketplace" },
     { "path": "../mcp-dkg" },
     { "path": "../rdf-utils" }
   ]
