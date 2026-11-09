@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 // Each node:test file runs in its own process. Load the explicit fictional profile
@@ -12,6 +12,30 @@ const { profileParameters } = await import('./dkg-profile.mjs');
 const { compileStudio } = await import('./studio-definition.mjs');
 const { createStudioProvider } = await import('./studio-provider.mjs');
 const { createStudioMcpService } = await import('./studio-mcp-service.mjs');
+const { handleDkgComponentCallback } = await import('./bridge.mjs');
+
+test('shared callback preserves MCP routing and does not fall back after an MCP rejection', async t => {
+  const state = mkdtempSync(join(tmpdir(), 'studio-mcp-callback-'));
+  t.after(() => rmSync(state, { recursive: true, force: true }));
+  const webhookTokenFile = join(state, 'token'), token = 'fixture-callback-token'.repeat(3);
+  writeFileSync(webhookTokenFile, token);
+  const config = { n8nNative: { webhookTokenFile } };
+  let manualCalls = 0, nativeCalls = 0;
+  const studio = { dkgComponent: async () => { manualCalls++; return { route: 'manual' }; } };
+  async function send(mcp) {
+    const req = { method: 'POST', headers: { authorization: 'Bearer ' + token },
+      async *[Symbol.asyncIterator]() { yield Buffer.from('{"effectId":"run-one"}'); } };
+    let status, body;
+    await handleDkgComponentCallback(req, { writeHead(s) { status = s; }, end(s) { body = JSON.parse(s); } }, studio, config, mcp);
+    return { status, body };
+  }
+  assert.deepEqual(await send({ dkgComponent: async () => { nativeCalls++; return { route: 'native' }; } }),
+    { status: 200, body: { route: 'native' } });
+  assert.equal(manualCalls, 0); assert.equal(nativeCalls, 1);
+  assert.deepEqual(await send({ dkgComponent: async () => undefined }), { status: 200, body: { route: 'manual' } });
+  const rejected = await send({ dkgComponent: async () => { throw Object.assign(new Error('Denied'), { status: 403 }); } });
+  assert.equal(rejected.status, 403); assert.equal(manualCalls, 1);
+});
 
 test('native DKG callback uses the admitted pins, typed profile and full agent actor; no Program path', async t => {
   const state = mkdtempSync(join(tmpdir(), 'studio-mcp-dkg-')); t.after(() => rmSync(state, { recursive: true, force: true }));

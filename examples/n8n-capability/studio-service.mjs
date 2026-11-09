@@ -31,7 +31,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     const plan = studioExecutionPlan(compiled, graphId);
     if (repository.row(kaRef).executor !== plan.kind) throw reject('The saved workflow executor changed.');
     return { compiled, plan, source, workflow: { definition: compiled.definition, kaRef, sourceHash: source.sourceHash, graphId,
-      ...(compiled.grant.workflowSha256 ? { workflowSha256: compiled.grant.workflowSha256 } : {}),
+      ...(compiled.grant?.workflowSha256 ? { workflowSha256: compiled.grant.workflowSha256 } : {}),
       mode: compiled.mode, approved: await approved(kaRef, source.sourceHash),
       requiresExportAuthorization: compiled.requiresExportAuthorization || !!repository.row(kaRef).requires_export,
       activation: (({ active, count, expiresAt }) => ({ active, count, expiresAt }))(activation(kaRef)), readbackVerified: true } };
