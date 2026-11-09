@@ -1,6 +1,5 @@
 import { PublicSnapshotSessionMethods } from './public-snapshot-session.js';
-import type { StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
-import type { AssertionPullFromOptions, AssertionPullFromResult } from '@origintrail-official/dkg-publisher';
+import type { AssertionPullFromOptions, AssertionPullFromResult, StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
 import { StorageACKAdmission } from './storage-ack-admission.js';
 import { runStorageACKOperation } from './storage-ack-diagnostics.js';
 import { requireStorageACKContextGraphId } from './internal/storage-ack-context-graph.js';

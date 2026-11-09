@@ -1449,12 +1449,9 @@ export class ApiClient {
     return this.post(`/api/pca/${encodeURIComponent(accountId)}/primary-node`, { node });
   }
 
-  /** A marketplace buyer route (OT-RFC-27): `path` is below `/api/marketplace`; its answer as the daemon sends it. */
   async marketplace<T = unknown>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body: unknown = {}): Promise<T> {
     const route = `/api/marketplace${path}`;
-    if (method === 'GET') return this.get<T>(route);
-    if (method === 'DELETE') return this.del<T>(route);
-    return method === 'PUT' ? this.put<T>(route, body) : this.post<T>(route, body);
+    return { GET: () => this.get<T>(route), DELETE: () => this.del<T>(route), PUT: () => this.put<T>(route, body), POST: () => this.post<T>(route, body) }[method]();
   }
 
   // ─── Node operational wallets (Identity operational keys) ────────────
