@@ -33,7 +33,24 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  *      The only per-CG participant list is the EOA allow-list used for
  *      curated / PCA flows.
  *
- *      Publish authorization supports the three curator types encoded in
+ *      Publishing into a curated CG passes TWO gates (10.1.0):
+ *
+ *        a. The SENDER gate, `isAuthorizedPublisher(cgId, msg.sender)`,
+ *           checked by KnowledgeAssetsLifecycle before the mint: who may
+ *           submit, and pay for, the publish.
+ *        b. The AUTHOR gate, `isAuthorizedAuthor(cgId, author)`, enforced
+ *           here in `registerKnowledgeAsset`: the KA's EIP-712-attested
+ *           author MUST be a MEMBER of the CG. Members are the participant
+ *           roster, the CG NFT holder, and (EOA / Safe mode) the curator.
+ *
+ *      Being an agent of the CG's PCA, or its owner, is NOT membership: a
+ *      PCA is a payment and commitment vehicle shared across many graphs,
+ *      and registration on it must not grant write access to any of them.
+ *      A PCA agent may still SUBMIT and pay for a member's KA (the payer /
+ *      author split), but cannot bind a KA it authors itself unless it is a
+ *      member. Open CGs (publishPolicy == 1) admit any author.
+ *
+ *      The sender gate supports the three curator types encoded in
  *      ContextGraphStorage (see decision #22):
  *
  *        1. EOA    — publishAuthority = wallet, accountId = 0
@@ -45,9 +62,9 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  *                    `publishAuthority` is a CREATE-TIME SNAPSHOT only.
  *                    Read path LIVE-RESOLVES `ownerOf(accountId)` and
  *                    accepts that owner or any registered agent of the
- *                    same account. The stored snapshot is IGNORED at read
- *                    time because it goes stale the moment the PCA NFT
- *                    transfers. Governance mutators (participant-agent
+ *                    same account AS SENDER. The stored snapshot is IGNORED
+ *                    at read time because it goes stale the moment the PCA
+ *                    NFT transfers. Governance mutators (participant-agent
  *                    allow-list) similarly live-resolve via
  *                    `_isOwnerOrAuthority`, and agents are NOT granted
  *                    governance rights — only the NFT holder is.
@@ -64,7 +81,23 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  */
 contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, ReentrancyGuard {
     string private constant _NAME = "ContextGraphs";
-    string private constant _VERSION = "10.0.4";
+    // 10.1.0 — Publishing requires membership. `registerKnowledgeAsset` binds a
+    //          KA to a curated CG only when the KA's attested author is a member
+    //          (participant roster, CG NFT holder, or EOA/Safe curator); an agent
+    //          or the owner of the CG's PCA is no longer accepted as an author on
+    //          that ground. Adds `isAuthorizedAuthor` and
+    //          `AuthorNotContextGraphMember`. `isAuthorizedPublisher` (the sender
+    //          gate) keeps its ABI and answers. Stateless facade: no storage
+    //          change; the upgrade is a Hub swap plus a re-initialize of
+    //          KnowledgeAssetsLifecycle, which caches this facade's address.
+    string private constant _VERSION = "10.1.0";
+
+    /// @notice A curated context graph refused a Knowledge Asset because the KA's
+    ///         attested author is not a member of the graph.
+    /// @dev    Raised by `registerKnowledgeAsset`, and therefore surfaces as the
+    ///         revert data of `KnowledgeAssetsLifecycle.publish`. Pre-check with
+    ///         `isAuthorizedAuthor`.
+    error AuthorNotContextGraphMember(uint256 contextGraphId, address author);
 
     ContextGraphStorage public contextGraphStorage;
 
@@ -363,8 +396,9 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
      *      transferring the PCA.
      *
      *      PCA REGISTERED AGENTS are NOT granted governance rights through
-     *      this modifier — agents can publish on behalf of the PCA owner
-     *      (see `isAuthorizedPublisher`), but only the PCA NFT holder
+     *      this modifier — agents may submit and pay for publishes (see
+     *      `isAuthorizedPublisher`; since 10.1.0 the KA's author must still be
+     *      a member, see `isAuthorizedAuthor`), but only the PCA NFT holder
      *      themselves can mutate the CG's participant-agent allow-list.
      *      Governance lives with the account, not with its operational
      *      wallets.
@@ -482,9 +516,18 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
     // --- Publish authorization ---
 
     /**
-     * @notice Check whether `publisher` is authorized to publish to a context graph.
+     * @notice Check whether `publisher` may SEND (submit and pay for) a publish
+     *         into a context graph — the sender gate.
      *
-     * @dev Implements the 3-curator-type model per decision #22:
+     * @dev Since 10.1.0 this is one of two gates. A publish into a curated CG
+     *      must also carry an author that is a MEMBER of the CG
+     *      (`isAuthorizedAuthor`, enforced in `registerKnowledgeAsset`). So a
+     *      `true` here for a registered agent of the CG's PCA means "may pay
+     *      for a member's KA", not "may publish its own KA". The answers and
+     *      the ABI of this function are unchanged from 10.0.4, so deployed
+     *      nodes that filter their payer wallets with it keep working.
+     *
+     *      Implements the 3-curator-type model per decision #22:
      *
      *      - Open CGs (publishPolicy == 1) allow any non-zero principal.
      *      - Curated + EOA curator (accountId == 0): direct address equality
@@ -505,8 +548,10 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
      *        agent whose `agentToAccountId(publisher) == accountId`. The live
      *        owner check revokes the FORMER owner immediately on transfer. The
      *        agent allow-list, however, is PRESERVED across transfer (it travels
-     *        with the PCA), so a former owner's registered agents retain publish
-     *        authority until the new owner calls `PublishingConviction.clearAgents`.
+     *        with the PCA), so a former owner's registered agents remain valid
+     *        SENDERS until the new owner calls `PublishingConviction.clearAgents`.
+     *        Since 10.1.0 that no longer lets them bind KAs they author
+     *        themselves: the author gate requires a member author.
      *
      *      Branch order is IMPORTANT. Because the EOA/Safe branch matches on
      *      the stored authority snapshot, it MUST NOT run in PCA mode — an
@@ -587,30 +632,116 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
             return false;
         }
 
-        // Registered agent of the authorized account. The agent allow-list is
-        // PRESERVED across PCA transfer (it travels with the token), so a former
-        // owner's agents keep authorizing here until the new owner explicitly
-        // resets it via `PublishingConviction.clearAgents`. The former OWNER is
-        // still revoked immediately by the live `ownerOf` check above.
+        // Registered agent of the authorized account, as SENDER only: the KA it
+        // submits must still have a member author (`isAuthorizedAuthor`). The
+        // agent allow-list is PRESERVED across PCA transfer (it travels with the
+        // token), so a former owner's agents keep passing this gate until the
+        // new owner explicitly resets it via `PublishingConviction.clearAgents`.
+        // The former OWNER is still revoked immediately by the live `ownerOf`
+        // check above.
         uint256 publisherAccountId = IDKGPublishingConvictionNFT(nftAddr).agentToAccountId(publisher);
         return publisherAccountId != 0 && publisherAccountId == authorityAccountId;
+    }
+
+    // --- Author authorization (10.1.0: publishing requires membership) ---
+
+    /**
+     * @notice Whether a Knowledge Asset whose EIP-712-attested author is
+     *         `author` may be published into `contextGraphId`.
+     *
+     * @dev The author gate that `registerKnowledgeAsset` enforces, exposed as a
+     *      view so nodes can pre-check before collecting ACKs.
+     *
+     *      - Unknown, zero or deactivated CG ids: false.
+     *      - Open CGs (publishPolicy == 1): any non-zero author.
+     *      - Curated CGs: the author must be a MEMBER of the CG:
+     *          1. a participant agent on the CG's roster
+     *             (`ContextGraphStorage.isParticipantAgent`), or
+     *          2. the CG NFT holder (`getContextGraphOwner`), who governs the
+     *             roster and can always add itself to it, or
+     *          3. in EOA / Safe curator mode (accountId == 0), the stored
+     *             `publishAuthority`, which storage keeps live for that mode.
+     *        In PCA curator mode the stored authority is a create-time
+     *        snapshot and is ignored. Neither the live PCA owner nor any agent
+     *        registered on the PCA is a member by virtue of the PCA; either one
+     *        becomes a member only through the roster or by holding the CG NFT.
+     *
+     *      Independent of who SENDS the publish: the sender gate is
+     *      `isAuthorizedPublisher`. A payer that is not a member can therefore
+     *      submit, and pay for, a member's KA.
+     * @param contextGraphId The context graph the KA would be published into.
+     * @param author         The KA's EIP-712-attested author.
+     * @return               True when the CG would bind a KA by `author`.
+     */
+    function isAuthorizedAuthor(
+        uint256 contextGraphId,
+        address author
+    ) external view returns (bool) {
+        uint256 latestId = contextGraphStorage.getLatestContextGraphId();
+        if (contextGraphId == 0 || contextGraphId > latestId) return false;
+        if (!contextGraphStorage.isContextGraphActive(contextGraphId)) return false;
+        return _isAuthorizedAuthor(contextGraphId, author);
+    }
+
+    /// @dev Shared by `isAuthorizedAuthor` and `registerKnowledgeAsset`. The
+    ///      caller has established that the CG exists. Reads are ordered
+    ///      cheapest first: the policy slot and accountId are already warm in
+    ///      a publish (the sender gate read them), the NFT holder is one cold
+    ///      slot, and the roster scan (at most MAX_PARTICIPANT_AGENTS slots)
+    ///      runs last and stops at the first match.
+    function _isAuthorizedAuthor(
+        uint256 contextGraphId,
+        address author
+    ) internal view returns (bool) {
+        if (author == address(0)) return false;
+
+        (uint8 policy, address storedAuthority) = contextGraphStorage.getPublishPolicy(contextGraphId);
+        if (policy == 1) return true;
+
+        if (
+            author == storedAuthority &&
+            contextGraphStorage.getPublishAuthorityAccountId(contextGraphId) == 0
+        ) {
+            return true;
+        }
+        if (contextGraphStorage.getContextGraphOwner(contextGraphId) == author) {
+            return true;
+        }
+        return contextGraphStorage.isParticipantAgent(contextGraphId, author);
     }
 
     // --- KA registration (Phase 8 publish flow entry point) ---
 
     /**
      * @notice Bind a Knowledge Asset to a Context Graph via the facade.
-     * @dev Thin wrapper over `ContextGraphStorage.registerKnowledgeAssetToContextGraph`.
-     *      Exists so Phase 8's `KnowledgeAssetsV10.publish` / `publishDirect`
-     *      can call the facade (stable interface) instead of reaching into
-     *      storage directly. `onlyContracts`-gated at the facade layer so the
-     *      entry point has one canonical caller — the KA contract — and no
-     *      direct EOA call path.
+     * @dev Wrapper over `ContextGraphStorage.registerKnowledgeAssetToContextGraph`
+     *      that enforces the AUTHOR gate (`isAuthorizedAuthor`): a KA joins a
+     *      curated CG only if its attested author is a member. Exists so
+     *      `KnowledgeAssetsLifecycle.publish` can call the facade (stable
+     *      interface) instead of reaching into storage directly.
+     *      `onlyContracts`-gated at the facade layer so the entry point has one
+     *      canonical caller — the KA contract — and no direct EOA call path.
+     *
+     *      The author comes from the id itself. Under OT-RFC-43 (variant 1a)
+     *      `kaId = (uint160(author) << 96) | uint96(number)`, and
+     *      `DKGKnowledgeAssets.createKnowledgeAsset` reverts
+     *      `KaIdNamespaceMismatch` unless the high 160 bits equal the author
+     *      that `KnowledgeAssetsLifecycle._verifyAuthorAttestation` proved. So
+     *      `kaId >> 96` IS the attested author, fixed at mint and unaffected by
+     *      any NFT transfer the mint's receiver hook might make. This keeps
+     *      KnowledgeAssetsLifecycle (and with it the EIP-712 domain and ACK
+     *      digest, which pin its address) unchanged by this rule.
+     * @param contextGraphId The context graph to bind the KA to.
+     * @param kaId           The packed KA id just minted, `(author << 96) | number`.
      */
     function registerKnowledgeAsset(
         uint256 contextGraphId,
         uint256 kaId
     ) external onlyContracts {
+        address author = address(uint160(kaId >> 96));
+        if (!_isAuthorizedAuthor(contextGraphId, author)) {
+            revert AuthorNotContextGraphMember(contextGraphId, author);
+        }
         contextGraphStorage.registerKnowledgeAssetToContextGraph(contextGraphId, kaId);
     }
 

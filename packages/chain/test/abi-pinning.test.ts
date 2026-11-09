@@ -194,7 +194,10 @@ const PINNED_DIGESTS: Record<string, string> = {
   // Digests recomputed post-merge from the combined ABI.
   // Re-pinned (vendored ABI sync): +event
   // `ContextGraphRegistrationDepositWaived(uint256,uint256,address)` from evm-module/abi.
-  ContextGraphs:                'c39fb7faf81da5f26782c80d53da2686d63e94fd3db419acb99f5b46b35d3cf8',
+  // Re-pinned for ContextGraphs 10.1.0 (publishing requires membership): +view
+  // `isAuthorizedAuthor(uint256,address)` and +error
+  // `AuthorNotContextGraphMember(uint256,address)`; nothing removed or changed.
+  ContextGraphs:                'fe7b1eb61850e180a3bbc7bd0debeb3053c1de1d3ddafc75651636baecc640c9',
   // Repinned: decoupled sampling list (10.0.6). Adds getSamplingKaCount/At
   // (the compacted per-CG list the within-CG draw + keeper use) alongside the
   // RandomSampling-gated `swapRemoveSamplingKnowledgeAssetAt` pruning primitive
