@@ -510,6 +510,8 @@ describe('the Marketplace Context Graph at boot', () => {
     };
     let admitted = false;
     const assets = offerAssetsIn(node as unknown as DKGAgent, 'graph', () => admitted);
+    // The graph names the target, so the seller keeps what it published by graph.
+    expect(assets.contextGraphId).toBe('graph');
     await expect(assets.publish('offer-a', quads)).rejects.toMatchObject({ code: 'MARKETPLACE_NOT_ADMITTED' });
     admitted = true;
     const published: Record<string, string[]> = {};

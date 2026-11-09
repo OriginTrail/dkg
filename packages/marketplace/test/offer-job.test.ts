@@ -7,10 +7,10 @@
  * holds), nothing sent after a restart, an asset extended with two epochs or
  * fewer left and paid for once when the publish after it fails, a withdrawal,
  * a seller without TRAC left unlisted with the reason and a backoff, a
- * confirmed publish whose catalog record is owed, and the job's runs beside
- * the landing tick.
+ * confirmed publish whose catalog record is owed, what was published kept by
+ * graph and read back checked, and the job's runs beside the landing tick.
  */
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -39,6 +39,10 @@ const A = serviceIdOf(MODEL_A);
 const B = serviceIdOf(MODEL_B);
 const PRICE = 10n;
 const EVIDENCE = { version: 1, transactionHash: `0x${'77'.repeat(32)}` };
+const GRAPH = 'test-marketplace';
+const OTHER_GRAPH = 'test-marketplace-2';
+/** Where the job keeps what it published. */
+const FILE = 'seller-offers-by-graph.json';
 
 let dir: string;
 let mock: MockChainAdapter;
@@ -68,9 +72,11 @@ async function onChain(kaId: bigint): Promise<void> {
   mock.__registerKC({ kaId, contextGraphId: 1n, merkleRootHex: ethers.ZeroHash, chunks: [], byteSize: 1_024n, startEpoch: BigInt(epoch), endEpoch: BigInt(epoch + TERM_EPOCHS), tokenAmount: 1n });
 }
 
-function memoryAssets(): Assets {
+/** A graph's assets in memory; the ids of another graph's start after `firstKaId`, so no two graphs share one. */
+function memoryAssets(contextGraphId = GRAPH, firstKaId = 1): Assets {
   const ids = new Map<string, bigint>();
   const a: Assets = {
+    contextGraphId,
     published: [],
     attempts: 0,
     recovered: [],
@@ -80,7 +86,7 @@ function memoryAssets(): Assets {
       if (failure) throw failure;
       let kaId = ids.get(name);
       if (kaId === undefined) {
-        ids.set(name, kaId = BigInt(ids.size + 1));
+        ids.set(name, kaId = BigInt(firstKaId + ids.size));
         await onChain(kaId);
       }
       a.published.push({ name, offer: offerIn(quads), kaId });
@@ -414,8 +420,70 @@ describe('the offer job', () => {
     vi.spyOn(chain, 'getEpochTimes').mockRejectedValueOnce(new Error('socket hang up'));
     seller.offers!.poke();
     await vi.waitFor(() => expect(logs).toContainEqual(expect.stringMatching(/offers were not kept: socket hang up/)));
-    await mkdir(join(dir, 'seller-offers.json'));
+    await mkdir(join(dir, FILE));
     await expect(sellerWith().load()).rejects.toThrow();
+  });
+
+  it('keeps what it published by graph: the same graph after a restart sends nothing, and another graph gets offers of its own', async () => {
+    const seller = sellerWith([serviceOf(MODEL_A)]);
+    await seller.load();
+    await settle(seller);
+    const { epoch } = await chain.getEpochTimes();
+    const restarted = sellerWith([serviceOf(MODEL_A)]);
+    await restarted.load();
+    await settle(restarted);
+    expect(assets.published).toHaveLength(1);
+    // The settings name another graph: the offer is published there as an asset of its own, its terms unchanged.
+    const other = memoryAssets(OTHER_GRAPH, 101);
+    const moved = sellerWith([serviceOf(MODEL_A)], other);
+    await moved.load();
+    await settle(moved);
+    expect(other.published.map((p) => [p.name, p.kaId])).toEqual([[`offer-${A}`, 101n]]);
+    expect(moved.offers!.listingOf(A, epoch)).toMatchObject({ listed: true, kaId: '101' });
+    // Back to the first graph: what was published there is kept, and nothing is sent again.
+    const back = sellerWith([serviceOf(MODEL_A)]);
+    await back.load();
+    await settle(back);
+    expect([assets.published.length, other.published.length]).toEqual([1, 1]);
+    expect(back.offers!.listingOf(A, epoch)).toMatchObject({ listed: true, kaId: String(assets.published[0]!.kaId) });
+    const kept = JSON.parse(await readFile(join(dir, FILE), 'utf8'));
+    expect(Object.keys(kept).sort()).toEqual([GRAPH, OTHER_GRAPH].sort());
+    expect(kept[OTHER_GRAPH][A].kaId).toBe('101');
+  });
+
+  it("reads back only records that hold an asset id and its offer as published, and fails the load on any other; other graphs' are kept as they are", async () => {
+    const seller = sellerWith([serviceOf(MODEL_A)]);
+    await seller.load();
+    await settle(seller);
+    const file = join(dir, FILE);
+    const kept = JSON.parse(await readFile(file, 'utf8'));
+    // Another graph's entry is not read, and is written back as it was; the file kept before offers were kept by graph is not read.
+    await writeFile(file, JSON.stringify({ ...kept, [OTHER_GRAPH]: 'not read' }));
+    await writeFile(join(dir, 'seller-offers.json'), 'not read');
+    const restarted = sellerWith();
+    await restarted.load();
+    await settle(restarted);
+    expect([offersOf(A).length, offersOf(B).length]).toEqual([1, 1]);
+    expect(JSON.parse(await readFile(file, 'utf8'))[OTHER_GRAPH]).toBe('not read');
+    const record = kept[GRAPH][A];
+    const broken: Array<[unknown, RegExp]> = [
+      ['not json', /JSON/],
+      ['[]', /holds no offers by graph/],
+      [{ [GRAPH]: [] }, /in "test-marketplace", holds no offers by service/],
+      [{ [GRAPH]: { [A]: 'a record' } }, /holds no published offer for/],
+      [{ [GRAPH]: { [A]: { offer: record.offer } } }, /holds no published offer for/],
+      [{ [GRAPH]: { [A]: { ...record, kaId: '0' } } }, /holds no published offer for/],
+      [{ [GRAPH]: { [A]: { kaId: record.kaId } } }, /holds no published offer for/],
+      [{ [GRAPH]: { [A]: { ...record, offer: { ...record.offer, capacity: 0 } } } }, /holds no published offer for/],
+      [{ [GRAPH]: { [A]: { ...record, offer: { ...record.offer, provenance: 'other' } } } }, /holds no published offer for/],
+      [{ [GRAPH]: { [A]: { ...record, offer: { ...record.offer, signedAt: String(record.offer.signedAt) } } } }, /holds no published offer for/],
+      [{ [GRAPH]: { [A]: { ...record, offer: { ...record.offer, pricePerUnit: 'ten' } } } }, /holds no published offer for/],
+      [{ [GRAPH]: { [B]: record } }, new RegExp(`holds no published offer for ${B}`)],
+    ];
+    for (const [content, message] of broken) {
+      await writeFile(file, typeof content === 'string' ? content : JSON.stringify(content));
+      await expect(sellerWith().load(), JSON.stringify(content)).rejects.toThrow(message);
+    }
   });
 });
 

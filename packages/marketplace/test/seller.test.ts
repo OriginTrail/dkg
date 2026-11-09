@@ -65,6 +65,7 @@ let failing: Error | undefined;
 /** Each asset's id by its name, put on the mock chain at its first publish. */
 let kaIds: Map<string, bigint>;
 const offers: OfferAssets = {
+  contextGraphId: 'test-marketplace',
   publish: async (name, quads) => {
     if (failing) throw failing;
     published.push({ name, quads });

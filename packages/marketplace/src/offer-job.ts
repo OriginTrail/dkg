@@ -22,7 +22,10 @@
  *      as an update of the same asset.
  * A service the settings no longer name is withdrawn: its offer is published
  * once more, marked withdrawn, and no longer extended. What was published is
- * kept on disk (`seller-offers.json`), so a restart sends nothing.
+ * kept on disk by graph (`seller-offers-by-graph.json`), so a restart sends
+ * nothing, and a graph the seller has not published to gets offers of its
+ * own; the assets in a graph it published to before are kept as they are,
+ * and extended no more while another graph is the seller's.
  *
  * A run that fails for a service (no TRAC, too few ACKs, a graph that is not
  * registered or has not admitted the node) leaves it as it was, says why in
@@ -40,10 +43,12 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { KeyedLock, writeDurably } from './journal.js';
 import {
+  MARKETPLACE_NS,
   scheduledPrice,
   serviceOfferFromWire,
   serviceOfferQuads,
   serviceOfferToWire,
+  serviceOffersFromBindings,
   signServiceOffer,
   type OfferQuad,
   type ServiceOffer,
@@ -59,6 +64,8 @@ export const MAX_OFFER_BACKOFF_SECONDS = 3_600;
 
 /** Where the offers go: the Marketplace Context Graph's Verifiable Memory, through the node's agent. */
 export interface OfferAssets {
+  /** The graph's id, as the node's settings name it: what was published is kept by it. */
+  contextGraphId: string;
   /** Publish `quads` as the asset `name`: the first time, or as an update of the one published under it. */
   publish(name: string, quads: OfferQuad[]): Promise<{ kaId: bigint }>;
   /** Finish the catalog's record of a confirmed publish, from the evidence its error carried. */
@@ -127,11 +134,43 @@ function sameTerms(a: Omit<ServiceOffer, 'signedAt' | 'signature'>, b: Omit<Serv
   return keys.every((k) => a[k] === b[k]);
 }
 
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/** The offer a record keeps, when it reads back as a buyer reads its asset (offers.ts checks each field); `undefined` otherwise. */
+function publishedOffer(wire: unknown): ServiceOffer | undefined {
+  if (!isObject(wire)) return undefined;
+  try {
+    const offer = serviceOfferFromWire(wire as ServiceOfferWire);
+    const row: Record<string, string> = {};
+    for (const q of serviceOfferQuads(offer)) if (q.predicate.startsWith(MARKETPLACE_NS)) row[q.predicate.slice(MARKETPLACE_NS.length)] = q.object;
+    const [read] = serviceOffersFromBindings([row]);
+    return read && sameTerms(read, offer) && read.signedAt === offer.signedAt && read.signature === offer.signature ? read : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One graph's records as the file keeps them, each checked: an asset id, and an offer that reads back as published. Throws on any other. */
+function recordsOf(value: unknown, where: string): Record<string, AssetRecord> {
+  if (value === undefined) return {};
+  if (!isObject(value)) throw new Error(`${where} holds no offers by service`);
+  const records: Record<string, AssetRecord> = {};
+  for (const [serviceId, record] of Object.entries(value)) {
+    const { kaId, offer, pending } = isObject(record) ? record : ({} as Record<string, unknown>);
+    const read = publishedOffer(offer);
+    if (typeof kaId !== 'string' || !/^[1-9]\d*$/.test(kaId) || !read || read.serviceId !== serviceId) {
+      throw new Error(`${where} holds no published offer for ${serviceId}`);
+    }
+    records[serviceId] = { kaId, offer: serviceOfferToWire(read), ...(pending === undefined ? {} : { pending }) };
+  }
+  return records;
+}
+
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 export interface OfferJobDeps {
   chain: MarketplaceChainAdapter;
-  /** Where `seller-offers.json` goes. */
+  /** Where `seller-offers-by-graph.json` goes. */
   dir: string;
   assets: OfferAssets;
   /** The operational wallet that signs offers. */
@@ -149,7 +188,10 @@ export interface OfferJobDeps {
 }
 
 export class OfferJob {
+  /** What was published in the graph the offers go to, by service id. */
   private records: Record<string, AssetRecord> = {};
+  /** What the file keeps of the graphs published to before, as it was read: written back as it is. */
+  private others: Record<string, unknown> = {};
   /** service id => its last run's failure, and how many in a row. */
   private readonly failures = new Map<string, { problem: ListingProblem; message: string; count: number; retryAt: number }>();
   private readonly closed = new Set<string>();
@@ -161,16 +203,26 @@ export class OfferJob {
   constructor(private readonly deps: OfferJobDeps) {}
 
   private get file(): string {
-    return join(this.deps.dir, 'seller-offers.json');
+    return join(this.deps.dir, 'seller-offers-by-graph.json');
   }
 
-  /** Read what was published. Call once before the first run. */
+  /**
+   * Read what was published in the graph the offers go to. Call once before the first run. A file it cannot read,
+   * or a record of the graph's that does not hold an asset id and its offer as published, fails the load.
+   */
   async load(): Promise<void> {
+    let text: string;
     try {
-      this.records = JSON.parse(await readFile(this.file, 'utf8'));
+      text = await readFile(this.file, 'utf8');
     } catch (err) {
       if ((err as { code?: string }).code !== 'ENOENT') throw err;
+      return;
     }
+    const graphs: unknown = JSON.parse(text);
+    if (!isObject(graphs)) throw new Error(`${this.file} holds no offers by graph`);
+    const { [this.deps.assets.contextGraphId]: records, ...others } = graphs;
+    this.records = recordsOf(records, `${this.file}, in "${this.deps.assets.contextGraphId}",`);
+    this.others = others;
   }
 
   /** A service's offer as Operate shows it, in `epoch`. */
@@ -303,10 +355,10 @@ export class OfferJob {
     if (before?.problem !== problem) this.deps.log?.(`[marketplace] the offer of ${serviceId} was not kept (${problem}), tried again in ${wait} s: ${messageOf(err)}`);
   }
 
-  /** Keep one service's record on disk: written beside the file, synced, then renamed over it. */
+  /** Keep one service's record on disk, under its graph: written beside the file, synced, then renamed over it. */
   private async save(serviceId: string, record: AssetRecord): Promise<void> {
     const records = { ...this.records, [serviceId]: record };
-    await writeDurably(this.file, `${JSON.stringify(records, null, 2)}\n`);
+    await writeDurably(this.file, `${JSON.stringify({ ...this.others, [this.deps.assets.contextGraphId]: records }, null, 2)}\n`);
     this.records = records;
   }
 }

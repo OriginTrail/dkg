@@ -37,6 +37,7 @@ export async function publishOfferAsset(agent: DKGAgent, contextGraphId: string,
 /** Where a seller's offers go: the graph's Verifiable Memory, once `admitted()` says the graph admits the node. */
 export function offerAssetsIn(agent: DKGAgent, contextGraphId: string, admitted: () => boolean): OfferAssets {
   return {
+    contextGraphId,
     publish: async (name, quads) => {
       if (!admitted()) throw Object.assign(new Error(`"${contextGraphId}" has not admitted this node yet`), { code: 'MARKETPLACE_NOT_ADMITTED' });
       return publishOfferAsset(agent, contextGraphId, name, quads);
