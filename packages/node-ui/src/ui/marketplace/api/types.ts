@@ -143,6 +143,13 @@ export interface Tx { txHash: string; blockNumber: number }
 /** A funding or top-up that was sent; `subscription` is null while the read lags the send. */
 export interface FundedAnswer extends Tx { subscription: Subscription | null }
 
+/**
+ * A top-up that went through. A repeat of its key gets the first answer; one
+ * whose first answer was lost, once the budgets show the top-up, names no
+ * transaction (`txHash` and `blockNumber` null).
+ */
+export interface TopUpAnswer { txHash: string | null; blockNumber: number | null; subscription: Subscription | null }
+
 export interface PlanService {
   serviceId: string;
   serviceClass: 'inference' | 'query';

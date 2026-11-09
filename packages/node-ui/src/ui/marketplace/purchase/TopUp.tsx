@@ -15,7 +15,7 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { copy } from '../copy.generated.js';
 import { marketplaceApi } from '../api/client.js';
-import type { CatalogAnswer, FundedAnswer, ServiceRequest, Subscription } from '../api/types.js';
+import type { CatalogAnswer, ServiceRequest, Subscription, TopUpAnswer } from '../api/types.js';
 import { fmtHex, fmtTrac, microOfWei, modelName, tracOfWei, usdOf, weiOfMicro, weiOfTrac } from '../amounts.js';
 import { ErrorCard } from '../shared.js';
 import { PreviewLine, lineFor } from './Composer.js';
@@ -39,7 +39,7 @@ export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
   const [cap, setCap] = useState(() => (terms ? microOfWei(terms.maxPricePerUnit)
     : budget ? microOfWei(budget.maxPricePerUnit) : service ? lineFor(service, 'current').capMicro : ''));
   // What this form's last send came to: the node's answer, or why nothing was added.
-  const [answer, setAnswer] = useState<FundedAnswer | null>(null);
+  const [answer, setAnswer] = useState<TopUpAnswer | null>(null);
   const [err, setErr] = useState<unknown>(null);
   // A refused send asks for a fresh dry run before the next one.
   const [round, setRound] = useState(0);
@@ -89,7 +89,9 @@ export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
   if (answer) {
     return (
       <div className="mkt-notice" role="status" data-testid="mkt-topup-sent">
-        <span data-copy="topup.sent">{copy('topup.sent', { name, tx: fmtHex(answer.txHash) })}</span>{' '}
+        {answer.txHash
+          ? <span data-copy="topup.sent">{copy('topup.sent', { name, tx: fmtHex(answer.txHash) })}</span>
+          : <span data-copy="topup.sent.shown">{copy('topup.sent.shown', { name })}</span>}{' '}
         <button type="button" className="mkt-linkbtn" data-copy="ctl.done" onClick={onDone}>{copy('ctl.done')}</button>
       </div>
     );

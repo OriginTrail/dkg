@@ -15,7 +15,7 @@
 // for a Retry. What the budget holds is never leave to send another: a
 // budget that does not show the top-up yet may still receive it.
 import { isMarketplaceError, marketplaceApi } from '../api/client.js';
-import type { FundedAnswer, ServiceRequest, TopUpRequest } from '../api/types.js';
+import type { ServiceRequest, TopUpAnswer, TopUpRequest } from '../api/types.js';
 import { randomUUID } from '../../lib/randomUUID.js';
 
 /**
@@ -43,7 +43,7 @@ export type Held =
  * be read first; or it is still held, as above.
  */
 export type Outcome =
-  | { kind: 'sent'; answer: FundedAnswer }
+  | { kind: 'sent'; answer: TopUpAnswer }
   | { kind: 'refused'; err: unknown }
   | { kind: 'unsent'; err: unknown }
   | { kind: 'held' };
@@ -109,16 +109,30 @@ function drop(id: string, attempt: Attempt): void {
   emit();
 }
 
+/** Answers that a key's top-up was, or may yet be, carried out: its key held for another request, still pending, or of unknown outcome. */
+const KEY_OPEN = new Set(['IdempotencyKeyReused', 'TopUpOutcomeUnknown', 'TopUpPending']);
+
+/** Refusals given before the node looks at a top-up's key: they say nothing of a send under it before this one. */
+const BEFORE_THE_KEY = new Set(['NodeAdminRequired', 'MarketplaceAbsent', 'Unauthorized', 'InvalidRequest']);
+
 /**
- * Whether the node refused the top-up itself (a 4xx), so nothing was added
- * under its key. No answer, a 5xx, or a refusal that says nothing of the key
- * leaves the outcome unknown: those given before the top-up is looked at (no
- * valid token, too many requests, a token that is not the node admin's, a
- * node without these routes), and the key held for another request.
+ * Whether the node refused the top-up so that nothing was added under its
+ * key, and nothing will be: a 4xx of its checks of the request, or of the
+ * contract (`TopUpNotSent` and `TopUpReverted` among them). The key is then
+ * free, and the next top-up is a new one. An answer that the top-up is
+ * pending, of unknown outcome, or that its key is held for another request
+ * leaves the outcome unknown, whatever its status; so do no answer, a 5xx,
+ * and a refusal given before the key is looked at (no valid token, too many
+ * requests, a token that is not the node admin's, a node without these
+ * routes, a request it cannot read), which says nothing of an earlier send.
+ * Only a first send, with nothing sent under its key before, is refused
+ * outright for a request the node cannot read.
  */
-function refusedOutright(e: unknown): boolean {
-  if (!isMarketplaceError(e) || e.status < 400 || e.status >= 500) return false;
-  return e.status !== 401 && e.status !== 429 && !['NodeAdminRequired', 'MarketplaceAbsent', 'IdempotencyKeyReused'].includes(e.code);
+function refusedOutright(e: unknown, retry: boolean): boolean {
+  if (!isMarketplaceError(e) || KEY_OPEN.has(e.code)) return false;
+  if (e.status < 400 || e.status >= 500 || e.status === 401 || e.status === 429) return false;
+  if (BEFORE_THE_KEY.has(e.code)) return !retry && e.code === 'InvalidRequest';
+  return true;
 }
 
 /** The value of the subscription's budget for `serviceId` as the node shows it now; 0 while it has none. */
@@ -164,7 +178,7 @@ async function deliver(id: string, attempt: Attempt, retry: boolean): Promise<Ou
     return { kind: 'sent', answer };
   } catch (e) {
     if (gen !== generation) return HELD;
-    if (!refusedOutright(e)) {
+    if (!refusedOutright(e, retry)) {
       toUnknown(id, attempt, e);
       return HELD;
     }

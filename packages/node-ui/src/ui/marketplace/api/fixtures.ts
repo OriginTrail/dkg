@@ -8,7 +8,7 @@ import type {
   Account, ActivityAnswer, Budget, Call, CatalogAnswer, ChatCompletion, Consent, Contracts, FundedAnswer, Funding,
   FundingRequest, GatewayModels, Key, KeysAnswer, LandNowAnswer, Listing, MadeKey, Offer, Offering, Plan, PlanRequest, Preview,
   ReconciliationAnswer, SellerStatus, Service, ServiceDetail, ServiceRequest, Source, SourceRequest, Storefront,
-  Subscription,
+  Subscription, TopUpAnswer,
 } from './types.js';
 
 export const FIXTURE_SCENARIOS = ['active', 'none', 'ended', 'off', 'viewer', 'ending'] as const;
@@ -399,7 +399,7 @@ export function fixtureAnswer(scenario: FixtureScenario, req: FixtureRequest, no
       return { ...b, ...amount('value', value), ...amount('left', BigInt(b.left) + BigInt(add.value)), ...amount('softCeiling', (value * 95n) / 100n) };
     });
     const added = budgetsOf(services.filter((x) => !s.budgets.some((b) => b.serviceId === x.serviceId)), budgets.length);
-    return { status: 200, body: { txHash: txHash(0xc2), blockNumber: 18_204_390, subscription: { ...s, budgets: [...budgets, ...added] } } satisfies FundedAnswer };
+    return { status: 200, body: { txHash: txHash(0xc2), blockNumber: 18_204_390, subscription: { ...s, budgets: [...budgets, ...added] } } satisfies TopUpAnswer };
   }
   if (method === 'PUT' && route === '/plan') return { status: 200, body: planOf(world, body as unknown as PlanRequest) };
   if (method === 'POST' && route === '/keys') {
