@@ -4,7 +4,7 @@
 // stops the key at its next call. Keys are the node admin's alone.
 import React, { useMemo, useState } from 'react';
 import { copy } from '../copy.generated.js';
-import { isMarketplaceOff, marketplaceApi, needsNodeAdmin } from '../api/client.js';
+import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi, needsNodeAdmin } from '../api/client.js';
 import type { Key, MadeKey } from '../api/types.js';
 import { fmtTrac, modelName, pctOf, usdOf, weiOfTrac } from '../amounts.js';
 import { AdminCard, ErrorCard, OffCard, relAt, useLoad } from '../shared.js';
@@ -61,6 +61,7 @@ export function AccessView(): React.ReactElement {
   };
 
   if (isMarketplaceOff(keys.err)) return <div className="mkt-frame" data-testid="mkt-access" data-state="off"><OffCard /></div>;
+  if (isMarketplaceAbsent(keys.err)) return <div className="mkt-frame" data-testid="mkt-access" data-state="absent"><OffCard absent /></div>;
   if (needsNodeAdmin(keys.err)) return <div className="mkt-frame" data-testid="mkt-access" data-state="admin"><AdminCard what="admin.access" /></div>;
   if (keys.err && !keys.data) {
     return (

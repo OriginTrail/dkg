@@ -120,7 +120,7 @@ export function MarketplaceGalleryView(): React.ReactElement {
         </Sect>
 
         <Sect title={copy('gallery.sect.states')}>
-          <OffCard /><OffCard selling /><AdminCard what="admin.access" />
+          <OffCard /><OffCard selling /><OffCard absent /><AdminCard what="admin.access" />
           {['empty.activity', 'empty.keys', 'recon.none', 'catalog.empty.offers'].map((k) => (
             <div key={k} className="mkt-card mkt-muted" style={{ textAlign: 'center' }}>{copy(k)}</div>
           ))}

@@ -5,7 +5,7 @@
 // "Add to plan" hands the service to Plans.
 import React, { useMemo, useState } from 'react';
 import { copy } from '../copy.generated.js';
-import { isMarketplaceOff, marketplaceApi } from '../api/client.js';
+import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi } from '../api/client.js';
 import type { CatalogAnswer, Fx, Offer, Service, Storefront } from '../api/types.js';
 import { fmtMicro, fmtTrac, modelName, usdPerMillion } from '../amounts.js';
 import { ErrorCard, OffCard, sellerName, useLoad, useMarketplaceNav } from '../shared.js';
@@ -178,6 +178,7 @@ export function MarketplaceView(): React.ReactElement {
   }, [catalog]);
 
   if (isMarketplaceOff(cat.err)) return <div className="mkt-frame" data-testid="mkt-marketplace" data-state="off"><OffCard /></div>;
+  if (isMarketplaceAbsent(cat.err)) return <div className="mkt-frame" data-testid="mkt-marketplace" data-state="absent"><OffCard absent /></div>;
   if (cat.err && !catalog) {
     return (
       <div className="mkt-frame" data-testid="mkt-marketplace" data-state="error">

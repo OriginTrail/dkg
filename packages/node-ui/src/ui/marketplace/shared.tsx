@@ -11,6 +11,8 @@ import { useTabsStore } from '../stores/tabs.js';
 /** A refusal's code → its plain words. */
 const CODE_COPY: Record<string, string> = {
   MarketplaceOff: 'err.off',
+  // A single route the node lacks; a surface whose loads all meet it shows the absent state instead.
+  MarketplaceAbsent: 'err.notfound',
   NodeAdminRequired: 'err.admin',
   Offline: 'err.offline',
   NotFound: 'err.notfound',
@@ -102,9 +104,12 @@ export function ErrorCard({ err, onRetry, retryKey = 'ctl.retry', children }: {
   );
 }
 
-/** The section's state when the node runs without the marketplace (or without selling). */
-export function OffCard({ selling = false, testId }: { selling?: boolean; testId?: string }): React.ReactElement {
-  const k = selling ? 'off.seller' : 'off.buyer';
+/**
+ * The section's state when the node runs without the marketplace (or without
+ * selling), or, `absent`, has no marketplace routes at all.
+ */
+export function OffCard({ selling = false, absent = false, testId }: { selling?: boolean; absent?: boolean; testId?: string }): React.ReactElement {
+  const k = absent ? 'off.absent' : selling ? 'off.seller' : 'off.buyer';
   return (
     <div className="mkt-card mkt-seatcard" data-testid={testId ?? 'mkt-off'}>
       <h2 data-copy={`${k}.title`}>{copy(`${k}.title`)}</h2>

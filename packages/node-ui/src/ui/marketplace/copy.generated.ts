@@ -159,6 +159,8 @@ export const COPY: Record<string, string> = {
   "off.buyer.body": "It needs marketplace.enabled in the node's config and a chain with the marketplace contracts.",
   "off.seller.title": "Selling is off on this node",
   "off.seller.body": "It needs marketplace.seller.enabled in the node's config, a chain with the marketplace contracts and a Core Node identity.",
+  "off.absent.title": "The marketplace isn't available on this node",
+  "off.absent.body": "This node answers no marketplace routes: it needs a node version that includes the marketplace.",
   "err.generic": "Something went wrong — the node did not say what",
   "err.off": "The marketplace is off on this node",
   "err.admin": "This needs the node-admin token",

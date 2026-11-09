@@ -26,7 +26,7 @@ describe('marketplace string table', () => {
   // The text around the placeholders is matched literally.
   const templates = [...code.matchAll(/`([a-z][a-z0-9-]*\.(?:[a-z0-9.-]|\$\{[^}]*\})+)`/g)]
     .map((m) => new RegExp(`^${m[1].split(/\$\{[^}]*\}/).map(escapeRegExp).join('[a-z0-9-]+')}$`));
-  templates.push(/^off\.(buyer|seller)\.(title|body)$/);
+  templates.push(/^off\.(buyer|seller|absent)\.(title|body)$/);
 
   it('holds no key the section does not use', () => {
     const unused = Object.keys(COPY).filter((k) => !literals.has(k) && !templates.some((t) => t.test(k)));

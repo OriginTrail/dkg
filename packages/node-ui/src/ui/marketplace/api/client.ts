@@ -48,6 +48,13 @@ export const isMarketplaceError = (e: unknown): e is MarketplaceError => e insta
 /** Whether a refusal says the marketplace (or selling) is off on this node. */
 export const isMarketplaceOff = (e: unknown): boolean => isMarketplaceError(e) && e.code === 'MarketplaceOff';
 
+/**
+ * Whether the node has no marketplace routes at all, as a node built without
+ * the marketplace: they answer 404 without naming a refusal, where a node
+ * with them names what it did not find.
+ */
+export const isMarketplaceAbsent = (e: unknown): boolean => isMarketplaceError(e) && e.code === 'MarketplaceAbsent';
+
 /** Whether a refusal needs the node-admin token. */
 export const needsNodeAdmin = (e: unknown): boolean => isMarketplaceError(e) && e.code === 'NodeAdminRequired';
 
@@ -84,8 +91,12 @@ function offline(err: unknown): MarketplaceError {
   return new MarketplaceError({ status: 0, code: 'Offline', message: err instanceof Error ? err.message : String(err), retryable: true });
 }
 
-async function answerOf<T>(res: Response): Promise<T> {
+async function answerOf<T>(res: Response, { nodeRoute = false }: { nodeRoute?: boolean } = {}): Promise<T> {
   const body: unknown = await res.json().catch(() => ({}));
+  // Every refusal of the node's marketplace routes names its code; a 404 without one is a route the node does not have.
+  if (nodeRoute && res.status === 404 && !(isRecord(body) && typeof body.code === 'string')) {
+    throw new MarketplaceError({ status: 404, code: 'MarketplaceAbsent', message: 'This node has no marketplace routes', retryable: false, body });
+  }
   if (!res.ok) throw errorOf(res.status, body, res.headers.get('Retry-After'));
   return body as T;
 }
@@ -99,7 +110,7 @@ async function call<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, 
   } catch (err) {
     throw offline(err);
   }
-  return answerOf<T>(res);
+  return answerOf<T>(res, { nodeRoute: true });
 }
 
 const queryOf = (q: Record<string, string | number | undefined>): string => {

@@ -6,7 +6,7 @@
 // operational wallets' ETH. Selling switched off is an explicit card.
 import React, { useState } from 'react';
 import { copy } from '../copy.generated.js';
-import { isMarketplaceOff, marketplaceApi } from '../api/client.js';
+import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi } from '../api/client.js';
 import type { LandNowAnswer, LandingReport, LandingStop, Offering } from '../api/types.js';
 import { fmtAt, fmtHex, fmtMicro, fmtTrac, modelName, weiOfMicro } from '../amounts.js';
 import { ErrorCard, OffCard, relAt, useLoad } from '../shared.js';
@@ -56,6 +56,7 @@ export function OperateView(): React.ReactElement {
       </div>
     );
   }
+  if (isMarketplaceAbsent(st.err)) return <div className="mkt-frame" data-testid="mkt-operate" data-state="absent"><OffCard absent /></div>;
   if (st.err && !st.data) {
     return (
       <div className="mkt-frame" data-testid="mkt-operate" data-state="error">

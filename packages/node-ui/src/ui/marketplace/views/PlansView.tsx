@@ -5,7 +5,7 @@
 // it to an account, compose a plan, mint a key.
 import React, { useEffect, useState } from 'react';
 import { copy } from '../copy.generated.js';
-import { isMarketplaceOff, marketplaceApi } from '../api/client.js';
+import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi } from '../api/client.js';
 import type { CatalogAnswer, Plan, Subscription } from '../api/types.js';
 import { fmtMicro, fmtTrac, microOfWei, modelName, sumWei } from '../amounts.js';
 import { ErrorCard, OffCard, refusalKey, relAt, sellerName, useLoad } from '../shared.js';
@@ -113,6 +113,7 @@ export function PlansView(): React.ReactElement {
 
   const loadErr = cat.err ?? subs.err ?? planned.err;
   if ([cat.err, subs.err, planned.err, funding.err].some(isMarketplaceOff)) return <div className="mkt-frame" data-testid="mkt-plans" data-state="off"><OffCard /></div>;
+  if ([cat.err, subs.err, planned.err, funding.err].some(isMarketplaceAbsent)) return <div className="mkt-frame" data-testid="mkt-plans" data-state="absent"><OffCard absent /></div>;
   if (loadErr && !(catalog && subs.data)) {
     return (
       <div className="mkt-frame" data-testid="mkt-plans" data-state="error">

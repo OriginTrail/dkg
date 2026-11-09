@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  ACCESS_KEY_RE, MarketplaceError, errorOf, isMarketplaceOff, marketplaceApi, marketplaceGateway, needsNodeAdmin,
+  ACCESS_KEY_RE, MarketplaceError, errorOf, isMarketplaceAbsent, isMarketplaceOff, marketplaceApi, marketplaceGateway, needsNodeAdmin,
 } from '../src/ui/marketplace/api/client.js';
 import { FIXTURE_IDS, FIXTURE_SECRET, FIXTURE_SCENARIOS, fixtureAnswer, fixtureFetch, fixtureWorld, tracWei } from '../src/ui/marketplace/api/fixtures.js';
 
@@ -110,9 +110,25 @@ describe('marketplace API client', () => {
     expect(needsNodeAdmin(await marketplaceApi.makeKey({ label: 'x', budget: '1' }).catch((e: unknown) => e))).toBe(true);
   });
 
-  it('reads PlanNotFound as no plan, and a missing route or a dead node as errors', async () => {
+  it('reads PlanNotFound as no plan, a node without the marketplace routes as absent, and a dead node as an error', async () => {
     stubNode('none');
     expect(await marketplaceApi.plan()).toBeNull();
+    // A node with the routes names what it did not find.
+    const missingService = await marketplaceApi.service(`0x${'99'.repeat(32)}`).catch((e: unknown) => e);
+    expect(missingService).toMatchObject({ status: 404, code: 'ServiceNotFound' });
+    expect(isMarketplaceAbsent(missingService)).toBe(false);
+    vi.unstubAllGlobals();
+    // A node without them answers 404 and names nothing, in JSON or not.
+    for (const answer of [() => new Response(JSON.stringify({ error: 'Not found' }), { status: 404 }), () => new Response('<h1>Not Found</h1>', { status: 404 })]) {
+      vi.stubGlobal('fetch', async () => answer());
+      for (const read of [() => marketplaceApi.catalog(), () => marketplaceApi.plan(), () => marketplaceApi.sellerStatus()]) {
+        const absent = await read().catch((e: unknown) => e);
+        expect(absent).toMatchObject({ status: 404, code: 'MarketplaceAbsent', retryable: false });
+        expect(isMarketplaceAbsent(absent)).toBe(true);
+        expect(isMarketplaceOff(absent)).toBe(false);
+      }
+      vi.unstubAllGlobals();
+    }
     expect(errorOf(404, { error: 'Not found' })).toMatchObject({ code: 'NotFound', retryable: false });
     expect(errorOf(409, { error: 'InsufficientAllowance(7, 664, 5, 2)', code: 'InsufficientAllowance', args: ['7', '664', '5', '2'], retryable: false }))
       .toMatchObject({ code: 'InsufficientAllowance', args: ['7', '664', '5', '2'] });
