@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTabsStore } from '../stores/tabs.js';
+import { useLayoutStore } from '../stores/layout.js';
 import { useProjectsStore } from '../stores/projects.js';
 import { isPassiveCatalogueGraph } from '../lib/contextGraphSidebar.js';
 import { pathToTab, tabIdToPath } from '../lib/tab-routes.js';
@@ -22,24 +23,43 @@ import { tabContextGraphId } from '../lib/tab-target.js';
  *   the address already shows the tab (it was the address that activated
  *   it) nothing is pushed. Paths that aren't tabs are left alone.
  *
+ *   Remembered locations: each tab's last query string (an Observability
+ *   tab, a graph view) is kept here, so switching back to a tab returns to
+ *   where it was. Route encoders stay pure.
+ *
+ *   Panels: the expanded right panel covers the centre, so any tab
+ *   activation, even of the tab already open, collapses it.
+ *
  * Tab metadata and order stay in the store; this hook only connects the
  * active tab to the address.
  */
 export function useShellRouting(): void {
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
   const navigate = useNavigate();
   const activeTabId = useTabsStore((s) => s.activeTabId);
   // The address as rendered: tab actions compare against it before pushing.
   const here = useRef(pathname);
   here.current = pathname;
   const restored = useRef(false);
+  const rememberedSearch = useRef(new Map<string, string>());
+
+  // Remember where each tab was.
+  useEffect(() => {
+    const route = pathToTab(pathname);
+    if (route) rememberedSearch.current.set(route.id, search);
+  }, [pathname, search]);
+
+  // Going anywhere shows the page.
+  useEffect(() => useTabsStore.subscribe((state, prev) => {
+    if (state.activations !== prev.activations) useLayoutStore.getState().setRightExpanded(false);
+  }), []);
 
   // Tab → address
   useEffect(() => useTabsStore.subscribe((state, prev) => {
     if (state.activeTabId === prev.activeTabId) return;
     if (!pathToTab(here.current)) return; // a path that isn't a tab
-    const target = tabIdToPath(state.activeTabId);
-    if (target !== here.current) navigate(target);
+    const path = tabIdToPath(state.activeTabId);
+    if (path !== here.current) navigate(path + (rememberedSearch.current.get(state.activeTabId) ?? ''));
   }), [navigate]);
 
   // Address → tab (after restoring a saved workspace once)
