@@ -15,12 +15,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import { ethers } from 'ethers';
 import { ChainRpcTransportError, MockChainAdapter, marketplaceChainOf, type MarketplaceChainAdapter } from '@origintrail-official/dkg-chain';
-import { AccessKeys, Buyer, BuyerStore, Gateway, Router, Seller, parsePlan, signOffer } from '@origintrail-official/dkg-marketplace';
+import { AccessKeys, Buyer, BuyerStore, Gateway, Router, Seller, parsePlan, signServiceOffer } from '@origintrail-official/dkg-marketplace';
 import { ApiClient } from '../src/api-client.js';
 import { registerMarketplaceCommand } from '../src/commands/marketplace.js';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { startMarketplaceBuyer, startMarketplaceGateway } from '../src/daemon/marketplace-buyer.js';
-import { subscribeWhenAdmitted } from '../src/daemon/marketplace-context-graph.js';
+import { offerAssetsIn, subscribeWhenAdmitted } from '../src/daemon/marketplace-context-graph.js';
 import { handleMarketplaceRoutes } from '../src/daemon/routes/marketplace.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
@@ -161,9 +161,9 @@ describe('the catalog routes', () => {
     await mock.ensureProfile();
     own = await chain.getIdentityId();
     const { epoch } = await chain.getEpochTimes();
-    const offers = [await signOffer(chain, SIGNER.address, (await chain.getMarketplaceContracts()).requestDomain, {
-      seller: own, serviceId: A, serviceClass: 1, unit: 'token', pricePerUnit: 10n, epoch, capacity: null, model: 'urn:test:model:a',
-      provenance: 'upstream-claimed', peerId: 'seller-peer', signedAt: 1,
+    const offers = [await signServiceOffer(chain, SIGNER.address, (await chain.getMarketplaceContracts()).requestDomain, {
+      seller: own, serviceId: A, serviceClass: 1, unit: 'token', model: 'urn:test:model:a', provenance: 'upstream-claimed', capacity: null,
+      peerId: 'seller-peer', pricePerUnit: 10n, priceEpoch: epoch, validUntilEpoch: epoch + 12, withdrawn: false, signedAt: 1,
     })];
     gateway = new Gateway({
       chain, buyerWallet: SIGNER.address, store: buyer!.store, keys: new AccessKeys(dir), dir,
@@ -489,6 +489,46 @@ describe('the Marketplace Context Graph at boot', () => {
     await vi.advanceTimersByTimeAsync(3_600_000);
     expect(waiting.resolveContextGraphSubscriptionBootstrapAuthority).toHaveBeenCalledTimes(1);
     expect(waiting.subscribeToContextGraph).not.toHaveBeenCalled();
+  });
+
+  it("publishes an offer's asset once the graph admits the node, reopening and rewriting a sealed one whole, and finishes a catalog record", async () => {
+    const quads = [{ subject: 'urn:test:offer', predicate: 'urn:test:p', object: '"1"', graph: '' }];
+    const steps: string[] = [];
+    let state: string | undefined;
+    let status = 'confirmed';
+    const step = (name: string) => vi.fn(async (...args: unknown[]) => { steps.push(`${name}${args[2] === 'swm' || args[2] === 'vm' ? `:${args[2]}` : ''}`); });
+    const node = {
+      assertion: {
+        history: vi.fn(async () => (state === undefined ? null : { state })),
+        pullFrom: step('pullFrom'), discard: step('discard'), create: step('create'), write: step('write'), promote: step('promote'),
+      },
+      publishFromFinalizedAssertion: vi.fn(async () => ({ status, kaId: 42n })),
+      recoverRfc64ConfirmedCatalogObligationV1: vi.fn(async () => undefined),
+    };
+    let admitted = false;
+    const assets = offerAssetsIn(node as unknown as DKGAgent, 'graph', () => admitted);
+    await expect(assets.publish('offer-a', quads)).rejects.toMatchObject({ code: 'MARKETPLACE_NOT_ADMITTED' });
+    admitted = true;
+    const published: Record<string, string[]> = {};
+    for (const each of [undefined, 'promoted', 'published', 'finalized', 'created', 'discarded']) {
+      state = each;
+      steps.length = 0;
+      expect(await assets.publish('offer-a', quads)).toEqual({ kaId: 42n });
+      published[String(each)] = [...steps];
+    }
+    expect(published).toEqual({
+      undefined: ['create', 'write', 'promote'],
+      promoted: ['pullFrom:swm', 'discard', 'create', 'write', 'promote'],
+      published: ['pullFrom:vm', 'discard', 'create', 'write', 'promote'],
+      finalized: ['pullFrom:vm', 'discard', 'create', 'write', 'promote'],
+      created: ['discard', 'create', 'write', 'promote'],
+      discarded: ['create', 'write', 'promote'],
+    });
+    expect(node.assertion.write).toHaveBeenLastCalledWith('graph', 'offer-a', quads);
+    status = 'tentative';
+    await expect(assets.publish('offer-a', quads)).rejects.toThrow(/not confirmed on chain \(tentative\)/);
+    await assets.recover({ version: 1 });
+    expect(node.recoverRfc64ConfirmedCatalogObligationV1).toHaveBeenCalledWith({ version: 1 });
   });
 });
 

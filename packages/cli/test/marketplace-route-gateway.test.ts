@@ -23,7 +23,7 @@ import {
   decodeMessage,
   encodeMessage,
   serviceIdOf,
-  signOffer,
+  signServiceOffer,
   type QuoteResponse,
 } from '@origintrail-official/dkg-marketplace';
 import { handleMarketplaceRoutes } from '../src/daemon/routes/marketplace.js';
@@ -80,9 +80,9 @@ async function setUp(turns?: { waitingPerKey: number; calls: number }): Promise<
   });
   await seller.load();
   await seller.tick();
-  const offers = [await signOffer(chain, NODE.address, (await chain.getMarketplaceContracts()).requestDomain, {
-    seller: seller.gate.identityId, serviceId: serviceIdOf(MODEL), serviceClass: 1, unit: 'token', pricePerUnit: 10n, epoch, capacity: null,
-    model: MODEL, provenance: 'upstream-claimed', peerId: 'seller-peer', signedAt: 1,
+  const offers = [await signServiceOffer(chain, NODE.address, (await chain.getMarketplaceContracts()).requestDomain, {
+    seller: seller.gate.identityId, serviceId: serviceIdOf(MODEL), serviceClass: 1, unit: 'token', model: MODEL, provenance: 'upstream-claimed',
+    capacity: null, peerId: 'seller-peer', pricePerUnit: 10n, priceEpoch: epoch, validUntilEpoch: epoch + 12, withdrawn: false, signedAt: 1,
   })];
   keys = new AccessKeys(join(dir, 'buyer'));
   gateway = new Gateway({

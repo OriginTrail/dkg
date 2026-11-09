@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
 import { requestDomain, type MarketplaceContracts } from '@origintrail-official/dkg-chain';
-import { Router, hashOffer, serviceIdOf, type Offer } from '../src/index.js';
+import { Router, hashServiceOffer, serviceIdOf, type ServiceOffer } from '../src/index.js';
 
 const MODEL = 'urn:test:model:router-demotion';
 const SERVICE = serviceIdOf(MODEL);
@@ -14,12 +14,12 @@ const SERVICE = serviceIdOf(MODEL);
 describe('a seller that refuses for good', () => {
   const domain = requestDomain(31337, ethers.Wallet.createRandom().address);
   const wallets = new Map<bigint, ethers.HDNodeWallet>([[1n, ethers.Wallet.createRandom()], [2n, ethers.Wallet.createRandom()]]);
-  const offer = (seller: bigint, price: bigint): Offer => {
+  const offer = (seller: bigint, price: bigint): ServiceOffer => {
     const unsigned = {
-      seller, serviceId: SERVICE, serviceClass: 1, unit: 'token' as const, pricePerUnit: price, epoch: 1, capacity: null,
-      model: MODEL, provenance: 'upstream-claimed' as const, peerId: `peer-${seller}`, signedAt: 1,
+      seller, serviceId: SERVICE, serviceClass: 1, unit: 'token' as const, model: MODEL, provenance: 'upstream-claimed' as const, capacity: null,
+      peerId: `peer-${seller}`, pricePerUnit: price, priceEpoch: 1, validUntilEpoch: 12, withdrawn: false, signedAt: 1,
     };
-    return { ...unsigned, signature: wallets.get(seller)!.signingKey.sign(hashOffer(domain, unsigned)).serialized };
+    return { ...unsigned, signature: wallets.get(seller)!.signingKey.sign(hashServiceOffer(domain, unsigned)).serialized };
   };
 
   it('goes behind every other seller for ten minutes, and serves when no other can', async () => {
