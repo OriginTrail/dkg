@@ -1,6 +1,11 @@
-// The node's marketplace answers, as its route tests and views write them,
-// against the UI's types: a field the node sends that the UI lacks, or one the
-// UI needs that the node does not send, fails the type check.
+// The UI's marketplace types against two sets of examples: answers written
+// out by hand in the shapes the node's marketplace routes send, and the
+// fixture node's answers that the section's tests and screenshots run on.
+// A hand-written answer with a field its UI type lacks, or without one the
+// type requires, fails the type check; a fixture answer fails only on a
+// field missing or of the wrong type. Nothing here reads the node's own
+// types, so a change to what the node sends is not caught here: these
+// examples only stay in step with what the UI expects.
 import type {
   CatalogAnswer, ChatCompletion, GatewayRefusalBody, KeysAnswer, LandNowAnswer, MadeKey, Plan, Preview, RefusalBody,
   SellerStatus, ServiceDetail, Storefront, SubscriptionsAnswer, Funding, ReconciliationAnswer, ActivityAnswer,
