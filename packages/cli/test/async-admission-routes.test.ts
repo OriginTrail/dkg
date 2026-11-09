@@ -5,7 +5,7 @@
  * route, as `lifecycle.ts` does; the agent and the publisher control are minimal fakes whose
  * failures stand in for the pre-queue reads.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
@@ -22,6 +22,8 @@ const NAME = 'albums';
 describe('async admission outcomes by route and phase', () => {
   let server: Server | undefined;
   let baseUrl: string;
+  let responseClosed: Promise<void>;
+  let routeFinished: Promise<void>;
 
   beforeEach(() => {
     asyncAdmissionUsage.reset();
@@ -64,7 +66,11 @@ describe('async admission outcomes by route and phase', () => {
     const publisherState = availability.available
       ? { runtime: { walletIds: ['0x1111111111111111111111111111111111111111'] }, availability }
       : { runtime: null, availability };
+    let noteClosed!: () => void, noteFinished!: () => void;
+    responseClosed = new Promise(resolve => { noteClosed = resolve; });
+    routeFinished = new Promise(resolve => { noteFinished = resolve; });
     server = createServer(async (req, res) => {
+      res.once('close', () => noteClosed());
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
       beginAsyncAdmissionTrace(req.method, url.pathname, res);
       try {
@@ -101,15 +107,16 @@ describe('async admission outcomes by route and phase', () => {
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);
-        if (!res.writableEnded) {
+        if (!res.writableEnded && !res.destroyed) {
           res.statusCode = 404;
           res.end();
         }
       } catch (err: any) {
+        if (res.destroyed) return;
         res.statusCode = 500;
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ error: `Unhandled: ${err?.message ?? err}` }));
-      }
+      } finally { noteFinished(); }
     });
     await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
     const addr = server!.address();
@@ -142,6 +149,33 @@ describe('async admission outcomes by route and phase', () => {
   const intent = { shareOperationId: 'op-1', contentScopeVersion: 'v', kaUal: 'did:dkg:x/1', intentKey: 'k' };
 
   describe('share_async', () => {
+    it('does not enqueue after the client disconnects during write preflight', async () => {
+      let release!: () => void, entered!: () => void;
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const waiting = new Promise<void>(resolve => { entered = resolve; });
+      const promoteAsync = vi.fn(async () => ({ jobId: 'must-not-be-created' }));
+      await start({ agent: {
+        async listContextGraphs() {
+          entered(); await held;
+          return [{ id: CG, uri: `did:dkg:context-graph:${CG}`, name: CG, subscribed: true, synced: true }];
+        },
+        assertion: { promoteAsync },
+      } });
+      const controller = new AbortController();
+      const response = fetch(`${baseUrl}/api/knowledge-assets/${NAME}/swm/share-async`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextGraphId: CG }), signal: controller.signal,
+      }).catch(error => error);
+      try {
+        await waiting;
+        controller.abort();
+        await response;
+        await responseClosed;
+      } finally { release(); }
+      await routeFinished;
+      expect(promoteAsync).not.toHaveBeenCalled();
+    });
+
     it('answers an unparseable body in the request phase', async () => {
       await start();
       expect(await post('swm/share-async', 'not json')).toBe(400);
