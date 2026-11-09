@@ -1,0 +1,4 @@
+{"type":"make","keyId":"dkgmk_a37cad0b","hash":"f2b9bb460195428fb6f8f20948d02cfde99d251963c700da67972d5462825ff4","label":"test-agent","budget":"1000000000000000000000000000000","services":null,"rps":1000,"expiresAt":null,"at":0,"spent":"740","lastUsedAt":1794248137}
+{"type":"make","keyId":"dkgmk_03953501","hash":"92038a404736a4bbf88b22df99e357bc7cd08d962ef60ca622415841a2fc2da3","label":"revoked","budget":"50","services":null,"rps":1,"expiresAt":null,"at":3,"spent":"7","lastUsedAt":4}
+{"type":"revoke","keyId":"dkgmk_03953501","at":5}
+{"type":"use","keyId":"dkgmk_a37cad0b","value":"120","at":1799432137}
