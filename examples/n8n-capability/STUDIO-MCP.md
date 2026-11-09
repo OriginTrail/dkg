@@ -208,9 +208,10 @@ withdrawal, bounded outputs and agent attribution on DKG callbacks.
 ### Native n8n callback regression
 
 The callback binds its execution ID to the durable webhook acknowledgement and
-checks the saved workflow digest/version and execution structure. It does not
-require in-progress `Receive input` data: n8n normally persists that only when
-the execution finishes. A callback racing acknowledgement persistence waits up
+checks the saved workflow digest/version and execution structure. It also requires
+the exact granted input from `Receive input` run data or the running execution's
+pending node stack. Missing or conflicting input evidence denies the callback.
+A callback racing acknowledgement persistence waits up
 to two seconds; a lost acknowledgement stays unconfirmed and cannot authorize a
 DKG read. Terminal inspection still requires matching saved input evidence.
 Withdrawal validates the stored KA/digest even after the current profile changes.
@@ -232,11 +233,14 @@ node examples/n8n-capability/test-support/mcp-native-smoke.mjs /tmp/mcp-smoke
 The smoke saves a fictional DKG Read workflow and pins its isolated callback
 address before publication. It allows native webhook registration to settle,
 then uses authenticated MCP HTTP admission, the real native runner and callback,
-and terminal readback. It requires absent in-progress input data, exactly one
+and terminal readback. It exercises absent in-progress run data with input evidence
+available on the pending node stack, exactly one
 webhook POST/callback/DKG read, the expected two measurement rows and no redispatch
 on repeated admission. Results are written to `mcp-smoke-result.json` in the state
 directory; credentials are not included.
 
-Verified locally on 2026-11-09: the previous callback failed this smoke; the fix
-completed it with default progress saving disabled. DKG transport is a fictional
-profile. This does not prove the nOS gateway, a customer DKG node or deployment.
+The earlier callback was verified locally on 2026-11-09 with default progress
+saving disabled. The subsequent exact-input binding has regression coverage;
+rerun this smoke to qualify that integration with a native n8n instance. DKG
+transport is a fictional profile. This does not prove the nOS gateway, a customer
+DKG node or deployment.

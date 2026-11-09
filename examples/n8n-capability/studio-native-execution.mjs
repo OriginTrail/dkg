@@ -11,6 +11,11 @@ export async function readNativeExecutionInput(api, { workflowId, executionId, g
   if (installed.id !== workflowId || installed.active !== true || String(native.id) !== executionId
     || !n8nPinnedExecutionMatches(published, native, grant, published.versionId))
     throw reject('Native execution does not match the approved workflow.');
+  return recordedNativeExecutionInput(native);
+}
+
+/** Extract the unique recorded input after the caller verifies its native execution pins. */
+export function recordedNativeExecutionInput(native) {
   // Running webhook executions retain their initial input on the pending stack;
   // completed/progress-saved executions expose it as Receive input run data.
   const received = [];

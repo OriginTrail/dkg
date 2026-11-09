@@ -58,12 +58,17 @@ test('native DKG callback uses the admitted pins, typed profile and full agent a
   const actor = { id: 'owner', role: 'owner', accountId: 'account-test', startedBy: 'agent:a', agentVersion: 'v1', toolDigest: 'd'.repeat(64), approvalDecisionId: 'decision-1' };
   let earlyCallback;
   const s = createStudioMcpService({ provider, accountId: actor.accountId, profile,
-    runner: { async prepare() { return 'v1'; }, async dispatch() { earlyCallback = s.dkgComponent({ effectId: runKey, workflowId: 'native-read', executionId: '42', blockId: 'read', items: [{ sample: 'a' }] }); return '42'; }, async inspect() { return { status: 'running' }; } } });
+    runner: { async prepare() { return 'v1'; }, async dispatch(_workflow, invocationId, input) {
+      inputEvidence = { executionData: { nodeExecutionStack: [{ node: { name: 'Receive input' },
+        data: { main: [[{ json: { body: { invocationId, input } } }]] } }] } };
+      earlyCallback = s.dkgComponent({ effectId: runKey, workflowId: 'native-read', executionId: '42', blockId: 'read', items: [{ sample: 'a' }] });
+      return '42';
+    }, async inspect() { return { status: 'running' }; } } });
   const input = { kaRef: compiled.kaRef, workflowSha256: compiled.grant.workflowSha256, runKey, arguments: { sample: 'a' } };
   await assert.rejects(s.run({ ...input, arguments: { sample: 'a" } UNION { ?s ?p ?o' } }, actor));
   assert.equal((await s.run(input, actor)).status, 'running');
   const callback = { effectId: runKey, workflowId: 'native-read', executionId: '42', blockId: 'read', items: [{ sample: 'a' }] };
-  // Default n8n progress saving has no Receive input runData while running.
+  // Default n8n progress saving retains the webhook input on its pending stack.
   const result = await earlyCallback;
   assert.equal(result.items.length, 2); assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].context.actor, { ...actor, runKey });
@@ -71,6 +76,13 @@ test('native DKG callback uses the admitted pins, typed profile and full agent a
   await assert.rejects(s.dkgComponent({ ...callback, executionId: '43' }));
   await assert.rejects(s.dkgComponent({ ...callback, blockId: 'write' }));
   await s.dkgComponent(callback); assert.equal(calls.length, 1); // retained read cache, no second node request
+  const admittedEvidence = structuredClone(inputEvidence);
+  inputEvidence.executionData.nodeExecutionStack[0].data.main[0][0].json.body.input.itemsJson = '[{"sample":"different"}]';
+  await assert.rejects(s.dkgComponent(callback), /exact input/);
+  inputEvidence = undefined;
+  await assert.rejects(s.dkgComponent(callback), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
+  inputEvidence = admittedEvidence;
+  await s.dkgComponent(callback); assert.equal(calls.length, 1);
   inputEvidence = { resultData: { runData: { 'Receive input': [{ data: { main: [[{ json: { body: { invocationId: 'foreign-run' } } }]] } }] } } };
   await assert.rejects(s.dkgComponent(callback), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
   inputEvidence = undefined;

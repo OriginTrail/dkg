@@ -174,7 +174,7 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
       if (selected.requiresExportAuthorization) authorize();
       json(res, 200, await invoke(selected, value.input, value.invocationId));
     },
-    dkgComponent: async ({ req, res }) => handleDkgComponentCallback(req, res, studio, config),
+    dkgComponent: async ({ req, res }) => handleDkgComponentCallback(req, res, studio, config, mcp),
     event: async ({ res, eventKey, value }) => json(res, 200, await studio.event(eventKey, value)),
     demo: async ({ res, value }) => json(res, 200, { source: 'nOS local demo API', items: [{ name: 'Ana', value: 12 }, { name: 'Luka', value: 7 }], ...(value === undefined ? {} : { received: value }) }),
   };

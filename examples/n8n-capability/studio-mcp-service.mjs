@@ -5,6 +5,7 @@ import { configuredDkgProfile } from './dkg-profile.mjs';
 import { dkgComponentStore } from './dkg-components.mjs';
 import { n8nWorkflowSha256, n8nPinnedExecutionMatches } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { createStudioNativeRunner } from './studio-native-runner.mjs';
+import { recordedNativeExecutionInput } from './studio-native-execution.mjs';
 
 /** Small native admission journal, not a second receipt or workflow engine.
  * Arguments/results remain in n8n; only identity, pins and state live here.
@@ -153,16 +154,16 @@ export function createStudioMcpService({ provider, installation, accountId, prof
       || value.workflowId !== workflow.grant.workflowId || !/^\d{1,20}$/.test(value.executionId ?? '')
       || r.execution_id !== value.executionId) throw fail('STUDIO_NATIVE_UNCONFIRMED');
     const execution = await provider.api('/executions/' + value.executionId + '?includeData=true');
-    const received = execution.data?.resultData?.runData?.['Receive input']?.[0]?.data?.main?.[0]?.[0]?.json?.body;
-    // In-progress runData is absent with n8n's default progress-saving setting.
-    // The durable POST acknowledgement binds this execution to the admitted run;
-    // when input evidence is available, it must agree too. Terminal inspection
-    // still requires the saved Receive input evidence before exposing any result.
-    if (String(execution.id) !== value.executionId || received && received.invocationId !== r.run_key
+    let received;
+    try { received = recordedNativeExecutionInput(execution); }
+    catch { throw fail('STUDIO_NATIVE_UNCONFIRMED'); }
+    // The running execution's pending stack or saved run data must prove the
+    // exact granted input, in addition to the durable POST acknowledgement.
+    if (String(execution.id) !== value.executionId || received.invocationId !== r.run_key
       || !n8nPinnedExecutionMatches({ ...workflow.published, versionId: r.version_id }, execution, workflow.grant, r.version_id))
       throw fail('STUDIO_NATIVE_UNCONFIRMED');
     if (saved(r.ka_ref).withdrawn) throw fail('STUDIO_WORKFLOW_WITHDRAWN');
-    return dkg.call(value, { ...workflow, nativeMcp: true, sourceHash: workflow.grant.workflowSha256 }, value.workflowId);
+    return dkg.call(value, { ...workflow, nativeMcp: true, sourceHash: workflow.grant.workflowSha256 }, value.workflowId, received);
   }
   return { list, get, run, readRun, withdraw, dkgComponent };
 }
