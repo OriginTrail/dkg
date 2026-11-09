@@ -5,7 +5,6 @@ import { component, normalizeComponentInput } from './component-registry.mjs';
 import { component as componentV1, normalizeComponentInput as normalizeComponentInputV1 } from './component-registry-v1.mjs';
 import { normalizeStudio, readStudio, validateStudioCapabilities } from './studio-definition.mjs';
 import { workflowUuid } from './workflow-definition.mjs';
-import { n8nObservationScope, n8nPinnedExecutionMatches } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { programWorkflowReceipt } from './program-workflow-receipt.mjs';
 
 const reference = (source, graphId) => ({ graphId, programIri: source.programIri, programLayer: 'wm', authorAgentAddress: source.authorAgentAddress, sourceHash: source.sourceHash });
@@ -176,30 +175,12 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
           continue;
         }
         if (compiled.mode !== 'schedule') continue;
-        const native = await provider.api('/workflows/' + row.provider_id);
-        if (native.id !== row.provider_id || native.active !== true) continue;
-        const published = { ...native.activeVersion, settings: native.settings };
-        const executions = await provider.api('/executions?limit=20&workflowId=' + encodeURIComponent(row.provider_id));
-        const reserved = repository.pendingEvents(row.ka_ref);
-        const candidates = new Map(executions.data.map(e => [String(e.id), e]));
-        // Pending identities must remain inspectable even after leaving the last page.
-        for (const pending of reserved) if (!candidates.has(pending.executionId)) {
-          const detail = await provider.api('/executions/' + pending.executionId + '?includeData=true');
-          candidates.set(pending.executionId, detail);
-        }
-        for (const e of [...candidates.values()].reverse()) {
-          if (!/^\d{1,20}$/.test(String(e.id))) continue;
-          const detail = await provider.api('/executions/' + e.id + '?includeData=true');
-          const scope = n8nObservationScope(graphId, owner, row.provider_id) + ' trigger';
-          const runs = detail.data?.resultData?.runData?.[scope];
-          if (String(detail.id) !== String(e.id) || detail.status !== 'success'
-            || !Number.isFinite(Date.parse(detail.startedAt)) || Date.parse(detail.startedAt) < a.startedAt
-            || !Array.isArray(runs) || !runs.length
-            || !n8nPinnedExecutionMatches(published, detail, compiled.grant, published.versionId)) continue;
-          const items = runs.at(-1).data.main[0].map(item => item.json);
+        const pendingExecutionIds = repository.pendingEvents(row.ka_ref).map(event => event.executionId);
+        for await (const { executionId, items } of provider.timerEvents({ grant: compiled.grant,
+          startedAt: a.startedAt, pendingExecutionIds })) {
           try {
             const event = repository.reserveEvent({ kaRef: row.ka_ref, providerId: row.provider_id,
-              executionId: String(e.id), invocationId: eventUuid(row.ka_ref, String(e.id)) }, () => eventAuthorized(row.ka_ref, compiled));
+              executionId, invocationId: eventUuid(row.ka_ref, executionId) }, () => eventAuthorized(row.ka_ref, compiled));
             if (event.receipt) continue;
             const receipt = await run({ kaRef: row.ka_ref, sourceHash: workflow.sourceHash, itemsJson: JSON.stringify(items),
               invocationId: event.invocationId }, () => eventAuthorized(row.ka_ref, compiled));

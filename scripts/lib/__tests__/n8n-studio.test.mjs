@@ -104,11 +104,11 @@ function environment() {
   const state=mkdtempSync(join(tmpdir(),'studio-unit-')), token=join(state,'fixture-api'), exportTokenFile=join(state,'fixture-export');
   writeFileSync(token,'unit-test-fixture-only');writeFileSync(exportTokenFile,'operator-unit-fixture-only');
   const config={n8nNative:{baseUrl:'http://127.0.0.1:45678',apiTokenFile:token,webhookTokenFile:token,workflows:[]}};
-  const native=new Map(),calls=[], executions=new Map();let loseCreate=false;
+  const native=new Map(),calls=[], executions=new Map();let loseCreate=false, executionPage=null;
   const fetchImpl=async(url,options)=>{
     const path=new URL(url).pathname.replace('/api/v1',''),method=options.method;calls.push([method,path]);
     const body=options.body?JSON.parse(options.body):undefined;
-    if(path==='/executions') return Response.json({data:[...executions.values()]});
+    if(path==='/executions') return Response.json({data:[...executions.values()].filter(e=>!executionPage||executionPage.includes(e.id))});
     if(path.startsWith('/executions/')) return Response.json(executions.get(path.split('/')[2]));
     if(path==='/workflows'&&method==='GET') return Response.json({data:[...native.values()]});
     if(path==='/workflows'&&method==='POST'){const value={...body,id:'provider_'+(native.size+1),active:false,versionId:'version1'};native.set(value.id,value);if(loseCreate){loseCreate=false;throw Error('lost-ack');}return Response.json(value);}
@@ -133,7 +133,7 @@ function environment() {
   }};
   const openService=()=>createStudioService({graphId,owner,client,provider,exportTokenFile,listCapabilities:async()=>inventory,loadOutputs:async iri=>outputs.get(iri)});
   let service=openService();
-  return {state,get provider(){return provider;},get service(){return service;},restart(){service.stop();provider.close();provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,setCatalog:v=>{inventory=v;},loseNextCreate:()=>{loseCreate=true;},
+  return {state,get provider(){return provider;},get service(){return service;},restart(){service.stop();provider.close();provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,setExecutionPage:ids=>{executionPage=ids;},setCatalog:v=>{inventory=v;},loseNextCreate:()=>{loseCreate=true;},
     close(){service.stop();provider.close();rmSync(state,{recursive:true,force:true});}};
 }
 test('a lost native create acknowledgement is reconciled by name without a second create',async()=>{
@@ -257,6 +257,25 @@ test('timer admission rejects changed versions, published digests, identities, s
     native.activeVersion = original; native.active = true;
     f.executions.set('7', timerExecution(f, row, '7'));
     await f.service.poll(); assert.equal(f.invocations.length, 1);
+  } finally { f.close(); }
+});
+
+test('timer intake fetches off-page pending details once and preserves candidate order', async () => {
+  const f = environment();
+  try {
+    const w = await f.service.save(definition(['schedule', 'edit-fields'], [[0,0,1,0]]), () => {});
+    await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+    const row = f.provider.row(w.kaRef), invocationId = randomUUID();
+    f.provider.repository.reserveEvent({ kaRef: w.kaRef, providerId: row.provider_id, executionId: '7', invocationId }, () => {});
+    for (const id of ['9', '8', '7']) f.executions.set(id, timerExecution(f, row, id));
+    f.setExecutionPage(['9', '8']);
+    f.restart(); await f.service.poll();
+    assert.deepEqual(f.invocations.map(v => JSON.parse(v.inputs[0].itemsJson)[0].tick), ['7', '8', '9']);
+    assert.equal(f.invocations[0].invocationId, invocationId);
+    for (const id of ['7', '8', '9']) assert.equal(f.calls.filter(([method, path]) => method === 'GET' && path === '/executions/' + id).length, 1);
+    assert.equal(f.provider.repository.pendingEvents(w.kaRef).length, 0);
+    assert.equal(f.provider.repository.activation(w.kaRef).count, 3);
+    await f.service.poll(); assert.equal(f.invocations.length, 3);
   } finally { f.close(); }
 });
 
