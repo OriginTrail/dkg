@@ -58,7 +58,24 @@ async function playgroundKey(budget: string): Promise<{ secret: string; keyId: s
 
 const KEY_GONE = new Set(['missing_key', 'unknown_key', 'revoked_key', 'expired_key']);
 
-interface Msg { role: 'user' | 'assistant'; content: string; served?: Served; error?: { copyKey: CopyKey; code: string } }
+/**
+ * The gateway's refusals given before it calls a seller: the caller's key,
+ * rate and services, the request, the epoch, the subscription and its budget,
+ * a seller to route to, the session key and the key's budget. Nothing was
+ * charged for these. Any other failure of a call that went out (no answer, an
+ * answer that cannot be read, a seller that did not answer or refused, a
+ * receipt that failed its check, a failure the node does not explain) leaves
+ * open whether the call was served and charged.
+ */
+const REFUSED_BEFORE_CALL = new Set([
+  ...KEY_GONE, 'key_rate', 'bad_request', 'service_not_allowed', 'epoch_ending', 'no_subscription', 'no_seller',
+  'soft_ceiling', 'session_key_missing', 'request_too_large', 'key_budget', 'MarketplaceOff',
+]);
+
+/** A failed send: in plain words, its code, and whether it may have been charged. */
+interface SendError { copyKey: CopyKey; code: string; outcome: 'uncharged' | 'unknown' }
+
+interface Msg { role: 'user' | 'assistant'; content: string; served?: Served; error?: SendError }
 type Fork = { kind: 'ceiling'; serviceId: string; nextEpochAt: number | null } | { kind: 'fund'; serviceId: string } | { kind: 'ending'; seconds: number | null };
 
 /** What a budget has for calls: its value left, less what the node holds. */
@@ -92,18 +109,23 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
     setBusy(true); setFork(null); setKeyErr(null);
     setMsgs((m) => [...m, { role: 'user', content }]);
     setInput('');
+    // Whether a call has gone to the gateway whose outcome a failure would leave open: until one has, nothing can be charged.
+    let called = false;
+    const chat = (secret: string) => { called = true; return marketplaceGateway.chat(secret, request); };
     try {
       let key = await playgroundKey(current.value);
       setKeyId(key.keyId);
       let answer;
       try {
-        answer = await marketplaceGateway.chat(key.secret, request);
+        answer = await chat(key.secret);
       } catch (err) {
         if (!isMarketplaceError(err) || !KEY_GONE.has(err.code)) throw err;
+        // The gateway refused that key before calling anyone: only the next key's call can be charged.
+        called = false;
         forgetPlaygroundKey();
         key = await playgroundKey(current.value);
         setKeyId(key.keyId);
-        answer = await marketplaceGateway.chat(key.secret, request);
+        answer = await chat(key.secret);
       }
       const served = answer.marketplace;
       setLeft((l) => ({ ...l, [served.serviceId]: served.budgetLeft }));
@@ -121,7 +143,8 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
       // The fork says what happened for these three; anything else is an error bubble.
       if (isMarketplaceError(err) && ['soft_ceiling', 'no_subscription', 'epoch_ending'].includes(err.code)) return;
       const d = describeError(err);
-      setMsgs((m) => [...m, { role: 'assistant', content: '', error: { copyKey: d.copyKey, code: d.code ?? 'Error' } }]);
+      const uncharged = !called || (isMarketplaceError(err) && REFUSED_BEFORE_CALL.has(err.code));
+      setMsgs((m) => [...m, { role: 'assistant', content: '', error: { copyKey: d.copyKey, code: d.code ?? 'Error', outcome: uncharged ? 'uncharged' : 'unknown' } }]);
     } finally {
       setBusy(false);
     }
@@ -177,8 +200,10 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
         {msgs.map((m, i) => (
           <div key={i}>
             {m.error ? (
-              <div className="mkt-bubble assistant error" role="alert" data-testid="mkt-error-bubble" data-code={m.error.code}>
-                <span data-copy="play.error.bubble">{copy('play.error.bubble', { reason: copy(m.error.copyKey) })}</span>
+              <div className="mkt-bubble assistant error" role="alert" data-testid="mkt-error-bubble" data-code={m.error.code} data-outcome={m.error.outcome}>
+                {m.error.outcome === 'uncharged'
+                  ? <span data-copy="play.error.bubble">{copy('play.error.bubble', { reason: copy(m.error.copyKey) })}</span>
+                  : <span data-copy="play.error.unknown">{copy('play.error.unknown', { reason: copy(m.error.copyKey) })}</span>}
               </div>
             ) : (
               <>
