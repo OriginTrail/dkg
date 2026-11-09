@@ -135,7 +135,9 @@ function createKnowledgeAssetTargetLookup(
   const { cg, name, subGraphName, agentAddress } = input;
   const identifier = input.kind === 'literal' ? { kind: 'name' as const } : classifyKaIdentifier(name);
   let literalLookup: Promise<AssertionHistoryDescriptor | null> | undefined;
-  const readLiteral = () => literalLookup ??= agent.assertion.history(cg, name, { agentAddress, subGraphName });
+  const readLiteral = () => literalLookup ??= agent.assertion.history(cg, name, {
+    agentAddress, subGraphName, ...(signal ? { signal } : {}),
+  });
   const resolveTarget = async (): Promise<KnowledgeAssetReadTarget> => {
     const target: KnowledgeAssetReadTarget = { kind: identifier.kind, cg, name, subGraphName, agentAddress, descriptor: null };
     if (input.lookup === 'none' || (identifier.kind === 'name' && input.lookup === 'quads')) return target;
@@ -143,7 +145,9 @@ function createKnowledgeAssetTargetLookup(
     if (identifier.kind === 'kaId') {
       const literal = AGENT_NUMBER_RE.test(name) ? await readLiteral() : null;
       signal?.throwIfAborted();
-      descriptor = literal ?? await agent.assertion.resolveByKaId?.(cg, identifier.kaId, { subGraphName }) ?? null;
+      descriptor = literal ?? await agent.assertion.resolveByKaId?.(cg, identifier.kaId, {
+        subGraphName, ...(signal ? { signal } : {}),
+      }) ?? null;
     } else {
       descriptor = await readLiteral();
     }

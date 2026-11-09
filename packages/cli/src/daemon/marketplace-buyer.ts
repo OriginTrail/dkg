@@ -26,19 +26,19 @@ import {
   Router,
   decodeMessage,
   encodeMessage,
-  offersFromBindings,
-  offersQuery,
+  serviceOffersFromBindings,
+  serviceOffersQuery,
   NO_FX,
   resolveFx,
   resolveMarketplaceConfig,
   type BuyerAlert,
   type MarketplaceConfig,
-  type QuoteResponse,
 } from '@origintrail-official/dkg-marketplace';
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import type { DkgConfig } from '../config.js';
 import { subscribeWhenAdmitted } from './marketplace-context-graph.js';
 import { startMarketplaceSeller, type MarketplaceSellerRuntime } from './marketplace-seller.js';
+import { withNetworkMarketplaceContextGraph } from './marketplace-network-default.js';
 
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
@@ -110,22 +110,23 @@ export interface MarketplaceGatewayOptions {
 
 /**
  * The buyer's gateway: its router reads offers from the Marketplace Context
- * Graph, which the node subscribes to once the graph admits it, keeps those
- * their sellers signed, and reaches sellers over the messenger. Its job runs
- * as often as the buyer's.
+ * Graph's Verifiable Memory alone, which the node subscribes to once the graph
+ * admits it, keeps those their sellers signed, and reaches sellers over the
+ * messenger. Its job runs as often as the buyer's.
  */
 export async function startMarketplaceGateway(options: MarketplaceGatewayOptions): Promise<Gateway> {
   const { agent, buyer, dataDir } = options;
   const contextGraphId = (options.config.marketplace as MarketplaceConfig | undefined)?.contextGraphId;
-  const offers = async (epochs: number[]) => contextGraphId
-    ? offersFromBindings((await agent.query(offersQuery(epochs), { contextGraphId, graphSuffix: '_shared_memory' })).bindings as Record<string, unknown>[])
+  const offers = async () => contextGraphId
+    ? serviceOffersFromBindings((await agent.query(serviceOffersQuery(), { contextGraphId, view: 'verifiable-memory' })).bindings as Record<string, unknown>[])
     : [];
   const router = new Router({
     chain: buyer.chain,
     offers,
+    // The router reads the answer as a quote.
     quote: async (peerId, services) => decodeMessage(await agent.sendMarketplaceMessage(peerId, 'quote', encodeMessage({ services }), {
       timeoutMs: PEER_LIMITS.quoteTimeoutMs, maxReadBytes: PEER_LIMITS.quoteResponseBytes,
-    })) as QuoteResponse,
+    })),
     pinned: async (serviceId) => {
       const pinned = (await buyer.store.readPlan())?.services.find((s) => s.serviceId === serviceId)?.pinnedSeller;
       return pinned === undefined ? [] : [pinned];
@@ -173,6 +174,8 @@ export async function startMarketplaceGateway(options: MarketplaceGatewayOptions
 
 export interface MarketplaceStartOptions {
   config: Pick<DkgConfig, 'marketplace'>;
+  /** The node's network config: its `marketplace.contextGraphId`, when it names one, is the node's default graph. */
+  network?: object | null;
   agent: DKGAgent;
   /** The node's operational wallets; the first signs the seller's receipts and offers. */
   wallets: readonly string[];
@@ -192,10 +195,12 @@ export interface MarketplaceParts {
  * The marketplace at boot, when enabled: the buyer with its gateway, and the
  * seller. A part that fails to start is logged and stays off, and never stops
  * the boot: a buyer whose gateway fails stops with it, since nothing could
- * spend what it funds.
+ * spend what it funds. Both use the network's Marketplace Context Graph unless
+ * the node's config names its own.
  */
 export async function startMarketplace(options: MarketplaceStartOptions): Promise<MarketplaceParts> {
-  const { config, agent, wallets, dataDir, dashDb, log } = options;
+  const { agent, wallets, dataDir, dashDb, log } = options;
+  const config = withNetworkMarketplaceContextGraph(options.config, options.network);
   let marketplace: Buyer | undefined;
   let marketplaceGateway: Gateway | undefined;
   try {
