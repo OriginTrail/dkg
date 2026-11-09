@@ -44,8 +44,6 @@ import { buildPublishParams, packReservedKaId, DEFAULT_CHAIN_ID } from './helper
 const MIN_STAKE = ethers.parseEther('50000');
 const COMMITTED_TRAC = ethers.parseEther('50000');
 const TOKEN_AMOUNT = ethers.parseEther('1000');
-// Instrumented coverage runs say nothing about deployed gas (and inflate it past the setup's limits).
-const skipUnderCoverage = process.argv.some((a) => a.includes('coverage'));
 
 type Fixture = {
   accounts: SignerWithAddress[];
@@ -284,9 +282,12 @@ describe('@integration V10 — publishing into a curated CG requires a member au
   // The roster scan is the only part of the author gate whose cost grows: one
   // cold SLOAD per entry before the match. Measured on the gate itself
   // (`isAuthorizedAuthor`, all reads cold), since publish-to-publish gas
-  // varies by more than the gate's fixed part. In a publish the policy and
-  // accountId reads are already warm, so these figures are an upper bound.
-  (skipUnderCoverage ? it.skip : it)('gas: the author gate costs one cold storage read per roster entry scanned', async () => {
+  // varies by more than the gate's fixed part. Coverage instrumentation
+  // inflates every figure, so the assertions are on the shape, which holds
+  // either way: the cost rises with the member's position, by the same amount
+  // per entry scanned, and a full roster still publishes. The figures it
+  // prints on an uninstrumented run are the ones the PR and OT-RFC-75 quote.
+  it('gas: the author gate scans the roster linearly, and a full roster still publishes', async () => {
     const curator = f.accounts[25];
     const rosterOf = (n: number) =>
       Array.from({ length: n }, (_, i) => ethers.getAddress(ethers.toBeHex(0x1000 + i, 20)));
@@ -295,11 +296,13 @@ describe('@integration V10 — publishing into a curated CG requires a member au
     const cgWithRoster = async (n: number): Promise<bigint> => {
       const roster = rosterOf(n);
       roster[n - 1] = member.address;
-      // A full 256-entry roster at creation exceeds the network's 15M default
-      // per-transaction gas (O(n²) dedup + 256 fresh slots); this is setup only.
-      await f.CGFacade.connect(curator).createContextGraph(
-        roster, 0, 0, 0, curator.address, 0, ethers.ZeroHash, { gasLimit: 29_000_000 },
-      );
+      const create = f.CGFacade.connect(curator).createContextGraph;
+      const args = [roster, 0, 0, 0, curator.address, 0, ethers.ZeroHash] as const;
+      // A full 256-entry roster needs more than the network's default
+      // per-transaction gas (O(n²) dedup + 256 fresh slots): give the setup
+      // what it estimates, instrumented or not.
+      const gasLimit = ((await create.estimateGas(...args)) * 11n) / 10n;
+      await create(...args, { gasLimit });
       return f.CGS.getLatestContextGraphId();
     };
     const gateGas = (cgId: bigint, author: string) =>
@@ -307,31 +310,34 @@ describe('@integration V10 — publishing into a curated CG requires a member au
 
     const curatorCg = await cgWithRoster(1);
     const curatorGas = await gateGas(curatorCg, curator.address); // matched before any scan
-    const rows: Array<[number, bigint]> = [];
-    const cgs: bigint[] = [];
+    const gas: Record<number, bigint> = {};
+    const cgs: Record<number, bigint> = {};
     for (const n of [1, 16, 256]) {
-      const cgId = await cgWithRoster(n);
-      cgs.push(cgId);
-      rows.push([n, (await gateGas(cgId, member.address)) - curatorGas]);
+      cgs[n] = await cgWithRoster(n);
+      gas[n] = await gateGas(cgs[n], member.address);
     }
-    const perEntry = (rows[2][1] - rows[0][1]) / 255n;
+    const early = (gas[16] - gas[1]) / 15n; // per entry, entries 2-16
+    const late = (gas[256] - gas[16]) / 240n; // per entry, entries 17-256
     // eslint-disable-next-line no-console
     console.log(
-      `      author gate, extra gas over a curator author: ` +
-        rows.map(([n, d]) => `${d} with the member last of ${n}`).join(', ') +
-        `; ~${perEntry} per entry scanned`,
+      `      author gate, extra gas over a curator author: ${gas[1] - curatorGas} with the member last of 1, ` +
+        `${gas[16] - curatorGas} of 16, ${gas[256] - curatorGas} of 256; ~${late} per entry scanned`,
     );
-    expect(rows[0][1]).to.be.lt(10_000n);
-    expect(perEntry).to.be.lt(3_000n);
+    expect(gas[1]).to.be.gt(curatorGas);
+    expect(gas[16]).to.be.gt(gas[1]);
+    expect(gas[256]).to.be.gt(gas[16]);
+    // Linear: entries 2-16 and entries 17-256 cost the same per entry, within 10%.
+    const spread = early > late ? early - late : late - early;
+    expect(spread * 10n).to.be.lte(late);
 
     // The worst case still publishes, end to end: the curator sends and pays
     // for a KA authored by the 256th roster entry.
     await f.Token.mint(curator.address, TOKEN_AMOUNT);
     await f.Token.connect(curator).approve(await f.KAV10.getAddress(), TOKEN_AMOUNT);
-    const { tx, reservedKaId } = await publish(curator, member, cgs[2], 2);
+    const { tx, reservedKaId } = await publish(curator, member, cgs[256], 2);
     const receipt = await (await tx).wait();
     expect(receipt!.status).to.equal(1);
-    expect(await f.CGS.kaToContextGraph(reservedKaId)).to.equal(cgs[2]);
+    expect(await f.CGS.kaToContextGraph(reservedKaId)).to.equal(cgs[256]);
     // eslint-disable-next-line no-console
     console.log(`      worst-case publish (member last of 256): ${receipt!.gasUsed} gas`);
   });
