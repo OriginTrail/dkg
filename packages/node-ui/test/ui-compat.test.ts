@@ -135,11 +135,11 @@ describe('header uses live status', () => {
     expect(header).toContain('connectedPeers');
   });
 
-  it('App.tsx polls status via useLiveStatus and stores in agents store', () => {
-    const app = readFile('App.tsx');
-    expect(app).toContain('useLiveStatus');
-    expect(app).toContain('setNodeStatus');
-    expect(app).toContain('api.fetchStatus()');
+  it('the shell polls status and stores it in the agents store', () => {
+    expect(readFile('App.tsx')).toContain('useNodeStatusPolling()');
+    const hook = readFile('hooks/useNodeState.ts');
+    expect(hook).toContain('setNodeStatus');
+    expect(hook).toContain('api.fetchStatus()');
   });
 
   it('header gracefully handles missing status data', () => {

@@ -6,13 +6,11 @@ import { PanelCenter } from './components/Shell/PanelCenter.js';
 import { PanelBottom } from './components/Shell/PanelBottom.js';
 import { PanelRight } from './components/Shell/PanelRight.js';
 import { useLayoutStore, useShellPanels, maxBottomHeight } from './stores/layout.js';
-import { useAgentsStore } from './stores/agents.js';
 import { useTabsStore } from './stores/tabs.js';
-import { api, detectMockMode, isUsingMocks, subscribeMockMode } from './api-wrapper.js';
+import { detectMockMode, isUsingMocks, subscribeMockMode } from './api-wrapper.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from './lib/contextGraphPrimer.js';
 import { applyTheme } from './lib/applyTheme.js';
-import { useVisibilityPolling } from './hooks/useVisibilityPolling.js';
-import { NODE_STATUS_POLL_MS, isNodeStatusFailure } from './lib/formatPeerStatus.js';
+import { useNodeStatusPolling } from './hooks/useNodeState.js';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
 import { useShellRouting } from './hooks/useShellRouting.js';
 import { NodeUnavailableView } from './components/NodeUnavailableView.js';
@@ -20,36 +18,25 @@ import { ApiTokenPrompt } from './components/ApiTokenPrompt.js';
 import { observabilityHref } from './lib/observabilityTab.js';
 import { tabIdToPath } from './lib/tab-routes.js';
 
-function useLiveStatus() {
-  const setNodeStatus = useAgentsStore((s) => s.setNodeStatus);
-  const recordNodeStatusFailure = useAgentsStore((s) => s.recordNodeStatusFailure);
-  const clearNodeStatusFailures = useAgentsStore((s) => s.clearNodeStatusFailures);
-  // Status was previously polled every 10s with a raw `setInterval`,
-  // even when the tab was hidden — burning ~6 requests/minute against
-  // the daemon for nothing. Route through the visibility-aware
-  // helper so a backgrounded tab stops polling entirely (BUG-007).
-  useVisibilityPolling(() => {
-    api.fetchStatus().then(setNodeStatus).catch((error) => {
-      if (isNodeStatusFailure(error)) recordNodeStatusFailure();
-      else clearNodeStatusFailures();
-    });
-  }, NODE_STATUS_POLL_MS);
-}
-
-function useDragResize(onDrag: (delta: number) => void) {
+/**
+ * Drag a resize handle along one axis. Every handle can mount after the
+ * shell does (a collapsed bottom panel, side panels hidden on a narrow
+ * screen), so the node is tracked in state through a callback ref and the
+ * listener attaches whenever a handle appears.
+ */
+function useDragResize(onDrag: (delta: number) => void, axis: 'x' | 'y') {
   const cbRef = useRef(onDrag);
   cbRef.current = onDrag;
-  // A handle comes and goes with its panel, so track the node and rebind when it changes.
   const [handle, setHandle] = useState<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!handle) return;
-
-    let startX = 0;
+    const pos = (e: MouseEvent) => (axis === 'x' ? e.clientX : e.clientY);
+    let start = 0;
 
     const onMouseMove = (e: MouseEvent) => {
-      const delta = e.clientX - startX;
-      startX = e.clientX;
+      const delta = pos(e) - start;
+      start = pos(e);
       cbRef.current(delta);
     };
 
@@ -63,60 +50,10 @@ function useDragResize(onDrag: (delta: number) => void) {
 
     const onMouseDown = (e: MouseEvent) => {
       e.preventDefault();
-      startX = e.clientX;
+      start = pos(e);
       document.addEventListener('mousemove', onMouseMove);
       document.addEventListener('mouseup', onMouseUp);
-      document.body.style.cursor = 'col-resize';
-      document.body.style.userSelect = 'none';
-      handle.classList.add('active');
-    };
-
-    handle.addEventListener('mousedown', onMouseDown);
-    return () => handle.removeEventListener('mousedown', onMouseDown);
-  }, [handle]);
-
-  return setHandle;
-}
-
-// Vertical twin of useDragResize for the bottom panel — tracks clientY
-// and uses a row-resize cursor. Kept as a separate hook (rather than
-// generalising useDragResize) to keep the horizontal path untouched.
-function useDragResizeV(onDrag: (delta: number) => void) {
-  const cbRef = useRef(onDrag);
-  cbRef.current = onDrag;
-  // The bottom handle only renders while the panel is expanded, and the
-  // panel defaults to collapsed — so a one-shot useEffect([]) keyed on a
-  // ref would bind to `null` on its only run and never re-bind when the
-  // handle later appears, leaving it inert. Track the node in state and
-  // key the effect on it so the listener (re)attaches whenever the
-  // handle mounts/unmounts (Codex).
-  const [handle, setHandle] = useState<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!handle) return;
-
-    let startY = 0;
-
-    const onMouseMove = (e: MouseEvent) => {
-      const delta = e.clientY - startY;
-      startY = e.clientY;
-      cbRef.current(delta);
-    };
-
-    const onMouseUp = () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      handle.classList.remove('active');
-    };
-
-    const onMouseDown = (e: MouseEvent) => {
-      e.preventDefault();
-      startY = e.clientY;
-      document.addEventListener('mousemove', onMouseMove);
-      document.addEventListener('mouseup', onMouseUp);
-      document.body.style.cursor = 'row-resize';
+      document.body.style.cursor = axis === 'x' ? 'col-resize' : 'row-resize';
       document.body.style.userSelect = 'none';
       handle.classList.add('active');
     };
@@ -124,22 +61,17 @@ function useDragResizeV(onDrag: (delta: number) => void) {
     handle.addEventListener('mousedown', onMouseDown);
     return () => {
       handle.removeEventListener('mousedown', onMouseDown);
-      // If the handle unmounts (panel collapsed) or the shell unmounts
-      // mid-drag, fully tear down: onMouseUp removes the document
-      // mousemove/mouseup listeners and resets the body cursor/
-      // user-select so the app can't get stuck in row-resize still
-      // firing setBottomHeight (Codex).
+      // A handle that unmounts mid-drag must not leave document listeners
+      // or the body cursor behind.
       onMouseUp();
     };
-  }, [handle]);
+  }, [handle, axis]);
 
-  // Stable callback ref: React invokes it with the node on mount and
-  // null on unmount, driving the effect above.
   return useCallback((node: HTMLDivElement | null) => setHandle(node), []);
 }
 
 function AppShell() {
-  useLiveStatus();
+  useNodeStatusPolling();
   useKeyboardShortcuts();
   useShellRouting();
   const { bottomCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
@@ -148,7 +80,10 @@ function AppShell() {
   const { pathname, state: routeState } = useLocation();
   const navigate = useNavigate();
   // Going somewhere, or resizing past the breakpoint, shows the page, not a floating panel.
-  useEffect(() => { closeNarrowPanel(); }, [pathname, narrow, closeNarrowPanel]);
+  // Not while a dialog from the panel is open: create and join navigate before their last step.
+  useEffect(() => {
+    if (!useLayoutStore.getState().narrowPanelHeld) closeNarrowPanel();
+  }, [pathname, narrow, closeNarrowPanel]);
   // Arrived from /agent-hub: wide screens get the panel expanded, narrow ones the floating panel.
   useEffect(() => {
     if (!(routeState as { openAgents?: boolean } | null)?.openAgents) return;
@@ -215,9 +150,9 @@ function AppShell() {
   const rightExpanded = useLayoutStore((s) => s.rightExpanded);
   const expanded = rightExpanded && rightOpen && !narrow;
 
-  const leftHandle = useDragResize(onDragLeft);
-  const rightHandle = useDragResize(onDragRight);
-  const bottomHandle = useDragResizeV(onDragBottom);
+  const leftHandle = useDragResize(onDragLeft, 'x');
+  const rightHandle = useDragResize(onDragRight, 'x');
+  const bottomHandle = useDragResize(onDragBottom, 'y');
 
   return (
     <div className="v10-app">
