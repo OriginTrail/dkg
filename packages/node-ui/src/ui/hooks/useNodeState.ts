@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
 import { useAgentsStore } from '../stores/agents.js';
 import { api } from '../api-wrapper.js';
 import { headerNodeStatus } from '../lib/formatPeerStatus.js';
@@ -20,7 +20,8 @@ export function useNodeState() {
  *
  * Checks can overlap (a slow one, then a tab coming back into view), so each
  * is numbered and only counts if no later check has already answered. An old
- * failure arriving after a newer success can't mark the node Unavailable.
+ * failure arriving after a newer success can't mark the node Unavailable. A
+ * check whose polling run has ended (unmount, Strict Mode's replay) never counts.
  */
 export function useNodeStatusPolling() {
   const setNodeStatus = useAgentsStore((s) => s.setNodeStatus);
@@ -28,18 +29,11 @@ export function useNodeStatusPolling() {
   const clearNodeStatusFailures = useAgentsStore((s) => s.clearNodeStatusFailures);
   const started = useRef(0);
   const answered = useRef(0);
-  // Each setup ignores checks started before it, and after cleanup nothing
-  // counts. Strict Mode's setup, cleanup, setup replay then still leaves
-  // later checks counting. Declared before the poll, so it runs first.
-  useEffect(() => {
-    answered.current = started.current;
-    return () => { answered.current = Infinity; };
-  }, []);
 
-  useVisibilityPolling(() => {
+  useVisibilityPolling((signal) => {
     const check = ++started.current;
     const current = () => {
-      if (check < answered.current) return false;
+      if (signal.aborted || check < answered.current) return false;
       answered.current = check;
       return true;
     };

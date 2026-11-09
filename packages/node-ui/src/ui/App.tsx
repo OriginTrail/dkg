@@ -6,6 +6,7 @@ import { PanelCenter } from './components/Shell/PanelCenter.js';
 import { PanelBottom } from './components/Shell/PanelBottom.js';
 import { PanelRight } from './components/Shell/PanelRight.js';
 import { ContextGraphDialogs } from './components/Shell/ContextGraphDialogs.js';
+import { PanelVisibleContext } from './components/common/PanelVisibility.js';
 import { useLayoutStore, useShellPanels, maxBottomHeight } from './stores/layout.js';
 import { useTabsStore } from './stores/tabs.js';
 import { detectMockMode, isUsingMocks, subscribeMockMode } from './api-wrapper.js';
@@ -162,7 +163,9 @@ function AppShell() {
             (a chat draft, queued files, a form). */}
         {leftMounted && (
           <div className="v10-panel-left" style={{ width: leftWidth }} hidden={!leftOpen}>
-            <PanelLeft />
+            <PanelVisibleContext.Provider value={leftOpen}>
+              <PanelLeft />
+            </PanelVisibleContext.Provider>
           </div>
         )}
         {leftOpen && <div className="v10-resize-handle-h" ref={leftHandle} />}
@@ -178,7 +181,9 @@ function AppShell() {
         {rightOpen && <div className="v10-resize-handle-h" ref={rightHandle} />}
         {rightMounted && (
           <div className="v10-panel-right" style={{ width: rightWidth }} hidden={!rightOpen}>
-            <PanelRight />
+            <PanelVisibleContext.Provider value={rightOpen}>
+              <PanelRight />
+            </PanelVisibleContext.Provider>
           </div>
         )}
       </div>

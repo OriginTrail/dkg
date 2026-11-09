@@ -165,6 +165,27 @@ test.describe('narrow screen (860px and below)', () => {
     await expect(composer).toHaveValue('Draft typed on desktop');
   });
 
+  test('hiding the agent panel closes its open picker menu but keeps the draft', async ({ page }) => {
+    const composer = right(page).locator('textarea.v10-agent-input');
+    // One Context Graph, so the composer's picker has something to offer.
+    await page.route('**/api/context-graph/list**', (route) => route.fulfill({ json: { contextGraphs: [
+      { id: 'cg-picker', name: 'Picker graph', accessPolicy: 'private', callerInvolved: true, subscribed: true, synced: true },
+    ] } }));
+    await open(page, DESKTOP, { leftCollapsed: false, rightCollapsed: false });
+    await composer.fill('Draft kept while the panel hides');
+    // The Context Graph picker's menu is portalled to the page body.
+    await right(page).locator('.v10-local-agent-target-select button[aria-haspopup="listbox"]').click();
+    await expect(page.getByRole('listbox')).toBeVisible();
+
+    // The shortcut closes the panel without a click outside the menu.
+    await page.keyboard.press('Control+Shift+B');
+    await expect(right(page)).toBeHidden();
+    await expect(page.getByRole('listbox')).toHaveCount(0);
+
+    await agentPanelButton(page).click();
+    await expect(composer).toHaveValue('Draft kept while the panel hides');
+  });
+
   test('a draft typed on a narrow screen survives widening when the desktop agent panel is saved closed', async ({ page }) => {
     const composer = right(page).locator('textarea.v10-agent-input');
     await open(page, NARROW, { leftCollapsed: false, rightCollapsed: true });
