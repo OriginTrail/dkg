@@ -301,6 +301,98 @@ for (const failure of ['reject', 'lost-ack', 'changed-pin']) test(`schedule deac
   } finally { f.close(); }
 });
 
+for (const loss of ['deactivation', 'expiry', 'replacement']) test('unprotected webhook rechecks ' + loss + ' after catalog inspection', async t => {
+  const f = environment(), entered = Promise.withResolvers(), resume = Promise.withResolvers();
+  try {
+    const w = await f.service.save(definition(['webhook', 'http-request'], [[0,0,1,0]]), () => assert.fail('unexpected export authorization'));
+    assert.equal(w.requiresExportAuthorization, false);
+    await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+    const key = f.repository.row(w.kaRef).event_key;
+    // event() inspects once, then run() inspects again after reserving the event.
+    f.beforeNextCatalog(() => f.beforeNextCatalog(async () => { entered.resolve(); await resume.promise; }));
+    const denied = assert.rejects(f.service.event(key, { invocationId: randomUUID(), items: [{}] }), /inactive|activation changed/);
+    await entered.promise;
+    if (loss === 'expiry') {
+      const expiresAt = f.repository.activation(w.kaRef).expiresAt;
+      t.mock.method(Date, 'now', () => expiresAt + 1);
+    } else {
+      await f.service.activate({ kaRef: w.kaRef, active: false, activationId: randomUUID() }, () => {});
+      if (loss === 'replacement') await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+    }
+    resume.resolve(); await denied;
+    assert.equal(f.invocations.length, 0);
+    assert.equal(f.repository.pendingEvents(w.kaRef).length, 1);
+    // Explicit owner runs are independent of delegated webhook authority.
+    assert.equal((await f.service.run({ kaRef: w.kaRef, sourceHash: w.sourceHash, itemsJson: '[{}]', invocationId: randomUUID() }, () => {})).persisted, true);
+    assert.equal(f.invocations.length, 1);
+  } finally { resume.resolve(); t.mock.restoreAll(); f.close(); }
+});
+
+test('webhook reconciliation rechecks activation after an acknowledged dispatch', async () => {
+  const f = environment(); let attempts = 0;
+  try {
+    const w = await f.service.save(definition(['webhook', 'edit-fields'], [[0,0,1,0]]), () => {});
+    await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+    const key = f.repository.row(w.kaRef).event_key;
+    f.client.programs.invoke = async () => {
+      attempts++;
+      await f.service.activate({ kaRef: w.kaRef, active: false, activationId: randomUUID() }, () => {});
+      throw Object.assign(new Error('inspect the durable acknowledgement'), { code: 'INVOCATION_REQUIRES_RECONCILIATION' });
+    };
+    await assert.rejects(f.service.event(key, { invocationId: randomUUID(), items: [{}] }), /inactive|activation changed/);
+    assert.equal(attempts, 1);
+    assert.equal(f.repository.pendingEvents(w.kaRef).length, 1);
+  } finally { f.close(); }
+});
+
+for (const mode of ['webhook', 'schedule']) for (const renewal of [false, true]) test(mode + ' pending activation cannot undo later deactivation, renewal=' + renewal, async () => {
+  const f = environment(), entered = Promise.withResolvers(), resume = Promise.withResolvers();
+  try {
+    const w = await f.service.save(definition([mode, 'edit-fields'], [[0,0,1,0]]), () => {});
+    if (renewal) await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+    f.beforeNextCatalog(async () => { entered.resolve(); await resume.promise; });
+    const pending = f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+    const denied = assert.rejects(pending, /activation changed/);
+    await entered.promise;
+    const revocationId = randomUUID();
+    await f.service.activate({ kaRef: w.kaRef, active: false, activationId: revocationId }, () => {});
+    const revoked = f.repository.row(w.kaRef);
+    const nativeActive = [...f.native.values()][0].active;
+    resume.resolve(); await denied;
+    assert.deepEqual(f.repository.row(w.kaRef), revoked);
+    assert.deepEqual(f.repository.activation(w.kaRef), { active: false, activationId: revocationId });
+    assert.equal(f.repository.row(w.kaRef).event_key, null);
+    assert.equal([...f.native.values()][0].active, nativeActive);
+    f.restart();
+    assert.deepEqual(f.repository.row(w.kaRef), revoked);
+  } finally { resume.resolve(); f.close(); }
+});
+
+test('activation waiting on provider cleanup cannot overwrite a later revocation', async () => {
+  const f = environment(), entered = Promise.withResolvers(), resume = Promise.withResolvers();
+  try {
+    const w = await f.service.save(definition(['schedule', 'edit-fields'], [[0,0,1,0]]), () => {});
+    await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+    f.setUnpublishFailure('reject');
+    await assert.rejects(f.service.activate({ kaRef: w.kaRef, active: false, activationId: randomUUID() }, () => {}));
+    f.setUnpublishFailure(null);
+    const publish = f.provider.setPublished; let pause = true;
+    f.provider.setPublished = async (...args) => {
+      if (pause) { pause = false; entered.resolve(); await resume.promise; }
+      return publish(...args);
+    };
+    const denied = assert.rejects(f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {}), /activation changed/);
+    await entered.promise;
+    const revocationId = randomUUID();
+    await f.service.activate({ kaRef: w.kaRef, active: false, activationId: revocationId }, () => {});
+    resume.resolve(); await denied;
+    assert.deepEqual(f.repository.activation(w.kaRef), { active: false, activationId: revocationId });
+    assert.equal(f.repository.row(w.kaRef).event_key, null);
+    assert.equal(f.repository.row(w.kaRef).unpublish_pending, null);
+    assert.equal([...f.native.values()][0].active, false);
+  } finally { resume.resolve(); f.close(); }
+});
+
 test('schedule deactivation fences an invocation already awaiting catalog inspection', async () => {
   const f = environment(); let release;
   try {
