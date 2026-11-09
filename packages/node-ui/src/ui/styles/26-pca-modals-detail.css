@@ -1,8 +1,8 @@
 /* PCA styles — S3 Detail + S2 Create modal + S4 Approve modal. Split from 26-pca.css (#1354); class names + cascade order unchanged. Groups the detail scaffold (was above the disjoint dashboard block) with the rest of detail/modals. */
 
 /* ----- S3 Detail (scaffold) ----- */
-.v10-pca-detail-band { display: flex; align-items: center; gap: var(--space-12); margin-bottom: var(--space-16); }
-.v10-pca-detail-id { margin: 0; font-size: var(--fs-title); font-weight: 700; color: var(--text-primary); }
+/* Wraps on narrow screens so the title stays on one line. */
+.v10-pca-detail-band { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-12); margin-bottom: var(--space-16); }
 .v10-pca-detail-committed { font-size: var(--fs-control); color: var(--text-secondary); }
 .v10-pca-detail-owner { display: flex; align-items: center; gap: var(--space-8); margin-top: var(--space-16); }
 .v10-pca-detail .v10-stat-strip-value {

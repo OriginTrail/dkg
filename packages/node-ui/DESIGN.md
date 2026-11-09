@@ -160,11 +160,11 @@ One set, one icon per job:
 - **`LayerGlyph`** for memory layers. Nothing else uses those shapes.
 - **`StatusGlyph`** for success, warning, danger and pending, including inside a sentence.
 
-Sizes: 14 in controls and rows, 12 in small buttons and badges, 10 inside the smallest chips. Icons take the text colour. An icon-only button always has a name.
+Sizes: 12 in small buttons, badges and labels, 14 in controls, rows, buttons and headers, 16 for standalone icons such as empty states. The layer glyph is the one exception: it drops to 10 inside a small badge. Icons take the text colour. An icon-only button always has a name.
 
 No emoji or Unicode symbols as icons: they change from one platform to the next and can't take a size or colour. `test/icons.test.ts` enforces this. Text arrows in a sentence or link (`→`, `←`, `↗`) are typography and stay. Subgraph marks are the exception: they are text from the project profile, so their defaults (`⊚`, `⊘`, `•`) stay text.
 
-Sizes are 12 in small controls and labels, 14 on buttons and in headers, 16 for standalone icons. A control's plus or arrow is an icon, not a typed character. A link that leaves the app ends in `<ExternalMark />`. Arrows inside a sentence stay as text.
+A control's plus or arrow is an icon, not a typed character. A link that leaves the app ends in `<ExternalMark />`. Arrows inside a sentence stay as text.
 
 ### Toggle
 
