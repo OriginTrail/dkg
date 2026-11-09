@@ -155,6 +155,7 @@ export const COPY = {
   "play.fork.fund": "No subscription funds this service in this epoch — nothing was charged",
   "play.fork.ending": "The epoch is ending: calls resume when the next one starts, in {n} s",
   "play.key.note": "Calls go through this node's gateway with {key}, this browser's playground key: kept in memory, good for an hour, and revoked when the next one is made",
+  "play.key.spent": "The budget of {key}, this browser's playground key, is spent: your next message makes a new key from this epoch's subscription and revokes this one",
   "play.key.first": "Your first message makes this browser's playground key for the gateway and revokes the one before: kept in memory, good for an hour",
   "admin.title": "This needs the node-admin token",
   "admin.playground": "The playground makes its own access key, which takes the node-admin token. Open the dashboard with that token to chat here.",

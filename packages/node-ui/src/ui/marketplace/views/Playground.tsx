@@ -12,8 +12,12 @@ import { fmtCount, fmtTrac, modelName, pctOf } from '../amounts.js';
 import { AdminCard, ErrorCard, describeError, relAt, sellerName, useLoad, useMarketplaceNav } from '../shared.js';
 import { useMarketplaceDraftStore } from '../draftStore.js';
 
-/** The playground's key: in this page's memory only, and good for an hour. */
-let pageKey: { secret: string; keyId: string; expiresAt: number } | null = null;
+/**
+ * The playground's key: in this page's memory only, good for an hour, with
+ * the budget it was made with (wei), and `spent` once the gateway refused a
+ * call as past that budget.
+ */
+let pageKey: { secret: string; keyId: string; expiresAt: number; budget: string; spent: boolean } | null = null;
 const KEY_LIFETIME_SECONDS = 3_600;
 
 /**
@@ -39,19 +43,25 @@ function rememberKeyId(keyId: string): void {
 /** Forget the page's key (tests, and a key the gateway no longer takes). */
 export function forgetPlaygroundKey(): void { pageKey = null; }
 
+/** The key's budget ran out: the next send makes a new one, from the subscription as it is then. */
+function spendPlaygroundKey(): void { if (pageKey) pageKey = { ...pageKey, spent: true }; }
+
 /**
- * The page's key, made on the first send. The key made before it, by this
- * page or an earlier one in this browser, is revoked first; a revoke that
- * fails (that key expired, or was revoked elsewhere) does not stop the new one.
+ * The page's key, made on the first send with `budget`, this epoch's
+ * subscription value, and made again once it expires, once its budget is
+ * spent, or once the subscription funds more than it was made with. The key
+ * made before it, by this page or an earlier one in this browser, is revoked
+ * first; a revoke that fails (that key expired, or was revoked elsewhere)
+ * does not stop the new one.
  */
 async function playgroundKey(budget: string): Promise<{ secret: string; keyId: string }> {
   const now = Math.floor(Date.now() / 1000);
-  if (pageKey && pageKey.expiresAt - 60 > now) return pageKey;
+  if (pageKey && !pageKey.spent && pageKey.expiresAt - 60 > now && BigInt(pageKey.budget) >= BigInt(budget)) return pageKey;
   const previous = pageKey?.keyId ?? lastKeyId();
   pageKey = null;
   if (previous) await marketplaceApi.revokeKey(previous).catch(() => undefined);
   const made = await marketplaceApi.makeKey({ label: copy('play.key.label'), budget, services: null, rps: 2, expiresAt: now + KEY_LIFETIME_SECONDS });
-  pageKey = { secret: made.secret, keyId: made.keyId, expiresAt: made.expiresAt ?? now + KEY_LIFETIME_SECONDS };
+  pageKey = { secret: made.secret, keyId: made.keyId, expiresAt: made.expiresAt ?? now + KEY_LIFETIME_SECONDS, budget, spent: false };
   rememberKeyId(made.keyId);
   return pageKey;
 }
@@ -92,6 +102,7 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
   const [busy, setBusy] = useState(false);
   const [keyErr, setKeyErr] = useState<unknown>(null);
   const [keyId, setKeyId] = useState<string | null>(pageKey?.keyId ?? null);
+  const [keySpent, setKeySpent] = useState(pageKey?.spent ?? false);
   const [left, setLeft] = useState<Record<string, string>>({});
   const askPlans = useMarketplaceDraftStore((s) => s.askPlans);
   const go = useMarketplaceNav();
@@ -113,8 +124,15 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
     let called = false;
     const chat = (secret: string) => { called = true; return marketplaceGateway.chat(secret, request); };
     try {
-      let key = await playgroundKey(current.value);
+      // A spent key is made again from the subscription as the node shows it now: a top-up may have come since.
+      let value = current.value;
+      if (pageKey?.spent) {
+        value = (await marketplaceApi.subscriptions(catalog.epoch)).subscriptions.find((s) => s.epoch === catalog.epoch)?.value ?? value;
+        subs.reload();
+      }
+      let key = await playgroundKey(value);
       setKeyId(key.keyId);
+      setKeySpent(false);
       let answer;
       try {
         answer = await chat(key.secret);
@@ -139,6 +157,11 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
         setFork({ kind: 'fund', serviceId: selected.serviceId });
       } else if (isMarketplaceError(err) && err.code === 'epoch_ending') {
         setFork({ kind: 'ending', seconds: err.retryAfter });
+      }
+      if (isMarketplaceError(err) && err.code === 'key_budget') {
+        // The playground key's own budget ran out: the next send makes a new key, from the subscription as the node shows it then.
+        spendPlaygroundKey();
+        setKeySpent(true);
       }
       // The fork says what happened for these three; anything else is an error bubble.
       if (isMarketplaceError(err) && ['soft_ceiling', 'no_subscription', 'epoch_ending'].includes(err.code)) return;
@@ -250,8 +273,8 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
           {busy ? copy('state.working') : copy('ctl.send')}
         </button>
       </div>
-      <span className="mkt-muted mkt-xs" data-testid="mkt-play-key" data-copy={keyId ? 'play.key.note' : 'play.key.first'}>
-        {keyId ? copy('play.key.note', { key: keyId }) : copy('play.key.first')}
+      <span className="mkt-muted mkt-xs" data-testid="mkt-play-key" data-copy={!keyId ? 'play.key.first' : keySpent ? 'play.key.spent' : 'play.key.note'}>
+        {!keyId ? copy('play.key.first') : keySpent ? copy('play.key.spent', { key: keyId }) : copy('play.key.note', { key: keyId })}
       </span>
     </div>
   );
