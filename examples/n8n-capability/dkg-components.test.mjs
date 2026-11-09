@@ -141,6 +141,49 @@ test("read is refreshed once per invocation; write and retry preserve exact prov
   assert.equal(payload.execution.status, "running-at-write");
   db.close();
 });
+test('ordinary evidence fields cannot select Program provenance', async t => {
+  let payload;
+  const { store, db } = setup(async (value, operation) => {
+    if (operation === 'read') return readResult;
+    payload = value; return written(value);
+  });
+  t.after(() => db.close());
+  await store.call(request('read', JSON.parse(input.itemsJson)), workflow, 'native1');
+  const rows = [{ erp: records[0], workbook: wb, programExecution: { source: 'ordinary record field' } }];
+  await store.call(request('write', rows), workflow, 'native1');
+  const evidence = JSON.parse(JSON.parse(payload.quads.find(q => q.predicate === 'urn:nos:workflow:payload').object));
+  assert.equal(evidence.kind, 'PLCAInputEvidence');
+  assert.deepEqual(evidence.records, rows);
+  assert.equal(evidence.programExecution, undefined);
+});
+test('overlapping identical Write callbacks share one pending transport and reject changed input', async t => {
+  const entered = Promise.withResolvers(), release = Promise.withResolvers();
+  let writes = 0, payload;
+  const { store, db } = setup(async (value, operation) => {
+    if (operation === 'read') return readResult;
+    writes++; payload = value; entered.resolve(); await release.promise; return written(value);
+  });
+  t.after(() => db.close());
+  await store.call(request('read', JSON.parse(input.itemsJson)), workflow, 'native1');
+  const value = request('write', [{ erp: records[0], workbook: wb }]);
+  const first = store.call(value, workflow, 'native1');
+  await entered.promise;
+  const second = store.call(structuredClone(value), workflow, 'native1');
+  const replies = Promise.all([first, second]); let results;
+  try {
+    await assert.rejects(store.call({ ...value, items: [{ erp: records[1], workbook: wb }] }, workflow, 'native1'), /different inputs/);
+    assert.equal(writes, 1);
+    assert.equal(payload.allowCreate, true);
+    const pending = db.prepare('SELECT * FROM dkg_component_calls WHERE id=?').get(id + ':write');
+    assert.equal(pending.result, null); assert.equal(pending.response, null);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM dkg_component_writes').get().n, 1);
+  } finally { release.resolve(); results = await replies; }
+  const [a, b] = results;
+  assert.deepEqual(a, b);
+  assert.deepEqual(JSON.parse(db.prepare('SELECT response FROM dkg_component_calls WHERE id=?').get(id + ':write').response), a);
+  assert.deepEqual(await store.call(value, workflow, 'native1'), a);
+  assert.equal(writes, 1);
+});
 test("rejects ungranted, foreign scope, changed replay, and invented ERP before effects", async () => {
   const calls = [];
   const { store, db } = setup(async (p, script) => {

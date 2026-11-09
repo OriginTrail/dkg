@@ -1,10 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { jpbReadSpec } from './profiles/jpb-read-policy.mjs';
 const fail = message => Object.assign(new Error(message), { status: 409, code: 'JPB_OUTPUT_UNCONFIRMED' });
 // Load once: the reviewed profile revision and every execution use the same script bytes.
 export const remoteScripts = Object.freeze(Object.fromEntries(
   ['jpb-read.py', 'jpb-write.py', 'jpb-invoke-program.py'].map(name =>
-    [name, readFileSync(new URL('./' + name, import.meta.url), 'utf8')]),
+    [name, (name === 'jpb-read.py' ? 'import base64,json\nREAD_SPEC=json.loads(base64.b64decode("'
+      + Buffer.from(JSON.stringify(jpbReadSpec)).toString('base64') + '"))\n' : '')
+      + readFileSync(new URL('./' + name, import.meta.url), 'utf8')]),
 ));
 export function createRemote(scripts = remoteScripts, spawnProcess = spawn) {
   const pinned = Object.freeze({ ...scripts });

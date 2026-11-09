@@ -1,7 +1,8 @@
 // DMaaST-specific payload and provenance policy. Not part of the generic component runtime.
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-export const JPB_SOURCE = '0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-data';
+import { jpbReadSpec } from './jpb-read-policy.mjs';
+export const JPB_SOURCE = jpbReadSpec.contextGraphId;
 export const JPB_TARGET = '0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-plca-study';
 export const JPB_WORKBOOK = '2f0585064042668c4a854290a2e0ef365a24e57d58345881108067d397470fbf';
 const fail = message => Object.assign(new Error(message), { status: 409, code: 'DKG_COMPONENT_UNCONFIRMED' });
@@ -10,14 +11,13 @@ export function verifyJpbEvidence(payload) {
   if (stored.length !== 1 || createHash('sha256').update(JSON.parse(stored[0].object)).digest('hex') !== payload.digest)
     throw fail('JPB evidence digest differs.');
 }
-export function componentEvidence(rows, context, read, workbook, programOutput) {
+export function componentEvidence(rows, context, read, workbook, programContext) {
   let assessment;
-  if (programOutput) {
-    const raw = programOutput.rawOutputs;
+  if (programContext) {
+    const raw = programContext.rawOutputs;
     if (!Array.isArray(raw) || raw.length !== 1 || !raw[0]?.assessment
-      || createHash('sha256').update(JSON.stringify(raw)).digest('hex') !== programOutput.programExecution.outputSha256
-      || !isDeepStrictEqual(rows, raw[0].records)
-      || !isDeepStrictEqual(programOutput.result?.assessment, raw[0].assessment))
+      || createHash('sha256').update(JSON.stringify(raw)).digest('hex') !== programContext.receipt?.outputSha256
+      || !isDeepStrictEqual(rows, raw[0].records))
       throw fail('Calculated evidence must preserve the verified Program output assessment and records.');
     assessment = raw[0].assessment;
   }
@@ -42,11 +42,11 @@ export function componentEvidence(rows, context, read, workbook, programOutput) 
       throw fail("Workbook provenance differs from this execution input.");
   }
   const payload = JSON.stringify({
-    kind: programOutput ? 'PLCADemoResult' : "PLCAInputEvidence",
+    kind: programContext ? 'PLCADemoResult' : "PLCAInputEvidence",
     interpretation: "planned-routing-reference-only",
     allocationStatus: "unconfirmed",
     plcaCalculated: assessment?.calculated === true,
-    ...(programOutput ? { assessment, programExecution: programOutput.programExecution } : {}),
+    ...(programContext ? { assessment, programExecution: programContext.receipt } : {}),
     execution: { ...context, status: "running-at-write" },
     source: read.source,
     records: rows,
@@ -57,7 +57,7 @@ export function componentEvidence(rows, context, read, workbook, programOutput) 
   const quads = [
     q(
       "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
-      programOutput ? 'urn:nos:workflow:PLCADemoResult' : "urn:nos:workflow:PLCAInputEvidence",
+      programContext ? 'urn:nos:workflow:PLCADemoResult' : "urn:nos:workflow:PLCAInputEvidence",
     ),
     q("urn:nos:workflow:payload", JSON.stringify(payload)),
     q("urn:nos:workflow:sha256", JSON.stringify(digest)),
@@ -65,7 +65,7 @@ export function componentEvidence(rows, context, read, workbook, programOutput) 
     q("http://www.w3.org/ns/prov#wasGeneratedBy", context.executionIri),
     q("urn:nos:workflow:workflow", context.kaRef),
   ];
-  if (programOutput) quads.push(q('http://www.w3.org/ns/prov#wasGeneratedBy', programOutput.programExecution.executionIri));
+  if (programContext) quads.push(q('http://www.w3.org/ns/prov#wasGeneratedBy', programContext.receipt.executionIri));
   for (const r of rows)
     for (const ref of [
       r.erp?.recordId,

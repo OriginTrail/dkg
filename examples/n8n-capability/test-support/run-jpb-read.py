@@ -3,7 +3,6 @@ import contextlib
 import io
 import json
 from pathlib import Path
-import runpy
 import socket
 import sys
 import urllib.error
@@ -55,7 +54,7 @@ try:
          patch.object(Path, 'read_text', token_text), patch.object(urllib.request, 'urlopen', urlopen), \
          patch.object(socket, 'create_connection', side_effect=AssertionError('Network access forbidden')), \
          contextlib.redirect_stdout(output):
-        runpy.run_path(sys.argv[1], init_globals={'PAYLOAD': fixture['payload']})
+        exec(compile(fixture['readerSource'], sys.argv[1], 'exec'), {'PAYLOAD': fixture['payload']})
     report = {'ok': True, 'result': json.loads(output.getvalue())}
 except Exception as error:
     report = {'ok': False, 'error': type(error).__name__, 'message': str(error)}

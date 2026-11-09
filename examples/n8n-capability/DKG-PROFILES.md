@@ -44,7 +44,7 @@ The default export is validated by `dkg-profile.mjs` and contains:
 - `validateNode(node, rows, input)` for dataset, graph and input policy checks.
 - `readRequest(node, rows, input)` and `readItems(inputRows, response, node)`;
   `readItems` must verify source scope and return the bounded normalized records.
-- `evidence(rows, context, readResponse, input, programOutput)` returning
+- `evidence(rows, context, readResponse, input, programContext)` returning
   `{ payload: { name, digest, quads }, recordCount, summary }`. It validates domain
   provenance and constructs the domain-specific output. `summary` cannot override
   the core write receipt fields.
@@ -65,8 +65,12 @@ The generic runtime verifies Program invocation/source/binding receipts and writ
 scope/digest/sealed status/readback. Its journal is written before dispatch.
 After a verified Program response, the journal retains `rawOutputs` separately
 from the workflow's mapped `items`. Only mapped items are returned to n8n.
-The evidence hook receives the journal's raw outputs as `programOutput.rawOutputs`;
-profiles must derive attested values from those outputs, not presentation mappings.
+The pinned incoming block selects whether a Write consumes Program provenance.
+For Invoke-to-Write, the callback's presentation items must match the completed
+upstream journal. The evidence hook receives those items in `rows` and a separate
+`programContext: { blockId, receipt, rawOutputs }` from that journal. An ordinary
+record field named `programExecution` cannot select this path. Profiles derive
+attested values from `programContext.rawOutputs` and check their presentation mapping.
 JPB requires the mapped assessment and records to match the single verified raw
 result and its output digest. Literal substitutions are rejected before Write;
 presentation fields outside the assessment and records do not become evidence.
@@ -230,6 +234,13 @@ revisions and workflow approval; existing invocations cannot reuse their cached
 reads or resume pending writes through that connection. Credential rotation alone
 does not change the connection identity. SSH scripts contribute only to the SSH
 profile revision; both transports compose their policy from `jpb-policy.mjs`.
+Their reviewed read selection, assertion partitions, snapshot, field mapping and
+provenance labels live in `profiles/jpb-read-spec.json`. `jpb-read-policy.mjs`
+constructs the query once; nOS uses it directly and the SSH bundle embeds the
+same compiled specification. Python retains host/authentication checks and RDF
+decoding, with domain checks driven by that specification. Both profile revisions
+include the captured specification and common policy bytes. Changes require new
+component/workflow pins as described above; running profiles retain their snapshot.
 
 Each companion state belongs to one account. A persisted `nos-account.json`
 prevents rebinding or reopening it as a kit-only service. To deliberately migrate

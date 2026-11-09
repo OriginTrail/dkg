@@ -50,18 +50,19 @@ export function dkgComponentOperations({ db, profile, transport, assertNoPending
           n8nExecutionId: value.executionId,
           blockId: node.id,
         };
-        let programOutput;
-        if (rows.length === 1 && rows[0]?.programExecution) {
-          const incoming = definition.edges.find(e => e.to === node.id);
-          const invoked = definition.nodes.find(n => n.id === incoming?.from && n.componentId === 'invoke-dkg-program');
-          const completed = invoked && db.prepare('SELECT result FROM dkg_component_calls WHERE id=?').get(id + ':' + invoked.id);
+        // The pinned upstream block selects provenance; record fields are only data.
+        const incoming = definition.edges.find(e => e.to === node.id);
+        const invoked = definition.nodes.find(n => n.id === incoming?.from && n.componentId === 'invoke-dkg-program');
+        let programContext;
+        if (invoked) {
+          const completed = db.prepare('SELECT result FROM dkg_component_calls WHERE id=?').get(id + ':' + invoked.id);
           const confirmed = completed?.result && JSON.parse(completed.result);
           if (!confirmed || !isDeepStrictEqual(confirmed.items, rows)) throw fail('Program output differs from this execution.');
-          programOutput = { ...confirmed.items[0], rawOutputs: confirmed.rawOutputs };
+          programContext = { blockId: invoked.id, receipt: confirmed.items[0].programExecution, rawOutputs: confirmed.rawOutputs };
         }
         const savedWrite = db.prepare('SELECT * FROM dkg_component_writes WHERE id=?').get(key);
         const evidence = savedWrite ? JSON.parse(savedWrite.evidence)
-          : profile.evidence(rows, context, JSON.parse(read.result), input, programOutput);
+          : profile.evidence(rows, context, JSON.parse(read.result), input, programContext);
         const { payload, recordCount, summary = {} } = evidence;
         if (!prior) assertNoPendingWrite(workflow, id);
         // Persist the exact callback AND write payload before the first possible effect.

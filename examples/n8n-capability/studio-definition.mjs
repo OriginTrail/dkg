@@ -99,7 +99,7 @@ export function validateStudioCapabilities(definition, capabilities) {
     return c;
   });
   return { selected, requiresExportAuthorization: selected.some(c => c.requiresExportAuthorization)
-    || definition.nodes.some(n => component(n.componentId).writes) };
+    || definition.nodes.some(n => needsExport(component(n.componentId))) };
 }
 
 export function compileStudio(value, { graphId, owner, headerCredential, credentials = {}, fixture = false, providerId } = {}) {

@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { remoteScripts } from './jpb-output.mjs';
+import { readJpbThroughNos } from './profiles/jpb-nos-read.mjs';
 
 const script = fileURLToPath(new URL('./jpb-read.py', import.meta.url));
 const harness = fileURLToPath(new URL('./test-support/run-jpb-read.py', import.meta.url));
@@ -41,7 +43,8 @@ function fixture(representation = 'binding-objects') {
   return { hostname: 'dmaast-mainnet-edge-2', payload: { orderNo: '62633' }, status: { peerId }, response: { result: { bindings: rows } } };
 }
 function run(value) {
-  const result = spawnSync('python3', [harness, script], { input: JSON.stringify(value), encoding: 'utf8', timeout: 10000 });
+  // Execute the exact production SSH bundle, including its trusted specification.
+  const result = spawnSync('python3', [harness, script], { input: JSON.stringify({ ...value, readerSource: remoteScripts['jpb-read.py'] }), encoding: 'utf8', timeout: 10000 });
   assert.ifError(result.error); assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
 }
@@ -92,6 +95,25 @@ test('actual SSH reader accepts a complete selection in a different response ord
   const value = fixture(); value.response.result.bindings.reverse();
   const result = run(value); assert.equal(result.ok, true, result.message);
   assert.deepEqual(result.result.records.map(row => row.recordId), [...selected].reverse());
+});
+
+test('SSH and nOS use the same query and normalized provenance for the shared selection', async () => {
+  const normalize = result => ({
+    records: result.records.map(({ evidence, ...record }) => {
+      const { readAt: _time, responseSha256: _hash, ...provenance } = evidence;
+      return { ...record, evidence: provenance };
+    }),
+    source: (({ readAt: _time, responseSha256: _hash, peerId: _peer, ...source }) => source)(result.source),
+  });
+  for (const representation of ['binding-objects', 'plain-literals', 'typed-literals', 'escaped-unicode', 'language-literals', 'null-date']) {
+    const value = fixture(representation), ssh = run(value);
+    assert.equal(ssh.ok, true, ssh.message);
+    const nos = await readJpbThroughNos(async (path, body) => {
+      assert.equal(path, 'query'); assert.deepEqual(body, ssh.calls[1].body);
+      return value.response;
+    }, value.payload);
+    assert.deepEqual(normalize(nos), normalize(ssh.result), representation);
+  }
 });
 
 test('actual SSH reader rejects duplicate bare record IRIs with distinct operations', () => {
