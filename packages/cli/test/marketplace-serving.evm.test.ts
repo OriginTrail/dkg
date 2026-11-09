@@ -32,6 +32,7 @@
  *   - a seller that restarts shares its offers again, signed later, and
  *     calls route by the new copies.
  */
+import { EventEmitter } from 'node:events';
 import { createServer, type Server } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -114,11 +115,12 @@ const GATEWAY_CHAT = MARKETPLACE_GATEWAY_ROUTES.chat.path;
 
 /** One request through the daemon's marketplace routes: as the node admin, or with `token` as the bearer. */
 async function route(method: string, path: string, body?: unknown, token?: string): Promise<{ status: number; body: any; headers?: Record<string, string> }> {
-  const res: any = { statusCode: 0, body: '' };
+  // Emitters, as the gateway listens for a client that goes away.
+  const res: any = Object.assign(new EventEmitter(), { statusCode: 0, body: '' });
   res.writeHead = (status: number, headers?: Record<string, string>) => { res.statusCode = status; res.headers = headers; };
   res.setHeader = () => undefined;
   res.end = (text: string) => { res.body = text; res.writableEnded = true; };
-  const req: any = { method, url: path };
+  const req: any = Object.assign(new EventEmitter(), { method, url: path });
   if (body !== undefined) req.__dkgPrebufferedBody = Buffer.from(JSON.stringify(body));
   const url = new URL(`http://127.0.0.1${path}`);
   const authentication = token === undefined
