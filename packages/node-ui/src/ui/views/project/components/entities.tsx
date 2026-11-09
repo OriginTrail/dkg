@@ -21,7 +21,6 @@ import { humanizeTypeName } from '../../../lib/formatLabels.js';
 import { FileText } from 'lucide-react';
 import { formatDateTime, formatNumber } from '../../../lib/format.js';
 
-const TRUST_TONE = { working: 'wm', shared: 'swm', verified: 'vm' } as const;
 export { AssertionsList } from './assertions.js';
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
@@ -473,7 +472,7 @@ export function LayerDetailView({
   return (
     <div className="v10-layer-detail">
       <div className="v10-layer-detail-header">
-        <span className={`v10-layer-detail-icon v10-layer-tone-text layer-tone-${TRUST_TONE[config.trustLevel]}`}>{config.icon}</span>
+        <span className={`v10-layer-detail-icon v10-layer-tone-text layer-tone-${layer}`}>{config.icon}</span>
         <div>
           <div className="v10-layer-detail-title">{config.title}</div>
           <div className="v10-layer-detail-desc">{config.desc}</div>
