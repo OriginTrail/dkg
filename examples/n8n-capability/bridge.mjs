@@ -23,7 +23,7 @@ const json = (res, status, value) => { res.writeHead(status, { 'content-type': '
 export function createCapabilityBridge({ agent, client, graphId, owner, config, definitions = [], exportTokenFile, studioOptions }) {
   if (!nosStudioSession && studioOptions && existsSync(join(studioOptions.state, 'nos-account.json')))
     throw new Error('This state requires its authenticated nOS account configuration.');
-  if (nosStudioSession && studioOptions) nosStudioSession.bindState(studioOptions.state);
+  const commitAccountBinding = nosStudioSession && studioOptions ? nosStudioSession.prepareStateBinding(studioOptions.state) : null;
   if (nosStudioSession && configuredDkgProfile && (!configuredDkgProfile.requiresNosActor || configuredDkgProfile.accountId !== nosStudioSession.accountId))
     throw new Error('Authenticated Studio requires an account-bound nOS transport profile.');
   const listPrograms = createProgramCatalog({ graphId, owner, client, definitions });
@@ -76,11 +76,15 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner),
   });
   const provider = studioOptions ? createStudioProvider({ ...studioOptions, config, graphId, owner }) : null;
-  if (nosStudioSession && provider && provider.db.prepare('SELECT activation_json FROM workflows WHERE activation_json IS NOT NULL').all().some(r => JSON.parse(r.activation_json).active))
-    throw new Error('Deactivate legacy schedules before adopting Studio state for an account.');
-  const studio = provider ? createStudioService({ graphId, owner, client, provider, exportTokenFile,
-    listCapabilities: async () => [...await list(), ...await listPrograms()],
-    loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner) }) : null;
+  let studio;
+  try {
+    if (nosStudioSession && provider && provider.db.prepare('SELECT activation_json FROM workflows WHERE activation_json IS NOT NULL').all().some(r => JSON.parse(r.activation_json).active))
+      throw new Error('Deactivate legacy schedules before adopting Studio state for an account.');
+    studio = provider ? createStudioService({ graphId, owner, client, provider, exportTokenFile,
+      listCapabilities: async () => [...await list(), ...await listPrograms()],
+      loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner) }) : null;
+    commitAccountBinding?.();
+  } catch (error) { studio?.stop(); provider?.close(); throw error; }
   async function invoke(capability, input, invocationId) {
     const result = await client.programs.invoke({ graphId, operationIri: capability.kaRef, inputs: [input], invocationId });
     const stored = await loadExecutionOutputs(agent, graphId, result.executionIri, 'wm', owner);

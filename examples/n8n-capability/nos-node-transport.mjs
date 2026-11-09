@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { parseRdfLiteralTerm, canonicalizeRdfObjectTerm } from '../../packages/rdf-utils/dist/index.js';
 
 const fail = message => Object.assign(new Error(message), { status: 409, code: 'DKG_COMPONENT_UNCONFIRMED' });
 export function createNosNodeClient(session, actor, send = fetch) {
@@ -51,6 +52,17 @@ export async function invokeNosProgram(call, request) {
 
 export async function writeNosEvidence(call, payload, graph) {
   if (!/^[A-Za-z0-9._:-]{1,256}$/.test(payload.name)) throw fail('Invalid evidence name.');
+  // Compare decoded lexical values without discarding datatype or language.
+  const term = value => {
+    if (typeof value !== 'string') throw fail('Invalid evidence RDF term.');
+    if (!value.startsWith('"')) return ['iri', value];
+    const literal = parseRdfLiteralTerm(value, { combineSurrogatePairs: true });
+    if (!literal) throw fail('Invalid evidence RDF literal.');
+    if (literal.kind === 'language') return ['literal', { ...literal, language: literal.language.toLowerCase() }];
+    return ['literal', canonicalizeRdfObjectTerm(value)];
+  };
+  const quads = rows => [...new Set(rows.map(q => JSON.stringify([q.subject, q.predicate, term(q.object)])))].sort();
+  const expected = quads(payload.quads); // Reject malformed input before creation.
   const path = 'knowledge-assets/' + payload.name, query = { contextGraphId: graph };
   let metadata, created = false;
   try { metadata = await call(path, undefined, query); }
@@ -62,11 +74,7 @@ export async function writeNosEvidence(call, payload, graph) {
     created = true;
   }
   const readback = await call(path + '/wm/quads', undefined, query);
-  // RDF serializers may escape Unicode differently. Compare literal values, preserving
-  // the literal/IRI distinction, rather than the spelling of equivalent JSON escapes.
-  const term = value => value.startsWith('"') ? ['literal', JSON.parse(value)] : ['iri', value];
-  const quads = rows => [...new Set(rows.map(q => JSON.stringify([q.subject, q.predicate, term(q.object)])))].sort();
-  if (!Array.isArray(readback.quads) || !isDeepStrictEqual(quads(readback.quads), quads(payload.quads)))
+  if (!Array.isArray(readback.quads) || !isDeepStrictEqual(quads(readback.quads), expected))
     throw fail('Stored evidence differs from this execution.');
   // The trusted profile owns its digest and RDF vocabulary. Exact readback binds
   // this storage receipt to the complete payload it supplied.

@@ -390,9 +390,14 @@ matching content, not independently verified execution of an external service.
 
 ### JPB DKG Read and DKG Write components
 
-Install `dkg-read,dkg-write` with `setup-components-local.mjs --install --only` in the isolated
-local n8n instance, using the same `httpHeaderAuth` connection as the native bridge. Restart that
-local n8n instance after offline installation. The fixed callback is
+Select the same `NOS_DKG_PROFILE_MODULE` and approved `NOS_JPB_WORKBOOK_INPUT_FILE`
+for installation and the companion. Install with
+`setup-components-local.mjs <state> --install --only dkg-read,dkg-write --n8n-cli <cli>`
+in the isolated local n8n instance, using the same `httpHeaderAuth` connection as the native bridge.
+Partial installation verifies the selected components and preserves all unselected
+manifest entries and pins. It does not advertise or require the unselected
+`invoke-dkg-program` component. Install that component explicitly when needed.
+Restart the local n8n instance after offline installation. The fixed callback is
 `http://127.0.0.1:4631/spike/ka/internal/dkg-component`; allow loopback for this isolated n8n
 instance with `N8N_SSRF_ALLOWED_IP_RANGES=127.0.0.1/32`, keeping SSRF protection enabled.
 The general HTTP component still rejects arbitrary private destinations.

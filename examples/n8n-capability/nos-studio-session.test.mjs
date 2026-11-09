@@ -108,3 +108,39 @@ test('JPB owns evidence digest validation, including equivalent Unicode escapes'
   assert.throws(() => verifyJpbEvidence({ ...payload, quads: [] }), /digest differs/);
   assert.throws(() => verifyJpbEvidence({ ...payload, quads: [...payload.quads, ...payload.quads] }), /digest differs/);
 });
+
+for (const [name, requested, stored] of [
+  ['integer', '"7"^^<http://www.w3.org/2001/XMLSchema#integer>', '"\\u0037"^^<http://www.w3.org/2001/XMLSchema#integer>'],
+  ['date', '"2026-11-09T12:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>', '"2026-11-09T12:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>'],
+  ['language', '"Équipement"@FR', '"\\u00c9quipement"@fr'],
+  ['explicit string', '"text"^^<http://www.w3.org/2001/XMLSchema#string>', '"text"'],
+]) test(`node writer verifies ${name} RDF and reconciles without another create`, async () => {
+  const payload = { name: 'typed-result', digest: 'a'.repeat(64), allowCreate: true,
+    quads: [{ subject: 'urn:test:s', predicate: 'urn:test:p', object: requested }] };
+  let exists = false, creates = 0;
+  const call = async path => {
+    if (path === 'knowledge-assets') { creates++; exists = true; throw new Error('reply lost after sealing'); }
+    if (!exists) throw Object.assign(new Error('missing'), { status: 404 });
+    return path.endsWith('/wm/quads') ? { quads: payload.quads.map(q => ({ ...q, object: stored })) } : { status: 'wm-sealed' };
+  };
+  await assert.rejects(writeNosEvidence(call, payload, 'study'), /reply lost/);
+  assert.equal((await writeNosEvidence(call, { ...payload, allowCreate: false }, 'study')).readbackVerified, true);
+  assert.equal(creates, 1);
+});
+
+test('node writer preserves RDF datatype, language, lexical value and literal identity', async () => {
+  for (const [requested, stored] of [
+    ['"7"^^<http://www.w3.org/2001/XMLSchema#integer>', '"7"^^<http://www.w3.org/2001/XMLSchema#decimal>'],
+    ['"7"^^<http://www.w3.org/2001/XMLSchema#integer>', '"8"^^<http://www.w3.org/2001/XMLSchema#integer>'],
+    ['"bonjour"@fr', '"bonjour"@en'], ['"bonjour"@fr', '"bonjour"'], ['"urn:test:value"', 'urn:test:value'],
+  ]) {
+    const quad = { subject: 'urn:test:s', predicate: 'urn:test:p', object: requested };
+    const call = async path => path.endsWith('/wm/quads') ? { quads: [{ ...quad, object: stored }] } : { status: 'wm-sealed' };
+    await assert.rejects(writeNosEvidence(call, { name: 'rdf-result', quads: [quad] }, 'study'), /differs/);
+  }
+  let calls = 0;
+  await assert.rejects(writeNosEvidence(async () => { calls++; }, { name: 'bad-rdf', quads: [
+    { subject: 'urn:test:s', predicate: 'urn:test:p', object: '"unterminated' },
+  ] }, 'study'), /Invalid evidence RDF literal/);
+  assert.equal(calls, 0);
+});

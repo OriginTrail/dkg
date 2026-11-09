@@ -58,6 +58,9 @@ The shared nOS writer creates/reconciles the named asset, compares exact RDF val
 and requires `wm-sealed`. Each trusted profile owns its evidence vocabulary and
 digest interpretation. The JPB profile validates its payload digest before calling
 the writer; exact readback then confirms the same validated payload was stored.
+Readback comparison decodes RDF literal escapes and preserves lexical values,
+datatypes and language tags. Typed and language-tagged evidence can reconcile an
+uncertain write without creating another asset; changed types or tags are refused.
 The generic runtime verifies Program invocation/source/binding receipts and write
 scope/digest/sealed status/readback. Its journal is written before dispatch.
 
@@ -96,7 +99,11 @@ Run `node --test examples/n8n-capability/*.test.mjs` from a built source checkou
 Tests select the demo profile explicitly where needed and inject transports; they
 do not use the partner node. Coverage includes alternate-schema Read/Invoke/Write,
 profile defaults, revision changes, provenance, receipts, ambiguous retries and
-journal reopen. No service startup or external write is part of these tests.
+journal reopen. Account tests select the profile/session before importing the real
+bridge, then verify role/account fences and the actor stored by the invocation
+grant. Installer tests run the real installer against a fixture CLI and SQLite,
+including partial upgrades and preservation of the existing manifest on failure.
+No partner service startup or external write is part of these tests.
 
 ## Existing nOS publish adapter (server integration seam)
 
@@ -183,6 +190,9 @@ prevents rebinding or reopening it as a kit-only service. To deliberately migrat
 an existing operator-owned demo state, set `adoptExistingState: true` once; legacy
 active schedules must first be deactivated. Do not use this flag to move tenant
 state between accounts. This integration exposes manual execution only.
+The account marker is committed only after startup eligibility checks succeed.
+Rejected adoption leaves an unbound legacy state reopenable for deactivation;
+existing account markers are checked before opening its database and remain fenced.
 
 Install the current native component profile and explicitly save a new workflow
 revision after switching transports. Old invocations cannot be rebound to a new
