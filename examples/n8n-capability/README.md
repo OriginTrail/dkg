@@ -249,6 +249,10 @@ the same invocation. Deactivation removes event access and unpublishes timers.
 Google event activation requires the operator export key; its fingerprint, not
 the key, is persisted. Event inputs/results and native workflow IDs are journalled
 in the private `studio.sqlite` database for recovery across service restarts.
+Reservation and quota consumption commit in one transaction; reaching five events
+still permits recovery of those reserved identities. Timer admission checks the
+execution's published version, approved workflow digest, structure and trigger
+scope while allowing n8n's normalized parameter snapshots.
 
 PoC bounds: eight blocks, one loop, twenty input/output records, 8 KiB serialized
 record sets, 4 KiB file uploads, three-second Wait, 24 saved graph revisions.

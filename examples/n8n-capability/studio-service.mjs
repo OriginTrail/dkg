@@ -6,7 +6,7 @@ import { component, componentNeedsExport, normalizeComponentInput } from './comp
 import { component as componentV1, normalizeComponentInput as normalizeComponentInputV1 } from './component-registry-v1.mjs';
 import { normalizeStudio, readStudio, validateStudioCapabilities } from './studio-definition.mjs';
 import { workflowUuid } from './workflow-definition.mjs';
-import { n8nObservationScope, n8nExecutionMatches, n8nPinnedExecutionMatches, n8nRecord } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
+import { n8nObservationScope, n8nPinnedExecutionMatches, n8nRecord } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { programWorkflowReceipt } from './program-workflow-receipt.mjs';
 
 const reference = (source, graphId) => ({ graphId, programIri: source.programIri, programLayer: 'wm', authorAgentAddress: source.authorAgentAddress, sourceHash: source.sourceHash });
@@ -22,7 +22,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     try { const a = await client.programs.getApproval({ graphId, operationIri: kaRef }); return a.binding.enabled && a.binding.program.sourceHash === sourceHash; }
     catch (e) { if (e.status === 404) return false; throw e; }
   }
-  const activation = ref => { const row = repository.row(ref); return row?.activation_json ? JSON.parse(row.activation_json) : { active: false }; };
+  const activation = repository.activation;
   async function get(kaRef, sourceHash) {
     if (typeof kaRef !== 'string' || !repository.row(kaRef)?.executor) throw reject('Unknown saved graph.');
     const source = await client.programs.getSource({ graphId, programIri: kaRef, programLayer: 'wm' });
@@ -122,9 +122,9 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
       steps: compiled.definition.nodes.map((n, i) => ({ nodeId: n.id, componentId: n.componentId, kaRef: n.kaRef, ...trace[i] })),
       ...(dkgRecovery ? { dkgRecovery } : {}), persisted: true, readbackVerified: true };
   }
-  function eventAuthorized(ref, compiled, reserved = false) {
+  function eventAuthorized(ref, compiled) {
     const active = activation(ref);
-    if (!active.active || active.expiresAt < Date.now() || !reserved && active.count >= 5) throw reject('This event workflow is inactive or its PoC event limit was reached.');
+    if (!active.active || active.expiresAt < Date.now()) throw reject('This event workflow is inactive.');
     if (compiled.requiresExportAuthorization && (!exportTokenFile || active.exportFingerprint !== provider.fingerprint(exportTokenFile))) throw reject('The operator export authorization changed.');
   }
   async function activate(value, authorize) {
@@ -143,35 +143,28 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
       if (workflow.requiresExportAuthorization) authorize();
       const a = { active: true, activationId, startedAt: Date.now(), expiresAt: Date.now() + 30 * 60 * 1000, count: 0,
         ...(workflow.requiresExportAuthorization ? { exportFingerprint: provider.fingerprint(exportTokenFile) } : {}) };
-      repository.db.prepare('UPDATE workflows SET activation_json=?,event_key=? WHERE ka_ref=?').run(JSON.stringify(a), randomUUID(), workflow.kaRef);
+      repository.setActivation(workflow.kaRef, a, randomUUID());
       if (compiled.mode === 'schedule') await provider.setPublished(workflow.kaRef, true);
     } else {
       if (compiled.mode === 'schedule') await provider.setPublished(workflow.kaRef, false);
-      repository.db.prepare('UPDATE workflows SET activation_json=?,event_key=NULL WHERE ka_ref=?').run(JSON.stringify({ active: false, activationId }), workflow.kaRef);
+      repository.setActivation(workflow.kaRef, { active: false, activationId });
     }
     return (await get(workflow.kaRef)).workflow;
   }
   async function event(key, value) {
     if (!value || Object.keys(value).some(k => !['invocationId', 'items'].includes(k))) throw reject('Supply an event identity and items.');
-    const row = repository.db.prepare('SELECT * FROM workflows WHERE event_key=?').get(key);
+    const row = repository.eventWorkflow(key);
     if (!row) throw reject('Inactive event endpoint.');
     const { compiled, workflow } = await get(row.ka_ref);
     if (compiled.mode !== 'webhook') throw reject('This endpoint is not a webhook.');
     if (!workflow.approved) throw reject('Event workflow approval changed.');
     validateStudioCapabilities(compiled.definition, await listCapabilities());
     const invocationId = workflowUuid(value.invocationId), itemsJson = JSON.stringify(value.items);
-    const previous = repository.db.prepare('SELECT * FROM events WHERE provider_id=? AND execution_id=?').get(row.provider_id, invocationId);
-    if (previous && previous.input_json !== itemsJson) throw reject('This event identity already belongs to different input.');
-    eventAuthorized(row.ka_ref, compiled, !!previous);
-    if (previous?.receipt_json) return JSON.parse(previous.receipt_json);
-    if (!previous) {
-      const a = activation(row.ka_ref); a.count++;
-      repository.db.prepare('INSERT INTO events (provider_id,execution_id,ka_ref,invocation_id,input_json) VALUES (?,?,?,?,?)').run(row.provider_id, invocationId, row.ka_ref, invocationId, itemsJson);
-      repository.db.prepare('UPDATE workflows SET activation_json=? WHERE ka_ref=?').run(JSON.stringify(a), row.ka_ref);
-    }
-    const receipt = await run({ kaRef: row.ka_ref, sourceHash: workflow.sourceHash, itemsJson, invocationId }, () => eventAuthorized(row.ka_ref, compiled, true));
-    repository.db.prepare('UPDATE events SET receipt_json=? WHERE provider_id=? AND execution_id=?').run(JSON.stringify(receipt), row.provider_id, invocationId);
-    return receipt;
+    const reserved = repository.reserveEvent({ kaRef: row.ka_ref, providerId: row.provider_id,
+      executionId: invocationId, invocationId, inputJson: itemsJson }, () => eventAuthorized(row.ka_ref, compiled));
+    if (reserved.receipt) return reserved.receipt;
+    const receipt = await run({ kaRef: row.ka_ref, sourceHash: workflow.sourceHash, itemsJson, invocationId: reserved.invocationId }, () => eventAuthorized(row.ka_ref, compiled));
+    return repository.completeEvent(reserved, receipt);
   }
   async function history(ref, mayDiscloseEvent) {
     const { compiled, workflow } = await get(ref);
@@ -185,17 +178,16 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     }
     return { activation: { active: !!a.active && a.expiresAt > Date.now() && a.count < 5, count: a.count ?? 0, expiresAt: a.expiresAt },
       ...(disclose ? { eventPath: '/spike/ka/events/' + row.event_key } : {}),
-      executions: repository.db.prepare('SELECT invocation_id,execution_id,receipt_json FROM events WHERE ka_ref=? ORDER BY rowid DESC LIMIT 20').all(ref)
-        .map(r => ({ invocationId: r.invocation_id, triggerExecutionId: r.execution_id, receipt: r.receipt_json ? JSON.parse(r.receipt_json) : null })) };
+      executions: repository.eventHistory(ref) };
   }
   async function poll() {
     if (polling || stopped) return; polling = true;
     try {
-      for (const row of repository.db.prepare('SELECT * FROM workflows WHERE activation_json IS NOT NULL').all()) {
+      for (const row of repository.activatedWorkflows()) {
         const a = activation(row.ka_ref); if (!a.active) continue;
         let compiled, workflow;
         try {
-          ({ compiled, workflow } = await get(row.ka_ref)); eventAuthorized(row.ka_ref, compiled, true);
+          ({ compiled, workflow } = await get(row.ka_ref)); eventAuthorized(row.ka_ref, compiled);
           validateStudioCapabilities(compiled.definition, await listCapabilities());
           if (!workflow.approved) throw reject('Event workflow approval changed.');
         } catch {
@@ -204,39 +196,33 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
         }
         if (compiled.mode !== 'schedule') continue;
         const native = await provider.api('/workflows/' + row.provider_id);
+        if (native.id !== row.provider_id || native.active !== true) continue;
         const published = { ...native.activeVersion, settings: native.settings };
         const executions = await provider.api('/executions?limit=20&workflowId=' + encodeURIComponent(row.provider_id));
-        const reserved = repository.db.prepare('SELECT execution_id FROM events WHERE ka_ref=? AND receipt_json IS NULL').all(row.ka_ref);
+        const reserved = repository.pendingEvents(row.ka_ref);
         const candidates = new Map(executions.data.map(e => [String(e.id), e]));
         // Pending identities must remain inspectable even after leaving the last page.
-        for (const pending of reserved) if (!candidates.has(pending.execution_id)) {
-          const detail = await provider.api('/executions/' + pending.execution_id + '?includeData=true');
-          candidates.set(pending.execution_id, detail);
+        for (const pending of reserved) if (!candidates.has(pending.executionId)) {
+          const detail = await provider.api('/executions/' + pending.executionId + '?includeData=true');
+          candidates.set(pending.executionId, detail);
         }
         for (const e of [...candidates.values()].reverse()) {
-          if (e.status !== 'success' || Date.parse(e.startedAt) < a.startedAt || !/^\d{1,20}$/.test(String(e.id))) continue;
+          if (!/^\d{1,20}$/.test(String(e.id))) continue;
           const detail = await provider.api('/executions/' + e.id + '?includeData=true');
           const scope = n8nObservationScope(graphId, owner, row.provider_id) + ' trigger';
           const runs = detail.data?.resultData?.runData?.[scope];
-          if (!Array.isArray(runs) || !runs.length || !n8nExecutionMatches(published, detail.workflowData)) continue;
-          const old = repository.db.prepare('SELECT * FROM events WHERE provider_id=? AND execution_id=?').get(row.provider_id, String(e.id));
-          if (old?.receipt_json) continue;
-          const invocationId = old?.invocation_id ?? eventUuid(row.ka_ref, String(e.id));
-          if (!old) {
-            // The quota closes admission, not inspection of reserved identities.
-            if (activation(row.ka_ref).count >= 5) continue;
-            eventAuthorized(row.ka_ref, compiled);
-            const current = activation(row.ka_ref); current.count++;
-            repository.db.prepare('INSERT INTO events (provider_id,execution_id,ka_ref,invocation_id) VALUES (?,?,?,?)').run(row.provider_id, String(e.id), row.ka_ref, invocationId);
-            repository.db.prepare('UPDATE workflows SET activation_json=? WHERE ka_ref=?').run(JSON.stringify(current), row.ka_ref);
-          }
+          if (String(detail.id) !== String(e.id) || detail.status !== 'success'
+            || !Number.isFinite(Date.parse(detail.startedAt)) || Date.parse(detail.startedAt) < a.startedAt
+            || !Array.isArray(runs) || !runs.length
+            || !n8nPinnedExecutionMatches(published, detail, compiled.grant, published.versionId)) continue;
           const items = runs.at(-1).data.main[0].map(item => item.json);
           try {
-            const receipt = await run({ kaRef: row.ka_ref, sourceHash: workflow.sourceHash, itemsJson: JSON.stringify(items), invocationId }, () => {
-              const active = activation(row.ka_ref); if (!active.active || active.expiresAt < Date.now()
-                || compiled.requiresExportAuthorization && active.exportFingerprint !== provider.fingerprint(exportTokenFile)) throw reject('Event authorization expired.');
-            });
-            repository.db.prepare('UPDATE events SET receipt_json=? WHERE provider_id=? AND execution_id=?').run(JSON.stringify(receipt), row.provider_id, String(e.id));
+            const event = repository.reserveEvent({ kaRef: row.ka_ref, providerId: row.provider_id,
+              executionId: String(e.id), invocationId: eventUuid(row.ka_ref, String(e.id)) }, () => eventAuthorized(row.ka_ref, compiled));
+            if (event.receipt) continue;
+            const receipt = await run({ kaRef: row.ka_ref, sourceHash: workflow.sourceHash, itemsJson: JSON.stringify(items),
+              invocationId: event.invocationId }, () => eventAuthorized(row.ka_ref, compiled));
+            repository.completeEvent(event, receipt);
           } catch { /* Retain this exact invocation for the next reconciliation poll. */ }
         }
       }

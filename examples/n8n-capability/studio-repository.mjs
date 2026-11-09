@@ -41,7 +41,48 @@ export function createStudioRepository(state) {
       || kind === 'dkg-program' && (existing.grant_json || existing.provider_id)) invalid('The saved workflow executor changed.');
     db.prepare('UPDATE workflows SET executor=?,requires_export=? WHERE ka_ref=?').run(kind, requiresExportAuthorization ? 1 : 0, ref);
   }
-  return { db, row, ensure, saved,
+  const activation = ref => { const value = row(ref); return value?.activation_json ? JSON.parse(value.activation_json) : { active: false }; };
+  const eventValue = value => value && ({ kaRef: value.ka_ref, providerId: value.provider_id, executionId: value.execution_id,
+    invocationId: value.invocation_id, receipt: value.receipt_json ? JSON.parse(value.receipt_json) : null });
+  function setActivation(ref, value, eventKey = null) {
+    db.prepare('UPDATE workflows SET activation_json=?,event_key=? WHERE ka_ref=?').run(JSON.stringify(value), eventKey, ref);
+  }
+  /** Authorization is synchronous, so admission, replay and quota see one database state. */
+  function reserveEvent({ kaRef, providerId, executionId, invocationId, inputJson }, authorize) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      if (row(kaRef)?.provider_id !== providerId) invalid('The event workflow identity changed.');
+      const previous = db.prepare('SELECT * FROM events WHERE provider_id=? AND execution_id=?').get(providerId, executionId);
+      if (previous && (previous.ka_ref !== kaRef || inputJson !== undefined && previous.input_json !== inputJson))
+        invalid('This event identity already belongs to different input or workflow.');
+      authorize();
+      const a = activation(kaRef);
+      if (!a.active || a.expiresAt < Date.now()) invalid('This event workflow is inactive.');
+      if (!previous) {
+        if (a.count >= 5) invalid('This event workflow has reached its PoC event limit.');
+        db.prepare('INSERT INTO events (provider_id,execution_id,ka_ref,invocation_id,input_json) VALUES (?,?,?,?,?)')
+          .run(providerId, executionId, kaRef, invocationId, inputJson ?? null);
+        a.count++;
+        db.prepare('UPDATE workflows SET activation_json=? WHERE ka_ref=?').run(JSON.stringify(a), kaRef);
+      }
+      const event = eventValue(previous ?? db.prepare('SELECT * FROM events WHERE provider_id=? AND execution_id=?').get(providerId, executionId));
+      db.exec('COMMIT');
+      return event;
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
+  }
+  function completeEvent(event, receipt) {
+    const encoded = JSON.stringify(receipt);
+    const result = db.prepare(`UPDATE events SET receipt_json=? WHERE provider_id=? AND execution_id=? AND ka_ref=? AND invocation_id=?
+      AND (receipt_json IS NULL OR receipt_json=?)`).run(encoded, event.providerId, event.executionId, event.kaRef, event.invocationId, encoded);
+    if (result.changes !== 1) invalid('The reserved event identity or completed receipt changed.');
+    return receipt;
+  }
+  return { db, row, ensure, saved, activation, setActivation, reserveEvent, completeEvent,
+    eventWorkflow: key => db.prepare('SELECT * FROM workflows WHERE event_key=?').get(key),
+    activatedWorkflows: () => db.prepare('SELECT * FROM workflows WHERE activation_json IS NOT NULL').all(),
+    pendingEvents: ref => db.prepare('SELECT * FROM events WHERE ka_ref=? AND receipt_json IS NULL').all(ref).map(eventValue),
+    eventHistory: ref => db.prepare('SELECT * FROM events WHERE ka_ref=? ORDER BY rowid DESC LIMIT 20').all(ref)
+      .map(value => { const event = eventValue(value); return { invocationId: event.invocationId, triggerExecutionId: event.executionId, receipt: event.receipt }; }),
     list: () => db.prepare('SELECT ka_ref FROM workflows WHERE executor IS NOT NULL ORDER BY created_at DESC LIMIT 24').all(),
     close: () => db.close() };
 }

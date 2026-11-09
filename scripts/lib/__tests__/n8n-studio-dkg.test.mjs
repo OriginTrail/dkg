@@ -35,6 +35,10 @@ test('saved Studio DKG Read/Write callbacks accept normalized execution paramete
     const invoke = f.client.programs.invoke;
     // The real save/run path creates the profile grant before dispatch.
     f.client.programs.invoke = async value => {
+      execution.data = { executionData: { nodeExecutionStack: [{
+        node: snapshot.nodes.find(node => node.name === 'Receive input'),
+        data: { main: [[{ json: { body: { invocationId: 'urn:sr:effect:' + value.invocationId + ':0', input: value.inputs[0] } } }]] },
+      }] }, resultData: { runData: {} } };
       const read = await f.service.dkgComponent(request('n0', [{}]));
       assert.deepEqual(read.items, measurements);
       const write = await f.service.dkgComponent(request('n1', read.items));
