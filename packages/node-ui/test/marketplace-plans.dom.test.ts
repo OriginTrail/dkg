@@ -648,6 +648,31 @@ describe('marketplace Plans', () => {
     expect(classesSent('/top-up')).toEqual(['query']);
   });
 
+  const classCases: Array<[string, (b: Json) => void, string]> = [
+    // The budget's class wins over the catalog's: the contract requires a top-up to repeat what it stores.
+    ['the budget names its class', (b) => { b.serviceClass = 'query'; }, 'inference'],
+    // A node that names no class on its budgets leaves the catalog to say.
+    ['the node names no class for the budget', (b) => { delete b.serviceClass; }, 'query'],
+  ];
+  for (const [what, budgetEdit, catalogClass] of classCases) {
+    it(`tops up a budget with the class it needs when ${what}`, async () => {
+      const writes = editedNode('active', (method, url, body) => {
+        if (method !== 'GET') return;
+        if (url.startsWith('/api/marketplace/subscriptions')) {
+          for (const s of (body.subscriptions as Json[]) ?? []) for (const b of s.budgets as Json[]) if (b.serviceId === FIXTURE_IDS.llama8b) budgetEdit(b);
+        }
+        if (url === '/api/marketplace/catalog') for (const s of body.services as Json[]) if (s.serviceId === FIXTURE_IDS.llama8b) s.serviceClass = catalogClass;
+      });
+      const c = await topUpLlama();
+      await click(byTestId(c, 'mkt-topup-confirm'));
+      await waitForText(c, 'llama-3.1-8b-instruct topped up');
+      const classesSent = (suffix: string) => writes.filter((w) => w.url.endsWith(suffix)).map((w) => (w.body as { services: Array<{ serviceClass: string }> }).services[0].serviceClass);
+      expect(classesSent('/top-up/preview').length).toBeGreaterThan(0);
+      expect(new Set(classesSent('/top-up/preview'))).toEqual(new Set(['query']));
+      expect(classesSent('/top-up')).toEqual(['query']);
+    });
+  }
+
   it('asks nothing for a service whose class neither the subscription nor the catalog names, and says why', async () => {
     const writes = recordWrites('active');
     const world = fixtureWorld();
@@ -657,7 +682,7 @@ describe('marketplace Plans', () => {
     await type(byTestId(c, 'mkt-topup-cap'), '1');
     await type(byTestId(c, 'mkt-topup-amount'), '0.5');
     await flush(300);
-    expect(byTestId(c, 'mkt-topup-class')?.textContent).toContain('its class is not known');
+    expect(byTestId(c, 'mkt-topup-class')?.textContent).toContain('names this service\'s class, so no top-up can be asked for');
     expect((byTestId(c, 'mkt-topup-confirm') as HTMLButtonElement).disabled).toBe(true);
     expect(writes.filter((w) => w.url.includes('/top-up'))).toEqual([]);
   });

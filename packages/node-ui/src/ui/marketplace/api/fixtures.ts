@@ -253,7 +253,7 @@ export function fixtureWorld(nowMs = Date.now()) {
     };
   };
   const plan = (renew: boolean): Plan => ({
-    services: current.budgets.map((b) => ({ serviceId: b.serviceId, serviceClass: b.serviceClass, ...amount('value', BigInt(b.value)), ...amount('maxPricePerUnit', BigInt(b.maxPricePerUnit)) })),
+    services: current.budgets.map((b) => ({ serviceId: b.serviceId, serviceClass: 'inference', ...amount('value', BigInt(b.value)), ...amount('maxPricePerUnit', BigInt(b.maxPricePerUnit)) })),
     source: wallet, renew, ...(renew ? { renewUntilEpoch: epoch + 6 } : {}),
   });
   return {

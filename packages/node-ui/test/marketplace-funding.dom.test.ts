@@ -54,6 +54,8 @@ function fundingNode() {
     writes,
     landings: [] as Landing[],
     failEpochReads: 0,
+    /** Reads name no class for the budgets, as a node before classes on budgets does. */
+    classless: false,
     /** The funding that did not land yet lands. */
     land() { if (waiting) onChain.set(waiting.epoch as number, waiting); waiting = null; },
   };
@@ -87,7 +89,9 @@ function fundingNode() {
         control.failEpochReads -= 1;
         return json({ error: 'database is locked', code: 'Error', retryable: false }, 500);
       }
-      return json({ subscriptions: [...onChain.values()].filter((s) => asked === null || s.epoch === Number(asked)) });
+      const shown = [...onChain.values()].filter((s) => asked === null || s.epoch === Number(asked));
+      const classless = (s: Json) => ({ ...s, budgets: (s.budgets as Json[]).map(({ serviceClass: _class, ...b }) => b) });
+      return json({ subscriptions: control.classless ? shown.map(classless) : shown });
     }
     return node(input, init);
   });
@@ -188,6 +192,16 @@ describe('marketplace funding whose answer is lost or comes late', () => {
       expect(byTestId(c, 'mkt-funded')?.querySelector('[data-copy="flow.tx"]')).toBeNull();
     });
   }
+
+  it('saves the plan of a funding that landed as confirmed though the node names no class for its budgets', async () => {
+    const node = fundingNode();
+    node.landings.push('lose');
+    node.classless = true;
+    const c = await composeAndConfirm();
+    await waitForText(c, 'Epoch 664 is funded with 1 TRAC');
+    expect(fundings(node.writes)).toHaveLength(1);
+    expect(planSaves(node.writes)).toHaveLength(1);
+  });
 
   it('sends the same funding again on Retry when the epoch shows it did not land, and then saves the plan', async () => {
     const node = fundingNode();

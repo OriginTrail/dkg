@@ -58,8 +58,8 @@ export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
   const sending = held?.kind === 'reserving' || held?.kind === 'sending';
   const value = weiOfTrac(amount);
   const capWei = budget ? budget.maxPricePerUnit : weiOfMicro(cap)?.toString() ?? null;
-  // A top-up repeats the class the chain stores for the budget; the catalog's class is only for a budget the subscription lacks.
-  const serviceClass = budget ? budget.serviceClass : service?.serviceClass ?? null;
+  // A top-up repeats the class the chain stores for the budget, where the node names it; otherwise the catalog's. Never a guess.
+  const serviceClass = budget?.serviceClass ?? service?.serviceClass ?? null;
   const addition: Addition | null = value && capWei && serviceClass && !fixed
     ? { subscriptionId, services: [{ serviceId, serviceClass, value: value.toString(), maxPricePerUnit: capWei }] }
     : null;

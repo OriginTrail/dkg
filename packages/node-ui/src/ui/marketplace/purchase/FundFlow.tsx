@@ -72,14 +72,19 @@ function mayHaveLanded(e: unknown): boolean {
   return e.status >= 500 && !REFUSED_BEFORE_SENDING.has(e.code);
 }
 
-/** Whether `s` is the subscription `request` funds: its epoch and source, and each budget's service, class, value and cap. */
+/**
+ * Whether `s` is the subscription `request` funds: its epoch and source, and
+ * each budget's service, class, value and cap. A budget whose class the node
+ * does not name matches on the rest.
+ */
 function fundedAsConfirmed(s: Subscription, request: FundConfirming['request']): boolean {
   const asked = request.source;
   if (s.epoch !== request.epoch || s.source.kind !== asked.kind) return false;
   if (s.source.kind === 'account' && asked.kind === 'account' && s.source.accountId !== asked.accountId) return false;
   return s.budgets.length === request.services.length && request.services.every((r) => {
     const b = s.budgets.find((x) => x.serviceId.toLowerCase() === r.serviceId.toLowerCase());
-    return !!b && b.serviceClass === r.serviceClass && BigInt(b.value) === BigInt(r.value) && BigInt(b.maxPricePerUnit) === BigInt(r.maxPricePerUnit);
+    return !!b && (b.serviceClass === undefined || b.serviceClass === r.serviceClass)
+      && BigInt(b.value) === BigInt(r.value) && BigInt(b.maxPricePerUnit) === BigInt(r.maxPricePerUnit);
   });
 }
 

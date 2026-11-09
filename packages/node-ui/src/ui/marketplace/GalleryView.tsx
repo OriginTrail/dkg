@@ -41,7 +41,7 @@ export function MarketplaceGalleryView(): React.ReactElement {
   const catalog = world.catalog(true);
   const noFx = { ...catalog.fx, tracUsd: null, source: 'none', asOf: null };
   const qwen = catalog.services.find((s) => s.serviceId === FIXTURE_IDS.qwen14b)!;
-  const services: ServiceRequest[] = world.current.budgets.map((b) => ({ serviceId: b.serviceId, serviceClass: b.serviceClass, value: b.value, maxPricePerUnit: b.maxPricePerUnit }));
+  const services: ServiceRequest[] = world.plan(true).services.map((s) => ({ serviceId: s.serviceId, serviceClass: s.serviceClass, value: s.value, maxPricePerUnit: s.maxPricePerUnit }));
   const preview: Preview = { epoch: world.epoch, source: { kind: 'account', accountId: '7', discountBps: 1_000 }, value: world.current.value, valueTrac: world.current.valueTrac, cost: '4500000000000000000', costTrac: '4.5', discountBps: 1_000 };
   const source: SourceRequest = { kind: 'account', accountId: '7' };
   const confirming: Confirming = {
