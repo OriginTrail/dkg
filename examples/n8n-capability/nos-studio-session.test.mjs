@@ -148,7 +148,7 @@ test('node writer preserves RDF datatype, language, lexical value and literal id
 test('node writer reconciles equivalent bracketed and bare IRIs in every position', async () => {
   for (const bracketedRequest of [true, false]) {
     const shape = (q, brackets) => Object.fromEntries(Object.entries(q).map(([key, value]) => [key, brackets ? `<${value}>` : value]));
-    const bare = { subject: 'urn:test:s', predicate: 'urn:test:p', object: 'urn:test:o' };
+    const bare = { subject: 'urn:test:s', predicate: 'urn:test:p', object: 'urn:test:o', graph: 'urn:test:g' };
     const payload = { name: 'iri-result', digest: 'b'.repeat(64), allowCreate: true, quads: [shape(bare, bracketedRequest)] };
     let exists = false, creates = 0, readback = shape(bare, !bracketedRequest);
     const call = async path => {
@@ -159,12 +159,32 @@ test('node writer reconciles equivalent bracketed and bare IRIs in every positio
     await assert.rejects(writeNosEvidence(call, payload, 'study'), /reply lost/);
     const retry = { ...payload, allowCreate: false };
     assert.equal((await writeNosEvidence(call, retry, 'study')).readbackVerified, true);
-    for (const field of ['subject', 'predicate', 'object']) {
+    for (const field of ['subject', 'predicate', 'object', 'graph']) {
       readback = shape({ ...bare, [field]: 'urn:test:different' }, !bracketedRequest);
       await assert.rejects(writeNosEvidence(call, retry, 'study'), /differs/);
     }
     assert.equal(creates, 1);
   }
+});
+
+test('node writer normalizes omitted and empty default graphs without dropping named graph identity', async () => {
+  const quad = { subject: 'urn:test:s', predicate: 'urn:test:p', object: '"value"' };
+  let readback, posts = 0;
+  const call = async (path, body) => {
+    if (body) posts++;
+    return path.endsWith('/wm/quads') ? { quads: readback } : { status: 'wm-sealed' };
+  };
+  for (const requested of [quad, { ...quad, graph: '' }]) {
+    const payload = { name: 'graph-result', allowCreate: false, quads: [requested] };
+    readback = [{ ...quad, ...(requested.graph === undefined ? { graph: '' } : {}) }];
+    assert.equal((await writeNosEvidence(call, payload, 'study')).readbackVerified, true);
+    for (const changed of [[{ ...quad, graph: 'urn:unexpected' }],
+      [requested, { ...quad, graph: 'urn:unexpected' }]]) {
+      readback = changed;
+      await assert.rejects(writeNosEvidence(call, payload, 'study'), /differs/);
+    }
+  }
+  assert.equal(posts, 0);
 });
 
 
