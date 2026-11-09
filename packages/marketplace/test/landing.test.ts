@@ -436,6 +436,23 @@ describe('a batch', () => {
     });
   });
 
+  it('does not send a sped-up batch again as first signed: it was on the network', async () => {
+    const seller = await started();
+    await serve(seller, 1);
+    later(31);
+    vi.spyOn(chain, 'submitReceiptBatch').mockImplementationOnce(async (_groups, opts) => {
+      await opts!.onBroadcast!({ txHash: ethers.id('stuck'), nonce: 0, wallet: SELLER.address, signedTx: ethers.id('stuck, signed') });
+      await opts!.onBeforeReplacementBroadcast!({ txHash: ethers.id('faster'), nonce: 0, replacesTxHashes: [ethers.id('stuck')] });
+      throw new Error('timed out');
+    });
+    seller.lander.landNow();
+    expect(await seller.lander.tick()).toMatchObject({ waiting: true });
+    const rebroadcast = vi.spyOn(chain, 'rebroadcastReceiptBatch');
+    await seller.lander.resolve();
+    expect(rebroadcast).not.toHaveBeenCalled();
+    expect(seller.ledger.pendingBatches()).toMatchObject([{ hashes: [ethers.id('stuck'), ethers.id('faster')] }]);
+  });
+
   it('is resolved by a speed-up that landed', async () => {
     const seller = await started();
     await serve(seller, 1);

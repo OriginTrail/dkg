@@ -38,11 +38,11 @@
  * When none is mined but its wallet's nonce has passed it, they are read once
  * more, since one may have been mined in between; if none is, the batch is
  * resolved by the nonce bits of its receipts: set, they landed; clear, they go
- * back to `served`. Otherwise it waits, and its first transaction is sent
- * again as it was signed, at every tick: the node may have stopped after the
- * batch was recorded and before it was broadcast, and then nothing else would
- * move its nonce. The same hash and nonce land at most once. Ticks take turns,
- * so two never send the same receipts.
+ * back to `served`. Otherwise it waits, and its first transaction, unless it
+ * was sped up, is sent again as it was signed, at every tick: the node may
+ * have stopped after the batch was recorded and before it was broadcast, and
+ * then nothing else would move its nonce. The same hash and nonce land at most
+ * once. Ticks take turns, so two never send the same receipts.
  */
 import { ethers } from 'ethers';
 import {
@@ -258,8 +258,9 @@ export class Lander {
         if (batch.nonce === null) continue;
         if ((await chain.getMinedNonce(batch.wallet)) <= batch.nonce) {
           // Not mined, and nothing else used its nonce: perhaps never sent, as when the node stopped after recording it.
-          // Sent again as it was signed, it lands at most once; the next tick reads what became of it.
-          if (batch.signedTx) await this.rebroadcast(batch.signedTx);
+          // Sent again as it was signed, it lands at most once; the next tick reads what became of it. One sped up was
+          // on the network, and its first bytes would only be refused as underpriced.
+          if (batch.signedTx && batch.hashes.length === 1) await this.rebroadcast(batch.signedTx);
           continue;
         }
         // The nonce has passed it: mined since the read above, or never to be.
