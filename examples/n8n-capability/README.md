@@ -231,7 +231,12 @@ worker invokes the DKG Program with a deterministic event identity, checking
 current parent/child approvals before any downstream native actions. Webhook
 callers POST `{ "invocationId": "<fresh UUID>", "items": [{...}] }` to the
 activation endpoint shown in the UI. Retrying that event identity reconciles
-the same invocation. Deactivation removes event access and unpublishes timers.
+the same invocation. Deactivation immediately persists local revocation and removes
+event access before asking n8n to unpublish a timer. Failed or unconfirmed
+unpublication remains pending in the Studio repository and is retried by polling
+or an explicit deactivation retry, including after restart. Changed native pins
+keep cleanup pending until the pinned revision is restored; they never restore
+local event authority. A new activation must finish pending cleanup first.
 Google event activation requires the operator export key; its fingerprint, not
 the key, is persisted. Event inputs/results and native workflow IDs are journalled
 in the private `studio.sqlite` database for recovery across service restarts.
