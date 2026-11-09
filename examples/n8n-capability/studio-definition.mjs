@@ -1,6 +1,6 @@
-import { needsExport, validateDkgTopology } from './dkg-components.mjs';
+import { validateDkgTopology } from './dkg-components.mjs';
 import { createHash } from 'node:crypto';
-import { component, normalizeComponentInput, componentContract, componentValidationSource } from './component-registry.mjs';
+import { component, componentNeedsExport as needsExport, componentExecutionDescriptor, normalizeComponentInput, componentContract, componentValidationSource } from './component-registry.mjs';
 import { readStudio as readStudioV1 } from './studio-definition-v1.mjs';
 import { componentPiece, nativeNode, editNode, wire, expression, nativeLiteral } from './component-workflows.mjs';
 import { n8nWorkflowSha256, n8nObservationScope } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
@@ -111,7 +111,7 @@ export function compileStudio(value, { graphId, owner, headerCredential, credent
   const root = definition.nodes.find(n => n.id === definition.entryId), mode = component(root.componentId).mode;
   const nodes = [], connections = {}, pieces = new Map();
   for (const n of definition.nodes) {
-    const descriptor = component(n.componentId), name = 'Block ' + n.id;
+    const descriptor = componentExecutionDescriptor(component(n.componentId)), name = 'Block ' + n.id;
     const piece = componentPiece(n.componentId, name, key => n.componentId === 'schedule' ? JSON.stringify(n.params[key]) : nativeLiteral(n.params[key]), { credentials: { ...credentials, httpHeaderAuth: headerCredential } });
     Object.assign(connections, piece.connections); nodes.push(...piece.nodes);
     if (n.componentId === 'schedule') {
@@ -164,7 +164,7 @@ export function studioProgramSource(compiled, grant = compiled.grant) {
   const metadata = { definition: compiled.definition, grant, mode: compiled.mode,
     ...([4, 5].includes(compiled.compiler) ? { compiler: compiled.compiler } : {}) };
   const root = compiled.definition.nodes.find(n => n.id === compiled.definition.entryId);
-  const descriptor = { ...component(root.componentId), ...(compiled.mode === 'schedule' ? { mode: 'action' } : {}) };
+  const descriptor = { ...componentExecutionDescriptor(component(root.componentId)), ...(compiled.mode === 'schedule' ? { mode: 'action' } : {}) };
   return marker + Buffer.from(JSON.stringify(metadata)).toString('base64') + '\n'
     + `import { invoke_tool } from '@origintrail-official/dkg-graph-computer/program';\n${componentValidationSource()}`
     + `export function run(input: unknown) { const value = normalize(${JSON.stringify(descriptor)}, input); if (value.paramsJson !== ${JSON.stringify(JSON.stringify(root.params))} || value.executionId) throw new Error('Use the saved workflow parameters.'); return invoke_tool('urn:dkg:tool:n8n', value); }\n`;

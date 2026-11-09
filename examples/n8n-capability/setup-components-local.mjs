@@ -1,11 +1,10 @@
-import { needsExport } from './dkg-components.mjs';
 /** Provision native templates with n8n's official local CLI; no API token is sent by this installer. */
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, renameSync, chmodSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync, backup } from 'node:sqlite';
-import { componentRegistry, componentContract, componentProgramSource } from './component-registry.mjs';
+import { componentRegistry, componentNeedsExport as needsExport, componentContract, componentProgramSource } from './component-registry.mjs';
 import { standaloneComponentWorkflow, echoSubworkflow } from './component-workflows.mjs';
 import { n8nWorkflowSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 

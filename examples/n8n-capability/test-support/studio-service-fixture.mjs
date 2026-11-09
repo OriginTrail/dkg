@@ -47,6 +47,6 @@ export function environment() {
   }};
   const openService=()=>createStudioService({graphId,owner,client,provider,exportTokenFile,listCapabilities:async()=>inventory,loadOutputs:async iri=>outputs.get(iri)});
   let service=openService();
-  return {state,get provider(){return provider;},get service(){return service;},restart(){service.stop();provider.close();provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,setCatalog:v=>{inventory=v;},loseNextCreate:()=>{loseCreate=true;},
+  return {state,get provider(){return provider;},get service(){return service;},restart(){service.stop();provider.close();provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,fetchImpl,setCatalog:v=>{inventory=v;},loseNextCreate:()=>{loseCreate=true;},
     close(){service.stop();provider.close();rmSync(state,{recursive:true,force:true});}};
 }

@@ -1,8 +1,8 @@
-import { dkgComponentStore, assertDkgEnabled, isDkg, needsExport as componentNeedsExport } from './dkg-components.mjs';
+import { dkgComponentStore, assertDkgEnabled, isDkg } from './dkg-components.mjs';
 import { studioExecutionPlan, prepareStudioExecution } from './studio-execution-plan.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { component, normalizeComponentInput } from './component-registry.mjs';
+import { component, componentNeedsExport, normalizeComponentInput } from './component-registry.mjs';
 import { component as componentV1, normalizeComponentInput as normalizeComponentInputV1 } from './component-registry-v1.mjs';
 import { normalizeStudio, readStudio, validateStudioCapabilities } from './studio-definition.mjs';
 import { workflowUuid } from './workflow-definition.mjs';
@@ -255,7 +255,29 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     if (installed.id !== value.workflowId || installed.active !== true || String(native.id) !== value.executionId
       || !n8nPinnedExecutionMatches(published, native, compiled.grant, published.versionId))
       throw reject('Native execution does not match the approved workflow.');
-    return dkg.call(value,workflow,value.workflowId);
+    // Running webhook executions retain their initial input on the pending stack;
+    // completed/progress-saved executions expose it as Receive input run data.
+    const received = [];
+    const take = task => {
+      const ports = task?.data?.main;
+      if (task?.error || !Array.isArray(ports) || ports.length !== 1 || !Array.isArray(ports[0])
+        || ports[0].length !== 1 || !n8nRecord(ports[0][0]?.json?.body))
+        throw reject('Native execution has no unique recorded Receive input.');
+      received.push(ports[0][0].json.body);
+    };
+    const runs = native.data?.resultData?.runData?.['Receive input'];
+    if (runs !== undefined) {
+      if (!Array.isArray(runs) || runs.length !== 1) throw reject('Native execution has no unique recorded Receive input.');
+      take(runs[0]);
+    }
+    const stack = native.data?.executionData?.nodeExecutionStack;
+    if (stack !== undefined && !Array.isArray(stack)) throw reject('Native execution has no unique recorded Receive input.');
+    const pending = (stack ?? []).filter(task => task?.node?.name === 'Receive input');
+    if (pending.length > 1) throw reject('Native execution has no unique recorded Receive input.');
+    pending.forEach(take);
+    if (!received.length || received.some(body => !isDeepStrictEqual(body, received[0])))
+      throw reject('Native execution has no unique recorded Receive input.');
+    return dkg.call(value,workflow,value.workflowId,received[0]);
   }
   const timer = setInterval(() => void poll(), 3000); timer.unref();
   return { dkgComponent, list, get, save, run, activate, event, history, poll, stop() { stopped = true; clearInterval(timer); } };

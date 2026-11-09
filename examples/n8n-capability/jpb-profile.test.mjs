@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { dkgComponentStore } from './dkg-components.mjs';
+import { dkgComponentStore } from './test-support/dkg-component-store-fixture.mjs';
 import { profileParameters } from './dkg-profile.mjs';
 import { JPB_SOURCE, JPB_WORKBOOK } from './profiles/jpb-evidence.mjs';
 

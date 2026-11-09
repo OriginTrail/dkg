@@ -4,7 +4,6 @@ import { configuredDkgProfile, requireDkgProfile } from './dkg-profile.mjs';
 import { programRequest, programResult } from './dkg-program.mjs';
 
 export const isDkg = (id) => ["dkg-read", "dkg-write", "invoke-dkg-program"].includes(id);
-export const needsExport = (d) => !!d.writes && d.id !== "dkg-write";
 const hash = (v) =>
   createHash("sha256").update(JSON.stringify(v)).digest("hex");
 const fail = (message) =>
@@ -54,6 +53,7 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
   db.exec('CREATE TABLE IF NOT EXISTS dkg_component_profiles (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, revision TEXT NOT NULL)');
   db.exec('CREATE TABLE IF NOT EXISTS dkg_component_actors (id TEXT PRIMARY KEY, actor TEXT NOT NULL)');
   db.exec('CREATE TABLE IF NOT EXISTS dkg_component_writes (id TEXT PRIMARY KEY, request TEXT NOT NULL, evidence TEXT NOT NULL, receipt TEXT)');
+  db.exec('CREATE TABLE IF NOT EXISTS dkg_component_native_executions (id TEXT PRIMARY KEY, effect_id TEXT NOT NULL, workflow_id TEXT NOT NULL, execution_id TEXT NOT NULL)');
   const active = new Map();
   function assertNoPendingWrite(workflow, invocationId) {
     const node = workflow.definition.nodes.find(n => n.componentId === 'dkg-write');
@@ -103,7 +103,7 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
       throw error;
     }
   }
-  async function call(value, workflow, nativeId) {
+  async function call(value, workflow, nativeId, receivedInput) {
     if (
       !value ||
       Object.keys(value).some(
@@ -174,6 +174,15 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
       throw fail(
         "This DKG step already belongs to different inputs or native execution.",
       );
+    if (!isDeepStrictEqual(receivedInput, { invocationId: value.effectId, input }))
+      throw fail('Native execution did not receive this invocation grant and its exact input.');
+    const binding = db.prepare('SELECT * FROM dkg_component_native_executions WHERE id=?').get(id);
+    if (!binding && db.prepare('SELECT 1 FROM dkg_component_calls WHERE substr(id,1,?)=? LIMIT 1').get(id.length + 1, id + ':'))
+      throw fail('Legacy DKG calls lack a verified native execution binding; operator reconciliation required.');
+    db.prepare('INSERT OR IGNORE INTO dkg_component_native_executions VALUES (?,?,?,?)').run(id, value.effectId, nativeId, value.executionId);
+    const bound = db.prepare('SELECT * FROM dkg_component_native_executions WHERE id=?').get(id);
+    if (bound.effect_id !== value.effectId || bound.workflow_id !== nativeId || bound.execution_id !== value.executionId)
+      throw fail('This invocation belongs to a different native execution.');
     if (active.has(key)) return active.get(key);
     if (node.componentId === 'invoke-dkg-program' && prior?.result) return { items: JSON.parse(prior.result).items };
     if (node.componentId === "dkg-read" && prior?.result)

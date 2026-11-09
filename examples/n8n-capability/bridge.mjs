@@ -12,7 +12,7 @@ import { createWorkflowService } from './workflow-service.mjs';
 import { WORKFLOW_PREFIX } from './workflow-definition.mjs';
 import { createStudioProvider } from './studio-provider.mjs';
 import { createStudioService } from './studio-service.mjs';
-import { normalizeComponentInput } from './component-registry.mjs';
+import { normalizeComponentInput, componentNeedsExport } from './component-registry.mjs';
 import { STUDIO_PREFIX } from './studio-definition.mjs';
 import { createProgramCatalog } from './program-catalog.mjs';
 
@@ -25,7 +25,7 @@ export async function handleDkgComponentCallback(req, res, studio, config) {
   try {
     const token=readFileSync(config.n8nNative.webhookTokenFile,'utf8').trim();
     const expected=Buffer.from('Bearer '+token), supplied=Buffer.from(String(req.headers.authorization??''));
-    if(!studio || req.method!=='POST' || req.headers.origin || token.length<32 || expected.length!==supplied.length || !timingSafeEqual(expected,supplied)) { json(res,403,{error:'Native DKG component access denied'});return true; }
+    if(!studio || req.method!=='POST' || Object.hasOwn(req.headers, 'origin') || token.length<32 || expected.length!==supplied.length || !timingSafeEqual(expected,supplied)) { json(res,403,{error:'Native DKG component access denied'});return true; }
     let body='',size=0;for await(const chunk of req) {size+=chunk.length;if(size>16384)throw Object.assign(new Error('Bounded DKG batch required'),{status:413});body+=chunk;}
     json(res,200,await studio.dkgComponent(JSON.parse(body)));
   } catch(e) { json(res,e.status??409,{code:e.code??'DKG_COMPONENT_UNCONFIRMED',error:e.message}); }
@@ -65,7 +65,7 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
         kind: definition?.kind ?? 'text', available,
         ...(definition.retired ? { retired: true } : {}),
         ...(definition?.kind === 'component' ? { descriptor: definition.descriptor } : {}),
-        ...((definition?.requiresExportAuthorization || definition?.kind === 'google-sheets-export') ? { requiresExportAuthorization: true } : {}),
+        ...((definition?.requiresExportAuthorization || componentNeedsExport(definition?.descriptor) || definition?.kind === 'google-sheets-export') ? { requiresExportAuthorization: true } : {}),
         ...(!available && definition?.descriptor?.connection ? { unavailableReason: 'Connect ' + definition.descriptor.name + ' OAuth in local n8n, then refresh the operator installation.' } : {}),
         ...(definition?.kind === 'google-sheets-export' && !available ? { unavailableReason: 'Connect a Google Sheets OAuth credential in n8n to enable this KA.' } : {}) });
     }

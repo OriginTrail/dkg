@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { loadDkgProfile, profileParameters } from './dkg-profile.mjs';
-import { dkgComponentStore } from './dkg-components.mjs';
+import { dkgComponentStore } from './test-support/dkg-component-store-fixture.mjs';
 import profile, { measurements } from './test-support/measurement-profile.mjs';
 const id = '11223344-1234-4234-8234-123456789abc';
 const block = (id, componentId) => ({ id, componentId, params: Object.fromEntries(Object.entries(profileParameters(profile, componentId)).map(([k,v]) => [k,v.default])) });

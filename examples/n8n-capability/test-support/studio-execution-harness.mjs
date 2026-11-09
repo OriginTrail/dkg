@@ -76,7 +76,9 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
       controls.dispatches++;
       const workflow = native.get('native1');
       const execution = { id: '42', workflowId: 'native1', workflowVersionId: workflow.activeVersion.versionId,
-        status: 'running', workflowData: snapshot(workflow) };
+        status: 'running', workflowData: snapshot(workflow), data: { executionData: { nodeExecutionStack: [
+          { node: workflow.activeVersion.nodes.find(n => n.name === 'Receive input'), data: { main: [[{ json: { body } }]] } },
+        ] }, resultData: { runData: {} } } };
       executions.set('42', execution);
       const read = await callback(requestFor(body.invocationId, 'read', JSON.parse(body.input.itemsJson)));
       const writeNode = workflow.activeVersion.nodes.find(n => n.name === 'Block write request');
@@ -87,6 +89,7 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
       }
       execution.status = written ? 'success' : 'error';
       const runData = Object.fromEntries([
+        ['Receive input', [{ body }]],
         ['Block read request', read.items], ...(written ? [['Block write request', written.items], ['Block write', written.items]] : []),
       ].map(([node, items]) => [node, [{ data: { main: [items.map(json => ({ json }))] } }]]));
       if (!written) runData['Block write request'] = [{ error, data: { main: [[]] } }];

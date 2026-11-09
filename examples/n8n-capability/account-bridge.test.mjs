@@ -33,7 +33,7 @@ function options(f) {
     program: { sourceHash: c.sourceHash }, n8n: {} }));
   for (const c of catalog) f.sources.set(c.kaRef, { programIri: c.kaRef, sourceHash: c.sourceHash, source: '', version: '1' });
   return { graphId, owner, config: f.config, client: f.client, definitions: catalog, exportTokenFile: f.exportTokenFile,
-    studioOptions: { state: f.state, headerCredential: { id: 'fixture-header', name: 'Fixture' }, credentials: {} },
+    studioOptions: { state: f.state, headerCredential: { id: 'fixture-header', name: 'Fixture' }, credentials: {}, fetchImpl: f.fetchImpl },
     agent: { query: async query => ({ bindings: query.includes('orderedOutputs')
       ? rawOutputs.map(value => ({ g: `did:dkg:context-graph:${graphId}/_working_memory/${owner}/1`, output: { value } }))
       : catalog.map(c => ({ program: c.kaRef })) }) } };
@@ -57,6 +57,99 @@ function legacyReopen(f, expectedError) {
     headerCredential: { id: 'fixture-header', name: 'Fixture' }, credentials: {} } });
   assert.equal(execFileSync(process.execPath, ['--input-type=module', '-e', script], { env, input, encoding: 'utf8' }).trim(), 'verified');
 }
+
+const callbackPath = '/spike/ka/internal/dkg-component';
+const nativeToken = 'fictional-native-callback-route-secret-at-least-32-characters';
+const nativeHeaders = { authorization: 'Bearer ' + nativeToken };
+async function callbackFixture() {
+  const { configuredDkgProfile: profile } = await import('./dkg-profile.mjs');
+  const { measurements } = await import('./test-support/measurement-profile.mjs');
+  const f = environment(), effects = [], original = profile.transport;
+  let bridge;
+  try {
+    profile.transport = async (payload, operation) => {
+      effects.push(operation);
+      if (operation === 'read') return { graph: 'urn:test:measurements', measurements };
+      assert.equal(operation, 'write');
+      return { contextGraphId: profile.targetGraph, name: payload.name, digest: payload.digest,
+        readbackVerified: true, metadata: { status: 'wm-sealed', reservedUal: 'urn:test:callback-asset' } };
+    };
+    writeFileSync(f.config.n8nNative.webhookTokenFile, nativeToken);
+    const workflow = await f.service.save(definition(['dkg-read', 'dkg-write'], [[0, 0, 1, 0]]), () => assert.fail('DKG Write uses account authority, not Google export authorization'));
+    bridge = createCapabilityBridge(options(f));
+    const invocationId = randomUUID();
+    assert.equal((await request(bridge, prefix + '/run', 'POST', headers,
+      { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, itemsJson: '[{}]', invocationId })).status, 200);
+    const { compiled } = await f.service.get(workflow.kaRef);
+    const installed = f.native.get(compiled.grant.workflowId);
+    const effectId = `urn:sr:effect:${invocationId}:0`;
+    const received = { invocationId: effectId, input: f.invocations.at(-1).inputs[0] };
+    const execution = { id: '42', workflowId: installed.id, workflowVersionId: installed.activeVersion.versionId,
+      workflowData: structuredClone(installed.activeVersion), status: 'running', data: { executionData: { nodeExecutionStack: [
+        { node: installed.nodes.find(n => n.name === 'Receive input'), data: { main: [[{ json: { body: received } }]] } },
+      ] }, resultData: { runData: {} } } };
+    f.executions.set('42', execution);
+    const value = { effectId, workflowId: installed.id, executionId: '42', blockId: 'n0', items: [{}] };
+    return { f, effects, value, execution, received, measurements,
+      send: (value, auth = nativeHeaders, method = 'POST') => request(bridge, callbackPath, method, auth, value),
+      reopen() { bridge.close(); bridge = createCapabilityBridge(options(f)); },
+      close() { bridge.close(); profile.transport = original; f.close(); } };
+  } catch (error) { bridge?.close(); profile.transport = original; f.close(); throw error; }
+}
+
+test('internal DKG callback route rejects credentials, Origin, methods and oversized bodies before effects', async () => {
+  const h = await callbackFixture();
+  try {
+    const calls = h.f.calls.length;
+    for (const auth of [{}, { authorization: 'Bearer wrong-token' }, { ...headers },
+      { ...nativeHeaders, origin: 'http://localhost:4620' }, { ...nativeHeaders, origin: '' }])
+      assert.equal((await h.send(h.value, auth)).status, 403);
+    for (const method of ['GET', 'PUT', 'DELETE', 'OPTIONS']) assert.equal((await h.send(h.value, nativeHeaders, method)).status, 403);
+    writeFileSync(h.f.config.n8nNative.webhookTokenFile, 'short');
+    assert.equal((await h.send(h.value, { authorization: 'Bearer short' })).status, 403);
+    writeFileSync(h.f.config.n8nNative.webhookTokenFile, nativeToken);
+    assert.equal((await h.send({ ...h.value, items: [{ text: 'x'.repeat(16384) }] })).status, 413);
+    assert.deepEqual(h.effects, []); assert.equal(h.f.calls.length, calls);
+    assert.equal(h.f.provider.db.prepare('SELECT count(*) AS n FROM dkg_component_calls').get().n, 0);
+    assert.equal((await h.send(h.value)).status, 200);
+    assert.equal((await h.send(h.value)).status, 200);
+    assert.deepEqual(h.effects, ['read']);
+  } finally { h.close(); }
+});
+
+test('DKG callback requires recorded grant input and one durable native execution across blocks', async () => {
+  const h = await callbackFixture();
+  try {
+    const run = body => [{ data: { main: [[{ json: { body } }]] } }];
+    for (const body of [
+      { ...h.received, invocationId: 'urn:sr:effect:' + randomUUID() + ':0' },
+      { ...h.received, invocationId: h.received.invocationId + '1' },
+      ...['itemsJson', 'paramsJson', 'executionId'].map(key => ({ ...h.received, input: { ...h.received.input, [key]: 'changed' } })),
+    ]) {
+      h.execution.data = { resultData: { runData: { 'Receive input': run(body) } } };
+      assert.equal((await h.send(h.value)).status, 409);
+    }
+    for (const runs of [[], [...run(h.received), ...run(h.received)]]) {
+      h.execution.data = { resultData: { runData: { 'Receive input': runs } } };
+      assert.equal((await h.send(h.value)).status, 400);
+    }
+    h.execution.data = {};
+    assert.equal((await h.send(h.value)).status, 400);
+    assert.deepEqual(h.effects, []);
+    h.execution.data = { resultData: { runData: { 'Receive input': run(h.received) } } };
+    assert.equal((await h.send(h.value)).status, 200);
+    h.reopen();
+    h.f.executions.set('43', { ...structuredClone(h.execution), id: '43' });
+    const write = { ...h.value, blockId: 'n1', items: h.measurements };
+    assert.equal((await h.send({ ...write, executionId: '43' })).status, 409);
+    assert.deepEqual(h.effects, ['read']);
+    assert.equal((await h.send(write)).status, 200);
+    assert.equal((await h.send(write)).status, 200);
+    assert.deepEqual(h.effects, ['read', 'write']);
+    h.f.provider.db.prepare('DELETE FROM dkg_component_native_executions').run();
+    assert.equal((await h.send(write)).status, 409, 'legacy calls cannot acquire a replacement execution binding');
+  } finally { h.close(); }
+});
 
 test('account bridge denies unauthorized runs and journals the authenticated owner at the invocation grant', async () => {
   const f = environment(); let bridge;

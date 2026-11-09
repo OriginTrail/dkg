@@ -71,6 +71,21 @@ JPB requires the mapped assessment and records to match the single verified raw
 result and its output digest. Literal substitutions are rejected before Write;
 presentation fields outside the assessment and records do not become evidence.
 
+The registry declares `requiresExportAuthorization` separately from `writes`.
+Google exporters require the operator export proof; DKG Write uses the configured
+profile and current account-owner authority. Installer, compiler, catalog and
+Studio consumers resolve this policy through the registry. Host authorization
+metadata is excluded from persisted guest descriptors to preserve source identities.
+
+Each DKG callback verifies the native execution's recorded Receive input body
+against the granted effect ID and exact input. The first authorized callback
+durably binds that invocation to one effect, workflow and native execution across
+all blocks. Both the initial webhook execution stack and completed Receive input
+data are supported; missing, conflicting or duplicate evidence is rejected.
+Retries and write reconciliation retain this binding after restart. Existing
+journals with calls but no native execution binding require operator reconciliation;
+they cannot acquire a new execution identity on replay.
+
 `test-support/measurement-profile.mjs` exercises another data shape, node, graph,
 Program and output without changing the runtime. It uses an injected test
 transport and is **not** a live DKG connector or live end-to-end proof.
