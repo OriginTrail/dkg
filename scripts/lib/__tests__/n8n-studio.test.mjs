@@ -1,3 +1,5 @@
+import { Readable } from 'node:stream';
+import { createCapabilityBridge } from '../../../examples/n8n-capability/bridge.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
@@ -108,7 +110,7 @@ function environment() {
   }};
   const openService=()=>createStudioService({graphId,owner,client,provider,exportTokenFile,listCapabilities:async()=>inventory,loadOutputs:async iri=>outputs.get(iri)});
   let service=openService();
-  return {get provider(){return provider;},get service(){return service;},restart(){service.stop();provider.close();provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,setCatalog:v=>{inventory=v;},loseNextCreate:()=>{loseCreate=true;},
+  return {state,get provider(){return provider;},get service(){return service;},restart(){service.stop();provider.close();provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,setCatalog:v=>{inventory=v;},loseNextCreate:()=>{loseCreate=true;},
     close(){service.stop();provider.close();rmSync(state,{recursive:true,force:true});}};
 }
 test('a lost native create acknowledgement is reconciled by name without a second create',async()=>{
@@ -138,11 +140,11 @@ test('Google writes require authorization before provisioning or invoking',async
 test('activation retries retain event identity and count; webhook receipt replay rejects changed inputs',async()=>{
   const f=environment();try{const w=await f.service.save(definition(['webhook','edit-fields'],[[0,0,1,0]]),()=>{});
     const activationId=randomUUID();await f.service.activate({kaRef:w.kaRef,sourceHash:w.sourceHash,active:true,activationId},()=>{});
-    const h=await f.service.history(w.kaRef), key=h.eventPath.split('/').at(-1), invocationId=randomUUID(),value={invocationId,items:[{name:'Ana'}]};
+    const h=await f.service.history(w.kaRef,()=>true), key=h.eventPath.split('/').at(-1), invocationId=randomUUID(),value={invocationId,items:[{name:'Ana'}]};
     const first=await f.service.event(key,value);assert.deepEqual(await f.service.event(key,value),first);
     await assert.rejects(f.service.event(key,{...value,items:[{name:'Changed'}]}),/different input/);
     await f.service.activate({kaRef:w.kaRef,active:true,activationId},()=>{});
-    const after=await f.service.history(w.kaRef);assert.equal(after.eventPath,h.eventPath);assert.equal(after.activation.count,1);assert.equal(f.invocations.length,1);
+    const after=await f.service.history(w.kaRef,()=>true);assert.equal(after.eventPath,h.eventPath);assert.equal(after.activation.count,1);assert.equal(f.invocations.length,1);
   }finally{f.close();}
 });
 test('a timer cannot invoke downstream actions after a component is revoked',async()=>{
@@ -197,4 +199,35 @@ test('native-only approval contract creates a new revision without rewriting leg
   assert.notEqual(previous.kaRef, current.kaRef);
   assert.equal(readStudio(studioProgramSource(current)).kaRef, current.kaRef);
   assert.equal(readStudio(studioProgramSource(current)).compiler, 4);
+});
+
+for (const protectedComponent of ['google-sheets', 'google-drive', 'edit-fields']) test(`history discloses ${protectedComponent} event capability only to authorized owners`, async () => {
+  const f = environment(), secret = 'fictional-export-key-for-history-test';
+  let bridge;
+  try {
+    writeFileSync(f.exportTokenFile, secret);
+    const graph = protectedComponent === 'google-drive' ? definition(['webhook','convert-file','google-drive'], [[0,0,1,0],[1,0,2,0]])
+      : definition(['webhook', protectedComponent], [[0,0,1,0]]);
+    const w = await f.service.save(graph, () => {});
+    await f.service.activate({kaRef:w.kaRef,active:true,activationId:randomUUID()},()=>{});
+    f.client.programs.listApprovals = async () => [];
+    bridge = createCapabilityBridge({ graphId, owner, config:f.config, client:f.client, exportTokenFile:f.exportTokenFile,
+      agent:{query:async()=>({bindings:[]})}, studioOptions:{state:f.state,headerCredential:{id:'fixture-header',name:'Fixture'},credentials:{}} });
+    assert.equal((await f.service.history(w.kaRef)).eventPath, undefined);
+    let delegatedPath;
+    for (const role of ['viewer','owner']) for (const token of [undefined,'wrong',secret]) {
+      const req=Readable.from([]);req.method='GET';req.url='/spike/ka/accounts/account-a/capabilities/studio/history?kaRef='+encodeURIComponent(w.kaRef);
+      req.headers={authorization:`Bearer l1-${role}-a`,...(token?{'x-dkg-export-token':token}:{})};
+      let status,body;const res={writeHead:s=>{status=s;},end:s=>{body=JSON.parse(s);}};
+      await bridge.handle(req,res,req.url.split('?')[0]);assert.equal(status,200);
+      assert.ok(Array.isArray(body.executions));
+      const allowed=role==='owner'&&(protectedComponent==='edit-fields'||token===secret);
+      assert.equal(typeof body.eventPath==='string',allowed);
+      if(allowed)delegatedPath=body.eventPath;
+      else assert.ok(!JSON.stringify(body).includes(f.provider.row(w.kaRef).event_key));
+    }
+    // Possession of an explicitly disclosed URL remains a delegated invocation capability.
+    const receipt=await f.service.event(delegatedPath.split('/').at(-1),{invocationId:randomUUID(),items:[{value:1}]});
+    assert.equal(receipt.readbackVerified,true);assert.equal(f.invocations.length,1);
+  } finally {bridge?.close();f.close();}
 });

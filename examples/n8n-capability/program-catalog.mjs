@@ -4,15 +4,32 @@ import { programDescriptor } from './program-block.mjs';
 export function createProgramCatalog({ graphId, owner, client, definitions }) {
   return async function listPrograms() {
     const approvals = await client.programs.listApprovals({ graphId });
-    const byOperation = new Map(approvals.map(a => [a.operationIri, a.binding]));
-    const requiresExport = (binding, seen = new Set()) => {
-      if (!binding || seen.has(binding.operationIri)) return true;
-      seen.add(binding.operationIri);
+    const key = (graph, operation) => JSON.stringify([graph, operation]);
+    const bindings = new Map(approvals.map(a => [key(graphId, a.operationIri), Promise.resolve(a.binding)]));
+    let remaining = 128, traversals = 512;
+    const resolve = async (graph, operation) => {
+      if (typeof graph !== 'string' || typeof operation !== 'string') return undefined;
+      const id = key(graph, operation);
+      if (!bindings.has(id)) {
+        if (remaining-- <= 0) return undefined;
+        bindings.set(id, client.programs.getApproval({ graphId: graph, operationIri: operation })
+          .then(a => a.binding).catch(() => undefined));
+      }
+      const binding = await bindings.get(id);
+      return binding?.contextGraphId === graph && binding.operationIri === operation && binding.enabled ? binding : undefined;
+    };
+    const requiresExport = async (binding, seen = new Set()) => {
+      if (!binding || traversals-- <= 0) return true;
+      const id = key(binding.contextGraphId, binding.operationIri);
+      if (seen.has(id) || seen.size >= 32) return true;
+      seen.add(id);
       if (binding.n8n) {
-        const known = definitions.find(d => d.grant.workflowId === binding.n8n.workflowId);
+        const known = definitions.find(d => d.grant?.workflowId === binding.n8n.workflowId && d.grant.workflowSha256 === binding.n8n.workflowSha256);
         if (!known || known.requiresExportAuthorization || known.descriptor?.writes || known.kind === 'google-sheets-export') return true;
       }
-      return (binding.typescript?.children ?? []).some(pin => requiresExport(byOperation.get(pin.operationIri), new Set(seen)));
+      for (const pin of binding.typescript?.children ?? [])
+        if (await requiresExport(await resolve(pin.contextGraphId, pin.operationIri), new Set(seen))) return true;
+      return false;
     };
     const programs = [];
     for (const approval of approvals) {
@@ -29,7 +46,7 @@ export function createProgramCatalog({ graphId, owner, client, definitions }) {
       programs.push({ kind: 'program', kaRef: ref.programIri, sourceHash: source.sourceHash, graphId,
         operationIri: b.operationIri, authorAgentAddress: source.authorAgentAddress,
         name: (source.label ?? ref.programIri).slice(0, 80), version: source.version, language: source.language,
-        available: true, requiresExportAuthorization: requiresExport(b), descriptor: programDescriptor });
+        available: true, requiresExportAuthorization: await requiresExport(b), descriptor: programDescriptor });
     }
     return programs.sort((a, b) => a.name.localeCompare(b.name) || b.version.localeCompare(a.version) || a.operationIri.localeCompare(b.operationIri));
   };

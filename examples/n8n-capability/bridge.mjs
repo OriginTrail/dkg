@@ -105,7 +105,11 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
         const route = path.slice((prefix + '/studio').length), authorize = () => authorizeExport(req);
         if (route === '' && req.method === 'GET') json(res, 200, { capabilities: [...(await list()).filter(c => c.kind === 'component'), ...await listPrograms()], workflows: await studio.list(), canInvoke: identity === 'Bearer l1-owner-a' });
         else if (route === '/history' && req.method === 'GET') {
-          const params = new URL(req.url, 'http://127.0.0.1:4631').searchParams; json(res, 200, await studio.history(params.get('kaRef')));
+          const params = new URL(req.url, 'http://127.0.0.1:4631').searchParams;
+          json(res, 200, await studio.history(params.get('kaRef'), needsExport => {
+            if (identity !== 'Bearer l1-owner-a') return false;
+            try { if (needsExport) authorize(); return true; } catch { return false; }
+          }));
         } else if (['/save', '/run', '/invoke', '/activation'].includes(route) && req.method === 'POST') {
           if (identity !== 'Bearer l1-owner-a') { json(res, 403, { error: 'Owner access required.' }); return true; }
           let body = '', size = 0; for await (const chunk of req) { size += chunk.length; if (size > 16384) throw new Error('Request too large'); body += chunk; }
