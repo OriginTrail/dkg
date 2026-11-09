@@ -112,3 +112,54 @@ describe('the accounts that granted a buyer', () => {
     expect(chain.reads.at(-1)?.to).toBe(chain.head);
   });
 });
+
+describe('a buyer accounts scan, kept between reads', () => {
+  /** The first block each `listBuyerAccounts` call read, in call order. */
+  const starts = (chain: { reads: Array<{ from: number }> }, before: number) => chain.reads.slice(before).map((r) => r.from)[0];
+
+  it('starts the next read after the blocks it kept, 50 below the head it last read', async () => {
+    const { a, chain, grant } = adapter();
+    grant(120, 5n);
+    await a.listBuyerAccounts(BUYER);
+    chain.head = 260;
+    const before = chain.reads.length;
+    grant(240, 6n);
+    expect(await a.listBuyerAccounts(BUYER)).toEqual([5n, 6n]);
+    expect(starts(chain, before)).toBe(151);
+    expect(chain.reads.at(-1)?.to).toBe(260);
+  });
+
+  it("is a buyer's own: another buyer's first read starts at the deployment", async () => {
+    const { a, chain, grant } = adapter();
+    grant(130, 1n, OTHER_BUYER);
+    await a.listBuyerAccounts(BUYER);
+    const before = chain.reads.length;
+    expect(await a.listBuyerAccounts(OTHER_BUYER)).toEqual([1n]);
+    expect(starts(chain, before)).toBe(chain.deployBlock);
+  });
+
+  it('keeps nothing while the contract is younger than the 50 blocks it holds back', async () => {
+    const { a, chain, grant } = adapter();
+    chain.deployBlock = 180;
+    grant(185, 4n);
+    await a.listBuyerAccounts(BUYER);
+    const before = chain.reads.length;
+    expect(await a.listBuyerAccounts(BUYER)).toEqual([4n]);
+    expect(starts(chain, before)).toBe(180);
+  });
+
+  it('moves its cursor only forward when two reads overlap', async () => {
+    const { a, chain, grant } = adapter();
+    grant(120, 5n);
+    // Two reads in flight: the first is answered head 300, the second a lagging 250, and the second keeps last.
+    const heads = [300, 250];
+    const resolve = a.resolveContractDeployBlock;
+    a.resolveContractDeployBlock = async (address: string) => ({ ...(await resolve(address)), head: heads.shift()! });
+    expect(await Promise.all([a.listBuyerAccounts(BUYER), a.listBuyerAccounts(BUYER)])).toEqual([[5n], [5n]]);
+    a.resolveContractDeployBlock = resolve;
+    chain.head = 310;
+    const before = chain.reads.length;
+    await a.listBuyerAccounts(BUYER);
+    expect(starts(chain, before)).toBe(251);
+  });
+});

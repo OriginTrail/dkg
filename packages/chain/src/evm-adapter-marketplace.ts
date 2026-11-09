@@ -24,6 +24,7 @@ import { ethers, type Contract, type JsonRpcProvider } from 'ethers';
 import type { TxResult } from './chain-adapter.js';
 import { loadAbi } from './evm-adapter-abi.js';
 import { enrichEvmError } from './evm-adapter-errors.js';
+import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import type { EvmSigner } from './evm-signer.js';
 import {
@@ -62,6 +63,18 @@ type Log = { address: string; topics: ReadonlyArray<string>; data: string };
 
 /** Blocks per `eth_getLogs` page of the `BuyerAdded` scan; the reader fits a page to each RPC's span cap. */
 const BUYER_SCAN_PAGE_BLOCKS = 10_000;
+
+/**
+ * What `listBuyerAccounts` found for one buyer through `throughBlock`, a block
+ * old enough to keep (`CG_REGISTRY_REORG_BUFFER_BLOCKS` below the head it read).
+ */
+interface BuyerAccountScan {
+  throughBlock: number;
+  accounts: ReadonlySet<bigint>;
+}
+
+/** Per adapter: the `ServiceSubscriptions` scanned, lowercased, and each buyer's scan of it. */
+const buyerAccountScans = new WeakMap<object, { contract: string; byBuyer: Map<string, BuyerAccountScan> }>();
 
 const interfaces = new Map<string, ethers.Interface>();
 
@@ -407,23 +420,45 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     return buyers;
   }
 
-  /** Read in pages from the deployment of the Hub's `ServiceSubscriptions` to the head; nothing is cached. */
+  /**
+   * Read in pages from the deployment of the Hub's `ServiceSubscriptions` to the
+   * head. What blocks at least `CG_REGISTRY_REORG_BUFFER_BLOCKS` below the head
+   * held is kept, per buyer, for as long as the Hub binds the same contract, so
+   * the next read starts after it; the blocks above are read again every time,
+   * so each answer still reaches the head.
+   */
   async listBuyerAccounts(buyer: string): Promise<bigint[]> {
     await this.init();
     const ss = await this.resolveContract('ServiceSubscriptions');
+    const contractAddress = await ss.getAddress();
+    const address = contractAddress.toLowerCase();
     const label = 'listBuyerAccounts';
-    const { fromBlock, head, scanProviders } = await this.resolveContractDeployBlock(await ss.getAddress(), label, 'ServiceSubscriptions');
+    const { fromBlock, head, scanProviders } = await this.resolveContractDeployBlock(contractAddress, label, 'ServiceSubscriptions');
+    let scans = buyerAccountScans.get(this);
+    if (scans?.contract !== address) buyerAccountScans.set(this, scans = { contract: address, byBuyer: new Map() });
+    const key = buyer.toLowerCase();
+    const kept = scans.byBuyer.get(key);
+    const keepThrough = head - CG_REGISTRY_REORG_BUFFER_BLOCKS;
     const filter = ss.filters.BuyerAdded(null, buyer);
     const connected = new Map<JsonRpcProvider, Contract>();
-    const accounts = new Set<bigint>();
+    const accounts = new Set<bigint>(kept?.accounts);
+    const settled = new Set<bigint>(kept?.accounts);
     let preferred: JsonRpcProvider | undefined;
-    for (let lo = fromBlock; lo <= head; lo += BUYER_SCAN_PAGE_BLOCKS) {
+    for (let lo = kept ? kept.throughBlock + 1 : fromBlock; lo <= head; lo += BUYER_SCAN_PAGE_BLOCKS) {
       const page = await this.queryEventLogsPage(
         ss, filter, lo, Math.min(lo + BUYER_SCAN_PAGE_BLOCKS - 1, head), scanProviders, connected, `${label} BuyerAdded`, preferred,
       );
       preferred = page.provider;
       // topics: the event, the indexed accountId, the indexed buyer.
-      for (const log of page.logs) accounts.add(BigInt(log.topics[1]!));
+      for (const log of page.logs) {
+        const accountId = BigInt(log.topics[1]!);
+        accounts.add(accountId);
+        if (log.blockNumber <= keepThrough) settled.add(accountId);
+      }
+    }
+    // Kept only forward: a read that raced a later one must not move the cursor back.
+    if (keepThrough >= fromBlock && keepThrough > (scans.byBuyer.get(key)?.throughBlock ?? -1)) {
+      scans.byBuyer.set(key, { throughBlock: keepThrough, accounts: settled });
     }
     return [...accounts].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   }
