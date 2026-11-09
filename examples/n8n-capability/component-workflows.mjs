@@ -1,4 +1,4 @@
-import { component } from './component-registry.mjs';
+import { component, componentExecutionDescriptor, componentValidationSource } from './component-registry.mjs';
 import { resolveComponentValueSource } from './guest-sources/component-v2.mjs';
 
 export const nativeVersions = { set: 3.4, filter: 2.3, sort: 1, limit: 1, removeDuplicates: 2, splitOut: 1.1,
@@ -158,13 +158,16 @@ export function echoSubworkflow() {
 }
 
 export function standaloneComponentWorkflow(id, workflowId, headerCredential, options = {}) {
-  const descriptor = component(id), params = key => `JSON.parse($('Receive input').first().json.body.input.paramsJson)[${JSON.stringify(key)}]`;
+  const descriptor = componentExecutionDescriptor(component(id)), params = key => `$('Prepare input').first().json.params[${JSON.stringify(key)}]`;
   const piece = componentPiece(id, 'Component', id === 'schedule' ? key => JSON.stringify(descriptor.parameters[key].default) : params, options);
   const receive = nativeNode('Receive input', 'webhook', { httpMethod: 'POST', path: 'dkg-capability-' + workflowId,
     authentication: 'headerAuth', responseMode: 'responseNode', options: {} }, { webhookId: workflowId,
     credentials: { httpHeaderAuth: headerCredential } });
   const ack = nativeNode('Execution accepted', 'respondToWebhook', { respondWith: 'json', responseBody: expression('({ executionId: String($execution.id) })'), options: {} }); ack.typeVersion = 1.4;
-  const prepare = editNode('Prepare input', `({ records: JSON.parse($('Receive input').first().json.body.input.itemsJson) })`);
+  // The installed graph must enforce its contract even when an independently
+  // approved Program invokes the tool without our supplied guest wrapper.
+  // Validate the entire batch before splitting or entering any native action.
+  const prepare = editNode('Prepare input', `(() => { ${componentValidationSource()} const input = normalize(${nativeLiteral(descriptor)}, $('Receive input').first().json.body.input); return { records: JSON.parse(input.itemsJson), params: JSON.parse(input.paramsJson) }; })()`);
   const split = nativeNode('Split input', 'splitOut', { fieldToSplitOut: 'records', include: 'noOtherFields', options: { destinationFieldName: 'record' } });
   const items = editNode('Input items', '$json.record');
   const connections = { ...piece.connections };
