@@ -37,20 +37,45 @@ const WORDS: [RegExp, string][] = [
  */
 const PENDING = new Set<string>([]);
 
+/**
+ * Names people see or hear: JSX attributes, and object properties anywhere in `src/ui`.
+ * In UI code an object's `message`, `body` or `reason` is nearly always copy, such as a toast
+ * or an alert built in a hook. An object that is internal data instead can say so (see NOT_SHOWN).
+ */
 const VISIBLE_ATTRIBUTES = new Set([
   'alt', 'aria-description', 'aria-label', 'body', 'caption', 'confirmLabel', 'cancelLabel', 'description',
   'detail', 'empty', 'emptyText', 'error', 'footnote', 'heading', 'help', 'helperText', 'hint', 'label', 'message',
   'note', 'placeholder', 'reason', 'subtitle', 'summary', 'text', 'title', 'tooltip',
 ]);
+/**
+ * A comment that marks an object property, or a whole object, as data that never reaches the screen:
+ * `{ reason: 'not admitted' } // writing-rules: not shown` or `// writing-rules: not shown` on the line above.
+ */
+const NOT_SHOWN = /writing-rules:\s*not shown/;
 const VISIBLE_CALL = /^(toast|notify|alert|confirm|set(Error|Notice|Message|Warning)\w*)$|\.(toast|notify)$/;
 
 const clean = (text: string) => text.replace(/&apos;/g, "'").replace(/\s+/g, ' ').trim();
 
 const isComparison = (node: ts.Node) => ts.isBinaryExpression(node)
   && [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken].includes(node.operatorToken.kind);
-/** Nested JSX is read by the main walk, comparisons are code, and objects are read by their visible property names. */
-const isCode = (node: ts.Node) => ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node) || isComparison(node)
-  || ts.isObjectLiteralExpression(node);
+/** Nested JSX is read by the main walk, and comparisons are code. */
+const isCode = (node: ts.Node) => ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node) || isComparison(node);
+const propertyName = (node: ts.PropertyAssignment) => node.name.getText().replace(/['"]/g, '');
+
+/** Whether a node, or the object or statement it sits in, is marked NOT_SHOWN on its own line or on a comment line just above. */
+const markedNotShown = (node: ts.Node) => {
+  const file = node.getSourceFile();
+  const lines = file.text.split('\n');
+  for (let at: ts.Node | undefined = node; at && !ts.isSourceFile(at) && !ts.isFunctionLike(at); at = at.parent) {
+    const line = file.getLineAndCharacterOfPosition(at.getStart(file)).line;
+    const above = (lines[line - 1] ?? '').trim();
+    if (NOT_SHOWN.test(lines[line] ?? '') || (above.startsWith('//') && NOT_SHOWN.test(above))) return true;
+    if (ts.isStatement(at)) return false;
+  }
+  return false;
+};
+const isProperty = (node: ts.Node): node is ts.PropertyAssignment => ts.isPropertyAssignment(node)
+  && VISIBLE_ATTRIBUTES.has(propertyName(node)) && !markedNotShown(node);
 
 /** One piece of visible text and where it is (`file:line`). */
 type Line = { text: string; where: string };
@@ -130,6 +155,11 @@ const literals = (node: ts.Node, add: Add, checker: ts.TypeChecker, following: R
     read(node.whenFalse);
   } else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
     read(node.right);
+  } else if (ts.isObjectLiteralExpression(node)) {
+    // Read the properties people see, not ids, tones or kinds.
+    for (const property of node.properties) {
+      if (isProperty(property)) read(property.initializer);
+    }
   } else if (!isCode(node)) {
     ts.forEachChild(node, (child) => read(child));
   }
@@ -156,7 +186,7 @@ export const visibleLines = (source: string, fileName = 'file.tsx'): Line[] => {
     if (ts.isJsxText(node)) add(node.text, node);
     else if (ts.isJsxExpression(node) && node.expression && !ts.isJsxAttribute(node.parent)) read(node.expression);
     else if (ts.isJsxAttribute(node) && node.initializer && VISIBLE_ATTRIBUTES.has(node.name.getText(file))) read(node.initializer);
-    else if (ts.isPropertyAssignment(node) && VISIBLE_ATTRIBUTES.has(node.name.getText(file).replace(/['"]/g, ''))) read(node.initializer);
+    else if (isProperty(node)) read(node.initializer);
     else if (ts.isCallExpression(node) && VISIBLE_CALL.test(node.expression.getText(file))) node.arguments.forEach(read);
     else if (ts.isNewExpression(node) && node.expression.getText(file).endsWith('Error')) node.arguments?.forEach(read);
     ts.forEachChild(node, visit);
@@ -235,6 +265,24 @@ describe('writing rules', () => {
     `, 'example.tsx');
     expect(lines.map((line) => line.text).sort()).toEqual(['Check the daemon', 'Node wallet', 'Shown', 'Your wallet']);
     expect(problemsIn(lines).map((problem) => `${problem.where} ${problem.use}`)).toEqual(['example.tsx:2 node']);
+  });
+
+  it('skips object data marked as not shown', () => {
+    const lines = visibleLines(`
+      const payload = { reason: 'not admitted', id: 'not-text' }; // writing-rules: not shown
+      // writing-rules: not shown
+      const audit = {
+        message: 'Internal message',
+      };
+      const request = {
+        reason: 'Also internal', // writing-rules: not shown
+        message: 'Shown message',
+      };
+      const tabs = [{ id: 'log', label: 'Tab label' }];
+      toast({ message: 'Toast object message', tone: 'not-text' });
+    `, 'example.tsx');
+    expect(lines.map((line) => line.text).sort()).toEqual(['Shown message', 'Tab label', 'Toast object message']);
+    expect(problemsIn(lines)).toEqual([]);
   });
 
   it('follows each name to its own declaration', () => {
