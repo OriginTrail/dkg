@@ -5,7 +5,7 @@ import { component, normalizeComponentInput } from './component-registry.mjs';
 import { component as componentV1, normalizeComponentInput as normalizeComponentInputV1 } from './component-registry-v1.mjs';
 import { normalizeStudio, readStudio, studioProgramSource, validateStudioCapabilities } from './studio-definition.mjs';
 import { workflowUuid } from './workflow-definition.mjs';
-import { n8nObservationScope, n8nExecutionMatches, n8nPinnedExecutionMatches } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
+import { n8nObservationScope, n8nExecutionMatches, n8nPinnedExecutionMatches, n8nRecord } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { programWorkflowReceipt } from './program-workflow-receipt.mjs';
 
 const reference = (source, graphId) => ({ graphId, programIri: source.programIri, programLayer: 'wm', authorAgentAddress: source.authorAgentAddress, sourceHash: source.sourceHash });
@@ -49,7 +49,9 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     const key = JSON.stringify(definition); if (saving.has(key)) return saving.get(key);
     const pending = (async () => {
       const compiled = await provider.provision(definition), sourceText = studioProgramSource(compiled);
-      // Native wrappers invoke one pinned tool; only DKG executors invoke child Programs.
+      // A native wrapper makes one pinned tool call. Its components (including
+      // DKG Read/Write and remote Programs) run inside n8n, not invoke_program.
+      // Only the DKG executor needs child Program grants.
       const nativeOnly = compiled.executor !== 'dkg';
       const sourceHash = createHash('sha256').update(sourceText).digest('hex');
       let source;
@@ -95,8 +97,10 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     let result;
     try { result = await invoke(); }
     catch (error) {
-      if (error.code !== 'INVOCATION_REQUIRES_RECONCILIATION' || compiled.executor === 'dkg') throw error;
-      // Reconcile the durable acknowledgement under the same invocation, once.
+      if (error.code !== 'INVOCATION_REQUIRES_RECONCILIATION' ||
+        compiled.executor === 'dkg') throw error;
+      // The native-only wrapper resumes its durable acknowledgement; it never
+      // creates another n8n run or another remote Program invocation.
       result = await invoke();
     }
     if (!isDeepStrictEqual(await loadOutputs(result.executionIri), result.rawOutputs)) throw new Error('The DKG receipt readback differs.');
@@ -232,8 +236,8 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     validateStudioCapabilities(compiled.definition,await listCapabilities());
     const native=await provider.api('/executions/'+encodeURIComponent(String(value.executionId))+'?includeData=true');
     const installed = await provider.api('/workflows/'+value.workflowId);
-    const published = installed.activeVersion ? { ...installed.activeVersion, settings: installed.settings } : installed;
-    if (installed.active !== true || installed.id !== value.workflowId || String(native.id) !== value.executionId
+    const published = n8nRecord(installed.activeVersion) ? { ...installed.activeVersion, settings: installed.settings } : installed;
+    if (installed.id !== value.workflowId || installed.active !== true || String(native.id) !== value.executionId
       || !n8nPinnedExecutionMatches(published, native, compiled.grant, published.versionId))
       throw reject('Native execution does not match the approved workflow.');
     return dkg.call(value,workflow,value.workflowId);

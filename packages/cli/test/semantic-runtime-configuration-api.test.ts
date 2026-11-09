@@ -1,3 +1,4 @@
+import { runInThisContext, constants as vmConstants } from 'node:vm';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
@@ -742,6 +743,42 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       }
       expect(dispatches).toBe(1);
     } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('recovers a Studio-produced Read Write approval after the sealed effect and runtime reopen', async () => {
+    // Native import keeps compiler-generated source in its real ESM environment.
+    const { createStudioExecutionHarness } = await runInThisContext('(url) => import(url)', { importModuleDynamically: vmConstants.USE_MAIN_CONTEXT_DEFAULT_LOADER })(
+      new URL('../../../examples/n8n-capability/test-support/studio-execution-harness.mjs', import.meta.url).href);
+    const f = await toolFixture('export function run() { return null; }', { graphId: graph }, []);
+    const h = createStudioExecutionHarness({ state: join(f.target.dir, 'studio'), graphId: graph, owner,
+      config: f.target.config.semanticRuntime, client: f.manager,
+      loadOutputs: async (iri: string) => (await f.store.query(`SELECT ?output WHERE { GRAPH ?g { <${iri}> <${SR}output> ?output } }`)).bindings
+        .map((row: any) => JSON.parse(row.output)) });
+    vi.stubGlobal('fetch', h.runtimeFetch);
+    try {
+      const workflow = await h.service.save(h.definition, () => {});
+      const approval = await f.manager.programs.getApproval({ graphId: graph, operationIri: workflow.kaRef });
+      expect(approval.binding.typescript!.children).toEqual([]);
+      const invocationId = randomUUID();
+      const input = { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, itemsJson: '[{}]', invocationId };
+      await expect(h.service.run(input, () => {}, h.actor)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
+      expect(h.controls.dispatches).toBe(1);
+      expect(h.effects).toEqual(['read', 'write']);
+      expect(h.assets.size).toBe(1);
+      const reopened = await restartNode(f.target);
+      h.reopen();
+      h.controls.interrupted = false;
+      const result = await h.service.run(input, () => {}, h.actor);
+      expect(result).toMatchObject({ invocationId, n8nExecutionId: '42', persisted: true, readbackVerified: true });
+      expect(reopened.store.execution(result.executionIri)?.status).toBe('completed');
+      expect(await h.service.run(input, () => {}, h.actor)).toEqual(result);
+      expect(h.controls.dispatches).toBe(1);
+      expect(h.effects).toEqual(['read', 'write']);
+      expect(h.assets.size).toBe(1);
+      await f.manager.programs.revoke({ graphId: graph, operationIri: workflow.kaRef, expectedRevision: approval.revision });
+      await expect(h.service.run(input, () => {}, h.actor)).rejects.toThrow('not approved');
+      expect(h.controls.dispatches).toBe(1);
+    } finally { h.close(); vi.unstubAllGlobals(); }
   });
 
   it('stores requests, approves and executes signed remote reads without data graph membership', async () => {

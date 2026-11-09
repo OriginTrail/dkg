@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SemanticN8nGrant, SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
 import { createNativeN8nWorkflowAdapter } from '../src/semantic-runtime-n8n-native-adapter.js';
 import { collectN8nExecutionResult } from '../src/semantic-runtime-n8n-results.js';
-import { n8nObservationScope, n8nWorkflowSha256, validateN8nGrant } from '../src/semantic-runtime-n8n-contract.js';
+import { n8nObservationScope, n8nWorkflowSha256, n8nPinnedExecutionMatches, validateN8nGrant } from '../src/semantic-runtime-n8n-contract.js';
 
 const graph = 'native-n8n-poc', owner = '0x' + '1'.repeat(40), workflowId = 'native';
 const objectSchema = (properties: Record<string, any>) => ({ type: 'object' as const, properties, required: Object.keys(properties), additionalProperties: false as const });
@@ -165,4 +165,19 @@ describe('native n8n component execution receipts', () => {
     for (const result of [{ nodes: [] }, { nodes: ['Component'], url: 'foreign' }, { nodes: ['A', 'B'], ports: ['a', 'b'] }, { nodes: ['Component'], traceNodes: ['../secret'] }])
       expect(() => validateN8nGrant({ ...f.grant, result })).toThrow('INVALID_N8N_GRANT');
   });
+});
+
+it('verifies the captured n8n 2.43.8 Studio Read Write execution with the published definition pin', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/n8n-2.43.8-studio-read-write.json', import.meta.url), 'utf8'));
+  const { published, execution } = fixture;
+  const approved = { workflowId: execution.workflowId, workflowSha256: n8nWorkflowSha256(published) };
+  expect(n8nPinnedExecutionMatches(published, execution, approved, published.versionId)).toBe(true);
+  const normalized = structuredClone(execution);
+  const request = normalized.workflowData.nodes.find((n: any) => n.name === 'Block read request');
+  expect(request.parameters.jsonBody.startsWith('=')).toBe(true);
+  request.parameters.jsonBody = request.parameters.jsonBody.slice(1);
+  expect(n8nPinnedExecutionMatches(published, normalized, approved, published.versionId)).toBe(true);
+  request.credentials.httpHeaderAuth.id = 'other-credential';
+  expect(n8nPinnedExecutionMatches(published, normalized, approved, published.versionId)).toBe(false);
+  expect(n8nPinnedExecutionMatches(published, execution, approved, 'another-version')).toBe(false);
 });

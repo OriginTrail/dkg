@@ -20,8 +20,8 @@ test('saved Studio DKG Read/Write callbacks accept normalized execution paramete
   try {
     const w = await f.service.save(definition(['dkg-read', 'dkg-write'], [[0,0,1,0]]), () => {});
     const approval = f.approvals.get(w.kaRef);
-    assert.equal(approval.typescript.children.length, 2);
-    assert.deepEqual(f.sources.get(w.kaRef).permittedPrograms, w.definition.nodes.map(n => n.kaRef));
+    assert.equal(approval.typescript.children.length, 0);
+    assert.deepEqual(f.sources.get(w.kaRef).permittedPrograms, []);
     const native = f.native.get(f.provider.row(w.kaRef).provider_id);
     const snapshot = structuredClone({ ...native.activeVersion, settings: native.settings });
     // n8n normalizes HTTP Request body/header parameters in execution snapshots.
