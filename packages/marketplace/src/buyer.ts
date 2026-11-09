@@ -59,9 +59,6 @@ import { Journal } from './journal.js';
 import { budgetsOf, planDigestOf, serviceToWire, valueOf, type FundingSource, type PlannedService, type StandingPlan } from './plan.js';
 import type { BuyerStore } from './store.js';
 
-/** No funding is sent this close to an epoch's end: it could land in the next one. */
-export const END_MARGIN_SECONDS = 30;
-
 /**
  * The share of an epoch, and the least time, that must be left of the epoch under way for the renewal job to fund
  * it or add to it. A subscription costs its full value however little of its epoch is left, and calls stop a few

@@ -3,7 +3,8 @@
  * The renewal job near the end of an epoch, against MockChainAdapter (30-day
  * epochs): it funds or adds to the epoch under way only while a quarter of it,
  * and at least fifteen minutes, is left, and otherwise waits for the next
- * epoch, which it prefunds within the lead as before.
+ * epoch, which it prefunds within the lead as before; and the plan's next
+ * renewal, as the node API shows it, says the same.
  */
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -11,7 +12,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter, marketplaceChainOf, subscriptionIdOf, type EpochTimes, type MarketplaceChainAdapter } from '@origintrail-official/dkg-chain';
-import { Buyer, BuyerStore, RENEWAL_MIN_SECONDS, parsePlan, renewsEpochUnderWay } from '../src/index.js';
+import { Buyer, BuyerStore, RENEWAL_MIN_SECONDS, parsePlan, planView, renewsEpochUnderWay } from '../src/index.js';
 
 const SIGNER = new ethers.Wallet(`0x${'22'.repeat(32)}`);
 const TRAC = 10n ** 18n;
@@ -94,5 +95,18 @@ describe('the renewal job near the end of an epoch', () => {
     // A ten-minute epoch is never funded once under way: calls stop a few minutes before its end.
     expect(renewsEpochUnderWay(epoch(600, 600))).toBe(false);
     expect(RENEWAL_MIN_SECONDS).toBeGreaterThan(180);
+  });
+});
+
+describe("the plan's next renewal", () => {
+  it('names the epoch the job funds next: the one under way while a quarter of it is left, then the next one', async () => {
+    await buyer.store.writePlan(plan());
+    before(7.5 * DAY);
+    expect((await planView(buyer, plan())).next).toMatchObject({ epoch: times.epoch, at: times.endsAt - 7.5 * DAY });
+    before(7.5 * DAY - 1);
+    expect((await planView(buyer, plan())).next).toMatchObject({ epoch: times.epoch + 1, at: times.endsAt - 7_200 });
+    // Within the lead, from now.
+    before(3_600);
+    expect((await planView(buyer, plan())).next).toMatchObject({ epoch: times.epoch + 1, at: times.endsAt - 3_600 });
   });
 });

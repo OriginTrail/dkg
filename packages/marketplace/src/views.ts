@@ -17,7 +17,7 @@ import {
   type Subscription,
   type TxResult,
 } from '@origintrail-official/dkg-chain';
-import { END_MARGIN_SECONDS, MarketplaceRefusal, accountRefusal, type Buyer, type FundingCheck } from './buyer.js';
+import { MarketplaceRefusal, accountRefusal, renewsEpochUnderWay, type Buyer, type FundingCheck } from './buyer.js';
 import { serviceToWire, type FundingSource, type StandingPlan } from './plan.js';
 
 /** A budget's soft ceiling: calls stop at 95% of its value (RFC-27). */
@@ -110,7 +110,8 @@ export async function planView(buyer: Buyer, plan: StandingPlan) {
   let next: { epoch: number; at: number; cost: string; costTrac: string; refusal?: string } | undefined;
   for (const epoch of [times.epoch, times.epoch + 1]) {
     if (!plan.renew || plan.renewUntilEpoch === undefined || epoch > plan.renewUntilEpoch) break;
-    if (epoch === times.epoch && times.endsAt - times.now < END_MARGIN_SECONDS) continue;
+    // As the renewal job decides: the epoch under way only while enough of it is left.
+    if (epoch === times.epoch && !renewsEpochUnderWay(times)) continue;
     if (await buyer.chain.subscriptionExists(subscriptionIdOf(buyer.buyerWallet, epoch))) continue;
     const check = await buyer.dryRun({ epoch, source: plan.source, services: plan.services });
     const at = epoch === times.epoch ? times.now : Math.max(times.now, times.endsAt - buyer.config.prefundLeadSeconds);
