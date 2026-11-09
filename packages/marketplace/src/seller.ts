@@ -18,7 +18,8 @@
  *   the node's peer id, and the receipts' operational wallet signs it. One
  *   whose price changed is shared again, signed later: buyers keep the newest.
  *   So is each one half an epoch after its last copy, which shared memory
- *   keeps for a limited time.
+ *   keeps for a limited time. Each copy is shared on its own, one at a time,
+ *   and counts as shared once its share returns.
  * - **Each call** is checked, cheapest check first, then
  *   served by the service's backend, cut to the units the request allows, and
  *   its receipt signed by an operational wallet. The call, its result and its
@@ -98,8 +99,8 @@ export interface SellerDeps {
   tickSeconds: number;
   /** The landing loop's settings; the defaults otherwise. */
   landing?: LandingSettings;
-  /** Shares quads into the Marketplace Context Graph's shared memory. */
-  shareOffers?: (quads: OfferQuad[]) => Promise<void>;
+  /** Shares one offer, its quads, into the Marketplace Context Graph's shared memory: one call per copy. */
+  shareOffer?: (quads: OfferQuad[]) => Promise<void>;
   log?: (message: string) => void;
 }
 
@@ -203,8 +204,10 @@ export class Seller {
     await this.readGate();
     const times = await this.deps.chain.getEpochTimes();
     this.lastTimes = { times, at: Date.now() };
-    if (this.open && this.deps.shareOffers) {
-      await this.shareNewOffers(times).catch((err: unknown) => this.deps.log?.(`[marketplace] the offers were not shared: ${messageOf(err)}`));
+    if (this.open && this.deps.shareOffer) {
+      // One tick shares at a time: a tick at once with another would sign the same copies, at the same chain time.
+      await this.lock.run('offers', () => this.shareNewOffers(times))
+        .catch((err: unknown) => this.deps.log?.(`[marketplace] the offers were not shared: ${messageOf(err)}`));
     }
     this.lastLanding = await this.lander.tick(this.open).catch((err: unknown) => {
       this.deps.log?.(`[marketplace] landing failed: ${messageOf(err)}`);
@@ -387,11 +390,10 @@ export class Seller {
    * Share the offers due: each service's, for this epoch and the next, when it was not shared at its price yet, or
    * half an epoch after its last copy. Shared memory drops a copy a while after it is written (30 days by default),
    * so the offer always has one younger than half an epoch. Each is signed at the chain's time, and later than the
-   * one before it, since buyers keep the newest.
+   * one before it, since buyers keep the newest. Each is shared on its own: one that fails stops the rest, which the
+   * next tick shares, and those before it stay shared.
    */
   private async shareNewOffers(times: EpochTimes): Promise<void> {
-    const quads: OfferQuad[] = [];
-    const due = new Map<string, { price: bigint; signedAt: number }>();
     for (const epoch of [times.epoch, times.epoch + 1]) {
       for (const s of this.services.values()) {
         const price = await this.priceFor(s, epoch, times.epoch);
@@ -399,17 +401,14 @@ export class Seller {
         const last = this.shared.get(key);
         if (last?.price === price && times.now - last.signedAt < (times.endsAt - times.startsAt) / 2) continue;
         const signedAt = Math.max(times.now, (last?.signedAt ?? 0) + 1);
-        due.set(key, { price, signedAt });
-        quads.push(...offerQuads(await signOffer(this.deps.chain, this.deps.signer, this.domain!, {
+        await this.deps.shareOffer!(offerQuads(await signOffer(this.deps.chain, this.deps.signer, this.domain!, {
           seller: this.identityId, serviceId: s.serviceId, serviceClass: SERVICE_CLASS_INFERENCE, unit: 'token',
           pricePerUnit: price, epoch, capacity: s.capacity, model: s.model, provenance: s.provenance,
           ...(s.tokenizerBundle ? { tokenizerBundle: s.tokenizerBundle } : {}), peerId: this.deps.peerId, signedAt,
         })));
+        this.shared.set(key, { price, signedAt });
       }
     }
-    if (quads.length === 0) return;
-    await this.deps.shareOffers!(quads);
-    for (const [key, copy] of due) this.shared.set(key, copy);
   }
 
   /** The price of `service` in `epoch`, frozen and stored once the epoch is current. */

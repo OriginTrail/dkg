@@ -76,7 +76,7 @@ export async function startMarketplaceSeller(options: MarketplaceSellerOptions):
     tickSeconds: resolved.tickSeconds,
     landing: resolved.landing,
     ...(options.wallets ? { wallets: options.wallets } : {}),
-    ...(contextGraphId ? { shareOffers: async (quads) => { await agent.share(contextGraphId, quads); } } : {}),
+    ...(contextGraphId ? { shareOffer: async (quads) => { await agent.share(contextGraphId, quads); } } : {}),
     log,
   });
   await seller.load();

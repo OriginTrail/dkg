@@ -83,7 +83,7 @@ function sellerWith(over: { stopServingSeconds?: number; price?: bigint } = {}):
     peerId: 'seller-peer',
     stopServingSeconds: over.stopServingSeconds ?? 180,
     tickSeconds: 300,
-    shareOffers: async (quads) => { shared.push(quads); },
+    shareOffer: async (quads) => { shared.push(quads); },
   });
 }
 
@@ -156,11 +156,12 @@ describe('the gate, quotes and offers', () => {
     await seller.load();
     await seller.tick();
     await seller.tick();
-    expect(shared).toHaveLength(1);
+    // A share per offer, each of one subject.
+    expect(shared).toHaveLength(4);
     const { epoch } = await chain.getEpochTimes();
-    const offers = offersIn(shared[0]!);
+    const offers = shared.map((quads) => offersIn(quads)[0]!);
     expect(offers.map((o) => `${o.serviceId}:${o.epoch}`).sort()).toEqual([`${A}:${epoch}`, `${A}:${epoch + 1}`, `${B}:${epoch}`, `${B}:${epoch + 1}`].sort());
-    expect(new Set(shared[0]!.map((q) => q.subject))).toEqual(new Set(offers.map((o) => offerSubject(o.signature))));
+    expect(shared.map((quads) => [...new Set(quads.map((q) => q.subject))])).toEqual(offers.map((o) => [offerSubject(o.signature)]));
     for (const o of offers) {
       expect(o).toMatchObject({ seller: seller.gate.identityId, pricePerUnit: PRICE, capacity: 4, peerId: 'seller-peer' });
       expect(offerSignerOf(domain, o)).toBe(SELLER.address);
@@ -174,7 +175,7 @@ describe('the gate, quotes and offers', () => {
     await repriced.load();
     await repriced.tick();
     expect((await repriced.quote({ services: [A] })).offers[0]!.pricePerUnit).toBe('10');
-    expect(offersIn(shared[1]!).filter((o) => o.serviceId === A).map((o) => String(o.pricePerUnit)).sort()).toEqual(['10', '20']);
+    expect(offersIn(shared.slice(4).flat()).filter((o) => o.serviceId === A).map((o) => String(o.pricePerUnit)).sort()).toEqual(['10', '20']);
     await expect(repriced.quote({ services: ['0x01'] })).rejects.toThrow(/32 bytes/);
   });
 
@@ -190,8 +191,8 @@ describe('the gate, quotes and offers', () => {
     await seller.tick();
     await seller.tick();
     // Only A's next offer was shared again, once per change.
-    expect(shared.map((quads) => offersIn(quads).length)).toEqual([4, 1, 1]);
-    const copies = shared.map((quads) => nextOfA(quads)[0]!);
+    expect(shared).toHaveLength(6);
+    const copies = shared.flatMap(nextOfA);
     expect(copies.map((o) => o.pricePerUnit)).toEqual([PRICE, 30n, PRICE]);
     expect(copies[0]!.signedAt).toBeGreaterThanOrEqual(startsAt);
     expect(copies[1]!.signedAt).toBeGreaterThan(copies[0]!.signedAt);
@@ -209,11 +210,38 @@ describe('the gate, quotes and offers', () => {
     const at = (now: number) => vi.spyOn(chain, 'getEpochTimes').mockImplementation(async () => ({ ...(await real()), now }));
     at(first + half - 1);
     await seller.tick();
-    expect(shared).toHaveLength(1);
+    expect(shared).toHaveLength(4);
     at(first + half);
     await seller.tick();
+    expect(shared).toHaveLength(8);
+    expect(offersIn(shared.slice(4).flat()).map((o) => o.signedAt)).toEqual([first + half, first + half, first + half, first + half]);
+  });
+
+  it('keeps the offers shared before one that fails, and the next tick shares the rest', async () => {
+    let calls = 0;
+    const seller = new Seller({
+      chain, dir, services: [serviceOf(MODEL_A), serviceOf(MODEL_B)], signer: SELLER.address, peerId: 'seller-peer', stopServingSeconds: 180, tickSeconds: 300,
+      shareOffer: async (quads) => {
+        if (++calls === 3) throw new Error('the graph is away');
+        shared.push(quads);
+      },
+    });
+    await seller.load();
+    await seller.tick();
     expect(shared).toHaveLength(2);
-    expect(offersIn(shared[1]!).map((o) => o.signedAt)).toEqual([first + half, first + half, first + half, first + half]);
+    await seller.tick();
+    expect(shared).toHaveLength(4);
+    const { epoch } = await chain.getEpochTimes();
+    expect(shared.map((quads) => `${offersIn(quads)[0]!.serviceId}:${offersIn(quads)[0]!.epoch}`).sort())
+      .toEqual([`${A}:${epoch}`, `${A}:${epoch + 1}`, `${B}:${epoch}`, `${B}:${epoch + 1}`].sort());
+  });
+
+  it('shares each offer once when two ticks run at once', async () => {
+    const seller = sellerWith();
+    await seller.load();
+    await Promise.all([seller.tick(), seller.tick()]);
+    expect(shared).toHaveLength(4);
+    expect(new Set(shared.map((quads) => quads[0]!.subject)).size).toBe(4);
   });
 });
 
@@ -225,7 +253,7 @@ describe('the job', () => {
     seller.start();
     await seller.stop();
     expect(seller.gate.open).toBe(true);
-    expect(shared).toHaveLength(1);
+    expect(shared).toHaveLength(4);
     expect(receiptSignerOf(domain, { requestDigest: ethers.ZeroHash, resultCommitment: ethers.ZeroHash, units: 1n, valueWei: 1n, completedAt: 1 }, '0x00')).toBeNull();
   });
 
@@ -233,7 +261,7 @@ describe('the job', () => {
     const logs: string[] = [];
     const seller = new Seller({
       chain, dir, services: [serviceOf(MODEL_A)], signer: SELLER.address, peerId: 'seller-peer', stopServingSeconds: 180, tickSeconds: 300,
-      shareOffers: async () => { throw new Error('the graph is away'); },
+      shareOffer: async () => { throw new Error('the graph is away'); },
       log: (m) => logs.push(m),
     });
     await seller.load();
