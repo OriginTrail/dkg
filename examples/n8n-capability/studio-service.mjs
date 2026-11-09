@@ -1,4 +1,5 @@
 import { assertDkgEnabled, isDkg } from './dkg-components.mjs';
+import { componentFailure } from './dkg-component-operations.mjs';
 import { studioExecutionPlan, prepareStudioExecution } from './studio-execution-plan.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -96,7 +97,8 @@ export function createStudioService({ graphId, owner, client, repository, provid
     authorizeEvent?.();
     assertDkgEnabled(compiled.definition);
     if (plan.kind === 'native-n8n') native().installGrant(compiled.grant);
-    if (compiled.definition.nodes.some(n => isDkg(n.componentId))) components().grant(workflow, invocationId, input, actor);
+    if (compiled.definition.nodes.some(n => isDkg(n.componentId)))
+      components().grant(workflow, { invocationId, revisionDigest: workflow.sourceHash }, input, actor);
     const invoke = () => {
       authorizeEvent?.();
       if (compiled.mode === 'schedule') eventAuthorized(workflow.kaRef, compiled);
@@ -250,13 +252,15 @@ export function createStudioService({ graphId, owner, client, repository, provid
     finally { polling = false; }
   }
   async function dkgComponent(value) {
+    const invocationId = /^urn:sr:effect:([a-f0-9-]{36}):[^\s]{1,100}$/.exec(value?.effectId ?? '')?.[1];
+    if (!invocationId) throw componentFailure('Native execution identity required.');
     const row=repository.nativeWorkflow(value?.workflowId ?? '');
     if(!row) throw reject('Unknown native workflow.');
     const {compiled,workflow}=await get(row.ka_ref);
     if(!workflow.approved) throw reject('Workflow approval is unavailable.');
     validateStudioCapabilities(compiled.definition,await listCapabilities());
     const input = await native().executionInput({ workflowId: value.workflowId, executionId: value.executionId, grant: compiled.grant });
-    return components().call(value, workflow, value.workflowId, input);
+    return components().call(value, workflow, { invocationId, revisionDigest: workflow.sourceHash }, value.workflowId, input);
   }
   const timer = setInterval(() => void poll(), 3000); timer.unref();
   return { dkgComponent, list, get, save, run, activate, event, history, poll, stop() { stopped = true; clearInterval(timer); } };

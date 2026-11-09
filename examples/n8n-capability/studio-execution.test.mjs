@@ -21,6 +21,9 @@ test('generated Read/Write callbacks accept normalized pinned snapshots but reje
     assert.deepEqual(h.effects, ['read', 'write']);
     assert.equal(h.assets.size, 1);
     const request = h.requestFor(effectId, 'read', [{}]);
+    for (const invalidEffect of [invocationId, 'urn:sr:effect:' + invocationId, effectId + ' invalid'])
+      await assert.rejects(h.service.dkgComponent({ ...request, effectId: invalidEffect }),
+        { code: 'DKG_COMPONENT_UNCONFIRMED', status: 409, message: 'Native execution identity required.' });
     for (const alter of [
       value => ({ ...value, id: '43' }),
       value => ({ ...value, workflowVersionId: 'foreign-version' }),

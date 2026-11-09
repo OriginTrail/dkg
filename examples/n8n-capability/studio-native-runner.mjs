@@ -33,24 +33,39 @@ export function createStudioNativeRunner(provider, installation, send = fetch) {
       throw fail('STUDIO_NATIVE_UNCONFIRMED');
     return ack.executionId;
   }
-  async function inspect(workflow, saved, runKey) {
+  async function loadExecution(workflow, saved) {
+    if (!/^\d{1,20}$/.test(saved.execution_id ?? '')) throw fail('STUDIO_NATIVE_UNCONFIRMED');
     const execution = await provider.api('/executions/' + saved.execution_id + '?includeData=true');
     if (String(execution.id) !== saved.execution_id || execution.workflowId !== workflow.grant.workflowId)
       throw fail('STUDIO_NATIVE_UNCONFIRMED');
-    if (['new', 'running', 'waiting'].includes(execution.status)) return { status: 'running' };
+    return execution;
+  }
+  function verifiedInput(workflow, saved, runKey, execution, terminal) {
     // Use the saved immutable native snapshot, not whichever revision is currently
     // published. Pin verification also applies to failed executions before releasing capacity.
     const published = { ...workflow.published, versionId: saved.version_id };
-    if (!['success', 'error', 'canceled', 'crashed'].includes(execution.status)
-      || !n8nPinnedExecutionMatches(published, execution, workflow.grant, saved.version_id)) throw fail('STUDIO_NATIVE_UNCONFIRMED');
+    if (!n8nPinnedExecutionMatches(published, execution, workflow.grant, saved.version_id)) throw fail('STUDIO_NATIVE_UNCONFIRMED');
     try {
       // Terminal inspection requires completed Receive input evidence. A pending
       // stack alone suffices only for running callbacks, not terminal attribution.
-      if (execution.data?.resultData?.runData?.['Receive input'] === undefined) throw fail('STUDIO_NATIVE_UNCONFIRMED');
+      if (terminal && execution.data?.resultData?.runData?.['Receive input'] === undefined) throw fail('STUDIO_NATIVE_UNCONFIRMED');
       const received = recordedNativeExecutionInput(execution);
       if (received.invocationId !== runKey || !hash(saved.input_sha256)
         || nativeInputDigest(received.input) !== saved.input_sha256) throw fail('STUDIO_NATIVE_UNCONFIRMED');
+      return received;
     } catch { throw fail('STUDIO_NATIVE_UNCONFIRMED'); }
+  }
+  async function verifyCallback(workflow, saved) {
+    const execution = await loadExecution(workflow, saved);
+    const running = ['new', 'running', 'waiting'].includes(execution.status);
+    if (!running && !['success', 'error', 'canceled', 'crashed'].includes(execution.status)) throw fail('STUDIO_NATIVE_UNCONFIRMED');
+    return verifiedInput(workflow, saved, saved.run_key, execution, !running);
+  }
+  async function inspect(workflow, saved, runKey) {
+    const execution = await loadExecution(workflow, saved);
+    if (['new', 'running', 'waiting'].includes(execution.status)) return { status: 'running' };
+    if (!['success', 'error', 'canceled', 'crashed'].includes(execution.status)) throw fail('STUDIO_NATIVE_UNCONFIRMED');
+    verifiedInput(workflow, saved, runKey, execution, true);
     if (execution.status !== 'success') return { status: 'failed' };
     try {
       const result = collectN8nExecutionResult(workflow.grant, execution);
@@ -64,5 +79,5 @@ export function createStudioNativeRunner(provider, installation, send = fetch) {
       return { status: 'failed' };
     }
   }
-  return { prepare, dispatch, inspect };
+  return { prepare, dispatch, inspect, verifyCallback };
 }

@@ -13,6 +13,7 @@ const { compileStudio } = await import('./studio-definition.mjs');
 const { createStudioRepository } = await import('./studio-repository.mjs');
 const { createStudioProvider } = await import('./studio-provider.mjs');
 const { createStudioMcpService } = await import('./studio-mcp-service.mjs');
+const { createStudioNativeRunner } = await import('./studio-native-runner.mjs');
 const { dkgComponentStore } = await import('./dkg-components.mjs');
 const { handleDkgComponentCallback } = await import('./bridge.mjs');
 
@@ -47,18 +48,18 @@ test('native DKG callback uses the admitted pins, typed profile and full agent a
     { graphId: 'test', owner: '0x' + 'a'.repeat(40), fixture: true, headerCredential: { id: 'test', name: 'test' }, providerId: 'native-read' });
   const published = { ...compiled.workflow, id: 'native-read', versionId: 'v1', active: true };
   const repository = createStudioRepository(state);
-  const provider = createStudioProvider({ repository, config: { n8nNative: { workflows: [] } }, graphId: 'test', owner: '0x' + 'a'.repeat(40) });
   t.after(() => { if (repository.db.isOpen) repository.close(); });
   const runKey = '123e4567-e89b-42d3-a456-426614174088';
   let inputEvidence;
-  provider.api = async path => path.startsWith('/workflows') ? published : { id: '42', workflowId: 'native-read', workflowVersionId: 'v1', status: 'running', workflowData: published,
-    data: inputEvidence };
+  let execution = { id: '42', workflowId: 'native-read', workflowVersionId: 'v1', status: 'running', workflowData: published };
+  const nativeRunner = createStudioNativeRunner({ api: async () => ({ ...execution, data: inputEvidence }) });
   // Test fixture installs the same durable saved record that a completed owner save writes.
   repository.mcp.recordSavedNative(compiled, published);
   const actor = { id: 'owner', role: 'owner', accountId: 'account-test', startedBy: 'agent:a', agentVersion: 'v1', toolDigest: 'd'.repeat(64), approvalDecisionId: 'decision-1' };
+  const dkg = dkgComponentStore(repository.db, undefined, undefined, profile);
   let earlyCallback;
-  const s = createStudioMcpService({ repository, provider, dkg: dkgComponentStore(repository.db, undefined, undefined, profile), accountId: actor.accountId, profile,
-    runner: { async prepare() { return 'v1'; }, async dispatch(_workflow, invocationId, input) {
+  const s = createStudioMcpService({ repository, dkg, accountId: actor.accountId, profile,
+    runner: { ...nativeRunner, async prepare() { return 'v1'; }, async dispatch(_workflow, invocationId, input) {
       inputEvidence = { executionData: { nodeExecutionStack: [{ node: { name: 'Receive input' },
         data: { main: [[{ json: { body: { invocationId, input } } }]] } }] } };
       earlyCallback = s.dkgComponent({ effectId: runKey, workflowId: 'native-read', executionId: '42', blockId: 'read', items: [{ sample: 'a' }] });
@@ -73,19 +74,42 @@ test('native DKG callback uses the admitted pins, typed profile and full agent a
   assert.equal(result.items.length, 2); assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].context.actor, { ...actor, runKey });
   assert.equal(calls[0].operation, 'read');
+  assert.deepEqual({ ...repository.db.prepare('SELECT id, source_hash FROM dkg_component_runs').get() },
+    { id: runKey, source_hash: compiled.grant.workflowSha256 });
+  assert.equal(repository.db.prepare('SELECT id FROM dkg_component_calls').get().id, runKey + ':read');
+  const received = inputEvidence.executionData.nodeExecutionStack[0].data.main[0][0].json.body;
+  const changedRevision = { invocationId: runKey, revisionDigest: 'b'.repeat(64) };
+  assert.throws(() => dkg.grant(compiled, changedRevision, received.input, { ...actor, runKey }), /different workflow or inputs/);
+  await assert.rejects(dkg.call(callback, compiled, changedRevision, 'native-read', received), /approved workflow/);
+  await assert.rejects(dkg.call(callback, compiled,
+    { invocationId: 'other-run', revisionDigest: compiled.grant.workflowSha256 }, 'native-read', received), /approved workflow/);
+  assert.equal(calls.length, 1, 'scope mismatches cannot use a cached callback or dispatch');
   await assert.rejects(s.dkgComponent({ ...callback, executionId: '43' }));
   await assert.rejects(s.dkgComponent({ ...callback, blockId: 'write' }));
   await s.dkgComponent(callback); assert.equal(calls.length, 1); // retained read cache, no second node request
   const admittedEvidence = structuredClone(inputEvidence);
   inputEvidence.executionData.nodeExecutionStack[0].data.main[0][0].json.body.input.itemsJson = '[{"sample":"different"}]';
-  await assert.rejects(s.dkgComponent(callback), /exact input/);
+  await assert.rejects(s.dkgComponent(callback), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
   inputEvidence = undefined;
   await assert.rejects(s.dkgComponent(callback), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
   inputEvidence = admittedEvidence;
   await s.dkgComponent(callback); assert.equal(calls.length, 1);
+  const admittedExecution = structuredClone(execution);
+  for (const changed of [
+    { id: '43' }, { workflowId: 'foreign-workflow' }, { workflowVersionId: 'v2' },
+    { workflowData: { ...published, connections: {} } }, { status: 'unknown' },
+    { status: 'success' }, // A terminal callback must have completed Receive input evidence.
+  ]) {
+    execution = { ...admittedExecution, ...changed };
+    await assert.rejects(s.dkgComponent(callback), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
+  }
+  execution = admittedExecution;
   const completedInput = { data: structuredClone(admittedEvidence.executionData.nodeExecutionStack[0].data) };
   inputEvidence = { resultData: { runData: { 'Receive input': [completedInput] } } };
   await s.dkgComponent(callback); assert.equal(calls.length, 1); // The same decoder accepts saved progress.
+  execution.status = 'success';
+  await s.dkgComponent(callback); assert.equal(calls.length, 1); // A completed callback can replay its cache.
+  execution.status = 'running';
   inputEvidence.executionData = structuredClone(admittedEvidence.executionData);
   inputEvidence.executionData.nodeExecutionStack[0].data.main[0][0].json.body.input.itemsJson = '[{"sample":"conflicting"}]';
   await assert.rejects(s.dkgComponent(callback), { code: 'STUDIO_NATIVE_UNCONFIRMED' });

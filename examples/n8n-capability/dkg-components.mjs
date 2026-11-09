@@ -63,7 +63,16 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
     if (pending) throw Object.assign(fail('Reconcile the previous DKG write before starting another invocation.'),
       { code: 'DKG_WRITE_PENDING', invocationId: pending.id });
   }
-  function grant(workflow, invocationId, input, actor) {
+  // Adapters resolve their wire identities. The legacy source_hash column stores
+  // the explicit revision digest for either protocol; journal keys stay unchanged.
+  function journalScope(scope) {
+    if (!scope || typeof scope.invocationId !== 'string' || !scope.invocationId || scope.invocationId.length > 128
+      || typeof scope.revisionDigest !== 'string' || !/^[a-f0-9]{64}$/.test(scope.revisionDigest))
+      throw fail('Invocation identity and revision digest required.');
+    return scope;
+  }
+  function grant(workflow, journal, input, actor) {
+    const { invocationId, revisionDigest } = journalScope(journal);
     if (profile?.requiresNosActor && (!actor || actor.role !== 'owner' || actor.accountId !== profile.accountId))
       throw fail('Authenticated nOS owner required.');
     const actorText = JSON.stringify(actor ?? null);
@@ -80,7 +89,7 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
     if (
       old &&
       (old.ka_ref !== workflow.kaRef ||
-        old.source_hash !== workflow.sourceHash ||
+        old.source_hash !== revisionDigest ||
         old.input !== encoded)
     )
       throw fail(
@@ -95,7 +104,7 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
       db.prepare('INSERT OR IGNORE INTO dkg_component_actors VALUES (?,?)').run(invocationId, actorText);
       db.prepare('INSERT OR IGNORE INTO dkg_component_profiles VALUES (?,?,?)').run(invocationId, profile.id, profile.revision);
       db.prepare('INSERT INTO dkg_component_runs VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET expires=excluded.expires')
-        .run(invocationId, workflow.kaRef, workflow.sourceHash, encoded, Date.now() + 600000);
+        .run(invocationId, workflow.kaRef, revisionDigest, encoded, Date.now() + 600000);
       db.exec('RELEASE dkg_profile_grant');
     } catch (error) {
       db.exec('ROLLBACK TO dkg_profile_grant');
@@ -103,7 +112,8 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
       throw error;
     }
   }
-  async function call(value, workflow, nativeId, receivedInput) {
+  async function call(value, workflow, journal, nativeId, receivedInput) {
+    const { invocationId: id, revisionDigest } = journalScope(journal);
     if (
       !value ||
       Object.keys(value).some(
@@ -118,19 +128,14 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
       )
     )
       throw fail("Invalid DKG component request.");
-    const nativeRun = workflow.nativeMcp === true && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.effectId ?? "");
-    const match = nativeRun ? [value.effectId, value.effectId] : /^urn:sr:effect:([a-f0-9-]{36}):[^\s]{1,100}$/.exec(
-      value.effectId ?? "",
-    );
     if (
-      !match ||
+      typeof value.effectId !== 'string' || !value.effectId ||
       value.workflowId !== nativeId ||
       !/^\d{1,20}$/.test(value.executionId ?? "") ||
       typeof value.blockId !== "string"
     )
       throw fail("Native execution identity required.");
-    const id = match[1],
-      run = db.prepare("SELECT * FROM dkg_component_runs WHERE id=?").get(id),
+    const run = db.prepare("SELECT * FROM dkg_component_runs WHERE id=?").get(id),
       definition = workflow.definition;
     assertDkgEnabled(definition, profile);
     validateDkgTopology(definition);
@@ -138,7 +143,7 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
       !run ||
       run.expires < Date.now() ||
       run.ka_ref !== workflow.kaRef ||
-      run.source_hash !== workflow.sourceHash
+      run.source_hash !== revisionDigest
     )
       throw fail(
         "Run the approved workflow as its account owner before accessing DKG.",

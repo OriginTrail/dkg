@@ -2,9 +2,8 @@ import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { canonical, closed, fail, hash, id, nativeInputDigest, readOnlyDefinition, runInput } from './studio-mcp-contract.mjs';
 import { configuredDkgProfile } from './dkg-profile.mjs';
-import { n8nWorkflowSha256, n8nPinnedExecutionMatches } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
+import { n8nWorkflowSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { createStudioNativeRunner } from './studio-native-runner.mjs';
-import { recordedNativeExecutionInput } from './studio-native-execution.mjs';
 
 /** Small native admission journal, not a second receipt or workflow engine.
  * Arguments/results remain in n8n; only identity, pins and state live here.
@@ -87,9 +86,7 @@ export function createStudioMcpService({ repository, provider, installation, acc
       if (saved(workflow.kaRef).withdrawn) throw fail('STUDIO_WORKFLOW_WITHDRAWN');
       if (workflow.definition.nodes.some(n => n.componentId === 'dkg-read')) {
         if (profile.accountId !== accountId) throw fail('STUDIO_READ_PROFILE_REQUIRED');
-        // Legacy column name source_hash holds the execution pin on this native
-        // path; no Program/sourceHash is exposed or invented in the MCP contract.
-        dkg.grant({ ...workflow, sourceHash: workflow.grant.workflowSha256 }, value.runKey, input,
+        dkg.grant(workflow, { invocationId: value.runKey, revisionDigest: workflow.grant.workflowSha256 }, input,
           { ...actor, runKey: value.runKey });
       }
       // Persist uncertainty BEFORE the POST. Crash/lost acknowledgement never retries it.
@@ -123,20 +120,12 @@ export function createStudioMcpService({ repository, provider, installation, acc
     }
     const workflow = saved(r.ka_ref);
     readOnlyDefinition(workflow.definition, profile);
-    if (!['running', 'unconfirmed'].includes(r.status) || workflow.withdrawn
+    if (!id(value.effectId) || !['running', 'unconfirmed'].includes(r.status) || workflow.withdrawn
       || value.workflowId !== workflow.grant.workflowId || !/^\d{1,20}$/.test(value.executionId ?? '')
       || r.execution_id !== value.executionId) throw fail('STUDIO_NATIVE_UNCONFIRMED');
-    const execution = await provider.api('/executions/' + value.executionId + '?includeData=true');
-    let received;
-    try { received = recordedNativeExecutionInput(execution); }
-    catch { throw fail('STUDIO_NATIVE_UNCONFIRMED'); }
-    // The running execution's pending stack or saved run data must prove the
-    // exact granted input, in addition to the durable POST acknowledgement.
-    if (String(execution.id) !== value.executionId || received.invocationId !== r.run_key
-      || !n8nPinnedExecutionMatches({ ...workflow.published, versionId: r.version_id }, execution, workflow.grant, r.version_id))
-      throw fail('STUDIO_NATIVE_UNCONFIRMED');
+    const received = await runner.verifyCallback(workflow, r);
     if (saved(r.ka_ref).withdrawn) throw fail('STUDIO_WORKFLOW_WITHDRAWN');
-    return dkg.call(value, { ...workflow, nativeMcp: true, sourceHash: workflow.grant.workflowSha256 }, value.workflowId, received);
+    return dkg.call(value, workflow, { invocationId: r.run_key, revisionDigest: workflow.grant.workflowSha256 }, value.workflowId, received);
   }
   return { list, get, run, readRun, withdraw, dkgComponent };
 }
