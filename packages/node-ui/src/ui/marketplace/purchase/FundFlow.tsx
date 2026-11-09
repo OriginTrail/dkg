@@ -6,25 +6,15 @@
 import React, { useState } from 'react';
 import { copy } from '../copy.generated.js';
 import { marketplaceApi } from '../api/client.js';
-import type { CatalogAnswer, FundedAnswer, Funding, FundingRequest, PlanRequest, Preview } from '../api/types.js';
+import type { CatalogAnswer, FundedAnswer, Funding, FundingRequest, PlanRequest } from '../api/types.js';
 import { fmtHex, fmtTrac } from '../amounts.js';
 import { ErrorCard } from '../shared.js';
 import { Composer, PreviewLine, fundingRequestOf, servicesOf, type Draft } from './Composer.js';
 import { ConfirmGate } from './ConfirmGate.js';
 import { KeyStep } from './KeyStep.js';
+import type { Confirming, FundConfirming } from './model.js';
 import { ProgressSteps } from './ProgressSteps.js';
 import { usePreview } from './usePreview.js';
-
-/**
- * What the confirmation shows and what Confirm sends, fixed when Continue is
- * pressed: a funding of the epoch the node's dry run answered for, named by
- * its number so that an epoch boundary cannot move it, with that answer and
- * the plan it saves; or the plan alone.
- */
-type Confirming =
-  | { kind: 'fund'; request: FundingRequest & { epoch: number }; preview: Preview; plan: PlanRequest }
-  | { kind: 'plan'; plan: PlanRequest };
-type FundConfirming = Extract<Confirming, { kind: 'fund' }>;
 
 /** The flow, one phase at a time. A funding goes out once: once it is `funded`, only the plan save can be sent again. */
 type Flow =
@@ -138,8 +128,7 @@ export function FundFlow({ catalog, funding, initial, fundsEpoch, onboarding, on
         </>
       )}
       {(flow.phase === 'confirm' || flow.phase === 'sending') && (
-        <ConfirmGate catalog={catalog} funding={funding} preview={flow.confirming.kind === 'fund' ? flow.confirming.preview : null} services={flow.confirming.plan.services}
-          fundsEpoch={fundsEpoch} renew={flow.confirming.plan.renew} renewUntil={flow.confirming.plan.renewUntilEpoch ?? null}
+        <ConfirmGate catalog={catalog} funding={funding} confirming={flow.confirming}
           busy={flow.phase === 'sending'} err={flow.phase === 'confirm' ? flow.err : null}
           onConfirm={() => { void confirm(); }} onCancel={() => { setFlow({ phase: 'compose' }); setRound((r) => r + 1); }} />
       )}
