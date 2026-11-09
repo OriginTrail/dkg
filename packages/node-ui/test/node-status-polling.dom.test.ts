@@ -8,7 +8,7 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
-import { NODE_STATUS_POLL_MS, NODE_UNAVAILABLE_AFTER_FAILURES } from '../src/ui/lib/formatPeerStatus.js';
+import { NODE_STATUS_POLL_MS, NODE_UNAVAILABLE_AFTER_FAILURES } from '../src/ui/lib/nodeStatusPolicy.js';
 import { useAgentsStore } from '../src/ui/stores/agents.js';
 
 const fetchStatusMock = vi.fn();
@@ -68,5 +68,42 @@ describe('node status polling', () => {
     const word = await poll(up, ...Array(NODE_UNAVAILABLE_AFTER_FAILURES).fill(down), up);
     expect(useAgentsStore.getState().nodeStatusFailures).toBe(0);
     expect(word).toBe('Connected');
+  });
+
+  describe('through the real status request', () => {
+    // A hung node never answers. Each request stays open until its deadline
+    // aborts it, which the fake clock drives here.
+    beforeEach(async () => {
+      const { fetchStatus } = await vi.importActual<typeof import('../src/ui/api.js')>('../src/ui/api.js');
+      fetchStatusMock.mockImplementation(fetchStatus);
+      vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(new DOMException('timed out', 'TimeoutError')), ms);
+        return controller.signal;
+      });
+    });
+    afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+    let answer = false;
+    // Without a deadline the request would simply never settle.
+    const fetchStub = (_url: string, init: RequestInit = {}) => answer
+      ? Promise.resolve(new Response(JSON.stringify({ connectedPeers: 4 }), { status: 200 }))
+      : new Promise<Response>((_, reject) => init.signal?.addEventListener('abort', () => reject(init.signal!.reason)));
+
+    it('counts stalled checks as failures, then recovers when the node answers', async () => {
+      answer = false;
+      vi.stubGlobal('fetch', vi.fn(fetchStub));
+      await act(async () => { root = createRoot(container); root.render(React.createElement(StatusWord)); });
+      // Each check times out as the next one starts, so the count trails by one.
+      for (let i = 0; i < NODE_UNAVAILABLE_AFTER_FAILURES; i++) {
+        await act(async () => { await vi.advanceTimersByTimeAsync(NODE_STATUS_POLL_MS); });
+      }
+      expect(useAgentsStore.getState().nodeStatusFailures).toBeGreaterThanOrEqual(NODE_UNAVAILABLE_AFTER_FAILURES);
+      expect(container.textContent).toBe('Unavailable');
+
+      answer = true;
+      await act(async () => { await vi.advanceTimersByTimeAsync(NODE_STATUS_POLL_MS); });
+      expect(container.textContent).toBe('Connected');
+    });
   });
 });

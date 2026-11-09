@@ -104,9 +104,13 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
 
   async function renderPanel(options: { graphs?: any[]; stage?: number } = {}) {
     const { PanelLeft } = await import('../src/ui/components/Shell/PanelLeft.js');
+    // The panel opens the create and join dialogs; the shell renders them.
+    const { ContextGraphDialogs } = await import('../src/ui/components/Shell/ContextGraphDialogs.js');
+    const { useContextGraphDialogs } = await import('../src/ui/stores/contextGraphDialogs.js');
     const { useJourneyStore } = await import('../src/ui/stores/journey.js');
     const { useProjectsStore } = await import('../src/ui/stores/projects.js');
     const { useLayoutStore } = await import('../src/ui/stores/layout.js');
+    useContextGraphDialogs.setState({ createOpen: false, joinOpen: false, joinContextGraphId: undefined });
     // Reset stores between tests so prior toggles don't leak.
     act(() => {
       useJourneyStore.setState({ stage: options.stage ?? 2 });
@@ -134,7 +138,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     mountedRoots.push(root);
     mountedContainers.push(container);
     await act(async () => {
-      root.render(React.createElement(PanelLeft));
+      root.render(React.createElement(React.Fragment, null, React.createElement(PanelLeft), React.createElement(ContextGraphDialogs)));
     });
     await flush();
     await flush();

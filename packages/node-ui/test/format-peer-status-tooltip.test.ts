@@ -1,10 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import {
-  NODE_UNAVAILABLE_AFTER_FAILURES,
-  formatPeerStatusTooltip,
-  headerNodeStatus,
-  isNodeStatusFailure,
-} from '../src/ui/lib/formatPeerStatus.js';
+import { formatPeerStatusTooltip, headerNodeStatus } from '../src/ui/lib/formatPeerStatus.js';
+import { NODE_UNAVAILABLE_AFTER_FAILURES, isNodeStatusFailure } from '../src/ui/lib/nodeStatusPolicy.js';
 import { useAgentsStore } from '../src/ui/stores/agents.js';
 
 /**

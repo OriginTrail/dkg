@@ -5,6 +5,7 @@ import { PanelLeft } from './components/Shell/PanelLeft.js';
 import { PanelCenter } from './components/Shell/PanelCenter.js';
 import { PanelBottom } from './components/Shell/PanelBottom.js';
 import { PanelRight } from './components/Shell/PanelRight.js';
+import { ContextGraphDialogs } from './components/Shell/ContextGraphDialogs.js';
 import { useLayoutStore, useShellPanels, maxBottomHeight } from './stores/layout.js';
 import { useTabsStore } from './stores/tabs.js';
 import { detectMockMode, isUsingMocks, subscribeMockMode } from './api-wrapper.js';
@@ -80,10 +81,8 @@ function AppShell() {
   const { pathname, state: routeState } = useLocation();
   const navigate = useNavigate();
   // Going somewhere, or resizing past the breakpoint, shows the page, not a floating panel.
-  // Not while a dialog from the panel is open: create and join navigate before their last step.
-  useEffect(() => {
-    if (!useLayoutStore.getState().narrowPanelHeld) closeNarrowPanel();
-  }, [pathname, narrow, closeNarrowPanel]);
+  // The create and join dialogs belong to the shell (ContextGraphDialogs), so closing the panel keeps them.
+  useEffect(() => { closeNarrowPanel(); }, [pathname, narrow, closeNarrowPanel]);
   // Arrived from /agent-hub: wide screens get the panel expanded, narrow ones the floating panel.
   useEffect(() => {
     if (!(routeState as { openAgents?: boolean } | null)?.openAgents) return;
@@ -159,6 +158,7 @@ function AppShell() {
       <ApiTokenPrompt />
       <nav aria-label="Skip link"><button type="button" className="ds-skip-link" onClick={() => document.getElementById(expanded ? 'agents-panel' : 'main-content')?.focus()}>Skip to content</button></nav>
       <Header />
+      <ContextGraphDialogs />
       <div className="v10-app-body">
         {narrow && (leftOpen || rightOpen) && (
           <button type="button" className="v10-panel-scrim" aria-label="Close panel" onClick={closeNarrowPanel} />

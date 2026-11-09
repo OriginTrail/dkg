@@ -24,15 +24,6 @@ describe('side panels on a narrow screen', () => {
     expect(store.getState().rightCollapsed).toBe(false);
   });
 
-  it('marks the panel held while one of its dialogs is open', async () => {
-    const store = await loadStore(true);
-    expect(store.getState().narrowPanelHeld).toBe(false);
-    store.getState().holdNarrowPanel(true);
-    expect(store.getState().narrowPanelHeld).toBe(true);
-    store.getState().holdNarrowPanel(false);
-    expect(store.getState().narrowPanelHeld).toBe(false);
-  });
-
   it('keeps the normal toggle on a wide screen', async () => {
     const store = await loadStore(false);
     store.getState().toggleLeft();

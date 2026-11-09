@@ -61,7 +61,7 @@ describe('/agent-hub', () => {
       tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }, { id: 'settings', label: 'Settings', closable: true }],
       activeTabId: 'settings',
     });
-    useLayoutStore.setState({ rightCollapsed: true, rightExpanded: false, narrowPanel: null, narrowPanelHeld: false });
+    useLayoutStore.setState({ rightCollapsed: true, rightExpanded: false, narrowPanel: null });
   });
   afterEach(async () => {
     await act(async () => root?.unmount()); root = null; document.body.innerHTML = '';

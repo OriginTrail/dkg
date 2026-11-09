@@ -1,11 +1,10 @@
-import React, { useCallback, useEffect, useId, useState } from 'react';
+import React, { useCallback, useId, useState } from 'react';
 import { ChevronRight, Eye, X, RefreshCw, LogIn, Plus } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
 import { useJourneyStore } from '../../stores/journey.js';
-import { CreateProjectModal } from '../Modals/CreateProjectModal.js';
-import { JoinProjectModal } from '../Modals/JoinProjectModal.js';
+import { useContextGraphDialogs } from '../../stores/contextGraphDialogs.js';
 import { useContextGraphInventory, refreshContextGraphInventory } from '../../hooks/useContextGraphInventory.js';
 import { useVisibilityPolling } from '../../hooks/useVisibilityPolling.js';
 import { useHiddenContextGraphIds as useHiddenProjectIds } from '../../hooks/useHiddenContextGraphIds.js';
@@ -231,27 +230,8 @@ export function PanelLeft() {
     belongsInPublicSidebar(cg, agentIdentity));
   const hiddenCount = contextGraphs.length - visibleContextGraphs.length;
 
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showJoinModal, setShowJoinModal] = useState(false);
-  const [joinContextGraphId, setJoinContextGraphId] = useState<string | undefined>();
-
-  const openJoinModal = useCallback((contextGraphId?: string) => {
-    setJoinContextGraphId(contextGraphId);
-    setShowJoinModal(true);
-  }, []);
-
-  const closeJoinModal = useCallback(() => {
-    setShowJoinModal(false);
-    setJoinContextGraphId(undefined);
-  }, []);
-
-  // The dialogs live in this panel, so it stays open on a narrow screen until they close.
-  const holdNarrowPanel = useLayoutStore((s) => s.holdNarrowPanel);
-  useEffect(() => {
-    holdNarrowPanel(showCreateModal || showJoinModal);
-    return () => holdNarrowPanel(false);
-  }, [showCreateModal, showJoinModal, holdNarrowPanel]);
-
+  const openCreateModal = useContextGraphDialogs((s) => s.openCreate);
+  const openJoinModal = useContextGraphDialogs((s) => s.openJoin);
 
   return (
     <div className="v10-panel-left">
@@ -276,7 +256,7 @@ export function PanelLeft() {
       </nav>
 
       <div className="v10-tree-create-actions">
-        <button className="v10-new-project-btn ds-btn" aria-label="New Context Graph" title="New Context Graph" onClick={() => setShowCreateModal(true)}><Plus size={14} aria-hidden="true" />New</button>
+        <button className="v10-new-project-btn ds-btn" aria-label="New Context Graph" title="New Context Graph" onClick={openCreateModal}><Plus size={14} aria-hidden="true" />New</button>
         <button className="v10-new-project-btn ds-btn" aria-label="Join Context Graph" title="Join Context Graph" onClick={() => openJoinModal()}><LogIn size={14} aria-hidden="true" />Join</button>
       </div>
 
@@ -301,7 +281,7 @@ export function PanelLeft() {
                   : 'Create your first Context Graph to give your agent structured memory.'}
               </div>
               {stage === 1 && (
-                <button className="v10-new-project-btn ds-btn" style={{ margin: 0 }} onClick={() => setShowCreateModal(true)}>
+                <button className="v10-new-project-btn ds-btn" style={{ margin: 0 }} onClick={openCreateModal}>
                   <Plus size={14} aria-hidden="true" />Create your first Context Graph
                 </button>
               )}
@@ -487,13 +467,6 @@ export function PanelLeft() {
           </button>
         ))}
       </nav>
-
-      <CreateProjectModal open={showCreateModal} onClose={() => setShowCreateModal(false)} />
-      <JoinProjectModal
-        open={showJoinModal}
-        onClose={closeJoinModal}
-        initialContextGraphId={joinContextGraphId}
-      />
     </div>
   );
 }
