@@ -590,7 +590,7 @@ export function CreatePcaModal({
             extension; the old account's TRAC stays locked until its own expiry. */}
         {replacingAccountId && (
           <div className="v10-modal-warning ds-card-nested" role="status" data-testid="pca-renew-note">
-            ⓘ This creates a <strong>new, separate</strong> account (a new id) — it does not extend or
+            <StatusGlyph tone="warning" /> This creates a <strong>new, separate</strong> account (a new id) — it does not extend or
             reclaim PCA #{replacingAccountId}. The old account’s committed TRAC stays locked until its
             own expiry (it can’t be withdrawn early), and the new account starts at <strong>0/100</strong>
             approved wallets. The next step is pre-filled with the old account’s wallets for one-step
@@ -635,10 +635,10 @@ export function CreatePcaModal({
           {/* S2b renew (LOW) — the old account's primary node couldn't be read, so the picker
               fell back to THIS node. Surface it rather than silently defaulting. */}
           {replacingAccountId && seed?.primaryNodeUnknown && (
-            <p className="v10-pca-create-hint" role="status" data-testid="pca-renew-primary-unknown">
-              ⓘ Couldn’t read PCA #{replacingAccountId}’s primary node — defaulting to this node. Pick a
+            <div className="v10-modal-warning ds-card-nested" role="status" data-testid="pca-renew-primary-unknown">
+              <StatusGlyph tone="warning" /> Couldn’t read PCA #{replacingAccountId}’s primary node — defaulting to this node. Pick a
               different staked node below if the replacement should point elsewhere.
-            </p>
+            </div>
           )}
           <PrimaryNodePicker
             nodes={stakedNodes}

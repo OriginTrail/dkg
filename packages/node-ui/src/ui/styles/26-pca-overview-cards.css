@@ -64,9 +64,6 @@
 .v10-pca-way-in .v10-pca-settings-line { margin: 0; flex: 1; }
 .v10-pca-row-actions { display: inline-flex; gap: var(--space-8); }
 .v10-pca-list td:not(:nth-child(3)) { white-space: nowrap; }
-.v10-pca-add-by-id { display: flex; flex-direction: column; align-items: flex-end; gap: var(--space-4); }
-/* The field keeps its natural width, so Add stays beside it instead of wrapping below. */
-.v10-pca-add-by-id .v10-form-input { width: auto; }
 .v10-pca-retry-block { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-8); }
 .v10-pca-text-link { color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline); text-underline-offset: 3px; }
 
@@ -86,29 +83,7 @@
 }
 
 .v10-pca-card-btn:disabled { opacity: var(--opacity-disabled); }
-.v10-pca-inline-btn {
-  text-decoration: underline;
-  text-decoration-color: var(--link-underline);
-  text-underline-offset: 3px;
-  border: none;
-  background: transparent;
-  color: var(--text-link);
-  font: inherit;
-  font-weight: 700;
-  padding: 0;
-  cursor: pointer;
-  text-decoration: underline;
-}
-.v10-pca-inline-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .v10-pca-card-error { display: flex; flex-direction: column; gap: 10px; font-size: var(--fs-control); color: var(--text-secondary); }
 .v10-pca-card-skeleton { min-height: 180px; opacity: 0.5; }
 
-/* ----- Track-by-id disclosure ----- */
-
-.v10-pca-track-status {
-  margin: var(--space-8) 0 0;
-  color: var(--text-secondary);
-  font-size: var(--fs-control);
-  line-height: var(--lh-snug);
-}
 

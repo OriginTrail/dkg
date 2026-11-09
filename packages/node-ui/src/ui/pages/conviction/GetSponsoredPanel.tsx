@@ -13,7 +13,7 @@ import {
   isTestnetChain,
 } from '../../components/Pca/index.js';
 import { Check } from 'lucide-react';
-import { StatusGlyph } from '../../components/ds/Badge.js';
+import { Badge, StatusGlyph } from '../../components/ds/Badge.js';
 import { Loading } from '../../components/ds/Loading.js';
 import { ExternalMark } from '../../components/ds/ExternalMark.js';
 
@@ -288,7 +288,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
           {probed && (
             <div className="v10-pca-approve-results" role="status" aria-live="polite">
               <p className="v10-pca-approve-summary">
-                <span className="v10-wallet-status" data-tone={summaryTone(probed.rows) === 'warning' ? 'warn' : summaryTone(probed.rows)}><StatusGlyph tone={summaryTone(probed.rows)} /></span> Approved on PCA #{probed.accountId}: {approvedCount} of {probed.rows.length} wallets
+                <Badge tone={summaryTone(probed.rows)}>Approved on PCA #{probed.accountId}: {approvedCount} of {probed.rows.length} wallets</Badge>
               </p>
               {inactiveReason(probed.accountId, probed.rows) && (
                 <p className="v10-modal-warning ds-card-nested">{inactiveReason(probed.accountId, probed.rows)}</p>

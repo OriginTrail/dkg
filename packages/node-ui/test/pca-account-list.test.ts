@@ -37,7 +37,6 @@ const handlers = {
   onRemove: vi.fn(),
   onRetry: vi.fn(),
   onAddFound: vi.fn(),
-  onAddById: vi.fn(),
 };
 
 async function renderList(accounts: PcaListAccount[], over: Record<string, unknown> = {}) {
@@ -46,7 +45,7 @@ async function renderList(accounts: PcaListAccount[], over: Record<string, unkno
   const root = createRoot(container);
   await act(async () => {
     root.render(React.createElement(PcaAccountList, {
-      accounts, found: [], loading: false, walletsInconclusive: false, pendingId: null, readingWallet: null, nowSec: NOW, ...handlers, ...over,
+      accounts, found: [], loading: false, walletsInconclusive: false, readingWallet: null, nowSec: NOW, ...handlers, ...over,
     }));
   });
   return container;
@@ -67,18 +66,23 @@ describe('PcaAccountList', () => {
     expect(row.textContent).toContain('20%');
     expect(row.textContent).toContain('This node');
     expect(row.textContent).toContain('2 approved');
-    expect(row.textContent).toContain('In 90 days');
+    expect(row.textContent).toContain('~90 days');
     expect(buttons(c)).toEqual(['Manage']);
   });
 
-  it('offers Approve wallets on an owned PCA with none approved, and still opens it from the ID', async () => {
+  it('offers Approve wallets on an owned PCA with none approved, and shows the ID as plain text', async () => {
     const c = await renderList([account({ approvedCount: 0 })]);
     expect(c.textContent).toContain('None approved');
     expect(buttons(c)).toEqual(['Approve wallets']);
-    await act(async () => {
-      (c.querySelector('[aria-label="Open PCA #12"]') as HTMLElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    expect(handlers.onManage).toHaveBeenCalledWith('12');
+    // View or Manage is the one way in; the ID is not a second button.
+    expect(c.querySelector('[data-account="12"] td:first-child button')).toBeNull();
+    expect(c.querySelector('[data-account="12"] td:first-child strong')?.textContent).toBe('#12');
+  });
+
+  it('shows the exact committed TRAC on hover', async () => {
+    const c = await renderList([account()]);
+    const cell = c.querySelector('[data-account="12"] td:nth-child(4)') as HTMLElement;
+    expect(cell.title).toMatch(/^Exact: /);
   });
 
   it('disables Approve wallets on the wrong network', async () => {
@@ -131,10 +135,11 @@ describe('PcaAccountList', () => {
     expect(row.textContent).not.toContain('10%');
   });
 
-  it('with no PCAs, asks whether you already have one and keeps Add by ID', async () => {
+  it('with no PCAs, points to Get added and Connect wallet instead of an ID field', async () => {
     const c = await renderList([]);
     expect(c.textContent).toContain('Already have a PCA?');
-    expect(c.querySelector('[data-testid="pca-track-toggle"]')).toBeTruthy();
+    expect(c.querySelector('[data-testid="pca-list-empty"]')?.textContent).toMatch(/Get added.*connect its owner wallet/);
+    expect(c.querySelector('input')).toBeNull();
     expect(c.querySelector('table')).toBeNull();
   });
 });

@@ -280,9 +280,7 @@ export const sel = {
     recheckBtn: '[data-testid="pca-recheck-btn"]',
     // S7 role-adaptive landing + S1 overview
     landing: '[data-testid="pca-landing"]',
-    trackToggle: '[data-testid="pca-track-toggle"]', // S1 collapsed "track by id" disclosure (expand first)
-    trackInput: '[data-testid="pca-track-input"]',         // S1 manual accountId paste (P0 pre-discovery)
-    trackSubmit: '[data-testid="pca-track-submit"]',
+    listEmpty: '[data-testid="pca-list-empty"]',           // S1 empty list: points to Get added and Connect wallet
     accountCard: '[data-testid="pca-account-row"]',         // S1 PCA list row
     healthChip: '[data-testid="pca-health-chip"]',          // HealthChip
     tierLadder: '[data-testid="pca-tier-ladder"]',          // DiscountTierLadder

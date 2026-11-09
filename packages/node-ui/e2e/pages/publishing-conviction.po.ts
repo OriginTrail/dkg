@@ -1,5 +1,6 @@
 import { type Page, type Locator } from '@playwright/test';
 import { sel } from '../helpers/selectors.js';
+import { fetchApiInPage } from '../helpers/page-api.js';
 
 /**
  * Page object for the GREENFIELD Publisher Conviction (PCA) tab
@@ -23,9 +24,7 @@ export class PublishingConvictionPage {
   readonly unavailable: Locator;
   readonly recheckBtn: Locator;
   readonly landing: Locator;
-  readonly trackToggle: Locator;
-  readonly trackInput: Locator;
-  readonly trackSubmit: Locator;
+  readonly listEmpty: Locator;
   readonly accountCard: Locator;
   readonly healthChip: Locator;
   readonly tierLadder: Locator;
@@ -60,9 +59,7 @@ export class PublishingConvictionPage {
     this.unavailable = page.locator(sel.conviction.unavailable);
     this.recheckBtn = page.locator(sel.conviction.recheckBtn);
     this.landing = page.locator(sel.conviction.landing);
-    this.trackToggle = page.locator(sel.conviction.trackToggle);
-    this.trackInput = page.locator(sel.conviction.trackInput);
-    this.trackSubmit = page.locator(sel.conviction.trackSubmit);
+    this.listEmpty = page.locator(sel.conviction.listEmpty);
     this.accountCard = page.locator(sel.conviction.accountCard);
     this.healthChip = page.locator(sel.conviction.healthChip);
     this.tierLadder = page.locator(sel.conviction.tierLadder);
@@ -106,14 +103,24 @@ export class PublishingConvictionPage {
     return this.unavailable.isVisible().catch(() => false);
   }
 
-  /** Track a known PCA by accountId (S1 pre-discovery manual path, P0). The
-   *  track-by-id input lives in a collapsed disclosure — expand it first. */
+  /** Track a known PCA by accountId. The UI has no typed-ID field on the
+   *  Overview (PCAs arrive by discovery or Get added), so this seeds the id into
+   *  the PCA store's saved list, under the same scoped key the app uses
+   *  (`dkg-pca:<chainId>:<nft>:<token>`), then reloads the Overview. */
   async trackAccount(accountId: string) {
-    if (!(await this.trackInput.isVisible().catch(() => false))) {
-      await this.trackToggle.first().click();
-    }
-    await this.trackInput.fill(accountId);
-    await this.trackSubmit.click();
+    const contracts = await fetchApiInPage<{ chainId: string | number; nft: string; token: string }>(
+      this.page, '/api/pca/contracts',
+    );
+    if (!contracts.ok || !contracts.json) throw new Error(`/api/pca/contracts failed (${contracts.status})`);
+    const { chainId, nft, token } = contracts.json;
+    const key = `dkg-pca:${[String(chainId), nft, token].map((v) => v.toLowerCase()).join(':')}`;
+    await this.page.evaluate(({ key, accountId }) => {
+      const saved = JSON.parse(localStorage.getItem(key) ?? '{}') as { trackedIds?: string[] };
+      const trackedIds = Array.from(new Set([...(saved.trackedIds ?? []), accountId]));
+      localStorage.setItem(key, JSON.stringify({ ...saved, trackedIds }));
+    }, { key, accountId });
+    await this.page.reload();
+    await this.open();
     await this.accountCard.first().waitFor({ state: 'visible', timeout: 15_000 });
   }
 

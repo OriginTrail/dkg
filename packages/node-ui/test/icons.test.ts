@@ -12,7 +12,7 @@ const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }
 const files = walk(UI);
 
 // Arrows, technical symbols, shapes, dingbats and emoji.
-const GLYPH = /[×←-⇿⌀-⏿■-➿⤀-⥿⬀-⯿\u{1f300}-\u{1faff}]/gu;
+const GLYPH = /[×ℹ←-⇿⌀-⏿①-⓿■-➿⤀-⥿⬀-⯿\u{1f300}-\u{1faff}]/gu;
 // Typography rather than icons: text arrows inside a sentence or link.
 const ALLOWED = new Set(['→', '←']);
 

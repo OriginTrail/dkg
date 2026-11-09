@@ -103,7 +103,6 @@ export function ConvictionOverview() {
   const [createOpen, setCreateOpen] = useState(false);
   const [approve, setApprove] = useState<{ accountId: string; mode: 'self' | 'sponsor'; selfCoverage?: boolean } | null>(null);
   const [sponsoredOpen, setSponsoredOpen] = useState(false);
-  const [manualTrackPending, setManualTrackPending] = useState<string | null>(null);
 
   const enhancedAccounts = useMemo<PcaListAccount[]>(
     () =>
@@ -122,13 +121,6 @@ export function ConvictionOverview() {
       }),
     [accounts, connectedWallet, primaryWallet, wrongNetwork],
   );
-
-  useEffect(() => {
-    if (!manualTrackPending || loading) return;
-    if (enhancedAccounts.some((account) => account.accountId === manualTrackPending)) {
-      setManualTrackPending(null);
-    }
-  }, [enhancedAccounts, loading, manualTrackPending]);
 
   const onManage = (id: string) => openTab({ id: `conviction:${id}`, label: `PCA #${id}`, closable: true });
   const walletCoverageRows = useMemo(
@@ -169,13 +161,6 @@ export function ConvictionOverview() {
   const switchNetwork = useCallback(() => {
     void switchToExpectedChain();
   }, [switchToExpectedChain]);
-  const trackAccountById = useCallback(
-    (id: string) => {
-      setManualTrackPending(id);
-      trackAccount(id);
-    },
-    [trackAccount],
-  );
 
   const firstLoad = loading && accounts.length === 0 && overview.wallets.length === 0;
   const walletTotal = overview.wallets.length;
@@ -339,8 +324,6 @@ export function ConvictionOverview() {
         onRemove={untrackAccount}
         onRetry={() => refresh()}
         onAddFound={trackAccount}
-        onAddById={trackAccountById}
-        pendingId={manualTrackPending}
         readingWallet={connectedWalletPcas.loading && connectedWallet ? connectedWallet : null}
       />
 

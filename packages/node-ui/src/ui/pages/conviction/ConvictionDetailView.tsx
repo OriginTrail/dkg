@@ -15,8 +15,9 @@ import {
   DeviceConfirmProgress,
   formatPcaTrac,
   formatWeiToTrac,
-  formatRelativeExpiry,
+  formatExpiryShort,
   RetryButton,
+  truncateAddress,
 } from '../../components/Pca/index.js';
 import { healthForSnapshot } from '../../pca/health.js';
 import { StatStrip } from '../../components/ContextGraphPrimitives.js';
@@ -26,7 +27,7 @@ import { LifecycleSection } from './LifecycleSection.js';
 import { eqAddress } from '../../web3/address.js';
 import { resolvePrimaryWalletState, type PcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
-import { Badge } from '../../components/ds/Badge.js';
+import { Badge, StatusGlyph } from '../../components/ds/Badge.js';
 import { BadgePercent } from 'lucide-react';
 import { Loading } from '../../components/ds/Loading.js';
 import { bpsToPercent } from '../../lib/format.js';
@@ -35,7 +36,7 @@ import { Breadcrumbs } from '../../components/ds/Breadcrumbs.js';
 import { useTabsStore } from '../../stores/tabs.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
-  return formatRelativeExpiry(expiresAtTimestamp).replace(/^Expires in /, '');
+  return formatExpiryShort(expiresAtTimestamp) ?? 'Expiry unknown';
 }
 
 /**
@@ -93,19 +94,20 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
   // gateReason stays consumer-built for now (model gateReason deferred to a later step): the
   // exact same branches, re-expressed on access.mode / access.wrongNetwork — identical values
   // to the old ownerMode / walletWrongNetwork now that both come from the one model.
+  const owner = truncateAddress(snapshot.owner);
   const ownerGateReason = walletsLoading
     ? `Confirming ownership of PCA #${accountId}…`
     : walletsUnreadable
-    ? `Couldn't load this node's wallets - can't confirm ownership of PCA #${accountId}.`
+    ? `Couldn’t load this node’s wallets, so we can’t confirm who owns PCA #${accountId}.`
     : access.mode === 'wallet' && access.wrongNetwork
-    ? `Wrong network - switch the connected wallet to this node's PCA network to manage PCA #${accountId}.`
+    ? `The PCA owner wallet is on another network. Switch it to this node’s network to change PCA #${accountId}.`
     : access.mode === 'wallet'
-    ? `Connected wallet ${snapshot.owner} owns PCA #${accountId}; device-signed owner actions are enabled.`
+    ? `Your connected wallet is the PCA owner wallet, so you can change PCA #${accountId}.`
     : ownerInPool
-    ? `Owner-only - PCA #${accountId} is owned by ${snapshot.owner}, not this node's primary operational wallet, so node-UI can't sign for it.`
+    ? `Only the PCA owner wallet (${owner}) can change PCA #${accountId}. It’s one of this node’s wallets, but not the one the node signs with.`
     : connectedWallet
-    ? `Owner-only - connected as ${connectedWallet}; switch to ${snapshot.owner} to manage PCA #${accountId}.`
-    : `Owner-only - connect ${snapshot.owner} to manage PCA #${accountId}.`;
+    ? `Only the PCA owner wallet (${owner}) can change PCA #${accountId}. Your connected wallet isn’t it.`
+    : `Only the PCA owner wallet (${owner}) can change PCA #${accountId}.`;
 
   return (
     <DetailBody
@@ -182,14 +184,17 @@ function DetailBody({
   const walletSurfaceCopy = connectedWallet
     ? access.mode === 'wallet'
       ? access.wrongNetwork
-        ? 'Owner wallet matches; switch network before signing owner actions.'
-        : 'Connected owner wallet will sign top-up, approve, remove, and renewal actions.'
+        ? 'Your connected wallet is the PCA owner wallet, but it’s on another network. Switch networks to top up, approve wallets or renew this PCA.'
+        : 'Your connected wallet is the PCA owner wallet. It signs top-ups, wallet approvals, removals and renewals.'
       : access.mode === 'daemon'
-        ? 'Connected wallet is available for wallet-owned PCAs; this account uses the node daemon for owner actions.'
-        : `Connected as ${connectedWallet}; switch to ${snapshot.owner} to manage owner actions.`
+        ? 'This node owns this PCA and signs changes itself. You don’t need to connect a wallet.'
+        : `Your connected wallet isn’t the PCA owner wallet. To top up, approve wallets or renew this PCA, switch to ${truncateAddress(snapshot.owner)}.`
     : access.mode === 'external'
-      ? 'Connect the PCA owner wallet to manage this account. Provider metadata is display-only.'
-      : 'Connect a wallet to view and manage wallet-owned PCAs from this tab.';
+      ? 'To top up, approve wallets or renew this PCA, connect the PCA owner wallet.'
+      : 'To manage a PCA that a wallet owns, connect that wallet.';
+  // Not connected to someone else's PCA: the line above already says what to do, so no warning repeats it.
+  const ownerNoticeRepeats = !connectedWallet && access.mode === 'external' && !walletsUnreadable
+    && !wallets.some((w) => eqAddress(w, snapshot.owner));
 
   const openTab = useTabsStore.getState().openTab;
   return (
@@ -209,8 +214,8 @@ function DetailBody({
         <p className="v10-pca-overview-caveat">Any leftover top-up went to the staker reward pool.</p>
       )}
 
-      <div className="v10-modal-tip ds-card-nested" role="status">
-        {walletSurfaceCopy}
+      <div className="v10-modal-tip ds-card-nested v10-pca-wallet-surface" role="status">
+        <p className="v10-pca-wallet-surface-copy">{walletSurfaceCopy}</p>
         {connectedWallet ? <WalletPill /> : <WalletConnectControl testId="pca-wallet-connect" />}
       </div>
 
@@ -222,7 +227,7 @@ function DetailBody({
         />
       )}
 
-      {!access.writesEnabled && (
+      {!access.writesEnabled && !ownerNoticeRepeats && (
         // Pure LOADING window (#1470): a neutral "confirming ownership" tip — no false "Couldn't
         // load", no Retry (the balances are auto-fetching); owner controls stay disabled for the
         // brief window. FAILED/EXTERNAL/wrong-network keep the warning box (+ Retry when unreadable).
@@ -231,7 +236,7 @@ function DetailBody({
         ) : (
           <div className="v10-pca-retry-block">
             <div className="v10-modal-warning ds-card-nested v10-pca-notice" role="status">
-              ⓘ {ownerOnlyReason}{walletsUnreadable ? null : ' Wallet probe stays available.'}
+              <StatusGlyph tone="warning" /> {ownerOnlyReason}{walletsUnreadable ? null : ' You can still check whether a wallet is approved.'}
             </div>
             {walletsUnreadable && <RetryButton onClick={onRetryWallets} />}
           </div>

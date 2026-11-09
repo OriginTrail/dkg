@@ -1,31 +1,23 @@
-import React, { useId, useState } from 'react';
-import { HealthChip, RetryButton, formatPcaTrac, truncateAddress } from '../../components/Pca/index.js';
+import React from 'react';
+import { HealthChip, RetryButton, formatExpiryShort, formatPcaTrac, truncateAddress } from '../../components/Pca/index.js';
 import type { ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
 import type { DiscoveredPca } from '../../hooks/useDiscoveredPcas.js';
 import { ownerModeWritesEnabled, type PcaOwnerMode } from '../../pca/ownerAccess.js';
 import { Badge } from '../../components/ds/Badge.js';
 import { formatBps } from '../../lib/format.js';
+import { formatTracTooltip } from '../../lib/formatTrac.js';
 
 export type PcaListAccount = ResolvedPcaAccount & {
   ownerMode: PcaOwnerMode;
   walletWrongNetwork: boolean;
 };
 
-const DAY = 86400;
-
 function pct(bps: number | undefined): string {
   return typeof bps === 'number' && Number.isFinite(bps) ? formatBps(bps) : '—';
 }
 
-function days(n: number): string {
-  return `${n} day${n === 1 ? '' : 's'}`;
-}
-
 function expiryText(expiresAt: number | undefined, nowSec: number): string {
-  if (!expiresAt || expiresAt <= 0) return '—';
-  const left = Math.round(Math.abs(expiresAt - nowSec) / DAY);
-  if (expiresAt > nowSec) return `In ${days(left)}`;
-  return left === 0 ? 'Expired today' : `Expired ${days(left)} ago`;
+  return formatExpiryShort(expiresAt, nowSec) ?? '—';
 }
 
 function ownerText(account: PcaListAccount, walletsInconclusive: boolean): string {
@@ -105,14 +97,12 @@ function AccountRow({
   return (
     <tr data-testid="pca-account-row" data-account={accountId} data-state="loaded" data-owner-mode={ownerMode}>
       <td>
-        <button type="button" className="v10-pca-inline-btn" aria-label={`Open PCA #${accountId}`} onClick={() => onManage(accountId)}>
-          #{accountId}
-        </button>
+        <strong>#{accountId}</strong>
         {showChip && account.health && <> <HealthChip state={account.health} /></>}
       </td>
       <td className="ds-num">{pct(snapshot.discountBps)}</td>
       <td>{ownerText(account, walletsInconclusive)}</td>
-      <td className="ds-num">{formatPcaTrac(snapshot.committedTRACTrac)} TRAC</td>
+      <td className="ds-num" title={formatTracTooltip(snapshot.committedTRACTrac)}>{formatPcaTrac(snapshot.committedTRACTrac)} TRAC</td>
       <td><Warn on={wallets.warn}>{wallets.text}</Warn></td>
       <td><Warn on={expiringSoon}>{expiryText(snapshot.expiresAtTimestamp, nowSec)}</Warn></td>
       <td className="ds-num">
@@ -151,68 +141,13 @@ function FoundRow({ item, nowSec, onAdd }: { item: DiscoveredPca; nowSec: number
       <td><strong>#{accountId}</strong></td>
       <td className="ds-num">{draws ? pct(basics?.discountBps) : '—'}</td>
       <td>{relation === 'agent' ? 'Someone else' : 'This node'}</td>
-      <td className="ds-num">{basics?.committedTRACTrac != null ? `${formatPcaTrac(basics.committedTRACTrac)} TRAC` : '—'}</td>
+      <td className="ds-num" title={formatTracTooltip(basics?.committedTRACTrac)}>{basics?.committedTRACTrac != null ? `${formatPcaTrac(basics.committedTRACTrac)} TRAC` : '—'}</td>
       <td>Found on-chain</td>
       <td>{expiryText(basics?.expiresAtTimestamp, nowSec)}</td>
       <td className="ds-num">
         <button type="button" className="v10-pca-card-btn ds-btn ds-sm" data-testid="pca-discovered-track" onClick={() => onAdd(accountId)}>Add</button>
       </td>
     </tr>
-  );
-}
-
-function AddById({ onAdd }: { onAdd: (id: string) => void }) {
-  const [open, setOpen] = useState(false);
-  const [value, setValue] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const panelId = useId();
-
-  const submit = () => {
-    const id = value.trim();
-    if (!/^\d+$/.test(id)) {
-      setError('Enter the PCA ID as a number.');
-      return;
-    }
-    onAdd(id);
-    setValue('');
-    setError(null);
-    setOpen(false);
-  };
-
-  return (
-    <div className="v10-pca-add-by-id">
-      {open ? (
-        <div id={panelId} className="v10-pca-overview-cta-group">
-          <input
-            type="text"
-            className="v10-form-input ds-input ds-sm"
-            data-testid="pca-track-input"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder="PCA ID (for example 7)"
-            aria-label="PCA ID to add"
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') submit();
-            }}
-          />
-          <button type="button" className="v10-pca-card-btn primary ds-btn ds-primary ds-sm" data-testid="pca-track-submit" onClick={submit}>
-            Add
-          </button>
-        </div>
-      ) : (
-        <button
-          type="button"
-          className="v10-pca-card-btn ds-btn ds-sm"
-          data-testid="pca-track-toggle"
-          aria-expanded={open}
-          aria-controls={panelId}
-          onClick={() => setOpen(true)}
-        >
-          Add by ID
-        </button>
-      )}
-      {error && <p className="v10-pca-crux-error" role="alert">{error}</p>}
-    </div>
   );
 }
 
@@ -227,8 +162,6 @@ export function PcaAccountList({
   onRemove,
   onRetry,
   onAddFound,
-  onAddById,
-  pendingId,
   readingWallet,
   nowSec = Math.floor(Date.now() / 1000),
 }: {
@@ -241,8 +174,6 @@ export function PcaAccountList({
   onRemove: (id: string) => void;
   onRetry: () => void;
   onAddFound: (id: string) => void;
-  onAddById: (id: string) => void;
-  pendingId: string | null;
   /** The full address of the wallet being read; shown shortened, in full on hover. */
   readingWallet: string | null;
   nowSec?: number;
@@ -256,11 +187,10 @@ export function PcaAccountList({
     <section className="v10-pca-section" data-testid="pca-list">
       <div className="v10-pca-section-head">
         <h3 className="v10-pca-section-title">{hasRows || loading ? 'PCAs' : 'Already have a PCA?'}</h3>
-        <AddById onAdd={onAddById} />
       </div>
-      {pendingId && (
-        <p className="v10-pca-track-status" role="status" data-testid="pca-track-status">
-          Checking PCA #{pendingId}. It will appear here shortly.
+      {!hasRows && !loading && (
+        <p className="v10-pca-overview-caveat" data-testid="pca-list-empty">
+          If a PCA owner approved this node’s wallets, check it with Get added. If you own a PCA, connect its owner wallet below.
         </p>
       )}
       {loading && !hasRows && <div className="card ds-card v10-pca-card v10-pca-card-skeleton" aria-hidden="true" />}

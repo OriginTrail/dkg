@@ -7,6 +7,7 @@ export {
   formatPcaTrac,
   formatWeiToTrac,
   formatRelativeExpiry,
+  formatExpiryShort,
   nativeGasSymbol,
   isTestnetChain,
 } from './format.js';

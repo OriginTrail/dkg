@@ -217,38 +217,12 @@ describe('ConvictionOverview — S1 discovery', () => {
     // No tracked ids -> usePcaOverview resolves to [] without any fetch.
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
     await waitForText(container, 'Your publishing discount');
-    expect(container.querySelector('[data-testid="pca-list"]')?.textContent).toContain('Add by ID');
+    expect(container.querySelector('[data-testid="pca-list"]')?.textContent).not.toContain('Add by ID');
+    expect(container.querySelector('[data-testid="pca-list-empty"]')).toBeTruthy();
     expect(container.querySelectorAll('[role="tab"]')).toHaveLength(0);
     await unmount();
   });
 
-  it('manual track-by-id shows progress while the chain read is pending', async () => {
-    let resolveFetch!: (value: ReturnType<typeof snapFixture>) => void;
-    mocks.fetchPca.mockImplementation(async (id: string) => new Promise((resolve) => {
-      resolveFetch = (value) => resolve(value);
-    }));
-    const { container, unmount } = await render(React.createElement(ConvictionOverview));
-    await waitForText(container, 'Add by ID');
-
-    await act(async () => {
-      (container.querySelector('[data-testid="pca-track-toggle"]') as HTMLButtonElement)
-        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    const input = container.querySelector('[data-testid="pca-track-input"]') as HTMLInputElement;
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '88');
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      (container.querySelector('[data-testid="pca-track-submit"]') as HTMLButtonElement)
-        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-
-    await waitForText(container, 'Checking PCA #88');
-    await act(async () => {
-      resolveFetch(snapFixture('88'));
-      await new Promise((r) => setTimeout(r, 0));
-    });
-    await unmount();
-  });
 
   it('discovers untracked PCAs owned by the connected wallet via ERC721Enumerable', async () => {
     const readContract = vi.fn(async ({ functionName }: { functionName: string }) => {

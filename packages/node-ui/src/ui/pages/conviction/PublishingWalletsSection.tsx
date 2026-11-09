@@ -149,7 +149,7 @@ export function PublishingWalletsSection({
               {wallets.length === 0 && <p className="v10-pca-handshake-empty">No operational wallets on this node.</p>}
             </div>
             <p className="v10-pca-overview-caveat">
-              ⓘ The chain exposes how many wallets are approved, not the full list — only this node’s
+              The chain exposes how many wallets are approved, not the full list — only this node’s
               wallets and any you probe are shown here.
             </p>
           </>

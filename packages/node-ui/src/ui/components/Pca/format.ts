@@ -81,3 +81,20 @@ export function formatRelativeExpiry(
   }
   return `Expires in ~${days} day${days === 1 ? '' : 's'}`;
 }
+
+/**
+ * Short expiry for a cell or tile that already says "Expires": `~221 days`,
+ * `Expired today`, `Expired 3 days ago`. The day count is rounded, hence `~`.
+ * Returns null when the expiry isn't known, so each place shows its own blank.
+ */
+export function formatExpiryShort(
+  expiresAtTimestamp?: number,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): string | null {
+  if (!expiresAtTimestamp || expiresAtTimestamp <= 0) return null;
+  const diff = expiresAtTimestamp - nowSec;
+  const days = Math.round(Math.abs(diff) / 86400);
+  const unit = `day${days === 1 ? '' : 's'}`;
+  if (diff > 0) return `~${days} ${unit}`;
+  return days === 0 ? 'Expired today' : `Expired ${days} ${unit} ago`;
+}
