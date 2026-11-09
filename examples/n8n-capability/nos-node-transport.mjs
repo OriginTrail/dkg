@@ -69,7 +69,10 @@ export async function writeNosEvidence(call, payload, graph) {
     if (literal.kind === 'language') return ['literal', { ...literal, language: literal.language.toLowerCase() }];
     return ['literal', canonicalizeRdfObjectTerm(value)];
   };
-  const quads = rows => [...new Set(rows.map(q => JSON.stringify([resource(q.subject), resource(q.predicate, true), term(q.object)])))].sort();
+  const graphTerm = value => value === undefined || value === '' ? ['default'] : resource(value);
+  const quads = rows => [...new Set(rows.map(q => JSON.stringify([
+    resource(q.subject), resource(q.predicate, true), term(q.object), graphTerm(q.graph),
+  ])))].sort();
   const expected = quads(payload.quads); // Reject malformed input before creation.
   const path = 'knowledge-assets/' + payload.name, query = { contextGraphId: graph };
   let metadata, created = false;
