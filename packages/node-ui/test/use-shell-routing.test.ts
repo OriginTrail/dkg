@@ -123,6 +123,24 @@ describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
       const { activeTabId } = useTabsStore.getState();
       expect(activeTabId).toBe('dashboard');
     });
+
+    it('ignores marketplace deep links while the section is disabled', () => {
+      localStorage.removeItem('dkg-marketplace-enabled');
+      const ref = { current: '' };
+      mountAtPath('/marketplace/plans', ref);
+      expect(useTabsStore.getState().activeTabId).toBe('dashboard');
+    });
+
+    it('opens a marketplace deep link once the section is enabled', () => {
+      localStorage.setItem('dkg-marketplace-enabled', '1');
+      try {
+        const ref = { current: '' };
+        mountAtPath('/marketplace/plans', ref);
+        expect(useTabsStore.getState().activeTabId).toBe('marketplace-plans');
+      } finally {
+        localStorage.removeItem('dkg-marketplace-enabled');
+      }
+    });
   });
 
   describe('Step 2 — URL syncs to the active tab', () => {

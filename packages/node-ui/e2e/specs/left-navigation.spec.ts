@@ -8,9 +8,9 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     await leftPanel.waitForProjectsLoaded();
   });
 
-  test('Context Graphs mode is active by default', async ({ leftPanel }) => {
+  test('My Context Graphs is expanded by default', async ({ leftPanel }) => {
     const mode = await leftPanel.getActiveMode();
-    expect(mode?.trim()).toContain('Context Graphs');
+    expect(mode?.trim()).toContain('My Context Graphs');
   });
 
   test('Dashboard row is visible', async ({ leftPanel }) => {
@@ -39,25 +39,40 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     expect(await importFilesModal.isOpen()).toBe(true);
   });
 
-  test('Context Oracle mode activates and renders the catalogue', async ({ leftPanel, page }) => {
+  test('Public Graphs expands and renders the catalogue', async ({ leftPanel }) => {
     await leftPanel.switchToMode('oracle');
-    expect((await leftPanel.getActiveMode())?.trim()).toContain('Context Oracle');
+    expect((await leftPanel.getActiveMode())?.trim()).toContain('Public Graphs');
     // The catalogue renders EITHER discovered public CGs OR the empty-state
     // hint — both are valid on a real node depending on what's been synced.
-    const emptyState = page.getByText(/No discovered public Context Graphs yet/i);
-    const catalogueRows = leftPanel.root.locator('.v10-tree-section');
+    // Only the Public Graphs section counts: My Context Graphs' rows share
+    // the row class.
+    const section = leftPanel.publicGraphsSection();
+    const body = section.locator(sel.leftPanel.peerGroupBody);
+    const rows = body.locator(sel.leftPanel.section);
+    const emptyState = body.locator(sel.leftPanel.emptyCard);
+    const count = section.locator(sel.leftPanel.peerGroupCount);
+    // As many rows as the header counts, or, with none, the empty state alone.
     await expect
-      .poll(async () => (await emptyState.isVisible().catch(() => false)) || (await catalogueRows.count()) > 0)
+      .poll(async () => {
+        const [counted, listed, empty] = await Promise.all([count.textContent(), rows.count(), emptyState.count()]);
+        return Number(counted) === listed && (listed > 0 ? empty === 0 : empty === 1);
+      })
       .toBe(true);
+    if ((await rows.count()) > 0) {
+      for (const row of await rows.all()) await expect(row).toBeVisible();
+    } else {
+      await expect(emptyState).toBeVisible();
+      await expect(emptyState).toContainText(/Discovered public graphs will appear here/i);
+    }
   });
 
-  test('switching back to Context Graphs mode restores project list', async ({ leftPanel }) => {
+  test('expanding Public Graphs keeps the My Context Graphs list available', async ({ leftPanel }) => {
     await leftPanel.switchToMode('oracle');
     await leftPanel.switchToMode('explorer');
     expect((await leftPanel.getProjectNames()).length).toBeGreaterThanOrEqual(2);
   });
 
-  test('+ New Context Graph button opens create modal', async ({ leftPanel, createProjectModal }) => {
+  test('New button opens create modal', async ({ leftPanel, createProjectModal }) => {
     await leftPanel.clickNewProject();
     expect(await createProjectModal.isOpen()).toBe(true);
   });
@@ -68,8 +83,8 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     expect((await centerPanel.getActiveTabName())?.trim()).toBe('Dashboard');
   });
 
-  test('Join Context Graph button opens join modal', async ({ page }) => {
-    await page.locator('.v10-new-project-btn').filter({ hasText: 'Join Context Graph' }).click();
+  test('Join button opens join modal', async ({ page }) => {
+    await page.locator('.v10-sidebar-inline-actions button').filter({ hasText: /^Join$/ }).click();
     await expect(page.locator('.v10-modal-overlay')).toBeVisible();
   });
 });

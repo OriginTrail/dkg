@@ -35,7 +35,7 @@
   border-radius: 6px;
   background: none;
   border: 1px solid var(--border-default);
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   color: var(--text-tertiary);
   transition: all 0.15s;
 }
@@ -44,7 +44,7 @@
 /* ── Result count badge ── */
 .v10-mlv-result-count {
   padding: 6px 12px;
-  font-size: 10px;
+  font-size: var(--font-size-meta);
   font-family: var(--font-mono);
   color: var(--text-tertiary);
   border-bottom: 1px solid var(--border-subtle);
@@ -69,7 +69,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 10px;
+  font-size: var(--font-size-meta);
   font-family: var(--font-mono);
   color: var(--text-tertiary);
   pointer-events: none;
@@ -80,7 +80,7 @@
   color: var(--bg-root);
   font-weight: 600;
   border-radius: 3px;
-  font-size: 9px;
+  font-size: var(--font-size-micro);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -90,7 +90,7 @@
   justify-content: center;
   height: 100%;
   color: var(--text-tertiary);
-  font-size: 12px;
+  font-size: var(--font-size-label);
 }
 
 /* ── Node detail panel (overlay inside graph) ── */
@@ -107,17 +107,17 @@
   padding: 14px 16px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
   z-index: 20;
-  font-size: 12px;
+  font-size: var(--font-size-label);
   color: var(--text-primary);
 }
 .v10-mlv-node-panel h3 {
-  font-size: 13px;
+  font-size: var(--font-size-ui);
   font-weight: 600;
   margin: 0 0 4px 0;
   word-break: break-word;
 }
 .v10-mlv-node-panel h4 {
-  font-size: 10px;
+  font-size: var(--font-size-meta);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -141,7 +141,7 @@
   border-bottom: 1px solid var(--border-subtle);
 }
 .v10-pv-overview-graph-title {
-  font-size: 13px;
+  font-size: var(--font-size-ui);
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -149,7 +149,7 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  font-size: 10px;
+  font-size: var(--font-size-meta);
   font-family: var(--font-mono);
   color: var(--text-tertiary);
 }
@@ -178,7 +178,7 @@
   justify-content: center;
   height: 100%;
   color: var(--text-tertiary);
-  font-size: 12px;
+  font-size: var(--font-size-label);
 }
 .v10-pv-overview-graph-empty {
   margin-top: 24px;
@@ -188,13 +188,13 @@
   border-radius: 10px;
 }
 .v10-pv-overview-graph-empty p {
-  font-size: 12px;
+  font-size: var(--font-size-label);
   color: var(--text-tertiary);
 }
 
 /* Layer card triple count */
 .v10-layer-card-count {
-  font-size: 10px;
+  font-size: var(--font-size-meta);
   font-family: var(--font-mono);
   color: var(--text-tertiary);
   margin-left: auto;

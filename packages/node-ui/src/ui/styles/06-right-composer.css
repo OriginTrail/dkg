@@ -186,7 +186,7 @@
   border-radius: 8px;
   background: var(--bg-active);
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: var(--font-size-meta);
   font-weight: 700;
   letter-spacing: 0.04em;
 }
@@ -197,7 +197,7 @@
   gap: 2px;
 }
 .v10-attachment-chip-name {
-  font-size: 12px;
+  font-size: var(--font-size-label);
   color: var(--text-primary);
   font-weight: 500;
   overflow: hidden;
@@ -209,7 +209,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 10px;
+  font-size: var(--font-size-meta);
   color: var(--text-secondary);
   white-space: nowrap;
 }
@@ -302,7 +302,7 @@
   color: var(--text-tertiary);
 }
 .v10-drop-overlay-title {
-  font-size: 14px;
+  font-size: var(--font-size-body);
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -310,7 +310,7 @@
   color: var(--text-secondary);
 }
 .v10-drop-overlay-hint {
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   color: var(--text-secondary);
 }
 @media (prefers-reduced-motion: reduce) {
@@ -325,7 +325,7 @@
 .v10-local-agent-error {
   padding: 10px 12px;
   border-radius: 8px;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   line-height: 1.5;
 }
 .v10-local-agent-notice {
@@ -349,7 +349,7 @@
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   font-weight: 600;
   text-decoration: none;
   transition: background 0.15s, color 0.15s, border-color 0.15s;
@@ -368,19 +368,19 @@
   gap: 4px;
 }
 .v10-agent-empty-state-title {
-  font-size: 13px;
+  font-size: var(--font-size-ui);
   font-weight: 500;
   color: var(--text-primary);
 }
 .v10-agent-empty-state-hint {
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   color: var(--text-tertiary);
 }
 /* Legacy: bare-text empty states elsewhere (NetworkTab, SessionsTab, Add-agent) */
 .v10-agent-empty-state:not(:has(.v10-agent-empty-state-title)) {
   padding: 16px;
   color: var(--text-tertiary);
-  font-size: 12px;
+  font-size: var(--font-size-label);
 }
 
 /* Agent input */
@@ -404,7 +404,7 @@
      should read at the same size in the same column (qa-lead). The
      global input/textarea rule (12px, mono) is for compact forms; the
      chat composer is conversational. */
-  font-size: 13px;
+  font-size: var(--font-size-ui);
   font-family: var(--font-sans);
   line-height: 1.5;
   min-width: 0;
@@ -422,7 +422,7 @@
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   font-weight: 600;
   display: flex;
   align-items: center;

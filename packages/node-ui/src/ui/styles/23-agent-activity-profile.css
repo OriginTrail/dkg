@@ -64,7 +64,7 @@
 .v10-agent-chip-sub {
   display: inline-flex;
   gap: 4px;
-  font-size: 9px;
+  font-size: var(--font-size-micro);
   color: var(--text-tertiary);
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -77,17 +77,17 @@
 .v10-agent-chip-op { opacity: 0.85; }
 
 /* Size variants */
-.v10-agent-chip-sm { font-size: 10px; padding: 1px 7px 1px 1px; }
+.v10-agent-chip-sm { font-size: var(--font-size-meta); padding: 1px 7px 1px 1px; }
 .v10-agent-chip-sm .v10-agent-chip-avatar { width: 16px; height: 16px; font-size: 8px; }
 .v10-agent-chip-sm .v10-agent-chip-glyph { width: 9px; height: 9px; font-size: 7px; bottom: -1px; right: -2px; }
 
-.v10-agent-chip-md { font-size: 11px; padding: 2px 9px 2px 2px; }
-.v10-agent-chip-md .v10-agent-chip-avatar { width: 22px; height: 22px; font-size: 9px; }
+.v10-agent-chip-md { font-size: var(--font-size-caption); padding: 2px 9px 2px 2px; }
+.v10-agent-chip-md .v10-agent-chip-avatar { width: 22px; height: 22px; font-size: var(--font-size-micro); }
 .v10-agent-chip-md .v10-agent-chip-glyph  { width: 11px; height: 11px; font-size: 8px; }
 
-.v10-agent-chip-lg { font-size: 13px; padding: 4px 12px 4px 4px; }
-.v10-agent-chip-lg .v10-agent-chip-avatar { width: 30px; height: 30px; font-size: 11px; }
-.v10-agent-chip-lg .v10-agent-chip-glyph  { width: 14px; height: 14px; font-size: 10px; bottom: -2px; right: -4px; }
+.v10-agent-chip-lg { font-size: var(--font-size-ui); padding: 4px 12px 4px 4px; }
+.v10-agent-chip-lg .v10-agent-chip-avatar { width: 30px; height: 30px; font-size: var(--font-size-caption); }
+.v10-agent-chip-lg .v10-agent-chip-glyph  { width: 14px; height: 14px; font-size: var(--font-size-meta); bottom: -2px; right: -4px; }
 
 /* ── Activity feed ── */
 .v10-activity-feed {
@@ -99,7 +99,7 @@
 }
 .v10-activity-feed-title {
   display: flex; align-items: baseline; gap: 8px;
-  font-size: 12px; font-weight: 700;
+  font-size: var(--font-size-label); font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.06em;
   color: var(--text-tertiary);
 }
@@ -109,7 +109,7 @@
    * Same mono+tertiary treatment as `.v10-activity-feed-bucket-count`
    * so the two read as the same kind of signal at different scopes. */
   font-family: var(--font-mono); font-weight: 400;
-  font-size: 10px; letter-spacing: 0;
+  font-size: var(--font-size-meta); letter-spacing: 0;
   text-transform: none;
   color: var(--text-tertiary);
 }
@@ -121,7 +121,7 @@
    * EmptyState primitive; recedes so the rest of the Overview
    * stays the focal area. */
   margin-top: 8px;
-  font-size: 12px; font-weight: 400; line-height: 1.5;
+  font-size: var(--font-size-label); font-weight: 400; line-height: 1.5;
   color: var(--text-tertiary);
 }
 .v10-activity-feed-error {
@@ -131,7 +131,7 @@
   margin-top: 8px;
   padding: 6px 8px;
   border-left: 2px solid var(--accent-warn, #f59e0b);
-  font-size: 12px; font-weight: 400; line-height: 1.5;
+  font-size: var(--font-size-label); font-weight: 400; line-height: 1.5;
   color: var(--text-tertiary);
 }
 .v10-activity-feed-bucket { display: flex; flex-direction: column; gap: 4px; }
@@ -141,13 +141,13 @@
   border-bottom: 1px dashed var(--border-subtle);
 }
 .v10-activity-feed-bucket-label {
-  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  font-size: var(--font-size-meta); font-weight: 700; letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-secondary);
 }
 .v10-activity-feed-bucket-count {
   margin-left: auto;
-  font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary);
+  font-family: var(--font-mono); font-size: var(--font-size-meta); color: var(--text-tertiary);
 }
 .v10-activity-feed-items { display: flex; flex-direction: column; }
 
@@ -185,21 +185,21 @@
 }
 .v10-activity-feed-row-static:hover { background: none; }
 .v10-activity-feed-layer {
-  font-size: 14px; line-height: 1;
+  font-size: var(--font-size-body); line-height: 1;
   justify-self: center;
 }
 .v10-activity-feed-type {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 2px 8px;
   border-radius: 10px;
-  font-size: 10px; font-weight: 700;
+  font-size: var(--font-size-meta); font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--text-secondary);
   background: color-mix(in srgb, var(--type-color, #a855f7) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--type-color, #a855f7) 30%, var(--border-subtle));
   white-space: nowrap;
 }
-.v10-activity-feed-type-icon { font-size: 11px; color: var(--type-color, #a855f7); }
+.v10-activity-feed-type-icon { font-size: var(--font-size-caption); color: var(--type-color, #a855f7); }
 .v10-activity-feed-title-text {
   /* Entity / assertion name in each row (e.g.
    * "pharmaceutical-derived-product-metadata"). Was `600` to
@@ -208,13 +208,13 @@
    * body relative to the surrounding chrome (`RECENT ACTIVITY · 7`
    * title, `TODAY` bucket label, agent chips). Dropped one notch
    * to `500` to bring it inline with the chrome's body weight. */
-  font-size: 12px; font-weight: 500;
+  font-size: var(--font-size-label); font-weight: 500;
   color: var(--text-primary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   min-width: 0;
 }
 .v10-activity-feed-status {
-  font-size: 9px; font-weight: 700;
+  font-size: var(--font-size-micro); font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.04em;
   padding: 1px 6px;
   border-radius: 8px;
@@ -227,7 +227,7 @@
 .v10-activity-feed-status.status-bad   { color: var(--text-danger); border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); }
 .v10-activity-feed-author { display: inline-flex; }
 .v10-activity-feed-time {
-  font-family: var(--font-mono); font-size: 10px;
+  font-family: var(--font-mono); font-size: var(--font-size-meta);
   color: var(--text-tertiary);
   white-space: nowrap;
   min-width: 54px; text-align: right;
@@ -254,7 +254,7 @@
   flex-wrap: wrap;
 }
 .v10-agent-profile-reputation {
-  font-size: 13px; color: var(--text-secondary);
+  font-size: var(--font-size-ui); color: var(--text-secondary);
   line-height: 1.55;
   max-width: 640px;
   flex: 1 1 260px;
@@ -265,17 +265,17 @@
 }
 .v10-agent-profile-meta-row {
   display: flex; gap: 10px; align-items: center;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
 }
 .v10-agent-profile-meta-lbl {
   text-transform: uppercase;
-  font-size: 9px; font-weight: 700;
+  font-size: var(--font-size-micro); font-weight: 700;
   letter-spacing: 0.08em;
   color: var(--text-ghost);
   min-width: 80px;
 }
 .v10-agent-profile-meta-val { color: var(--text-secondary); }
-.v10-agent-profile-meta-val.mono { font-family: var(--font-mono); font-size: 11px; }
+.v10-agent-profile-meta-val.mono { font-family: var(--font-mono); font-size: var(--font-size-caption); }
 .v10-agent-profile-wallet {
   display: inline-flex; align-items: center; gap: 6px;
   color: var(--text-primary);
@@ -286,7 +286,7 @@
   border: 1px solid var(--border-subtle);
   border-radius: 4px;
   color: var(--text-ghost);
-  font-size: 10px;
+  font-size: var(--font-size-meta);
   cursor: pointer;
   font-family: var(--font-sans);
   transition: border-color 0.15s, color 0.15s;
@@ -325,7 +325,7 @@
   color: var(--stat-color, var(--text-primary));
 }
 .v10-agent-profile-stat-lbl {
-  font-size: 10px; text-transform: uppercase;
+  font-size: var(--font-size-meta); text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-tertiary);
 }

@@ -11,17 +11,26 @@ export class LeftPanelPage {
   constructor(page: Page) {
     this.page = page;
     this.root = page.locator(sel.leftPanel.root).first();
-    // rc11 renamed "+ New Project" -> "+ New Context Graph". The button
-    // class (`.v10-new-project-btn`) was kept for backwards-compat but
-    // is now shared with "↗ Join Context Graph", so each handle filters
-    // by visible label to disambiguate.
-    this.newProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /New Context Graph/i });
-    this.joinProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /Join Context Graph/i });
+    this.newProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /^New$/i });
+    this.joinProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /^Join$/i });
     this.oraclePlaceholder = page.locator(sel.leftPanel.oraclePlaceholder);
   }
 
   private myCgSections() {
-    return this.root.locator(sel.myContextGraphs.peerGroupBody).locator(sel.leftPanel.section);
+    return this.root
+      .locator(sel.myContextGraphs.peerGroup)
+      .filter({ has: this.page.getByText('My Context Graphs', { exact: true }) })
+      .first()
+      .locator(sel.myContextGraphs.peerGroupBody)
+      .locator(sel.leftPanel.section);
+  }
+
+  /** The Public Graphs section alone: its header (with the count) and, while expanded, its body. */
+  publicGraphsSection() {
+    return this.root
+      .locator(sel.leftPanel.peerGroup)
+      .filter({ has: this.page.locator(sel.leftPanel.peerGroupLabel, { hasText: /^Public Graphs$/ }) })
+      .first();
   }
 
   private memoryStackControl() {
@@ -42,7 +51,7 @@ export class LeftPanelPage {
       await sidebar.click();
       return;
     }
-    throw new Error('Memory Stack navigation control not found (expected .v10-tree-dashboard with "Memory Stack" label)');
+    throw new Error('Memory Stack navigation control not found in the structured sidebar');
   }
 
   async isMemoryStackVisible() {
@@ -50,19 +59,20 @@ export class LeftPanelPage {
   }
 
   async switchToMode(mode: 'explorer' | 'oracle') {
-    // rc11 renamed mode tab "Projects" -> "Context Graphs"; the underlying
-    // store value `treeMode` is still 'explorer'/'oracle'.
-    const label = mode === 'explorer' ? 'Context Graphs' : 'Context Oracle';
-    await this.root.locator(sel.leftPanel.modeBtn).filter({ hasText: label }).click();
+    const label = mode === 'explorer' ? 'My Context Graphs' : 'Public Graphs';
+    const header = this.root.locator(sel.leftPanel.peerGroupHeader).filter({ hasText: label }).first();
+    if ((await header.getAttribute('aria-expanded')) !== 'true') await header.click();
   }
 
   async getActiveMode() {
-    const active = this.root.locator(`${sel.leftPanel.modeBtn}.active`);
-    return active.textContent();
+    const publicHeader = this.root.locator(sel.leftPanel.peerGroupHeader).filter({ hasText: 'Public Graphs' }).first();
+    return (await publicHeader.getAttribute('aria-expanded')) === 'true'
+      ? 'Public Graphs'
+      : 'My Context Graphs';
   }
 
   async clickNewProject() {
-    const btn = this.newProjectBtn.filter({ hasText: '+ New Context Graph' });
+    const btn = this.newProjectBtn;
     await btn.waitFor({ state: 'visible', timeout: 10_000 });
     await btn.click();
     // The modal mounts via a layout-store update. If the click lands while the
