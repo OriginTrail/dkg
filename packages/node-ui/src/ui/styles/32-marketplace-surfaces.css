@@ -51,7 +51,6 @@
 .mkt-snippet { background: var(--surface-0); border: 1px solid var(--border-strong); border-radius: var(--r-sm); padding: var(--sp-3); font-family: var(--font-mono); font-size: var(--fs-xs); overflow-wrap: anywhere; }
 .mkt-warnonce { color: var(--state-pending); font-size: var(--fs-sm); }
 .mkt-wallet { border: 1px solid var(--border-strong); border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4); }
-.mkt-wallet.rev { border-color: var(--state-verified); }
 /* ── purchase flow · degraded catalog · access form · operate ── */
 .mkt-h1 { font-size: var(--fs-xl); font-weight: var(--fw-semibold); margin: 0; }
 .mkt-card h2, .mkt-card h3 { margin: 0; }
@@ -65,9 +64,7 @@
 button.mkt-chipadd { background: transparent; cursor: pointer; }
 .mkt-chipwarn { font-size: var(--fs-xs); border-radius: var(--r-full); padding: var(--sp-1) var(--sp-3); background: color-mix(in srgb, var(--state-pending) 16%, var(--surface-1)); color: var(--state-pending); white-space: nowrap; }
 .mkt-chipblock { font-size: var(--fs-xs); border-radius: var(--r-full); padding: var(--sp-1) var(--sp-3); background: color-mix(in srgb, var(--state-blocked) 16%, var(--surface-1)); color: var(--state-blocked); white-space: nowrap; }
-.mkt-chipq { font-size: var(--fs-xs); border-radius: var(--r-full); padding: var(--sp-1) var(--sp-3); border: 1px dashed var(--border-strong); color: var(--text-secondary); display: inline-flex; gap: var(--sp-2); align-items: center; }
 .mkt-errline { color: var(--state-blocked); }
-.mkt-missing { color: var(--state-pending); }
 /* steps */
 .mkt-steps { display: flex; gap: var(--sp-5); list-style: none; margin: 0; padding: 0; flex-wrap: wrap; }
 .mkt-step { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--text-muted); }
@@ -77,19 +74,10 @@ button.mkt-chipadd { background: transparent; cursor: pointer; }
 .mkt-step.now .mkt-step-n { border-color: var(--interactive); color: var(--interactive); }
 .mkt-step.done .mkt-step-n { border-color: var(--state-verified); }
 .mkt-step-sub { font-weight: var(--fw-regular); }
-/* identities */
-.mkt-idstrip { display: grid; gap: var(--sp-3); grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
-.mkt-id { display: grid; gap: var(--sp-1); border: 1px solid var(--border-subtle); border-radius: var(--r-md); padding: var(--sp-3); font-size: var(--fs-sm); }
-.mkt-id.buyer { border-color: var(--interactive); }
-.mkt-id.seller { border-color: var(--state-verified); }
-.mkt-id-k { color: var(--text-muted); font-size: var(--fs-xs); }
-/* error card / notice / diff */
+/* error card / notice */
 .mkt-errcard { border: 1px solid var(--state-blocked); border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4); display: grid; gap: var(--sp-2); font-size: var(--fs-sm); }
 .mkt-notice { border: 1px solid var(--state-pending); border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4); font-size: var(--fs-sm); display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
-.mkt-diff { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); }
-.mkt-diff th, .mkt-diff td { text-align: left; padding: var(--sp-1) var(--sp-2); border-top: 1px solid var(--border-subtle); }
 /* composer */
-.mkt-sellergroup { display: grid; gap: var(--sp-2); border-top: 1px solid var(--border-subtle); padding-top: var(--sp-3); }
 .mkt-orow { display: grid; gap: var(--sp-1); padding: var(--sp-2) 0; font-size: var(--fs-sm); }
 .mkt-orow.off { opacity: .55; }
 .mkt-orow-main { display: flex; gap: var(--sp-2); align-items: baseline; flex-wrap: wrap; cursor: pointer; }
@@ -99,16 +87,8 @@ button.mkt-chipadd { background: transparent; cursor: pointer; }
 .mkt-input--short { width: 7ch; }
 /* gate */
 .mkt-gate { border-color: var(--interactive); }
-.mkt-paylines { display: grid; gap: var(--sp-3); }
-.mkt-payline { display: grid; gap: var(--sp-1); border-top: 1px solid var(--border-subtle); padding-top: var(--sp-3); font-size: var(--fs-sm); }
-.mkt-frozenlines { margin: 0; padding-left: var(--sp-5); }
-.mkt-balances { font-size: var(--fs-sm); }
 .mkt-gate-actions { justify-content: flex-end; }
-/* pay / recover */
-.mkt-payrow { display: grid; gap: var(--sp-2); border-top: 1px solid var(--border-subtle); padding: var(--sp-3) 0; font-size: var(--fs-sm); }
-.mkt-recover { display: grid; gap: var(--sp-2); border: 1px solid var(--state-pending); border-radius: var(--r-md); padding: var(--sp-3); }
-.mkt-walletcard { display: grid; gap: var(--sp-2); border: 1px solid var(--interactive); border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4); }
-.mkt-starter { display: grid; gap: var(--sp-2); border: 1px solid var(--border-strong); border-radius: var(--r-md); padding: var(--sp-4); }
+/* a key's secret, shown once */
 .mkt-once { background: var(--surface-2); }
 /* catalog degraded rows */
 .mkt-sellerstrip { padding: var(--sp-3) var(--sp-4); gap: var(--sp-2); }
@@ -121,7 +101,6 @@ button.mkt-sellerlink:hover, button.mkt-sellerchip:hover .mkt-mono { text-decora
 .mkt-prow { border-top: 1px solid var(--border-subtle); padding-top: var(--sp-3); }
 .mkt-prow.off { opacity: .6; }
 .mkt-prov { color: var(--prov-pinned); }
-.mkt-dialog { border-color: var(--interactive); box-shadow: var(--shadow-2); }
 .mkt-tabs { padding-left: var(--sp-1); }
 .mkt-bubble.error { border-color: var(--state-blocked); color: var(--state-blocked); }
 /* access form */
