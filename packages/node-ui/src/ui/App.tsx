@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useCallback, useState, useSyncExternalStore } from 'react';
-import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import { Header } from './components/Shell/Header.js';
 import { PanelLeft } from './components/Shell/PanelLeft.js';
 import { PanelCenter } from './components/Shell/PanelCenter.js';
@@ -78,19 +78,15 @@ function AppShell() {
   const { bottomCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
   const { narrow, leftOpen, rightOpen } = useShellPanels();
   const closeNarrowPanel = useLayoutStore((s) => s.closeNarrowPanel);
-  const { pathname, state: routeState } = useLocation();
-  const navigate = useNavigate();
-  // Going somewhere, or resizing past the breakpoint, shows the page, not a floating panel.
-  // The create and join dialogs belong to the shell (ContextGraphDialogs), so closing the panel keeps them.
-  useEffect(() => { closeNarrowPanel(); }, [pathname, narrow, closeNarrowPanel]);
-  // Arrived from /agent-hub: wide screens get the panel expanded, narrow ones the floating panel.
+  // Resizing past the breakpoint shows the page, not a floating panel. Navigation does the
+  // same in useShellRouting. The create and join dialogs belong to the shell
+  // (ContextGraphDialogs), so closing the panel keeps them.
+  const lastNarrow = useRef(narrow);
   useEffect(() => {
-    if (!(routeState as { openAgents?: boolean } | null)?.openAgents) return;
-    const layout = useLayoutStore.getState();
-    if (narrow || layout.rightCollapsed) layout.toggleRight();
-    if (!narrow) layout.setRightExpanded(true);
-    navigate(pathname, { replace: true, state: null });
-  }, [routeState, narrow, pathname, navigate]);
+    if (lastNarrow.current === narrow) return; // only a crossing, not the first render
+    lastNarrow.current = narrow;
+    closeNarrowPanel();
+  }, [narrow, closeNarrowPanel]);
   const [, setVpTick] = useState(0);
 
   useEffect(() => {
@@ -163,14 +159,14 @@ function AppShell() {
         {narrow && (leftOpen || rightOpen) && (
           <button type="button" className="v10-panel-scrim" aria-label="Close panel" onClick={closeNarrowPanel} />
         )}
-        {leftOpen && (
-          <>
-            <div className="v10-panel-left" role="complementary" aria-label="Context Graphs and node" style={{ width: leftWidth }}>
-              <PanelLeft />
-            </div>
-            <div className="v10-resize-handle-h" ref={leftHandle} />
-          </>
+        {/* On a narrow screen a closed panel stays mounted but hidden, so a resize
+            or opening the other panel keeps what's in it (a chat draft, a form). */}
+        {(narrow || leftOpen) && (
+          <div className="v10-panel-left" role="complementary" aria-label="Context Graphs and node" style={{ width: leftWidth }} hidden={!leftOpen}>
+            <PanelLeft />
+          </div>
         )}
+        {leftOpen && <div className="v10-resize-handle-h" ref={leftHandle} />}
 
         <div className="v10-center-region" style={{ flex: 1, minWidth: 0, display: expanded ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
@@ -180,13 +176,11 @@ function AppShell() {
           <PanelBottom />
         </div>
 
-        {rightOpen && (
-          <>
-            {!expanded && <div className="v10-resize-handle-h" ref={rightHandle} />}
-            <div id="agents-panel" tabIndex={-1} className="v10-panel-right" role="complementary" aria-label="Agents" style={expanded ? { flex: 1, minWidth: 0 } : { width: rightWidth }}>
-              <PanelRight />
-            </div>
-          </>
+        {rightOpen && !expanded && <div className="v10-resize-handle-h" ref={rightHandle} />}
+        {(narrow || rightOpen) && (
+          <div id="agents-panel" tabIndex={-1} className="v10-panel-right" role="complementary" aria-label="Agents" style={expanded ? { flex: 1, minWidth: 0 } : { width: rightWidth }} hidden={!rightOpen}>
+            <PanelRight />
+          </div>
         )}
       </div>
     </div>

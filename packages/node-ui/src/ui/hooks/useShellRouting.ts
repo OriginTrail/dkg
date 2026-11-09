@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTabsStore } from '../stores/tabs.js';
-import { useLayoutStore } from '../stores/layout.js';
+import { useLayoutStore, useShellPanels } from '../stores/layout.js';
 import { useProjectsStore } from '../stores/projects.js';
 import { isPassiveCatalogueGraph } from '../lib/contextGraphSidebar.js';
 import { pathToTab, tabIdToPath } from '../lib/tab-routes.js';
@@ -27,14 +27,18 @@ import { tabContextGraphId } from '../lib/tab-target.js';
  *   tab, a graph view) is kept here, so switching back to a tab returns to
  *   where it was. Route encoders stay pure.
  *
- *   Panels: the expanded right panel covers the centre, so any tab
- *   activation, even of the tab already open, collapses it.
+ *   Panels: going anywhere shows the page. Every address change, the path
+ *   or only the query string, collapses the expanded right panel and closes a
+ *   floating one. Arriving from the old /agent-hub address is the one
+ *   navigation that opens the panel instead. Choosing the tab already open
+ *   doesn't change the address; lib/shellNavigation handles that case.
  *
  * Tab metadata and order stay in the store; this hook only connects the
  * active tab to the address.
  */
 export function useShellRouting(): void {
-  const { pathname, search } = useLocation();
+  const { pathname, search, key, state } = useLocation();
+  const { narrow } = useShellPanels();
   const navigate = useNavigate();
   const activeTabId = useTabsStore((s) => s.activeTabId);
   // The address as rendered: tab actions compare against it before pushing.
@@ -50,9 +54,23 @@ export function useShellRouting(): void {
   }, [pathname, search]);
 
   // Going anywhere shows the page.
-  useEffect(() => useTabsStore.subscribe((state, prev) => {
-    if (state.activations !== prev.activations) useLayoutStore.getState().setRightExpanded(false);
-  }), []);
+  const clearingAgentsState = useRef(false);
+  useEffect(() => {
+    const layout = useLayoutStore.getState();
+    if ((state as { openAgents?: boolean } | null)?.openAgents) {
+      // Wide screens get the panel expanded, narrow ones the floating panel.
+      if (narrow || layout.rightCollapsed) layout.toggleRight();
+      if (!narrow) layout.setRightExpanded(true);
+      clearingAgentsState.current = true;
+      navigate(pathname + search, { replace: true, state: null });
+      return;
+    }
+    if (clearingAgentsState.current) { clearingAgentsState.current = false; return; }
+    layout.revealCentre();
+    // Only a new address counts: a new history entry, or a path or query string that
+    // changed without one (an entry pushed outside the router has no key).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, pathname, search]);
 
   // Tab → address
   useEffect(() => useTabsStore.subscribe((state, prev) => {

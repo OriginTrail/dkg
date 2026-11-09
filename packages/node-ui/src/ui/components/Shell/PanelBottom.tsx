@@ -4,6 +4,7 @@ import { api } from '../../api-wrapper.js';
 import { formatTime, formatDuration, shortId } from '../../hooks.js';
 import { opTone } from '../../op-type-colors.js';
 import { pressable } from '../../lib/pressable.js';
+import { OperationStatusBadge } from '../OperationStatusBadge.js';
 
 const BOTTOM_TABS = ['Node Log', 'Transactions'] as const;
 type BottomTab = typeof BOTTOM_TABS[number];
@@ -207,11 +208,7 @@ function TransactionsContent() {
                     {shortId(op.operation_id)}
                   </td>
                   <td style={{ padding: '7px 12px' }}>
-                    <span style={{
-                      padding: '2px 6px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-micro)', fontWeight: 600,
-                      background: op.status === 'success' ? 'var(--success-bg-strong)' : op.status === 'error' ? 'var(--danger-bg-strong)' : 'var(--warning-bg-strong)',
-                      color: op.status === 'success' ? 'var(--text-success)' : op.status === 'error' ? 'var(--text-danger)' : 'var(--accent-amber)',
-                    }}>{op.status}</span>
+                    <OperationStatusBadge status={op.status} />
                   </td>
                   <td style={{ padding: '7px 12px', color: 'var(--text-secondary)' }}>
                     {op.duration_ms != null ? formatDuration(op.duration_ms) : '—'}

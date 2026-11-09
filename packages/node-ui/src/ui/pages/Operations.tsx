@@ -14,7 +14,7 @@ import {
 } from 'recharts';
 import { useFetch, formatBytes, formatTime, formatDuration, shortId } from '../hooks.js';
 import { opTone, opChartColor } from '../op-type-colors.js';
-import { Badge, type BadgeTone, StatusGlyph } from '../components/ds/Badge.js';
+import { Badge, StatusGlyph } from '../components/ds/Badge.js';
 import { Button } from '../components/ds/Button.js';
 import {
   fetchOperationsWithPhases,
@@ -42,6 +42,7 @@ import {
   PHASE_LEGEND_ENTRIES,
 } from '../phase-colors.js';
 import { humanizeStatus } from '../lib/formatLabels.js';
+import { OperationStatusBadge, operationStatusLabel } from '../components/OperationStatusBadge.js';
 import { HW_THRESHOLDS, hardwareChartRow, hardwareLevels, latestHardwareReading, type MetricLevel, type MetricsSnapshot } from './hardware-metrics.js';
 import { ArrowDown, ChevronDown, ChevronRight, Check as CheckIcon, Copy, RefreshCw, Activity, ChartColumn, Check, FileText, Search, X } from 'lucide-react';
 import { useModalDismiss } from '../components/Modals/useModalDismiss.js';
@@ -465,7 +466,7 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
           >
             <span className="obs-meta">{expandedOp === op.operation_id ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
             <button type="button" className={`ds-row-open obs-failed-name op-tone-${opTone(op.operation_name)}`} aria-expanded={expandedOp === op.operation_id}>{op.operation_name}</button>
-            <StatusBadge status={op.status} />
+            <OperationStatusBadge status={op.status} />
             <span className="mono obs-meta">{op.operation_id} <CopyButton text={op.operation_id} /></span>
             <span className="obs-meta obs-push-end">{formatTime(op.phase_started_at)}</span>
             {op.duration_ms != null && <span className="obs-meta">{formatDuration(op.duration_ms)}</span>}
@@ -991,7 +992,7 @@ function OperationsTab() {
                 >
                   <td title={op.started_at ? formatDateTime(op.started_at, { seconds: true }) : undefined}>{formatTime(op.started_at)}</td>
                   <td><Badge size="sm" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} className={`obs-op-badge op-tone-${opTone(op.operation_name)}`}>{op.operation_name}</Badge></td>
-                  <td><StatusBadge status={op.status} /></td>
+                  <td><OperationStatusBadge status={op.status} /></td>
                   <td><MiniGantt phases={op.phases} totalMs={op.duration_ms} /></td>
                   <td className="ds-num">{formatDuration(op.duration_ms)}</td>
                   <td className="ds-num">{op.gas_cost_eth != null ? op.gas_cost_eth.toFixed(6) : '—'}</td>
@@ -1151,7 +1152,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
       <div className="card ds-card obs-card obs-detail-gap">
         <div className="obs-detail-head">
           <span className="obs-detail-name">{op.operation_name}</span>
-          <StatusBadge status={op.status} />
+          <OperationStatusBadge status={op.status} />
           <span className="obs-detail-duration">{formatDuration(op.duration_ms)}</span>
           <span className="obs-detail-id mono">{op.operation_id} <CopyButton text={op.operation_id} /></span>
         </div>
@@ -1206,7 +1207,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
                 return (
                   <div key={`${p.phase}-${i}`} className="obs-phase-row" style={{ borderLeftColor: terminalColor }}>
                     <span className="obs-phase-name" style={{ color }} title={desc ?? ''}>{p.phase}</span>
-                    <StatusBadge status={p.status} />
+                    <OperationStatusBadge status={p.status} />
                     <span className="obs-detail-id mono">{formatDuration(p.duration_ms)}</span>
                     {desc && <span className="obs-meta obs-italic obs-phase-desc obs-clip">{desc}</span>}
                     <span
@@ -1441,24 +1442,6 @@ function StyledDaemonLine({ line, lineNum, highlight }: { line: string; lineNum:
       <span className="obs-log-text">{highlight ? highlight(parsed.message) : parsed.message}</span>
     </div>
   );
-}
-
-export function operationStatusTone(status: string): BadgeTone {
-  if (status === 'success') return 'success';
-  if (status === 'error') return 'danger';
-  if (status === 'cancelled') return 'muted';
-  return 'pending';
-}
-
-/** The word shown for an operation status: the same Done and Failed as nOS. */
-export function operationStatusLabel(status: string): string {
-  if (status === 'success') return 'Done';
-  if (status === 'error') return 'Failed';
-  return humanizeStatus(status);
-}
-
-export function StatusBadge({ status }: { status: string }) {
-  return <Badge size="sm" tone={operationStatusTone(status)}>{operationStatusLabel(status)}</Badge>;
 }
 
 function CopyButton({ text }: { text: string }) {
