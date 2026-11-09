@@ -5,6 +5,7 @@ import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { vi } from 'vitest';
 import { fixtureFetch, type FixtureScenario } from '../../src/ui/marketplace/api/fixtures.js';
+import { forgetFundings } from '../../src/ui/marketplace/purchase/fundings.js';
 import { forgetPlanSaves } from '../../src/ui/marketplace/purchase/planSaves.js';
 import { forgetTopUpAttempts } from '../../src/ui/marketplace/purchase/topUpAttempts.js';
 import { forgetPlaygroundKey } from '../../src/ui/marketplace/views/Playground.js';
@@ -46,6 +47,7 @@ export async function unmountAll(): Promise<void> {
   vi.unstubAllGlobals();
   forgetPlaygroundKey();
   forgetPlanSaves();
+  forgetFundings();
   forgetTopUpAttempts();
 }
 
