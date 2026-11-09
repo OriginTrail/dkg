@@ -72,7 +72,7 @@ import type {
   ExternalAuthorSigners,
   RpcRequestAdmission,
 } from '@origintrail-official/dkg-chain';
-import type { AgentChainSignerSource } from './agent-chain-signer-source.js';
+import type { AgentChainSignerSource, NodeHeldAuthorConfig } from './agent-chain-signer-source.js';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';
@@ -1400,7 +1400,7 @@ export interface Rfc64CatalogBootstrapConfigV1 {
 
 export type { FinalizationRecoveryStoreFactory } from './finalization-recovery-store.js';
 
-export interface DKGAgentConfig {
+export interface DKGAgentConfig extends NodeHeldAuthorConfig {
   /** Lower RPC usage by using the DKG Core chain cache. */
   DKG_Core_chain_cache?: boolean;
   /** Trusted local deployment configuration; never taken from a peer response. */

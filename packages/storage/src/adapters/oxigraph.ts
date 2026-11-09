@@ -73,6 +73,7 @@ type OxQuad = oxigraph.Quad;
 export class OxigraphStore implements TripleStore {
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly graphEnumerationVisibility = oxigraphGraphEnumerationVisibility;
+  readonly sparqlEngine = 'oxigraph' as const;
   readonly queryCancellation = 'pre-dispatch' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   readonly rfc64SemanticReadCertifiedV1 = true as const;

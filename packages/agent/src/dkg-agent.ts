@@ -1,6 +1,5 @@
 import { PublicSnapshotSessionMethods } from './public-snapshot-session.js';
-import type { StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
-import type { AssertionPullFromOptions, AssertionPullFromResult } from '@origintrail-official/dkg-publisher';
+import type { AssertionPullFromOptions, AssertionPullFromResult, StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
 import { StorageACKAdmission } from './storage-ack-admission.js';
 import { runStorageACKOperation } from './storage-ack-diagnostics.js';
 import { requireStorageACKContextGraphId } from './internal/storage-ack-context-graph.js';
@@ -554,8 +553,10 @@ import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { VmReconcileSchedulingMethods } from './dkg-agent-vm-reconcile-scheduling.js';
 import { VmPromotionMethods } from './dkg-agent-vm-promotion.js';
 import { AgentsPhonebookMethods } from './dkg-agent-agents-phonebook.js';
+import { MarketplaceAgentMethods } from './dkg-agent-marketplace.js';
 import { SwmChangeNoticeMethods } from './dkg-agent-swm-change-notice.js';
 import { WritePreflightGeneration, WritePreflightIdentityMethods, attachWritePreflightGeneration, withWritePreflightGeneration } from './dkg-agent-write-preflight.js';
+import { NodeHeldAuthorMethods, assertNodeHeldAuthorConfig } from './dkg-agent-node-held-author.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
 import { ContextGraphNameResolutionMethods } from './dkg-agent-cg-name-resolution.js';
 import { ContextGraphOnChainIdMethods } from './dkg-agent-cg-on-chain-id.js';
@@ -1203,6 +1204,7 @@ export class DKGAgent extends DKGAgentBase {
         'DKGAgentConfig.contextGraphSubscriptionRehydrationEnabled must be a boolean',
       );
     }
+    assertNodeHeldAuthorConfig(inputConfig);
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
     const preparedContentCache = normalizeAgentPreparedCacheConfig(inputConfig);
     const normalizedConfig = normalizeStorageAckConfig({
@@ -4347,9 +4349,7 @@ export class DKGAgent extends DKGAgentBase {
   whenRfc64CatalogSupervisorsIdleV1(): Promise<void> {
     return this.rfc64CatalogRuntimeV1.whenIdle();
   }
-
 }
 
-
-export interface DKGAgent extends PrivateAccessMethods, PublicSnapshotMethods, PublicSnapshotSessionMethods, PublicCheckpointMethods, ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, ContextGraphPartitionQueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64OwedShareInventoryMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods, WritePreflightIdentityMethods {}
-applyMixins(DKGAgent, [PrivateAccessMethods, PublicSnapshotMethods, PublicSnapshotSessionMethods, PublicCheckpointMethods,ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, ContextGraphPartitionQueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64OwedShareInventoryMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods, WritePreflightIdentityMethods]);
+export interface DKGAgent extends PrivateAccessMethods, PublicSnapshotMethods, PublicSnapshotSessionMethods, PublicCheckpointMethods, ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, ContextGraphPartitionQueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64OwedShareInventoryMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods, WritePreflightIdentityMethods, NodeHeldAuthorMethods, MarketplaceAgentMethods {}
+applyMixins(DKGAgent, [PrivateAccessMethods, PublicSnapshotMethods, PublicSnapshotSessionMethods, PublicCheckpointMethods,ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, ContextGraphPartitionQueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64OwedShareInventoryMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods, WritePreflightIdentityMethods, NodeHeldAuthorMethods, MarketplaceAgentMethods]);
