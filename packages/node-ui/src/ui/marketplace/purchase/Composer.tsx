@@ -11,7 +11,8 @@ import type { CatalogAnswer, Funding, FundingRequest, Offer, Preview, Service, S
 import { fmtCount, fmtMicro, fmtTrac, microOfWei, modelName, unitsOf, usdOf, weiOfMicro, weiOfTrac } from '../amounts.js';
 import { ErrorCard, refusalKey, relAt, sellerName } from '../shared.js';
 
-export interface Line { serviceId: string; valueTrac: string; capMicro: string; pinned: number | null }
+/** One service of the plan. Its class goes with it, so a service the catalog lacks this epoch is saved back as it was. */
+export interface Line { serviceId: string; serviceClass: Service['serviceClass']; valueTrac: string; capMicro: string; pinned: number | null }
 
 export interface Draft {
   epoch: 'current' | 'next';
@@ -29,18 +30,17 @@ function priceIn(o: Offer, epoch: 'current' | 'next'): bigint {
 /** A new line: one TRAC, capped at the dearest seller's price, so every seller qualifies. */
 export function lineFor(s: Service, epoch: 'current' | 'next', valueTrac = '1'): Line {
   const top = s.offers.reduce((m, o) => (priceIn(o, epoch) > m ? priceIn(o, epoch) : m), 0n);
-  return { serviceId: s.serviceId, valueTrac, capMicro: microOfWei(top), pinned: null };
+  return { serviceId: s.serviceId, serviceClass: s.serviceClass, valueTrac, capMicro: microOfWei(top), pinned: null };
 }
 
 /** The lines as the node takes them, or null while any is not a positive amount. */
-export function servicesOf(draft: Draft, catalog: CatalogAnswer): ServiceRequest[] | null {
+export function servicesOf(draft: Draft): ServiceRequest[] | null {
   const out: ServiceRequest[] = [];
   for (const l of draft.lines) {
     const value = weiOfTrac(l.valueTrac);
     const cap = weiOfMicro(l.capMicro);
     if (!value || !cap) return null;
-    const serviceClass = catalog.services.find((s) => s.serviceId === l.serviceId)?.serviceClass ?? 'inference';
-    out.push({ serviceId: l.serviceId, serviceClass, value: value.toString(), maxPricePerUnit: cap.toString(), ...(l.pinned !== null ? { pinnedSeller: l.pinned } : {}) });
+    out.push({ serviceId: l.serviceId, serviceClass: l.serviceClass, value: value.toString(), maxPricePerUnit: cap.toString(), ...(l.pinned !== null ? { pinnedSeller: l.pinned } : {}) });
   }
   return out.length ? out : null;
 }

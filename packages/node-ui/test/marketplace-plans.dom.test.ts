@@ -645,6 +645,32 @@ describe('marketplace Plans', () => {
     expect(services.find((s) => s.serviceId === FIXTURE_IDS.llama8b)?.value).toBe('750000000000000000');
   });
 
+  it('saves an edit to the plan with a query service the catalog lacks this epoch as it was, its class included', async () => {
+    const query = `0x${'51'.repeat(32)}`;
+    const writes = editedNode('active', (method, url, body) => {
+      if (method !== 'GET' || url !== '/api/marketplace/plan') return;
+      (body.services as Json[]).push({
+        serviceId: query, serviceClass: 'query', value: '400000000000000000', valueTrac: '0.4', maxPricePerUnit: '2000000000000', maxPricePerUnitTrac: '0.000002', pinnedSeller: FIXTURE_IDS.sellerB,
+      });
+    });
+    const c = await render(plans());
+    await waitForText(c, 'Epoch 665 is funded');
+    await click(byTestId(c, 'mkt-change-plan'));
+    // No seller offers it this epoch, so the composer has no line to show for it.
+    expect(byTestId(c, `mkt-line-${query}`)).toBeNull();
+    await type(byTestId(c, `mkt-value-${FIXTURE_IDS.llama8b}`), '0.75');
+    await click(byTestId(c, 'mkt-compose-continue'));
+    await click(byTestId(c, 'mkt-gate-confirm'));
+    await flush(50);
+    const saved = writes.filter((w) => w.method === 'PUT' && w.url === '/api/marketplace/plan');
+    expect(saved).toHaveLength(1);
+    const services = (saved[0].body as { services: Json[] }).services;
+    expect(services.find((s) => s.serviceId === query)).toEqual({
+      serviceId: query, serviceClass: 'query', value: '400000000000000000', maxPricePerUnit: '2000000000000', pinnedSeller: FIXTURE_IDS.sellerB,
+    });
+    expect(services.filter((s) => s.serviceId !== query).map((s) => s.serviceClass)).toEqual(['inference', 'inference', 'inference']);
+  });
+
   it('walks a node that never subscribed through compose, one confirmation and a key', async () => {
     const writes = recordWrites('none');
     const c = await render(plans());

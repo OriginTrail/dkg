@@ -20,10 +20,14 @@ import { Treasury } from '../purchase/Treasury.js';
 
 type Flow = { kind: 'fund'; epoch: 'current' | 'next'; serviceId?: string } | { kind: 'plan' } | { kind: 'top-up'; serviceId: string };
 
-/** A draft from the plan, or a fresh one with `serviceId` picked. Each cap is the plan's to the wei, so an edit elsewhere saves it unchanged. */
+/**
+ * A draft from the plan, or a fresh one with `serviceId` picked. Each line
+ * keeps the plan's class and its cap to the wei, so an edit elsewhere saves
+ * it unchanged, even when the catalog lacks its service this epoch.
+ */
 function draftOf(catalog: CatalogAnswer, plan: Plan | null, epoch: 'current' | 'next', serviceId?: string): Draft {
   const lines = plan
-    ? plan.services.map((s) => ({ serviceId: s.serviceId, valueTrac: s.valueTrac.replace(/\.0$/, ''), capMicro: microOfWei(s.maxPricePerUnit), pinned: s.pinnedSeller ?? null }))
+    ? plan.services.map((s) => ({ serviceId: s.serviceId, serviceClass: s.serviceClass, valueTrac: s.valueTrac.replace(/\.0$/, ''), capMicro: microOfWei(s.maxPricePerUnit), pinned: s.pinnedSeller ?? null }))
     : [];
   const extra = serviceId && !lines.some((l) => l.serviceId === serviceId) ? catalog.services.find((s) => s.serviceId === serviceId) : undefined;
   return {

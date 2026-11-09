@@ -52,7 +52,7 @@ export function FundFlow({ catalog, funding, initial, fundsEpoch, onboarding, on
   const [flow, setFlow] = useState<Flow>({ phase: 'compose' });
   // Back from the confirmation, the draft is asked about afresh: an epoch may have ended since its last dry run.
   const [round, setRound] = useState(0);
-  const services = servicesOf(draft, catalog);
+  const services = servicesOf(draft);
   const request = services ? fundingRequestOf(draft, services) : null;
   // While a changed draft's dry run loads, the last answer stays on show; only the draft's own answer opens Continue.
   const dryRun = usePreview(fundsEpoch ? request : null, (r) => marketplaceApi.preview(r), { retain: 'last', round });
