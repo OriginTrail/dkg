@@ -326,11 +326,24 @@ describe('a call', () => {
   });
 
   it.each([40, 60])('serves a request that lasts %i days, its receipt completed before it expires', async (days) => {
-    // No timer runs to a request's expiry: one past the longest a timer can wait (about 24.8 days) would fire at once.
+    // No timer runs to a request's expiry: one past the longest a timer can wait (about 24.8 days) fires after 1 ms.
+    // So the backend answers only after 50 ms, and a call cut short by such a timer would have failed by then.
     const id = await fund();
     const { now } = await chain.getEpochTimes();
     const request = await requestFor(id, { expiry: now + days * 86_400 });
-    const answer = await seller.serve(wire(request)) as ServeAnswer;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const complete = connector.complete.bind(connector);
+    const backendCall = vi.spyOn(connector, 'complete').mockImplementationOnce(async (input) => {
+      await held;
+      return complete(input);
+    });
+    const serving = seller.serve(wire(request));
+    await vi.waitFor(() => expect(backendCall).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    release();
+    const answer = await serving as ServeAnswer;
+    backendCall.mockRestore();
     expect(answer.ok).toBe(true);
     expect(receiptFromWire(answer.receipt).completedAt).toBeLessThanOrEqual(request.expiry);
     expect(backend.calls).toBe(1);
