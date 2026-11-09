@@ -1,4 +1,3 @@
-import { refuseUnlistedWorkspaceSigner } from './internal/context-graph-authority/approved-member-metadata-pending.js';
 // SPDX-License-Identifier: Apache-2.0
 /**
  * Workspace-encryption / sender-key subsystem extracted from dkg-agent.ts as

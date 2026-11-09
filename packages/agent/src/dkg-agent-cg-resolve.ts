@@ -1,4 +1,3 @@
-import { withCallerJoinState } from './internal/context-graph-authority/approved-member-metadata-pending.js';
 // SPDX-License-Identifier: Apache-2.0
 /**
  * Context-graph resolution subsystem extracted from dkg-agent.ts as a mixin
