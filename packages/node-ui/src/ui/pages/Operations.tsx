@@ -465,7 +465,7 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
             className={expandedOp === op.operation_id ? 'obs-failed-head obs-failed-head-open' : 'obs-failed-head'}
           >
             <span className="obs-meta">{expandedOp === op.operation_id ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
-            <button type="button" className={`ds-row-open obs-failed-name obs-op-${opTone(op.operation_name)}`} aria-expanded={expandedOp === op.operation_id}>{op.operation_name}</button>
+            <button type="button" className={`ds-row-open obs-failed-name op-tone-${opTone(op.operation_name)}`} aria-expanded={expandedOp === op.operation_id}>{op.operation_name}</button>
             <StatusBadge status={op.status} />
             <span className="mono obs-meta">{op.operation_id} <CopyButton text={op.operation_id} /></span>
             <span className="obs-meta obs-push-end">{formatTime(op.phase_started_at)}</span>
@@ -595,7 +595,7 @@ function OperationStatsSection() {
               {rates.map((r: any) => {
                 const rateTier = r.rate >= 0.9 ? 'obs-rate-good' : r.rate >= 0.7 ? 'obs-rate-fair' : 'obs-rate-poor';
                 return (
-                  <div key={r.type} className={`obs-type-card obs-op-${opTone(r.type)} ${rateTier}`}>
+                  <div key={r.type} className={`obs-type-card op-tone-${opTone(r.type)} ${rateTier}`}>
                     <div className="obs-type-name">{r.type}</div>
                     <div className="obs-type-stats">
                       <div>
@@ -991,7 +991,7 @@ function OperationsTab() {
                   className={selectedOp === op.operation_id ? 'obs-row-press obs-row-open' : 'obs-row-press'}
                 >
                   <td title={op.started_at ? formatDateTime(op.started_at, { seconds: true }) : undefined}>{formatTime(op.started_at)}</td>
-                  <td><Badge size="sm" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} className={`obs-op-badge obs-op-${opTone(op.operation_name)}`}>{op.operation_name}</Badge></td>
+                  <td><Badge size="sm" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} className={`obs-op-badge op-tone-${opTone(op.operation_name)}`}>{op.operation_name}</Badge></td>
                   <td><StatusBadge status={op.status} /></td>
                   <td><MiniGantt phases={op.phases} totalMs={op.duration_ms} /></td>
                   <td className="ds-num">{formatDuration(op.duration_ms)}</td>
@@ -1436,7 +1436,7 @@ function StyledDaemonLine({ line, lineNum, highlight }: { line: string; lineNum:
     <div className={lineClass}>
       <span className="obs-log-num">{lineNum}</span>
       <span className="obs-log-ts">{parsed.ts}</span>{' '}
-      <span className={`obs-log-op obs-op-${opTone(parsed.opName)}`}>{parsed.opName}</span>{' '}
+      <span className={`obs-log-op op-tone-${opTone(parsed.opName)}`}>{parsed.opName}</span>{' '}
       <span className="obs-faint">{parsed.opId.slice(0, 8)}</span>{' '}
       <span className="obs-log-module">[{parsed.module}]</span>{' '}
       <span className="obs-log-text">{highlight ? highlight(parsed.message) : parsed.message}</span>

@@ -1,5 +1,13 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { opTone, opTypeText, opTypeBg, opChartColor } from '../src/ui/op-type-colors.js';
+import { opTone, opChartColor } from '../src/ui/op-type-colors.js';
+
+const DS_CSS = readFileSync(join(__dirname, '../src/ui/styles/27-ds-components.css'), 'utf8');
+const toneRule = (tone: string) => {
+  const at = DS_CSS.indexOf(`.op-tone-${tone} {`);
+  return at < 0 ? '' : DS_CSS.slice(at, DS_CSS.indexOf('}', at));
+};
 
 describe('operation type colours (C4 / C5)', () => {
   it('colours operations by the layer they write to', () => {
@@ -10,10 +18,10 @@ describe('operation type colours (C4 / C5)', () => {
     }
   });
 
-  it('uses layer tokens for labels and badges', () => {
-    expect(opTypeText('publish')).toBe('var(--layer-verified-text)');
-    expect(opTypeBg('share')).toBe('var(--layer-shared-bg)');
-    expect(opTypeText('query')).toBe('var(--text-secondary)');
+  it('uses layer tokens for labels and badges, set once in the op-tone classes', () => {
+    expect(toneRule('vm')).toContain('--op-text: var(--layer-verified-text)');
+    expect(toneRule('swm')).toContain('--op-bg: var(--layer-shared-bg)');
+    expect(toneRule('neutral')).toContain('--op-text: var(--text-secondary)');
   });
 
   it('gives chart series distinct data-palette colours in type order', () => {
