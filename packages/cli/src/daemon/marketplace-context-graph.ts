@@ -13,14 +13,11 @@ import { CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS } from './context-graph-readin
 import { readLocalAgentSubscriptionAdmission } from './context-graph-subscription-admission.js';
 
 /**
- * Publish `quads` as the asset `name` in the graph's Verifiable Memory, as the
- * node's default agent: staged (created, written and shared, which seals it),
- * then published in one transaction, the sync publish. Writes add to a draft,
- * so a sealed version is first reopened from the layer it is in and its draft
- * discarded, then the whole offer written anew; publishing it updates the same
- * asset. Only a confirmed publish counts.
+ * Stage `quads` as the asset `name` (created, written and shared, which seals
+ * it). Writes add to a draft, so a sealed version is first reopened from the
+ * layer it is in and its draft discarded, then the whole offer written anew.
  */
-export async function publishOfferAsset(agent: DKGAgent, contextGraphId: string, name: string, quads: OfferQuad[]): Promise<{ kaId: bigint }> {
+async function stageOfferAsset(agent: DKGAgent, contextGraphId: string, name: string, quads: OfferQuad[]): Promise<void> {
   const state = (await agent.assertion.history(contextGraphId, name))?.state;
   if (state === 'promoted' || state === 'published' || state === 'finalized') {
     await agent.assertion.pullFrom(contextGraphId, name, state === 'promoted' ? 'swm' : 'vm', { onConflict: 'replace' });
@@ -29,6 +26,25 @@ export async function publishOfferAsset(agent: DKGAgent, contextGraphId: string,
   await agent.assertion.create(contextGraphId, name);
   await agent.assertion.write(contextGraphId, name, quads);
   await agent.assertion.promote(contextGraphId, name);
+}
+
+/**
+ * Publish `quads` as the asset `name` in the graph's Verifiable Memory, as the
+ * node's default agent: staged, then published in one transaction, the sync
+ * publish; publishing it updates the same asset. A promote an earlier attempt
+ * left unfinished keeps the draft from changing until it runs again
+ * (`KA_PROMOTE_RECOVERY_REQUIRED`): it is run again first, finishing with the
+ * content it has, and the offer is then staged anew. Only a confirmed publish
+ * counts.
+ */
+export async function publishOfferAsset(agent: DKGAgent, contextGraphId: string, name: string, quads: OfferQuad[]): Promise<{ kaId: bigint }> {
+  try {
+    await stageOfferAsset(agent, contextGraphId, name, quads);
+  } catch (err) {
+    if ((err as { code?: unknown } | null)?.code !== 'KA_PROMOTE_RECOVERY_REQUIRED') throw err;
+    await agent.assertion.promote(contextGraphId, name);
+    await stageOfferAsset(agent, contextGraphId, name, quads);
+  }
   const published = await agent.publishFromFinalizedAssertion(contextGraphId, name);
   if (published.status !== 'confirmed') throw new Error(`${name} was not confirmed on chain (${published.status})`);
   return { kaId: published.kaId };

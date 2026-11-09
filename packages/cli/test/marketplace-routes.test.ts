@@ -535,6 +535,40 @@ describe('the Marketplace Context Graph at boot', () => {
     await assets.recover({ version: 1 });
     expect(node.recoverRfc64ConfirmedCatalogObligationV1).toHaveBeenCalledWith({ version: 1 });
   });
+
+  it('finishes a promote an earlier publish left unfinished, then stages the offer anew and publishes it', async () => {
+    const quads = [{ subject: 'urn:test:offer', predicate: 'urn:test:p', object: '"2"', graph: '' }];
+    const steps: string[] = [];
+    // A promote that failed after its intent was kept: the draft is frozen until the promote runs again.
+    let state = 'created';
+    let unfinished = true;
+    const mutation = (name: string) => vi.fn(async (...args: unknown[]) => {
+      if (unfinished) {
+        throw Object.assign(new Error('Assertion "offer-a" has an unfinished promote; retry assertionPromote before mutating its draft'), { code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+      }
+      steps.push(`${name}${args[2] === 'swm' ? ':swm' : ''}`);
+    });
+    const node = {
+      assertion: {
+        history: vi.fn(async () => ({ state })),
+        pullFrom: mutation('pullFrom'), discard: mutation('discard'), create: mutation('create'), write: mutation('write'),
+        promote: vi.fn(async () => {
+          steps.push(unfinished ? 'promote, finishing the one left' : 'promote');
+          unfinished = false;
+          state = 'promoted';
+        }),
+      },
+      publishFromFinalizedAssertion: vi.fn(async () => ({ status: 'confirmed', kaId: 42n })),
+      recoverRfc64ConfirmedCatalogObligationV1: vi.fn(async () => undefined),
+    };
+    const assets = offerAssetsIn(node as unknown as DKGAgent, 'graph', () => true);
+    expect(await assets.publish('offer-a', quads)).toEqual({ kaId: 42n });
+    expect(steps).toEqual(['promote, finishing the one left', 'pullFrom:swm', 'discard', 'create', 'write', 'promote']);
+    expect(node.assertion.write).toHaveBeenLastCalledWith('graph', 'offer-a', quads);
+    // Any other error fails the publish as it is.
+    node.assertion.discard.mockRejectedValueOnce(Object.assign(new Error('store unavailable'), { code: 'STORE_UNAVAILABLE' }));
+    await expect(assets.publish('offer-a', quads)).rejects.toThrow('store unavailable');
+  });
 });
 
 describe('dkg marketplace', () => {
