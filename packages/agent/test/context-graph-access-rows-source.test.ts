@@ -379,6 +379,34 @@ describe('a context graph access list comes from its own metadata', () => {
       expect(declaredPrivate.accessPolicy).toBe('private');
     }, 60_000);
 
+    it('takes a spaced or capitalised private policy from the agents graph over a public one', async () => {
+      const { agent, node, store } = await startNode();
+      const caller = ethers.Wallet.createRandom().address;
+      await store.insert([
+        declared(ONTOLOGY_GRAPH),
+        accessRow(id, DKG_ONTOLOGY.DKG_ACCESS_POLICY, 'public', ONTOLOGY_GRAPH),
+        accessRow(id, DKG_ONTOLOGY.DKG_ACCESS_POLICY, ' Private ', AGENTS_GRAPH),
+      ]);
+
+      expect(await node.isPrivateContextGraph(id)).toBe(true);
+      expect(await agent.probeContextGraphWritePreflight(id, { callerAgentAddress: caller }))
+        .toMatchObject({ declarationFound: true, accessPolicy: 'private', callerAuthorized: false });
+    }, 60_000);
+
+    it('takes no spaced or capitalised public policy from the agents graph', async () => {
+      const { agent, node, store } = await startNode();
+      const caller = ethers.Wallet.createRandom().address;
+      await store.insert([
+        declared(metaGraph),
+        accessRow(id, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, ethers.Wallet.createRandom().address, metaGraph),
+        accessRow(id, DKG_ONTOLOGY.DKG_ACCESS_POLICY, ' Public ', AGENTS_GRAPH),
+      ]);
+
+      expect(await node.isPrivateContextGraph(id)).toBe(true);
+      expect(await agent.probeContextGraphWritePreflight(id, { callerAgentAddress: caller }))
+        .toMatchObject({ declarationFound: true, accessPolicy: 'private', callerAuthorized: false });
+    }, 60_000);
+
     it('takes no curator from the agents graph, and authorizes the one its own metadata names', async () => {
       const caller = ethers.Wallet.createRandom().address;
       const curator = { subject, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${caller.toLowerCase()}` };

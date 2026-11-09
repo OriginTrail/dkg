@@ -12,7 +12,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { resolveWorkspaceAgentRecipientKeys, WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES as RECIPIENT_AUTHORITY_PREDICATES } from '@origintrail-official/dkg-publisher';
 import { storeLaneInflightLimit, type Quad, type QueryOptions, type TripleStore } from '@origintrail-official/dkg-storage';
-import { ACCESS_ROW_ROOT_PREDICATES } from './curator-meta-member-list.js';
+import { LEGACY_SCHEMA_NS, agentsGraphMayState, ontologyGraphMayState } from './context-graph-meta-sources.js';
 import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { cloneMetaRecord } from './internal/context-graph-meta-record-copy.js';
@@ -34,7 +34,6 @@ export interface ContextGraphReadAuthorityFactsSnapshot {
 
 const DKG_NS = 'https://dkg.network/ontology#';
 const LEGACY_DKG_NS = 'http://dkg.io/ontology/';
-const LEGACY_SCHEMA_NS = 'http://schema.org/';
 const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
 
 const SUB_GRAPH_TYPE_URIS = new Set([
@@ -104,26 +103,7 @@ const CATALOG_META_PREDICATES = new Set<string>([
   DKG_ONTOLOGY.RDF_TYPE,
   DKG_ONTOLOGY.DCT_ACCESS_RIGHTS,
 ]);
-// The `agents` system graph holds agents' profiles. About a context graph it can
-// declare existence, a description and a restriction, nothing that says who speaks
-// for the graph or who may access it.
-const AGENTS_GRAPH_META_PREDICATES = new Set<string>([
-  DKG_ONTOLOGY.RDF_TYPE,
-  DKG_ONTOLOGY.SCHEMA_NAME,
-  `${LEGACY_SCHEMA_NS}name`,
-  DKG_ONTOLOGY.SCHEMA_DESCRIPTION,
-  `${LEGACY_SCHEMA_NS}description`,
-  DKG_ONTOLOGY.DKG_CREATED_AT,
-  DKG_ONTOLOGY.DKG_ACCESS_POLICY,
-  DKG_ONTOLOGY.DCT_ACCESS_RIGHTS,
-]);
 const isCatalogFact = (predicate: string): boolean => CATALOG_META_PREDICATES.has(predicate);
-const isAgentsGraphFact = (predicate: string, object: string): boolean => AGENTS_GRAPH_META_PREDICATES.has(predicate)
-  // A policy from this graph can only make a graph private, never public.
-  && (predicate !== DKG_ONTOLOGY.DKG_ACCESS_POLICY || object.trim().toLowerCase() !== 'public');
-// The `ontology` system graph is the catalogue of public graphs: it keeps their
-// definition, but a graph's access list comes from the graph's own `_meta`.
-const isOntologyFact = (predicate: string): boolean => !ACCESS_ROW_ROOT_PREDICATES.has(predicate);
 const PROJECTION_RECORD_PREDICATES: ReadonlySet<string> = new Set([
   ...DIRECT_META_PREDICATES, ...SUB_GRAPH_META_PREDICATES, ...DELEGATION_META_PREDICATES, ...CATALOG_META_PREDICATES]);
 const AGENT_ROSTER_PREDICATES: ReadonlySet<string> = new Set([
@@ -566,9 +546,9 @@ export class ContextGraphMetaProjection {
     // a private access class. The shared ONTOLOGY seed keeps a public graph's
     // definition.
     await this.loadContextGraphFacts(metaGraph, uri, record, options);
-    await this.loadContextGraphFacts(agentsGraph, uri, record, options, isAgentsGraphFact);
+    await this.loadContextGraphFacts(agentsGraph, uri, record, options, agentsGraphMayState);
     await this.loadContextGraphFacts(catalogGraph, uri, record, options, isCatalogFact);
-    await this.loadContextGraphFacts(ontologyGraph, uri, record, options, isOntologyFact);
+    await this.loadContextGraphFacts(ontologyGraph, uri, record, options, ontologyGraphMayState);
     record.delegations = await this.loadDelegations(contextGraphId, options);
     record.subGraphs = await this.loadSubGraphs(contextGraphId, options);
 
