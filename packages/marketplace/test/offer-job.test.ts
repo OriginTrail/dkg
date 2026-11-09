@@ -5,9 +5,10 @@
  * service, published once and updated only when its signed terms change (a
  * price included, and the epoch turning only when the schedule no longer
  * holds), nothing sent after a restart, an asset extended with two epochs or
- * fewer left, a withdrawal, a seller without TRAC left unlisted with the
- * reason and a backoff, a confirmed publish whose catalog record is owed, and
- * the job's runs beside the landing tick.
+ * fewer left and paid for once when the publish after it fails, a withdrawal,
+ * a seller without TRAC left unlisted with the reason and a backoff, a
+ * confirmed publish whose catalog record is owed, and the job's runs beside
+ * the landing tick.
  */
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -207,6 +208,34 @@ describe('the offer job', () => {
     expect(logs).toContainEqual(expect.stringMatching(new RegExp(`stored through epoch ${epoch + 2 * TERM_EPOCHS}`)));
     await settle(seller);
     expect(extensions).toHaveBeenCalledTimes(2);
+  });
+
+  it('pays for an extension once: when the publish after it fails, a restart publishes the new last epoch and pays nothing more', async () => {
+    const seller = sellerWith([serviceOf(MODEL_A)]);
+    await seller.load();
+    await settle(seller);
+    const { epoch } = await chain.getEpochTimes();
+    const kaId = assets.published[0]!.kaId;
+    const extensions = vi.spyOn(chain, 'extendKnowledgeAssetLifetime');
+    for (let i = 0; i < TERM_EPOCHS - 2; i++) mock.__advanceEpoch();
+    assets.fail = () => Object.assign(new Error('collected 0/3'), { name: 'QuorumUnmetError' });
+    await settle(seller);
+    // Paid on chain, the offer not published: the asset is stored through its new last epoch, the offer still names the old one.
+    expect(extensions).toHaveBeenCalledTimes(1);
+    expect((await chain.getKnowledgeAssetUpdateContext(kaId)).endEpoch).toBe(BigInt(epoch + 2 * TERM_EPOCHS));
+    expect(offersOf(A).map((o) => o.validUntilEpoch)).toEqual([epoch + TERM_EPOCHS]);
+    expect(seller.offers!.listingOf(A, epoch + TERM_EPOCHS - 2)).toMatchObject({ listed: true, validUntilEpoch: epoch + TERM_EPOCHS, problem: 'no-ack-quorum' });
+    // The restart reads the asset's end epoch from the chain, not from what it kept, and publishes it without paying again.
+    assets.fail = undefined;
+    const restarted = sellerWith([serviceOf(MODEL_A)]);
+    await restarted.load();
+    await settle(restarted);
+    expect(extensions).toHaveBeenCalledTimes(1);
+    expect(assets.published.map((p) => [p.kaId, p.offer.validUntilEpoch])).toEqual([[kaId, epoch + TERM_EPOCHS], [kaId, epoch + 2 * TERM_EPOCHS]]);
+    expect(restarted.offers!.listingOf(A, epoch + TERM_EPOCHS - 2)).toEqual({ listed: true, kaId: String(kaId), validUntilEpoch: epoch + 2 * TERM_EPOCHS, withdrawn: false });
+    await settle(restarted);
+    expect(extensions).toHaveBeenCalledTimes(1);
+    expect(assets.published).toHaveLength(2);
   });
 
   it('withdraws a service the settings no longer name, once, keeping its terms, and extends it no more', async () => {
