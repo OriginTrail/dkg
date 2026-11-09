@@ -486,8 +486,8 @@ export function CreatePcaModal({
 
         {/* Section 1 — Owner key (H-D). Hardware is recommended but not verifiable; hot stays daemon-signed. */}
         <section className="v10-pca-create-section" data-testid="pca-create-owner-key">
-          <h3 className="v10-pca-create-section-title">1 · Owner key</h3>
-          <div className="v10-pca-owner-key-grid" role="radiogroup" aria-label="PCA owner key">
+          <h3 className="v10-pca-create-section-title">1 · Owner wallet</h3>
+          <div className="v10-pca-owner-key-grid" role="radiogroup" aria-label="PCA owner wallet">
             <label className={`v10-pca-owner-key-card ds-card-nested${ownerKey === 'hardware' ? ' selected' : ''}`}>
               <input
                 type="radio"
@@ -500,8 +500,8 @@ export function CreatePcaModal({
               <span>
                 <strong>Hardware wallet (recommended)</strong>
                 <small>
-                  If your browser wallet is backed by a device, verify the amount and contract there.
-                  The app cannot verify hardware backing from provider metadata.
+                  Connect a hardware wallet through your browser, and check the amount and contract on the
+                  device before you confirm. The app can’t tell whether a browser wallet is backed by a device.
                 </small>
               </span>
             </label>
@@ -516,7 +516,7 @@ export function CreatePcaModal({
               />
               <span>
                 <strong>This node&apos;s hot wallet</strong>
-                <small>No connected browser wallet is required. The daemon signs with this node&apos;s primary operational wallet.</small>
+                <small>This node signs with its primary operational wallet. You don’t need to connect a wallet.</small>
               </span>
             </label>
           </div>
