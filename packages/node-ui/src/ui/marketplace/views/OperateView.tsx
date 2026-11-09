@@ -7,9 +7,41 @@
 import React, { useState } from 'react';
 import { copy, type CopyKey } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi } from '../api/client.js';
-import type { LandNowAnswer, LandingReport, LandingStop, Offering } from '../api/types.js';
+import type { LandNowAnswer, LandingReport, LandingStop, Listing, ListingProblem, Offering } from '../api/types.js';
 import { fmtAt, fmtHex, fmtMicro, fmtTrac, modelName, weiOfMicro } from '../amounts.js';
 import { ErrorCard, OffCard, relAt, useLoad } from '../shared.js';
+
+/** Why an offer is not listed, in plain words. */
+const LISTING_PROBLEM: Record<ListingProblem, CopyKey> = {
+  'not-core-node': 'operate.listing.not-core-node',
+  'not-admitted': 'operate.listing.not-admitted',
+  'no-trac': 'operate.listing.no-trac',
+  'no-ack-quorum': 'operate.listing.no-ack-quorum',
+  'graph-not-registered': 'operate.listing.graph-not-registered',
+  'catalog-pending': 'operate.listing.catalog-pending',
+  expired: 'operate.listing.expired',
+  error: 'operate.listing.error',
+};
+
+/** Whether an offering's offer is listed, in one line; the node's own words, if any, beneath it. */
+function ListingLine({ serviceId, listing }: { serviceId: string; listing: Listing }): React.ReactElement {
+  // No problem named: not listed yet. A problem this page does not know reads as a failed publish.
+  const problemKey: CopyKey = !listing.problem ? 'operate.listing.none' : LISTING_PROBLEM[listing.problem] ?? 'operate.listing.error';
+  const state = listing.listed ? 'listed' : listing.withdrawn ? 'withdrawn' : 'not-listed';
+  return (
+    <div className="mkt-xs" data-testid={`mkt-listing-${serviceId}`} data-state={state} data-problem={listing.problem ?? ''}>
+      {state === 'listed' && <span className="mkt-yours" data-copy="operate.listing.listed">{copy('operate.listing.listed', { n: listing.validUntilEpoch ?? '—' })}</span>}
+      {state === 'withdrawn' && <span className="mkt-muted" data-copy="operate.listing.withdrawn">{copy('operate.listing.withdrawn')}</span>}
+      {state === 'not-listed' && (
+        <span className="mkt-errline">
+          <span data-copy={problemKey}>{copy(problemKey)}</span>
+          {listing.retryAt != null && <span data-copy="operate.listing.retry"> · {copy('operate.listing.retry', { t: fmtAt(listing.retryAt) })}</span>}
+        </span>
+      )}
+      {listing.message && <div className="mkt-muted mkt-mono" data-copy="_data">{listing.message}</div>}
+    </div>
+  );
+}
 
 /** What a landing came to, in the fields the last landing's report and a Land now answer share. */
 type Landed = { stopped: LandingStop } | { batches: ReadonlyArray<{ items: number }>; refused: number; waiting: boolean };
@@ -95,6 +127,7 @@ export function OperateView(): React.ReactElement {
                 <div className="mkt-muted mkt-xs" data-copy={changed ? 'operate.price.queued' : 'operate.price.none'}>
                   {changed ? copy('operate.price.queued', { price: fmtMicro(o.nextPrice) }) : copy('operate.price.none')}
                 </div>
+                {o.listing ? <ListingLine serviceId={o.serviceId} listing={o.listing} /> : null}
                 {priceErr?.id === o.serviceId ? <ErrorCard err={priceErr.err} onRetry={() => setPrice(o.serviceId)}><span className="mkt-muted mkt-xs" data-copy="operate.price.error">{copy('operate.price.error')}</span></ErrorCard> : null}
               </span>
               <span className="mkt-mono mkt-sec mkt-askedit">

@@ -273,7 +273,28 @@ export interface MadeKey extends Key { secret: string }
 
 // ── seller ──────────────────────────────────────────────────────────────────
 
-/** One of the seller's services: its backend's state, and this and the next epoch's price. */
+/** Why a seller's offer is not listed, or why its last publish or extension failed. */
+export type ListingProblem =
+  | 'not-core-node' | 'not-admitted' | 'no-trac' | 'no-ack-quorum' | 'graph-not-registered' | 'catalog-pending' | 'expired' | 'error';
+
+/**
+ * Whether a service's offer is in the catalog: published to Verifiable
+ * Memory, valid this epoch, not withdrawn, its catalog record kept, and this
+ * node a Core Node.
+ */
+export interface Listing {
+  listed: boolean;
+  kaId?: string;
+  validUntilEpoch?: number;
+  withdrawn?: boolean;
+  problem?: ListingProblem;
+  /** The node's own words for the problem. */
+  message?: string;
+  /** When a failed run is tried again, in chain seconds. */
+  retryAt?: number;
+}
+
+/** One of the seller's services: its backend's state, this and the next epoch's price, and whether its offer is listed. */
 export interface Offering {
   serviceId: string;
   connector: 'up' | 'down';
@@ -281,6 +302,8 @@ export interface Offering {
   priceTrac: string;
   nextPrice: string;
   nextPriceTrac: string;
+  /** Null when the node runs without the module that publishes offers. */
+  listing: Listing | null;
 }
 
 export interface Batch {

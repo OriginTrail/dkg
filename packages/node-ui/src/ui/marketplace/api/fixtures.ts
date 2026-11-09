@@ -6,7 +6,7 @@
 // service ids are synthetic.
 import type {
   Account, ActivityAnswer, Budget, Call, CatalogAnswer, ChatCompletion, Consent, Contracts, FundedAnswer, Funding,
-  FundingRequest, GatewayModels, Key, KeysAnswer, LandNowAnswer, MadeKey, Offer, Offering, Plan, PlanRequest, Preview,
+  FundingRequest, GatewayModels, Key, KeysAnswer, LandNowAnswer, Listing, MadeKey, Offer, Offering, Plan, PlanRequest, Preview,
   ReconciliationAnswer, SellerStatus, Service, ServiceDetail, ServiceRequest, Source, SourceRequest, Storefront,
   Subscription,
 } from './types.js';
@@ -211,14 +211,23 @@ export function fixtureWorld(nowMs = Date.now()) {
   const batch = (n: number, minsAgo: number, items: number, value: string, counted: string) => ({
     tx: txHash(0xb0 + n), at: now - minsAgo * 60, items, ...amount('value', tracWei(value)), ...amount('counted', tracWei(counted)), gasUsed: 182_000 + items * 1_900,
   });
-  const offering = (serviceId: string, connector: Offering['connector'], price: string, nextPrice: string): Offering => ({
-    serviceId, connector, ...amount('price', microWei(price)), ...amount('nextPrice', microWei(nextPrice)),
+  const offering = (serviceId: string, connector: Offering['connector'], price: string, nextPrice: string, listing: Listing | null): Offering => ({
+    serviceId, connector, ...amount('price', microWei(price)), ...amount('nextPrice', microWei(nextPrice)), listing,
   });
+  // One offer listed, one this node cannot publish for want of TRAC, and one withdrawn.
+  const listings: Record<string, Listing> = {
+    [I.qwen14b]: { listed: true, kaId: '81', validUntilEpoch: epoch + 2, withdrawn: false },
+    [I.qwen7b]: {
+      listed: false, problem: 'no-trac', retryAt: now + 15 * 60,
+      message: 'No publisher wallet holds enough TRAC to publish to Verifiable Memory',
+    },
+    [I.mistral24b]: { listed: false, kaId: '83', validUntilEpoch: epoch, withdrawn: true },
+  };
   const sellerStatus: SellerStatus = {
     epoch, startsAt, endsAt,
     identityId: I.sellerA, gate, scoredThisEpoch: true,
     wallets: [{ address: I.sellerWallet, eth: '42000000000000000', ethEther: '0.042' }],
-    offerings: [offering(I.qwen14b, 'up', '0.6', '0.6'), offering(I.qwen7b, 'up', '0.3', '0.32'), offering(I.mistral24b, 'down', '3.3', '3.0')],
+    offerings: [offering(I.qwen14b, 'up', '0.6', '0.6', listings[I.qwen14b]), offering(I.qwen7b, 'up', '0.3', '0.32', listings[I.qwen7b]), offering(I.mistral24b, 'down', '3.3', '3.0', listings[I.mistral24b])],
     ledger: {
       served: 412, sent: 380, landed: 360, refused: 2, missed: 0,
       ...amount('heldValue', tracWei('0.0213')), ...amount('landedValue', tracWei('0.23')), ...amount('counted', tracWei('0.2')),
