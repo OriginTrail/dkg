@@ -5,7 +5,7 @@
  * journal and the per-key lock, and the seller's settings.
  */
 import { createServer, type IncomingMessage, type Server } from 'node:http';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -194,6 +194,35 @@ describe('the journal and the lock', () => {
     await journal.append({ n: 2 });
     await writeFile(journal.file, `${await readFile(journal.file, 'utf8')}{"n":`);
     expect(await journal.read()).toEqual([{ n: 1 }, { n: 2 }]);
+  });
+
+  it('repairs a torn last line before the next append, so that append survives a reload', async () => {
+    const journal = new Journal<{ n: number }>(join(dir, 'log.jsonl'));
+    await journal.append({ n: 1 });
+    // A crash part way through an append: the line has no newline and does not parse. It is cut off.
+    await appendFile(journal.file, '{"n":');
+    await journal.append({ n: 2 });
+    expect(await readFile(journal.file, 'utf8')).toBe('{"n":1}\n{"n":2}\n');
+    expect(await new Journal(journal.file).read()).toEqual([{ n: 1 }, { n: 2 }]);
+    // A line missing only its newline, which a read already takes: it is kept, and ended.
+    await appendFile(journal.file, '{"n":3}');
+    await journal.append({ n: 4 });
+    expect(await new Journal(journal.file).read()).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }]);
+    // A file that is one torn line.
+    const torn = new Journal<{ n: number }>(join(dir, 'torn.jsonl'));
+    await writeFile(torn.file, '{"n"');
+    await torn.append({ n: 5 });
+    expect(await readFile(torn.file, 'utf8')).toBe('{"n":5}\n');
+  });
+
+  it('takes the appends of two journals over one file one at a time, past a torn last line', async () => {
+    const file = join(dir, 'shared.jsonl');
+    await writeFile(file, '{"n":0}\n{"n":');
+    const [a, b] = [new Journal<{ n: number }>(file), new Journal<{ n: number }>(join(dir, '.', 'shared.jsonl'))];
+    await Promise.all(Array.from({ length: 10 }, (_, i) => (i % 2 ? a : b).append({ n: i + 1 })));
+    const lines = (await readFile(file, 'utf8')).split('\n');
+    expect(lines.pop()).toBe('');
+    expect(lines.map((l) => JSON.parse(l).n).sort((x, y) => x - y)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   });
 
   it('runs calls under one key one at a time, in order, and others alongside', async () => {
