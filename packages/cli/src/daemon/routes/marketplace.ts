@@ -13,6 +13,11 @@
 // reads need any valid token. Amounts are decimal strings of wei with `…Trac`
 // siblings, times are chain seconds, and a refusal is
 // { error, code, args?, retryable }, with the contract error's name as `code`.
+//
+// A top-up may carry an `idempotencyKey`: the node sends it at most once for
+// that key, and a repeat gets the first answer (`Buyer.topUpOnce`). A key
+// that names another request is refused with 409 `IdempotencyKeyReused`, and
+// a repeat of one whose outcome is not known yet with 503 `TopUpOutcomeUnknown`.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { ethers } from 'ethers';
@@ -81,9 +86,11 @@ const REFUSAL_STATUS: Readonly<Record<string, number>> = {
   KeyNotFound: 404,
   ServiceNotFound: 404,
   SellerNotFound: 404,
+  IdempotencyKeyReused: 409,
   QueryInferencePaused: 503,
   QueryInferenceNotActive: 503,
   MarketplaceOff: 503,
+  TopUpOutcomeUnknown: 503,
 };
 
 function refuse(res: ServerResponse, code: string, error: string, args: readonly string[] = []): void {
@@ -123,6 +130,15 @@ async function fundingRequestOf(buyer: Buyer, req: IncomingMessage): Promise<Fun
   const body = await bodyOf(req);
   const { epoch } = await buyer.chain.getEpochTimes();
   return { epoch: parseEpoch(body.epoch, epoch), source: parseSource(body.source), services: parseServices(body.services) };
+}
+
+/** A top-up's key: absent, or a short token of letters, digits and `._:-` (a UUID, say). */
+function idempotencyKeyOf(raw: unknown): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(raw)) {
+    throw new PlanError('idempotencyKey must be 1 to 128 letters, digits or ._:-');
+  }
+  return raw;
 }
 
 /** An access key's scopes from a request: a label, a budget in wei, and its services, rate and expiry if it limits them. */
@@ -195,8 +211,12 @@ async function answer(buyer: Buyer, method: string, route: string, ctx: RequestC
   const topUp = /^\/subscriptions\/(0x[0-9a-fA-F]{64})\/top-up$/.exec(route);
   if (method === 'POST' && topUp) {
     const subscriptionId = topUp[1]!.toLowerCase();
-    const sent = await buyer.topUp(subscriptionId, parseServices((await bodyOf(req)).services));
-    return { ...txView(sent), subscription: await subscriptionAfter(buyer, subscriptionId, ctx) };
+    const body = await bodyOf(req);
+    const services = parseServices(body.services);
+    const key = idempotencyKeyOf(body.idempotencyKey);
+    const sent = key === undefined ? txView(await buyer.topUp(subscriptionId, services)) : await buyer.topUpOnce(subscriptionId, services, key);
+    // The top-up went through: a read of its subscription that fails leaves the answer without it, as one that lags does.
+    return { ...sent, subscription: await subscriptionAfter(buyer, subscriptionId, ctx).catch(() => null) };
   }
   if (route === '/plan' && method === 'PUT') {
     const plan = parsePlan(await bodyOf(req));
