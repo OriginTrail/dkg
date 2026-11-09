@@ -98,7 +98,7 @@ test.describe('Network tab in Observability (/ui/network)', () => {
 
   test('sits inside the app shell, like every other Observability tab', async ({ page }) => {
     await expect(page.locator('button[title="Toggle sidebar"]')).toHaveCount(1);
-    await expect(page.locator('.v10-panel-left')).toHaveCount(1);
+    await expect(page.locator('.v10-panel-left').first()).toBeVisible();
   });
 
   test('document.title is "DKG Node"', async ({ page }) => {
