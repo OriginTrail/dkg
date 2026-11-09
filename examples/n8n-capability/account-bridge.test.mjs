@@ -184,11 +184,24 @@ test('DKG callback requires recorded grant input and one durable native executio
       h.execution.data = { resultData: { runData: { 'Receive input': runs } } };
       assert.equal((await h.send(h.value)).status, 400);
     }
+    const pending = body => ({ node: { name: 'Receive input' }, ...run(body)[0] });
+    for (const data of [
+      { executionData: { nodeExecutionStack: {} } },
+      { executionData: { nodeExecutionStack: [pending(h.received), pending(h.received)] } },
+      { resultData: { runData: { 'Receive input': [{ ...run(h.received)[0], error: 'failed' }] } } },
+      { resultData: { runData: { 'Receive input': run(h.received) } },
+        executionData: { nodeExecutionStack: [pending({ ...h.received, invocationId: 'conflicting-effect' })] } },
+    ]) {
+      h.execution.data = data;
+      assert.equal((await h.send(h.value)).status, 400);
+    }
     h.execution.data = {};
     assert.equal((await h.send(h.value)).status, 400);
     assert.deepEqual(h.effects, []);
     h.execution.data = { resultData: { runData: { 'Receive input': run(h.received) } } };
     assert.equal((await h.send(h.value)).status, 200);
+    h.execution.data.executionData = { nodeExecutionStack: [pending(h.received)] };
+    assert.equal((await h.send(h.value)).status, 200, 'matching running and completed representations share one input');
     h.reopen();
     h.f.executions.set('43', { ...structuredClone(h.execution), id: '43' });
     const write = { ...h.value, blockId: 'n1', items: h.measurements };
@@ -199,6 +212,30 @@ test('DKG callback requires recorded grant input and one durable native executio
     assert.deepEqual(h.effects, ['read', 'write']);
     h.f.provider.db.prepare('DELETE FROM dkg_component_native_executions').run();
     assert.equal((await h.send(write)).status, 409, 'legacy calls cannot acquire a replacement execution binding');
+  } finally { h.close(); }
+});
+
+test('provider callback verification refuses changed execution, publication and credential pins before effects', async () => {
+  const h = await callbackFixture();
+  try {
+    const execution = structuredClone(h.execution), installed = structuredClone(h.f.native.get(h.value.workflowId));
+    for (const change of [
+      (e) => { e.id = '43'; },
+      (e) => { e.workflowId = 'another-workflow'; },
+      (e) => { e.workflowVersionId = 'another-version'; },
+      (e) => { e.workflowData.nodes[0].credentials = { httpHeaderAuth: { id: 'another-credential' } }; },
+      (_e, w) => { w.id = 'another-workflow'; },
+      (_e, w) => { w.active = false; },
+      (_e, w) => { w.activeVersion.nodes[0].parameters.changed = true; },
+    ]) {
+      const e = structuredClone(execution), w = structuredClone(installed); change(e, w);
+      h.f.executions.set(h.value.executionId, e); h.f.native.set(h.value.workflowId, w);
+      assert.equal((await h.send(h.value)).status, 400);
+      assert.deepEqual(h.effects, []);
+      assert.equal(h.f.provider.db.prepare('SELECT count(*) AS n FROM dkg_component_calls').get().n, 0);
+    }
+    h.f.executions.set(h.value.executionId, execution); h.f.native.set(h.value.workflowId, installed);
+    assert.equal((await h.send(h.value)).status, 200); assert.deepEqual(h.effects, ['read']);
   } finally { h.close(); }
 });
 

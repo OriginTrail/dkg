@@ -6,7 +6,6 @@ import { component, componentNeedsExport, normalizeComponentInput } from './comp
 import { component as componentV1, normalizeComponentInput as normalizeComponentInputV1 } from './component-registry-v1.mjs';
 import { normalizeStudio, readStudio, validateStudioCapabilities } from './studio-definition.mjs';
 import { workflowUuid } from './workflow-definition.mjs';
-import { n8nPinnedExecutionMatches, n8nRecord } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { programWorkflowReceipt } from './program-workflow-receipt.mjs';
 
 const reference = (source, graphId) => ({ graphId, programIri: source.programIri, programLayer: 'wm', authorAgentAddress: source.authorAgentAddress, sourceHash: source.sourceHash });
@@ -223,35 +222,8 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     const {compiled,workflow}=await get(row.ka_ref);
     if(!workflow.approved) throw reject('Workflow approval is unavailable.');
     validateStudioCapabilities(compiled.definition,await listCapabilities());
-    const native=await provider.api('/executions/'+encodeURIComponent(String(value.executionId))+'?includeData=true');
-    const installed = await provider.api('/workflows/'+value.workflowId);
-    const published = n8nRecord(installed.activeVersion) ? { ...installed.activeVersion, settings: installed.settings } : installed;
-    if (installed.id !== value.workflowId || installed.active !== true || String(native.id) !== value.executionId
-      || !n8nPinnedExecutionMatches(published, native, compiled.grant, published.versionId))
-      throw reject('Native execution does not match the approved workflow.');
-    // Running webhook executions retain their initial input on the pending stack;
-    // completed/progress-saved executions expose it as Receive input run data.
-    const received = [];
-    const take = task => {
-      const ports = task?.data?.main;
-      if (task?.error || !Array.isArray(ports) || ports.length !== 1 || !Array.isArray(ports[0])
-        || ports[0].length !== 1 || !n8nRecord(ports[0][0]?.json?.body))
-        throw reject('Native execution has no unique recorded Receive input.');
-      received.push(ports[0][0].json.body);
-    };
-    const runs = native.data?.resultData?.runData?.['Receive input'];
-    if (runs !== undefined) {
-      if (!Array.isArray(runs) || runs.length !== 1) throw reject('Native execution has no unique recorded Receive input.');
-      take(runs[0]);
-    }
-    const stack = native.data?.executionData?.nodeExecutionStack;
-    if (stack !== undefined && !Array.isArray(stack)) throw reject('Native execution has no unique recorded Receive input.');
-    const pending = (stack ?? []).filter(task => task?.node?.name === 'Receive input');
-    if (pending.length > 1) throw reject('Native execution has no unique recorded Receive input.');
-    pending.forEach(take);
-    if (!received.length || received.some(body => !isDeepStrictEqual(body, received[0])))
-      throw reject('Native execution has no unique recorded Receive input.');
-    return dkg.call(value,workflow,value.workflowId,received[0]);
+    const input = await provider.executionInput({ workflowId: value.workflowId, executionId: value.executionId, grant: compiled.grant });
+    return dkg.call(value, workflow, value.workflowId, input);
   }
   const timer = setInterval(() => void poll(), 3000); timer.unref();
   return { dkgComponent, list, get, save, run, activate, event, history, poll, stop() { stopped = true; clearInterval(timer); } };

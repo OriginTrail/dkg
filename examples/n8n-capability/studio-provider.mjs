@@ -3,6 +3,7 @@ import { createStudioRepository } from './studio-repository.mjs';
 import { createHash } from 'node:crypto';
 import { compileStudio } from './studio-definition.mjs';
 import { nativeTimerEvents } from './studio-native-events.mjs';
+import { readNativeExecutionInput } from './studio-native-execution.mjs';
 import { n8nWorkflowSha256, n8nResultSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 
 /** The operator owns provisioning. Neither this API key nor credential data reaches a KA or browser. */
@@ -77,5 +78,6 @@ export function createStudioProvider({ state, config, graphId, owner, headerCred
   }
   const fingerprint = path => createHash('sha256').update(readFileSync(path, 'utf8').trim()).digest('hex');
   const timerEvents = options => nativeTimerEvents(api, { ...options, graphId, owner });
-  return { repository, db, row, api, provision, setPublished, fingerprint, installGrant, timerEvents, close: repository.close };
+  const executionInput = options => readNativeExecutionInput(api, options);
+  return { repository, db, row, api, provision, setPublished, fingerprint, installGrant, timerEvents, executionInput, close: repository.close };
 }
