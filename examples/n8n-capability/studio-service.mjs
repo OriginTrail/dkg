@@ -5,7 +5,7 @@ import { component, normalizeComponentInput } from './component-registry.mjs';
 import { component as componentV1, normalizeComponentInput as normalizeComponentInputV1 } from './component-registry-v1.mjs';
 import { normalizeStudio, readStudio, studioProgramSource, validateStudioCapabilities } from './studio-definition.mjs';
 import { workflowUuid } from './workflow-definition.mjs';
-import { n8nObservationScope, n8nExecutionMatches, n8nPinnedExecutionMatches } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
+import { n8nObservationScope, n8nExecutionMatches, n8nPinnedExecutionMatches, n8nRecord } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { programWorkflowReceipt } from './program-workflow-receipt.mjs';
 
 const reference = (source, graphId) => ({ graphId, programIri: source.programIri, programLayer: 'wm', authorAgentAddress: source.authorAgentAddress, sourceHash: source.sourceHash });
@@ -50,10 +50,10 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     const key = JSON.stringify(definition); if (saving.has(key)) return saving.get(key);
     const pending = (async () => {
       const compiled = await provider.provision(definition), sourceText = studioProgramSource(compiled);
-      // Remote Program invocation is inside the pinned native graph, not an
-      // invoke_program child of this wrapper. Native recovery inspects recorded effects; declared child pins
-      // in older saved wrappers remain authority checks, not evidence of execution.
-      const nativeRemote = compiled.executor !== 'dkg' && definition.nodes.some(n => n.componentId === 'invoke-dkg-program');
+      // A native wrapper makes one pinned tool call. Its components (including
+      // DKG Read/Write and remote Programs) run inside n8n, not invoke_program.
+      // Only the DKG executor needs child Program grants.
+      const nativeOnly = compiled.executor !== 'dkg';
       const sourceHash = createHash('sha256').update(sourceText).digest('hex');
       let source;
       try { source = await client.programs.getSource({ graphId, programIri: compiled.kaRef, programLayer: 'wm' }); }
@@ -61,7 +61,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
       if (!source) {
         await client.programs.upload({ graphId, programIri: compiled.kaRef, name: 'studio-' + sourceHash.slice(0, 24), label: definition.name,
           language: 'typescript-v1', version: '1.0.0', source: sourceText, requiredTools: compiled.executor === 'dkg' ? [] : ['urn:dkg:tool:n8n'],
-          permittedPrograms: nativeRemote ? [] : [...new Set(definition.nodes.map(n => n.kaRef))],
+          permittedPrograms: nativeOnly ? [] : [...new Set(definition.nodes.map(n => n.kaRef))],
           ...(compiled.executor === 'dkg' ? {} : { requestedPermissions: { graphId, n8n: compiled.grant } }) });
         source = await client.programs.getSource({ graphId, programIri: compiled.kaRef, programLayer: 'wm' });
       }
@@ -73,7 +73,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
         .run(JSON.stringify({ ...compiled.grant, requiresExportAuthorization: needsExport() }), compiled.kaRef);
       if (!await approved(compiled.kaRef, sourceHash)) await client.programs.approve({ graphId, operationIri: compiled.kaRef,
         program: reference(source, graphId), allowedCallers: [owner], ...(compiled.executor === 'dkg' ? {} : { n8n: compiled.grant }),
-        typescript: { children: nativeRemote ? [] : [...new Map(definition.nodes.map(n => [n.kaRef, { graphId,
+        typescript: { children: nativeOnly ? [] : [...new Map(definition.nodes.map(n => [n.kaRef, { graphId,
           operationIri: n.componentId === 'run-program' ? n.params.operationIri : n.kaRef }])).values()],
         maxCalls: compiled.executor === 'dkg' ? 256 : 16, maxConcurrency: 1, timeoutMs: 60000 } });
       const saved = (await get(compiled.kaRef, sourceHash)).workflow;
@@ -101,7 +101,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     try { result = await invoke(); }
     catch (error) {
       if (error.code !== 'INVOCATION_REQUIRES_RECONCILIATION' ||
-        !compiled.definition.nodes.some(n => n.componentId === 'invoke-dkg-program')) throw error;
+        compiled.executor === 'dkg') throw error;
       // The native-only wrapper resumes its durable acknowledgement; it never
       // creates another n8n run or another remote Program invocation.
       result = await invoke();
@@ -239,8 +239,8 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     validateStudioCapabilities(compiled.definition,await listCapabilities());
     const native=await provider.api('/executions/'+encodeURIComponent(String(value.executionId))+'?includeData=true');
     const installed = await provider.api('/workflows/'+value.workflowId);
-    const published = installed.activeVersion ? { ...installed.activeVersion, settings: installed.settings } : installed;
-    if (installed.active !== true || installed.id !== value.workflowId || String(native.id) !== value.executionId
+    const published = n8nRecord(installed.activeVersion) ? { ...installed.activeVersion, settings: installed.settings } : installed;
+    if (installed.id !== value.workflowId || installed.active !== true || String(native.id) !== value.executionId
       || !n8nPinnedExecutionMatches(published, native, compiled.grant, published.versionId))
       throw reject('Native execution does not match the approved workflow.');
     return dkg.call(value,workflow,value.workflowId);
