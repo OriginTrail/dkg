@@ -222,11 +222,7 @@ select.input {
 .obs-legend-item { cursor: pointer; }
 .obs-legend-dimmed { color: var(--text-tertiary); text-decoration: line-through; }
 
-/* Operation types: one tone per layer the operation writes to. */
-.obs-op-vm { --obs-op-text: var(--layer-verified-text); --obs-op-bg: var(--layer-verified-bg); --obs-op-rule: var(--layer-verified); }
-.obs-op-swm { --obs-op-text: var(--layer-shared-text); --obs-op-bg: var(--layer-shared-bg); --obs-op-rule: var(--layer-shared); }
-.obs-op-neutral { --obs-op-text: var(--text-secondary); --obs-op-bg: var(--bg-elevated); --obs-op-rule: var(--border-strong); }
-.data-table .ds-badge.obs-op-badge { background: var(--obs-op-bg); color: var(--obs-op-text); box-shadow: none; }
+.data-table .ds-badge.obs-op-badge { background: var(--op-bg); color: var(--op-text); box-shadow: none; }
 .data-table .ds-badge.obs-promote-badge { background: var(--layer-verified-bg); color: var(--layer-verified-text); box-shadow: none; }
 
 /* Table rows */
@@ -250,7 +246,7 @@ select.input {
 .obs-failed-item { border-bottom: 1px solid var(--border-default); }
 .obs-failed-head { display: flex; align-items: center; gap: var(--space-8); padding: var(--space-8) var(--space-20); cursor: pointer; }
 .obs-failed-head-open { background: var(--danger-bg); }
-.obs-failed-head .obs-failed-name { width: auto; font-weight: 600; font-size: var(--fs-control); color: var(--obs-op-text); }
+.obs-failed-head .obs-failed-name { width: auto; font-weight: 600; font-size: var(--fs-control); color: var(--op-text); }
 .obs-failed-detail { padding: var(--space-4) var(--space-20) var(--space-16); }
 .obs-failed-nologs { padding: var(--space-4) 0; font-size: var(--fs-label); color: var(--text-tertiary); }
 .obs-error-note {
@@ -270,13 +266,13 @@ select.input {
   padding: var(--pad-compact);
   background: var(--tint-subtle);
   border: 1px solid var(--border-default);
-  border-left: 3px solid var(--obs-op-rule);
+  border-left: 3px solid var(--op-rule);
   border-radius: var(--radius-nested);
 }
 .obs-rate-good { --obs-rate: var(--accent-green); --obs-rate-text: var(--text-success); }
 .obs-rate-fair { --obs-rate: var(--accent-amber); --obs-rate-text: var(--text-warning); }
 .obs-rate-poor { --obs-rate: var(--accent-red); --obs-rate-text: var(--text-danger); }
-.obs-type-name { margin-bottom: var(--space-8); font-size: var(--fs-body); font-weight: 700; color: var(--obs-op-text); }
+.obs-type-name { margin-bottom: var(--space-8); font-size: var(--fs-body); font-weight: 700; color: var(--op-text); }
 .obs-type-stats { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-6) var(--space-12); font-size: var(--fs-label); }
 .obs-type-label { margin-bottom: var(--space-2); font-weight: 400; }
 .obs-type-big { font-size: var(--fs-title); font-weight: 700; }
@@ -473,7 +469,7 @@ select.input {
 .obs-log-info { color: var(--log-meta); }
 .obs-log-module { color: var(--log-module); }
 .obs-log-text { color: var(--log-text); }
-.obs-log-op { font-weight: 600; color: var(--obs-op-text); }
+.obs-log-op { font-weight: 600; color: var(--op-text); }
 .obs-log-match { padding: 0 1px; background: var(--accent-amber); color: var(--bg-root); border-radius: var(--radius-hair); }
 
 /* Copy */

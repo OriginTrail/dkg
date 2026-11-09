@@ -13,6 +13,7 @@ import { graphOptions } from './memory-layer-graph-options.js';
 import { schemaTypeColors } from './schema-type-colors.js';
 import { RefreshCw } from 'lucide-react';
 import { Loading } from '../components/ds/Loading.js';
+import { PageHeader } from '../components/ds/PageHeader.js';
 
 const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -224,10 +225,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
     <div className="v10-memory-layer-view">
       <div className="v10-mlv-header">
         <span className={`v10-mlv-icon v10-layer-tone-text layer-tone-${layer}`}>{meta.icon}</span>
-        <div>
-          <h1 className="v10-mlv-title">{meta.label}</h1>
-          <p className="v10-mlv-desc">{meta.description}</p>
-        </div>
+        <PageHeader title={meta.label} description={meta.description} />
       </div>
 
       {layer === 'wm' && (

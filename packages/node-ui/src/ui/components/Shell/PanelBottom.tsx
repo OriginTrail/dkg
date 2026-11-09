@@ -200,7 +200,7 @@ function TransactionsContent() {
                   aria-expanded={isExp} {...pressable(() => setExpanded(id => id === op.operation_id ? null : op.operation_id))}
                   className={isExp ? 'v10-bottom-op-row v10-bottom-op-row-open' : 'v10-bottom-op-row'}
                 >
-                  <td className={`v10-bottom-td-op v10-bottom-op-${opTone(op.operation_name)}`}>
+                  <td className={`v10-bottom-td-op op-tone-${opTone(op.operation_name)}`}>
                     {op.operation_name}
                   </td>
                   <td className="v10-bottom-td-mono">

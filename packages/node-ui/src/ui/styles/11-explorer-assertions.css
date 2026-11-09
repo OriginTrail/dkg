@@ -8,6 +8,7 @@
 .v10-memory-layer-view { max-width: 1000px; min-width: 0; }
 .v10-mlv-header { display: flex; align-items: center; gap: var(--space-12); margin-bottom: var(--space-20); }
 .v10-mlv-icon { font-size: var(--fs-heading); }
+.v10-mlv-header .ds-page-header { margin-bottom: 0; }
 .v10-mlv-title { font-size: var(--fs-title); line-height: var(--lh-tight); font-weight: 600; color: var(--text-primary); margin: 0 0 var(--space-2); }
 .v10-mlv-desc { font-size: var(--fs-control); line-height: var(--lh-snug); color: var(--text-secondary); margin: 0; }
 .v10-vm-search-panel {
