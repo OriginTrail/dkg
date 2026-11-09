@@ -307,9 +307,11 @@ body.light .v10-import-dropzone.drag-over { border-color: var(--border-strong); 
 .v10-import-file-list.v10-import-list-gap { margin-top: var(--space-12); }
 
 /* ── Join modal ── */
-.v10-join-info { padding: var(--pad-nested); border-radius: var(--radius-nested); margin-bottom: var(--space-16); font-size: var(--fs-control); background: var(--tint-subtle); border: 1px solid var(--border-default); color: var(--accent-primary); }
-.v10-join-success { padding: var(--pad-nested); border-radius: var(--radius-nested); margin-bottom: var(--space-16); font-size: var(--fs-control); background: var(--success-bg); border: 1px solid var(--success-border); color: var(--text-success); }
-.v10-join-warning { padding: var(--pad-nested); border-radius: var(--radius-nested); margin-bottom: var(--space-16); font-size: var(--fs-control); background: var(--warning-bg); border: 1px solid var(--warning-border); color: var(--text-warning); }
+/* Join banners: one box, three tones. */
+.v10-join-info, .v10-join-success, .v10-join-warning { padding: var(--pad-nested); border-radius: var(--radius-nested); margin-bottom: var(--space-16); font-size: var(--fs-control); }
+.v10-join-info, .v10-wire-info { background: var(--tint-subtle); border: 1px solid var(--border-default); color: var(--accent-primary); }
+.v10-join-success, .v10-wire-success { background: var(--success-bg); border: 1px solid var(--success-border); color: var(--text-success); }
+.v10-join-warning { background: var(--warning-bg); border: 1px solid var(--warning-border); color: var(--text-warning); }
 .v10-form-textarea.ds-input.v10-join-input { font-family: var(--font-mono); font-size: var(--fs-label); }
 .v10-join-note { display: block; color: var(--text-tertiary); margin-top: var(--space-2); }
 
@@ -326,8 +328,8 @@ body.light .v10-import-dropzone.drag-over { border-color: var(--border-strong); 
 .v10-share-name { color: var(--text-primary); }
 .v10-share-role { font-family: var(--font-sans); font-weight: 500; }
 .v10-share-you { color: var(--text-tertiary); font-size: var(--fs-micro); }
-.v10-share-empty-row { padding: var(--space-8) var(--space-12); border-radius: var(--radius-control); font-size: var(--fs-label); color: var(--text-tertiary); background: var(--bg-surface); border: 1px dashed var(--border-default); margin-bottom: var(--space-8); }
-.v10-share-empty { padding: var(--space-8) var(--space-12); border-radius: var(--radius-control); font-size: var(--fs-label); color: var(--text-tertiary); background: var(--bg-surface); border: 1px dashed var(--border-default); }
+.v10-share-empty, .v10-share-empty-row { padding: var(--space-8) var(--space-12); border-radius: var(--radius-control); font-size: var(--fs-label); color: var(--text-tertiary); background: var(--bg-surface); border: 1px dashed var(--border-default); }
+.v10-share-empty-row { margin-bottom: var(--space-8); }
 .v10-share-code { position: relative; }
 .v10-share-code-text { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-control); padding: var(--space-12) var(--space-12); font-size: var(--fs-label); line-height: var(--lh-loose); font-family: var(--font-mono); color: var(--text-primary); overflow: auto; margin: 0; white-space: pre-wrap; word-break: break-all; }
 .v10-share-copy { position: absolute; top: var(--space-6); right: var(--space-6); }
@@ -341,18 +343,20 @@ body.light .v10-import-dropzone.drag-over { border-color: var(--border-strong); 
 .v10-share-error { font-size: var(--fs-micro); color: var(--text-danger); margin-top: var(--space-4); }
 
 /* ── Wire workspace panel ── */
-.v10-wire-success { padding: var(--space-12) var(--space-16); border-radius: var(--radius-nested); margin-bottom: var(--space-12); font-size: var(--fs-control); background: var(--success-bg); border: 1px solid var(--success-border); color: var(--text-success); }
+.v10-wire-success { padding: var(--space-12) var(--space-16); border-radius: var(--radius-nested); margin-bottom: var(--space-12); font-size: var(--fs-control); }
 .v10-wire-title { font-weight: 600; margin-bottom: var(--space-6); }
 .v10-wire-code { font-family: var(--font-mono); }
 .v10-wire-text { font-size: var(--fs-label); color: var(--text-secondary); margin-bottom: var(--space-8); }
-.v10-wire-pre { font-size: var(--fs-micro); font-family: var(--font-mono); max-height: 200px; overflow: auto; padding: var(--space-12); border-radius: var(--radius-control); background: var(--bg-elevated); border: 1px solid var(--border-default); margin: 0; }
+/* Workspace output: one surface, two heights. */
+.v10-wire-pre, .v10-wire-pre-tall { font-size: var(--fs-micro); font-family: var(--font-mono); overflow: auto; padding: var(--space-12); border-radius: var(--radius-control); background: var(--bg-elevated); border: 1px solid var(--border-default); margin: 0; }
+.v10-wire-pre { max-height: 200px; }
 .v10-wire-end { display: flex; justify-content: flex-end; margin-top: var(--space-12); }
 .ds-card-nested.v10-modal-error.v10-wire-error { margin-bottom: var(--space-12); }
 .v10-wire-intro { margin-bottom: var(--space-8); font-size: var(--fs-label); color: var(--text-secondary); }
-.v10-wire-pre-tall { font-size: var(--fs-micro); font-family: var(--font-mono); max-height: 320px; overflow: auto; padding: var(--space-12); border-radius: var(--radius-control); background: var(--bg-elevated); border: 1px solid var(--border-default); margin: 0; white-space: pre-wrap; }
+.v10-wire-pre-tall { max-height: 320px; white-space: pre-wrap; }
 .v10-wire-actions { display: flex; justify-content: space-between; align-items: center; margin-top: var(--space-12); gap: var(--space-8); }
 .v10-wire-action-group { display: flex; gap: var(--space-8); }
-.v10-wire-info { padding: var(--pad-nested); border-radius: var(--radius-nested); margin-bottom: var(--space-12); font-size: var(--fs-control); background: var(--tint-subtle); border: 1px solid var(--border-default); color: var(--accent-primary); }
+.v10-wire-info { padding: var(--pad-nested); border-radius: var(--radius-nested); margin-bottom: var(--space-12); font-size: var(--fs-control); }
 .v10-wire-info-title { font-weight: 600; margin-bottom: var(--space-4); }
 .v10-form-input.ds-input.v10-wire-input { font-family: var(--font-mono); font-size: var(--fs-control); }
 .v10-wire-hint { font-size: var(--fs-micro); color: var(--text-tertiary); margin-top: var(--space-4); }
