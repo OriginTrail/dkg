@@ -56,6 +56,7 @@ import {
   decodeMessage,
   encodeMessage,
   offerSignerOf,
+  offerSubject,
   offersFromBindings,
   offersQuery,
   receiptFromWire,
@@ -277,9 +278,10 @@ describe('serving between two nodes on Hardhat', () => {
     expect(offers.every((o) => o.peerId === sellerAgent.peerId)).toBe(true);
     expect(offers.every((o) => offerSignerOf(domain, o) === new Wallet(HARDHAT_KEYS.CORE_OP).address)).toBe(true);
     expect(await gateway.router.offersOf([epoch, epoch + 1])).toHaveLength(4);
-    // Each its own Knowledge Asset of the seller's, shared with no transaction.
-    const assets = await buyerAgent.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?offer <https://dkg.network/marketplace#signature> ?s } }');
-    expect(new Set(assets.bindings.map((row) => String(row['g']))).size).toBe(4);
+    // Each its own Knowledge Asset of the seller's, named after its subject and shared, with no transaction.
+    const assets = await Promise.all(offers.map((o) => sellerAgent.assertion.history(contextGraph, `offer-${offerSubject(o.signature).split(':').pop()}`)));
+    expect(assets.every((asset) => asset?.status === 'swm-shared')).toBe(true);
+    expect(new Set(assets.map((asset) => asset?.reservedUal)).size).toBe(4);
     expect(await createProvider().getTransactionCount(new Wallet(HARDHAT_KEYS.CORE_OP).address)).toBe(sellerNonce);
   }, 120_000);
 
