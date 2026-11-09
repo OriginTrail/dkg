@@ -131,6 +131,8 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     if (!row) throw reject('Inactive event endpoint.');
     const { compiled, workflow } = await get(row.ka_ref);
     if (compiled.mode !== 'webhook') throw reject('This endpoint is not a webhook.');
+    if (!workflow.approved) throw reject('Event workflow approval changed.');
+    validateStudioCapabilities(compiled.definition, await listCapabilities());
     const invocationId = workflowUuid(value.invocationId), itemsJson = JSON.stringify(value.items);
     const previous = provider.db.prepare('SELECT * FROM events WHERE provider_id=? AND execution_id=?').get(row.provider_id, invocationId);
     if (previous && previous.input_json !== itemsJson) throw reject('This event identity already belongs to different input.');
@@ -160,7 +162,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
         const a = activation(row.ka_ref); if (!a.active) continue;
         let compiled, workflow;
         try {
-          ({ compiled, workflow } = await get(row.ka_ref)); eventAuthorized(row.ka_ref, compiled);
+          ({ compiled, workflow } = await get(row.ka_ref)); eventAuthorized(row.ka_ref, compiled, true);
           validateStudioCapabilities(compiled.definition, await listCapabilities());
           if (!workflow.approved) throw reject('Event workflow approval changed.');
         } catch {
@@ -171,7 +173,14 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
         const native = await provider.api('/workflows/' + row.provider_id);
         const published = { ...native.activeVersion, settings: native.settings };
         const executions = await provider.api('/executions?limit=20&workflowId=' + encodeURIComponent(row.provider_id));
-        for (const e of executions.data.slice().reverse()) {
+        const reserved = provider.db.prepare('SELECT execution_id FROM events WHERE ka_ref=? AND receipt_json IS NULL').all(row.ka_ref);
+        const candidates = new Map(executions.data.map(e => [String(e.id), e]));
+        // Pending identities must remain inspectable even after leaving the last page.
+        for (const pending of reserved) if (!candidates.has(pending.execution_id)) {
+          const detail = await provider.api('/executions/' + pending.execution_id + '?includeData=true');
+          candidates.set(pending.execution_id, detail);
+        }
+        for (const e of [...candidates.values()].reverse()) {
           if (e.status !== 'success' || Date.parse(e.startedAt) < a.startedAt || !/^\d{1,20}$/.test(String(e.id))) continue;
           const detail = await provider.api('/executions/' + e.id + '?includeData=true');
           const scope = n8nObservationScope(graphId, owner, row.provider_id) + ' trigger';
@@ -181,6 +190,8 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
           if (old?.receipt_json) continue;
           const invocationId = old?.invocation_id ?? eventUuid(row.ka_ref, String(e.id));
           if (!old) {
+            // The quota closes admission, not inspection of reserved identities.
+            if (activation(row.ka_ref).count >= 5) continue;
             eventAuthorized(row.ka_ref, compiled);
             const current = activation(row.ka_ref); current.count++;
             provider.db.prepare('INSERT INTO events (provider_id,execution_id,ka_ref,invocation_id) VALUES (?,?,?,?)').run(row.provider_id, String(e.id), row.ka_ref, invocationId);
