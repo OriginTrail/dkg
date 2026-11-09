@@ -13,26 +13,26 @@ interface AuthLookupOptions {
 }
 
 /** The agent gate of one sync decision. */
-export interface SyncAgentGate {
-  /** `null`: the graph has no agent gate. Empty: nobody passes it. */
-  readonly addresses: readonly string[] | null;
-  /** The addresses are the graph's authoritative roster: they decide alone, whatever local metadata adds. */
-  readonly conclusive: boolean;
-}
+export type SyncAgentGate =
+  /** The graph has no agent gate. */
+  | { readonly kind: 'ungated' }
+  /** Its authority could not be read: it holds nobody, and decides as an empty list. */
+  | { readonly kind: 'unavailable' }
+  /** The agents the graph's metadata lists. */
+  | { readonly kind: 'listed'; readonly addresses: readonly string[] }
+  /** The graph's authoritative roster: it decides alone, whatever local metadata adds. */
+  | { readonly kind: 'roster'; readonly addresses: readonly string[] };
 
 /**
- * The gate of a sync decision. A gate whose authority is unavailable holds nobody,
- * but is no roster: it decides nothing by itself. A local revocation takes effect
- * at once, also on a roster that changes only when the curator's next rotation lands.
+ * The gate of a sync decision. A local revocation takes effect at once, also on a
+ * roster that changes only when the curator's next rotation lands.
  */
 export function syncAgentGateOf(authority: ContextGraphAgentGateAuthority, revokedAgents: readonly string[]): SyncAgentGate {
-  if (authority.kind === 'ungated') return { addresses: null, conclusive: false };
-  if (authority.kind === 'unavailable') return { addresses: [], conclusive: false };
+  if (authority.kind === 'ungated') return { kind: 'ungated' };
+  if (authority.kind === 'unavailable') return { kind: 'unavailable' };
   const revoked = new Set(revokedAgents.map((address) => address.toLowerCase()));
-  return {
-    addresses: authority.agentAddresses.filter((address) => !revoked.has(address.toLowerCase())),
-    conclusive: authority.conclusive === true,
-  };
+  const addresses = authority.agentAddresses.filter((address) => !revoked.has(address.toLowerCase()));
+  return authority.conclusive === true ? { kind: 'roster', addresses } : { kind: 'listed', addresses };
 }
 
 interface AuthorizeSyncRequestParams {
@@ -259,9 +259,12 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
     p.toLowerCase() === recoveredAddress.toLowerCase() ||
     (requesterIdentityId > 0n && p === String(requesterIdentityId)),
   ) ?? false;
-  const isOnAgentGate = (address: string) => agentGate.addresses?.some((agent) =>
+  const agentGateAddresses = (): readonly string[] => (
+    agentGate.kind === 'listed' || agentGate.kind === 'roster' ? agentGate.addresses : []
+  );
+  const isOnAgentGate = (address: string) => agentGateAddresses().some((agent) =>
     agent.toLowerCase() === address.toLowerCase(),
-  ) ?? false;
+  );
   const isAgentGateAllowed = () => isOnAgentGate(recoveredAddress);
   const isPeerAllowed = () => allowedPeers?.includes(remotePeerId) ?? false;
   // Agent-signed delegation. The envelope's `requesterAgentAddress`
@@ -282,15 +285,22 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
   // chain verified the signer's identity above.
   const isIdentityParticipant = () => requesterIdentityId > 0n
     && (participants?.includes(String(requesterIdentityId)) ?? false);
-  const resolveAllowed = () => {
-    // An authoritative roster decides alone: a delegation counts for an agent on
-    // it, and the metadata lists of this node add nobody to it.
-    if (isDelegateeAllowed() && (!agentGate.conclusive || isOnAgentGate(claimedAgent!))) return true;
-    if (agentGate.addresses !== null && allowedPeers !== null) {
-      return isPeerAllowed() && isAgentGateAllowed();
+  const resolveAllowed = (): boolean => {
+    switch (agentGate.kind) {
+      case 'roster':
+        // An authoritative roster decides alone: a delegation counts for an agent
+        // on it, and the metadata lists of this node add nobody to it.
+        if (isDelegateeAllowed() && isOnAgentGate(claimedAgent!)) return true;
+        if (allowedPeers !== null) return isPeerAllowed() && isAgentGateAllowed();
+        return isAgentGateAllowed() || isIdentityParticipant();
+      case 'listed':
+      case 'unavailable':
+        if (isDelegateeAllowed()) return true;
+        if (allowedPeers !== null) return isPeerAllowed() && isAgentGateAllowed();
+        return isParticipantAllowed() || isPeerAllowed();
+      case 'ungated':
+        return isDelegateeAllowed() || isParticipantAllowed() || isPeerAllowed();
     }
-    if (agentGate.conclusive) return isAgentGateAllowed() || isIdentityParticipant();
-    return isParticipantAllowed() || isPeerAllowed();
   };
 
   let allowed = resolveAllowed();
@@ -320,7 +330,7 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
   const delegateeKeySetForClaim = claimedAgent ? allowedDelegateeKeys.get(claimedAgent)?.length ?? 0 : 0;
   logInfo(
     ctx,
-    `Private sync auth for "${request.contextGraphId}": identityId=${requesterIdentityId.toString()} signer=${recoveredAddress} requesterAgentAddress=${request.requesterAgentAddress ?? 'n/a'} participantCount=${participants?.length ?? 0} agentGateCount=${agentGate.addresses?.length ?? 0} agentGateConclusive=${agentGate.conclusive} delegateePeerCount=${delegateePeerSetForClaim} delegateeKeyCount=${delegateeKeySetForClaim} peerAllowed=${isPeerAllowed()} delegateeAllowed=${isDelegateeAllowed()} allowed=${allowed}`,
+    `Private sync auth for "${request.contextGraphId}": identityId=${requesterIdentityId.toString()} signer=${recoveredAddress} requesterAgentAddress=${request.requesterAgentAddress ?? 'n/a'} participantCount=${participants?.length ?? 0} agentGate=${agentGate.kind} agentGateCount=${agentGateAddresses().length} delegateePeerCount=${delegateePeerSetForClaim} delegateeKeyCount=${delegateeKeySetForClaim} peerAllowed=${isPeerAllowed()} delegateeAllowed=${isDelegateeAllowed()} allowed=${allowed}`,
   );
 
   if (allowed) {
