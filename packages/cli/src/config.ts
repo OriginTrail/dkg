@@ -763,6 +763,7 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
   logging?: LoggingConfig;
   /** Cross-agent query access policy for inbound query-remote requests. */
   queryAccess?: QueryAccessConfig;
+  marketplace?: { enabled?: boolean; seller?: { enabled?: boolean }; [setting: string]: unknown }; // OT-RFC-27; packages/marketplace reads it.
   autoUpdate?: AutoUpdateConfig;
   /**
    * Field-merged over network/<env>.json#chain by resolveChainConfig().

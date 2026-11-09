@@ -113,7 +113,7 @@ describe('who shares a probe', () => {
     const { agent, probe, pending } = fakeAgent();
     const calls = [call(agent, ALICE_LOWER), call(agent, ALICE), call(agent, `did:dkg:agent:${ALICE_LOWER}`)];
     expect(probe).toHaveBeenCalledTimes(1);
-    expect(probe.mock.calls[0]![1]).toMatchObject({ callerAgentAddress: ALICE_LOWER });
+    expect(probe.mock.calls[0]![1]).toMatchObject({ callerAgentAddress: ALICE_LOWER, contentCheck: 'when-needed-for-write' });
     pending[0]!.resolve(ACCEPT);
     await Promise.all(calls);
   });
@@ -387,7 +387,7 @@ describe('without coalescing', () => {
     const first = call(agent, ALICE);
     const second = call(agent, ALICE);
     expect(probe).toHaveBeenCalledTimes(2);
-    expect(probe.mock.calls).toEqual([[CG, { callerAgentAddress: ALICE }], [CG, { callerAgentAddress: ALICE }]]);
+    expect(probe.mock.calls).toEqual([[CG, { callerAgentAddress: ALICE, contentCheck: 'when-needed-for-write' }], [CG, { callerAgentAddress: ALICE, contentCheck: 'when-needed-for-write' }]]);
     pending[0]!.resolve(ACCEPT);
     pending[1]!.resolve(ACCEPT);
     expect((await first).probe).toBe(ACCEPT);
@@ -397,7 +397,7 @@ describe('without coalescing', () => {
   it('probes directly when the agent has no identity method at all', async () => {
     const probe = vi.fn(async () => ACCEPT);
     const result = await probeWritePreflight({ probeContextGraphWritePreflight: probe }, CG, null, { accepts: fastAccepts });
-    expect(probe).toHaveBeenCalledWith(CG, { callerAgentAddress: null });
+    expect(probe).toHaveBeenCalledWith(CG, { callerAgentAddress: null, contentCheck: 'when-needed-for-write' });
     expect(result.probe).toBe(ACCEPT);
   });
 
@@ -407,7 +407,7 @@ describe('without coalescing', () => {
     await probeWritePreflight(agent, CG, ALICE, { accepts: fastAccepts });
     await probeWritePreflight(agent, CG, ALICE, { accepts: fastAccepts });
     expect(probe).toHaveBeenCalledTimes(2);
-    expect(probe).toHaveBeenCalledWith(CG, { callerAgentAddress: ALICE });
+    expect(probe).toHaveBeenCalledWith(CG, { callerAgentAddress: ALICE, contentCheck: 'when-needed-for-write' });
   });
 
   it.each(['0', 'false', 'no', 'off', 'OFF'])('with %s the switch restores today\'s calls: every call probes, with the same arguments, and gets the probe itself', async (value) => {
@@ -415,7 +415,7 @@ describe('without coalescing', () => {
     const { agent, probe, pending } = fakeAgent();
     const calls = [call(agent, ALICE), call(agent, ALICE)];
     expect(probe).toHaveBeenCalledTimes(2);
-    expect(probe.mock.calls).toEqual([[CG, { callerAgentAddress: ALICE }], [CG, { callerAgentAddress: ALICE }]]);
+    expect(probe.mock.calls).toEqual([[CG, { callerAgentAddress: ALICE, contentCheck: 'when-needed-for-write' }], [CG, { callerAgentAddress: ALICE, contentCheck: 'when-needed-for-write' }]]);
     pending[0]!.resolve(ACCEPT);
     pending[1]!.resolve(ACCEPT);
     const [first, second] = await Promise.all(calls);

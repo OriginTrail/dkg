@@ -1,38 +1,45 @@
 /* ══════════════════════════════════════════
-   DKG V10 — DESIGN TOKENS (from prototype v5.1)
+   DKG V10 — DESIGN TOKENS
    ══════════════════════════════════════════ */
 :root {
-  /* Surface hierarchy — true black base */
-  --bg-root: #000000;
-  --bg-panel: #0a0a0a;
-  --bg-surface: #111111;
-  --bg-elevated: #181818;
-  --bg-hover: #1f1f1f;
-  --bg-active: #262626;
+  /* App canvas — a restrained OriginTrail-purple ambient field behind the
+     neutral UI surfaces. Multiple oversized radial gradients keep the result
+     soft and dimensional rather than reading as a conventional colour ramp. */
+  --app-canvas: #020104;
+  --app-ambient-gradient:
+    radial-gradient(72% 68% at -4% -6%, rgba(139, 92, 246, 0.68) 0%, rgba(91, 33, 182, 0.36) 36%, transparent 70%),
+    radial-gradient(60% 76% at 106% 38%, rgba(109, 40, 217, 0.52) 0%, rgba(76, 29, 149, 0.24) 42%, transparent 70%),
+    radial-gradient(72% 60% at 18% 108%, rgba(126, 34, 206, 0.38) 0%, transparent 72%),
+    linear-gradient(145deg, #0c0315 0%, #020104 64%);
+  --app-chrome: rgba(4, 3, 6, 0.38);
+  --app-chrome-strong: rgba(4, 3, 6, 0.48);
+  --app-workspace: rgba(2, 1, 4, 0.20);
+  --app-chrome-border: rgba(221, 214, 254, 0.10);
+
+  /* Surface hierarchy — translucent ink-plum instead of neutral gray. The
+     canvas now supplies the atmosphere; surfaces only separate content. */
+  --bg-root: #030205;
+  --bg-panel: rgba(8, 6, 10, 0.84);
+  --bg-surface: rgba(15, 12, 18, 0.92);
+  --bg-elevated: rgba(24, 19, 29, 0.94);
+  --bg-hover: rgba(47, 34, 58, 0.70);
+  --bg-active: rgba(61, 41, 78, 0.72);
 
   /* Borders */
-  --border-subtle: #1a1a1a;
-  --border-default: #222222;
-  --border-strong: #333333;
+  --border-subtle: rgba(221, 214, 254, 0.10);
+  --border-default: rgba(221, 214, 254, 0.16);
+  --border-strong: rgba(221, 214, 254, 0.26);
   /* Higher-contrast border for chips that need to clear 3:1 non-text on any
      surface (used by the inline-code chip, which can land on user bubbles
      whose bg is identical to a chip fill). */
   --border-prominent: #888888;
 
-  /* Text — dark mode. Round-3 nudge 2026-05-20 (PR8): user feedback on
-     the live state was "almost there but still could be a bit better."
-     Single targeted bump on secondary (the tier that touches the most
-     body text): #a8a8a8 → #b8b8b8 — opens the secondary↔primary gap to
-     ~5pt luminance and pushes secondary to AAA on both bg-panel and
-     bg-surface. Tertiary, primary, and ghost stay. Future cleanup:
-     tertiary tier could be rebalanced (#9a9a9a is perceptually very
-     close to the new secondary), but that's its own pass. Ratios on
-     --bg-panel #0a0a0a: primary 15.9:1, secondary 9.98:1, tertiary
-     ~7.1:1. */
-  --text-primary: #f0f0f0;
-  --text-secondary: #b8b8b8;
-  --text-tertiary: #9a9a9a;
-  --text-ghost: #333333;
+  /* Text — a warmer near-white ramp offsets the purple canvas. Metadata
+     stays quieter, but primary and secondary copy no longer look gray. */
+  --text-primary: #fbfaff;
+  --text-secondary: #d8d3df;
+  --text-tertiary: #aaa3b2;
+  --text-ghost: #44394f;
 
   /* Accent — reserved for signals */
   --accent-red: #ef4444;
@@ -55,13 +62,22 @@
   --layer-verified: #22c55e;
 
   /* Typography */
-  --font-sans: 'Instrument Sans', -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
+  --font-sans: 'Geist Variable', -apple-system, sans-serif;
+  /* SF Mono (with system fallbacks) for addresses, hashes and figures. */
+  --font-mono: 'SF Mono', ui-monospace, Menlo, monospace;
+  --font-size-micro: 11px;
+  --font-size-meta: 12px;
+  --font-size-caption: 13px;
+  --font-size-label: 14px;
+  --font-size-ui: 15px;
+  --font-size-body: 16px;
+  --font-size-body-lg: 17px;
+  --font-size-heading-sm: 18px;
 
   /* Sizing */
-  --header-h: 44px;
-  --tab-h: 36px;
-  --toolbar-h: 38px;
+  --header-h: 48px;
+  --tab-h: 40px;
+  --toolbar-h: 42px;
 
   /* Legacy aliases (for existing components that use the old tokens) */
   --bg: var(--bg-root);
@@ -71,7 +87,7 @@
   --border: var(--border-default);
   --border-light: var(--border-strong);
   --text: var(--text-primary);
-  --text-muted: var(--text-secondary);
+  --text-muted: #bdb6c6;
   --text-dim: var(--text-tertiary);
   --green: var(--accent-green);
   --green-dark: #166534;
@@ -95,12 +111,23 @@
    LIGHT THEME
    ══════════════════════════════════════════ */
 /* BUG-004: the variable overrides have to apply at the html element
-   level too, otherwise the `html { background: var(--bg-root) }` rule
-   keeps reading the dark `:root` definition and macOS rubber-band
-   overscroll flashes the dark colour in light mode. The matching
+   level too, otherwise the root canvas keeps reading the dark `:root`
+   definition and macOS rubber-band overscroll flashes the dark colour
+   in light mode. The matching
    class is set on both html and body in App.tsx so existing
    `body.light .foo` selectors below still work unchanged. */
 :root.light, body.light {
+  --app-canvas: #f7f4fb;
+  --app-ambient-gradient:
+    radial-gradient(110% 95% at -8% -18%, rgba(168, 85, 247, 0.22) 0%, rgba(196, 181, 253, 0.14) 40%, transparent 68%),
+    radial-gradient(82% 78% at 108% 4%, rgba(139, 92, 246, 0.18) 0%, transparent 72%),
+    radial-gradient(72% 82% at -10% 92%, rgba(196, 181, 253, 0.24) 0%, transparent 70%),
+    radial-gradient(78% 68% at 72% 116%, rgba(221, 214, 254, 0.32) 0%, transparent 68%),
+    linear-gradient(145deg, #fbf9fe 0%, #f7f4fb 50%, #f1edf7 100%);
+  --app-chrome: rgba(250, 249, 252, 0.46);
+  --app-chrome-strong: rgba(252, 251, 253, 0.62);
+  --app-workspace: rgba(250, 248, 252, 0.42);
+  --app-chrome-border: rgba(91, 33, 182, 0.12);
   --bg-root: #fafafa;
   --bg-panel: #f5f5f5;
   --bg-surface: #ffffff;
