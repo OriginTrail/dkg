@@ -54,18 +54,21 @@ export function useShellRouting(): void {
   }, [pathname, search]);
 
   // Going anywhere shows the page.
-  const clearingAgentsState = useRef(false);
   useEffect(() => {
     const layout = useLayoutStore.getState();
-    if ((state as { openAgents?: boolean } | null)?.openAgents) {
-      // Wide screens get the panel expanded, narrow ones the floating panel.
-      if (narrow || layout.rightCollapsed) layout.toggleRight();
+    const routeState = state as { openAgents?: boolean; agentsOpened?: boolean } | null;
+    if (routeState?.openAgents) {
+      // Wide screens get the panel expanded, narrow ones the floating panel. Both steps
+      // set a state rather than toggle one, so running this twice (StrictMode replays
+      // mount effects) leaves the panel open.
+      layout.openRight();
       if (!narrow) layout.setRightExpanded(true);
-      clearingAgentsState.current = true;
-      navigate(pathname + search, { replace: true, state: null });
+      // Mark the entry as handled rather than clearing it, so the replace (or two, under
+      // StrictMode) is recognised below and doesn't count as going somewhere.
+      navigate(pathname + search, { replace: true, state: { agentsOpened: true } });
       return;
     }
-    if (clearingAgentsState.current) { clearingAgentsState.current = false; return; }
+    if (routeState?.agentsOpened) return;
     layout.revealCentre();
     // Only a new address counts: a new history entry, or a path or query string that
     // changed without one (an entry pushed outside the router has no key).

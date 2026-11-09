@@ -44,13 +44,14 @@ function setNarrow(narrow: boolean) {
 }
 
 let root: Root | null = null;
-async function visit(path: string) {
+async function visit(path: string, strict = false) {
   const container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   await act(async () => {
-    root!.render(React.createElement(MemoryRouter, { initialEntries: [path] },
-      React.createElement(App), React.createElement(Probe)));
+    const tree = React.createElement(MemoryRouter, { initialEntries: [path] },
+      React.createElement(App), React.createElement(Probe));
+    root!.render(strict ? React.createElement(React.StrictMode, null, tree) : tree);
   });
   for (let i = 0; i < 5; i++) await act(async () => { await Promise.resolve(); });
 }
@@ -71,7 +72,7 @@ describe('/agent-hub', () => {
     setNarrow(false);
     await visit('/agent-hub');
     expect(seen.path).toBe('/settings');
-    expect(seen.state).toBeNull();
+    expect(seen.state).toEqual({ agentsOpened: true });
     const layout = useLayoutStore.getState();
     expect(layout.rightCollapsed).toBe(false);
     expect(layout.rightExpanded).toBe(true);
@@ -85,5 +86,28 @@ describe('/agent-hub', () => {
     const layout = useLayoutStore.getState();
     expect(layout.narrowPanel).toBe('right');
     expect(layout.rightExpanded).toBe(false);
+  });
+
+  it('stays open under StrictMode, which runs the redirect effect twice (narrow)', async () => {
+    setNarrow(true);
+    await visit('/agent-hub', true);
+    expect(seen.path).toBe('/settings');
+    expect(useLayoutStore.getState().narrowPanel).toBe('right');
+  });
+
+  it('stays expanded under StrictMode (wide)', async () => {
+    setNarrow(false);
+    await visit('/agent-hub', true);
+    const layout = useLayoutStore.getState();
+    expect(layout.rightCollapsed).toBe(false);
+    expect(layout.rightExpanded).toBe(true);
+  });
+
+  it('a later navigation still shows the page', async () => {
+    setNarrow(false);
+    await visit('/agent-hub');
+    await act(async () => { useTabsStore.getState().openTab({ id: 'dashboard', label: 'Dashboard', closable: false }); });
+    expect(seen.path).toBe('/');
+    expect(useLayoutStore.getState().rightExpanded).toBe(false);
   });
 });
