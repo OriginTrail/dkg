@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 // before the component registry, just as the companion startup does.
 process.env.NOS_DKG_PROFILE_MODULE = fileURLToPath(new URL('./test-support/agent-read-profile.mjs', import.meta.url));
 const { default: profile, calls } = await import('./test-support/agent-read-profile.mjs');
+const { measurements } = await import('./test-support/measurement-profile.mjs');
 const { profileParameters } = await import('./dkg-profile.mjs');
 const { compileStudio } = await import('./studio-definition.mjs');
 const { createStudioRepository } = await import('./studio-repository.mjs');
@@ -16,6 +17,13 @@ const { createStudioMcpService } = await import('./studio-mcp-service.mjs');
 const { createStudioNativeRunner } = await import('./studio-native-runner.mjs');
 const { dkgComponentStore } = await import('./dkg-components.mjs');
 const { handleDkgComponentCallback } = await import('./bridge.mjs');
+
+function readWorkflow() {
+  const node = { id: 'read', componentId: 'dkg-read', kaRef: 'urn:demo:n8n:component:dkg-read:test', sourceHash: 'a'.repeat(64), x: 0, y: 0,
+    params: Object.fromEntries(Object.entries(profileParameters(profile, 'dkg-read')).map(([key, value]) => [key, value.default])) };
+  return compileStudio({ id: '123e4567-e89b-42d3-a456-426614174099', name: 'Read a sample', entryId: 'read', nodes: [node], edges: [] },
+    { graphId: 'test', owner: '0x' + 'a'.repeat(40), fixture: true, headerCredential: { id: 'test', name: 'test' }, providerId: 'native-read' });
+}
 
 test('shared callback preserves MCP routing and does not fall back after an MCP rejection', async t => {
   const state = mkdtempSync(join(tmpdir(), 'studio-mcp-callback-'));
@@ -42,10 +50,7 @@ test('shared callback preserves MCP routing and does not fall back after an MCP 
 
 test('native DKG callback uses the admitted pins, typed profile and full agent actor; no Program path', async t => {
   const state = mkdtempSync(join(tmpdir(), 'studio-mcp-dkg-')); t.after(() => rmSync(state, { recursive: true, force: true }));
-  const node = { id: 'read', componentId: 'dkg-read', kaRef: 'urn:demo:n8n:component:dkg-read:test', sourceHash: 'a'.repeat(64), x: 0, y: 0,
-    params: Object.fromEntries(Object.entries(profileParameters(profile, 'dkg-read')).map(([key, value]) => [key, value.default])) };
-  const compiled = compileStudio({ id: '123e4567-e89b-42d3-a456-426614174099', name: 'Read a sample', entryId: 'read', nodes: [node], edges: [] },
-    { graphId: 'test', owner: '0x' + 'a'.repeat(40), fixture: true, headerCredential: { id: 'test', name: 'test' }, providerId: 'native-read' });
+  const compiled = readWorkflow();
   const published = { ...compiled.workflow, id: 'native-read', versionId: 'v1', active: true };
   const repository = createStudioRepository(state);
   t.after(() => { if (repository.db.isOpen) repository.close(); });
@@ -142,4 +147,63 @@ test('native DKG callback uses the admitted pins, typed profile and full agent a
   await assert.rejects(restored.dkgComponent(callback), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
   assert.equal((await restored.readRun({ runKey }, actor)).output, undefined);
   assert.equal(calls.length, 1);
+});
+
+for (const reopen of [false, true]) test(`colon-prefixed MCP run keys bind and read independently${reopen ? ' after repository reopen' : ''}`, async t => {
+  const state = mkdtempSync(join(tmpdir(), 'studio-mcp-keys-'));
+  t.after(() => rmSync(state, { recursive: true, force: true }));
+  let repository = createStudioRepository(state);
+  t.after(() => repository.close());
+  const compiled = readWorkflow(), published = { ...compiled.workflow, id: 'native-read', versionId: 'v1', active: true };
+  repository.mcp.recordSavedNative(compiled, published);
+  const actor = { id: 'owner', role: 'owner', accountId: profile.accountId };
+  const executions = new Map(), reads = [];
+  const scoped = { ...profile, transport(request, operation, context) {
+    assert.equal(operation, 'read'); reads.push({ request, actor: context.actor });
+    return { graph: 'urn:test:measurements', measurements };
+  } };
+  const native = createStudioNativeRunner({ api: async path => executions.get(path.match(/\/executions\/(\d+)/)[1]) });
+  const runner = { ...native, async prepare() { return 'v1'; }, async dispatch(_workflow, runKey, input) {
+    const id = String(42 + executions.size);
+    executions.set(id, { id, workflowId: 'native-read', workflowVersionId: 'v1', status: 'running', workflowData: published,
+      data: { resultData: { runData: { 'Receive input': [{ data: { main: [[{ json: { body: { invocationId: runKey, input } } }]] } }] } } } });
+    return id;
+  } };
+  const open = () => createStudioMcpService({ repository, runner, accountId: profile.accountId, profile: scoped,
+    dkg: dkgComponentStore(repository.db, undefined, undefined, scoped) });
+  let service = open();
+  async function admit(runKey, sample) {
+    const run = await service.run({ kaRef: compiled.kaRef, workflowSha256: compiled.grant.workflowSha256,
+      runKey, arguments: { sample } }, actor);
+    assert.equal(run.status, 'running');
+    return { effectId: runKey, workflowId: 'native-read', executionId: run.n8nExecutionId, blockId: 'read', items: [{ sample }] };
+  }
+  async function complete(callback, result) {
+    const execution = executions.get(callback.executionId);
+    execution.status = 'success';
+    execution.data.resultData.runData[compiled.grant.result.nodes[0]] = [{ data: { main: [result.items.map(json => ({ json }))] } }];
+    assert.equal((await service.readRun({ runKey: callback.effectId }, actor)).status, 'succeeded');
+  }
+  const child = await admit('run-one:child', 'a'), childResult = await service.dkgComponent(child);
+  await complete(child, childResult);
+  assert.equal(reads.length, 1);
+  if (reopen) { repository.close(); repository = createStudioRepository(state); service = open(); }
+  const retained = repository.db.prepare('SELECT * FROM dkg_component_calls WHERE id=?').get('run-one:child:read');
+  assert.ok(retained.response);
+  const parent = await admit('run-one', 'b'), parentResult = await service.dkgComponent(parent);
+  assert.deepEqual(parentResult, { items: measurements });
+  assert.deepEqual(reads.map(read => [read.request.sample, read.actor.runKey]), [['a', 'run-one:child'], ['b', 'run-one']]);
+  assert.deepEqual(await service.dkgComponent(parent), parentResult);
+  assert.equal(reads.length, 2, 'a repeated callback uses only its own cached read');
+  await assert.rejects(service.dkgComponent({ ...parent, executionId: child.executionId }), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
+  assert.deepEqual(repository.db.prepare('SELECT * FROM dkg_component_calls WHERE id=?').get('run-one:child:read'), retained);
+  const bindings = repository.db.prepare('SELECT id, effect_id, workflow_id, execution_id FROM dkg_component_native_executions ORDER BY id').all();
+  assert.deepEqual(bindings.map(row => ({ ...row })), [parent, child].map(callback => ({ id: callback.effectId,
+    effect_id: callback.effectId, workflow_id: callback.workflowId, execution_id: callback.executionId })));
+  await complete(parent, parentResult);
+  repository.close(); repository = createStudioRepository(state); service = open();
+  for (const runKey of ['run-one', 'run-one:child'])
+    assert.equal((await service.readRun({ runKey }, actor)).status, 'succeeded');
+  assert.equal(reads.length, 2);
+  assert.equal(executions.size, 2);
 });

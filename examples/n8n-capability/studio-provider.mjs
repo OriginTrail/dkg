@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { readResponseBodyBytesBounded, BoundedResponseBodyLimitError } from '../../packages/http-utils/dist/index.js';
 import { compileStudio } from './studio-definition.mjs';
 import { nativeTimerEvents } from './studio-native-events.mjs';
 import { readNativeExecutionInput } from './studio-native-execution.mjs';
@@ -14,13 +15,13 @@ export function createStudioProvider({ repository, config, graphId, owner, heade
       headers: { 'X-N8N-API-KEY': token, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     if (!res.ok) { await res.body?.cancel(); throw error('n8n did not confirm provisioning (' + res.status + '). Retry this save.'); }
-    let size = 0; const chunks = [];
-    for await (const chunk of res.body ?? []) {
-      size += chunk.byteLength;
-      if (size > 1_048_576) throw error('n8n response exceeds the PoC limit.');
-      chunks.push(chunk);
+    let bytes;
+    try { bytes = await readResponseBodyBytesBounded(res, 1_048_576); }
+    catch (cause) {
+      if (cause instanceof BoundedResponseBodyLimitError) throw error('n8n response exceeds the PoC limit.');
+      throw cause;
     }
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    return JSON.parse(Buffer.from(bytes).toString('utf8'));
   }
   const installGrant = grant => {
     const flows = config.n8nNative.workflows;

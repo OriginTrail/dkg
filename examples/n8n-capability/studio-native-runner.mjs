@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { readResponseBodyBytesBounded, BoundedResponseBodyLimitError } from '../../packages/http-utils/dist/index.js';
 import { n8nWorkflowSha256, n8nPinnedExecutionMatches } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { collectN8nExecutionResult } from '../../packages/cli/dist/semantic-runtime-n8n-results.js';
 import { fail, hash, nativeInputDigest } from './studio-mcp-contract.mjs';
@@ -21,14 +22,14 @@ export function createStudioNativeRunner(provider, installation, send = fetch) {
       headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
       body: JSON.stringify({ invocationId: runKey, input }),
     });
-    let size = 0; const chunks = [];
-    for await (const chunk of response.body ?? []) {
-      size += chunk.byteLength;
-      if (size > 512) throw fail('STUDIO_NATIVE_UNCONFIRMED');
-      chunks.push(chunk);
+    let bytes;
+    try { bytes = await readResponseBodyBytesBounded(response, 512); }
+    catch (cause) {
+      if (cause instanceof BoundedResponseBodyLimitError) throw fail('STUDIO_NATIVE_UNCONFIRMED');
+      throw cause;
     }
     if (!response.ok) throw fail('STUDIO_NATIVE_UNCONFIRMED');
-    const ack = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const ack = JSON.parse(Buffer.from(bytes).toString('utf8'));
     if (!ack || Object.keys(ack).length !== 1 || typeof ack.executionId !== 'string' || !/^\d{1,20}$/.test(ack.executionId))
       throw fail('STUDIO_NATIVE_UNCONFIRMED');
     return ack.executionId;

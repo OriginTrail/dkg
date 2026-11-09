@@ -183,7 +183,10 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
     if (!isDeepStrictEqual(receivedInput, { invocationId: value.effectId, input }))
       throw fail('Native execution did not receive this invocation grant and its exact input.');
     const binding = db.prepare('SELECT * FROM dkg_component_native_executions WHERE id=?').get(id);
-    if (!binding && db.prepare('SELECT 1 FROM dkg_component_calls WHERE substr(id,1,?)=? LIMIT 1').get(id.length + 1, id + ':'))
+    // Block IDs cannot contain colons, but MCP run keys can. Only exact keys
+    // from this pinned workflow are evidence of calls belonging to this run.
+    if (!binding && definition.nodes.some(n => isDkg(n.componentId)
+      && db.prepare('SELECT 1 FROM dkg_component_calls WHERE id=?').get(id + ':' + n.id)))
       throw fail('Legacy DKG calls lack a verified native execution binding; operator reconciliation required.');
     db.prepare('INSERT OR IGNORE INTO dkg_component_native_executions VALUES (?,?,?,?)').run(id, value.effectId, nativeId, value.executionId);
     const bound = db.prepare('SELECT * FROM dkg_component_native_executions WHERE id=?').get(id);
