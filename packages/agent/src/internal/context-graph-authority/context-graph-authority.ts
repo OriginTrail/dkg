@@ -131,6 +131,15 @@ export function isContextGraphAuthorityUnavailableMarker(
   }
 }
 
+/**
+ * An authority failure that can heal on its own, so the same request may be
+ * sent again: the shared retry classification applied to a thrown value.
+ */
+export function isRetryableContextGraphAuthorityUnavailableError(error: unknown): boolean {
+  return isContextGraphAuthorityUnavailableMarker(error)
+    && isRetryableContextGraphAuthorityUnavailableReason(error.reason);
+}
+
 export function createContextGraphAuthorityError(
   message: string,
   failure: {

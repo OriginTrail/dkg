@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { acquireFinalizedChainRead, ChainRpcTransportError } from '@origintrail-official/dkg-chain';
-import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
+import {
+  acquireFinalizedChainRead,
+  ChainRpcTransportError,
+  CurrentFinalizedEvmCallErrorV1,
+  RpcRequestGovernorQueueFullError,
+} from '@origintrail-official/dkg-chain';
+import { StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import type { DKGAgent } from '../src/dkg-agent.js';
+import { Rfc64AuthorityRpcCircuitOpenErrorV1 } from '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
 import {
   isRegisteredPrivateEmptyVmReadinessCandidateV1,
   RegisteredPrivateEmptyVmMethods,
@@ -96,7 +102,7 @@ describe('registered private empty-VM agent guard', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.snapshot.mockReturnValue(async () => true);
-    mocks.proof.mockResolvedValue(true);
+    mocks.proof.mockResolvedValue('proven');
   });
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -513,7 +519,7 @@ describe('registered private empty-VM agent guard', () => {
   it('never commits a negative finalized zero-VM proof', async () => {
     const state = fixture();
     const commit = vi.fn();
-    mocks.proof.mockResolvedValueOnce(false);
+    mocks.proof.mockResolvedValueOnce('unproven');
     expect(await complete(state.agent, commit)).toMatchObject({ proven: false });
     expect(mocks.proof).toHaveBeenCalledTimes(1);
     expect(commit).not.toHaveBeenCalled();
@@ -522,7 +528,7 @@ describe('registered private empty-VM agent guard', () => {
   it('delivers a failed proof and final live denial to one fenced completion callback', async () => {
     const state = fixture();
     const commit = vi.fn((completion: InspectedPrivateEmptyVmReadinessV1) => completion);
-    mocks.proof.mockResolvedValueOnce(false);
+    mocks.proof.mockResolvedValueOnce('unproven');
     state.authority.mockResolvedValueOnce({
       outcome: 'allowed', source: 'registered-chain', onChainId: 3n,
     }).mockResolvedValueOnce({ outcome: 'denied' });
@@ -537,6 +543,8 @@ describe('registered private empty-VM agent guard', () => {
         kind: 'current', authority: { outcome: 'denied' },
       }),
       proven: false,
+      final: true,
+      stage: 'authority-denied',
     });
   });
 
@@ -562,7 +570,7 @@ describe('registered private empty-VM agent guard', () => {
     const commit = vi.fn();
     mocks.proof.mockImplementationOnce(async () => {
       state.invalidateMetadata();
-      return true;
+      return 'proven';
     });
     expect(await complete(state.agent, commit)).toMatchObject({ proven: false, retryable: true });
     expect(commit).not.toHaveBeenCalled();
@@ -607,7 +615,7 @@ describe('registered private empty-VM agent guard', () => {
     ));
     mocks.proof.mockImplementationOnce(async () => {
       removedOnChain = true;
-      return true;
+      return 'proven';
     });
     expect(await complete(state.agent, commit)).toMatchObject({ proven: false });
     expect(state.authority).toHaveBeenCalledWith(CG, expect.objectContaining({ freshness: 'live' }));
@@ -657,11 +665,239 @@ describe('registered private empty-VM agent guard', () => {
     const commit = vi.fn();
     mocks.proof.mockImplementationOnce(async () => {
       deadline.abort();
-      return true;
+      return 'proven';
     });
     expect(await complete(state.agent, commit, deadline.signal)).toMatchObject({ proven: false });
     expect(commit).not.toHaveBeenCalled();
     expect(state.authority).toHaveBeenCalledWith(CG, expect.objectContaining({ signal: deadline.signal }));
     expect(state.chainSnapshot).toHaveBeenCalledWith(CG, deadline.signal);
+  });
+
+  describe('when an attempt is worth making again', () => {
+    const transient: Array<[string, () => unknown]> = [
+      ['a busy store', () => new StoreSchedulerBusyError('queue_full', 'background', 'query')],
+      ['a store operation timeout', () => new StoreOperationTimeoutError({ backend: 'store', operation: 'query', timeoutMs: 1_000 })],
+      ['a refusal of the request governor', () => new RpcRequestGovernorQueueFullError(10)],
+      ['every endpoint exhausted', () => new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', 'all failed')],
+      ['a chain request timeout', () => new ChainRpcTransportError('RPC_TIMEOUT', 'too slow')],
+      ['an open authority circuit', () => new Rfc64AuthorityRpcCircuitOpenErrorV1(1_000, 1_000)],
+      ['finalized state not available yet', () => new CurrentFinalizedEvmCallErrorV1('finalized-state-unavailable', 'x')],
+      ['an endpoint that could not answer', () => new CurrentFinalizedEvmCallErrorV1('rpc-unavailable', 'x')],
+      ['a finalized read timeout', () => new CurrentFinalizedEvmCallErrorV1('rpc-timeout', 'x')],
+      ['the attempt\'s own timeout', () => new DOMException('The operation timed out', 'TimeoutError')],
+      ['a wrapped cause', () => new Error('read failed', { cause: new Error('inner', { cause: new RpcRequestGovernorQueueFullError(10) }) })],
+    ];
+
+    it.each(transient)('asks again soon after %s', async (_label, failure) => {
+      const state = fixture();
+      mocks.proof.mockRejectedValueOnce(failure());
+      const commit = vi.fn();
+      const end = await complete(state.agent, commit);
+      expect(end).toMatchObject({ proven: false, retryable: true });
+      expect(commit).not.toHaveBeenCalled();
+    });
+
+    it('asks again soon when the store or the authority read fails before the proof', async () => {
+      const state = fixture();
+      state.isPrivate.mockRejectedValueOnce(new Error('store unavailable'));
+      expect(await complete(state.agent)).toMatchObject({
+        proven: false, retryable: true, stage: 'private-policy-unavailable',
+      });
+      state.chainSnapshot.mockRejectedValueOnce(new StoreOperationTimeoutError({ backend: 'store', operation: 'query', timeoutMs: 1_000 }));
+      expect(await complete(state.agent)).toMatchObject({ proven: false, retryable: true });
+      expect(mocks.proof).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['an error it cannot read', () => new Error('read unavailable')],
+      ['a reverted read', () => new CurrentFinalizedEvmCallErrorV1('revert', 'x')],
+      ['a malformed answer', () => new CurrentFinalizedEvmCallErrorV1('malformed-return', 'x')],
+      ['contention no lane reported', () => new CurrentFinalizedEvmCallErrorV1('concurrency-saturated', 'x')],
+      ['a transport failure about a sent transaction', () => new ChainRpcTransportError('RPC_TIMEOUT', 'x', { txHash: `0x${'aa'.repeat(32)}` })],
+    ])('does not ask again soon after %s, and may try later', async (_label, failure) => {
+      const state = fixture();
+      mocks.proof.mockRejectedValueOnce(failure());
+      const end = await complete(state.agent);
+      expect(end).toMatchObject({ proven: false });
+      if (!end.proven) {
+        expect(end.retryable).not.toBe(true);
+        expect(end.final).not.toBe(true);
+        expect(end.stage).toMatch(/^proof-error:/);
+      }
+    });
+
+    it('treats a caller deadline as no verdict on the graph', async () => {
+      const state = fixture();
+      const deadline = new AbortController();
+      mocks.proof.mockImplementationOnce(async () => {
+        deadline.abort();
+        throw new RpcRequestGovernorQueueFullError(10);
+      });
+      const end = await complete(state.agent, () => undefined, deadline.signal);
+      expect(end).toMatchObject({ proven: false });
+      if (!end.proven) {
+        expect(end.retryable).not.toBe(true);
+        expect(end.final).not.toBe(true);
+      }
+    });
+
+    it('never tries again on a graph that holds Knowledge Assets', async () => {
+      const state = fixture();
+      mocks.proof.mockResolvedValueOnce('not-empty');
+      const commit = vi.fn();
+      expect(await complete(state.agent, commit)).toMatchObject({
+        proven: false, final: true, stage: 'finalized-not-empty',
+      });
+      expect(commit).not.toHaveBeenCalled();
+    });
+
+    it('may try later when another condition does not hold at this anchor', async () => {
+      const state = fixture();
+      mocks.proof.mockResolvedValueOnce('unproven');
+      const end = await complete(state.agent);
+      expect(end).toMatchObject({ proven: false, stage: 'finalized-zero-proof-false' });
+      if (!end.proven) {
+        expect(end.retryable).not.toBe(true);
+        expect(end.final).not.toBe(true);
+      }
+    });
+
+    it.each([
+      ['a public graph', (state: ReturnType<typeof fixture>) => { state.isPrivate.mockResolvedValueOnce(false); }, 'not-private'],
+      ['a removed subscription', (state: ReturnType<typeof fixture>) => { state.subscriptions.get(CG)!.subscribed = false; }, 'not-subscribed'],
+    ] as const)('does not try again on %s', async (_label, arrange, stage) => {
+      const state = fixture();
+      arrange(state);
+      const preparation = await state.agent.prepareContextGraphReadinessWithPrivateEmptyVmV1({
+        contextGraphId: CG, attemptPrivateEmptyVm: true, callerAgentAddress: CALLER,
+      });
+      const attempt = await preparation.inspectAndCommit({ inspectMetadata: true }, (end) => end);
+      expect(attempt.proven).toBe(false);
+      if (stage === 'not-private') expect(attempt).toMatchObject({ final: true, stage });
+      else expect(attempt).toMatchObject({ proven: false });
+    });
+  });
+
+  describe('an approved member whose authority has not settled here yet', () => {
+    const approved = (state: ReturnType<typeof fixture>, agentAddress = CALLER.toUpperCase().replace('0X', '0x')) => {
+      (state.agent as unknown as { localApprovedAgentByCG: Map<string, string> }).localApprovedAgentByCG = new Map([[CG, agentAddress]]);
+    };
+    const notSettled: Array<[string, Record<string, unknown>]> = [
+      ['denied', { outcome: 'denied' }],
+      ['allowed from another source', { outcome: 'allowed', source: 'legacy-local' }],
+      ['allowed without an on-chain id', { outcome: 'allowed', source: 'registered-chain' }],
+    ];
+    const UNREGISTERED = { outcome: 'allowed', source: 'registered-chain', onChainId: 3n, registration: 'unregistered' };
+
+    it('waits for the later attempts when the graph is not registered: it may stay so', async () => {
+      const state = fixture();
+      approved(state);
+      state.authority.mockResolvedValue(UNREGISTERED as never);
+      const end = await complete(state.agent);
+      expect(end).toMatchObject({ proven: false, stage: 'authority-not-registered-allowed' });
+      if (!end.proven) {
+        expect(end.retryable).not.toBe(true);
+        expect(end.final).not.toBe(true);
+      }
+      expect(mocks.proof).not.toHaveBeenCalled();
+    });
+
+    it('without the approval, a graph that is not registered is that caller\'s answer', async () => {
+      const state = fixture();
+      state.authority.mockResolvedValue(UNREGISTERED as never);
+      expect(await complete(state.agent)).toMatchObject({ proven: false, final: true });
+    });
+
+    it.each(notSettled)('asks again when the authority is %s, and proves nothing', async (_label, decision) => {
+      const state = fixture();
+      approved(state);
+      state.authority.mockResolvedValue(decision as never);
+      const commit = vi.fn();
+      expect(await complete(state.agent, commit)).toMatchObject({
+        proven: false, retryable: true, stage: 'authority-not-registered-allowed',
+      });
+      expect(mocks.proof).not.toHaveBeenCalled();
+      expect(commit).not.toHaveBeenCalled();
+    });
+
+    it.each(notSettled)('without the approval, %s is that caller\'s answer', async (_label, decision) => {
+      const state = fixture();
+      state.authority.mockResolvedValue(decision as never);
+      expect(await complete(state.agent)).toMatchObject({ proven: false, final: true });
+      expect(mocks.proof).not.toHaveBeenCalled();
+    });
+
+    it('does not take another agent\'s approval for the caller\'s', async () => {
+      const state = fixture();
+      approved(state, `0x${'99'.repeat(20)}`);
+      state.authority.mockResolvedValue({ outcome: 'denied' } as never);
+      expect(await complete(state.agent)).toMatchObject({ proven: false, final: true });
+    });
+
+    it('asks again when the indexed authority is missing or does not match', async () => {
+      const state = fixture();
+      approved(state);
+      state.chainSnapshot.mockResolvedValueOnce(null as never);
+      expect(await complete(state.agent)).toMatchObject({
+        proven: false, retryable: true, stage: 'indexed-private-authority-absent',
+      });
+      state.chainSnapshot.mockResolvedValueOnce({
+        expectedNameHash: NAME_HASH, expectedOnChainId: 3n,
+        snapshot: { chainId: '31337', contextGraphId: '3', active: true, accessPolicy: 0, governanceContract: `0x${'22'.repeat(20)}`, nameHash: NAME_HASH },
+      } as never);
+      expect(await complete(state.agent)).toMatchObject({
+        proven: false, retryable: true, stage: 'indexed-private-authority-absent',
+      });
+      expect(mocks.proof).not.toHaveBeenCalled();
+    });
+
+    it('without the approval, a missing index is not asked about again soon, but may be later', async () => {
+      const state = fixture();
+      state.chainSnapshot.mockResolvedValueOnce(null as never);
+      const end = await complete(state.agent);
+      expect(end).toMatchObject({ proven: false, stage: 'indexed-private-authority-absent' });
+      if (!end.proven) {
+        expect(end.retryable).not.toBe(true);
+        expect(end.final).not.toBe(true);
+      }
+    });
+
+    it('keeps asking past a live denial at the final fence, and does not commit', async () => {
+      const state = fixture();
+      approved(state);
+      state.authority.mockResolvedValue({ outcome: 'denied' } as never);
+      const commit = vi.fn();
+      expect(await complete(state.agent, commit)).toMatchObject({ proven: false, retryable: true });
+      expect(commit).not.toHaveBeenCalled();
+    });
+
+    it('needs the full proof all the same: a proof that holds still meets the final authority', async () => {
+      const state = fixture();
+      approved(state);
+      state.authority.mockResolvedValueOnce({ outcome: 'allowed', source: 'registered-chain', onChainId: 3n } as never)
+        .mockResolvedValueOnce({ outcome: 'denied' } as never);
+      const commit = vi.fn();
+      const end = await complete(state.agent, commit);
+      expect(end).toMatchObject({ proven: false, stage: 'post-proof-authority-changed' });
+      expect(commit).not.toHaveBeenCalled();
+      expect(mocks.proof).toHaveBeenCalledOnce();
+    });
+
+    it('never treats a proof that does not hold as proven, whatever the approval', async () => {
+      const state = fixture();
+      approved(state);
+      for (const proof of ['unproven', 'not-empty'] as const) {
+        mocks.proof.mockResolvedValueOnce(proof);
+        expect((await complete(state.agent)).proven).toBe(false);
+      }
+    });
+
+    it('still proves the graph once every condition holds', async () => {
+      const state = fixture();
+      approved(state);
+      state.authority.mockResolvedValueOnce({ outcome: 'denied' } as never);
+      expect((await complete(state.agent)).proven).toBe(false);
+      expect(await prove(state.agent)).toBe(true);
+    });
   });
 });

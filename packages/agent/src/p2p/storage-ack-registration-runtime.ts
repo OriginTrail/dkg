@@ -197,11 +197,12 @@ class StorageACKRegistrationSession {
   sendLocal(
     timeoutMs: number,
     work: RegisteredLocalACKWork,
+    signal?: AbortSignal,
   ): Promise<Uint8Array> {
     if (this.state.kind === 'retired') throw new Error('Local StorageACK transport is closed for a retired agent lifetime');
     const endpoint = this.endpoint;
     if (!endpoint) throw new Error('Local StorageACK handler is not registered');
-    return this.transport.send((signal) => work(endpoint, signal), timeoutMs);
+    return this.transport.send((requestSignal) => work(endpoint, requestSignal), timeoutMs, signal);
   }
 
   async drainAttempts(): Promise<void> { await Promise.allSettled(this.attempts); }
@@ -259,13 +260,13 @@ export class StorageACKRegistrationRuntime {
   clearRetry(): void { this.currentSession?.stopRetry(); }
 
   /** A sender captures its generation so stale factories cannot use a replacement endpoint. */
-  createLocalSender(): (timeoutMs: number, work: RegisteredLocalACKWork) => Promise<Uint8Array> {
+  createLocalSender(): (timeoutMs: number, work: RegisteredLocalACKWork, signal?: AbortSignal) => Promise<Uint8Array> {
     const session = this.currentSession;
-    return (timeoutMs, work) => {
+    return (timeoutMs, work, signal) => {
       if (!session || session !== this.currentSession || !session.isCurrent()) {
         throw new Error('Local StorageACK transport is closed for a retired agent lifetime');
       }
-      return session.sendLocal(timeoutMs, work);
+      return session.sendLocal(timeoutMs, work, signal);
     };
   }
 

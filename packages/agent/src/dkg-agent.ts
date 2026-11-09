@@ -1,3 +1,4 @@
+import { PublicSnapshotSessionMethods } from './public-snapshot-session.js';
 import type { StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
 import type { AssertionPullFromOptions, AssertionPullFromResult } from '@origintrail-official/dkg-publisher';
 import { StorageACKAdmission } from './storage-ack-admission.js';
@@ -8,7 +9,7 @@ import { snapshotCoreChainCacheNetworks } from './core-chain-cache-config.js';
 import { assertionLifecycleAuthorCandidates } from '@origintrail-official/dkg-publisher';
 import { durableAssertionShareMethods } from './internal/promote/durable-assertion-share.js';
 import { normalizeAgentPreparedCacheConfig } from './prepared-cache-config.js';
-import { PublicSnapshotMethods } from './dkg-agent-public-snapshot.js';
+import { PublicSnapshotMethods, PublicCheckpointMethods } from './dkg-agent-public-snapshot.js';
 import { CatalogRepairConditionErrorV1 } from './rfc64/catalog-repair-diagnostics-v1.js';
 import type { StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
 
@@ -1064,6 +1065,7 @@ export class DKGAgent extends DKGAgentBase {
             headRevision: headDigest,
           };
         },
+        listFinalizedPrivateRepairsAsync: async signal => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.listAsync(signal) ?? [],
         listFinalizedPrivateRepairs: () => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? [],
         readPrivateFailure: (repair) => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.readFailure(repair) ?? null,
         writePrivateFailures: entries => {
@@ -3318,7 +3320,7 @@ export class DKGAgent extends DKGAgentBase {
       timeoutMs,
     });
     const sendLocal = this.storageACKRegistrationRuntime.createLocalSender();
-    return async (peerId: string, protocol: string, data: Uint8Array) => {
+    return async (peerId: string, protocol: string, data: Uint8Array, options) => {
       if (peerId === this.peerId) {
         if (!this.localACKCandidate().available) {
           throw new Error('Local StorageACK handler is not registered');
@@ -3326,12 +3328,12 @@ export class DKGAgent extends DKGAgentBase {
         if (!isStorageACKProtocol(protocol)) throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
         return sendLocal(timeoutMs, (endpoint, signal) => endpoint.dispatch({
           protocol, data, peerId: this.peerId, signal, context: expectedHead,
-        }));
+        }), options?.signal);
       }
       if (!this.networkAdmissionCoordinator.isAcceptedPeer(peerId)) {
         throw new Error(`peer ${peerId.slice(-8)} is not admitted for active-network ACK collection`);
       }
-      return send(peerId, protocol, data);
+      return send(peerId, protocol, data, options);
     };
   }
 
@@ -3371,9 +3373,9 @@ export class DKGAgent extends DKGAgentBase {
         this.ackOperationContext(protocol),
       ),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
-        ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
+        ? async (recoveredAddress: string, claimedIdentityId: bigint, options) => {
             try {
-              return await this.chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId);
+              return await this.chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId, options);
             } catch {
               return false;
             }
@@ -3385,9 +3387,9 @@ export class DKGAgent extends DKGAgentBase {
       // distinctly from definitive key/stake rejections — pre-PR this
       // try/catch swallowed RPC errors as `false`, conflating them.
       verifyIdentityDetailed: typeof this.chain.verifyACKIdentityDetailed === 'function'
-        ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
+        ? async (recoveredAddress: string, claimedIdentityId: bigint, options) => {
             try {
-              return await this.chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId);
+              return await this.chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId, options);
             } catch {
               return { valid: false, reason: 'rpc-error' as const };
             }
@@ -3458,7 +3460,7 @@ export class DKGAgent extends DKGAgentBase {
 
       const result = await admit(onDiagnostic => {
         return collector.collect({
-          onDiagnostic,
+          onDiagnostic, signal: this.workLifetime.signal,
           merkleRoot: params.merkleRoot,
           contextGraphId: cgIdBigInt,
           contextGraphIdStr: params.contextGraphId,
@@ -3519,18 +3521,18 @@ export class DKGAgent extends DKGAgentBase {
         this.ackOperationContext(protocol),
       ),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
-        ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
+        ? async (recoveredAddress: string, claimedIdentityId: bigint, options) => {
             try {
-              return await this.chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId);
+              return await this.chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId, options);
             } catch {
               return false;
             }
           }
         : undefined,
       verifyIdentityDetailed: typeof this.chain.verifyACKIdentityDetailed === 'function'
-        ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
+        ? async (recoveredAddress: string, claimedIdentityId: bigint, options) => {
             try {
-              return await this.chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId);
+              return await this.chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId, options);
             } catch {
               return { valid: false, reason: 'rpc-error' as const };
             }
@@ -3617,7 +3619,7 @@ export class DKGAgent extends DKGAgentBase {
 
       const result = await admit(onDiagnostic => {
         return collector.collectUpdate({
-          onDiagnostic,
+          onDiagnostic, signal: this.workLifetime.signal,
           kaId: params.kaId,
           contextGraphId: cgIdBigInt,
           preUpdateMerkleRootCount: params.preUpdateMerkleRootCount,
@@ -3661,7 +3663,7 @@ export class DKGAgent extends DKGAgentBase {
       /** Curated assertions stay on encrypted member channels. */
       curated?: boolean;
     },
-  ): Promise<void> {
+  ): Promise<readonly string[] | undefined> {
     // Use the public quads from the publish result to avoid leaking private
     // triples that are stored in the same data graph.
     const publicQuads = result.publicQuads ?? [];
@@ -3739,9 +3741,10 @@ export class DKGAgent extends DKGAgentBase {
     const topic = contextGraphPublishTopic(contextGraphId);
     this.log.info(ctx, `Broadcasting to topic ${topic}`);
     try {
-      await this.gossip.publish(topic, msg);
+      return await this.gossip.publish(topic, msg);
     } catch {
       this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+      return [];
     }
   }
 
@@ -4272,7 +4275,7 @@ export class DKGAgent extends DKGAgentBase {
         opts?: Pick<
           AssertionPromoteOptions,
           'entities' | 'subGraphName' | 'agentAddress' | 'authorAgentAddress'
-        >,
+        > & { signal?: AbortSignal },
       ): Promise<{ jobId: string }> {
         const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
         const jobId = await agent.promoteQueue.enqueue({
@@ -4282,7 +4285,7 @@ export class DKGAgent extends DKGAgentBase {
           entities: opts?.entities ?? 'all',
           ...(promoteAgentAddress ? { agentAddress: promoteAgentAddress } : {}),
           ...(opts?.authorAgentAddress ? { authorAgentAddress: opts.authorAgentAddress } : {}),
-        });
+        }, opts?.signal ? { signal: opts.signal } : undefined);
         return { jobId };
       },
       async getPromoteAsyncStatus(jobId: string): Promise<PromoteJob | null> {
@@ -4348,5 +4351,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends PrivateAccessMethods, PublicSnapshotMethods, ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, ContextGraphPartitionQueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64OwedShareInventoryMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods, WritePreflightIdentityMethods {}
-applyMixins(DKGAgent, [PrivateAccessMethods, PublicSnapshotMethods,ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, ContextGraphPartitionQueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64OwedShareInventoryMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods, WritePreflightIdentityMethods]);
+export interface DKGAgent extends PrivateAccessMethods, PublicSnapshotMethods, PublicSnapshotSessionMethods, PublicCheckpointMethods, ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, ContextGraphPartitionQueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64OwedShareInventoryMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods, WritePreflightIdentityMethods {}
+applyMixins(DKGAgent, [PrivateAccessMethods, PublicSnapshotMethods, PublicSnapshotSessionMethods, PublicCheckpointMethods,ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, ContextGraphPartitionQueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64OwedShareInventoryMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods, WritePreflightIdentityMethods]);
