@@ -46,6 +46,60 @@ describe('marketplace Operate', () => {
     ]);
   });
 
+  const tx = `0x${'b1'.repeat(32)}`;
+  const reports: Array<[string, unknown, string]> = [
+    ['stopped', { stopped: 'end-margin' }, 'Nothing landed: too close to the epoch\'s end'],
+    ['waiting', { sent: [], refused: 2, waiting: true }, 'Nothing landed yet: receipts are waiting to be ready · 2 refused'],
+    ['empty', { sent: [], refused: 1, waiting: false }, 'Nothing landed · 1 refused'],
+    ['sent', { sent: [{ txHash: tx, items: 120, value: '1', valueTrac: '0.0', counted: '1', countedTrac: '0.0' }, { txHash: tx, items: 30, value: '1', valueTrac: '0.0', counted: '1', countedTrac: '0.0' }], refused: 3, waiting: false },
+      'Batches landed: 2 · 150 receipts · 3 refused'],
+  ];
+  for (const [what, lastLanding, text] of reports) {
+    it(`words the last landing when it ${what === 'sent' ? 'sent batches' : `was ${what}`}`, async () => {
+      const node = fixtureFetch('active');
+      vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+        const res = await node(input, init);
+        if (String(input) !== '/api/marketplace/seller') return res;
+        return new Response(JSON.stringify({ ...(await res.json()), lastLanding }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      });
+      const c = await render(operate());
+      await waitForText(c, 'Epoch 664');
+      expect(byTestId(c, 'mkt-land-result')?.textContent).toBe(text);
+    });
+  }
+
+  const answers: Array<[string, unknown, string]> = [
+    ['stopped', { batches: [], stopped: 'not-due' }, 'Nothing landed: no landing is due yet'],
+    ['waiting', { batches: [], refused: 0, waiting: true }, 'Nothing landed yet: receipts are waiting to be ready · 0 refused'],
+    ['empty', { batches: [], refused: 4, waiting: false }, 'Nothing landed · 4 refused'],
+  ];
+  for (const [what, answer, text] of answers) {
+    it(`words a Land now that was ${what}`, async () => {
+      const node = fixtureFetch('active');
+      vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input) === '/api/marketplace/seller/land') return new Response(JSON.stringify(answer), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        return node(input, init);
+      });
+      const c = await render(operate());
+      await waitForText(c, 'Batches landed: 1 · 120 receipts · 0 refused');
+      await click(byTestId(c, 'mkt-land-now'));
+      await waitForText(c, text);
+      expect(byTestId(c, 'mkt-land-result')?.textContent).toBe(text);
+    });
+  }
+
+  it('shows no landing line before the first landing', async () => {
+    const node = fixtureFetch('active');
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const res = await node(input, init);
+      if (String(input) !== '/api/marketplace/seller') return res;
+      return new Response(JSON.stringify({ ...(await res.json()), lastLanding: null }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    const c = await render(operate());
+    await waitForText(c, 'Epoch 664');
+    expect(byTestId(c, 'mkt-land-result')).toBeNull();
+  });
+
   it('says what selling needs when it is off', async () => {
     useFixtureNode('off');
     const c = await render(operate());

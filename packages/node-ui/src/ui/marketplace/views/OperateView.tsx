@@ -7,11 +7,17 @@
 import React, { useState } from 'react';
 import { copy } from '../copy.generated.js';
 import { isMarketplaceOff, marketplaceApi } from '../api/client.js';
-import type { LandNowAnswer, Offering } from '../api/types.js';
+import type { LandNowAnswer, LandingReport, LandingStop, Offering } from '../api/types.js';
 import { fmtAt, fmtHex, fmtMicro, fmtTrac, modelName, weiOfMicro } from '../amounts.js';
 import { ErrorCard, OffCard, relAt, useLoad } from '../shared.js';
 
-function landedLine(r: LandNowAnswer): { key: string; vars: Record<string, string | number> } {
+/** What a landing came to, in the fields the last landing's report and a Land now answer share. */
+type Landed = { stopped: LandingStop } | { batches: ReadonlyArray<{ items: number }>; refused: number; waiting: boolean };
+
+/** The last landing's report in those fields: its sent batches are the batches. */
+const landedOf = (r: LandingReport): Landed => ('stopped' in r ? r : { batches: r.sent, refused: r.refused, waiting: r.waiting });
+
+function landedLine(r: Landed): { key: string; vars: Record<string, string | number> } {
   if ('stopped' in r) return { key: `operate.stopped.${r.stopped}`, vars: {} };
   if (r.batches.length === 0) return { key: r.waiting ? 'operate.land.waiting' : 'operate.land.none', vars: { refused: r.refused } };
   return { key: 'operate.land.sent', vars: { n: r.batches.length, items: r.batches.reduce((s, b) => s + b.items, 0), refused: r.refused } };
@@ -62,7 +68,7 @@ export function OperateView(): React.ReactElement {
   const epoch = s.epoch;
   const g = s.gate;
   const l = s.ledger;
-  const report = landed ?? (s.lastLanding ? ('stopped' in s.lastLanding ? { batches: [], stopped: s.lastLanding.stopped } : { batches: s.lastLanding.sent.map((b) => ({ ...b, tx: b.txHash, at: 0, gasUsed: 0 })), refused: s.lastLanding.refused, waiting: s.lastLanding.waiting }) : null);
+  const report: Landed | null = landed ?? (s.lastLanding ? landedOf(s.lastLanding) : null);
   const line = report ? landedLine(report) : null;
 
   return (
