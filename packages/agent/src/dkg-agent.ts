@@ -4275,7 +4275,7 @@ export class DKGAgent extends DKGAgentBase {
         opts?: Pick<
           AssertionPromoteOptions,
           'entities' | 'subGraphName' | 'agentAddress' | 'authorAgentAddress'
-        >,
+        > & { signal?: AbortSignal },
       ): Promise<{ jobId: string }> {
         const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
         const jobId = await agent.promoteQueue.enqueue({
@@ -4285,7 +4285,7 @@ export class DKGAgent extends DKGAgentBase {
           entities: opts?.entities ?? 'all',
           ...(promoteAgentAddress ? { agentAddress: promoteAgentAddress } : {}),
           ...(opts?.authorAgentAddress ? { authorAgentAddress: opts.authorAgentAddress } : {}),
-        });
+        }, opts?.signal ? { signal: opts.signal } : undefined);
         return { jobId };
       },
       async getPromoteAsyncStatus(jobId: string): Promise<PromoteJob | null> {
