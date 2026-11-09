@@ -304,6 +304,10 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'requireConvictionNFT',
   'pcaWrite',
   'pcaWriteAndInvalidate',
+  // The send behind the marketplace writes (evm-adapter-marketplace.ts): the
+  // wallet `opts.from`, the Hub self-heal retry and the revert decoding. The
+  // writes it sends are mirrored on MockChainAdapter (mock-adapter-marketplace.ts).
+  'marketplaceSend',
   // Identity read-cache helpers are EVM-only: the mock's identity registry is
   // in-memory and its writes are already immediately visible.
   'invalidateIdentityStorageBinding',

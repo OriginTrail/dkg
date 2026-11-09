@@ -193,6 +193,7 @@ export {
   createChainDiscoveryScanRunner,
 } from './chain-discovery-scan.js';
 import { createDaemonLocalLlmService } from './local-llm-service.js';
+import { startMarketplace } from './marketplace-buyer.js';
 import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
 import {
   createTelemetrySettings,
@@ -2243,6 +2244,11 @@ async function runDaemonInnerWithStartupOwnership(
     const coverage = await checkpointStartup.complete();
     log(`[bootstrap] Current public coverage: ${coverage.committed}/${coverage.assets}`);
   }
+  // The marketplace (OT-RFC-27), when enabled: the buyer, whose job keeps the standing plan funded, its gateway, and
+  // the seller. A part that fails to start is logged and stays off; the node boots on.
+  const { marketplace, marketplaceGateway, marketplaceSeller } = await startMarketplace({
+    config, agent, wallets: evmSigning.addresses.wallets.map((w) => w.address), dataDir: dkgDir(), dashDb, log,
+  });
 
   // Classify configured graphs before migrating legacy readiness. Explicit
   // local-bootstrap targets receive current provenance here; configured
@@ -3568,6 +3574,9 @@ async function runDaemonInnerWithStartupOwnership(
         eventLoopDelay: eventLoopDelayView,
         localLlm,
         routeRpcTransport: daemonRpcRuntime?.routeTransport,
+        marketplace,
+        marketplaceGateway,
+        marketplaceSeller: marketplaceSeller?.seller,
         emitMemoryGraphChanged,
         emitNotification,
       });
@@ -3692,6 +3701,9 @@ async function runDaemonInnerWithStartupOwnership(
           log(`Chain discovery scan drain error: ${err instanceof Error ? err.message : String(err)}`);
         });
         logVolumePruner.stop();
+        void marketplace?.stop();
+        void marketplaceGateway?.stop();
+        void marketplaceSeller?.stop();
         backpressureMonitor.stop();
         eventLoopDelayMonitor.stop();
         rateLimiter.destroy();
