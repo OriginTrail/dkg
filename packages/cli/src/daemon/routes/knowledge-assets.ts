@@ -1127,7 +1127,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     agent,
     parsed.contextGraphId,
     res,
-    writePreflightContextGraphOpts,
+    {
+      ...writePreflightContextGraphOpts,
+      // This common preflight precedes every mutation and the publish enqueue fence.
+      ...(layer === 'vm' && verb === 'publish-async' ? { beforeAsyncPublishEnqueue: true as const } : {}),
+    },
   );
   if (!contextGraphId) return;
 

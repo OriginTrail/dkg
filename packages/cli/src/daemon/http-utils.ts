@@ -817,17 +817,28 @@ function rejectKnownNonWritableContextGraph(res: ServerResponse, raw: string, ou
   return null;
 }
 
+/** A failed preflight store read cannot have enqueued this async publish request. */
+function respondPreflightStoreUnavailable(res: ServerResponse, err: unknown, beforeAsyncPublishEnqueue: boolean): StoreUnavailableOutcome | null {
+  if (!beforeAsyncPublishEnqueue) return respondIfStoreUnavailable(res, err);
+  const classified = classifyStoreUnavailable(err);
+  if (!classified) return null;
+  jsonResponse(res, 503, { ...classified.body, jobCreated: false }, undefined, { 'Retry-After': '1' });
+  return classified.outcome;
+}
+
 function contextGraphValidationUnavailable(
   res: ServerResponse,
   message: string,
   attribution: readonly WritePreflightDiagnosticFailure[],
   rescue: WritePreflightRescueOutcome = 'not-attempted',
   observer?: WritePreflightDiagnostics,
+  beforeAsyncPublishEnqueue = false,
 ): null {
   const ctx = createOperationContext('resolve');
   recordWritePreflightUnavailable(ctx, attribution, rescue, observer);
   jsonResponse(res, 503, {
     code: "CONTEXT_GRAPH_VALIDATION_UNAVAILABLE",
+    ...(beforeAsyncPublishEnqueue ? { jobCreated: false, retryable: true } : {}),
     error: `Failed to validate contextGraphId against known context graphs: ${message}`,
   }, undefined, { 'x-dkg-operation-id': ctx.operationId });
   return null;
@@ -907,6 +918,9 @@ async function resolveWriteContextGraphIdOnce(
     writePreflightDiagnostics?: WritePreflightDiagnostics;
     /** Set by the re-resolve after a readiness wait: the exact probe must not share one that began before it. */
     freshProbe?: boolean;
+    /** Internal route proof: this resolver runs before async publish can create a job.
+     * Never set after a mutation or at another admission surface. */
+    beforeAsyncPublishEnqueue?: true;
   } = {},
 ): Promise<string | KnownNotWritable | null> {
   if (!validateRequiredContextGraphId(contextGraphId, res)) return null;
@@ -944,7 +958,7 @@ async function resolveWriteContextGraphIdOnce(
     return { notWritable: candidateId, raw };
   }
   if (exactDecision.kind === "validationUnavailable") {
-    return contextGraphValidationUnavailable(res, exactDecision.errorMessage, exactDecision.attribution, 'not-attempted', opts.writePreflightDiagnostics);
+    return contextGraphValidationUnavailable(res, exactDecision.errorMessage, exactDecision.attribution, 'not-attempted', opts.writePreflightDiagnostics, opts.beforeAsyncPublishEnqueue === true);
   }
   // Qualified ids are already canonical and unambiguous. Never turn their
   // point-validation into a full ONTOLOGY/AGENTS catalog scan: under store
@@ -960,14 +974,14 @@ async function resolveWriteContextGraphIdOnce(
       opts.chainRescueTimeoutMs,
     );
     if (rescue === 'accepted') return candidateId;
-    return contextGraphValidationUnavailable(res, message, exactDecision.attribution, rescue, opts.writePreflightDiagnostics);
+    return contextGraphValidationUnavailable(res, message, exactDecision.attribution, rescue, opts.writePreflightDiagnostics, opts.beforeAsyncPublishEnqueue === true);
   }
   if (
     exactDecision.kind !== "listFallback" &&
     exactDecision.kind !== "listDeferredReject" &&
     exactDecision.kind !== "listUnavailable"
   ) {
-    return contextGraphValidationUnavailable(res, 'exact context graph preflight was inconclusive', [{ site: 'decision', kind: 'incomplete' }], 'not-attempted', opts.writePreflightDiagnostics);
+    return contextGraphValidationUnavailable(res, 'exact context graph preflight was inconclusive', [{ site: 'decision', kind: 'incomplete' }], 'not-attempted', opts.writePreflightDiagnostics, opts.beforeAsyncPublishEnqueue === true);
   }
   // Immutable carry-forward for the list leg. Track B (rescue gating): the
   // store-free on-chain rescue may run ONLY on an `unavailable` verdict — the
@@ -1008,7 +1022,7 @@ async function resolveWriteContextGraphIdOnce(
       ...(exactDecision.kind === 'listUnavailable' ? exactDecision.attribution : []),
       { site: 'list', kind: classifyWritePreflightFailure(err) },
     ];
-    return contextGraphValidationUnavailable(res, message, attribution, rescue, opts.writePreflightDiagnostics);
+    return contextGraphValidationUnavailable(res, message, attribution, rescue, opts.writePreflightDiagnostics, opts.beforeAsyncPublishEnqueue === true);
   }
 
   const knownIds = contextGraphs
@@ -1025,7 +1039,7 @@ async function resolveWriteContextGraphIdOnce(
     try {
       exactWritable = await contextGraphRowIsWritable(agent, exact);
     } catch (err) {
-      if (respondIfStoreUnavailable(res, err)) return null;
+      if (respondPreflightStoreUnavailable(res, err, opts.beforeAsyncPublishEnqueue === true)) return null;
       const message = err instanceof Error ? err.message : String(err);
       jsonResponse(res, 500, {
         error: `Failed to validate contextGraphId local writability: ${message}`,
@@ -1099,7 +1113,7 @@ async function resolveWriteContextGraphIdOnce(
         return candidateId;
       }
     } catch (err) {
-      if (respondIfStoreUnavailable(res, err)) return null;
+      if (respondPreflightStoreUnavailable(res, err, opts.beforeAsyncPublishEnqueue === true)) return null;
       const message = err instanceof Error ? err.message : String(err);
       jsonResponse(res, 500, {
         error: `Failed to validate contextGraphId local existence: ${message}`,

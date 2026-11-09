@@ -45,10 +45,12 @@ describe('store pressure in the preflight follow-up reads, at both async admissi
   let server: Server | undefined;
   let baseUrl: string;
   const resolveIntent = vi.fn();
+  const enqueue = vi.fn();
 
   beforeEach(() => {
     asyncAdmissionUsage.reset();
     resolveIntent.mockReset();
+    enqueue.mockReset();
     daemonState.promoteWorkerAvailable = true;
     daemonState.promoteWorkerUnavailableReason = null;
   });
@@ -74,7 +76,7 @@ describe('store pressure in the preflight follow-up reads, at both async admissi
       try {
         await handleKnowledgeAssetsRoutes({
           req, res, agent,
-          publisherControl: {},
+          publisherControl: { enqueueKnowledgeAssetVmPublish: enqueue },
           publisherState: { runtime: { walletIds: [] }, availability: { available: true } },
           config: {}, startedAt: Date.now(), dashDb: { insertNotification: () => 1 }, opWallets: {}, network: {}, tracker: {},
           memoryManager: {}, bridgeAuthToken: undefined, nodeVersion: 'test', nodeCommit: 'test',
@@ -140,6 +142,9 @@ describe('store pressure in the preflight follow-up reads, at both async admissi
       });
       // It is the preflight's answer: nothing after it ran.
       expect(resolveIntent).not.toHaveBeenCalled();
+      expect(enqueue).not.toHaveBeenCalled();
+      if (route === 'publish_async') expect(answer.body.jobCreated).toBe(false);
+      else expect(answer.body).not.toHaveProperty('jobCreated');
       expect(await recorded()).toEqual([`${route}/write_preflight/503/STORE_SCHEDULER_BUSY:1`]);
     });
 
@@ -152,6 +157,9 @@ describe('store pressure in the preflight follow-up reads, at both async admissi
       expect(answer.status).toBe(503);
       expect(answer.retryAfter).toBe('1');
       expect(answer.body).toMatchObject({ retryable: true, outcome: 'indeterminate' });
+      if (route === 'publish_async') expect(answer.body.jobCreated).toBe(false);
+      else expect(answer.body).not.toHaveProperty('jobCreated');
+      expect(enqueue).not.toHaveBeenCalled();
       expect(await recorded()).toEqual([expect.stringMatching(new RegExp(`^${route}/write_preflight/503/`))]);
     });
 
@@ -167,6 +175,24 @@ describe('store pressure in the preflight follow-up reads, at both async admissi
       expect(await recorded()).toEqual([`${route}/write_preflight/500/-:1`]);
     });
   });
+
+  it.each(['vm/publish-async', 'swm/share-async', 'wm/write'])(
+    'marks validation failure as no publisher job only for the async-publish route (%s)',
+    async (verbPath) => {
+      await start({ listContextGraphs: async () => { throw new Error('metadata unavailable'); } });
+      const answer = await post(verbPath);
+      expect(answer.status).toBe(503);
+      expect(answer.body.code).toBe('CONTEXT_GRAPH_VALIDATION_UNAVAILABLE');
+      if (verbPath === 'vm/publish-async') {
+        expect(answer.body).toEqual({ code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE',
+          error: expect.any(String), jobCreated: false, retryable: true });
+      } else {
+        expect(answer.body).not.toHaveProperty('jobCreated');
+      }
+      expect(resolveIntent).not.toHaveBeenCalled();
+      expect(enqueue).not.toHaveBeenCalled();
+    },
+  );
 
   it('answers the standalone share-async handler the same way', async () => {
     const record = { status: 0, body: '', headers: {} as Record<string, string> };
