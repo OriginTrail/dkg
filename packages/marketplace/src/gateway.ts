@@ -77,11 +77,14 @@ import {
   inferenceBodyFromWire,
   inputUnitsBound,
   receiptFromWire,
+  receiptToWire,
   requestToWire,
   resultCommitmentOf,
+  serveResponseFromWire,
   type InferenceBody,
   type ReceiptWire,
-  type ServeResponse,
+  type ServeAnswerReceived,
+  type ServeResponseReceived,
   type ServiceRequestWire,
 } from './wire.js';
 
@@ -122,8 +125,8 @@ export interface GatewayDeps {
   log?: (message: string) => void;
 }
 
-/** A call's receipt, as the buyer keeps it: `held` until it lands, or `refused` with the check it failed. */
-export interface HeldReceipt {
+/** A call answered with a receipt, as the buyer keeps it. */
+interface AnsweredCall {
   callId: string;
   /** The subscription's epoch. */
   epoch: number;
@@ -133,11 +136,25 @@ export interface HeldReceipt {
   keyId: string;
   request: ServiceRequestWire;
   signature: string;
-  receipt: ReceiptWire;
   receiptSignature: string;
-  state: 'held' | 'refused';
-  problem?: string;
 }
+
+/** A call's receipt that passed the buyer's checks: held until it lands. */
+export interface HeldReceipt extends AnsweredCall {
+  receipt: ReceiptWire;
+  state: 'held';
+}
+
+/** A call's receipt that failed a check, `problem`: kept as its seller sent it, whatever its shape. */
+export interface RefusedReceipt extends AnsweredCall {
+  receipt: unknown;
+  state: 'refused';
+  problem: string;
+}
+
+type KeptReceipt = HeldReceipt | RefusedReceipt;
+
+const isHeld = (r: KeptReceipt): r is HeldReceipt => r.state === 'held';
 
 /** How many calls `activity` answers. */
 const ACTIVITY_LIMIT = 200;
@@ -188,7 +205,7 @@ interface Released {
   epoch: number;
 }
 
-type ReceiptEntry = HeldReceipt | FinalEpoch | PendingCall | Released;
+type ReceiptEntry = KeptReceipt | FinalEpoch | PendingCall | Released;
 
 /** A request sent to a seller, as the chain's nonces tell whether it landed. */
 type SentRequest = { callId: string; subscriptionId: string; seller: string; request: ServiceRequestWire };
@@ -212,7 +229,7 @@ export class Gateway {
   /** The pending calls seen landed, by call id: out of the held value, as the chain counts them, until their epoch is final. */
   private readonly landedPending = new Map<string, PendingCall>();
   /** The receipts of each epoch not made final. */
-  private readonly byEpoch = new Map<number, HeldReceipt[]>();
+  private readonly byEpoch = new Map<number, KeptReceipt[]>();
   /** The epochs with receipts or nonce counters not made final. */
   private readonly epochs = new Set<number>();
   private readonly finals = new Map<number, ReconciledRow[]>();
@@ -263,7 +280,7 @@ export class Gateway {
   async activity(epoch?: number, keyId?: string): Promise<{ calls: CallView[] }> {
     const times = await this.deps.chain.getEpochTimes();
     const asked = epoch ?? times.epoch;
-    const receipts = (this.byEpoch.get(asked) ?? []).filter((r) => r.state === 'held' && (keyId === undefined || r.keyId === keyId));
+    const receipts = (this.byEpoch.get(asked) ?? []).filter(isHeld).filter((r) => keyId === undefined || r.keyId === keyId);
     const used = await this.usedOf(receipts);
     const calls: CallView[] = receipts.map((r) => ({
       callId: r.callId,
@@ -443,11 +460,12 @@ export class Gateway {
       await this.lock.run('journal', () => this.receipts.append(pending));
       this.hold(pending);
       const started = Date.now();
-      let sent: { answer: ServeResponse; retried: boolean };
+      let sent: { answer: ServeResponseReceived; retried: boolean };
       try {
         sent = await this.sendServe(route.peerId, message, callId);
       } catch {
-        // The seller may have served it: it stays held, and reserved against the key, until what landed says otherwise.
+        // No answer, or none that reads as one: the seller may have served it. It stays held, and reserved against the key,
+        // until what landed says otherwise.
         this.deps.router.unreachable(route.seller);
         return fail(503, 'seller_unreachable', 'the seller did not answer; try again', { serviceId });
       }
@@ -461,21 +479,24 @@ export class Gateway {
         return fail(502, 'seller_refused', `the seller refused the call: ${answer.code}`, { sellerCode: answer.code, retry: answer.retry });
       }
       const checked = await this.checkReceipt(domain, request, callId, budgetIndex, answer);
-      // The key pays for the call before its receipt is kept: a stop between the two leaves it pending, and its key paid once.
-      if (checked.receipt) await this.deps.keys.settle(callId, checked.receipt.valueWei);
-      const entry: HeldReceipt = {
+      const answered: AnsweredCall = {
         callId, epoch: times.epoch, subscriptionId, budgetIndex, seller: route.seller.toString(), keyId, request: requestToWire(request), signature,
-        receipt: answer.receipt, receiptSignature: answer.receiptSignature, state: checked.problem ? 'refused' : 'held',
-        ...(checked.problem ? { problem: checked.problem } : {}),
+        receiptSignature: answer.receiptSignature,
       };
-      await this.lock.run('journal', () => this.receipts.append(entry));
-      this.remember(entry);
-      if (checked.problem) {
+      if (!checked.ok) {
         // Its seller holds a receipt it may land: the call stays pending, as one whose answer did not come.
+        const refused: RefusedReceipt = { ...answered, receipt: answer.receipt, state: 'refused', problem: checked.problem };
+        await this.lock.run('journal', () => this.receipts.append(refused));
+        this.remember(refused);
         this.deps.router.failed(route.seller, times.epoch);
         return fail(502, 'bad_receipt', `the seller's receipt failed a check: ${checked.problem}`, { problem: checked.problem });
       }
-      const receipt = checked.receipt!;
+      const { receipt } = checked;
+      // The key pays for the call before its receipt is kept: a stop between the two leaves it pending, and its key paid once.
+      await this.deps.keys.settle(callId, receipt.valueWei);
+      const kept: HeldReceipt = { ...answered, receipt: receiptToWire(receipt), state: 'held' };
+      await this.lock.run('journal', () => this.receipts.append(kept));
+      this.remember(kept);
       const left = budget.value - used - (this.held.get(budgetKey) ?? 0n);
       return {
         status: 200,
@@ -495,45 +516,45 @@ export class Gateway {
     });
   }
 
-  /** The checks of the module comment: `problem` names the first that failed. */
+  /** The checks of the module comment, of a receipt as it came: decoded first, then `problem` names the first check that failed. */
   private async checkReceipt(
     domain: MarketplaceDomain,
     request: ServiceRequest,
     callId: string,
     budgetIndex: number,
-    answer: Extract<ServeResponse, { ok: true }>,
-  ): Promise<{ receipt?: QueryInferenceReceipt; problem?: string }> {
+    answer: ServeAnswerReceived,
+  ): Promise<{ ok: true; receipt: QueryInferenceReceipt } | { ok: false; problem: string }> {
+    const refused = (problem: string) => ({ ok: false as const, problem });
     let receipt: QueryInferenceReceipt;
     try {
       receipt = receiptFromWire(answer.receipt);
     } catch {
-      return { problem: 'malformed' };
+      return refused('malformed');
     }
-    if (receipt.requestDigest !== callId) return { problem: 'other_request' };
-    if (answer.budgetIndex !== budgetIndex) return { problem: 'other_budget' };
-    if (receipt.units > request.maxUnits) return { problem: 'units_over_max' };
-    if (receipt.valueWei !== receipt.units * request.pricePerUnit || receipt.valueWei > request.maxValueWei) return { problem: 'value_mismatch' };
-    if (receipt.completedAt < request.issuedAt || receipt.completedAt > request.expiry) return { problem: 'outside_time' };
-    if (typeof answer.result?.content !== 'string' || receipt.resultCommitment !== resultCommitmentOf(answer.result.content)) {
-      return { problem: 'result_mismatch' };
-    }
+    if (receipt.requestDigest !== callId) return refused('other_request');
+    if (answer.budgetIndex !== budgetIndex) return refused('other_budget');
+    if (receipt.units > request.maxUnits) return refused('units_over_max');
+    if (receipt.valueWei !== receipt.units * request.pricePerUnit || receipt.valueWei > request.maxValueWei) return refused('value_mismatch');
+    if (receipt.completedAt < request.issuedAt || receipt.completedAt > request.expiry) return refused('outside_time');
+    if (receipt.resultCommitment !== resultCommitmentOf(answer.result.content)) return refused('result_mismatch');
     const signer = receiptSignerOf(domain, receipt, answer.receiptSignature);
-    if (!signer) return { problem: 'bad_signature' };
+    if (!signer) return refused('bad_signature');
     const verdict = await this.deps.chain.verifyACKIdentityDetailed(signer, request.seller);
     // An RPC failure says nothing about the seller: the receipt is kept, and checked again when it lands.
-    if (!verdict.valid && verdict.reason !== 'rpc-error') return { problem: 'not_a_seller_key' };
-    return { receipt };
+    if (!verdict.valid && verdict.reason !== 'rpc-error') return refused('not_a_seller_key');
+    return { ok: true, receipt };
   }
 
   /**
    * One `serve`, with one retry under a new message id when the messenger lost the first answer: the seller
-   * answers that repeat with the answer it stored. `retried` says the answer is the retry's.
+   * answers that repeat with the answer it stored. The answer is read with `serveResponseFromWire`, so one that
+   * is not a serve response throws as no answer does. `retried` says the answer is the retry's.
    */
-  private async sendServe(peerId: string, message: Uint8Array, callId: string): Promise<{ answer: ServeResponse; retried: boolean }> {
+  private async sendServe(peerId: string, message: Uint8Array, callId: string): Promise<{ answer: ServeResponseReceived; retried: boolean }> {
     for (let attempt = 0; ; attempt++) {
       const bytes = await this.deps.send(peerId, message, `${callId}:${attempt}`);
       if (attempt === 0 && new TextDecoder().decode(bytes) === 'RESPONSE_GONE') continue;
-      return { answer: decodeMessage(bytes) as ServeResponse, retried: attempt > 0 };
+      return { answer: serveResponseFromWire(decodeMessage(bytes)), retried: attempt > 0 };
     }
   }
 
@@ -556,12 +577,12 @@ export class Gateway {
    * A receipt kept: in its epoch's, and, held, in the held value until it is seen landed, in place of its call
    * pending. A refused one leaves its call pending: its seller may land a receipt of its own.
    */
-  private remember(r: HeldReceipt): void {
+  private remember(r: KeptReceipt): void {
     const kept = this.byEpoch.get(r.epoch) ?? [];
     kept.push(r);
     this.byEpoch.set(r.epoch, kept);
     this.epochs.add(r.epoch);
-    if (r.state !== 'held') return;
+    if (!isHeld(r)) return;
     this.resolve(r.callId);
     this.unlanded.set(r.callId, r);
     this.addHeld(r, BigInt(r.receipt.valueWei));
@@ -617,7 +638,7 @@ export class Gateway {
   private async rowsOf(epoch: number): Promise<ReconciledRow[]> {
     const chain = this.deps.chain;
     const subscriptionId = subscriptionIdOf(this.deps.buyerWallet, epoch);
-    const receipts = (this.byEpoch.get(epoch) ?? []).filter((r) => r.state === 'held');
+    const receipts = (this.byEpoch.get(epoch) ?? []).filter(isHeld);
     if (!(await chain.subscriptionExists(subscriptionId))) return [];
     const budgets = await chain.getBudgets(subscriptionId);
     const used = await this.usedOf(receipts);
@@ -647,7 +668,7 @@ export class Gateway {
   private async finalize(epoch: number): Promise<void> {
     const rows = await this.rowsOf(epoch);
     const calls = [...this.pending.values(), ...this.landedPending.values()].filter((p) => p.epoch === epoch);
-    const held = (this.byEpoch.get(epoch) ?? []).filter((r) => r.state === 'held');
+    const held = (this.byEpoch.get(epoch) ?? []).filter(isHeld);
     const used = await this.usedOf([...held, ...calls]);
     for (const p of calls) {
       let cost = 0n;
@@ -665,7 +686,7 @@ export class Gateway {
       await this.nonceLog.replace((await this.nonceLog.read()).filter((n) => n.epoch !== epoch));
     });
     this.finals.set(epoch, rows);
-    for (const r of this.byEpoch.get(epoch) ?? []) this.forget(r);
+    for (const r of held) this.forget(r);
     for (const p of calls) this.resolve(p.callId);
     this.byEpoch.delete(epoch);
     this.epochs.delete(epoch);

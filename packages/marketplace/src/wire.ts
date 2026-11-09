@@ -11,7 +11,10 @@
  *
  * Messages are JSON. Integers past 2^53 (wei, nonces, units, identity ids) are
  * decimal strings; times are chain seconds. Everything that comes off the wire
- * is checked here before it reaches a store or a chain read.
+ * is checked here before it reaches a store or a chain read: the requests a
+ * seller takes in, and the answers a buyer reads back. A serve answer's
+ * receipt is the one part left as it came: the buyer's gateway decodes it
+ * with its checks of the receipt.
  */
 import { ethers } from 'ethers';
 import type { QueryInferenceReceipt, ServiceRequest } from '@origintrail-official/dkg-chain';
@@ -113,6 +116,13 @@ export interface ServeRefusal {
 }
 
 export type ServeResponse = ServeAnswer | ServeRefusal;
+
+/** A served call as a buyer reads it off the wire: its receipt is decoded where the buyer's checks of it run. */
+export interface ServeAnswerReceived extends Omit<ServeAnswer, 'receipt'> {
+  receipt: unknown;
+}
+
+export type ServeResponseReceived = ServeAnswerReceived | ServeRefusal;
 
 /** Why a seller refuses a call, in the order of its checks. */
 export const SERVE_ERRORS = {
@@ -220,6 +230,11 @@ function time(value: unknown, field: string): number {
   return value;
 }
 
+function count(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) throw new WireError(`${field} must be a whole number`);
+  return value;
+}
+
 export function requestToWire(r: ServiceRequest): ServiceRequestWire {
   return {
     subscriptionId: r.subscriptionId,
@@ -303,4 +318,43 @@ export function serveRequestFromWire(raw: unknown): { request: ServiceRequest; s
     throw new WireError('signature must be 64 bytes of hex (EIP-2098)');
   }
   return { request: requestFromWire(raw.request), signature: raw.signature.toLowerCase(), body: inferenceBodyFromWire(raw.body) };
+}
+
+/** A seller's answer to `quote`: its identity, the epoch, and at most `quoteServices` offers, each whole. */
+export function quoteResponseFromWire(raw: unknown): QuoteResponse {
+  if (!isRecord(raw) || !Array.isArray(raw.offers) || raw.offers.length > PEER_LIMITS.quoteServices) {
+    throw new WireError(`a quote must have a list of at most ${PEER_LIMITS.quoteServices} offers`);
+  }
+  return {
+    seller: uint(raw.seller, 'seller', 72).toString(),
+    epoch: count(raw.epoch, 'epoch'),
+    offers: raw.offers.map((o, i): QuotedOffer => {
+      if (!isRecord(o) || typeof o.available !== 'boolean') throw new WireError(`offers[${i}] must be an offer that says whether it is available`);
+      return {
+        serviceId: bytes32(o.serviceId, `offers[${i}].serviceId`),
+        pricePerUnit: uint(o.pricePerUnit, `offers[${i}].pricePerUnit`, 96).toString(),
+        available: o.available,
+        capacity: o.capacity === null ? null : count(o.capacity, `offers[${i}].capacity`),
+      };
+    }),
+  };
+}
+
+/**
+ * A seller's answer to `serve`: a refusal with a code of `SERVE_ERRORS`, or a
+ * result with text, a receipt signature, and the budget's index. The receipt
+ * is left as it came, for the buyer's checks of it.
+ */
+export function serveResponseFromWire(raw: unknown): ServeResponseReceived {
+  if (!isRecord(raw) || typeof raw.ok !== 'boolean') throw new WireError('an answer must be an object that says whether it is ok');
+  if (!raw.ok) {
+    if (typeof raw.code !== 'string' || !Object.hasOwn(SERVE_ERRORS, raw.code) || typeof raw.retry !== 'boolean') {
+      throw new WireError('a refusal must have a known code and say whether to retry');
+    }
+    if (raw.message !== undefined && typeof raw.message !== 'string') throw new WireError('a refusal message must be text');
+    return { ok: false, code: raw.code as ServeErrorCode, retry: raw.retry, ...(raw.message === undefined ? {} : { message: raw.message }) };
+  }
+  if (!isRecord(raw.result) || typeof raw.result.content !== 'string') throw new WireError('result must have text content');
+  if (typeof raw.receiptSignature !== 'string') throw new WireError('receiptSignature must be text');
+  return { ok: true, result: { content: raw.result.content }, receipt: raw.receipt, receiptSignature: raw.receiptSignature, budgetIndex: count(raw.budgetIndex, 'budgetIndex') };
 }

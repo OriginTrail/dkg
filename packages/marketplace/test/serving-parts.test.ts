@@ -28,10 +28,12 @@ import {
   offersFromBindings,
   offersQuery,
   quoteRequestFromWire,
+  quoteResponseFromWire,
   receiptFromWire,
   receiptToWire,
   requestFromWire,
   resolveSellerConfig,
+  serveResponseFromWire,
   serviceIdOf,
   signOffer,
   type Offer,
@@ -65,6 +67,61 @@ describe('the wire', () => {
     const receipt = { requestDigest: request.subscriptionId, resultCommitment: request.serviceId, units: 3n, valueWei: 30n, completedAt: 5 };
     expect(receiptFromWire(receiptToWire(receipt))).toEqual(receipt);
     expect(() => receiptFromWire({ ...receiptToWire(receipt), units: 3 })).toThrow(WireError);
+  });
+
+  const offer = { serviceId: `0x${'BB'.repeat(32)}`, pricePerUnit: '10', available: true, capacity: 4 };
+  const quote = { seller: '7', epoch: 663, offers: [offer, { ...offer, capacity: null, available: false }] };
+
+  it("reads a seller's quote whole, and refuses one that is not", () => {
+    expect(quoteResponseFromWire(quote)).toEqual({
+      seller: '7', epoch: 663,
+      offers: [{ ...offer, serviceId: offer.serviceId.toLowerCase() }, { ...offer, serviceId: offer.serviceId.toLowerCase(), capacity: null, available: false }],
+    });
+    expect(quoteResponseFromWire({ ...quote, offers: [] }).offers).toEqual([]);
+  });
+
+  it.each([
+    ['not an object', null],
+    ['offers not a list', { ...quote, offers: 'none' }],
+    ['too many offers', { ...quote, offers: Array(33).fill(offer) }],
+    ['a seller that is not a decimal string', { ...quote, seller: 7 }],
+    ['an epoch that is not a number', { ...quote, epoch: '663' }],
+    ['an epoch that is not whole', { ...quote, epoch: 1.5 }],
+    ['a negative epoch', { ...quote, epoch: -1 }],
+    ['an offer that is not an object', { ...quote, offers: [null] }],
+    ['an offer that does not say whether it is available', { ...quote, offers: [{ ...offer, available: 'yes' }] }],
+    ['an offer of no service', { ...quote, offers: [{ ...offer, serviceId: '0x01' }] }],
+    ['a price that is not a decimal string', { ...quote, offers: [{ ...offer, pricePerUnit: 10 }] }],
+    ['a price past 96 bits', { ...quote, offers: [{ ...offer, pricePerUnit: String(1n << 96n) }] }],
+    ['a capacity that is not whole', { ...quote, offers: [{ ...offer, capacity: 'four' }] }],
+  ])('refuses a quote with %s', (_what, raw) => {
+    expect(() => quoteResponseFromWire(raw)).toThrow(WireError);
+  });
+
+  const served = { ok: true, result: { content: 'synthetic answer' }, receipt: { anything: 1 }, receiptSignature: '0x00', budgetIndex: 0 };
+
+  it("reads a seller's serve answer, its receipt as it came, and its refusals", () => {
+    expect(serveResponseFromWire(served)).toEqual(served);
+    expect(serveResponseFromWire({ ...served, receipt: undefined })).toEqual({ ...served, receipt: undefined });
+    expect(serveResponseFromWire({ ok: false, code: 'WrongPrice', retry: true })).toEqual({ ok: false, code: 'WrongPrice', retry: true });
+    expect(serveResponseFromWire({ ok: false, code: 'BadRequest', retry: false, message: 'messages must be a list' }))
+      .toEqual({ ok: false, code: 'BadRequest', retry: false, message: 'messages must be a list' });
+  });
+
+  it.each([
+    ['not an object', 'RESPONSE_GONE'],
+    ['no ok', { ...served, ok: 'yes' }],
+    ['a refusal with an unknown code', { ok: false, code: 'NoSuchCode', retry: true }],
+    ['a refusal whose code is a property every object has', { ok: false, code: 'toString', retry: true }],
+    ['a refusal whose code is not text', { ok: false, code: 7, retry: true }],
+    ['a refusal that does not say whether to retry', { ok: false, code: 'WrongPrice' }],
+    ['a refusal whose message is not text', { ok: false, code: 'WrongPrice', retry: true, message: 7 }],
+    ['a result that is not an object', { ...served, result: 'synthetic answer' }],
+    ['a result without text', { ...served, result: { content: 7 } }],
+    ['a receipt signature that is not text', { ...served, receiptSignature: 7 }],
+    ['a budget index that is not whole', { ...served, budgetIndex: '0' }],
+  ])('refuses a serve answer with %s', (_what, raw) => {
+    expect(() => serveResponseFromWire(raw)).toThrow(WireError);
   });
 });
 
