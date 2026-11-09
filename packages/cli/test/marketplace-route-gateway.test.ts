@@ -90,7 +90,7 @@ async function setUp(turns?: { waitingPerKey: number; calls: number }): Promise<
     send: async (_peer, payload) => {
       sends++;
       await gate;
-      return encodeMessage(await seller.serve(decodeMessage(payload)));
+      return encodeMessage(await seller.serve(decodeMessage(payload), 'buyer-peer'));
     },
     ...(turns ? { turns } : {}),
   });

@@ -112,7 +112,7 @@ async function setUp(options: { value?: bigint; models?: string[]; keyBudget?: b
     send: async (_peer, payload) => {
       sends++;
       await gate;
-      const answer = await seller.serve(decodeMessage(payload));
+      const answer = await seller.serve(decodeMessage(payload), 'buyer-peer');
       return encodeMessage(tamper ? tamper(answer) : answer);
     },
   };
