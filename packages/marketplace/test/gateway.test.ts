@@ -514,13 +514,14 @@ describe('landing, reconciliation and pruning', () => {
     expect((await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n')).toHaveLength(2);
     mock.__advanceEpoch();
     await gateway.tick();
-    // Its rows kept, its receipts and nonce counters gone, and the keys' costs folded in.
+    // Its rows kept, its receipts and nonce counters gone, and the keys' costs folded in. The call whose receipt the
+    // node refused landed too: its key is charged the most its request allowed (620), all the node can tell of it.
     const receipts = (await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
     expect(receipts).toEqual([{ type: 'final', epoch, rows }]);
     expect((await readFile(join(dir, 'buyer', 'buyer-nonces.jsonl'), 'utf8')).trim()).toBe('');
     const keyLines = (await readFile(join(dir, 'buyer', 'access-keys.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
-    expect(keyLines).toMatchObject([{ type: 'make', spent: '120' }]);
-    expect((await keys.list())[0]).toMatchObject({ spent: '120', lastUsedAt: expect.any(Number) });
+    expect(keyLines).toMatchObject([{ type: 'make', spent: '740' }]);
+    expect((await keys.list())[0]).toMatchObject({ spent: '740', lastUsedAt: expect.any(Number) });
     const restarted = new Gateway(gatewayDeps);
     await restarted.load();
     expect(await restarted.reconciliation(epoch)).toEqual({ epoch, final: true, rows });
