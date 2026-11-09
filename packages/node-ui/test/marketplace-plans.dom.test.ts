@@ -149,7 +149,7 @@ function topUpNode() {
   let landings = 0;
   let toppedUp = false;
   const keys = new Map<string, { body: string; answer: Promise<string> }>();
-  const onTheirWay: Array<() => void> = [];
+  const onTheirWay: Array<() => Promise<void>> = [];
   const held: Array<() => void> = [];
   const control = {
     requests,
@@ -159,8 +159,8 @@ function topUpNode() {
     holdReads: false,
     /** The subscriptions read once fails, as a node error. */
     failNextRead: false,
-    /** The transactions whose answers were lost land. */
-    land() { for (const l of onTheirWay.splice(0)) l(); },
+    /** The transactions whose answers were lost land; awaited, once they have. */
+    land() { return Promise.all(onTheirWay.splice(0).map((l) => l())).then(() => undefined); },
     release() { for (const r of held.splice(0)) r(); },
     get waiting() { return held.length; },
     /** How many top-ups landed on chain. */
@@ -196,7 +196,7 @@ function topUpNode() {
       if (taken) return taken.body === raw ? new Response(await taken.answer, { status: 200 }) : refusal(409, 'IdempotencyKeyReused');
       const how = control.first.shift() ?? 'answer';
       if (typeof how === 'function') return how();
-      const answer = how === 'lose' ? new Promise<string>((resolve) => { onTheirWay.push(() => { void commit(input, init).then(resolve); }); }) : commit(input, init);
+      const answer = how === 'lose' ? new Promise<string>((resolve) => { onTheirWay.push(() => commit(input, init).then(resolve)); }) : commit(input, init);
       keys.set(key, { body: raw, answer });
       if (how === 'lose') throw new TypeError('Failed to fetch');
       const text = await answer;
@@ -329,7 +329,7 @@ describe('marketplace Plans', () => {
     expect(topUps(node.requests)).toHaveLength(1);
 
     // The transaction lands: the budget shows it, but only the node's answer ends the top-up.
-    node.land();
+    await node.land();
     await click(byTestId(c, 'mkt-topup-check'));
     await waitForText(c, 'The budget holds 1 TRAC, up from 0.5: it shows the top-up.');
     expect(byTestId(c, 'mkt-topup-sent')).toBeNull();
@@ -384,7 +384,7 @@ describe('marketplace Plans', () => {
     expect(byTestId(c, 'mkt-topup-unsure')?.getAttribute('data-state')).toBe('unread');
     expect(byTestId(c, 'mkt-topup-confirm')).toBeNull();
     node.holdChecks = false;
-    node.land();
+    await node.land();
     await click(byTestId(c, 'mkt-topup-check'));
     await waitForText(c, 'The budget holds 1 TRAC, up from 0.5');
     await click(byTestId(c, 'mkt-topup-retry'));
@@ -480,7 +480,7 @@ describe('marketplace Plans', () => {
     expect((byTestId(c, 'mkt-topup-confirm') as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it('sends the first form\'s top-up, under its key, when a second form of the same budget is confirmed while the first one reads the budget', async () => {
+  it('shows the first form\'s top-up in a second form of the same budget from the moment it is confirmed, and sends no other', async () => {
     const node = topUpNode();
     const world = fixtureWorld();
     const form = () => render(React.createElement(TopUp, {
@@ -495,18 +495,19 @@ describe('marketplace Plans', () => {
     await waitForText(second, 'Costs 0.7 TRAC');
     node.holdReads = true;
     await click(byTestId(first, 'mkt-topup-confirm'));
-    await click(byTestId(second, 'mkt-topup-confirm'));
-    // The second form takes up the first one's top-up as it was confirmed, rather than one of its own.
-    expect(byTestId(second, 'mkt-topup')?.getAttribute('data-phase')).toBe('unknown');
+    // The budget holds the first form's top-up now: the second form shows it as it was confirmed, with nothing of its own to send.
+    expect(byTestId(second, 'mkt-topup')?.getAttribute('data-phase')).toBe('sending');
     expect((byTestId(second, 'mkt-topup-amount') as HTMLInputElement).value).toBe('0.5');
+    await click(byTestId(second, 'mkt-topup-confirm'));
+    expect((byTestId(second, 'mkt-topup-confirm') as HTMLButtonElement).disabled).toBe(true);
     node.holdReads = false;
     node.release();
     await waitForText(first, 'llama-3.1-8b-instruct topped up · tx');
-    await click(byTestId(second, 'mkt-topup-retry'));
-    await waitForText(second, 'llama-3.1-8b-instruct topped up · tx');
+    // Answered, the top-up is over: the second form is back to its own draft, which would be a new top-up.
+    await waitUntil(() => byTestId(second, 'mkt-topup')?.getAttribute('data-phase') === 'compose', 'the second form to compose again');
+    expect((byTestId(second, 'mkt-topup-amount') as HTMLInputElement).value).toBe('0.7');
     const sent = topUps(node.requests);
-    expect(sent).toHaveLength(2);
-    expect(sent[1].body).toEqual(sent[0].body);
+    expect(sent).toHaveLength(1);
     expect((sent[0].body as { services: Array<{ value: string }> }).services[0].value).toBe('500000000000000000');
     expect(node.landings).toBe(1);
   });
