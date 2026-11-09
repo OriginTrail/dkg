@@ -349,7 +349,7 @@ describe('the marketplace mixin on Hardhat', () => {
     expect(receiptBatchFaultOf(again)).toEqual({ groupIndex: 0, itemIndex: 0, fault: 'DuplicateNonce' });
 
     // A node that stops once a batch is signed, before it is sent, has sent nothing. The signed transaction it was
-    // given lands as signed when sent again, under its own hash and nonce; once mined, its nonce refuses it.
+    // given lands as signed when sent again, under its own hash and nonce; once its nonce is used, it is not sent.
     const late = requestOf(FIRST, 3n, 100n);
     const lateReceipt = { requestDigest: hashServiceRequest(domain, late), resultCommitment: ethers.id('result 3'), units: 100n, valueWei: 100_000n, completedAt: late.issuedAt };
     const lateGroup = { subscriptionId, budgetIndex: 0, minCounted: 0n, items: [receiptItemOf(late, lateReceipt, signServiceRequest(session.privateKey, domain, late))] };
@@ -366,7 +366,8 @@ describe('the marketplace mixin on Hardhat', () => {
     await seller.rebroadcastReceiptBatch(stopped[0]!.signedTx);
     expect(await seller.getReceiptBatchOutcome(stopped[0]!.txHash)).toMatchObject({ landed: { hash: stopped[0]!.txHash, itemCount: 1, value: 100_000n } });
     expect(await seller.getMinedNonce(seller.getSignerAddress())).toBe(nonceBefore + 1);
-    await expect(seller.rebroadcastReceiptBatch(stopped[0]!.signedTx)).rejects.toThrow(/nonce/i);
+    await seller.rebroadcastReceiptBatch(stopped[0]!.signedTx);
+    expect(await seller.getMinedNonce(seller.getSignerAddress())).toBe(nonceBefore + 1);
 
     // A batch mined and reverted: sent past the simulation, with its own gas limit, by a wallet that is no node's.
     const sender = new Wallet(HARDHAT_KEYS.EXTRA2, createProvider());

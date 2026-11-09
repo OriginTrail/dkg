@@ -481,14 +481,21 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
 
   /**
    * The exact signed bytes, through the write endpoints: one already known is no error. Sent in the lane of the
-   * wallet that signed them, as its other writes are, so never between one of those reading its nonce and sending.
+   * wallet that signed them, as its other writes are, so never between one of those reading its nonce and sending,
+   * and only while that wallet's pending nonce has not passed the batch's.
    */
   async rebroadcastReceiptBatch(signedTx: string): Promise<void> {
     await this.init();
     const tx = ethers.Transaction.from(signedTx);
-    const send = () => this.broadcastSignedTransactionWithFailover(signedTx, tx.hash!, 'marketplace receipt batch rebroadcast');
+    const from = tx.from;
+    const send = async () => {
+      // A pending nonce past the batch's: another transaction holds its nonce, or the batch is out already. Sent now,
+      // it could only be refused, or replace that transaction; its receipts resolve by its nonce either way.
+      if (from && (await this.readTipProvider('marketplace wallet pending nonce', (p) => p.getTransactionCount(from, 'pending'))) > tx.nonce) return;
+      await this.broadcastSignedTransactionWithFailover(signedTx, tx.hash!, 'marketplace receipt batch rebroadcast');
+    };
     // A wallet that is not one of this node's has no lane here to share.
-    const signer = tx.from ? this.findSignerByAddress(tx.from) : undefined;
+    const signer = from ? this.findSignerByAddress(from) : undefined;
     await (signer ? this.withSerializedSignerWrite(signer, send, 'receipt batch rebroadcast') : send());
   }
 

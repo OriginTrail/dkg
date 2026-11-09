@@ -621,7 +621,8 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
 
 describe('rebroadcastReceiptBatch — in the lane of the wallet that signed the batch', () => {
   // A receipt batch recorded at nonce 7 but never broadcast left its wallet's pending nonce at 7, so a write in that
-  // wallet's lane reads 7 too. These endpoints take a transaction only at its wallet's pending nonce, as a node does.
+  // wallet's lane reads 7 too. These endpoints take a transaction only at its wallet's pending nonce, as a node does,
+  // and answer the pending-nonce read from the same count.
   const signedAt = (pk: string, nonce: number, data: string) => new ethers.Wallet(pk).signTransaction({
     type: 2, chainId: 31337, nonce, to: V10_KA_ADDRESS, data, gasLimit: 100_000n, maxFeePerGas: 2n, maxPriorityFeePerGas: 1n,
   });
@@ -639,7 +640,15 @@ describe('rebroadcastReceiptBatch — in the lane of the wallet that signed the 
       sent.push(signedTx);
     });
     (a as any).waitForReceiptWithFailover = recorder(async (txHash: string) => fakeReceipt(txHash));
-    return { a, sent, pendingOf };
+    const tags: string[] = [];
+    (a as any).readTipProvider = recorder(async (_label: string, read: (p: unknown) => Promise<unknown>) => read({
+      getTransactionCount: async (address: string, tag: string) => {
+        tags.push(tag);
+        return pendingOf(address);
+      },
+    }));
+    const broadcasts: unknown[][] = (a as any).broadcastSignedTransactionWithFailover.calls;
+    return { a, sent, pending, pendingOf, tags, broadcasts };
   }
 
   /** Hold a wallet's lane, as a write that has read its nonce and not yet sent does. */
@@ -649,8 +658,8 @@ describe('rebroadcastReceiptBatch — in the lane of the wallet that signed the 
     return { release: () => release.resolve(), held };
   }
 
-  it('waits while a write in the same lane signs at the nonce it read, so that write is not refused', async () => {
-    const { a, sent, pendingOf } = onChain();
+  it('waits while a write in the same lane signs at the nonce it read, then leaves that nonce to it', async () => {
+    const { a, sent, pendingOf, broadcasts } = onChain();
     const wallet = new ethers.Wallet(DEPLOYER_PK);
     const batch = await signedAt(DEPLOYER_PK, 7, '0xba');
     const read = deferred();
@@ -663,15 +672,34 @@ describe('rebroadcastReceiptBatch — in the lane of the wallet that signed the 
       return { signedTx, txHash: ethers.Transaction.from(signedTx).hash!, nonce };
     }, neverNull);
     await read.promise;
-    const recovery = a.rebroadcastReceiptBatch(batch).then(() => 'sent', (err: Error) => err.message);
+    const recovery = a.rebroadcastReceiptBatch(batch);
     await tick(10);
     // Nothing is sent while the publish signs at nonce 7.
     expect(sent).toEqual([]);
     signing.resolve();
-    await publish;
-    // The publish took nonce 7. The batch, sent after it, is refused, as a node would refuse it.
-    expect(await recovery).toMatch(/nonce too low/);
+    await Promise.all([publish, recovery]);
+    // The publish took nonce 7, so the batch is not sent at all: it could only be refused, or replace the publish.
+    expect(broadcasts).toHaveLength(1);
     expect(sent).toHaveLength(1);
+    expect(sent).not.toContain(batch);
+  });
+
+  it("sends nothing once its wallet's pending nonce is past the batch's", async () => {
+    const { a, pending, tags, broadcasts } = onChain();
+    // Another transaction holds nonce 7, pending, or the batch itself is out already.
+    pending.set(new ethers.Wallet(DEPLOYER_PK).address, 8);
+    await a.rebroadcastReceiptBatch(await signedAt(DEPLOYER_PK, 7, '0xba'));
+    expect(broadcasts).toEqual([]);
+    expect(tags).toEqual(['pending']);
+  });
+
+  it("sends a batch at its wallet's pending nonce once: sent again, it finds that nonce taken", async () => {
+    const { a, sent, broadcasts } = onChain();
+    const batch = await signedAt(DEPLOYER_PK, 7, '0xba');
+    await a.rebroadcastReceiptBatch(batch);
+    await a.rebroadcastReceiptBatch(batch);
+    expect(sent).toEqual([batch]);
+    expect(broadcasts).toHaveLength(1);
   });
 
   it('waits in the lane of the wallet that signed it, and in no other', async () => {
