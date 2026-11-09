@@ -45,6 +45,33 @@ export function walletCoverage(
   });
 }
 
+/** This node's coverage: one state per publishing wallet, plus the best discount among the
+ *  PCAs that cover it. The single aggregate the Overview, Dashboard and Settings all read. */
+export interface NodeCoverage {
+  wallets: WalletCoverage[];
+  /** Best discount among spendable PCAs that approve at least one of this node's wallets. */
+  bestCoveringDiscountBps: number | null;
+  /** At least one publishing wallet is covered right now. */
+  covered: boolean;
+}
+
+export function nodeCoverage(
+  wallets: readonly string[],
+  accounts: readonly CoverageAccount[],
+  walletsInconclusive: boolean,
+  nowSec?: number,
+): NodeCoverage {
+  const states = walletCoverage(wallets, accounts, walletsInconclusive, nowSec);
+  let best: number | null = null;
+  for (const account of accounts) {
+    if (!account.snapshot || !isPcaSpendable(account.snapshot, nowSec)) continue;
+    const approvesHere = account.walletProbes.some((probe) => probe.registered === true && wallets.some((w) => eqAddress(w, probe.wallet)));
+    const bps = account.snapshot.discountBps;
+    if (approvesHere && typeof bps === 'number' && (best == null || bps > best)) best = bps;
+  }
+  return { wallets: states, bestCoveringDiscountBps: best, covered: states.some((c) => c.kind === 'covered') };
+}
+
 export type WalletCoverageTone = 'success' | 'warn' | 'neutral';
 
 /** The wallet row's status text and tone. */
@@ -70,14 +97,14 @@ export interface CoverageSummary {
 }
 
 export function summarizeCoverage(
-  coverage: readonly WalletCoverage[],
+  node: NodeCoverage,
   ctx: {
     walletsInconclusive: boolean;
     lookupError: boolean;
     accountCount: number;
-    bestCoveringDiscountBps: number | null;
   },
 ): CoverageSummary {
+  const coverage = node.wallets;
   const walletTotal = coverage.length;
   const coveredCount = coverage.filter((c) => c.kind === 'covered').length;
   const hasCoveredWallet = coveredCount > 0;
@@ -86,11 +113,11 @@ export function summarizeCoverage(
   const inactiveLabel = inactive
     ? `PCA #${inactive.accountId}, ${inactive.expired ? 'which has expired' : 'which has no TRAC left this epoch'}`
     : null;
-  // #9 - never say "None" while the wallets or the PCA lookup can't be read.
-  const unconfirmed = !hasCoveredWallet && (ctx.walletsInconclusive || ctx.lookupError);
+  // #9 - never say "None" while the wallets, the PCA lookup or any wallet's approval can't be read.
+  const unconfirmed = !hasCoveredWallet && (ctx.walletsInconclusive || ctx.lookupError || anyUnknown);
 
   const value = hasCoveredWallet
-    ? ctx.bestCoveringDiscountBps != null ? formatBps(ctx.bestCoveringDiscountBps) : '—'
+    ? node.bestCoveringDiscountBps != null ? formatBps(node.bestCoveringDiscountBps) : '—'
     : unconfirmed ? 'Unknown' : inactive ? 'None' : 'None yet';
   const sub = hasCoveredWallet
     ? coveredCount === walletTotal
@@ -100,11 +127,13 @@ export function summarizeCoverage(
       ? "Couldn't read this node's wallets, so we can't confirm your discount."
       : ctx.lookupError
         ? "Couldn't check this node's PCAs. You may still have a discount."
-        : inactiveLabel
-          ? `Your wallets are on ${inactiveLabel}. They pay the full fee.`
-          : walletTotal === 0 && ctx.accountCount > 0
-            ? "This node didn't report any publishing wallets."
-            : "This node's publishing wallets pay the full TRAC fee.";
+        : anyUnknown
+          ? "Couldn't check whether a PCA covers this node's wallets. You may still have a discount."
+          : inactiveLabel
+            ? `Your wallets are on ${inactiveLabel}. They pay the full fee.`
+            : walletTotal === 0 && ctx.accountCount > 0
+              ? "This node didn't report any publishing wallets."
+              : "This node's publishing wallets pay the full TRAC fee.";
 
   return {
     coveredCount,

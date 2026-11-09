@@ -31,6 +31,12 @@ function faucetUrl(chainId: string | null | undefined): string | undefined {
   return FAUCETS[numeric];
 }
 
+/** A failed approval check: what to say, and whether Retry can help (not for a capability gap). */
+interface ProbeError {
+  message: string;
+  retry: boolean;
+}
+
 interface ProbeRow {
   wallet: string;
   /**
@@ -121,8 +127,8 @@ export function GetSponsoredPanel({
 
   const [sponsorId, setSponsorId] = useState(initialAccountId ?? '');
   const [checking, setChecking] = useState(false);
-  const [probeError, setProbeError] = useState<string | null>(null);
-  const [probeRetryable, setProbeRetryable] = useState(false);
+  // One error model: the message and whether Retry can help are set and cleared together.
+  const [probeError, setProbeError] = useState<ProbeError | null>(null);
   const [probed, setProbed] = useState<{ accountId: string; rows: ProbeRow[] } | null>(null);
 
   const ethFor = (w: string) => balances.find((b) => b.address?.toLowerCase() === w.toLowerCase())?.eth;
@@ -133,10 +139,9 @@ export function GetSponsoredPanel({
 
   const check = async (idToCheck?: string) => {
     const id = (idToCheck ?? sponsorId).trim();
-    if (!/^\d+$/.test(id)) { setProbeError('Enter the PCA ID as a number.'); return; }
+    if (!/^\d+$/.test(id)) { setProbeError({ message: 'Enter the PCA ID as a number.', retry: false }); return; }
     setChecking(true);
     setProbeError(null);
-    setProbeRetryable(false);
     try {
       const rows = await Promise.all(
         wallets.map((w) =>
@@ -159,12 +164,12 @@ export function GetSponsoredPanel({
         // queries here — retrying is futile) from a transient RPC failure (retry).
         // Only claim "not supported" when EVERY inconclusive probe is an adapter gap.
         const allAdapterGap = rows.every((r) => r.coverage.outcome === 'inconclusive' && r.coverage.adapterUnsupported);
-        setProbeError(
-          allAdapterGap
+        setProbeError({
+          message: allAdapterGap
             ? 'This node can’t check PCA approval, so we can’t confirm which wallets are covered. You can still publish. To check approval, update the node or ask the PCA owner.'
             : `Couldn’t check PCA #${id} right now.`,
-        );
-        setProbeRetryable(!allAdapterGap);
+          retry: !allAdapterGap,
+        });
         setProbed(null);
         return;
       }
@@ -174,7 +179,7 @@ export function GetSponsoredPanel({
       if (rows.some((r) => r.coverage.registered === true)) trackAccount(id);
       setProbed({ accountId: id, rows });
     } catch (err) {
-      setProbeError(describePcaError(err, { accountId: id })?.message ?? 'Couldn’t check approval.');
+      setProbeError({ message: describePcaError(err, { accountId: id })?.message ?? 'Couldn’t check approval.', retry: false });
     } finally {
       setChecking(false);
     }
@@ -306,8 +311,8 @@ export function GetSponsoredPanel({
           <div ref={resultsRef} aria-hidden="true" />
           {probeError && (
             <div className="v10-pca-retry-block">
-              <p className="v10-modal-error ds-card-nested" role="alert">{probeError}</p>
-              {probeRetryable && <RetryButton onClick={() => void check()} />}
+              <p className="v10-modal-error ds-card-nested" role="alert">{probeError.message}</p>
+              {probeError.retry && <RetryButton onClick={() => void check()} />}
             </div>
           )}
           {probed && (

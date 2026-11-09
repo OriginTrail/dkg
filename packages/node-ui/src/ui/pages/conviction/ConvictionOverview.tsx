@@ -8,7 +8,7 @@ import { useDiscoveredPcas } from '../../hooks/useDiscoveredPcas.js';
 import { useConnectedWalletPcas } from '../../hooks/useConnectedWalletPcas.js';
 import { listPcaContracts } from '../../api.js';
 import { WalletConnectControl, WalletRow, RetryButton } from '../../components/Pca/index.js';
-import { walletCoverage, walletCoverageRow, summarizeCoverage } from '../../pca/walletCoverage.js';
+import { walletCoverageRow, summarizeCoverage } from '../../pca/walletCoverage.js';
 import { PcaAccountList, type PcaListAccount } from './PcaAccountList.js';
 import { CreatePcaModal } from './CreatePcaModal.js';
 import { ApproveWalletsModal } from './ApproveWalletsModal.js';
@@ -55,7 +55,7 @@ export function ConvictionOverview() {
   const connectedWalletPcas = useConnectedWalletPcas();
   const [bootstrapNonce, setBootstrapNonce] = useState(0);
   const overview = usePcaOverview(30_000, connectedWalletPcas.ids);
-  const { accounts, loading, refresh, walletsInconclusive, bestCoveringDiscountBps } = overview;
+  const { accounts, loading, refresh, walletsInconclusive } = overview;
   const primaryWallet = overview.wallets[0];
 
   useEffect(() => {
@@ -116,22 +116,18 @@ export function ConvictionOverview() {
   );
 
   const onManage = (id: string) => openTab({ id: `conviction:${id}`, label: `PCA #${id}`, closable: true });
-  // One typed coverage state per publishing wallet, and one summary derived from it.
-  const coverage = useMemo(
-    () => walletCoverage(overview.wallets, enhancedAccounts, walletsInconclusive),
-    [enhancedAccounts, overview.wallets, walletsInconclusive],
-  );
+  // One typed coverage state per publishing wallet (from the overview's single aggregate).
+  const coverage = overview.coverage.wallets;
   const retryWalletBootstrap = useCallback(() => setBootstrapNonce((n) => n + 1), []);
   const switchNetwork = useCallback(() => {
     void switchToExpectedChain();
   }, [switchToExpectedChain]);
 
   const firstLoad = loading && accounts.length === 0 && overview.wallets.length === 0;
-  const summary = summarizeCoverage(coverage, {
+  const summary = summarizeCoverage(overview.coverage, {
     walletsInconclusive,
     lookupError: !!discoveredLookupError,
     accountCount: accounts.length,
-    bestCoveringDiscountBps,
   });
   const { hasCoveredWallet, anyUnknown, showWalletRows } = summary;
   const showWaysIn = !hasCoveredWallet && !walletsInconclusive && !firstLoad;

@@ -538,3 +538,21 @@ describe('ConvictionOverview — discount summary', () => {
     await unmount();
   });
 });
+
+describe('ConvictionOverview — failed approval checks', () => {
+  it('keeps the headline uncertain when only the per-wallet approval checks fail', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      if (key) throw new Error('probe failed');
+      return { ...snapFixture(id), owner: '0xSOMEONEELSE0000000000000000000000000000' };
+    });
+    usePcaStore.setState({ trackedIds: ['7'], createPending: null });
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'You may still have a discount');
+    const value = container.querySelector('[data-testid="pca-discount-value"]');
+    expect(value?.textContent).toBe('Unknown');
+    expect(value?.nextElementSibling?.textContent).toBe("Couldn't check whether a PCA covers this node's wallets. You may still have a discount.");
+    expect(container.textContent).not.toContain('pay the full TRAC fee');
+    await unmount();
+  });
+});
