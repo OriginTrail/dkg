@@ -1,17 +1,16 @@
 import { runInThisContext, constants as vmConstants } from 'node:vm';
 import { createHash, randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { n8nWorkflowSha256 } from '../src/semantic-runtime-n8n-contract.js';
+import { n8nResultSha256, n8nWorkflowSha256 } from '../src/semantic-runtime-n8n-contract.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { DKGAgent, signAgentDelegation } from '@origintrail-official/dkg-agent';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { SemanticRuntimeStore, type SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
+import { SemanticRuntimeStore, ProgramTraceRecorder, readProgramTrace, readProgramCallHistory, type SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
 import { ethers } from 'ethers';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -580,12 +579,9 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       id: 'program', componentId: 'run-program', kaRef: f.program.programIri, sourceHash: f.program.sourceHash,
       params: { operationIri: f.operation.operationIri, version: '1.0.0', inputMode: 'each-item', inputMapping: { value: '{{ $json.incoming.amount }}', factor: 3 } }, x: 40, y: 80,
     }], edges: [] };
-    // Generate in the same native ESM context as the PoC server: Vite rewrites imported
-    // identifiers inside functions that the compiler deliberately embeds with toString().
-    const generated = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e',
-      `import { readFileSync } from 'node:fs'; import { compileStudio, studioProgramSource } from ${JSON.stringify(new URL('../../../examples/n8n-capability/studio-definition.mjs', import.meta.url).href)};
-       const compiled = compileStudio(JSON.parse(readFileSync(0, 'utf8'))); console.log(JSON.stringify({ source: studioProgramSource(compiled), params: compiled.ordered[0].params }));`],
-    { input: JSON.stringify(definition), encoding: 'utf8', maxBuffer: 262144 }));
+    const { compileStudio, studioProgramSource } = await import('../../../examples/n8n-capability/studio-definition.mjs');
+    const compiled = compileStudio(definition);
+    const generated = { source: studioProgramSource(compiled), params: compiled.ordered[0].params };
     const parent = await f.manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', requiredTools: [],
       permittedPrograms: [f.program.programIri], source: generated.source });
     const operation = { graphId: graph, operationIri: 'urn:test:studio-run-program' };
@@ -659,18 +655,78 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     } finally { vi.unstubAllGlobals(); }
   });
 
-  it.each(['complete', 'declared-child', 'new-call', 'missing-acknowledgement', 'revoke', 'expire', 'epoch'])('reconciles native results without dispatching new work (%s)', async mode => {
+  it.each(['direct', 'copy', 'sink', 'trace', 'safe', 'safe-sink', 'safe-trace', 'missing-pin'])('binds native tenant output to operator authority (%s)', async mode => {
+    const workflowId = 'output-authority', toolIri = 'urn:dkg:tool:n8n';
+    const definition = { versionId: 'reviewed-1', nodes: ['Component', 'Receive input', 'Header copy'].map(name => ({
+      id: name, name, type: 'n8n-nodes-base.set', typeVersion: 3.4, parameters: {} })), connections: {}, settings: {} };
+    const string = { type: 'string', maxLength: 8192 };
+    const outputSchema = { type: 'object', additionalProperties: false, required: ['ok', 'itemsJson', 'portsJson', 'error'],
+      properties: { ok: { type: 'boolean' }, itemsJson: string, portsJson: string, error: string, traceJson: string } };
+    const inputSchema = { type: 'object', properties: {}, required: [], additionalProperties: false };
+    const safeResult = { nodes: ['Component'], ...(mode === 'safe-sink' ? { sinks: [{ node: 'Component', port: 0, name: 'safe' }] } : {}),
+      ...(mode === 'safe-trace' ? { traceNodes: ['Component'] } : {}) };
+    const result = mode === 'direct' ? { nodes: ['Receive input'] } : mode === 'copy' ? { nodes: ['Header copy'] }
+      : mode === 'sink' ? { nodes: ['Header copy'], sinks: [{ node: 'Header copy', port: 0, name: 'copied' }] }
+      : mode === 'trace' ? { nodes: ['Component'], traceNodes: ['Header copy'] } : safeResult;
+    const n8n = { toolIri, workflowId, workflowSha256: n8nWorkflowSha256(definition), inputSchema, outputSchema, result };
+    const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
+      export function run(input: unknown) { return invoke_tool('${toolIri}', input); }`, { graphId: graph, n8n }, [toolIri]);
+    const apiTokenFile = join(f.target.dir, 'output-api'), webhookTokenFile = join(f.target.dir, 'output-webhook');
+    const credential = 'fictional-output-test-token';
+    writeFileSync(apiTokenFile, 'fictional-output-api-token'); writeFileSync(webhookTokenFile, credential);
+    f.target.config.semanticRuntime.n8nNative = { baseUrl: 'http://127.0.0.1:5679', apiTokenFile, webhookTokenFile,
+      workflows: [{ contextGraphId: graph, executorAgentAddress: owner, workflowId, workflowSha256: n8n.workflowSha256,
+        ...(mode === 'missing-pin' ? {} : { resultSha256: n8nResultSha256({ result: safeResult, outputSchema } as any) }) }] };
+    let posts = 0;
+    const fetch = vi.fn(async (url: URL, _init: RequestInit) => {
+      const path = new URL(String(url)).pathname;
+      if (path.startsWith('/api/v1/workflows/')) return Response.json({ ...definition, id: workflowId, active: true });
+      if (path.startsWith('/webhook/')) { posts++; return Response.json({ executionId: '42' }); }
+      const run = (json: unknown) => [{ data: { main: [[{ json }]] } }];
+      return Response.json({ id: '42', workflowId, workflowVersionId: definition.versionId, status: 'success', workflowData: definition,
+        data: { resultData: { runData: { Component: run({ value: 'safe' }), 'Receive input': run({ headers: { authorization: 'Bearer ' + credential } }),
+          'Header copy': run({ copied: credential }) } } } });
+    });
+    vi.stubGlobal('fetch', fetch);
+    try {
+      if (!mode.startsWith('safe')) {
+        await expect(f.approve()).rejects.toThrow('adapter is unavailable');
+        // Existing tenant approvals must also obey a subsequently tightened installation.
+        const installed = f.target.config.semanticRuntime.n8nNative.workflows[0]!;
+        const pin = installed.resultSha256;
+        installed.resultSha256 = n8nResultSha256(n8n as any);
+        await f.approve();
+        installed.resultSha256 = pin;
+      } else await f.approve();
+      await f.client.routes.create({ ...f.operation, targetPeerId: f.agent.peerId });
+      if (mode.startsWith('safe')) {
+        const receipt = await f.client.programs.invoke({ ...f.operation, inputs: [{}] });
+        expect(receipt.outputs).toMatchObject([{ output: { itemsJson: '[{"value":"safe"}]' } }]);
+        expect(JSON.stringify(receipt)).not.toContain(credential); expect(posts).toBe(1);
+      } else {
+        const error = await f.client.programs.invoke({ ...f.operation, inputs: [{}] }).catch(e => e);
+        expect(error).toBeInstanceOf(Error); expect(String(error)).not.toContain(credential);
+        expect(posts).toBe(0); expect(fetch).not.toHaveBeenCalled();
+      }
+      const rows = await f.store.query(`SELECT ?output WHERE { GRAPH ?g { ?s <${SR}output> ?output } }`);
+      expect(JSON.stringify(rows)).not.toContain(credential);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it.each(['complete', 'oversized', 'escaped-envelope', 'restart-before-callback', 'loop-terminal', 'declared-child', 'mixed-child', 'new-call', 'missing-acknowledgement', 'revoke', 'expire', 'epoch'])('reconciles native results without dispatching new work (%s)', async mode => {
     const extraCall = mode === 'new-call';
     const n8nTool = 'urn:dkg:tool:n8n', workflowId = 'native-inspection';
     const definition = { versionId: 'published-native-1', nodes: [{ id: 'component', name: 'Component',
       type: 'n8n-nodes-base.set', typeVersion: 3.4, parameters: { hidden: 'reviewed' } }],
       connections: {}, settings: { executionOrder: 'v1' } };
+    if (mode === 'escaped-envelope') for (let i = 0; i < 8; i++) definition.nodes.push({ ...definition.nodes[0]!, id: 'trace' + i, name: 'Trace' + i });
     const string = { type: 'string', maxLength: 8192 };
     const outputSchema = { type: 'object', additionalProperties: false, required: ['ok', 'itemsJson', 'portsJson', 'error'],
-      properties: { ok: { type: 'boolean' }, itemsJson: string, portsJson: string, error: string } };
+      properties: { ok: { type: 'boolean' }, itemsJson: string, portsJson: string, error: string, ...(mode === 'escaped-envelope' ? { traceJson: string } : {}) } };
     const inputSchema = { type: 'object', additionalProperties: false, required: ['text'], properties: { text: string } };
     const n8n = { toolIri: n8nTool, workflowId, workflowSha256: n8nWorkflowSha256(definition), inputSchema, outputSchema,
-      result: { nodes: ['Component'] } };
+      result: { nodes: ['Component'], ...(mode === 'escaped-envelope' ? { traceNodes: Array.from({ length: 8 }, (_, i) => 'Trace' + i) } : {}),
+        ...(mode === 'loop-terminal' ? { sinks: [{ node: 'Component', port: 1, name: 'terminal false' }] } : {}) } };
     const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
       export async function run(input: unknown) {
         const value = await invoke_tool('${n8nTool}', input);
@@ -680,7 +736,7 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     const apiTokenFile = join(f.target.dir, 'native-api'), webhookTokenFile = join(f.target.dir, 'native-webhook');
     writeFileSync(apiTokenFile, 'unit-native-api-fixture'); writeFileSync(webhookTokenFile, 'unit-native-webhook-fixture');
     f.target.config.semanticRuntime.n8nNative = { baseUrl: 'http://127.0.0.1:5679', apiTokenFile, webhookTokenFile,
-      workflows: [{ contextGraphId: graph, executorAgentAddress: owner, workflowId, workflowSha256: n8n.workflowSha256 }] };
+      workflows: [{ contextGraphId: graph, executorAgentAddress: owner, workflowId, workflowSha256: n8n.workflowSha256, resultSha256: n8nResultSha256(n8n as any) }] };
     let dispatches = 0, interrupted = true, publishedVersion = definition.versionId;
     vi.stubGlobal('fetch', vi.fn(async (url: URL, _init: RequestInit) => {
       const u = new URL(String(url));
@@ -692,17 +748,22 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       }
       if (interrupted) throw new Error('interrupted-after-durable-ack');
       const snapshot = structuredClone(definition); snapshot.nodes[0]!.parameters = {} as any;
+      const runs = mode === 'loop-terminal' ? [1, 2].map(value => ({ data: { main: [[], [{ json: { value } }]] } }))
+        : [{ data: { main: [Array.from({ length: mode === 'oversized' ? 201 : 1 }, () => ({ json: { value: mode === 'escaped-envelope' ? '\\'.repeat(4000) : 12 } }))] } }];
       return Response.json({ id: '42', workflowId, workflowVersionId: definition.versionId, status: 'success', workflowData: snapshot,
-        data: { resultData: { runData: { Component: [{ data: { main: [[{ json: { value: 12 } }]] } }] } } } });
+        data: { resultData: { runData: { Component: runs } } } });
     }));
     try {
       let overrides = {};
-      if (mode === 'declared-child') {
+      if (['declared-child', 'mixed-child'].includes(mode)) {
         const child = await f.manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', requiredTools: [], source: 'export function run() { return 42; }' });
         const childOperation = { graphId: graph, operationIri: 'urn:child:declared-only' };
         await f.manager.programs.approve({ ...childOperation, program: child, allowedCallers: [caller], typescript: { children: [] } });
         const saved = await f.manager.programs.getSource(f.program);
-        const program = await f.manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', source: saved.source,
+        const source = mode === 'mixed-child'
+          ? `import { invoke_tool, invoke_program } from '${toolApi}'; export async function run(input: unknown) {
+              await invoke_program('${child.programIri}', []); return invoke_tool('${n8nTool}', input); }` : saved.source;
+        const program = await f.manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', source,
           requiredTools: [n8nTool], permittedPrograms: [child.programIri], requestedPermissions: { graphId: graph, n8n } });
         overrides = { program, typescript: { children: [childOperation] } };
       }
@@ -714,7 +775,29 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       const oldRuntime = f.target.runtime!;
       await oldRuntime.stop(); runtimes.delete(oldRuntime); f.target.runtime = null;
       await f.target.boot(true);
+      if (mode === 'restart-before-callback') {
+        const runtime = f.target.runtime!;
+        const execute = vi.spyOn(runtime.typescript!, 'execute').mockRejectedValueOnce(new Error('stopped-before-first-callback'));
+        await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'TYPESCRIPT_EXECUTION_FAILED' });
+        execute.mockRestore();
+        const executionIri = `urn:sr:execution:${prepared.invocationId}`;
+        expect(readProgramTrace(runtime.store, executionIri)?.calls).toEqual([]);
+        expect(readProgramCallHistory(runtime.store, executionIri)).toHaveLength(1);
+        // The runner has durably written a fresh, empty trace. Restarting must
+        // still recover the original acknowledged effect, without another POST.
+        await restartNode(f.target);
+      }
       await expect(f.client.programs.invoke({ ...prepared, inputs: [{ text: 'changed' }] })).rejects.toMatchObject({ code: 'INVOCATION_LAYER_CONFLICT' });
+      if (mode === 'mixed-child') {
+        // An empty later diagnostic attempt must not hide the earlier child call.
+        const executionIri = `urn:sr:execution:${prepared.invocationId}`;
+        f.target.runtime!.store.setExecutionStatus(executionIri, 'active');
+        new ProgramTraceRecorder(f.target.runtime!.store, executionIri);
+        await restartNode(f.target);
+        await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_NOT_RETRYABLE' });
+        expect(dispatches).toBe(1);
+        return;
+      }
       if (mode === 'missing-acknowledgement') {
         await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_NOT_RETRYABLE' });
         expect(dispatches).toBe(1);
@@ -736,7 +819,10 @@ describe('TypeScript direct tools through shared authorization and effects', () 
         await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
       } else {
         const result = await f.client.programs.invoke(prepared);
-        expect(result.outputs).toMatchObject([{ n8nExecutionId: '42', output: { ok: true, itemsJson: '[{"value":12}]' } }]);
+        expect(result.outputs).toMatchObject([{ n8nExecutionId: '42', output: mode === 'escaped-envelope'
+          ? { ok: false, itemsJson: '[]', error: expect.stringContaining('complete result') } : mode === 'oversized'
+          ? { ok: false, itemsJson: '[]', error: expect.stringContaining('twenty records') }
+          : { ok: true, itemsJson: mode === 'loop-terminal' ? '[{"value":1},{"value":2}]' : '[{"value":12}]' } }]);
         expect(await f.client.programs.invoke(prepared)).toEqual(result);
         const stored = await f.store.query(`SELECT ?output WHERE { GRAPH ?g { <${result.executionIri}> <${SR}output> ?output } }`);
         expect(JSON.stringify(stored)).toContain('n8nExecutionId');
@@ -779,6 +865,69 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       await expect(h.service.run(input, () => {}, h.actor)).rejects.toThrow('not approved');
       expect(h.controls.dispatches).toBe(1);
     } finally { h.close(); vi.unstubAllGlobals(); }
+  });
+
+  it('reconciles a journalled DKG write after both native callbacks fail and the failed receipt is cached', async () => {
+    const { createStudioExecutionHarness } = await runInThisContext('(url) => import(url)', { importModuleDynamically: vmConstants.USE_MAIN_CONTEXT_DEFAULT_LOADER })(
+      new URL('../../../examples/n8n-capability/test-support/studio-execution-harness.mjs', import.meta.url).href);
+    const f = await toolFixture('export function run() { return null; }', { graphId: graph }, []);
+    const h = createStudioExecutionHarness({ state: join(f.target.dir, 'studio'), graphId: graph, owner,
+      config: f.target.config.semanticRuntime, client: f.manager,
+      loadOutputs: async (iri: string) => (await f.store.query(`SELECT ?output WHERE { GRAPH ?g { <${iri}> <${SR}output> ?output } }`)).bindings
+        .map((row: any) => JSON.parse(row.output)) });
+    vi.stubGlobal('fetch', h.runtimeFetch);
+    const revision = h.profile.revision;
+    try {
+      h.controls.interrupted = false;
+      h.controls.loseWriteReply = true;
+      const workflow = await h.service.save(h.definition, () => {});
+      const input = { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, itemsJson: '[{}]', invocationId: randomUUID() };
+      await expect(h.service.run(input, () => {}, h.actor)).rejects.toMatchObject({ code: 'DKG_WRITE_PENDING', invocationId: input.invocationId });
+      expect(h.controls.callbackStatuses).toEqual([200, 409, 409]);
+      expect(h.controls.allowCreates).toEqual([true, false, false]);
+      expect(h.executions.get('42').status).toBe('error');
+      expect(h.controls.dispatches).toBe(1);
+      expect(h.assets.size).toBe(1);
+      const executionIri = 'urn:sr:execution:' + input.invocationId;
+      expect(f.target.runtime!.store.execution(executionIri)?.status).toBe('completed');
+      const reopened = await restartNode(f.target); h.reopen();
+      const attempt = () => h.service.run(input, () => {}, h.actor);
+      // A fresh invocation cannot be used to bypass the outstanding write.
+      await expect(h.service.run({ ...input, invocationId: randomUUID() }, () => {}, h.actor)).rejects.toMatchObject({ code: 'DKG_WRITE_PENDING', invocationId: input.invocationId });
+      await expect(h.service.run({ ...input, itemsJson: '[{"changed":true}]' }, () => {}, h.actor)).rejects.toThrow('different workflow or inputs');
+      await expect(h.service.run(input, () => {}, { ...h.actor, principalId: 'another-owner' })).rejects.toThrow('different account or principal');
+      h.controls.owner = false;
+      await expect(attempt()).rejects.toThrow('owner revoked');
+      h.controls.owner = true;
+      h.profile.revision = 'f'.repeat(64);
+      await expect(attempt()).rejects.toThrow('profile changed');
+      h.profile.revision = revision;
+      h.controls.snapshot = (value: any) => ({ ...value, workflowVersionId: 'other-version' });
+      await expect(attempt()).rejects.toThrow('does not match');
+      h.controls.snapshot = (value: any) => value;
+      expect(h.controls.allowCreates).toEqual([true, false, false]);
+      h.controls.nodeUnavailable = false;
+      const [name, payload] = [...h.assets.entries()][0];
+      h.assets.delete(name);
+      await expect(attempt()).rejects.toMatchObject({ code: 'DKG_WRITE_PENDING' });
+      expect(h.assets.size).toBe(0); // Missing readback must not recreate the asset.
+      h.assets.set(name, payload);
+      const result = await attempt();
+      expect(result).toMatchObject({ invocationId: input.invocationId, n8nExecutionId: '42', output: { ok: false },
+        dkgRecovery: { status: 'confirmed', invocationId: input.invocationId, n8nExecutionId: '42', blockId: 'write',
+          receipt: { items: [{ assetId: 'urn:test:asset:1', readbackVerified: true, status: 'wm-sealed' }] } } });
+      expect(reopened.store.execution(executionIri)?.status).toBe('completed');
+      expect(h.executions.get('42').status).toBe('error'); // Preserve the original native outcome.
+      expect(h.controls.allowCreates).toEqual([true, false, false, false, false]);
+      h.reopen();
+      expect(await attempt()).toEqual(result);
+      expect(h.controls.allowCreates).toEqual([true, false, false, false, false]);
+      expect(h.controls.dispatches).toBe(1);
+      expect(h.assets.size).toBe(1);
+      const approval = await f.manager.programs.getApproval({ graphId: graph, operationIri: workflow.kaRef });
+      await f.manager.programs.revoke({ graphId: graph, operationIri: workflow.kaRef, expectedRevision: approval.revision });
+      await expect(attempt()).rejects.toThrow('not approved');
+    } finally { h.profile.revision = revision; h.close(); vi.unstubAllGlobals(); }
   });
 
   it('stores requests, approves and executes signed remote reads without data graph membership', async () => {

@@ -1,25 +1,16 @@
-import { readFileSync, mkdirSync, chmodSync } from 'node:fs';
-import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { readFileSync } from 'node:fs';
+import { createStudioRepository } from './studio-repository.mjs';
 import { createHash } from 'node:crypto';
 import { compileStudio } from './studio-definition.mjs';
-import { n8nWorkflowSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
+import { n8nWorkflowSha256, n8nResultSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 
 /** The operator owns provisioning. Neither this API key nor credential data reaches a KA or browser. */
 export function createStudioProvider({ state, config, graphId, owner, headerCredential, credentials, fetchImpl = fetch }) {
-  mkdirSync(state, { recursive: true, mode: 0o700 });
-  const file = join(state, 'studio.sqlite'), db = new DatabaseSync(file); chmodSync(file, 0o600);
-  db.exec(`PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workflows (
-    ka_ref TEXT PRIMARY KEY, name TEXT NOT NULL, provider_id TEXT, creating INTEGER DEFAULT 0,
-    grant_json TEXT, activation_json TEXT, event_key TEXT, created_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS events (provider_id TEXT NOT NULL, execution_id TEXT NOT NULL,
-    ka_ref TEXT NOT NULL, invocation_id TEXT NOT NULL, input_json TEXT, receipt_json TEXT, PRIMARY KEY(provider_id,execution_id));`);
-  if (!db.prepare('PRAGMA table_info(events)').all().some(c => c.name === 'input_json')) db.exec('ALTER TABLE events ADD COLUMN input_json TEXT');
+  const repository = createStudioRepository(state), { db, row } = repository;
   db.exec(`CREATE TABLE IF NOT EXISTS studio_saved_native (
     ka_ref TEXT PRIMARY KEY, compiled_json TEXT NOT NULL, published_json TEXT NOT NULL,
     withdrawn INTEGER NOT NULL DEFAULT 0);`);
   const error = message => Object.assign(new Error(message), { status: 409, code: 'INVALID_WORKFLOW' });
-  const row = ref => db.prepare('SELECT * FROM workflows WHERE ka_ref=?').get(ref);
   async function api(path, method = 'GET', body) {
     const installation = config.n8nNative;
     const token = readFileSync(installation.apiTokenFile, 'utf8').trim();
@@ -36,27 +27,19 @@ export function createStudioProvider({ state, config, graphId, owner, headerCred
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   }
   const installGrant = grant => {
-    if (grant.kind === 'program-workflow-v1') return;
     const flows = config.n8nNative.workflows;
     const current = flows.find(w => w.workflowId === grant.workflowId && w.contextGraphId === graphId && w.executorAgentAddress === owner);
     if (current && current.workflowSha256 !== grant.workflowSha256) throw error('An installed native workflow revision changed.');
+    const resultSha256 = n8nResultSha256(grant);
+    if (current && current.resultSha256 !== resultSha256) throw error('The installed output contract requires operator review.');
     if (!current) { if (flows.length >= 64) throw error('The native installation inventory is full.');
-      flows.push({ contextGraphId: graphId, executorAgentAddress: owner, workflowId: grant.workflowId, workflowSha256: grant.workflowSha256 }); }
+      flows.push({ contextGraphId: graphId, executorAgentAddress: owner, workflowId: grant.workflowId, workflowSha256: grant.workflowSha256, resultSha256 }); }
   };
   for (const saved of db.prepare('SELECT grant_json FROM workflows WHERE grant_json IS NOT NULL').all()) installGrant(JSON.parse(saved.grant_json));
   async function provision(definition) {
     let compiled = compileStudio(definition, { graphId, owner, headerCredential, credentials });
-    let saved = row(compiled.kaRef);
-    if (!saved) {
-      if (Number(db.prepare('SELECT COUNT(*) AS n FROM workflows').get().n) >= 24) throw error('The PoC supports 24 saved graph revisions.');
-      db.prepare('INSERT INTO workflows (ka_ref,name,created_at) VALUES (?,?,?)').run(compiled.kaRef, compiled.workflowName, Date.now());
-      saved = row(compiled.kaRef);
-    }
-    if (compiled.executor === 'dkg') {
-      if (saved.grant_json && JSON.parse(saved.grant_json).kind !== 'program-workflow-v1') throw error('The saved workflow executor changed.');
-      db.prepare('UPDATE workflows SET grant_json=? WHERE ka_ref=?').run(JSON.stringify(compiled.grant), compiled.kaRef);
-      return compiled;
-    }
+    if (!compiled.workflow || !compiled.grant?.toolIri) throw error('Native provisioning requires an n8n execution plan.');
+    let saved = repository.ensure(compiled);
     if (!saved.provider_id) {
       let cursor, found = [];
       for (let page = 0; page < 8; page++) {
@@ -110,5 +93,5 @@ export function createStudioProvider({ state, config, graphId, owner, headerCred
     db.prepare('INSERT INTO studio_saved_native (ka_ref,compiled_json,published_json) VALUES (?,?,?) ON CONFLICT(ka_ref) DO NOTHING')
       .run(compiled.kaRef, JSON.stringify({ definition: compiled.definition, grant: compiled.grant, mode: compiled.mode, kaRef: compiled.kaRef }), JSON.stringify(published));
   }
-  return { db, row, api, provision, setPublished, fingerprint, installGrant, recordSavedNative, close: () => db.close() };
+  return { repository, db, row, api, provision, setPublished, fingerprint, installGrant, recordSavedNative, close: repository.close };
 }

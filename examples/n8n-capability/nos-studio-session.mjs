@@ -17,17 +17,26 @@ export function loadNosStudioSession(file = process.env.NOS_STUDIO_SESSION_FILE)
     return value;
   };
   secret();
-  return { accountId: config.accountId, controlPlaneUrl: url.origin, secret,
-    bindState(state) {
-      const file = join(state, 'nos-account.json');
-      if (!existsSync(file)) {
-        if (!config.adoptExistingState && existsSync(join(state, 'studio.sqlite')))
-          throw new Error('Existing Studio state requires explicit operator adoption.');
-        writeFileSync(file, JSON.stringify({ accountId: config.accountId }), { flag: 'wx', mode: 0o600 });
-      }
+  const prepareStateBinding = state => {
+    const file = join(state, 'nos-account.json');
+    const checkAccount = () => {
       if (JSON.parse(readFileSync(file, 'utf8')).accountId !== config.accountId)
         throw new Error('This companion state belongs to a different account.');
-    },
+    };
+    if (existsSync(file)) checkAccount();
+    else if (!config.adoptExistingState && existsSync(join(state, 'studio.sqlite')))
+      throw new Error('Existing Studio state requires explicit operator adoption.');
+    // Eligibility is checked against the original state; commit only after the
+    // companion has completed its remaining startup checks.
+    return () => {
+      if (!existsSync(file))
+        writeFileSync(file, JSON.stringify({ accountId: config.accountId }), { flag: 'wx', mode: 0o600 });
+      checkAccount();
+    };
+  };
+  return { accountId: config.accountId, controlPlaneUrl: url.origin, secret,
+    prepareStateBinding,
+    bindState: state => prepareStateBinding(state)(),
     actor(headers) {
       const digest = value => createHash('sha256').update(String(value ?? '')).digest();
       if (headers.authorization || !timingSafeEqual(digest(headers['x-nos-workflows-secret']), digest(secret())) ||

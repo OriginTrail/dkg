@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SemanticN8nGrant, SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
 import { createNativeN8nWorkflowAdapter } from '../src/semantic-runtime-n8n-native-adapter.js';
 import { collectN8nExecutionResult } from '../src/semantic-runtime-n8n-results.js';
-import { n8nObservationScope, n8nWorkflowSha256, n8nPinnedExecutionMatches, validateN8nGrant } from '../src/semantic-runtime-n8n-contract.js';
+import { n8nObservationScope, n8nResultSha256, n8nPinnedExecutionMatches, n8nWorkflowSha256, validateN8nGrant } from '../src/semantic-runtime-n8n-contract.js';
 
 const graph = 'native-n8n-poc', owner = '0x' + '1'.repeat(40), workflowId = 'native';
 const objectSchema = (properties: Record<string, any>) => ({ type: 'object' as const, properties, required: Object.keys(properties), additionalProperties: false as const });
@@ -29,7 +29,7 @@ function fixture() {
   const grant: SemanticN8nGrant = { toolIri: 'urn:dkg:tool:n8n', workflowId, workflowSha256: n8nWorkflowSha256(definition),
     inputSchema, outputSchema, result: { nodes: ['Component'], allowObservation: true } };
   const config = { baseUrl: 'http://127.0.0.1:45670', apiTokenFile, webhookTokenFile,
-    workflows: [{ contextGraphId: graph, executorAgentAddress: owner, workflowId, workflowSha256: grant.workflowSha256 }] };
+    workflows: [{ contextGraphId: graph, executorAgentAddress: owner, workflowId, workflowSha256: grant.workflowSha256, resultSha256: n8nResultSha256(grant) }] };
   let execution: any = { id: '42', workflowId, status: 'success', workflowVersionId: 'v1', workflowData: structuredClone(definition),
     data: { resultData: { runData: { Component: [{ data: { main: [[{ json: { name: 'Ana' } }]] } }], [scope]: [{ data: { main: [[{ json: {} }]] } }],
       'Receive input': [{ data: { main: [[{ json: { headers: { authorization: 'never-leak-fixture' } } }]] } }] } } } };
@@ -125,6 +125,56 @@ describe('native n8n component execution receipts', () => {
     expect((await f.adapter().resume!(authorization, input)).status).toBe('succeeded');
     expect(f.posts()).toBe(1);
   });
+  it('collects every terminal branch iteration once and reports aggregate trace counts', () => {
+    const f = fixture();
+    f.grant.result = { nodes: ['Component'], sinks: [{ node: 'Component', port: 1, name: 'terminal false' }], traceNodes: ['Component'] };
+    f.execution.data.resultData.runData.Component = [1, 2].map(iteration => ({ data: { main: [
+      [{ json: { connected: iteration } }], [{ json: { terminal: iteration } }, { json: { repeated: true } }],
+    ] } }));
+    const result = collectN8nExecutionResult(f.grant, f.execution);
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(result.itemsJson as string)).toEqual([{ terminal: 1 }, { repeated: true }, { terminal: 2 }, { repeated: true }]);
+    expect(JSON.parse(result.traceJson as string)[0].items).toEqual([2, 4]);
+    expect(JSON.stringify(result)).not.toContain('connected');
+  });
+  it('keeps Loop Over Items done records separate from its per-iteration loop port', () => {
+    const f = fixture();
+    f.grant.result = { nodes: ['Component'], sinks: [{ node: 'Component', port: 0, name: 'done' }], traceNodes: ['Component'] };
+    const done = [{ value: 'first processed' }, { value: 'second processed' }];
+    f.execution.data.resultData.runData.Component = [
+      { data: { main: [[], [{ json: { input: 'first' } }]] } },
+      { data: { main: [[], [{ json: { input: 'second' } }]] } },
+      { data: { main: [done.map(json => ({ json })), []] } },
+    ];
+    const result = collectN8nExecutionResult(f.grant, f.execution);
+    expect(result.ok).toBe(true); expect(JSON.parse(result.itemsJson as string)).toEqual(done);
+    expect(JSON.parse(result.traceJson as string)[0].items).toEqual([2, 2]);
+  });
+  it.each([20, 21, 201])('enforces the aggregate %s-record result across repeated runs', count => {
+    const f = fixture(); f.grant.result!.traceNodes = ['Component'];
+    f.execution.data.resultData.runData.Component = [Math.floor(count / 2), Math.ceil(count / 2)]
+      .map(length => ({ data: { main: [Array.from({ length }, () => ({ json: { value: 1 } }))] } }));
+    const result = collectN8nExecutionResult(f.grant, f.execution);
+    expect(result.ok).toBe(count <= 20);
+    expect(JSON.parse(result.itemsJson as string)).toHaveLength(count <= 20 ? count : 0);
+    expect(JSON.parse(result.traceJson as string)[0].items).toEqual([count]);
+    if (count > 200) expect(JSON.parse(result.traceJson as string)[0]).toMatchObject({ outputOmitted: 'record-limit' });
+  });
+  it('enforces byte and record limits across runs and named output ports', () => {
+    const f = fixture();
+    f.execution.data.resultData.runData.Component = [1, 2].map(() => ({ data: { main: [[{ json: { text: 'x'.repeat(4200) } }]] } }));
+    expect(collectN8nExecutionResult(f.grant, f.execution)).toMatchObject({ ok: false, itemsJson: '[]' });
+    f.execution.data.resultData.runData.Component = [{ data: { main: [[{ json: { text: '💫'.repeat(2200) } }]] } }];
+    expect(collectN8nExecutionResult(f.grant, f.execution)).toMatchObject({ ok: false, itemsJson: '[]' });
+    f.grant.result!.ports = ['true', 'false'];
+    f.execution.data.resultData.runData.Component = [{ data: { main: [10, 11].map(length => Array.from({ length }, () => ({ json: { value: 1 } }))) } }];
+    expect(collectN8nExecutionResult(f.grant, f.execution)).toMatchObject({ ok: false, portsJson: '{}' });
+  });
+  it('does not silently discard malformed records from an earlier iteration', () => {
+    const f = fixture();
+    f.execution.data.resultData.runData.Component.unshift({ data: { main: [[{ invalid: true }]] } });
+    expect(() => collectN8nExecutionResult(f.grant, f.execution)).toThrow('N8N_EXECUTION_DATA_INVALID');
+  });
   it('keeps an unacknowledged outcome unresolved and never redispatches on resume', async () => {
     const f = fixture();
     await expect(f.adapter().resume!(authorization, input)).rejects.toThrow('INSPECTION_REQUIRED');
@@ -165,6 +215,55 @@ describe('native n8n component execution receipts', () => {
     for (const result of [{ nodes: [] }, { nodes: ['Component'], url: 'foreign' }, { nodes: ['A', 'B'], ports: ['a', 'b'] }, { nodes: ['Component'], traceNodes: ['../secret'] }])
       expect(() => validateN8nGrant({ ...f.grant, result })).toThrow('INVALID_N8N_GRANT');
   });
+});
+
+// The installation pin is independent of tenant-controlled approval fields.
+it.each(['nodes', 'ports', 'sinks', 'trace', 'schema'])('rejects altered native output contract before provider dispatch (%s)', async kind => {
+  const f = fixture();
+  if (kind === 'nodes') f.grant.result!.nodes = ['Receive input'];
+  if (kind === 'ports') f.grant.result!.ports = ['first', 'second'];
+  if (kind === 'sinks') f.grant.result!.sinks = [{ node: 'Component', port: 1, name: 'copy' }];
+  if (kind === 'trace') f.grant.result!.traceNodes = ['Receive input'];
+  if (kind === 'schema') f.grant.outputSchema = { ...f.grant.outputSchema, required: ['ok'] };
+  await expect(f.adapter().dispatch(authorization, input)).rejects.toThrow('N8N_WORKFLOW_NOT_INSTALLED');
+  expect(f.fetch).not.toHaveBeenCalled();
+});
+
+it.each(['database', 'url', 'localFile', 'expression', 'nested', 'embedded-id'])('refuses unpinned %s helpers before effects', async source => {
+  const f = fixture();
+  const child = { nodes: [{ name: 'effect', type: 'n8n-nodes-base.executeWorkflow', parameters: { source: 'database', workflowId: 'mutable' } }], connections: {} };
+  f.definition.nodes.push({ id: 'child', name: 'Child', type: 'n8n-nodes-base.executeWorkflow', typeVersion: 1.4,
+    parameters: source === 'expression' ? { source: 'parameter', workflowJson: '={{ $json.workflow }}' }
+      : source === 'nested' ? { source: 'parameter', workflowJson: JSON.stringify(child) }
+        : source === 'embedded-id' ? { source: 'parameter', workflowJson: JSON.stringify({ id: 'mutable', nodes: [], connections: {} }) } : { source, workflowId: 'mutable' } });
+  f.grant.workflowSha256 = n8nWorkflowSha256(f.definition); f.config.workflows[0]!.workflowSha256 = f.grant.workflowSha256;
+  await expect(f.adapter().dispatch(authorization, input)).rejects.toThrow('N8N_SUBWORKFLOW_NOT_PINNED');
+  expect(f.posts()).toBe(0);
+});
+
+it('withholds acknowledged output after the operator output policy changes', async () => {
+  const f = fixture(); f.setFailRead(true);
+  await expect(f.adapter().dispatch(authorization, input)).rejects.toThrow('N8N_INVOCATION_FAILED');
+  expect(f.posts()).toBe(1); f.setFailRead(false);
+  f.config.workflows[0]!.resultSha256 = 'f'.repeat(64);
+  f.fetch.mockClear();
+  await expect(f.adapter().resume!(authorization, input)).rejects.toThrow('N8N_WORKFLOW_NOT_INSTALLED');
+  expect(f.fetch).not.toHaveBeenCalled();
+});
+
+it.each([201, 10000])('confirms a completed %s-record rejection with bounded output and truthful trace', async count => {
+  const f = fixture();
+  f.execution.data.resultData.runData.Component[0].data.main = [Array.from({length:count}, () => ({json:{value:1}}))];
+  const result = await f.adapter().dispatch(authorization, input);
+  expect(JSON.parse(result.output).output).toMatchObject({ok:false,itemsJson:'[]',portsJson:'{}',error:expect.stringContaining('twenty records')});
+  expect(await f.adapter().resume!(authorization,input)).toEqual(result);expect(f.posts()).toBe(1);
+  f.grant.result!.traceNodes=['Component'];
+  const traced=collectN8nExecutionResult(f.grant,f.execution);
+  expect(JSON.parse(traced.traceJson as string)).toEqual([{node:'Component',status:'completed',items:[count],outputOmitted:'record-limit'}]);
+});
+it('rejects malformed native port shapes independently of overflow', () => {
+  const f=fixture(); f.execution.data.resultData.runData.Component[0].data.main=[{invalid:true}];
+  expect(()=>collectN8nExecutionResult(f.grant,f.execution)).toThrow('N8N_EXECUTION_DATA_INVALID');
 });
 
 it('verifies the captured n8n 2.43.8 Studio Read Write execution with the published definition pin', () => {

@@ -20,6 +20,11 @@ That profile owns its existing `NOS_JPB_READ_ENABLED`, `NOS_JPB_PROGRAM_ENABLED`
 its existing `jpb-*.py`, `jpb-programs.json` and `jpb-output.mjs` demo artifacts.
 These artifacts retain their deliberately restrictive host, graph, order,
 workbook and evidence checks. Importing a profile makes no network calls.
+The workbook is validated and snapshotted at profile load. `loadInputs()` returns
+copies of that snapshot; changing the file or its environment setting does not
+change a running profile. Its revision includes a digest of the complete normalized
+rows, including quantities and mappings. Whitespace, object-key order and the file
+path do not affect that digest. The authenticated JPB profile inherits this pin.
 
 The module path is operator configuration, not a browser parameter. Treat a
 profile as trusted executable server code: never accept module paths, endpoints,
@@ -49,6 +54,13 @@ The default export is validated by `dkg-profile.mjs` and contains:
 
 The transport remains responsible for verification at the actual node and for
 remote idempotency; dependency injection alone does not establish those guarantees.
+The shared nOS writer creates/reconciles the named asset, compares exact RDF values
+and requires `wm-sealed`. Each trusted profile owns its evidence vocabulary and
+digest interpretation. The JPB profile validates its payload digest before calling
+the writer; exact readback then confirms the same validated payload was stored.
+Readback comparison decodes RDF literal escapes and preserves lexical values,
+datatypes and language tags. Typed and language-tagged evidence can reconcile an
+uncertain write without creating another asset; changed types or tags are refused.
 The generic runtime verifies Program invocation/source/binding receipts and write
 scope/digest/sealed status/readback. Its journal is written before dispatch.
 
@@ -62,7 +74,8 @@ The execution profile revision is included in each public component's parameters
 so installation/source hashes and saved workflow parameters pin it. Change the
 revision whenever connections, permitted graphs, policy implementation, pinned
 inputs or Program bindings change. The demo computes it from its policy and
-transport artifacts. New profiles must provide the same revision discipline.
+transport artifacts and approved workbook snapshot. New profiles must provide the
+same revision discipline.
 
 Installation and companion must use the same profile revision. Regenerate/import
 components and explicitly reselect/save/approve workflow revisions when migrating.
@@ -86,7 +99,11 @@ Run `node --test examples/n8n-capability/*.test.mjs` from a built source checkou
 Tests select the demo profile explicitly where needed and inject transports; they
 do not use the partner node. Coverage includes alternate-schema Read/Invoke/Write,
 profile defaults, revision changes, provenance, receipts, ambiguous retries and
-journal reopen. No service startup or external write is part of these tests.
+journal reopen. Account tests select the profile/session before importing the real
+bridge, then verify role/account fences and the actor stored by the invocation
+grant. Installer tests run the real installer against a fixture CLI and SQLite,
+including partial upgrades and preservation of the existing manifest on failure.
+No partner service startup or external write is part of these tests.
 
 ## Existing nOS publish adapter (server integration seam)
 
@@ -173,6 +190,9 @@ prevents rebinding or reopening it as a kit-only service. To deliberately migrat
 an existing operator-owned demo state, set `adoptExistingState: true` once; legacy
 active schedules must first be deactivated. Do not use this flag to move tenant
 state between accounts. This integration exposes manual execution only.
+The account marker is committed only after startup eligibility checks succeed.
+Rejected adoption leaves an unbound legacy state reopenable for deactivation;
+existing account markers are checked before opening its database and remain fenced.
 
 Install the current native component profile and explicitly save a new workflow
 revision after switching transports. Old invocations cannot be rebound to a new
@@ -193,6 +213,24 @@ SWM sharing. After an uncertain creation, retry reads/reconciles the existing
 name and refuses another create. This differs intentionally from the existing
 Workflows release publisher's `saved` draft contract; `nos-publish-adapter.mjs`
 continues to expose that contract and is not used to manufacture a sealed receipt.
+
+A Write journals its original callback, exact evidence payload and confirmed
+receipt in the companion SQLite database. If both native HTTP attempts fail,
+**Run with the same invocation ID** can reconcile that journal even after the
+native adapter has persisted a terminal failed execution. Reconciliation repeats
+the current owner, workflow/source, profile and native-execution checks and uses
+`allowCreate: false`; it does not dispatch another workflow. While a write is
+unconfirmed, a new invocation of that saved workflow is refused.
+
+The Run API returns `DKG_WRITE_PENDING` with the original `invocationId` while
+readback is unavailable. Retain that identity and the original inputs for retry.
+After confirmation, `dkgRecovery.status: "confirmed"` and its `receipt` describe
+the recovered write. The original `output` and step trace still describe the
+native failure; recovery does not claim that n8n completed successfully or alter
+the persisted Graph Computer receipt. The write receipt is stored in the
+companion journal and identifies the sealed asset whose contents were read back.
+An unresolved legacy write without a saved request remains blocked for operator
+reconciliation; it is never reconstructed from new inputs or silently recreated.
 
 Local integration verification (fictional HTTP node, no JPB data or connection):
 

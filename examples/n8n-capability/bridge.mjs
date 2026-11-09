@@ -22,10 +22,23 @@ const SR = 'https://origintrail.io/semantic-runtime/v1#';
 const prefix = '/spike/ka/accounts/' + (nosStudioSession?.accountId ?? 'account-a') + '/capabilities';
 const json = (res, status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); };
 
+/** Shared by the bridge and transport-level regression fixtures. */
+export async function handleDkgComponentCallback(req, res, studio, config, mcp) {
+  try {
+    const token=readFileSync(config.n8nNative.webhookTokenFile,'utf8').trim();
+    const expected=Buffer.from('Bearer '+token), supplied=Buffer.from(String(req.headers.authorization??''));
+    if(!studio || req.method!=='POST' || req.headers.origin || token.length<32 || expected.length!==supplied.length || !timingSafeEqual(expected,supplied)) { json(res,403,{error:'Native DKG component access denied'});return true; }
+    let body='',size=0;for await(const chunk of req) {size+=chunk.length;if(size>16384)throw Object.assign(new Error('Bounded DKG batch required'),{status:413});body+=chunk;}
+    const value = JSON.parse(body);
+    const nativeResult = mcp ? await mcp.dkgComponent(value) : undefined;
+    json(res,200,nativeResult === undefined ? await studio.dkgComponent(value) : nativeResult);
+  } catch(e) { json(res,e.status??409,{code:e.code??'DKG_COMPONENT_UNCONFIRMED',error:e.message}); }
+}
+
 export function createCapabilityBridge({ agent, client, graphId, owner, config, definitions = [], exportTokenFile, studioOptions }) {
   if (!nosStudioSession && studioOptions && existsSync(join(studioOptions.state, 'nos-account.json')))
     throw new Error('This state requires its authenticated nOS account configuration.');
-  if (nosStudioSession && studioOptions) nosStudioSession.bindState(studioOptions.state);
+  const commitAccountBinding = nosStudioSession && studioOptions ? nosStudioSession.prepareStateBinding(studioOptions.state) : null;
   if (nosStudioSession && configuredDkgProfile && (!configuredDkgProfile.requiresNosActor || configuredDkgProfile.accountId !== nosStudioSession.accountId))
     throw new Error('Authenticated Studio requires an account-bound nOS transport profile.');
   const listPrograms = createProgramCatalog({ graphId, owner, client, definitions });
@@ -78,15 +91,19 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner),
   });
   const provider = studioOptions ? createStudioProvider({ ...studioOptions, config, graphId, owner }) : null;
-  if (nosStudioSession && provider && provider.db.prepare('SELECT activation_json FROM workflows WHERE activation_json IS NOT NULL').all().some(r => JSON.parse(r.activation_json).active))
-    throw new Error('Deactivate legacy schedules before adopting Studio state for an account.');
-  const studio = provider ? createStudioService({ graphId, owner, client, provider, exportTokenFile,
-    listCapabilities: async () => [...await list(), ...await listPrograms()],
-    loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner) }) : null;
-  const mcpFlags = studioMcpFlags();
-  if (mcpFlags.enabled && (!nosStudioSession || !provider)) throw new Error('Studio MCP requires an authenticated account companion.');
-  const mcp = mcpFlags.enabled ? createStudioMcpService({ provider, installation: config.n8nNative, accountId: nosStudioSession.accountId }) : null;
-  const mcpHttp = mcp ? createStudioMcpHttp({ service: mcp, session: nosStudioSession, agentEnabled: mcpFlags.agentEnabled }) : null;
+  let studio, mcp, mcpHttp;
+  try {
+    if (nosStudioSession && provider && provider.db.prepare('SELECT activation_json FROM workflows WHERE activation_json IS NOT NULL').all().some(r => JSON.parse(r.activation_json).active))
+      throw new Error('Deactivate legacy schedules before adopting Studio state for an account.');
+    studio = provider ? createStudioService({ graphId, owner, client, provider, exportTokenFile,
+      listCapabilities: async () => [...await list(), ...await listPrograms()],
+      loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner) }) : null;
+    const mcpFlags = studioMcpFlags();
+    if (mcpFlags.enabled && (!nosStudioSession || !provider)) throw new Error('Studio MCP requires an authenticated account companion.');
+    mcp = mcpFlags.enabled ? createStudioMcpService({ provider, installation: config.n8nNative, accountId: nosStudioSession.accountId }) : null;
+    mcpHttp = mcp ? createStudioMcpHttp({ service: mcp, session: nosStudioSession, agentEnabled: mcpFlags.agentEnabled }) : null;
+    commitAccountBinding?.();
+  } catch (error) { studio?.stop(); provider?.close(); throw error; }
   async function invoke(capability, input, invocationId) {
     const result = await client.programs.invoke({ graphId, operationIri: capability.kaRef, inputs: [input], invocationId });
     const stored = await loadExecutionOutputs(agent, graphId, result.executionIri, 'wm', owner);
@@ -105,15 +122,7 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
       return true;
     }
     if(path === '/spike/ka/internal/dkg-component') {
-      try {
-        const token=readFileSync(config.n8nNative.webhookTokenFile,'utf8').trim();
-        const expected=Buffer.from('Bearer '+token), supplied=Buffer.from(String(req.headers.authorization??''));
-        if(!studio || req.method!=='POST' || req.headers.origin || token.length<32 || expected.length!==supplied.length || !timingSafeEqual(expected,supplied)) { json(res,403,{error:'Native DKG component access denied'});return true; }
-        let body='',size=0;for await(const chunk of req) {size+=chunk.length;if(size>16384)throw Object.assign(new Error('Bounded DKG batch required'),{status:413});body+=chunk;}
-        const value = JSON.parse(body);
-        const nativeResult = mcp ? await mcp.dkgComponent(value) : undefined;
-        json(res,200,nativeResult === undefined ? await studio.dkgComponent(value) : nativeResult);
-      } catch(e) { json(res,e.status??409,{code:e.code??'DKG_COMPONENT_UNCONFIRMED',error:e.message}); }
+      await handleDkgComponentCallback(req, res, studio, config, mcp);
       return true;
     }
     if (path === '/spike/ka/demo-data' && ['GET', 'POST'].includes(req.method)) {
@@ -147,7 +156,11 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
         const authorize = () => authorizeExport(req);
         if (route === '' && req.method === 'GET') json(res, 200, { capabilities: [...(await list()).filter(c => c.kind === 'component'), ...await listPrograms()], workflows: await studio.list(), canInvoke: ownerAccess });
         else if (route === '/history' && req.method === 'GET') {
-          const params = new URL(req.url, 'http://127.0.0.1:4631').searchParams; json(res, 200, await studio.history(params.get('kaRef')));
+          const params = new URL(req.url, 'http://127.0.0.1:4631').searchParams;
+          json(res, 200, await studio.history(params.get('kaRef'), needsExport => {
+            if (!ownerAccess || nosStudioSession) return false;
+            try { if (needsExport) authorize(); return true; } catch { return false; }
+          }));
         } else if (['/save', '/run', '/invoke', '/activation'].includes(route) && req.method === 'POST') {
           if (!ownerAccess) { json(res, 403, { error: 'Owner access required.' }); return true; }
           let body = '', size = 0; for await (const chunk of req) { size += chunk.length; if (size > 16384) throw new Error('Request too large'); body += chunk; }
@@ -201,7 +214,9 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
         json(res, 200, await invoke(selected, value.input, value.invocationId));
       } else json(res, 405, { error: 'Method unavailable' });
     } catch (error) { json(res, error.status ?? 400, { code: error.code ?? 'POC_REQUEST_REJECTED',
-      error: ['INVALID_WORKFLOW', 'WORKFLOW_CAPABILITY_CHANGED'].includes(error.code) ? error.message : 'The DKG request did not confirm a result' }); }
+      ...(error.code === 'DKG_WRITE_PENDING' ? { invocationId: error.invocationId, n8nExecutionId: error.n8nExecutionId } : {}),
+      error: error.code === 'DKG_WRITE_PENDING' ? 'The DKG write is unconfirmed. Retry this invocation; do not start another run.'
+        : ['INVALID_WORKFLOW', 'WORKFLOW_CAPABILITY_CHANGED'].includes(error.code) ? error.message : 'The DKG request did not confirm a result' }); }
     return true;
   }
   return { list, listPrograms, invoke, workflows, studio, handle, close() { studio?.stop(); provider?.close(); } };

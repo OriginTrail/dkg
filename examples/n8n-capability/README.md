@@ -201,6 +201,8 @@ keep their original pins and behavior. Select the exact field in input A and inp
 with fuzzy comparison disabled. All matches are retained, including one-to-many/many-to-many
 results, within the existing twenty-record/8 KiB result bound. Overlapping properties prefer
 input A; map independent provenance into separate named fields before joining to preserve both.
+With `keepNonMatches`, native n8n adds `_source: input1` or `_source: input2` to identify
+the unmatched input (and overwrites any existing `_source` property).
 This exposes n8n's native Merge v3.2 settings; no new join engine or domain-specific mapping is added.
 
 Provision the installed local n8n runtime with its official CLI while that owned
@@ -308,6 +310,17 @@ node examples/n8n-capability/verify-studio-native.mjs /tmp/n8n-component-fixture
 node examples/n8n-capability/verify-studio-native.mjs /tmp/n8n-component-fixture http://127.0.0.1:45780
 ```
 
+The field-join regression runs eight generated Merge cases on n8n 2.43.8 with
+distinct left/right field names, all three join modes, duplicate matches and
+append-only compatibility. It imports and executes through the native CLI in a
+fresh temporary SQLite state, then removes that state; it needs no running
+server, account credentials or partner data. Use a Node version supported by
+that n8n installation:
+
+```sh
+node examples/n8n-capability/verify-field-join-native.mjs /path/to/node_modules/n8n /tmp/field-join-report.json
+```
+
 ```sh
 node examples/n8n-capability/verify-workflows.mjs /tmp/n8n-ka-state
 ```
@@ -390,9 +403,14 @@ matching content, not independently verified execution of an external service.
 
 ### JPB DKG Read and DKG Write components
 
-Install `dkg-read,dkg-write` with `setup-components-local.mjs --install --only` in the isolated
-local n8n instance, using the same `httpHeaderAuth` connection as the native bridge. Restart that
-local n8n instance after offline installation. The fixed callback is
+Select the same `NOS_DKG_PROFILE_MODULE` and approved `NOS_JPB_WORKBOOK_INPUT_FILE`
+for installation and the companion. Install with
+`setup-components-local.mjs <state> --install --only dkg-read,dkg-write --n8n-cli <cli>`
+in the isolated local n8n instance, using the same `httpHeaderAuth` connection as the native bridge.
+Partial installation verifies the selected components and preserves all unselected
+manifest entries and pins. It does not advertise or require the unselected
+`invoke-dkg-program` component. Install that component explicitly when needed.
+Restart the local n8n instance after offline installation. The fixed callback is
 `http://127.0.0.1:4631/spike/ka/internal/dkg-component`; allow loopback for this isolated n8n
 instance with `N8N_SSRF_ALLOWED_IP_RANGES=127.0.0.1/32`, keeping SSRF protection enabled.
 The general HTTP component still rejects arbitrary private destinations.
@@ -498,6 +516,57 @@ the approved workbook input. Confirmed Write retries reuse their durable receipt
 only an unconfirmed write calls the transport again with `allowCreate: false`.
 The transport owns actual DKG content readback; the generic component additionally
 checks graph, asset name, content digest and sealed status before retaining it.
+
+
+### Operator output authority and embedded helpers
+
+Native installations must include `resultSha256`, computed by
+`n8nResultSha256(reviewedGrant)` from the reviewed result selector and output schema.
+The pin covers nodes, ports, sinks, trace nodes and observation policy. The companion
+installs it from its operator-owned component manifest and generated Studio grants.
+Tenants cannot change the projection by approving a different grant for the same
+workflow digest. Missing pins deny native execution; an existing installation with
+a different pin requires operator review instead of being silently widened.
+Do not populate this field from an unreviewed tenant request.
+
+Execute Sub-workflow now embeds the complete helper JSON without a database ID.
+The parent digest covers the helper's output and effects. The runtime rejects
+mutable database, URL/file and expression-selected helpers, recursively, before
+native or legacy adapter dispatch. Historical templates remain readable but their
+unpinned helper executions are refused. Install the current component and save a
+new Studio revision to use it; helper-containing Studio graphs use compiler
+contract 5, preserving older source serialization and invocation identities.
+
+
+### Event URLs, cross-graph exports and oversized results
+
+Studio history is readable without disclosing its event capability URL. Only an
+owner can receive `eventPath`; protected workflows additionally require the current
+`x-dkg-export-token` header on the history request. A deliberately shared event URL
+still delegates bounded webhook invocation. Direct service history omits the URL
+unless its caller explicitly supplies a disclosure authorization callback.
+Account-bound nOS Studio remains manual-only and never discloses an event URL.
+
+Program export analysis resolves each child by both `contextGraphId` and
+`operationIri`, including descendants in other graphs. Unreadable, missing,
+mismatched or cyclic bindings conservatively require operator export authorization.
+The catalog bounds traversal and requires an exact known native workflow digest.
+
+A completed native result over the record limit produces `ok: false` and empty
+record sets. Its receipt can be persisted and replayed without redispatch. Trace
+counts remain accurate; when records were omitted to bound processing, the trace
+marks `outputOmitted: "record-limit"` instead of claiming a hash of unprocessed data.
+
+Terminal results accumulate in execution order across all runs of each selected
+node and port. This includes terminal branches inside loops; the Loop Over Items
+done port stays separate from its loop port. Trace counts cover all runs, and the
+twenty-record / 8 KiB output limits apply to the aggregate result.
+
+The preview gateway reserves one of its twenty write admissions per minute before
+reading the request body, so concurrent or incomplete bodies cannot bypass the
+limit. An admitted attempt keeps its reservation for that window. Owner history
+requests forward the export key to the companion; viewer history and unrelated
+read routes do not receive that header.
 
 ### Development Studio MCP adapter
 

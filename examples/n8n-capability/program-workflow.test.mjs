@@ -142,7 +142,8 @@ test('catalog exposes only enabled, source-matching, caller-approved local Progr
   assert.equal((await list())[0].requiresExportAuthorization, true);
 });
 
-test('Studio service saves a pinned mixed revision and reads its persisted parent and child results', async () => {
+for (const mixed of [false, true]) test(`Studio service saves and runs a ${mixed ? 'mixed' : 'pure Program'} revision without native provisioning`, async () => {
+  const definition = mixed ? graph() : graph([program]);
   const state = mkdtempSync(join(tmpdir(), 'studio-program-test-'));
   const graphId = 'program-test', owner = '0x1111111111111111111111111111111111111111';
   const sources = new Map(), approvals = new Map(), receipts = new Map(), uploads = [];
@@ -169,20 +170,27 @@ test('Studio service saves a pinned mixed revision and reads its persisted paren
       return { ...proof.result, executionIri };
     },
   } };
-  const provider = createStudioProvider({ state, config: { n8nNative: { workflows: [] } }, graphId, owner,
+  const provider = createStudioProvider({ state, config: {}, graphId, owner,
     fetchImpl: async () => { throw new Error('Mixed workflows must not provision an n8n graph.'); } });
-  const service = createStudioService({ graphId, owner, client, provider, listCapabilities: async () => [cap], loadOutputs: async iri => receipts.get(iri) });
+  provider.provision = async () => { throw new Error('DKG execution must bypass native provisioning.'); };
+  const nativeCapabilities = definition.nodes.filter(n => n.componentId !== 'run-program').map(n => ({ ...n, kind: 'component', available: true, descriptor: component(n.componentId) }));
+  const service = createStudioService({ graphId, owner, client, provider, listCapabilities: async () => [cap, ...nativeCapabilities], loadOutputs: async iri => receipts.get(iri) });
   try {
-    const saved = await service.save(graph([program]), () => { throw new Error('A pure Program does not need Google authorization.'); });
+    const saved = await service.save(definition, () => { throw new Error('A pure Program does not need Google authorization.'); });
     assert.equal(saved.approved, true);
     assert.deepEqual(uploads[0].requiredTools, []);
-    assert.deepEqual(approvals.get(saved.kaRef).request.typescript.children, [{ graphId, operationIri: program.params.operationIri }]);
+    assert.deepEqual(approvals.get(saved.kaRef).request.typescript.children, [...new Map(definition.nodes.map(n => [n.kaRef, { graphId, operationIri: n.componentId === 'run-program' ? n.params.operationIri : n.kaRef }])).values()]);
+    assert.equal(provider.row(saved.kaRef).grant_json, null);
+    assert.equal(provider.row(saved.kaRef).provider_id, null);
+    assert.equal(provider.row(saved.kaRef).executor, 'dkg-program');
+    assert.deepEqual(await service.save(definition, () => {}), saved);
+    assert.equal(uploads.length, 1);
     assert.equal(approvals.get(saved.kaRef).request.n8n, undefined);
-    const request = { kaRef: saved.kaRef, sourceHash: saved.sourceHash, invocationId: randomUUID(), itemsJson: '[{"value":7}]' };
+    const request = { kaRef: saved.kaRef, sourceHash: saved.sourceHash, invocationId: randomUUID(), itemsJson: mixed ? '[{"incoming":{"number":7}}]' : '[{"value":7}]' };
     const receipt = await service.run(request, () => {});
     assert.equal(receipt.executor, 'dkg');
-    assert.deepEqual(JSON.parse(receipt.output.itemsJson), [{ result: 21 }]);
-    assert.equal(receipt.steps[0].programVersion, '1.0.0');
+    assert.deepEqual(JSON.parse(receipt.output.itemsJson), mixed ? [{ answer: 21 }] : [{ result: 21 }]);
+    assert.equal(receipt.steps.find(s => s.nodeId === 'program').programVersion, '1.0.0');
     assert.equal((await service.list())[0].kaRef, saved.kaRef);
     cap = { ...cap, requiresExportAuthorization: true };
     await assert.rejects(service.run({ ...request, invocationId: randomUUID() }, () => { throw new Error('Export denied'); }), /Export denied/);

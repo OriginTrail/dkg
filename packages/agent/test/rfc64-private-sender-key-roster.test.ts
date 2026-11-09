@@ -92,7 +92,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
     await expect(WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority.call(
       availableReceiver as never,
       CG,
-    )).resolves.toEqual({ kind: 'available', agentAddresses: [] });
+    )).resolves.toEqual({ kind: 'available', agentAddresses: [], conclusive: true });
     await expect(WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority.call(
       unavailableReceiver as never,
       CG,

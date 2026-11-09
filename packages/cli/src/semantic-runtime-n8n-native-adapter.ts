@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { RuntimeAdapterOperation, SemanticN8nConfig, SemanticN8nGrant, SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
-import { assertN8nValue, n8nPinnedExecutionMatches, n8nObservationScope, n8nRecord, n8nWorkflowSha256, validateN8nConfig, validateN8nGrant } from './semantic-runtime-n8n-contract.js';
+import { assertN8nEmbeddedWorkflows, n8nResultSha256, assertN8nValue, n8nPinnedExecutionMatches, n8nObservationScope, n8nRecord, n8nWorkflowSha256, validateN8nConfig, validateN8nGrant } from './semantic-runtime-n8n-contract.js';
 import { collectN8nExecutionResult } from './semantic-runtime-n8n-results.js';
 
 type Checkpoint = { kind: 'n8n-native-v1'; workflowId: string; workflowSha256: string; executionId: string; versionId: string; observed: boolean };
@@ -52,7 +52,8 @@ export function createNativeN8nWorkflowAdapter(
     validateN8nConfig(installation);
     return installation.workflows.some(item => item.contextGraphId === graph
       && item.executorAgentAddress.toLowerCase() === executor.toLowerCase()
-      && item.workflowId === grant.workflowId && item.workflowSha256 === grant.workflowSha256);
+      && item.workflowId === grant.workflowId && item.workflowSha256 === grant.workflowSha256
+      && item.resultSha256 === n8nResultSha256(grant));
   };
   const authorized = async () => { await assertAuthorized(); if (!matches()) throw new Error('N8N_WORKFLOW_NOT_INSTALLED'); };
   const checkpoint = (effectId: string): Checkpoint | null => {
@@ -76,6 +77,7 @@ export function createNativeN8nWorkflowAdapter(
     const published = n8nRecord(workflow.activeVersion) ? { ...workflow.activeVersion, settings: workflow.settings } : workflow;
     if (workflow.id !== grant.workflowId || workflow.active !== true || typeof published.versionId !== 'string'
       || n8nWorkflowSha256(published) !== grant.workflowSha256) throw new Error('N8N_WORKFLOW_NOT_PINNED');
+    assertN8nEmbeddedWorkflows(published);
     const names = new Set((published.nodes as Record<string, unknown>[]).map(node => node.name));
     if ([...grant.result!.nodes, ...grant.result!.traceNodes ?? []].some(name => !names.has(name))) throw new Error('N8N_WORKFLOW_NOT_PINNED');
     return { origin, headers, published };
@@ -110,6 +112,7 @@ export function createNativeN8nWorkflowAdapter(
     id: 'n8n/workflow', version: '1', witInterface: 'origintrail:semantic-runtime/n8n-workflow@0.1.0',
     implementationVersion: 'n8n-native-components-v1',
     implementationHash: createHash('sha256').update(readFileSync(new URL(import.meta.url)))
+      .update(n8nResultSha256.toString()).update(assertN8nEmbeddedWorkflows.toString())
       .update(collectN8nExecutionResult.toString()).update(n8nPinnedExecutionMatches.toString())
       .update(configuration).update(JSON.stringify(grant)).digest('hex'),
     enabled: matches, effectClass: 'external-workflow', verb: 'invoke', idempotencyClass: 'non_repeatable',

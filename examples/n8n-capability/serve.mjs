@@ -1,3 +1,4 @@
+import { n8nResultSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
@@ -64,7 +65,7 @@ try {
     n8n: { ...connection, workflows: legacyDefinitions.filter(item => item.enabled).map(item => ({ contextGraphId: graphId, executorAgentAddress: owner,
       workflowId: item.grant.workflowId, workflowSha256: item.grant.workflowSha256 })) },
     n8nNative: { ...connection, workflows: nativeDefinitions.map(item => ({ contextGraphId: graphId, executorAgentAddress: owner,
-      workflowId: item.grant.workflowId, workflowSha256: item.grant.workflowSha256 })) } };
+      workflowId: item.grant.workflowId, workflowSha256: item.grant.workflowSha256, resultSha256: n8nResultSha256(item.grant) })) } };
   runtime = await startConfiguredSemanticRuntime(semanticRuntime, { dataDirectory: join(state, 'runtime'), log: () => {} });
   const config = { name: 'n8n-ka-poc', apiPort: 4631, listenPort: 0, nodeRole: 'edge', semanticRuntime };
   const Database = require('better-sqlite3');

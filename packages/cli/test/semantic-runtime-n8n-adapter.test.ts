@@ -124,3 +124,15 @@ describe('n8n workflow Program tool', () => {
     expect(() => validateN8nGrant({ ...grant, inputSchema: { type: 'object' } })).toThrow();
   });
 });
+
+it('blocks the legacy response adapter from executing a mutable helper', async () => {
+  const original = structuredClone(definition), originalHash = grant.workflowSha256;
+  try {
+    definition.nodes[0]!.type = 'n8n-nodes-base.executeWorkflow';
+    definition.nodes[0]!.parameters = { source: 'database', workflowId: 'mutable-helper' } as any;
+    grant.workflowSha256 = n8nWorkflowSha256(definition);
+    const f = await fixture();
+    await expect(f.adapter.dispatch(authorization, { text: 'hello' })).rejects.toThrow('N8N_SUBWORKFLOW_NOT_PINNED');
+    expect(f.dispatches).toBe(0);
+  } finally { Object.assign(definition, original); grant.workflowSha256 = originalHash; }
+});

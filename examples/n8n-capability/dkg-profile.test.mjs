@@ -92,7 +92,57 @@ test('authenticated execution pins its principal and rechecks revocation before 
     revoked = true;
     await assert.rejects(store.call(request('write', calculated.items), workflow, 'native'), /revoked/);
     await assert.rejects(store.call(request('invoke', source.items), workflow, 'native'), /revoked/);
-    assert.equal(checks, 5); assert.equal(calls.length, 3);
+    assert.equal(checks, 6); assert.equal(calls.length, 3); // Includes authorization after write readback.
+  } finally { db.close(); }
+});
+test('write recovery retains its exact payload and refuses unjournalled legacy recovery', async () => {
+  const db = new DatabaseSync(':memory:'), calls = [], scoped = { ...profile };
+  try {
+    const store = dkgComponentStore(db, transport(calls, true), [], scoped);
+    store.grant(workflow, id, input);
+    const source = await store.call(request('read', [{}]), workflow, 'native');
+    const calculated = await store.call(request('invoke', source.items), workflow, 'native');
+    const value = request('write', calculated.items);
+    await assert.rejects(store.call(value, workflow, 'native'), { code: 'DKG_WRITE_PENDING' });
+    const saved = db.prepare('SELECT * FROM dkg_component_writes WHERE id=?').get(id + ':write');
+    assert.deepEqual(JSON.parse(saved.request), value);
+    assert.deepEqual({ ...JSON.parse(saved.evidence).payload, allowCreate: true }, calls.at(-1).payload);
+    assert.equal(saved.receipt, null);
+    assert.throws(() => store.writeRecovery(workflow, id, 'native', '43'), /different native execution/);
+    db.prepare('DELETE FROM dkg_component_writes WHERE id=?').run(id + ':write');
+    assert.throws(() => store.writeRecovery(workflow, id, 'native', '42'), /legacy write has no saved request/);
+    assert.throws(() => store.grant(workflow, '11223344-1234-4234-8234-123456789abd', input), { code: 'DKG_WRITE_PENDING' });
+    db.prepare('INSERT INTO dkg_component_writes VALUES (?,?,?,?)').run(saved.id, saved.request, saved.evidence, saved.receipt);
+    scoped.evidence = () => { throw new Error('Recovery must not rebuild the write payload'); };
+    const recovery = store.writeRecovery(workflow, id, 'native', '42');
+    const receipt = await store.call(recovery.request, workflow, 'native');
+    assert.deepEqual(calls.at(-1).payload, { ...JSON.parse(saved.evidence).payload, allowCreate: false });
+    assert.deepEqual(JSON.parse(db.prepare('SELECT receipt FROM dkg_component_writes WHERE id=?').get(saved.id).receipt), receipt);
+    assert.equal(store.writeRecovery(workflow, id, 'native', '42').pending, false);
+  } finally { db.close(); }
+});
+test('ownership withdrawn during write readback leaves the original write pending', async () => {
+  const db = new DatabaseSync(':memory:'), calls = [];
+  const actor = { id: 'person-1', accountId: 'test-account', role: 'owner' };
+  let revoked = false, withdraw = true;
+  const scoped = { ...profile, requiresNosActor: true, accountId: actor.accountId,
+    async authorize() { if (revoked) throw new Error('owner revoked'); } };
+  const remote = transport(calls);
+  try {
+    const store = dkgComponentStore(db, async (payload, kind) => {
+      const result = await remote(payload, kind);
+      if (kind === 'write' && withdraw) revoked = true;
+      return result;
+    }, [], scoped);
+    store.grant(workflow, id, input, actor);
+    const source = await store.call(request('read', [{}]), workflow, 'native');
+    const calculated = await store.call(request('invoke', source.items), workflow, 'native');
+    const value = request('write', calculated.items);
+    await assert.rejects(store.call(value, workflow, 'native'), /owner revoked/);
+    assert.equal(db.prepare('SELECT result FROM dkg_component_calls WHERE id=?').get(id + ':write').result, null);
+    revoked = false; withdraw = false;
+    await store.call(value, workflow, 'native');
+    assert.deepEqual(calls.filter(c => c.operation === 'write').map(c => c.payload.allowCreate), [true, false]);
   } finally { db.close(); }
 });
 test('profile switch and changed revisions cannot reuse an invocation or its cached results', async () => {

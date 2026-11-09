@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import jpb from './jpb.mjs';
 import { readJpbThroughNos } from './jpb-nos-read.mjs';
+import { verifyJpbEvidence } from './jpb-evidence.mjs';
 import { nosStudioSession } from '../nos-studio-session.mjs';
 import { createNosNodeClient, invokeNosProgram, writeNosEvidence } from '../nos-node-transport.mjs';
 if (!nosStudioSession) throw new Error('Configure the account-bound nOS Studio session.');
@@ -23,7 +24,10 @@ export default {
     const call = createNosNodeClient(nosStudioSession, actor);
     if (operation === 'read') return readJpbThroughNos(call, payload);
     if (operation === 'invoke') return invokeNosProgram(call, payload);
-    if (operation === 'write') return writeNosEvidence(call, payload, jpb.targetGraph);
+    if (operation === 'write') {
+      verifyJpbEvidence(payload);
+      return writeNosEvidence(call, payload, jpb.targetGraph);
+    }
     throw new Error('Unknown DKG operation.');
   },
 };
