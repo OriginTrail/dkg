@@ -25,8 +25,17 @@
  *   its receipt signed by an operational wallet. The call, its result and its
  *   receipt are in the ledger before the answer goes back; if that write fails,
  *   the answer is an error and no result. A repeat of a call already served
- *   gets the stored answer. Calls on one subscription run one at a time, so a
- *   nonce is claimed once and a budget's check counts every call before it.
+ *   gets the stored answer, but only from the peer it was served to: once its
+ *   receipt lands, the request and its signature are public. Calls on one
+ *   subscription run one at a time, so a nonce is claimed once and a budget's
+ *   check counts every call before it.
+ * - **No backend work it is not paid for.** A request is taken only while its
+ *   backend's longest answer, and the receipt after it, still come before the
+ *   request expires, checked again after any wait for the calls before it; a
+ *   receipt is never signed past the expiry, which the chain would refuse. A
+ *   unit cap the input could use up is refused before the backend runs, and
+ *   the backend is asked for no more output than the cap pays for. A call
+ *   whose backend ran but gave nothing to sign is not run again.
  * - **The end of the epoch.** Within `stopServingSeconds` of it, new calls are
  *   refused: their receipts could not land in time.
  * - **The job.** Ticks every `tickSeconds` from the epoch's start, and once
@@ -55,6 +64,7 @@ import { KeyedLock, setAside, writeDurably } from './journal.js';
 import { DEFAULT_LANDING, Lander, nextLandingAt, secondsToNextTick, secondsToRetry, type LandingReport, type LandingSettings } from './landing.js';
 import { SellerLedger, type ServedCall } from './ledger.js';
 import { offerQuads, signOffer, type OfferQuad } from './offers.js';
+import { inputUnitsBound } from './seller-bounds.js';
 import {
   WireError,
   quoteRequestFromWire,
@@ -66,11 +76,18 @@ import {
   type InferenceBody,
   type QuoteResponse,
   type ServeAnswer,
+  type ServeRefusal,
   type ServeResponse,
 } from './wire.js';
 
 /** New calls stop this long before an epoch ends. */
 export const DEFAULT_STOP_SERVING_SECONDS = 180;
+/** The longest a service's backend takes to answer, when its settings name no time limit. */
+export const DEFAULT_BACKEND_TIMEOUT_MS = 60_000;
+/** What a call needs after its backend answers, before its request expires: the chain's time, the receipt signed and stored. */
+const RECEIPT_SECONDS = 5;
+/** Calls whose backend ran but gave nothing to sign, kept so a repeat does not run it again: the newest this many. */
+const FAILED_CALLS_KEPT = 10_000;
 
 export interface SellerService {
   /** The model's URN; `serviceId` is its keccak256. */
@@ -82,6 +99,8 @@ export interface SellerService {
   provenance: 'weights-pinned' | 'upstream-claimed';
   tokenizerBundle?: string;
   connector: Connector;
+  /** The connector's time limit: a request that expires sooner, and the receipt after it, is refused. `DEFAULT_BACKEND_TIMEOUT_MS` by default. */
+  backendTimeoutMs?: number;
 }
 
 export interface SellerDeps {
@@ -124,6 +143,8 @@ export class Seller {
   private lastTimes: { times: EpochTimes; at: number } | undefined;
   /** service id and epoch => the price and `signedAt` of its offer as last shared. */
   private readonly shared = new Map<string, { price: bigint; signedAt: number }>();
+  /** request digest => the refusal of a call whose backend ran but gave nothing to sign, oldest first. */
+  private readonly failed = new Map<string, ServeRefusal>();
   private running = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private ticking: Promise<void> | undefined;
@@ -298,17 +319,20 @@ export class Seller {
 
   // -------------------------------------------------------------- serve
 
-  /** Answer a `serve` message: the result and its receipt, or a refusal. Never throws. */
-  async serve(raw: unknown): Promise<ServeResponse> {
+  /**
+   * Answer a `serve` message from the peer `from`, as its connection
+   * authenticated it: the result and its receipt, or a refusal. Never throws.
+   */
+  async serve(raw: unknown, from: string): Promise<ServeResponse> {
     try {
-      return await this.checkAndServe(raw);
+      return await this.checkAndServe(raw, from);
     } catch (err) {
       this.deps.log?.(`[marketplace] a call could not be served: ${messageOf(err)}`);
       return refusal('Unavailable');
     }
   }
 
-  private async checkAndServe(raw: unknown): Promise<ServeResponse> {
+  private async checkAndServe(raw: unknown, from: string): Promise<ServeResponse> {
     let call: { request: ServiceRequest; signature: string; body: InferenceBody };
     try {
       call = serveRequestFromWire(raw);
@@ -319,11 +343,12 @@ export class Seller {
     // The request as this seller would have been named in it: a request for another seller recovers to another key.
     const request: ServiceRequest = { ...call.request, seller: this.identityId };
     const requestDigest = hashServiceRequest(this.domain, request);
-    const before = this.ledger.served(requestDigest);
-    if (before) return before.signature === call.signature ? answerOf(before) : refusal('BadSignature');
+    const repeat = this.repeatOf(requestDigest, call.signature, from);
+    if (repeat) return repeat;
 
     const chain = this.deps.chain;
     const times = await chain.getEpochTimes();
+    const readAt = Date.now();
     // 1. Not too near the epoch's end, at this epoch's price.
     if (times.endsAt - times.now <= this.deps.stopServingSeconds) return refusal('EpochEnding');
     const service = this.services.get(request.serviceId);
@@ -339,9 +364,9 @@ export class Seller {
     if (request.pricePerUnit > budgets[budgetIndex]!.maxPricePerUnit) return refusal('PriceOverCap');
     // 3. Signed by the subscription's session key, with a low s.
     if (recoverSigner(requestDigest, call.signature) !== ethers.getAddress(subscription.sessionKey)) return refusal('BadSignature');
-    // 4. Issued within the subscription, and not expired.
+    // 4. Issued within the subscription, and not expiring before the backend's longest answer and the receipt after it.
     if (request.issuedAt < subscription.startsAt || request.issuedAt > times.now) return refusal('NotYetValid');
-    if (times.now >= request.expiry) return refusal('Expired');
+    if (this.expiresTooSoon(service, request, times.now)) return refusal('Expired');
     // 5. For an account's subscription, issued while the grant it was funded under lasts.
     if (subscription.accountId !== 0n) {
       const end = await chain.grantEnd(subscription.accountId, subscription.buyer, subscription.grantNonce);
@@ -349,63 +374,111 @@ export class Seller {
     }
     // One call at a time per subscription: its nonces are one set, whatever the budget.
     return this.lock.run(request.subscriptionId, async () => {
+      // A repeat that came while the call it repeats was served gets its answer too.
+      const repeated = this.repeatOf(requestDigest, call.signature, from);
+      if (repeated) return repeated;
       // 6. A nonce new to the ledger. 7. Budget left, less this seller's receipts not landed, covers the call.
       if (this.ledger.nonceUsed(request.subscriptionId, request.nonce.toString())) return refusal('NonceUsed');
       const left = await chain.budgetLeft(request.subscriptionId, budgetIndex);
       if (left - this.ledger.unlanded(request.subscriptionId, budgetIndex) < request.maxValueWei) return refusal('BudgetExhausted');
-      return this.run(service, request, call, requestDigest, budgetIndex, times.epoch);
+      // 4 again, by the time the calls before it took, on this host's clock.
+      if (this.expiresTooSoon(service, request, times.now + Math.ceil((Date.now() - readAt) / 1_000))) return refusal('Expired');
+      // 8. Units for an answer: more than the most the input could take, or the backend would run for nothing to bill.
+      const unitCap = minBig(request.maxUnits, request.maxValueWei / request.pricePerUnit);
+      const room = unitCap - inputUnitsBound(call.body);
+      if (room <= 0n) return refusal('UnitsTooFew');
+      return this.run(service, request, call, { requestDigest, budgetIndex, epoch: times.epoch, unitCap, room, from });
     });
   }
 
-  /** Serve the call, cut to what it allows, sign its receipt and store it all before answering. */
+  /**
+   * Serve the call, cut to what it allows, sign its receipt and store it all before answering. A call whose backend
+   * ran but gave nothing to sign is kept as failed, so a repeat of it does not run the backend again.
+   */
   private async run(
     service: SellerService,
     request: ServiceRequest,
     call: { signature: string; body: InferenceBody },
-    requestDigest: string,
-    budgetIndex: number,
-    epoch: number,
+    at: { requestDigest: string; budgetIndex: number; epoch: number; unitCap: bigint; room: bigint; from: string },
   ): Promise<ServeResponse> {
-    const unitCap = minBig(request.maxUnits, request.maxValueWei / request.pricePerUnit);
+    const { requestDigest, unitCap } = at;
     let completion;
     try {
       completion = await service.connector.complete({
         messages: call.body.messages,
-        maxTokens: Number(minBig(BigInt(call.body.max_tokens), unitCap)),
+        // No more output than the cap pays for once the input takes the most it could.
+        maxTokens: Number(minBig(BigInt(call.body.max_tokens), at.room)),
       });
       this.backends.set(service.serviceId, 'up');
     } catch (err) {
       this.backends.set(service.serviceId, 'down');
       // The backend's detail (a missing key's variable, an address) stays in the log.
       this.deps.log?.(`[marketplace] the backend of ${service.model} failed: ${err instanceof UpstreamError ? err.message : String(err)}`);
-      return refusal('UpstreamError');
+      return this.failedOnce(requestDigest, refusal('UpstreamError'));
     }
-    const input = BigInt(completion.promptTokens);
-    if (input >= unitCap) return refusal('UnitsTooFew');
-    const output = minBig(BigInt(completion.completionTokens), unitCap - input);
-    const content = cutTo(completion.content, completion.completionTokens, Number(output));
-    const units = input + output;
-    const receipt: QueryInferenceReceipt = {
-      requestDigest,
-      resultCommitment: resultCommitmentOf(content),
-      units,
-      valueWei: units * request.pricePerUnit,
-      completedAt: Math.max((await this.deps.chain.getEpochTimes()).now, request.issuedAt),
-    };
-    const receiptSignature = await this.deps.chain.signTypedDataAs(this.deps.signer, this.domain!, QUERY_INFERENCE_RECEIPT_TYPES, { ...receipt });
-    const served: ServedCall = {
-      requestDigest,
-      subscriptionId: request.subscriptionId,
-      budgetIndex,
-      epoch,
-      request: requestToWire(request),
-      signature: call.signature,
-      receipt: receiptToWire(receipt),
-      receiptSignature,
-      result: { content },
-    };
-    await this.ledger.recordServed(served);
-    return answerOf(served);
+    try {
+      const input = BigInt(completion.promptTokens);
+      if (input >= unitCap) return this.failedOnce(requestDigest, refusal('UnitsTooFew'));
+      const completedAt = Math.max((await this.deps.chain.getEpochTimes()).now, request.issuedAt);
+      // The chain refuses a receipt completed after its request's expiry: no receipt, and no answer.
+      if (completedAt > request.expiry) return this.failedOnce(requestDigest, refusal('Expired'));
+      const output = minBig(BigInt(completion.completionTokens), unitCap - input);
+      const content = cutTo(completion.content, completion.completionTokens, Number(output));
+      const units = input + output;
+      const receipt: QueryInferenceReceipt = {
+        requestDigest,
+        resultCommitment: resultCommitmentOf(content),
+        units,
+        valueWei: units * request.pricePerUnit,
+        completedAt,
+      };
+      const receiptSignature = await this.deps.chain.signTypedDataAs(this.deps.signer, this.domain!, QUERY_INFERENCE_RECEIPT_TYPES, { ...receipt });
+      const served: ServedCall = {
+        requestDigest,
+        subscriptionId: request.subscriptionId,
+        budgetIndex: at.budgetIndex,
+        epoch: at.epoch,
+        request: requestToWire(request),
+        signature: call.signature,
+        receipt: receiptToWire(receipt),
+        receiptSignature,
+        result: { content },
+        peerId: at.from,
+      };
+      await this.ledger.recordServed(served);
+      return answerOf(served);
+    } catch (err) {
+      this.deps.log?.(`[marketplace] a call could not be served: ${messageOf(err)}`);
+      return this.failedOnce(requestDigest, refusal('Unavailable'));
+    }
+  }
+
+  /**
+   * A call served or tried before: the stored answer, only for the peer it was served to, since the request and its
+   * signature are public once its receipt lands; the stored refusal of one whose backend ran but gave nothing to
+   * sign. `undefined` for a call new to the seller.
+   */
+  private repeatOf(requestDigest: string, signature: string, from: string): ServeResponse | undefined {
+    const served = this.ledger.served(requestDigest);
+    if (served) {
+      if (served.signature !== signature) return refusal('BadSignature');
+      return served.peerId === from ? answerOf(served) : refusal('NonceUsed');
+    }
+    return this.failed.get(requestDigest);
+  }
+
+  /** Keep a call whose backend ran but gave nothing to sign, and its refusal: the newest `FAILED_CALLS_KEPT`. */
+  private failedOnce(requestDigest: string, refused: ServeRefusal): ServeRefusal {
+    this.failed.delete(requestDigest);
+    this.failed.set(requestDigest, refused);
+    if (this.failed.size > FAILED_CALLS_KEPT) this.failed.delete(this.failed.keys().next().value!);
+    return refused;
+  }
+
+  /** Whether `request` expires before the service's backend could answer and its receipt be signed, at chain time `now`. */
+  private expiresTooSoon(service: SellerService, request: ServiceRequest, now: number): boolean {
+    const backendSeconds = Math.ceil((service.backendTimeoutMs ?? DEFAULT_BACKEND_TIMEOUT_MS) / 1_000);
+    return request.expiry - now < backendSeconds + RECEIPT_SECONDS;
   }
 
   /**
