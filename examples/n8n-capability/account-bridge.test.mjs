@@ -17,7 +17,7 @@ writeFileSync(profileFile, `import profile from ${JSON.stringify(new URL('./test
   export default {...profile, requiresNosActor:true, accountId:${JSON.stringify(accountId)}, authorize:async()=>{}};`);
 process.env.NOS_STUDIO_SESSION_FILE = sessionFile;
 process.env.NOS_DKG_PROFILE_MODULE = profileFile;
-const { createCapabilityBridge } = await import('./bridge.mjs');
+const { createCapabilityBridge, handleDkgComponentCallback } = await import('./bridge.mjs');
 const { environment, definition, catalog, graphId, owner } = await import('./test-support/studio-service-fixture.mjs');
 after(() => rmSync(setup, { recursive: true, force: true }));
 
@@ -61,6 +61,57 @@ function legacyReopen(f, expectedError) {
 const callbackPath = '/spike/ka/internal/dkg-component';
 const nativeToken = 'fictional-native-callback-route-secret-at-least-32-characters';
 const nativeHeaders = { authorization: 'Bearer ' + nativeToken };
+function handlerFixture() {
+  const tokenFile = join(setup, 'native-token-' + randomUUID()), calls = [];
+  writeFileSync(tokenFile, nativeToken, { mode: 0o600 });
+  return { calls, tokenFile, async send(chunks, auth = nativeHeaders, method = 'POST') {
+    const req = Readable.from(chunks); req.headers = auth; req.method = method;
+    let status, body;
+    await handleDkgComponentCallback(req, { writeHead: value => { status = value; }, end: text => { body = JSON.parse(text); } },
+      { dkgComponent: async value => { calls.push(value); return { accepted: true }; } },
+      { n8nNative: { webhookTokenFile: tokenFile } });
+    return { status, body };
+  } };
+}
+
+test('callback handler rejects native authentication, Origin and method failures without service dispatch', async () => {
+  const h = handlerFixture(), value = { items: [{ operation: 'test' }] }, bytes = Buffer.from(JSON.stringify(value));
+  for (const auth of [{}, { authorization: 'Bearer wrong' }, { authorization: 'Bearer ' + 'x'.repeat(nativeToken.length) },
+    { ...nativeHeaders, origin: 'http://localhost:4620' }, { ...nativeHeaders, origin: '' }])
+    assert.equal((await h.send([bytes], auth)).status, 403);
+  for (const method of ['GET', 'PUT', 'DELETE', 'OPTIONS']) assert.equal((await h.send([bytes], nativeHeaders, method)).status, 403);
+  writeFileSync(h.tokenFile, 'short');
+  assert.equal((await h.send([bytes], { authorization: 'Bearer short' })).status, 403);
+  assert.deepEqual(h.calls, []);
+  writeFileSync(h.tokenFile, nativeToken);
+  assert.deepEqual(await h.send([bytes]), { status: 200, body: { accepted: true } });
+  assert.deepEqual(h.calls, [value]);
+});
+
+test('callback handler preserves UTF-8 characters split across Buffer chunks', async () => {
+  const h = handlerFixture(), value = { items: [{ operation: 'Ébavurer', label: 'Đorđe — 鋼 🔧', combining: 'e\u0301' }] };
+  const bytes = Buffer.from(JSON.stringify(value)), split = bytes.indexOf(Buffer.from('É')) + 1;
+  assert.equal((await h.send([bytes.subarray(0, split), bytes.subarray(split)])).status, 200);
+  assert.deepEqual(h.calls, [value]);
+  const bytewise = Array.from(bytes, byte => Buffer.from([byte]));
+  assert.equal((await h.send(bytewise)).status, 200);
+  assert.deepEqual(h.calls, [value, value]);
+});
+
+test('callback handler enforces the 16 KiB byte limit before dispatching Unicode bodies', async () => {
+  const h = handlerFixture(), limit = 16384, overhead = Buffer.byteLength(JSON.stringify({ text: '' }));
+  const count = Math.floor((limit - overhead) / 3);
+  const text = '€'.repeat(count) + 'x'.repeat(limit - overhead - count * 3);
+  const bytes = Buffer.from(JSON.stringify({ text }));
+  assert.equal(bytes.length, limit);
+  assert.equal((await h.send([bytes.subarray(0, 4096), bytes.subarray(4096)])).status, 200);
+  assert.deepEqual(h.calls, [{ text }]);
+  const oversized = Buffer.from(JSON.stringify({ text: text + 'x' }));
+  assert.equal(oversized.length, limit + 1);
+  assert.equal((await h.send([oversized.subarray(0, 4096), oversized.subarray(4096)])).status, 413);
+  assert.deepEqual(h.calls, [{ text }]);
+});
+
 async function callbackFixture() {
   const { configuredDkgProfile: profile } = await import('./dkg-profile.mjs');
   const { measurements } = await import('./test-support/measurement-profile.mjs');
@@ -101,7 +152,7 @@ test('internal DKG callback route rejects credentials, Origin, methods and overs
   const h = await callbackFixture();
   try {
     const calls = h.f.calls.length;
-    for (const auth of [{}, { authorization: 'Bearer wrong-token' }, { ...headers },
+    for (const auth of [{}, { authorization: 'Bearer wrong-token' }, { authorization: 'Bearer ' + 'x'.repeat(nativeToken.length) }, { ...headers },
       { ...nativeHeaders, origin: 'http://localhost:4620' }, { ...nativeHeaders, origin: '' }])
       assert.equal((await h.send(h.value, auth)).status, 403);
     for (const method of ['GET', 'PUT', 'DELETE', 'OPTIONS']) assert.equal((await h.send(h.value, nativeHeaders, method)).status, 403);

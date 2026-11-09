@@ -26,8 +26,14 @@ export async function handleDkgComponentCallback(req, res, studio, config) {
     const token=readFileSync(config.n8nNative.webhookTokenFile,'utf8').trim();
     const expected=Buffer.from('Bearer '+token), supplied=Buffer.from(String(req.headers.authorization??''));
     if(!studio || req.method!=='POST' || Object.hasOwn(req.headers, 'origin') || token.length<32 || expected.length!==supplied.length || !timingSafeEqual(expected,supplied)) { json(res,403,{error:'Native DKG component access denied'});return true; }
-    let body='',size=0;for await(const chunk of req) {size+=chunk.length;if(size>16384)throw Object.assign(new Error('Bounded DKG batch required'),{status:413});body+=chunk;}
-    json(res,200,await studio.dkgComponent(JSON.parse(body)));
+    const chunks = []; let size = 0;
+    for await (const chunk of req) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += bytes.length;
+      if (size > 16384) throw Object.assign(new Error('Bounded DKG batch required'), { status: 413 });
+      chunks.push(bytes);
+    }
+    json(res,200,await studio.dkgComponent(JSON.parse(Buffer.concat(chunks, size).toString('utf8'))));
   } catch(e) { json(res,e.status??409,{code:e.code??'DKG_COMPONENT_UNCONFIRMED',error:e.message}); }
 }
 
