@@ -167,6 +167,7 @@ export const COPY: Record<string, string> = {
   "err.notfound": "The node has no such route — it may run an older version",
   "err.unauthorized": "The node did not take this page's token",
   "err.invalid": "The node refused the request as malformed",
+  "err.funding.epoch": "That epoch can no longer be funded — go back for a fresh dry run",
   "err.terms.changed": "A budget's terms changed — check them and try again",
   "err.service.none": "No seller offers this service this epoch",
   "err.seller.none": "No such seller",

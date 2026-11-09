@@ -70,11 +70,17 @@ const CODE_COPY: Record<string, string> = {
 /** The copy key for a refusal code; anything unknown reads as a general failure. */
 export const refusalKey = (code: string | null | undefined): string => (code && CODE_COPY[code]) || 'err.generic';
 
+/** Plain words for one reason of a code that covers several, by the code and its first argument. */
+const REASON_COPY: Record<string, string> = {
+  // A funding of an epoch that is neither the current nor the next one: an epoch boundary passed since its dry run.
+  'InvalidFundingRequest:epoch': 'err.funding.epoch',
+};
+
 export interface DescribedError { copyKey: string; message: string; code: string | null; detail: string | null; retryable: boolean; retryAfter: number | null }
 
 export function describeError(e: unknown): DescribedError {
   if (isMarketplaceError(e)) {
-    const copyKey = refusalKey(e.code);
+    const copyKey = REASON_COPY[`${e.code}:${e.args[0] ?? ''}`] ?? refusalKey(e.code);
     const detail = e.args.length ? `${e.code}(${e.args.join(', ')})` : e.message !== e.code ? e.message : null;
     return { copyKey, message: copy(copyKey), code: e.code, detail, retryable: e.retryable, retryAfter: e.retryAfter };
   }

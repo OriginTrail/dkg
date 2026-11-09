@@ -75,6 +75,33 @@ function editedNode(scenario: 'active' | 'none', edit: (method: string, url: str
   return writes;
 }
 
+/**
+ * The fixture node of a buyer that never subscribed, in epoch 664 until
+ * `pass()` moves it to 665, keeping each write. Dry runs and fundings name
+ * their epoch as the node's route reads it, 'current', 'next' or a number,
+ * and a funding of an epoch that is neither the current nor the next one is
+ * refused with InvalidFundingRequest(epoch), as the node refuses it.
+ */
+function boundaryNode() {
+  const writes: Array<{ method: string; url: string; body: unknown }> = [];
+  const node = fixtureFetch('none');
+  let epoch = 664;
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method ?? 'GET';
+    const url = String(input);
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) as Json : undefined;
+    if (method !== 'GET') writes.push({ method, url, body });
+    if (method !== 'POST' || (url !== '/api/marketplace/subscriptions' && url !== '/api/marketplace/subscriptions/preview')) return node(input, init);
+    const asked = body!.epoch === 'current' ? epoch : body!.epoch === 'next' ? epoch + 1 : body!.epoch as number;
+    if (asked !== epoch && asked !== epoch + 1 && !url.endsWith('/preview')) return refusal(400, 'InvalidFundingRequest', ['epoch']);
+    const answer = await (await node(input, { ...init, body: JSON.stringify({ ...body, epoch: asked }) })).json() as Json;
+    // What it funded: the epoch it was asked for, as the node reads it now.
+    if (answer.subscription) (answer.subscription as Json).epoch = asked;
+    return json(answer);
+  });
+  return { writes, pass: () => { epoch += 1; } };
+}
+
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 /** A refusal as the node's marketplace routes send it. */
 const refusal = (status: number, code: string, args: string[] = []) => json({ error: `${code}(${args.join(', ')})`, code, ...(args.length ? { args } : {}), retryable: false }, status);
@@ -522,7 +549,7 @@ describe('marketplace Plans', () => {
     expect(writes.map((w) => `${w.method} ${w.url}`)).toEqual([
       'POST /api/marketplace/subscriptions/preview', 'POST /api/marketplace/subscriptions', 'PUT /api/marketplace/plan', 'POST /api/marketplace/keys',
     ]);
-    expect(writes[1].body).toEqual({ epoch: 'current', source: { kind: 'account', accountId: '7' }, services: [{ serviceId: FIXTURE_IDS.qwen14b, serviceClass: 'inference', value: '2000000000000000000', maxPricePerUnit: '700000000000' }] });
+    expect(writes[1].body).toEqual({ epoch: 664, source: { kind: 'account', accountId: '7' }, services: [{ serviceId: FIXTURE_IDS.qwen14b, serviceClass: 'inference', value: '2000000000000000000', maxPricePerUnit: '700000000000' }] });
     expect(writes[2].body).toMatchObject({ renew: true, renewUntilEpoch: 670 });
     expect(c.textContent).not.toContain(MISSING_COPY);
   });
@@ -554,6 +581,77 @@ describe('marketplace Plans', () => {
     expect(byTestId(c, 'mkt-plan-unsaved')).toBeNull();
     expect(sent.filter((x) => x === 'POST /api/marketplace/subscriptions')).toHaveLength(1);
     expect(sent.filter((x) => x === 'PUT /api/marketplace/plan')).toHaveLength(2);
+  });
+
+  it('saves a changed plan alone: a failed save stays on the confirmation, and nothing is funded', async () => {
+    const sent: string[] = [];
+    const node = fixtureFetch('active');
+    let failPlan = true;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      if (method !== 'GET') sent.push(`${method} ${String(input)}`);
+      if (method === 'PUT' && failPlan) {
+        failPlan = false;
+        return json({ error: 'disk full', code: 'Error', retryable: false }, 500);
+      }
+      return node(input, init);
+    });
+    const c = await render(plans());
+    await waitForText(c, 'Epoch 665 is funded');
+    await click(byTestId(c, 'mkt-change-plan'));
+    await click(byTestId(c, 'mkt-compose-continue'));
+    expect(byTestId(c, 'mkt-confirm-gate')?.textContent).toContain('One confirmation — the plan');
+    await click(byTestId(c, 'mkt-gate-confirm'));
+    await waitForText(c, 'Something went wrong');
+    expect(byTestId(c, 'mkt-fund-flow')?.getAttribute('data-phase')).toBe('confirm');
+    await click(byTestId(c, 'mkt-gate-confirm'));
+    await waitUntil(() => byTestId(c, 'mkt-fund-flow') === null, 'the plan flow to close');
+    expect(sent).toEqual(['PUT /api/marketplace/plan', 'PUT /api/marketplace/plan']);
+  });
+
+  it('funds the epoch its dry run answered for when the next epoch starts before Confirm', async () => {
+    const node = boundaryNode();
+    const c = await render(plans());
+    await waitForText(c, 'Compose your plan');
+    await click(byTestId(c, `mkt-pick-${FIXTURE_IDS.qwen14b}`));
+    await click(byTestId(c, 'mkt-epoch-next'));
+    await flush(300);
+    await waitForText(c, 'Costs 1 TRAC from the buyer wallet for epoch 665');
+    await click(byTestId(c, 'mkt-compose-continue'));
+    expect(byTestId(c, 'mkt-gate-source')?.textContent).toContain('Epoch 665, paid from the buyer wallet');
+    // Epoch 665 starts: 'next' would now be 666.
+    node.pass();
+    await click(byTestId(c, 'mkt-gate-confirm'));
+    await waitForText(c, 'Epoch 665 is funded with 1 TRAC');
+    expect(fundings(node.writes).map((w) => (w.body as { epoch: unknown }).epoch)).toEqual([665]);
+    expect(node.writes.filter((w) => w.method === 'PUT' && w.url === '/api/marketplace/plan')).toHaveLength(1);
+  });
+
+  it('sends nothing more when the epoch a confirmation shows has ended, and funds the open one after a fresh dry run', async () => {
+    const node = boundaryNode();
+    const c = await render(plans());
+    await waitForText(c, 'Compose your plan');
+    await click(byTestId(c, `mkt-pick-${FIXTURE_IDS.qwen14b}`));
+    await flush(300);
+    await waitForText(c, 'Costs 1 TRAC from the buyer wallet for epoch 664');
+    await click(byTestId(c, 'mkt-compose-continue'));
+    expect(byTestId(c, 'mkt-gate-source')?.textContent).toContain('Epoch 664');
+    // Epoch 664 ends: 'current' would now be 665, which the confirmation does not show.
+    node.pass();
+    await click(byTestId(c, 'mkt-gate-confirm'));
+    await waitForText(c, 'That epoch can no longer be funded — go back for a fresh dry run');
+    expect(byTestId(c, 'mkt-error-card')?.getAttribute('data-code')).toBe('InvalidFundingRequest');
+    expect(byTestId(c, 'mkt-funded')).toBeNull();
+    expect(fundings(node.writes).map((w) => (w.body as { epoch: unknown }).epoch)).toEqual([664]);
+    expect(node.writes.some((w) => w.method === 'PUT')).toBe(false);
+
+    await click(byTestId(c, 'mkt-gate-cancel'));
+    await flush(300);
+    await waitForText(c, 'Costs 1 TRAC from the buyer wallet for epoch 665');
+    await click(byTestId(c, 'mkt-compose-continue'));
+    await click(byTestId(c, 'mkt-gate-confirm'));
+    await waitForText(c, 'Epoch 665 is funded with 1 TRAC');
+    expect(fundings(node.writes).map((w) => (w.body as { epoch: unknown }).epoch)).toEqual([664, 665]);
   });
 
   it('holds Continue while a changed budget\'s dry run is pending, and funds only what the shown dry run answered', async () => {
@@ -591,7 +689,7 @@ describe('marketplace Plans', () => {
     await click(byTestId(c, 'mkt-gate-confirm'));
     await waitForText(c, 'Epoch 664 is funded with 50 TRAC');
     const sent = fundings(node.writes);
-    expect(sent.map((w) => w.body)).toEqual([{ epoch: 'current', source: { kind: 'account', accountId: '7' }, services: [{ serviceId: FIXTURE_IDS.qwen14b, serviceClass: 'inference', value: '50000000000000000000', maxPricePerUnit: '700000000000' }] }]);
+    expect(sent.map((w) => w.body)).toEqual([{ epoch: 664, source: { kind: 'account', accountId: '7' }, services: [{ serviceId: FIXTURE_IDS.qwen14b, serviceClass: 'inference', value: '50000000000000000000', maxPricePerUnit: '700000000000' }] }]);
     const lastDryRun = node.writes.map((w) => w.url).lastIndexOf('/api/marketplace/subscriptions/preview');
     expect((node.writes[lastDryRun].body as { services: Array<{ value: string }> }).services[0].value).toBe('50000000000000000000');
     expect(node.writes.indexOf(sent[0])).toBeGreaterThan(lastDryRun);
