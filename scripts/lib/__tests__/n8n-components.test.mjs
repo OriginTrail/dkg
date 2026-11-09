@@ -6,8 +6,8 @@ import { componentRegistry, component, normalizeComponentInput, componentProgram
 import { standaloneComponentWorkflow, echoSubworkflow, nativeLiteral } from '../../../examples/n8n-capability/component-workflows.mjs';
 import { resolveComponentValue, validateComponentUrl } from '../../../examples/n8n-capability/component-values.mjs';
 
-test('thirty native components have bounded descriptors and valid workflow result selectors', () => {
-  assert.equal(componentRegistry.length, 30); assert.equal(new Set(componentRegistry.map(c => c.id)).size, 30);
+test('thirty-one native components have bounded descriptors and valid workflow result selectors', () => {
+  assert.equal(componentRegistry.length, 31); assert.equal(new Set(componentRegistry.map(c => c.id)).size, 31);
   for (const c of componentRegistry) {
     normalizeComponentInput(c, { itemsJson: JSON.stringify(c.sampleItems), paramsJson: '{}', executionId: c.mode === 'schedule' ? '1' : '' });
     const flow = standaloneComponentWorkflow(c.id, 'fixture_' + c.id, { id: 'fixture', name: 'Fixture' });
