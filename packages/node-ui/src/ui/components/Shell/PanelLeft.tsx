@@ -1,4 +1,4 @@
-import React, { useCallback, useId, useState } from 'react';
+import React, { useCallback, useEffect, useId, useState } from 'react';
 import { ChevronRight, Eye, X, RefreshCw, LogIn, Plus } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
@@ -244,6 +244,13 @@ export function PanelLeft() {
     setShowJoinModal(false);
     setJoinContextGraphId(undefined);
   }, []);
+
+  // The dialogs live in this panel, so it stays open on a narrow screen until they close.
+  const holdNarrowPanel = useLayoutStore((s) => s.holdNarrowPanel);
+  useEffect(() => {
+    holdNarrowPanel(showCreateModal || showJoinModal);
+    return () => holdNarrowPanel(false);
+  }, [showCreateModal, showJoinModal, holdNarrowPanel]);
 
 
   return (

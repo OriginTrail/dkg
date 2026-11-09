@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useTabsStore } from '../stores/tabs.js';
 import { useProjectsStore } from '../stores/projects.js';
 import { isPassiveCatalogueGraph } from '../lib/contextGraphSidebar.js';
-import { pathToTab, tabIdToPath } from '../lib/tab-routes.js';
+import { pathToTab, tabIdToHref } from '../lib/tab-routes.js';
 import { tabContextGraphId } from '../lib/tab-target.js';
 
 /**
@@ -38,8 +38,8 @@ export function useShellRouting(): void {
   useEffect(() => useTabsStore.subscribe((state, prev) => {
     if (state.activeTabId === prev.activeTabId) return;
     if (!pathToTab(here.current)) return; // a path that isn't a tab
-    const target = tabIdToPath(state.activeTabId);
-    if (target !== here.current) navigate(target);
+    const target = tabIdToHref(state.activeTabId);
+    if (target.split('?')[0] !== here.current) navigate(target);
   }), [navigate]);
 
   // Address → tab (after restoring a saved workspace once)
@@ -48,7 +48,7 @@ export function useShellRouting(): void {
       restored.current = true;
       const saved = useTabsStore.getState().activeTabId;
       if (pathname === '/' && saved !== 'dashboard') {
-        navigate(tabIdToPath(saved), { replace: true });
+        navigate(tabIdToHref(saved), { replace: true });
         return;
       }
     }

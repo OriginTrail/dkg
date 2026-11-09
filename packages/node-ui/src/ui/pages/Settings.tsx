@@ -1,7 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { useFetch, formatBytes } from '../hooks.js';
 import {
-  fetchStatus,
   fetchWalletsBalances,
   shutdownNode,
   fetchMetrics,
@@ -376,15 +375,14 @@ export function SettingsPage() {
 }
 
 function GeneralSettingsTab() {
-  const { data: status } = useFetch(fetchStatus, [], 30_000);
   const { data: wallets } = useFetch(fetchWalletsBalances, [], 60_000);
-  const s = status as any;
   const w = wallets as any;
 
   const [shutdownConfirm, setShutdownConfirm] = useState(false);
   const [shuttingDown, setShuttingDown] = useState(false);
 
-  const { nodeStatus, peers: peerCount, state: nodeState } = useNodeState();
+  // The shell's status poll feeds the whole card, so every field shows the same check.
+  const { nodeStatus: s, peers: peerCount, state: nodeState } = useNodeState();
 
   const handleShutdown = useCallback(async () => {
     if (!shutdownConfirm) {
@@ -418,7 +416,7 @@ function GeneralSettingsTab() {
               style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', marginTop: 4 }}
               title="Peers = unique remote nodes. Direct + Relayed counts are connections — a single peer can hold both a direct and a relayed link, so they sum to ≥ Peers, not exactly equal to it."
             >
-              {nodeState.tooltip ?? `${peerCount} peer${peerCount !== 1 ? 's' : ''}: ${nodeStatus?.connections?.direct ?? 0} direct, ${nodeStatus?.connections?.relayed ?? 0} relayed. Up ${formatUptime(nodeStatus?.uptimeMs ?? 0)}.`}
+              {nodeState.tooltip ?? `${peerCount} peer${peerCount !== 1 ? 's' : ''}: ${s?.connections?.direct ?? 0} direct, ${s?.connections?.relayed ?? 0} relayed. Up ${formatUptime(s?.uptimeMs ?? 0)}.`}
             </div>
           </div>
         </div>

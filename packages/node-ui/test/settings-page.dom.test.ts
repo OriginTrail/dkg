@@ -16,8 +16,8 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
+import { useAgentsStore } from '../src/ui/stores/agents.js';
 
-const fetchStatusMock = vi.fn();
 const fetchWalletsBalancesMock = vi.fn();
 const fetchMetricsMock = vi.fn();
 const fetchRetentionSettingsMock = vi.fn();
@@ -66,7 +66,6 @@ vi.mock('../src/ui/api.js', async () => {
   const actual = await vi.importActual<any>('../src/ui/api.js');
   return {
     ...actual,
-    fetchStatus: fetchStatusMock,
     fetchWalletsBalances: fetchWalletsBalancesMock,
     fetchMetrics: fetchMetricsMock,
     fetchRetentionSettings: fetchRetentionSettingsMock,
@@ -103,7 +102,8 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     document.body.innerHTML = '';
     vi.clearAllMocks();
-    fetchStatusMock.mockResolvedValue({
+    // Settings reads the shell's shared status, not its own request.
+    useAgentsStore.getState().setNodeStatus({
       name: 'Test Node', peerId: '12D3KooWTest', nodeRole: 'core',
       networkName: 'testnet', storeBackend: 'oxigraph', connectedPeers: 2,
       connections: { direct: 1, relayed: 1 }, uptimeMs: 60_000,
