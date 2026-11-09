@@ -22,24 +22,31 @@
  *      key, in one step with the check that the budget has it beside what the
  *      key's calls cost and hold reserved, so calls on other services at once
  *      never take the key past its budget;
- *   8. the seller's answer, and its receipt's checks: it answers this request,
+ *   8. the call, kept as pending before it is sent, and in the held value at
+ *      its most: once sent, its seller can settle it whatever comes back;
+ *   9. the seller's answer, and its receipt's checks: it answers this request,
  *      `units` within `maxUnits`, `valueWei` the units at the price, completed
  *      between the request's issue and its expiry, as settlement requires, the
  *      result is what it commits to, and an operational key of the seller's
  *      Core Node signed it. A receipt that fails takes the seller out of
  *      routing for the epoch, and the call fails;
- *   9. the key's reservation is settled at the receipt's value, or at nothing
- *      when no receipt passed, and the receipt is kept before the answer goes
- *      back.
- * Calls on one budget run one at a time, from the ceiling to the receipt;
- * calls on others run at once. A reservation left open when the node stopped
- * is settled at nothing when it starts again.
+ *  10. the key's reservation is settled at the receipt's value, and the receipt
+ *      is kept in place of the pending call before the answer goes back.
+ * A call stays pending, held and reserved at its most, until there is
+ * evidence of what it cost: a receipt that passes, which the seller also gives
+ * for a repeat of the request when the messenger lost its first answer; a
+ * refusal of its first sending, which releases it; or, for a call whose answer
+ * did not come or whose receipt failed its checks, what landed (below). Calls
+ * on one budget run one at a time, from the ceiling to the receipt; calls on
+ * others run at once. A key's reservation of a call the node stopped before
+ * keeping is settled at nothing when it starts again: that call was never sent.
  *
- * Its job, every tick: the held receipts whose nonces the chain shows used
- * have landed, and leave the held value the ceiling counts. An epoch before
- * the last ended one is made final: its reconciliation is kept, and its
- * receipts and nonce counters are dropped, as are what the access keys' calls
- * cost, folded into each key's total.
+ * Its job, every tick: the held receipts and pending calls whose nonces the
+ * chain shows used have landed, and leave the held value the ceiling counts.
+ * An epoch before the last ended one is made final: its pending calls' keys
+ * pay what they can have cost (`finalize`), its reconciliation is kept, and
+ * its receipts, pending calls and nonce counters are dropped, as are what the
+ * access keys' calls cost, folded into each key's total.
  */
 import { join } from 'node:path';
 import { ethers } from 'ethers';
@@ -156,22 +163,54 @@ interface FinalEpoch {
   rows: ReconciledRow[];
 }
 
-type NonceEntry = { epoch: number; subscriptionId: string; seller: string; nonce: string };
+/**
+ * A call about to be sent. Once sent, its seller can settle it whether or not
+ * its answer comes back, so it is kept, and held at its most value, before it
+ * goes, until its outcome is known: a receipt that passes, a refusal of its
+ * first sending (`released`), or, once its epoch is final, what landed.
+ */
+interface PendingCall {
+  type: 'pending';
+  callId: string;
+  epoch: number;
+  subscriptionId: string;
+  budgetIndex: number;
+  seller: string;
+  keyId: string;
+  request: ServiceRequestWire;
+  signature: string;
+}
 
-const isFinal = (e: HeldReceipt | FinalEpoch): e is FinalEpoch => (e as FinalEpoch).type === 'final';
+/** A pending call its seller refused at its first sending: nothing was served. */
+interface Released {
+  type: 'released';
+  callId: string;
+  epoch: number;
+}
+
+type ReceiptEntry = HeldReceipt | FinalEpoch | PendingCall | Released;
+
+/** A request sent to a seller, as the chain's nonces tell whether it landed. */
+type SentRequest = { callId: string; subscriptionId: string; seller: string; request: ServiceRequestWire };
+
+type NonceEntry = { epoch: number; subscriptionId: string; seller: string; nonce: string };
 
 const fail = (status: number, code: string, message: string, more: Record<string, unknown> = {}, headers?: Record<string, string>): GatewayAnswer =>
   ({ status, body: { error: { code, message, type: 'marketplace' }, ...more }, ...(headers ? { headers } : {}) });
 
 export class Gateway {
-  private readonly receipts: Journal<HeldReceipt | FinalEpoch>;
+  private readonly receipts: Journal<ReceiptEntry>;
   private readonly nonceLog: Journal<NonceEntry>;
   private readonly lock = new KeyedLock();
   private readonly nonces = new Map<string, bigint>();
-  /** subscription id and budget index => the value of its receipts held and not seen landed. */
+  /** subscription id and budget index => the value of its receipts held and its pending calls, not seen landed. */
   private readonly held = new Map<string, bigint>();
   /** The held receipts not seen landed, by call id. */
   private readonly unlanded = new Map<string, HeldReceipt>();
+  /** The calls sent whose outcome is not known yet, by call id: in the held value at their most. */
+  private readonly pending = new Map<string, PendingCall>();
+  /** The pending calls seen landed, by call id: out of the held value, as the chain counts them, until their epoch is final. */
+  private readonly landedPending = new Map<string, PendingCall>();
   /** The receipts of each epoch not made final. */
   private readonly byEpoch = new Map<number, HeldReceipt[]>();
   /** The epochs with receipts or nonce counters not made final. */
@@ -210,7 +249,7 @@ export class Gateway {
     return this.deps.fx ?? NO_FX;
   }
 
-  /** The value of a budget's receipts this node holds and has not seen landed. */
+  /** The value of a budget's receipts this node holds, and the most of its calls pending, not seen landed. */
   heldValue(subscriptionId: string, budgetIndex: number): bigint {
     return this.held.get(`${subscriptionId.toLowerCase()}:${budgetIndex}`) ?? 0n;
   }
@@ -240,8 +279,8 @@ export class Gateway {
   }
 
   /**
-   * Read the receipts held, the epochs made final and the nonce counters, and settle at nothing the keys'
-   * reservations of calls the node stopped during. Call once before serving.
+   * Read the receipts held, the calls pending, the epochs made final and the nonce counters, and settle at nothing
+   * a key's reservation of a call never sent: the node stopped before the call was kept. Call once before serving.
    */
   async load(): Promise<void> {
     for (const n of await this.nonceLog.read()) {
@@ -249,10 +288,14 @@ export class Gateway {
       this.epochs.add(n.epoch);
     }
     for (const e of await this.receipts.read()) {
-      if (isFinal(e)) this.finals.set(e.epoch, e.rows);
-      else this.remember(e);
+      if (!('type' in e)) this.remember(e);
+      else if (e.type === 'final') this.finals.set(e.epoch, e.rows);
+      else if (e.type === 'pending') this.hold(e);
+      else this.resolve(e.callId);
     }
-    for (const r of await this.deps.keys.reservations()) await this.deps.keys.settle(r.callId, 0n);
+    for (const r of await this.deps.keys.reservations()) {
+      if (!this.pending.has(r.callId)) await this.deps.keys.settle(r.callId, 0n);
+    }
   }
 
   /** The job: a tick now, then every `tickSeconds`. */
@@ -275,12 +318,19 @@ export class Gateway {
     await this.ticking;
   }
 
-  /** The held receipts that landed leave the held value; epochs before the last ended one are made final. */
+  /** The held receipts and pending calls that landed leave the held value; epochs before the last ended one are made final. */
   async tick(): Promise<void> {
     const { epoch } = await this.deps.chain.getEpochTimes();
     const open = [...this.unlanded.values()].filter((r) => r.epoch === epoch);
-    const used = await this.usedOf(open);
+    const sent = [...this.pending.values()].filter((p) => p.epoch === epoch);
+    const used = await this.usedOf([...open, ...sent]);
     for (const r of open) if (used.has(r.callId)) this.forget(r);
+    // A pending call that landed: what it cost is in what the chain shows its budget used. Its key pays once the epoch is final.
+    for (const p of sent) {
+      if (!used.has(p.callId)) continue;
+      this.resolve(p.callId);
+      this.landedPending.set(p.callId, p);
+    }
     const ended = [...this.epochs].filter((e) => e < epoch - 1);
     for (const e of ended) await this.finalize(e);
     if (ended.length > 0) await this.deps.keys.compact();
@@ -386,25 +436,33 @@ export class Gateway {
       if (!(await this.deps.keys.reserve(keyId, callId, maxValueWei, times.now))) {
         return fail(402, 'key_budget', "the call could cost more than the access key's budget has left");
       }
+      const pending: PendingCall = {
+        type: 'pending', callId, epoch: times.epoch, subscriptionId, budgetIndex, seller: route.seller.toString(), keyId,
+        request: requestToWire(request), signature,
+      };
+      await this.lock.run('journal', () => this.receipts.append(pending));
+      this.hold(pending);
       const started = Date.now();
-      let answer: ServeResponse;
+      let sent: { answer: ServeResponse; retried: boolean };
       try {
-        answer = await this.sendServe(route.peerId, message, callId);
+        sent = await this.sendServe(route.peerId, message, callId);
       } catch {
-        await this.deps.keys.settle(callId, 0n);
+        // The seller may have served it: it stays held, and reserved against the key, until what landed says otherwise.
         this.deps.router.unreachable(route.seller);
         return fail(503, 'seller_unreachable', 'the seller did not answer; try again', { serviceId });
       }
+      const { answer, retried } = sent;
       this.deps.router.measured(route.seller, Date.now() - started);
       if (!answer.ok) {
-        await this.deps.keys.settle(callId, 0n);
+        // A refusal of its first sending: nothing was served. One after an answer was lost says nothing of what that answered.
+        if (!retried) await this.release(pending);
         if (answer.code === 'WrongPrice') this.deps.router.requote(route.seller);
         else if (answer.retry && answer.code !== 'EpochEnding') this.deps.router.unreachable(route.seller);
         return fail(502, 'seller_refused', `the seller refused the call: ${answer.code}`, { sellerCode: answer.code, retry: answer.retry });
       }
       const checked = await this.checkReceipt(domain, request, callId, budgetIndex, answer);
-      // The key pays for the call before the receipt is kept: a stop between the two leaves no receipt the key did not pay for.
-      await this.deps.keys.settle(callId, checked.receipt?.valueWei ?? 0n);
+      // The key pays for the call before its receipt is kept: a stop between the two leaves it pending, and its key paid once.
+      if (checked.receipt) await this.deps.keys.settle(callId, checked.receipt.valueWei);
       const entry: HeldReceipt = {
         callId, epoch: times.epoch, subscriptionId, budgetIndex, seller: route.seller.toString(), keyId, request: requestToWire(request), signature,
         receipt: answer.receipt, receiptSignature: answer.receiptSignature, state: checked.problem ? 'refused' : 'held',
@@ -413,6 +471,7 @@ export class Gateway {
       await this.lock.run('journal', () => this.receipts.append(entry));
       this.remember(entry);
       if (checked.problem) {
+        // Its seller holds a receipt it may land: the call stays pending, as one whose answer did not come.
         this.deps.router.failed(route.seller, times.epoch);
         return fail(502, 'bad_receipt', `the seller's receipt failed a check: ${checked.problem}`, { problem: checked.problem });
       }
@@ -466,12 +525,15 @@ export class Gateway {
     return { receipt };
   }
 
-  /** One `serve`, with one retry under a new message id when the messenger lost the first answer. */
-  private async sendServe(peerId: string, message: Uint8Array, callId: string): Promise<ServeResponse> {
+  /**
+   * One `serve`, with one retry under a new message id when the messenger lost the first answer: the seller
+   * answers that repeat with the answer it stored. `retried` says the answer is the retry's.
+   */
+  private async sendServe(peerId: string, message: Uint8Array, callId: string): Promise<{ answer: ServeResponse; retried: boolean }> {
     for (let attempt = 0; ; attempt++) {
       const bytes = await this.deps.send(peerId, message, `${callId}:${attempt}`);
       if (attempt === 0 && new TextDecoder().decode(bytes) === 'RESPONSE_GONE') continue;
-      return decodeMessage(bytes) as ServeResponse;
+      return { answer: decodeMessage(bytes) as ServeResponse, retried: attempt > 0 };
     }
   }
 
@@ -490,27 +552,57 @@ export class Gateway {
     if (nonce > (this.nonces.get(key) ?? -1n)) this.nonces.set(key, nonce);
   }
 
-  /** A receipt kept: in its epoch's, and, held, in the held value until it is seen landed. */
+  /**
+   * A receipt kept: in its epoch's, and, held, in the held value until it is seen landed, in place of its call
+   * pending. A refused one leaves its call pending: its seller may land a receipt of its own.
+   */
   private remember(r: HeldReceipt): void {
     const kept = this.byEpoch.get(r.epoch) ?? [];
     kept.push(r);
     this.byEpoch.set(r.epoch, kept);
     this.epochs.add(r.epoch);
     if (r.state !== 'held') return;
+    this.resolve(r.callId);
     this.unlanded.set(r.callId, r);
-    const key = `${r.subscriptionId}:${r.budgetIndex}`;
-    this.held.set(key, (this.held.get(key) ?? 0n) + BigInt(r.receipt.valueWei));
+    this.addHeld(r, BigInt(r.receipt.valueWei));
   }
 
   /** A held receipt seen landed: out of the held value. */
   private forget(r: HeldReceipt): void {
     if (!this.unlanded.delete(r.callId)) return;
+    this.addHeld(r, -BigInt(r.receipt.valueWei));
+  }
+
+  /** A call about to be sent, kept: pending, and in the held value at its most, until its outcome is known. */
+  private hold(p: PendingCall): void {
+    this.pending.set(p.callId, p);
+    this.epochs.add(p.epoch);
+    this.addHeld(p, BigInt(p.request.maxValueWei));
+  }
+
+  /** A pending call whose outcome is known, or that is seen landed: no longer pending, and out of the held value. */
+  private resolve(callId: string): void {
+    this.landedPending.delete(callId);
+    const p = this.pending.get(callId);
+    if (!p) return;
+    this.pending.delete(callId);
+    this.addHeld(p, -BigInt(p.request.maxValueWei));
+  }
+
+  /** A pending call its seller refused at its first sending: its key's reservation settled at nothing, then the call released. */
+  private async release(p: PendingCall): Promise<void> {
+    await this.deps.keys.settle(p.callId, 0n);
+    await this.lock.run('journal', () => this.receipts.append({ type: 'released', callId: p.callId, epoch: p.epoch }));
+    this.resolve(p.callId);
+  }
+
+  private addHeld(r: { subscriptionId: string; budgetIndex: number }, value: bigint): void {
     const key = `${r.subscriptionId}:${r.budgetIndex}`;
-    this.held.set(key, (this.held.get(key) ?? 0n) - BigInt(r.receipt.valueWei));
+    this.held.set(key, (this.held.get(key) ?? 0n) + value);
   }
 
   /** The call ids of `receipts` whose nonces the chain shows used. */
-  private async usedOf(receipts: readonly HeldReceipt[]): Promise<Set<string>> {
+  private async usedOf(receipts: readonly SentRequest[]): Promise<Set<string>> {
     const words = new Map<string, bigint>();
     const used = new Set<string>();
     for (const r of receipts) {
@@ -544,15 +636,37 @@ export class Gateway {
     return groups;
   }
 
-  /** Keep an ended epoch's reconciliation, and drop its receipts and nonce counters. */
+  /**
+   * Keep an ended epoch's reconciliation, settle its pending calls' reservations, and drop its receipts, pending
+   * calls and nonce counters. Nothing lands for an epoch after it ends, so a pending call whose nonce is unused
+   * cost nothing. One whose nonce is used landed at no more than its most value, nor than what its seller
+   * landed on its budget beyond the receipts this node holds there: its key pays the lesser, or the most when
+   * what landed does not show it. The keys are settled first: a stop before the receipts are dropped settles
+   * them again, which changes nothing.
+   */
   private async finalize(epoch: number): Promise<void> {
     const rows = await this.rowsOf(epoch);
+    const calls = [...this.pending.values(), ...this.landedPending.values()].filter((p) => p.epoch === epoch);
+    const held = (this.byEpoch.get(epoch) ?? []).filter((r) => r.state === 'held');
+    const used = await this.usedOf([...held, ...calls]);
+    for (const p of calls) {
+      let cost = 0n;
+      if (used.has(p.callId)) {
+        const sameRow = (r: { budgetIndex: number; seller: string | number }) => r.budgetIndex === p.budgetIndex && String(r.seller) === p.seller;
+        const landed = BigInt(rows.find(sameRow)?.landed.value ?? '0');
+        const beyond = landed - held.filter((r) => sameRow(r) && used.has(r.callId)).reduce((v, r) => v + BigInt(r.receipt.valueWei), 0n);
+        const most = BigInt(p.request.maxValueWei);
+        cost = beyond > 0n ? minBig(most, beyond) : most;
+      }
+      await this.deps.keys.settle(p.callId, cost);
+    }
     await this.lock.run('journal', async () => {
-      await this.receipts.replace([...(await this.receipts.read()).filter((e) => isFinal(e) || e.epoch !== epoch), { type: 'final', epoch, rows }]);
+      await this.receipts.replace([...(await this.receipts.read()).filter((e) => ('type' in e && e.type === 'final') || e.epoch !== epoch), { type: 'final', epoch, rows }]);
       await this.nonceLog.replace((await this.nonceLog.read()).filter((n) => n.epoch !== epoch));
     });
     this.finals.set(epoch, rows);
     for (const r of this.byEpoch.get(epoch) ?? []) this.forget(r);
+    for (const p of calls) this.resolve(p.callId);
     this.byEpoch.delete(epoch);
     this.epochs.delete(epoch);
     const subscriptionId = subscriptionIdOf(this.deps.buyerWallet, epoch);
@@ -582,3 +696,5 @@ export class Gateway {
 export function unitsBound(body: InferenceBody): bigint {
   return inputUnitsBound(body.messages) + BigInt(body.max_tokens);
 }
+
+const minBig = (a: bigint, b: bigint) => (a < b ? a : b);

@@ -7,7 +7,7 @@
  * memory, the keys' scopes, and what landed: the held value at the gateway's
  * tick, reconciliation, and an ended epoch made final.
  */
-import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -32,6 +32,7 @@ import {
   decodeMessage,
   encodeMessage,
   SIGNER_TTL_MS,
+  UNREACHABLE_MS,
   hashOffer,
   receiptFromWire,
   serviceIdOf,
@@ -63,6 +64,8 @@ let keys: AccessKeys;
 let offers: Offer[];
 let tamper: ((answer: ServeResponse) => ServeResponse) | undefined;
 let reachable: boolean;
+/** How far the router's clock runs ahead of this host's, in milliseconds. */
+let routerSkew: number;
 let DOMAIN: MarketplaceDomain | undefined;
 let caller: { key: AccessKey };
 const call = (chat: unknown = CHAT, g: Gateway = gateway) => g.chatCompletion(caller, chat);
@@ -96,6 +99,7 @@ async function setUp(value = 10n ** 6n, models: string[] = [MODEL]): Promise<voi
       if (!reachable) throw new Error('unreachable');
       return seller.quote({ services }) as Promise<QuoteResponse>;
     },
+    clock: () => Date.now() + routerSkew,
   });
   keys = new AccessKeys(join(dir, 'buyer'));
   gatewayDeps = {
@@ -119,6 +123,7 @@ beforeEach(async () => {
   chain = marketplaceChainOf(mock)!;
   tamper = undefined;
   reachable = true;
+  routerSkew = 0;
   completion = { content: 'synthetic answer', promptTokens: 7, completionTokens: 5 };
 });
 afterEach(async () => {
@@ -569,19 +574,24 @@ describe('landing, reconciliation and pruning', () => {
     const rows = (await gateway.reconciliation()).rows;
     expect(rows).toMatchObject([{ held: { count: 0 }, landed: { count: 2, matched: 0, value: '240' } }]);
 
+    // The refused call stays reserved against its key until the epoch is final: its seller landed a receipt of its own.
+    expect((await keys.list())[0]).toMatchObject({ spent: '120', reserved: '620' });
     mock.__advanceEpoch();
     expect(await gateway.reconciliation(epoch)).toEqual({ epoch, final: true, rows });
     await gateway.tick();
-    expect((await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n')).toHaveLength(2);
+    // Each call kept as pending, then its receipt.
+    expect((await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l).type ?? JSON.parse(l).state))
+      .toEqual(['pending', 'held', 'pending', 'refused']);
     mock.__advanceEpoch();
     await gateway.tick();
-    // Its rows kept, its receipts and nonce counters gone, and the keys' costs folded in.
+    // Its rows kept, its receipts, pending calls and nonce counters gone, and the keys' costs folded in: the refused
+    // call's key pays what its seller landed beyond the receipt the node holds, 120.
     const receipts = (await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
     expect(receipts).toEqual([{ type: 'final', epoch, rows }]);
     expect((await readFile(join(dir, 'buyer', 'buyer-nonces.jsonl'), 'utf8')).trim()).toBe('');
     const keyLines = (await readFile(join(dir, 'buyer', 'access-keys.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
-    expect(keyLines).toMatchObject([{ type: 'make', spent: '120' }]);
-    expect((await keys.list())[0]).toMatchObject({ spent: '120', lastUsedAt: expect.any(Number) });
+    expect(keyLines).toMatchObject([{ type: 'make', spent: '240' }]);
+    expect((await keys.list())[0]).toMatchObject({ spent: '240', reserved: '0', lastUsedAt: expect.any(Number) });
     const restarted = new Gateway(gatewayDeps);
     await restarted.load();
     expect(await restarted.reconciliation(epoch)).toEqual({ epoch, final: true, rows });
@@ -598,6 +608,137 @@ describe('landing, reconciliation and pruning', () => {
     await vi.waitFor(() => expect(logs).toEqual([expect.stringMatching(/gateway tick failed: socket hang up/)]));
     await job.stop();
     await job.stop();
+  });
+
+  describe('a call whose outcome is not known', () => {
+    /** The seller serves each call sent and keeps its receipt, and the answer is lost on the way back. */
+    const losingAnswers = () => {
+      const send = gatewayDeps.send;
+      gatewayDeps.send = async (peer, payload, messageId) => {
+        await send(peer, payload, messageId);
+        throw new Error('the stream was reset');
+      };
+      return () => { gatewayDeps.send = send; };
+    };
+    const keyOf = async (all: AccessKeys, keyId: string) => (await all.list()).find((k) => k.keyId === keyId)!;
+
+    it('stays held at its most and reserved against its key, through a restart, so no new call passes the budget', async () => {
+      await setUp();
+      // A call may cost 620 wei and costs 120; the key's budget fits one call's most, not two.
+      const { key } = await keys.make({ label: 'tight', budget: 1_000n, services: null, rps: 1_000, expiresAt: null }, 0);
+      const subscriptionId = subscriptionIdOf(NODE.address, (await chain.getEpochTimes()).epoch);
+      const answered = losingAnswers();
+      expect(await gateway.chatCompletion({ key }, CHAT)).toMatchObject({ status: 503, body: { error: { code: 'seller_unreachable' } } });
+      answered();
+      expect(seller.ledger.inState('served')).toHaveLength(1);
+      expect(gateway.heldValue(subscriptionId, 0)).toBe(620n);
+      expect(await keyOf(keys, key.keyId)).toMatchObject({ spent: '0', reserved: '620' });
+      // A restart, with the keys read again from disk, keeps both.
+      const restarted = new Gateway({ ...gatewayDeps, keys: new AccessKeys(join(dir, 'buyer')) });
+      await restarted.load();
+      expect(restarted.heldValue(subscriptionId, 0)).toBe(620n);
+      expect(await keyOf(restarted.keys, key.keyId)).toMatchObject({ spent: '0', reserved: '620' });
+      // A new request, once the router takes the seller again after its ten minutes out, cannot take the key past
+      // its budget; a key with room is served, and the held value counts both calls.
+      routerSkew = UNREACHABLE_MS;
+      expect(body(await restarted.chatCompletion({ key }, CHAT)).error.code).toBe('key_budget');
+      expect((await restarted.chatCompletion(caller, CHAT)).status).toBe(200);
+      expect(restarted.heldValue(subscriptionId, 0)).toBe(740n);
+    });
+
+    it('is settled at what its seller landed once the epoch is final, and one the seller never got at nothing', async () => {
+      await setUp();
+      const { key } = await keys.make({ label: 'calls', budget: 10_000n, services: null, rps: 1_000, expiresAt: null }, 0);
+      const subscriptionId = subscriptionIdOf(NODE.address, (await chain.getEpochTimes()).epoch);
+      const answered = losingAnswers();
+      expect((await gateway.chatCompletion({ key }, CHAT)).status).toBe(503);
+      answered();
+      // Ten minutes on, a call that never reaches the seller.
+      routerSkew = UNREACHABLE_MS;
+      const send = gatewayDeps.send;
+      gatewayDeps.send = async () => { throw new Error('the dial failed'); };
+      expect((await gateway.chatCompletion({ key }, CHAT)).status).toBe(503);
+      gatewayDeps.send = send;
+      expect(gateway.heldValue(subscriptionId, 0)).toBe(1_240n);
+      // The seller lands its receipt: the tick takes that call out of the held value, as the chain counts it now.
+      laterBy(31);
+      await landAll();
+      await gateway.tick();
+      expect(gateway.heldValue(subscriptionId, 0)).toBe(620n);
+      expect(await keyOf(keys, key.keyId)).toMatchObject({ spent: '0', reserved: '1240' });
+      // Final: the one that landed costs what its seller landed beyond the receipts the node holds, the other nothing.
+      mock.__advanceEpoch();
+      mock.__advanceEpoch();
+      await gateway.tick();
+      expect(await keyOf(keys, key.keyId)).toMatchObject({ spent: '120', reserved: '0' });
+    });
+
+    it('that landed is paid at its most when what landed does not show it', async () => {
+      await setUp();
+      const answered = losingAnswers();
+      expect((await call()).status).toBe(503);
+      answered();
+      laterBy(31);
+      await landAll();
+      vi.spyOn(chain, 'listReceiptsLanded').mockResolvedValue({ groups: [], toBlock: 0 });
+      mock.__advanceEpoch();
+      mock.__advanceEpoch();
+      await gateway.tick();
+      expect(await keyOf(keys, caller.key.keyId)).toMatchObject({ spent: '620', reserved: '0' });
+    });
+
+    it('is settled at the receipt its seller stored when the messenger lost the first answer', async () => {
+      await setUp();
+      const subscriptionId = subscriptionIdOf(NODE.address, (await chain.getEpochTimes()).epoch);
+      const completions = vi.spyOn(backend, 'complete');
+      const send = gatewayDeps.send;
+      gatewayDeps.send = async (peer, payload, messageId) => {
+        const answer = await send(peer, payload, messageId);
+        return messageId.endsWith(':0') ? new TextEncoder().encode('RESPONSE_GONE') : answer;
+      };
+      expect((await call()).status).toBe(200);
+      // The repeat was answered from the seller's ledger.
+      expect(completions).toHaveBeenCalledTimes(1);
+      expect(gateway.heldValue(subscriptionId, 0)).toBe(120n);
+      expect(await keyOf(keys, caller.key.keyId)).toMatchObject({ spent: '120', reserved: '0' });
+    });
+
+    it('was not kept by journals from before: their held receipts count as before', async () => {
+      await setUp();
+      const subscriptionId = subscriptionIdOf(NODE.address, (await chain.getEpochTimes()).epoch);
+      expect((await call()).status).toBe(200);
+      const file = join(dir, 'buyer', 'buyer-receipts.jsonl');
+      const lines = (await readFile(file, 'utf8')).trim().split('\n').filter((l) => JSON.parse(l).type !== 'pending');
+      await writeFile(file, `${lines.join('\n')}\n`);
+      const restarted = new Gateway(gatewayDeps);
+      await restarted.load();
+      expect(restarted.heldValue(subscriptionId, 0)).toBe(120n);
+    });
+
+    it("is released by its seller's refusal of its first sending, and stays held when refused after a lost answer", async () => {
+      await setUp();
+      const subscriptionId = subscriptionIdOf(NODE.address, (await chain.getEpochTimes()).epoch);
+      tamper = () => ({ ok: false, code: 'UpstreamError', retry: true });
+      expect(body(await call())).toMatchObject({ sellerCode: 'UpstreamError' });
+      expect(gateway.heldValue(subscriptionId, 0)).toBe(0n);
+      expect(await keyOf(keys, caller.key.keyId)).toMatchObject({ spent: '0', reserved: '0' });
+      const restarted = new Gateway(gatewayDeps);
+      await restarted.load();
+      expect(restarted.heldValue(subscriptionId, 0)).toBe(0n);
+      // The seller served the first sending, the messenger lost its answer, and the repeat is refused: that says
+      // nothing of what the first answered, so the call stays held and reserved.
+      tamper = undefined;
+      routerSkew = UNREACHABLE_MS;
+      const send = gatewayDeps.send;
+      gatewayDeps.send = async (peer, payload, messageId) => {
+        if (!messageId.endsWith(':0')) return encodeMessage({ ok: false, code: 'Unavailable', retry: true });
+        await send(peer, payload, messageId);
+        return new TextEncoder().encode('RESPONSE_GONE');
+      };
+      expect(body(await call())).toMatchObject({ sellerCode: 'Unavailable' });
+      expect(gateway.heldValue(subscriptionId, 0)).toBe(620n);
+      expect(await keyOf(keys, caller.key.keyId)).toMatchObject({ reserved: '620' });
+    });
   });
 
   it('keeps a revocation and an open reservation when it folds the keys', async () => {
