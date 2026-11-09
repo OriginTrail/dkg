@@ -7,9 +7,10 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, StoreSchedulerBusyError, type TripleStore } from '@origintrail-official/dkg-storage';
 import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
-import { AsyncLiftJobConflictError } from '@origintrail-official/dkg-publisher';
+import { AsyncLiftJobConflictError, TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publisher';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { beginAsyncAdmissionTrace } from '../src/daemon/async-admission-trace.js';
 import { daemonState } from '../src/daemon/state.js';
@@ -149,6 +150,55 @@ describe('async admission outcomes by route and phase', () => {
   const intent = { shareOperationId: 'op-1', contentScopeVersion: 'v', kaUal: 'did:dkg:x/1', intentKey: 'k' };
 
   describe('share_async', () => {
+    it('cancels the real agent queue when HTTP closes during admission, without a late job', async () => {
+      let release!: () => void, entered!: () => void;
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const waiting = new Promise<void>(resolve => { entered = resolve; });
+      const inner = new OxigraphStore();
+      let admissionSignal: AbortSignal | undefined;
+      const store = new Proxy(inner, { get(target, prop) {
+        if (prop === 'query') return async (...args: Parameters<TripleStore['query']>) => {
+          if (args[1]?.source === 'publisher.asyncPromote.findActiveConflict') {
+            entered(); await held;
+          }
+          return target.query(...args);
+        };
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      } }) as TripleStore;
+      const queue = new TripleStoreAsyncPromoteQueue(store, { admissionTimeoutMs: 5_000 });
+      const enqueue = queue.enqueue.bind(queue);
+      vi.spyOn(queue, 'enqueue').mockImplementation((request, options) => {
+        admissionSignal = options?.signal;
+        return enqueue(request, options);
+      });
+      const agent = Object.assign(Object.create(DKGAgent.prototype), {
+        defaultAgentAddress: `0x${'11'.repeat(20)}`, _promoteQueue: queue,
+      }) as DKGAgent;
+      await start({ agent: { assertion: agent.assertion } });
+      const controller = new AbortController();
+      const response = fetch(`${baseUrl}/api/knowledge-assets/${NAME}/swm/share-async`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextGraphId: CG }), signal: controller.signal,
+      }).catch(error => error);
+      try {
+        try {
+          await waiting;
+          expect(admissionSignal?.aborted).toBe(false);
+          controller.abort();
+          await response;
+          await responseClosed;
+          expect(admissionSignal?.aborted).toBe(true);
+        } finally { release(); }
+        await routeFinished;
+        expect(await queue.list()).toEqual([]);
+      } finally {
+        release();
+        await routeFinished;
+        await inner.close();
+      }
+    });
+
     it('does not enqueue after the client disconnects during write preflight', async () => {
       let release!: () => void, entered!: () => void;
       const held = new Promise<void>(resolve => { release = resolve; });
