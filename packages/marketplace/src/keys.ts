@@ -13,7 +13,8 @@
  *   - A key's budget holds across its calls at once: each call reserves the
  *     most it may cost before it is sent, and is charged what it cost after.
  *     A call whose cost is not known yet (one its seller refused or never
- *     answered) keeps its reservation until the gateway knows.
+ *     answered) keeps its reservation until the gateway knows. A key shows
+ *     what its calls hold so (`reserved`) beside what they cost (`spent`).
  * Kept in a journal: makes, revocations, and what each call cost. The journal
  * is read once; the keys are kept in memory and every append updates them.
  * `compact` folds each key's calls into its total: the gateway's job runs it,
@@ -44,6 +45,11 @@ export interface AccessKey {
   label: string;
   budget: string;
   spent: string;
+  /**
+   * What its calls not yet settled hold of its budget, in wei: those in flight, and those whose cost is not known
+   * yet. What it has left is budget − spent − reserved.
+   */
+  reserved: string;
   services: string[] | null;
   rps: number;
   expiresAt: number | null;
@@ -63,7 +69,10 @@ type Entry =
   | { type: 'revoke'; keyId: string; at: number }
   | { type: 'use'; keyId: string; value: string; at: number };
 
-type Folded = { make: MakeEntry; key: AccessKey; hash: Buffer; revokedAt?: number };
+/** A key as the journal folds it: what it shows but `reserved`, which is read each time it is shown. */
+type KeptKey = Omit<AccessKey, 'reserved'>;
+
+type Folded = { make: MakeEntry; key: KeptKey; hash: Buffer; revokedAt?: number };
 
 export type KeyCheck =
   | { ok: true; key: AccessKey }
@@ -121,17 +130,17 @@ export class AccessKeys {
       type: 'make', keyId, hash: hashOf(secret).toString('hex'), label: scopes.label, budget: scopes.budget.toString(),
       services: scopes.services, rps: scopes.rps, expiresAt: scopes.expiresAt, at: now,
     });
-    return { secret, key: { ...(await this.keys()).get(keyId)!.key } };
+    return { secret, key: this.shown((await this.keys()).get(keyId)!.key) };
   }
 
   async revoke(keyId: string, now: number): Promise<AccessKey | null> {
     if (!(await this.keys()).has(keyId)) return null;
     await this.append({ type: 'revoke', keyId, at: now });
-    return { ...(await this.keys()).get(keyId)!.key };
+    return this.shown((await this.keys()).get(keyId)!.key);
   }
 
   async list(): Promise<AccessKey[]> {
-    return [...(await this.keys()).values()].map((k) => ({ ...k.key }));
+    return [...(await this.keys()).values()].map((k) => this.shown(k.key));
   }
 
   /**
@@ -142,7 +151,7 @@ export class AccessKeys {
   async check(secret: string | undefined, now: number): Promise<KeyCheck> {
     if (!secret) return { ok: false, status: 401, code: 'missing_key' };
     const presented = hashOf(secret);
-    let found: AccessKey | undefined;
+    let found: KeptKey | undefined;
     for (const { key, hash } of (await this.keys()).values()) {
       if (timingSafeEqual(presented, hash)) found = key;
     }
@@ -153,7 +162,7 @@ export class AccessKeys {
     const recent = (this.recent.get(found.keyId) ?? []).filter((t) => ms - t < 1_000);
     if (recent.length >= found.rps) return { ok: false, status: 429, code: 'key_rate' };
     this.recent.set(found.keyId, [...recent, ms]);
-    return { ok: true, key: { ...found } };
+    return { ok: true, key: this.shown(found) };
   }
 
   /**
@@ -183,6 +192,11 @@ export class AccessKeys {
   /** What the key's calls in flight, or whose cost is not known yet, may still cost. */
   reservedOf(keyId: string): bigint {
     return this.reserved.get(keyId) ?? 0n;
+  }
+
+  /** A key as the node API shows it: a copy, with what its calls not yet settled hold now. */
+  private shown(key: KeptKey): AccessKey {
+    return { ...key, reserved: this.reservedOf(key.keyId).toString() };
   }
 
   /** Book what a call cost against its key. */
