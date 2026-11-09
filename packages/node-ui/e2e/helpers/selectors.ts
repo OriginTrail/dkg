@@ -59,6 +59,7 @@ export const sel = {
     peerGroup: '.v10-peer-group',
     peerGroupHeader: '.v10-peer-group-header',
     peerGroupLabel: '.v10-peer-group-label',
+    peerGroupCount: '.v10-peer-group-count',
     peerGroupBody: '.v10-peer-group-body',
   },
 

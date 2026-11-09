@@ -25,6 +25,14 @@ export class LeftPanelPage {
       .locator(sel.leftPanel.section);
   }
 
+  /** The Public Graphs section alone: its header (with the count) and, while expanded, its body. */
+  publicGraphsSection() {
+    return this.root
+      .locator(sel.leftPanel.peerGroup)
+      .filter({ has: this.page.locator(sel.leftPanel.peerGroupLabel, { hasText: /^Public Graphs$/ }) })
+      .first();
+  }
+
   private memoryStackControl() {
     return this.root.locator(sel.leftPanel.dashboard).filter({ hasText: 'Memory Stack' });
   }

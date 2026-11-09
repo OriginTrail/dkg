@@ -39,16 +39,31 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     expect(await importFilesModal.isOpen()).toBe(true);
   });
 
-  test('Public Graphs expands and renders the catalogue', async ({ leftPanel, page }) => {
+  test('Public Graphs expands and renders the catalogue', async ({ leftPanel }) => {
     await leftPanel.switchToMode('oracle');
     expect((await leftPanel.getActiveMode())?.trim()).toContain('Public Graphs');
     // The catalogue renders EITHER discovered public CGs OR the empty-state
     // hint — both are valid on a real node depending on what's been synced.
-    const emptyState = page.getByText(/Discovered public graphs will appear here/i);
-    const catalogueRows = leftPanel.root.locator('.v10-tree-section');
+    // Only the Public Graphs section counts: My Context Graphs' rows share
+    // the row class.
+    const section = leftPanel.publicGraphsSection();
+    const body = section.locator(sel.leftPanel.peerGroupBody);
+    const rows = body.locator(sel.leftPanel.section);
+    const emptyState = body.locator(sel.leftPanel.emptyCard);
+    const count = section.locator(sel.leftPanel.peerGroupCount);
+    // As many rows as the header counts, or, with none, the empty state alone.
     await expect
-      .poll(async () => (await emptyState.isVisible().catch(() => false)) || (await catalogueRows.count()) > 0)
+      .poll(async () => {
+        const [counted, listed, empty] = await Promise.all([count.textContent(), rows.count(), emptyState.count()]);
+        return Number(counted) === listed && (listed > 0 ? empty === 0 : empty === 1);
+      })
       .toBe(true);
+    if ((await rows.count()) > 0) {
+      for (const row of await rows.all()) await expect(row).toBeVisible();
+    } else {
+      await expect(emptyState).toBeVisible();
+      await expect(emptyState).toContainText(/Discovered public graphs will appear here/i);
+    }
   });
 
   test('expanding Public Graphs keeps the My Context Graphs list available', async ({ leftPanel }) => {
