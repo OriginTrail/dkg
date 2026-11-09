@@ -30,8 +30,10 @@ function options(f) {
   f.client.programs.invoke = async value => { const result = await invoke(value); rawOutputs = result.rawOutputs; return result; };
   f.client.programs.listApprovals = async () => [];
   f.config.programBindings = catalog.map(c => ({ operationIri: c.kaRef, contextGraphId: graphId, enabled: true,
-    program: { sourceHash: c.sourceHash }, n8n: {} }));
-  for (const c of catalog) f.sources.set(c.kaRef, { programIri: c.kaRef, sourceHash: c.sourceHash, source: '', version: '1' });
+    executorAgentAddress: owner, allowedCallerAgentAddresses: [owner],
+    program: { contextGraphId: graphId, programIri: c.kaRef, programLayer: 'wm', authorAgentAddress: owner, sourceHash: c.sourceHash }, n8n: {} }));
+  for (const binding of f.config.programBindings) f.approvals.set(binding.operationIri, { binding: structuredClone(binding) });
+  for (const c of catalog) f.sources.set(c.kaRef, { programIri: c.kaRef, sourceHash: c.sourceHash, source: '', version: '1', authorAgentAddress: owner });
   return { graphId, owner, config: f.config, client: f.client, definitions: catalog, exportTokenFile: f.exportTokenFile,
     studioOptions: { state: f.state, headerCredential: { id: 'fixture-header', name: 'Fixture' }, credentials: {}, fetchImpl: f.fetchImpl },
     agent: { query: async query => ({ bindings: query.includes('orderedOutputs')
@@ -161,7 +163,7 @@ test('internal DKG callback route rejects credentials, Origin, methods and overs
     writeFileSync(h.f.config.n8nNative.webhookTokenFile, nativeToken);
     assert.equal((await h.send({ ...h.value, items: [{ text: 'x'.repeat(16384) }] })).status, 413);
     assert.deepEqual(h.effects, []); assert.equal(h.f.calls.length, calls);
-    assert.equal(h.f.provider.db.prepare('SELECT count(*) AS n FROM dkg_component_calls').get().n, 0);
+    assert.equal(h.f.repository.db.prepare('SELECT count(*) AS n FROM dkg_component_calls').get().n, 0);
     assert.equal((await h.send(h.value)).status, 200);
     assert.equal((await h.send(h.value)).status, 200);
     assert.deepEqual(h.effects, ['read']);
@@ -210,7 +212,7 @@ test('DKG callback requires recorded grant input and one durable native executio
     assert.equal((await h.send(write)).status, 200);
     assert.equal((await h.send(write)).status, 200);
     assert.deepEqual(h.effects, ['read', 'write']);
-    h.f.provider.db.prepare('DELETE FROM dkg_component_native_executions').run();
+    h.f.repository.db.prepare('DELETE FROM dkg_component_native_executions').run();
     assert.equal((await h.send(write)).status, 409, 'legacy calls cannot acquire a replacement execution binding');
   } finally { h.close(); }
 });
@@ -232,7 +234,7 @@ test('provider callback verification refuses changed execution, publication and 
       h.f.executions.set(h.value.executionId, e); h.f.native.set(h.value.workflowId, w);
       assert.equal((await h.send(h.value)).status, 400);
       assert.deepEqual(h.effects, []);
-      assert.equal(h.f.provider.db.prepare('SELECT count(*) AS n FROM dkg_component_calls').get().n, 0);
+      assert.equal(h.f.repository.db.prepare('SELECT count(*) AS n FROM dkg_component_calls').get().n, 0);
     }
     h.f.executions.set(h.value.executionId, execution); h.f.native.set(h.value.workflowId, installed);
     assert.equal((await h.send(h.value)).status, 200); assert.deepEqual(h.effects, ['read']);
@@ -254,13 +256,13 @@ test('account bridge denies unauthorized runs and journals the authenticated own
       { ...value, kaRef: selected.kaRef, sourceHash: selected.sourceHash })).status, 403);
     assert.equal((await request(bridge, prefix.replace(accountId, 'foreign') + '/run', 'POST', headers, value)).status, 403);
     assert.equal(f.invocations.length, 0);
-    assert.equal(f.provider.db.prepare('SELECT count(*) AS n FROM dkg_component_runs').get().n, 0);
+    assert.equal(f.repository.db.prepare('SELECT count(*) AS n FROM dkg_component_runs').get().n, 0);
     const view = await request(bridge, prefix, 'GET', { ...headers, 'x-nos-workflows-role': 'viewer' });
     assert.equal(view.status, 200); assert.equal(view.body.canInvoke, false);
     const result = await request(bridge, prefix + '/run', 'POST', headers, value);
     assert.equal(result.status, 200, JSON.stringify(result.body)); assert.equal(result.body.readbackVerified, true);
     assert.equal(f.invocations.length, 1); assert.equal(f.invocations[0].invocationId, invocationId);
-    assert.deepEqual(JSON.parse(f.provider.db.prepare('SELECT actor FROM dkg_component_actors WHERE id=?').get(invocationId).actor),
+    assert.deepEqual(JSON.parse(f.repository.db.prepare('SELECT actor FROM dkg_component_actors WHERE id=?').get(invocationId).actor),
       { id: 'owner-one', accountId, role: 'owner' });
     const changedActor = await request(bridge, prefix + '/run', 'POST', { ...headers, 'x-nos-workflows-principal': 'owner-two' }, value);
     assert.notEqual(changedActor.status, 200); assert.equal(f.invocations.length, 1);
@@ -292,10 +294,10 @@ test('rejected account adoption leaves legacy state reopenable; successful adopt
   try {
     const workflow = await f.service.save(definition(['schedule', 'edit-fields'], [[0,0,1,0]]), () => {});
     await f.service.activate({ kaRef: workflow.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const before = f.provider.row(workflow.kaRef), marker = join(f.state, 'nos-account.json');
+    const before = f.repository.row(workflow.kaRef), marker = join(f.state, 'nos-account.json');
     assert.throws(() => createCapabilityBridge(options(f)), /Deactivate legacy schedules/);
     assert.equal(existsSync(marker), false);
-    assert.deepEqual(f.provider.row(workflow.kaRef), before);
+    assert.deepEqual(f.repository.row(workflow.kaRef), before);
     legacyReopen(f, false);
     await f.service.activate({ kaRef: workflow.kaRef, active: false, activationId: randomUUID() }, () => {});
     bridge = createCapabilityBridge(options(f));

@@ -1,9 +1,11 @@
+import { dkgComponentStore } from '../dkg-components.mjs';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { componentRegistry, component } from '../component-registry.mjs';
 import { readStudio } from '../studio-definition.mjs';
+import { createStudioRepository } from '../studio-repository.mjs';
 import { createStudioProvider } from '../studio-provider.mjs';
 import { createStudioService } from '../studio-service.mjs';
 export const graphId='n8n-capability-poc', owner='0x'+'1'.repeat(40);
@@ -33,7 +35,8 @@ export function environment() {
     if(action==='unpublish'){w.active=false;delete w.activeVersion;return Response.json(w);}
     return Response.json(w);
   };
-  const openProvider=()=>createStudioProvider({state,config,graphId,owner,headerCredential:{id:'fixture-header',name:'Fixture'},credentials:{},fetchImpl});
+  let repository=createStudioRepository(state);
+  const openProvider=()=>createStudioProvider({repository,config,graphId,owner,headerCredential:{id:'fixture-header',name:'Fixture'},credentials:{},fetchImpl});
   let provider=openProvider();
   const sources=new Map(), approvals=new Map(),outputs=new Map(),invocations=[]; let inventory=catalog, catalogFailure;
   const client={programs:{
@@ -45,8 +48,8 @@ export function environment() {
       const value={kind:'n8n-result',n8nExecutionId:'42',workflowSha256:c.grant.workflowSha256,output:{ok:true,itemsJson:v.inputs[0].itemsJson,portsJson:'{}',error:'',traceJson:JSON.stringify(c.grant.result.traceNodes.map(node=>({node,status:'completed',items:[1],outputHash:'a'.repeat(64)})))}};
       const executionIri='urn:sr:execution:'+v.invocationId,rawOutputs=[JSON.stringify(value)];outputs.set(executionIri,rawOutputs);return {...v,executionIri,rawOutputs,outputs:[value],persisted:true};},
   }};
-  const openService=()=>createStudioService({graphId,owner,client,provider,exportTokenFile,listCapabilities:async()=>{if(catalogFailure){const error=catalogFailure;catalogFailure=undefined;throw error;}return inventory;},loadOutputs:async iri=>outputs.get(iri)});
+  const openService=()=>createStudioService({graphId,owner,client,repository,provider,dkg:dkgComponentStore(repository.db),exportTokenFile,listCapabilities:async()=>{if(catalogFailure){const error=catalogFailure;catalogFailure=undefined;throw error;}return inventory;},loadOutputs:async iri=>outputs.get(iri)});
   let service=openService();
-  return {state,get provider(){return provider;},get service(){return service;},restart(){service.stop();provider.close();provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,fetchImpl,setExecutionPage:ids=>{executionPage=ids;},setCatalog:v=>{inventory=v;},failNextCatalog:error=>{catalogFailure=error;},loseNextCreate:()=>{loseCreate=true;},
-    close(){service.stop();provider.close();rmSync(state,{recursive:true,force:true});}};
+  return {state,get repository(){return repository;},get provider(){return provider;},get service(){return service;},restart(){service.stop();repository.close();repository=createStudioRepository(state);provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,fetchImpl,setExecutionPage:ids=>{executionPage=ids;},setCatalog:v=>{inventory=v;},failNextCatalog:error=>{catalogFailure=error;},loseNextCreate:()=>{loseCreate=true;},
+    close(){service.stop();repository.close();rmSync(state,{recursive:true,force:true});}};
 }

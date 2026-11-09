@@ -7,6 +7,8 @@ import { Readable } from 'node:stream';
 process.env.NOS_DKG_PROFILE_MODULE = fileURLToPath(new URL('./measurement-profile.mjs', import.meta.url));
 const { default: profile, measurements } = await import('./measurement-profile.mjs');
 const { componentRegistry, component } = await import('../component-registry.mjs');
+const { dkgComponentStore } = await import('../dkg-components.mjs');
+const { createStudioRepository } = await import('../studio-repository.mjs');
 const { createStudioProvider } = await import('../studio-provider.mjs');
 const { createStudioService } = await import('../studio-service.mjs');
 const { handleDkgComponentCallback } = await import('../bridge.mjs');
@@ -115,16 +117,18 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
       throw new Error('inspection unavailable after sealed write');
     return fetchImpl(url, options);
   };
+  let repository;
   function open() {
-    provider = createStudioProvider({ state, config, graphId, owner,
+    repository = createStudioRepository(state);
+    provider = createStudioProvider({ repository, config, graphId, owner,
       headerCredential: { id: 'test-header', name: 'Test header' }, credentials: {}, fetchImpl });
-    service = createStudioService({ graphId, owner, provider, client, loadOutputs, listCapabilities: async () => catalog });
+    service = createStudioService({ graphId, owner, repository, provider, dkg: dkgComponentStore(repository.db), client, loadOutputs, listCapabilities: async () => catalog });
   }
   open();
   return { definition, actor, controls, effects, assets, native, executions, runtimeFetch, profile,
     requestFor, get service() { return service; }, get provider() { return provider; },
-    reopen() { service.stop(); provider.close(); open(); },
-    close() { service.stop(); provider.close(); Object.assign(profile, original); },
+    reopen() { service.stop(); repository.close(); open(); },
+    close() { service.stop(); repository.close(); Object.assign(profile, original); },
   };
 }
 

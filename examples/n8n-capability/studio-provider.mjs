@@ -1,14 +1,11 @@
 import { readFileSync } from 'node:fs';
-import { createStudioRepository } from './studio-repository.mjs';
-import { createHash } from 'node:crypto';
 import { compileStudio } from './studio-definition.mjs';
 import { nativeTimerEvents } from './studio-native-events.mjs';
 import { readNativeExecutionInput } from './studio-native-execution.mjs';
 import { n8nWorkflowSha256, n8nResultSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 
 /** The operator owns provisioning. Neither this API key nor credential data reaches a KA or browser. */
-export function createStudioProvider({ state, config, graphId, owner, headerCredential, credentials, fetchImpl = fetch }) {
-  const repository = createStudioRepository(state), { db, row } = repository;
+export function createStudioProvider({ repository, config, graphId, owner, headerCredential, credentials, fetchImpl = fetch }) {
   const error = message => Object.assign(new Error(message), { status: 409, code: 'INVALID_WORKFLOW' });
   async function api(path, method = 'GET', body) {
     const installation = config.n8nNative;
@@ -29,12 +26,12 @@ export function createStudioProvider({ state, config, graphId, owner, headerCred
     if (!current) { if (flows.length >= 64) throw error('The native installation inventory is full.');
       flows.push({ contextGraphId: graphId, executorAgentAddress: owner, workflowId: grant.workflowId, workflowSha256: grant.workflowSha256, resultSha256 }); }
   };
-  for (const saved of db.prepare('SELECT grant_json FROM workflows WHERE grant_json IS NOT NULL').all()) installGrant(JSON.parse(saved.grant_json));
   async function provision(definition) {
     let compiled = compileStudio(definition, { graphId, owner, headerCredential, credentials });
     if (!compiled.workflow || !compiled.grant?.toolIri) throw error('Native provisioning requires an n8n execution plan.');
-    let saved = repository.ensure(compiled);
-    if (!saved.provider_id) {
+    repository.ensure(compiled);
+    let saved = repository.nativeRevision(compiled.kaRef);
+    if (!saved.providerId) {
       let cursor, found = [];
       for (let page = 0; page < 8; page++) {
         const list = await api('/workflows?limit=10&excludePinnedData=true&name=' + encodeURIComponent(compiled.workflowName) + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
@@ -46,38 +43,35 @@ export function createStudioProvider({ state, config, graphId, owner, headerCred
       let created = found[0];
       if (!created) {
         if (saved.creating) throw error('An earlier create request is unconfirmed. Its identity is retained for reconciliation.');
-        db.prepare('UPDATE workflows SET creating=1 WHERE ka_ref=?').run(compiled.kaRef);
+        repository.beginNativeCreate(compiled.kaRef);
         created = await api('/workflows', 'POST', compiled.workflow);
       }
       if (typeof created.id !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(created.id)) throw error('Native graph identity is invalid.');
-      db.prepare('UPDATE workflows SET provider_id=?, creating=0 WHERE ka_ref=?').run(created.id, compiled.kaRef);
-      saved = row(compiled.kaRef);
+      saved = repository.nativeCreated(compiled.kaRef, created.id);
     }
-    compiled = compileStudio(definition, { graphId, owner, headerCredential, credentials, providerId: saved.provider_id });
-    let native = await api('/workflows/' + saved.provider_id);
-    if (!saved.grant_json) {
+    compiled = compileStudio(definition, { graphId, owner, headerCredential, credentials, providerId: saved.providerId });
+    let native = await api('/workflows/' + saved.providerId);
+    if (!saved.grant) {
       // A newly allocated workflow has no publication or callers. Fix its scoped trigger before publishing it.
       if (native.active) throw error('An unreviewed native graph was published outside this service.');
-      native = await api('/workflows/' + saved.provider_id, 'PUT', compiled.workflow);
+      native = await api('/workflows/' + saved.providerId, 'PUT', compiled.workflow);
       const grant = { ...compiled.grant, workflowSha256: n8nWorkflowSha256(native) };
-      db.prepare('UPDATE workflows SET grant_json=? WHERE ka_ref=?').run(JSON.stringify(grant), compiled.kaRef);
-      saved = row(compiled.kaRef);
+      saved = repository.nativeGranted(compiled.kaRef, grant);
     }
-    const grant = JSON.parse(saved.grant_json);
+    const grant = saved.grant;
     if (n8nWorkflowSha256(native.activeVersion ? { ...native.activeVersion, settings: native.settings } : native) !== grant.workflowSha256) throw error('The native graph differs from the saved revision.');
     installGrant(grant);
-    if (compiled.mode !== 'schedule' && !native.active) await api('/workflows/' + saved.provider_id + '/publish', 'POST', {});
+    if (compiled.mode !== 'schedule' && !native.active) await api('/workflows/' + saved.providerId + '/publish', 'POST', {});
     return { ...compiled, grant };
   }
   async function setPublished(ref, active) {
-    const saved = row(ref); if (!saved?.grant_json) throw error('Save this graph first.');
-    const native = await api('/workflows/' + saved.provider_id);
-    const grant = JSON.parse(saved.grant_json);
+    const saved = repository.nativeRevision(ref); if (!saved?.grant) throw error('Save this graph first.');
+    const native = await api('/workflows/' + saved.providerId);
+    const grant = saved.grant;
     if (n8nWorkflowSha256(native.activeVersion ? { ...native.activeVersion, settings: native.settings } : native) !== grant.workflowSha256) throw error('The native graph revision changed.');
-    if (!!native.active !== active) await api('/workflows/' + saved.provider_id + (active ? '/publish' : '/unpublish'), 'POST', {});
+    if (!!native.active !== active) await api('/workflows/' + saved.providerId + (active ? '/publish' : '/unpublish'), 'POST', {});
   }
-  const fingerprint = path => createHash('sha256').update(readFileSync(path, 'utf8').trim()).digest('hex');
   const timerEvents = options => nativeTimerEvents(api, { ...options, graphId, owner });
   const executionInput = options => readNativeExecutionInput(api, options);
-  return { repository, db, row, api, provision, setPublished, fingerprint, installGrant, timerEvents, executionInput, close: repository.close };
+  return { provision, setPublished, installGrant, timerEvents, executionInput };
 }

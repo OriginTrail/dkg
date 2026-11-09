@@ -315,12 +315,14 @@ test("native lookup filters names and fails closed if pagination is incomplete",
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { createStudioProvider } = await import("./studio-provider.mjs");
+  const { createStudioRepository } = await import("./studio-repository.mjs");
   const dir = mkdtempSync(join(tmpdir(), "jpb-provider-"));
   const tokenFile = join(dir, "test-token");
   writeFileSync(tokenFile, "test-only");
   let requests = 0;
+  const repository = createStudioRepository(dir);
   const provider = createStudioProvider({
-    state: dir,
+    repository,
     graphId: "g",
     owner: "a",
     headerCredential: { id: "ref", name: "ref" },
@@ -344,7 +346,7 @@ test("native lookup filters names and fails closed if pagination is incomplete",
     await assert.rejects(provider.provision(def), /lookup is incomplete/);
     assert.equal(requests, 8);
   } finally {
-    provider.close();
+    repository.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

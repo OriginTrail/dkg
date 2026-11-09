@@ -8,13 +8,18 @@ import { randomUUID } from 'node:crypto';
 import { createCapabilityBridge } from '../../../examples/n8n-capability/bridge.mjs';
 import { component } from '../../../examples/n8n-capability/component-registry-v1.mjs';
 
+const owner = '0x' + '1'.repeat(40);
+const approval = (graphId, kaRef, sourceHash) => ({ binding: { contextGraphId: graphId, operationIri: kaRef, enabled: true,
+  executorAgentAddress: owner, allowedCallerAgentAddresses: [owner], n8n: {},
+  program: { contextGraphId: graphId, programIri: kaRef, programLayer: 'wm', sourceHash, authorAgentAddress: owner } } });
+
 test('invalid inputs on a retired leaf give a confirmed upgrade error before dispatching n8n', async () => {
   const state = mkdtempSync(join(tmpdir(), 'retired-ka-unit-'));
   const graphId = 'n8n-capability-poc', kaRef = 'urn:demo:n8n:component:http-request:e360cc6e6621', sourceHash = 'a'.repeat(64);
   let dispatched = 0;
   const bridge = createCapabilityBridge({ graphId, owner: '0x' + '1'.repeat(40),
     agent: { async query() { return { bindings: [{ program: kaRef }] }; } },
-    client: { programs: { async getSource() { return { sourceHash, label: 'HTTP Request', version: '1.0.0' }; },
+    client: { programs: { getApproval: async () => approval(graphId, kaRef, sourceHash), async getSource() { return { sourceHash, authorAgentAddress: owner, label: 'HTTP Request', version: '1.0.0' }; },
       async invoke() { dispatched++; throw Error('outcome-unknown'); } } },
     config: { programBindings: [{ contextGraphId: graphId, operationIri: kaRef, enabled: true, program: { sourceHash }, n8n: {} }],
       n8nNative: { workflows: [] } },
@@ -48,7 +53,7 @@ for (const id of ['google-sheets', 'google-drive']) for (const route of ['/invok
     let dispatches = 0;
     const bridge = createCapabilityBridge({ graphId, owner: '0x' + '1'.repeat(40), exportTokenFile: tokenFile,
       agent: { query: async () => ({ bindings: [{ program: kaRef }] }) },
-      client: { programs: { getSource: async () => ({ sourceHash, version: '1' }), invoke: async () => { dispatches++; throw Error('fixture-stop'); } } },
+      client: { programs: { getApproval: async () => approval(graphId, kaRef, sourceHash), getSource: async () => ({ sourceHash, authorAgentAddress: owner, version: '1' }), invoke: async () => { dispatches++; throw Error('fixture-stop'); } } },
       config: { programBindings: [{ contextGraphId: graphId, operationIri: kaRef, enabled: true, program: { sourceHash }, n8n: {} }], n8nNative: { workflows: [] } },
       definitions: [{ kind: 'component', kaRef, descriptor, enabled: true, requiresExportAuthorization: true }],
       studioOptions: { state, headerCredential: { id: 'unit', name: 'Unit' }, credentials: {} } });

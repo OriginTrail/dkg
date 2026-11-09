@@ -8,7 +8,7 @@ import { compileStudio, readStudio, studioProgramSource, normalizeStudio, valida
 import { programWorkflowReceipt } from './program-workflow-receipt.mjs';
 import { createProgramCatalog } from './program-catalog.mjs';
 import { programRecords } from './program-block.mjs';
-import { createStudioProvider } from './studio-provider.mjs';
+import { createStudioRepository } from './studio-repository.mjs';
 import { createStudioService } from './studio-service.mjs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -170,22 +170,27 @@ for (const mixed of [false, true]) test(`Studio service saves and runs a ${mixed
       return { ...proof.result, executionIri };
     },
   } };
-  const provider = createStudioProvider({ state, config: {}, graphId, owner,
-    fetchImpl: async () => { throw new Error('Mixed workflows must not provision an n8n graph.'); } });
-  provider.provision = async () => { throw new Error('DKG execution must bypass native provisioning.'); };
+  let repository = createStudioRepository(state);
+  // Unrelated persisted native state must not require a native provider or installation.
+  repository.ensure({ kaRef: 'unrelated-native', workflowName: 'Native elsewhere' });
+  repository.nativeCreated('unrelated-native', 'native-elsewhere');
+  repository.nativeGranted('unrelated-native', { workflowId: 'native-elsewhere', workflowSha256: 'b'.repeat(64) });
   const nativeCapabilities = definition.nodes.filter(n => n.componentId !== 'run-program').map(n => ({ ...n, kind: 'component', available: true, descriptor: component(n.componentId) }));
-  const service = createStudioService({ graphId, owner, client, provider, listCapabilities: async () => [cap, ...nativeCapabilities], loadOutputs: async iri => receipts.get(iri) });
+  const openService = () => createStudioService({ graphId, owner, client, repository, listCapabilities: async () => [cap, ...nativeCapabilities], loadOutputs: async iri => receipts.get(iri) });
+  let service = openService();
   try {
     const saved = await service.save(definition, () => { throw new Error('A pure Program does not need Google authorization.'); });
     assert.equal(saved.approved, true);
     assert.deepEqual(uploads[0].requiredTools, []);
     assert.deepEqual(approvals.get(saved.kaRef).request.typescript.children, [...new Map(definition.nodes.map(n => [n.kaRef, { graphId, operationIri: n.componentId === 'run-program' ? n.params.operationIri : n.kaRef }])).values()]);
-    assert.equal(provider.row(saved.kaRef).grant_json, null);
-    assert.equal(provider.row(saved.kaRef).provider_id, null);
-    assert.equal(provider.row(saved.kaRef).executor, 'dkg-program');
+    assert.equal(repository.row(saved.kaRef).grant_json, null);
+    assert.equal(repository.row(saved.kaRef).provider_id, null);
+    assert.equal(repository.row(saved.kaRef).executor, 'dkg-program');
     assert.deepEqual(await service.save(definition, () => {}), saved);
     assert.equal(uploads.length, 1);
     assert.equal(approvals.get(saved.kaRef).request.n8n, undefined);
+    service.stop(); repository.close(); repository = createStudioRepository(state); service = openService();
+    assert.equal((await service.get(saved.kaRef)).workflow.sourceHash, saved.sourceHash);
     const request = { kaRef: saved.kaRef, sourceHash: saved.sourceHash, invocationId: randomUUID(), itemsJson: mixed ? '[{"incoming":{"number":7}}]' : '[{"value":7}]' };
     const receipt = await service.run(request, () => {});
     assert.equal(receipt.executor, 'dkg');
@@ -197,5 +202,5 @@ for (const mixed of [false, true]) test(`Studio service saves and runs a ${mixed
     cap = { ...cap, available: false };
     await assert.rejects(service.run({ ...request, invocationId: randomUUID() }, () => {}), /unavailable/);
     assert.equal(dispatches, 1);
-  } finally { service.stop(); provider.close(); rmSync(state, { recursive: true, force: true }); }
+  } finally { service.stop(); repository.close(); rmSync(state, { recursive: true, force: true }); }
 });

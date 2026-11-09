@@ -17,7 +17,7 @@ function fixture() {
     agent: { query: async query => ({ bindings: query.includes('orderedOutputs')
       ? rawOutputs.map(value => ({ g: `did:dkg:context-graph:${graphId}/_working_memory/${owner}/1`, output: { value } }))
       : [{ program: kaRef }] }) },
-    client: { programs: { getSource: async () => source, listApprovals: async () => [],
+    client: { programs: { getSource: async () => source, getApproval: async () => ({ binding: { contextGraphId: graphId, operationIri: kaRef, enabled: true, executorAgentAddress: owner, allowedCallerAgentAddresses: [owner], n8n: {}, program: { ...source, contextGraphId: graphId, programIri: kaRef, programLayer: 'wm' } } }), listApprovals: async () => [],
       invoke: async value => { calls.push({ handler: 'invoke', value }); return { ...value, executionIri: 'urn:execution:fixture', rawOutputs, outputs: [output], persisted: true }; } } },
     definitions: [{ kind: 'component', kaRef, descriptor }],
     config: { n8nNative: { workflows: [] }, programBindings: [{ contextGraphId: graphId, operationIri: kaRef, enabled: true, program: { sourceHash }, n8n: {} }] },

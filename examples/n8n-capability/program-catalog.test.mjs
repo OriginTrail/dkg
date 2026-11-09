@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createProgramCatalog } from './program-catalog.mjs';
-import { createStudioProvider } from './studio-provider.mjs';
+import { createStudioRepository } from './studio-repository.mjs';
 import { createStudioService } from './studio-service.mjs';
 
 function fixture(mode) {
@@ -51,8 +51,8 @@ test('cross-graph export protection gates actual Studio save and run before SDK 
   f.client.programs.upload=async value=>{uploads++;sources.set(value.programIri,{...value,authorAgentAddress:f.owner,sourceHash:createHash('sha256').update(value.source).digest('hex')});};
   f.client.programs.approve=async value=>approvals.set(value.operationIri,{binding:{enabled:true,program:value.program}});
   f.client.programs.invoke=async()=>{invokes++;throw new Error('fixture-dispatch');};
-  const provider=createStudioProvider({state,config:{n8nNative:{workflows:[]}},graphId:f.graphId,owner:f.owner});
-  const service=createStudioService({graphId:f.graphId,owner:f.owner,client:f.client,provider,listCapabilities:f.list,loadOutputs:async()=>[]});
+  const repository=createStudioRepository(state);
+  const service=createStudioService({graphId:f.graphId,owner:f.owner,client:f.client,repository,listCapabilities:f.list,loadOutputs:async()=>[]});
   const definition={id:randomUUID(),name:'Cross graph export',entryId:'program',nodes:[{id:'program',componentId:'run-program',kaRef:f.source.programIri,sourceHash:f.source.sourceHash,
     params:{operationIri:f.root.operationIri,version:'1.0.0',inputMode:'each-item',inputMapping:'{{ $json }}'},x:0,y:0}],edges:[]};
   const deny=()=>{throw new Error('export key required');};
@@ -62,5 +62,5 @@ test('cross-graph export protection gates actual Studio save and run before SDK 
     const request={kaRef:saved.kaRef,sourceHash:saved.sourceHash,itemsJson:'[{}]',invocationId:randomUUID()};
     await assert.rejects(service.run(request,deny),/export key required/);assert.equal(invokes,0);
     await assert.rejects(service.run(request,()=>{}),/fixture-dispatch/);assert.equal(invokes,1);
-  }finally{service.stop();provider.close();rmSync(state,{recursive:true,force:true});}
+  }finally{service.stop();repository.close();rmSync(state,{recursive:true,force:true});}
 });
