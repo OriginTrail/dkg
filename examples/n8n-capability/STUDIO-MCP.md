@@ -204,3 +204,39 @@ fixture and an explicit fictional read profile. They cover pins, authority
 headers, read-only rejection, changed arguments, concurrent reservation, restart,
 unknown acknowledgement, actual terminal release, owner/agent slot separation,
 withdrawal, bounded outputs and agent attribution on DKG callbacks.
+
+### Native n8n callback regression
+
+The callback binds its execution ID to the durable webhook acknowledgement and
+checks the saved workflow digest/version and execution structure. It does not
+require in-progress `Receive input` data: n8n normally persists that only when
+the execution finishes. A callback racing acknowledgement persistence waits up
+to two seconds; a lost acknowledgement stays unconfirmed and cannot authorize a
+DKG read. Terminal inspection still requires matching saved input evidence.
+Withdrawal validates the stored KA/digest even after the current profile changes.
+
+For a repeatable local smoke, start a **fresh, owned** n8n 2.43.8 instance with
+Node 24.22.0, a private state directory and unused loopback ports. Keep
+`EXECUTIONS_DATA_SAVE_ON_PROGRESS=false` (the default). For example:
+
+```sh
+N8N_USER_FOLDER=/tmp/mcp-smoke/engine N8N_PORT=51790 \
+  N8N_HOST=127.0.0.1 N8N_LISTEN_ADDRESS=127.0.0.1 N8N_PROTOCOL=http \
+  N8N_SECURE_COOKIE=false N8N_RUNNERS_BROKER_PORT=51792 \
+  N8N_DIAGNOSTICS_ENABLED=false EXECUTIONS_DATA_SAVE_ON_PROGRESS=false n8n start
+# In a second terminal, once n8n is ready:
+node examples/n8n-capability/setup-n8n.mjs /tmp/mcp-smoke http://127.0.0.1:51790
+node examples/n8n-capability/test-support/mcp-native-smoke.mjs /tmp/mcp-smoke
+```
+
+The smoke saves a fictional DKG Read workflow and pins its isolated callback
+address before publication. It allows native webhook registration to settle,
+then uses authenticated MCP HTTP admission, the real native runner and callback,
+and terminal readback. It requires absent in-progress input data, exactly one
+webhook POST/callback/DKG read, the expected two measurement rows and no redispatch
+on repeated admission. Results are written to `mcp-smoke-result.json` in the state
+directory; credentials are not included.
+
+Verified locally on 2026-11-09: the previous callback failed this smoke; the fix
+completed it with default progress saving disabled. DKG transport is a fictional
+profile. This does not prove the nOS gateway, a customer DKG node or deployment.

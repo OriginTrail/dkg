@@ -21,27 +21,53 @@ test('native DKG callback uses the admitted pins, typed profile and full agent a
     { graphId: 'test', owner: '0x' + 'a'.repeat(40), fixture: true, headerCredential: { id: 'test', name: 'test' }, providerId: 'native-read' });
   const published = { ...compiled.workflow, id: 'native-read', versionId: 'v1', active: true };
   const provider = createStudioProvider({ state, config: { n8nNative: { workflows: [] } }, graphId: 'test', owner: '0x' + 'a'.repeat(40) });
-  t.after(() => provider.close());
+  t.after(() => { if (provider.db.isOpen) provider.close(); });
   const runKey = '123e4567-e89b-42d3-a456-426614174088';
+  let inputEvidence;
   provider.api = async path => path.startsWith('/workflows') ? published : { id: '42', workflowId: 'native-read', workflowVersionId: 'v1', status: 'running', workflowData: published,
-    data: { resultData: { runData: { 'Receive input': [{ data: { main: [[{ json: { body: { invocationId: runKey } } }]] } }] } } } };
+    data: inputEvidence };
   // Test fixture installs the same durable saved record that a completed owner save writes.
   provider.db.prepare('INSERT INTO studio_saved_native (ka_ref,compiled_json,published_json) VALUES (?,?,?)')
     .run(compiled.kaRef, JSON.stringify(compiled), JSON.stringify(published));
   const actor = { id: 'owner', role: 'owner', accountId: 'account-test', startedBy: 'agent:a', agentVersion: 'v1', toolDigest: 'd'.repeat(64), approvalDecisionId: 'decision-1' };
+  let earlyCallback;
   const s = createStudioMcpService({ provider, accountId: actor.accountId, profile,
-    runner: { async prepare() { return 'v1'; }, async dispatch() { return '42'; }, async inspect() { return { status: 'running' }; } } });
+    runner: { async prepare() { return 'v1'; }, async dispatch() { earlyCallback = s.dkgComponent({ effectId: runKey, workflowId: 'native-read', executionId: '42', blockId: 'read', items: [{ sample: 'a' }] }); return '42'; }, async inspect() { return { status: 'running' }; } } });
   const input = { kaRef: compiled.kaRef, workflowSha256: compiled.grant.workflowSha256, runKey, arguments: { sample: 'a' } };
   await assert.rejects(s.run({ ...input, arguments: { sample: 'a" } UNION { ?s ?p ?o' } }, actor));
   assert.equal((await s.run(input, actor)).status, 'running');
   const callback = { effectId: runKey, workflowId: 'native-read', executionId: '42', blockId: 'read', items: [{ sample: 'a' }] };
-  const result = await s.dkgComponent(callback);
+  // Default n8n progress saving has no Receive input runData while running.
+  const result = await earlyCallback;
   assert.equal(result.items.length, 2); assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].context.actor, { ...actor, runKey });
   assert.equal(calls[0].operation, 'read');
   await assert.rejects(s.dkgComponent({ ...callback, executionId: '43' }));
   await assert.rejects(s.dkgComponent({ ...callback, blockId: 'write' }));
   await s.dkgComponent(callback); assert.equal(calls.length, 1); // retained read cache, no second node request
+  inputEvidence = { resultData: { runData: { 'Receive input': [{ data: { main: [[{ json: { body: { invocationId: 'foreign-run' } } }]] } }] } } };
+  await assert.rejects(s.dkgComponent(callback), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
+  inputEvidence = undefined;
+  provider.db.prepare("UPDATE studio_tool_runs SET execution_id=NULL, status='unconfirmed'").run();
+  await assert.rejects(s.dkgComponent(callback), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
+  provider.db.prepare("UPDATE studio_tool_runs SET execution_id='42', status='running'").run();
+  const revision = profile.revision;
   profile.revision = 'f'.repeat(64);
   await assert.rejects(s.dkgComponent(callback));
+  const pin = { kaRef: compiled.kaRef, workflowSha256: compiled.grant.workflowSha256 };
+  assert.throws(() => s.withdraw({ ...pin, workflowSha256: '0'.repeat(64) }, actor));
+  const owner = { id: actor.id, accountId: actor.accountId, role: 'owner' };
+  assert.throws(() => s.withdraw({ ...pin, workflowSha256: '0'.repeat(64) }, owner), { code: 'STUDIO_NATIVE_PIN_CHANGED' });
+  assert.equal(s.withdraw(pin, owner).approved, false);
+  profile.revision = revision;
+  provider.close();
+  const reopened = createStudioProvider({ state, config: { n8nNative: { workflows: [] } }, graphId: 'test', owner: '0x' + 'a'.repeat(40) });
+  t.after(() => reopened.close());
+  const restored = createStudioMcpService({ provider: reopened, accountId: actor.accountId, profile,
+    runner: { async inspect() { return { status: 'succeeded', output: { secret: 'retained' } }; } } });
+  assert.equal(restored.list(owner).length, 0);
+  await assert.rejects(restored.run({ ...input, runKey: 'new-run' }, actor), { code: 'STUDIO_WORKFLOW_WITHDRAWN' });
+  await assert.rejects(restored.dkgComponent(callback), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
+  assert.equal((await restored.readRun({ runKey }, actor)).output, undefined);
+  assert.equal(calls.length, 1);
 });

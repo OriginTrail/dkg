@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { canonical, closed, fail, hash, id, readOnlyDefinition, runInput } from './studio-mcp-contract.mjs';
 import { configuredDkgProfile } from './dkg-profile.mjs';
 import { dkgComponentStore } from './dkg-components.mjs';
@@ -129,23 +130,38 @@ export function createStudioMcpService({ provider, installation, accountId, prof
   function withdraw(value, actor) {
     actorCheck(actor);
     if (actor.startedBy) throw fail('STUDIO_MCP_FORBIDDEN', 403);
-    get(value, actor);
+    // Revocation uses the stored identity/pin, independently of today's profile
+    // eligibility. A changed or disabled profile must never prevent withdrawal.
+    if (!closed(value, ['kaRef', 'workflowSha256']) || !hash(value.workflowSha256)) throw fail('STUDIO_INVALID_PIN', 400);
+    if (saved(value.kaRef).grant.workflowSha256 !== value.workflowSha256) throw fail('STUDIO_NATIVE_PIN_CHANGED');
     db.prepare('UPDATE studio_saved_native SET withdrawn=1 WHERE ka_ref=?').run(value.kaRef);
     return { ...value, approved: false };
   }
   async function dkgComponent(value) {
-    const r = row(value?.effectId);
+    let r = row(value?.effectId);
     if (!r) return undefined; // Not a native MCP run: existing manual service handles it.
+    // Respond to Webhook precedes DKG Read. Its acknowledgement can race the
+    // callback, so briefly wait for the dispatcher to persist that exact ID.
+    // Missing/lost acknowledgements stay unconfirmed; no callback can adopt an ID.
+    for (let i = 0; !r.execution_id && r.status === 'unconfirmed' && i < 40; i++) {
+      await delay(50);
+      r = row(value.effectId);
+    }
     const workflow = saved(r.ka_ref);
     readOnlyDefinition(workflow.definition, profile);
     if (!['running', 'unconfirmed'].includes(r.status) || workflow.withdrawn
       || value.workflowId !== workflow.grant.workflowId || !/^\d{1,20}$/.test(value.executionId ?? '')
-      || r.execution_id && r.execution_id !== value.executionId) throw fail('STUDIO_NATIVE_UNCONFIRMED');
+      || r.execution_id !== value.executionId) throw fail('STUDIO_NATIVE_UNCONFIRMED');
     const execution = await provider.api('/executions/' + value.executionId + '?includeData=true');
     const received = execution.data?.resultData?.runData?.['Receive input']?.[0]?.data?.main?.[0]?.[0]?.json?.body;
-    if (String(execution.id) !== value.executionId || received?.invocationId !== r.run_key
+    // In-progress runData is absent with n8n's default progress-saving setting.
+    // The durable POST acknowledgement binds this execution to the admitted run;
+    // when input evidence is available, it must agree too. Terminal inspection
+    // still requires the saved Receive input evidence before exposing any result.
+    if (String(execution.id) !== value.executionId || received && received.invocationId !== r.run_key
       || !n8nPinnedExecutionMatches({ ...workflow.published, versionId: r.version_id }, execution, workflow.grant, r.version_id))
       throw fail('STUDIO_NATIVE_UNCONFIRMED');
+    if (saved(r.ka_ref).withdrawn) throw fail('STUDIO_WORKFLOW_WITHDRAWN');
     return dkg.call(value, { ...workflow, nativeMcp: true, sourceHash: workflow.grant.workflowSha256 }, value.workflowId);
   }
   return { list, get, run, readRun, withdraw, dkgComponent };

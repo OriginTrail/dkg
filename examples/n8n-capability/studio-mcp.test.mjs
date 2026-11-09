@@ -6,13 +6,13 @@ import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:http';
 import { createStudioProvider } from './studio-provider.mjs';
-import { compileStudio } from './studio-definition.mjs';
+import { compileStudio, normalizeStudio } from './studio-definition.mjs';
 import { createStudioMcpService } from './studio-mcp-service.mjs';
 import { createStudioMcpHttp, studioMcpFlags } from './studio-mcp-http.mjs';
 import { createStudioNativeRunner } from './studio-native-runner.mjs';
 import { loadNosStudioSession } from './nos-studio-session.mjs';
 import { readOnlyDefinition } from './studio-mcp-contract.mjs';
-import { componentRegistry } from './component-registry.mjs';
+import { componentRegistry, component } from './component-registry.mjs';
 import { createNosNodeClient } from './nos-node-transport.mjs';
 
 const owner = { id: 'person-one', role: 'owner', accountId: 'account-test' };
@@ -99,12 +99,18 @@ test('cross-worker reservation wins once, and failed native completion releases 
 });
 test('read-only admission uses an explicit list; no HTTP, file, wait, loop, subworkflow or Program', () => {
   const unsupported = componentRegistry.filter(d => ['Integrations', 'Files', 'Events'].includes(d.category)
-    || ['loop-items', 'execute-workflow'].includes(d.id));
+    || d.id === 'execute-workflow');
   for (const d of unsupported) {
     const params = Object.fromEntries(Object.entries(d.parameters).map(([key, p]) => [key, p.default]));
     const altered = { ...definition, nodes: [{ ...definition.nodes[0], componentId: d.id, kaRef: 'urn:demo:n8n:component:' + d.id + ':unit', params }] };
     assert.throws(() => readOnlyDefinition(altered, null));
   }
+  const loop = { ...definition, entryId: 'n0', nodes: ['loop-items', 'edit-fields', 'aggregate'].map((id, i) => ({
+    id: 'n' + i, componentId: id, kaRef: 'urn:demo:n8n:component:' + id + ':unit', sourceHash: 'a'.repeat(64), x: i * 200, y: 0,
+    params: Object.fromEntries(Object.entries(component(id).parameters).map(([k, p]) => [k, p.default])),
+  })), edges: [[0,1,1,0],[1,0,0,0],[0,0,2,0]].map(([a,output,b,input]) => ({ from:'n'+a, output, to:'n'+b, input })) };
+  assert.doesNotThrow(() => normalizeStudio(loop));
+  assert.throws(() => readOnlyDefinition(loop, null), { code: 'STUDIO_WORKFLOW_NOT_READ_ONLY' });
 });
 test('withdrawal suppresses retained output but still reconciles terminal capacity', async t => {
   const c = controllable(), f = await fixture(t, c.runner), s = f.service();
@@ -128,6 +134,14 @@ test('native HTTP dispatch checks acknowledgement and verifies exact execution/v
     { ...f.config.n8nNative, baseUrl: 'http://127.0.0.1:' + native.address().port });
   const workflow = { ...compiled, published };
   assert.equal(await runner.prepare(workflow), 'v1');
+  // Exercise the real preflight through admission: a changed published digest
+  // must fail before the HTTP webhook is posted.
+  published.nodes[0].parameters.unreviewed = true;
+  const service = createStudioMcpService({ provider: f.provider, installation: f.config.n8nNative,
+    accountId: owner.accountId, profile: null, runner });
+  assert.equal((await service.run(f.input('changed-native'), actor)).status, 'failed');
+  assert.equal(count, 0);
+  delete published.nodes[0].parameters.unreviewed;
   assert.equal(await runner.dispatch(workflow, 'native-run', { itemsJson: '[{}]' }), '42');
   const checkpoint = { execution_id: '42', version_id: 'v1' };
   execution = { id: '42', workflowId: 'native-one', status: 'running' };
@@ -155,6 +169,8 @@ test('HTTP MCP authenticates before dispatch, rejects browser/bearer/forged auth
   writeFileSync(secretFile, secret); const file = join(f.state, 'session.json');
   writeFileSync(file, JSON.stringify({ accountId: owner.accountId, controlPlaneUrl: 'http://127.0.0.1:4610', secretFile }));
   const session = loadNosStudioSession(file);
+  const defaultServer = createServer(createStudioMcpHttp({ service, session }));
+  await new Promise(resolve => defaultServer.listen(0, '127.0.0.1', resolve)); t.after(() => defaultServer.close());
   const server = createServer(createStudioMcpHttp({ service, session, agentEnabled: true }));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => server.close());
   const url = 'http://127.0.0.1:' + server.address().port;
@@ -164,6 +180,12 @@ test('HTTP MCP authenticates before dispatch, rejects browser/bearer/forged auth
     'x-nos-workflows-started-by': actor.startedBy, 'x-nos-workflows-agent-version': actor.agentVersion,
     'x-nos-workflows-tool-digest': actor.toolDigest, 'x-nos-workflows-approval-decision': actor.approvalDecisionId };
   const call = (method, params, h = headers) => fetch(url, { method: 'POST', headers: h, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+  const defaultUrl = 'http://127.0.0.1:' + defaultServer.address().port;
+  const listBody = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
+  assert.equal((await fetch(defaultUrl, { method: 'POST', headers, body: listBody })).status, 403);
+  const ownerHeaders = Object.fromEntries(Object.entries(headers).filter(([key]) =>
+    !['x-nos-workflows-started-by', 'x-nos-workflows-agent-version', 'x-nos-workflows-tool-digest', 'x-nos-workflows-approval-decision'].includes(key)));
+  assert.equal((await fetch(defaultUrl, { method: 'POST', headers: ownerHeaders, body: listBody })).status, 200);
   assert.equal((await (await call('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fixture', version: '1' } })).json()).result.serverInfo.name, 'nos-studio');
   // Exercise the actual MCP SDK transport, not just our JSON fixtures.
   const require = createRequire(new URL('../../packages/cli/package.json', import.meta.url));
