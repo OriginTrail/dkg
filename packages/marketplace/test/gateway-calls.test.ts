@@ -29,6 +29,8 @@ import {
   BuyerStore,
   DEFAULT_STOP_SERVING_SECONDS,
   Gateway,
+  ISSUED_BEFORE_SECONDS,
+  MAX_UNSETTLED_PER_SELLER,
   MIN_REQUEST_SECONDS,
   PEER_LIMITS,
   Router,
@@ -73,8 +75,9 @@ const backend: Connector = { kind: 'openai', complete: async () => ({ content: '
 const body = (a: GatewayAnswer) => a.body as any;
 const call = (chat: unknown = CHAT, signal?: AbortSignal, g: Gateway = gateway) => g.chatCompletion(caller, chat, { signal });
 const nonceLines = async () => (await readFile(join(dir, 'buyer', 'buyer-nonces.jsonl'), 'utf8').catch(() => '')).trim().split('\n').filter(Boolean);
-/** The calls the gateway has taken, running or waiting. */
+/** The calls the gateway has taken (reading the chain, waiting or running), and those waiting for their turn. */
 const turnsOf = (g: Gateway) => (g as unknown as { turns: { size: number } }).turns.size;
+const waitingOf = (g: Gateway) => (g as unknown as { turns: { waiting: number } }).turns.waiting;
 
 /** A gate that holds every send until `open()`. */
 function holdSends(): () => void {
@@ -83,7 +86,14 @@ function holdSends(): () => void {
   return () => { gate = undefined; open(); };
 }
 
-async function setUp(options: { value?: bigint; models?: string[]; keyBudget?: bigint; turns?: GatewayDeps['turns']; clock?: () => number } = {}): Promise<void> {
+/** A fresh router over the epoch's signed offers, as a restarted node builds one. */
+let routerOf: () => Router;
+
+async function setUp(options: {
+  value?: bigint; models?: string[]; keyBudget?: bigint; turns?: GatewayDeps['turns']; clock?: () => number;
+  /** Seconds the seller's head is behind the chain the gateway reads. */
+  sellerLag?: number;
+} = {}): Promise<void> {
   const models = options.models ?? [MODEL];
   await mock.ensureProfile();
   const buyer = new Buyer({ chain, store: new BuyerStore(join(dir, 'buyer')), config: { enabled: true, buyerWallet: NODE.address, prefundLeadSeconds: 7_200, tickSeconds: 300 } });
@@ -92,8 +102,15 @@ async function setUp(options: { value?: bigint; models?: string[]; keyBudget?: b
     epoch, source: { kind: 'wallet' },
     services: models.map((m) => ({ serviceId: serviceIdOf(m), serviceClass: 1, value: options.value ?? 10n ** 6n, maxPricePerUnit: 100n })),
   });
+  const lag = options.sellerLag ?? 0;
+  const sellerChain: MarketplaceChainAdapter = lag === 0 ? chain : Object.assign(Object.create(chain) as MarketplaceChainAdapter, {
+    getEpochTimes: async () => {
+      const times = await chain.getEpochTimes();
+      return { ...times, now: times.now - lag };
+    },
+  });
   seller = new Seller({
-    chain, dir: join(dir, 'seller'), signer: NODE.address, peerId: 'seller-peer', stopServingSeconds: DEFAULT_STOP_SERVING_SECONDS, tickSeconds: 300,
+    chain: sellerChain, dir: join(dir, 'seller'), signer: NODE.address, peerId: 'seller-peer', stopServingSeconds: DEFAULT_STOP_SERVING_SECONDS, tickSeconds: 300,
     services: models.map((m) => ({ model: m, serviceId: serviceIdOf(m), pricePerUnit: PRICE, capacity: null, provenance: 'upstream-claimed' as const, connector: backend })),
   });
   await seller.load();
@@ -103,7 +120,8 @@ async function setUp(options: { value?: bigint; models?: string[]; keyBudget?: b
     seller: seller.gate.identityId, serviceId: serviceIdOf(m), serviceClass: 1, unit: 'token', pricePerUnit: PRICE, epoch, capacity: null,
     model: m, provenance: 'upstream-claimed', peerId: 'seller-peer', signedAt: 1,
   })));
-  const router = new Router({ chain, offers: async () => offers, quote: async (_peer, services) => seller.quote({ services }) as Promise<QuoteResponse> });
+  routerOf = () => new Router({ chain, offers: async () => offers, quote: async (_peer, services) => seller.quote({ services }) as Promise<QuoteResponse> });
+  const router = routerOf();
   keys = new AccessKeys(join(dir, 'buyer'));
   deps = {
     chain, buyerWallet: NODE.address, store: buyer.store, router, keys, dir: join(dir, 'buyer'),
@@ -121,10 +139,10 @@ async function setUp(options: { value?: bigint; models?: string[]; keyBudget?: b
   caller = { key: (await keys.make({ label: 'test-agent', budget: options.keyBudget ?? 10n ** 30n, services: null, rps: 1_000, expiresAt: null }, 0)).key };
 }
 
-/** The gateway and the keys as a restarted node reads them. */
-async function restart(): Promise<void> {
+/** The gateway and the keys as a restarted node reads them; with a router of its own when `fresh`. */
+async function restart(fresh = false): Promise<void> {
   keys = new AccessKeys(join(dir, 'buyer'));
-  deps = { ...deps, keys };
+  deps = { ...deps, keys, ...(fresh ? { router: routerOf() } : {}) };
   gateway = new Gateway(deps);
   await gateway.load();
 }
@@ -150,7 +168,7 @@ describe('calls waiting for their turn', () => {
     const running = call();
     await vi.waitFor(() => expect(sends).toBe(1));
     const waiting = [call(), call()];
-    await vi.waitFor(() => expect(turnsOf(gateway)).toBe(3));
+    await vi.waitFor(() => expect(waitingOf(gateway)).toBe(2));
     const refused = await call();
     expect(refused).toMatchObject({ status: 429, headers: { 'Retry-After': '5' }, body: { error: { code: 'budget_busy' }, serviceId: SERVICE } });
     open();
@@ -177,7 +195,7 @@ describe('calls waiting for their turn', () => {
     const client = new AbortController();
     const leaving = call(CHAT, client.signal);
     const after = call();
-    await vi.waitFor(() => expect(turnsOf(gateway)).toBe(3));
+    await vi.waitFor(() => expect(waitingOf(gateway)).toBe(2));
     client.abort();
     expect(await leaving).toMatchObject({ status: 499, body: { error: { code: 'client_gone' } } });
     expect(turnsOf(gateway)).toBe(2);
@@ -227,8 +245,9 @@ describe('the end of the epoch', () => {
     const inTime = await call();
     expect(inTime.status).toBe(200);
     // The request it sent lives as long as the gateway waits for its answer, and its receipt was completed in it.
-    const kept = JSON.parse((await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim());
-    expect(kept.request.expiry - kept.request.issuedAt).toBe(MIN_REQUEST_SECONDS);
+    const kept = JSON.parse((await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').at(-1)!);
+    expect(kept.request.expiry - lastSend).toBe(MIN_REQUEST_SECONDS);
+    expect(kept.request.issuedAt).toBe(lastSend - ISSUED_BEFORE_SECONDS);
     expect(kept.receipt.completedAt).toBeLessThanOrEqual(kept.request.expiry);
   });
 
@@ -240,7 +259,8 @@ describe('the end of the epoch', () => {
     const running = call();
     await vi.waitFor(() => expect(sends).toBe(1));
     const waiting = call();
-    await vi.waitFor(() => expect(turnsOf(gateway)).toBe(2));
+    // Queued: it read the chain's time before it waited.
+    await vi.waitFor(() => expect(waitingOf(gateway)).toBe(1));
     // By the time its turn comes, the chain's time has passed the last moment a call may be sent.
     ms = (times.endsAt - DEFAULT_STOP_SERVING_SECONDS - MIN_REQUEST_SECONDS - times.now + 1) * 1_000;
     open();
@@ -343,5 +363,82 @@ describe("a key's budget", () => {
     // Settled at 120, the next call fits: 120 spent and 620 more is within 1,000.
     expect((await call({ ...CHAT, model: OTHER_MODEL })).status).toBe(200);
     expect((await keys.list())[0]!.spent).toBe(String(2n * COST));
+  });
+});
+
+describe('calls that hold their bound (re-review)', () => {
+  it('issues a request half a minute back, so a seller whose head is behind takes it', async () => {
+    await setUp({ sellerLag: 10 });
+    // Past the subscription's start, which `issuedAt` never goes before.
+    const real = chain.getEpochTimes.bind(chain);
+    vi.spyOn(chain, 'getEpochTimes').mockImplementation(async () => {
+      const times = await real();
+      return { ...times, now: times.now + 100 };
+    });
+    const { now } = await chain.getEpochTimes();
+    expect((await call()).status).toBe(200);
+    const kept = JSON.parse((await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').at(-1)!);
+    expect(kept.request.issuedAt).toBeGreaterThanOrEqual(now - ISSUED_BEFORE_SECONDS);
+    expect(kept.request.issuedAt).toBeLessThan(now - 10);
+  });
+
+  it('takes a seller out of routing for the epoch once it refused or left unanswered so many calls, and lists them', async () => {
+    await setUp();
+    const { epoch } = await chain.getEpochTimes();
+    const subscriptionId = subscriptionIdOf(NODE.address, epoch);
+    // Refused for good: it is demoted, but alone it is still tried.
+    tamper = () => ({ ok: false, code: 'UnitsTooFew', retry: false });
+    for (let i = 0; i < MAX_UNSETTLED_PER_SELLER; i++) expect((await call()).status).toBe(502);
+    expect(await call()).toMatchObject({ status: 503, body: { error: { code: 'no_seller' } } });
+    expect(gateway.heldValue(subscriptionId, 0)).toBe(BigInt(MAX_UNSETTLED_PER_SELLER) * MOST);
+    // The held value has its calls: each at its most value, with why.
+    const { calls } = await gateway.activity();
+    expect(calls).toHaveLength(MAX_UNSETTLED_PER_SELLER);
+    expect(calls[0]).toMatchObject({ state: 'held', units: Number(MOST / PRICE), value: String(MOST), problem: 'UnitsTooFew', keyId: caller.key.keyId });
+    // A restarted node, with a router of its own, leaves the seller out too.
+    await restart(true);
+    expect(await call()).toMatchObject({ status: 503, body: { error: { code: 'no_seller' } } });
+  });
+
+  it('takes a place in the gateway before reading the chain, so a slow chain holds no more calls than it takes', async () => {
+    await setUp({ turns: { waitingPerKey: 4, calls: 1 } });
+    const read = chain.getSubscription.bind(chain);
+    let release!: () => void;
+    const stalled = new Promise<void>((resolve) => { release = resolve; });
+    const reads = vi.spyOn(chain, 'getSubscription').mockImplementationOnce(async (id) => {
+      await stalled;
+      return read(id);
+    });
+    const first = call();
+    await vi.waitFor(() => expect(reads).toHaveBeenCalledTimes(1));
+    const epochReads = vi.spyOn(chain, 'getEpochTimes');
+    expect(await call()).toMatchObject({ status: 503, body: { error: { code: 'gateway_busy' } } });
+    expect(epochReads).not.toHaveBeenCalled();
+    release();
+    expect((await first).status).toBe(200);
+  });
+
+  it('writes a call down before it sends it, so a node that stops while it waits still counts it', async () => {
+    await setUp();
+    const { epoch } = await chain.getEpochTimes();
+    const subscriptionId = subscriptionIdOf(NODE.address, epoch);
+    const open = holdSends();
+    const pending = call();
+    await vi.waitFor(() => expect(sends).toBe(1));
+    const records = async () => (await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+    expect(await records()).toMatchObject([{ state: 'open', problem: 'sent' }]);
+    // The node stops here: a restart counts the call from that record alone.
+    const restartedKeys = new AccessKeys(join(dir, 'buyer'));
+    const restarted = new Gateway({ ...deps, keys: restartedKeys });
+    await restarted.load();
+    expect(restarted.heldValue(subscriptionId, 0)).toBe(MOST);
+    expect(restartedKeys.reservedOf(caller.key.keyId)).toBe(MOST);
+    expect((await restarted.activity()).calls).toMatchObject([{ problem: 'sent', value: String(MOST) }]);
+    // Here, the answer takes the record's place.
+    open();
+    expect((await pending).status).toBe(200);
+    expect((await records()).map((r) => r.state)).toEqual(['open', 'held']);
+    expect(gateway.heldValue(subscriptionId, 0)).toBe(COST);
+    expect(keys.reservedOf(caller.key.keyId)).toBe(0n);
   });
 });

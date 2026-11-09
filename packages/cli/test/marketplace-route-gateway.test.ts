@@ -60,6 +60,7 @@ function request(body: unknown) {
 }
 
 const turnsOf = () => (gateway as unknown as { turns: { size: number } }).turns.size;
+const waitingOf = () => (gateway as unknown as { turns: { waiting: number } }).turns.waiting;
 
 async function setUp(turns?: { waitingPerKey: number; calls: number }): Promise<void> {
   const mock = new MockChainAdapter('mock:31337', NODE.address);
@@ -116,7 +117,7 @@ describe('the chat route while its budget is busy', () => {
     const running = request(CHAT);
     await vi.waitFor(() => expect(sends).toBe(1));
     const leaving = request(CHAT);
-    await vi.waitFor(() => expect(turnsOf()).toBe(2));
+    await vi.waitFor(() => expect(waitingOf()).toBe(1));
     leaving.close();
     await leaving.done;
     expect(leaving.res).toMatchObject({ statusCode: 0, writableEnded: false });

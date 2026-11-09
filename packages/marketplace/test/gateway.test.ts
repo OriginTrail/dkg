@@ -511,7 +511,10 @@ describe('landing, reconciliation and pruning', () => {
     mock.__advanceEpoch();
     expect(await gateway.reconciliation(epoch)).toEqual({ epoch, final: true, rows });
     await gateway.tick();
-    expect((await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n')).toHaveLength(2);
+    // Two calls, each with its record from before it was sent and what came back in its place.
+    const records = (await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+    expect(records.map((r) => r.state)).toEqual(['open', 'held', 'open', 'refused']);
+    expect(new Set(records.map((r) => r.callId)).size).toBe(2);
     mock.__advanceEpoch();
     await gateway.tick();
     // Its rows kept, its receipts and nonce counters gone, and the keys' costs folded in. The call whose receipt the

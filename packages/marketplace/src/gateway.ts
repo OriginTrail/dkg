@@ -12,8 +12,9 @@
  *      with `Retry-After`;
  *   3. this epoch's subscription, and the call's service budget in it;
  *   4. its budget's turn (gateway-turns.ts): calls on one budget run one at a
- *      time, a few wait, and the gateway takes a bounded number at once; a
- *      call with no room is refused at once (429, or 503 for the gateway);
+ *      time, a few wait, and the gateway takes a bounded number at once, from
+ *      before the reads of steps 2 and 3; a call with no room is refused at
+ *      once (429, or 503 for the gateway);
  *   5. a seller, from the router;
  *   6. the soft ceiling: what the budget used on chain, what this node's calls
  *      on it may still cost, and this call's most value stay under 95% of the
@@ -22,10 +23,12 @@
  *      the key's other calls in flight;
  *   8. the request, signed by the subscription's session key: a nonce from a
  *      counter per subscription and seller, written before it is signed;
- *      `issuedAt` the chain's time and never before `startsAt`; an expiry ten
- *      minutes on, or at the stop time if that is sooner; `maxUnits` the input's
- *      UTF-8 bytes, which a tokenizer never exceeds, plus `max_tokens` and an
- *      allowance per message; `maxValueWei` those units at the quoted price;
+ *      `issuedAt` half a minute before the chain's time, for a seller whose
+ *      head is a block or two behind, and never before `startsAt`; an expiry
+ *      ten minutes on, or at the stop time if that is sooner; `maxUnits` the
+ *      input's UTF-8 bytes, which a tokenizer never exceeds, plus `max_tokens`
+ *      and an allowance per message; `maxValueWei` those units at the quoted
+ *      price. The call is on disk (gateway-book.ts) before it is sent;
  *   9. the seller's answer, and its receipt's checks: it answers this request,
  *      `units` within `maxUnits`, `valueWei` the units at the price, the result
  *      is what it commits to, and an operational key of the seller's Core Node
@@ -38,7 +41,10 @@
  * key signed: one refused, unanswered, or answered with a receipt that fails a
  * check counts at its request's most value, against the budget until the chain
  * shows its nonce used, and against its key until the epoch is made final,
- * when the key is charged that value if the request landed.
+ * when the key is charged that value if the request landed. A seller that
+ * refuses or leaves unanswered `MAX_UNSETTLED_PER_SELLER` calls in an epoch is
+ * out of routing for the rest of it, so its calls hold no more. The activity
+ * lists these calls too, at their most value, with why.
  *
  * Its job, every tick: the calls whose nonces the chain shows used have
  * landed, and leave the value the ceiling counts. A call of an ended epoch
@@ -63,6 +69,7 @@ import {
   type Subscription,
 } from '@origintrail-official/dkg-chain';
 import { NO_FX, type Fx } from './config.js';
+import { CallBook, exposureOf, isKept, type HeldReceipt } from './gateway-book.js';
 import { CallerGone, Turns, TurnsFull, type TurnLimits } from './gateway-turns.js';
 import type { AccessKey, AccessKeys } from './keys.js';
 import { Journal, KeyedLock } from './journal.js';
@@ -82,9 +89,7 @@ import {
   requestToWire,
   resultCommitmentOf,
   type InferenceBody,
-  type ReceiptWire,
   type ServeResponse,
-  type ServiceRequestWire,
 } from './wire.js';
 
 /** Calls stop at this share of a budget's value. */
@@ -99,6 +104,10 @@ const REQUEST_LIFETIME_SECONDS = 600;
 export const MIN_REQUEST_SECONDS = Math.ceil(PEER_LIMITS.serveTimeoutMs / 1_000) + 30;
 /** How long a caller refused for want of room is asked to wait. */
 const BUSY_RETRY_AFTER_SECONDS = 5;
+/** How far a request's `issuedAt` is before the chain's time as read: a seller whose head is behind takes it. */
+export const ISSUED_BEFORE_SECONDS = 30;
+/** The calls one seller may refuse or leave unanswered in an epoch before it is out of routing for the rest of it. */
+export const MAX_UNSETTLED_PER_SELLER = 8;
 /** Units allowed per message for the chat template, and per call. */
 const UNITS_PER_MESSAGE = 8;
 const UNITS_PER_CALL = 16;
@@ -144,29 +153,7 @@ export interface GatewayDeps {
   log?: (message: string) => void;
 }
 
-/**
- * A call the buyer keeps, from when it is sent: `held`, its receipt checked, until it lands; `refused`, its receipt
- * failing the check `problem` names; or `open`, with no receipt, as its seller refused it (`problem` is the seller's
- * code) or never answered (`unanswered`).
- */
-export interface HeldReceipt {
-  callId: string;
-  /** The subscription's epoch. */
-  epoch: number;
-  subscriptionId: string;
-  budgetIndex: number;
-  seller: string;
-  keyId: string;
-  request: ServiceRequestWire;
-  signature: string;
-  /** The seller's receipt; none on an open call. */
-  receipt?: ReceiptWire;
-  receiptSignature?: string;
-  state: 'held' | 'refused' | 'open';
-  problem?: string;
-}
-
-type KeptReceipt = HeldReceipt & { state: 'held'; receipt: ReceiptWire };
+export type { HeldReceipt } from './gateway-book.js';
 
 /** How many calls `activity` answers. */
 const ACTIVITY_LIMIT = 200;
@@ -183,6 +170,12 @@ export interface CallView {
   value: string;
   valueTrac: string;
   state: 'held' | 'landed' | 'missed';
+  /**
+   * Set on a call with no receipt the node relies on: its seller's refusal code, `unanswered`, `sent` (the node
+   * stopped while it waited), or the check its receipt failed. Its `units` and `value` are then the most its request
+   * allows, which it holds until it lands or its epoch ends.
+   */
+  problem?: string;
 }
 
 /** An epoch made final: its reconciliation, kept once its receipts are dropped. */
@@ -213,9 +206,6 @@ interface BudgetCall {
 }
 
 const isFinal = (e: HeldReceipt | FinalEpoch): e is FinalEpoch => (e as FinalEpoch).type === 'final';
-const isKept = (r: HeldReceipt): r is KeptReceipt => r.state === 'held' && r.receipt !== undefined;
-/** What a call may still cost: its receipt's value once checked, otherwise the most its request allows. */
-const exposureOf = (r: HeldReceipt): bigint => (isKept(r) ? BigInt(r.receipt.valueWei) : BigInt(r.request.maxValueWei));
 
 const fail = (status: number, code: string, message: string, more: Record<string, unknown> = {}, headers?: Record<string, string>): GatewayAnswer =>
   ({ status, body: { error: { code, message, type: 'marketplace' }, ...more }, ...(headers ? { headers } : {}) });
@@ -233,14 +223,8 @@ export class Gateway {
   private readonly turns: Turns;
   private readonly clock: () => number;
   private readonly nonces = new Map<string, bigint>();
-  /** subscription id and budget index => what its calls not seen landed may still cost. */
-  private readonly held = new Map<string, bigint>();
-  /** The calls not seen landed, by call id. */
-  private readonly unlanded = new Map<string, HeldReceipt>();
-  /** The refused and open calls whose most value their key still reserves, by call id. */
-  private readonly keyHolds = new Map<string, HeldReceipt>();
-  /** The calls of each epoch not made final. */
-  private readonly byEpoch = new Map<number, HeldReceipt[]>();
+  /** The calls sent and not made final, and what each may still cost. */
+  private readonly book: CallBook;
   /** The epochs with calls or nonce counters not made final. */
   private readonly epochs = new Set<number>();
   private readonly finals = new Map<number, ReconciledRow[]>();
@@ -256,6 +240,7 @@ export class Gateway {
     this.nonceLog = new Journal(join(deps.dir, 'buyer-nonces.jsonl'));
     this.turns = new Turns(deps.turns);
     this.clock = deps.clock ?? Date.now;
+    this.book = new CallBook(deps.keys);
   }
 
   /** The access keys callers present. */
@@ -281,30 +266,31 @@ export class Gateway {
 
   /** What this node's calls on a budget not seen landed may still cost. */
   heldValue(subscriptionId: string, budgetIndex: number): bigint {
-    return this.held.get(`${subscriptionId.toLowerCase()}:${budgetIndex}`) ?? 0n;
+    return this.book.heldValue(`${subscriptionId.toLowerCase()}:${budgetIndex}`);
   }
 
   /**
    * An epoch's calls (`Call`), newest first, at most `ACTIVITY_LIMIT`, or one
    * access key's: held while the chain shows its nonce unused, landed once it
-   * shows it used, and missed once the epoch ended without it. An epoch made
-   * final keeps its reconciliation, not its calls.
+   * shows it used, and missed once the epoch ended without it. A call with
+   * no receipt the node relies on is listed at its most value, from when it
+   * was issued, with its `problem`. An epoch made final keeps its
+   * reconciliation, not its calls.
    */
   async activity(epoch?: number, keyId?: string): Promise<{ calls: CallView[] }> {
     const times = await this.deps.chain.getEpochTimes();
     const asked = epoch ?? times.epoch;
-    const receipts = (this.byEpoch.get(asked) ?? []).filter(isKept).filter((r) => keyId === undefined || r.keyId === keyId);
-    const used = await this.usedOf(receipts);
-    const calls: CallView[] = receipts.map((r) => ({
-      callId: r.callId,
-      at: r.receipt.completedAt,
-      serviceId: r.request.serviceId,
-      seller: Number(r.seller),
-      keyId: r.keyId,
-      units: Number(r.receipt.units),
-      ...amount('value', BigInt(r.receipt.valueWei)),
-      state: used.has(r.callId) ? 'landed' : asked < times.epoch ? 'missed' : 'held',
-    }));
+    const kept = this.book.callsOf(asked).filter((r) => keyId === undefined || r.keyId === keyId);
+    const used = await this.usedOf(kept);
+    const calls: CallView[] = kept.map((r) => {
+      const state = used.has(r.callId) ? 'landed' : asked < times.epoch ? 'missed' : 'held';
+      const of = { callId: r.callId, serviceId: r.request.serviceId, seller: Number(r.seller), keyId: r.keyId, state } as const;
+      if (isKept(r)) return { ...of, at: r.receipt.completedAt, units: Number(r.receipt.units), ...amount('value', BigInt(r.receipt.valueWei)) };
+      return {
+        ...of, at: r.request.issuedAt, units: Number(r.request.maxUnits), ...amount('value', BigInt(r.request.maxValueWei)),
+        problem: r.problem ?? r.state,
+      };
+    });
     return { calls: calls.sort((a, b) => b.at - a.at).slice(0, ACTIVITY_LIMIT) };
   }
 
@@ -314,14 +300,16 @@ export class Gateway {
       this.noteNonce(n.subscriptionId, n.seller, BigInt(n.nonce));
       this.epochs.add(n.epoch);
     }
+    // A call's last record is what the node knows of it.
+    const calls = new Map<string, HeldReceipt>();
     for (const e of await this.receipts.read()) {
-      if (isFinal(e)) {
-        this.finals.set(e.epoch, e.rows);
-        continue;
-      }
-      this.remember(e);
-      // Its key reserved the call's most value before it was sent; a restart reserves it again.
-      if (this.keyHolds.has(e.callId)) this.deps.keys.hold(e.keyId, exposureOf(e));
+      if (isFinal(e)) this.finals.set(e.epoch, e.rows);
+      else calls.set(e.callId, e);
+    }
+    for (const r of [...calls.values()].sort((a, b) => a.epoch - b.epoch)) {
+      this.book.restore(r);
+      this.epochs.add(r.epoch);
+      if (r.state === 'open') this.unsettled(r);
     }
   }
 
@@ -351,13 +339,13 @@ export class Gateway {
    */
   async tick(): Promise<void> {
     const { epoch } = await this.deps.chain.getEpochTimes();
-    const open = [...this.unlanded.values()].filter((r) => r.epoch === epoch);
+    const open = this.book.unlandedOf(epoch);
     const used = await this.usedOf(open);
-    for (const r of open) if (used.has(r.callId)) this.forget(r);
+    for (const r of open) if (used.has(r.callId)) this.book.landed(r);
     // An ended epoch takes no more receipts: what did not land by then never will.
-    const ended = [...this.keyHolds.values()].filter((r) => r.epoch < epoch);
+    const ended = this.book.keyHeldBefore(epoch);
     const landed = await this.usedOf(ended);
-    for (const r of ended) if (!landed.has(r.callId)) this.releaseKey(r);
+    for (const r of ended) if (!landed.has(r.callId)) this.book.release(r);
     const finals = [...this.epochs].filter((e) => e < epoch - 1);
     for (const e of finals) await this.finalize(e);
     if (finals.length > 0) await this.deps.keys.compact();
@@ -416,6 +404,22 @@ export class Gateway {
       return fail(401, 'service_not_allowed', 'the access key may not call this service');
     }
 
+    const model = call.model;
+    try {
+      // A place in the gateway before the chain is read: a slow chain holds no more calls than the gateway takes.
+      return await this.turns.admit(() => this.callOnChain(caller, model, body, serviceId, options.signal));
+    } catch (err) {
+      if (err instanceof CallerGone) return gone();
+      if (!(err instanceof TurnsFull)) throw err;
+      const retry = { 'Retry-After': String(BUSY_RETRY_AFTER_SECONDS) };
+      return err.scope === 'budget'
+        ? fail(429, 'budget_busy', 'too many calls wait on this service now; try again shortly', { serviceId }, retry)
+        : fail(503, 'gateway_busy', 'the gateway has as many calls as it takes at once; try again shortly', {}, retry);
+    }
+  }
+
+  /** A call with its place in the gateway: the epoch, its subscription and budget, then its budget's turn. */
+  private async callOnChain(caller: GatewayCaller, model: string, body: InferenceBody, serviceId: string, signal: AbortSignal | undefined): Promise<GatewayAnswer> {
     const chain = this.deps.chain;
     const times = await chain.getEpochTimes();
     const readAt = this.clock();
@@ -430,19 +434,10 @@ export class Gateway {
     }
     const budgetKey = `${subscriptionId}:${budgetIndex}`;
     const turn: BudgetCall = {
-      caller, model: call.model, body, serviceId, times, readAt, stopAt, subscriptionId, subscription,
-      budget: budgets[budgetIndex]!, budgetIndex, budgetKey, signal: options.signal,
+      caller, model, body, serviceId, times, readAt, stopAt, subscriptionId, subscription,
+      budget: budgets[budgetIndex]!, budgetIndex, budgetKey, signal,
     };
-    try {
-      return await this.turns.run(budgetKey, () => this.callInTurn(turn), options.signal);
-    } catch (err) {
-      if (err instanceof CallerGone) return gone();
-      if (!(err instanceof TurnsFull)) throw err;
-      const retry = { 'Retry-After': String(BUSY_RETRY_AFTER_SECONDS) };
-      return err.scope === 'budget'
-        ? fail(429, 'budget_busy', 'too many calls wait on this service now; try again shortly', { serviceId }, retry)
-        : fail(503, 'gateway_busy', 'the gateway has as many calls as it takes at once; try again shortly', {}, retry);
-    }
+    return this.turns.turn(budgetKey, () => this.callInTurn(turn), signal);
   }
 
   /** A call in its budget's turn, from the seller and the ceiling to the request, signed and sent. */
@@ -455,7 +450,7 @@ export class Gateway {
     const maxUnits = unitsBound(c.body);
     const maxValueWei = maxUnits * route.pricePerUnit;
     const used = c.budget.value - await chain.budgetLeft(c.subscriptionId, c.budgetIndex);
-    const held = this.held.get(c.budgetKey) ?? 0n;
+    const held = this.book.heldValue(c.budgetKey);
     const ceiling = (c.budget.value * SOFT_CEILING_PERCENT) / 100n;
     if (used + held + maxValueWei > ceiling) {
       const left = ceiling > used + held ? ceiling - used - held : 0n;
@@ -475,14 +470,15 @@ export class Gateway {
       const domain = await this.domainOf();
       if (c.signal?.aborted) return gone();
       // The chain's time now, by how long the call has waited since it was read: a turn that came too near the stop
-      // time is not sent. `issuedAt` stays the time read, which the chain and the seller have passed.
+      // time is not sent. `issuedAt` is before the time read, which the chain and the seller have passed.
       const now = c.times.now + Math.floor((this.clock() - c.readAt) / 1_000);
       if (now > c.stopAt - MIN_REQUEST_SECONDS) return epochEnding(c.times.endsAt, now);
       const request: ServiceRequest = {
         subscriptionId: c.subscriptionId, serviceId: c.serviceId, seller: route.seller,
         nonce: await this.nextNonce(c.times.epoch, c.subscriptionId, route.seller),
         pricePerUnit: route.pricePerUnit, maxUnits, maxValueWei,
-        issuedAt: Math.max(c.times.now, c.subscription.startsAt), expiry: Math.min(now + REQUEST_LIFETIME_SECONDS, c.stopAt),
+        issuedAt: Math.max(c.times.now - ISSUED_BEFORE_SECONDS, c.subscription.startsAt),
+        expiry: Math.min(now + REQUEST_LIFETIME_SECONDS, c.stopAt),
       };
       const callId = hashServiceRequest(domain, request);
       const signature = signServiceRequest(sessionKey.privateKey, domain, request);
@@ -493,11 +489,14 @@ export class Gateway {
       }
       // The last moment its client's leaving stops the call.
       if (c.signal?.aborted) return gone();
-      sent = true;
       const kept: HeldReceipt = {
         callId, epoch: c.times.epoch, subscriptionId: c.subscriptionId, budgetIndex: c.budgetIndex, seller: route.seller.toString(), keyId,
         request: requestToWire(request), signature, state: 'open',
       };
+      // On disk before it goes, with the key's reservation: a node that stops while it waits still counts it.
+      await this.write({ ...kept, problem: 'sent' });
+      this.book.record({ ...kept, problem: 'sent' });
+      sent = true;
       return await this.sendAndKeep(c, route, domain, request, message, kept, used);
     } finally {
       if (!sent) this.deps.keys.release(keyId, maxValueWei);
@@ -524,7 +523,7 @@ export class Gateway {
       answer = await this.sendServe(route.peerId, message, kept.callId);
     } catch {
       router.unreachable(route.seller);
-      await this.keep({ ...kept, problem: 'unanswered' });
+      await this.keepUnsettled({ ...kept, problem: 'unanswered' });
       return fail(503, 'seller_unreachable', 'the seller did not answer; try again', { serviceId: c.serviceId });
     }
     router.measured(route.seller, Date.now() - started);
@@ -532,10 +531,12 @@ export class Gateway {
       if (answer.code === 'WrongPrice') router.requote(route.seller);
       else if (!answer.retry) router.demote(route.seller);
       else if (answer.code !== 'EpochEnding') router.unreachable(route.seller);
-      await this.keep({ ...kept, problem: answer.code });
+      await this.keepUnsettled({ ...kept, problem: answer.code });
       return fail(502, 'seller_refused', `the seller refused the call: ${answer.code}`, { sellerCode: answer.code, retry: answer.retry });
     }
     const checked = await this.checkReceipt(domain, request, kept.callId, c.budgetIndex, answer);
+    // The key's reservation is the call's while it is held; checked, its receipt settles it below.
+    const reserved = this.book.isKeyHeld(kept.callId) ? request.maxValueWei : 0n;
     await this.keep({
       ...kept, receipt: answer.receipt, receiptSignature: answer.receiptSignature, state: checked.problem ? 'refused' : 'held',
       ...(checked.problem ? { problem: checked.problem } : {}),
@@ -545,8 +546,8 @@ export class Gateway {
       return fail(502, 'bad_receipt', `the seller's receipt failed a check: ${checked.problem}`, { problem: checked.problem });
     }
     const receipt = checked.receipt!;
-    await this.deps.keys.settle(kept.keyId, request.maxValueWei, receipt.valueWei, c.times.now);
-    const left = c.budget.value - used - (this.held.get(c.budgetKey) ?? 0n);
+    await this.deps.keys.settle(kept.keyId, reserved, receipt.valueWei, c.times.now);
+    const left = c.budget.value - used - this.book.heldValue(c.budgetKey);
     return {
       status: 200,
       body: {
@@ -617,34 +618,26 @@ export class Gateway {
     if (nonce > (this.nonces.get(key) ?? -1n)) this.nonces.set(key, nonce);
   }
 
-  /** A sent call kept: counted at once, then on disk. A write that fails still leaves it counted while the node runs. */
-  private async keep(r: HeldReceipt): Promise<void> {
-    this.remember(r);
+  /** A call's record on disk. */
+  private async write(r: HeldReceipt): Promise<void> {
     await this.lock.run('journal', () => this.receipts.append(r));
   }
 
-  /** A call kept: in its epoch's, and in the value its budget's calls may still cost until it is seen landed. */
-  private remember(r: HeldReceipt): void {
-    const kept = this.byEpoch.get(r.epoch) ?? [];
-    kept.push(r);
-    this.byEpoch.set(r.epoch, kept);
+  /** What came back for a sent call, in its record's place: counted at once, then on disk. A write that fails still leaves it counted while the node runs. */
+  private async keep(r: HeldReceipt): Promise<void> {
     this.epochs.add(r.epoch);
-    this.unlanded.set(r.callId, r);
-    const key = `${r.subscriptionId}:${r.budgetIndex}`;
-    this.held.set(key, (this.held.get(key) ?? 0n) + exposureOf(r));
-    if (!isKept(r)) this.keyHolds.set(r.callId, r);
+    this.book.record(r);
+    await this.write(r);
   }
 
-  /** A call seen landed: out of the value its budget's calls may still cost. */
-  private forget(r: HeldReceipt): void {
-    if (!this.unlanded.delete(r.callId)) return;
-    const key = `${r.subscriptionId}:${r.budgetIndex}`;
-    this.held.set(key, (this.held.get(key) ?? 0n) - exposureOf(r));
+  /** A call its seller refused or never answered, kept; past `MAX_UNSETTLED_PER_SELLER` in its epoch, the seller is out for the rest of it. */
+  private async keepUnsettled(r: HeldReceipt): Promise<void> {
+    this.unsettled(r);
+    await this.keep(r);
   }
 
-  /** A refused or open call's reservation of its key's budget, released. */
-  private releaseKey(r: HeldReceipt): void {
-    if (this.keyHolds.delete(r.callId)) this.deps.keys.release(r.keyId, exposureOf(r));
+  private unsettled(r: HeldReceipt): void {
+    if (this.book.unsettledBy(r) >= MAX_UNSETTLED_PER_SELLER) this.deps.router.failed(BigInt(r.seller), r.epoch);
   }
 
   /** The call ids of `receipts` whose nonces the chain shows used. */
@@ -663,7 +656,7 @@ export class Gateway {
   private async rowsOf(epoch: number): Promise<ReconciledRow[]> {
     const chain = this.deps.chain;
     const subscriptionId = subscriptionIdOf(this.deps.buyerWallet, epoch);
-    const receipts = (this.byEpoch.get(epoch) ?? []).filter(isKept);
+    const receipts = this.book.callsOf(epoch).filter(isKept);
     if (!(await chain.subscriptionExists(subscriptionId))) return [];
     const budgets = await chain.getBudgets(subscriptionId);
     const used = await this.usedOf(receipts);
@@ -689,8 +682,7 @@ export class Gateway {
    */
   private async finalize(epoch: number): Promise<void> {
     const rows = await this.rowsOf(epoch);
-    const calls = this.byEpoch.get(epoch) ?? [];
-    const unknown = calls.filter((r) => !isKept(r));
+    const unknown = this.book.callsOf(epoch).filter((r) => !isKept(r));
     const landed = await this.usedOf(unknown);
     for (const r of unknown) if (landed.has(r.callId)) await this.deps.keys.charge(r.keyId, exposureOf(r), r.request.issuedAt);
     await this.lock.run('journal', async () => {
@@ -698,15 +690,11 @@ export class Gateway {
       await this.nonceLog.replace((await this.nonceLog.read()).filter((n) => n.epoch !== epoch));
     });
     this.finals.set(epoch, rows);
-    for (const r of calls) {
-      this.forget(r);
-      this.releaseKey(r);
-    }
-    this.byEpoch.delete(epoch);
-    this.epochs.delete(epoch);
     const subscriptionId = subscriptionIdOf(this.deps.buyerWallet, epoch);
+    this.book.drop(epoch, subscriptionId);
+    this.epochs.delete(epoch);
     this.scans.delete(subscriptionId);
-    for (const map of [this.nonces, this.held, this.sessionKeys]) {
+    for (const map of [this.nonces, this.sessionKeys]) {
       for (const key of map.keys()) if (key.startsWith(subscriptionId)) map.delete(key);
     }
   }

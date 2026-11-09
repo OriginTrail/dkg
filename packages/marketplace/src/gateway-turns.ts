@@ -3,9 +3,10 @@
 /**
  * The gateway's turns (OT-RFC-27): calls on one budget run one at a time, and
  * wait for their turn in a queue of bounded length; the gateway as a whole
- * takes a bounded number of calls at once, running or waiting. A call that
- * would pass either bound is refused at once, and a call whose client goes
- * away while it waits leaves the queue, so its turn is never taken.
+ * takes a bounded number of calls at once, from their first chain read,
+ * running or waiting. A call that would pass either bound is refused at once,
+ * and a call whose client goes away while it waits leaves the queue, so its
+ * turn is never taken.
  *
  * Every call that waits holds one of the daemon's in-flight request slots,
  * which loopback clients share with every other route: the bounds keep the
@@ -48,33 +49,55 @@ export class Turns {
 
   constructor(private readonly limits: TurnLimits = DEFAULT_TURN_LIMITS) {}
 
-  /** Calls running or waiting, over every key. */
+  /** Calls with a place in the gateway, reading the chain, waiting or running. */
   get size(): number {
     return this.taken;
   }
 
+  /** Calls waiting for their turn, over every key. */
+  get waiting(): number {
+    let n = 0;
+    for (const queue of this.queues.values()) n += queue.length;
+    return n;
+  }
+
   /**
-   * Run `fn` once every call queued on `key` before it has run. Refused with
-   * `TurnsFull` when the queue or the gateway has no room, and with
-   * `CallerGone` when `signal` aborts before its turn comes.
+   * Run `fn` with a place in the gateway, refused with `TurnsFull('gateway')`
+   * when the gateway has as many calls as it takes. A call takes its place
+   * before its first chain read, so a slow chain holds no more calls than that.
    */
-  async run<R>(key: string, fn: () => Promise<R>, signal?: AbortSignal): Promise<R> {
-    if (signal?.aborted) throw new CallerGone();
+  async admit<R>(fn: () => Promise<R>): Promise<R> {
     if (this.taken >= this.limits.calls) throw new TurnsFull('gateway');
-    const busy = this.running.has(key);
-    if (busy && (this.queues.get(key)?.length ?? 0) >= this.limits.waitingPerKey) throw new TurnsFull('budget');
     this.taken++;
     try {
-      if (busy) await this.turnOf(key, signal);
-      else this.running.add(key);
-      try {
-        return await fn();
-      } finally {
-        this.pass(key);
-      }
+      return await fn();
     } finally {
       this.taken--;
     }
+  }
+
+  /**
+   * Within a place in the gateway, run `fn` once every call queued on `key`
+   * before it has run. Refused with `TurnsFull('budget')` when the queue has no
+   * room, and with `CallerGone` when `signal` aborts before its turn comes.
+   */
+  async turn<R>(key: string, fn: () => Promise<R>, signal?: AbortSignal): Promise<R> {
+    if (signal?.aborted) throw new CallerGone();
+    const busy = this.running.has(key);
+    if (busy && (this.queues.get(key)?.length ?? 0) >= this.limits.waitingPerKey) throw new TurnsFull('budget');
+    if (busy) await this.turnOf(key, signal);
+    else this.running.add(key);
+    try {
+      return await fn();
+    } finally {
+      this.pass(key);
+    }
+  }
+
+  /** A place in the gateway, then the turn on `key`. */
+  async run<R>(key: string, fn: () => Promise<R>, signal?: AbortSignal): Promise<R> {
+    if (signal?.aborted) throw new CallerGone();
+    return this.admit(() => this.turn(key, fn, signal));
   }
 
   /** Wait in `key`'s queue until the call before it passes the turn on, or leave it when `signal` aborts first. */
