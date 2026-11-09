@@ -14,7 +14,9 @@
  *  - its `finalizedAt` or `updatedAt` is dated after `now`, or it is younger than the window;
  *  - an older sibling of its lifecycle key is kept (a failed job, a job that is not terminal, a finalized one that is not deletable itself, one the sweep kept earlier in its
  *    walk, one it could not delete at all: a pre-upgrade payload, a stored index the scan does not match): see async-lift-lifecycle-siblings.ts, which is the rule that keeps
- *    every binding decision of the key as it was, and async-lift-retention.ts, which keeps the records of a key leaving oldest first.
+ *    every binding decision of the key as it was, and async-lift-retention.ts, which keeps the records of a key leaving oldest first;
+ *  - its key's older records cannot all be verified within one hold of the claim lock (`siblings_too_many`, #3563): it is kept for the pass, and so is every record of the
+ *    key behind it.
  * The pending-admission, held and post-commit-recoverable jobs of AC7 need no rule of their own here: an admission in flight holds the claim lock the sweep runs
  * under, a held job is a failed job (kept), and a finalized publisher job has no recovery left to run.
  */
@@ -33,11 +35,11 @@ export interface PublisherRetentionPolicy {
 
 export type PublisherRetentionKeepReason =
   | 'unreadable' | 'unknown_state' | 'index_mismatch' | 'not_terminal' | 'bound_obligation' | 'too_recent' | 'future_dated'
-  | 'older_sibling_kept' | 'older_sibling_pending' | 'siblings_unreadable' | 'binding_would_change' | 'vanished';
+  | 'older_sibling_kept' | 'older_sibling_pending' | 'siblings_unreadable' | 'siblings_too_many' | 'binding_would_change' | 'vanished';
 
 export const PUBLISHER_RETENTION_KEEP_REASONS: readonly PublisherRetentionKeepReason[] = Object.freeze([
   'unreadable', 'unknown_state', 'index_mismatch', 'not_terminal', 'bound_obligation', 'too_recent', 'future_dated',
-  'older_sibling_kept', 'older_sibling_pending', 'siblings_unreadable', 'binding_would_change', 'vanished',
+  'older_sibling_kept', 'older_sibling_pending', 'siblings_unreadable', 'siblings_too_many', 'binding_would_change', 'vanished',
 ]);
 
 /** The only class: the vocabulary of the counters mirrors the share sweep's classes. */

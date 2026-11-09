@@ -44,6 +44,7 @@ export function fixture(retryIntervalMs = 5_000, overrides: Partial<ConstructorP
     readPrivateFailure: () => null,
     writePrivateFailures: () => {},
     listFinalizedPrivateRepairs: listPrivateRepairs,
+    listFinalizedPrivateRepairsAsync: async () => listPrivateRepairs(),
     repairFinalizedPrivatePlacement: repairPrivate,
     reconcile,
     warn,

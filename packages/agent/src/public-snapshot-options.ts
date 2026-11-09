@@ -3,15 +3,13 @@ import { isPublicGraphSnapshotScope } from '@origintrail-official/dkg-chain';
 import { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';
 import { BASE_MAINNET_SOURCE_POLICY } from './public-snapshot-source-proof.js';
 
-interface PublicSnapshotSyncBase {
+interface PublicSnapshotSourceBase {
   contextGraphId: string;
   onChainId: string;
   mode?: PublicSnapshotMode;
-  transport?: "exact" | "bulk";
-  signal?: AbortSignal;
 }
 
-export type PublicSnapshotSyncOptions = PublicSnapshotSyncBase & (
+export type PublicSnapshotSourceOptions = PublicSnapshotSourceBase & (
   | {
       /** Operator-configured identities, never advertised roles. */
       trustedCorePeerIds: readonly string[];
@@ -23,6 +21,12 @@ export type PublicSnapshotSyncOptions = PublicSnapshotSyncBase & (
       sourcePolicy: typeof BASE_MAINNET_SOURCE_POLICY | typeof DKG_CORE_CHAIN_CACHE;
     }
 );
+
+/** Nested Edge source selection; activation/restart own their single outer signal and exact catch-up. */
+export type PublicCheckpointSourceOptions = PublicSnapshotSourceOptions & { signal?: never; transport?: never };
+/** Preparation uses the checkpoint protocol and supports one caller cancellation signal. */
+export type PublicCheckpointPreparationOptions = PublicSnapshotSourceOptions & { signal?: AbortSignal; transport?: never };
+export type PublicSnapshotSyncOptions = PublicSnapshotSourceOptions & { signal?: AbortSignal; transport?: "exact" | "bulk" };
 
 /** The agent and HTTP boundary share domain validation; HTTP owns wire-size/field limits. */
 export function normalizePublicSnapshotSyncOptions(input: unknown): PublicSnapshotSyncOptions & { mode: PublicSnapshotMode; transport: "exact" | "bulk" } {
@@ -40,7 +44,7 @@ export function normalizePublicSnapshotSyncOptions(input: unknown): PublicSnapsh
   const peers = [...new Set(value.trustedCorePeerIds as string[])];
   if (value.sourcePolicy ? peers.length !== 0 : (!peers.length || peers.length > 4))
     throw new Error('Configure one to four trusted cores or the registered-core policy, never both');
-  const common: PublicSnapshotSyncBase & { mode: PublicSnapshotMode; transport: "exact" | "bulk" } = {
+  const common: PublicSnapshotSourceBase & { signal?: AbortSignal; mode: PublicSnapshotMode; transport: "exact" | "bulk" } = {
     contextGraphId: value.contextGraphId, onChainId: value.onChainId, mode, transport,
     ...(value.signal ? { signal: value.signal as AbortSignal } : {}),
   };

@@ -8,11 +8,11 @@ import type { PublicSnapshotRecoveryOptions, PublicSnapshotRecoveryResult } from
 import { type BulkGraphRequest } from './sync/bulk-graph-contract.js';
 import { exchangeBulkGraphVerified, type BulkGraphMetrics } from './sync/requester/bulk-graph-stream.js';
 import { materializeVerifiedGraphScopedGroup } from './sync/requester/graph-scoped-group.js';
+import { publicSnapshotSuppliers, type PublicSnapshotSupplierHost } from './public-snapshot-suppliers.js';
 
-export type PublicSnapshotBulkHost = Pick<DurableRecoveryHost, 'verification' | 'reconcile'> & {
+export type PublicSnapshotBulkHost = PublicSnapshotSupplierHost & Pick<DurableRecoveryHost, 'verification' | 'reconcile'> & {
   readonly store: Parameters<typeof materializeVerifiedGraphScopedGroup>[0]['store'];
   readonly router: Pick<ProtocolRouter, 'probeProtocol' | 'withDuplexStream'>;
-  ensurePeerConnected(peer: string, options: { signal: AbortSignal }): Promise<void>;
 };
 
 /** One explicit public job, one configured supplier. No background or private sync policy changes. */
@@ -25,29 +25,13 @@ export async function recoverPublicSnapshotBulk(agent: PublicSnapshotBulkHost, o
   if (!options.dataDir) throw new Error('Bulk snapshot requires an isolated persistent data directory');
   signal.throwIfAborted(); assertCurrent();
   if (!options.uals.length) return { committed: new Set(), bulkChunks: [] };
-  async function* suppliers() {
-    for await (const peers of options.peerBatches()) for (const peer of peers) {
-      signal.throwIfAborted(); assertCurrent();
-      try {
-        await agent.ensurePeerConnected(peer, { signal });
-        signal.throwIfAborted(); assertCurrent();
-        const remaining = options.deadline - Date.now();
-        if (remaining <= 0) throw new Error('Bulk snapshot deadline exceeded');
-        const supported = await agent.router.probeProtocol(peer, BULK_GRAPH_PROTOCOL, Math.min(3_000, remaining), signal) === 'supported';
-        signal.throwIfAborted(); assertCurrent();
-        if (supported) yield peer;
-      } catch {
-        signal.throwIfAborted(); assertCurrent();
-        if (Date.now() >= options.deadline) throw new Error('Bulk snapshot deadline exceeded');
-      }
-    }
-  }
   let committedCount = 0;
   const chunks: BulkGraphMetrics[] = [];
   const ctx = createOperationContext('sync');
   let failure: unknown;
   let materialized = false;
-  for await (const supplier of suppliers()) {
+  for await (const supplier of publicSnapshotSuppliers(agent, { ...options, protocol: BULK_GRAPH_PROTOCOL,
+    deadlineMessage: 'Bulk snapshot deadline exceeded' })) {
     try {
       while (committedCount < options.uals.length) {
         assertCurrent();
