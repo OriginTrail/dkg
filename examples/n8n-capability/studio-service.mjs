@@ -5,7 +5,7 @@ import { component, normalizeComponentInput } from './component-registry.mjs';
 import { component as componentV1, normalizeComponentInput as normalizeComponentInputV1 } from './component-registry-v1.mjs';
 import { normalizeStudio, readStudio, studioProgramSource, validateStudioCapabilities } from './studio-definition.mjs';
 import { workflowUuid } from './workflow-definition.mjs';
-import { n8nObservationScope, n8nExecutionMatches, n8nWorkflowSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
+import { n8nObservationScope, n8nExecutionMatches, n8nPinnedExecutionMatches } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { programWorkflowReceipt } from './program-workflow-receipt.mjs';
 
 const reference = (source, graphId) => ({ graphId, programIri: source.programIri, programLayer: 'wm', authorAgentAddress: source.authorAgentAddress, sourceHash: source.sourceHash });
@@ -50,8 +50,8 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     const pending = (async () => {
       const compiled = await provider.provision(definition), sourceText = studioProgramSource(compiled);
       // Remote Program invocation is inside the pinned native graph, not an
-      // invoke_program child of this wrapper. Empty child grants also permit
-      // acknowledged native execution reconciliation after a slow response.
+      // invoke_program child of this wrapper. Native recovery inspects recorded effects; declared child pins
+      // in older saved wrappers remain authority checks, not evidence of execution.
       const nativeRemote = compiled.executor !== 'dkg' && definition.nodes.some(n => n.componentId === 'invoke-dkg-program');
       const sourceHash = createHash('sha256').update(sourceText).digest('hex');
       let source;
@@ -236,7 +236,10 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     validateStudioCapabilities(compiled.definition,await listCapabilities());
     const native=await provider.api('/executions/'+encodeURIComponent(String(value.executionId))+'?includeData=true');
     const installed = await provider.api('/workflows/'+value.workflowId);
-    if(String(native.id)!==value.executionId || native.workflowId!==value.workflowId || n8nWorkflowSha256(installed)!==compiled.grant.workflowSha256 || !n8nExecutionMatches(installed,native.workflowData)) throw reject('Native execution does not match the approved workflow.');
+    const published = installed.activeVersion ? { ...installed.activeVersion, settings: installed.settings } : installed;
+    if (installed.active !== true || installed.id !== value.workflowId || String(native.id) !== value.executionId
+      || !n8nPinnedExecutionMatches(published, native, compiled.grant, published.versionId))
+      throw reject('Native execution does not match the approved workflow.');
     return dkg.call(value,workflow,value.workflowId);
   }
   const timer = setInterval(() => void poll(), 3000); timer.unref();
