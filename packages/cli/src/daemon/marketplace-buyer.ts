@@ -10,6 +10,10 @@
  * subscription and served by sellers over the messenger, each dialed by the
  * peer id its signed offer names, with its job, which follows what landed and
  * makes ended epochs final.
+ *
+ * At boot (`startMarketplace`) buying and selling start each on its own: a
+ * part that fails to start (a file it cannot read, say) is logged and stays
+ * off, and the node boots on without it.
  */
 import { join } from 'node:path';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
@@ -34,6 +38,9 @@ import {
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import type { DkgConfig } from '../config.js';
 import { subscribeWhenAdmitted } from './marketplace-context-graph.js';
+import { startMarketplaceSeller, type MarketplaceSellerRuntime } from './marketplace-seller.js';
+
+const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 export interface MarketplaceBuyerOptions {
   config: Pick<DkgConfig, 'marketplace'>;
@@ -148,13 +155,62 @@ export async function startMarketplaceGateway(options: MarketplaceGatewayOptions
   await gateway.load();
   gateway.start(buyer.config.tickSeconds);
   if (contextGraphId) {
-    // Asked until the graph admits the node, or until the gateway stops.
-    const stopAdmission = subscribeWhenAdmitted(agent, contextGraphId, options.log ? { log: options.log } : {});
-    const stopJob = gateway.stop.bind(gateway);
-    gateway.stop = () => {
-      stopAdmission();
-      return stopJob();
-    };
+    try {
+      // Asked until the graph admits the node, or until the gateway stops.
+      const stopAdmission = subscribeWhenAdmitted(agent, contextGraphId, options.log ? { log: options.log } : {});
+      const stopJob = gateway.stop.bind(gateway);
+      gateway.stop = () => {
+        stopAdmission();
+        return stopJob();
+      };
+    } catch (err) {
+      await gateway.stop();
+      throw err;
+    }
   }
   return gateway;
+}
+
+export interface MarketplaceStartOptions {
+  config: Pick<DkgConfig, 'marketplace'>;
+  agent: DKGAgent;
+  /** The node's operational wallets; the first signs the seller's receipts and offers. */
+  wallets: readonly string[];
+  dataDir: string;
+  dashDb: Pick<DashboardDB, 'insertNotification'>;
+  log: (message: string) => void;
+}
+
+/** What runs of the marketplace: each part `undefined` while it is off. */
+export interface MarketplaceParts {
+  marketplace: Buyer | undefined;
+  marketplaceGateway: Gateway | undefined;
+  marketplaceSeller: MarketplaceSellerRuntime | undefined;
+}
+
+/**
+ * The marketplace at boot, when enabled: the buyer with its gateway, and the
+ * seller. A part that fails to start is logged and stays off, and never stops
+ * the boot: a buyer whose gateway fails stops with it, since nothing could
+ * spend what it funds.
+ */
+export async function startMarketplace(options: MarketplaceStartOptions): Promise<MarketplaceParts> {
+  const { config, agent, wallets, dataDir, dashDb, log } = options;
+  let marketplace: Buyer | undefined;
+  let marketplaceGateway: Gateway | undefined;
+  try {
+    marketplace = startMarketplaceBuyer({ config, agent, wallets, dataDir, dashDb, log });
+    if (marketplace) marketplaceGateway = await startMarketplaceGateway({ config, agent, buyer: marketplace, dataDir, log });
+  } catch (err) {
+    log(`[marketplace] buying could not start and stays off: ${messageOf(err)}`);
+    await marketplace?.stop().catch(() => undefined);
+    marketplace = undefined;
+  }
+  let marketplaceSeller: MarketplaceSellerRuntime | undefined;
+  try {
+    marketplaceSeller = await startMarketplaceSeller({ config, agent, signer: wallets[0], wallets, dataDir, log });
+  } catch (err) {
+    log(`[marketplace] selling could not start and stays off: ${messageOf(err)}`);
+  }
+  return { marketplace, marketplaceGateway, marketplaceSeller };
 }
