@@ -271,6 +271,9 @@ describe('marketplace top-ups', () => {
     ['HTTP_429', () => json({ error: 'Too many requests' }, 429)],
     // A body the node cannot read is refused before the key is looked at: it says nothing of the first send.
     ['InvalidRequest', () => refusal(400, 'InvalidRequest')],
+    // A node too busy to take the request now: try again, with the same key.
+    ['budget_busy', () => new Response(JSON.stringify({ error: { code: 'budget_busy', message: 'busy', type: 'marketplace' } }), { status: 429, headers: { 'Retry-After': '5' } })],
+    ['gateway_busy', () => new Response(JSON.stringify({ error: { code: 'gateway_busy', message: 'busy', type: 'marketplace' } }), { status: 503, headers: { 'Retry-After': '5' } })],
   ];
   for (const [code, answer] of silentOnTheKey) {
     it(`keeps the top-up unknown when a Retry meets a refusal that says nothing of its key (${code})`, async () => {
@@ -311,7 +314,7 @@ describe('marketplace top-ups', () => {
       await click(byTestId(c, 'mkt-topup-retry'));
       await waitUntil(() => !!byTestId(c, 'mkt-topup-unsure')?.querySelector(`[data-code="${code}"]`), `the ${code} answer beside Retry`);
       expect(byTestId(c, 'mkt-topup')?.getAttribute('data-phase')).toBe('unknown');
-      expect(byTestId(c, 'mkt-topup-unsure')?.textContent).toContain('The node has not seen this top-up land yet: it may still');
+      expect(byTestId(c, 'mkt-topup-unsure')?.textContent).toContain('The node cannot tell yet whether this top-up went through');
       expect(byTestId(c, 'mkt-topup-confirm')).toBeNull();
       expect(sessionStorage.length).toBe(1);
       node.refuseCaller = null;

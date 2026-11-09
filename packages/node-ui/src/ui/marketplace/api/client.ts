@@ -73,7 +73,8 @@ export function errorOf(status: number, body: unknown, retryAfterHeader: string 
     const { error, ...extra } = body as unknown as GatewayRefusalBody;
     return new MarketplaceError({
       status, code: error.code, message: error.message ?? error.code, retryAfter, extra: extra as GatewayExtra, body,
-      retryable: extra.retry ?? (status === 503 || status === 0),
+      // Busy (503) or too many waiting (429) passes; a refusal that says `retry: false` does not.
+      retryable: extra.retry ?? (status === 503 || status === 429 || status === 0),
     });
   }
   if (isRecord(body) && typeof body.error === 'string') {

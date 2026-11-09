@@ -56,6 +56,8 @@ const CODE_COPY: Record<string, CopyKey> = {
   epoch_ending: 'err.epoch.ending',
   no_subscription: 'err.gw.nosub',
   soft_ceiling: 'err.gw.ceiling',
+  budget_busy: 'err.gw.busy',
+  gateway_busy: 'err.gw.nodebusy',
   key_budget: 'err.gw.keybudget',
   no_seller: 'err.gw.noseller',
   seller_unreachable: 'err.gw.unreachable',

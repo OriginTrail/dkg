@@ -82,8 +82,15 @@ const REFUSED_BEFORE_CALL = new Set([
   'soft_ceiling', 'session_key_missing', 'request_too_large', 'key_budget', 'MarketplaceOff',
 ]);
 
-/** A failed send: in plain words, its code, and whether it may have been charged. */
-interface SendError { copyKey: CopyKey; code: string; outcome: 'uncharged' | 'unknown' }
+/** The gateway's answers that it is too busy to take the call now, before it calls anyone: try again in a moment. */
+const TRY_AGAIN = new Set(['budget_busy', 'gateway_busy']);
+
+/**
+ * A failed send: in plain words, its code, and how it ended: refused before
+ * any call (`uncharged`), too busy to take it now (`busy`, with when to try
+ * again), or of an outcome that may have been charged (`unknown`).
+ */
+interface SendError { copyKey: CopyKey; code: string; outcome: 'uncharged' | 'busy' | 'unknown'; retryAfter: number | null }
 
 interface Msg { role: 'user' | 'assistant'; content: string; served?: Served; error?: SendError }
 type Fork = { kind: 'ceiling'; serviceId: string; nextEpochAt: number | null } | { kind: 'fund'; serviceId: string } | { kind: 'ending'; seconds: number | null };
@@ -167,7 +174,8 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
       if (isMarketplaceError(err) && ['soft_ceiling', 'no_subscription', 'epoch_ending'].includes(err.code)) return;
       const d = describeError(err);
       const uncharged = !called || (isMarketplaceError(err) && REFUSED_BEFORE_CALL.has(err.code));
-      setMsgs((m) => [...m, { role: 'assistant', content: '', error: { copyKey: d.copyKey, code: d.code ?? 'Error', outcome: uncharged ? 'uncharged' : 'unknown' } }]);
+      const outcome = isMarketplaceError(err) && TRY_AGAIN.has(err.code) ? 'busy' : uncharged ? 'uncharged' : 'unknown';
+      setMsgs((m) => [...m, { role: 'assistant', content: '', error: { copyKey: d.copyKey, code: d.code ?? 'Error', outcome, retryAfter: d.retryAfter } }]);
     } finally {
       setBusy(false);
     }
@@ -224,9 +232,13 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
           <div key={i}>
             {m.error ? (
               <div className="mkt-bubble assistant error" role="alert" data-testid="mkt-error-bubble" data-code={m.error.code} data-outcome={m.error.outcome}>
-                {m.error.outcome === 'uncharged'
-                  ? <span data-copy="play.error.bubble">{copy('play.error.bubble', { reason: copy(m.error.copyKey) })}</span>
-                  : <span data-copy="play.error.unknown">{copy('play.error.unknown', { reason: copy(m.error.copyKey) })}</span>}
+                {m.error.outcome === 'busy' && (
+                  <span data-copy={m.error.copyKey}>
+                    {copy(m.error.copyKey)}{m.error.retryAfter != null && <span data-copy="err.retry.after"> · {copy('err.retry.after', { n: m.error.retryAfter })}</span>}
+                  </span>
+                )}
+                {m.error.outcome === 'uncharged' && <span data-copy="play.error.bubble">{copy('play.error.bubble', { reason: copy(m.error.copyKey) })}</span>}
+                {m.error.outcome === 'unknown' && <span data-copy="play.error.unknown">{copy('play.error.unknown', { reason: copy(m.error.copyKey) })}</span>}
               </div>
             ) : (
               <>

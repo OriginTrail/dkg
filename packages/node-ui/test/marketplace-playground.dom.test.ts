@@ -141,16 +141,20 @@ describe('marketplace playground key', () => {
   /** The answer comes from the node, which served and charged the call, but stops partway through its body. */
   const cutOff = async (served: () => Promise<Response>) => { const text = await (await served()).text(); return new Response(text.slice(0, Math.floor(text.length / 2)), { status: 200 }); };
   const unreachable = () => Promise.reject(new TypeError('Failed to fetch'));
-  const outcomes: Array<[string, { chat?: (served: () => Promise<Response>) => Response | Promise<Response>; keys?: () => Promise<Response> }, string, 'uncharged' | 'unknown']> = [
+  /** The gateway too busy to take the call, as it answers before calling anyone: with Retry-After. */
+  const busy = (status: number, code: string) => () => new Response(JSON.stringify({ error: { code, message: code, type: 'marketplace' } }), { status, headers: { 'Retry-After': '5' } });
+  const outcomes: Array<[string, { chat?: (served: () => Promise<Response>) => Response | Promise<Response>; keys?: () => Promise<Response> }, string, 'uncharged' | 'unknown' | 'busy']> = [
     ['an answer that cannot be read', { chat: cutOff }, 'UnreadableAnswer', 'unknown'],
     ['no answer to the call', { chat: unreachable }, 'Offline', 'unknown'],
     ['a seller that did not answer', { chat: refused(503, 'seller_unreachable') }, 'seller_unreachable', 'unknown'],
     ['a receipt that failed its check', { chat: refused(502, 'bad_receipt') }, 'bad_receipt', 'unknown'],
     ['a refusal before any seller is called', { chat: refused(503, 'no_seller') }, 'no_seller', 'uncharged'],
     ['no answer while the key is made, before any call', { keys: unreachable }, 'Offline', 'uncharged'],
+    ['too many calls waiting on the service', { chat: busy(429, 'budget_busy') }, 'budget_busy', 'busy'],
+    ['a gateway taking as many calls as it can', { chat: busy(503, 'gateway_busy') }, 'gateway_busy', 'busy'],
   ];
   for (const [what, node, code, outcome] of outcomes) {
-    it(`says ${outcome === 'uncharged' ? 'nothing was charged' : 'the charge is not known'} after ${what}`, async () => {
+    it(`says ${{ uncharged: 'nothing was charged', unknown: 'the charge is not known', busy: 'to try again' }[outcome]} after ${what}`, async () => {
       const fixture = fixtureFetch('active');
       vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
@@ -161,13 +165,17 @@ describe('marketplace playground key', () => {
       const c = await openPlayground();
       await type(byTestId(c, 'mkt-play-input'), 'hello');
       await click(byTestId(c, 'mkt-play-send'));
-      await waitForText(c, outcome === 'uncharged' ? 'nothing was charged' : 'is not known');
+      await waitForText(c, { uncharged: 'nothing was charged', unknown: 'is not known', busy: 'try again in a moment' }[outcome]);
       const bubble = byTestId(c, 'mkt-error-bubble');
       expect(bubble?.getAttribute('data-code')).toBe(code);
       expect(bubble?.getAttribute('data-outcome')).toBe(outcome);
       if (outcome === 'unknown') {
         expect(bubble?.textContent).not.toContain('nothing was charged');
         expect(bubble?.textContent).toContain('check Recent calls in Plans before sending it again');
+      }
+      if (outcome === 'busy') {
+        expect(bubble?.textContent).not.toContain('nothing was charged');
+        expect(bubble?.textContent).toContain('Try again in 5 s');
       }
     });
   }
