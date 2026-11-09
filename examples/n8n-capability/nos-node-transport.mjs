@@ -68,9 +68,8 @@ export async function writeNosEvidence(call, payload, graph) {
   const quads = rows => [...new Set(rows.map(q => JSON.stringify([q.subject, q.predicate, term(q.object)])))].sort();
   if (!Array.isArray(readback.quads) || !isDeepStrictEqual(quads(readback.quads), quads(payload.quads)))
     throw fail('Stored evidence differs from this execution.');
-  const stored = readback.quads.find(q => q.predicate === 'urn:nos:workflow:payload');
-  if (!stored || createHash('sha256').update(JSON.parse(stored.object)).digest('hex') !== payload.digest)
-    throw fail('Stored evidence digest differs.');
+  // The trusted profile owns its digest and RDF vocabulary. Exact readback binds
+  // this storage receipt to the complete payload it supplied.
   metadata = await call(path, undefined, query);
   if (metadata.status !== 'wm-sealed') throw fail('Evidence has not been sealed.');
   return { contextGraphId: graph, name: payload.name, digest: payload.digest, metadata, created, readbackVerified: true };

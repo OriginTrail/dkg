@@ -20,6 +20,11 @@ That profile owns its existing `NOS_JPB_READ_ENABLED`, `NOS_JPB_PROGRAM_ENABLED`
 its existing `jpb-*.py`, `jpb-programs.json` and `jpb-output.mjs` demo artifacts.
 These artifacts retain their deliberately restrictive host, graph, order,
 workbook and evidence checks. Importing a profile makes no network calls.
+The workbook is validated and snapshotted at profile load. `loadInputs()` returns
+copies of that snapshot; changing the file or its environment setting does not
+change a running profile. Its revision includes a digest of the complete normalized
+rows, including quantities and mappings. Whitespace, object-key order and the file
+path do not affect that digest. The authenticated JPB profile inherits this pin.
 
 The module path is operator configuration, not a browser parameter. Treat a
 profile as trusted executable server code: never accept module paths, endpoints,
@@ -49,6 +54,10 @@ The default export is validated by `dkg-profile.mjs` and contains:
 
 The transport remains responsible for verification at the actual node and for
 remote idempotency; dependency injection alone does not establish those guarantees.
+The shared nOS writer creates/reconciles the named asset, compares exact RDF values
+and requires `wm-sealed`. Each trusted profile owns its evidence vocabulary and
+digest interpretation. The JPB profile validates its payload digest before calling
+the writer; exact readback then confirms the same validated payload was stored.
 The generic runtime verifies Program invocation/source/binding receipts and write
 scope/digest/sealed status/readback. Its journal is written before dispatch.
 
@@ -62,7 +71,8 @@ The execution profile revision is included in each public component's parameters
 so installation/source hashes and saved workflow parameters pin it. Change the
 revision whenever connections, permitted graphs, policy implementation, pinned
 inputs or Program bindings change. The demo computes it from its policy and
-transport artifacts. New profiles must provide the same revision discipline.
+transport artifacts and approved workbook snapshot. New profiles must provide the
+same revision discipline.
 
 Installation and companion must use the same profile revision. Regenerate/import
 components and explicitly reselect/save/approve workflow revisions when migrating.

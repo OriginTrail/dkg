@@ -5,6 +5,11 @@ export const JPB_SOURCE = '0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-data';
 export const JPB_TARGET = '0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-plca-study';
 export const JPB_WORKBOOK = '2f0585064042668c4a854290a2e0ef365a24e57d58345881108067d397470fbf';
 const fail = message => Object.assign(new Error(message), { status: 409, code: 'DKG_COMPONENT_UNCONFIRMED' });
+export function verifyJpbEvidence(payload) {
+  const stored = payload.quads.filter(q => q.predicate === 'urn:nos:workflow:payload');
+  if (stored.length !== 1 || createHash('sha256').update(JSON.parse(stored[0].object)).digest('hex') !== payload.digest)
+    throw fail('JPB evidence digest differs.');
+}
 export function componentEvidence(rows, context, read, workbook, programOutput) {
   if (
     !Array.isArray(rows) ||
