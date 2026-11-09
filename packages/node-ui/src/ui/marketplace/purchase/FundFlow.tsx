@@ -10,7 +10,12 @@
 // subscription shows decides instead. Funded as confirmed, the plan is saved
 // and nothing is funded again; not funded, Retry sends the same funding;
 // funded on other terms, the flow says so and saves no plan.
-import React, { useState } from 'react';
+//
+// A funding's answer can come back after another flow replaced this one: the
+// funding is kept, and its plan is still saved, but only in the order of the
+// confirmations (planSaves.ts), so it never writes over a plan confirmed
+// later. A replaced flow closes nothing: what is on show now is another's.
+import React, { useEffect, useRef, useState } from 'react';
 import { copy } from '../copy.generated.js';
 import { isMarketplaceError, marketplaceApi } from '../api/client.js';
 import type { CatalogAnswer, Funding, FundingRequest, PlanRequest, Source, Subscription, Tx } from '../api/types.js';
@@ -20,6 +25,7 @@ import { Composer, PreviewLine, fundingRequestOf, servicesOf, type Draft } from 
 import { ConfirmGate } from './ConfirmGate.js';
 import { KeyStep } from './KeyStep.js';
 import type { Confirming, FundConfirming } from './model.js';
+import { confirmationTicket, savePlanFor } from './planSaves.js';
 import { ProgressSteps } from './ProgressSteps.js';
 import { usePreview } from './usePreview.js';
 
@@ -35,7 +41,10 @@ type FundingRead =
   | { state: 'other'; subscription: Subscription }
   | { state: 'unread'; err: unknown };
 
-/** The flow, one phase at a time. A funding goes out once: once it is `funded`, only the plan save can be sent again. */
+/**
+ * The flow, one phase at a time. A funding goes out once: once it is `funded`, only the plan save can be sent again.
+ * `ticket` is the confirmation's place among plan saves, taken when Confirm was pressed.
+ */
 type Flow =
   | { phase: 'compose' }
   /** The confirmation, with the failure of the last Confirm, if any. */
@@ -43,9 +52,9 @@ type Flow =
   /** Confirm sent: the funding and then the plan, or the plan alone. */
   | { phase: 'sending'; confirming: Confirming }
   /** The funding went out, but no answer says whether it landed (`err`): the epoch's subscription is read to tell. */
-  | { phase: 'unknown'; confirming: FundConfirming; err: unknown; read: FundingRead }
+  | { phase: 'unknown'; confirming: FundConfirming; ticket: number; err: unknown; read: FundingRead }
   /** The epoch is funded. The plan is saved unless `planErr`; `saving` while it is sent again. */
-  | { phase: 'funded'; confirming: FundConfirming; funded: Funded; planErr: unknown; saving: boolean }
+  | { phase: 'funded'; confirming: FundConfirming; ticket: number; funded: Funded; planErr: unknown; saving: boolean }
   /** The plan alone is saved, and the flow is done. */
   | { phase: 'saved' };
 
@@ -149,21 +158,27 @@ export function FundFlow({ catalog, funding, initial, fundsEpoch, onboarding, on
     setFlow({ phase: 'confirm', confirming: { kind: 'fund', request: funds, preview: answered.preview, plan: planOf(funds) }, err: null });
   };
 
-  /** The epoch is funded: save the plan that renews it. */
-  const savePlanAfter = async (confirming: FundConfirming, funded: Funded) => {
+  // Whether this flow is still on show: a funding's answer can come back after another flow replaced it.
+  const open = useRef(true);
+  useEffect(() => { open.current = true; return () => { open.current = false; }; }, []);
+  /** Done, while on show; a replaced flow leaves alone the one that replaced it. */
+  const finish = () => { if (open.current) onDone(); };
+
+  /** The epoch is funded: save the plan that renews it, unless a plan confirmed later was saved first. */
+  const savePlanAfter = async (confirming: FundConfirming, ticket: number, funded: Funded) => {
     try {
-      await marketplaceApi.savePlan(confirming.plan);
+      await savePlanFor(ticket, confirming.plan);
     } catch (e) {
-      setFlow({ phase: 'funded', confirming, funded, planErr: e, saving: false });
+      setFlow({ phase: 'funded', confirming, ticket, funded, planErr: e, saving: false });
       return;
     }
-    if (onboarding) setFlow({ phase: 'funded', confirming, funded, planErr: null, saving: false });
-    else onDone();
+    if (onboarding) setFlow({ phase: 'funded', confirming, ticket, funded, planErr: null, saving: false });
+    else finish();
   };
 
   /** Read the epoch's subscription after a funding whose outcome is unknown, and go on as it says. */
-  const settle = async (confirming: FundConfirming, err: unknown) => {
-    setFlow({ phase: 'unknown', confirming, err, read: { state: 'checking' } });
+  const settle = async (confirming: FundConfirming, ticket: number, err: unknown) => {
+    setFlow({ phase: 'unknown', confirming, ticket, err, read: { state: 'checking' } });
     const { epoch } = confirming.request;
     let read: FundingRead;
     try {
@@ -171,57 +186,58 @@ export function FundFlow({ catalog, funding, initial, fundsEpoch, onboarding, on
       if (subscription && fundedAsConfirmed(subscription, confirming.request)) {
         // It landed as confirmed: nothing is funded again, and the plan follows.
         setFlow({ phase: 'sending', confirming });
-        await savePlanAfter(confirming, { subscription, tx: null });
+        await savePlanAfter(confirming, ticket, { subscription, tx: null });
         return;
       }
       read = subscription ? { state: 'other', subscription } : { state: 'absent' };
     } catch (e) {
       read = { state: 'unread', err: e };
     }
-    setFlow({ phase: 'unknown', confirming, err, read });
+    setFlow({ phase: 'unknown', confirming, ticket, err, read });
   };
 
   /** Send the confirmed funding, or, on `retry`, send it again once the epoch's subscription showed it had not landed. */
-  const fund = async (confirming: FundConfirming, retry: boolean) => {
+  const fund = async (confirming: FundConfirming, ticket: number, retry: boolean) => {
     setFlow({ phase: 'sending', confirming });
     let answer;
     try {
       answer = await marketplaceApi.fund(confirming.request);
     } catch (e) {
       // A lost answer, or a repeat refused because the epoch is funded now: whether the funding landed is read, not assumed.
-      if (mayHaveLanded(e) || (retry && isMarketplaceError(e) && e.code === 'SubscriptionAlreadyFunded')) await settle(confirming, e);
+      if (mayHaveLanded(e) || (retry && isMarketplaceError(e) && e.code === 'SubscriptionAlreadyFunded')) await settle(confirming, ticket, e);
       else setFlow({ phase: 'confirm', confirming, err: e });
       return;
     }
-    await savePlanAfter(confirming, { subscription: answer.subscription, tx: { txHash: answer.txHash, blockNumber: answer.blockNumber } });
+    await savePlanAfter(confirming, ticket, { subscription: answer.subscription, tx: { txHash: answer.txHash, blockNumber: answer.blockNumber } });
   };
 
   const confirm = async () => {
     if (flow.phase !== 'confirm') return;
     const { confirming } = flow;
+    const ticket = confirmationTicket();
     if (confirming.kind === 'fund') {
-      await fund(confirming, false);
+      await fund(confirming, ticket, false);
       return;
     }
     setFlow({ phase: 'sending', confirming });
     try {
-      await marketplaceApi.savePlan(confirming.plan);
+      await savePlanFor(ticket, confirming.plan);
     } catch (e) {
       setFlow({ phase: 'confirm', confirming, err: e });
       return;
     }
     setFlow({ phase: 'saved' });
-    onDone();
+    finish();
   };
-  const retryFunding = () => { if (flow.phase === 'unknown' && flow.read.state === 'absent') void fund(flow.confirming, true); };
-  const readAgain = () => { if (flow.phase === 'unknown' && flow.read.state !== 'checking') void settle(flow.confirming, flow.err); };
+  const retryFunding = () => { if (flow.phase === 'unknown' && flow.read.state === 'absent') void fund(flow.confirming, flow.ticket, true); };
+  const readAgain = () => { if (flow.phase === 'unknown' && flow.read.state !== 'checking') void settle(flow.confirming, flow.ticket, flow.err); };
   const backToCompose = () => { setFlow({ phase: 'compose' }); setRound((r) => r + 1); };
   // The funding went out: a retry saves the plan alone.
   const retryPlan = () => {
     if (flow.phase !== 'funded' || flow.saving) return;
     const done = flow;
     setFlow({ ...done, saving: true });
-    marketplaceApi.savePlan(done.confirming.plan)
+    savePlanFor(done.ticket, done.confirming.plan)
       .then(() => setFlow({ ...done, planErr: null, saving: false }), (e: unknown) => setFlow({ ...done, planErr: e, saving: false }));
   };
 

@@ -4,10 +4,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PlansView } from '../src/ui/marketplace/views/PlansView.js';
 import { useMarketplaceDraftStore } from '../src/ui/marketplace/draftStore.js';
 import { FIXTURE_IDS, fixtureFetch } from '../src/ui/marketplace/api/fixtures.js';
-import { byTestId, click, flush, render, unmountAll, waitForText } from './helpers/marketplace-render.js';
+import { byTestId, click, flush, render, type, unmountAll, waitForText } from './helpers/marketplace-render.js';
 
 type Json = Record<string, unknown>;
 type Write = { method: string; url: string; body: unknown };
+
+async function waitUntil(check: () => boolean, what: string, timeoutMs = 2_000): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (check()) return;
+    await flush(10);
+  }
+  throw new Error(`Timed out waiting for ${what}`);
+}
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 const refusal = (status: number, code: string, args: string[] = []) => json({ error: `${code}(${args.join(', ')})`, code, ...(args.length ? { args } : {}), retryable: false }, status);
@@ -85,6 +94,64 @@ function fundingNode() {
   return control;
 }
 
+/**
+ * The fixture node with this epoch funded and the next one not, keeping each
+ * write. A funding of the next epoch lands at once, but its answer waits for
+ * `release()`. A plan saved is the plan read after it.
+ */
+function heldNextNode() {
+  const writes: Write[] = [];
+  const node = fixtureFetch('active');
+  let next: Json | null = null;
+  let plan: Json | null = null;
+  const held: Array<() => void> = [];
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method ?? 'GET';
+    const url = String(input);
+    if (method !== 'GET') writes.push({ method, url, body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined });
+    if (method === 'POST' && url === '/api/marketplace/subscriptions') {
+      const text = await (await node(input, init)).text();
+      next = (JSON.parse(text) as { subscription: Json }).subscription;
+      await new Promise<void>((resolve) => { held.push(resolve); });
+      return new Response(text, { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (method === 'GET' && url.startsWith('/api/marketplace/subscriptions')) {
+      const asked = new URL(url, 'http://fixture.localhost').searchParams.get('epoch');
+      const { subscriptions } = await (await node(input, init)).json() as { subscriptions: Json[] };
+      const landed = next && (asked === null || Number(asked) === next.epoch) ? [next] : [];
+      return json({ subscriptions: [...subscriptions.filter((s) => s.epoch !== 665), ...landed] });
+    }
+    if (method === 'PUT' && url === '/api/marketplace/plan') {
+      plan = await (await node(input, init)).json() as Json;
+      return json(plan);
+    }
+    if (method === 'GET' && url === '/api/marketplace/plan' && plan) return json(plan);
+    return node(input, init);
+  });
+  return {
+    writes,
+    release() { for (const r of held.splice(0)) r(); },
+    get waiting() { return held.length; },
+    /** The plan the node holds now, by service: each budget's value. */
+    get planValues() { return plan && Object.fromEntries((plan.services as Json[]).map((s) => [s.serviceId, s.value])); },
+  };
+}
+
+/** Fund epoch 665 from the plan with the llama budget at 0.6 TRAC, and confirm it; its answer is held. */
+async function fundNextHeld(node: ReturnType<typeof heldNextNode>): Promise<HTMLElement> {
+  const c = await render(React.createElement(PlansView));
+  await waitForText(c, 'Epoch 665 is not funded');
+  await click(byTestId(c, 'mkt-fund-next'));
+  await type(byTestId(c, `mkt-value-${FIXTURE_IDS.llama8b}`), '0.6');
+  await flush(300);
+  await waitForText(c, 'Costs 5.1 TRAC from the buyer wallet for epoch 665');
+  await click(byTestId(c, 'mkt-compose-continue'));
+  await click(byTestId(c, 'mkt-gate-confirm'));
+  await flush(20);
+  expect(node.waiting).toBe(1);
+  return c;
+}
+
 const fundings = (writes: Write[]) => writes.filter((w) => w.method === 'POST' && w.url === '/api/marketplace/subscriptions');
 const planSaves = (writes: Write[]) => writes.filter((w) => w.method === 'PUT' && w.url === '/api/marketplace/plan');
 
@@ -102,7 +169,7 @@ async function composeAndConfirm(): Promise<HTMLElement> {
 
 const CONFIRMED = { epoch: 664, source: { kind: 'wallet' }, services: [{ serviceId: FIXTURE_IDS.qwen14b, serviceClass: 'inference', value: '1000000000000000000', maxPricePerUnit: '700000000000' }] };
 
-describe('marketplace funding whose answer is lost', () => {
+describe('marketplace funding whose answer is lost or comes late', () => {
   afterEach(async () => {
     await unmountAll();
     useMarketplaceDraftStore.setState({ ask: null });
@@ -164,6 +231,38 @@ describe('marketplace funding whose answer is lost', () => {
     await click(byTestId(c, 'mkt-funding-done'));
     await waitForText(c, 'Epoch 664: 0% of its value landed');
     expect(byTestId(c, 'mkt-plans')?.getAttribute('data-state')).toBe('active');
+  });
+
+  it('keeps a funding whose answer comes after a later plan was saved, and does not save its own plan over that one', async () => {
+    const node = heldNextNode();
+    const c = await fundNextHeld(node);
+    // While that answer is on its way, the plan is changed and saved from another flow.
+    await click(byTestId(c, 'mkt-change-plan'));
+    await type(byTestId(c, `mkt-value-${FIXTURE_IDS.llama8b}`), '0.75');
+    await click(byTestId(c, 'mkt-compose-continue'));
+    await click(byTestId(c, 'mkt-gate-confirm'));
+    await waitUntil(() => planSaves(node.writes).length === 1 && byTestId(c, 'mkt-fund-flow') === null, 'the changed plan to be saved');
+    expect(node.planValues?.[FIXTURE_IDS.llama8b]).toBe('750000000000000000');
+    // The first funding's answer comes back: the epoch stays funded, and the plan confirmed later stays.
+    node.release();
+    await flush(50);
+    await flush(50);
+    expect(fundings(node.writes).map((w) => (w.body as { epoch: number }).epoch)).toEqual([665]);
+    expect(planSaves(node.writes)).toHaveLength(1);
+    expect(node.planValues?.[FIXTURE_IDS.llama8b]).toBe('750000000000000000');
+  });
+
+  it('still saves the plan of a funding whose answer comes after a top-up replaced its form, and leaves that form open', async () => {
+    const node = heldNextNode();
+    const c = await fundNextHeld(node);
+    await click(byTestId(c, `mkt-addon-${FIXTURE_IDS.mistral24b}`));
+    expect(byTestId(c, 'mkt-fund-flow')).toBeNull();
+    node.release();
+    await waitUntil(() => planSaves(node.writes).length === 1, 'the funding\'s plan to be saved');
+    expect(node.planValues?.[FIXTURE_IDS.llama8b]).toBe('600000000000000000');
+    await flush(50);
+    // The top-up stays on show: the flow that funded the epoch was replaced, so it closes nothing.
+    expect(byTestId(c, 'mkt-topup')?.textContent).toContain('Add mistral-small-24b-instruct to epoch 664');
   });
 
   it('reads the epoch again on request when it cannot be read, offering nothing that sends meanwhile', async () => {

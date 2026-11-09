@@ -5,6 +5,7 @@ import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { vi } from 'vitest';
 import { fixtureFetch, type FixtureScenario } from '../../src/ui/marketplace/api/fixtures.js';
+import { forgetPlanSaves } from '../../src/ui/marketplace/purchase/planSaves.js';
 import { forgetPlaygroundKey } from '../../src/ui/marketplace/views/Playground.js';
 
 /** What `copy()` prints for a key the string table lacks. */
@@ -43,6 +44,7 @@ export async function unmountAll(): Promise<void> {
   sessionStorage.clear();
   vi.unstubAllGlobals();
   forgetPlaygroundKey();
+  forgetPlanSaves();
 }
 
 /** The tab reloads: every view goes, the node stays as it is, and so does the tab's session storage. */
