@@ -4,7 +4,8 @@
  * offers' assets in memory in place of Verifiable Memory: one asset per
  * service, published once and updated only when its signed terms change (a
  * price included, and the epoch turning only when the schedule no longer
- * holds), nothing sent after a restart, an asset extended with two epochs or
+ * holds), nothing sent after a restart, an unchanged offer signed again when
+ * the node's signing wallet changes, an asset extended with two epochs or
  * fewer left and paid for once when the publish after it fails, a withdrawal,
  * a seller without TRAC left unlisted with the reason and a backoff, a
  * confirmed publish whose catalog record is owed, what was published kept by
@@ -19,6 +20,7 @@ import { MockChainAdapter, marketplaceChainOf, type MarketplaceChainAdapter, typ
 import {
   MARKETPLACE_NS,
   MAX_OFFER_BACKOFF_SECONDS,
+  Router,
   Seller,
   TERM_EPOCHS,
   listingProblemOf,
@@ -100,8 +102,8 @@ function memoryAssets(contextGraphId = GRAPH, firstKaId = 1): Assets {
 const connector = { kind: 'openai' as const, complete: async () => ({ content: 'synthetic answer', promptTokens: 1, completionTokens: 1 }) };
 const serviceOf = (model: string): SellerService => ({ model, serviceId: serviceIdOf(model), pricePerUnit: PRICE, capacity: 4, provenance: 'upstream-claimed', connector });
 
-function sellerWith(services: SellerService[] = [serviceOf(MODEL_A), serviceOf(MODEL_B)], offers: OfferAssets = assets): Seller {
-  return new Seller({ chain, dir, services, signer: SELLER.address, peerId: 'seller-peer', stopServingSeconds: 180, tickSeconds: 300, offers, log: (m) => logs.push(m) });
+function sellerWith(services: SellerService[] = [serviceOf(MODEL_A), serviceOf(MODEL_B)], offers: OfferAssets = assets, signer = SELLER.address): Seller {
+  return new Seller({ chain, dir, services, signer, peerId: 'seller-peer', stopServingSeconds: 180, tickSeconds: 300, offers, log: (m) => logs.push(m) });
 }
 
 /** A tick, then a run of the offer job once the tick's own run is done. */
@@ -214,6 +216,43 @@ describe('the offer job', () => {
     expect(logs).toContainEqual(expect.stringMatching(new RegExp(`stored through epoch ${epoch + 2 * TERM_EPOCHS}`)));
     await settle(seller);
     expect(extensions).toHaveBeenCalledTimes(2);
+  });
+
+  it("signs an unchanged offer again when the node's signing wallet changes, so a buyer keeps it once the old wallet is retired", async () => {
+    const seller = sellerWith([serviceOf(MODEL_A)]);
+    await seller.load();
+    await settle(seller);
+    const { epoch } = await chain.getEpochTimes();
+    const identityId = seller.gate.identityId;
+    // The node now signs with wallet B, an operational wallet of the same identity; its terms are unchanged.
+    const rotated = new ethers.Wallet(`0x${'33'.repeat(32)}`);
+    mock.seedIdentity(rotated.address, identityId);
+    mock.setMockACKSigner(rotated);
+    const restarted = sellerWith([serviceOf(MODEL_A)], assets, rotated.address);
+    await restarted.load();
+    await settle(restarted);
+    expect(offersOf(A).map((o) => serviceOfferSignerOf(domain, o))).toEqual([SELLER.address, rotated.address]);
+    const { signedAt: _signedAt, signature: _signature, ...terms } = offersOf(A)[0]!;
+    expect(offersOf(A)[1]).toMatchObject(terms);
+    expect(new Set(assets.published.map((p) => p.kaId)).size).toBe(1);
+    // A buyer that sees the old wallet retired keeps the offer the new one signed.
+    const wallets = new Map([[rotated.address, identityId]]);
+    const router = new Router({
+      chain: {
+        getMarketplaceContracts: () => chain.getMarketplaceContracts(),
+        getIdentityIdForAddress: async (wallet: string) => wallets.get(ethers.getAddress(wallet)) ?? 0n,
+        isShardingTableMember: async () => true,
+      },
+      offers: async () => assets.published.map((p) => p.offer),
+      quote: async () => { throw new Error('no quote is asked for'); },
+    });
+    expect((await router.offersOf([epoch])).map((o) => o.signature)).toEqual([offersOf(A)[1]!.signature]);
+    // Signed by the node's wallet, the unchanged offer is not sent again, after a restart either.
+    await settle(restarted);
+    const again = sellerWith([serviceOf(MODEL_A)], assets, rotated.address);
+    await again.load();
+    await settle(again);
+    expect(offersOf(A)).toHaveLength(2);
   });
 
   it('pays for an extension once: when the publish after it fails, a restart publishes the new last epoch and pays nothing more', async () => {

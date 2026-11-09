@@ -16,8 +16,9 @@
  *      and the next's, and the asset's end epoch (for a new asset,
  *      `TERM_EPOCHS` from now). The schedule published is kept while it
  *      prices this epoch and the next as the seller does.
- *   4. Unchanged from the offer last published, nothing is sent. Changed (a
- *      price, a setting, the peer id, the end epoch after an extension), it is
+ *   4. Unchanged from the offer last published, and signed by the node's
+ *      signing wallet, nothing is sent. Changed (a price, a setting, the peer
+ *      id, the end epoch after an extension, the wallet that signs), it is
  *      signed, later than the one before it, and published: the first time, or
  *      as an update of the same asset.
  * A service the settings no longer name is withdrawn: its offer is published
@@ -47,6 +48,7 @@ import {
   scheduledPrice,
   serviceOfferFromWire,
   serviceOfferQuads,
+  serviceOfferSignerOf,
   serviceOfferToWire,
   serviceOffersFromBindings,
   signServiceOffer,
@@ -331,7 +333,8 @@ export class OfferJob {
       ...(terms.tokenizerBundle ? { tokenizerBundle: terms.tokenizerBundle } : {}), capacity: terms.capacity, peerId: this.deps.peerId,
       ...schedule, validUntilEpoch, withdrawn: !service,
     };
-    if (published && sameTerms(published, desired)) return;
+    // An offer another wallet signed, as before the node's signing wallet changed, is signed again: buyers drop one whose signer is retired.
+    if (published && sameTerms(published, desired) && serviceOfferSignerOf(gate.domain, published)?.toLowerCase() === this.deps.signer.toLowerCase()) return;
     const offer = await signServiceOffer(this.deps.chain, this.deps.signer, gate.domain, { ...desired, signedAt: Math.max(times.now, (published?.signedAt ?? 0) + 1) });
     try {
       const { kaId } = await this.deps.assets.publish(`offer-${serviceId}`, serviceOfferQuads(offer));
