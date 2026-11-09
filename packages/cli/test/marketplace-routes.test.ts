@@ -7,6 +7,7 @@
  * the contracts together are tested on Hardhat in
  * marketplace-buyer.evm.test.ts.
  */
+import { EventEmitter } from 'node:events';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -48,11 +49,12 @@ async function api(
   body?: unknown,
   authentication = requestAuthentication({ kind: 'nodeOperator' }),
 ): Promise<{ status: number; body: any; claimed: boolean; headers?: Record<string, string> }> {
-  const res: any = { statusCode: 0, body: '', writableEnded: false };
+  // Emitters, as the gateway listens for a client that goes away.
+  const res: any = Object.assign(new EventEmitter(), { statusCode: 0, body: '', writableEnded: false });
   res.writeHead = (status: number, headers?: Record<string, string>) => { res.statusCode = status; res.headers = headers; };
   res.setHeader = () => undefined;
   res.end = (text: string) => { res.body = text; res.writableEnded = true; };
-  const req: any = { method, url: path };
+  const req: any = Object.assign(new EventEmitter(), { method, url: path });
   if (body !== undefined) req.__dkgPrebufferedBody = Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
   const url = new URL(`http://127.0.0.1${path}`);
   await handleMarketplaceRoutes({
