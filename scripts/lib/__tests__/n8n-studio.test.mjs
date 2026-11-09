@@ -151,6 +151,60 @@ function timerExecution(f, row, id, normalized = true) {
     data: { resultData: { runData: { [trigger]: [{ data: { main: [[{ json: { tick: id } }]] } }] } } } };
 }
 
+for (const mode of ['webhook', 'schedule']) for (const stage of ['source', 'approval', 'catalog']) {
+  test(`temporary ${stage} inspection failure preserves ${mode} activation and pending recovery`, async () => {
+    const f = environment();
+    try {
+      const w = await f.service.save(definition([mode, 'edit-fields'], [[0,0,1,0]]), () => {});
+      await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+      const row = f.provider.row(w.kaRef), invocationId = randomUUID(), items = [{ name: 'retry' }];
+      f.provider.repository.reserveEvent({ kaRef: w.kaRef, providerId: row.provider_id,
+        executionId: mode === 'schedule' ? '7' : invocationId, invocationId,
+        ...(mode === 'webhook' ? { inputJson: JSON.stringify(items) } : {}) }, () => {});
+      if (mode === 'schedule') f.executions.set('7', timerExecution(f, row, '7'));
+      const before = f.provider.repository.activation(w.kaRef), pending = f.provider.repository.pendingEvents(w.kaRef);
+      const timeout = Object.assign(new Error('temporary inspection timeout'), { code: 'ETIMEDOUT', status: 503 });
+      if (stage === 'catalog') f.failNextCatalog(timeout);
+      else {
+        const method = stage === 'source' ? 'getSource' : 'getApproval', read = f.client.programs[method];
+        f.client.programs[method] = async () => { f.client.programs[method] = read; throw timeout; };
+      }
+      const calls = f.calls.length;
+      await f.service.poll();
+      assert.deepEqual(f.provider.repository.activation(w.kaRef), before);
+      assert.equal(f.provider.row(w.kaRef).event_key, row.event_key);
+      assert.deepEqual(f.provider.repository.pendingEvents(w.kaRef), pending);
+      assert.equal(f.native.get(row.provider_id).active, true);
+      assert.equal(f.calls.length, calls); assert.equal(f.invocations.length, 0);
+      f.restart(); await f.service.poll();
+      if (mode === 'webhook') await f.service.event(row.event_key, { invocationId, items });
+      assert.equal(f.invocations.length, 1); assert.equal(f.invocations[0].invocationId, invocationId);
+      assert.equal(f.provider.repository.pendingEvents(w.kaRef).length, 0);
+      assert.equal(f.provider.repository.activation(w.kaRef).count, 1);
+    } finally { f.close(); }
+  });
+}
+
+for (const mode of ['webhook', 'schedule']) for (const loss of ['expired', 'approval', 'export']) {
+  test(`confirmed ${loss} loss deactivates ${mode} without dispatch`, async () => {
+    const f = environment();
+    try {
+      const w = await f.service.save(definition([mode, loss === 'export' ? 'google-sheets' : 'edit-fields'], [[0,0,1,0]]), () => {});
+      await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+      const row = f.provider.row(w.kaRef);
+      if (loss === 'expired') f.provider.repository.setActivation(w.kaRef,
+        { ...f.provider.repository.activation(w.kaRef), expiresAt: Date.now() - 1 }, row.event_key);
+      if (loss === 'approval') f.approvals.get(w.kaRef).binding.enabled = false;
+      if (loss === 'export') writeFileSync(f.exportTokenFile, 'rotated-fictional-export-authorization');
+      await f.service.poll();
+      assert.equal(f.provider.repository.activation(w.kaRef).active, false);
+      assert.equal(f.provider.row(w.kaRef).event_key, null);
+      if (mode === 'schedule') assert.equal(f.native.get(row.provider_id).active, false);
+      assert.equal(f.invocations.length, 0);
+    } finally { f.close(); }
+  });
+}
+
 for (const interrupted of [false, true]) test(`normalized timer ${interrupted ? 'recovers after restart' : 'is delivered once'}`, async () => {
   const f = environment();
   try {

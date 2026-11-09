@@ -233,6 +233,23 @@ test('account bridge denies unauthorized runs and journals the authenticated own
   } finally { bridge?.close(); f.close(); }
 });
 
+test('account route retains the original recovery identities in a pending-write response', async () => {
+  const f = environment(); let bridge;
+  try {
+    bridge = createCapabilityBridge(options(f));
+    const invocationId = randomUUID(), n8nExecutionId = '42', actors = [];
+    bridge.studio.run = async (_value, _authorize, actor) => {
+      actors.push(actor);
+      throw Object.assign(new Error('write unconfirmed'), { status: 409, code: 'DKG_WRITE_PENDING', invocationId, n8nExecutionId });
+    };
+    const result = await request(bridge, prefix + '/run', 'POST', headers, { invocationId });
+    assert.equal(result.status, 409); assert.equal(result.body.code, 'DKG_WRITE_PENDING');
+    assert.equal(result.body.invocationId, invocationId); assert.equal(result.body.n8nExecutionId, n8nExecutionId);
+    assert.match(result.body.error, /Retry this invocation/);
+    assert.deepEqual(actors, [{ id: 'owner-one', accountId, role: 'owner' }]);
+  } finally { bridge?.close(); f.close(); }
+});
+
 test('rejected account adoption leaves legacy state reopenable; successful adoption retains account fences', async () => {
   const f = environment(); let bridge;
   try {
