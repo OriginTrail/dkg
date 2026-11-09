@@ -5,8 +5,7 @@
  * holder: profile publishing, agent registration + keystore persistence,
  * workspace-key rotation/revocation, publishing-conviction NFT operations,
  * and peer messaging/chat/skill-invocation/connection helpers. 1:1 move;
- * methods take `this: DKGAgent` so cross-calls resolve against the composed
- * class.
+ * methods take `this: DKGAgent` for calls against the composed class.
  */
 
 
