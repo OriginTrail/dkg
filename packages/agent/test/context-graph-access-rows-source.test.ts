@@ -9,7 +9,7 @@ import {
   encodePublishRequest,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import { DKGAgent } from '../src/index.js';
+import { DKGAgent, agentFromPrivateKey } from '../src/index.js';
 import { signAgentDelegation } from '../src/auth/agent-delegation.js';
 import { buildAgentProfile } from '../src/profile.js';
 
@@ -36,6 +36,7 @@ interface Internals {
   getCgMeta(id: string): Promise<{ allowedAgents: string[]; allowedPeers: string[]; revokedAgents: string[] }>;
   getContextGraphParticipantAgentAddresses(id: string): Promise<string[]>;
   isPrivateContextGraph(id: string): Promise<boolean>;
+  persistAgentToStore(record: ReturnType<typeof agentFromPrivateKey>): Promise<void>;
 }
 
 type Row = Pick<Quad, 'subject' | 'predicate' | 'object'>;
@@ -449,6 +450,7 @@ describe('a context graph access list comes from its own metadata', () => {
 
       expect(await authorized(node, ethers.Wallet.createRandom(), id)).toBe(false);
       const member = ethers.Wallet.createRandom();
+      await node.persistAgentToStore(agentFromPrivateKey(member.privateKey, 'peer-list-member'));
       await agent.inviteAgentToContextGraph(id, member.address);
       expect(await authorized(node, member, id)).toBe(true);
     }, 60_000);
@@ -548,6 +550,7 @@ describe('a context graph access list comes from its own metadata', () => {
       const member = ethers.Wallet.createRandom();
       expect(await authorized(node, member, id)).toBe(false);
 
+      await node.persistAgentToStore(agentFromPrivateKey(member.privateKey, 'late-member'));
       await agent.inviteAgentToContextGraph(id, member.address);
 
       expect(await chainAdapter.getContextGraphParticipantAgents(onChainId)).toContain(member.address);
@@ -601,6 +604,7 @@ describe('a context graph access list comes from its own metadata', () => {
         delegateeOpKey: opKey.address,
       });
 
+      await node.persistAgentToStore(agentFromPrivateKey(member.privateKey, 'delegated-member'));
       await agent.inviteAgentToContextGraph(id, member.address, undefined, delegation);
 
       expect(await authorized(node, opKey, id, { identityId: 41n, claimedAgent: member.address })).toBe(true);
