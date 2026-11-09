@@ -497,7 +497,7 @@ describe('EligibilityVerdictBanner', () => {
     // P2-interim — the amber copy must HEDGE (attempt + fails-below-fee), not assert
     // the direct-cost publish will go through.
     expect(banner.textContent).toContain('will pay the full cost in TRAC');
-    expect(banner.textContent).toContain('the publish fails');
+    expect(banner.textContent).toContain('If it doesn’t have enough TRAC, the publish fails.');
     expect(banner.textContent).not.toContain('it will pay the direct cost');
     expect(banner.textContent).toContain('no approved wallet');
     expect(banner.textContent).toContain('expired');
