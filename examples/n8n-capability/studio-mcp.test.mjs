@@ -365,6 +365,67 @@ test('HTTP MCP authenticates before dispatch, rejects browser/bearer/forged auth
   assert.equal(injected.result.isError, true); assert.equal(c.count, 1);
   assert.equal((await fetch(url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/call', params: { name: 'studio_run', arguments: f.input('new') } }) })).status, 400);
 });
+for (const [field, different] of [
+  ['started-by', 'agent:two'],
+  ['agent-version', 'version-2'],
+  ['tool-digest', 'e'.repeat(64)],
+  ['approval-decision', 'decision-2'],
+  ['principal', 'person-two'],
+]) test(`authenticated MCP run lookup isolates retained output from a different ${field}, including after reopen`, async t => {
+  const { f, state, service } = await nativeFixture(t);
+  const secret = 'fixture-lookup-service-secret'.repeat(3), secretFile = join(f.state, 'lookup-key');
+  writeFileSync(secretFile, secret);
+  const sessionFile = join(f.state, 'lookup-session.json');
+  writeFileSync(sessionFile, JSON.stringify({ accountId: owner.accountId, controlPlaneUrl: 'http://127.0.0.1:4610', secretFile }));
+  const session = loadNosStudioSession(sessionFile);
+  const open = () => createStudioMcpHttp({ service: service(), session, agentEnabled: true });
+  let handle = open();
+  const server = createServer((req, res) => handle(req, res));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const url = 'http://127.0.0.1:' + server.address().port;
+  const ownerHeaders = { 'content-type': 'application/json', 'x-nos-workflows-secret': secret,
+    'x-nos-workflows-account': owner.accountId, 'x-nos-workflows-principal': owner.id, 'x-nos-workflows-role': owner.role };
+  const agentHeaders = { ...ownerHeaders, 'x-nos-workflows-started-by': actor.startedBy,
+    'x-nos-workflows-agent-version': actor.agentVersion, 'x-nos-workflows-tool-digest': actor.toolDigest,
+    'x-nos-workflows-approval-decision': actor.approvalDecisionId };
+  const call = async (name, args, headers = agentHeaders) => {
+    const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 1,
+      method: 'tools/call', params: { name, arguments: args } }) });
+    // All actors have valid service authentication. Rejection must come from
+    // lookup ownership, independently of admission conflicts or malformed headers.
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  assert.equal((await call('studio_run', f.input())).result.structuredContent.status, 'running');
+  state.execution.status = 'success';
+  const retained = (await call('studio_run_read', { runKey: 'run-one' })).result.structuredContent;
+  assert.equal(retained.status, 'succeeded');
+  assert.deepEqual(retained.output.items, [{ value: 'private-output' }]);
+  assert.equal(retained.steps.length, 1);
+  assert.equal(retained.steps[0].node, f.compiled.grant.result.traceNodes[0]);
+  const verifyLookup = async () => {
+    const before = f.repository.mcp.run(owner.accountId, 'run-one');
+    assert.equal(before.status, 'succeeded');
+    const refused = await call('studio_run_read', { runKey: 'run-one' }, { ...agentHeaders, ['x-nos-workflows-' + field]: different });
+    assert.deepEqual(refused, { jsonrpc: '2.0', id: 1, result: { isError: true,
+      content: [{ type: 'text', text: 'STUDIO_RUN_NOT_FOUND' }], structuredContent: { code: 'STUDIO_RUN_NOT_FOUND' } } });
+    assert.deepEqual(refused, await call('studio_run_read', { runKey: 'missing-run' }));
+    assert.deepEqual(f.repository.mcp.run(owner.accountId, 'run-one'), before);
+    for (const headers of [agentHeaders, ownerHeaders]) {
+      const allowed = (await call('studio_run_read', { runKey: 'run-one' }, headers)).result.structuredContent;
+      assert.equal(allowed.status, 'succeeded');
+      assert.deepEqual(allowed.output, retained.output);
+      assert.deepEqual(allowed.steps, retained.steps);
+      for (const key of ['startedBy', 'agentVersion', 'toolDigest', 'approvalDecisionId']) assert.equal(allowed[key], actor[key]);
+      assert.equal(allowed.approvedBy, owner.id);
+    }
+    assert.equal(state.posts, 1);
+  };
+  await verifyLookup();
+  f.restart(); handle = open();
+  await verifyLookup();
+});
 test('MCP and agent preview are separate explicit development gates', () => {
   assert.deepEqual(studioMcpFlags({}), { enabled: false, agentEnabled: false });
   for (const env of [{ NOS_STUDIO_MCP: 'true' }, { NOS_STUDIO_MCP: '1', NODE_ENV: 'production' },
