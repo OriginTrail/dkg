@@ -569,6 +569,48 @@ describe('PanelRight component', () => {
     container.remove();
   });
 
+  it('a reply in flight survives closing the panel, and Stop in the reopened panel aborts it', async () => {
+    let signal: AbortSignal | undefined;
+    streamLocalAgentChatMock.mockImplementation((_id: string, _text: string, options: any) => {
+      signal = options.signal;
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      });
+    });
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    await act(async () => { await Promise.resolve(); });
+
+    const textarea = container.querySelector('textarea');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, 'Keep going while closed');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      (container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement).click();
+    });
+    await waitForAssertion(() => expect(container.querySelector('button[aria-label="Stop reply"]')).toBeTruthy());
+
+    // Close the panel (unmount) and open it again (a new instance).
+    await act(async () => { root.unmount(); });
+    root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    try {
+      await waitForAssertion(() => expect(container.textContent).toContain('Keep going while closed'));
+      const stop = container.querySelector('button[aria-label="Stop reply"]') as HTMLButtonElement | null;
+      expect(stop).toBeTruthy();
+      await act(async () => { stop!.click(); });
+      expect(signal?.aborted).toBe(true);
+      await waitForAssertion(() => expect(container.querySelector('button[aria-label="Send message"]')).toBeTruthy());
+    } finally {
+      await act(async () => { root.unmount(); });
+      container.remove();
+    }
+  }, 20_000);
+
   it('persists failed Hermes turns so timeout sessions survive refresh', async () => {
     fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
       id: 'hermes',
