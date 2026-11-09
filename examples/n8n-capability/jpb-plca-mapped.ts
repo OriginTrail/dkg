@@ -1,8 +1,6 @@
 // Readable PLCA study Program. Only reachable pure functions are bundled.
 // jpb-plca-study.ts
-var JPB_TRACE_HISTORY_LIMITS = { records: 1e3, bytes: 768 * 1024, partitions: 24, pageRecords: 100, pageBytes: 24 * 1024 };
-var JPB_TRACE_CONTENT_LIMITS = { records: 2e3, bytes: JPB_TRACE_HISTORY_LIMITS.bytes };
-var JPB_TRACE_LIMITS = { records: 200, flows: 500, depth: 64, bytes: 96 * 1024 };
+
 function preparedJpbJson(value) {
   if (Array.isArray(value)) return "[" + value.map(preparedJpbJson).join(",") + "]";
   if (value !== null && typeof value === "object") {
@@ -147,62 +145,7 @@ function jpbSha256(text) {
   for (let i = 7; i >= 0; i--) byte(Math.floor(bits / 2 ** (i * 8)) & 255);
   return h.map((n) => (n >>> 0).toString(16).padStart(8, "0")).join("");
 }
-function jpbRecordEvidenceIds(dataset, record) {
-  return [.../* @__PURE__ */ new Set([...record.evidenceIds, ...(record.evidenceScopes ?? []).map((scope) => {
-    const binding = dataset.evidenceBindings?.find((b) => b.scopeId === scope);
-    if (!binding) throw new Error("UNBOUND_EVIDENCE_SCOPE: " + scope);
-    return binding.evidenceId;
-  })])];
-}
-function jpbExecutionLiteralBytes(value) {
-  const serialized = JSON.stringify([value]);
-  let bytes = 2;
-  for (let i = 0; i < serialized.length; i++) {
-    const c = serialized.charCodeAt(i);
-    if (c === 34 || c === 92) bytes += 2;
-    else if (c <= 31) bytes += c === 8 || c === 9 || c === 10 || c === 12 || c === 13 ? 2 : 6;
-    else bytes += c <= 127 ? 1 : c <= 2047 ? 2 : 3;
-  }
-  return bytes;
-}
-function paginateJpbTraceResult(result, requestedPage = 0) {
-  if (!Number.isInteger(requestedPage) || requestedPage < 0) throw new Error("INVALID_RESULT_PAGE");
-  const budget = 4e4;
-  if (jpbExecutionLiteralBytes(result) <= budget) {
-    if (requestedPage !== 0) throw new Error("RESULT_PAGE_OUT_OF_RANGE");
-    return result;
-  }
-  const arrays = Object.entries(result).filter(([, value]) => Array.isArray(value));
-  const totals = Object.fromEntries(arrays.map(([key, values]) => [key, values.length]));
-  const resultSha256 = jpbSha256(preparedJpbJson(result));
-  const empty = () => ({ ...result, ...Object.fromEntries(arrays.map(([key]) => [key, []])), pagination: { page: 1e4, pageCount: 1e4, nextPage: 1e4, resultSha256, totals } });
-  let page = empty(), count = 0, pageIndex = 0, output;
-  const metadataBytes = jpbExecutionLiteralBytes(page);
-  let pageBytes = metadataBytes;
-  if (metadataBytes > budget) throw new Error("RESULT_METADATA_CAPACITY");
-  for (const [key, items] of arrays) for (const item of items) {
-    let list = page[key];
-    const itemBytes = jpbExecutionLiteralBytes(item) - 4;
-    if (pageBytes + itemBytes + (list.length ? 1 : 0) > budget) {
-      if (!count) throw new Error("RESULT_ITEM_CAPACITY");
-      if (pageIndex === requestedPage) output = page;
-      pageIndex++;
-      page = empty();
-      count = 0;
-      pageBytes = metadataBytes;
-      list = page[key];
-      if (pageBytes + itemBytes > budget) throw new Error("RESULT_ITEM_CAPACITY");
-    }
-    pageBytes += itemBytes + (list.length ? 1 : 0);
-    list.push(item);
-    count++;
-  }
-  const pageCount = pageIndex + (count ? 1 : 0);
-  if (requestedPage >= pageCount) throw new Error("RESULT_PAGE_OUT_OF_RANGE");
-  if (pageIndex === requestedPage) output = page;
-  output.pagination = { page: requestedPage, pageCount, nextPage: requestedPage + 1 < pageCount ? requestedPage + 1 : null, resultSha256, totals };
-  return output;
-}
+
 function validateJpbPlcaFactorCatalogue(catalogue) {
   if (catalogue.schemaVersion !== "jpb.plca-factors.v1" || !catalogue.studyId || !catalogue.workbookSha256 || !catalogue.source?.name || !catalogue.source.reference || !catalogue.source.exportedAt || !catalogue.method?.name || !catalogue.method.version || !catalogue.indicators?.length)
     throw new Error("PLCA_FACTOR_SOURCE_REQUIRED");
@@ -333,90 +276,7 @@ function calculateJpbStudyEstimate(snapshot, studyId, basis, catalogue) {
     issues
   };
 }
-function readJpbStudySnapshot(reader) {
-  const rows = reader.result.bindings.map((row) => {
-    const literal = row.payload.replace(/\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#string>$/, "");
-    const json = literal.startsWith('"') ? JSON.parse(literal) : literal;
-    return { record: row.record, data: JSON.parse(json) };
-  });
-  const manifest = rows.find((row) => row.data.recordCount !== void 0);
-  if (!manifest) throw new Error("INCOMPLETE_STUDY_INVENTORY");
-  const { recordCount, ...metadata } = manifest.data;
-  const records = rows.filter((row) => row !== manifest).map((row) => row.data);
-  if (records.length !== recordCount) throw new Error("INCOMPLETE_STUDY_INVENTORY");
-  records.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-  const snapshotIri = manifest.record;
-  return { ...metadata, records, snapshotIri, revision: "sha256:" + snapshotIri.slice(snapshotIri.lastIndexOf(":") + 1) };
-}
-function studyIssues(snapshot) {
-  const issues = [];
-  const issue = (code, recordId, message) => issues.push({ code, recordId, message, severity: "warning" });
-  if (!snapshot.coverage.complete) issue("INCOMPLETE_COVERAGE", "dataset", snapshot.coverage.description);
-  for (const record of snapshot.records) {
-    if (record.kind !== "evidence" && !jpbRecordEvidenceIds(snapshot, record).length)
-      issue("MISSING_EVIDENCE", record.id, "No supporting evidence reference");
-    if (record.kind === "study")
-      issue("UNCONFIRMED_STUDY_BASIS", record.id, "Inventory quantities are preserved at study scope; per-product normalization and order allocation are unconfirmed");
-    if (record.kind === "study-item" && record.value === null)
-      issue("MISSING_STUDY_QUANTITY", record.id, "No quantity supplied at " + record.sourceCell);
-  }
-  return issues;
-}
-function prepareJpbStudyInventory(snapshot, request) {
-  if (request.datasetRevision !== snapshot.revision) throw new Error("SNAPSHOT_REVISION_MISMATCH");
-  if (!request.studyId) throw new Error("PLCA_STUDY_ID_REQUIRED");
-  const issues = studyIssues(snapshot);
-  const study = snapshot.records.find((record) => record.id === request.studyId && record.kind === "study");
-  const result = {
-    schemaVersion: snapshot.schemaVersion,
-    operation: "prepare-plca",
-    datasetRevision: snapshot.revision,
-    subjectId: request.studyId,
-    completeness: "partial",
-    coverage: snapshot.coverage,
-    records: [],
-    issues,
-    evidenceRefs: []
-  };
-  if (!study) {
-    issues.push({ code: "UNKNOWN_SUBJECT", severity: "error", recordId: request.studyId, message: "Subject is absent from the approved snapshot" });
-    return paginateJpbTraceResult(result, request.resultPage);
-  }
-  const inventory = snapshot.records.filter((record) => record.kind === "study-item" && record.studyId === study.id);
-  const selected = /* @__PURE__ */ new Set([study.id, ...inventory.map((item) => item.id)]);
-  const evidence = /* @__PURE__ */ new Set();
-  for (const record of snapshot.records.filter((record2) => selected.has(record2.id))) {
-    for (const evidenceId of jpbRecordEvidenceIds(snapshot, record)) {
-      evidence.add(evidenceId);
-      selected.add(evidenceId);
-    }
-  }
-  result.studyInventory = inventory;
-  result.denominator = null;
-  result.records = snapshot.records.filter((record) => selected.has(record.id));
-  result.evidenceRefs = [...evidence].sort();
-  result.completeness = issues.length ? "partial" : "complete";
-  if (request.estimate) {
-    const { inventory: normalizedInventory, ...estimate } = calculateJpbStudyEstimate(snapshot, study.id, request.estimate);
-    result.studyInventory = normalizedInventory;
-    result.studyEstimate = estimate;
-  }
-  return paginateJpbTraceResult(result, request.resultPage);
-}
-function prepareJpbStudyFromReader(reader, request) {
-  const snapshot = readJpbStudySnapshot(reader);
-  const result = prepareJpbStudyInventory(snapshot, request);
-  return {
-    ...result,
-    readerEvidence: {
-      contextGraphId: reader.contextGraphId,
-      layer: reader.layer,
-      querySha256: reader.querySha256,
-      snapshotIri: snapshot.snapshotIri,
-      assertionGraph: reader.result.bindings.find((row) => row.record === snapshot.snapshotIri).assertionGraph
-    }
-  };
-}
+
 // Mapped-input adapter; calculation above is reused verbatim from JPB's installed Program.
 export function run(input) {
   const {records, assumptions}=input;
