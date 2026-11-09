@@ -3,7 +3,8 @@ import React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MarketplaceView } from '../src/ui/marketplace/views/MarketplaceView.js';
 import { PLAYGROUND_KEY_STORAGE, forgetPlaygroundKey } from '../src/ui/marketplace/views/Playground.js';
-import { FIXTURE_SECRET, fixtureFetch } from '../src/ui/marketplace/api/fixtures.js';
+import { marketplaceGateway } from '../src/ui/marketplace/api/client.js';
+import { FIXTURE_IDS, FIXTURE_SECRET, fixtureFetch } from '../src/ui/marketplace/api/fixtures.js';
 import { byTestId, click, flush, render, type, unmountAll, waitForText } from './helpers/marketplace-render.js';
 
 /** The fixture node, keeping each call's method and path. */
@@ -45,16 +46,20 @@ const keyCalls = (calls: string[]) => calls.filter((x) => x.includes('/api/marke
 type Json = Record<string, unknown>;
 
 /**
- * The fixture node with each access key's budget kept, as the gateway keeps
- * it: a key's calls count against the budget it was made with, and one that
- * would go past it is refused with key_budget. `exhaust()` spends what every
+ * The fixture node with each access key kept as the gateway keeps it: its own
+ * id and secret, the budget it was made with, and whether it was revoked. A
+ * call with a revoked or unknown key is refused, and one that would go past
+ * its key's budget is refused with key_budget. `exhaust()` spends what every
  * key has left; `topUp(wei)` adds to this epoch's subscription and its first
- * budget, as the reads of it then show.
+ * budget, as the reads of it then show. `secrets` are the keys made, in turn,
+ * and `chatsBy` the secret each answered call came with.
  */
 function keyBudgetNode() {
   const node = fixtureFetch('active');
   const calls: string[] = [];
-  const keys = new Map<string, { keyId: string; budget: bigint; spent: bigint }>();
+  const keys = new Map<string, { keyId: string; budget: bigint; spent: bigint; revoked: boolean }>();
+  const secrets: string[] = [];
+  const chatsBy: string[] = [];
   let added = 0n;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -63,20 +68,33 @@ function keyBudgetNode() {
     calls.push(method === 'POST' && url === '/api/marketplace/keys' ? `${method} ${url} ${String(body.budget)}` : `${method} ${url}`);
     const reply = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'Content-Type': 'application/json' } });
     if (method === 'POST' && url === '/api/marketplace/keys') {
-      const secret = `dkgmk_${String(keys.size + 1).padStart(48, '0')}`;
+      // Each key its own id (its first 14 characters) and secret.
+      const secret = `dkgmk_${(keys.size + 1).toString(16).padStart(8, '0')}${'7'.repeat(40)}`;
       const keyId = secret.slice(0, 14);
-      keys.set(secret, { keyId, budget: BigInt(String(body.budget)), spent: 0n });
+      keys.set(secret, { keyId, budget: BigInt(String(body.budget)), spent: 0n, revoked: false });
+      secrets.push(secret);
       return reply({ keyId, label: body.label, budget: body.budget, spent: '0', reserved: '0', services: null, rps: 2, expiresAt: body.expiresAt, revoked: false, lastUsedAt: null, secret });
     }
-    if (method === 'POST' && /^\/api\/marketplace\/keys\/[^/]+\/revoke$/.test(url)) return reply({});
+    const revoke = /^\/api\/marketplace\/keys\/([^/]+)\/revoke$/.exec(url);
+    if (method === 'POST' && revoke) {
+      const key = [...keys.values()].find((k) => k.keyId === decodeURIComponent(revoke[1]));
+      if (!key) return reply({ error: `KeyNotFound(${revoke[1]})`, code: 'KeyNotFound', args: [revoke[1]], retryable: false }, 404);
+      key.revoked = true;
+      return reply({ keyId: key.keyId, revoked: true });
+    }
     if (method === 'POST' && url.endsWith('/v1/chat/completions')) {
-      const key = keys.get(new Headers(init?.headers).get('Authorization')?.replace('Bearer ', '') ?? '');
+      const secret = new Headers(init?.headers).get('Authorization')?.replace('Bearer ', '') ?? '';
+      const key = keys.get(secret);
+      if (!key || key.revoked) {
+        return reply({ error: { code: key ? 'revoked_key' : 'unknown_key', message: 'an access key of this node is needed', type: 'marketplace' } }, 401);
+      }
       const res = await node(input, init);
-      if (!key || res.status !== 200) return res;
+      if (res.status !== 200) return res;
       const answer = await res.json() as { marketplace: { value: string } };
       const cost = BigInt(answer.marketplace.value);
       if (key.spent + cost > key.budget) return reply({ error: { code: 'key_budget', message: "the call could cost more than the access key's budget has left", type: 'marketplace' } }, 402);
       key.spent += cost;
+      chatsBy.push(secret);
       return reply(answer);
     }
     if (method === 'GET' && url.startsWith('/api/marketplace/subscriptions') && added > 0n) {
@@ -93,6 +111,8 @@ function keyBudgetNode() {
   });
   return {
     calls,
+    secrets,
+    chatsBy,
     exhaust() { for (const k of keys.values()) k.spent = k.budget; },
     topUp(wei: bigint) { added += wei; },
   };
@@ -200,10 +220,14 @@ describe('marketplace playground key', () => {
     await waitUntilAnswers(c, 2);
     expect(node.calls.filter((x) => x.startsWith('POST /api/marketplace/keys'))).toEqual([
       'POST /api/marketplace/keys 5000000000000000000',
-      'POST /api/marketplace/keys/dkgmk_00000000/revoke',
+      'POST /api/marketplace/keys/dkgmk_00000001/revoke',
       'POST /api/marketplace/keys 5500000000000000000',
     ]);
-    expect(byTestId(c, 'mkt-play-key')?.textContent).toContain('dkgmk_00000000');
+    expect(byTestId(c, 'mkt-play-key')?.textContent).toContain('dkgmk_00000002');
+    // The chat now goes with the new key's secret, and the old key is refused.
+    expect(node.chatsBy.at(-1)).toBe(node.secrets[1]);
+    await expect(marketplaceGateway.chat(node.secrets[0], { model: FIXTURE_IDS.qwen14b, messages: [{ role: 'user', content: 'old' }] }))
+      .rejects.toMatchObject({ status: 401, code: 'revoked_key' });
   });
 
   it('makes a new key once the subscription funds more than the key was made with', async () => {
@@ -220,9 +244,12 @@ describe('marketplace playground key', () => {
     await waitUntilAnswers(c, 1);
     expect(node.calls.filter((x) => x.startsWith('POST /api/marketplace/keys'))).toEqual([
       'POST /api/marketplace/keys 5000000000000000000',
-      'POST /api/marketplace/keys/dkgmk_00000000/revoke',
+      'POST /api/marketplace/keys/dkgmk_00000001/revoke',
       'POST /api/marketplace/keys 5500000000000000000',
     ]);
+    expect(node.chatsBy).toEqual([node.secrets[0], node.secrets[1]]);
+    await expect(marketplaceGateway.chat(node.secrets[0], { model: FIXTURE_IDS.qwen14b, messages: [{ role: 'user', content: 'old' }] }))
+      .rejects.toMatchObject({ status: 401, code: 'revoked_key' });
   });
 
   it('sends no later request with a prompt the gateway refused, and still shows it with its error', async () => {
