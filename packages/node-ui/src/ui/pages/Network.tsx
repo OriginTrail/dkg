@@ -99,7 +99,7 @@ export function NetworkPage() {
                   <td className="mono">{shortId(c.peerId, 12)}</td>
                   <td><span className={`badge ${c.transport === 'direct' ? 'badge-success' : 'badge-info'}`}>{c.transport}</span></td>
                   <td>{c.direction}</td>
-                  <td className="mono" style={{ fontSize: 11 }}>{c.remoteAddr}</td>
+                  <td className="mono" style={{ fontSize: 'var(--font-size-caption)' }}>{c.remoteAddr}</td>
                   <td>{formatDuration(c.durationMs)}</td>
                 </tr>
               ))}

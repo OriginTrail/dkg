@@ -43,13 +43,13 @@
 .v10-pca-health-chip {
   gap: 4px;
 }
-.v10-pca-health-glyph { font-size: 10px; line-height: 1; }
+.v10-pca-health-glyph { font-size: var(--font-size-meta); line-height: 1; }
 
 /* ----- AddressCrux ----- */
 .v10-pca-address-crux { display: flex; flex-direction: column; gap: 6px; }
 .v10-pca-crux-note {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--font-size-label);
   line-height: 1.55;
   color: var(--text-secondary);
 }
@@ -57,21 +57,21 @@
 .v10-pca-crux-note code,
 .v10-pca-crux-help code {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   padding: 1px 4px;
   border-radius: 4px;
   background: var(--bg-elevated);
 }
 .v10-pca-crux-help {
   margin: 0;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   line-height: 1.5;
   color: var(--text-tertiary);
 }
 .v10-pca-crux-help abbr { cursor: help; text-decoration-style: dotted; }
 .v10-pca-crux-error {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--font-size-label);
   color: var(--text-danger);
 }
 
@@ -92,7 +92,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 6px 12px;
-  font-size: 12px;
+  font-size: var(--font-size-label);
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -105,7 +105,7 @@
 .v10-pca-tier-trac { font-family: var(--font-mono); }
 .v10-pca-tier-pct { font-weight: 700; }
 .v10-pca-tier-row.active .v10-pca-tier-pct { color: var(--text-success); }
-.v10-pca-tier-caption { margin: 0; font-size: 11px; color: var(--text-tertiary); }
+.v10-pca-tier-caption { margin: 0; font-size: var(--font-size-caption); color: var(--text-tertiary); }
 
 /* ----- DiscountAppliedBadge ----- */
 .v10-pca-discount-applied { gap: 3px; }
@@ -119,7 +119,7 @@
 }
 .v10-pca-verdict-message {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--font-size-label);
   line-height: 1.55;
   color: var(--text-primary);
 }
@@ -159,13 +159,13 @@
 }
 .v10-pca-device-progress-title {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--font-size-label);
   font-weight: 700;
   color: var(--text-primary);
 }
 .v10-pca-device-progress-note {
   margin: 4px 0 0;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   line-height: 1.45;
   color: var(--text-tertiary);
 }
@@ -182,7 +182,7 @@
   grid-template-columns: 44px minmax(0, 1fr);
   align-items: start;
   gap: 8px;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   color: var(--text-secondary);
   min-width: 0;
 }
@@ -195,7 +195,7 @@
 .v10-pca-device-progress-glyph {
   width: 44px;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--font-size-meta);
   color: inherit;
   line-height: 1.45;
 }
@@ -204,7 +204,7 @@
   display: block;
   color: var(--text-link);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--font-size-meta);
   min-width: 0;
   overflow-wrap: anywhere;
   line-height: 1.45;
@@ -229,7 +229,7 @@
   gap: 6px;
   padding: 2px 8px;
   border-radius: 6px;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   font-weight: 700;
   font-family: var(--font-mono);
   border: 1px solid var(--border-default);
@@ -272,15 +272,15 @@
   background: var(--bg-elevated);
 }
 .v10-pca-handshake-head { display: flex; flex-direction: column; gap: 2px; }
-.v10-pca-handshake-title { font-size: 12px; font-weight: 700; color: var(--text-primary); }
-.v10-pca-handshake-sub { font-size: 11px; color: var(--text-tertiary); line-height: 1.45; }
+.v10-pca-handshake-title { font-size: var(--font-size-label); font-weight: 700; color: var(--text-primary); }
+.v10-pca-handshake-sub { font-size: var(--font-size-caption); color: var(--text-tertiary); line-height: 1.45; }
 .v10-pca-handshake-wallets { display: flex; flex-direction: column; gap: 6px; }
 .v10-pca-handshake-copyall {
   align-self: flex-start;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   padding: 4px 10px;
   border-radius: 6px;
   cursor: pointer;
@@ -289,8 +289,8 @@
 .v10-pca-handshake-account { display: flex; align-items: center; gap: 8px; }
 .v10-pca-handshake-account-id {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--font-size-ui);
   font-weight: 700;
   color: var(--text-primary);
 }
-.v10-pca-handshake-empty { margin: 0; font-size: 11px; color: var(--text-tertiary); }
+.v10-pca-handshake-empty { margin: 0; font-size: var(--font-size-caption); color: var(--text-tertiary); }
