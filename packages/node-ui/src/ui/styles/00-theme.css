@@ -224,7 +224,6 @@
      and highlighted rows. Text on them uses --text-success/-warning/-danger.
      Mixed from the accents, so they follow the theme. */
   --success-bg: color-mix(in srgb, var(--accent-green) 8%, transparent);
-  --success-bg-strong: color-mix(in srgb, var(--accent-green) 15%, transparent);
   --success-border: color-mix(in srgb, var(--accent-green) 28%, transparent);
   --warning-bg: color-mix(in srgb, var(--accent-amber) 8%, transparent);
   --warning-bg-strong: color-mix(in srgb, var(--accent-amber) 15%, transparent);

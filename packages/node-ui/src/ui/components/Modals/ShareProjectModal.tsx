@@ -6,6 +6,7 @@ import {
 } from '../../api.js';
 import { useModalDismiss } from './useModalDismiss.js';
 import { Count } from '../ds/Badge.js';
+import { Button } from '../ds/Button.js';
 import { X } from 'lucide-react';
 import { formatDateTime, truncateAddress } from '../../lib/format.js';
 
@@ -304,13 +305,12 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                               <><span className="v10-share-role">{peer.name}</span>{' '}<span className="v10-share-you">{truncAddr(addr)}</span></>
                             ) : addr}
                           </span>
-                          <button
+                          <Button variant="ghost" size="sm" icon
                             onClick={() => handleRemoveAgent(addr)}
-                            className="v10-share-remove"
                             aria-label="Remove agent" title="Remove agent"
                           >
                             <X size={14} />
-                          </button>
+                          </Button>
                         </div>
                       );
                     })}
@@ -377,20 +377,18 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                     </span>
                   </div>
                   <div className="v10-share-request-actions">
-                    <button
+                    <Button size="sm"
                       onClick={() => handleApprove(req.agentAddress)}
                       disabled={processingRequest === req.agentAddress}
-                      className="v10-share-approve"
                     >
                       {processingRequest === req.agentAddress ? '…' : 'Approve'}
-                    </button>
-                    <button
+                    </Button>
+                    <Button variant="danger" size="sm"
                       onClick={() => handleReject(req.agentAddress)}
                       disabled={processingRequest === req.agentAddress}
-                      className="v10-share-deny"
                     >
                       Reject
-                    </button>
+                    </Button>
                   </div>
                 </div>
               ))}

@@ -197,7 +197,7 @@ Every token in `00-theme.css` is listed in this file, and `test/design-docs.test
 | Group | Tokens | Use |
 |---|---|---|
 | Layer colours | `--layer-shared-bg`, `--layer-shared-border`, `--layer-shared-text`, `--layer-verified-bg`, `--layer-verified-border`, `--layer-verified-text`, `--layer-working-bg`, `--layer-working-border`, `--layer-working-text` | Fills, outlines and text for the memory layers |
-| Signal variants | `--accent-amber`, `--accent-red`, `--danger-bg-strong`, `--danger-border`, `--danger-stripe`, `--success-bg-strong`, `--success-border`, `--text-danger-hover`, `--text-on-accent`, `--warning-bg-strong`, `--warning-border` | Stronger washes, outlines and text for the signals |
+| Signal variants | `--accent-amber`, `--accent-red`, `--danger-bg-strong`, `--danger-border`, `--danger-stripe`, `--success-border`, `--text-danger-hover`, `--text-on-accent`, `--warning-bg-strong`, `--warning-border` | Stronger washes, outlines and text for the signals |
 | Layout and scale | `--accent-vm-hover`, `--font-mono`, `--font-sans`, `--fs-layer`, `--header-h`, `--tab-h` | Fixed shell heights and the remaining scale steps |
 
 ## Changing the system

@@ -326,7 +326,6 @@ body.light .v10-import-dropzone.drag-over { border-color: var(--border-strong); 
 .v10-share-name { color: var(--text-primary); }
 .v10-share-role { font-family: var(--font-sans); font-weight: 500; }
 .v10-share-you { color: var(--text-tertiary); font-size: var(--fs-micro); }
-.v10-share-remove { background: none; border: none; cursor: pointer; color: var(--text-tertiary); font-size: var(--fs-control); padding: 0 var(--space-4); }
 .v10-share-empty-row { padding: var(--space-8) var(--space-12); border-radius: var(--radius-control); font-size: var(--fs-label); color: var(--text-tertiary); background: var(--bg-surface); border: 1px dashed var(--border-default); margin-bottom: var(--space-8); }
 .v10-share-empty { padding: var(--space-8) var(--space-12); border-radius: var(--radius-control); font-size: var(--fs-label); color: var(--text-tertiary); background: var(--bg-surface); border: 1px dashed var(--border-default); }
 .v10-share-code { position: relative; }
@@ -339,8 +338,6 @@ body.light .v10-import-dropzone.drag-over { border-color: var(--border-strong); 
 .v10-share-request-id { color: var(--text-tertiary); font-family: var(--font-mono); font-size: var(--fs-micro); }
 .v10-share-request-time { font-size: var(--fs-micro); color: var(--text-tertiary); }
 .v10-share-request-actions { display: flex; gap: var(--space-6); }
-.v10-share-approve { background: var(--success-bg-strong); color: var(--text-success); border: 1px solid var(--success-border); cursor: pointer; border-radius: var(--radius-xs); font-size: var(--fs-micro); padding: var(--space-4) var(--space-12); font-weight: 600; }
-.v10-share-deny { background: var(--danger-bg); color: var(--text-danger); border: 1px solid var(--danger-border); cursor: pointer; border-radius: var(--radius-xs); font-size: var(--fs-micro); padding: var(--space-4) var(--space-12); font-weight: 600; }
 .v10-share-error { font-size: var(--fs-micro); color: var(--text-danger); margin-top: var(--space-4); }
 
 /* ── Wire workspace panel ── */
