@@ -7,6 +7,24 @@ import { FIXTURE_IDS, fixtureFetch } from '../src/ui/marketplace/api/fixtures.js
 import { MISSING_COPY, byTestId, click, flush, render, type, unmountAll, useFixtureNode, waitForText } from './helpers/marketplace-render.js';
 import { boundaryNode, editedNode, fundings, holdDryRuns, json, plans, recordWrites, waitUntil, withCaps, type Json } from './helpers/marketplace-nodes.js';
 
+/** A query service no seller offers this epoch, so the catalog lacks it. */
+const UNLISTED = `0x${'51'.repeat(32)}`;
+
+/** The fixture node with UNLISTED in its plan, pinned to seller B, keeping each write and each plan it answered. */
+function planWithUnlisted(): { writes: Array<{ method: string; url: string; body: unknown }>; reads: Json[] } {
+  const reads: Json[] = [];
+  const writes = editedNode('active', (method, url, body) => {
+    if (method !== 'GET' || url !== '/api/marketplace/plan') return;
+    (body.services as Json[]).push({
+      serviceId: UNLISTED, serviceClass: 'query', value: '400000000000000000', valueTrac: '0.4', maxPricePerUnit: '2000000000000', maxPricePerUnitTrac: '0.000002', pinnedSeller: FIXTURE_IDS.sellerB,
+    });
+    reads.push(JSON.parse(JSON.stringify(body)) as Json);
+  });
+  return { writes, reads };
+}
+
+const savedPlans = (writes: Array<{ method: string; url: string; body: unknown }>) => writes.filter((w) => w.method === 'PUT' && w.url === '/api/marketplace/plan');
+
 describe('marketplace plan composition and funding', () => {
   afterEach(async () => {
     await unmountAll();
@@ -34,29 +52,72 @@ describe('marketplace plan composition and funding', () => {
   });
 
   it('saves an edit to the plan with a query service the catalog lacks this epoch as it was, its class included', async () => {
-    const query = `0x${'51'.repeat(32)}`;
-    const writes = editedNode('active', (method, url, body) => {
-      if (method !== 'GET' || url !== '/api/marketplace/plan') return;
-      (body.services as Json[]).push({
-        serviceId: query, serviceClass: 'query', value: '400000000000000000', valueTrac: '0.4', maxPricePerUnit: '2000000000000', maxPricePerUnitTrac: '0.000002', pinnedSeller: FIXTURE_IDS.sellerB,
-      });
-    });
+    const { writes } = planWithUnlisted();
     const c = await render(plans());
     await waitForText(c, 'Epoch 665 is funded');
     await click(byTestId(c, 'mkt-change-plan'));
-    // No seller offers it this epoch, so the composer has no line to show for it.
-    expect(byTestId(c, `mkt-line-${query}`)).toBeNull();
+    // No seller offers it this epoch: the composer shows it as unavailable, with its saved terms.
+    expect(byTestId(c, `mkt-line-${UNLISTED}`)?.textContent).toContain('Unavailable: no seller offers it this epoch');
     await type(byTestId(c, `mkt-value-${FIXTURE_IDS.llama8b}`), '0.75');
     await click(byTestId(c, 'mkt-compose-continue'));
     await click(byTestId(c, 'mkt-gate-confirm'));
     await flush(50);
-    const saved = writes.filter((w) => w.method === 'PUT' && w.url === '/api/marketplace/plan');
+    const saved = savedPlans(writes);
     expect(saved).toHaveLength(1);
     const services = (saved[0].body as { services: Json[] }).services;
-    expect(services.find((s) => s.serviceId === query)).toEqual({
-      serviceId: query, serviceClass: 'query', value: '400000000000000000', maxPricePerUnit: '2000000000000', pinnedSeller: FIXTURE_IDS.sellerB,
+    expect(services.find((s) => s.serviceId === UNLISTED)).toEqual({
+      serviceId: UNLISTED, serviceClass: 'query', value: '400000000000000000', maxPricePerUnit: '2000000000000', pinnedSeller: FIXTURE_IDS.sellerB,
     });
-    expect(services.filter((s) => s.serviceId !== query).map((s) => s.serviceClass)).toEqual(['inference', 'inference', 'inference']);
+    expect(services.filter((s) => s.serviceId !== UNLISTED).map((s) => s.serviceClass)).toEqual(['inference', 'inference', 'inference']);
+  });
+
+  it('removes a service the catalog lacks this epoch from the plan, saving every other term as it was read', async () => {
+    const { writes, reads } = planWithUnlisted();
+    const c = await render(plans());
+    await waitForText(c, 'Epoch 665 is funded');
+    await click(byTestId(c, 'mkt-change-plan'));
+    const row = byTestId(c, `mkt-line-${UNLISTED}`);
+    expect(row?.textContent).toContain('Unavailable: no seller offers it this epoch');
+    expect(row?.textContent).toContain('Pinned to seller 31');
+    expect((byTestId(c, `mkt-value-${UNLISTED}`) as HTMLInputElement).value).toBe('0.4');
+    expect((byTestId(c, `mkt-cap-${UNLISTED}`) as HTMLInputElement).value).toBe('2');
+    await click(byTestId(c, `mkt-remove-${UNLISTED}`));
+    expect(byTestId(c, `mkt-line-${UNLISTED}`)).toBeNull();
+    await click(byTestId(c, 'mkt-compose-continue'));
+    await click(byTestId(c, 'mkt-gate-confirm'));
+    await flush(50);
+    const saved = savedPlans(writes);
+    expect(saved).toHaveLength(1);
+    const read = reads[0] as unknown as { services: Json[]; source: Json; renew: boolean; renewUntilEpoch?: number };
+    expect(read.services.map((s) => s.serviceId)).toContain(UNLISTED);
+    expect(saved[0].body).toEqual({
+      services: read.services.filter((s) => s.serviceId !== UNLISTED).map((s) => ({
+        serviceId: s.serviceId, serviceClass: s.serviceClass, value: s.value, maxPricePerUnit: s.maxPricePerUnit, ...(s.pinnedSeller !== undefined ? { pinnedSeller: s.pinnedSeller } : {}),
+      })),
+      source: read.source.kind === 'account' ? { kind: 'account', accountId: read.source.accountId } : { kind: 'wallet' },
+      renew: read.renew,
+      ...(read.renewUntilEpoch !== undefined ? { renewUntilEpoch: read.renewUntilEpoch } : {}),
+    });
+    expect(c.textContent).not.toContain(MISSING_COPY);
+  });
+
+  it('saves edits to the budget and cap of a service the catalog lacks this epoch, its class and seller as they were', async () => {
+    const { writes } = planWithUnlisted();
+    const c = await render(plans());
+    await waitForText(c, 'Epoch 665 is funded');
+    await click(byTestId(c, 'mkt-change-plan'));
+    await type(byTestId(c, `mkt-value-${UNLISTED}`), '0.25');
+    await type(byTestId(c, `mkt-cap-${UNLISTED}`), '3');
+    await click(byTestId(c, 'mkt-compose-continue'));
+    await click(byTestId(c, 'mkt-gate-confirm'));
+    await flush(50);
+    const saved = savedPlans(writes);
+    expect(saved).toHaveLength(1);
+    const services = (saved[0].body as { services: Json[] }).services;
+    expect(services).toHaveLength(4);
+    expect(services.find((s) => s.serviceId === UNLISTED)).toEqual({
+      serviceId: UNLISTED, serviceClass: 'query', value: '250000000000000000', maxPricePerUnit: '3000000000000', pinnedSeller: FIXTURE_IDS.sellerB,
+    });
   });
 
   it('walks a node that never subscribed through compose, one confirmation and a key', async () => {
