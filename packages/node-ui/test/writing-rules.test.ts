@@ -71,7 +71,7 @@ export const visibleText = (source: string, fileName = 'file.tsx') => {
     else if (ts.isJsxAttribute(node) && node.initializer && VISIBLE_ATTRIBUTES.has(node.name.getText(file))) literals(node.initializer, found);
     else if (ts.isPropertyAssignment(node) && VISIBLE_ATTRIBUTES.has(node.name.getText(file).replace(/['"]/g, ''))) literals(node.initializer, found);
     else if (ts.isCallExpression(node) && VISIBLE_CALL.test(node.expression.getText(file))) node.arguments.forEach((argument) => literals(argument, found));
-    else if (ts.isNewExpression(node) && /Error$/.test(node.expression.getText(file))) node.arguments?.forEach((argument) => literals(argument, found));
+    else if (ts.isNewExpression(node) && node.expression.getText(file).endsWith('Error')) node.arguments?.forEach((argument) => literals(argument, found));
     ts.forEachChild(node, visit);
   };
   visit(file);
