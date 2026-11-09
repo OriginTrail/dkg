@@ -295,6 +295,30 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(container.textContent).not.toContain('Agents');
   });
 
+  it('discloses each section\'s body from its header, mounted only while open, so Integrations polls only then', async () => {
+    localStorage.setItem('dkg-marketplace-enabled', '1');
+    const { container } = await renderPanel();
+    for (const label of ['Marketplace', 'My Context Graphs', 'Public Graphs', 'Integrations']) {
+      const header = sectionHeader(container, label);
+      const wasOpen = header.getAttribute('aria-expanded') === 'true';
+      const bodyId = header.getAttribute('aria-controls');
+      expect(bodyId).toBeTruthy();
+      expect(!!container.querySelector(`[id="${bodyId}"]`)).toBe(wasOpen);
+      await act(async () => { header.click(); });
+      await flush();
+      expect(sectionHeader(container, label).getAttribute('aria-expanded')).toBe(String(!wasOpen));
+      const body = container.querySelector(`[id="${bodyId}"]`);
+      expect(!!body).toBe(!wasOpen);
+      if (body) expect(body.classList.contains('v10-peer-group-body')).toBe(true);
+      if (label === 'Integrations') expect(fetchLocalAgentIntegrationsMock).toHaveBeenCalledTimes(1);
+      await act(async () => { sectionHeader(container, label).click(); });
+      expect(!!container.querySelector(`[id="${bodyId}"]`)).toBe(wasOpen);
+    }
+    // Collapsed again, Integrations' body is gone and its poll with it.
+    expect(fetchLocalAgentIntegrationsMock).toHaveBeenCalledTimes(1);
+    expect(container.textContent).not.toContain('No agents detected.');
+  });
+
   it('toggling a section updates the layout store and persists to localStorage', async () => {
     const { useLayoutStore } = await import('../src/ui/stores/layout.js');
     const { container } = await renderPanel();
