@@ -7,7 +7,7 @@
  * runs against a stub chain or a stub messenger, so no node starts.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { NoChainAdapter } from '@origintrail-official/dkg-chain';
+import { MockChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { PROTOCOL_MARKETPLACE_QUOTE, PROTOCOL_MARKETPLACE_SERVE } from '@origintrail-official/dkg-core';
 import {
   MarketplaceAgentMethods,
@@ -45,6 +45,11 @@ describe("an agent's chain marketplace", () => {
     // Only the methods' presence is checked: nothing is read from the chain.
     expect(chain.getMarketplaceContracts).not.toHaveBeenCalled();
     expect(chain.getPublishingConvictionAccountInfo).not.toHaveBeenCalled();
+  });
+
+  it('is the mock chain itself, as the daemon and its tests are handed it', () => {
+    const chain = new MockChainAdapter('mock:31337', '0x0000000000000000000000000000000000000002');
+    expect(methods.marketplaceChain.call({ chain } as never)).toBe(chain);
   });
 
   it('is null with no chain configured', () => {
