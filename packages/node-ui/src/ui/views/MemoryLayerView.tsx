@@ -371,9 +371,9 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
           <div className="ds-table-scroll"><table className="v10-mlv-table">
             <thead>
               <tr>
-                <th>Subject</th>
-                <th>Predicate</th>
-                <th>Object</th>
+                <th className="ds-table-head">Subject</th>
+                <th className="ds-table-head">Predicate</th>
+                <th className="ds-table-head">Object</th>
               </tr>
             </thead>
             <tbody>

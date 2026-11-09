@@ -135,11 +135,11 @@ describe('header uses live status', () => {
     expect(header).toContain('connectedPeers');
   });
 
-  it('App.tsx polls status via useLiveStatus and stores in agents store', () => {
-    const app = readFile('App.tsx');
-    expect(app).toContain('useLiveStatus');
-    expect(app).toContain('setNodeStatus');
-    expect(app).toContain('api.fetchStatus()');
+  it('the shell polls status and stores it in the agents store', () => {
+    expect(readFile('App.tsx')).toContain('useNodeStatusPolling()');
+    const hook = readFile('hooks/useNodeState.ts');
+    expect(hook).toContain('setNodeStatus');
+    expect(hook).toContain('api.fetchStatus()');
   });
 
   it('header gracefully handles missing status data', () => {
@@ -226,7 +226,7 @@ describe('right-rail agent shell replaces Agent hub', () => {
     expect(app).toContain('[leftOpen, rightOpen]');
   });
 
-  it('has no Agent hub page: the old address opens the right panel expanded', () => {
+  it('has no Agent hub page (app-agent-hub-route.test.ts covers what the old address opens)', () => {
     expect(panelLeft).not.toContain("id: 'agent-hub'");
     expect(panelLeft).not.toContain('Agent hub');
     expect(panelCenter).not.toContain("activeTabId === 'agent-hub'");

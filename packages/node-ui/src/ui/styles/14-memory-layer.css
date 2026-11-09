@@ -103,8 +103,8 @@
 .v10-mlv-status.v10-mlv-status-failed { color: var(--text-danger); }
 
 .v10-layer-action-result { margin-bottom: var(--space-8); font-size: var(--fs-label); color: var(--text-success); }
-.v10-layer-action-warn { color: var(--text-warning); }
-.v10-layer-action-error { color: var(--text-danger); }
+.v10-layer-action-result[data-tone="warning"] { color: var(--text-warning); }
+.v10-layer-action-result[data-tone="danger"] { color: var(--text-danger); }
 .v10-decision-btn-blocked { opacity: var(--opacity-disabled); }
 
 /* Layer colours by class: a layer's colour is known from its name, not from data. */

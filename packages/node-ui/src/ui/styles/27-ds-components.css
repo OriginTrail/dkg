@@ -457,11 +457,8 @@ button.ds-crumb:hover { color: var(--text-primary); text-decoration: underline; 
 /* Numbers sit right and line up; the header matches its column. */
 .ds-num { text-align: right; font-variant-numeric: tabular-nums; }
 /* One header style for every table. A table's own rule sets padding and borders, not type. */
-.ds-table-head,
 .data-table th,
-.v10-mlv-table th,
-.v10-ka-triples-table th,
-.v10-cg-colhead {
+.ds-table-head {
   font-size: var(--fs-label);
   font-weight: 500;
   line-height: var(--lh-tight);

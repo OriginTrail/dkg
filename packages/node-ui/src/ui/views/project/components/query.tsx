@@ -788,7 +788,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
               <thead>
                 <tr>
                   {columns.map((column) => (
-                    <th key={column}>{column}</th>
+                    <th key={column} className="ds-table-head">{column}</th>
                   ))}
                 </tr>
               </thead>

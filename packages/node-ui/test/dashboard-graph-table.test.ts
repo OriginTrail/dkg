@@ -20,7 +20,13 @@ describe('My Context Graphs table', () => {
   it('shares one header style with every other table', () => {
     const dir = join(__dirname, '../src/ui/styles');
     const all = readdirSync(dir).map((name) => readFileSync(join(dir, name), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')).join('\n');
-    expect(all).toMatch(/\.v10-cg-colhead \{\s*font-size: var\(--fs-label\);\s*font-weight: 500;[^}]*letter-spacing: var\(--ls-caps\);\s*text-transform: uppercase;\s*color: var\(--text-tertiary\);/);
+    expect(all).toMatch(/\.data-table th,\s*\.ds-table-head \{\s*font-size: var\(--fs-label\);\s*font-weight: 500;[^}]*letter-spacing: var\(--ls-caps\);\s*text-transform: uppercase;\s*color: var\(--text-tertiary\);/);
+    // Screens take the shared class; the design-system rule names no screen.
+    expect(readFileSync(join(__dirname, '../src/ui/views/DashboardView.tsx'), 'utf8')).toContain('className="v10-cg-colhead ds-table-head"');
+    for (const file of ['views/MemoryLayerView.tsx', 'views/project/components/ka.tsx', 'views/project/components/query.tsx']) {
+      const src = readFileSync(join(__dirname, '../src/ui', file), 'utf8');
+      expect(src.match(/<th\b(?![^>]*ds-table-head)/g), file).toBeNull();
+    }
     const ownType = [...all.matchAll(/(?:^|[\s,>])th\s*\{([^}]*)\}/g)].filter((m) => /font-size|font-weight|letter-spacing|text-transform|(?:^|\s)color:/.test(m[1]!));
     expect(ownType.map((m) => m[0].trim())).toEqual([]);
   });
