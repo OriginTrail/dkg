@@ -6,6 +6,7 @@ import { PLAYGROUND_KEY_STORAGE, forgetPlaygroundKey } from '../src/ui/marketpla
 import { marketplaceGateway } from '../src/ui/marketplace/api/client.js';
 import { FIXTURE_IDS, FIXTURE_SECRET, fixtureFetch } from '../src/ui/marketplace/api/fixtures.js';
 import { byTestId, click, flush, render, type, unmountAll, waitForText } from './helpers/marketplace-render.js';
+import { waitUntil } from './helpers/marketplace-nodes.js';
 
 /** The fixture node, keeping each call's method and path. */
 function recordCalls(): string[] {
@@ -52,7 +53,9 @@ type Json = Record<string, unknown>;
  * its key's budget is refused with key_budget. `exhaust()` spends what every
  * key has left; `topUp(wei)` adds to this epoch's subscription and its first
  * budget, as the reads of it then show. `secrets` are the keys made, in turn,
- * and `chatsBy` the secret each answered call came with.
+ * and `chatsBy` the secret each answered call came with. With
+ * `control.holdKeys`, a key is made when it is asked for, but the answer that
+ * names it waits for `releaseKeys()`.
  */
 function keyBudgetNode() {
   const node = fixtureFetch('active');
@@ -60,6 +63,8 @@ function keyBudgetNode() {
   const keys = new Map<string, { keyId: string; budget: bigint; spent: bigint; revoked: boolean }>();
   const secrets: string[] = [];
   const chatsBy: string[] = [];
+  const control = { holdKeys: false };
+  const heldKeys: Array<() => void> = [];
   let added = 0n;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -73,6 +78,7 @@ function keyBudgetNode() {
       const keyId = secret.slice(0, 14);
       keys.set(secret, { keyId, budget: BigInt(String(body.budget)), spent: 0n, revoked: false });
       secrets.push(secret);
+      if (control.holdKeys) await new Promise<void>((resolve) => { heldKeys.push(resolve); });
       return reply({ keyId, label: body.label, budget: body.budget, spent: '0', reserved: '0', services: null, rps: 2, expiresAt: body.expiresAt, revoked: false, lastUsedAt: null, secret });
     }
     const revoke = /^\/api\/marketplace\/keys\/([^/]+)\/revoke$/.exec(url);
@@ -113,6 +119,16 @@ function keyBudgetNode() {
     calls,
     secrets,
     chatsBy,
+    control,
+    /** Answer the key requests held so far: in the order they came, or the last first. */
+    releaseKeys(lastFirst = false) {
+      const held = heldKeys.splice(0);
+      for (const r of lastFirst ? held.reverse() : held) r();
+    },
+    get heldKeys() { return heldKeys.length; },
+    /** The ids of the keys not revoked. */
+    liveKeyIds() { return [...keys.values()].filter((k) => !k.revoked).map((k) => k.keyId); },
+    madeKeyIds() { return [...keys.values()].map((k) => k.keyId); },
     exhaust() { for (const k of keys.values()) k.spent = k.budget; },
     topUp(wei: bigint) { added += wei; },
   };
@@ -251,6 +267,32 @@ describe('marketplace playground key', () => {
     await expect(marketplaceGateway.chat(node.secrets[0], { model: FIXTURE_IDS.qwen14b, messages: [{ role: 'user', content: 'old' }] }))
       .rejects.toMatchObject({ status: 401, code: 'revoked_key' });
   });
+
+  for (const lastFirst of [false, true]) {
+    it(`leaves one live playground key, the one remembered, when the playground opens again while its key is on its way (answers ${lastFirst ? 'last first' : 'in the order they came'})`, async () => {
+      const node = keyBudgetNode();
+      node.control.holdKeys = true;
+      const c = await openPlayground();
+      await type(byTestId(c, 'mkt-play-input'), 'first');
+      await click(byTestId(c, 'mkt-play-send'));
+      await waitUntil(() => node.heldKeys === 1, 'the first key to be asked for');
+      // The playground goes and comes back, and the new one sends while that key is on its way.
+      await click(Array.from(c.querySelectorAll('[role="tab"]')).find((t) => t.textContent === 'Models'));
+      await click(Array.from(c.querySelectorAll('[role="tab"]')).find((t) => t.textContent === 'Playground'));
+      await waitForText(c, 'qwen2.5-14b-instruct ·');
+      await type(byTestId(c, 'mkt-play-input'), 'second');
+      await click(byTestId(c, 'mkt-play-send'));
+      await flush(50);
+      node.control.holdKeys = false;
+      node.releaseKeys(lastFirst);
+      await waitUntilAnswers(c, 1);
+      await flush(50);
+      const live = node.liveKeyIds();
+      expect(live).toHaveLength(1);
+      expect(localStorage.getItem(PLAYGROUND_KEY_STORAGE)).toBe(live[0]);
+      expect(new Set(node.madeKeyIds()).size).toBe(node.madeKeyIds().length);
+    });
+  }
 
   it('sends no later request with a prompt the gateway refused, and still shows it with its error', async () => {
     const sent: Array<Array<{ role: string; content: string }>> = [];

@@ -17,7 +17,12 @@ import { useMarketplaceDraftStore } from '../draftStore.js';
  * the budget it was made with (wei), and `spent` once the gateway refused a
  * call as past that budget.
  */
-let pageKey: { secret: string; keyId: string; expiresAt: number; budget: string; spent: boolean } | null = null;
+interface PageKey { secret: string; keyId: string; expiresAt: number; budget: string; spent: boolean }
+let pageKey: PageKey | null = null;
+/** The key on its way, while one is made: every send, from any mount of the playground, waits for it. */
+let making: Promise<PageKey> | null = null;
+/** Bumped when the page forgets its key: a key made before then is not taken up. */
+let generation = 0;
 const KEY_LIFETIME_SECONDS = 3_600;
 
 /**
@@ -40,30 +45,52 @@ function rememberKeyId(keyId: string): void {
   try { localStorage.setItem(PLAYGROUND_KEY_STORAGE, keyId); } catch { /* storage unavailable: the key still expires within the hour */ }
 }
 
-/** Forget the page's key (tests, and a key the gateway no longer takes). */
-export function forgetPlaygroundKey(): void { pageKey = null; }
+/** Forget the page's key, and any on its way, as a new page does (tests). */
+export function forgetPlaygroundKey(): void {
+  generation += 1;
+  pageKey = null;
+  making = null;
+}
+
+/** The gateway no longer takes `keyId`: the next send makes a new key, unless another send already did. */
+function dropPlaygroundKey(keyId: string): void { if (pageKey?.keyId === keyId) pageKey = null; }
 
 /** The key's budget ran out: the next send makes a new one, from the subscription as it is then. */
 function spendPlaygroundKey(): void { if (pageKey) pageKey = { ...pageKey, spent: true }; }
 
-/**
- * The page's key, made on the first send with `budget`, this epoch's
- * subscription value, and made again once it expires, once its budget is
- * spent, or once the subscription funds more than it was made with. The key
- * made before it, by this page or an earlier one in this browser, is revoked
- * first; a revoke that fails (that key expired, or was revoked elsewhere)
- * does not stop the new one.
- */
-async function playgroundKey(budget: string): Promise<{ secret: string; keyId: string }> {
+/** Revoke the key made before, then make the page's key with `budget`. */
+async function makePageKey(budget: string, gen: number): Promise<PageKey> {
   const now = Math.floor(Date.now() / 1000);
-  if (pageKey && !pageKey.spent && pageKey.expiresAt - 60 > now && BigInt(pageKey.budget) >= BigInt(budget)) return pageKey;
   const previous = pageKey?.keyId ?? lastKeyId();
   pageKey = null;
   if (previous) await marketplaceApi.revokeKey(previous).catch(() => undefined);
   const made = await marketplaceApi.makeKey({ label: copy('play.key.label'), budget, services: null, rps: 2, expiresAt: now + KEY_LIFETIME_SECONDS });
-  pageKey = { secret: made.secret, keyId: made.keyId, expiresAt: made.expiresAt ?? now + KEY_LIFETIME_SECONDS, budget, spent: false };
-  rememberKeyId(made.keyId);
-  return pageKey;
+  const key: PageKey = { secret: made.secret, keyId: made.keyId, expiresAt: made.expiresAt ?? now + KEY_LIFETIME_SECONDS, budget, spent: false };
+  if (gen === generation) {
+    pageKey = key;
+    rememberKeyId(key.keyId);
+  }
+  return key;
+}
+
+/**
+ * The page's key, made on the first send with `budget`, this epoch's
+ * subscription value, and made again once it expires, once its budget is
+ * spent, or once the subscription funds more than it was made with. One key
+ * is made at a time, whichever mount of the playground asks: a send while one
+ * is on its way waits for it, then takes it if it fits, or replaces it. The
+ * key made before, by this page or an earlier one in this browser, is revoked
+ * first; a revoke that fails (that key expired, or was revoked elsewhere)
+ * does not stop the new one. So one playground key is live, and it is the one
+ * remembered.
+ */
+async function playgroundKey(budget: string): Promise<PageKey> {
+  while (making) await making.catch(() => undefined);
+  const now = Math.floor(Date.now() / 1000);
+  if (pageKey && !pageKey.spent && pageKey.expiresAt - 60 > now && BigInt(pageKey.budget) >= BigInt(budget)) return pageKey;
+  const made: Promise<PageKey> = makePageKey(budget, generation).finally(() => { if (making === made) making = null; });
+  making = made;
+  return made;
 }
 
 const KEY_GONE = new Set(['missing_key', 'unknown_key', 'revoked_key', 'expired_key']);
@@ -156,7 +183,7 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
         if (!isMarketplaceError(err) || !KEY_GONE.has(err.code)) throw err;
         // The gateway refused that key before calling anyone: only the next key's call can be charged.
         called = false;
-        forgetPlaygroundKey();
+        dropPlaygroundKey(key.keyId);
         key = await playgroundKey(current.value);
         setKeyId(key.keyId);
         answer = await chat(key.secret);
