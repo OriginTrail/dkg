@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import {
   MockChainAdapter,
+  hashQueryInferenceReceipt,
   marketplaceChainOf,
   subscriptionIdOf,
   type MarketplaceChainAdapter,
@@ -37,6 +38,7 @@ import {
   Seller,
   decodeMessage,
   encodeMessage,
+  receiptFromWire,
   serviceIdOf,
   signOffer,
   type AccessKey,
@@ -440,5 +442,29 @@ describe('calls that hold their bound (re-review)', () => {
     expect((await records()).map((r) => r.state)).toEqual(['open', 'held']);
     expect(gateway.heldValue(subscriptionId, 0)).toBe(COST);
     expect(keys.reservedOf(caller.key.keyId)).toBe(0n);
+  });
+});
+
+describe("a receipt's time", () => {
+  it.each([
+    ['after its request expired', 2 ** 39],
+    ['before its request was issued', 0],
+  ])('refuses a receipt its seller signed but completed %s, which could never land, and counts the call at its bound', async (_when, completedAt) => {
+    await setUp();
+    const { epoch } = await chain.getEpochTimes();
+    const domain = (await chain.getMarketplaceContracts()).requestDomain;
+    tamper = (a) => {
+      if (!a.ok) return a;
+      const receipt = { ...a.receipt, completedAt };
+      // Signed again by the seller's operational key, so only its time is wrong.
+      return { ...a, receipt, receiptSignature: NODE.signingKey.sign(hashQueryInferenceReceipt(domain, receiptFromWire(receipt))).serialized };
+    };
+    expect(await call()).toMatchObject({ status: 502, body: { error: { code: 'bad_receipt' }, problem: 'outside_time' } });
+    tamper = undefined;
+    // The seller is out for the epoch, the key is not charged, and the call holds its most value.
+    expect(await call()).toMatchObject({ status: 503, body: { error: { code: 'no_seller' } } });
+    expect((await keys.list())[0]!.spent).toBe('0');
+    expect(keys.reservedOf(caller.key.keyId)).toBe(MOST);
+    expect(gateway.heldValue(subscriptionIdOf(NODE.address, epoch), 0)).toBe(MOST);
   });
 });
