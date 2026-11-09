@@ -208,7 +208,6 @@ export function LayerContent({
   showQueryCatalog?: boolean;
   onShowQueryCatalogChange?: (show: boolean) => void;
 }) {
-  const config = LAYER_CONFIG[layer];
   const itemsLabel = layerNoun(layer, 2);
   // The visibility checkbox is presentation-only. Catalog KAs remain
   // shareable/publishable through their explicit assertion-row action, but
