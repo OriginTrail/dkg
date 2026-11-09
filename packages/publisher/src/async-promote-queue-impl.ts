@@ -121,7 +121,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
 
   // Public surface — RFC §3.1–3.4
 
-  async enqueue(request: PromoteRequest): Promise<string> {
+  async enqueue(request: PromoteRequest, options?: { signal?: AbortSignal }): Promise<string> {
     this.validateRequest(request);
     const requestSnapshot = this.snapshotRequest(request);
     return this.admissions.run(requestSnapshot, admission => this.withMutationLock(async () => {
@@ -149,7 +149,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         : { phase: 'persist', admissionOutcome: 'not_admitted' }, persistence.cause);
       this.notifyWorkAvailable();
       return jobId;
-    }), this.admissionTimeoutMs);
+    }), this.admissionTimeoutMs, undefined, options?.signal);
   }
 
   async enqueueAndClaim(request: BoundPromoteRequest, workerId: string): Promise<BoundPromoteJob> {

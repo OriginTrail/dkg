@@ -1,3 +1,4 @@
+import { admitShareWhileConnected } from '../share-admission-lifetime.js';
 import { handleKnowledgeAssetPullFrom } from './knowledge-asset-pull-from.js';
 import { handleShareJobCollection } from './share-job-collection.js';
 import { handlePublishedDescriptorRepair } from './published-descriptor-repair.js';
@@ -1309,11 +1310,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         }
       }
       try {
-        const result = await admissionStep(res, 'enqueue', () => agent.assertion.promoteAsync(contextGraphId, name, {
+        const result = await admitShareWhileConnected(res, signal => admissionStep(res, 'enqueue', () => agent.assertion.promoteAsync(contextGraphId, name, {
+          signal,
           entities: entities ?? "all",
           subGraphName,
           ...promoteStorageLane,
-        }));
+        })));
+        if (result === undefined) return;
         return jsonResponse(res, 200, { jobId: result.jobId, state: "queued" });
       } catch (err: any) {
         if (err instanceof PromoteJobConflictError) {
