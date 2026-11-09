@@ -15,6 +15,7 @@ const SCREEN_BUTTONS = [
   'ws-pca-cta', 'wallet-connect-btn', 'wallet-pill-btn', 'modal-close', 'graph-expanded-close', 'agents-refresh',
   'md-copy', 'publish-panel-refresh', 'notif-pane-markread', 'bottom-toggle', 'peer-chip-more',
 ].map(n => `v10-${n}`);
+const BUTTON_COMPONENTS = new Set(['Button', 'RetryButton']);
 const NAME = new RegExp(`(?<![\\w-])(${SCREEN_BUTTONS.join('|')})(?![\\w-])`);
 
 function tsxFiles(dir: string): string[] {
@@ -31,6 +32,9 @@ describe('button classes', () => {
     for (const file of tsxFiles(UI)) {
       const src = readFileSync(file, 'utf8');
       for (const m of src.matchAll(/className=(\{`[^`]*`\}|"[^"]*"|\{\[[^\]]*\])/g)) {
+        // <Button> and the components built on it render ds-btn themselves.
+        const tag = /<([A-Za-z]\w*)[^<]*$/.exec(src.slice(0, m.index!))?.[1];
+        if (tag && BUTTON_COMPONENTS.has(tag)) continue;
         if (NAME.test(m[1]) && !m[1].includes('ds-btn')) missing.push(`${relative(UI, file)}: ${m[1]}`);
       }
     }

@@ -55,7 +55,7 @@ export function PcaSettingsCard() {
           </p>
         )}
         <div className="v10-pca-settings-actions">
-          {walletsInconclusive && <RetryButton onClick={() => refresh()} />}
+          {walletsInconclusive && <RetryButton size="md" onClick={() => refresh()} />}
           <button
             type="button"
             className="v10-pca-card-btn ds-btn"

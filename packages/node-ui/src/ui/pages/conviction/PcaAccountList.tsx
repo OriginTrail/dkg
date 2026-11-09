@@ -1,9 +1,9 @@
 import React, { useId, useState } from 'react';
-import { HealthChip, RetryButton, formatPcaTrac } from '../../components/Pca/index.js';
+import { HealthChip, RetryButton, formatPcaTrac, truncateAddress } from '../../components/Pca/index.js';
 import type { ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
 import type { DiscoveredPca } from '../../hooks/useDiscoveredPcas.js';
 import { ownerModeWritesEnabled, type PcaOwnerMode } from '../../pca/ownerAccess.js';
-import { StatusGlyph } from '../../components/ds/Badge.js';
+import { Badge } from '../../components/ds/Badge.js';
 import { formatBps } from '../../lib/format.js';
 
 export type PcaListAccount = ResolvedPcaAccount & {
@@ -50,7 +50,7 @@ function walletsCell(account: PcaListAccount, walletsInconclusive: boolean): { t
 }
 
 function Warn({ on, children }: { on: boolean; children: React.ReactNode }) {
-  return on ? <span className="v10-wallet-status" data-tone="warn"><StatusGlyph tone="warning" />{children}</span> : <>{children}</>;
+  return on ? <Badge tone="warning" size="sm">{children}</Badge> : <>{children}</>;
 }
 
 function AccountRow({
@@ -185,7 +185,7 @@ function AddById({ onAdd }: { onAdd: (id: string) => void }) {
         <div id={panelId} className="v10-pca-overview-cta-group">
           <input
             type="text"
-            className="v10-form-input ds-input"
+            className="v10-form-input ds-input ds-sm"
             data-testid="pca-track-input"
             value={value}
             onChange={(e) => setValue(e.target.value)}
@@ -243,6 +243,7 @@ export function PcaAccountList({
   onAddFound: (id: string) => void;
   onAddById: (id: string) => void;
   pendingId: string | null;
+  /** The full address of the wallet being read; shown shortened, in full on hover. */
   readingWallet: string | null;
   nowSec?: number;
 }) {
@@ -296,7 +297,11 @@ export function PcaAccountList({
           </table></div>
       )}
       {partial && <p className="v10-pca-overview-caveat">Wallets that aren’t approved pay the full fee, without any warning.</p>}
-      {readingWallet && <p className="v10-pca-overview-caveat" role="status">Reading PCAs owned by {readingWallet}…</p>}
+      {readingWallet && (
+        <p className="v10-pca-overview-caveat" role="status">
+          Reading PCAs owned by <span title={readingWallet}>{truncateAddress(readingWallet)}</span>…
+        </p>
+      )}
     </section>
   );
 }

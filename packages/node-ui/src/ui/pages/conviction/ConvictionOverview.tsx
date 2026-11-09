@@ -7,7 +7,7 @@ import { usePcaOverview, type ResolvedPcaAccount } from '../../hooks/usePcaOverv
 import { useDiscoveredPcas } from '../../hooks/useDiscoveredPcas.js';
 import { useConnectedWalletPcas } from '../../hooks/useConnectedWalletPcas.js';
 import { listPcaContracts } from '../../api.js';
-import { WalletConnectControl, WalletRow, RetryButton, truncateAddress } from '../../components/Pca/index.js';
+import { WalletConnectControl, WalletRow, RetryButton } from '../../components/Pca/index.js';
 import { isPcaSpendable } from '../../pca/coverage.js';
 import { isPcaExpired } from '../../pca/pca-primitives.js';
 import { PcaAccountList, type PcaListAccount } from './PcaAccountList.js';
@@ -341,7 +341,7 @@ export function ConvictionOverview() {
         onAddFound={trackAccount}
         onAddById={trackAccountById}
         pendingId={manualTrackPending}
-        readingWallet={connectedWalletPcas.loading && connectedWallet ? truncateAddress(connectedWallet) : null}
+        readingWallet={connectedWalletPcas.loading && connectedWallet ? connectedWallet : null}
       />
 
       <div className="v10-pca-overview-wallet">

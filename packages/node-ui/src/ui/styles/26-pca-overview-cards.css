@@ -65,6 +65,8 @@
 .v10-pca-row-actions { display: inline-flex; gap: var(--space-8); }
 .v10-pca-list td:not(:nth-child(3)) { white-space: nowrap; }
 .v10-pca-add-by-id { display: flex; flex-direction: column; align-items: flex-end; gap: var(--space-4); }
+/* The field keeps its natural width, so Add stays beside it instead of wrapping below. */
+.v10-pca-add-by-id .v10-form-input { width: auto; }
 .v10-pca-retry-block { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-8); }
 .v10-pca-text-link { color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline); text-underline-offset: 3px; }
 
@@ -74,7 +76,6 @@
 
 .v10-pca-card-owner-lbl { font-size: var(--fs-label); color: var(--text-tertiary); min-width: 44px; }
 
-.v10-pca-card-explorer { color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline); text-underline-offset: 3px; font-size: var(--fs-body); }
 .v10-pca-card-warn {
   margin: 10px 0 0;
   padding: var(--pad-nested-sm);

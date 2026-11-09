@@ -271,7 +271,7 @@ function DetailBody({
         <span className="v10-pca-card-owner-lbl">Owner</span>
         <WalletRow
           address={snapshot.owner}
-          trailing={explorer ? <a className="v10-pca-card-explorer" href={`${explorer}/address/${snapshot.owner}`} target="_blank" rel="noreferrer" aria-label="View owner on explorer"><ExternalMark /></a> : undefined}
+          trailing={explorer ? <a className="v10-pca-text-link" href={`${explorer}/address/${snapshot.owner}`} target="_blank" rel="noreferrer" aria-label="View owner on explorer"><ExternalMark /></a> : undefined}
         />
       </div>
 

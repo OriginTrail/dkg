@@ -1,5 +1,6 @@
 import React from 'react';
-import { ArrowRight, RefreshCw } from 'lucide-react';
+import { ArrowRight } from 'lucide-react';
+import { RetryButton } from '../../components/Pca/RetryButton.js';
 import { useAgentsStore } from '../../stores/agents.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { usePcaOverview } from '../../hooks/usePcaOverview.js';
@@ -35,16 +36,14 @@ export function PcaDashboardRow() {
       </span>
       {/* Coverage is unknown, so offer the re-read rather than a way to get a PCA. */}
       {walletsInconclusive ? (
-        <button type="button" className="v10-ws-pca-cta ds-btn ds-sm" onClick={() => refresh()}>
-          <RefreshCw size={12} aria-hidden="true" />Retry
-        </button>
+        <RetryButton className="v10-ws-pca-cta" onClick={() => refresh()} />
       ) : (
         <button
           type="button"
           className="v10-ws-pca-cta ds-btn ds-sm"
           onClick={() => openTab({ id: 'conviction', label: 'Publisher Conviction', closable: true })}
         >
-          {covered ? 'Manage PCA' : role === 'edge' ? 'Get added to a PCA' : 'Set up PCA'}<ArrowRight size={14} aria-hidden="true" />
+          {covered ? 'Manage PCA' : role === 'edge' ? 'Get added to a PCA' : 'Set up PCA'}<ArrowRight size={12} aria-hidden="true" />
         </button>
       )}
     </div>
