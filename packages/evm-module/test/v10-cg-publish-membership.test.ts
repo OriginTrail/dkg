@@ -31,6 +31,7 @@ import {
   DKGKnowledgeAssets,
   DKGPublishingConvictionNFT,
   DKGStakingConvictionNFT,
+  Hub,
   KnowledgeAssetsLifecycle,
   Profile,
   StakingV10,
@@ -43,6 +44,8 @@ import { buildPublishParams, packReservedKaId, DEFAULT_CHAIN_ID } from './helper
 const MIN_STAKE = ethers.parseEther('50000');
 const COMMITTED_TRAC = ethers.parseEther('50000');
 const TOKEN_AMOUNT = ethers.parseEther('1000');
+// Instrumented coverage runs say nothing about deployed gas (and inflate it past the setup's limits).
+const skipUnderCoverage = process.argv.some((a) => a.includes('coverage'));
 
 type Fixture = {
   accounts: SignerWithAddress[];
@@ -233,6 +236,41 @@ describe('@integration V10 — publishing into a curated CG requires a member au
       .withArgs(cgId, member.address);
   });
 
+  // The upgrade is a Hub facade swap plus a re-initialize of KnowledgeAssetsLifecycle (step 998 does both in
+  // one transaction). Graphs, rosters and KAs live in ContextGraphStorage and survive it; until KAL is
+  // re-initialized it still calls the replaced facade, which the Hub dropped, so publishes revert rather
+  // than slip past the new rule.
+  it('upgrade: a facade swap keeps graphs, rosters and KAs; KAL follows once re-initialized', async () => {
+    const cgId = await pcaCuratedCg([member.address]);
+    const first = await publish(payer, member, cgId);
+    expect((await (await first.tx).wait())!.status).to.equal(1);
+
+    const hub = await hre.ethers.getContract<Hub>('Hub');
+    const next = await (await hre.ethers.getContractFactory('ContextGraphs')).deploy(await hub.getAddress());
+    const nextAddress = await next.getAddress();
+    const kalAddress = await f.KAV10.getAddress();
+
+    // Swap the facade without re-initializing KAL: the stale facade has lost storage access.
+    await hub.setAndReinitializeContracts([{ name: 'ContextGraphs', addr: nextAddress }], [], [nextAddress], []);
+    expect(await hub.getContractAddress('ContextGraphs')).to.equal(nextAddress);
+    const stale = await publish(payer, member, cgId);
+    await expect(stale.tx).to.be.revertedWithCustomError(hub, 'UnauthorizedAccess');
+
+    // Re-initialize KAL, as step 998 does: publishing resumes through the new facade, on the same storage.
+    await hub.setAndReinitializeContracts([], [], [kalAddress], []);
+    expect(await f.KAV10.contextGraphs()).to.equal(nextAddress);
+    const second = await publish(payer, member, cgId);
+    expect((await (await second.tx).wait())!.status).to.equal(1);
+    expect(await f.CGS.getContextGraphKaCount(cgId)).to.equal(2n);
+    expect(await f.CGS.kaToContextGraph(first.reservedKaId)).to.equal(cgId);
+    expect(await next.isAuthorizedAuthor(cgId, member.address)).to.equal(true);
+
+    const refused = await publish(outsider, outsider, cgId);
+    await expect(refused.tx)
+      .to.be.revertedWithCustomError(next, 'AuthorNotContextGraphMember')
+      .withArgs(cgId, outsider.address);
+  });
+
   it('leaves open CGs open: any agent may publish its own KA', async () => {
     await f.CGFacade.connect(registrar).createContextGraph(
       [], 0, 0, 1, ethers.ZeroAddress, 0, ethers.ZeroHash,
@@ -248,7 +286,7 @@ describe('@integration V10 — publishing into a curated CG requires a member au
   // (`isAuthorizedAuthor`, all reads cold), since publish-to-publish gas
   // varies by more than the gate's fixed part. In a publish the policy and
   // accountId reads are already warm, so these figures are an upper bound.
-  it('gas: the author gate costs one cold storage read per roster entry scanned', async () => {
+  (skipUnderCoverage ? it.skip : it)('gas: the author gate costs one cold storage read per roster entry scanned', async () => {
     const curator = f.accounts[25];
     const rosterOf = (n: number) =>
       Array.from({ length: n }, (_, i) => ethers.getAddress(ethers.toBeHex(0x1000 + i, 20)));
