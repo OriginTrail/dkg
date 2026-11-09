@@ -58,6 +58,32 @@ export function FundingUnknown({ id, held, onBack, onDone }: {
   );
 }
 
+/**
+ * A confirmation that waits for the user with no form on show for it, as one
+ * whose form another flow replaced or that a tab change took away: a funding
+ * of unknown outcome, or a plan that was not saved, with Retry, which saves
+ * the plan alone.
+ */
+export function WaitingConfirmation({ id, onDone }: { id: number; onDone: () => void }): React.ReactElement | null {
+  const held = useSyncExternalStore(fundings.subscribe, () => fundings.held(id));
+  if (held?.kind === 'unknown') return <FundingUnknown id={id} held={held} onBack={() => fundings.dismiss(id)} onDone={() => { fundings.dismiss(id); onDone(); }} />;
+  if (held?.kind !== 'plan' || held.save !== 'failed') return null;
+  const preview = held.confirming.kind === 'fund' ? held.confirming.preview : null;
+  const subscription = held.funded?.subscription ?? null;
+  const unsaved = held.funded ? 'flow.plan.failed' : 'flow.plan.unsaved';
+  return (
+    <div className="mkt-card" data-testid="mkt-plan-waiting" data-confirmation={id}>
+      {held.funded && (
+        <strong data-copy="flow.funded">{copy('flow.funded', { n: subscription?.epoch ?? preview?.epoch ?? '—', trac: fmtTrac(subscription?.value ?? preview?.value ?? '0') })}</strong>
+      )}
+      <ErrorCard err={held.err}>
+        <span className="mkt-xs" data-testid="mkt-plan-unsaved" data-copy={unsaved}>{copy(unsaved)}</span>
+        <button type="button" className="mkt-btn" data-testid="mkt-plan-retry" data-copy="flow.plan.retry" onClick={() => fundings.retryPlan(id)}>{copy('flow.plan.retry')}</button>
+      </ErrorCard>
+    </div>
+  );
+}
+
 /** The form's own part: composing, or the confirmation before Confirm; from then on, the coordinator's confirmation, by its id. */
 type Phase = { kind: 'compose' } | { kind: 'confirm'; confirming: Confirming } | { kind: 'held'; id: number };
 

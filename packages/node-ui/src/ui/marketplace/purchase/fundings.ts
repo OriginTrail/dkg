@@ -80,7 +80,9 @@ const listeners = new Set<() => void>();
 
 function put(id: number, c: Confirmed): void {
   held.set(id, c);
-  waiting = [...held].filter(([, x]) => waitsForUser(x)).map(([i]) => i);
+  // The same list while the same confirmations wait, so a change of it means a change of them.
+  const next = [...held].filter(([, x]) => waitsForUser(x)).map(([i]) => i);
+  if (next.length !== waiting.length || next.some((i, k) => i !== waiting[k])) waiting = next;
   for (const l of listeners) l();
 }
 

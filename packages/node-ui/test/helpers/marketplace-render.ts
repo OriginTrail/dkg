@@ -51,6 +51,15 @@ export async function unmountAll(): Promise<void> {
   forgetTopUpAttempts();
 }
 
+/** One view goes, as a tab change takes it away: the page, its stores and the node stay. */
+export async function unmount(container: HTMLElement): Promise<void> {
+  const i = mounted.findIndex((m) => m.container === container);
+  if (i < 0) throw new Error('unmount: not a view rendered here');
+  const [{ root }] = mounted.splice(i, 1);
+  await act(async () => { root.unmount(); });
+  container.remove();
+}
+
 /** The tab reloads: every view goes, the node stays as it is, and so does the tab's session storage. */
 export async function reloadPage(): Promise<void> {
   const kept = Array.from({ length: sessionStorage.length }, (_, i) => sessionStorage.key(i)!).map((k) => [k, sessionStorage.getItem(k)!] as const);

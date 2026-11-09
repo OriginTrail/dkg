@@ -428,6 +428,7 @@ export const COPY = {
   "gallery.sect.states": "off, admin-needed and empty states",
   "gallery.key.gone": "Secret dismissed — only the prefix {key} remains",
   "flow.plan.failed": "The epoch is funded, but the plan was not saved: it won't renew until it is.",
+  "flow.plan.unsaved": "The plan you confirmed was not saved: the node keeps the plan it had.",
   "flow.plan.retry": "Save the plan again"
 } as const satisfies Record<string, string>;
 

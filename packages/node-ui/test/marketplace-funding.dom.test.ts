@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PlansView } from '../src/ui/marketplace/views/PlansView.js';
 import { useMarketplaceDraftStore } from '../src/ui/marketplace/draftStore.js';
 import { FIXTURE_IDS, fixtureFetch } from '../src/ui/marketplace/api/fixtures.js';
-import { byTestId, click, flush, render, type, unmountAll, waitForText } from './helpers/marketplace-render.js';
+import { byTestId, click, flush, render, type, unmount, unmountAll, waitForText } from './helpers/marketplace-render.js';
 
 type Json = Record<string, unknown>;
 type Write = { method: string; url: string; body: unknown };
@@ -102,8 +102,8 @@ function fundingNode() {
  * The fixture node with this epoch funded and the next one not, keeping each
  * write. A funding of the next epoch lands at once, but its answer waits for
  * `release()`. A plan saved is the plan read after it; with `cutPlanAnswers`,
- * a save lands but its answer stops partway, and `failPlanReads` reads of
- * the plan fail first, as a node error.
+ * a save lands but its answer stops partway; `failPlanReads` reads of the
+ * plan, and `failPlanSaves` saves, fail first, as a node error.
  */
 function heldNextNode() {
   const writes: Write[] = [];
@@ -111,7 +111,7 @@ function heldNextNode() {
   let next: Json | null = null;
   let plan: Json | null = null;
   const held: Array<() => void> = [];
-  const control = { cutPlanAnswers: false, failPlanReads: 0 };
+  const control = { cutPlanAnswers: false, failPlanReads: 0, failPlanSaves: 0 };
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const method = init?.method ?? 'GET';
     const url = String(input);
@@ -127,6 +127,10 @@ function heldNextNode() {
       const { subscriptions } = await (await node(input, init)).json() as { subscriptions: Json[] };
       const landed = next && (asked === null || Number(asked) === next.epoch) ? [next] : [];
       return json({ subscriptions: [...subscriptions.filter((s) => s.epoch !== 665), ...landed] });
+    }
+    if (method === 'PUT' && url === '/api/marketplace/plan' && control.failPlanSaves > 0) {
+      control.failPlanSaves -= 1;
+      return json({ error: 'disk full', code: 'Error', retryable: false }, 500);
     }
     if (method === 'PUT' && url === '/api/marketplace/plan') {
       plan = await (await node(input, init)).json() as Json;
@@ -313,6 +317,33 @@ describe('marketplace funding whose answer is lost or comes late', () => {
     // The top-up stays on show: the flow that funded the epoch was replaced, so it closes nothing.
     expect(byTestId(c, 'mkt-topup')?.textContent).toContain('Add mistral-small-24b-instruct to epoch 664');
   });
+
+  const goneBeforeTheAnswer: Array<[string, (c: HTMLElement) => Promise<HTMLElement>]> = [
+    ['another flow replaces the form', async (c) => { await click(byTestId(c, `mkt-addon-${FIXTURE_IDS.mistral24b}`)); return c; }],
+    ['Plans goes and comes back', async (c) => {
+      await unmount(c);
+      return render(React.createElement(PlansView));
+    }],
+  ];
+  for (const [how, leave] of goneBeforeTheAnswer) {
+    it(`shows a plan left unsaved when ${how} before the funding's answer, with a retry that saves the plan alone`, async () => {
+      const node = heldNextNode();
+      let c = await fundNextHeld(node);
+      c = await leave(c);
+      expect(byTestId(c, 'mkt-fund-flow')).toBeNull();
+      // The funding's answer comes back with no form for it, and its plan fails to save.
+      node.control.failPlanSaves = 1;
+      node.release();
+      await waitForText(c, 'The epoch is funded, but the plan was not saved');
+      const waiting = byTestId(c, 'mkt-plan-waiting');
+      expect(waiting?.textContent).toContain('Epoch 665 is funded with 5.1 TRAC');
+      await click(byTestId(waiting!, 'mkt-plan-retry'));
+      await waitUntil(() => byTestId(c, 'mkt-plan-waiting') === null, 'the plan to be saved');
+      expect(fundings(node.writes)).toHaveLength(1);
+      expect(planSaves(node.writes)).toHaveLength(2);
+      expect(node.planValues?.[FIXTURE_IDS.llama8b]).toBe('600000000000000000');
+    });
+  }
 
   it('reads the epoch again on request when it cannot be read, offering nothing that sends meanwhile', async () => {
     const node = fundingNode();

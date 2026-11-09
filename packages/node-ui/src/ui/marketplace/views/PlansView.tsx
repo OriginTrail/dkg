@@ -2,15 +2,18 @@
 // plan and its renewal, top-ups, the reconciliation of what this node holds
 // against what landed, recent calls by key, and the funding behind it all.
 // A node that never subscribed gets three steps: fund the buyer wallet or add
-// it to an account, compose a plan, mint a key.
-import React, { useEffect, useState } from 'react';
+// it to an account, compose a plan, mint a key. A confirmation that waits for
+// the user with no flow on show for it (a funding of unknown outcome, a plan
+// not saved) is shown above the page, with what it allows.
+import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { copy } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi } from '../api/client.js';
 import type { CatalogAnswer, Plan, Subscription } from '../api/types.js';
 import { fmtMicro, fmtTrac, microOfWei, modelName, sumWei } from '../amounts.js';
 import { ErrorCard, OffCard, refusalKey, relAt, sellerName, useLoad } from '../shared.js';
 import { useMarketplaceDraftStore } from '../draftStore.js';
-import { FundFlow } from '../purchase/FundFlow.js';
+import { FundFlow, WaitingConfirmation } from '../purchase/FundFlow.js';
+import { fundings } from '../purchase/fundings.js';
 import { lineFor, type Draft } from '../purchase/Composer.js';
 import { Meters } from '../purchase/Meters.js';
 import { Activity, Reconciliation } from '../purchase/Ledger.js';
@@ -18,7 +21,8 @@ import { ProgressSteps } from '../purchase/ProgressSteps.js';
 import { TopUp } from '../purchase/TopUp.js';
 import { Treasury } from '../purchase/Treasury.js';
 
-type Flow = { kind: 'fund'; epoch: 'current' | 'next'; serviceId?: string } | { kind: 'plan' } | { kind: 'top-up'; serviceId: string };
+/** The flow on show; `confirmed` is the confirmation it made, once the coordinator holds it. */
+type Flow = ({ kind: 'fund'; epoch: 'current' | 'next'; serviceId?: string } | { kind: 'plan' } | { kind: 'top-up'; serviceId: string }) & { confirmed?: number };
 
 /**
  * A draft from the plan, or a fresh one with `serviceId` picked. Each line
@@ -135,6 +139,18 @@ export function PlansView(): React.ReactElement {
   const planPending = planned.loading && plan === null && planRead.state !== 'failed';
   const reloadAll = () => { cat.reload(); subs.reload(); planned.reload(); funding.reload(); activity.reload(); };
   const close = () => { setFlow(null); reloadAll(); };
+  // The confirmations that wait for the user that no flow on show shows. When they change, one failed or settled out of
+  // sight, and the page is read again.
+  const waiting = useSyncExternalStore(fundings.subscribe, fundings.waiting).filter((id) => id !== shown?.confirmed);
+  const waitingKey = waiting.join(',');
+  const seen = useRef(waitingKey);
+  useEffect(() => {
+    if (seen.current === waitingKey) return;
+    seen.current = waitingKey;
+    reloadAll();
+  });
+  // The flow on show made a confirmation; the onboarding one is on show with no flow asked for, and is one from here.
+  const confirmed = (id: number) => setFlow((f) => ({ ...(f ?? { kind: 'fund', epoch: 'current' }), confirmed: id }));
 
   // One-shot asks from Browse and the playground: compose with a service picked, or top it up.
   useEffect(() => {
@@ -163,11 +179,12 @@ export function PlansView(): React.ReactElement {
   }
 
   const endsAt = funding.data?.epochEndsAt ?? current?.endsAt ?? null;
+  const notices = mayEditPlan ? waiting.map((id) => <WaitingConfirmation key={id} id={id} onDone={close} />) : null;
   const treasury = funding.data ? <Treasury funding={funding.data} onChanged={funding.reload} /> : funding.err ? <ErrorCard err={funding.err} onRetry={funding.reload} /> : null;
   const planErr = planRead.state === 'failed' ? <PlanUnread err={planRead.err} onRetry={planned.reload} /> : null;
   const fundFlow = (f: Extract<Flow, { kind: 'fund' }>, onboarding: boolean) => (
     <FundFlow key={`${f.epoch}:${f.serviceId ?? ''}`} catalog={catalog} funding={funding.data} initial={draftOf(catalog, plan, f.epoch, f.serviceId)}
-      fundsEpoch onboarding={onboarding} endsAt={endsAt} onDone={close} onCancel={onboarding ? undefined : () => setFlow(null)} />
+      fundsEpoch onboarding={onboarding} endsAt={endsAt} onDone={close} onCancel={onboarding ? undefined : () => setFlow(null)} onConfirmed={confirmed} />
   );
 
   // ── no subscription this epoch ──
@@ -186,6 +203,7 @@ export function PlansView(): React.ReactElement {
       const f = shown?.kind === 'fund' ? shown : { kind: 'fund' as const, epoch: 'current' as const };
       return (
         <div className="mkt-frame" data-testid="mkt-plans" data-state="never-subscribed">
+          {notices}
           <h1 className="mkt-h1" data-copy="onboard.p5.title">{copy('onboard.p5.title')}</h1>
           {!funded && <ProgressSteps step={1} />}
           {treasury}
@@ -195,6 +213,7 @@ export function PlansView(): React.ReactElement {
     }
     return (
       <div className="mkt-frame" data-testid="mkt-plans" data-state="period-ended">
+        {notices}
         {shown?.kind === 'fund' ? fundFlow(shown, false) : (
           <div className="mkt-card">
             <h2 data-copy="ended.title">{copy('ended.title', { n: catalog.epoch })}</h2>
@@ -218,13 +237,14 @@ export function PlansView(): React.ReactElement {
   if (shown?.kind === 'top-up') {
     flowNode = <TopUp key={shown.serviceId} catalog={catalog} subscription={current} serviceId={shown.serviceId} onDone={close} onCancel={() => setFlow(null)} />;
   } else if (shown?.kind === 'plan') {
-    flowNode = <FundFlow key="plan" catalog={catalog} funding={funding.data} initial={draftOf(catalog, plan, 'next')} fundsEpoch={false} onboarding={false} endsAt={endsAt} onDone={close} onCancel={() => setFlow(null)} />;
+    flowNode = <FundFlow key="plan" catalog={catalog} funding={funding.data} initial={draftOf(catalog, plan, 'next')} fundsEpoch={false} onboarding={false} endsAt={endsAt} onDone={close} onCancel={() => setFlow(null)} onConfirmed={confirmed} />;
   } else if (shown?.kind === 'fund') {
     flowNode = fundFlow(shown, false);
   }
   const readErr = cat.err ?? subs.err;
   return (
     <div className="mkt-frame" data-testid="mkt-plans" data-state="active">
+      {notices}
       {flowNode}
       {readErr ? <ErrorCard err={readErr} onRetry={reloadAll} /> : null}
       {planErr}
