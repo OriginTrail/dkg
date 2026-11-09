@@ -54,17 +54,39 @@ const isCode = (node: ts.Node) => ts.isJsxElement(node) || ts.isJsxSelfClosingEl
 type Line = { text: string; where: string };
 type Add = (text: string, at: ts.Node) => void;
 
+/** The `const` declarations in a file, by name, so visible text kept in a constant can be followed to its value. */
+const constantsIn = (file: ts.SourceFile) => {
+  const byName = new Map<string, ts.Expression[]>();
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableDeclarationList(node) && node.flags & ts.NodeFlags.Const) {
+      for (const declaration of node.declarations) {
+        if (ts.isIdentifier(declaration.name) && declaration.initializer) {
+          byName.set(declaration.name.text, [...(byName.get(declaration.name.text) ?? []), declaration.initializer]);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return byName;
+};
+
 /**
  * Every literal inside an expression, including those inside a template's
- * `${…}` parts. Nested JSX is read by the main walk; calls and comparisons are code.
+ * `${…}` parts and in the value of a `const` the expression names.
+ * Nested JSX is read by the main walk; calls and comparisons are code.
  */
-const literals = (node: ts.Node, add: Add) => {
+const literals = (node: ts.Node, add: Add, constants: Map<string, ts.Expression[]>, following = new Set<string>()) => {
   if (ts.isStringLiteralLike(node)) add(node.text, node);
   else if (ts.isTemplateExpression(node)) {
     add([node.head.text, ...node.templateSpans.map((span) => span.literal.text)].join(' '), node);
-    node.templateSpans.forEach((span) => literals(span.expression, add));
+    node.templateSpans.forEach((span) => literals(span.expression, add, constants, following));
+  } else if (ts.isIdentifier(node)) {
+    if (following.has(node.text)) return;
+    const next = new Set(following).add(node.text);
+    constants.get(node.text)?.forEach((value) => literals(value, add, constants, next));
   } else if (!isCode(node)) {
-    ts.forEachChild(node, (child) => literals(child, add));
+    ts.forEachChild(node, (child) => literals(child, add, constants, following));
   }
 };
 
@@ -84,13 +106,15 @@ export const visibleLines = (source: string, fileName = 'file.tsx'): Line[] => {
     seen.add(key);
     lines.push({ text, where });
   };
+  const constants = constantsIn(file);
+  const read = (node: ts.Node) => literals(node, add, constants);
   const visit = (node: ts.Node) => {
     if (ts.isJsxText(node)) add(node.text, node);
-    else if (ts.isJsxExpression(node) && node.expression && !ts.isJsxAttribute(node.parent)) literals(node.expression, add);
-    else if (ts.isJsxAttribute(node) && node.initializer && VISIBLE_ATTRIBUTES.has(node.name.getText(file))) literals(node.initializer, add);
-    else if (ts.isPropertyAssignment(node) && VISIBLE_ATTRIBUTES.has(node.name.getText(file).replace(/['"]/g, ''))) literals(node.initializer, add);
-    else if (ts.isCallExpression(node) && VISIBLE_CALL.test(node.expression.getText(file))) node.arguments.forEach((argument) => literals(argument, add));
-    else if (ts.isNewExpression(node) && node.expression.getText(file).endsWith('Error')) node.arguments?.forEach((argument) => literals(argument, add));
+    else if (ts.isJsxExpression(node) && node.expression && !ts.isJsxAttribute(node.parent)) read(node.expression);
+    else if (ts.isJsxAttribute(node) && node.initializer && VISIBLE_ATTRIBUTES.has(node.name.getText(file))) read(node.initializer);
+    else if (ts.isPropertyAssignment(node) && VISIBLE_ATTRIBUTES.has(node.name.getText(file).replace(/['"]/g, ''))) read(node.initializer);
+    else if (ts.isCallExpression(node) && VISIBLE_CALL.test(node.expression.getText(file))) node.arguments.forEach(read);
+    else if (ts.isNewExpression(node) && node.expression.getText(file).endsWith('Error')) node.arguments?.forEach(read);
     ts.forEachChild(node, visit);
   };
   visit(file);
@@ -146,13 +170,25 @@ describe('writing rules', () => {
     expect(problemsIn(lines)).toEqual([{ where: 'example.tsx:1', text: 'processing', word: '\\bprocessing\\b', use: 'In progress' }]);
   });
 
+  it('follows text kept in a constant, but not the values it compares', () => {
+    const lines = visibleLines(`
+      const text = 'Check the daemon';
+      const note = mode === 'daemon' ? 'Managed by the daemon' : 'Signed by your wallet';
+      const loop = loop;
+      export const View = () => <p title={note}>{text}{loop}</p>;
+    `, 'example.tsx');
+    expect(lines.map((line) => line.text).sort()).toEqual(['Check the daemon', 'Managed by the daemon', 'Signed by your wallet']);
+    expect(problemsIn(lines).map((problem) => `${problem.where} ${problem.use}`).sort()).toEqual(['example.tsx:2 node', 'example.tsx:3 node']);
+  });
+
   it('says where each piece of text is', () => {
     const lines = visibleLines('const a = 1;\nexport const View = () => (\n  <p>\n    Shown text\n  </p>\n);\n', 'view.tsx');
     expect(lines).toEqual([{ text: 'Shown text', where: 'view.tsx:4' }]);
   });
 
   it('finds real text in the UI', () => {
-    for (const known of ['Retry loading agent', 'Copy UAL', 'Context Graph']) {
+    // The last two are kept in constants (walletSurfaceCopy, ownerNote) before they reach the screen.
+    for (const known of ['Retry loading agent', 'Copy UAL', 'Context Graph', 'Your connected wallet isn’t needed here', 'Managed by this node']) {
       expect([...allText].some((line) => line.includes(known)), known).toBe(true);
     }
   });
