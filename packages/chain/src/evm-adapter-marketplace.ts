@@ -16,7 +16,8 @@
  *   `resolveContract`'s address memo, which a Hub rotation clears.
  * - Every other write is sent by the wallet `opts.from`, one of this node's
  *   operational wallets, or else the primary one, under the Hub self-heal
- *   retry, as the Publishing Conviction writes are (`pcaWrite`).
+ *   retry, as the Publishing Conviction writes are (`pcaWrite`). A top-up
+ *   with a hook is recorded by it before its broadcast, as a batch is.
  * - A revert is thrown with its custom error decoded (`err.revert`).
  */
 
@@ -54,6 +55,8 @@ import {
   type Subscription,
   type SubscriptionFunding,
   type SubscriptionTopUp,
+  type TopUpOutcome,
+  type TopUpSendOptions,
   type WalletFundingRequest,
   type WindowAllowance,
 } from './marketplace.js';
@@ -245,7 +248,7 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     subscriptionId: string,
     additions: ServiceBudget[],
     planDigest: string,
-    opts?: MarketplaceWriteOptions,
+    opts?: TopUpSendOptions,
   ): Promise<SubscriptionTopUp> {
     return subscriptionTopUpOf(await this.marketplaceSend(
       () => this.resolveContract('ServiceSubscriptions'), 'topUpFromAccount', [subscriptionId, budgetArgs(additions), planDigest], opts,
@@ -289,11 +292,18 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     subscriptionId: string,
     additions: ServiceBudget[],
     planDigest: string,
-    opts?: MarketplaceWriteOptions,
+    opts?: TopUpSendOptions,
   ): Promise<SubscriptionTopUp> {
     return subscriptionTopUpOf(await this.marketplaceSend(
       () => this.resolveContract('ServiceSubscriptionsWallet'), 'topUpFromWallet', [subscriptionId, budgetArgs(additions), planDigest], opts,
     ));
+  }
+
+  async getTopUpOutcome(txHash: string): Promise<TopUpOutcome> {
+    await this.init();
+    const receipt = await this.getTransactionReceiptWithFailover(txHash);
+    if (!receipt) return null;
+    return receipt.status === 1 ? { toppedUp: subscriptionTopUpOf(receipt) } : { reverted: true };
   }
 
   async approveServiceSubscriptionsWallet(amount: bigint, opts?: MarketplaceWriteOptions): Promise<TxResult> {
@@ -636,19 +646,34 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
   /**
    * Send `method` from `opts.from`, or the primary wallet, under the Hub
    * self-heal retry; `contract` resolves the contract again for the retry.
+   * With `opts.onBroadcast` it is sent as a receipt batch is: signed, then
+   * the hook, then the broadcast, each speed-up after
+   * `opts.onBeforeReplacementBroadcast`.
    */
   protected async marketplaceSend(
     contract: () => Promise<Contract>,
     method: string,
     args: readonly unknown[],
-    opts: MarketplaceWriteOptions | undefined,
+    opts: TopUpSendOptions | undefined,
   ): Promise<ethers.TransactionReceipt> {
     await this.init();
     const signer = opts?.from === undefined ? this.signer : this.findSignerByAddress(opts.from);
     if (!signer) throw new Error(`Cannot send from ${opts?.from}: it is not one of this node's operational wallets`);
+    const onBroadcast = opts?.onBroadcast;
+    const label = `marketplace ${method}`;
     return this.withHubStaleRetryAny(async () => {
       try {
-        return await this.sendContractTransaction(await contract(), method, args, signer, `marketplace ${method}`);
+        const target = await contract();
+        if (!onBroadcast) return await this.sendContractTransaction(target, method, args, signer, label);
+        return await this.dispatchSerializedV10Write(
+          signer,
+          'top-up',
+          (signal) => onBroadcast({ ...signal, wallet: signer.address }),
+          async () => this.signPreparedTransaction(await this.prepareAcrossProviders(target, method, args, signer, label)),
+          (hash) => { throw new Error(`${method} ${hash} was sent but has no receipt`); },
+          undefined,
+          opts?.onBeforeReplacementBroadcast,
+        );
       } catch (err) {
         enrichEvmError(err);
         throw err;

@@ -106,6 +106,15 @@ export function parseServices(raw: unknown): PlannedService[] {
   return services;
 }
 
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** A top-up's idempotency key from the wire: absent, or a UUID v4, lowercased. */
+export function parseTopUpKey(raw: unknown): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string' || !UUID_V4.test(raw)) throw new PlanError('idempotencyKey must be a UUID v4');
+  return raw.toLowerCase();
+}
+
 export function parsePlan(raw: unknown): StandingPlan {
   const plan = raw as Partial<StandingPlanWire> | undefined;
   if (typeof plan?.renew !== 'boolean') throw new PlanError('renew must be true or false');

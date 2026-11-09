@@ -231,6 +231,12 @@ export interface ReceiptBatchSendOptions {
 /** What became of a batch's transaction: it landed, with its groups; it reverted; or `null` while it is not mined. */
 export type ReceiptBatchOutcome = { landed: ReceiptBatch } | { reverted: true } | null;
 
+/** A top-up's send, from `from`: with `onBroadcast`, recorded before it is broadcast as a receipt batch is. */
+export type TopUpSendOptions = MarketplaceWriteOptions & ReceiptBatchSendOptions;
+
+/** What became of a top-up's transaction: it landed, with its event; it reverted; or `null` while it is not mined. */
+export type TopUpOutcome = { toppedUp: SubscriptionTopUp } | { reverted: true } | null;
+
 /** A batch that landed: its `ReceiptBatchAccepted` event and its groups. */
 export interface ReceiptBatch extends TxResult {
   gasUsed: bigint;
@@ -329,12 +335,14 @@ export interface MarketplaceChain {
   /** The buyer's consent to `terms`, by the wallet `terms.buyer`: a 64-byte signature. Sends nothing. */
   signBuyerGrant?(terms: BuyerGrantTerms): Promise<{ digest: string; signature: string }>;
   fundFromAccount?(request: AccountFundingRequest, opts?: MarketplaceWriteOptions): Promise<SubscriptionFunding>;
-  topUpFromAccount?(subscriptionId: string, additions: ServiceBudget[], planDigest: string, opts?: MarketplaceWriteOptions): Promise<SubscriptionTopUp>;
+  topUpFromAccount?(subscriptionId: string, additions: ServiceBudget[], planDigest: string, opts?: TopUpSendOptions): Promise<SubscriptionTopUp>;
+  /** What became of a top-up sent with `onBroadcast`, by its hash or a speed-up's. */
+  getTopUpOutcome?(txHash: string): Promise<TopUpOutcome>;
   previewCost?(accountId: bigint, value: bigint): Promise<{ cost: bigint; discountBps: number }>;
   currentWindowAllowance?(accountId: bigint): Promise<WindowAllowance>;
   // ServiceSubscriptionsWallet, and the Token allowance it pulls payments under.
   fundFromWallet?(request: WalletFundingRequest, opts?: MarketplaceWriteOptions): Promise<SubscriptionFunding>;
-  topUpFromWallet?(subscriptionId: string, additions: ServiceBudget[], planDigest: string, opts?: MarketplaceWriteOptions): Promise<SubscriptionTopUp>;
+  topUpFromWallet?(subscriptionId: string, additions: ServiceBudget[], planDigest: string, opts?: TopUpSendOptions): Promise<SubscriptionTopUp>;
   /** `Token.approve(ServiceSubscriptionsWallet, amount)`. */
   approveServiceSubscriptionsWallet?(amount: bigint, opts?: MarketplaceWriteOptions): Promise<TxResult>;
   /** `Token.allowance(owner, ServiceSubscriptionsWallet)`. */

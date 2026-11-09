@@ -200,7 +200,9 @@ describe('the marketplace buyer on Hardhat', () => {
     expect(current.body.subscription).toMatchObject({ source: { ...source, discountBps: 2000 }, value: String(500n * TRAC), cost: String(400n * TRAC) });
     const next = await api('POST', '/api/marketplace/subscriptions', { epoch: 'next', source, services: [service(A, 500n)] });
     expect(next.status).toBe(200);
-    const topUp = await api('POST', `/api/marketplace/subscriptions/${current.body.subscription.subscriptionId}/top-up`, { services: [service(B, 100n, 'query')] });
+    const topUpPath = `/api/marketplace/subscriptions/${current.body.subscription.subscriptionId}/top-up`;
+    const idempotencyKey = '5b0a1c3e-9d2f-4e6a-8b7c-1d2e3f4a5b6c';
+    const topUp = await api('POST', topUpPath, { services: [service(B, 100n, 'query')], idempotencyKey });
     expect(topUp.body.subscription.cost).toBe(String(480n * TRAC));
 
     // The owner's later actions: a new limit, then the buyer removed; its subscriptions run on.
@@ -208,6 +210,12 @@ describe('the marketplace buyer on Hardhat', () => {
     expect(limits.status).toBe(200);
     expect((await chain.getGrant(accountId, NODE))!.maxCostPerEpoch).toBe(2_000n * TRAC);
     expect((await api('DELETE', `/api/marketplace/accounts/${accountId}/buyers/${NODE}`)).status).toBe(200);
+    // The keyed top-up's repeat still gets its answer, though a new top-up is refused now, and sends nothing.
+    const sends = vi.spyOn(chain, 'topUpFromAccount');
+    expect(await api('POST', topUpPath, { services: [service(B, 100n, 'query')], idempotencyKey }))
+      .toMatchObject({ status: 200, body: { txHash: topUp.body.txHash, subscription: { cost: String(480n * TRAC) } } });
+    expect(sends).not.toHaveBeenCalled();
+    expect((await api('POST', topUpPath, { services: [service(B, 100n, 'query')] })).body.code).toBe('GrantRevoked');
     const refused = await api('POST', '/api/marketplace/subscriptions/preview', { epoch: 'next', source, services: [service(A, 1n)] });
     expect(refused.body.refusal.code).toBe('SubscriptionAlreadyFunded');
     expect((await api('GET', '/api/marketplace/subscriptions')).body.subscriptions).toHaveLength(2);

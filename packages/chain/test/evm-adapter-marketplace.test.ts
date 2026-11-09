@@ -174,12 +174,24 @@ describe('the marketplace mixin on Hardhat', () => {
     expect(await walletBuyer.fundingIn(epoch)).toEqual({ wallet: 100n * TRAC, account: 0n });
     expect(await revertName(walletBuyer.fundFromWallet(request))).toBe('SubscriptionAlreadyFunded');
 
-    const topUp = await walletBuyer.topUpFromWallet(id, [budget(FIRST, 10n * TRAC), budget(SECOND, 20n * TRAC, SERVICE_CLASS_QUERY)], ethers.id('plan 2'));
+    // Recorded once signed, before its broadcast: the hook sees its hash and nonce while the chain has none of it.
+    const nonce = await walletBuyer.getMinedNonce(buyer);
+    const signals: Array<{ txHash: string; nonce?: number; wallet: string; mined: unknown }> = [];
+    const topUp = await walletBuyer.topUpFromWallet(id, [budget(FIRST, 10n * TRAC), budget(SECOND, 20n * TRAC, SERVICE_CLASS_QUERY)], ethers.id('plan 2'), {
+      onBroadcast: async (s) => { signals.push({ ...s, mined: await walletBuyer.getTopUpOutcome(s.txHash) }); },
+    });
     expect(topUp).toMatchObject({ success: true, value: 30n * TRAC, cost: 30n * TRAC });
+    expect(signals).toEqual([{ txHash: topUp.hash, nonce, wallet: buyer, mined: null }]);
+    expect(await walletBuyer.getTopUpOutcome(topUp.hash)).toEqual({ toppedUp: topUp });
+    expect(await walletBuyer.getTopUpOutcome(ethers.ZeroHash)).toBeNull();
     expect(await walletBuyer.getBudgets(id)).toEqual([budget(FIRST, 110n * TRAC), budget(SECOND, 20n * TRAC, SERVICE_CLASS_QUERY)]);
     expect(await walletBuyer.getSubscription(id)).toMatchObject({ budgetCount: 2, value: 130n * TRAC, planDigest: ethers.id('plan 2') });
     expect(await walletBuyer.getServiceSubscriptionsWalletAllowance(buyer)).toBe(20n * TRAC);
     expect(await walletBuyer.budgetLeft(id, 1)).toBe(20n * TRAC);
+    // A hook that throws sends nothing.
+    await expect(walletBuyer.topUpFromWallet(id, [budget(FIRST, TRAC)], PLAN, { onBroadcast: () => { throw new Error('the journal is full'); } }))
+      .rejects.toThrow(/journal/);
+    expect(await walletBuyer.getMinedNonce(buyer)).toBe(nonce + 1);
   });
 
   it('runs an account: opt-in, a grant with the buyer\'s signature, a prefunded next epoch, a top-up, limits and removal', async () => {

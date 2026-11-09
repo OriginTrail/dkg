@@ -17,6 +17,7 @@
  *   before signing it, so a refusal the checks missed is still never sent.
  * - **Session keys.** Each subscription gets a fresh session key, stored
  *   encrypted before its funding is sent.
+ * - **Top-ups with a key** are carried out once per key (`TopUpKeys`).
  * - **The job.** At every tick the buyer decides from the chain alone: it funds
  *   the current epoch when it has no subscription, funds the next one within
  *   `prefundLeadSeconds` of the boundary, and tops up a subscription with the
@@ -30,6 +31,7 @@
  * `ServiceSubscriptionsWallet`, when short, is raised to what the plan needs
  * through its last epoch.
  */
+import { join } from 'node:path';
 import { ethers } from 'ethers';
 import {
   enrichEvmError,
@@ -40,9 +42,11 @@ import {
   type Subscription,
   type SubscriptionFunding,
   type SubscriptionTopUp,
+  type TopUpSendOptions,
   type V10PublishingConvictionAccountInfo,
 } from '@origintrail-official/dkg-chain';
 import type { ResolvedMarketplaceConfig } from './config.js';
+import { Journal, KeyedLock } from './journal.js';
 import { budgetsOf, planDigestOf, valueOf, type FundingSource, type PlannedService, type StandingPlan } from './plan.js';
 import type { BuyerStore } from './store.js';
 
@@ -105,6 +109,7 @@ export class Buyer {
   readonly nodeWallets: readonly string[];
   /** The last renewal outcome per epoch: `null` for success. */
   readonly renewals = new Map<number, { at: number; refusal: { code: string; args: string[] } | null }>();
+  private readonly topUps: TopUpKeys;
   private queue: Promise<unknown> = Promise.resolve();
   private timer: ReturnType<typeof setInterval> | undefined;
   private ticking: Promise<void> | undefined;
@@ -114,6 +119,7 @@ export class Buyer {
     this.store = deps.store;
     this.config = deps.config;
     this.nodeWallets = (deps.nodeWallets ?? [deps.config.buyerWallet]).map((w) => ethers.getAddress(w));
+    this.topUps = new TopUpKeys(deps.store.dir, deps.chain);
   }
 
   get buyerWallet(): string {
@@ -163,20 +169,24 @@ export class Buyer {
   /**
    * Add `services` to the buyer's subscription: value to the budgets it has,
    * and the services it lacks as new budgets. A service it has keeps its class
-   * and price cap.
+   * and price cap. With `key`, it is carried out once (`TopUpKeys`): the key is
+   * looked up before any check.
    */
-  async topUp(subscriptionId: string, services: PlannedService[]): Promise<SubscriptionTopUp> {
-    return this.exclusive(async () => {
-      const { subscription, stored, additions, check } = await this.topUpCheck(subscriptionId, services);
-      if (check.refusal) throw new MarketplaceRefusal(check.refusal.code, check.refusal.args);
-      const planDigest = planDigestOf(subscription.epoch, this.buyerWallet, merged(stored, additions));
-      const from = { from: this.buyerWallet };
-      if (check.source.kind === 'wallet') {
-        await this.ensureAllowance(check.value, subscription.epoch);
-        return this.chain.topUpFromWallet(subscriptionId, additions, planDigest, from);
-      }
-      return this.chain.topUpFromAccount(subscriptionId, additions, planDigest, from);
-    });
+  async topUp(subscriptionId: string, services: PlannedService[], key?: string): Promise<SubscriptionTopUp> {
+    if (key === undefined) return this.exclusive(() => this.sendTopUp(subscriptionId, services, {}));
+    return this.topUps.once(key, topUpDigestOf(subscriptionId, services), (hooks) => this.exclusive(() => this.sendTopUp(subscriptionId, services, hooks)));
+  }
+
+  private async sendTopUp(subscriptionId: string, services: PlannedService[], hooks: TopUpHooks): Promise<SubscriptionTopUp> {
+    const { subscription, stored, additions, check } = await this.topUpCheck(subscriptionId, services);
+    if (check.refusal) throw new MarketplaceRefusal(check.refusal.code, check.refusal.args);
+    const planDigest = planDigestOf(subscription.epoch, this.buyerWallet, merged(stored, additions));
+    const send: TopUpSendOptions = { from: this.buyerWallet, ...(hooks.of ? hooks.of(subscription.epoch) : {}) };
+    if (check.source.kind === 'wallet') {
+      await this.ensureAllowance(check.value, subscription.epoch);
+      return this.chain.topUpFromWallet(subscriptionId, additions, planDigest, send);
+    }
+    return this.chain.topUpFromAccount(subscriptionId, additions, planDigest, send);
   }
 
   // ------------------------------------------------------------------ job
@@ -377,3 +387,199 @@ function merged(stored: readonly ServiceBudget[], additions: readonly ServiceBud
   }
   return out;
 }
+
+// ------------------------------------------------------ idempotent top-ups
+
+/** The digest of a top-up request, as its key binds it: the subscription and each service's terms. */
+export function topUpDigestOf(subscriptionId: string, services: readonly PlannedService[]): string {
+  return ethers.id(JSON.stringify([
+    subscriptionId.toLowerCase(),
+    services.map((s) => [s.serviceId.toLowerCase(), s.serviceClass, s.value.toString(), s.maxPricePerUnit.toString(), s.pinnedSeller?.toString() ?? null]),
+  ]));
+}
+
+/** The send's hooks for one keyed top-up, given the subscription's epoch; none for a top-up without a key. */
+interface TopUpHooks {
+  of?: (epoch: number) => Pick<TopUpSendOptions, 'onBroadcast' | 'onBeforeReplacementBroadcast'>;
+}
+
+type TopUpWire = { hash: string; blockNumber: number; txIndex?: number; success: boolean; value: string; cost: string };
+
+type TopUpEntry =
+  | { type: 'sent'; key: string; digest: string; epoch: number; hash: string; wallet: string; nonce: number | null }
+  | { type: 'speedup'; key: string; hash: string }
+  | { type: 'done'; key: string; digest: string; epoch: number; topUp: TopUpWire }
+  | { type: 'refused'; key: string; code: string; args: string[] };
+
+interface KeyedTopUp {
+  digest: string;
+  /** The subscription's epoch. */
+  epoch: number;
+  hashes: string[];
+  wallet: string;
+  nonce: number | null;
+  topUp?: SubscriptionTopUp;
+  refusal?: { code: string; args: string[] };
+}
+
+const topUpToWire = (t: SubscriptionTopUp): TopUpWire => ({
+  hash: t.hash, blockNumber: t.blockNumber, ...(t.txIndex === undefined ? {} : { txIndex: t.txIndex }), success: t.success,
+  value: t.value.toString(), cost: t.cost.toString(),
+});
+const topUpFromWire = (t: TopUpWire): SubscriptionTopUp => ({ ...t, value: BigInt(t.value), cost: BigInt(t.cost) });
+
+/**
+ * Top-ups carried out once per key (OT-RFC-27): the caller makes a key, a
+ * UUID v4, for each top-up it confirms, so a retry after a lost answer never
+ * adds the value twice.
+ *
+ * - **Looked up first**, before any check: a repeat gets the first request's
+ *   answer, even when the subscription would refuse a new top-up now, and
+ *   never sends a second one. While the first is in flight, a repeat waits for
+ *   it. The key with another request is refused `IdempotencyKeyReused`.
+ * - **Recorded before it is sent**, in `top-ups.jsonl` beside the buyer's
+ *   other files: once signed, before its broadcast, its hash, wallet and nonce,
+ *   with the request's digest and the subscription's epoch, and each speed-up's
+ *   hash before that is broadcast; then the top-up it landed, or the refusal of
+ *   one mined and reverted. A refusal before anything is sent is not recorded:
+ *   a repeat is checked again.
+ * - **Settled by its hash** when its outcome was not seen, as after a restart:
+ *   mined, it landed or reverted; not mined though its wallet's nonce has
+ *   passed it, it was never sent (`TopUpNotSent`); otherwise it is still
+ *   pending (`TopUpPending`, asked again later).
+ * - **Kept** through the epoch after the subscription's.
+ */
+export class TopUpKeys {
+  private readonly journal: Journal<TopUpEntry>;
+  private readonly lock = new KeyedLock();
+  private readonly keys = new Map<string, KeyedTopUp>();
+  /** key => the request in flight under it, and its outcome. */
+  private readonly running = new Map<string, { digest: string; outcome: Promise<SubscriptionTopUp> }>();
+  private loaded: Promise<void> | undefined;
+
+  constructor(dir: string, private readonly chain: Pick<MarketplaceChainAdapter, 'getEpochTimes' | 'getTopUpOutcome' | 'getMinedNonce'>) {
+    this.journal = new Journal(join(dir, 'top-ups.jsonl'));
+  }
+
+  /** The top-up under `key`: the one recorded for it, or `send`'s, sent with the hooks that record it. */
+  once(key: string, digest: string, send: (hooks: TopUpHooks) => Promise<SubscriptionTopUp>): Promise<SubscriptionTopUp> {
+    const running = this.running.get(key);
+    if (running) return running.digest === digest ? running.outcome : Promise.reject(reused(key));
+    const outcome = this.run(key, digest, send);
+    this.running.set(key, { digest, outcome });
+    void outcome.catch(() => undefined).finally(() => {
+      if (this.running.get(key)?.outcome === outcome) this.running.delete(key);
+    });
+    return outcome;
+  }
+
+  private async run(key: string, digest: string, send: (hooks: TopUpHooks) => Promise<SubscriptionTopUp>): Promise<SubscriptionTopUp> {
+    await this.load();
+    const known = this.keys.get(key);
+    if (known) {
+      if (known.digest !== digest) throw reused(key);
+      return this.answerOf(key, known);
+    }
+    let sent = false;
+    let epoch = 0;
+    try {
+      const topUp = await send({
+        of: (subscriptionEpoch) => {
+          epoch = subscriptionEpoch;
+          return {
+            onBroadcast: async (signal) => {
+              // One transaction per key: a second broadcast under it, as a retry within the send would make, is refused.
+              if (this.keys.has(key)) throw new Error(`a top-up under ${key} was sent already`);
+              await this.record({ type: 'sent', key, digest, epoch, hash: signal.txHash, wallet: signal.wallet, nonce: signal.nonce ?? null });
+              sent = true;
+            },
+            onBeforeReplacementBroadcast: (signal) => this.record({ type: 'speedup', key, hash: signal.txHash }),
+          };
+        },
+      });
+      await this.record({ type: 'done', key, digest, epoch, topUp: topUpToWire(topUp) });
+      return topUp;
+    } catch (err) {
+      // Mined and reverted: its refusal is the answer. Not known yet: it stays sent, settled by its hash when asked again.
+      if (sent && (err as { receipt?: { status?: number } }).receipt?.status === 0) {
+        await this.record({ type: 'refused', key, ...(refusalOf(err) ?? { code: 'TopUpReverted', args: [] }) });
+      }
+      throw err;
+    }
+  }
+
+  /** The recorded answer under a key; a top-up sent but not seen to land is settled from the chain first. */
+  private async answerOf(key: string, state: KeyedTopUp): Promise<SubscriptionTopUp> {
+    if (state.topUp) return { ...state.topUp };
+    if (state.refusal) throw new MarketplaceRefusal(state.refusal.code, state.refusal.args);
+    const outcome = await this.settle(state);
+    if (outcome === null) throw new MarketplaceRefusal('TopUpPending', [key, state.hashes[state.hashes.length - 1]!]);
+    if ('toppedUp' in outcome) {
+      await this.record({ type: 'done', key, digest: state.digest, epoch: state.epoch, topUp: topUpToWire(outcome.toppedUp) });
+      return outcome.toppedUp;
+    }
+    await this.record({ type: 'refused', key, ...outcome.refused });
+    throw new MarketplaceRefusal(outcome.refused.code, outcome.refused.args);
+  }
+
+  /** A sent top-up by its hashes: landed, reverted, never sent once its wallet's nonce passed it with none mined; `null` while pending. */
+  private async settle(state: KeyedTopUp): Promise<{ toppedUp: SubscriptionTopUp } | { refused: { code: string; args: string[] } } | null> {
+    const mined = async () => {
+      for (const hash of state.hashes) {
+        const outcome = await this.chain.getTopUpOutcome(hash);
+        if (outcome) return outcome;
+      }
+      return null;
+    };
+    let outcome = await mined();
+    if (!outcome) {
+      if (state.nonce === null || (await this.chain.getMinedNonce(state.wallet)) <= state.nonce) return null;
+      // The nonce has passed it: mined since the read above, or never to be.
+      outcome = await mined();
+      if (!outcome) return { refused: { code: 'TopUpNotSent', args: [state.hashes[0]!] } };
+    }
+    return 'toppedUp' in outcome ? outcome : { refused: { code: 'TopUpReverted', args: [...state.hashes] } };
+  }
+
+  /** Read the journal, once, and drop the keys of subscriptions that ended before the current epoch. */
+  private load(): Promise<void> {
+    this.loaded ??= (async () => {
+      const entries = await this.journal.read();
+      for (const entry of entries) this.apply(entry);
+      const { epoch } = await this.chain.getEpochTimes();
+      const stale = new Set([...this.keys].filter(([, state]) => state.epoch < epoch - 1).map(([key]) => key));
+      if (stale.size === 0) return;
+      await this.journal.replace(entries.filter((entry) => !stale.has(entry.key)));
+      for (const key of stale) this.keys.delete(key);
+    })().catch((err: unknown) => {
+      // Read again by the next request.
+      this.loaded = undefined;
+      this.keys.clear();
+      throw err;
+    });
+    return this.loaded;
+  }
+
+  private async record(entry: TopUpEntry): Promise<void> {
+    await this.lock.run('journal', () => this.journal.append(entry));
+    this.apply(entry);
+  }
+
+  private apply(entry: TopUpEntry): void {
+    if (entry.type === 'sent') {
+      this.keys.set(entry.key, { digest: entry.digest, epoch: entry.epoch, hashes: [entry.hash], wallet: entry.wallet, nonce: entry.nonce });
+      return;
+    }
+    if (entry.type === 'done') {
+      const state = this.keys.get(entry.key) ?? { digest: entry.digest, epoch: entry.epoch, hashes: [entry.topUp.hash], wallet: '', nonce: null };
+      this.keys.set(entry.key, { ...state, topUp: topUpFromWire(entry.topUp) });
+      return;
+    }
+    const state = this.keys.get(entry.key);
+    if (!state) return;
+    if (entry.type === 'speedup') state.hashes.push(entry.hash);
+    else state.refusal = { code: entry.code, args: entry.args };
+  }
+}
+
+const reused = (key: string) => new MarketplaceRefusal('IdempotencyKeyReused', [key]);

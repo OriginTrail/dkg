@@ -374,6 +374,32 @@ describe('the marketplace routes', () => {
     expect((await api('GET', '/api/marketplace/subscriptions?epoch=current')).body.subscriptions[0]).toMatchObject({ value: String(10n * TRAC), cost: String(7n * TRAC) });
   });
 
+  it('carry out a top-up once per idempotency key: the repeat gets its answer, another body 409, an unsettled one 503', async () => {
+    const funded = await api('POST', '/api/marketplace/subscriptions', { epoch: 'current', source: { kind: 'wallet' }, services: plan.services });
+    const topUp = `/api/marketplace/subscriptions/${funded.body.subscription.subscriptionId}/top-up`;
+    const idempotencyKey = '5b0a1c3e-9d2f-4e6a-8b7c-1d2e3f4a5b6c';
+    const sends = vi.spyOn(chain, 'topUpFromWallet');
+    const first = await api('POST', topUp, { services: plan.services, idempotencyKey });
+    expect(first).toMatchObject({ status: 200, body: { subscription: { value: String(20n * TRAC) } } });
+    // The answer was lost: the retry gets the same top-up, and nothing more is sent.
+    expect(await api('POST', topUp, { services: plan.services, idempotencyKey: idempotencyKey.toUpperCase() })).toEqual(first);
+    expect(sends).toHaveBeenCalledTimes(1);
+    expect(await api('POST', topUp, { services: [{ ...plan.services[0], value: String(TRAC) }], idempotencyKey }))
+      .toMatchObject({ status: 409, body: { code: 'IdempotencyKeyReused', args: [idempotencyKey], retryable: false } });
+    expect(await api('POST', topUp, { services: plan.services, idempotencyKey: 'once' }))
+      .toMatchObject({ status: 400, body: { code: 'InvalidRequest', error: expect.stringContaining('UUID v4') } });
+    // Sent and lost before it was mined: the repeat is asked to wait, as a retryable 503, and sends nothing.
+    const pending = '0f1e2d3c-4b5a-4968-a7b6-c5d4e3f2a1b0';
+    sends.mockImplementationOnce(async (_id, _additions, _digest, opts) => {
+      await opts!.onBroadcast!({ txHash: `0x${'ee'.repeat(32)}`, nonce: 9, wallet: SIGNER.address });
+      throw new Error('socket hang up');
+    });
+    expect((await api('POST', topUp, { services: plan.services, idempotencyKey: pending })).status).toBe(500);
+    expect(await api('POST', topUp, { services: plan.services, idempotencyKey: pending }))
+      .toMatchObject({ status: 503, body: { code: 'TopUpPending', retryable: true } });
+    expect(sends).toHaveBeenCalledTimes(2);
+  });
+
   it('answer a funding that was sent as sent, even while the read of its subscription lags', async () => {
     vi.spyOn(chain, 'getSubscription').mockResolvedValueOnce(null);
     const sent = await api('POST', '/api/marketplace/subscriptions', { epoch: 'next', source: { kind: 'wallet' }, services: plan.services });

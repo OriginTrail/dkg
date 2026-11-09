@@ -31,6 +31,7 @@ import {
   parsePlan,
   parseServices,
   parseSource,
+  parseTopUpKey,
   parseWei,
   planView,
   refusalOf,
@@ -84,6 +85,8 @@ const REFUSAL_STATUS: Readonly<Record<string, number>> = {
   QueryInferencePaused: 503,
   QueryInferenceNotActive: 503,
   MarketplaceOff: 503,
+  // A keyed top-up sent and not yet mined: asked again, never sent again.
+  TopUpPending: 503,
 };
 
 function refuse(res: ServerResponse, code: string, error: string, args: readonly string[] = []): void {
@@ -195,7 +198,9 @@ async function answer(buyer: Buyer, method: string, route: string, ctx: RequestC
   const topUp = /^\/subscriptions\/(0x[0-9a-fA-F]{64})\/top-up$/.exec(route);
   if (method === 'POST' && topUp) {
     const subscriptionId = topUp[1]!.toLowerCase();
-    const sent = await buyer.topUp(subscriptionId, parseServices((await bodyOf(req)).services));
+    const body = await bodyOf(req);
+    // With `idempotencyKey`, a repeat gets the first request's answer and sends nothing.
+    const sent = await buyer.topUp(subscriptionId, parseServices(body.services), parseTopUpKey(body.idempotencyKey));
     return { ...txView(sent), subscription: await subscriptionAfter(buyer, subscriptionId, ctx) };
   }
   if (route === '/plan' && method === 'PUT') {
