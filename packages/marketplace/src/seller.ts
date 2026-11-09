@@ -66,6 +66,7 @@ import { SellerLedger, type ServedCall } from './ledger.js';
 import { offerQuads, signOffer, type OfferQuad } from './offers.js';
 import { inputUnitsBound } from './seller-bounds.js';
 import {
+  PEER_LIMITS,
   WireError,
   quoteRequestFromWire,
   receiptToWire,
@@ -84,6 +85,11 @@ import {
 export const DEFAULT_STOP_SERVING_SECONDS = 180;
 /** The longest a service's backend takes to answer, when its settings name no time limit. */
 export const DEFAULT_BACKEND_TIMEOUT_MS = 60_000;
+/**
+ * The longest time limit a backend may have: ten seconds inside the buyer gateway's wait for an answer
+ * (`PEER_LIMITS.serveTimeoutMs`). A slower answer reaches a buyer that has stopped waiting, which still pays for it.
+ */
+export const MAX_BACKEND_TIMEOUT_MS = PEER_LIMITS.serveTimeoutMs - 10_000;
 /** What a call needs after its backend answers, before its request expires: the chain's time, the receipt signed and stored. */
 const RECEIPT_SECONDS = 5;
 /** Calls whose backend ran but gave nothing to sign, kept so a repeat does not run it again: the newest this many. */

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
  * The daemon's seller at boot (`startMarketplaceSeller`): a backend time limit
- * that is not a whole number of milliseconds leaves selling off; seller files
- * it cannot read leave selling off, logged, and the boot goes on; and each
- * `serve` reaches the seller with the peer that sent it.
+ * that is not a whole number of milliseconds, or longer than buyers wait for an
+ * answer, leaves selling off; seller files it cannot read leave selling off,
+ * logged, and the boot goes on; and each `serve` reaches the seller with the
+ * peer that sent it.
  */
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -12,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { MockChainAdapter, marketplaceChainOf } from '@origintrail-official/dkg-chain';
-import { Seller, decodeMessage, encodeMessage } from '@origintrail-official/dkg-marketplace';
+import { MAX_BACKEND_TIMEOUT_MS, Seller, decodeMessage, encodeMessage } from '@origintrail-official/dkg-marketplace';
 import { startMarketplace } from '../src/daemon/marketplace-buyer.js';
 import { startMarketplaceSeller } from '../src/daemon/marketplace-seller.js';
 
@@ -58,11 +59,16 @@ afterEach(async () => {
 });
 
 describe("the daemon's seller at boot", () => {
-  it('leaves selling off, logged, for a backend time limit that is not a whole number of milliseconds', async () => {
-    for (const timeoutMs of [0, -1, 1.5, '60000']) expect(await start([service({ timeoutMs })])).toBeUndefined();
-    expect(log).toHaveBeenCalledTimes(4);
-    expect(log).toHaveBeenLastCalledWith(expect.stringMatching(/backend\.timeoutMs must be a whole number of milliseconds, above 0: selling stays off$/));
+  it('leaves selling off, logged, for a backend time limit that is not a whole number of milliseconds, or past what buyers wait', async () => {
+    expect(MAX_BACKEND_TIMEOUT_MS).toBe(110_000);
+    for (const timeoutMs of [0, -1, 1.5, '60000', MAX_BACKEND_TIMEOUT_MS + 1]) expect(await start([service({ timeoutMs })])).toBeUndefined();
+    expect(log).toHaveBeenCalledTimes(5);
+    expect(log).toHaveBeenLastCalledWith(expect.stringMatching(/backend\.timeoutMs must be a whole number of milliseconds, from 1 to 110000: selling stays off$/));
     expect(handlers).toBeUndefined();
+    // The longest it takes sells.
+    const runtime = await start([service({ timeoutMs: MAX_BACKEND_TIMEOUT_MS })]);
+    expect(runtime).toBeDefined();
+    await runtime!.stop();
   });
 
   it('leaves selling off, logged, when its files cannot be read, and the boot goes on', async () => {

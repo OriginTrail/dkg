@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   DEFAULT_BACKEND_TIMEOUT_MS,
+  MAX_BACKEND_TIMEOUT_MS,
   PEER_LIMITS,
   Seller,
   connectorOf,
@@ -66,10 +67,11 @@ export async function startMarketplaceSeller(options: MarketplaceSellerOptions):
   let services;
   try {
     services = resolved.services.map((s, i) => {
-      // The seller refuses a request that expires before its backend's time limit, so it sets that limit itself.
+      // The seller refuses a request that expires before its backend's time limit, so it sets that limit itself; one
+      // past the buyers' wait for an answer would serve answers nobody waits for.
       const timeoutMs = s.backend.timeoutMs ?? DEFAULT_BACKEND_TIMEOUT_MS;
-      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
-        throw new Error(`marketplace.seller.services[${i}].backend.timeoutMs must be a whole number of milliseconds, above 0`);
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_BACKEND_TIMEOUT_MS) {
+        throw new Error(`marketplace.seller.services[${i}].backend.timeoutMs must be a whole number of milliseconds, from 1 to ${MAX_BACKEND_TIMEOUT_MS}`);
       }
       return { ...s, connector: connectorOf({ ...s.backend, timeoutMs }), backendTimeoutMs: timeoutMs };
     });
