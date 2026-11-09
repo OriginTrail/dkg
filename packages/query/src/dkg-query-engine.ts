@@ -11,9 +11,10 @@ import { resolveQueryReadPlan, type QueryReadPlan } from './query-read-plan.js';
 import { storeOptions } from './query-store-options.js';
 import {
   asGraphWriteRevisionSource, asQueryReadAdmissionCapability,
-  isSparqlHttpResponseError, StoreResponseTooLargeError,
+  isSparqlHttpResponseError, sparqlEngineOf, StoreResponseTooLargeError,
 } from '@origintrail-official/dkg-storage';
 import type {
+  SparqlEngineFamily,
   TripleStore,
   Quad,
   QueryResult as StoreQueryResult,
@@ -67,8 +68,8 @@ import {
   prepareGraphScope,
   requireGraphScopeRewrite,
   rewriteGraphSet,
+  rewriteSingleGraph,
   transitionGraphScope,
-  wrapWithGraph,
   type PreparedGraphScope,
 } from './sparql-graph-scope.js';
 import { injectMinTrustFilter } from './sparql-min-trust.js';
@@ -326,11 +327,13 @@ type ScopedQueryReadPlan = Extract<QueryReadPlan, { kind: 'scoped' }>;
  */
 export class DKGQueryEngine implements GraphAwareQueryEngine {
   private readonly store: TripleStore;
+  private readonly sparqlEngine: SparqlEngineFamily | null;
   private readonly graphManager: GraphManager;
   private readonly scopedContentGraphDiscoveryMemo: ScopedContentGraphDiscoveryMemo;
 
   constructor(store: TripleStore) {
     this.store = store;
+    this.sparqlEngine = sparqlEngineOf(store);
     this.graphManager = new GraphManager(store);
     this.scopedContentGraphDiscoveryMemo = new ScopedContentGraphDiscoveryMemo(
       asGraphWriteRevisionSource(store),
@@ -359,7 +362,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     if (prepared.status === 'malformed-uchar') {
       throw new Error('SPARQL rejected: malformed Unicode code-point escape');
     }
-    if (prepared.wordTokens.has('SERVICE')) {
+    const initialGraphScope = prepareGraphScope(prepared);
+    if (initialGraphScope.hasServiceClause) {
       throw new Error('SPARQL rejected: SERVICE clauses are not allowed');
     }
     const guard = validateReadOnlySparql(prepared);
@@ -369,7 +373,6 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // Policy checks and rewrites retain the prepared source/logical views.
     // Active UCHAR syntax is materialized once, immediately before the final
     // caller query crosses the store boundary.
-    const initialGraphScope = prepareGraphScope(prepared);
     if (options?.contextGraphId) assertNoCallerDatasetClauses(initialGraphScope);
     if (options?.subGraphName) {
       const validation = validateSubGraphName(options.subGraphName);
@@ -433,8 +436,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
     const routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(initialGraphScope, variableAllowedGraphs));
     const resolve = (target: { root: string; family: 'data' | 'shared-memory' }) => resolveLegacyRouteScope(
-      routedScope, target.root, target.family, prefix => this.discoverGraphsByPrefix(prefix, reads),
-      plan.fallbackPolicy);
+      routedScope, { ...target, discover: prefix => this.discoverGraphsByPrefix(prefix, reads),
+        fallbackPolicy: plan.fallbackPolicy, engine: this.sparqlEngine, authorizedDatasetGraphs: variableAllowedGraphs });
     const route = plan.policy.execution;
     if (route.kind === 'combined') {
       const dataScope = await resolve(route.data);
@@ -652,7 +655,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
     if (allGraphs.length === 1) {
       return this.execAndNormalize(
-        requireGraphScopeRewrite(wrapWithGraph(effectiveScope, allGraphs[0])),
+        requireGraphScopeRewrite(rewriteSingleGraph(effectiveScope, allGraphs[0], this.sparqlEngine)),
         reads,
       );
     }
@@ -662,6 +665,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         effectiveScope,
         allGraphs,
         'deduplicated-values-union',
+        this.sparqlEngine,
       );
       if (rewritten.kind === 'ready') {
         return this.execAndNormalize(rewritten.value, reads);
@@ -678,11 +682,9 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   ): Promise<QueryResult> {
     const sparql = scope.source;
     if (graphs.length === 0) return { bindings: [] };
+    const oneGraph = (graph: string) => requireGraphScopeRewrite(rewriteSingleGraph(scope, graph, this.sparqlEngine));
     if (graphs.length === 1) {
-      return this.execAndNormalize(
-        requireGraphScopeRewrite(wrapWithGraph(scope, graphs[0])),
-        reads,
-      );
+      return this.execAndNormalize(oneGraph(graphs[0]), reads);
     }
     // Prefer a single `VALUES ?g { … } GRAPH ?g { … }` query: it scopes the
     // read to the named-graph set as ONE basic graph pattern iterated over a
@@ -693,12 +695,12 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // VALUES form plans in constant depth. LIMIT/ORDER BY/DISTINCT/aggregate
     // semantics are preserved because those modifiers stay in the outer query
     // around the injected block.
-    const graphSetRewrite = rewriteGraphSet(scope, graphs, 'values-union');
+    const graphSetRewrite = rewriteGraphSet(scope, graphs, 'values-union', this.sparqlEngine);
     if (graphSetRewrite.kind === 'ready') {
       return this.execAndNormalize(graphSetRewrite.value, reads);
     }
     // Residual shapes the graph-set policy declines (an inner top-level
-    // UNION, no locatable WHERE block, or a sentinel-variable collision) keep
+    // UNION or no locatable WHERE block) keep
     // the original union / per-graph fallback so the #789 form-aware
     // cross-graph merge below is preserved unchanged.
     // Fallback: the inner body contains a UNION so we cannot safely wrap
@@ -718,10 +720,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // constructed from multiple source graphs).
       const merged: Quad[] = [];
       for (const g of graphs) {
-        const r = await this.execAndNormalize(
-          requireGraphScopeRewrite(wrapWithGraph(scope, g)),
-          reads,
-        );
+        const r = await this.execAndNormalize(oneGraph(g), reads);
         if (r.quads) merged.push(...r.quads);
       }
       return { bindings: [], quads: dedupeQuads(merged) };
@@ -731,10 +730,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // Boolean result: true iff the pattern matches in ANY graph.
       // Short-circuit on the first positive graph.
       for (const g of graphs) {
-        const r = await this.execAndNormalize(
-          requireGraphScopeRewrite(wrapWithGraph(scope, g)),
-          reads,
-        );
+        const r = await this.execAndNormalize(oneGraph(g), reads);
         if (r.bindings[0]?.result === 'true') {
           return { bindings: [{ result: 'true' }] };
         }
@@ -761,10 +757,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
     const all: Record<string, string>[] = [];
     for (const g of graphs) {
-      const r = await this.execAndNormalize(
-        requireGraphScopeRewrite(wrapWithGraph(scope, g)),
-        reads,
-      );
+      const r = await this.execAndNormalize(oneGraph(g), reads);
       all.push(...r.bindings);
     }
     return { bindings: all };

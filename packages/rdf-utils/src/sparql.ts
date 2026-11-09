@@ -1,4 +1,5 @@
 export {
+  isSparqlKeyword,
   materializePreparedSparql,
   prepareSparql,
   type PreparedSparql,
@@ -18,6 +19,7 @@ export {
 
 export {
   prepareSparqlQuery,
+  readSparqlQueryBoundaries,
   type PreparedSparqlQuery,
   type SparqlQueryGroupRange,
   type SparqlQueryVariable,
