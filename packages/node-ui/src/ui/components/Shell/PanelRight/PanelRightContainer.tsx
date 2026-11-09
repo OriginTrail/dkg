@@ -52,7 +52,7 @@ import {
 import type { AgentInfo, ConnectionRow, LocalAgentAttachmentDraft, LocalAgentAttachmentStatus, LocalAgentMessage, LocalAgentSessionSummary } from './types.js';
 import { useLayoutStore } from '../../../stores/layout.js';
 import { Maximize2, Minimize2 } from 'lucide-react';
-import { useConversationField } from '../../../stores/agentConversations.js';
+import { conversationRequests, useConversationField } from '../../../stores/agentConversations.js';
 
 export function PanelRight() {
   const { stage, advance } = useJourneyStore();
@@ -91,7 +91,6 @@ export function PanelRight() {
   // user switched conversations mid-stream and started a send in the
   // new one — clicking Stop in the original conversation would then
   // abort the wrong request. Codex CIV4a / CIcaM / CIlg0.
-  const localAbortRef = useRef<Map<string, AbortController>>(new Map());
   const autoFocusedLocalAgentRef = useRef(false);
   const localChatEndRef = useRef<HTMLDivElement>(null);
   const memorySessionsRef = useRef<MemorySession[]>([]);
@@ -547,7 +546,7 @@ export function PanelRight() {
       // ref. Multiple conversations can stream concurrently, and the
       // user can switch tabs mid-stream — each Stop button must abort
       // its own request.
-      localAbortRef.current.set(conversationKey, controller);
+      conversationRequests.start(conversationKey, controller);
       const contextEntries = [
         ...buildChatContextEntries(availableProjects, activeProjectId, currentAgent),
       ];
@@ -709,9 +708,7 @@ export function PanelRight() {
       // in-flight conversation's entry alone. Compare-and-delete so a
       // late `finally` from a previous send can't accidentally wipe a
       // newer entry under the same key after a quick retry.
-      if (localAbortRef.current.get(conversationKey) === controller) {
-        localAbortRef.current.delete(conversationKey);
-      }
+      conversationRequests.finish(conversationKey, controller);
     }
   }, [
     activeProjectId,
@@ -745,8 +742,7 @@ export function PanelRight() {
     // "Request cancelled." and dropping `streaming: false`, so a
     // single `.abort()` here is enough — no additional teardown.
     if (!selectedConversationKey) return;
-    const controller = localAbortRef.current.get(selectedConversationKey);
-    controller?.abort();
+    conversationRequests.stop(selectedConversationKey);
   }, [selectedConversationKey]);
 
   const connectIntegration = useCallback(async (integrationId: string) => {

@@ -43,5 +43,24 @@ const setters: { [K in Field]: (update: Update<AgentConversations[K]>) => void }
   attachmentDrafts: setterFor('attachmentDrafts'),
 };
 
+/**
+ * The request controller of each conversation's reply in flight. It lives
+ * with the conversations, not in the panel, so Stop in a reopened panel can
+ * still abort a reply started before the panel closed.
+ */
+const activeRequests = new Map<string, AbortController>();
+
+export const conversationRequests = {
+  start(conversationKey: string, controller: AbortController) { activeRequests.set(conversationKey, controller); },
+  stop(conversationKey: string) { activeRequests.get(conversationKey)?.abort(); },
+  /** Forget a finished request, unless a newer one has replaced it under the same key. */
+  finish(conversationKey: string, controller: AbortController | null) {
+    if (activeRequests.get(conversationKey) === controller) activeRequests.delete(conversationKey);
+  },
+};
+
 /** For tests: start with no conversations. */
-export const resetAgentConversations = () => useAgentConversations.setState({ ...EMPTY });
+export const resetAgentConversations = () => {
+  activeRequests.clear();
+  useAgentConversations.setState({ ...EMPTY });
+};
