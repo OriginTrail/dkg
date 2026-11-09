@@ -54,7 +54,7 @@ interface RestartInternals {
   wireSwmHostModeHandler(contextGraphId: string, source?: string, curated?: boolean): void;
   gossipWireIdFor(contextGraphId: string): string;
   rehydrateContextGraphsFromDurableState(): Promise<void>;
-  updateContextGraphSubscriptionRehydrationStatusAfterPersist(
+  recordContextGraphSubscriptionPersistence(
     contextGraphId: string,
     next?: { subscribed: boolean; coreHosted?: boolean },
   ): void;
@@ -96,7 +96,7 @@ function accountSaveAfterRehydration(internals: RestartInternals, contextGraphId
   const rehydrate = internals.rehydrateContextGraphsFromDurableState.bind(internals);
   vi.spyOn(internals, 'rehydrateContextGraphsFromDurableState').mockImplementation(async () => {
     await rehydrate();
-    internals.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, { subscribed: true });
+    internals.recordContextGraphSubscriptionPersistence(contextGraphId, { subscribed: true });
   });
 }
 
@@ -475,8 +475,8 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
     agent.subscribeToContextGraph(OTHER_CG, { persist: false });
     await agent.stop();
 
-    const subscribe = agent.subscribeToContextGraph.bind(agent);
-    vi.spyOn(agent, 'subscribeToContextGraph').mockImplementation((id, options) => {
+    const subscribe = agent.installContextGraphSubscription.bind(agent);
+    vi.spyOn(agent, 'installContextGraphSubscription').mockImplementation((id, options) => {
       if (id === CG) throw new Error('boom');
       return subscribe(id, options);
     });

@@ -163,19 +163,21 @@ export async function awaitContextGraphWriteReadiness(
  * proving the graph may still have left content that makes it writable.
  * `refuse` answers a graph still not writable. A write with nothing to wait
  * for, one that shutdown ended and one whose request closed are refused
- * without a second pass: none of them may go through.
+ * without a second pass: none of them may go through. The second pass is told
+ * it follows a wait (`afterWait`): it exists to see what the wait changed, so
+ * it may not reuse a preflight probe that began before the wait ended.
  */
 export async function resolveAwaitingWriteReadiness(
   agent: ContextGraphSubscriptionReader,
-  resolveOnce: () => Promise<string | KnownNotWritable | null>,
+  resolveOnce: (afterWait: boolean) => Promise<string | KnownNotWritable | null>,
   refuse: (raw: string, outcome: WriteReadinessOutcome) => null,
   request?: WriteReadinessRequest,
 ): Promise<string | null> {
-  const first = await resolveOnce();
+  const first = await resolveOnce(false);
   if (first === null || typeof first === 'string') return first;
   const outcome = await awaitContextGraphWriteReadiness(agent, first.notWritable, request);
   const resolveAgain = outcome === 'ready' || outcome === 'stopped' || outcome === 'timed-out';
-  const again = resolveAgain ? await resolveOnce() : first;
+  const again = resolveAgain ? await resolveOnce(true) : first;
   if (again === null || typeof again === 'string') return again;
   return refuse(again.raw, outcome);
 }

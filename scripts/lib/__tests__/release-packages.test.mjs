@@ -6,6 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { fixture as packageCertificateFixture, releaseGitFixture } from './package-certification-fixture.mjs';
+import { preparedRelease } from '../package-certification/publish.mjs';
 import ts from 'typescript';
 
 import {
@@ -53,8 +55,6 @@ const REPO_CHECKOUT_AVAILABLE = GIT_AVAILABLE && spawnSync('git', [
   '-C', REPO_ROOT, 'rev-parse', '--is-inside-work-tree',
 ], { encoding: 'utf8' }).stdout?.trim() === 'true';
 
-
-const SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../release-packages.mjs');
 
 function writePackage(root, rel, pkg) {
   const filePath = path.join(root, rel, 'package.json');
@@ -339,31 +339,72 @@ test('verifyReleaseTag flags a tag/version mismatch and a missing local tag', ()
   assert.match(missing[0], /not found locally/);
 });
 
-// Regression for the release-blocking promote crash: `run()` with stdio:'inherit'
-// returned null stdout and threw AFTER the first successful `npm dist-tag add`,
-// so a non-dry-run promote moved exactly one tag and exited 1. Exercise the real
-// CLI end-to-end against a stubbed `npm` binary.
-test('promote survives interactive npm calls for the whole package set', () => {
+// The real promotion runner and dist-tag reader against a stubbed `npm` that
+// keeps each package's dist-tags in its own file and answers a code it does not
+// take the way npm does. npm runs without a terminal, the code reaches it only
+// in its environment (an inherited one is dropped), and npm's EOTP stops the run.
+test('promote runs npm without a terminal and hands it the code only in its environment', async (t) => {
+  const fixture = packageCertificateFixture(t);
   const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-npm-shim-'));
-  try {
-    const logPath = path.join(shimDir, 'calls.log');
-    fs.writeFileSync(path.join(shimDir, 'npm'), '#!/bin/sh\necho "$@" >> "$NPM_SHIM_LOG"\n');
-    fs.chmodSync(path.join(shimDir, 'npm'), 0o755);
-    const result = spawnSync(process.execPath, [
-      SCRIPT_PATH, 'promote', '--version', '0.0.0-shimtest', '--tags', 'faketag', '--otp', '000000',
-    ], {
-      encoding: 'utf8',
-      env: { ...process.env, PATH: `${shimDir}:${process.env.PATH}`, NPM_SHIM_LOG: logPath },
-    });
-    assert.equal(result.status, 0, `stderr: ${result.stderr}`);
-    const calls = fs.readFileSync(logPath, 'utf8').trim().split('\n');
-    assert.ok(calls.length >= 2, `expected one npm call per publishable package, got ${calls.length}`);
-    for (const call of calls) {
-      assert.match(call, /^dist-tag add @origintrail-official\/\S+@0\.0\.0-shimtest faketag --otp=000000$/);
-    }
-  } finally {
-    fs.rmSync(shimDir, { recursive: true, force: true });
+  t.after(() => fs.rmSync(shimDir, { recursive: true, force: true }));
+  const calls = path.join(shimDir, 'calls.jsonl'), script = path.join(shimDir, 'npm.cjs');
+  const tagsOf = (name) => {
+    const file = path.join(shimDir, `${encodeURIComponent(name)}.json`);
+    return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+  };
+  fs.writeFileSync(script, `const fs = require('node:fs');
+const path = require('node:path');
+const args = process.argv.slice(2), [command, action, spec, tag] = args;
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ args, otp: process.env.npm_config_otp ?? null, inherited: process.env.NPM_CONFIG_OTP ?? null, terminal: Boolean(process.stdin.isTTY) }) + '\\n');
+const file = (name) => path.join(${JSON.stringify(shimDir)}, encodeURIComponent(name) + '.json');
+const tagsOf = (name) => fs.existsSync(file(name)) ? JSON.parse(fs.readFileSync(file(name), 'utf8')) : {};
+if (command === 'dist-tag' && action === 'ls') {
+  for (const [name, version] of Object.entries(tagsOf(spec))) console.log(name + ': ' + version);
+} else if (command === 'dist-tag' && action === 'add') {
+  if (process.env.npm_config_otp !== '222222') { console.error('npm error code EOTP'); process.exit(1); }
+  const at = spec.lastIndexOf('@'), name = spec.slice(0, at);
+  fs.writeFileSync(file(name), JSON.stringify({ ...tagsOf(name), [tag]: spec.slice(at + 1) }));
+  console.log('+' + tag + ': ' + spec);
+} else process.exit(91);
+`);
+  fs.writeFileSync(path.join(shimDir, 'npm'), `#!/bin/sh\nexec '${process.execPath}' '${script}' "$@"\n`, { mode: 0o755 });
+  const previous = { PATH: process.env.PATH, NPM_CONFIG_OTP: process.env.NPM_CONFIG_OTP };
+  process.env.PATH = `${shimDir}${path.delimiter}${previous.PATH}`;
+  process.env.NPM_CONFIG_OTP = '999999';
+  t.after(() => {
+    process.env.PATH = previous.PATH;
+    if (previous.NPM_CONFIG_OTP === undefined) delete process.env.NPM_CONFIG_OTP;
+    else process.env.NPM_CONFIG_OTP = previous.NPM_CONFIG_OTP;
+  });
+  const promote = (otp) => preparedRelease({
+    mode: 'promote', bundle: fixture.bundle, receiptFile: fixture.receiptFile, expected: fixture.expected,
+    tags: ['testnet', 'mainnet'], otp, ...releaseGitFixture(fixture.expected),
+    readDist: (pkg) => ({ integrity: pkg.integrity }), askOtp: null, settle: 0, log: () => {},
+  });
+  const packages = fixture.manifest.packages.length;
+
+  // A code npm does not take: the first write goes alone, and npm's own EOTP stops the run.
+  await assert.rejects(promote('111111'), (error) => {
+    assert.match(error.message, /no longer accepts the one-time code \(EOTP/);
+    assert.deepEqual(error.progress.completed, []);
+    assert.equal(error.progress.remaining.length, packages * 2);
+    return true;
+  });
+  const progress = await promote('222222');
+  assert.equal(progress.completed.length, packages * 2);
+  assert.deepEqual(progress.remaining, []);
+
+  const recorded = fs.readFileSync(calls, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  const writes = recorded.filter(({ args }) => args[1] === 'add');
+  assert.equal(writes.length, 1 + packages * 2, 'the refused code was sent once');
+  assert.deepEqual(writes.map(({ otp }) => otp), ['111111', ...Array(packages * 2).fill('222222')]);
+  for (const call of recorded) {
+    assert.equal(call.terminal, false, 'npm must not get a terminal to prompt on');
+    assert.equal(call.inherited, null, 'an inherited code must not reach npm');
+    assert.ok(!call.args.some((arg) => /otp|111111|222222|999999/.test(arg)), `the code must not be an npm argument: ${call.args}`);
+    if (call.args[1] === 'ls') assert.equal(call.otp, null, 'reads carry no code');
   }
+  for (const pkg of fixture.manifest.packages) assert.deepEqual(tagsOf(pkg.name), { testnet: pkg.version, mainnet: pkg.version });
 });
 
 function writeCliPackFixture(root) {

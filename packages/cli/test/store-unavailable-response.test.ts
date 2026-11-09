@@ -59,6 +59,24 @@ describe('respondIfStoreUnavailable', () => {
     });
   });
 
+  it('maps a control-path refusal to the same retryable not-started 503, naming the control lane', () => {
+    for (const reason of ['queue_full', 'queue_wait_timeout'] as const) {
+      const res = mockResponse();
+      const error = new StoreSchedulerBusyError(reason, 'control', 'publisher.asyncPromote.writeJob');
+
+      expect(respondIfStoreUnavailable(res, error)).toBe('not_started');
+      expect(res.statusCode).toBe(503);
+      expect(res.headers['Retry-After']).toBe('1');
+      expect(JSON.parse(res.body ?? '{}')).toMatchObject({
+        code: 'STORE_SCHEDULER_BUSY',
+        reason,
+        priority: 'control',
+        retryable: true,
+        outcome: 'not_started',
+      });
+    }
+  });
+
   it('maps pre-dispatch scheduler shedding to retryable 503 with a known outcome', () => {
     const res = mockResponse();
     const error = new StoreSchedulerBusyError(

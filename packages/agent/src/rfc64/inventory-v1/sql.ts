@@ -585,6 +585,11 @@ export const INVENTORY_V1_MIGRATE_V5_TO_V6_SQL = `
 ${INVENTORY_V1_PRIVATE_PLACEMENT_FAILURES_TABLE_SQL};
 PRAGMA user_version = ${INVENTORY_V1_USER_VERSION};`;
 
+/** Rollback to v5: v6 only adds retry diagnostics, so dropping them leaves the exact v5 schema. */
+export const INVENTORY_V1_DOWNGRADE_V6_TO_V5_SQL = `
+DROP TABLE rfc64_private_placement_failures_v1;
+PRAGMA user_version = ${INVENTORY_V1_V5_USER_VERSION};`;
+
 export function normalizeInventoryV1SchemaSql(sql: string): string {
   return sql.replace(/\s+/g, ' ').trim().replace(/;$/, '');
 }

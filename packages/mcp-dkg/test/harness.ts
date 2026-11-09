@@ -1,6 +1,6 @@
 import { z, type ZodRawShape, type ZodTypeAny } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { DkgClient } from '../src/client.js';
+import type { DkgClient, PeerInfo } from '../src/client.js';
 import type { DkgConfig } from '../src/config.js';
 
 export interface RegisteredTool {
@@ -166,7 +166,7 @@ export class FakeClient {
    */
   readonly peerInfoByPeerId = new Map<
     string,
-    Record<string, unknown>
+    PeerInfo
   >();
 
   constructor(private readonly overrides: ClientMethods = {}) {}
@@ -440,8 +440,8 @@ export class FakeClient {
   }
 
   // ── Query ───────────────────────────────────────────────────────
-  async query(args: Record<string, unknown>) {
-    this.queryCalls.push(args);
+  async query(args: Parameters<DkgClient['query']>[0]) {
+    this.queryCalls.push({ ...args });
     if (this.overrides.query) return this.overrides.query.call(this, args);
     const cgId = String(args.contextGraphId ?? '');
     const view = String(args.view ?? 'working-memory');
@@ -537,7 +537,7 @@ export class FakeClient {
   async getPeerInfo(peerId: string) {
     if (this.overrides.getPeerInfo) return this.overrides.getPeerInfo.call(this, peerId);
     const seeded = this.peerInfoByPeerId.get(peerId);
-    if (seeded) return seeded as ReturnType<DkgClient['getPeerInfo']> extends Promise<infer T> ? T : never;
+    if (seeded) return seeded;
     // Default fixture: not connected, no peerStore entry, no outbox.
     return {
       peerId,
@@ -572,7 +572,7 @@ export class FakeClient {
   // tests can assert the tool never lets the client helper's seal-true default
   // leak. `status` follows the route: quads + share → swm-shared (publish-ready);
   // quads only → wm-sealed; (the no-quads path uses createAssertion, not this).
-  async createKnowledgeAsset(args: Record<string, unknown>) {
+  async createKnowledgeAsset(args: Parameters<DkgClient['createKnowledgeAsset']>[0]) {
     if (this.overrides.createKnowledgeAsset) return this.overrides.createKnowledgeAsset.call(this, args);
     this.createKnowledgeAssetCalls.push({ ...args });
     const shared = args.alsoShareSwm === true;

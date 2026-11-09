@@ -21,6 +21,12 @@ export class SwmInventoryWriteFailure extends Error {
   }
 }
 
+/** Internal writer result; strict callers adapt supersession at their boundary. */
+export type SwmInventoryAttemptOutcome = SwmInventoryWriteOutcome | {
+  status: 'superseded';
+  reason: 'missing-seal' | 'workspace-mismatch';
+};
+
 /** Local readiness only: accepted policy and catalog service may arrive after startup. */
 export class SwmCatalogAuthorityNotReady extends Error {
   readonly code = 'SWM_CATALOG_AUTHORITY_NOT_READY';

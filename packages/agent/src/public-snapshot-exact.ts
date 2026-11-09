@@ -5,7 +5,8 @@ import { exactAssetFetchSessionPolicy } from './sync/requester/exact-durable-fet
 import { createOperationContext } from '@origintrail-official/dkg-core';
 // SPDX-License-Identifier: Apache-2.0
 import type { PublicSnapshotRecoveryOptions, PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
-import { PublicSnapshotRecoveryPacing } from './public-snapshot-exact-pacing.js';
+import type { PublicSnapshotAttemptVerdict } from './public-snapshot-exact-pacing.js';
+import { PublicSnapshotExactJob } from './public-snapshot-exact-job.js';
 
 export interface PublicSnapshotExactRecoveryOptions extends PublicSnapshotRecoveryOptions {
   /** Epoch milliseconds at which the job ends. */
@@ -14,6 +15,8 @@ export interface PublicSnapshotExactRecoveryOptions extends PublicSnapshotRecove
   readonly canAdmit?: () => boolean;
   /** Whether the asset is already stored as the snapshot pins it. */
   readonly holds?: (ual: string) => Promise<boolean>;
+  /** One lane by default; per-peer locks serialize requests to a shared supplier. */
+  readonly maxLanes?: 1 | 2;
 }
 
 type ExactTransport = 'stream-preferred' | 'legacy';
@@ -31,27 +34,39 @@ type SelectionPass = { kind: 'complete' | 'answered' }
  * is waited out inside the job's limit; only peers' answers and the limit end
  * the job. Assets already stored as the snapshot pins them are not fetched.
  */
-export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, options: PublicSnapshotExactRecoveryOptions): Promise<PublicSnapshotRecoveryResult> {
-  const { contextGraphId, uals, evidence, signal, assertCurrent, deadline } = options;
-  const committed = new Set<string>();
-  let alreadyPresent = 0;
+export async function recoverPublicSnapshotExact(
+  host: DurableRecoveryHost, options: PublicSnapshotExactRecoveryOptions,
+): Promise<PublicSnapshotRecoveryResult> {
+  const job = new PublicSnapshotExactJob(options);
+  job.assertActive();
+  const lanes = options.maxLanes === 2 && options.uals.length > 10 ? 2 : 1;
+  const partitions: string[][] = Array.from({ length: lanes }, () => []);
+  for (let offset = 0; offset < options.uals.length; offset += 10)
+    partitions[(offset / 10) % lanes]!.push(...options.uals.slice(offset, offset + 10));
+  return job.run(partitions.map((uals, lane) => () => recoverLane(host, options, job, uals, lane)));
+}
+
+/** Selection answers and supplier preference are lane-local; job state is not. */
+async function recoverLane(
+  host: DurableRecoveryHost, options: PublicSnapshotExactRecoveryOptions,
+  job: PublicSnapshotExactJob, uals: readonly string[], lane: number,
+): Promise<void> {
+  const { contextGraphId, evidence } = options;
+  const { committed, pacing, signal, isCurrent } = job;
+  let lastCompletePeer: string | undefined;
   const ctx = createOperationContext('sync');
-  const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
-  const pacing = new PublicSnapshotRecoveryPacing({ contextGraphId, deadline, signal, assertCurrent, canAdmit: options.canAdmit });
-  const incomplete = (reason?: string) => new Error(
-    `Snapshot recovery incomplete: ${committed.size}/${uals.length} committed${reason ? ` (${reason})` : ''}`);
-  const assertActive = () => {
-    if (Date.now() >= deadline) throw incomplete('job time limit reached');
-    assertCurrent();
-  };
   const skipHeld = async (batch: readonly string[]) => {
     for (const ual of batch) {
       if (committed.has(ual) || !options.holds) continue;
-      assertActive();
-      if (await options.holds(ual)) { committed.add(ual); alreadyPresent += 1; }
+      job.assertActive();
+      if (await options.holds(ual)) job.record([ual], true);
     }
   };
-  const attempt = async (peer: string, selection: string[], transport: ExactTransport) => {
+  const transfer = async (peer: string, selection: string[], transport: ExactTransport): Promise<PublicSnapshotAttemptVerdict> => {
+    job.assertActive();
+    if (pacing.localAdmissionDeferred()) return 'local-refusal';
+    // Another lane may have received BUSY while this one waited for the peer.
+    if (pacing.heldOff(peer)) return 'retry-peer';
     const result = await exactRecovery.runExactRecovery({
       host, ctx,
       remotePeerId: peer, contextGraphId, policy: exactAssetFetchSessionPolicy(createUalOnlyExactAssetSelection(selection), 'vm-update-refresh'), authority: evidence,
@@ -61,20 +76,28 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
         totalTimeoutMs: pacing.attemptTimeoutMs(),
       },
     });
-    const before = committed.size;
-    for (const ual of result.committedExactAssetUals ?? []) committed.add(ual);
-    return pacing.settle(peer, result, committed.size - before);
+    const added = job.record(result.committedExactAssetUals ?? []);
+    // A completed, verified batch is a scheduling hint within this job only.
+    // It grants no authority or coverage for any later asset; all other
+    // admitted providers remain available, with unchanged retry/hold rules.
+    if (result.streamOutcome === 'complete' && result.disposition === 'found'
+      && selection.every(ual => result.committedExactAssetUals?.includes(ual))) lastCompletePeer = peer;
+    return pacing.settle(peer, result, added);
   };
+  const attempt = (peer: string, selection: string[], transport: ExactTransport) =>
+    job.serializePeer(peer, () => transfer(peer, selection, transport));
   // One pass reports what happened. Only the scheduler below advances
   // discovery or waits; answer history belongs to the asset selection.
   const pass = async (selection: RecoverySelection, peers: readonly string[]): Promise<SelectionPass> => {
     let wait: 'admission' | 'peer' | undefined;
-    for (const peer of peers) {
+    const ordered = lastCompletePeer && peers.includes(lastCompletePeer)
+      ? [lastCompletePeer, ...peers.filter(peer => peer !== lastCompletePeer)] : peers;
+    for (const peer of ordered) {
       const remaining = selection.uals.filter(ual => !committed.has(ual));
       if (!remaining.length) return { kind: 'complete' };
       if (selection.answered.has(peer)) continue;
       if (pacing.heldOff(peer)) { wait ??= 'peer'; continue; }
-      assertActive();
+      job.assertActive();
       const verdict = await attempt(peer, remaining, selection.transport);
       if (verdict === 'answered') selection.answered.add(peer);
       else if (verdict === 'retry-peer') wait ??= 'peer';
@@ -87,6 +110,7 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
   for (let offset = 0; offset < uals.length; offset += 10) {
     const batch = uals.slice(offset, offset + 10);
     await skipHeld(batch);
+    if (batch.every(ual => committed.has(ual))) continue;
     const selections: RecoverySelection[] = [
       { uals: batch, transport: 'stream-preferred', answered: new Set() },
       // The stream profile excludes private commitments. Only missing assets
@@ -99,13 +123,15 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
     let peers: readonly string[] = [];
     try {
       while (batch.some(ual => !committed.has(ual))) {
-        assertActive();
+        job.assertActive();
         if (index === selections.length) {
-          if (discoveryDone) throw incomplete();
+          if (discoveryDone) throw job.incomplete();
           const next = await discovery.next();
           discoveryDone = next.done === true;
           peers = discoveryDone ? [...admitted] : next.value;
           if (!discoveryDone) peers.forEach(peer => admitted.add(peer));
+          const preferredOffset = lane % Math.max(1, peers.length);
+          peers = [...peers.slice(preferredOffset), ...peers.slice(0, preferredOffset)];
           index = 0;
         }
         const selection = selections[index]!;
@@ -113,10 +139,10 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
         // Busy suppliers never hide later undiscovered healthy suppliers.
         if (result.kind !== 'wait' || (result.reason === 'peer' && !discoveryDone)) { index++; continue; }
         host.log.info(ctx, `Snapshot recovery for "${contextGraphId}" is waiting for `
-          + `${result.reason === 'admission' ? 'local sync capacity' : 'a busy core'}: ${committed.size}/${uals.length} committed`);
+          + `${result.reason === 'admission' ? 'local sync capacity' : 'a busy core'}: ${job.progress()} committed`);
         const waited = result.reason === 'admission' ? await pacing.waitForAdmission()
           : await pacing.waitForPeer(peers.filter(peer => !selection.answered.has(peer)));
-        if (!waited) throw incomplete(result.reason === 'admission'
+        if (!waited) throw job.incomplete(result.reason === 'admission'
           ? 'local sync capacity stayed in use' : 'the configured cores stayed busy');
         // Another sync may have stored some of these while the job waited.
         await skipHeld(selection.uals);
@@ -125,5 +151,4 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
       if (!discoveryDone) await discovery.return?.();
     }
   }
-  return { committed, alreadyPresent };
 }

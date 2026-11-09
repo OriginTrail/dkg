@@ -60,9 +60,9 @@ writes it back. Some direct local resolution paths do not yet refetch on demand,
 so nodes that may hold the only copy of locally produced data should use a
 longer minimum age or leave v1 disabled until replication is established.
 
-GC v2 will replace age as the deletion proof with recorded provenance,
-replication/finality evidence, leases, and cache-miss rehydration. See
-[`../active-now/swm-public-snapshot-gc-v2-spec.md`](../active-now/swm-public-snapshot-gc-v2-spec.md).
+A later version, GC v2, will replace age as the deletion proof with recorded
+provenance, replication/finality evidence, leases, and cache-miss rehydration.
+It is not built yet.
 
 ## Automatic cleanup after confirmed publication
 

@@ -108,7 +108,23 @@ export class PromoteAdmissionCoordinator {
     return coordinator;
   }
 
+  /**
+   * The coordinator the queue of this exact store object and graph already created, or `undefined`. It never creates one: a coordinator made here would be empty
+   * and shared with nobody, so a caller that needs the queue's pending admissions (share retention, OT-RFC-73 AC7) would silently see none.
+   */
+  static existing(store: TripleStore, graph: string): PromoteAdmissionCoordinator | undefined {
+    return coordinators.get(store)?.get(graph);
+  }
+
   invalidate(jobId: string): void { this.owners.delete(jobId); }
+  /**
+   * True while an admission that has handed this job ID to persistence is still unsettled: in flight, or retained because its outcome is
+   * uncertain until a durable read of the job settles it. Retention never deletes such a job (OT-RFC-73 AC7).
+   */
+  hasPendingJob(jobId: string): boolean {
+    for (const flight of this.pending.values()) if (flight.attempt.jobId === jobId) return true;
+    return false;
+  }
   /** One pending-owner lookup, including legacy wildcard lanes and caller exclusions. */
   findPendingConflict(scope: ReturnType<typeof promoteLaneConflictScope>, excludeJobId?: string,
     excludeAttempt?: PromoteAdmissionAttempt): PromoteAdmissionError | undefined {

@@ -499,4 +499,51 @@ describe('DashboardDB context graph join policy', () => {
     expect(JSON.parse(commitAudit?.details as string)).toMatchObject({ policyEpoch: 101 });
     db.close();
   });
+
+  it('releases only an unused reservation, with an audit row, and frees its quota (#3366)', () => {
+    const { db } = createDb();
+    const contextGraphId = 'cg-release';
+    const timestamp = 30_000_000;
+    const reserve = (requestDigest: string) => db.reserveContextGraphAutomaticApproval({
+      contextGraphId,
+      timestamp,
+      contextGraphLimit: 3,
+      nodeLimit: 10,
+      actor: 'did:dkg:agent:owner',
+      agentAddress: '0x0000000000000000000000000000000000000001',
+      requestDigest,
+      policyVersion: 2,
+      policyEpoch: 100,
+    });
+    const release = (requestDigest: string, policyEpoch = 100) => db.releaseContextGraphAutomaticApproval({
+      contextGraphId, requestDigest, policyEpoch, timestamp: timestamp + 1, reason: 'encryption-key-invalid-before-commit',
+    });
+    for (const digest of ['unused', 'committed', 'repairing']) expect(reserve(digest)).toMatchObject({ allowed: true });
+    expect(reserve('fourth')).toMatchObject({ allowed: false, reason: 'context-graph-rate-limit' });
+    db.commitContextGraphAutomaticApproval({
+      contextGraphId, timestamp, actor: 'did:dkg:agent:owner',
+      agentAddress: '0x0000000000000000000000000000000000000001', requestDigest: 'committed', policyEpoch: 100,
+    });
+    db.markContextGraphAutomaticApprovalRepairPending({ contextGraphId, requestDigest: 'repairing', policyEpoch: 100 });
+
+    expect(release('unused', 101)).toBe(false);
+    expect(release('committed')).toBe(false);
+    expect(release('repairing')).toBe(false);
+    expect(release('unused')).toBe(true);
+    expect(release('unused')).toBe(false);
+
+    expect(db.getContextGraphAutomaticApprovalUsage(contextGraphId, timestamp + 2))
+      .toMatchObject({ contextGraphApprovalsLastHour: 2 });
+    expect(reserve('fourth')).toMatchObject({ allowed: true });
+    const released = db.listContextGraphJoinPolicyAudit(contextGraphId).filter((row) => row.outcome === 'released');
+    expect(released).toEqual([expect.objectContaining({
+      event_type: 'join_auto_reservation',
+      request_digest: 'unused',
+      reason: 'encryption-key-invalid-before-commit',
+      actor: 'did:dkg:agent:owner',
+      policy_version: 2,
+    })]);
+    expect(JSON.parse(released[0].details as string)).toEqual({ policyEpoch: 100 });
+    db.close();
+  });
 });

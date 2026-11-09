@@ -9,6 +9,7 @@ import { computeNetworkId } from '../../core/src/genesis.js';
 import {
   loadNetworkConfig,
   loadConfig,
+  assertAuthorityIndexConfigPlacement,
   DkgHomeFiles,
   removePid,
   removeApiPort,
@@ -45,6 +46,18 @@ import {
   resolveStorageAckTiming,
 } from '../src/config.js';
 import { rfc64PublicCatalogPolicy as policy } from './helpers/rfc64-public-catalog.js';
+
+describe('raw authority index placement', () => {
+  it.each([undefined, null, false, 3, 'core', []])('preserves non-mapping core behavior for %j', (core) => {
+    expect(() => assertAuthorityIndexConfigPlacement({ core })).not.toThrow();
+  });
+
+  it('rejects an own misplaced policy before config validation', () => {
+    expect(() => assertAuthorityIndexConfigPlacement({ core: { authorityIndex: {} } }))
+      .toThrow('core.authorityIndex is not supported');
+    expect(() => assertAuthorityIndexConfigPlacement({ core: {} })).not.toThrow();
+  });
+});
 
 describe('resolveContextGraphSubscriptionRehydrationEnabled', () => {
   it('defaults to enabled and preserves explicit config values', () => {

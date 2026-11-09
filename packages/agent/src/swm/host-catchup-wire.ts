@@ -66,6 +66,17 @@ export const MAX_MAX_ENTRIES = 1024;
 export const DEFAULT_MAX_BYTES = 4 * 1024 * 1024;
 export const MAX_MAX_BYTES = 16 * 1024 * 1024;
 
+/**
+ * The `maxEntries` a request will carry on the wire: the default when unset,
+ * otherwise the value clamped to [1, MAX_MAX_ENTRIES], as the encoder clamps
+ * it. The request digest binds `maxEntries`, so a requester must sign this
+ * value, not the one it was asked for: a signature over a larger page does not
+ * verify against the clamped request the host receives.
+ */
+export function normalizeCatchupMaxEntries(maxEntries: number | undefined): number {
+  return maxEntries === undefined ? DEFAULT_MAX_ENTRIES : clamp(maxEntries, 1, MAX_MAX_ENTRIES);
+}
+
 export interface SwmHostCatchupRequest {
   version: number;
   contextGraphId: string;

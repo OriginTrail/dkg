@@ -114,3 +114,88 @@ describe('local argument validation', () => {
     }, referenced).ok).toBe(true);
   });
 });
+
+describe('schema boundaries', () => {
+  it('preserves the language of digit classes and escaped punctuation without mutating the input', () => {
+    const pattern = '^ID-[\\d]{2}\\.[0-9]+$';
+    const input: McpToolDefinition = { name: 'id', inputSchema: { type: 'string', pattern } };
+    const result = normalizeToolForLlama(input);
+    expect(result.tool.inputSchema.pattern).toBe('^ID-[0-9]{2}\\.[0-9]+$');
+    expect(input.inputSchema.pattern).toBe(pattern);
+    for (const sample of ['ID-00.1', 'ID-99.123', 'ID-1.2', 'ID-aa.3', 'ID-12x3', 'ID-12.']) {
+      expect(new RegExp(String(result.tool.inputSchema.pattern)).test(sample))
+        .toBe(new RegExp(pattern).test(sample));
+    }
+  });
+
+  it.each([
+    ['^\\w+$', 'regexp escape \\w'],
+    ['^[abc$', 'unclosed character class'],
+    ['abc$', 'anchored pattern'],
+  ])('rejects an unsafe pattern %s', (pattern, error) => {
+    expect(() => normalizeToolForLlama({ name: 'unsafe', inputSchema: { type: 'string', pattern } }))
+      .toThrow(error);
+  });
+
+  it('rejects remote references and preserves keyword-like property names', () => {
+    expect(() => normalizeToolForLlama({ name: 'remote', inputSchema: { $ref: 'https://example.org/schema' } }))
+      .toThrow('only local JSON Schema refs are safe');
+    const inputSchema = { type: 'object', properties: { if: { type: 'boolean' }, not: { type: 'string' } } };
+    expect(normalizeToolForLlama({ name: 'keywords', inputSchema }).tool.inputSchema).toEqual(inputSchema);
+  });
+
+  it.each([
+    [null, { type: 'null' }, []],
+    [false, { type: 'null' }, ['$: expected null']],
+    [true, { type: 'boolean' }, []],
+    [Infinity, { type: 'number' }, ['$: expected number']],
+    [0.5, { type: 'integer' }, ['$: expected integer']],
+    ['x', { type: ['null', 'string'] }, []],
+    [0, { type: ['null', 'string'] }, ['$: expected null or string']],
+    ['bad', { enum: ['ok', 'yes'] }, ['$: expected one of "ok", "yes"']],
+    ['ok', { enum: ['ok', 'yes'] }, []],
+    [[], { type: 'array', minItems: 1 }, ['$: needs at least 1 item(s)']],
+    [[1, 2], { type: 'array', maxItems: 1 }, ['$: allows at most 1 item(s)']],
+    [[0, 1], { type: 'array', items: { type: 'integer', minimum: 1 } }, ['$[0]: minimum is 1']],
+    [[1], { type: 'array', minItems: 1, maxItems: 1, items: { type: 'integer' } }, []],
+    ['x', { anyOf: [{ type: 'number' }, { type: 'boolean' }] }, ['$: does not match anyOf ($: expected number; $: expected boolean)']],
+    [1, { oneOf: [{ type: 'integer' }, { type: 'number' }] }, ['$: does not match oneOf ()']],
+    [1, { allOf: [{ minimum: 2 }, { const: 3 }] }, ['$: minimum is 2', '$: expected 3']],
+  ])('validates %j against %j', (value, schema, errors) => {
+    expect(validateAgainstSchema(value, schema)).toEqual(errors);
+  });
+
+  it('resolves escaped JSON pointers and validates reference siblings', () => {
+    const schema = {
+      $defs: { 'a/b~c': { type: 'string', minLength: 2 } },
+      $ref: '#/$defs/a~1b~0c', maxLength: 3,
+    };
+    expect(validateAgainstSchema('ab', schema)).toEqual([]);
+    expect(validateAgainstSchema('a', schema)).toEqual(['$: minimum length is 2']);
+    expect(validateAgainstSchema('abcd', schema)).toEqual(['$: maximum length is 3']);
+    expect(validateAgainstSchema('ab', { ...schema, $ref: '#/%24defs/a~1b~0c' })).toEqual([]);
+  });
+
+  it.each(['#/$defs/missing', '#/%zz', 'https://example.org/schema', '#/$defs/items/0', '#/toString'])
+    ('refuses unresolved or non-object references %s', ref => {
+      expect(validateAgainstSchema(1, { $defs: { items: [{ type: 'number' }] }, $ref: ref }))
+        .toEqual([`$: unresolved local JSON Schema ref ${ref}`]);
+    });
+
+  it('rejects reference cycles without recursing forever', () => {
+    const schema = { $defs: { cycle: { $ref: '#/$defs/cycle' } }, $ref: '#/$defs/cycle' };
+    expect(validateAgainstSchema({}, schema))
+      .toEqual(['$: recursive local JSON Schema ref #/$defs/cycle is unsupported']);
+  });
+
+  it.each([null, 1, true, [], 'null', '[]'])('rejects non-object tool arguments %j', raw => {
+    expect(parseAndValidateToolArguments(raw, tool))
+      .toEqual({ ok: false, error: 'tool arguments must be a JSON object' });
+  });
+
+  it('rejects malformed JSON and supplies an empty object for an empty argument string', () => {
+    expect(parseAndValidateToolArguments('{', tool)).toEqual({ ok: false, error: expect.stringContaining('invalid JSON:') });
+    expect(parseAndValidateToolArguments('', { name: 'empty', inputSchema: { type: 'object' } }))
+      .toEqual({ ok: true, args: {} });
+  });
+});

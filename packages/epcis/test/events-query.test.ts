@@ -205,17 +205,12 @@ describe('handleEventsQuery', () => {
   it('throws EpcisQueryError with 400 when date range is invalid', async () => {
     const { engine } = createTrackingQueryEngine();
 
-    try {
-      await handleEventsQuery(
-        new URLSearchParams('epc=urn:test&from=2024-12-31T00:00:00Z&to=2024-01-01T00:00:00Z'),
-        { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
-      );
-      expect.fail('should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(EpcisQueryError);
-      expect((err as EpcisQueryError).statusCode).toBe(400);
-      expect((err as EpcisQueryError).message).toMatch(/date range/i);
-    }
+    const result = handleEventsQuery(
+      new URLSearchParams('epc=urn:test&from=2024-12-31T00:00:00Z&to=2024-01-01T00:00:00Z'),
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
+    );
+    await expect(result).rejects.toBeInstanceOf(EpcisQueryError);
+    await expect(result).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/date range/i) });
   });
 
   it('passes eventType filter through to SPARQL query', async () => {
@@ -259,7 +254,7 @@ describe('handleEventsQuery', () => {
       { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
-    expect(calls[0].sparql).toContain('epcis:readPoint <urn:epc:id:sgln:4012345.00001.0>');
+    expect(calls[0].sparql).toContain('?event ?_epcis_readPoint_value <urn:epc:id:sgln:4012345.00001.0>');
   });
 
   it('passes extension configurationId and shipmentId filters through to SPARQL', async () => {

@@ -31,6 +31,7 @@ function fixture() {
     persistSubscription: async () => { throw new Error('already bound'); },
     bindSubscription: () => { throw new Error('already bound'); },
     recordDrops: () => {},
+      logTiming: () => {},
     reconcile: (asset, ctx) => cleanup.reconcileAfterMaterialization(
       {} as Parameters<typeof cleanup.reconcileAfterMaterialization>[0], asset, ctx),
   };

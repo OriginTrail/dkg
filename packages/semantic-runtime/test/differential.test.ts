@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -8,9 +9,14 @@ import {
   MESSAGE_TYPE,
   decodeAbiSuccess,
   decodeHandle,
+  decodeCompileResult,
+  encodeAdmitRequest,
+  encodeApplyPlanRequest,
+  encodeCompileRequest,
   encodeCreateRequest,
   encodeEmptyRequest,
   encodeEventRequest,
+  encodeStartPlanRequest,
 } from '../src/codec.js';
 import { WorkerSupervisor } from '../src/worker-supervisor.js';
 
@@ -30,6 +36,48 @@ interface NativeV1Vector {
 }
 
 describe('native and Wasm differential conformance', () => {
+  it('preserves pre-refactor native plan, execution and error bytes in Wasm', async () => {
+    const golden = new Map(readFileSync(path.join(REPO_ROOT,
+      'rust/crates/dkg-runtime-wasm/tests/fixtures/plan-v1.txt'), 'utf8').trim().split('\n')
+      .map(line => line.split('=') as [string, string]));
+    const source = `(strategy transport/compat
+      (version "1.0.0") (scope network:devnet) (goal preserve-wire)
+      (supervise one-for-one (max-restarts 2) (window-ms 60000)
+        (parallel (max 2)
+          (delegate observer (emit started))
+          (delegate reader (grant dkg.query) (call dkg/query@1 "urn:query:compat")))))`;
+    const supervisor = new WorkerSupervisor({ workerUrl });
+    await supervisor.start();
+    const check = async (name: string, op: Parameters<WorkerSupervisor['call']>[0],
+      body: Uint8Array, handle?: number) => {
+      const response = await supervisor.call(op, body, handle === undefined ? {} : { handle });
+      expect(hex(response.body), name).toBe(golden.get(name));
+      return response.body;
+    };
+    try {
+      const result = decodeCompileResult(decodeAbiSuccess(
+        await check('compile', 'compile', encodeCompileRequest(7n, source)), 7n, MESSAGE_TYPE.compile));
+      if (!result.ok) throw new Error('compatibility fixture must compile');
+      const plan = result.plan.canonicalPlan;
+      await check('admit', 'admit', encodeAdmitRequest(8n, plan));
+      await check('start', 'start_plan', encodeStartPlanRequest(9n, plan, 123n));
+      await check('inspect-start', 'inspect_plan', encodeEmptyRequest(10n, MESSAGE_TYPE.inspectPlan), 1);
+      await check('effect', 'apply_plan', encodeApplyPlanRequest(11n), 1);
+      await check('effect-required', 'apply_plan', encodeApplyPlanRequest(12n), 1);
+      await check('effect-mismatch', 'apply_plan', encodeApplyPlanRequest(13n,
+        { effectId: 99n, ok: true, value: 'wrong' }), 1);
+      await check('completed', 'apply_plan', encodeApplyPlanRequest(14n,
+        { effectId: 1n, ok: true, value: 'private-result' }), 1);
+      await check('inspect-completed', 'inspect_plan', encodeEmptyRequest(15n, MESSAGE_TYPE.inspectPlan), 1);
+      await check('drop', 'drop_plan', encodeEmptyRequest(16n, MESSAGE_TYPE.dropPlan), 1);
+      await check('stale', 'inspect_plan', encodeEmptyRequest(17n, MESSAGE_TYPE.inspectPlan), 1);
+      await check('malformed-source', 'compile', encodeCompileRequest(18n, '('));
+      await check('malformed-plan', 'admit', encodeAdmitRequest(19n, new Uint8Array([0xff])));
+    } finally {
+      await supervisor.stop();
+    }
+  });
+
   it('emits byte-identical requests, step output, and snapshot', async () => {
     const vector = JSON.parse(
       execFileSync(

@@ -308,3 +308,25 @@ describe('canonical durable manifest digest', () => {
       .toBe(2);
   });
 });
+
+it('ignores only receiver-local publishedAt while binding permission and confirmation facts', () => {
+  const original = asset(1);
+  const plan = (meta: Quad[]) => createGraphScopedDurableManifestPlan(meta, CONTEXT_GRAPH_ID)!;
+  const before = plan(original.meta);
+  const timestampOnly = original.meta.map(q => q.predicate === 'http://dkg.io/ontology/publishedAt'
+    ? { ...q, object: '"2030-01-01T00:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' } : q);
+  const after = plan(timestampOnly);
+  expect(after.manifestDigest).toBe(before.manifestDigest);
+  expect(graphScopedDurableManifestPrefixAtOffset(after, after.manifestRowCount)?.prefixDigest)
+    .toBe(graphScopedDurableManifestPrefixAtOffset(before, before.manifestRowCount)?.prefixDigest);
+  for (const [name, object] of [['accessPolicy', '"ownerOnly"'], ['publisherPeerId', '"other-publisher"'],
+    ['allowedPeer', '"other-peer"'], ['transactionHash', '"0x' + 'aa'.repeat(32) + '"'],
+    ['materializedVersion', '"2:0"']] as const) {
+    const predicate = `http://dkg.io/ontology/${name}`;
+    const changed = plan([...timestampOnly.filter(q => q.predicate !== predicate),
+      { ...timestampOnly[0]!, predicate, object }]);
+    expect(changed.manifestDigest, name).not.toBe(before.manifestDigest);
+    expect(graphScopedDurableManifestPrefixAtOffset(changed, changed.manifestRowCount)?.prefixDigest, name)
+      .not.toBe(graphScopedDurableManifestPrefixAtOffset(before, before.manifestRowCount)?.prefixDigest);
+  }
+});

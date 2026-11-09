@@ -1,5 +1,6 @@
+import { createQueryStoreReadContext, QueryMaterializationBudget } from '../src/query-store-read-context.js';
 import type { ScopedContentGraphDiscoverySnapshot } from '../src/scoped-content-graph-discovery-memo.js';
-import { describe, it, expect, beforeEach, expectTypeOf } from 'vitest';
+import { describe, it, expect, beforeEach, expectTypeOf, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +12,7 @@ import {
   asGraphWriteRevisionSource,
   type Quad,
   type QueryOptions as StoreQueryOptions,
+  type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -168,6 +170,7 @@ describe('DKGQueryEngine', () => {
         signal: controller.signal,
         priority: 'background',
         source: 'api.query',
+        maxResponseBytes: 10 * 1024 * 1024,
       },
     );
 
@@ -176,15 +179,79 @@ describe('DKGQueryEngine', () => {
       signal: controller.signal,
       priority: 'background',
       source: 'api.query',
+      maxResponseBytes: 10 * 1024 * 1024,
     }));
     expect(recordingStore.discoveryOptions).not.toHaveLength(0);
     for (const options of recordingStore.discoveryOptions) {
       expect(options).toMatchObject({
         priority: 'background',
         source: 'api.query',
+        maxResponseBytes: 8 * 1024 * 1024,
       });
       expect(options.signal).toBeUndefined();
     }
+  });
+
+  it('charges a shared graph catalog to each logical request budget', async () => {
+    const catalogStore = new OxigraphStore();
+    try {
+      const catalog = Array.from(
+        { length: 16 },
+        (_, index) => `${GRAPH}/_verifiable_memory/${index}-${'x'.repeat(80)}`,
+      );
+      catalogStore.listGraphsByPrefix = async () => catalog;
+      const catalogEngine = new DKGQueryEngine(catalogStore);
+
+      await expect(catalogEngine.query(
+        'SELECT ?s WHERE { ?s <urn:missing> ?o }',
+        {
+          contextGraphId: CONTEXT_GRAPH,
+          view: 'verifiable-memory',
+          maxMaterializedBytes: 128,
+        },
+      )).rejects.toMatchObject({
+        code: 'QUERY_MATERIALIZATION_TOO_LARGE',
+        maxBytes: 128,
+        actualBytes: expect.any(Number),
+      });
+    } finally {
+      await catalogStore.close();
+    }
+  });
+
+  it('charges structural JSON bytes for empty bindings', async () => {
+    let seenOptions: StoreQueryOptions | undefined;
+    const structuralStore = {
+      async query(_sparql: string, options?: StoreQueryOptions) {
+        seenOptions = options;
+        return {
+          type: 'bindings' as const,
+          bindings: Array.from({ length: 128 }, () => ({})),
+        };
+      },
+    } as unknown as TripleStore;
+    const structuralEngine = new DKGQueryEngine(structuralStore);
+
+    await expect(structuralEngine.query(
+      'SELECT ?unbound WHERE { ?s ?p ?o }',
+      { maxResponseBytes: 1_000, maxMaterializedBytes: 100 },
+    )).rejects.toMatchObject({
+      code: 'QUERY_MATERIALIZATION_TOO_LARGE',
+      maxBytes: 100,
+      actualBytes: expect.any(Number),
+    });
+    expect(seenOptions?.maxResponseBytes).toBe(1_000);
+  });
+
+  it('keeps the cumulative budget when an unscoped query withholds graphs', async () => {
+    const result = { type: 'bindings' as const, bindings: [{ value: 'x'.repeat(200) }] };
+    const query = vi.fn(async (_sparql: string, _options?: StoreQueryOptions) => result);
+    const engine = new DKGQueryEngine({ query } as unknown as TripleStore);
+    await expect(engine.query('SELECT ?value WHERE { ?s ?p ?value }', {
+      withheldGraphRoots: ['urn:hidden'], maxMaterializedBytes: 100,
+    })).rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: 100,
+      actualBytes: Buffer.byteLength(JSON.stringify(result)) });
+    expect(query.mock.calls[0]?.[1]).toMatchObject({ withheldGraphRoots: ['urn:hidden'] });
   });
 
   it('keeps caller cancellation out of shared graph-discovery flights', async () => {
@@ -254,6 +321,80 @@ describe('DKGQueryEngine', () => {
     });
     expect(sharedStore.sharedOptions[0]?.signal).toBeUndefined();
     expect(secondController.signal.aborted).toBe(false);
+  });
+
+  it('coalesces bounded discovery while accounting independently per request', async () => {
+    let releaseDiscovery!: () => void;
+    const discoveryGate = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
+    let discoveryStarted!: () => void;
+    const started = new Promise<void>((resolve) => { discoveryStarted = resolve; });
+
+    class BoundedFlightStore extends OxigraphStore {
+      sharedOptions: StoreQueryOptions[] = [];
+
+      async query(sparql: string, options?: StoreQueryOptions) {
+        if (sparql.includes('ontology/SubGraph')) {
+          this.sharedOptions.push(options ?? {});
+          discoveryStarted();
+          await discoveryGate;
+          return {
+            type: 'bindings' as const,
+            bindings: Array.from({ length: 64 }, () => ({})),
+          };
+        }
+        return super.query(sparql, options);
+      }
+    }
+
+    const boundedStore = new BoundedFlightStore();
+    const boundedEngine = new DKGQueryEngine(boundedStore);
+    await boundedStore.insert([q('urn:bounded:s', 'http://schema.org/name', '"Bounded"', GRAPH)]);
+    const commonOptions = {
+      contextGraphId: CONTEXT_GRAPH,
+      includeContextGraphPartitions: true,
+      priority: 'background' as const,
+      source: 'api.query',
+      maxResponseBytes: 10 * 1024 * 1024,
+    };
+    const sparql =
+      'SELECT ?sourceGraph ?name WHERE { GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name } }';
+
+    const first = boundedEngine.query(sparql, {
+      ...commonOptions,
+      maxMaterializedBytes: 100,
+    });
+    await started;
+    const second = boundedEngine.query(sparql, {
+      ...commonOptions,
+      maxMaterializedBytes: 10 * 1024 * 1024,
+    });
+    releaseDiscovery();
+    await expect(first).rejects.toMatchObject({
+      code: 'QUERY_MATERIALIZATION_TOO_LARGE',
+      maxBytes: 100,
+    });
+    await expect(second).resolves.toMatchObject({ bindings: expect.any(Array) });
+    expect(boundedStore.sharedOptions).toHaveLength(1);
+    for (const seen of boundedStore.sharedOptions) {
+      expect(seen).toMatchObject({ maxResponseBytes: 8 * 1024 * 1024 });
+      expect(seen.signal).toBeUndefined();
+    }
+
+    const charges: number[] = [];
+    class RecordingBudget extends QueryMaterializationBudget {
+      override consumeBytes(bytes: number): void { charges.push(bytes); super.consumeBytes(bytes); }
+    }
+    await boundedEngine.query(sparql, {
+      ...commonOptions, materializationBudget: new RecordingBudget(10 * 1024 * 1024),
+    });
+    const cachedBytes = Buffer.byteLength(JSON.stringify({ type: 'bindings', bindings: Array.from({ length: 64 }, () => ({})) }));
+    expect(charges).toContain(cachedBytes);
+    const totalBytes = charges.reduce((sum, bytes) => sum + bytes, 0);
+    const ceiling = totalBytes - 1;
+    expect(totalBytes - cachedBytes).toBeLessThan(ceiling); // Fresh reads alone fit.
+    await expect(boundedEngine.query(sparql, { ...commonOptions, maxMaterializedBytes: ceiling }))
+      .rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: ceiling });
+    expect(boundedStore.sharedOptions).toHaveLength(1);
   });
 
   it('keeps caller cancellation out of GraphSetIndexStore refresh flights', async () => {
@@ -912,6 +1053,47 @@ describe('DKGQueryEngine', () => {
       );
       const subjects = result.bindings.map((b) => b['s']).sort();
       expect(subjects).toEqual([E1, E2]);
+    });
+
+    it.each(['SELECT ?s ?v', 'CONSTRUCT { ?s <urn:out> ?v }'])(
+      'charges the second content read after discovery and the first fit: %s', async form => {
+      const query = `${form} WHERE {
+        { ?s <http://ex.org/p1> ?v } UNION { ?s <http://ex.org/p2> ?v }
+      }`;
+      const originalQuery = store.query.bind(store);
+      const originalList = async (prefix: string, options?: StoreQueryOptions) => (await store.listGraphs(options)).filter(graph => graph.startsWith(prefix));
+      const content: number[] = [];
+      let discoveryBytes = 0;
+      const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
+      store.query = async (...args) => {
+        const result = await originalQuery(...args);
+        if (args[0].includes('http://ex.org/p1')) content.push(size(result));
+        else discoveryBytes += size(result);
+        return result;
+      };
+      store.listGraphsByPrefix = async (...args) => {
+        const result = await originalList(...args);
+        discoveryBytes += size(result);
+        return result;
+      };
+      await new DKGQueryEngine(store).query(query, {
+        contextGraphId: CONTEXT_GRAPH, view: 'verifiable-memory',
+      });
+      expect(content).toHaveLength(2);
+      const ceiling = discoveryBytes + Math.max(...content);
+      const total = discoveryBytes + content.reduce((sum, bytes) => sum + bytes, 0);
+      expect(ceiling).toBeLessThan(total);
+      content.length = 0; discoveryBytes = 0;
+      await expect(new DKGQueryEngine(store).query(query, {
+        contextGraphId: CONTEXT_GRAPH, view: 'verifiable-memory', maxMaterializedBytes: ceiling,
+      })).rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: ceiling, actualBytes: total });
+      // Neither discovery nor the first content read can be the rejection.
+      expect(content).toHaveLength(2);
+      expect(discoveryBytes + content[0]).toBeLessThanOrEqual(ceiling);
+      expect(discoveryBytes + content[1]).toBeLessThanOrEqual(ceiling);
+      await expect(new DKGQueryEngine(store).query(query, {
+        contextGraphId: CONTEXT_GRAPH, view: 'verifiable-memory', maxMaterializedBytes: total,
+      })).resolves.toBeDefined();
     });
 
     it('SELECT with a solution-set modifier (ORDER BY) is rejected, not silently corrupted', async () => {
@@ -2355,10 +2537,7 @@ describe('DKGQueryEngine', () => {
       discoveryCalls += 1;
       return discoveryCalls === 1 ? firstDiscovery.promise : secondDiscovery.promise;
     };
-    const reads = {
-      signal: undefined,
-      shared: { cacheKey: '["normal",null]' },
-    };
+    const reads = createQueryStoreReadContext(store, undefined);
 
     const beforeWrite = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, reads);
     expect(discoveryCalls).toBe(1);
@@ -2393,14 +2572,8 @@ describe('DKGQueryEngine', () => {
       return discoveryCalls === 1 ? laneA.promise : laneB.promise;
     };
 
-    const first = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, {
-      signal: undefined,
-      shared: { cacheKey: '["normal","dashboard.wm"]' },
-    });
-    const second = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, {
-      signal: undefined,
-      shared: { cacheKey: '["normal","dashboard.vm"]' },
-    });
+    const first = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, createQueryStoreReadContext(store, { source: 'dashboard.wm' }));
+    const second = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, createQueryStoreReadContext(store, { source: 'dashboard.vm' }));
     expect(discoveryCalls).toBe(2);
     laneA.resolve({ inventory: ['urn:graph:a'], partitions: [] });
     laneB.resolve({ inventory: ['urn:graph:b'], partitions: [] });

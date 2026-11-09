@@ -1040,9 +1040,9 @@ describe('DkgDaemonClient', () => {
     await expect(client.query('bad query')).rejects.toThrow('DKG daemon /api/query responded 500');
   });
 
-  it('getAuthToken returns the loaded token or undefined', () => {
-    const token = client.getAuthToken();
-    expect(token === undefined || typeof token === 'string').toBe(true);
+  it.each(['explicit-token', ''])('getAuthToken preserves the explicit token %j', apiToken => {
+    const isolatedClient = new DkgDaemonClient({ apiToken });
+    expect(isolatedClient.getAuthToken()).toBe(apiToken);
   });
 
   // -- OT-RFC-43 Section 10.5 -- GitHub-shaped Knowledge Asset client --------------

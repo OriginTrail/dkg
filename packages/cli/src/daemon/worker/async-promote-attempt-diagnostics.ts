@@ -2,7 +2,7 @@ import type {
   ContextGraphAuthorityFailureSite,
   RegisteredContextGraphAuthorityUnavailableReason,
 } from '@origintrail-official/dkg-agent';
-import type { PromoteJob } from '@origintrail-official/dkg-publisher';
+import { jobFailureText, type PromoteJob } from '@origintrail-official/dkg-publisher';
 import { isStoreOperationTimeoutError, isStoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { diagnosticPromoteStage } from '../promote-stage-diagnostics.js';
 import {
@@ -129,6 +129,19 @@ export function promoteAttemptAuthorityReason(
   } catch {
     return {};
   }
+}
+
+/**
+ * The short reason the queue keeps for a failed attempt (`jobFailureText`). When the reason had to
+ * be cut, the full text, reduced the same way, goes to the local log first: no job view shows it.
+ */
+export function promoteFailureReason(job: PromoteJob, message: string, log: PromoteWorkerSyncLogger): string {
+  const { reason, detail } = jobFailureText(message);
+  if (reason !== detail) {
+    log(`[async-promote-worker] ${JSON.stringify({ event: 'async_promote_failure_detail', schemaVersion: 1,
+      jobId: job.jobId, attempt: job.attempt.count, detail })}`);
+  }
+  return reason;
 }
 
 /**

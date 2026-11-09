@@ -9,7 +9,7 @@ import {
   sparqlString,
 } from "@origintrail-official/dkg-core";
 import { isWithheldGraphQueryError, type QueryEngine, type QueryOptions, type QueryResult } from "@origintrail-official/dkg-query";
-import type { TripleStore } from "@origintrail-official/dkg-storage";
+import type { Quad, TripleStore } from "@origintrail-official/dkg-storage";
 import type {
   VerifiedGraphScopedAsset,
   AuthenticatedGraphScopedAsset,
@@ -29,14 +29,18 @@ export async function markCoreTrustedGraph(
   store: TripleStore,
   contextGraphId: string,
 ): Promise<void> {
-  await store.insert([
+  await store.insert(coreTrustedGraphQuads(contextGraphId));
+}
+/** The same durable query restriction for live materialization and an empty checkpoint. */
+export function coreTrustedGraphQuads(contextGraphId: string): Quad[] {
+  return [
     {
       subject: contextGraphDataUri(contextGraphId),
       predicate: `${DKG}chainEvidenceMode`,
       object: '"core-cache"',
       graph: SNAPSHOT_TRUST_GRAPH,
     },
-  ]);
+  ];
 }
 /** True when the caller accepted core-cache evidence, which needs an explicit context graph. */
 function acceptsCoreCache(contextGraphId: string | undefined, accepted: PublicSnapshotMode | undefined): boolean {
@@ -207,6 +211,22 @@ export class PublicSnapshotEvidence implements DurableRecoveryAuthority {
   }
 }
 
+/** Share scoped evidence and cancellation checks across SPARQL and typed reads. */
+export async function withScopedPublicSnapshotTrust<T>(
+  store: TripleStore,
+  contextGraphId: string,
+  mode: PublicSnapshotMode | undefined,
+  read: () => Promise<T>,
+  readOptions?: import("@origintrail-official/dkg-storage").QueryOptions,
+): Promise<T> {
+  readOptions?.signal?.throwIfAborted();
+  await assertPublicSnapshotQueryTrust(store, contextGraphId, mode, readOptions);
+  const result = await read();
+  await assertPublicSnapshotQueryTrust(store, contextGraphId, mode, readOptions);
+  readOptions?.signal?.throwIfAborted();
+  return result;
+}
+
 /**
  * Run one local query under the chain evidence policy, after the normal
  * read-authority gate. Evidence is rechecked before the result is released,
@@ -228,10 +248,8 @@ export async function queryWithPublicSnapshotTrust(
 ): Promise<QueryResult> {
   const { contextGraphId } = options;
   if (contextGraphId) {
-    await assertPublicSnapshotQueryTrust(store, contextGraphId, mode, readOptions);
-    const result = await engine.query(sparql, options);
-    await assertPublicSnapshotQueryTrust(store, contextGraphId, mode, readOptions);
-    return result;
+    return withScopedPublicSnapshotTrust(store, contextGraphId, mode,
+      () => engine.query(sparql, options), readOptions);
   }
   acceptsCoreCache(contextGraphId, mode);
   const withheldGraphRoots = await readCoreCacheWithheldGraphRoots(store, readOptions);

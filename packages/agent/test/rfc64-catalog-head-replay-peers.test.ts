@@ -117,6 +117,32 @@ describe('answering a request to replay a graph\'s catalog heads', () => {
     expect(answer(busy, { acceptedPolicyDigest: `0x${'cd'.repeat(32)}` }).followers.followers(GRAPH)).toEqual([]);
     expect(answer(busy, { acceptedPolicyDigest: undefined }).followers.followers(GRAPH)).toEqual([]);
   });
+
+  it('passes on a peer the request made a follower: not one it already counted, nor one it did not record', () => {
+    let clock = 0;
+    const followers = new SharedMemoryFollowers({ now: () => clock, ttlMs: 1_000 });
+    const newFollowers: Array<[string, string]> = [];
+    const ask = (acceptedPolicyDigest: string | undefined) => answerRfc64CatalogHeadReplayRequestV1({
+      request,
+      remotePeerId: PEER,
+      followers,
+      acceptedPolicyDigest,
+      queue: () => Object.freeze({ status: 'busy' as const }),
+      onNewFollower: (contextGraphId, peerId) => { newFollowers.push([contextGraphId, peerId]); },
+      log: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    ask(`0x${'cd'.repeat(32)}`);
+    expect(newFollowers).toEqual([]);
+    ask(POLICY);
+    clock = 500;
+    ask(POLICY);
+    expect(newFollowers).toEqual([[GRAPH, PEER]]);
+    // A follower this node no longer counts, its last request past the follower TTL, is a new one again.
+    clock = 1_501;
+    ask(POLICY);
+    expect(newFollowers).toEqual([[GRAPH, PEER], [GRAPH, PEER]]);
+  });
 });
 
 describe('a peer that gave no answer to this node\'s replay request', () => {
@@ -145,7 +171,7 @@ describe('a peer that gave no answer to this node\'s replay request', () => {
  * a real replay request, and the responder's own policy check admits it.
  */
 describe('an agent answering a peer\'s replay request it cannot serve now', () => {
-  const { startAgent, cleanup } = createRfc64RolloutAgentHarness();
+  const { startAgent, stopAgent, cleanup } = createRfc64RolloutAgentHarness();
 
   afterEach(async () => {
     await cleanup();
@@ -184,4 +210,58 @@ describe('an agent answering a peer\'s replay request it cannot serve now', () =
     }));
     expect(sharedMemoryFollowersOf(responder).followers(CONTEXT_GRAPH_ID)).toContain(requester.peerId);
   });
+
+  it('tells its change notifier of a peer the request made a follower, once', async () => {
+    const responder = await startAgent({ name: 'replay-new-follower-responder', activation: activation('catalog') });
+    const requester = await startAgent({ name: 'replay-new-follower-requester', activation: activation('catalog') });
+    acceptEveryPeer(responder);
+    acceptEveryPeer(requester);
+    vi.spyOn(responder, 'tryQueueRfc64CatalogHeadReplayV1').mockReturnValue(Object.freeze({ status: 'busy' }) as never);
+    const newFollower = vi.spyOn((responder as any).swmChangeNotifierV1(), 'afterNewFollower');
+    await requester.node.libp2p.dial(multiaddr(tcpMultiaddr(responder)));
+    const askForReplay = () => expect((requester as any).rfc64PublicCatalogServiceV1.requestCatalogHeadReplay({
+      remotePeerId: responder.peerId,
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+    })).rejects.toThrow('catalog-transport-overloaded');
+
+    await askForReplay();
+    await askForReplay();
+
+    expect(newFollower.mock.calls).toEqual([[CONTEXT_GRAPH_ID, requester.peerId]]);
+  });
+
+  it('GH-3502: a change before the first replay after an empty owner restart triggers the real notice receiver', async () => {
+    const previous = await startAgent({ name: 'restart-old-owner', activation: activation('catalog') });
+    const requester = await startAgent({ name: 'restart-late-member', activation: activation('catalog') });
+    sharedMemoryFollowersOf(previous).note(CONTEXT_GRAPH_ID, requester.peerId);
+    await stopAgent(previous);
+    const responder = await startAgent({ name: 'restart-empty-owner', activation: activation('catalog') });
+    acceptEveryPeer(responder);
+    acceptEveryPeer(requester);
+    // Control ownership/policy and the expensive data pull. Replay admission,
+    // notifier, real loopback notice transport and receiver dispatch are real.
+    vi.spyOn(responder, 'isCuratorOf').mockResolvedValue(true);
+    vi.spyOn(responder, 'isPrivateContextGraph').mockResolvedValue(false);
+    vi.spyOn(requester, 'isPrivateContextGraph').mockResolvedValue(false);
+    vi.spyOn(requester, 'resolveCuratorPeerIdsForCg').mockResolvedValue({
+      peerIds: [responder.peerId], curatorIsLocal: false, legacyTripleResolved: true,
+    } as never);
+    vi.spyOn(responder, 'tryQueueRfc64CatalogHeadReplayV1').mockReturnValue(Object.freeze({ status: 'busy' }) as never);
+    const pull = vi.spyOn(requester, 'syncSharedMemoryFromPeerDetailed').mockResolvedValue({ deferredBackpressure: 0 } as never);
+    expect(sharedMemoryFollowersOf(responder).followers(CONTEXT_GRAPH_ID)).toEqual([]);
+    // The applied member write precedes ANY requester connection or replay.
+    responder.noticeSwmFollowersAfterApplyV1({ cgId: CONTEXT_GRAPH_ID, subGraphName: 'notes', shareOperationId: 'restart-write' }, 'third-member');
+    await responder.swmChangeNotifierV1().settled();
+    expect(pull).not.toHaveBeenCalled();
+    await requester.node.libp2p.dial(multiaddr(tcpMultiaddr(responder)));
+    await expect((requester as any).rfc64PublicCatalogServiceV1.requestCatalogHeadReplay({
+      remotePeerId: responder.peerId, networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID,
+    })).rejects.toThrow('catalog-transport-overloaded');
+    await responder.swmChangeNotifierV1().settled();
+    await requester.swmChangeNoticeReceiverV1().settled();
+    expect(pull, 'GH-3502: late replay must trigger a fresh owner pull without another write or resubscribe')
+      .toHaveBeenCalledWith(responder.peerId, [CONTEXT_GRAPH_ID], { source: 'reconcile', freshSnapshot: true });
+  }, 30_000);
+
 });

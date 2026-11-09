@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: Apache-2.0
+import { readPublicSnapshotWithAdmission } from './public-snapshot-admission-read.js';
+import { buildNativeSnapshotCheckpoint } from './snapshot-native-build.js';
+import { resolveWithinAbort } from '@origintrail-official/dkg-core';
+import { PublicSnapshotSessionMethods } from './public-snapshot-session.js';
+import type { DKGAgent } from './dkg-agent.js';
+import type { PublicCheckpointPreparationOptions } from './public-snapshot-options.js';
+import type { PublicCheckpointPreparationResult } from './snapshot-checkpoint-contract.js';
+import { preparePublicSnapshotCheckpoint, assertCheckpointInventoryUnchanged } from './public-snapshot-checkpoint.js';
+
+export class PublicCheckpointMethods extends PublicSnapshotSessionMethods {
+  /** Drain startup discovery before taking a foreground graph-ownership snapshot. */
+  async waitForPublicCheckpointStartup(this: DKGAgent, contextGraphId: string, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    await resolveWithinAbort(async () => { await this.chainPoller?.waitForCurrentPoll(); }, signal);
+    signal.throwIfAborted();
+    const activation = this.waitForContextGraphSubscriptionActivation(contextGraphId, signal);
+    if (activation) (await activation).assertCurrent();
+    signal.throwIfAborted();
+  }
+  async preparePublicGraphCheckpoint(this: DKGAgent, options: PublicCheckpointPreparationOptions, nativeBuild = false): Promise<PublicCheckpointPreparationResult> {
+    const runtime = nativeBuild ? { java: process.env.DKG_PUBLIC_CHECKPOINT_JAVA ?? '',
+      jar: process.env.DKG_PUBLIC_CHECKPOINT_JAR ?? '', jarSha256: process.env.DKG_PUBLIC_CHECKPOINT_JAR_SHA256 ?? '' } : undefined;
+    if (runtime && (!runtime.java || !runtime.jar || !/^[a-f0-9]{64}$/.test(runtime.jarSha256)))
+      throw new Error('Native checkpoint runtime is not configured');
+    if (!this.config.dataDir) throw new Error('Checkpoint requires a persistent data directory');
+    const { prepared, native } = await this.preparePublicCheckpointHandoff(options, runtime);
+    return { directory: prepared.directory, assets: prepared.manifest.assets.length,
+      inventoryDigest: prepared.manifest.observation.snapshot.inventoryDigest, mode: prepared.manifest.observation.mode,
+      committed: 0, current: false, activeStoreChanged: false, state: 'verified-unpublished', ...(native ? { native } : {}) };
+  }
+
+  /** Local composition only: carries verified in-memory handoff, never caller-supplied manifests. */
+  async preparePublicCheckpointHandoff(this: DKGAgent, options: PublicCheckpointPreparationOptions,
+    runtime?: { java: string; jar: string; jarSha256: string }) {
+    if (!this.config.dataDir) throw new Error('Checkpoint requires a persistent data directory');
+    return this.withPublicSnapshotSession(options, async session => {
+      const { initial, sourcePlan: plan, signal, deadline, assertInitialInventoryCurrent: assertCurrent,
+        readBeforeAdmission: read } = session;
+      const readFresh = () => readPublicSnapshotWithAdmission({ read: () => read(true), signal, deadline, assertCurrent });
+      // No subscription admission, metadata writes, reconciliation, or active-store mutation.
+      const prepared = await preparePublicSnapshotCheckpoint({ router: this.router,
+        ensurePeerConnected: (peer, opts) => this.ensurePeerConnected(peer, opts) }, {
+        initial, readFresh, peerBatches: plan.contentPeerBatches,
+        dataDir: this.config.dataDir!, signal, deadline, assertCurrent,
+      });
+      const native = runtime ? await buildNativeSnapshotCheckpoint(prepared, { ...runtime, signal,
+        assertInventoryCurrent: async () => { const fresh = await readFresh(); assertCurrent(); assertCheckpointInventoryUnchanged(initial, fresh); },
+      }) : undefined;
+      return { prepared, native };
+    }, { ownershipError: 'Checkpoint ownership changed' });
+  }
+}

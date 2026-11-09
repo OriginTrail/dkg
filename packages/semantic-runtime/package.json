@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-semantic-runtime",
-  "version": "10.0.25",
+  "version": "10.0.27",
   "description": "Locally built, integrity-verified Rust/Wasm semantic runtime host for DKG V10",
   "type": "module",
   "main": "dist/index.js",

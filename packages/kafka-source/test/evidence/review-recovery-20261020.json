@@ -1,0 +1,67 @@
+{
+  "verifiedAt": "2026-10-20T18:03:50.843Z",
+  "baseCanaryCommit": "693be6317ba8d6db6aefc6b6ff3c77f52ef535cd",
+  "sourceFilesSha256": "9d32b4ddc2db0034a302802436d0fda20fb6654313274864005b03c5e24879b6",
+  "environment": {
+    "node": "24.11.1",
+    "dkg": "10.0.25",
+    "broker": "Redpanda v24.3.18 on localhost",
+    "storage": "native Oxigraph",
+    "chain": "mock"
+  },
+  "focusedSuite": {
+    "tests": 40,
+    "passed": 40,
+    "lineCoverage": 96.93
+  },
+  "replay": {
+    "messages": 5,
+    "partitions": 2,
+    "distinctSealedKAs": 5,
+    "reusedWithoutAdditionalCreates": 5
+  },
+  "newTailRecovery": [
+    {
+      "failure": "write",
+      "firstPollEmpty": true,
+      "brokerOffsetAbsentDuringFailure": true,
+      "restartRecoveredOffsets": [
+        "1",
+        "2"
+      ],
+      "distinctKAs": 2,
+      "createRequests": 2,
+      "reusedAfterFailure": 0
+    },
+    {
+      "failure": "commit",
+      "firstPollEmpty": true,
+      "brokerOffsetAbsentDuringFailure": true,
+      "restartRecoveredOffsets": [
+        "1",
+        "2"
+      ],
+      "distinctKAs": 2,
+      "createRequests": 2,
+      "reusedAfterFailure": 1
+    }
+  ],
+  "partitionFairness": {
+    "boundedPolls": 2,
+    "partitionZeroStillBacklogged": true,
+    "committedNextOffsets": [
+      {
+        "partition": 0,
+        "offset": "1"
+      },
+      {
+        "partition": 1,
+        "offset": "1"
+      }
+    ]
+  },
+  "nativeRdfControlCharacters": true,
+  "faultInjection": "First write, lost response and offset commit failures are injected at handler/HTTP/commit boundaries. The broker and private DKG lifecycle/readback are real.",
+  "http429AndRetryAfter": "Covered by native-worker tests using an explicitly labelled HTTP contract double.",
+  "scope": "Isolated localhost test only. No IDENER authentication, JPB deployment, public-chain publication or SASL/TLS end-to-end claim."
+}

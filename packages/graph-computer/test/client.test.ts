@@ -308,13 +308,14 @@ describe('Program client', () => {
 
   it('recovers a dropped HTTP response without repeating the side effect', async () => {
     const executions = new Map<string, ReturnType<typeof receipt>>();
-    const nonces = new Set<string>(); let requests = 0; let effects = 0;
+    const nonces = new Set<string>(); const nonceWasFresh: boolean[] = []; const handlerErrors: unknown[] = [];
+    let requests = 0; let effects = 0;
     const server = createServer(async (req, res) => {
       try {
         const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
         const body = Buffer.concat(chunks).toString();
         verifyHttp(new URL(req.url!, 'http://fixture'), { method: req.method, headers: req.headers as Record<string, string>, body, redirect: 'error', credentials: 'omit' });
-        expect(nonces.has(req.headers['x-dkg-agent-nonce'] as string)).toBe(false);
+        nonceWasFresh.push(!nonces.has(req.headers['x-dkg-agent-nonce'] as string));
         nonces.add(req.headers['x-dkg-agent-nonce'] as string);
         requests++;
         const input = JSON.parse(body);
@@ -322,7 +323,7 @@ describe('Program client', () => {
         if (requests === 1) { req.socket.destroy(); return; }
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify(executions.get(input.invocationId)));
-      } catch (error) { res.writeHead(500); res.end(JSON.stringify({ error: String(error) })); }
+      } catch (error) { handlerErrors.push(error); res.writeHead(500); res.end(JSON.stringify({ error: String(error) })); }
     });
     servers.push(server);
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -331,6 +332,8 @@ describe('Program client', () => {
     const result = await c.programs.invoke(operation);
     expect(result.persisted).toBe(true);
     expect(requests).toBe(2); expect(effects).toBe(1); expect(nonces.size).toBe(2);
+    expect(nonceWasFresh).toEqual([true, true]);
+    expect(handlerErrors).toEqual([]);
   });
 });
 

@@ -229,6 +229,9 @@ import {
   isContextGraphReadAuthorityUnavailable,
   respondIfContextGraphReadAuthorityUnavailable,
 } from '../http-utils.js';
+
+/** Keep an arbitrary public query from materializing an unbounded remote result. */
+export const API_QUERY_MAX_STORE_RESPONSE_BYTES = 10 * 1024 * 1024;
 import {
   normalizeRepo,
   isValidRepoSpec,
@@ -685,6 +688,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
           signal: queryLifecycle.signal,
           priority: queryLifecycle.priority,
           source: queryLifecycle.source,
+          maxResponseBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES,
           // the daemon admin
           // token is the authorisation anchor for cross-agent WM reads
           // (adapter-openclaw and the CLI rely on this). Pass it through

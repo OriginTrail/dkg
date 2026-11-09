@@ -1,8 +1,8 @@
 import type { LocalFirstWriteProvenance } from './context-graph-write-provenance.js';
 import type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
 import type { PreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
+import type { ContextGraphJoinPolicyReservationRelease } from './context-graph-join-policy-release.js';
 // SPDX-License-Identifier: Apache-2.0
-
 /**
  * Type and error-class surface for `DKGAgent` extracted from
  * `dkg-agent.ts` as part of a mechanical file-size reduction. Behaviour
@@ -1166,15 +1166,12 @@ export interface ContextGraphJoinPolicyRateReservation {
  * The rate reservation must atomically count and, when allowed, append the
  * reservation row so concurrent admissions cannot overrun either ceiling.
  */
-export interface ContextGraphJoinPolicyStore {
+export interface ContextGraphJoinPolicyStore extends ContextGraphJoinPolicyReservationRelease {
   load(contextGraphId: string): Promise<ContextGraphJoinPolicyRecord | null>;
   save(record: ContextGraphJoinPolicyRecord): Promise<void>;
   appendAudit(event: ContextGraphJoinPolicyAuditEvent): Promise<void>;
   /** Atomically persist a policy transition and its security audit event. */
-  saveWithAudit(
-    record: ContextGraphJoinPolicyRecord,
-    event: ContextGraphJoinPolicyAuditEvent,
-  ): Promise<void>;
+  saveWithAudit(record: ContextGraphJoinPolicyRecord, event: ContextGraphJoinPolicyAuditEvent): Promise<void>;
   getAutomaticApprovalUsage(
     contextGraphId: string,
     timestamp: number,
@@ -1245,6 +1242,8 @@ export interface DurableSyncDiagnostics {
   metaOnlyResponses: number;
   /** Cryptographically verified V2 responses whose public graph is intentionally empty. */
   verifiedPrivateOnlyResponses: number;
+  /** Assets of a completed generation already stored here and current on chain; no DATA fetched for them. */
+  verifiedHeldAssets?: number;
   dataRejectedMissingMeta: number;
   rejectedKcs: number;
   failedPeers: number;
@@ -1264,10 +1263,8 @@ export interface DurableSyncResult extends DurableSyncDiagnostics {
   insertedTriples: number;
   deniedPhases: number;
   /**
-   * True only when every requested Context Graph reached a verified terminal
-   * state in this invocation. Committed prefixes remain observable through the
-   * counters while this stays false, so callers never have to infer whole-run
-   * completeness from per-phase progress.
+   * True only when every requested Context Graph reached a verified terminal state.
+   * Committed-prefix counters remain observable even when the whole run is incomplete.
    */
   complete: boolean;
 }
@@ -1541,6 +1538,8 @@ export interface DKGAgentConfig {
   }>;
   dataDir?: string;
   store?: TripleStore;
+  /** Write-preflight unresolved-write window in ms (default 120 s; 0 = strict). A policy, not a store guarantee: see `dkg-agent-write-preflight.ts`. */
+  writePreflightUnresolvedWriteWindowMs?: number;
   /** Triple store backend configuration (e.g. oxigraph-worker, blazegraph). If omitted, defaults to oxigraph-worker when dataDir is set. */
   storeConfig?: TripleStoreConfig;
   /** Out-of-line storage for large public SWM RDF literal object terms. Defaults on for local Oxigraph-backed dataDir stores. */
@@ -2054,8 +2053,7 @@ export type ResolvedDKGAgentConfig =
     /** Graphs the manual peer table of `rfc64Catalog.accessPolicyAuthority` covers. */
     rfc64CatalogManualTrustRootContextGraphs?: readonly string[];
     /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */
-    rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js')
-      .Rfc64CatalogExecutionPlanV1;
+    rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js').Rfc64CatalogExecutionPlanV1;
     rfc64CatalogAuthoringPolicy?: ResolvedRfc64CatalogAuthoringPolicyV1;
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };

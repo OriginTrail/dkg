@@ -11,7 +11,10 @@ import type { TripleStore } from '@origintrail-official/dkg-storage';
  * `revision` to model a write to a key or route fact.
  */
 export function stubFence(revision = 0) {
-  return { revision, ensureReady: vi.fn(async () => undefined), begin: vi.fn(() => () => undefined) };
+  const fence = { revision, hasPendingWrites: false,
+    isCurrentFor: (prior: number) => !fence.hasPendingWrites && prior === fence.revision,
+    ensureReady: vi.fn(async () => undefined), begin: vi.fn(() => () => undefined) };
+  return fence;
 }
 
 /** The two revisions a recipient resolution of a private roster checks, quiet unless a test moves them. */

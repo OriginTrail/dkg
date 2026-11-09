@@ -22,7 +22,7 @@ import { runInstallLayoutCheck } from './checks/install-layout.js';
 import { runVersionSkewCheck } from './checks/version-skew.js';
 import { runServedUiMismatchCheck } from './checks/served-ui-mismatch.js';
 import { runPluginRootCheck } from './checks/plugin-root.js';
-import { runNodeRuntimeCheck } from './checks/node-runtime.js';
+import { runNodeRuntimeCheck, runNodeSecurityCheck } from './checks/node-runtime.js';
 import { ALL_CHECK_IDS, type CheckId } from './policy.js';
 import type { DoctorDeps, DoctorReport, Finding, StateSummary } from './types.js';
 
@@ -74,6 +74,9 @@ export async function runDoctor(
           break;
         case 'node-runtime':
           next = runNodeRuntimeCheck(state);
+          break;
+        case 'node-security':
+          next = runNodeSecurityCheck(state);
           break;
         default: {
           // Defensive: unknown id — surface it but keep going.

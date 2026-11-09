@@ -1,0 +1,257 @@
+import { LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
+import { replaceLocallyTrustedKnowledgeAssetControlEnvelope } from '@origintrail-official/dkg-publisher';
+import { afterEach, expect, it, vi } from 'vitest';
+import { createOperationContext } from '@origintrail-official/dkg-core';
+import * as contentVerifier from '../src/exact-graph-content-verifier.js';
+import { classifyDurableProgress } from '../src/sync/durable-progress.js';
+import { getSyncCheckpointKey } from '../src/sync/checkpoint/state.js';
+import { continueContextGraphSubscriptionLine } from '../src/context-graph-subscription-policy.js';
+import { CG, PEER, createHeldProductionHarness, stopHeldProductionAgents } from './_helpers/durable-held-production.js';
+
+afterEach(async () => { await stopHeldProductionAgents(); vi.restoreAllMocks(); });
+
+it('verifies unchanged held content once and skips payload reconciliation without an SWM head', async () => {
+  const h = await createHeldProductionHarness();
+  const verify = vi.spyOn(contentVerifier, 'verifyExactGraphContent');
+  const query = vi.spyOn(h.internal.store, 'query');
+  const recovered = await h.run();
+  expect(recovered.outcome).toBe('terminal');
+  expect(recovered.result.verifiedHeldAssets).toBe(1);
+  expect(verify).toHaveBeenCalledOnce();
+  expect(query.mock.calls.some(([, options]) =>
+    (options as { source?: string })?.source === 'agent.durableSync.finalizedSwmTwin.readGraph')).toBe(false);
+  expect(h.dataRequests()).toBe(0);
+}, 15_000);
+
+it.each(['missing', 'wrong'])('repairs a %s named-subgraph route before reporting held readiness', async fault => {
+  const h = await createHeldProductionHarness();
+  vi.spyOn(h.chain, 'getContextGraphAccessPolicy').mockResolvedValue(0);
+  vi.spyOn(h.chain, 'isContextGraphActiveOnChain').mockResolvedValue(true);
+  const ns = 'http://dkg.io/ontology/', metaGraph = h.meta[0]!.graph;
+  await h.internal.store.deleteByPattern({ graph: metaGraph, subject: h.ual, predicate: ns + 'authenticatedSubGraphName' });
+  await h.internal.store.deleteByPattern({ graph: metaGraph,
+    predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: ns + 'SubGraph' });
+  if (fault === 'wrong') await h.internal.store.insert([{ graph: metaGraph, subject: h.ual,
+    predicate: ns + 'authenticatedSubGraphName', object: '"other"' }]);
+  const query = () => h.agent.query('SELECT ?value WHERE { GRAPH ?g { <urn:held:subject> <urn:held:value> ?value } }',
+    { contextGraphId: CG, view: 'verifiable-memory' });
+  expect((await query()).bindings).toEqual([]);
+  h.fetchMissingData();
+  const recovered = await h.run();
+  expect(recovered.outcome).toBe('terminal');
+  expect(recovered.result.verifiedHeldAssets ?? 0).toBe(0);
+  expect(h.dataRequests()).toBeGreaterThan(0);
+  expect((await query()).bindings).toEqual([{ value: '"held"' }]);
+  const dataRequests = h.dataRequests();
+  const held = await h.run();
+  expect(held.outcome).toBe('terminal');
+  expect(held.result.verifiedHeldAssets).toBe(1);
+  expect(h.dataRequests()).toBe(dataRequests);
+  expect((await query()).bindings).toEqual([{ value: '"held"' }]);
+}, 15_000);
+
+it('preserves a held META write during cancellation without publishing terminal readiness', async () => {
+  const h = await createHeldProductionHarness();
+  const controller = new AbortController();
+  const ns = 'http://dkg.io/ontology/', subject = 'urn:held:cancelled-lifecycle', graph = h.meta[0]!.graph;
+  const row = (predicate: string, object: string) => ({ subject, predicate: ns + predicate, object, graph });
+  h.meta.push(row('kaUal', h.ual), row('contentScopeVersion', '"2"'),
+    row('assertionVersion', '"1"'), row('assertionGraph', h.graph));
+  const insert = h.internal.store.insert.bind(h.internal.store);
+  vi.spyOn(h.internal.store, 'insert').mockImplementation(async (...args: unknown[]) => {
+    await insert(...args);
+    controller.abort(new Error('operation deadline expired during the dispatched write'));
+  });
+  const recovered = await h.internal.runGraphOwnedDurableRecoveryRound({
+    ctx: createOperationContext('sync'), remotePeerId: PEER, contextGraphId: CG,
+    recovery: { meta: { requesterScope: 'durable-recovery-meta:cancel-held' }, holdings: {} },
+    options: { signal: controller.signal },
+  });
+  expect(controller.signal.aborted).toBe(true);
+  expect(recovered.result.insertedMetaTriples).toBeGreaterThan(0);
+  expect(recovered.result.complete).toBe(false);
+  expect(recovered.result.verifiedHeldAssets).toBe(0);
+  expect(recovered.decision).toEqual({ strategy: 'not-started' });
+  expect(h.internal.syncCheckpoints.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal).not.toBe(true);
+  expect(h.dataRequests()).toBe(0);
+  const pointers = await h.internal.store.query(`SELECT ?pointer WHERE { GRAPH <${graph}> { <${subject}> <${ns}assertionGraph> ?pointer } }`);
+  expect(pointers.bindings).toEqual([{ pointer: h.graph }]);
+}, 15_000);
+
+it.each([false, true])('persists the discovered binding before held readiness (save fails: %s)', async failBindingSave => {
+  const h = await createHeldProductionHarness({ unbound: true, failBindingSave });
+  h.fetchMissingData();
+  const recovered = await h.run();
+  expect(h.dataRequests()).toBeGreaterThan(0);
+  expect(recovered.result.verifiedHeldAssets ?? 0).toBe(0);
+  expect(h.persist).toHaveBeenCalledWith(CG, expect.objectContaining({ onChainId: CG }), 'on-chain id binding', expect.any(Function));
+  expect(recovered.outcome === 'terminal').toBe(!failBindingSave);
+  expect(h.savedBindings).toEqual(failBindingSave ? [] : [CG]);
+  expect(h.internal.subscribedContextGraphs.get(CG).onChainId).toBe(failBindingSave ? undefined : CG);
+  expect(h.internal.syncCheckpoints.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal === true).toBe(!failBindingSave);
+}, 15_000);
+
+it('fetches and repairs corrupt preexisting content before readiness', async () => {
+  const h = await createHeldProductionHarness();
+  await h.internal.store.delete(h.data);
+  await h.internal.store.insert([{ ...h.data[0]!, object: '"tampered"' }]);
+  h.fetchMissingData();
+  const recovered = await h.run();
+  expect(h.dataRequests()).toBeGreaterThan(0);
+  expect(recovered.result.verifiedHeldAssets ?? 0).toBe(0);
+  expect(recovered.outcome).toBe('terminal');
+  const rows = await h.internal.store.query(`SELECT ?object WHERE { GRAPH <${h.graph}> { ?subject ?predicate ?object } }`);
+  expect(rows.bindings).toEqual([{ object: '"held"' }]);
+}, 15_000);
+
+it('retries failed SWM twin cleanup on the next held recovery', async () => {
+  const h = await createHeldProductionHarness();
+  await h.seedSwmTwin('1');
+  h.retire.mockRejectedValueOnce(new Error('temporary cleanup failure'));
+  const recovered = await h.run();
+  expect(recovered.outcome).toBe('terminal');
+  expect(recovered.result.verifiedHeldAssets).toBe(1);
+  expect(h.retire).toHaveBeenCalledTimes(1);
+  expect(await h.internal.store.countQuads(h.swmGraph)).toBe(1);
+  const replay = await h.run();
+  expect(replay.outcome).toBe('terminal');
+  expect(replay.result.verifiedHeldAssets).toBe(1);
+  expect(h.retire).toHaveBeenCalledTimes(2);
+  expect(await h.internal.store.countQuads(h.swmGraph)).toBe(0);
+  expect(h.dataRequests()).toBe(0);
+}, 15_000);
+
+it('retains newer SWM content during held recovery', async () => {
+  const h = await createHeldProductionHarness();
+  await h.seedSwmTwin('2');
+  const recovered = await h.run();
+  expect(recovered.outcome).toBe('terminal');
+  expect(recovered.result.verifiedHeldAssets).toBe(1);
+  expect(await h.internal.store.countQuads(h.swmGraph)).toBe(1);
+  expect(h.retire).not.toHaveBeenCalled();
+  const rows = await h.internal.store.query(`SELECT ?object WHERE { GRAPH <${h.swmGraph}> { ?subject ?predicate ?object } }`);
+  expect(rows.bindings).toEqual([{ object: '"newer"' }]);
+  expect(h.dataRequests()).toBe(0);
+}, 15_000);
+
+it.each(['chain', 'worker', 'reconcile'].flatMap(phase =>
+  ['clean', 'deactivate', 'recreate', 'equivalent', 'drop-graph', 'remove-subgraph'].map(change => [phase, change] as const)))(
+  'fences held readiness through paused %s verification: %s', async (phase, change) => {
+    const h = await createHeldProductionHarness();
+    const { internal, subscription, entered, release, graph, agent } = h;
+    if (phase === 'reconcile') await h.seedSwmTwin('1');
+    h.pause(phase as 'chain' | 'worker' | 'reconcile');
+    const run = h.run();
+    try {
+      await Promise.race([entered.promise, run.then(result => { throw new Error('Recovery ended before the paused verification: ' + JSON.stringify(result)); })]);
+      if (change === 'deactivate') {
+        const next = { ...subscription, subscribed: false }; continueContextGraphSubscriptionLine(subscription, next);
+        internal.subscribedContextGraphs.set(CG, next);
+      } else if (change === 'recreate') {
+        internal.subscribedContextGraphs.delete(CG); internal.subscribedContextGraphs.set(CG, { ...subscription });
+      } else if (change === 'equivalent') {
+        const next = { ...subscription, name: 'renamed' }; continueContextGraphSubscriptionLine(subscription, next);
+        internal.subscribedContextGraphs.set(CG, next);
+      } else if (change === 'drop-graph') await internal.store.dropGraph(graph);
+      else if (change === 'remove-subgraph') await agent.removeSubGraph(CG, 'reports');
+    } finally { release.resolve(); }
+    const recovered = await run;
+    const valid = change === 'clean' || change === 'equivalent';
+    expect(recovered.outcome === 'terminal').toBe(valid);
+    expect(recovered.result.verifiedHeldAssets ?? 0).toBe(valid ? 1 : 0);
+    expect(classifyDurableProgress(recovered.result, { complete: recovered.result.complete }).completedReadinessCleanly).toBe(valid);
+    expect(internal.syncCheckpoints.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal === true).toBe(valid);
+    expect(h.dataRequests()).toBe(0);
+    if (change === 'drop-graph' || change === 'remove-subgraph') expect(await internal.store.countQuads(graph)).toBe(0);
+  }, 15_000,
+);
+
+it('settles held VM recovery on the first run with finalized snapshot cleanup enabled', async () => {
+  const h = await createHeldProductionHarness({ finalizedCleanup: true });
+  await h.seedSwmTwin('1');
+  const recovered = await h.run();
+  expect(recovered.outcome).toBe('terminal');
+  expect(recovered.result.verifiedHeldAssets).toBe(1);
+  expect(h.dataRequests()).toBe(0);
+  expect(h.retire).toHaveBeenCalledOnce();
+  expect(await h.internal.store.countQuads(h.swmGraph)).toBe(0);
+  expect(h.markPublished).toHaveBeenCalled();
+  expect(h.internal.syncCheckpoints.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal).toBe(true);
+}, 15_000);
+
+it.each(['valid', 'wrong-graph', 'wrong-version', 'wrong-owner', 'wrong-scope', 'ambiguous-owner'])(
+  'admits only authenticated lifecycle pointers during held recovery: %s', async fault => {
+    const h = await createHeldProductionHarness();
+    const ns = 'http://dkg.io/ontology/', subject = 'urn:held:new-lifecycle', graph = h.meta[0]!.graph;
+    const row = (predicate: string, object: string) => ({ subject, predicate: ns + predicate, object, graph });
+    const integer = (n: number) => `"${n}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
+    h.meta.push(row('kaUal', fault === 'wrong-owner' ? 'urn:unheld' : h.ual),
+      row('contentScopeVersion', integer(fault === 'wrong-scope' ? 1 : 2)),
+      row('assertionVersion', integer(fault === 'wrong-version' ? 2 : 1)),
+      row('assertionGraph', fault === 'wrong-graph' ? 'urn:forged-graph' : h.graph));
+    if (fault === 'ambiguous-owner') h.meta.push(row('reservedUal', 'urn:unheld'));
+    const recovered = await h.run();
+    expect(recovered.outcome).toBe('terminal');
+    expect(recovered.result.verifiedHeldAssets).toBe(1);
+    expect(h.dataRequests()).toBe(0);
+    const pointers = await h.internal.store.query(`SELECT ?pointer WHERE { GRAPH <${graph}> { <${subject}> <${ns}assertionGraph> ?pointer } }`);
+    expect(pointers.bindings).toEqual(fault === 'valid' ? [{ pointer: h.graph }] : []);
+  }, 15_000,
+);
+
+it.each(['accessPolicy', 'publisherPeerId', 'attribution'])(
+  'repairs divergent descriptor metadata through authenticated replay: %s', async field => {
+    const h = await createHeldProductionHarness();
+    const predicate = field === 'attribution' ? 'http://www.w3.org/ns/prov#wasAttributedTo' : `http://dkg.io/ontology/${field}`;
+    const row = { subject: h.ual, predicate, graph: h.meta[0]!.graph, object: '"ownerOnly"' };
+    await h.internal.store.deleteByPattern({ subject: row.subject, predicate, graph: row.graph });
+    await h.internal.store.insert([row]);
+    h.fetchMissingData();
+    const recovered = await h.run();
+    expect(recovered.outcome).toBe('terminal');
+    expect(recovered.result.verifiedHeldAssets ?? 0).toBe(0);
+    expect(h.dataRequests()).toBeGreaterThan(0);
+    const values = await h.internal.store.query(`SELECT ?value WHERE { GRAPH <${row.graph}> { <${h.ual}> <${predicate}> ?value } }`);
+    expect(values.bindings).toEqual(field === 'attribution' ? []
+      : [{ value: field === 'accessPolicy' ? '"public"' : '"publisher-peer"' }]);
+  }, 15_000,
+);
+
+it('keeps a trusted local ACL instead of the peer public ACL while skipping DATA', async () => {
+  const h = await createHeldProductionHarness({ localAccessPolicy: 'ownerOnly' }), predicate = 'http://dkg.io/ontology/accessPolicy';
+  const recovered = await h.run();
+  expect(recovered.outcome).toBe('terminal'); expect(recovered.result.verifiedHeldAssets).toBe(1);
+  expect(h.dataRequests()).toBe(0);
+  expect(await h.internal.store.query(`ASK { GRAPH <${h.meta[0]!.graph}> { <${h.ual}> <${predicate}> "ownerOnly" } }`))
+    .toEqual({ type: 'boolean', value: true });
+}, 15_000);
+
+it('retains the receiver timestamp and stronger receipt provenance during held completion', async () => {
+  const h = await createHeldProductionHarness(), ns = 'http://dkg.io/ontology/', graph = h.meta[0]!.graph;
+  const row = (name: string, object: string) => ({ subject: h.ual, predicate: ns + name, object, graph });
+  const local = [row('publishedAt', '"2020-02-03T04:05:06.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>'),
+    row('confirmationKind', '"transaction"'), row('transactionHash', '"0x' + '42'.repeat(32) + '"'), row('materializedVersion', '"99:3"')];
+  for (const q of local) await h.internal.store.deleteByPattern({ subject: h.ual, graph, predicate: q.predicate });
+  await h.internal.store.insert(local);
+  const recovered = await h.run();
+  expect(recovered.outcome).toBe('terminal'); expect(recovered.result.verifiedHeldAssets).toBe(1);
+  expect(h.dataRequests()).toBe(0);
+  for (const q of local) expect(await h.internal.store.query(`ASK { GRAPH <${graph}> { <${h.ual}> <${q.predicate}> ${q.object} } }`))
+    .toEqual({ type: 'boolean', value: true });
+}, 15_000);
+
+it('fences a local control-sidecar change after the content proof was acquired', async () => {
+  const h = await createHeldProductionHarness(); h.pause('chain');
+  const pending = h.run();
+  try {
+    await Promise.race([h.entered.promise, pending.then(() => { throw new Error('round ended before chain confirmation'); })]);
+    await h.internal.store.deleteByPattern({ graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH, predicate: 'http://dkg.io/ontology/accessPolicy' });
+    await replaceLocallyTrustedKnowledgeAssetControlEnvelope(h.internal.store, h.ual,
+      { assertionVersion: '1', merkleRoot: h.root },
+      { accessPolicy: 'ownerOnly', publisherPeerId: 'publisher-peer', allowedPeers: [] });
+  } finally { h.release.resolve(); }
+  const recovered = await pending;
+  expect(recovered.outcome).not.toBe('terminal');
+  expect(recovered.result.verifiedHeldAssets ?? 0).toBe(0);
+  expect(h.internal.syncCheckpoints.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal).not.toBe(true);
+}, 15_000);

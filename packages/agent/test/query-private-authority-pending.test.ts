@@ -784,6 +784,7 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
     const { agent, runtime, queryExecution } = await fixture({ publicGraph: false });
     runtime.subscribedContextGraphs.clear();
     runtime.config.syncContextGraphs = [];
+    Object.defineProperty(agent.store, 'readGraphInventory', { configurable: true, value: undefined });
     Object.defineProperty(agent.store, 'listGraphsByPrefix', { configurable: true, value: undefined });
     const inventory = vi.spyOn(agent.store, 'listGraphs');
     await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
@@ -856,7 +857,7 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
     if (source === 'metadata') {
       vi.spyOn(agent.store, 'query').mockRejectedValue(new Error('metadata discovery unavailable'));
     } else {
-      vi.spyOn(agent.store, 'listGraphsByPrefix').mockRejectedValue(new Error('graph inventory discovery unavailable'));
+      vi.spyOn(agent.store, 'readGraphInventory').mockRejectedValue(new Error('graph inventory discovery unavailable'));
     }
     await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
       .rejects.toThrow('discovery unavailable');

@@ -22,6 +22,7 @@ import {
   type Authority,
 } from './_helpers/readiness-member-edge.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
+import { recordSharedMemoryPhaseFailure } from '@origintrail-official/dkg-agent/dist/sync/shared-memory-diagnostics.js';
 
 await import('../src/catchup-runner-worker-impl.js');
 const { createCatchupRunner } = await import('../src/catchup-runner.js');
@@ -425,6 +426,235 @@ describe('a public graph that its subscribe job left unproven is caught up again
       `"${CG}" is still not proven synced after ${CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS.length} repeated catch-up job(s)`,
     );
   });
+  /**
+   * An unproven round whose shared-memory walk stopped making progress. The
+   * coverage diagnostic describes one peer (`resolved` of 40); `inserted` is
+   * the new data the job wrote from all of its peers; `fetchedMeta` is the
+   * metadata peers served it, none when no peer was reached.
+   */
+  function stalledRound(resolved: number, inserted = 0, fetchedMeta = 27): () => CatchupJobResult {
+    const total = 40;
+    return () => {
+      const round = lossyEmptyRound();
+      return {
+        ...round,
+        diagnostics: {
+          ...round.diagnostics!,
+          sharedMemory: {
+            ...round.diagnostics!.sharedMemory,
+            // A clean walk: every round answered without a failure.
+            failedPhases: 0,
+            failedPeers: 0,
+            timedOutPhases: 0,
+            fetchedMetaTriples: fetchedMeta,
+            insertedDataTriples: inserted,
+            continuationStopReason: 'coverage-stalled',
+            swmCoverage: {
+              contextGraphId: CG,
+              peerIdSuffix: 'peer0001',
+              snapshotsResolved: resolved,
+              snapshotsTotal: total,
+              manifestComplete: true,
+              descriptorsAuthoritative: true,
+              missingCount: total - resolved,
+              missingSample: [],
+              materializationFailures: 0,
+            },
+          },
+        },
+      };
+    };
+  }
+
+  it.each(['prepare', 'commit'] as const)('keeps retries armed after two readiness %s failures despite clean stalled diagnostics', async phase => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const member = memberEdge();
+    const { runs } = stubRunner([stalledRound(12), stalledRound(12), cleanEmptyRound]);
+    if (phase === 'prepare') {
+      vi.spyOn(member.agent, 'prepareContextGraphReadinessWithPrivateEmptyVmV1')
+        .mockRejectedValueOnce(new Error('readiness prepare failed'))
+        .mockRejectedValueOnce(new Error('readiness prepare failed'));
+    } else {
+      vi.spyOn(member.store, 'setContextGraphReadinessProvenance')
+        .mockImplementationOnce(() => { throw new Error('readiness commit failed'); })
+        .mockImplementationOnce(() => { throw new Error('readiness commit failed'); });
+    }
+    const api = await startRoutes(member);
+    expect(await api.finished(await api.subscribe())).toMatchObject({ status: 'failed' });
+    fire(await waitUntil(() => armed()[0], 'first retry armed'));
+    await waitUntil(() => runs.length === 2 ? true : undefined, 'first retry');
+    expect(await api.finished(api.latestJobId()!)).toMatchObject({ status: 'failed' });
+    fire(await waitUntil(() => armed()[0], 'second retry remains armed'));
+    await waitUntil(() => runs.length === 3 ? true : undefined, 'second retry');
+    await api.finished(api.latestJobId()!);
+    expect(member.subscription()).toMatchObject({ synced: true });
+    expect(armed()).toEqual([]);
+  });
+
+  it('ends the chain after two jobs in a row that stalled without writing anything new', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const member = memberEdge();
+    const { runs } = stubRunner([stalledRound(12), stalledRound(12)]);
+    const api = await startRoutes(member);
+    await api.finished(await api.subscribe());
+
+    // One stalled attempt is not enough: what stopped it may have passed.
+    fire(await waitUntil(() => armed()[0], 'the first repeat armed'));
+    await waitUntil(() => (runs.length === 2 ? true : undefined), 'the first repeat');
+    await api.finished(api.latestJobId()!);
+    await waitUntil(
+      () => (log.mock.calls.flat().join('\n').includes('not repeating') ? true : undefined),
+      'the line that ends the chain',
+    );
+
+    expect(log.mock.calls.flat().join('\n')).toContain(
+      `not repeating the catch-up of "${CG}": two jobs in a row walked its peers until no pass made progress `
+        + 'and wrote nothing new',
+    );
+    expect(armed()).toEqual([]);
+    expect(runs).toHaveLength(2);
+    expect(member.subscription()).toMatchObject({ synced: false });
+  });
+
+  it('keeps repeating while no peer served the graph or the work was deferred, and proves it once a peer answers', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const member = memberEdge();
+    const noPeer = stalledRound(0, 0, 0);
+    const deferred = () => ({ ...stalledRound(12)(), deferredBackpressure: 1 });
+    // A continuation pass that was deferred shows only in the shared-memory diagnostic.
+    const continuationDeferred = () => {
+      const round = stalledRound(12)();
+      return {
+        ...round,
+        diagnostics: { ...round.diagnostics!, sharedMemory: { ...round.diagnostics!.sharedMemory, deferredBackpressure: 2 } },
+      };
+    };
+    const { runs } = stubRunner([
+      noPeer, noPeer, deferred, deferred, continuationDeferred, continuationDeferred, cleanEmptyRound,
+    ]);
+    const api = await startRoutes(member);
+    await api.finished(await api.subscribe());
+
+    for (let repeat = 1; repeat <= 6; repeat += 1) {
+      fire(await waitUntil(() => armed()[0], `repeat ${repeat} armed`));
+      await waitUntil(() => (runs.length === repeat + 1 ? true : undefined), `repeat ${repeat}`);
+      await api.finished(api.latestJobId()!);
+    }
+
+    expect(runs).toHaveLength(7);
+    expect(member.subscription()).toMatchObject({ synced: true });
+    expect(armed()).toEqual([]);
+  });
+
+  it('keeps repeating while any peer still delivers, though the coverage diagnostic stays the same', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const member = memberEdge();
+    // The diagnostic peer stays at 12 of 40 throughout; the second job wrote new data from another peer.
+    const { runs } = stubRunner([stalledRound(12), stalledRound(12, 4), stalledRound(12), stalledRound(12)]);
+    const api = await startRoutes(member);
+    await api.finished(await api.subscribe());
+
+    for (let repeat = 1; repeat <= 3; repeat += 1) {
+      fire(await waitUntil(() => armed()[0], `repeat ${repeat} armed`));
+      await waitUntil(() => (runs.length === repeat + 1 ? true : undefined), `repeat ${repeat}`);
+      await api.finished(api.latestJobId()!);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // Stalled without progress in jobs 3 and 4 only: the chain ends after them.
+    expect(armed()).toEqual([]);
+    expect(runs).toHaveLength(4);
+  });
+
+  /**
+   * A peer's answer for a graph whose manifest lists 40 snapshots, 12 of them
+   * written here: its metadata arrived, nothing new did. `fault` is what went
+   * wrong in the round, if anything.
+   */
+  function stalledAnswer(peerId: string, fault?: 'snapshot-timeout' | 'materialization' | 'local-yield') {
+    const answer = emptyAnswer(peerId);
+    const shared = {
+      ...answer.shared,
+      emptyResponses: 0,
+      fetchedMetaTriples: 27,
+      swmCoverage: { ...answer.shared.swmCoverage, snapshotsResolved: 12, snapshotsTotal: 40, missingCount: 28 },
+    };
+    if (fault === 'snapshot-timeout') {
+      shared.timedOutPhases = 1;
+      recordSharedMemoryPhaseFailure(shared, 'transport');
+    } else if (fault === 'materialization') {
+      shared.swmCoverage.materializationFailures = 1;
+      recordSharedMemoryPhaseFailure(shared, 'materialization');
+    } else if (fault === 'local-yield') {
+      recordSharedMemoryPhaseFailure(shared, 'local-budget');
+    }
+    return { ...answer, shared };
+  }
+
+  function useRealRunner(member: ReturnType<typeof memberEdge>): void {
+    const runner = createCatchupRunner(member.agent);
+    runners.push(runner);
+    daemonState.catchupRunner = runner;
+  }
+
+  it('ends the chain after two clean walks that stall at the same coverage', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const member = memberEdge();
+    member.node.answer = (peerId) => stalledAnswer(peerId);
+    useRealRunner(member);
+    const api = await startRoutes(member);
+    const first = await api.finished(await api.subscribe());
+    expect(first.result.diagnostics.sharedMemory).toMatchObject({
+      continuationStopReason: 'coverage-stalled', failedPhases: 0,
+    });
+
+    fire(await waitUntil(() => armed()[0], 'the first repeat armed'));
+    const repeatJobId = await waitUntil(() => {
+      const latest = api.latestJobId();
+      return latest !== first.jobId ? latest : undefined;
+    }, 'the repeat');
+    await api.finished(repeatJobId);
+    await waitUntil(
+      () => (log.mock.calls.flat().join('\n').includes('not repeating') ? true : undefined),
+      'the line that ends the chain',
+    );
+
+    expect(armed()).toEqual([]);
+    expect(member.subscription()).toMatchObject({ subscribed: true, synced: false });
+  });
+
+  it.each(['snapshot-timeout', 'materialization', 'local-yield'] as const)(
+    'keeps repeating after walks stalled by a %s, and proves the graph once it has cleared',
+    async (fault) => {
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      const member = memberEdge();
+      member.node.answer = (peerId) => stalledAnswer(peerId, fault);
+      useRealRunner(member);
+      const api = await startRoutes(member);
+      let jobId = await api.subscribe();
+      await api.finished(jobId);
+      const next = async (what: string): Promise<void> => {
+        fire(await waitUntil(() => armed()[0], `${what} armed`));
+        const previous = jobId;
+        jobId = await waitUntil(() => {
+          const latest = api.latestJobId();
+          return latest !== previous ? latest : undefined;
+        }, what);
+        await api.finished(jobId);
+      };
+
+      // The fault lasts through the first repeat as well.
+      await next('the first repeat');
+      // Two walks that failed are no evidence of a stall: another repeat is
+      // armed, and it proves the graph once the fault has cleared.
+      member.node.answer = (peerId) => emptyAnswer(peerId);
+      await next('the second repeat');
+
+      expect(member.subscription()).toMatchObject({ subscribed: true, synced: true, sharedMemorySynced: true });
+      expect(armed()).toEqual([]);
+    },
+  );
+
   it('repeats a job that local backpressure deferred, also when the metadata pull failed', async () => {
     const member = memberEdge();
     (member.agent as any).bootstrapRfc64CatalogContextGraphMetadataFromPeersV1 = async () => {

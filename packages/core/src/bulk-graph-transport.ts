@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Stream } from '@libp2p/interface';
 import { type ProtocolRouter, type DuplexStreamOptions } from './protocol-router.js';
-import { BULK_GRAPH_KIND as K, BULK_GRAPH_PROTOCOL, BULK_GRAPH_REQUEST_BYTES,
+import { GRAPH_TRANSFER_KIND as K, BULK_GRAPH_PROTOCOL, BULK_GRAPH_REQUEST_BYTES,
   decodeBulkGraphFrames, encodeBulkGraphFrame, type BulkGraphFrame } from './bulk-graph-wire.js';
+
+/** Distinct negotiation: PERSISTED means durable checkpoint bytes, never applied graph data. */
+export const PUBLIC_CHECKPOINT_PROTOCOL = '/dkg/experimental/public-checkpoint/1.0.0';
+export { PUBLIC_CHECKPOINT_KIND } from './bulk-graph-wire.js';
 
 export class BulkGraphSession {
   private readonly frames: AsyncGenerator<BulkGraphFrame>;
@@ -47,9 +51,17 @@ export function bulkGraphTransportOptions(timeoutMs: number, signal?: AbortSigna
 }
 export async function exchangeBulkGraph<T>(router: Pick<ProtocolRouter, 'withDuplexStream'>, peer: string, request: Uint8Array,
   options: DuplexStreamOptions, consume: (session: BulkGraphSession) => Promise<T>): Promise<T> {
+  return exchangeGraphProtocol(BULK_GRAPH_PROTOCOL, router, peer, request, options, consume);
+}
+export async function exchangePublicCheckpoint<T>(router: Pick<ProtocolRouter, 'withDuplexStream'>, peer: string,
+  request: Uint8Array, options: DuplexStreamOptions, consume: (session: BulkGraphSession) => Promise<T>): Promise<T> {
+  return exchangeGraphProtocol(PUBLIC_CHECKPOINT_PROTOCOL, router, peer, request, options, consume);
+}
+async function exchangeGraphProtocol<T>(protocol: string, router: Pick<ProtocolRouter, 'withDuplexStream'>,
+  peer: string, request: Uint8Array, options: DuplexStreamOptions, consume: (session: BulkGraphSession) => Promise<T>): Promise<T> {
   let session: BulkGraphSession | undefined;
   try {
-    return await router.withDuplexStream(peer, BULK_GRAPH_PROTOCOL, options, async (stream, signal) => {
+    return await router.withDuplexStream(peer, protocol, options, async (stream, signal) => {
       session = new BulkGraphSession(stream, signal);
       await session.send({ kind: K.REQUEST, index: 0, sequence: 0, payload: request });
       return consume(session);
@@ -60,7 +72,19 @@ export function registerBulkGraphResponder<T>(router: ProtocolRouter,
   authorize: (bytes: Uint8Array, peer: string, signal: AbortSignal) => Promise<T>,
   respond: (request: T, session: BulkGraphSession, peer: string) => Promise<void>,
   diagnostics: Pick<DuplexStreamOptions, 'onInboundFailure'> = {}): void {
-  router.registerDuplexStream(BULK_GRAPH_PROTOCOL, async (stream, signal) => {
+  registerGraphProtocol(BULK_GRAPH_PROTOCOL, router, authorize, respond, diagnostics);
+}
+export function registerPublicCheckpointResponder<T>(router: ProtocolRouter,
+  authorize: (bytes: Uint8Array, peer: string, signal: AbortSignal) => Promise<T>,
+  respond: (request: T, session: BulkGraphSession, peer: string) => Promise<void>,
+  diagnostics: Pick<DuplexStreamOptions, 'onInboundFailure'> = {}): void {
+  registerGraphProtocol(PUBLIC_CHECKPOINT_PROTOCOL, router, authorize, respond, diagnostics);
+}
+function registerGraphProtocol<T>(protocol: string, router: ProtocolRouter,
+  authorize: (bytes: Uint8Array, peer: string, signal: AbortSignal) => Promise<T>,
+  respond: (request: T, session: BulkGraphSession, peer: string) => Promise<void>,
+  diagnostics: Pick<DuplexStreamOptions, 'onInboundFailure'>): void {
+  router.registerDuplexStream(protocol, async (stream, signal) => {
     const session = new BulkGraphSession(stream, signal);
     try {
       const first = await session.next();

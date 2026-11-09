@@ -29,7 +29,9 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: rfc64-inventory-windows-${{ github.event.pull_request.number || github.ref }}
+  # The caller owns branch/PR cancellation. Sharing a branch key here lets
+  # ordinary CI cancel the Windows jobs of an independent nightly run.
+  group: rfc64-inventory-windows-${{ github.run_id }}-${{ github.run_attempt }}
   cancel-in-progress: true
 
 permissions:

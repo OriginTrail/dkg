@@ -1,22 +1,8 @@
 /**
- * ACK 6-field digest + EIP-191 round-trip, exercised from the agent layer
- * with real secp256k1 agent identities (no mocks, no chain).
- *
- * Audit findings covered:
- *   A-10 (HIGH / SPEC-GAP) — no agent-layer test for the 6-field ACK digest
- *        + EIP-191 flow: "sign with agent identity, verify ecrecover yields
- *        the same address." This file pins that contract end-to-end using
- *        `computeACKDigest` + `eip191Hash` + `ethers.Wallet.signMessage`.
- *
- *   A-12 (TEST-DEBT) — cross-checks that an agent registered via
- *        `DKGAgent#registerAgent` produces a `did:dkg:agent:0x...` DID in
- *        Ethereum-address form, matching spec §03. The helper-level test in
- *        `did-format-extra.test.ts` covers the static drift; this test
- *        covers the live runtime.
- *
- * No mocks: uses `ethers.Wallet` to generate / sign, real `computeACKDigest`
- * and `eip191Hash` from @origintrail-official/dkg-core, and real
- * `DKGAgent.registerAgent` for the DID check.
+ * Six-field ACK digest and EIP-191 signing with real secp256k1 identities.
+ * Cross-check the framing against ethers and verify keystore address contracts;
+ * no DKG node or chain is started. The DID checks below validate the address
+ * embedded in the string, not the DKGAgent.registerAgent integration path.
  */
 import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
@@ -80,40 +66,23 @@ describe('A-10: 6-field ACK digest + EIP-191 signing (agent identity)', () => {
     const digest = computeACKDigest(CG_ID, merkleRoot, kaCount, byteSize, epochs, tokenAmount);
     const signature = await wallet.signMessage(digest);
 
-    // A valid signature for the original digest must NOT verify against the
-    // original signer once ANY byte is flipped. Secp256k1 recovery has two
-    // failure modes here, both of which satisfy the spec requirement that
-    // "a forged/tampered signature is rejected":
-    //   (1) verifyMessage returns a DIFFERENT address (tampered r/s still
-    //       decodes to a valid curve point, ecrecover returns a stranger);
-    //   (2) verifyMessage THROWS because the tampered r no longer maps to a
-    //       point on the curve (noble/curves "Cannot find square root").
-    // We accept either — silently returning the original address would be
-    // the only unacceptable outcome.
-    //
-    // Flip a byte across several positions to exercise both branches in a
-    // single deterministic test. Byte 0 targets the r component, byte 40 the
-    // s component. At least one of these should recover without throwing
-    // (covering branch 1); throws are counted as rejections (branch 2).
-    const positions = [0, 40, 10, 50];
-    let gotDifferentAddress = false;
-    let gotThrow = false;
-    for (const pos of positions) {
+    expect(ethers.verifyMessage(digest, signature).toLowerCase()).toBe(wallet.address.toLowerCase());
+
+    // Recovery may reject an invalid curve point or return a different signer.
+    // Keep assertions OUTSIDE the recovery catch so an accepted tampered
+    // signature cannot be mistaken for an expected parser/recovery exception.
+    for (const pos of [0, 40, 10, 50]) {
       const sigBytes = ethers.getBytes(signature);
       sigBytes[pos] ^= 0x01;
-      const bad = ethers.hexlify(sigBytes);
+      let recovered: string;
       try {
-        const recovered = ethers.verifyMessage(digest, bad);
-        expect(recovered.toLowerCase()).not.toBe(wallet.address.toLowerCase());
-        gotDifferentAddress = true;
+        recovered = ethers.verifyMessage(digest, ethers.hexlify(sigBytes));
       } catch {
-        gotThrow = true;
+        continue;
       }
+      expect(recovered.toLowerCase(), `tampered signature byte ${pos}`)
+        .not.toBe(wallet.address.toLowerCase());
     }
-    expect(
-      gotDifferentAddress || gotThrow,
-      'at least one tampered position must either throw or recover a different address',
-    ).toBe(true);
   });
 
   it('tampered digest (different tokenAmount) does NOT recover the agent address', async () => {

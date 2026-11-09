@@ -16,6 +16,14 @@ Publishing protocol for DKG V10. Handles the complete lifecycle of getting Knowl
 - **ChainEventPoller** — monitors on-chain events for KA finalization confirmations
 - **Access control** — `AccessHandler` for serving private triple access requests; `AccessClient` for requesting them
 
+## Async queues
+
+- **Async publish queue** (`TripleStoreAsyncLiftPublisher`): `list()` reads every job; `listPage({ status?, contextGraphId?, cursor?, limit? })` reads one page, `{ jobs, nextCursor, complete }`, with `limit` from 1 to 1000 (100 by default). A bad cursor or limit throws `LiftJobPageError` (`malformed_cursor`, `invalid_limit`); a stored row it cannot read or order throws it too (`unreadable_row`, `unordered_page`). `getStats()` counts jobs per status with one query. `clear(status)` is the guarded bulk clear: it never changes which job holds a Knowledge Asset. `clearTerminalJob(jobId)` is the unguarded override for one job.
+- **Share queue** (`TripleStoreAsyncPromoteQueue`): `list()`, `listPage(filter?, request?)` and `getStats()`.
+- **Retention cores** (`createShareRetention`, `createPublisherRetention`): finished-job cleanup, off by default. They do not check who calls them. Only the daemon's admission instance may run them, because the only exclusion is the daemon's in-process lock.
+
+Operator settings are in [Async Queue Operations](../../docs/use-dkg/async-queue-operations.md). How the queues admit, list, clear and retain jobs internally is in [`docs/async-queue-internals.md`](docs/async-queue-internals.md).
+
 ## Usage
 
 ```typescript

@@ -8,17 +8,7 @@ import { withCallerJoinState } from './internal/context-graph-authority/approved
  * listContextGraphs enumeration. 1:1 move; methods take `this: DKGAgent` so
  * cross-calls resolve against the composed class.
  */
-
-// SPDX-License-Identifier: Apache-2.0
-/**
- * Context-graph resolution subsystem extracted from dkg-agent.ts as a mixin
- * holder: existence/curation checks, sync-request envelope parse/build/auth,
- * on-chain participant + curator resolution, wire-id <-> local-id mapping,
- * access-policy resolution, private-CG participant listing, and the
- * listContextGraphs enumeration. 1:1 move; methods take `this: DKGAgent` so
- * cross-calls resolve against the composed class.
- */
-import { probeContextGraphWritePreflight } from './context-graph-write-preflight.js';
+import { probeContextGraphWritePreflight, type WritePreflightProbeOptions } from './context-graph-write-preflight.js';
 import { throwIfOperationAborted } from './bounded-operation.js';
 import { resolveContextGraphNameBindingTarget, type ContextGraphNameHashBindingTarget } from './context-graph-name-binding-target.js';
 import { readAgentPeerPage } from './agent-peer-discovery.js';
@@ -26,6 +16,7 @@ import { contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphDataUri
 import { GraphManager, type Quad } from '@origintrail-official/dkg-storage';
 import { assertContextGraphAuthorityIndexId, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthoritySnapshot } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
+import { withCallerJoinState } from './internal/context-graph-authority/approved-member-metadata-pending.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { claimedAgentSyncRequestSigner } from './sync/auth/request-signing.js';
 import { normalizeExactSyncResponseEncoding } from './sync/wire-compression.js';
@@ -700,7 +691,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     );
   }
 
-  probeContextGraphWritePreflight(this: DKGAgent, contextGraphId: string, opts?: { callerAgentAddress?: string | null }): Promise<ContextGraphWritePreflightProbe> {
+  probeContextGraphWritePreflight(this: DKGAgent, contextGraphId: string, opts?: WritePreflightProbeOptions): Promise<ContextGraphWritePreflightProbe> {
     return probeContextGraphWritePreflight(this, { locallyCreated: this.localContextGraphProvenance.hasLocalCreate(contextGraphId),
       store: this.config.contextGraphSubscriptionStore,
       current: id => this.subscribedContextGraphs.get(id) }, contextGraphId, opts);

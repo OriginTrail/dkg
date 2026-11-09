@@ -263,6 +263,16 @@ export async function insertWithOversizeGuard(
 ): Promise<Quad[]> {
   const { kept, dropped } = filterOversizedSyncQuads(quads);
   if (dropped.length > 0) hooks.recordDrops(dropped, seam);
+  return insertPrefilteredSyncQuads(insert, kept, hooks, seam);
+}
+
+/** Bounded persistence/backstop for rows already accepted by the protocol filter. */
+export async function insertPrefilteredSyncQuads(
+  insert: (quads: Quad[]) => Promise<void>,
+  kept: Quad[],
+  hooks: OversizeGuardHooks,
+  seam: string,
+): Promise<Quad[]> {
   if (kept.length === 0) return kept;
   try {
     await insertInBoundedBatches(insert, kept);

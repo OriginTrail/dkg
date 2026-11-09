@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from 'vite
 import {
   BlazegraphNamespaceManager,
   blazegraphNamespaceApiUrlFromSparqlEndpoint,
+  controlStoreOptions,
   createTripleStore,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
@@ -151,7 +152,7 @@ export function registerPrimaryPersistenceBlazegraphCases({
     const observed = observePrimary(f.graph, f.jobId, 'success', `urn:test:unused:${randomUUID()}`);
     await f.publisher.update(f.jobId, 'validated', { validation: KA_VM_VALIDATION });
     expect(compound).toHaveBeenCalledOnce();
-    expect(compound.mock.calls[0]?.[4]).toMatchObject({ source: 'publisher.asyncLift.writeJob' });
+    expect(compound.mock.calls[0]?.[4]).toEqual(controlStoreOptions('publisher', 'publisher.asyncLift.writeJob'));
     expect(observed.requests).toHaveLength(1);
     expect(observed.requests[0]).toContain('http://dkg.io/ontology/externalLiteralRef');
     expect(observed.responses[0]?.status).toBeLessThan(300);

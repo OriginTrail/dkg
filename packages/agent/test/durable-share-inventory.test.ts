@@ -221,7 +221,7 @@ describe('throwing confirmed inventory removal and observation', () => {
     expect(agent.rfc64SwmAuthorInventoryShadowStatusV1()).toEqual(stats);
     const confirmed = { ...request, assertionCoordinate: seeded.assertionCoordinate,
       shareOperationId: seeded.shareOperationId, assertionUri: 'urn:confirmed', ctx: createOperationContext('publish'), publicationLabel: 'queued publish' as const };
-    expect(await agent.observeRfc64ConfirmedVmV1(confirmed)).toBe(true);
+    expect(await agent.transferRfc64ConfirmedVmV1(confirmed)).toBe('owned');
     expect(agent.rfc64SwmAuthorInventoryShadowStatusV1()).toMatchObject({ attemptedRemovals: stats.attemptedRemovals + 1, absentRemovals: stats.absentRemovals + 1 });
     vi.spyOn(agent as any, 'recordRfc64SwmAuthorInventoryShadowStatsV1').mockImplementation(() => { throw new Error('observer accounting unavailable'); });
     expect(await agent.transferRfc64ConfirmedVmV1(confirmed)).toBe('owned');
@@ -237,8 +237,8 @@ describe('throwing confirmed inventory removal and observation', () => {
     const request = { contextGraphId: CONTEXT_GRAPH_ID, seal: seeded.seal };
     await expect(agent.commitRfc64ConfirmedInventoryRemovalV1(request)).rejects.toMatchObject({ phase: 'inventory-maintenance', cause });
     expect(agent.rfc64SwmAuthorInventoryShadowStatusV1().failed).toBe(0);
-    expect(await agent.observeRfc64ConfirmedVmV1({ ...request, assertionCoordinate: seeded.assertionCoordinate,
-      assertionUri: 'urn:confirmed', ctx: createOperationContext('publish'), publicationLabel: 'queued publish' })).toBe(false);
+    await expect(agent.transferRfc64ConfirmedVmV1({ ...request, assertionCoordinate: seeded.assertionCoordinate,
+      assertionUri: 'urn:confirmed', ctx: createOperationContext('publish'), publicationLabel: 'queued publish' })).rejects.toMatchObject({ phase: 'inventory-maintenance', cause });
     expect(agent.rfc64SwmAuthorInventoryShadowStatusV1()).toMatchObject({ attemptedRemovals: 1, failed: 1 });
   });
 });

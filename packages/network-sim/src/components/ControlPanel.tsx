@@ -1,6 +1,8 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { SIMULATION_OPERATIONS, type SimOp } from '../simulation-protocol';
+import { useState, useCallback, useEffect } from 'react';
 import { useStore } from '../store';
 import * as api from '../api';
+import { useSimulationController } from '../hooks/use-simulation-controller';
 import { OP_COLORS, type OperationType } from '../types';
 
 type Tab = 'setup' | 'simulate' | 'sharedMemory' | 'publish' | 'query' | 'chat' | 'access' | 'stake' | 'fairswap' | 'conviction';
@@ -20,8 +22,9 @@ const MANUAL_TABS: { id: Tab; label: string; op: OperationType }[] = [
 const SIM_TAB: { id: Tab; label: string; op: OperationType } = { id: 'simulate', label: 'Simulate', op: 'connect' };
 
 export function ControlPanel() {
-  const { state, dispatch, addOperation, completeOperation } = useStore();
+  const { state, dispatch } = useStore();
   const [activeTab, setActiveTab] = useState<Tab>('publish');
+  const simulation = useSimulationController();
 
   return (
     <div className="control-panel">
@@ -69,7 +72,7 @@ export function ControlPanel() {
 
       <div className="tab-content">
         {activeTab === 'setup' && <SetupTab />}
-        {activeTab === 'simulate' && <SimulateTab />}
+        {activeTab === 'simulate' && <SimulateTab controller={simulation} />}
         {activeTab === 'sharedMemory' && <SharedMemoryTab />}
         {activeTab === 'publish' && <PublishTab />}
         {activeTab === 'query' && <QueryTab />}
@@ -238,162 +241,16 @@ function SetupTab() {
   );
 }
 
-type SimOp = 'publish' | 'workspace' | 'query' | 'chat';
+const SIM_OP_LABELS: Record<SimOp, string> = {
+  publish: 'Publish', query: 'Query', workspace: 'Shared Memory', chat: 'Chat',
+};
+const SIM_OPS = SIMULATION_OPERATIONS.map(id => ({ id, label: SIM_OP_LABELS[id] }));
 
-const SIM_OPS: { id: SimOp; label: string }[] = [
-  { id: 'publish', label: 'Publish' },
-  { id: 'workspace', label: 'Shared Memory' },
-  { id: 'query', label: 'Query' },
-  { id: 'chat', label: 'Chat' },
-];
-
-interface SimStats {
-  total: number;
-  completed: number;
-  errors: number;
-  startedAt: number;
-  finishedAt?: number;
-}
-
-function pickRandom<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
-
-function rndId(): string {
-  return Math.random().toString(36).slice(2, 8);
-}
-
-let simCounter = 0;
-
-function SimulateTab() {
-  const { state, dispatch, addBroadcast, addOperation, completeOperation } = useStore();
-  const [simName, setSimName] = useState(() => `Simulation #${++simCounter}`);
-  const [opCount, setOpCount] = useState(500);
-  const [opsPerSec, setOpsPerSec] = useState(10);
-  const [concurrency, setConcurrency] = useState(10);
-  const [kasPerPublish, setKasPerPublish] = useState(1);
-  const [contextGraphId, setContextGraphId] = useState('devnet-test');
-  const [enabledOps, setEnabledOps] = useState<Set<SimOp>>(new Set(['publish', 'workspace', 'query', 'chat']));
-  const [running, setRunning] = useState(false);
-  const [stats, setStats] = useState<SimStats | null>(null);
-  const eventSourceRef = useRef<EventSource | null>(null);
+function SimulateTab({ controller }: { controller: ReturnType<typeof useSimulationController> }) {
+  const { simName, setSimName, opCount, setOpCount, opsPerSec, setOpsPerSec, concurrency, setConcurrency,
+    kasPerPublish, setKasPerPublish, contextGraphId, setContextGraphId, enabledOps, toggleOp,
+    running, disconnected, failure, stats, runSimulation, stopSimulation } = controller;
   const contextGraphIds = useContextGraphIds();
-
-  const toggleOp = useCallback((op: SimOp) => {
-    setEnabledOps((prev) => {
-      const next = new Set(prev);
-      if (next.has(op)) {
-        if (next.size > 1) next.delete(op);
-      } else {
-        next.add(op);
-      }
-      return next;
-    });
-  }, []);
-
-  const runSimulation = useCallback(async () => {
-    const ops = Array.from(enabledOps);
-    const simId = `sim-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-
-    dispatch({
-      type: 'START_SIMULATION',
-      id: simId,
-      name: simName || `Simulation #${simCounter}`,
-      config: { opCount, opsPerSec, concurrency, kasPerPublish, contextGraphId, enabledOps: ops },
-    });
-
-    const simStats: SimStats = { total: opCount, completed: 0, errors: 0, startedAt: Date.now() };
-    setStats({ ...simStats });
-    setRunning(true);
-
-    try {
-      const res = await fetch('/sim/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: simName, opCount, opsPerSec, concurrency, kasPerPublish, contextGraph: contextGraphId, enabledOps: ops }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Unknown error' }));
-        simStats.errors = 1;
-        simStats.finishedAt = Date.now();
-        setStats({ ...simStats });
-        setRunning(false);
-        dispatch({ type: 'STOP_SIMULATION' });
-        return;
-      }
-    } catch {
-      setRunning(false);
-      dispatch({ type: 'STOP_SIMULATION' });
-      return;
-    }
-
-    const es = new EventSource('/sim/events');
-    eventSourceRef.current = es;
-
-    es.onmessage = (e) => {
-      try {
-        const event = JSON.parse(e.data);
-
-        if (event.type === 'op') {
-          if (simStats.finishedAt) return; // ignore late op events after done
-          const opType = event.opType as string;
-          const nodeId = event.nodeId as number;
-          const isBroadcast = opType === 'publish' || opType === 'workspace';
-          const opId = isBroadcast
-            ? addBroadcast(opType as any, nodeId, `sim ${opType}`)
-            : addOperation(opType as any, nodeId, `sim ${opType}`);
-          completeOperation(opId, event.success ? 'success' : 'error', event.detail);
-          dispatch({ type: 'RECORD_OP', opType, success: event.success, durationMs: event.durationMs, phases: event.phases });
-          simStats.completed++;
-          if (!event.success) simStats.errors++;
-          setStats({ ...simStats });
-        }
-
-        if (event.type === 'status') {
-          if (simStats.finishedAt) return;
-          simStats.completed = event.completed;
-          simStats.errors = event.errors;
-          setStats({ ...simStats });
-        }
-
-        if (event.type === 'done') {
-          simStats.completed = event.completed;
-          simStats.errors = event.errors;
-          simStats.finishedAt = Date.now();
-          setStats({ ...simStats });
-          es.close();
-          eventSourceRef.current = null;
-          setRunning(false);
-          dispatch({ type: 'STOP_SIMULATION' });
-          setSimName(`Simulation #${++simCounter}`);
-        }
-
-        if (event.type === 'error') {
-          simStats.errors++;
-          setStats({ ...simStats });
-        }
-      } catch { /* ignore parse errors */ }
-    };
-
-    es.onerror = () => {
-      es.close();
-      eventSourceRef.current = null;
-      if (running) {
-        simStats.finishedAt = Date.now();
-        setStats({ ...simStats });
-        setRunning(false);
-        dispatch({ type: 'STOP_SIMULATION' });
-      }
-    };
-  }, [opCount, opsPerSec, concurrency, contextGraphId, enabledOps, simName, kasPerPublish, addBroadcast, addOperation, completeOperation, dispatch]);
-
-  const stopSimulation = useCallback(async () => {
-    eventSourceRef.current?.close();
-    eventSourceRef.current = null;
-    await fetch('/sim/stop', { method: 'POST' }).catch(() => {});
-    dispatch({ type: 'STOP_SIMULATION' });
-    setRunning(false);
-  }, [dispatch]);
 
   const [, forceUpdate] = useState(0);
   useEffect(() => {
@@ -405,8 +262,8 @@ function SimulateTab() {
   const elapsed = stats
     ? ((stats.finishedAt ?? Date.now()) - stats.startedAt) / 1000
     : 0;
-  const actualOps = stats ? (stats.completed + stats.errors) : 0; // total finished (success + fail)
-  const pct = stats ? Math.min(100, Math.round((actualOps / stats.total) * 100)) : 0;
+  const succeeded = stats?.success ?? 0;
+  const pct = stats ? Math.min(100, Math.round((stats.completed / stats.total) * 100)) : 0;
 
   return (
     <div className="tab-form">
@@ -479,6 +336,8 @@ function SimulateTab() {
         {running ? 'Stop Simulation' : 'Play Simulation'}
       </button>
 
+      {failure && <div role="alert">{failure}</div>}
+      {running && disconnected && <div role="status">Connection lost. The server may still be running; reconnecting automatically. Use Stop Simulation to cancel.</div>}
       {stats && (
         <div className="sim-stats">
           <div className="sim-progress-bar">
@@ -489,7 +348,7 @@ function SimulateTab() {
           </div>
           <div className="sim-stats-grid">
             <div className="sim-stat">
-              <span className="sim-stat-value">{stats.completed}/{stats.total}</span>
+              <span className="sim-stat-value">{succeeded}/{stats.total}</span>
               <span className="sim-stat-label">succeeded</span>
             </div>
             <div className="sim-stat">
@@ -499,7 +358,7 @@ function SimulateTab() {
               <span className="sim-stat-label">errors</span>
             </div>
             <div className="sim-stat">
-              <span className="sim-stat-value">{elapsed > 0 ? (actualOps / elapsed).toFixed(1) : '0'}</span>
+              <span className="sim-stat-value">{elapsed > 0 ? (stats.completed / elapsed).toFixed(1) : '0'}</span>
               <span className="sim-stat-label">ops/sec</span>
             </div>
             <div className="sim-stat">
@@ -509,7 +368,7 @@ function SimulateTab() {
           </div>
           {stats.finishedAt && (
             <div className="sim-summary">
-              Simulation complete: {stats.completed} succeeded, {stats.errors} failed in {elapsed.toFixed(1)}s
+              Simulation complete: {succeeded} succeeded, {stats.errors} failed in {elapsed.toFixed(1)}s
             </div>
           )}
         </div>

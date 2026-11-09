@@ -445,7 +445,7 @@ describe('storage-owned exact graph profiles', () => {
     return { store, query };
   }
 
-  it('uses one bounded payload between count fences and keeps queries on decorators', async () => {
+  it('uses one bounded payload and a final count fence and keeps queries on decorators', async () => {
     const { store: innerStore, query } = httpStore([row]);
     const outerQuery = vi.fn((sparql: string, options?: QueryOptions) => innerStore.query(sparql, options));
     const store = { innerStore, query: outerQuery } as unknown as TripleStore;
@@ -455,11 +455,11 @@ describe('storage-owned exact graph profiles', () => {
       expectedQuadCount: 1, profile: 'bounded-single-result', outputGraph: '',
       queryOptions: { source: 'test.exact-profile', priority: 'background', signal },
     })).resolves.toEqual([quad]);
-    expect(outerQuery).toHaveBeenCalledTimes(3);
-    expect(query.mock.calls[1]![0]).toContain('LIMIT 2');
-    expect(query.mock.calls[1]![0]).not.toMatch(/ORDER BY|OFFSET/);
+    expect(outerQuery).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[0]![0]).toContain('LIMIT 2');
+    expect(query.mock.calls[0]![0]).not.toMatch(/ORDER BY|OFFSET/);
     expect(query.mock.calls.map(([, options]) => options?.maxResponseBytes)).toEqual([
-      64 * 1024, EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES, 64 * 1024,
+      EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES, 64 * 1024,
     ]);
     for (const [, options] of query.mock.calls) {
       expect(options).toMatchObject({ source: 'test.exact-profile', priority: 'background', signal });
@@ -478,7 +478,7 @@ describe('storage-owned exact graph profiles', () => {
     await expect(readExactGraph(count.store, graph, {
       expectedQuadCount: 1, profile,
     })).rejects.toMatchObject({ kind: 'integrity', code: 'INVALID_QUERY_RESULT' });
-    expect(count.query).toHaveBeenCalledTimes(1);
+    expect(count.query).toHaveBeenCalledTimes(profile === 'paged' ? 1 : 2);
   });
 
   it.each(profiles)('%s enforces caller row, UTF-8 and response ceilings', async (profile) => {
@@ -498,7 +498,8 @@ describe('storage-owned exact graph profiles', () => {
     for (const [, options] of query.mock.calls) expect(options?.maxResponseBytes).toBe(1024);
   });
 
-  it.each(profiles)('%s rejects preflight and postflight count races', async (profile) => {
+  it('keeps both count fences around paged reads', async () => {
+    const profile = 'paged';
     const before = httpStore([row], { counts: ['2'] });
     await expect(readExactGraph(before.store, graph, {
       expectedQuadCount: 1, profile,
@@ -543,9 +544,9 @@ describe('storage-owned exact graph profiles', () => {
     await expect(readExactGraph(store, graph, {
       expectedQuadCount: rows.length, profile: 'bounded-single-result',
     })).resolves.toHaveLength(rows.length);
-    expect(query.mock.calls.filter(([sparql]) => sparql.includes('COUNT(*)'))).toHaveLength(3);
+    expect(query.mock.calls.filter(([sparql]) => sparql.includes('COUNT(*)'))).toHaveLength(2);
     expect(query.mock.calls.filter(([sparql]) => sparql.includes('OFFSET'))).toHaveLength(2);
-    const raced = httpStore([row], { oversized: true, counts: ['1', '2'] });
+    const raced = httpStore([row], { oversized: true, counts: ['2'] });
     await expect(readExactGraph(raced.store, graph, {
       expectedQuadCount: 1, profile: 'bounded-single-result',
     })).rejects.toMatchObject({ code: 'QUAD_COUNT_MISMATCH', expected: 1, actual: 2 });
@@ -565,7 +566,7 @@ describe('storage-owned exact graph profiles', () => {
       expectedQuadCount: 1, profile: 'bounded-single-result', outputGraph: '',
     })).resolves.toEqual([{ subject: 'urn:root', predicate: 'urn:p', object: '_:document', graph: '' }]);
     expect(query.mock.calls.filter(([sparql]) => sparql.includes('CONSTRUCT'))).toHaveLength(1);
-    expect(query.mock.calls.filter(([sparql]) => sparql.includes('COUNT(*)'))).toHaveLength(3);
+    expect(query.mock.calls.filter(([sparql]) => sparql.includes('COUNT(*)'))).toHaveLength(2);
   });
 
   it('rejects a server ignoring the single-result overflow LIMIT', async () => {
@@ -576,7 +577,7 @@ describe('storage-owned exact graph profiles', () => {
     await expect(readExactGraph(store, graph, {
       expectedQuadCount: 1, profile: 'bounded-single-result',
     })).rejects.toMatchObject({ code: 'INVALID_QUERY_RESULT' });
-    expect(query).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(1);
   });
 });
 

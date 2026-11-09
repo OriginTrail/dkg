@@ -34,7 +34,7 @@ import {
   type SwmChangeNoticeDisposition,
   type SwmChangeRecipientPorts,
 } from './swm/shared-memory-change-notice.js';
-import { sharedMemoryFollowersOf } from './swm/shared-memory-followers.js';
+import { sharedMemoryFollowersOf, type SharedMemoryFollowers } from './swm/shared-memory-followers.js';
 import {
   checkRelayedShare,
   graphHasAllowlist,
@@ -272,6 +272,21 @@ export class SwmChangeNoticeMethods extends DKGAgentBase {
 
   swmChangeNotifierV1(this: DKGAgent): SwmChangeNotifier {
     return this.swmChangeNoticeOwnersV1().notifier;
+  }
+
+  /**
+   * Where a catalog-head replay request records its peer: the graph's
+   * followers. A peer the request made a follower goes to the notifier, which
+   * tells it of a recent change it may lack (after this node restarted, say).
+   */
+  swmCatalogHeadReplayFollowerPortsV1(this: DKGAgent): {
+    readonly followers: SharedMemoryFollowers;
+    readonly onNewFollower: (contextGraphId: string, peerId: string) => void;
+  } {
+    return {
+      followers: sharedMemoryFollowersOf(this),
+      onNewFollower: (contextGraphId, peerId) => this.swmChangeNotifierV1().afterNewFollower(contextGraphId, peerId),
+    };
   }
 
   swmChangeNoticeReceiverV1(this: DKGAgent): SwmChangeNoticeReceiver {

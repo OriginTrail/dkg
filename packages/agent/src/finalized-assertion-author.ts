@@ -28,7 +28,7 @@ function distinctAuthors(candidates: readonly string[]): string[] {
 
 /** Minimal structural view of the store this resolver needs. */
 export interface AssertionAuthorQueryStore {
-  query(sparql: string): Promise<{
+  query(sparql: string, options?: { source?: string }): Promise<{
     type: string;
     bindings?: ReadonlyArray<Record<string, string>>;
     quads?: ReadonlyArray<SealQuad>;
@@ -107,7 +107,7 @@ export async function resolveFinalizedAssertionAuthor(
         FILTER(STRSTARTS(STR(?s), "${escapeSparqlLiteral(prefix)}"))
         FILTER(STRENDS(STR(?s), "${escapeSparqlLiteral(suffix)}"))
       }
-    }`,
+    }`, { source: 'agent.assertionAuthor.scan' },
   );
   const subjects = subjectsResult.type === 'bindings'
     ? (subjectsResult.bindings ?? []).map((b) => b.s).filter((s): s is string => typeof s === 'string' && s.length > 0)
@@ -129,7 +129,7 @@ export async function resolveFinalizedAssertionAuthor(
       continue; // unsafe/corrupt subject IRI — cannot be a valid candidate
     }
     const rowsResult = await store.query(
-      `CONSTRUCT { <${safeSubject}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${safeSubject}> ?p ?o } }`,
+      `CONSTRUCT { <${safeSubject}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${safeSubject}> ?p ?o } }`, { source: 'agent.assertionAuthor.seal' },
     );
     const rows = rowsResult.type === 'quads' ? (rowsResult.quads ?? []) : [];
     const candidate = parseGraphScopedAssertionSealCandidate(rows, subject);

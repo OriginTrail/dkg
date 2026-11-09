@@ -7,40 +7,52 @@ doc_type: concept
 
 # Roadmap & Convergence
 
-DKG V10 is aimed at one problem: agents are producing knowledge faster than teams can preserve, share, and verify it. Proprietary assistant memories solve part of that problem for one product. DKG solves it as a shared network layer where memory is portable, graph-native, ownable, and verifiable.
+The DKG's direction is a network where people and agents can contribute knowledge, discover what others have learned, and combine those contributions into new insights. Shared graph knowledge and verifiable publication provide the foundation. Reasoning, graph learning, and distributed AI services expand what participants can do with it.
 
-## Why does it matter?
+## Knowledge that keeps becoming useful
 
-Multi-agent systems need a substrate where many agents can contribute without turning every claim into a verifiable truth. The DKG model separates drafting, collaboration, and finality:
+An agent's finding can become evidence for another agent's investigation. A collection of related findings can support a rule-based conclusion or become input to a learned model. Sharing the resulting knowledge lets that work continue across teams and applications.
 
-* Agents draft in Working Memory
-* Teams and swarms collaborate through Shared Working Memory
-* Selected knowledge becomes Verifiable Memory through on-chain publication
+The memory lifecycle gives participants control over this process:
 
-That makes DKG useful for research agents, coding agents, operational agents, and applications that need provenance instead of one-off chat history.
+* Working Memory holds drafts and work in progress.
+* Shared Working Memory lets teams and agents collaborate on knowledge.
+* Verifiable Memory anchors selected records on-chain so others can check their provenance and integrity.
+
+The opportunity grows as relevant contributions connect, while source quality, access policy, and evidence remain essential to the usefulness of the result.
 
 ## Four convergence areas
 
 <table><thead><tr><th width="230">Area</th><th>Direction</th></tr></thead><tbody><tr><td>DePIN infrastructure</td><td>Local nodes become agent hosts, query endpoints, and network participants.</td></tr><tr><td>Multi-agent memory</td><td>Agents use shared graph memory instead of isolated logs or vector-only stores.</td></tr><tr><td>DKG applications</td><td>Apps ground predictions, research, operations, and support in queryable Knowledge Assets.</td></tr><tr><td>Truth-seeking algorithms</td><td>Verification, conviction, and payment rails align publishers, stakers, and consumers.</td></tr></tbody></table>
 
-## Current public surface
+## Reasoning and learning over shared knowledge
 
-The current docs focus on the operational DKG V10 surface that users and agents can call today:
+The neuro-symbolic direction combines several ways of working with the graph:
 
-* node install and runtime setup
-* MCP, Hermes, and OpenClaw connection paths
-* Working Memory and Shared Working Memory Knowledge Assets
-* sharing from WM to SWM
-* Verifiable Memory publishing flows
-* Context Graph creation and subscription
-* peer discovery, relays, and P2P resilience
-* Publishing Conviction Account CLI/API routes
+| Capability | Contribution to an agent's work | Availability in these guides |
+| --- | --- | --- |
+| Graph queries and evidence retrieval | Follow known relationships and return inspectable source records | Exercised in the quickstart and integration recipes |
+| Symbolic graph reasoning | Apply explicit rules to derive conclusions and retain their supporting facts and derivation | Development direction for integrated reasoning workflows |
+| Graph neural networks (GNNs) and graph learning | Learn from connected data to rank candidates, predict relationships, and guide retrieval | Development direction for integrated graph-ML services |
+| Language and other AI models | Interpret requests, propose hypotheses, and explain evidence | Model/tool connections exist; capabilities depend on the selected runtime |
 
-## Roadmap surface
+These methods can work together. A GNN might identify a promising relationship, an agent could retrieve the relevant records, and a reasoner could evaluate an explicit rule over the available facts. The resulting prediction or derivation can be recorded with its inputs so another participant can assess it. Publication establishes provenance and integrity; evaluating the inference still depends on the inputs, method, and evidence.
 
-Some roadmap concepts are important to explain now because they shape the system vocabulary and bounty program, but they should not be confused with day-one operator commands.
+OriginTrail's [Verifiable Internet for AI whitepaper](https://origintrail.io/documents/Verifiable_Internet_for_Artificial_Intelligence_whitepaper_v3_pre_publication.pdf) places graph neural networks and neural-symbolic reasoning within the wider AI architecture. This is the architectural direction; individual services still need their own implementation and release evidence.
 
-<table><thead><tr><th width="205">Topic</th><th>Status in these docs</th></tr></thead><tbody><tr><td>Publisher conviction</td><td>Current concept with current PCA CLI/API surface.</td></tr><tr><td>Staker conviction</td><td>Contract-backed V10 economics concept; no public staker how-to is documented here yet.</td></tr><tr><td>Context oracles</td><td>Roadmap direction for consuming matured verifiable knowledge.</td></tr><tr><td>x402 paid access</td><td>Roadmap/payment integration direction; current protocol surfaces reserve payment-proof hooks.</td></tr><tr><td>Later bounty rounds</td><td>Planned and indicative unless the official bounty page says otherwise.</td></tr></tbody></table>
+## Knowledge and intelligence services across the network
+
+The public [NeuroSymbolic Marketplace RFC](https://github.com/OriginTrail/OT-RFC-repository/tree/main/RFCs/OT-RFC-27_NeuroSymbolic_Marketplace) proposes a network of query, reasoning, graph-ML, and inference services. Participants could combine knowledge and capabilities supplied by different nodes through a common service experience.
+
+The RFC reports prototype transactions for graph queries and model inference between separately operated peers. Those experiments demonstrate part of the path toward the proposed marketplace; the broader service and settlement design remains under development.
+
+## What you can build with now
+
+The builder journey covers WM/SWM workflows, explicit VM publication, Context Graphs, MCP/framework connections, Google OKF, and local-model integration. Connection capabilities differ: Prime Agent currently supplies chat transport without advertised primary-memory integration.
+
+Use [Feature availability](../references/availability.md) for reviewed baselines and recorded validation. Check `dkg --version`, the running node's status, and its served skill to match the instructions to your installation. The reasoning and GNN directions above describe where the architecture is going; the procedural guides describe the interfaces you can use in the reviewed release.
+
+Publisher conviction has a documented [PCA workflow](../use-dkg/publishing-conviction.md). Staking has its own [staking/migration guide](../active-now/staking-migration.md). Context-oracle and x402 concepts must not be inferred to have a complete operator workflow unless the installed contract and current guide supply one. Private planning documents inform development but are not a public API specification.
 
 ## Sequence
 

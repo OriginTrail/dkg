@@ -1,5 +1,5 @@
 import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
-import type { PeerSyncConnection } from '../p2p/peer-connection.js';
+import type { Libp2pConnection, PeerSyncConnection } from '../p2p/peer-connection.js';
 import { NetworkAdmissionProbeError } from '../p2p/network-admission-coordinator.js';
 import type { PeerSyncSession } from './peer-sync-session.js';
 
@@ -29,11 +29,7 @@ export interface PeerConnectionSyncContext {
 }
 
 /** The parts of a libp2p connection {@link isRedundantLimitedConnection} reads. */
-export interface OpenedConnectionView {
-  readonly id?: string;
-  readonly status?: string;
-  readonly limits?: unknown;
-}
+export type OpenedConnectionView = Pick<Libp2pConnection, 'id' | 'status' | 'limits'>;
 
 /**
  * A limited connection to a peer that already holds another open connection
@@ -51,9 +47,7 @@ export function isRedundantLimitedConnection(
   peerConnections: readonly OpenedConnectionView[],
 ): boolean {
   if (connection.limits == null) return false;
-  return peerConnections.some((other) => other !== connection
-    && (other.id === undefined || other.id !== connection.id)
-    && (other.status === undefined || other.status === 'open'));
+  return peerConnections.some((other) => other.id !== connection.id && other.status === 'open');
 }
 
 /** Connection policy belongs to sync; the generic lifetime owns only supervision. */
@@ -132,6 +126,25 @@ export async function syncOpenedPeerConnection(
     releaseCleanup();
     rejectCatalogReplay();
   }
+}
+
+/**
+ * Remember when the last live connection to a peer is gone. A3 keeps
+ * `lastSuccessfulSyncAt` and reconciler backoff across relay flaps, but
+ * the next `connection:open` must not suppress catch-up using a sync
+ * timestamp from before an offline gap. `lastSyncDisconnectedAt` is the
+ * boundary that distinguishes stale pre-disconnect success from a fresh
+ * sync in the current live session. Catalog replay uses the same boundary.
+ */
+export function syncClosedPeerConnection(input: Readonly<{
+  remotePeer: string;
+  localPeerId: string;
+  connectedPeers: readonly { toString(): string }[];
+  onLastConnectionClosed(remotePeer: string): void;
+}>): void {
+  if (input.remotePeer === input.localPeerId
+    || input.connectedPeers.some(peer => peer.toString() === input.remotePeer)) return;
+  input.onLastConnectionClosed(input.remotePeer);
 }
 
 /** Record the connection's way back through its relay; best-effort, so a failure is only logged. */

@@ -229,7 +229,9 @@ async function readExactGraphSingleResult(
     ...options.queryOptions,
     maxResponseBytes: Math.min(options.queryOptions?.maxResponseBytes ?? 64 * 1024, 64 * 1024),
   };
-  await verifyExactGraphCount(store, graph, expectedQuadCount, maxQuadCount, countOptions);
+  // The bounded SELECT validates the exact row count with an overflow sentinel.
+  // A separate preflight COUNT would repeat that check. Keep the postflight count
+  // to detect changes after the payload; fallback restarts with its own fences.
   const payload = await readBoundedGraphPayload(store, graph, {
     expectedQuadCount: expectedQuadCount!, outputGraph: options.outputGraph,
     queryOptions: options.queryOptions,

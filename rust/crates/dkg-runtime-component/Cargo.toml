@@ -9,10 +9,10 @@ rust-version.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
-dkg-runtime-codec.workspace = true
 dkg-runtime-types.workspace = true
-dkg-runtime-wasm.workspace = true
-minicbor.workspace = true
+dkg-runtime-executor.workspace = true
+dkg-strategy-compiler.workspace = true
+dkg-ir.workspace = true
 wit-bindgen.workspace = true
 
 [lints.rust]
