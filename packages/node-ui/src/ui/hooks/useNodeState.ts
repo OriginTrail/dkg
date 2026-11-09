@@ -28,8 +28,13 @@ export function useNodeStatusPolling() {
   const clearNodeStatusFailures = useAgentsStore((s) => s.clearNodeStatusFailures);
   const started = useRef(0);
   const answered = useRef(0);
-  // After unmount nothing counts.
-  useEffect(() => () => { answered.current = Infinity; }, []);
+  // Each setup ignores checks started before it, and after cleanup nothing
+  // counts. Strict Mode's setup, cleanup, setup replay then still leaves
+  // later checks counting. Declared before the poll, so it runs first.
+  useEffect(() => {
+    answered.current = started.current;
+    return () => { answered.current = Infinity; };
+  }, []);
 
   useVisibilityPolling(() => {
     const check = ++started.current;
