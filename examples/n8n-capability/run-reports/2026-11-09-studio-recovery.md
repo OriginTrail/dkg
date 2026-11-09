@@ -67,6 +67,6 @@ pnpm run test:types
 ```
 
 Root lint still reports three pre-existing unused declarations in
-`jpb-plca-mapped.ts`. The base review also identifies expired platform-test
-exception annotations. These checks, the other open #3427/#3446 review findings,
+`jpb-plca-mapped.ts`. The disabled-test audit reports five expired platform-test
+exception annotations in three existing test files (zero new findings). These checks, the other open #3427/#3446 review findings,
 independent review and deployed qualification are not cleared by this evidence.
