@@ -222,8 +222,11 @@ export interface LandedGroup extends ReceiptsLanded {
  * hash of each speed-up before that is broadcast.
  */
 export interface ReceiptBatchSendOptions {
-  /** Awaited once the batch is signed, before it is broadcast, with the wallet and nonce it took; a throw sends nothing. */
-  onBroadcast?: (signal: PreBroadcastSignal & { wallet: string }) => Promise<void> | void;
+  /**
+   * Awaited once the batch is signed, before it is broadcast, with the wallet and nonce it took and the signed
+   * transaction, which `rebroadcastReceiptBatch` can send again; a throw sends nothing.
+   */
+  onBroadcast?: (signal: PreBroadcastSignal & { wallet: string; signedTx: string }) => Promise<void> | void;
   /** Awaited before each same-nonce replacement of a stuck batch is broadcast; a throw sends no replacement. */
   onBeforeReplacementBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void;
 }
@@ -361,6 +364,11 @@ export interface MarketplaceChain {
    * batch that is mined and reverts rejects with `receipt.status` 0.
    */
   submitReceiptBatch?(groups: ReceiptGroup[], opts?: ReceiptBatchSendOptions): Promise<ReceiptBatch>;
+  /**
+   * Send a batch's signed transaction again, as `onBroadcast` was given it: the same hash and nonce, so it lands
+   * at most once. One the network already holds is no error; its outcome is read with `getReceiptBatchOutcome`.
+   */
+  rebroadcastReceiptBatch?(signedTx: string): Promise<void>;
   getReceiptBatchOutcome?(txHash: string): Promise<ReceiptBatchOutcome>;
   /**
    * The groups landed for the subscription (`ReceiptsLanded`, its id indexed),
