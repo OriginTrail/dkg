@@ -154,3 +154,86 @@ test('authenticated JPB write checks its digest before dispatch and verifies exa
       env: { ...process.env, NOS_STUDIO_SESSION_FILE: sessionFile(f.dir), NOS_JPB_WORKBOOK_INPUT_FILE: f.file } }).trim(), 'verified');
   } finally { f.close(); }
 });
+
+for (const scenario of [
+  { name: 'rejects a literal calculated claim over an uncalculated result', raw: { calculated: false, total: null }, mapped: { calculated: true, total: 999 }, reject: true },
+  { name: 'rejects a literal replacement of a calculated assessment', raw: { calculated: true, total: 7 }, mapped: { calculated: true, total: 900 }, reject: true },
+  { name: 'accepts a genuine calculated assessment', raw: { calculated: true, total: 7 } },
+  { name: 'accepts a presentation mapping that preserves the assessment and records', raw: { calculated: true, total: 7 }, project: true },
+  { name: 'preserves a genuine uncalculated assessment', raw: { calculated: false, total: null } },
+  { name: 'rejects a legacy mapped-only journal without raw output', raw: { calculated: true, total: 7 }, legacy: true, reject: true },
+]) test(`JPB calculated evidence ${scenario.name}`, async () => {
+  const f = fixture(), workbook = rows(), id = randomUUID(), calls = [], writes = [];
+  const flags = ['NOS_JPB_READ_ENABLED', 'NOS_JPB_PROGRAM_ENABLED', 'NOS_JPB_WRITE_ENABLED'];
+  const old = flags.map(key => process.env[key]);
+  let db;
+  try {
+    flags.forEach(key => { process.env[key] = '1'; });
+    f.write(workbook);
+    const profile = await load(f.file);
+    const block = (id, componentId) => ({ id, componentId,
+      params: Object.fromEntries(Object.entries(profileParameters(profile, componentId)).map(([key, value]) => [key, value.default])) });
+    const read = block('read', 'dkg-read'), invoke = block('invoke', 'invoke-dkg-program'), write = block('write', 'dkg-write');
+    invoke.params.program = 'JPB PLCA - Calculate mapped demo v1.0.0';
+    invoke.params.inputs = [{ records: [{ erp: '{{ $json[0].erp[0] }}', workbook: '{{ $json[0].workbook[0] }}' }] }];
+    invoke.params.outputMapping = scenario.mapped || scenario.project
+      ? { records: '{{ $json[0].records }}', assessment: scenario.mapped ?? '{{ $json[0].assessment }}', display: 'presentation only' }
+      : '{{ $json[0] }}';
+    const workflow = { kaRef: 'urn:test:calculated-evidence', sourceHash: 'a'.repeat(64), definition: {
+      entryId: 'read', nodes: [read, invoke, write], edges: [{ from: 'read', to: 'invoke' }, { from: 'invoke', to: 'write' }] } };
+    const input = { itemsJson: JSON.stringify([{ workbook }]), paramsJson: '{}', executionId: '' };
+    const request = (blockId, items) => ({ blockId, items, effectId: `urn:sr:effect:${id}:0`, workflowId: 'native', executionId: '42' });
+    const records = ['CUT', 'USILU', 'EBAVM'].map(operationCode => ({ operationCode, orderNo: '62633',
+      recordId: 'urn:test:' + operationCode, evidence: { contextGraphId: JPB_SOURCE } }));
+    let remoteOutputs;
+    const transport = async (payload, operation) => {
+      calls.push(operation);
+      if (operation === 'read') return { records, source: { contextGraphId: JPB_SOURCE } };
+      if (operation === 'invoke') {
+        remoteOutputs = [{ records: payload.inputs[0].records, assessment: scenario.raw }];
+        return { invocationId: payload.invocationId, executionIri: 'urn:sr:execution:' + payload.invocationId,
+          operationIri: payload.selected.operationIri, sourceHash: payload.selected.program.sourceHash,
+          bindingDigest: payload.selected.bindingDigest, outputs: remoteOutputs };
+      }
+      assert.equal(operation, 'write'); writes.push(payload);
+      return { contextGraphId: profile.targetGraph, digest: payload.digest, name: payload.name,
+        readbackVerified: true, metadata: { status: 'wm-sealed', reservedUal: 'urn:test:calculated-evidence' } };
+    };
+    const file = join(f.dir, 'calculation.sqlite'); db = new DatabaseSync(file);
+    let store = dkgComponentStore(db, transport, undefined, profile);
+    store.grant(workflow, id, input);
+    const source = await store.call(request('read', JSON.parse(input.itemsJson)), workflow, 'native');
+    const result = await store.call(request('invoke', source.items), workflow, 'native');
+    assert.deepEqual(Object.keys(result), ['items'], 'raw verification data stays inside the journal');
+    const journal = JSON.parse(db.prepare('SELECT result FROM dkg_component_calls WHERE id=?').get(id + ':invoke').result);
+    if (scenario.legacy) {
+      delete journal.rawOutputs;
+      db.prepare('UPDATE dkg_component_calls SET result=? WHERE id=?').run(JSON.stringify(journal), id + ':invoke');
+    }
+    db.close(); db = new DatabaseSync(file);
+    store = dkgComponentStore(db, transport, undefined, profile);
+    assert.deepEqual(await store.call(request('invoke', source.items), workflow, 'native'), result);
+    if (scenario.reject) {
+      await assert.rejects(store.call(request('write', result.items), workflow, 'native'), /verified Program output/);
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM dkg_component_writes').get().n, 0);
+      assert.deepEqual(calls, ['read', 'invoke']);
+      return;
+    }
+    const receipt = await store.call(request('write', result.items), workflow, 'native');
+    assert.deepEqual(journal.rawOutputs, remoteOutputs);
+    assert.deepEqual(receipt.items[0].assessment, scenario.raw);
+    assert.equal(receipt.items[0].plcaCalculated, scenario.raw.calculated);
+    const payload = JSON.parse(JSON.parse(writes[0].quads.find(q => q.predicate === 'urn:nos:workflow:payload').object));
+    assert.deepEqual(payload.assessment, scenario.raw);
+    assert.deepEqual(payload.records, remoteOutputs[0].records);
+    assert.equal(payload.plcaCalculated, scenario.raw.calculated);
+    assert.equal(payload.programExecution.executionIri, result.items[0].programExecution.executionIri);
+    assert.ok(writes[0].quads.some(q => q.predicate === 'http://www.w3.org/ns/prov#wasGeneratedBy'
+      && q.object === result.items[0].programExecution.executionIri));
+    assert.deepEqual(await store.call(request('write', result.items), workflow, 'native'), receipt);
+    assert.deepEqual(calls, ['read', 'invoke', 'write']);
+  } finally {
+    db?.close(); f.close();
+    flags.forEach((key, i) => { if (old[i] === undefined) delete process.env[key]; else process.env[key] = old[i]; });
+  }
+});

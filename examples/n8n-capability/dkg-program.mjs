@@ -25,12 +25,15 @@ export function programResult(result, request) {
     || result.sourceHash !== selected.program.sourceHash || result.bindingDigest !== selected.bindingDigest
     || result.executionIri !== 'urn:sr:execution:' + invocationId || !Array.isArray(result.outputs))
     throw new Error('The remote Program receipt does not match this pinned invocation.');
-  return { items: programRecords([{
-    result: resolveComponentValue(request.outputMapping, result.outputs),
+  // Keep receipt-verified outputs independent of the workflow's presentation mapping.
+  const rawOutputs = structuredClone(result.outputs);
+  programRecords([{ outputs: rawOutputs }]);
+  return { rawOutputs, items: programRecords([{
+    result: resolveComponentValue(request.outputMapping, rawOutputs),
     programExecution: { node: selected.node, contextGraphId: selected.contextGraphId,
       operationIri: selected.operationIri, programIri: selected.program.programIri,
       version: selected.version, sourceHash: selected.program.sourceHash,
       bindingDigest: selected.bindingDigest, invocationId, executionIri: result.executionIri,
-      outputSha256: createHash('sha256').update(JSON.stringify(result.outputs)).digest('hex') },
+      outputSha256: createHash('sha256').update(JSON.stringify(rawOutputs)).digest('hex') },
   }]) };
 }

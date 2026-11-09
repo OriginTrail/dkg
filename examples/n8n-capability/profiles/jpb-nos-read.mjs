@@ -1,9 +1,18 @@
 import { createHash } from 'node:crypto';
-import { iriValue, literalValue } from '../../../packages/cli/dist/semantic-runtime-values.js';
+import { iriValue } from '../../../packages/cli/dist/semantic-runtime-values.js';
+import { parseRdfLiteralTerm } from '../../../packages/rdf-utils/dist/index.js';
 const graph = "0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-data";
 const snapshot = "urn:dmaast:jpb:trace:snapshot:6876805538656718c1b000b3b141edeccbef8465076ee8f81d4c7ac95d46591a";
 const selected = ["urn:dmaast:jpb:trace:record:bf97e8ad8bb03b08c855013bfde5d8b4371f76458adfb1aef8da298f25e4bfda", "urn:dmaast:jpb:trace:record:cbf0c0755a087cc12b70234e7e9a8d3ea88d4bd75c822cf12de230962665ec2e", "urn:dmaast:jpb:trace:record:3789e86fc7cc194875b600483ee6930267f262959f5a36ebe8d94b3912ed7906"];
 const fail = message => { throw new Error(message); };
+// Adapt query binding shapes; rdf-utils owns RDF escaping and suffix grammar.
+const literalValue = value => {
+  if (value == null) return null;
+  if (typeof value === 'object' && typeof value.value === 'string') return value.value;
+  const literal = typeof value === 'string' && parseRdfLiteralTerm(value, { combineSurrogatePairs: true });
+  if (!literal) fail('Invalid JPB RDF literal binding.');
+  return literal.value;
+};
 export async function readJpbThroughNos(call, payload) {
   if (payload.orderNo !== '62633' || Object.keys(payload).length !== 1) fail('Reviewed order required.');
   const prefix = 'did:dkg:context-graph:' + graph + '/_working_memory/0xf77258a965ba13adc77bca85da7c6a287272959a/';

@@ -63,6 +63,13 @@ datatypes and language tags. Typed and language-tagged evidence can reconcile an
 uncertain write without creating another asset; changed types or tags are refused.
 The generic runtime verifies Program invocation/source/binding receipts and write
 scope/digest/sealed status/readback. Its journal is written before dispatch.
+After a verified Program response, the journal retains `rawOutputs` separately
+from the workflow's mapped `items`. Only mapped items are returned to n8n.
+The evidence hook receives the journal's raw outputs as `programOutput.rawOutputs`;
+profiles must derive attested values from those outputs, not presentation mappings.
+JPB requires the mapped assessment and records to match the single verified raw
+result and its output digest. Literal substitutions are rejected before Write;
+presentation fields outside the assessment and records do not become evidence.
 
 `test-support/measurement-profile.mjs` exercises another data shape, node, graph,
 Program and output without changing the runtime. It uses an injected test
@@ -88,6 +95,10 @@ Program outputs and write retries cannot cross profiles. Legacy journal entries
 without a profile binding fail closed. Reconcile any pending legacy execution with
 its original runtime before switching; do not restart it under a new identity to
 work around an ambiguous write.
+Mapped-only Program journals lack the proof needed for a new calculated JPB write.
+They are rejected rather than treating their mapped assessment as a verified result.
+The updated JPB evidence policy changes the profile revision, so installation and
+saved workflows must explicitly adopt the new revision as described above.
 
 This remains one operator-selected profile per companion. Existing account/owner
 checks remain unchanged. Multi-account routing, automatic node discovery and new

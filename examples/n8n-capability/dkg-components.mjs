@@ -175,7 +175,7 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
         "This DKG step already belongs to different inputs or native execution.",
       );
     if (active.has(key)) return active.get(key);
-    if (node.componentId === 'invoke-dkg-program' && prior?.result) return JSON.parse(prior.result);
+    if (node.componentId === 'invoke-dkg-program' && prior?.result) return { items: JSON.parse(prior.result).items };
     if (node.componentId === "dkg-read" && prior?.result)
       return { items: profile.readItems(rows, JSON.parse(prior.result), node) };
     const pending = (async () => {
@@ -188,7 +188,7 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
         const request = programRequest(node, rows, id, profile);
         const result = programResult(await transport(request, 'invoke', { actor }), request);
         db.prepare('UPDATE dkg_component_calls SET result=? WHERE id=?').run(JSON.stringify(result), key);
-        return result;
+        return { items: result.items };
       }
       if (node.componentId === "dkg-read") {
         const result = await transport(profile.readRequest(node, rows, input), 'read', { actor });
@@ -222,8 +222,9 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
         const incoming = definition.edges.find(e => e.to === node.id);
         const invoked = definition.nodes.find(n => n.id === incoming?.from && n.componentId === 'invoke-dkg-program');
         const completed = invoked && db.prepare('SELECT result FROM dkg_component_calls WHERE id=?').get(id + ':' + invoked.id);
-        if (!completed?.result || !isDeepStrictEqual(JSON.parse(completed.result).items, rows)) throw fail('Program output differs from this execution.');
-        programOutput = rows[0];
+        const confirmed = completed?.result && JSON.parse(completed.result);
+        if (!confirmed || !isDeepStrictEqual(confirmed.items, rows)) throw fail('Program output differs from this execution.');
+        programOutput = { ...confirmed.items[0], rawOutputs: confirmed.rawOutputs };
       }
       const savedWrite = db.prepare('SELECT * FROM dkg_component_writes WHERE id=?').get(key);
       const evidence = savedWrite ? JSON.parse(savedWrite.evidence)

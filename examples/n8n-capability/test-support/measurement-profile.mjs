@@ -29,9 +29,12 @@ export default {
     return result.measurements;
   },
   evidence(rows, context, read, input, programOutput) {
-    const records = programOutput ? programOutput.result.samples : rows;
+    const calculated = programOutput?.rawOutputs?.[0];
+    if (programOutput && (programOutput.rawOutputs?.length !== 1 || !calculated || !isDeepStrictEqual(programOutput.result, calculated)))
+      throw new Error('verified Program output mismatch');
+    const records = programOutput ? calculated.samples : rows;
     if (!isDeepStrictEqual(records, read.measurements)) throw new Error('provenance mismatch');
-    const value = { kind: 'Measurements', records, execution: context.executionIri, result: programOutput?.result.sum ?? null };
+    const value = { kind: 'Measurements', records, execution: context.executionIri, result: calculated?.sum ?? null };
     const payload = JSON.stringify(value), digest = createHash('sha256').update(payload).digest('hex');
     return { payload: { digest, name: 'samples-' + digest,
       quads: [{ subject: 'urn:test:' + digest, predicate: 'urn:test:payload', object: JSON.stringify(payload), graph: '' }] },

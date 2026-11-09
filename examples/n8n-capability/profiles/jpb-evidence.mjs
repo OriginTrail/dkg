@@ -11,6 +11,16 @@ export function verifyJpbEvidence(payload) {
     throw fail('JPB evidence digest differs.');
 }
 export function componentEvidence(rows, context, read, workbook, programOutput) {
+  let assessment;
+  if (programOutput) {
+    const raw = programOutput.rawOutputs;
+    if (!Array.isArray(raw) || raw.length !== 1 || !raw[0]?.assessment
+      || createHash('sha256').update(JSON.stringify(raw)).digest('hex') !== programOutput.programExecution.outputSha256
+      || !isDeepStrictEqual(rows, raw[0].records)
+      || !isDeepStrictEqual(programOutput.result?.assessment, raw[0].assessment))
+      throw fail('Calculated evidence must preserve the verified Program output assessment and records.');
+    assessment = raw[0].assessment;
+  }
   if (
     !Array.isArray(rows) ||
     !rows.length ||
@@ -35,8 +45,8 @@ export function componentEvidence(rows, context, read, workbook, programOutput) 
     kind: programOutput ? 'PLCADemoResult' : "PLCAInputEvidence",
     interpretation: "planned-routing-reference-only",
     allocationStatus: "unconfirmed",
-    plcaCalculated: programOutput?.result?.assessment?.calculated === true,
-    ...(programOutput ? { assessment: programOutput.result.assessment, programExecution: programOutput.programExecution } : {}),
+    plcaCalculated: assessment?.calculated === true,
+    ...(programOutput ? { assessment, programExecution: programOutput.programExecution } : {}),
     execution: { ...context, status: "running-at-write" },
     source: read.source,
     records: rows,
