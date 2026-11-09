@@ -25,10 +25,10 @@ export { AssertionsList } from './assertions.js';
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
 
-const TRUST_BADGE_CONFIG: Record<TrustLevel, { layerKey: 'wm' | 'swm' | 'vm'; icon: ReactNode; label: string }> = {
-  working:  { layerKey: 'wm',  icon: <LayerGlyph layer="wm" />, label: 'Working'  },
-  shared:   { layerKey: 'swm', icon: <LayerGlyph layer="swm" />, label: 'Shared'   },
-  verified: { layerKey: 'vm',  icon: <LayerGlyph layer="vm" />, label: 'Verifiable' },
+const TRUST_BADGE_CONFIG: Record<TrustLevel, { layerKey: 'wm' | 'swm' | 'vm'; label: string }> = {
+  working:  { layerKey: 'wm',  label: 'Working'  },
+  shared:   { layerKey: 'swm', label: 'Shared'   },
+  verified: { layerKey: 'vm',  label: 'Verifiable' },
 };
 
 const QUERY_CATALOG_CONFIGURATION_TYPES = new Set([
@@ -44,7 +44,7 @@ export function isQueryCatalogConfigurationEntity(entity: MemoryEntity): boolean
 export function EntityList({
   entities,
   layerKey,
-  layerIcon,
+  emptyIcon,
   onSelectEntity,
   onOpenAgent,
   externallySorted = false,
@@ -55,7 +55,8 @@ export function EntityList({
 }: {
   entities: MemoryEntity[];
   layerKey: 'wm' | 'swm' | 'vm';
-  layerIcon: ReactNode;
+  /** The empty state's icon, when it isn't the layer's own glyph (a sub-graph's icon). */
+  emptyIcon?: ReactNode;
   onSelectEntity: (uri: string) => void;
   onOpenAgent?: (uri: string) => void;
   /** Skip the internal triple-count sort — caller already ordered `entities`. */
@@ -72,7 +73,7 @@ export function EntityList({
   timestampPredicate?: string;
   /** When true, render the trailing trust badge from each entity's own
    *  `trustLevel` (cross-layer view — e.g. Subgraph Explorer detail).
-   *  When false (default), every row uses `layerKey`/`layerIcon` (the
+   *  When false (default), every row uses `layerKey` (the
    *  WM/SWM/VM layer-tab convention). */
   perEntityTrustBadge?: boolean;
 }) {
@@ -98,7 +99,7 @@ export function EntityList({
         <EmptyState
           compact
           tone={toneForLayer(layerKey)}
-          icon={layerIcon}
+          icon={emptyIcon ?? <LayerGlyph layer={layerKey} />}
           title={`No ${layerNoun(layerKey, 2).toLowerCase()} yet`}
           description={`This view will fill when matching ${layerNoun(layerKey, 2).toLowerCase()} are available.`}
         />
@@ -284,7 +285,7 @@ export function LayerContent({
               <EmptyState
                 compact
                 tone="vm"
-                icon={LAYER_CONFIG.vm.icon}
+                icon={<LayerGlyph layer="vm" />}
                 title="Verifiable Memory status unavailable."
                 description="This node could not read the verified layer right now."
               />
@@ -303,7 +304,6 @@ export function LayerContent({
               <EntityList
                 entities={entities}
                 layerKey={layer}
-                layerIcon={config.icon}
                 onSelectEntity={onSelectEntity}
               />
             </>
@@ -400,7 +400,7 @@ export function VerifiableMemoryHeroBanner({ entities, vmTriples, contextGraphId
           compact
           className="v10-vm-empty-state"
           tone="vm"
-          icon={LAYER_CONFIG.vm.icon}
+          icon={<LayerGlyph layer="vm" />}
           title="No Knowledge Assets yet."
           description="Publish complete Knowledge Assets from Shared Working Memory to verify them on-chain."
         />
@@ -472,7 +472,7 @@ export function LayerDetailView({
   return (
     <div className="v10-layer-detail">
       <div className="v10-layer-detail-header">
-        <span className="v10-layer-detail-icon" style={{ color: LAYER_VAR[config.trustLevel] }}>{config.icon}</span>
+        <span className="v10-layer-detail-icon" style={{ color: LAYER_VAR[config.trustLevel] }}><LayerGlyph layer={layer} /></span>
         <div>
           <div className="v10-layer-detail-title">{config.title}</div>
           <div className="v10-layer-detail-desc">{config.desc}</div>
