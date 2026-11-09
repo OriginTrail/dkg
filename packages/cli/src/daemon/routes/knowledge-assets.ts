@@ -96,6 +96,7 @@ import {
   respondCatalogPublicationAdmissionError,
   respondPromoteRecoveryError,
   respondAmbiguousAssertionAuthor,
+  respondAuthorNotContextGraphMember,
   respondAuthorSelectionError,
   respondPublicationPricingPolicyError,
   respondRetryablePublishAuthorityError,
@@ -1589,6 +1590,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // "is not finalized" as a generic VM_PUBLISH_PRECONDITION.
         if (respondCatalogPublicationAdmissionError(res, e)) return;
         if (respondPublicationPricingPolicyError(res, e)) return;
+        if (respondAuthorNotContextGraphMember(res, e)) return;
         if (respondAuthorSelectionError(res, e)) return;
         if (respondIfStoreUnavailable(res, e)) return;
         // GH#2958 — the finalized version is not the next publishable one (the async lane maps
