@@ -72,7 +72,8 @@ describe('async promote admission under store pressure (#3331)', () => {
       jobId = result.error.jobId;
     } finally { delay.release(); }
     await tick();
-    expect((await queue.list()).map(job => job.jobId)).toEqual([jobId!]);
+    expect((await queue.list()).map(job => ({ jobId: job.jobId, state: job.state })))
+      .toEqual([{ jobId: jobId!, state: 'queued' }]);
   });
 
   it('expires during conflict lookup and never admits later after the caller has a no-admission verdict', async () => {
