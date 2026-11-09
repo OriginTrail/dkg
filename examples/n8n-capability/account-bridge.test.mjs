@@ -262,7 +262,7 @@ test('account bridge denies unauthorized runs and journals the authenticated own
     const result = await request(bridge, prefix + '/run', 'POST', headers, value);
     assert.equal(result.status, 200, JSON.stringify(result.body)); assert.equal(result.body.readbackVerified, true);
     assert.equal(f.invocations.length, 1); assert.equal(f.invocations[0].invocationId, invocationId);
-    assert.deepEqual(JSON.parse(f.repository.db.prepare('SELECT actor FROM dkg_component_actors WHERE id=?').get(invocationId).actor),
+    assert.deepEqual(JSON.parse(f.repository.db.prepare('SELECT actor FROM dkg_component_runs WHERE id=?').get(invocationId).actor),
       { id: 'owner-one', accountId, role: 'owner' });
     const changedActor = await request(bridge, prefix + '/run', 'POST', { ...headers, 'x-nos-workflows-principal': 'owner-two' }, value);
     assert.notEqual(changedActor.status, 200); assert.equal(f.invocations.length, 1);

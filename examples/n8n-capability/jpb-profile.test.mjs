@@ -20,7 +20,7 @@ function fixture() {
 function sessionFile(dir) {
   const secretFile = join(dir, 'secret'), file = join(dir, 'session.json');
   writeFileSync(secretFile, 'fictional-profile-test-service-secret', { mode: 0o600 });
-  writeFileSync(file, JSON.stringify({ accountId: 'test-account', controlPlaneUrl: 'http://127.0.0.1:4610', secretFile }));
+  writeFileSync(file, JSON.stringify({ accountId: 'test-account', controlPlaneUrl: 'http://127.0.0.1:4610', runnerBindingRevision: 'test-runner-v1', secretFile }));
   return file;
 }
 async function load(file) {
