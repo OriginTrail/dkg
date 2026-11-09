@@ -88,7 +88,7 @@ describe('the gateway routes', () => {
 
   beforeEach(async () => {
     gateway = new Gateway({
-      chain, buyerWallet: SIGNER.address, store: buyer!.store, keys: new AccessKeys(dir), dir,
+      chain, buyerWallet: SIGNER.address, store: buyer!.store, keys: new AccessKeys(dir),
       router: new Router({ chain, offers: async () => [], quote: async () => { throw new Error('no sellers'); } }),
       send: async () => { throw new Error('no sellers'); },
     });
@@ -166,7 +166,7 @@ describe('the catalog routes', () => {
       provenance: 'upstream-claimed', peerId: 'seller-peer', signedAt: 1,
     })];
     gateway = new Gateway({
-      chain, buyerWallet: SIGNER.address, store: buyer!.store, keys: new AccessKeys(dir), dir,
+      chain, buyerWallet: SIGNER.address, store: buyer!.store, keys: new AccessKeys(dir),
       router: new Router({ chain, offers: async () => offers, quote: async () => { throw new Error('no sellers'); } }),
       send: async () => { throw new Error('no sellers'); },
     });

@@ -86,7 +86,7 @@ async function setUp(turns?: { waitingPerKey: number; calls: number }): Promise<
   })];
   keys = new AccessKeys(join(dir, 'buyer'));
   gateway = new Gateway({
-    chain, buyerWallet: NODE.address, store, keys, dir: join(dir, 'buyer'),
+    chain, buyerWallet: NODE.address, store, keys,
     router: new Router({ chain, offers: async () => offers, quote: async (_peer, services) => seller.quote({ services }) as Promise<QuoteResponse> }),
     send: async (_peer, payload) => {
       sends++;
