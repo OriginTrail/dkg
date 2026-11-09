@@ -24,8 +24,13 @@ const xsd = 'http://www.w3.org/2001/XMLSchema#';
 
 function fixture(representation = 'binding-objects') {
   const iri = value => representation === 'binding-objects' ? { type: 'uri', value } : value;
-  const literal = (value, datatype) => representation === 'binding-objects' ? { type: 'literal', value, datatype }
-    : JSON.stringify(value) + (representation === 'language-literals' ? '@fr' : `^^<${datatype}>`);
+  const literal = (value, datatype) => {
+    if (representation === 'binding-objects') return { type: 'literal', value, datatype };
+    const encoded = JSON.stringify(value);
+    if (representation === 'plain-literals') return encoded;
+    if (representation === 'escaped-unicode') return encoded.replaceAll('É', '\\u00c9').replaceAll('🛠', '\\ud83d\\udee0') + `^^<${datatype}>`;
+    return encoded + (representation === 'language-literals' ? '@fr' : `^^<${datatype}>`);
+  };
   const rows = selected.map((recordVersion, i) => ({ recordVersion: iri(recordVersion),
     recordJson: literal(JSON.stringify({ table: 'GAMME', source: { organisation: 'JPB' }, fields: {
       COFRAIS: operations[i], NAF: '62633', PARTNUMBER: 'fictional-part', PHASE: String(i + 1), GA_DES: description,
@@ -51,7 +56,7 @@ function editRecord(row, change) {
   const record = JSON.parse(row.recordJson.value); change(record); row.recordJson.value = JSON.stringify(record);
 }
 
-for (const representation of ['binding-objects', 'typed-literals', 'language-literals', 'null-date'])
+for (const representation of ['binding-objects', 'plain-literals', 'typed-literals', 'escaped-unicode', 'language-literals', 'null-date'])
   test(`actual SSH reader decodes the complete pinned selection (${representation})`, () => {
     const result = run(fixture(representation));
     assert.equal(result.ok, true, result.message);
@@ -63,6 +68,8 @@ for (const representation of ['binding-objects', 'typed-literals', 'language-lit
     assert.deepEqual(scope, { contextGraphId: graph, view: 'working-memory', includeContextGraphPartitions: true });
     assert.deepEqual([...sparql.matchAll(/GRAPH <([^>]+)>/g)].map(m => m[1]), ['4085', '14902', '4081', '17347'].map(id => prefix + id));
     assert.deepEqual([...sparql.matchAll(/VALUES \?recordVersion \{ <([^>]+)> \}/g)].map(m => m[1]), selected);
+    assert.deepEqual([...sparql.matchAll(/GRAPH <([^>]+)> \{ VALUES \?recordVersion \{ <([^>]+)> \}/g)].map(m => m.slice(1)),
+      selected.map((id, i) => [prefix + ['4085', '14902', '4081'][i], id]));
     assert.ok(sparql.includes(`VALUES ?snapshot { <${snapshot}> }`));
     assert.match(sparql, /SELECT DISTINCT \?recordVersion \?recordJson \?logicalRecord \?snapshot \?sourceEvidence \?evidenceCapturedAt WHERE/);
     assert.match(sparql, /\?snapshot d:hasRecord \?recordVersion; d:supportedBy \?evidenceVersion/);
@@ -85,6 +92,12 @@ test('actual SSH reader accepts a complete selection in a different response ord
   const value = fixture(); value.response.result.bindings.reverse();
   const result = run(value); assert.equal(result.ok, true, result.message);
   assert.deepEqual(result.result.records.map(row => row.recordId), [...selected].reverse());
+});
+
+test('actual SSH reader rejects duplicate bare record IRIs with distinct operations', () => {
+  const value = fixture('plain-literals'), rows = value.response.result.bindings;
+  rows[1].recordVersion = rows[0].recordVersion;
+  refused(run(value));
 });
 
 for (const [name, change] of [
@@ -116,6 +129,11 @@ for (const [name, change, paths] of [
 
 test('actual SSH reader refuses malformed record JSON without returning evidence', () => {
   const value = fixture(); value.response.result.bindings[0].recordJson.value = '{malformed';
+  refused(run(value), completePath, 'JSONDecodeError');
+});
+
+test('actual SSH reader refuses malformed RDF literals without returning evidence', () => {
+  const value = fixture('typed-literals'); value.response.result.bindings[0].recordJson = '"unterminated';
   refused(run(value), completePath, 'JSONDecodeError');
 });
 
