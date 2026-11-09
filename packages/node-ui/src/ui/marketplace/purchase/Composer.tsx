@@ -4,9 +4,9 @@
 // next); the source, the buyer wallet or an account, with its discount; and
 // renewal. The node's dry run says what it would cost and what it would
 // refuse. Nothing here is sent to a seller.
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { copy } from '../copy.generated.js';
-import { marketplaceApi, needsNodeAdmin } from '../api/client.js';
+import { needsNodeAdmin } from '../api/client.js';
 import type { CatalogAnswer, Funding, FundingRequest, Offer, Preview, Service, ServiceRequest, SourceRequest } from '../api/types.js';
 import { fmtCount, fmtMicro, fmtTrac, modelName, unitsOf, usdOf, weiOfMicro, weiOfTrac } from '../amounts.js';
 import { ErrorCard, refusalKey, relAt, sellerName } from '../shared.js';
@@ -52,28 +52,6 @@ function bestPrice(s: Service, l: Line, epoch: 'current' | 'next'): bigint | nul
   const cap = weiOfMicro(l.capMicro) ?? 0n;
   const prices = s.offers.filter((o) => (l.pinned === null || o.seller === l.pinned) && o.available !== false).map((o) => priceIn(o, epoch)).filter((p) => p <= cap);
   return prices.length ? prices.reduce((a, b) => (a < b ? a : b)) : null;
-}
-
-/** The node's dry run of the draft, kept fresh as it changes. */
-export function usePreview(draft: Draft, catalog: CatalogAnswer, enabled: boolean): { preview: Preview | null; err: unknown; busy: boolean } {
-  const [preview, setPreview] = useState<Preview | null>(null);
-  const [err, setErr] = useState<unknown>(null);
-  const [busy, setBusy] = useState(false);
-  const services = servicesOf(draft, catalog);
-  const key = JSON.stringify(services ? fundingRequestOf(draft, services) : null);
-  useEffect(() => {
-    if (!enabled || !services) { setPreview(null); setErr(null); return undefined; }
-    let live = true;
-    setBusy(true);
-    const t = setTimeout(() => {
-      marketplaceApi.preview(fundingRequestOf(draft, services))
-        .then((p) => { if (live) { setPreview(p); setErr(null); } })
-        .catch((e: unknown) => { if (live) { setPreview(null); setErr(e); } })
-        .finally(() => { if (live) setBusy(false); });
-    }, 250);
-    return () => { live = false; clearTimeout(t); };
-  }, [key, enabled]);   // eslint-disable-line react-hooks/exhaustive-deps
-  return { preview, err, busy };
 }
 
 /** The dry run's answer in one line: the cost from the source, or what the node would refuse. */

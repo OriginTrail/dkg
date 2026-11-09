@@ -1,7 +1,8 @@
 // One confirmation: every number on this card is the node's dry run of the
-// draft (its epoch, source, value, cost and discount), beside the budgets and
-// caps the operator set, the buyer wallet that sends the funding and its ETH
-// for gas, and how the plan renews. Cancel, or Confirm.
+// request it lists (its epoch, source, value, cost and discount), beside the
+// budgets and caps of that request, the buyer wallet that sends the funding
+// and its ETH for gas, and how the plan renews. Cancel, or Confirm, which
+// sends that same request.
 import React from 'react';
 import { copy } from '../copy.generated.js';
 import type { CatalogAnswer, Funding, Preview, ServiceRequest } from '../api/types.js';

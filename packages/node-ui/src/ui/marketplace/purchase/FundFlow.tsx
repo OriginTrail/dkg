@@ -6,13 +6,27 @@
 import React, { useState } from 'react';
 import { copy } from '../copy.generated.js';
 import { marketplaceApi } from '../api/client.js';
-import type { CatalogAnswer, FundedAnswer, Funding } from '../api/types.js';
+import type { CatalogAnswer, FundedAnswer, Funding, FundingRequest, Preview } from '../api/types.js';
 import { fmtHex, fmtTrac } from '../amounts.js';
 import { ErrorCard } from '../shared.js';
-import { Composer, PreviewLine, fundingRequestOf, servicesOf, usePreview, type Draft } from './Composer.js';
+import { Composer, PreviewLine, fundingRequestOf, servicesOf, type Draft } from './Composer.js';
 import { ConfirmGate } from './ConfirmGate.js';
 import { KeyStep } from './KeyStep.js';
 import { ProgressSteps } from './ProgressSteps.js';
+import { usePreview } from './usePreview.js';
+
+/**
+ * What the confirmation shows and what Confirm sends, fixed when Continue is
+ * pressed: the request the node's dry run answered, that answer, and how the
+ * plan renews.
+ */
+interface Confirming {
+  request: FundingRequest;
+  /** The dry run of `request`; null when the flow only saves the plan. */
+  preview: Preview | null;
+  renew: boolean;
+  renewUntil: number | null;
+}
 
 export function FundFlow({ catalog, funding, initial, fundsEpoch, onboarding, onDone, onCancel, endsAt }: {
   catalog: CatalogAnswer;
@@ -26,30 +40,45 @@ export function FundFlow({ catalog, funding, initial, fundsEpoch, onboarding, on
 }): React.ReactElement {
   const [draft, setDraft] = useState<Draft>(initial);
   const [phase, setPhase] = useState<'compose' | 'confirm' | 'done'>('compose');
+  const [confirming, setConfirming] = useState<Confirming | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<unknown>(null);
   const [funded, setFunded] = useState<FundedAnswer | null>(null);
   const [planErr, setPlanErr] = useState<unknown>(null);
-  const { preview, err: previewErr, busy: previewBusy } = usePreview(draft, catalog, fundsEpoch);
   const services = servicesOf(draft, catalog);
+  const request = services ? fundingRequestOf(draft, services) : null;
+  // While a changed draft's dry run loads, the last answer stays on show; only the draft's own answer opens Continue.
+  const dryRun = usePreview(fundsEpoch ? request : null, (r) => marketplaceApi.preview(r), { retain: 'last' });
+  const shown = dryRun.shown?.preview ?? null;
   const renewUntil = Number(draft.renewUntil);
   const renewOk = !draft.renew || (Number.isInteger(renewUntil) && renewUntil >= catalog.epoch);
-  const continueKey = !services ? 'composer.empty' : !renewOk ? 'composer.renew.invalid' : fundsEpoch && preview?.refusal ? 'composer.refused' : null;
+  const continueKey = !services ? 'composer.empty' : !renewOk ? 'composer.renew.invalid' : fundsEpoch && shown?.refusal ? 'composer.refused' : null;
+  const canContinue = !!request && !continueKey && (!fundsEpoch || !!dryRun.current);
 
-  const savePlan = () => marketplaceApi.savePlan({ services: services!, source: draft.source, renew: draft.renew, ...(draft.renew ? { renewUntilEpoch: renewUntil } : {}) });
+  const toConfirm = () => {
+    if (!canContinue || !request) return;
+    const answered = fundsEpoch ? dryRun.current : null;
+    setConfirming({ request: answered?.request ?? request, preview: answered?.preview ?? null, renew: draft.renew, renewUntil: draft.renew ? renewUntil : null });
+    setPhase('confirm');
+  };
+
+  const savePlan = (c: Confirming) => marketplaceApi.savePlan({
+    services: c.request.services, source: c.request.source, renew: c.renew, ...(c.renew && c.renewUntil !== null ? { renewUntilEpoch: c.renewUntil } : {}),
+  });
 
   // Funding goes out once: a retry after it was sent only saves the plan again.
   const confirm = async () => {
-    if (!services || busy) return;
+    const c = confirming;
+    if (!c || busy) return;
     setBusy(true); setErr(null);
     let sent = funded;
     try {
-      if (fundsEpoch && !sent) { sent = await marketplaceApi.fund(fundingRequestOf(draft, services)); setFunded(sent); }
+      if (fundsEpoch && !sent) { sent = await marketplaceApi.fund(c.request); setFunded(sent); }
     } catch (e) {
       setErr(e); setBusy(false); return;
     }
     try {
-      await savePlan();
+      await savePlan(c);
       setPlanErr(null);
     } catch (e) {
       setBusy(false);
@@ -61,12 +90,13 @@ export function FundFlow({ catalog, funding, initial, fundsEpoch, onboarding, on
     else onDone();
   };
   const retryPlan = () => {
-    if (busy) return;
+    if (busy || !confirming) return;
     setBusy(true);
-    savePlan().then(() => setPlanErr(null)).catch(setPlanErr).finally(() => setBusy(false));
+    savePlan(confirming).then(() => setPlanErr(null)).catch(setPlanErr).finally(() => setBusy(false));
   };
 
   const step = phase === 'done' ? 3 : 2;
+  const confirmed = confirming?.preview ?? null;
   return (
     <div className="mkt-flow" data-testid="mkt-fund-flow" data-phase={phase}>
       {onboarding && <ProgressSteps step={step} sub={phase === 'confirm' ? (busy ? 'sending' : 'confirm') : null} />}
@@ -74,25 +104,26 @@ export function FundFlow({ catalog, funding, initial, fundsEpoch, onboarding, on
         <>
           <Composer catalog={catalog} funding={funding} draft={draft} onChange={setDraft} fundsEpoch={fundsEpoch} endsAt={endsAt} />
           <div className="mkt-card" data-testid="mkt-compose-actions">
-            {fundsEpoch && <PreviewLine preview={preview} err={previewErr} busy={previewBusy} />}
+            {fundsEpoch && <PreviewLine preview={shown} err={dryRun.err} busy={dryRun.busy} />}
             <div className="mkt-fork">
               {onCancel && <button type="button" className="mkt-btn" data-copy="gate.cancel" onClick={onCancel}>{copy('gate.cancel')}</button>}
               <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-compose-continue" data-copy="composer.continue"
-                disabled={!!continueKey || (fundsEpoch && !preview)} title={continueKey ? copy(continueKey) : undefined} onClick={() => setPhase('confirm')}>{copy('composer.continue')}</button>
+                disabled={!canContinue} title={continueKey ? copy(continueKey) : fundsEpoch && dryRun.busy ? copy('composer.preview.updating') : undefined}
+                onClick={toConfirm}>{copy('composer.continue')}</button>
               {continueKey && <span className="mkt-muted mkt-xs" data-copy={continueKey}>{copy(continueKey)}</span>}
             </div>
           </div>
         </>
       )}
-      {phase === 'confirm' && services && (
-        <ConfirmGate catalog={catalog} funding={funding} preview={preview} services={services} fundsEpoch={fundsEpoch}
-          renew={draft.renew} renewUntil={draft.renew ? renewUntil : null} busy={busy} err={err}
-          onConfirm={() => { void confirm(); }} onCancel={() => { setErr(null); setPhase('compose'); }} />
+      {phase === 'confirm' && confirming && (
+        <ConfirmGate catalog={catalog} funding={funding} preview={confirmed} services={confirming.request.services} fundsEpoch={fundsEpoch}
+          renew={confirming.renew} renewUntil={confirming.renewUntil} busy={busy} err={err}
+          onConfirm={() => { void confirm(); }} onCancel={() => { setErr(null); setConfirming(null); setPhase('compose'); }} />
       )}
       {phase === 'done' && (
         <>
           <div className="mkt-notice" role="status" data-testid="mkt-funded">
-            <strong data-copy="flow.funded">{copy('flow.funded', { n: funded?.subscription?.epoch ?? preview?.epoch ?? catalog.epoch, trac: fmtTrac(funded?.subscription?.value ?? preview?.value ?? '0') })}</strong>{' '}
+            <strong data-copy="flow.funded">{copy('flow.funded', { n: funded?.subscription?.epoch ?? confirmed?.epoch ?? catalog.epoch, trac: fmtTrac(funded?.subscription?.value ?? confirmed?.value ?? '0') })}</strong>{' '}
             {funded && <span className="mkt-muted mkt-xs mkt-mono" data-copy="flow.tx">{copy('flow.tx', { tx: fmtHex(funded.txHash), block: funded.blockNumber })}</span>}
           </div>
           {planErr ? (
@@ -102,7 +133,7 @@ export function FundFlow({ catalog, funding, initial, fundsEpoch, onboarding, on
             </ErrorCard>
           ) : null}
           {onboarding
-            ? <KeyStep budgetTrac={fmtTrac(funded?.subscription?.value ?? preview?.value ?? '0')} onPlans={onDone} />
+            ? <KeyStep budgetTrac={fmtTrac(funded?.subscription?.value ?? confirmed?.value ?? '0')} onPlans={onDone} />
             : <div className="mkt-fork"><button type="button" className="mkt-btn" data-copy="ctl.done" onClick={onDone}>{copy('ctl.done')}</button></div>}
         </>
       )}

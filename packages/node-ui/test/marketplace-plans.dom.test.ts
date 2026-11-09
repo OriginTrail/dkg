@@ -18,6 +18,36 @@ function recordWrites(scenario: 'active' | 'none'): Array<{ method: string; url:
   return writes;
 }
 
+/** The fixture node, keeping each write, with dry runs held back while `hold` is on until `release()`. */
+function holdDryRuns(scenario: 'active' | 'none') {
+  const writes: Array<{ method: string; url: string; body: unknown }> = [];
+  const held: Array<{ body: unknown; answer: () => void }> = [];
+  const node = fixtureFetch(scenario);
+  const control = {
+    writes,
+    hold: false,
+    /** How many dry runs are waiting. */
+    get waiting() { return held.length; },
+    /** Answer the held dry runs, newest first when `newestFirst`. */
+    release(newestFirst = false) {
+      const out = held.splice(0);
+      for (const h of newestFirst ? out.reverse() : out) h.answer();
+    },
+  };
+  vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method ?? 'GET';
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+    if (method !== 'GET') writes.push({ method, url: String(input), body });
+    if (control.hold && String(input).endsWith('/subscriptions/preview')) {
+      return new Promise<Response>((resolve) => { held.push({ body, answer: () => resolve(node(input, init)) }); });
+    }
+    return node(input, init);
+  });
+  return control;
+}
+
+const fundings = (writes: Array<{ method: string; url: string }>) => writes.filter((w) => w.method === 'POST' && w.url === '/api/marketplace/subscriptions');
+
 describe('marketplace Plans', () => {
   afterEach(unmountAll);
 
@@ -120,6 +150,96 @@ describe('marketplace Plans', () => {
     expect(byTestId(c, 'mkt-plan-unsaved')).toBeNull();
     expect(sent.filter((x) => x === 'POST /api/marketplace/subscriptions')).toHaveLength(1);
     expect(sent.filter((x) => x === 'PUT /api/marketplace/plan')).toHaveLength(2);
+  });
+
+  it('holds Continue while a changed budget\'s dry run is pending, and funds only what the shown dry run answered', async () => {
+    const node = holdDryRuns('none');
+    const c = await render(plans());
+    await waitForText(c, 'Compose your plan');
+    await click(byTestId(c, `mkt-pick-${FIXTURE_IDS.qwen14b}`));
+    await click(byTestId(c, 'mkt-source-7'));
+    await flush(300);
+    await waitForText(c, 'Costs 0.9 TRAC from account 7 for epoch 664: 1 TRAC of service, 10% off');
+    const continueBtn = () => byTestId(c, 'mkt-compose-continue') as HTMLButtonElement;
+    expect(continueBtn().disabled).toBe(false);
+
+    // The budget changes to 50 TRAC; its dry run stays pending.
+    node.hold = true;
+    await type(byTestId(c, `mkt-value-${FIXTURE_IDS.qwen14b}`), '50');
+    await flush(300);
+    expect(node.waiting).toBe(1);
+    expect(byTestId(c, 'mkt-preview')?.textContent).toContain('1 TRAC of service');
+    expect(continueBtn().disabled).toBe(true);
+    await click(continueBtn());
+    expect(byTestId(c, 'mkt-fund-flow')?.getAttribute('data-phase')).toBe('compose');
+    expect(byTestId(c, 'mkt-confirm-gate')).toBeNull();
+    expect(byTestId(c, 'mkt-gate-confirm')).toBeNull();
+    expect(fundings(node.writes)).toEqual([]);
+
+    // The matching dry run comes back: it is shown, and only now can it be accepted.
+    node.hold = false;
+    node.release();
+    await waitForText(c, 'Costs 45 TRAC from account 7 for epoch 664: 50 TRAC of service, 10% off');
+    expect(fundings(node.writes)).toEqual([]);
+    await click(continueBtn());
+    expect(byTestId(c, 'mkt-gate-total')?.textContent).toContain('50 TRAC of service · costs 45 TRAC');
+    expect(byTestId(c, 'mkt-gate-lines')?.textContent).toContain('50 TRAC');
+    await click(byTestId(c, 'mkt-gate-confirm'));
+    await waitForText(c, 'Epoch 664 is funded with 50 TRAC');
+    const sent = fundings(node.writes);
+    expect(sent.map((w) => w.body)).toEqual([{ epoch: 'current', source: { kind: 'account', accountId: '7' }, services: [{ serviceId: FIXTURE_IDS.qwen14b, serviceClass: 'inference', value: '50000000000000000000', maxPricePerUnit: '700000000000' }] }]);
+    const lastDryRun = node.writes.map((w) => w.url).lastIndexOf('/api/marketplace/subscriptions/preview');
+    expect((node.writes[lastDryRun].body as { services: Array<{ value: string }> }).services[0].value).toBe('50000000000000000000');
+    expect(node.writes.indexOf(sent[0])).toBeGreaterThan(lastDryRun);
+  });
+
+  it('holds Continue while a changed source\'s dry run is pending, and confirms that source', async () => {
+    const node = holdDryRuns('none');
+    const c = await render(plans());
+    await waitForText(c, 'Compose your plan');
+    await click(byTestId(c, `mkt-pick-${FIXTURE_IDS.qwen14b}`));
+    await flush(300);
+    await waitForText(c, 'Costs 1 TRAC from the buyer wallet for epoch 664');
+    node.hold = true;
+    await click(byTestId(c, 'mkt-source-7'));
+    await flush(300);
+    expect(node.waiting).toBe(1);
+    expect(byTestId(c, 'mkt-preview')?.textContent).toContain('from the buyer wallet');
+    expect((byTestId(c, 'mkt-compose-continue') as HTMLButtonElement).disabled).toBe(true);
+    await click(byTestId(c, 'mkt-compose-continue'));
+    expect(byTestId(c, 'mkt-confirm-gate')).toBeNull();
+    node.hold = false;
+    node.release();
+    await waitForText(c, 'Costs 0.9 TRAC from account 7 for epoch 664');
+    await click(byTestId(c, 'mkt-compose-continue'));
+    expect(byTestId(c, 'mkt-gate-source')?.textContent).toContain('account 7');
+    expect(byTestId(c, 'mkt-gate-total')?.textContent).toContain('costs 0.9 TRAC');
+    await click(byTestId(c, 'mkt-gate-confirm'));
+    await waitForText(c, 'Epoch 664 is funded with 1 TRAC');
+    expect(fundings(node.writes).map((w) => (w.body as { source: unknown }).source)).toEqual([{ kind: 'account', accountId: '7' }]);
+  });
+
+  it('drops a late dry run of an earlier budget', async () => {
+    const node = holdDryRuns('none');
+    const c = await render(plans());
+    await waitForText(c, 'Compose your plan');
+    node.hold = true;
+    await click(byTestId(c, `mkt-pick-${FIXTURE_IDS.qwen14b}`));
+    await flush(300);
+    await type(byTestId(c, `mkt-value-${FIXTURE_IDS.qwen14b}`), '2');
+    await flush(300);
+    expect(node.waiting).toBe(2);
+    // The 2 TRAC answer arrives first, then the 1 TRAC one, late.
+    node.hold = false;
+    node.release(true);
+    await waitForText(c, 'Costs 2 TRAC from the buyer wallet for epoch 664');
+    await flush(50);
+    expect(byTestId(c, 'mkt-preview')?.textContent).toContain('Costs 2 TRAC');
+    await click(byTestId(c, 'mkt-compose-continue'));
+    expect(byTestId(c, 'mkt-gate-total')?.textContent).toContain('2 TRAC of service · costs 2 TRAC');
+    await click(byTestId(c, 'mkt-gate-confirm'));
+    await waitForText(c, 'Epoch 664 is funded with 2 TRAC');
+    expect(fundings(node.writes).map((w) => (w.body as { services: Array<{ value: string }> }).services[0].value)).toEqual(['2000000000000000000']);
   });
 
   it('shows the dry run\'s refusal and holds the confirmation back', async () => {
