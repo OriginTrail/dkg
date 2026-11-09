@@ -80,7 +80,9 @@ async function waitForAssertion(assertion: () => void): Promise<void> {
 
 describe('PanelRight component', () => {
   afterEach(() => vi.unstubAllGlobals());
-  beforeEach(() => {
+  beforeEach(async () => {
+    // Conversations live in a store that outlives the panel, so each test starts clean.
+    (await import('../src/ui/stores/agentConversations.js')).resetAgentConversations();
     vi.clearAllMocks();
     fetchContextGraphsMock.mockImplementation(async () => {
       const { useProjectsStore } = await import('../src/ui/stores/projects.js');

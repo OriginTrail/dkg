@@ -52,6 +52,7 @@ import {
 import type { AgentInfo, ConnectionRow, LocalAgentAttachmentDraft, LocalAgentAttachmentStatus, LocalAgentMessage, LocalAgentSessionSummary } from './types.js';
 import { useLayoutStore } from '../../../stores/layout.js';
 import { Maximize2, Minimize2 } from 'lucide-react';
+import { useConversationField } from '../../../stores/agentConversations.js';
 
 export function PanelRight() {
   const { stage, advance } = useJourneyStore();
@@ -76,11 +77,13 @@ export function PanelRight() {
   const [refreshBusyId, setRefreshBusyId] = useState<string | null>(null);
   const [clearBusyId, setClearBusyId] = useState<string | null>(null);
 
-  const [localMessagesByConversation, setLocalMessagesByConversation] = useState<Record<string, LocalAgentMessage[]>>({});
-  const [localInputByConversation, setLocalInputByConversation] = useState<Record<string, string>>({});
-  const [localSendingByConversation, setLocalSendingByConversation] = useState<Record<string, boolean>>({});
-  const [localHistoryLoadedByConversation, setLocalHistoryLoadedByConversation] = useState<Record<string, boolean>>({});
-  const [attachmentDraftsByConversation, setAttachmentDraftsByConversation] = useState<Record<string, LocalAgentAttachmentDraft[]>>({});
+  // Conversations outlive the panel: it unmounts when closed, and drafts,
+  // queued files, messages and sends in flight are still there when it opens.
+  const [localMessagesByConversation, setLocalMessagesByConversation] = useConversationField('messages');
+  const [localInputByConversation, setLocalInputByConversation] = useConversationField('inputs');
+  const [localSendingByConversation, setLocalSendingByConversation] = useConversationField('sending');
+  const [localHistoryLoadedByConversation, setLocalHistoryLoadedByConversation] = useConversationField('historyLoaded');
+  const [attachmentDraftsByConversation, setAttachmentDraftsByConversation] = useConversationField('attachmentDrafts');
 
   // AbortControllers keyed by `conversationKey` so the stop-button on
   // conversation A always aborts A's in-flight request and never B's.

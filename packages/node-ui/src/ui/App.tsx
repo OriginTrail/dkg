@@ -6,7 +6,6 @@ import { PanelCenter } from './components/Shell/PanelCenter.js';
 import { PanelBottom } from './components/Shell/PanelBottom.js';
 import { PanelRight } from './components/Shell/PanelRight.js';
 import { ContextGraphDialogs } from './components/Shell/ContextGraphDialogs.js';
-import { PanelVisibleContext } from './components/common/PanelVisibility.js';
 import { useLayoutStore, useShellPanels, maxBottomHeight } from './stores/layout.js';
 import { useTabsStore } from './stores/tabs.js';
 import { chooseTab as openTab } from './lib/shellNavigation.js';
@@ -73,21 +72,12 @@ function useDragResize(onDrag: (delta: number) => void, axis: 'x' | 'y') {
   return useCallback((node: HTMLDivElement | null) => setHandle(node), []);
 }
 
-/** True from the first render where `value` is true, and from then on. */
-function useOnceTrue(value: boolean): boolean {
-  const seen = useRef(false);
-  if (value) seen.current = true;
-  return seen.current;
-}
-
 function AppShell() {
   useNodeStatusPolling();
   useKeyboardShortcuts();
   useShellRouting();
   const { bottomCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
   const { narrow, leftOpen, rightOpen } = useShellPanels();
-  const leftMounted = useOnceTrue(narrow || leftOpen);
-  const rightMounted = useOnceTrue(narrow || rightOpen);
   const closeNarrowPanel = useLayoutStore((s) => s.closeNarrowPanel);
   // Resizing past the breakpoint shows the page, not a floating panel. Navigation does the
   // same in useShellRouting. The create and join dialogs belong to the shell
@@ -171,17 +161,17 @@ function AppShell() {
         {narrow && (leftOpen || rightOpen) && (
           <button type="button" className="v10-panel-scrim" aria-label="Close panel" onClick={closeNarrowPanel} />
         )}
-        {/* Once a side panel has mounted it stays mounted, hidden while closed, so
-            closing it, a resize or opening the other panel keeps what's in it
-            (a chat draft, queued files, a form). */}
-        {leftMounted && (
-          <div className="v10-panel-left" role="complementary" aria-label="Context Graphs and node" style={{ width: leftWidth }} hidden={!leftOpen}>
-            <PanelVisibleContext.Provider value={leftOpen}>
+        {/* A closed side panel unmounts, so its polling and listeners stop. What
+            must outlive it lives in the shell: the Context Graph dialogs
+            (ContextGraphDialogs) and agent conversations (stores/agentConversations). */}
+        {leftOpen && (
+          <>
+            <div className="v10-panel-left" role="complementary" aria-label="Context Graphs and node" style={{ width: leftWidth }}>
               <PanelLeft />
-            </PanelVisibleContext.Provider>
-          </div>
+            </div>
+            <div className="v10-resize-handle-h" ref={leftHandle} />
+          </>
         )}
-        {leftOpen && <div className="v10-resize-handle-h" ref={leftHandle} />}
 
         <div className="v10-center-region" style={{ flex: 1, minWidth: 0, display: expanded ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
@@ -191,13 +181,13 @@ function AppShell() {
           <PanelBottom />
         </div>
 
-        {rightOpen && !expanded && <div className="v10-resize-handle-h" ref={rightHandle} />}
-        {rightMounted && (
-          <div id="agents-panel" tabIndex={-1} className="v10-panel-right" role="complementary" aria-label="Agents" style={expanded ? { flex: 1, minWidth: 0 } : { width: rightWidth }} hidden={!rightOpen}>
-            <PanelVisibleContext.Provider value={rightOpen}>
+        {rightOpen && (
+          <>
+            {!expanded && <div className="v10-resize-handle-h" ref={rightHandle} />}
+            <div id="agents-panel" tabIndex={-1} className="v10-panel-right" role="complementary" aria-label="Agents" style={expanded ? { flex: 1, minWidth: 0 } : { width: rightWidth }}>
               <PanelRight />
-            </PanelVisibleContext.Provider>
-          </div>
+            </div>
+          </>
         )}
       </div>
     </div>
