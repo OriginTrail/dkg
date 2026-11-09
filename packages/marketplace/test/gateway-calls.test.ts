@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import {
   MockChainAdapter,
+  hashQueryInferenceReceipt,
   marketplaceChainOf,
   subscriptionIdOf,
   type MarketplaceChainAdapter,
@@ -37,6 +38,7 @@ import {
   Seller,
   decodeMessage,
   encodeMessage,
+  receiptFromWire,
   serviceIdOf,
   signServiceOffer,
   type AccessKey,
@@ -440,5 +442,59 @@ describe('calls that hold their bound (re-review)', () => {
     expect((await records()).map((r) => r.state)).toEqual(['open', 'held']);
     expect(gateway.heldValue(subscriptionId, 0)).toBe(COST);
     expect(keys.reservedOf(caller.key.keyId)).toBe(0n);
+  });
+});
+
+describe("a receipt's time", () => {
+  it.each([
+    ['after its request expired', 2 ** 39],
+    ['before its request was issued', 0],
+  ])('refuses a receipt its seller signed but completed %s, which could never land, and counts the call at its bound', async (_when, completedAt) => {
+    await setUp();
+    const { epoch } = await chain.getEpochTimes();
+    const domain = (await chain.getMarketplaceContracts()).requestDomain;
+    tamper = (a) => {
+      if (!a.ok) return a;
+      const receipt = { ...a.receipt, completedAt };
+      // Signed again by the seller's operational key, so only its time is wrong.
+      return { ...a, receipt, receiptSignature: NODE.signingKey.sign(hashQueryInferenceReceipt(domain, receiptFromWire(receipt))).serialized };
+    };
+    expect(await call()).toMatchObject({ status: 502, body: { error: { code: 'bad_receipt' }, problem: 'outside_time' } });
+    tamper = undefined;
+    // The seller is out for the epoch, the key is not charged, and the call holds its most value.
+    expect(await call()).toMatchObject({ status: 503, body: { error: { code: 'no_seller' } } });
+    expect((await keys.list())[0]!.spent).toBe('0');
+    expect(keys.reservedOf(caller.key.keyId)).toBe(MOST);
+    expect(gateway.heldValue(subscriptionIdOf(NODE.address, epoch), 0)).toBe(MOST);
+  });
+});
+
+describe('an answer that is not one', () => {
+  it("of null counts as no answer, toward its seller's bound of unsettled calls", async () => {
+    await setUp();
+    const { epoch } = await chain.getEpochTimes();
+    tamper = () => null as unknown as ServeResponse;
+    // The seller stays reachable, so only the bound takes it out of routing.
+    vi.spyOn(deps.router, 'unreachable').mockImplementation(() => {});
+    for (let i = 0; i < MAX_UNSETTLED_PER_SELLER; i++) {
+      expect(await call()).toMatchObject({ status: 503, body: { error: { code: 'seller_unreachable' } } });
+    }
+    expect(await call()).toMatchObject({ status: 503, body: { error: { code: 'no_seller' } } });
+    expect(gateway.heldValue(subscriptionIdOf(NODE.address, epoch), 0)).toBe(BigInt(MAX_UNSETTLED_PER_SELLER) * MOST);
+    expect((await gateway.activity()).calls[0]).toMatchObject({ state: 'held', problem: 'unanswered', value: String(MOST) });
+  });
+
+  it('with a receipt that does not read as one is refused, and stays refused at its most value through a restart', async () => {
+    await setUp();
+    const { epoch } = await chain.getEpochTimes();
+    tamper = (a) => (a.ok ? { ...a, receipt: { anything: 1 } } as unknown as ServeResponse : a);
+    expect(await call()).toMatchObject({ status: 502, body: { error: { code: 'bad_receipt' }, problem: 'malformed' } });
+    const kept = JSON.parse((await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').at(-1)!);
+    expect(kept).toMatchObject({ state: 'refused', problem: 'malformed', receipt: { anything: 1 } });
+    // Kept as its seller sent it, it is read back as kept: refused, never a receipt to land.
+    await restart();
+    expect(gateway.heldValue(subscriptionIdOf(NODE.address, epoch), 0)).toBe(MOST);
+    expect(keys.reservedOf(caller.key.keyId)).toBe(MOST);
+    expect((await gateway.activity()).calls).toMatchObject([{ state: 'held', problem: 'malformed', value: String(MOST) }]);
   });
 });

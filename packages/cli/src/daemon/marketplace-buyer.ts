@@ -33,7 +33,6 @@ import {
   resolveMarketplaceConfig,
   type BuyerAlert,
   type MarketplaceConfig,
-  type QuoteResponse,
 } from '@origintrail-official/dkg-marketplace';
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import type { DkgConfig } from '../config.js';
@@ -123,9 +122,10 @@ export async function startMarketplaceGateway(options: MarketplaceGatewayOptions
   const router = new Router({
     chain: buyer.chain,
     offers,
+    // The router reads the answer as a quote.
     quote: async (peerId, services) => decodeMessage(await agent.sendMarketplaceMessage(peerId, 'quote', encodeMessage({ services }), {
       timeoutMs: PEER_LIMITS.quoteTimeoutMs, maxReadBytes: PEER_LIMITS.quoteResponseBytes,
-    })) as QuoteResponse,
+    })),
     pinned: async (serviceId) => {
       const pinned = (await buyer.store.readPlan())?.services.find((s) => s.serviceId === serviceId)?.pinnedSeller;
       return pinned === undefined ? [] : [pinned];
