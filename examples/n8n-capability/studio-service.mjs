@@ -46,6 +46,8 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     const key = JSON.stringify(definition); if (saving.has(key)) return saving.get(key);
     const pending = (async () => {
       const compiled = await provider.provision(definition), sourceText = studioProgramSource(compiled);
+      // Native wrappers invoke one pinned tool; only DKG executors invoke child Programs.
+      const nativeOnly = compiled.executor !== 'dkg';
       const sourceHash = createHash('sha256').update(sourceText).digest('hex');
       let source;
       try { source = await client.programs.getSource({ graphId, programIri: compiled.kaRef, programLayer: 'wm' }); }
@@ -53,7 +55,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
       if (!source) {
         await client.programs.upload({ graphId, programIri: compiled.kaRef, name: 'studio-' + sourceHash.slice(0, 24), label: definition.name,
           language: 'typescript-v1', version: '1.0.0', source: sourceText, requiredTools: compiled.executor === 'dkg' ? [] : ['urn:dkg:tool:n8n'],
-          permittedPrograms: [...new Set(definition.nodes.map(n => n.kaRef))],
+          permittedPrograms: nativeOnly ? [] : [...new Set(definition.nodes.map(n => n.kaRef))],
           ...(compiled.executor === 'dkg' ? {} : { requestedPermissions: { graphId, n8n: compiled.grant } }) });
         source = await client.programs.getSource({ graphId, programIri: compiled.kaRef, programLayer: 'wm' });
       }
@@ -65,7 +67,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
         .run(JSON.stringify({ ...compiled.grant, requiresExportAuthorization: needsExport() }), compiled.kaRef);
       if (!await approved(compiled.kaRef, sourceHash)) await client.programs.approve({ graphId, operationIri: compiled.kaRef,
         program: reference(source, graphId), allowedCallers: [owner], ...(compiled.executor === 'dkg' ? {} : { n8n: compiled.grant }),
-        typescript: { children: [...new Map(definition.nodes.map(n => [n.kaRef, { graphId,
+        typescript: { children: nativeOnly ? [] : [...new Map(definition.nodes.map(n => [n.kaRef, { graphId,
           operationIri: n.componentId === 'run-program' ? n.params.operationIri : n.kaRef }])).values()],
         maxCalls: compiled.executor === 'dkg' ? 256 : 16, maxConcurrency: 1, timeoutMs: 60000 } });
       return (await get(compiled.kaRef, sourceHash)).workflow;
@@ -84,7 +86,14 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     const descriptor = { ...(compiled.legacy ? componentV1 : component)(root.componentId), ...(compiled.mode === 'schedule' ? { mode: 'action' } : {}) };
     let input; try { input = (compiled.legacy ? normalizeComponentInputV1 : normalizeComponentInput)(descriptor, { itemsJson: value.itemsJson, paramsJson: JSON.stringify(root.params), executionId: '' }); }
     catch (e) { throw reject(e.message); }
-    const result = await client.programs.invoke({ graphId, operationIri: workflow.kaRef, invocationId, inputs: [input] });
+    const invoke = () => client.programs.invoke({ graphId, operationIri: workflow.kaRef, invocationId, inputs: [input] });
+    let result;
+    try { result = await invoke(); }
+    catch (error) {
+      if (error.code !== 'INVOCATION_REQUIRES_RECONCILIATION' || compiled.executor === 'dkg') throw error;
+      // Reconcile the durable acknowledgement under the same invocation, once.
+      result = await invoke();
+    }
     if (!isDeepStrictEqual(await loadOutputs(result.executionIri), result.rawOutputs)) throw new Error('The DKG receipt readback differs.');
     if (compiled.executor === 'dkg') return { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, invocationId, executionIri: result.executionIri,
       ...await programWorkflowReceipt(compiled, result, input, loadOutputs) };

@@ -223,6 +223,7 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
     if (continuation) {
       await check();
       runtime.store.setExecutionStatus(executionIri, 'active');
+      // Fence subsequent checks against the state this continuation owns.
       expectedStatus = 'active';
     }
     else runtime.store.createExecution({ executionId: executionIri, planId, partitionId: hashParts([graph]),

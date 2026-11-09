@@ -118,10 +118,11 @@ test('a lost native create acknowledgement is reconciled by name without a secon
     assert.equal(f.config.n8nNative.workflows.length,1);
   }finally{f.close();}
 });
-test('saving creates a Program KA with native permissions and pinned child authority; readback precedes success',async()=>{
+test('saving creates a Program KA with native permissions and no unused child authority; readback precedes success',async()=>{
   const f=environment();try{const w=await f.service.save(definition(),()=>{});assert.equal(w.approved,true);
     const source=f.sources.get(w.kaRef),approval=f.approvals.get(w.kaRef);
-    assert.deepEqual(new Set(source.permittedPrograms),new Set(w.definition.nodes.map(n=>n.kaRef)));
+    assert.deepEqual(source.permittedPrograms,[]);
+    assert.deepEqual(approval.typescript.children,[]);
     assert.deepEqual(approval.n8n,source.requestedPermissions.n8n);
     const request={kaRef:w.kaRef,sourceHash:w.sourceHash,itemsJson:'[{"name":"Ana"}]',invocationId:randomUUID()};
     const receipt=await f.service.run(request,()=>{});assert.equal(receipt.readbackVerified,true);assert.equal(receipt.steps.length,3);
@@ -185,4 +186,15 @@ for (const mode of ['webhook', 'schedule']) test(`pending fifth ${mode} retains 
     f.setCatalog(catalog.map(c=>({...c,available:false}))); await f.service.poll();
     assert.equal(f.provider.row(w.kaRef).event_key,null);
   } finally { f.close(); }
+});
+
+test('native-only approval contract creates a new revision without rewriting legacy sources', () => {
+  const current = compile(definition(['edit-fields'], []));
+  const legacy = { ...current }; delete legacy.compiler;
+  const previousSource = studioProgramSource(legacy);
+  const previous = readStudio(previousSource);
+  assert.equal(studioProgramSource(previous), previousSource);
+  assert.notEqual(previous.kaRef, current.kaRef);
+  assert.equal(readStudio(studioProgramSource(current)).kaRef, current.kaRef);
+  assert.equal(readStudio(studioProgramSource(current)).compiler, 4);
 });
