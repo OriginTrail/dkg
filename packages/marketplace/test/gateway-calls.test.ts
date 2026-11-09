@@ -483,4 +483,18 @@ describe('an answer that is not one', () => {
     expect(gateway.heldValue(subscriptionIdOf(NODE.address, epoch), 0)).toBe(BigInt(MAX_UNSETTLED_PER_SELLER) * MOST);
     expect((await gateway.activity()).calls[0]).toMatchObject({ state: 'held', problem: 'unanswered', value: String(MOST) });
   });
+
+  it('with a receipt that does not read as one is refused, and stays refused at its most value through a restart', async () => {
+    await setUp();
+    const { epoch } = await chain.getEpochTimes();
+    tamper = (a) => (a.ok ? { ...a, receipt: { anything: 1 } } as unknown as ServeResponse : a);
+    expect(await call()).toMatchObject({ status: 502, body: { error: { code: 'bad_receipt' }, problem: 'malformed' } });
+    const kept = JSON.parse((await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').at(-1)!);
+    expect(kept).toMatchObject({ state: 'refused', problem: 'malformed', receipt: { anything: 1 } });
+    // Kept as its seller sent it, it is read back as kept: refused, never a receipt to land.
+    await restart();
+    expect(gateway.heldValue(subscriptionIdOf(NODE.address, epoch), 0)).toBe(MOST);
+    expect(keys.reservedOf(caller.key.keyId)).toBe(MOST);
+    expect((await gateway.activity()).calls).toMatchObject([{ state: 'held', problem: 'malformed', value: String(MOST) }]);
+  });
 });
