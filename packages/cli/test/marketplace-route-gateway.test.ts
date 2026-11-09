@@ -144,4 +144,20 @@ describe('the chat route while its budget is busy', () => {
     await running.done;
     expect(running.res.statusCode).toBe(200);
   });
+
+  it('answers a request that takes no listeners, as a stand-in for one, without watching for its client', async () => {
+    await setUp();
+    const res: any = { statusCode: 0, body: '' };
+    res.writeHead = (status: number) => { res.statusCode = status; };
+    res.setHeader = () => undefined;
+    res.end = (text: string) => { res.body = text; res.writableEnded = true; };
+    const req: any = { method: 'POST', url: PATH, __dkgPrebufferedBody: Buffer.from(JSON.stringify(CHAT)) };
+    const url = new URL(`http://127.0.0.1${PATH}`);
+    await handleMarketplaceRoutes({
+      req, res, url, path: url.pathname, marketplaceGateway: gateway,
+      actor: { authentication: requestAuthentication({ kind: 'anonymous', mode: 'public', presentedToken: secret }) },
+    } as unknown as RequestContext);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({ object: 'chat.completion' });
+  });
 });

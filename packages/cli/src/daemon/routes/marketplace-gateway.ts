@@ -11,6 +11,7 @@
 // request slots: the gateway bounds how many wait (429 or 503 beyond that),
 // and a call whose client goes away leaves its queue and is never sent.
 
+import type { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { PEER_LIMITS } from '@origintrail-official/dkg-marketplace';
 import { jsonResponse, readBody } from '../http-utils.js';
@@ -22,20 +23,23 @@ const CHAT_BODY_BYTES = PEER_LIMITS.serveRequestBytes;
 
 const refuse = (code: string, message: string) => ({ error: { code, message, type: 'marketplace' } });
 
-/** A signal aborted when the client goes away before the answer is written, and the listeners to remove after. */
+/**
+ * A signal aborted when the client goes away before the answer is written, and the listeners to remove after. A
+ * request or response that takes no listeners (a stand-in for one) is never seen going away.
+ */
 function clientSignal(req: IncomingMessage, res: ServerResponse): { signal: AbortSignal; dispose(): void } {
   const controller = new AbortController();
   const left = () => {
     if (!res.writableEnded) controller.abort();
   };
-  req.once('aborted', left);
-  res.once('close', left);
+  const pairs: Array<[EventEmitter, string]> = [[req, 'aborted'], [res, 'close']];
+  const watched = pairs.filter(([emitter]) => typeof (emitter as Partial<EventEmitter>).once === 'function');
+  for (const [emitter, event] of watched) emitter.once(event, left);
   if (req.aborted || res.destroyed) left();
   return {
     signal: controller.signal,
     dispose() {
-      req.removeListener('aborted', left);
-      res.removeListener('close', left);
+      for (const [emitter, event] of watched) emitter.removeListener(event, left);
     },
   };
 }
