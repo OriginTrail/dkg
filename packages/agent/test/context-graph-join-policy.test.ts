@@ -972,7 +972,7 @@ describe('context graph open enrollment policy', () => {
     })));
     (agent as any).contextGraphMetaProjection.markDirty(contextGraphId);
     expect((await agent.getCgMeta(contextGraphId)).allowedAgents.map((address: string) => address.toLowerCase()))
-      .toContain(listedElsewhere.agentAddress.toLowerCase());
+      .not.toContain(listedElsewhere.agentAddress.toLowerCase());
     const request = await agent.signJoinRequest(contextGraphId, listedElsewhere.agentAddress);
     await expect(agent.processIncomingJoinRequest(contextGraphId, request, listedElsewhere.name, agent.peerId))
       .resolves.toMatchObject({ status: 'pending' });

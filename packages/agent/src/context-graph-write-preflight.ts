@@ -2,7 +2,8 @@ import { ethers } from 'ethers';
 import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { ContextGraphSub, ContextGraphSubscriptionStore, ContextGraphWritePreflightProbe } from './dkg-agent-types.js';
-import { stripLiteral } from './dkg-agent-utils.js';
+import { strip, stripLiteral } from './dkg-agent-utils.js';
+import { agentsGraphMayState, ontologyGraphMayState } from './context-graph-meta-sources.js';
 import { classifyWritePreflightFailure, type WritePreflightFailure, type WritePreflightFailureSite } from './write-preflight-attribution.js';
 
 /** Read-only dependencies of this point probe; the agent mixin remains its adapter. */
@@ -41,6 +42,13 @@ export function normalizeWritePreflightCaller(callerAgentAddress: string | null 
   return ethers.isAddress(rawAddress) ? ethers.getAddress(rawAddress) : null;
 }
 
+/** The predicate each kind of declaration row reads; a gate row reads the graph's own `_meta` only. */
+const DECLARATION_ROW_PREDICATES: Readonly<Partial<Record<string, string>>> = {
+  declared: DKG_ONTOLOGY.RDF_TYPE,
+  access: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+  curator: DKG_ONTOLOGY.DKG_CURATOR,
+};
+
 interface WritePreflightSubscriptions {
   readonly locallyCreated?: boolean;
   readonly store?: Pick<ContextGraphSubscriptionStore, 'load'>;
@@ -63,16 +71,18 @@ export async function probeContextGraphWritePreflight(
     const persistedSubscriptionPromise = subscriptionStore?.load
       ? subscriptionStore.load(contextGraphId)
       : Promise.resolve(null);
-    // One bounded point projection over the three trusted metadata sources.
+    // One bounded point projection over the three metadata sources.
     // Facts are intentionally collected independently: the established
     // ContextGraphMetaProjection model permits the declaration to live in one
     // source and policy/curator/gates in another. Requiring every source to
     // repeat rdf:type would both reject valid gate-only graphs and, worse,
-    // ignore a cross-source private-policy ratchet. Gate presence uses EXISTS
-    // so this path returns at most one gate row per source instead of expanding
-    // a potentially large allowlist.
+    // ignore a cross-source private-policy ratchet. As in that projection, the
+    // gates come from the graph's own `_meta`, and the rows of a shared graph pass
+    // the projection's source rules, applied below. Gate presence uses EXISTS so
+    // this path returns at most one gate row per source instead of expanding a
+    // potentially large allowlist.
     const declarationPromise = host.store.query(`
-      SELECT ?kind ?value WHERE {
+      SELECT ?kind ?value ?sourceGraph WHERE {
         VALUES (?sourceGraph ?sourceSubject) {
           (<${ontologyGraph}> <${contextGraphUri}>)
           (<${agentsGraph}> <${contextGraphUri}>)
@@ -101,8 +111,8 @@ export async function probeContextGraphWritePreflight(
               <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}>
               <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}>
             }
-            GRAPH ?sourceGraph {
-              ?sourceSubject ?gatePredicate ?gateValue .
+            GRAPH <${cgMetaGraph}> {
+              <${metaSubjectUri}> ?gatePredicate ?gateValue .
             }
           }
           BIND("gate" AS ?kind)
@@ -158,6 +168,15 @@ export async function probeContextGraphWritePreflight(
     // failed, so a store outage can never masquerade as "no declaration".
     let declarationFound: boolean | undefined = declarationResult === undefined ? undefined : false;
     const curators: string[] = [];
+    const sourceMayState = (sourceGraph: string | undefined, kind: string, value: string | undefined): boolean => {
+      const predicate = DECLARATION_ROW_PREDICATES[kind];
+      if (predicate === undefined) return true;
+      const source = typeof sourceGraph === 'string' ? strip(sourceGraph) : undefined;
+      if (source === cgMetaGraph) return true;
+      if (source === ontologyGraph) return ontologyGraphMayState(predicate);
+      // The agents graph, and any source this query does not name, as strictly.
+      return agentsGraphMayState(predicate, typeof value === 'string' ? stripLiteral(strip(value)) : '');
+    };
     if (declarationResult && declarationResult.type === 'bindings') {
       let sawPublic = false;
       let sawPrivate = false;
@@ -167,6 +186,7 @@ export async function probeContextGraphWritePreflight(
           ? stripLiteral(row['kind']).trim().toLowerCase()
           : '';
         const value = row['value'];
+        if (!sourceMayState(row['sourceGraph'], kind, value)) continue;
         if (kind === 'declared') declarationFound = true;
         if (kind === 'access' && typeof value === 'string') {
           const normalized = stripLiteral(value).trim().toLowerCase();

@@ -11,10 +11,14 @@
  * registration's `participantAgents`), as the EOA auto-promotion in
  * `registerContextGraph` does for a curator that is not the chain signer.
  */
+import { ethers } from 'ethers';
 import type { ChainAdapter, ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
+import type { AgentKeyRecord } from './agent-keystore.js';
+import type { NodeHeldAuthorConfig } from './agent-chain-signer-source.js';
 import { addRegistrationParticipantAgent, type RegistrationRoster } from './context-graph-registration-roster.js';
 import { externalAuthorSignerFor } from './author-signer.js';
 import { signsThroughExternalSigner } from './external-author-signing.js';
+import { isNodeHeldAgent, localAgentRecord, nodeHeldAuthorEnabled } from './node-held-author.js';
 
 /**
  * Whether the node signs through an external signer and `curator`, which is
@@ -32,8 +36,27 @@ export async function isExternalAuthorCurator(
 }
 
 /**
+ * Whether `curator`, which is not the registration signer, is an agent key held on a node whose
+ * authors are held on it (`nodeHeldAuthor`): such a key signs no transactions either, so the payer
+ * sends the registration, as for an author key of the external signer. False with the setting off.
+ */
+export function isNodeHeldCurator(
+  config: NodeHeldAuthorConfig | undefined,
+  chain: Pick<ChainAdapter, 'operationalSigning'> | undefined,
+  agents: ReadonlyMap<string, AgentKeyRecord>,
+  curator: string,
+  registrationSigner: string,
+): boolean {
+  if (!nodeHeldAuthorEnabled(config, chain) || !ethers.isAddress(curator)) return false;
+  if (curator.toLowerCase() === registrationSigner.toLowerCase()) return false;
+  return isNodeHeldAgent(localAgentRecord(agents, curator));
+}
+
+/**
  * Add the external-author curator as a participant agent of the context graph
- * and return the participant agents to register on-chain.
+ * and return the participant agents to register on-chain. `heldOnNode`: the
+ * curator is instead an agent key held on the node (`nodeHeldAuthor`), which
+ * signs no transactions either and is added the same way.
  */
 export async function addExternalAuthorCuratorAsParticipant(
   roster: RegistrationRoster,
@@ -41,9 +64,12 @@ export async function addExternalAuthorCuratorAsParticipant(
   curator: string,
   registrationSigner: string,
   logInfo: (message: string) => void,
+  heldOnNode = false,
 ): Promise<string[]> {
   logInfo(
-    `PCA-curated CG "${contextGraphId}": curator ${curator} is an author key of the external signer and signs no transactions. ` +
+    `PCA-curated CG "${contextGraphId}": curator ${curator} is ` +
+    (heldOnNode ? 'an agent key held on the node (nodeHeldAuthor)' : 'an author key of the external signer') +
+    ' and signs no transactions. ' +
     `Adding it as a participantAgent; local DKG_CURATOR stays ${curator}; on-chain NFT mints to chain signer ${registrationSigner}.`,
   );
   return addRegistrationParticipantAgent(roster, contextGraphId, curator, 'adding the curator');
