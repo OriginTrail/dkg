@@ -312,6 +312,11 @@ export {
 } from './graph-knowledge-asset-metadata-loader.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
+export {
+  OXIGRAPH_STORE_READ_ONLY_CODE,
+  OxigraphStoreReadOnlyError,
+  type OxigraphStoreOptions,
+} from './adapters/oxigraph-read-only.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
 export {
   BlazegraphStore,
@@ -384,3 +389,4 @@ export { StoreReadTransportFailure, isStoreReadTransportFailure } from './store-
 export { readStoreOperationExecutionGeneration, asStoreRecoveryGenerationReader, type StoreRecoveryGenerationReader, type StoreRecoveryState } from './store-recovery-generation.js';
 
 export { readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
+export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';

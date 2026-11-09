@@ -199,6 +199,8 @@ export interface AsyncLiftClaimCoordinatorDependencies {
   readonly assertJobMatchesStatus: (job: LiftJob) => void;
   readonly resetInterruptedClaim: (job: LiftJob) => LiftJobAccepted;
   readonly notifyWalletRelease: (walletId: string) => void;
+  /** #3591 — `false` keeps a wallet that cannot pay from claiming; the job stays accepted for another. */
+  readonly walletMayClaim?: (walletId: string) => boolean;
   readonly mutations: ActiveLiftJobClaimMutations;
 }
 
@@ -259,12 +261,13 @@ export class AsyncLiftClaimCoordinator {
   ): Promise<ActiveLiftJobClaim | null> {
     return await owner.runCanonical((section) => this.withClaimLock(async (trace) => {
       await this.dependencies.ensureGraph();
-      const idle = (result: 'paused' | 'wallet-active' | 'no-candidate' | 'stale-candidate'): null => { trace.emit('claim_outcome', { result }); return null; };
+      const idle = (result: 'paused' | 'wallet-active' | 'no-candidate' | 'wallet-unfunded' | 'stale-candidate'): null => { trace.emit('claim_outcome', { result }); return null; };
       if (this.dependencies.isPaused()) return idle('paused');
       if (await this.hasActiveWalletLock(walletId, trace)) return idle('wallet-active');
 
       const next = await this.dependencies.nextClaimCandidate(section, this.config.now());
       if (!next) return idle('no-candidate');
+      if (this.dependencies.walletMayClaim?.(walletId) === false) return idle('wallet-unfunded');
       const claimedJob = await this.withJobTransitionLock(next.jobId, async () => {
         const current = await this.getStatus(next.jobId);
         if (!current || current.status !== 'accepted') return null;

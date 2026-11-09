@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Command } from 'commander';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
@@ -16,7 +19,7 @@ const CALLER = '0x2222222222222222222222222222222222222222';
 const SCOPED = ['own-a', 'own-z'];
 const UNSCOPED = ['legacy', 'other', 'own-a', 'own-z'];
 
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.doUnmock('../src/publisher-runner.js'); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.doUnmock('../src/publisher-runner.js'); });
 
 async function inventoryRoute(operator: boolean) {
   const inventory = await createMixedPublisherInventory(CG);
@@ -82,6 +85,8 @@ describe('native publisher inventory through HTTP and stopped-daemon adapters', 
     const { store, publisher } = await createMixedPublisherInventory(CG);
     const list = vi.spyOn(publisher, 'list');
     const stop = vi.fn(() => store.close());
+    const home = mkdtempSync(join(tmpdir(), 'dkg-inventory-offline-'));
+    vi.stubEnv('DKG_HOME', home);   // an empty node home: no daemon.pid, so the offline read opens the inspector (#3551)
     vi.spyOn(ApiClient, 'connect').mockRejectedValue(new Error('Daemon is not running'));
     vi.spyOn(configModule, 'loadConfig').mockResolvedValue({} as never);
     vi.doMock('../src/publisher-runner.js', () => ({ createPublisherInspector: async () => ({ publisher, stop }) }));
@@ -96,6 +101,6 @@ describe('native publisher inventory through HTTP and stopped-daemon adapters', 
       expect(JSON.parse(String(output.mock.calls[0][0])).map((job: { jobId: string }) => job.jobId))
         .toEqual(scoped ? SCOPED : UNSCOPED);
       expect(stop).toHaveBeenCalledOnce();
-    } finally { await store.close(); }
+    } finally { await store.close(); rmSync(home, { recursive: true, force: true }); }
   });
 });

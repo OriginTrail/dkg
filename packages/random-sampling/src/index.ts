@@ -57,6 +57,8 @@ export {
   type RandomSamplingRepairMaterial,
   type ProverLogger,
   type TickOutcome,
+  type ChallengePeriod,
+  type TickFailureKind,
 } from './prover.js';
 
 export {

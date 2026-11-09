@@ -18,6 +18,7 @@ dkg start [-f]                           # start the node daemon (-f for foregro
 dkg stop                                 # graceful shutdown
 dkg status                               # node health, peer count, store status
 dkg logs                                 # tail the daemon log
+dkg debug cpu-profile [--seconds <n>]    # record a CPU profile of the node (node-admin token; 10 s default, 60 s max)
 dkg peers                                # list discovered agents on the network
 dkg peer info <peer-id>                  # inspect a peer's identity and addresses
 
@@ -81,7 +82,7 @@ dkg publisher stats                      # job counts by status, as JSON
 dkg publisher cancel <job-id>            # remove a job that is still accepted
 dkg publisher retry                      # accept failed jobs again that are safe to re-run
 dkg publisher clear finalized|failed     # bulk clear; keeps jobs whose removal would change which job holds the KA
-# one finished job by ID, even a held one: POST /api/publisher/clear-job (API only; check a held job's transaction first)
+# one finished job by ID: POST /api/publisher/clear-job (API only; a held job needs allowPendingTransaction: check its transaction first)
 # publisher wallets need native gas plus PCA registration or TRAC; node identity is optional attribution
 
 # Code & memory indexing
@@ -194,7 +195,7 @@ explicitly after cleanup.
 - A finished `--all` listed every job that matched the filters for its whole walk. A job missing from it is not thereby proven absent.
 - `--all` stops at the first failed request, a retryable `503` included, and prints only the error. Run it again, or page on with `--page-size` and `--cursor` from the last cursor you have.
 
-When the daemon's API cannot be reached, `publisher jobs` reads the node's store directly and pages it in the same way. That happens when the daemon is stopped, when it is still starting or restarting, or when it answers the route with `404`, `405` or `501`. A request that times out does not fall back. See [Async publisher commands without the daemon](#async-publisher-commands-without-the-daemon).
+When the daemon's API cannot be reached and no daemon is running, `publisher jobs` reads the node's store directly and pages it in the same way. A request that times out does not fall back. See [Async publisher commands without the daemon](#async-publisher-commands-without-the-daemon).
 
 What each job state means, and how a client recovers a job, is in [Async Share and Publish Jobs](../build/async-jobs.md).
 
@@ -202,7 +203,7 @@ What each job state means, and how a client recovers a job, is in [Async Share a
 
 When the daemon's API cannot be reached, the `dkg publisher` commands open the node's store directly.
 
-`cancel`, `retry` and `clear` refuse to do that while the node home's `daemon.pid` names a live process. They exit with code 1 and print:
+They refuse to do that while the node home's `daemon.pid` names a live process. A daemon that is still starting or restarting, or that answers the route with `404`, `405` or `501`, owns the store as much as one that answers. The commands exit with code 1 and print:
 
 ```text
 Refusing to run "dkg publisher <command>" offline: a daemon appears to be running (PID <pid>) but did not answer the API. ...
@@ -210,7 +211,7 @@ Refusing to run "dkg publisher <command>" offline: a daemon appears to be runnin
 
 Try again once the daemon answers, or stop it first with `dkg stop`. If that PID is not a DKG daemon, remove the stale `daemon.pid` file.
 
-`jobs`, `job` and `stats` change no queue state, so they still fall back. They are not free of writes, though. With the file-backed Oxigraph stores, closing the offline read rewrites the store file from what it loaded. Run them next to a daemon that does not answer only when you need to.
+`jobs`, `job` and `stats` open the store read-only. With the file-backed Oxigraph stores (`oxigraph-worker`, the default, and `oxigraph-persistent`) they load the store file and never write it: the file is the same after they run.
 
 ## Client request timeouts
 
@@ -228,10 +229,9 @@ instead. A Knowledge Asset publish, share, file import, or a create that also
 shares or publishes, that gets no answer in time is reported as outcome
 unknown, not as failed: the daemon keeps working after the client stops
 waiting, so check `dkg ka history` (MCP: `dkg_knowledge_asset_history`) before
-retrying. Any other request that times out fails with a `TimeoutError`.
-That includes `ka share-async`, `ka publish-async` and `publisher publish-async`,
-though a job may still exist: find the job and follow
-[Retry safely](../build/async-jobs.md#retry-safely) instead of running them again.
+retrying. The CLI's `ka share-async`, `ka publish-async` and `publisher publish-async`
+are reported as outcome unknown too, naming the job list to check (`dkg ka share-jobs`
+or `dkg publisher jobs`). Any other request that times out fails with a `TimeoutError`.
 
 On a slow node or store, override the read and long deadlines, in
 milliseconds, with environment variables (for the MCP server, in the MCP

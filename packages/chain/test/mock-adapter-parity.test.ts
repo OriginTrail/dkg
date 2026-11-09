@@ -122,6 +122,10 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'signMessageAs',          // pool-specific wallet-key signing; mock has no adapter-held private keys
   'getOperationalPrivateKey', // mock has no wallet keys
   'operationalSigning',     // optional; absent, an adapter is taken to sign with local wallets, as the mock's do
+  // #3591 — the async publisher's claim gate reads a refused wallet's balances through this. The
+  // mock holds no wallet balances; the publisher's reader treats the absent method as unreadable,
+  // which never keeps a wallet out.
+  'readPublisherWalletBalances',
   'getRequiredPublishTokenAmount', // TODO: missing on mock, cross-check below
   // Snapshot reuse requires a finalized block hash plus the exact physical
   // DKGKnowledgeAssets address and binding generation. Mock snapshots

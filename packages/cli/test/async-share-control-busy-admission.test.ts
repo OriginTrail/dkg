@@ -16,6 +16,7 @@
  * has had time to run anything it wrongly kept, that no job write was dispatched and the queue lists nothing; the admitted control
  * asserts the opposite through the same stub (one job write, and `queue.list()` returns that job).
  */
+import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   StorePriorityScheduler,
@@ -209,10 +210,10 @@ function route(queue: TripleStoreAsyncPromoteQueue) {
   const url = new URL('http://localhost/api/knowledge-assets/asset/swm/share-async');
   const ctx = {
     req: { method: 'POST', __dkgPrebufferedBody: Buffer.from(JSON.stringify({ contextGraphId: 'busy-cg' })) },
-    res: {
+    res: Object.assign(new EventEmitter(), {
       writeHead(status: number, headers: Record<string, string>) { record.status = status; Object.assign(record.headers, headers); },
       end(body: string) { record.body = body; },
-    },
+    }),
     url, path: url.pathname, authentication: requestAuthentication({ kind: 'nodeOperator' }),
     agent: {
       probeContextGraphWritePreflight: vi.fn(async () => ({

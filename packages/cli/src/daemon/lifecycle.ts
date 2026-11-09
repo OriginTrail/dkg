@@ -1,3 +1,6 @@
+import { getBoundListenMultiaddrs } from './bound-listen-addresses.js';
+import { PublicCheckpointStartup } from './public-checkpoint-startup.js';
+import { checkDaemonCheckpointEligibility, bindCheckpointNetwork } from './public-checkpoint-config.js';
 import { buildCoreChainCacheConfig } from './core-chain-cache-config.js';
 // daemon/lifecycle.ts
 //
@@ -204,6 +207,7 @@ import { handleSharedMemoryTtlSettingsRequest } from './shared-memory-ttl-route.
 import { nodeUiTokenForRequest } from './node-ui-access.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import { createProtocolStores } from './protocol-persistence.js';
+import { createContextGraphJoinPolicyStore } from './join-policy-store.js';
 
 import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
@@ -219,6 +223,7 @@ import { registerJoinMetadataEmptyVmSettlement } from '../context-graph-empty-vm
 import { startActivationCatchups } from './context-graph-activation-catchup.js';
 import { cancelContextGraphReadinessRepeats } from './context-graph-readiness-repeat.js';
 import { endContextGraphWriteReadinessWaits } from './context-graph-write-readiness.js';
+import { daemonCpuProfiles } from './cpu-profile.js';
 import { startContextGraphCatchupProgress } from './context-graph-catchup-progress-sources.js';
 import { beginAsyncAdmissionTrace } from './async-admission-trace.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
@@ -479,68 +484,6 @@ import {
   type PromoteWorkerConfig,
   type PromoteWorkerSupervisor,
 } from './worker/async-promote-worker.js';
-
-type MultiaddrLike = { toString: () => string };
-
-function stringifyMultiaddrList(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((ma) => {
-      try {
-        return (ma as MultiaddrLike).toString();
-      } catch {
-        return '';
-      }
-    })
-    .filter((addr) => addr.length > 0);
-}
-
-function listenerMultiaddrs(listener: unknown): string[] {
-  const candidate = listener as {
-    getAddrs?: () => unknown;
-    getMultiaddrs?: () => unknown;
-    addrs?: unknown;
-    multiaddrs?: unknown;
-  };
-  if (typeof candidate?.getAddrs === 'function') {
-    const addrs = stringifyMultiaddrList(candidate.getAddrs());
-    if (addrs.length > 0) return addrs;
-  }
-  if (typeof candidate?.getMultiaddrs === 'function') {
-    const addrs = stringifyMultiaddrList(candidate.getMultiaddrs());
-    if (addrs.length > 0) return addrs;
-  }
-  const addrs = stringifyMultiaddrList(candidate?.addrs);
-  if (addrs.length > 0) return addrs;
-  return stringifyMultiaddrList(candidate?.multiaddrs);
-}
-
-function getBoundListenMultiaddrs(libp2p: unknown): string[] | null {
-  const node = libp2p as {
-    components?: { transportManager?: unknown };
-    services?: { transportManager?: unknown };
-    transportManager?: unknown;
-    getMultiaddrs?: () => unknown;
-  };
-  const managers = [
-    node.components?.transportManager,
-    node.services?.transportManager,
-    node.transportManager,
-  ];
-  for (const manager of managers) {
-    const getListeners = (manager as { getListeners?: () => unknown } | undefined)?.getListeners;
-    if (typeof getListeners !== 'function') continue;
-    const listeners = getListeners.call(manager);
-    if (!Array.isArray(listeners)) continue;
-    const addrs = listeners.flatMap((listener) => listenerMultiaddrs(listener));
-    if (addrs.length > 0) return Array.from(new Set(addrs));
-  }
-
-  // If this libp2p shape does not expose transport listeners, prefer an
-  // indeterminate result over treating advertised self-addresses as bound
-  // listener evidence.
-  return null;
-}
 
 /**
  * Resolve the WM agentAddress the daemon hands to `ChatMemoryManager`.
@@ -1214,6 +1157,8 @@ async function runDaemonInnerWithStartupOwnership(
   // trust before allocating startup resources; it always wins. Without it an
   // edge seeds from the network file's relays, planned below from the
   // finished agent config.
+  const checkpointMode = await checkDaemonCheckpointEligibility(dkgDir(), config);
+  let checkpointStartup: PublicCheckpointStartup | undefined;
   assertAuthorityIndexConfigPlacement(config);
   const authorityIndex = resolveAuthorityIndexConfig(config.authorityIndex, config.nodeRole ?? 'edge');
   configureKaPublishLifecycleDebugLogging(config);
@@ -1277,7 +1222,11 @@ async function runDaemonInnerWithStartupOwnership(
   let startupUnhandledRejectionHandler: NodeJS.UnhandledRejectionListener | undefined;
   // Stops what would start catch-up jobs later; replaced once they exist.
   let stopCatchupTriggers = (): void => {};
-  registerStartupFailureCleanup(async () => {
+  let startupCleanup: Promise<void> | undefined;
+  const cleanupStartup = () => startupCleanup ??= (async () => {
+    // A failed native shutdown must not prevent the daemon writer from retiring.
+    const stopped = await Promise.allSettled([checkpointStartup?.close()]);
+    for (const result of stopped) if (result.status === 'rejected') log(`[bootstrap] Cleanup failed: ${String(result.reason)}`);
     try {
       stopCatchupTriggers();
     } catch {
@@ -1294,7 +1243,8 @@ async function runDaemonInnerWithStartupOwnership(
     }
     detachDaemonLogTee();
     await daemonLogFileWriter.shutdown();
-  });
+  })();
+  registerStartupFailureCleanup(cleanupStartup);
 
   function log(msg: string) {
     const line = `[${new Date().toISOString()}] ${msg}`;
@@ -1522,7 +1472,7 @@ async function runDaemonInnerWithStartupOwnership(
   // silently would look like data loss to the operator.
   const backendSwitch = detectBackendSwitch({
     dataDir: dkgDir(),
-    currentBackend: config.store?.backend ?? 'oxigraph-worker',
+    currentBackend: checkpointMode ? 'public-checkpoint' : config.store?.backend ?? 'oxigraph-worker',
     acceptStoreReset: process.env.DKG_ACCEPT_STORE_RESET === '1',
     log,
   });
@@ -1615,7 +1565,12 @@ async function runDaemonInnerWithStartupOwnership(
       }
     : config;
 
-  await runPreAgentStoreBootSteps({
+  // Native journals are deployment-bound by the completion record and fresh authority.
+  // A chain reset must fail that binding, never wipe or reuse a checkpoint implicitly.
+  if (checkpointMode) await bindCheckpointNetwork(dkgDir(), checkpointMode, {
+    networkId, networkConfig: selectedNetworkConfig, chainResetMarker: network?.chainResetMarker,
+  });
+  if (!checkpointMode) await runPreAgentStoreBootSteps({
     managedOxigraph, runtimeStore, runtimeStoreConfig,
     dataDir: dkgDir(), chainResetMarker: network?.chainResetMarker,
     randomSamplingWalPath: config.randomSampling?.walPath,
@@ -2088,28 +2043,7 @@ async function runDaemonInnerWithStartupOwnership(
         dashDb.deleteContextGraphMember(contextGraphId, principalType, principalId);
       },
     },
-    contextGraphJoinPolicyStore: {
-      load: async (contextGraphId) => dashDb.getContextGraphJoinPolicy(contextGraphId),
-      save: async (record) => {
-        dashDb.setContextGraphJoinPolicy(record);
-      },
-      appendAudit: async (event) => {
-        dashDb.appendContextGraphJoinPolicyAudit(event);
-      },
-      saveWithAudit: async (record, event) => {
-        dashDb.setContextGraphJoinPolicyWithAudit(record, event);
-      },
-      getAutomaticApprovalUsage: async (contextGraphId, timestamp) =>
-        dashDb.getContextGraphAutomaticApprovalUsage(contextGraphId, timestamp),
-      reserveAutomaticApproval: async (input) =>
-        dashDb.reserveContextGraphAutomaticApproval(input),
-      markAutomaticApprovalRepairPending: async (input) =>
-        dashDb.markContextGraphAutomaticApprovalRepairPending(input),
-      getAutomaticApprovalRepair: async (contextGraphId, requestDigest) =>
-        dashDb.getContextGraphAutomaticApprovalRepair(contextGraphId, requestDigest),
-      commitAutomaticApproval: async (input) =>
-        dashDb.commitContextGraphAutomaticApproval(input),
-    },
+    contextGraphJoinPolicyStore: createContextGraphJoinPolicyStore(dashDb),
     messengerOutboxDrain: config.messengerOutboxDrain,
     messengerStores: {
       idempotencyStore: protocolStores.messengerStores.idempotencyStore,
@@ -2148,7 +2082,16 @@ async function runDaemonInnerWithStartupOwnership(
   }
   log(formatAuthorityIndexStartupLine(authorityIndexPlan));
   const promoteQueuePolicy = resolveDaemonPromoteQueueConfig(config.promoteQueue);
-  const agent = await DKGAgent.create(agentConfig);
+  let checkpointAgent: DKGAgent | undefined;
+  if (checkpointMode) {
+    checkpointStartup = new PublicCheckpointStartup(async () => {
+      try { await cleanupStartup(); } finally { process.exit(1); }
+    });
+    log(`[bootstrap] ${checkpointMode === 'fresh' ? 'Preparing verified public data' : 'Opening retained native journal'}`);
+    checkpointAgent = await checkpointStartup.open(agentConfig, config.publicSnapshotBootstrap!, checkpointMode,
+      config.apiPort, config.apiHost, writeApiPort);
+  }
+  const agent = checkpointAgent ?? await DKGAgent.create(agentConfig);
   agent.configurePromoteQueue(promoteQueuePolicy);
   const publicSnapshotStore = agent.publicSnapshotStore;
 
@@ -2297,6 +2240,10 @@ async function runDaemonInnerWithStartupOwnership(
   registerJoinMetadataEmptyVmSettlement({ agent, dashboard: dashDb, log });
 
   await agent.start();
+  if (checkpointStartup) {
+    const coverage = await checkpointStartup.complete();
+    log(`[bootstrap] Current public coverage: ${coverage.committed}/${coverage.assets}`);
+  }
   // The marketplace buyer (OT-RFC-27), when enabled: its job keeps the standing plan funded.
   const marketplace = startMarketplaceBuyer({
     config, agent, wallets: evmSigning.addresses.wallets.map((w) => w.address), dataDir: dkgDir(), dashDb, log,
@@ -2318,6 +2265,8 @@ async function runDaemonInnerWithStartupOwnership(
     readinessStore: dashDb,
     log,
   });
+
+  checkpointStartup?.assertActive();
 
   // Rows written before per-plane provenance existed cannot distinguish a
   // complete catch-up from v10.0.6's clean-empty false-ready state. Migrate
@@ -3663,7 +3612,7 @@ async function runDaemonInnerWithStartupOwnership(
     headersTimeoutEnv: process.env.DKG_HEADERS_TIMEOUT_MS,
   });
 
-  const apiPort = config.apiPort || 0;
+  const apiPort = checkpointStartup?.port ?? (config.apiPort || 0);
   const apiHost = config.apiHost || "127.0.0.1";
 
   // Route plugins: loaded before listen() so requests can't race the array; fail-soft per ADR 0001.
@@ -3681,6 +3630,9 @@ async function runDaemonInnerWithStartupOwnership(
     `route-plugins-loaded loaded=${routePlugins.length} configured=${configuredCount}`,
   );
 
+  checkpointStartup?.assertActive();
+  await checkpointStartup?.closeStatus();
+  checkpointStartup?.assertActive();
   await new Promise<void>((resolve) => {
     server.listen(apiPort, apiHost, () => resolve());
   });
@@ -3729,6 +3681,7 @@ async function runDaemonInnerWithStartupOwnership(
       endShareAdmissionWaits: () => agent.endLegacySwmShareAdmissionWaits(),
       endWriteReadinessWaits: endContextGraphWriteReadinessWaits,
       stopCatchupTriggers,
+      endCpuProfile: () => daemonCpuProfiles.end(),
     });
     const cleanupStateFiles = async () => {
       await removeOwnedDaemonRuntimeState().catch((err: any) =>
@@ -3850,6 +3803,8 @@ async function runDaemonInnerWithStartupOwnership(
     process.exit(forced ? encodeForcedShutdownExitCode(exitCode) : exitCode);
   }
 
+  checkpointStartup?.assertActive();
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
+  checkpointStartup?.handoff();
 }

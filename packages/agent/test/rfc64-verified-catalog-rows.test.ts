@@ -37,6 +37,7 @@ import {
   Rfc64SuccessorRowVerificationV1,
   Rfc64VerifiedCatalogRowSetV1,
 } from '../src/internal/verified-catalog-rows.js';
+import { prepareCatalogAssetV1 } from '../src/internal/prepared-catalog-asset.js';
 import type { Rfc64PublicCatalogSuccessorAssetInputV1 } from
   '../src/rfc64/public-catalog-successor-producer-v1.js';
 import {
@@ -352,6 +353,58 @@ describe('RFC-64 successor production over rows already verified', () => {
     expect(verified.transferredBundle).toBe(1);
     expect(verified.projection).toBe(1);
   });
+
+  it('refuses mixed prepared fields before either cached or uncached preflight', async () => {
+    const { genesis, verifiedRows, assets } = await rememberedCatalog(1);
+    const binding = { scope: genesis.scope, deployment: PRODUCER_DEPLOYMENT };
+    const a = prepareCatalogAssetV1(assets[0]!, binding);
+    const b = prepareCatalogAssetV1({ ...assets[0]!, projectionBytes: new Uint8Array([0]) }, binding);
+    const mixed = { ...a, sealBytes: b.sealBytes, bundleBytes: b.bundleBytes,
+      assertProjectionBinds: b.assertProjectionBinds };
+    for (const remembered of [undefined, verifiedRows]) {
+      const verifier = new Rfc64SuccessorRowVerificationV1(remembered);
+      expect(() => verifier.assertAssetBinds(mixed)).toThrow('canonically prepared catalog asset');
+      expect(() => verifier.assertAssetBinds(a)).not.toThrow();
+      expect(() => verifier.assertAssetBinds(b)).toThrow();
+    }
+  });
+
+  it('owns the prepared content despite caller or exposed-byte mutations', async () => {
+    const { genesis, verifiedRows, assets, history } = await rememberedCatalog(1);
+    const input = { ...assets[0]!, seal: { ...assets[0]!.seal },
+      projectionBytes: new Uint8Array(assets[0]!.projectionBytes) };
+    const prepared = prepareCatalogAssetV1(input, { scope: genesis.scope, deployment: PRODUCER_DEPLOYMENT });
+    const original = preparedSuccessorRowV1(assets[0]!, genesis.scope);
+    input.projectionBytes.fill(0);
+    input.seal.assertionMerkleRoot = `0x${'00'.repeat(32)}` as typeof input.seal.assertionMerkleRoot;
+    prepared.sealBytes.fill(0); prepared.bundleBytes.fill(0);
+    expect(prepared.bundleBytes).toEqual(original.bundleBytes);
+    expect(prepared.sealBytes).toEqual(original.sealBytes);
+    expect(Object.isFrozen(prepared.row.transfer)).toBe(true);
+    for (const remembered of [undefined, verifiedRows]) {
+      const verifier = new Rfc64SuccessorRowVerificationV1(remembered);
+      expect(() => verifier.assertAssetBinds(prepared)).not.toThrow();
+      expect(() => verifier.verifyProduced(history.previousHead,
+        history.previousBucket!.payload.rows[0]!, prepared)).not.toThrow();
+    }
+  });
+
+  it.each(['malformed', 'wrong-root', 'bad-attestation'] as const)(
+    'refuses canonically prepared %s content with and without remembered rows', async fault => {
+      const { genesis, verifiedRows, assets } = await rememberedCatalog(1);
+      const input = { ...assets[0]!, seal: { ...assets[0]!.seal } };
+      if (fault === 'malformed') input.projectionBytes = new Uint8Array([0]);
+      if (fault === 'wrong-root') {
+        input.seal.assertionMerkleRoot = `0x${'00'.repeat(32)}` as typeof input.seal.assertionMerkleRoot;
+      }
+      if (fault === 'bad-attestation') {
+        input.seal.authorAttestationR = `0x${'00'.repeat(32)}` as typeof input.seal.authorAttestationR;
+      }
+      const prepared = prepareCatalogAssetV1(input, { scope: genesis.scope, deployment: PRODUCER_DEPLOYMENT });
+      for (const remembered of [undefined, verifiedRows]) {
+        expect(() => new Rfc64SuccessorRowVerificationV1(remembered).assertAssetBinds(prepared)).toThrow();
+      }
+    });
 
   it('keeps what one completed successor holds and nothing else', async () => {
     const rows = new Rfc64VerifiedCatalogRowSetV1();

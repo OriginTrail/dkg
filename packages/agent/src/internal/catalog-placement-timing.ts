@@ -281,12 +281,17 @@ export class CatalogPlacementTimingV1 {
     });
   }
 
+  /** Include durable listing and key preparation, including failed reads. */
+  passReading(): void {
+    observe(() => { this.#passStartedAt = this.#sources.clock(); });
+  }
+
   /** Supervisor: a pass listed the durable markers with these keys; exactly they are owed now. */
   passStarted(listed: ReadonlySet<string>): void {
     observe(() => {
       this.#depth = listed.size;
       const now = this.#sources.clock();
-      this.#passStartedAt = now;
+      this.#passStartedAt ??= now;
       for (const key of this.#owedSince.keys()) {
         if (!listed.has(key)) this.#owedSince.delete(key);
       }

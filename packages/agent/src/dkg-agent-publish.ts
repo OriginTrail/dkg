@@ -7,6 +7,7 @@ import { tryWithKeyedLocks, assertionLifecycleWriteLockKey, type PromoteExecutio
 
 import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
 import { isTransientInventorySignerFailure } from './internal/promote/share-inventory-signing-capability.js';
+import { resolvePromoteRecipientsWithinBound } from './internal/promote/assertion-promote-precommit.js';
 import { finalizeQueuedKnowledgeAssetVmPublish, retireLegacySwmAfterConfirmedLocalPublish } from './queued-publish-finalization.js';
 
 /**
@@ -117,6 +118,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
 import {
+  controlStoreOptions,
   deleteByPatternWithoutCount,
   GraphManager,
   PrivateContentStore,
@@ -935,19 +937,12 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   graphOwnerRoutePortsV1(this: DKGAgent): GraphOwnerRoutePorts {
-    const owners = graphOwnerPeersOf(this, async (contextGraphId, signal) => {
-      const lookUp = () => this.resolveCuratorPeerIdsForCg(contextGraphId, { maxPeerIds: 16, signal });
-      let resolution = await lookUp();
-      const ownerDid = deriveCuratorDidFromCgId(contextGraphId);
-      if (resolution.peerIds.length === 0 && !resolution.curatorIsLocal && ownerDid !== null) {
-        // An Edge keeps no `agents` phonebook: fetch the owner's profile from a
-        // Core's, then look the owner's peers up again.
-        await this.ensureAgentsInOnDemandPhonebook([ownerDid.slice('did:dkg:agent:'.length)], signal);
-        resolution = await lookUp();
-      }
-      return resolution.peerIds.filter((peerId) => peerId !== this.peerId);
-    });
     const isConnected = (peerId: string): boolean => this.node.libp2p.getPeers().some((peer) => peer.toString() === peerId);
+    const owners = graphOwnerPeersOf(this, (contextGraphId, signal) => this.lookUpGraphOwnerPeers(
+      contextGraphId,
+      { isConnected, failedRecently: (peerId) => owners.failedRecently(peerId) },
+      signal,
+    ));
     return {
       ownerPeerIds: (contextGraphId, signal) => owners.of(contextGraphId, signal),
       isConnected,
@@ -959,7 +954,10 @@ export class PublishMethods extends DKGAgentBase {
         return waitForPeerProtocol(this.node.libp2p.peerStore, { toString: () => peerId }, PROTOCOL_SWM_UPDATE, 20, 250, signal);
       },
       mayConnect: (peerId) => owners.mayConnect(peerId),
+      failedRecently: (peerId) => owners.failedRecently(peerId),
+      inConnectOrder: (peerIds) => owners.inConnectOrder(peerIds),
       connectFailed: (peerId) => owners.connectFailed(peerId),
+      connectSucceeded: (peerId) => owners.connectSucceeded(peerId),
       noteFollower: (contextGraphId, peerId) => sharedMemoryFollowersOf(this).note(contextGraphId, peerId),
     };
   }
@@ -4252,10 +4250,13 @@ export class PublishMethods extends DKGAgentBase {
         `Refusing to publish curated CG payload via the plaintext-inline fallback.`,
       );
     }
-    const resolution = await withRpcUsageSite(
+    // The bounded repeat of the share's recipient read (#3044): an authority
+    // that moved while the keys resolved is read again before the publish fails.
+    const resolveRecipients = () => resolvePromoteRecipientsWithinBound(() => withRpcUsageSite(
       CG_AUTH_RPC_SITES.curatedKeyContext,
       () => this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId }),
-    );
+    ));
+    const resolution = await resolveRecipients();
     if (!resolution.requiresEncryption) {
       throw new Error(
         `${logPrefix}: curated CG ${contextGraphId}: access-policy says curated but recipient resolver ` +
@@ -4337,10 +4338,7 @@ export class PublishMethods extends DKGAgentBase {
     // once more. On a difference the resolution starts over, as a new attempt would,
     // and sets up an epoch for the authority as it is now. An authority that keeps
     // moving gives the attempt back as the typed authority failure.
-    const current = await withRpcUsageSite(
-      CG_AUTH_RPC_SITES.curatedKeyContext,
-      () => this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId }),
-    );
+    const current = await resolveRecipients();
     if (!current.requiresEncryption
       || computeSwmSenderKeyMembershipHash({ contextGraphId, subGraphName,
         members: current.recipients.map((recipient) => ({ agentAddress: recipient.agentAddress, recipientKeyId: recipient.recipientKeyId })),
@@ -4769,9 +4767,10 @@ export class PublishMethods extends DKGAgentBase {
 
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const assertionUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, opts?.subGraphName);
+    // This seal point read gates publisher admission; keep it off the bulk-read lane.
     const metaResult = await this.store.query(
       `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
-      { source: 'agent.asyncVmPublish.seal' },
+      controlStoreOptions('publisher', 'agent.asyncVmPublish.seal'),
     );
     const metaQuads = metaResult.type === 'quads' ? metaResult.quads : [];
     const seal = parseAssertionSealQuads(metaQuads, assertionUri);
