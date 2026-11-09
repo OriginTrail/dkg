@@ -23,8 +23,6 @@ interface TabsState {
   activeTabId: string;
   /** Most recent first; capped. */
   recentlyClosed: CenterTab[];
-  /** Counts tab activations, including of the tab already open, so the shell can react to each one. */
-  activations: number;
 
   openTab: (tab: CenterTab) => void;
   closeTab: (id: string) => void;
@@ -128,17 +126,16 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   tabs: initial.tabs,
   activeTabId: initial.activeTabId,
   recentlyClosed: initial.recentlyClosed,
-  activations: 0,
 
   openTab: (tab) => {
-    const { tabs, activeTabId, recentlyClosed, activations } = get();
+    const { tabs, activeTabId, recentlyClosed } = get();
     const existing = tabs.find((t) => t.id === tab.id);
     if (existing) {
       // Re-opening refreshes the label (e.g. a graph's name arrives after a deep link).
       const next = tab.label && tab.label !== existing.label
         ? tabs.map((t) => (t.id === tab.id ? { ...t, label: tab.label } : t))
         : tabs;
-      set({ tabs: next, activeTabId: tab.id, activations: activations + 1 });
+      set({ tabs: next, activeTabId: tab.id });
       return;
     }
     // New tabs open right after the active one.
@@ -148,7 +145,6 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       tabs: next,
       activeTabId: tab.id,
       recentlyClosed: recentlyClosed.filter((t) => t.id !== tab.id),
-      activations: activations + 1,
     });
   },
 
@@ -166,7 +162,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   },
 
   setActiveTab: (id) => {
-    if (get().tabs.some((t) => t.id === id)) set((s) => ({ activeTabId: id, activations: s.activations + 1 }));
+    if (get().tabs.some((t) => t.id === id)) set({ activeTabId: id });
   },
 
   moveTab: (id, toIndex) => {

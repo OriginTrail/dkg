@@ -4,6 +4,7 @@ import { api } from '../../api-wrapper.js';
 import { formatTime, formatDuration, shortId } from '../../hooks.js';
 import { opTone } from '../../op-type-colors.js';
 import { pressable } from '../../lib/pressable.js';
+import { OperationStatusBadge } from '../OperationStatusBadge.js';
 
 const BOTTOM_TABS = ['Node Log', 'Transactions'] as const;
 type BottomTab = typeof BOTTOM_TABS[number];
@@ -207,7 +208,7 @@ function TransactionsContent() {
                     {shortId(op.operation_id)}
                   </td>
                   <td className="v10-bottom-td">
-                    <span className={op.status === 'success' ? 'v10-bottom-status v10-bottom-status-done' : op.status === 'error' ? 'v10-bottom-status v10-bottom-status-failed' : 'v10-bottom-status'}>{op.status}</span>
+                    <OperationStatusBadge status={op.status} />
                   </td>
                   <td className="v10-bottom-td-muted">
                     {op.duration_ms != null ? formatDuration(op.duration_ms) : '—'}

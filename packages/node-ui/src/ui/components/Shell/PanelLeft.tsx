@@ -2,6 +2,7 @@ import React, { useCallback, useId, useState } from 'react';
 import { ChevronRight, Eye, X, RefreshCw, LogIn, Plus } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
+import { chooseOpenTab, chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
 import { useJourneyStore } from '../../stores/journey.js';
 import { useContextGraphDialogs } from '../../stores/contextGraphDialogs.js';
@@ -207,7 +208,7 @@ export function PanelLeft() {
   const myProjectsBodyId = useId();
   const integrationsBodyId = useId();
   const publicGraphsBodyId = useId();
-  const { openTab, activeTabId, setActiveTab } = useTabsStore();
+  const activeTabId = useTabsStore((s) => s.activeTabId);
   const { activeProjectId, setActiveProject } = useProjectsStore();
   const { contextGraphs, error: listError, identity: sharedAgent,
     inventoryLoading, inventoryError } = useContextGraphInventory();
@@ -233,7 +234,7 @@ export function PanelLeft() {
           type="button"
           className={`v10-tree-dashboard ${activeTabId === 'dashboard' ? 'active' : ''}`}
           aria-current={activeTabId === 'dashboard' ? 'page' : undefined}
-          onClick={() => { setActiveTab('dashboard'); setActiveProject(null); }}
+          onClick={() => { chooseOpenTab('dashboard'); setActiveProject(null); }}
         >
           <span className="v10-sidebar-place-icon">{DASHBOARD_ICON}</span> Dashboard
         </button>

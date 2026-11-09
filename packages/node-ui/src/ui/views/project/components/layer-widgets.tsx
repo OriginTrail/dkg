@@ -131,16 +131,21 @@ function useLayerAction(
     async (body: () => Promise<ActionOutcome>, formatError: (err: unknown) => string) => {
       setBusy(true);
       setOutcome(null);
+      // Completion follows the execution path: a body that resolves completed (with a
+      // warning or not), one that throws did not. The tone only decides how it looks.
       let next: ActionOutcome;
+      let completed = false;
       try {
         next = await body();
+        completed = true;
       } catch (err) {
         next = failed(formatError(err));
+      } finally {
+        setBusy(false);
       }
       setOutcome(next);
       onResult?.(next);
-      setBusy(false);
-      if (next.tone !== 'danger') onComplete?.();
+      if (completed) onComplete?.();
     },
     [onResult, onComplete],
   );
