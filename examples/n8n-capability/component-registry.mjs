@@ -3,7 +3,7 @@ import { resolveComponentValueSource, validateComponentUrlSource, normalizeCompo
 import { resolveComponentValue, validateComponentUrl } from './component-values.mjs';
 import { componentProgramSource as componentProgramSourceV1 } from './component-registry-v1.mjs';
 import { programDescriptor } from './program-block.mjs';
-import { configuredDkgProfile, profileParameters } from './dkg-profile.mjs';
+import { configuredDkgProfile, dkgOperationIds, profileParameters } from './dkg-profile.mjs';
 const text = (label, value = '', extra = {}) => ({ type: 'string', label, default: value, maxLength: 256, ...extra });
 const field = (label, value) => text(label, value, { pattern: 'field', maxLength: 64 });
 const number = (label, value, min = 1, max = 20) => ({ type: 'integer', label, default: value, min, max });
@@ -82,6 +82,8 @@ export function componentExecutionDescriptor({ requiresExportAuthorization: _pol
 export function component(id) {
   if (id === 'run-program') return programDescriptor;
   const value = componentRegistry.find(item => item.id === id);
+  if (!value && !configuredDkgProfile && dkgOperationIds.includes(id))
+    throw Object.assign(new Error('This workflow requires its configured DKG execution profile.'), { code: 'WORKFLOW_CAPABILITY_CHANGED', status: 409 });
   if (!value) throw Object.assign(new Error('Unknown component.'), { code: 'INVALID_COMPONENT', status: 400 });
   return value;
 }

@@ -39,7 +39,9 @@ export function createStudioService({ graphId, owner, client, repository, provid
   async function list() {
     const workflows = [];
     for (const row of repository.list()) {
-      try { workflows.push((await get(row.ka_ref)).workflow); } catch (e) { if (!['PROGRAM_NOT_FOUND', 'INVALID_WORKFLOW'].includes(e.code)) throw e; }
+      // Unavailable revisions remain saved with their original pins; other workflows can still be listed.
+      try { workflows.push((await get(row.ka_ref)).workflow); }
+      catch (e) { if (!['PROGRAM_NOT_FOUND', 'INVALID_WORKFLOW', 'WORKFLOW_CAPABILITY_CHANGED'].includes(e.code)) throw e; }
     }
     return workflows;
   }

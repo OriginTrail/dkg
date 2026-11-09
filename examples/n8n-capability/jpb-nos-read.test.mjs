@@ -30,3 +30,31 @@ for (const representation of ['bare-iris', 'rdf-terms', 'binding-objects', 'rdf-
   assert.equal(result.records[0].evidence.capturedAt, representation === 'null-date' ? null : '2026-10-18T00:00:00.000Z');
   assert.equal(result.source.freshSqlFetch, false);
 });
+
+
+for (const [invalid, change, message] of [
+  ['foreign record', rows => { rows[0].recordVersion = 'urn:foreign:record'; }, /source scope/],
+  ['foreign order', rows => { rows[0].record.fields.NAF = '62634'; }, /source scope/],
+  ['foreign organization', rows => { rows[0].record.source.organisation = 'Other'; }, /source scope/],
+  ['foreign table', rows => { rows[0].record.table = 'OTHER'; }, /source scope/],
+  ['missing row', rows => rows.pop(), /missing, duplicated or truncated/],
+  ['extra duplicate row', rows => rows.push(structuredClone(rows[0])), /missing, duplicated or truncated/],
+  ['missing operation', rows => { delete rows[0].record.fields.COFRAIS; }, /operation selection/],
+  ['duplicate operation', rows => { rows[0].record.fields.COFRAIS = rows[1].record.fields.COFRAIS; }, /operation selection/],
+  ['foreign operation', rows => { rows[0].record.fields.COFRAIS = 'OTHER'; }, /operation selection/],
+]) test(`nOS JPB reader rejects ${invalid} before returning records`, async () => {
+  let calls = 0;
+  await assert.rejects(readJpbThroughNos(async (path, body) => {
+    calls++;
+    assert.equal(path, 'query');
+    assert.equal(body.view, 'working-memory');
+    const ids = [...body.sparql.matchAll(/VALUES \?recordVersion \{ <([^>]+)>/g)].map(m => m[1]);
+    assert.equal(ids.length, 3);
+    const rows = ids.map((recordVersion, i) => ({ recordVersion,
+      record: { table: 'GAMME', source: { organisation: 'JPB' }, fields: { COFRAIS: ['CUT', 'USILU', 'EBAVM'][i], NAF: '62633' } },
+      logicalRecord: 'urn:test:logical:' + i, snapshot: 'urn:test:snapshot', sourceEvidence: 'urn:test:evidence', evidenceCapturedAt: null }));
+    change(rows);
+    return { result: { bindings: rows.map(({ record, ...row }) => ({ ...row, recordJson: { type: 'literal', value: JSON.stringify(record) } })) } };
+  }, { orderNo: '62633' }), message);
+  assert.equal(calls, 1);
+});
