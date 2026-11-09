@@ -166,3 +166,38 @@ test('node writer reconciles equivalent bracketed and bare IRIs in every positio
     assert.equal(creates, 1);
   }
 });
+
+
+for (const phase of ['before dispatch', 'after execution']) for (const invalid of ['disabled', 'missing', 'digest', 'program pin']) {
+  test(`Program transport rejects ${invalid} approval ${phase}`, async () => {
+    const source = 'return 3;', selected = { contextGraphId: 'study', operationIri: 'urn:calculate', version: '1', bindingDigest: 'b'.repeat(64),
+      program: { contextGraphId: 'programs', programIri: 'urn:p', programLayer: 'wm', authorAgentAddress: '0x' + '1'.repeat(40),
+        sourceHash: createHash('sha256').update(source).digest('hex') } };
+    const request = { selected, invocationId: 'same-id', inputs: [{ value: 3 }] }, paths = [];
+    let executes = 0;
+    const call = async (path, body, query) => {
+      paths.push(path);
+      if (path === 'programs/bindings') {
+        assert.deepEqual(query, { contextGraphId: selected.contextGraphId, operationIri: selected.operationIri });
+        const approval = { bindingDigest: selected.bindingDigest, binding: { enabled: true, program: structuredClone(selected.program) } };
+        if (phase === 'before dispatch' || executes) {
+          if (invalid === 'disabled') approval.binding.enabled = false;
+          if (invalid === 'missing') delete approval.binding;
+          if (invalid === 'digest') approval.bindingDigest = 'c'.repeat(64);
+          if (invalid === 'program pin') approval.binding.program.programIri = 'urn:another-program';
+        }
+        return approval;
+      }
+      if (path === 'programs/source') return { source, version: '1' };
+      assert.equal(path, 'programs/execute');
+      assert.deepEqual(body, { contextGraphId: selected.contextGraphId, operationIri: selected.operationIri,
+        invocationId: request.invocationId, inputs: request.inputs });
+      executes++;
+      return { persisted: true, invocationId: request.invocationId, executionIri: 'urn:sr:execution:same-id', outputs: ['{"calculated":true}'] };
+    };
+    await assert.rejects(invokeNosProgram(call, request), { code: 'DKG_COMPONENT_UNCONFIRMED', message: 'Program binding changed.' });
+    assert.equal(executes, phase === 'before dispatch' ? 0 : 1);
+    assert.deepEqual(paths, phase === 'before dispatch' ? ['programs/bindings']
+      : ['programs/bindings', 'programs/source', 'programs/execute', 'programs/bindings']);
+  });
+}
