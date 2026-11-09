@@ -94,6 +94,7 @@ export default defineConfig({
       'test/promote-retry-policy.test.ts',
       'test/local-private-access-signal.test.ts',
       'test/workspace-agent-recipients.test.ts',
+      'test/workspace-agent-recipients-access-sources.test.ts',
       'test/async-promote-writejob-atomicity.test.ts',
       'test/query-source-coverage.test.ts',
       'test/subject-atomic-write.test.ts',
