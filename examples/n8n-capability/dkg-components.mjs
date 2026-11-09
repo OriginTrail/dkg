@@ -1,16 +1,11 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { configuredDkgProfile, requireDkgProfile } from './dkg-profile.mjs';
-import { programRequest, programResult } from './dkg-program.mjs';
+import { dkgComponentOperations, componentFailure as fail } from './dkg-component-operations.mjs';
 
 export const isDkg = (id) => ["dkg-read", "dkg-write", "invoke-dkg-program"].includes(id);
 const hash = (v) =>
   createHash("sha256").update(JSON.stringify(v)).digest("hex");
-const fail = (message) =>
-  Object.assign(new Error(message), {
-    status: 409,
-    code: "DKG_COMPONENT_UNCONFIRMED",
-  });
 export function assertDkgEnabled(definition, profile = configuredDkgProfile) {
   for (const node of definition.nodes.filter(n => isDkg(n.componentId))) {
     requireDkgProfile(profile);
@@ -49,17 +44,22 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
   transport ??= profile?.transport;
   approvedInputs ??= profile?.loadInputs() ?? [];
   db.exec(`CREATE TABLE IF NOT EXISTS dkg_component_runs(id TEXT PRIMARY KEY, ka_ref TEXT NOT NULL, source_hash TEXT NOT NULL, input TEXT NOT NULL, expires INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS dkg_component_calls(id TEXT PRIMARY KEY, request_hash TEXT NOT NULL, result TEXT);`);
+    CREATE TABLE IF NOT EXISTS dkg_component_calls(id TEXT PRIMARY KEY, request_hash TEXT NOT NULL, result TEXT, response TEXT);`);
   db.exec('CREATE TABLE IF NOT EXISTS dkg_component_profiles (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, revision TEXT NOT NULL)');
   db.exec('CREATE TABLE IF NOT EXISTS dkg_component_actors (id TEXT PRIMARY KEY, actor TEXT NOT NULL)');
   db.exec('CREATE TABLE IF NOT EXISTS dkg_component_writes (id TEXT PRIMARY KEY, request TEXT NOT NULL, evidence TEXT NOT NULL, receipt TEXT)');
   db.exec('CREATE TABLE IF NOT EXISTS dkg_component_native_executions (id TEXT PRIMARY KEY, effect_id TEXT NOT NULL, workflow_id TEXT NOT NULL, execution_id TEXT NOT NULL)');
+  // Retain operation evidence in result; only response is returned to native callers.
+  // Older completed calls acquire a response lazily after the same authority checks.
+  if (!db.prepare('PRAGMA table_info(dkg_component_calls)').all().some(column => column.name === 'response'))
+    db.exec('ALTER TABLE dkg_component_calls ADD COLUMN response TEXT');
+  const operations = dkgComponentOperations({ db, profile, transport, assertNoPendingWrite });
   const active = new Map();
   function assertNoPendingWrite(workflow, invocationId) {
     const node = workflow.definition.nodes.find(n => n.componentId === 'dkg-write');
     if (!node) return;
     const pending = db.prepare(`SELECT r.id FROM dkg_component_runs r JOIN dkg_component_calls c ON c.id=r.id||':'||?
-      WHERE r.ka_ref=? AND r.id<>? AND c.result IS NULL LIMIT 1`).get(node.id, workflow.kaRef, invocationId);
+      WHERE r.ka_ref=? AND r.id<>? AND c.response IS NULL AND c.result IS NULL LIMIT 1`).get(node.id, workflow.kaRef, invocationId);
     if (pending) throw Object.assign(fail('Reconcile the previous DKG write before starting another invocation.'),
       { code: 'DKG_WRITE_PENDING', invocationId: pending.id });
   }
@@ -184,114 +184,28 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
     if (bound.effect_id !== value.effectId || bound.workflow_id !== nativeId || bound.execution_id !== value.executionId)
       throw fail('This invocation belongs to a different native execution.');
     if (active.has(key)) return active.get(key);
-    if (node.componentId === 'invoke-dkg-program' && prior?.result) return { items: JSON.parse(prior.result).items };
-    if (node.componentId === "dkg-read" && prior?.result)
-      return { items: profile.readItems(rows, JSON.parse(prior.result), node) };
+    const operation = operations[node.componentId];
+    const context = { node, rows, id, key, input, value, workflow, actor, prior };
+    if (prior?.result && !prior.response) {
+      const response = operation.legacyResponse(context);
+      db.prepare('UPDATE dkg_component_calls SET response=? WHERE id=?').run(JSON.stringify(response), key);
+      prior.response = JSON.stringify(response);
+    }
+    if (prior?.response) return JSON.parse(prior.response);
     const pending = (async () => {
-      if (!prior && node.componentId !== 'dkg-write')
-        db.prepare("INSERT INTO dkg_component_calls VALUES (?,?,NULL)").run(
-          key,
-          requestHash,
-        );
-      if (node.componentId === 'invoke-dkg-program') {
-        const request = programRequest(node, rows, id, profile);
-        const result = programResult(await transport(request, 'invoke', { actor }), request);
-        db.prepare('UPDATE dkg_component_calls SET result=? WHERE id=?').run(JSON.stringify(result), key);
-        return { items: result.items };
-      }
-      if (node.componentId === "dkg-read") {
-        const result = await transport(profile.readRequest(node, rows, input), 'read', { actor });
-        const items = profile.readItems(rows, result, node);
-        if (JSON.stringify(items).length > 8192)
-          throw fail("DKG Read result exceeds the workflow batch limit.");
-        db.prepare("UPDATE dkg_component_calls SET result=? WHERE id=?").run(
-          JSON.stringify(result),
-          key,
-        );
-        return { items };
-      }
-      const readNode = definition.nodes.find(
-        (n) => n.componentId === "dkg-read",
-      );
-      const read = db
-        .prepare("SELECT result FROM dkg_component_calls WHERE id=?")
-        .get(id + ":" + readNode.id);
-      if (!read?.result)
-        throw fail("DKG Read has not completed in this execution.");
-      const context = {
-        kaRef: workflow.kaRef,
-        sourceHash: workflow.sourceHash,
-        invocationId: id,
-        executionIri: "urn:sr:execution:" + id,
-        n8nExecutionId: value.executionId,
-        blockId: node.id,
-      };
-      let programOutput;
-      if (rows.length === 1 && rows[0]?.programExecution) {
-        const incoming = definition.edges.find(e => e.to === node.id);
-        const invoked = definition.nodes.find(n => n.id === incoming?.from && n.componentId === 'invoke-dkg-program');
-        const completed = invoked && db.prepare('SELECT result FROM dkg_component_calls WHERE id=?').get(id + ':' + invoked.id);
-        const confirmed = completed?.result && JSON.parse(completed.result);
-        if (!confirmed || !isDeepStrictEqual(confirmed.items, rows)) throw fail('Program output differs from this execution.');
-        programOutput = { ...confirmed.items[0], rawOutputs: confirmed.rawOutputs };
-      }
-      const savedWrite = db.prepare('SELECT * FROM dkg_component_writes WHERE id=?').get(key);
-      const evidence = savedWrite ? JSON.parse(savedWrite.evidence)
-        : profile.evidence(rows, context, JSON.parse(read.result), input, programOutput);
-      const { payload, recordCount, summary = {} } = evidence;
-      if (!prior) assertNoPendingWrite(workflow, id);
-      // Persist the exact callback AND write payload before the first possible effect.
-      // A new profile evaluation or a new native run must never stand in for this request.
-      db.exec('SAVEPOINT dkg_write_request');
+      let execute;
+      db.exec('SAVEPOINT dkg_call_pending');
       try {
-        db.prepare('INSERT OR IGNORE INTO dkg_component_calls VALUES (?,?,NULL)').run(key, requestHash);
-        db.prepare('INSERT OR IGNORE INTO dkg_component_writes VALUES (?,?,?,NULL)').run(key, JSON.stringify(value), JSON.stringify(evidence));
-        db.exec('RELEASE dkg_write_request');
+        db.prepare('INSERT OR IGNORE INTO dkg_component_calls (id,request_hash,result,response) VALUES (?,?,NULL,NULL)').run(key, requestHash);
+        execute = operation.prepare(context);
+        db.exec('RELEASE dkg_call_pending');
       } catch (error) {
-        db.exec('ROLLBACK TO dkg_write_request'); db.exec('RELEASE dkg_write_request'); throw error;
+        db.exec('ROLLBACK TO dkg_call_pending'); db.exec('RELEASE dkg_call_pending'); throw error;
       }
-      let result;
-      try { result = prior?.result ? JSON.parse(prior.result) : await transport({ ...payload, allowCreate: !prior }, 'write', { actor }); }
-      catch (error) {
-        throw Object.assign(error, { status: error.status ?? 409, code: 'DKG_WRITE_PENDING', invocationId: id, n8nExecutionId: value.executionId });
-      }
-      if (
-        result.contextGraphId !== profile.targetGraph ||
-        result.digest !== payload.digest ||
-        result.name !== payload.name ||
-        result.readbackVerified !== true ||
-        result.metadata?.status !== "wm-sealed"
-      )
-        throw Object.assign(fail("DKG write readback did not confirm this exact evidence."),
-          { code: 'DKG_WRITE_PENDING', invocationId: id, n8nExecutionId: value.executionId });
-      if (profile.requiresNosActor) await profile.authorize(actor);
-      const receipt = {
-        items: [
-          {
-            ...summary,
-            node: profile.node,
-            contextGraphId: profile.targetGraph,
-            name: result.name,
-            assetId: result.metadata.reservedUal,
-            layer: "wm",
-            status: "wm-sealed",
-            readbackVerified: true,
-            digest: payload.digest,
-            recordCount,
-            executionIri: context.executionIri,
-            n8nExecutionId: value.executionId,
-          },
-        ],
-      };
-      db.exec('SAVEPOINT dkg_write_receipt');
-      try {
-        db.prepare('UPDATE dkg_component_calls SET result=? WHERE id=?').run(JSON.stringify(result), key);
-        db.prepare('UPDATE dkg_component_writes SET receipt=? WHERE id=?').run(JSON.stringify(receipt), key);
-        db.exec('RELEASE dkg_write_receipt');
-      } catch (error) {
-        db.exec('ROLLBACK TO dkg_write_receipt'); db.exec('RELEASE dkg_write_receipt'); throw error;
-      }
-      return receipt;
+      const { result, response } = await execute();
+      // Evidence and the exact outward response become complete atomically.
+      db.prepare('UPDATE dkg_component_calls SET result=?,response=? WHERE id=?').run(JSON.stringify(result), JSON.stringify(response), key);
+      return response;
     })();
     active.set(key, pending);
     try {
@@ -314,7 +228,7 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
     const request = JSON.parse(saved.request);
     if (hash(request) !== prior.request_hash || request.workflowId !== workflowId || request.executionId !== executionId)
       throw fail('The saved write belongs to a different native execution.');
-    return { request, requestHash: prior.request_hash, pending: !prior.result };
+    return { request, requestHash: prior.request_hash, pending: !prior.response && !prior.result };
   }
   return { grant, call, writeRecovery };
 }

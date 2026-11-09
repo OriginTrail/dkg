@@ -86,6 +86,15 @@ Retries and write reconciliation retain this binding after restart. Existing
 journals with calls but no native execution binding require operator reconciliation;
 they cannot acquire a new execution identity on replay.
 
+Completed Read, Invoke and Write calls journal their exact native response
+separately from operation evidence. All three replay through the same path after
+current authority, profile, request and native-execution checks. Operation handlers
+prepare durable requests before dispatch; evidence and response commit atomically.
+Older completed rows acquire responses without transport calls, using the original
+Write receipt where present. A completed legacy Write without its receipt requires
+operator reconciliation. Uncertain writes retain their exact payload and reconcile
+with `allowCreate: false`, including across a response-schema upgrade.
+
 `test-support/measurement-profile.mjs` exercises another data shape, node, graph,
 Program and output without changing the runtime. It uses an injected test
 transport and is **not** a live DKG connector or live end-to-end proof.
