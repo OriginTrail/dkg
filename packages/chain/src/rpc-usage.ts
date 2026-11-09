@@ -421,6 +421,7 @@ const RPC_USAGE_SNAPSHOT_RAW_CONSUMERS = [
   'identityStorage.getIdentityId',
   'identityStorage.keyHasPurpose',
   'contextGraphs.isAuthorizedPublisher',
+  'contextGraphs.isAuthorizedAuthor',
   'token.allowance',
   'token.balanceOf',
   'IERC1271.isValidSignature',
@@ -510,8 +511,11 @@ const RPC_USAGE_SNAPSHOT_HUB_ASSET_NAMES = [
  * v3 adds `multicall3.aggregate3` and `multicall3.getCode`: one aggregate
  * request now carries background views that v2 counted one request each under
  * their own labels.
+ *
+ * v4 adds `contextGraphs.isAuthorizedAuthor`, the ContextGraphs 10.1.0 author
+ * gate the publisher asks before it collects ACKs.
  */
-export const RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION = 3 as const;
+export const RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION = 4 as const;
 
 /** Complete closed vocabulary that the cumulative diagnostic may serialize. */
 export const RPC_USAGE_SNAPSHOT_CONSUMERS: readonly string[] = Object.freeze(

@@ -126,6 +126,11 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // mock holds no wallet balances; the publisher's reader treats the absent method as unreadable,
   // which never keeps a wallet out.
   'readPublisherWalletBalances',
+  // ContextGraphs 10.1.0 author gate (`ContextGraphAuthorGate`), an optional capability the
+  // publisher asks before it collects ACKs. The mock's publish path enforces no author gate, so
+  // absent is its honest answer: the publisher reads the absent method as "no gate", exactly as
+  // it reads a pre-10.1.0 facade, and never refuses a mock publish on its account.
+  'isAuthorizedAuthor',
   'getRequiredPublishTokenAmount', // TODO: missing on mock, cross-check below
   // Snapshot reuse requires a finalized block hash plus the exact physical
   // DKGKnowledgeAssets address and binding generation. Mock snapshots

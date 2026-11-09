@@ -54,6 +54,7 @@ import type {
   ContextGraphStorageRangeOptions,
 } from './chain-adapter.js';
 import { readEvmContextGraphStorageRange } from './evm-context-graph-storage-range-read.js';
+import { isAbsentContractViewError } from './context-graph-author-gate.js';
 
 /** Only the cursor-backed modes that stop at a page budget may carry one. */
 type ContextGraphRegistryLiveScanPlan =
@@ -1324,6 +1325,34 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       cgs, 'cgStorage.getParticipantAgents', 'getParticipantAgents', contextGraphId,
     );
     return raw.map((addr: string) => ethers.getAddress(addr));
+  }
+
+  /**
+   * ContextGraphs 10.1.0 author gate (`ContextGraphs.isAuthorizedAuthor`); see
+   * `ContextGraphAuthorGate` in context-graph-author-gate.ts. One eth_call. On a
+   * facade that predates the gate the selector is absent, which is
+   * deterministic on every endpoint: it is neither failed over nor retried, and
+   * resolves `undefined`.
+   */
+  async isAuthorizedAuthor(contextGraphId: bigint, author: string): Promise<boolean | undefined> {
+    await this.init();
+    const contextGraphs = this.contracts.contextGraphs;
+    if (!contextGraphs) return undefined;
+    const normalized = ethers.getAddress(author);
+    try {
+      const allowed: boolean = await this.readContractWith(
+        contextGraphs,
+        'contextGraphs.isAuthorizedAuthor',
+        (c) => c.isAuthorizedAuthor(contextGraphId, normalized),
+        {
+          isRetryable: (err) => isRpcEndpointFailoverEligible(err) && !isAbsentContractViewError(err),
+        },
+      );
+      return Boolean(allowed);
+    } catch (err) {
+      if (isAbsentContractViewError(err)) return undefined;
+      throw err;
+    }
   }
 
   /**
