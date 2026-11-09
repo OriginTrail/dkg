@@ -81,7 +81,7 @@ export function createStudioService({ graphId, owner, client, repository, provid
     })();
     saving.set(key, pending); try { return await pending; } finally { saving.delete(key); }
   }
-  async function run(value, authorize, actor) {
+  async function run(value, authorize, actor, authorizeEvent) {
     if (!value || Object.keys(value).some(k => !['kaRef', 'sourceHash', 'itemsJson', 'invocationId'].includes(k))) throw reject('Invalid graph invocation.');
     const invocationId = workflowUuid(value.invocationId), { compiled, plan, workflow } = await get(value.kaRef, value.sourceHash);
     if (!workflow.approved) throw reject('This graph is not approved.');
@@ -93,10 +93,12 @@ export function createStudioService({ graphId, owner, client, repository, provid
     const descriptor = { ...(compiled.legacy ? componentV1 : component)(root.componentId), ...(compiled.mode === 'schedule' ? { mode: 'action' } : {}) };
     let input; try { input = (compiled.legacy ? normalizeComponentInputV1 : normalizeComponentInput)(descriptor, { itemsJson: value.itemsJson, paramsJson: JSON.stringify(root.params), executionId: '' }); }
     catch (e) { throw reject(e.message); }
+    authorizeEvent?.();
     assertDkgEnabled(compiled.definition);
     if (plan.kind === 'native-n8n') native().installGrant(compiled.grant);
     if (compiled.definition.nodes.some(n => isDkg(n.componentId))) components().grant(workflow, invocationId, input, actor);
     const invoke = () => {
+      authorizeEvent?.();
       if (compiled.mode === 'schedule') eventAuthorized(workflow.kaRef, compiled);
       return client.programs.invoke({ graphId, operationIri: workflow.kaRef, invocationId, inputs: [input] });
     };
@@ -132,8 +134,9 @@ export function createStudioService({ graphId, owner, client, repository, provid
       steps: compiled.definition.nodes.map((n, i) => ({ nodeId: n.id, componentId: n.componentId, kaRef: n.kaRef, ...trace[i] })),
       ...(dkgRecovery ? { dkgRecovery } : {}), persisted: true, readbackVerified: true };
   }
-  function eventAuthorized(ref, compiled) {
-    const active = activation(ref);
+  function eventAuthorized(ref, compiled, expectedRevision) {
+    const row = repository.row(ref), active = row?.activation_json ? JSON.parse(row.activation_json) : { active: false };
+    if (expectedRevision !== undefined && row?.activation_revision !== expectedRevision) throw reject('The event activation changed.');
     if (!active.active || active.expiresAt < Date.now()) throw reject('This event workflow is inactive.');
     if (compiled.requiresExportAuthorization && (!exportTokenFile || active.exportFingerprint !== fingerprint(exportTokenFile))) throw reject('The operator export authorization changed.');
   }
@@ -143,13 +146,14 @@ export function createStudioService({ graphId, owner, client, repository, provid
     await native().setPublished(ref, false);
     repository.completeUnpublication(ref, pending);
   }
-  async function deactivate(ref, activationId, mode) {
-    repository.deactivate(ref, activationId, mode === 'schedule');
+  async function deactivate(ref, activationId, mode, expectedRevision) {
+    if (!repository.deactivate(ref, activationId, mode === 'schedule', expectedRevision)) return;
     await reconcileUnpublication(ref);
   }
   async function activate(value, authorize) {
     if (!value || Object.keys(value).some(k => !['kaRef', 'sourceHash', 'active', 'activationId'].includes(k)) || typeof value.active !== 'boolean') throw reject('Choose an activation state.');
     const activationId = workflowUuid(value.activationId);
+    const revision = typeof value.kaRef === 'string' ? repository.row(value.kaRef)?.activation_revision : undefined;
     const { compiled, workflow } = await get(value.kaRef, value.sourceHash);
     if (!['schedule', 'webhook'].includes(compiled.mode)) throw reject('Start with a Webhook or Schedule Trigger to activate events.');
     if (activation(value.kaRef).activationId === activationId) {
@@ -165,7 +169,7 @@ export function createStudioService({ graphId, owner, client, repository, provid
       if (workflow.requiresExportAuthorization) authorize();
       const a = { active: true, activationId, startedAt: Date.now(), expiresAt: Date.now() + 30 * 60 * 1000, count: 0,
         ...(workflow.requiresExportAuthorization ? { exportFingerprint: fingerprint(exportTokenFile) } : {}) };
-      repository.setActivation(workflow.kaRef, a, randomUUID());
+      repository.setActivation(workflow.kaRef, a, randomUUID(), revision);
       if (compiled.mode === 'schedule') await native().setPublished(workflow.kaRef, true);
     } else {
       await deactivate(workflow.kaRef, activationId, compiled.mode);
@@ -181,10 +185,11 @@ export function createStudioService({ graphId, owner, client, repository, provid
     if (!workflow.approved) throw reject('Event workflow approval changed.');
     validateStudioCapabilities(compiled.definition, await listCapabilities());
     const invocationId = workflowUuid(value.invocationId), itemsJson = JSON.stringify(value.items);
+    const authorizeEvent = () => eventAuthorized(row.ka_ref, compiled, row.activation_revision);
     const reserved = repository.reserveEvent({ kaRef: row.ka_ref, providerId: row.provider_id,
-      executionId: invocationId, invocationId, inputJson: itemsJson }, () => eventAuthorized(row.ka_ref, compiled));
+      executionId: invocationId, invocationId, inputJson: itemsJson }, authorizeEvent);
     if (reserved.receipt) return reserved.receipt;
-    const receipt = await run({ kaRef: row.ka_ref, sourceHash: workflow.sourceHash, itemsJson, invocationId: reserved.invocationId }, () => eventAuthorized(row.ka_ref, compiled));
+    const receipt = await run({ kaRef: row.ka_ref, sourceHash: workflow.sourceHash, itemsJson, invocationId: reserved.invocationId }, authorizeEvent, undefined, authorizeEvent);
     return repository.completeEvent(reserved, receipt);
   }
   async function history(ref, mayDiscloseEvent) {
@@ -217,25 +222,26 @@ export function createStudioService({ graphId, owner, client, repository, provid
           capabilities = await listCapabilities();
         } catch { continue; } // Unavailable inspection is not evidence of revoked authority.
         try {
-          eventAuthorized(row.ka_ref, compiled);
+          eventAuthorized(row.ka_ref, compiled, row.activation_revision);
           validateStudioCapabilities(compiled.definition, capabilities);
           if (!workflow.approved) throw reject('Event workflow approval changed.');
         } catch (error) {
           if (['INVALID_WORKFLOW', 'WORKFLOW_CAPABILITY_CHANGED'].includes(error.code)) {
-            try { await deactivate(row.ka_ref, randomUUID(), compiled.mode); } catch {}
+            try { await deactivate(row.ka_ref, randomUUID(), compiled.mode, row.activation_revision); } catch {}
           }
           continue;
         }
         if (compiled.mode !== 'schedule') continue;
         const pendingExecutionIds = repository.pendingEvents(row.ka_ref).map(event => event.executionId);
+        const authorizeEvent = () => eventAuthorized(row.ka_ref, compiled, row.activation_revision);
         for await (const { executionId, items } of native().timerEvents({ grant: compiled.grant,
           startedAt: a.startedAt, pendingExecutionIds })) {
           try {
             const event = repository.reserveEvent({ kaRef: row.ka_ref, providerId: row.provider_id,
-              executionId, invocationId: eventUuid(row.ka_ref, executionId) }, () => eventAuthorized(row.ka_ref, compiled));
+              executionId, invocationId: eventUuid(row.ka_ref, executionId) }, authorizeEvent);
             if (event.receipt) continue;
             const receipt = await run({ kaRef: row.ka_ref, sourceHash: workflow.sourceHash, itemsJson: JSON.stringify(items),
-              invocationId: event.invocationId }, () => eventAuthorized(row.ka_ref, compiled));
+              invocationId: event.invocationId }, authorizeEvent, undefined, authorizeEvent);
             repository.completeEvent(event, receipt);
           } catch { /* Retain this exact invocation for the next reconciliation poll. */ }
         }
