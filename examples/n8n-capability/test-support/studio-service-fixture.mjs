@@ -20,7 +20,7 @@ export function environment() {
   const state=mkdtempSync(join(tmpdir(),'studio-unit-')), token=join(state,'fixture-api'), exportTokenFile=join(state,'fixture-export');
   writeFileSync(token,'unit-test-fixture-only');writeFileSync(exportTokenFile,'operator-unit-fixture-only');
   const config={n8nNative:{baseUrl:'http://127.0.0.1:45678',apiTokenFile:token,webhookTokenFile:token,workflows:[]}};
-  const native=new Map(),calls=[], executions=new Map();let loseCreate=false, executionPage=null;
+  const native=new Map(),calls=[], executions=new Map();let loseCreate=false, executionPage=null, unpublishFailure=null;
   const fetchImpl=async(url,options)=>{
     const path=new URL(url).pathname.replace('/api/v1',''),method=options.method;calls.push([method,path]);
     const body=options.body?JSON.parse(options.body):undefined;
@@ -32,13 +32,18 @@ export function environment() {
     const key=path.split('/')[2],w=native.get(key);if(!w)return Response.json({},{status:404});
     if(method==='PUT'){Object.assign(w,body);return Response.json(w);}
     if(action==='publish'){w.active=true;w.activeVersion={...w};return Response.json(w);}
-    if(action==='unpublish'){w.active=false;delete w.activeVersion;return Response.json(w);}
+    if(action==='unpublish'){
+      if(unpublishFailure==='reject') return Response.json({}, {status:503});
+      w.active=false;delete w.activeVersion;
+      if(unpublishFailure==='lost-ack') throw new Error('unpublish acknowledgement lost');
+      return Response.json(w);
+    }
     return Response.json(w);
   };
   let repository=createStudioRepository(state);
   const openProvider=()=>createStudioProvider({repository,config,graphId,owner,headerCredential:{id:'fixture-header',name:'Fixture'},credentials:{},fetchImpl});
   let provider=openProvider();
-  const sources=new Map(), approvals=new Map(),outputs=new Map(),invocations=[]; let inventory=catalog, catalogFailure;
+  const sources=new Map(), approvals=new Map(),outputs=new Map(),invocations=[]; let inventory=catalog, catalogFailure, catalogHook;
   const client={programs:{
     async getSource({programIri}){const s=sources.get(programIri);if(!s)throw Object.assign(Error('missing'),{code:'PROGRAM_NOT_FOUND',status:404});return s;},
     async upload(v){const source={...v,authorAgentAddress:owner,sourceHash:createHash('sha256').update(v.source).digest('hex')};sources.set(v.programIri,source);return source;},
@@ -48,8 +53,10 @@ export function environment() {
       const value={kind:'n8n-result',n8nExecutionId:'42',workflowSha256:c.grant.workflowSha256,output:{ok:true,itemsJson:v.inputs[0].itemsJson,portsJson:'{}',error:'',traceJson:JSON.stringify(c.grant.result.traceNodes.map(node=>({node,status:'completed',items:[1],outputHash:'a'.repeat(64)})))}};
       const executionIri='urn:sr:execution:'+v.invocationId,rawOutputs=[JSON.stringify(value)];outputs.set(executionIri,rawOutputs);return {...v,executionIri,rawOutputs,outputs:[value],persisted:true};},
   }};
-  const openService=()=>createStudioService({graphId,owner,client,repository,provider,dkg:dkgComponentStore(repository.db),exportTokenFile,listCapabilities:async()=>{if(catalogFailure){const error=catalogFailure;catalogFailure=undefined;throw error;}return inventory;},loadOutputs:async iri=>outputs.get(iri)});
+  const openService=()=>createStudioService({graphId,owner,client,repository,provider,dkg:dkgComponentStore(repository.db),exportTokenFile,listCapabilities:async()=>{if(catalogHook){const hook=catalogHook;catalogHook=undefined;await hook();}if(catalogFailure){const error=catalogFailure;catalogFailure=undefined;throw error;}return inventory;},loadOutputs:async iri=>outputs.get(iri)});
   let service=openService();
   return {state,get repository(){return repository;},get provider(){return provider;},get service(){return service;},restart(){service.stop();repository.close();repository=createStudioRepository(state);provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,fetchImpl,setExecutionPage:ids=>{executionPage=ids;},setCatalog:v=>{inventory=v;},failNextCatalog:error=>{catalogFailure=error;},loseNextCreate:()=>{loseCreate=true;},
+    setUnpublishFailure:value=>{unpublishFailure=value;},
+    beforeNextCatalog:hook=>{catalogHook=hook;},
     close(){service.stop();repository.close();rmSync(state,{recursive:true,force:true});}};
 }
