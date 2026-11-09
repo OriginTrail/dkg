@@ -62,5 +62,12 @@ test('cross-graph export protection gates actual Studio save and run before SDK 
     const request={kaRef:saved.kaRef,sourceHash:saved.sourceHash,itemsJson:'[{}]',invocationId:randomUUID()};
     await assert.rejects(service.run(request,deny),/export key required/);assert.equal(invokes,0);
     await assert.rejects(service.run(request,()=>{}),/fixture-dispatch/);assert.equal(invokes,1);
+    // A later catalog inspection cannot erase an export requirement already saved.
+    f.root.typescript.children=[];
+    assert.equal((await f.list())[0].requiresExportAuthorization,false);
+    await assert.rejects(service.save(definition,deny),/export key required/);
+    await assert.rejects(service.run({...request,invocationId:randomUUID()},deny),/export key required/);
+    assert.equal(uploads,1);assert.equal(invokes,1);
+    assert.equal(repository.row(saved.kaRef).requires_export,1);
   }finally{service.stop();repository.close();rmSync(state,{recursive:true,force:true});}
 });
