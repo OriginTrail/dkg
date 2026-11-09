@@ -100,6 +100,15 @@ export const SERVICES = [CHAT, REASONER] as const;
  */
 export const PLAN = { chatTrac: '1', reasonerTrac: '0.05', topUpTrac: '1' } as const;
 
+/**
+ * The Conviction Account the account spec opens from the buyer node's wallet:
+ * 100,000 TRAC committed, the tier with 30% off (PublishingMathLib).
+ */
+export const ACCOUNT = { committedTrac: '100000', discountBps: 3_000 } as const;
+
+/** The chat service's price for the next epoch, which the next-price spec sets on Operate: 150 µTRAC a token. */
+export const NEXT_CHAT_PRICE = 150_000_000_000_000n;
+
 export const WEI_PER_TRAC = 10n ** 18n;
 
 /** Wei from a TRAC amount written as the specs write it (`1`, `0.05`). */
