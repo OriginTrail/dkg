@@ -479,10 +479,17 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     return batch;
   }
 
-  /** The exact signed bytes, through the write endpoints: one already known is no error. */
+  /**
+   * The exact signed bytes, through the write endpoints: one already known is no error. Sent in the lane of the
+   * wallet that signed them, as its other writes are, so never between one of those reading its nonce and sending.
+   */
   async rebroadcastReceiptBatch(signedTx: string): Promise<void> {
     await this.init();
-    await this.broadcastSignedTransactionWithFailover(signedTx, ethers.Transaction.from(signedTx).hash!, 'marketplace receipt batch rebroadcast');
+    const tx = ethers.Transaction.from(signedTx);
+    const send = () => this.broadcastSignedTransactionWithFailover(signedTx, tx.hash!, 'marketplace receipt batch rebroadcast');
+    // A wallet that is not one of this node's has no lane here to share.
+    const signer = tx.from ? this.findSignerByAddress(tx.from) : undefined;
+    await (signer ? this.withSerializedSignerWrite(signer, send, 'receipt batch rebroadcast') : send());
   }
 
   async getReceiptBatchOutcome(txHash: string): Promise<ReceiptBatchOutcome> {
