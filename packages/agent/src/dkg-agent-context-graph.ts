@@ -2,9 +2,7 @@
 /**
  * Context-graph lifecycle methods (create / register / invite / remove /
  * rename / allowed-agents) extracted from dkg-agent.ts as a mixin holder.
- * Methods take `this: DKGAgent` so cross-calls resolve against the composed
- * class; the holder extends DKGAgentBase for shared field state. Behaviour is
- * unchanged — bodies are a 1:1 move. Assembled onto DKGAgent via applyMixins.
+ * Methods use the composed DKGAgent via applyMixins and DKGAgentBase state.
  */
 
 import { contextGraphPublishTopic, contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphDataUri, contextGraphMetaUri, encodePublishRequest, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, createOperationContext, escapeSparqlLiteral, CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE, contextGraphMetadataGraphs, contextGraphMetadataHomeGraph, type ContextGraphIdV1, type EvmAddressV1, type NetworkIdV1, assertRdfLiteralMutf8Safe } from '@origintrail-official/dkg-core';
