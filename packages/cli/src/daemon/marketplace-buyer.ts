@@ -149,7 +149,7 @@ export async function startMarketplaceGateway(options: MarketplaceGatewayOptions
   gateway.start(buyer.config.tickSeconds);
   if (contextGraphId) {
     // Asked until the graph admits the node, or until the gateway stops.
-    const stopAdmission = subscribeWhenAdmitted(agent, contextGraphId, { ...(options.log ? { log: options.log } : {}) });
+    const stopAdmission = subscribeWhenAdmitted(agent, contextGraphId, options.log ? { log: options.log } : {});
     const stopJob = gateway.stop.bind(gateway);
     gateway.stop = () => {
       stopAdmission();
