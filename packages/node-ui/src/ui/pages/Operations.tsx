@@ -5,7 +5,7 @@ import {
 } from 'recharts';
 import { useFetch, formatTime, formatDuration, shortId } from '../hooks.js';
 import { opTypeText, opTypeBg, opTypeRule, opChartColor } from '../op-type-colors.js';
-import { Badge, type BadgeTone } from '../components/ds/Badge.js';
+import { Badge } from '../components/ds/Badge.js';
 import {
   fetchOperationsWithPhases, fetchOperation, fetchNodeLog,
   fetchOperationStats, fetchStatus, fetchErrorHotspots, fetchFailedOperations,
@@ -23,6 +23,7 @@ import {
   PHASE_LEGEND_ENTRIES,
 } from '../phase-colors.js';
 import { humanizeStatus } from '../lib/formatLabels.js';
+import { OperationStatusBadge, operationStatusLabel } from '../components/OperationStatusBadge.js';
 import { HW_THRESHOLDS, hardwareChartRow, hardwareLevels, latestHardwareReading, type MetricLevel, type MetricsSnapshot } from './hardware-metrics.js';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
@@ -466,7 +467,7 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
           >
             <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{expandedOp === op.operation_id ? '▼' : '▸'}</span>
             <span style={{ fontWeight: 600, fontSize: 12, color: opTypeText(op.operation_name) }}>{op.operation_name}</span>
-            <StatusBadge status={op.status} />
+            <OperationStatusBadge status={op.status} />
             <span className="mono" style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
             <span style={{ fontSize: 10, color: 'var(--text-tertiary)', marginLeft: 'auto' }}>{formatTime(op.phase_started_at)}</span>
             {op.duration_ms != null && <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{formatDuration(op.duration_ms)}</span>}
@@ -1027,7 +1028,7 @@ function OperationsTab() {
                 >
                   <td title={op.started_at ? new Date(op.started_at).toLocaleString() : undefined}>{formatTime(op.started_at)}</td>
                   <td><Badge size="sm" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} style={{ background: opTypeBg(op.operation_name), color: opTypeText(op.operation_name), boxShadow: 'none' }}>{op.operation_name}</Badge></td>
-                  <td><StatusBadge status={op.status} /></td>
+                  <td><OperationStatusBadge status={op.status} /></td>
                   <td><MiniGantt phases={op.phases} totalMs={op.duration_ms} /></td>
                   <td>{formatDuration(op.duration_ms)}</td>
                   <td>{op.gas_cost_eth != null ? op.gas_cost_eth.toFixed(6) : '—'}</td>
@@ -1256,7 +1257,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
       <div className="card ds-card" style={{ padding: 16, marginBottom: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
           <span style={{ fontSize: 15, fontWeight: 700 }}>{op.operation_name}</span>
-          <StatusBadge status={op.status} />
+          <OperationStatusBadge status={op.status} />
           <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>{formatDuration(op.duration_ms)}</span>
           <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: "'JetBrains Mono', monospace" }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
         </div>
@@ -1311,7 +1312,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
                 return (
                   <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--tint-faint)', borderRadius: 'var(--radius-control)', borderLeft: `3px solid ${terminalColor}` }}>
                     <span style={{ fontWeight: 600, fontSize: 12, color, minWidth: 65 }} title={desc ?? ''}>{p.phase}</span>
-                    <StatusBadge status={p.status} />
+                    <OperationStatusBadge status={p.status} />
                     <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: "'JetBrains Mono', monospace" }}>{formatDuration(p.duration_ms)}</span>
                     {desc && <span style={{ fontSize: 10, color: 'var(--text-tertiary)', fontStyle: 'italic', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desc}</span>}
                     <span
@@ -1623,24 +1624,6 @@ function StyledDaemonLine({ line, lineNum, highlight }: { line: string; lineNum:
       <span style={{ color: LOG_COLORS.message }}>{highlight ? highlight(parsed.message) : parsed.message}</span>
     </div>
   );
-}
-
-export function operationStatusTone(status: string): BadgeTone {
-  if (status === 'success') return 'success';
-  if (status === 'error') return 'danger';
-  if (status === 'cancelled') return 'muted';
-  return 'pending';
-}
-
-/** The word shown for an operation status: the same Done and Failed as nOS. */
-export function operationStatusLabel(status: string): string {
-  if (status === 'success') return 'Done';
-  if (status === 'error') return 'Failed';
-  return humanizeStatus(status);
-}
-
-export function StatusBadge({ status }: { status: string }) {
-  return <Badge size="sm" tone={operationStatusTone(status)}>{operationStatusLabel(status)}</Badge>;
 }
 
 function CopyButton({ text }: { text: string }) {
