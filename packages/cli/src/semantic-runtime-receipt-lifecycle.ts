@@ -1,25 +1,10 @@
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { ExecutionReceiptJournal, ReceiptProgress } from '@origintrail-official/dkg-semantic-runtime';
-import { Parser } from 'n3';
-import { canonicalizeExactStoreDateTime, sparqlIri } from '@origintrail-official/dkg-core';
+import { exactStoredTripleKey as tripleKey } from './semantic-runtime-rdf.js';
 import { type PersistenceEvidence, type SemanticMemoryLayer, SemanticProgramError } from './semantic-runtime-types.js';
 import { historyIsAtLayer, historyLayerLabel } from './semantic-runtime-values.js';
 
 type Triple = { subject: string; predicate: string; object: string };
-function tripleKey(q: Triple): string {
-  const [parsed] = new Parser({ format: 'N-Triples' }).parse(
-    `${sparqlIri(q.subject)} ${sparqlIri(q.predicate)} ${q.object.startsWith('"') ? q.object : sparqlIri(q.object)} .`);
-  const term = parsed.object;
-  // Receipts journal ISO millisecond instants, while stores can trim zeroes or
-  // spell the same timezone differently. Compare exact values on BOTH sides so
-  // old journals recover without rewriting them or reissuing guest effects.
-  // The hash canonicalizer truncates submilliseconds and is unsafe here.
-  const value = term.termType === 'Literal' && term.datatype.value === 'http://www.w3.org/2001/XMLSchema#dateTime'
-    ? canonicalizeExactStoreDateTime(term.value) ?? term.value
-    : term.value;
-  return JSON.stringify([parsed.subject.value, parsed.predicate.value, term.termType, value,
-    term.termType === 'Literal' ? term.language.toLowerCase() : '', term.termType === 'Literal' ? term.datatype.value : '']);
-}
 
 /** Layer labels include drafts. Only exact content plus the pinned finalized pointer
  * can acknowledge a receipt. Issued uncertain finalize/share/publish calls are read back,
@@ -76,7 +61,7 @@ export async function persistKnowledgeAsset(
       if (written.size !== expected.size || [...written].some(q => !expected.has(q))) conflict(`${errors.subject} write is incomplete or conflicts`);
       await assertAuthorized();
       save({ phase: 'finalize' });
-      await agent.assertion.finalize(contextGraphId, name, lane);
+      await agent.assertion.finalize(contextGraphId, name, { ...lane, authorAgentAddress: agentAddress });
       history = await read();
     } else if (actual.size !== expected.size) conflict(`${errors.subject} sealed content differs from the expected receipt`);
     if (!history?.wmCurrentAssertion) uncertain();
