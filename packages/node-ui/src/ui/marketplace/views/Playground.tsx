@@ -5,7 +5,7 @@
 // token never goes to the gateway, and one playground key per browser is live. Under each answer, what it cost and who served it; at the soft
 // ceiling, the fork inline: top up, or wait for the next epoch.
 import React, { useState } from 'react';
-import { copy } from '../copy.generated.js';
+import { copy, type CopyKey } from '../copy.generated.js';
 import { isMarketplaceError, marketplaceApi, marketplaceGateway, needsNodeAdmin, type ChatRequest } from '../api/client.js';
 import type { Budget, CatalogAnswer, Served } from '../api/types.js';
 import { fmtCount, fmtTrac, modelName, pctOf } from '../amounts.js';
@@ -58,7 +58,7 @@ async function playgroundKey(budget: string): Promise<{ secret: string; keyId: s
 
 const KEY_GONE = new Set(['missing_key', 'unknown_key', 'revoked_key', 'expired_key']);
 
-interface Msg { role: 'user' | 'assistant'; content: string; served?: Served; error?: { copyKey: string; code: string } }
+interface Msg { role: 'user' | 'assistant'; content: string; served?: Served; error?: { copyKey: CopyKey; code: string } }
 type Fork = { kind: 'ceiling'; serviceId: string; nextEpochAt: number | null } | { kind: 'fund'; serviceId: string } | { kind: 'ending'; seconds: number | null };
 
 /** What a budget has for calls: its value left, less what the node holds. */

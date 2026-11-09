@@ -4,7 +4,7 @@
 // fork: top up, or wait for the next epoch. Each budget's pace comes from
 // this node's own calls.
 import React, { useMemo } from 'react';
-import { copy } from '../copy.generated.js';
+import { copy, type CopyKey } from '../copy.generated.js';
 import type { Budget, Call, CatalogAnswer, Plan, Subscription } from '../api/types.js';
 import { fmtCount, fmtMicro, fmtTrac, modelName, pctOf, sumWei, unitsOf } from '../amounts.js';
 import { relAt, sellerName } from '../shared.js';
@@ -23,7 +23,7 @@ function Spark({ series }: { series: number[] }): React.ReactElement {
 }
 
 /** One sentence on pace: will the budget last to the epoch's end at the rate so far? */
-function pace(b: Budget, s: Subscription, nowMs: number): { tone: 'warn' | 'quiet'; key: string; hours?: number } {
+function pace(b: Budget, s: Subscription, nowMs: number): { tone: 'warn' | 'quiet'; key: CopyKey; hours?: number } {
   const total = Math.max(1, s.endsAt - s.startsAt);
   const elapsed = Math.min(total, Math.max(1, nowMs / 1000 - s.startsAt));
   const spent = pctOf(BigInt(b.used) + BigInt(b.held), b.value) / 100;

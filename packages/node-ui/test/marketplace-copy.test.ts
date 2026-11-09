@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { COPY, copy } from '../src/ui/marketplace/copy.generated.js';
+import { COPY, copy, type CopyKey } from '../src/ui/marketplace/copy.generated.js';
 
 const ROOT = fileURLToPath(new URL('../src/ui/marketplace', import.meta.url));
 
@@ -34,7 +34,8 @@ describe('marketplace string table', () => {
   });
 
   it('says what a missing key is, so a test can catch it', () => {
-    expect(copy('no.such.key')).toBe('⟦missing copy: no.such.key⟧');
+    // Only a key from outside the type system can be missing.
+    expect(copy('no.such.key' as CopyKey)).toBe('⟦missing copy: no.such.key⟧');
     expect(copy('catalog.covered', { trac: '2.5' })).toBe('2.5 TRAC left this epoch');
   });
 });

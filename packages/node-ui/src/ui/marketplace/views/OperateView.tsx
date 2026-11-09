@@ -5,7 +5,7 @@
 // and weighted value and the pool so far, each ended epoch's gross; and the
 // operational wallets' ETH. Selling switched off is an explicit card.
 import React, { useState } from 'react';
-import { copy } from '../copy.generated.js';
+import { copy, type CopyKey } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi } from '../api/client.js';
 import type { LandNowAnswer, LandingReport, LandingStop, Offering } from '../api/types.js';
 import { fmtAt, fmtHex, fmtMicro, fmtTrac, modelName, weiOfMicro } from '../amounts.js';
@@ -17,7 +17,7 @@ type Landed = { stopped: LandingStop } | { batches: ReadonlyArray<{ items: numbe
 /** The last landing's report in those fields: its sent batches are the batches. */
 const landedOf = (r: LandingReport): Landed => ('stopped' in r ? r : { batches: r.sent, refused: r.refused, waiting: r.waiting });
 
-function landedLine(r: Landed): { key: string; vars: Record<string, string | number> } {
+function landedLine(r: Landed): { key: CopyKey; vars: Record<string, string | number> } {
   if ('stopped' in r) return { key: `operate.stopped.${r.stopped}`, vars: {} };
   if (r.batches.length === 0) return { key: r.waiting ? 'operate.land.waiting' : 'operate.land.none', vars: { refused: r.refused } };
   return { key: 'operate.land.sent', vars: { n: r.batches.length, items: r.batches.reduce((s, b) => s + b.items, 0), refused: r.refused } };

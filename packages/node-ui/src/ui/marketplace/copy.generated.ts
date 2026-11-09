@@ -1,6 +1,8 @@
 // The marketplace section's string table — every string the section shows
-// lives here, and components render through copy(key).
-export const COPY: Record<string, string> = {
+// lives here, and components render through copy(key). Its keys are a closed
+// set, CopyKey: a key the table lacks, or one renamed here, is a type error
+// wherever it is used. The table is edited by hand; no script writes it.
+export const COPY = {
   "onboard.key.title": "Get your key",
   "onboard.key.body": "Works with anything that speaks the OpenAI API — paste the two lines below.",
   "onboard.key.once": "Shown once. Store it now.",
@@ -401,10 +403,14 @@ export const COPY: Record<string, string> = {
   "gallery.key.gone": "Secret dismissed — only the prefix {key} remains",
   "flow.plan.failed": "The epoch is funded, but the plan was not saved: it won't renew until it is.",
   "flow.plan.retry": "Save the plan again"
-};
+} as const satisfies Record<string, string>;
 
-export function copy(key: string, params?: Record<string, string | number>): string {
-  let s = COPY[key] ?? `⟦missing copy: ${key}⟧`;
+/** A key of the string table. A refusal code from the node stays a string until refusalKey maps it to one. */
+export type CopyKey = keyof typeof COPY;
+
+export function copy(key: CopyKey, params?: Record<string, string | number>): string {
+  // A key from outside the type system, as a test's, still says which string is missing.
+  let s: string = (COPY as Record<string, string>)[key] ?? `⟦missing copy: ${key}⟧`;
   if (params) for (const [k, v] of Object.entries(params)) s = s.split(`{${k}}`).join(String(v));
   return s;
 }

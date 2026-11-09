@@ -2,17 +2,17 @@
 // account, compose a plan, mint a key), with the compose step's one
 // confirmation named under it while it is open.
 import React from 'react';
-import { copy } from '../copy.generated.js';
+import { copy, type CopyKey } from '../copy.generated.js';
 
 export type StepSub = 'confirm' | 'sending' | null;
 
-const SUB_KEY: Record<Exclude<StepSub, null>, string> = {
+const SUB_KEY: Record<Exclude<StepSub, null>, CopyKey> = {
   confirm: 'steps.sub.confirm',
   sending: 'steps.sub.sending',
 };
 
 export function ProgressSteps({ step, sub = null }: { step: 1 | 2 | 3; sub?: StepSub }): React.ReactElement {
-  const steps: Array<{ n: 1 | 2 | 3; key: string }> = [
+  const steps: Array<{ n: 1 | 2 | 3; key: CopyKey }> = [
     { n: 1, key: 'steps.fund' },
     { n: 2, key: 'steps.compose' },
     { n: 3, key: 'steps.key' },

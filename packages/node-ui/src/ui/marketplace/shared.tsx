@@ -2,14 +2,14 @@
 // reveal deeper), the section's off and admin-needed states, one loader hook,
 // relative times, seller names, and the hop to another marketplace tab.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { copy } from './copy.generated.js';
+import { copy, type CopyKey } from './copy.generated.js';
 import { isMarketplaceError } from './api/client.js';
 import { spanOf } from './amounts.js';
 import { MARKETPLACE_TABS } from './tabs.js';
 import { useTabsStore } from '../stores/tabs.js';
 
-/** A refusal's code → its plain words. */
-const CODE_COPY: Record<string, string> = {
+/** A refusal's code → its plain words. The codes are the node's, so any string; the words are the table's. */
+const CODE_COPY: Record<string, CopyKey> = {
   MarketplaceOff: 'err.off',
   // A single route the node lacks; a surface whose loads all meet it shows the absent state instead.
   MarketplaceAbsent: 'err.notfound',
@@ -69,15 +69,15 @@ const CODE_COPY: Record<string, string> = {
 };
 
 /** The copy key for a refusal code; anything unknown reads as a general failure. */
-export const refusalKey = (code: string | null | undefined): string => (code && CODE_COPY[code]) || 'err.generic';
+export const refusalKey = (code: string | null | undefined): CopyKey => (code && CODE_COPY[code]) || 'err.generic';
 
 /** Plain words for one reason of a code that covers several, by the code and its first argument. */
-const REASON_COPY: Record<string, string> = {
+const REASON_COPY: Record<string, CopyKey> = {
   // A funding of an epoch that is neither the current nor the next one: an epoch boundary passed since its dry run.
   'InvalidFundingRequest:epoch': 'err.funding.epoch',
 };
 
-export interface DescribedError { copyKey: string; message: string; code: string | null; detail: string | null; retryable: boolean; retryAfter: number | null }
+export interface DescribedError { copyKey: CopyKey; message: string; code: string | null; detail: string | null; retryable: boolean; retryAfter: number | null }
 
 export function describeError(e: unknown): DescribedError {
   if (isMarketplaceError(e)) {
@@ -90,7 +90,7 @@ export function describeError(e: unknown): DescribedError {
 
 /** One error card: plain words first, the code one reveal deeper, Retry when the node says it may pass. */
 export function ErrorCard({ err, onRetry, retryKey = 'ctl.retry', children }: {
-  err: unknown; onRetry?: () => void; retryKey?: string; children?: React.ReactNode;
+  err: unknown; onRetry?: () => void; retryKey?: CopyKey; children?: React.ReactNode;
 }): React.ReactElement {
   const d = describeError(err);
   const [open, setOpen] = useState(false);
@@ -127,7 +127,7 @@ export function OffCard({ selling = false, absent = false, testId }: { selling?:
 }
 
 /** A surface that needs the node-admin token, opened with another one. */
-export function AdminCard({ what }: { what: string }): React.ReactElement {
+export function AdminCard({ what }: { what: CopyKey }): React.ReactElement {
   return (
     <div className="mkt-card mkt-seatcard" data-testid="mkt-admin-needed">
       <h2 data-copy="admin.title">{copy('admin.title')}</h2>
