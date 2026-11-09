@@ -21,6 +21,7 @@ import {
   isChainWriteAheadHookError,
 } from '../src/write-ahead-hook-error.js';
 import { connectable } from './connectable.js';
+import { makeClient, retryable429 } from './rpc-failover-test-helpers.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -640,15 +641,15 @@ describe('rebroadcastReceiptBatch — in the lane of the wallet that signed the 
       sent.push(signedTx);
     });
     (a as any).waitForReceiptWithFailover = recorder(async (txHash: string) => fakeReceipt(txHash));
-    const tags: string[] = [];
-    (a as any).readTipProvider = recorder(async (_label: string, read: (p: unknown) => Promise<unknown>) => read({
-      getTransactionCount: async (address: string, tag: string) => {
-        tags.push(tag);
-        return pendingOf(address);
-      },
-    }));
+    // The guard asks where the wallet's writes read their nonce; a read through the read provider fails the test.
+    const nonceReads: string[] = [];
+    (a as any).rpcFailover.pendingNonce = async (address: string) => {
+      nonceReads.push(address);
+      return pendingOf(address);
+    };
+    (a as any).readTipProvider = async () => { throw new Error('the guard read the read provider'); };
     const broadcasts: unknown[][] = (a as any).broadcastSignedTransactionWithFailover.calls;
-    return { a, sent, pending, pendingOf, tags, broadcasts };
+    return { a, sent, pending, pendingOf, nonceReads, broadcasts };
   }
 
   /** Hold a wallet's lane, as a write that has read its nonce and not yet sent does. */
@@ -685,12 +686,36 @@ describe('rebroadcastReceiptBatch — in the lane of the wallet that signed the 
   });
 
   it("sends nothing once its wallet's pending nonce is past the batch's", async () => {
-    const { a, pending, tags, broadcasts } = onChain();
+    const { a, pending, nonceReads, broadcasts } = onChain();
     // Another transaction holds nonce 7, pending, or the batch itself is out already.
-    pending.set(new ethers.Wallet(DEPLOYER_PK).address, 8);
+    const address = new ethers.Wallet(DEPLOYER_PK).address;
+    pending.set(address, 8);
     await a.rebroadcastReceiptBatch(await signedAt(DEPLOYER_PK, 7, '0xba'));
     expect(broadcasts).toEqual([]);
-    expect(tags).toEqual(['pending']);
+    expect(nonceReads).toEqual([address]);
+  });
+
+  it("reads the pending nonce where its wallet's writes read theirs, so a lagging primary frees no taken nonce", async () => {
+    // Two RPCs. A publish took nonce 7 on the backup once the primary failed it, so writes now read their nonce there.
+    // The primary never saw that publish and still reports 7; the backup reports 8.
+    const a = new EVMChainAdapter(minimalConfig());
+    (a as any).initialized = true;
+    const address = new ethers.Wallet(DEPLOYER_PK).address;
+    const primary = { getTransactionCount: recorder(async () => 7) };
+    const backup = { getTransactionCount: recorder(async () => 8) };
+    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'],
+      async (_signer: unknown, populated: any) => ({ ...populated, nonce: 7 }), { enabled: true });
+    const signer = { address, connect: (p: unknown) => ({ address, boundTo: p }) } as any;
+    const knowledgeAssets = { connect: (s: any) => ({ publish: { populateTransaction: () => (s.boundTo === primary
+      ? Promise.reject(retryable429()) : Promise.resolve({ to: V10_KA_ADDRESS, data: '0x' })) } }) } as any;
+    await client.prepareTransaction(knowledgeAssets, 'publish', [], signer, 'publish');
+    (a as any).rpcFailover = client;
+    const send = recorder(async () => undefined);
+    (a as any).broadcastSignedTransactionWithFailover = send;
+    await a.rebroadcastReceiptBatch(await signedAt(DEPLOYER_PK, 7, '0xba'));
+    expect(send.calls).toEqual([]);
+    expect(backup.getTransactionCount.calls).toEqual([[address, 'pending']]);
+    expect(primary.getTransactionCount.calls).toEqual([]);
   });
 
   it("sends a batch at its wallet's pending nonce once: sent again, it finds that nonce taken", async () => {
