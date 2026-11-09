@@ -5,7 +5,8 @@
  * a power loss after a rename that was never synced can leave it), a ledger
  * journal that cannot be read, and one with entries that lack the shape of
  * their type, are each logged and kept aside, and the seller starts on safe
- * defaults. The prices are on disk before they are renamed over the old ones.
+ * defaults; a journal it may not read stays where it is and fails the load.
+ * The prices are on disk before they are renamed over the old ones.
  */
 import { appendFile, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -24,6 +25,7 @@ import {
   type ServiceRequest,
 } from '@origintrail-official/dkg-chain';
 import {
+  Journal,
   Seller,
   SellerLedger,
   requestToWire,
@@ -124,6 +126,21 @@ describe('a prices file', () => {
 });
 
 describe("the ledger's journal", () => {
+  it('that it may not read stays where it is and fails the load, so selling stays off until it reads', async () => {
+    const seller = await started();
+    const digest = await serveOne(seller, await fund());
+    for (const code of ['EACCES', 'EPERM']) {
+      const reads = vi.spyOn(Journal.prototype, 'read').mockRejectedValueOnce(Object.assign(new Error(`${code}: operation not permitted`), { code }));
+      await expect(new SellerLedger(dir).load()).rejects.toThrow(code);
+      reads.mockRestore();
+    }
+    expect(await asideOf('seller-ledger.jsonl')).toEqual([]);
+    // Once it can read the journal again, the epoch's calls are all there.
+    const reread = new SellerLedger(dir);
+    await reread.load();
+    expect(reread.stateOf(digest)).toBe('served');
+  });
+
   it('that cannot be read is moved aside and logged, and the ledger starts empty in a new one', async () => {
     // A directory where the journal goes: reading it fails with EISDIR.
     await mkdir(journalFile());

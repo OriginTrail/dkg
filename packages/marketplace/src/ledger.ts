@@ -99,8 +99,11 @@ interface CallState {
 
 const isOpen = (state: ReceiptState) => state === 'served' || state === 'sent';
 
-/** Read errors that may pass, for which the journal stays where it is and the load fails. */
-const PASSING_READ_ERRORS = new Set(['EAGAIN', 'EBUSY', 'EINTR', 'EIO', 'EMFILE', 'ENFILE', 'ENOMEM']);
+/**
+ * Read errors for which the journal stays where it is and the load fails: those that may pass (the disk, or too
+ * many open files), and a permission the operator can restore, whose journal still holds the epoch's receipts.
+ */
+const KEEPING_READ_ERRORS = new Set(['EAGAIN', 'EBUSY', 'EINTR', 'EIO', 'EMFILE', 'ENFILE', 'ENOMEM', 'EACCES', 'EPERM']);
 
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -123,7 +126,8 @@ export class SellerLedger {
    * ledger starts empty, in a new one: its calls are in the copy. Entries that
    * lack the shape of their type are left out, and the journal is written
    * again without them, after a copy of it as it was. A read error that may
-   * pass (the disk, or too many open files) fails the load and moves nothing.
+   * pass (the disk, or too many open files), or a permission it lacks, fails
+   * the load and moves nothing: selling stays off until it reads.
    */
   async load(): Promise<void> {
     const file = this.journal.file;
@@ -131,7 +135,7 @@ export class SellerLedger {
     try {
       entries = await this.journal.read();
     } catch (err) {
-      if (PASSING_READ_ERRORS.has((err as { code?: string }).code ?? '')) throw err;
+      if (KEEPING_READ_ERRORS.has((err as { code?: string }).code ?? '')) throw err;
       const aside = await setAside(file);
       this.log?.(`[marketplace] the seller's ledger ${file} could not be read (${messageOf(err)}); it was moved to ${aside}, and the ledger starts empty`);
       return;
