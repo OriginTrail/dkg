@@ -94,7 +94,7 @@ export function fixtureWorld(nowMs = Date.now()) {
   const budget = (i: number, [serviceId, value, cap, used, held]: [string, string, string, string, string]): Budget => {
     const v = tracWei(value);
     return {
-      budgetIndex: i, serviceId, ...amount('value', v), ...amount('maxPricePerUnit', microWei(cap)),
+      budgetIndex: i, serviceId, serviceClass: 'inference', ...amount('value', v), ...amount('maxPricePerUnit', microWei(cap)),
       ...amount('used', tracWei(used)), ...amount('held', tracWei(held)), ...amount('left', v - tracWei(used)),
       ...amount('softCeiling', (v * 95n) / 100n),
     };
@@ -244,7 +244,7 @@ export function fixtureWorld(nowMs = Date.now()) {
     };
   };
   const plan = (renew: boolean): Plan => ({
-    services: current.budgets.map((b) => ({ serviceId: b.serviceId, serviceClass: 'inference', ...amount('value', BigInt(b.value)), ...amount('maxPricePerUnit', BigInt(b.maxPricePerUnit)) })),
+    services: current.budgets.map((b) => ({ serviceId: b.serviceId, serviceClass: b.serviceClass, ...amount('value', BigInt(b.value)), ...amount('maxPricePerUnit', BigInt(b.maxPricePerUnit)) })),
     source: wallet, renew, ...(renew ? { renewUntilEpoch: epoch + 6 } : {}),
   });
   return {
@@ -284,7 +284,7 @@ function previewOf(world: FixtureWorld, r: FundingRequest): Preview {
 
 function budgetsOf(services: ServiceRequest[], from = 0): Budget[] {
   return services.map((s, i) => ({
-    budgetIndex: from + i, serviceId: s.serviceId, ...amount('value', BigInt(s.value)), ...amount('maxPricePerUnit', BigInt(s.maxPricePerUnit)),
+    budgetIndex: from + i, serviceId: s.serviceId, serviceClass: s.serviceClass, ...amount('value', BigInt(s.value)), ...amount('maxPricePerUnit', BigInt(s.maxPricePerUnit)),
     ...amount('used', 0n), ...amount('held', 0n), ...amount('left', BigInt(s.value)), ...amount('softCeiling', (BigInt(s.value) * 95n) / 100n),
   }));
 }

@@ -87,6 +87,8 @@ export type Source = { kind: 'wallet' } | { kind: 'account'; accountId: string; 
 export interface Budget {
   budgetIndex: number;
   serviceId: string;
+  /** As the chain stored it: a top-up repeats it exactly, whatever the catalog says of the service now. */
+  serviceClass: 'inference' | 'query';
   value: string;
   valueTrac: string;
   maxPricePerUnit: string;

@@ -625,6 +625,42 @@ describe('marketplace Plans', () => {
     expect(writes.filter((w) => w.url.endsWith('/top-up')).map((w) => (w.body as { services: Array<{ maxPricePerUnit: string }> }).services[0].maxPricePerUnit)).toEqual([price]);
   });
 
+  it('tops up a query budget the catalog lacks as a query budget, in its dry run and in the top-up sent', async () => {
+    const query = `0x${'51'.repeat(32)}`;
+    const world = fixtureWorld();
+    const subscription = { ...world.current, budgets: [...world.current.budgets, { ...world.current.budgets[2], budgetIndex: 3, serviceId: query, serviceClass: 'query' as const }] };
+    const writes = editedNode('active', (method, url, body) => {
+      if (method !== 'GET' || !url.startsWith('/api/marketplace/subscriptions')) return;
+      for (const s of body.subscriptions as Json[]) if (s.subscriptionId === subscription.subscriptionId) s.budgets = subscription.budgets;
+    });
+    const catalog = world.catalog(true);
+    expect(catalog.services.some((s) => s.serviceId === query)).toBe(false);
+    const c = await render(React.createElement(TopUp, { catalog, subscription, serviceId: query, onDone: () => undefined, onCancel: () => undefined }));
+    await type(byTestId(c, 'mkt-topup-amount'), '0.5');
+    await flush(300);
+    await waitForText(c, 'Costs 0.5 TRAC from the buyer wallet for epoch 664');
+    await click(byTestId(c, 'mkt-topup-confirm'));
+    await waitForText(c, 'topped up');
+    const classesSent = (suffix: string) => writes.filter((w) => w.url.endsWith(suffix)).map((w) => (w.body as { services: Array<{ serviceClass: string }> }).services[0].serviceClass);
+    expect(classesSent('/top-up/preview').length).toBeGreaterThan(0);
+    expect(new Set(classesSent('/top-up/preview'))).toEqual(new Set(['query']));
+    expect(classesSent('/top-up')).toEqual(['query']);
+  });
+
+  it('asks nothing for a service whose class neither the subscription nor the catalog names, and says why', async () => {
+    const writes = recordWrites('active');
+    const world = fixtureWorld();
+    const c = await render(React.createElement(TopUp, {
+      catalog: world.catalog(true), subscription: world.current, serviceId: `0x${'52'.repeat(32)}`, onDone: () => undefined, onCancel: () => undefined,
+    }));
+    await type(byTestId(c, 'mkt-topup-cap'), '1');
+    await type(byTestId(c, 'mkt-topup-amount'), '0.5');
+    await flush(300);
+    expect(byTestId(c, 'mkt-topup-class')?.textContent).toContain('its class is not known');
+    expect((byTestId(c, 'mkt-topup-confirm') as HTMLButtonElement).disabled).toBe(true);
+    expect(writes.filter((w) => w.url.includes('/top-up'))).toEqual([]);
+  });
+
   it('saves an edit to one line of the plan with every other cap unchanged to the wei', async () => {
     const writes = editedNode('active', withCaps({ [FIXTURE_IDS.qwen14b]: '123456000000', [FIXTURE_IDS.qwen7b]: '10' }));
     const c = await render(plans());

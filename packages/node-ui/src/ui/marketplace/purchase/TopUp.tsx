@@ -123,8 +123,10 @@ export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
   const fixed = phase.kind === 'unknown' || (phase.kind === 'sending' && phase.retry);
   const value = weiOfTrac(amount);
   const capWei = budget ? budget.maxPricePerUnit : weiOfMicro(cap)?.toString() ?? null;
-  const addition: Addition | null = value && capWei && !fixed
-    ? { subscriptionId: subscription.subscriptionId, services: [{ serviceId, serviceClass: service?.serviceClass ?? 'inference', value: value.toString(), maxPricePerUnit: capWei }] }
+  // A top-up repeats the class the chain stores for the budget; the catalog's class is only for a budget the subscription lacks.
+  const serviceClass = budget ? budget.serviceClass : service?.serviceClass ?? null;
+  const addition: Addition | null = value && capWei && serviceClass && !fixed
+    ? { subscriptionId: subscription.subscriptionId, services: [{ serviceId, serviceClass, value: value.toString(), maxPricePerUnit: capWei }] }
     : null;
   const dryRun = usePreview(addition, (r) => marketplaceApi.topUpPreview(r.subscriptionId, r.services), { retain: 'none', round });
   const name = modelName(service?.label ?? serviceId);
@@ -229,6 +231,7 @@ export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
           <span data-copy="composer.cap.unit">{copy('composer.cap.unit')}</span></label>
       </div>
       {budget && <div className="mkt-muted mkt-xs" data-copy="topup.after">{copy('topup.after', { trac: fmtTrac(BigInt(budget.value) + (value ?? 0n)) })}</div>}
+      {!fixed && !serviceClass && <div className="mkt-xs mkt-errline" data-testid="mkt-topup-class" data-copy="topup.class.unknown">{copy('topup.class.unknown')}</div>}
       {!fixed && <PreviewLine preview={dryRun.shown?.preview ?? null} err={dryRun.err} busy={dryRun.busy} />}
       {phase.kind === 'compose' && phase.err ? <ErrorCard err={phase.err} /> : null}
       {phase.kind === 'unknown' && seen && (

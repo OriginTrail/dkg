@@ -32,6 +32,18 @@ const A = '0x1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a9f0e1d2c';
 ({ keys: [{ keyId: 'dkgmk_0011aabb', label: 'agent', budget: '1000000000000000000', spent: '0', services: null, rps: 100, expiresAt: null, revoked: false, lastUsedAt: null }] }) satisfies KeysAnswer;
 ({ keyId: 'dkgmk_0011aabb', label: 'agent', budget: '1', spent: '0', services: [A], rps: 5, expiresAt: 1_800_000_000, revoked: false, lastUsedAt: null, secret: 'dkgmk_0011aabb' }) satisfies MadeKey;
 
+// A subscription whose budget names its class as the chain stores it.
+({
+  subscriptions: [{
+    subscriptionId: A, epoch: 664, startsAt: 1_799_900_000, endsAt: 1_799_986_400, source: { kind: 'wallet' },
+    value: '5', valueTrac: '0.000000000000000005', cost: '5', costTrac: '0.000000000000000005', sessionKey: '0x5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e',
+    budgets: [{
+      budgetIndex: 0, serviceId: A, serviceClass: 'query', value: '5', valueTrac: '0.000000000000000005', maxPricePerUnit: '10', maxPricePerUnitTrac: '0.00000000000000001',
+      used: '0', usedTrac: '0.0', held: '0', heldTrac: '0.0', left: '5', leftTrac: '0.000000000000000005', softCeiling: '4', softCeilingTrac: '0.000000000000000004',
+    }],
+  }],
+}) satisfies SubscriptionsAnswer;
+
 // A dry run the contracts would refuse, and a plan with its next renewal.
 ({ epoch: 664, source: { kind: 'account', accountId: '7', discountBps: 1000 }, value: '5', valueTrac: '0.000000000000000005', cost: '4', costTrac: '0.000000000000000004', discountBps: 1000, refusal: { code: 'LimitExceeded', args: ['maxCostPerEpoch', '1', '4'] } }) satisfies Preview;
 ({ services: [{ serviceId: A, serviceClass: 'inference', value: '5', valueTrac: '0.000000000000000005', maxPricePerUnit: '10', maxPricePerUnitTrac: '0.00000000000000001' }], source: { kind: 'wallet' }, renew: true, renewUntilEpoch: 670, next: { epoch: 665, at: 1_800_000_000, cost: '5', costTrac: '0.000000000000000005', refusal: 'ERC20InsufficientBalance' } }) satisfies Plan;
