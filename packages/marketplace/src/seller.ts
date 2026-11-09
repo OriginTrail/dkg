@@ -80,6 +80,9 @@ import {
 /** New calls stop this long before an epoch ends. */
 export const DEFAULT_STOP_SERVING_SECONDS = 180;
 
+/** The longest delay a timer of this runtime takes, in milliseconds; a longer one would fire at once. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 export interface SellerService {
   /** The model's URN; `serviceId` is its keccak256. */
   model: string;
@@ -344,8 +347,9 @@ export class Seller {
       if (this.ledger.nonceUsed(request.subscriptionId, request.nonce.toString())) return refusal('NonceUsed');
       const left = await chain.budgetLeft(request.subscriptionId, budgetIndex);
       if (left - this.ledger.unlanded(request.subscriptionId, budgetIndex) < request.maxValueWei) return refusal('BudgetExhausted');
-      // The backend has until the request expires, by this host's clock.
-      const deadline = AbortSignal.timeout(Math.max(0, readAt + (request.expiry - times.now) * 1_000 - Date.now()));
+      // The backend has until the request expires, by this host's clock: for a request that lasts weeks, as long as a
+      // timer can wait, far past any backend's own timeout. The check of the completion's time below still holds.
+      const deadline = AbortSignal.timeout(Math.min(MAX_TIMER_MS, Math.max(0, readAt + (request.expiry - times.now) * 1_000 - Date.now())));
       return this.run(service, request, call, requestDigest, budgetIndex, times.epoch, deadline);
     });
   }

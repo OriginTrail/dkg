@@ -467,6 +467,20 @@ describe('a call', () => {
     expect(backend.calls).toBe(1);
   });
 
+  it.each([40, 60])('gives its backend the time of a request that lasts %i days', async (days) => {
+    const id = await fund();
+    const { now } = await chain.getEpochTimes();
+    // A backend that fails if its signal aborts, and answers a little later otherwise.
+    let abortedAtAnswer: boolean | undefined;
+    backend.during = (signal) => new Promise((resolve, reject) => {
+      if (signal.aborted) reject(new UpstreamError('aborted'));
+      signal.addEventListener('abort', () => reject(new UpstreamError('aborted')));
+      setTimeout(() => { abortedAtAnswer = signal.aborted; resolve(); }, 20);
+    });
+    expect(codeOf(await seller.serve(wire(await requestFor(id, { expiry: now + days * 86_400 }))))).toBe('ok');
+    expect(abortedAtAnswer).toBe(false);
+  });
+
   it("stops its backend when the request expires, and does not count the backend as down", async () => {
     const id = await fund();
     const { now } = await chain.getEpochTimes();
