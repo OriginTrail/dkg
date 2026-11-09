@@ -42,7 +42,7 @@ export class ShareProjectModal {
   }
 
   async openJoinRequestsTab() {
-    await this.page.getByRole('button', { name: /Join requests/i }).click();
+    await this.page.getByRole('tab', { name: /Join requests/i }).click();
   }
 
   async getInviteCodeText(): Promise<string | null> {

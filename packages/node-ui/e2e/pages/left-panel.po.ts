@@ -164,7 +164,7 @@ export class LeftPanelPage {
    */
   async hideProject(name: string) {
     const section = this.root.locator(sel.leftPanel.section).filter({ hasText: name }).first();
-    await section.locator(sel.leftPanel.sectionHeader).first().getByRole('button', { name: /Hide this Context Graph/ }).click();
+    await section.locator(sel.leftPanel.sectionHeader).first().getByRole('button', { name: /^Hide .+ from the sidebar$/ }).click();
   }
 
   /** The "↺ Show N hidden context graphs" restore button (only present while ≥1 is hidden). */

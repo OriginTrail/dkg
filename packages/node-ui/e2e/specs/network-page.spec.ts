@@ -1,7 +1,6 @@
 import { test, expect } from '../fixtures/base.js';
 
-// `/network` is an unframed legacy debug page mounted at the root
-// router (no AppShell, no sidebar, no Vite client). The Vite dev
+// `/network` forwards to the Network tab in Observability. The Vite dev
 // server is configured with `base: '/ui/'`, so absolute paths like
 // `/network` get rewritten by the dev server to "did you mean
 // /ui/network?". We use a path relative to the configured `baseURL`
@@ -97,11 +96,9 @@ test.describe('Network tab in Observability (/ui/network)', () => {
     await expect(desc.or(table).first()).toBeVisible();
   });
 
-  test('the page is unframed (no AppShell sidebar / header)', async ({ page }) => {
-    // Sidebar toggle button only exists inside the framed AppShell.
-    await expect(page.locator('button[title="Toggle sidebar"]')).toHaveCount(0);
-    await expect(page.locator('.v10-panel-left')).toHaveCount(0);
-    await expect(page.locator('.v10-panel-bottom')).toHaveCount(0);
+  test('sits inside the app shell, like every other Observability tab', async ({ page }) => {
+    await expect(page.locator('button[title="Toggle sidebar"]')).toHaveCount(1);
+    await expect(page.locator('.v10-panel-left').first()).toBeVisible();
   });
 
   test('document.title is "DKG Node"', async ({ page }) => {
