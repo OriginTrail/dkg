@@ -4,7 +4,8 @@
  * The NeuroSymbolic Marketplace (OT-RFC-27) on the EVM adapter: the methods of
  * `MarketplaceChain` (marketplace.ts) against `ServiceSubscriptions`,
  * `ServiceSubscriptionsWallet`, `ServiceSubscriptionsStorage`,
- * `QueryInferenceSettlement` and `QueryInferenceStorage`.
+ * `QueryInferenceSettlement` and `QueryInferenceStorage`, and the lifetime
+ * extension of a seller's offer asset (`KnowledgeAssetsLifecycle`).
  *
  * Mixin holder in the pattern of `evm-adapter-conviction.ts`, mixed into
  * `EVMChainAdapter` with `applyMixins` (evm-adapter.ts). A receipt batch is
@@ -41,6 +42,7 @@ import {
   type EpochFunding,
   type EpochTimes,
   type EpochTotals,
+  type KnowledgeAssetExtension,
   type MarketplaceContracts,
   type MarketplaceWriteOptions,
   type NodeEpoch,
@@ -524,6 +526,26 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     await this.init();
     const block = await this.readTipProvider('marketplace base fee', (p) => p.getBlock('latest'));
     return block?.baseFeePerGas ?? null;
+  }
+
+  // --------------------------------------------- KnowledgeAssetsLifecycle
+
+  /** Paid at `_validateTokenAmount`'s rate for an extension: ask × bytes × epochs / 1024, and never 0. */
+  async extendKnowledgeAssetLifetime(kaId: bigint, epochs: number, opts?: MarketplaceWriteOptions): Promise<KnowledgeAssetExtension> {
+    await this.init();
+    const signer = opts?.from === undefined ? this.signer : this.findSignerByAddress(opts.from);
+    if (!signer) throw new Error(`Cannot send from ${opts?.from}: it is not one of this node's operational wallets`);
+    const { knowledgeAssetStorage: kas, askStorage } = this.contracts;
+    if (!kas || !askStorage) throw new Error('DKGKnowledgeAssets or AskStorage not available: cannot extend a Knowledge Asset');
+    const { byteSize } = await this.readKnowledgeAssetUpdateContext(kas, kaId);
+    const ask = BigInt(await this.readContract(askStorage, 'askStorage.getStakeWeightedAverageAsk', 'getStakeWeightedAverageAsk'));
+    const quoted = (ask * byteSize * BigInt(epochs)) / 1024n;
+    const tokenAmount = quoted > 0n ? quoted : 1n;
+    const lifecycle = () => this.resolveContract('KnowledgeAssetsLifecycle');
+    await this.ensureV10ApproveTrac(signer, await (await lifecycle()).getAddress(), tokenAmount, 'extend knowledge asset');
+    const receipt = await this.marketplaceSend(lifecycle, 'extendKnowledgeAssetLifetime', [kaId, epochs, tokenAmount], { from: signer.address });
+    const { endEpoch } = await this.readKnowledgeAssetUpdateContext(kas, kaId);
+    return { ...txResultOf(receipt), tokenAmount, endEpoch: Number(endEpoch) };
   }
 
 
