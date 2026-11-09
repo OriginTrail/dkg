@@ -1,5 +1,7 @@
 import { Readable } from 'node:stream';
 import { createCapabilityBridge } from '../../../examples/n8n-capability/bridge.mjs';
+import { createPreviewHandler } from '../../../examples/n8n-capability/cloudflare-preview.mjs';
+import { collectN8nExecutionResult } from '../../../packages/cli/dist/semantic-runtime-n8n-results.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
@@ -22,6 +24,27 @@ function definition(ids=['edit-fields','if','limit'], edges=[[0,0,1,0],[1,0,2,0]
     edges:edges.map(([a,output,b,input])=>({from:'n'+a,output,to:'n'+b,input}))};
 }
 const compile=v=>compileStudio(v,{graphId,owner,fixture:true,providerId:'unit_native'});
+
+test('compiled loop keeps repeated terminal branches and the done output exactly once', () => {
+  const compiled = compile(definition(['loop-items', 'if'], [[0,1,1,0], [1,0,0,0]]));
+  const item = json => ({ json });
+  const first = { accepted: 1 }, second = { accepted: 2 }, rejected1 = { rejected: 1 }, rejected2 = { rejected: 2 };
+  const execution = { status: 'success', data: { resultData: { runData: {
+    'Block n0': [
+      { data: { main: [[], [item(first), item(rejected1)]] } },
+      { data: { main: [[], [item(second), item(rejected2)]] } },
+      { data: { main: [[item(first), item(second)], []] } },
+    ],
+    'Block n1': [
+      { data: { main: [[item(first)], [item(rejected1)]] } },
+      { data: { main: [[item(second)], [item(rejected2)]] } },
+    ],
+  } } } };
+  const result = collectN8nExecutionResult(compiled.grant, execution);
+  assert.equal(result.ok, true);
+  assert.deepEqual(JSON.parse(result.portsJson), { 'n0 done': [first, second], 'n1 false': [rejected1, rejected2] });
+  assert.deepEqual(JSON.parse(result.traceJson).map(t => t.items), [[2,4], [2,2]]);
+});
 
 test('native graph compiles branch ports, selected sinks and a source that pins root parameters',()=>{
   const v=compile(definition()), names=v.workflow.nodes.map(n=>n.name);
@@ -213,13 +236,22 @@ for (const protectedComponent of ['google-sheets', 'google-drive', 'edit-fields'
     f.client.programs.listApprovals = async () => [];
     bridge = createCapabilityBridge({ graphId, owner, config:f.config, client:f.client, exportTokenFile:f.exportTokenFile,
       agent:{query:async()=>({bindings:[]})}, studioOptions:{state:f.state,headerCredential:{id:'fixture-header',name:'Fixture'},credentials:{}} });
+    writeFileSync(join(f.state, 'public-origin'), 'http://127.0.0.1:4621');
+    const preview = createPreviewHandler(f.state, { send: async (url, options) => {
+      const target = new URL(url), req = Readable.from([]);
+      req.method = options.method; req.url = target.pathname + target.search; req.headers = options.headers;
+      let status, body;
+      await bridge.handle(req, { writeHead: s => { status = s; }, end: s => { body = s; } }, target.pathname);
+      return new Response(body, { status, headers: { 'content-type': 'application/json' } });
+    } });
     assert.equal((await f.service.history(w.kaRef)).eventPath, undefined);
     let delegatedPath;
-    for (const role of ['viewer','owner']) for (const token of [undefined,'wrong',secret]) {
+    for (const throughPreview of [false, true]) for (const role of ['viewer','owner']) for (const token of [undefined,'wrong',secret]) {
       const req=Readable.from([]);req.method='GET';req.url='/spike/ka/accounts/account-a/capabilities/studio/history?kaRef='+encodeURIComponent(w.kaRef);
-      req.headers={authorization:`Bearer l1-${role}-a`,...(token?{'x-dkg-export-token':token}:{})};
+      req.headers={host:'127.0.0.1:4621',authorization:`Bearer l1-${role}-a`,...(token?{'x-dkg-export-token':token}:{})};
       let status,body;const res={writeHead:s=>{status=s;},end:s=>{body=JSON.parse(s);}};
-      await bridge.handle(req,res,req.url.split('?')[0]);assert.equal(status,200);
+      if (throughPreview) await preview(req, res); else await bridge.handle(req,res,req.url.split('?')[0]);
+      assert.equal(status,200);
       assert.ok(Array.isArray(body.executions));
       const allowed=role==='owner'&&(protectedComponent==='edit-fields'||token===secret);
       assert.equal(typeof body.eventPath==='string',allowed);

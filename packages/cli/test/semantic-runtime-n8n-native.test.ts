@@ -125,6 +125,54 @@ describe('native n8n component execution receipts', () => {
     expect((await f.adapter().resume!(authorization, input)).status).toBe('succeeded');
     expect(f.posts()).toBe(1);
   });
+  it('collects every terminal branch iteration once and reports aggregate trace counts', () => {
+    const f = fixture();
+    f.grant.result = { nodes: ['Component'], sinks: [{ node: 'Component', port: 1, name: 'terminal false' }], traceNodes: ['Component'] };
+    f.execution.data.resultData.runData.Component = [1, 2].map(iteration => ({ data: { main: [
+      [{ json: { connected: iteration } }], [{ json: { terminal: iteration } }, { json: { repeated: true } }],
+    ] } }));
+    const result = collectN8nExecutionResult(f.grant, f.execution);
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(result.itemsJson as string)).toEqual([{ terminal: 1 }, { repeated: true }, { terminal: 2 }, { repeated: true }]);
+    expect(JSON.parse(result.traceJson as string)[0].items).toEqual([2, 4]);
+    expect(JSON.stringify(result)).not.toContain('connected');
+  });
+  it('keeps Loop Over Items done records separate from its per-iteration loop port', () => {
+    const f = fixture();
+    f.grant.result = { nodes: ['Component'], sinks: [{ node: 'Component', port: 0, name: 'done' }], traceNodes: ['Component'] };
+    const done = [{ value: 'first processed' }, { value: 'second processed' }];
+    f.execution.data.resultData.runData.Component = [
+      { data: { main: [[], [{ json: { input: 'first' } }]] } },
+      { data: { main: [[], [{ json: { input: 'second' } }]] } },
+      { data: { main: [done.map(json => ({ json })), []] } },
+    ];
+    const result = collectN8nExecutionResult(f.grant, f.execution);
+    expect(result.ok).toBe(true); expect(JSON.parse(result.itemsJson as string)).toEqual(done);
+    expect(JSON.parse(result.traceJson as string)[0].items).toEqual([2, 2]);
+  });
+  it.each([20, 21, 201])('enforces the aggregate %s-record result across repeated runs', count => {
+    const f = fixture(); f.grant.result!.traceNodes = ['Component'];
+    f.execution.data.resultData.runData.Component = [Math.floor(count / 2), Math.ceil(count / 2)]
+      .map(length => ({ data: { main: [Array.from({ length }, () => ({ json: { value: 1 } }))] } }));
+    const result = collectN8nExecutionResult(f.grant, f.execution);
+    expect(result.ok).toBe(count <= 20);
+    expect(JSON.parse(result.itemsJson as string)).toHaveLength(count <= 20 ? count : 0);
+    expect(JSON.parse(result.traceJson as string)[0].items).toEqual([count]);
+    if (count > 200) expect(JSON.parse(result.traceJson as string)[0]).toMatchObject({ outputOmitted: 'record-limit' });
+  });
+  it('enforces byte and record limits across runs and named output ports', () => {
+    const f = fixture();
+    f.execution.data.resultData.runData.Component = [1, 2].map(() => ({ data: { main: [[{ json: { text: 'x'.repeat(4200) } }]] } }));
+    expect(collectN8nExecutionResult(f.grant, f.execution)).toMatchObject({ ok: false, itemsJson: '[]' });
+    f.grant.result!.ports = ['true', 'false'];
+    f.execution.data.resultData.runData.Component = [{ data: { main: [10, 11].map(length => Array.from({ length }, () => ({ json: { value: 1 } }))) } }];
+    expect(collectN8nExecutionResult(f.grant, f.execution)).toMatchObject({ ok: false, portsJson: '{}' });
+  });
+  it('does not silently discard malformed records from an earlier iteration', () => {
+    const f = fixture();
+    f.execution.data.resultData.runData.Component.unshift({ data: { main: [[{ invalid: true }]] } });
+    expect(() => collectN8nExecutionResult(f.grant, f.execution)).toThrow('N8N_EXECUTION_DATA_INVALID');
+  });
   it('keeps an unacknowledged outcome unresolved and never redispatches on resume', async () => {
     const f = fixture();
     await expect(f.adapter().resume!(authorization, input)).rejects.toThrow('INSPECTION_REQUIRED');

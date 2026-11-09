@@ -414,3 +414,14 @@ A completed native result over the record limit produces `ok: false` and empty
 record sets. Its receipt can be persisted and replayed without redispatch. Trace
 counts remain accurate; when records were omitted to bound processing, the trace
 marks `outputOmitted: "record-limit"` instead of claiming a hash of unprocessed data.
+
+Terminal results accumulate in execution order across all runs of each selected
+node and port. This includes terminal branches inside loops; the Loop Over Items
+done port stays separate from its loop port. Trace counts cover all runs, and the
+twenty-record / 8 KiB output limits apply to the aggregate result.
+
+The preview gateway reserves one of its twenty write admissions per minute before
+reading the request body, so concurrent or incomplete bodies cannot bypass the
+limit. An admitted attempt keeps its reservation for that window. Owner history
+requests forward the export key to the companion; viewer history and unrelated
+read routes do not receive that header.
