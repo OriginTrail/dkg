@@ -23,7 +23,7 @@ import { topUpAttempts, type Outcome } from './topUpAttempts.js';
 import { usePreview } from './usePreview.js';
 
 /** What a top-up's dry run is asked about: the subscription, and what to add. */
-interface Addition { subscriptionId: string; services: ServiceRequest[] }
+interface Addition { subscriptionId: string; service: ServiceRequest }
 
 export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
   catalog: CatalogAnswer; subscription: Subscription; serviceId: string; onDone: () => void; onCancel: () => void;
@@ -33,7 +33,7 @@ export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
   const service = catalog.services.find((s) => s.serviceId === serviceId);
   // The top-up this budget holds, if any: confirmed here, in another form, or before a reload.
   const held = useSyncExternalStore(topUpAttempts.subscribe, () => topUpAttempts.held(subscriptionId, serviceId));
-  const terms = held?.attempt.request.services[0] ?? null;
+  const terms = held?.attempt.service ?? null;
   const [amount, setAmount] = useState(() => (terms ? tracOfWei(terms.value) : '1'));
   // A budget the subscription has keeps its cap: shown exactly, and sent back as the node stores it, in wei.
   const [cap, setCap] = useState(() => (terms ? microOfWei(terms.maxPricePerUnit)
@@ -61,9 +61,9 @@ export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
   // A top-up repeats the class the chain stores for the budget, where the node names it; otherwise the catalog's. Never a guess.
   const serviceClass = budget?.serviceClass ?? service?.serviceClass ?? null;
   const addition: Addition | null = value && capWei && serviceClass && !fixed
-    ? { subscriptionId, services: [{ serviceId, serviceClass, value: value.toString(), maxPricePerUnit: capWei }] }
+    ? { subscriptionId, service: { serviceId, serviceClass, value: value.toString(), maxPricePerUnit: capWei } }
     : null;
-  const dryRun = usePreview(addition, (r) => marketplaceApi.topUpPreview(r.subscriptionId, r.services), { retain: 'none', round });
+  const dryRun = usePreview(addition, (r) => marketplaceApi.topUpPreview(r.subscriptionId, [r.service]), { retain: 'none', round });
   const name = modelName(service?.label ?? serviceId);
   const source = subscription.source.kind === 'account' ? copy('source.account', { id: subscription.source.accountId }) : copy('source.wallet');
   // Only the dry run of exactly this top-up lets it go, and what goes is the request that dry run answered.
@@ -79,7 +79,7 @@ export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
     const closed = closing.current?.signal;
     if (!asked || !ready || !closed) return;
     setErr(null);
-    settled(await topUpAttempts.confirm({ subscriptionId, epoch: subscription.epoch, services: asked.request.services, before: budget?.value ?? '0' }, closed));
+    settled(await topUpAttempts.confirm({ subscriptionId, epoch: subscription.epoch, service: asked.request.service, before: budget?.value ?? '0' }, closed));
   };
   const retry = async () => {
     setErr(null);
@@ -103,7 +103,7 @@ export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
   let seen: 'checking' | 'shows' | 'missing' | 'unread' | null = null;
   if (held?.kind === 'unknown') {
     const { read, attempt } = held;
-    seen = read.state !== 'read' ? read.state : read.now >= BigInt(attempt.before) + BigInt(attempt.request.services[0].value) ? 'shows' : 'missing';
+    seen = read.state !== 'read' ? read.state : read.now >= BigInt(attempt.before) + BigInt(attempt.service.value) ? 'shows' : 'missing';
   }
   return (
     <div className="mkt-card mkt-gate" data-testid="mkt-topup" data-phase={held ? (held.kind === 'reserving' ? 'sending' : held.kind) : 'compose'}>

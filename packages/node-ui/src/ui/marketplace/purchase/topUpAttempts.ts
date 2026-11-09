@@ -19,11 +19,18 @@ import type { ServiceRequest, TopUpAnswer, TopUpRequest } from '../api/types.js'
 import { randomUUID } from '../../lib/randomUUID.js';
 
 /**
- * A confirmed top-up: the request as sent, with its key, its subscription's
- * epoch, and the budget's value before the first send, in wei: as the form
- * showed it at Confirm, until the read just before the first send replaces it.
+ * A confirmed top-up of one service: what it adds, with its key, its
+ * subscription's epoch, and the budget's value before the first send, in wei:
+ * as the form showed it at Confirm, until the read just before the first send
+ * replaces it. The node's route takes a list of services; the list is made
+ * only where the request is sent, and kept so in storage.
  */
-export interface Attempt { subscriptionId: string; epoch: number; request: TopUpRequest; before: string }
+export interface Attempt { subscriptionId: string; epoch: number; service: ServiceRequest; idempotencyKey: string; before: string }
+
+/** An attempt as the top-up route takes it, and as session storage keeps it. */
+interface Kept { subscriptionId: string; epoch: number; request: TopUpRequest; before: string }
+
+const requestOf = (a: Attempt): TopUpRequest => ({ services: [a.service], idempotencyKey: a.idempotencyKey });
 
 /** What the budget holds after an unknown outcome: for the operator to see beside Retry. */
 export type BudgetRead = { state: 'checking' } | { state: 'read'; now: bigint } | { state: 'unread'; err: unknown };
@@ -52,7 +59,7 @@ const HELD: Outcome = { kind: 'held' };
 
 const idOf = (subscriptionId: string, serviceId: string) => `${subscriptionId}:${serviceId}`;
 const storageKey = (id: string) => `dkg-marketplace-topup:${id}`;
-const attemptId = (a: Attempt) => idOf(a.subscriptionId, a.request.services[0].serviceId);
+const attemptId = (a: Attempt) => idOf(a.subscriptionId, a.service.serviceId);
 
 const attempts = new Map<string, Held>();
 /** The budgets whose stored top-up was looked for. */
@@ -69,7 +76,8 @@ function emit(): void {
 }
 
 function store(a: Attempt): void {
-  try { window.sessionStorage.setItem(storageKey(attemptId(a)), JSON.stringify(a)); } catch { /* kept in the page alone */ }
+  const kept: Kept = { subscriptionId: a.subscriptionId, epoch: a.epoch, request: requestOf(a), before: a.before };
+  try { window.sessionStorage.setItem(storageKey(attemptId(a)), JSON.stringify(kept)); } catch { /* kept in the page alone */ }
 }
 
 function unstore(a: Attempt): void {
@@ -82,17 +90,30 @@ function stored(subscriptionId: string, serviceId: string): Attempt | null {
   try { raw = window.sessionStorage.getItem(storageKey(idOf(subscriptionId, serviceId))); } catch { /* storage unavailable */ }
   if (raw === null) return null;
   try {
-    const a = JSON.parse(raw) as Attempt;
-    if (a.subscriptionId === subscriptionId && Number.isInteger(a.epoch) && typeof a.before === 'string'
-      && typeof a.request?.idempotencyKey === 'string' && a.request.services?.[0]?.serviceId === serviceId) return a;
+    const k = JSON.parse(raw) as Partial<Kept> | null;
+    const services: unknown = k?.request?.services;
+    // One service, and a whole one: a top-up names exactly one.
+    if (!k || k.subscriptionId !== subscriptionId || !Number.isInteger(k.epoch) || typeof k.before !== 'string'
+      || typeof k.request?.idempotencyKey !== 'string' || !Array.isArray(services) || services.length !== 1) return null;
+    const [service] = services as unknown[];
+    if (!isServiceOf(service, serviceId)) return null;
+    return { subscriptionId, epoch: k.epoch as number, service, idempotencyKey: k.request.idempotencyKey, before: k.before };
   } catch { /* not a top-up this store wrote */ }
   return null;
+}
+
+/** Whether `s` is a service request of `serviceId`: its class, its value and cap in wei, and a pinned seller, if any. */
+function isServiceOf(s: unknown, serviceId: string): s is ServiceRequest {
+  const r = s as Partial<ServiceRequest> | null;
+  const wei = (v: unknown) => typeof v === 'string' && /^\d+$/.test(v);
+  return !!r && r.serviceId === serviceId && (r.serviceClass === 'inference' || r.serviceClass === 'query')
+    && wei(r.value) && wei(r.maxPricePerUnit) && (r.pinnedSeller === undefined || Number.isSafeInteger(r.pinnedSeller));
 }
 
 /** Whether `id` still holds `attempt`, in one of `kinds`. */
 function holds(id: string, attempt: Attempt, ...kinds: Held['kind'][]): boolean {
   const h = attempts.get(id);
-  return !!h && h.attempt.request.idempotencyKey === attempt.request.idempotencyKey && kinds.includes(h.kind);
+  return !!h && h.attempt.idempotencyKey === attempt.idempotencyKey && kinds.includes(h.kind);
 }
 
 function put(id: string, h: Held): void {
@@ -158,7 +179,7 @@ function readBudget(id: string): void {
     const now = attempts.get(id);
     if (now?.kind === 'unknown' && holds(id, attempt, 'unknown')) put(id, { ...now, read });
   };
-  budgetValueOf(attempt.subscriptionId, attempt.epoch, attempt.request.services[0].serviceId)
+  budgetValueOf(attempt.subscriptionId, attempt.epoch, attempt.service.serviceId)
     .then((now) => settle({ state: 'read', now }), (err: unknown) => settle({ state: 'unread', err }));
 }
 
@@ -173,7 +194,7 @@ async function deliver(id: string, attempt: Attempt, retry: boolean): Promise<Ou
   store(attempt);
   put(id, { kind: 'sending', attempt, retry });
   try {
-    const answer = await marketplaceApi.topUp(attempt.subscriptionId, attempt.request);
+    const answer = await marketplaceApi.topUp(attempt.subscriptionId, requestOf(attempt));
     if (gen === generation) drop(id, attempt);
     return { kind: 'sent', answer };
   } catch (e) {
@@ -216,18 +237,18 @@ export const topUpAttempts = {
   },
 
   /**
-   * Confirm a top-up of `services` (one service), as its dry run answered it.
+   * Confirm a top-up of `service`, as its dry run answered it.
    * It and a new key are kept from here on, before anything is awaited; the
    * budget is read, and the top-up sent, unless the form was `closed`
    * meanwhile: then it waits, with its key, for a Retry. A budget that holds a
    * top-up already takes no other.
    */
-  async confirm(t: { subscriptionId: string; epoch: number; services: ServiceRequest[]; before: string }, closed: AbortSignal): Promise<Outcome> {
-    const serviceId = t.services[0].serviceId;
+  async confirm(t: { subscriptionId: string; epoch: number; service: ServiceRequest; before: string }, closed: AbortSignal): Promise<Outcome> {
+    const { serviceId } = t.service;
     const id = idOf(t.subscriptionId, serviceId);
     if (heldBy(t.subscriptionId, serviceId)) return HELD;
     const gen = generation;
-    const reserved: Attempt = { subscriptionId: t.subscriptionId, epoch: t.epoch, request: { services: t.services, idempotencyKey: randomUUID() }, before: t.before };
+    const reserved: Attempt = { subscriptionId: t.subscriptionId, epoch: t.epoch, service: t.service, idempotencyKey: randomUUID(), before: t.before };
     store(reserved);
     put(id, { kind: 'reserving', attempt: reserved });
     const onClose = () => { if (gen === generation && holds(id, reserved, 'reserving')) toUnknown(id, reserved, null); };

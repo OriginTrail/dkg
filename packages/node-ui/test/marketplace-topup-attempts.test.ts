@@ -22,8 +22,8 @@ function heldTopUps() {
 function topUpTerms() {
   const s = fixtureWorld().current;
   const b = s.budgets[2];
-  const services = [{ serviceId: b.serviceId, serviceClass: b.serviceClass, value: '500000000000000000', maxPricePerUnit: b.maxPricePerUnit }];
-  return { s, b, t: { subscriptionId: s.subscriptionId, epoch: s.epoch, services, before: b.value } };
+  const service = { serviceId: b.serviceId, serviceClass: b.serviceClass ?? 'inference', value: '500000000000000000', maxPricePerUnit: b.maxPricePerUnit };
+  return { s, b, t: { subscriptionId: s.subscriptionId, epoch: s.epoch, service, before: b.value } };
 }
 
 describe('marketplace top-up attempts', () => {
@@ -59,12 +59,27 @@ describe('marketplace top-up attempts', () => {
     const node = heldTopUps();
     const { s, b, t } = topUpTerms();
     const first = topUpAttempts.confirm(t, new AbortController().signal);
-    const second = await topUpAttempts.confirm({ ...t, services: [{ ...t.services[0], value: '700000000000000000' }] }, new AbortController().signal);
+    const second = await topUpAttempts.confirm({ ...t, service: { ...t.service, value: '700000000000000000' } }, new AbortController().signal);
     expect(second).toEqual({ kind: 'held' });
     await vi.waitFor(() => expect(node.waiting).toBe(1));
     node.answer();
     expect((await first).kind).toBe('sent');
     expect(node.posts.map((p) => (JSON.parse(p) as { services: Array<{ value: string }> }).services[0].value)).toEqual(['500000000000000000']);
     expect(topUpAttempts.held(s.subscriptionId, b.serviceId)).toBeNull();
+  });
+
+  it('brings back from storage only a top-up of exactly one whole service', () => {
+    const { s: sub, b, t } = topUpTerms();
+    const key = `dkg-marketplace-topup:${sub.subscriptionId}:${b.serviceId}`;
+    const kept = (services: unknown[]) => JSON.stringify({ subscriptionId: sub.subscriptionId, epoch: sub.epoch, before: b.value, request: { services, idempotencyKey: 'k-1' } });
+    const other = `0x${'52'.repeat(32)}`;
+    for (const services of [[], [t.service, { ...t.service, serviceId: other }], [{ ...t.service, value: '0.5' }], [{ ...t.service, serviceClass: 'other' }]]) {
+      sessionStorage.setItem(key, kept(services));
+      forgetTopUpAttempts();
+      expect(topUpAttempts.held(sub.subscriptionId, b.serviceId)).toBeNull();
+    }
+    sessionStorage.setItem(key, kept([t.service]));
+    forgetTopUpAttempts();
+    expect(topUpAttempts.held(sub.subscriptionId, b.serviceId)).toMatchObject({ kind: 'unknown', attempt: { service: t.service, idempotencyKey: 'k-1' } });
   });
 });
