@@ -3,6 +3,7 @@ import React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PlansView } from '../src/ui/marketplace/views/PlansView.js';
 import { TopUp } from '../src/ui/marketplace/purchase/TopUp.js';
+import { useMarketplaceDraftStore } from '../src/ui/marketplace/draftStore.js';
 import { FIXTURE_IDS, fixtureFetch, fixtureWorld } from '../src/ui/marketplace/api/fixtures.js';
 import { MISSING_COPY, buttonWithText, byTestId, click, flush, reloadPage, render, type, unmountAll, useFixtureNode, waitForText } from './helpers/marketplace-render.js';
 
@@ -100,6 +101,19 @@ function boundaryNode() {
     return json(answer);
   });
   return { writes, pass: () => { epoch += 1; } };
+}
+
+/** The fixture node in `scenario`, keeping each write, whose plan reads fail as a node error while `failing()` holds. */
+function failingPlanNode(scenario: 'active' | 'none' | 'ended', failing: () => boolean): Array<{ method: string; url: string }> {
+  const writes: Array<{ method: string; url: string }> = [];
+  const node = fixtureFetch(scenario);
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method ?? 'GET';
+    if (method !== 'GET') writes.push({ method, url: String(input) });
+    if (method === 'GET' && String(input) === '/api/marketplace/plan' && failing()) return json({ error: 'database is locked', code: 'Error', retryable: false }, 500);
+    return node(input, init);
+  });
+  return writes;
 }
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -219,7 +233,10 @@ function withCaps(caps: Record<string, string>) {
 }
 
 describe('marketplace Plans', () => {
-  afterEach(unmountAll);
+  afterEach(async () => {
+    await unmountAll();
+    useMarketplaceDraftStore.setState({ ask: null });
+  });
 
   it('shows this epoch\'s budgets as landed, held and left, with the soft ceiling\'s fork', async () => {
     useFixtureNode('active');
@@ -765,6 +782,66 @@ describe('marketplace Plans', () => {
     await click(byTestId(c, 'mkt-new-period'));
     expect(byTestId(c, 'mkt-composer')).toBeTruthy();
     expect(c.querySelectorAll('[data-testid^="mkt-value-"]').length).toBe(3);
+  });
+
+  for (const [scenario, after] of [['none', 'never-subscribed'], ['ended', 'period-ended']] as const) {
+    it(`shows a failed plan read with a retry, not what a plan or its absence would offer (${scenario})`, async () => {
+      let fail = true;
+      const writes = failingPlanNode(scenario, () => fail);
+      const c = await render(plans());
+      await waitForText(c, 'The plan could not be read: nothing that saves a plan is offered until it is.');
+      expect(byTestId(c, 'mkt-plans')?.getAttribute('data-state')).toBe('plan-unread');
+      expect(byTestId(c, 'mkt-error-card')?.getAttribute('data-code')).toBe('Error');
+      for (const id of ['mkt-composer', 'mkt-fund-flow', 'mkt-new-period', 'mkt-treasury']) expect(byTestId(c, id)).toBeNull();
+      expect(c.textContent).not.toContain('Three steps to your first answer');
+      // The node says the plan is not retryable; a read is safe to ask for again all the same.
+      fail = false;
+      await click(byTestId(c, 'mkt-plan-reload'));
+      await waitUntil(() => byTestId(c, 'mkt-plans')?.getAttribute('data-state') === after, after);
+      expect(byTestId(c, 'mkt-plan-unread')).toBeNull();
+      expect(writes).toEqual([]);
+      expect(c.textContent).not.toContain(MISSING_COPY);
+    });
+  }
+
+  it('keeps this epoch\'s page but offers nothing that saves a plan while the plan cannot be read, and holds a compose ask until it can', async () => {
+    let fail = true;
+    const writes = failingPlanNode('active', () => fail);
+    useMarketplaceDraftStore.getState().askPlans({ kind: 'compose' });
+    const c = await render(plans());
+    await waitForText(c, 'The plan could not be read');
+    expect(byTestId(c, 'mkt-plans')?.getAttribute('data-state')).toBe('active');
+    expect(byTestId(c, 'mkt-next-epoch')?.textContent).toContain('The plan is unknown until the node reads it');
+    expect(byTestId(c, 'mkt-change-plan')).toBeNull();
+    expect(byTestId(c, 'mkt-fund-flow')).toBeNull();
+    expect(useMarketplaceDraftStore.getState().ask).toEqual({ kind: 'compose' });
+    // A top-up saves no plan: it stays on offer.
+    expect(byTestId(c, `mkt-topup-${FIXTURE_IDS.llama8b}`)).toBeTruthy();
+    fail = false;
+    await click(byTestId(c, 'mkt-plan-reload'));
+    await waitForText(c, 'Compose your plan');
+    expect(useMarketplaceDraftStore.getState().ask).toBeNull();
+    // The plan as the node read it: its three services.
+    expect(c.querySelectorAll('[data-testid^="mkt-value-"]').length).toBe(3);
+    expect(writes).toEqual([]);
+  });
+
+  it('offers no plan change once a reload of the plan fails, though an earlier read succeeded', async () => {
+    let fail = false;
+    failingPlanNode('active', () => fail);
+    const c = await topUpLlama();
+    await click(byTestId(c, 'mkt-topup-confirm'));
+    await waitForText(c, 'llama-3.1-8b-instruct topped up · tx');
+    expect(byTestId(c, 'mkt-change-plan')).toBeTruthy();
+    // Done, the page reads everything again, and this time the plan read fails.
+    fail = true;
+    await click(buttonWithText(c, 'Done'));
+    await waitForText(c, 'The plan could not be read');
+    expect(byTestId(c, 'mkt-change-plan')).toBeNull();
+    expect(byTestId(c, 'mkt-next-epoch')?.textContent).toContain('The plan renews each epoch until epoch 670');
+    fail = false;
+    await click(byTestId(c, 'mkt-plan-reload'));
+    await waitUntil(() => !!byTestId(c, 'mkt-change-plan'), 'Change plan');
   });
 
   it('says when the marketplace is off', async () => {

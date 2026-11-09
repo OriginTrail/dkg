@@ -35,14 +35,27 @@ function draftOf(catalog: CatalogAnswer, plan: Plan | null, epoch: 'current' | '
   };
 }
 
-function NextEpoch({ catalog, next, plan, onChange, onFundNext }: { catalog: CatalogAnswer; next: Subscription | null; plan: Plan | null; onChange: () => void; onFundNext: () => void }): React.ReactElement {
+/** The plan could not be read: why, and a read again, which is always safe to ask for. */
+function PlanUnread({ err, onRetry }: { err: unknown; onRetry: () => void }): React.ReactElement {
+  return (
+    <ErrorCard err={err}>
+      <span className="mkt-xs" data-testid="mkt-plan-unread" data-copy="plan.unread">{copy('plan.unread')}</span>
+      <button type="button" className="mkt-btn" data-testid="mkt-plan-reload" data-copy="ctl.retry" onClick={onRetry}>{copy('ctl.retry')}</button>
+    </ErrorCard>
+  );
+}
+
+function NextEpoch({ catalog, next, plan, planUnread, onChange, onFundNext }: {
+  catalog: CatalogAnswer; next: Subscription | null; plan: Plan | null; planUnread: boolean; onChange: () => void; onFundNext: () => void;
+}): React.ReactElement {
   const n = catalog.epoch + 1;
   const source = (s: { kind: string; accountId?: string }) => (s.kind === 'account' ? copy('source.account', { id: s.accountId ?? '' }) : copy('source.wallet'));
+  const planKey = planUnread && !plan ? 'plan.unknown' : plan?.renew ? 'plan.renews' : plan ? 'plan.once' : 'plan.none';
   return (
     <div className="mkt-card" data-testid="mkt-next-epoch" data-funded={!!next}>
       <div className="mkt-planhead">
         <h2 data-copy={next ? 'next.funded' : 'next.title'}>{copy(next ? 'next.funded' : 'next.title', { n })}</h2>
-        {plan && <button type="button" className="mkt-btn" data-testid="mkt-change-plan" data-copy="next.change" onClick={onChange}>{copy('next.change')}</button>}
+        {plan && !planUnread && <button type="button" className="mkt-btn" data-testid="mkt-change-plan" data-copy="next.change" onClick={onChange}>{copy('next.change')}</button>}
       </div>
       {next ? (
         <p className="mkt-sec mkt-sm" data-copy="next.funded.body">{copy('next.funded.body', { value: fmtTrac(next.value), cost: fmtTrac(next.cost), n: next.budgets.length, source: source(next.source), t: relAt(next.startsAt) })}</p>
@@ -54,11 +67,11 @@ function NextEpoch({ catalog, next, plan, onChange, onFundNext }: { catalog: Cat
       ) : (
         <div className="mkt-fork">
           <span className="mkt-sec mkt-sm" data-copy="next.none">{copy('next.none', { n })}</span>
-          <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-fund-next" data-copy="next.fund" onClick={onFundNext}>{copy('next.fund', { n })}</button>
+          {!planUnread && <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-fund-next" data-copy="next.fund" onClick={onFundNext}>{copy('next.fund', { n })}</button>}
         </div>
       )}
-      <div className="mkt-muted mkt-xs" data-copy={plan?.renew ? 'plan.renews' : plan ? 'plan.once' : 'plan.none'}>
-        {plan?.renew ? copy('plan.renews', { n: plan.renewUntilEpoch ?? '—', source: source(plan.source) }) : copy(plan ? 'plan.once' : 'plan.none')}
+      <div className="mkt-muted mkt-xs" data-copy={planKey}>
+        {plan && planKey === 'plan.renews' ? copy('plan.renews', { n: plan.renewUntilEpoch ?? '—', source: source(plan.source) }) : copy(planKey)}
       </div>
     </div>
   );
@@ -99,17 +112,24 @@ export function PlansView(): React.ReactElement {
   const current = subs.data?.subscriptions.find((s) => s.epoch === epoch) ?? null;
   const next = subs.data?.subscriptions.find((s) => epoch !== null && s.epoch === epoch + 1) ?? null;
   const plan = planned.data;
+  // The node answers a node without a plan with PlanNotFound, which reads as null. Any other failure of the
+  // latest read leaves the plan unknown, whatever an earlier read said: until a read succeeds, nothing that
+  // saves a plan is offered (onboarding, a funding, a plan change), as it would write over the plan there is.
+  const planUnread = !!planned.err;
   const reloadAll = () => { cat.reload(); subs.reload(); planned.reload(); funding.reload(); activity.reload(); };
   const close = () => { setFlow(null); reloadAll(); };
 
   // One-shot asks from Browse and the playground: compose with a service picked, or top it up.
   useEffect(() => {
     if (!ask || !catalog || !subs.data) return;
+    // An ask that composes saves a plan: it waits, untaken, until the plan is read.
+    const topsUp = !!current && (ask.kind === 'top-up' || !!ask.serviceId);
+    if (!topsUp && (planned.err || planned.loading)) return;
     const a = takeAsk();
     if (!a) return;
     if (current) setFlow(a.kind === 'top-up' || a.serviceId ? { kind: 'top-up', serviceId: a.serviceId ?? '' } : { kind: 'plan' });
     else setFlow({ kind: 'fund', epoch: 'current', ...(a.serviceId ? { serviceId: a.serviceId } : {}) });
-  }, [ask, catalog, subs.data, current, takeAsk]);
+  }, [ask, catalog, subs.data, current, takeAsk, planned.err, planned.loading]);
 
   const loadErr = cat.err ?? subs.err ?? planned.err;
   if ([cat.err, subs.err, planned.err, funding.err].some(isMarketplaceOff)) return <div className="mkt-frame" data-testid="mkt-plans" data-state="off"><OffCard /></div>;
@@ -127,6 +147,7 @@ export function PlansView(): React.ReactElement {
 
   const endsAt = funding.data?.epochEndsAt ?? current?.endsAt ?? null;
   const treasury = funding.data ? <Treasury funding={funding.data} onChanged={funding.reload} /> : funding.err ? <ErrorCard err={funding.err} onRetry={funding.reload} /> : null;
+  const planErr = planUnread ? <PlanUnread err={planned.err} onRetry={planned.reload} /> : null;
   const fundFlow = (f: Extract<Flow, { kind: 'fund' }>, onboarding: boolean) => (
     <FundFlow key={`${f.epoch}:${f.serviceId ?? ''}`} catalog={catalog} funding={funding.data} initial={draftOf(catalog, plan, f.epoch, f.serviceId)}
       fundsEpoch onboarding={onboarding} endsAt={endsAt} onDone={close} onCancel={onboarding ? undefined : () => setFlow(null)} />
@@ -134,6 +155,14 @@ export function PlansView(): React.ReactElement {
 
   // ── no subscription this epoch ──
   if (!current) {
+    // Whether to onboard or to fund the plan's next epoch turns on the plan: unknown, neither is offered.
+    if (planUnread) {
+      return (
+        <div className="mkt-frame" data-testid="mkt-plans" data-state="plan-unread">
+          <div className="mkt-card"><div data-copy="empty.error">{copy('empty.error')}</div>{planErr}</div>
+        </div>
+      );
+    }
     if (!plan) {
       const w = funding.data?.buyerWallet;
       const funded = !!w && BigInt(w.trac) > 0n || (funding.data?.accounts ?? []).some((a) => a.serviceCapable && a.grant?.live);
@@ -168,20 +197,23 @@ export function PlansView(): React.ReactElement {
   }
 
   // ── this epoch's subscription ──
+  // A top-up saves no plan, so it stays open while the plan cannot be read; a plan change or a funding does not.
   let flowNode: React.ReactNode = null;
   if (flow?.kind === 'top-up') {
     flowNode = <TopUp key={flow.serviceId} catalog={catalog} subscription={current} serviceId={flow.serviceId} onDone={close} onCancel={() => setFlow(null)} />;
-  } else if (flow?.kind === 'plan') {
+  } else if (flow?.kind === 'plan' && !planUnread) {
     flowNode = <FundFlow key="plan" catalog={catalog} funding={funding.data} initial={draftOf(catalog, plan, 'next')} fundsEpoch={false} onboarding={false} endsAt={endsAt} onDone={close} onCancel={() => setFlow(null)} />;
-  } else if (flow?.kind === 'fund') {
+  } else if (flow?.kind === 'fund' && !planUnread) {
     flowNode = fundFlow(flow, false);
   }
+  const readErr = cat.err ?? subs.err;
   return (
     <div className="mkt-frame" data-testid="mkt-plans" data-state="active">
       {flowNode}
-      {loadErr ? <ErrorCard err={loadErr} onRetry={reloadAll} /> : null}
+      {readErr ? <ErrorCard err={readErr} onRetry={reloadAll} /> : null}
+      {planErr}
       <Meters subscription={current} catalog={catalog} plan={plan} calls={activity.data?.calls ?? []} onTopUp={(serviceId) => setFlow({ kind: 'top-up', serviceId })} />
-      <NextEpoch catalog={catalog} next={next} plan={plan} onChange={() => setFlow({ kind: 'plan' })} onFundNext={() => setFlow({ kind: 'fund', epoch: 'next' })} />
+      <NextEpoch catalog={catalog} next={next} plan={plan} planUnread={planUnread} onChange={() => setFlow({ kind: 'plan' })} onFundNext={() => setFlow({ kind: 'fund', epoch: 'next' })} />
       <NotOnPlan catalog={catalog} current={current} onAdd={(serviceId) => setFlow({ kind: 'top-up', serviceId })} />
       <Reconciliation catalog={catalog} epoch={catalog.epoch} />
       <Activity catalog={catalog} calls={activity.data?.calls ?? null} err={activity.err} />

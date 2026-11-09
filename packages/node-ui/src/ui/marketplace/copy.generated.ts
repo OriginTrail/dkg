@@ -278,6 +278,8 @@ export const COPY: Record<string, string> = {
   "plan.renews": "The plan renews each epoch until epoch {n}, from {source}",
   "plan.once": "The plan does not renew",
   "plan.none": "No plan saved: funding an epoch saves one",
+  "plan.unread": "The plan could not be read: nothing that saves a plan is offered until it is.",
+  "plan.unknown": "The plan is unknown until the node reads it",
   "topup.title": "Top up {name} for epoch {n}",
   "topup.title.new": "Add {name} to epoch {n}",
   "topup.body": "Paid from {source}, at its discount, in one transaction from this node",
