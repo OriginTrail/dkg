@@ -236,9 +236,9 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
             so an absolutely-positioned button would anchor to the overlay
             viewport instead of the modal; see #959 Codex review). */}
         <div
-          className="v10-modal-header v10-share-header"
+          className="v10-modal-header v10-modal-header-row"
         >
-          <div className="v10-share-heading">
+          <div className="v10-modal-heading">
             <div id="dkg-share-modal-title" className="v10-modal-title">Share Context Graph</div>
             <div className="v10-modal-subtitle">
               Invite agents to collaborate on <strong>{contextGraphName}</strong>.
@@ -246,7 +246,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
           </div>
           <button
             type="button"
-            className="v10-modal-close ds-btn ds-ghost ds-icon v10-share-close"
+            className="v10-modal-close ds-btn ds-ghost ds-icon"
             onClick={onClose}
             aria-label="Close share dialog"
             title="Close (Esc)"
@@ -339,7 +339,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                       {invitePayload}
                     </pre>
                     <button
-                      className="v10-modal-btn primary ds-btn ds-primary v10-share-copy"
+                      className="ds-btn ds-primary ds-sm v10-share-copy"
                       onClick={() => copyToClipboard(invitePayload, 'invite')}
                     >
                       {copied === 'invite' ? 'Copied' : 'Copy Invite'}

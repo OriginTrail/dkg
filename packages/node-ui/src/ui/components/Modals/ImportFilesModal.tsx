@@ -162,9 +162,9 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
             so an absolutely-positioned button would anchor to the overlay
             viewport instead of the modal; see #959 Codex review). */}
         <div
-          className="v10-modal-header v10-import-header"
+          className="v10-modal-header v10-modal-header-row"
         >
-          <div className="v10-import-heading">
+          <div className="v10-modal-heading">
             <div id="dkg-import-modal-title" className="v10-modal-title">Import to Working Memory</div>
             <div className="v10-modal-subtitle">
               {contextGraphName

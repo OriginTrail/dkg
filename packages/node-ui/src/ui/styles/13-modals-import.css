@@ -274,9 +274,15 @@ body.light .v10-import-dropzone { border-color: var(--border-default); }
 body.light .v10-import-dropzone:hover,
 body.light .v10-import-dropzone.drag-over { border-color: var(--border-strong); background: var(--bg-hover); }
 
+/* ── Shared modal chrome ── */
+/* A close button pinned to the dialog's corner; its look is the ghost icon button. */
+.v10-modal-close-corner { position: absolute; top: var(--space-12); right: var(--space-12); z-index: 1; }
+/* A header that puts the title block and the close button on one row. */
+.v10-modal-header-row { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-12); }
+.v10-modal-header-row > .v10-modal-close { flex-shrink: 0; }
+.v10-modal-heading { flex: 1; min-width: 0; }
+
 /* ── Create Context Graph modal ── */
-.v10-modal-close.ds-btn.ds-ghost.ds-icon.v10-create-close { position: absolute; top: 12px; right: 12px; background: none; border: none; color: var(--text-tertiary); cursor: pointer; font-size: var(--fs-title); line-height: 1; padding: var(--space-4); }
-.v10-modal-close.ds-btn.ds-ghost.ds-icon.v10-create-close-top { position: absolute; top: 12px; right: 12px; background: none; border: none; color: var(--text-tertiary); cursor: pointer; font-size: var(--fs-title); line-height: 1; padding: var(--space-4); z-index: 1; }
 .v10-create-hint { margin-top: var(--space-6); font-size: var(--fs-label); color: var(--text-tertiary); }
 .v10-form-radio.v10-create-radio { display: flex; align-items: flex-start; gap: var(--space-8); }
 .v10-create-radio-input { margin-top: var(--space-2); }
@@ -289,8 +295,6 @@ body.light .v10-import-dropzone.drag-over { border-color: var(--border-strong); 
 
 /* ── Import modal ── */
 .v10-import-box { max-width: 560px; }
-.v10-modal-header.v10-import-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-12); }
-.v10-import-heading { flex: 1; min-width: 0; }
 .v10-import-hint-gap { margin-top: var(--space-4); }
 .v10-import-hint-wide { margin-top: var(--space-8); }
 .v10-import-file-input { display: none; }
@@ -303,7 +307,6 @@ body.light .v10-import-dropzone.drag-over { border-color: var(--border-strong); 
 .v10-import-file-list.v10-import-list-gap { margin-top: var(--space-12); }
 
 /* ── Join modal ── */
-.v10-modal-close.ds-btn.ds-ghost.ds-icon.v10-join-close { position: absolute; top: 12px; right: 12px; background: none; border: none; color: var(--text-tertiary); cursor: pointer; font-size: var(--fs-title); line-height: 1; padding: var(--space-4); z-index: 1; }
 .v10-join-info { padding: var(--pad-nested); border-radius: var(--radius-nested); margin-bottom: var(--space-16); font-size: var(--fs-control); background: var(--tint-subtle); border: 1px solid var(--border-default); color: var(--accent-primary); }
 .v10-join-success { padding: var(--pad-nested); border-radius: var(--radius-nested); margin-bottom: var(--space-16); font-size: var(--fs-control); background: var(--success-bg); border: 1px solid var(--success-border); color: var(--text-success); }
 .v10-join-warning { padding: var(--pad-nested); border-radius: var(--radius-nested); margin-bottom: var(--space-16); font-size: var(--fs-control); background: var(--warning-bg); border: 1px solid var(--warning-border); color: var(--text-warning); }
@@ -315,9 +318,6 @@ body.light .v10-import-dropzone.drag-over { border-color: var(--border-strong); 
 
 /* ── Share modal ── */
 .v10-share-box { max-width: 560px; }
-.v10-modal-header.v10-share-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-12); }
-.v10-share-heading { flex: 1; min-width: 0; }
-.v10-modal-close.ds-btn.ds-ghost.ds-icon.v10-share-close { flex-shrink: 0; cursor: pointer; }
 .v10-share-tabs { display: flex; gap: var(--space-16); margin-bottom: var(--space-16); border-bottom: 1px solid var(--border-default); }
 .ds-tab.v10-share-tab { height: var(--h-control-md); }
 .v10-share-hint { font-size: var(--fs-micro); color: var(--text-tertiary); margin-bottom: var(--space-8); }
@@ -331,7 +331,7 @@ body.light .v10-import-dropzone.drag-over { border-color: var(--border-strong); 
 .v10-share-empty { padding: var(--space-8) var(--space-12); border-radius: var(--radius-control); font-size: var(--fs-label); color: var(--text-tertiary); background: var(--bg-surface); border: 1px dashed var(--border-default); }
 .v10-share-code { position: relative; }
 .v10-share-code-text { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-control); padding: var(--space-12) var(--space-12); font-size: var(--fs-label); line-height: var(--lh-loose); font-family: var(--font-mono); color: var(--text-primary); overflow: auto; margin: 0; white-space: pre-wrap; word-break: break-all; }
-.ds-primary.primary.v10-modal-btn.ds-btn.v10-share-copy { position: absolute; top: 6px; right: 6px; font-size: var(--fs-micro); padding: var(--space-4) var(--space-12); height: 26px; cursor: pointer; }
+.v10-share-copy { position: absolute; top: var(--space-6); right: var(--space-6); }
 .v10-share-none { padding: var(--space-16) var(--space-12); border-radius: var(--radius-control); font-size: var(--fs-label); text-align: center; color: var(--text-tertiary); background: var(--bg-surface); border: 1px dashed var(--border-default); }
 .v10-share-request { display: flex; align-items: center; justify-content: space-between; padding: var(--pad-nested-sm); border-radius: var(--radius-control); font-size: var(--fs-label); background: var(--bg-surface); border: 1px solid var(--border-default); margin-bottom: var(--space-4); }
 .v10-share-request-text { display: flex; flex-direction: column; gap: var(--space-2); }

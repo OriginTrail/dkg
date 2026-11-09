@@ -495,8 +495,6 @@ select.input {
 .settings-confirm-list-last { font-size: var(--fs-control); color: var(--text-primary); line-height: var(--lh-loose); margin: 0 0 var(--space-16) var(--space-16); padding: 0; }
 .settings-confirm-note { font-size: var(--fs-label); color: var(--text-tertiary); margin-bottom: var(--space-20); line-height: var(--lh-body); }
 .settings-confirm-actions { display: flex; justify-content: flex-end; gap: var(--space-8); }
-.settings-confirm-cancel { padding: var(--space-8) var(--space-20); border-radius: var(--radius-control); font-size: var(--fs-control); font-weight: 600; cursor: pointer; border: 1px solid var(--border-default); background: var(--bg-surface); color: var(--text-secondary); }
-.settings-confirm-accept { padding: var(--space-8) var(--space-20); border-radius: var(--radius-control); font-size: var(--fs-control); font-weight: 700; cursor: pointer; border: 1px solid var(--success-border); background: var(--success-bg); color: var(--text-success); }
 .settings-field-label.settings-select-label { display: block; margin-bottom: var(--space-4); }
 .settings-select-row { display: flex; align-items: center; gap: var(--space-8); }
 .settings-select { width: 160px; }
@@ -506,8 +504,6 @@ select.input {
 .settings-warning-title { font-size: var(--fs-label); color: var(--text-warning); font-weight: 600; margin-bottom: var(--space-4); }
 .settings-warning-text { font-size: var(--fs-label); color: var(--text-secondary); line-height: var(--lh-body); margin-bottom: var(--space-8); }
 .settings-warning-actions { display: flex; gap: var(--space-8); }
-.settings-warning-btn { padding: var(--space-6) var(--space-16); border-radius: var(--radius-control); font-size: var(--fs-label); font-weight: 700; cursor: pointer; border: 1px solid var(--warning-border); background: var(--warning-bg); color: var(--text-warning); }
-.settings-warning-dismiss { padding: var(--space-6) var(--space-16); border-radius: var(--radius-control); font-size: var(--fs-label); font-weight: 600; cursor: pointer; border: 1px solid var(--border-default); background: var(--bg-surface); color: var(--text-secondary); }
 .settings-hint { font-size: var(--fs-micro); color: var(--text-tertiary); margin-top: var(--space-4); }
 .settings-note { font-size: var(--fs-label); color: var(--text-secondary); margin-top: var(--space-4); }
 .settings-block { margin-bottom: var(--space-8); }

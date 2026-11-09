@@ -18,6 +18,7 @@ import { Badge, StatusGlyph } from '../components/ds/Badge.js';
 import { PcaSettingsCard } from './conviction/PcaSettingsCard.js';
 import { IdentityWalletsSection } from './identity-wallets/IdentityWalletsSection.js';
 import { Toggle } from '../components/ds/Toggle.js';
+import { Button } from '../components/ds/Button.js';
 import { useModalDismiss } from '../components/Modals/useModalDismiss.js';
 import { formatNodeRole, truncateAddress } from '../lib/format.js';
 import { PageHeader } from '../components/ds/PageHeader.js';
@@ -172,20 +173,12 @@ function NetworkTelemetrySection() {
               You can disable streaming at any time from this page.
             </div>
             <div className="settings-confirm-actions">
-              <button
-                type="button"
-                onClick={() => { setShowConsentModal(false); toggleRef.current?.focus(); }}
-                className="settings-confirm-cancel"
-              >
+              <Button onClick={() => { setShowConsentModal(false); toggleRef.current?.focus(); }}>
                 Cancel
-              </button>
-              <button
-                type="button"
-                onClick={confirmTelemetry}
-                className="settings-confirm-accept"
-              >
+              </Button>
+              <Button variant="primary" onClick={confirmTelemetry}>
                 Enable streaming
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -292,21 +285,12 @@ function LocalDataRetentionSection() {
               Operations, logs, and metrics older than {pendingRetention} days will be permanently deleted.
             </div>
             <div className="settings-warning-actions">
-              <button
-                ref={confirmRef}
-                type="button"
-                onClick={confirmRetention}
-                className="settings-warning-btn"
-              >
+              <Button ref={confirmRef} variant="danger" size="sm" onClick={confirmRetention}>
                 Prune &amp; Save
-              </button>
-              <button
-                type="button"
-                onClick={() => setPendingRetention(null)}
-                className="settings-warning-dismiss"
-              >
+              </Button>
+              <Button size="sm" onClick={() => setPendingRetention(null)}>
                 Cancel
-              </button>
+              </Button>
             </div>
           </div>
         )}
