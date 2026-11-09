@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { DKGAgent, signAgentDelegation } from '@origintrail-official/dkg-agent';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { SemanticRuntimeStore, ProgramTraceRecorder, readProgramTrace, readProgramCallHistory, type SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
+import { SemanticRuntimeStore, ExecutionReceiptJournal, ProgramTraceRecorder, readProgramTrace, readProgramCallHistory, type SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
 import { ethers } from 'ethers';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -713,7 +713,7 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     } finally { vi.unstubAllGlobals(); }
   });
 
-  it.each(['complete', 'oversized', 'escaped-envelope', 'restart-before-callback', 'loop-terminal', 'declared-child', 'mixed-child', 'new-call', 'missing-acknowledgement', 'revoke', 'expire', 'epoch'])('reconciles native results without dispatching new work (%s)', async mode => {
+  it.each(['complete', 'oversized', 'escaped-envelope', 'restart-before-callback', 'restart-before-receipt', 'succeeded-revoked', 'loop-terminal', 'declared-child', 'mixed-child', 'new-call', 'missing-acknowledgement', 'revoke', 'expire', 'epoch'])('reconciles native results without dispatching new work (%s)', async mode => {
     const extraCall = mode === 'new-call';
     const n8nTool = 'urn:dkg:tool:n8n', workflowId = 'native-inspection';
     const definition = { versionId: 'published-native-1', nodes: [{ id: 'component', name: 'Component',
@@ -815,7 +815,33 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
       expect(dispatches).toBe(1);
       publishedVersion = definition.versionId;
+      if (mode === 'restart-before-receipt' || mode === 'succeeded-revoked') {
+        const executionIri = `urn:sr:execution:${prepared.invocationId}`;
+        const prepare = vi.spyOn(ExecutionReceiptJournal.prototype, 'prepare').mockImplementationOnce(() => { throw new Error('stopped-before-parent-receipt'); });
+        try { await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'TYPESCRIPT_EXECUTION_FAILED' }); }
+        finally { prepare.mockRestore(); }
+        const store = f.target.runtime!.store;
+        const effects = store.effectsForExecution(executionIri);
+        expect(effects).toHaveLength(1);
+        expect(effects[0].state).toBe('succeeded');
+        expect(store.adapterCheckpoint(effects[0].effectId)).toBeDefined();
+        expect(new ExecutionReceiptJournal(store, executionIri).terminal).toBeUndefined();
+        // Model a hard stop before the catch handler could mark the parent failed.
+        if (mode === 'restart-before-receipt') store.setExecutionStatus(executionIri, 'active');
+        if (mode === 'succeeded-revoked') invalidateExecutionCapability(f.target, prepared.invocationId, 'revoke');
+        await restartNode(f.target);
+        if (mode === 'succeeded-revoked') {
+          await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ status: 403 });
+          expect(dispatches).toBe(1);
+          return;
+        }
+      }
       if (extraCall) {
+        await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
+        const effects = f.target.runtime!.store.effectsForExecution(`urn:sr:execution:${prepared.invocationId}`);
+        expect(effects).toHaveLength(1);
+        expect(effects[0].state).toBe('succeeded');
+        await restartNode(f.target);
         await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
       } else {
         const result = await f.client.programs.invoke(prepared);
