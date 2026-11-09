@@ -41,7 +41,7 @@
   {
     "pattern": "packages/node-ui/browser-regressions/shell/*.spec.ts",
     "lane": "browser",
-    "reason": "Real app against a mocked node: narrow-screen side panels and badge contrast from the browser cascade, in the second required browser CI shard",
+    "reason": "Real app against a mocked node: narrow-screen side panels, badge contrast and Select menu placement from the browser cascade, in the second required browser CI shard",
     "cadence": "required",
     "command": "pnpm --dir packages/node-ui exec playwright test --config playwright.shell.config.ts",
     "layer": "browser regression fixtures",
