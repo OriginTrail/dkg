@@ -3474,7 +3474,8 @@ export class PublishMethods extends DKGAgentBase {
 
     // 7. Resolve author. preSigned > custodial agent > publisher fallback.
     const schemeVersion = opts?.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
-    const nodeHeldAuthor = nodeHeldDefaultAuthor(this.config, this.chain, this.localAgents, this.defaultAgentAddress);
+    // The agent named as author, else, with authors held on the node (nodeHeldAuthor), the default agent.
+    const authorAgent = opts?.authorAgentAddress ?? nodeHeldDefaultAuthor(this.config, this.chain, this.localAgents, this.defaultAgentAddress);
     let authorAddress: string;
     let authorSigner: AuthorSigner | undefined;
     let preSigned: PreSignedAuthorAttestation | undefined;
@@ -3485,16 +3486,12 @@ export class PublishMethods extends DKGAgentBase {
       // Self-sovereign callback: the daemon builds the exact typed data after
       // canonicalization and allocation, while the caller retains its key.
       authorAddress = ethers.getAddress(opts.authorAgentAddress!);
-    } else if (opts?.authorAgentAddress != null) {
+    } else if (authorAgent != null) {
       // #1116 (round 11) — a custodial agent without a key on file is a CAPABILITY GAP.
       authorSigner = await registeredAgentAuthorSigner(
-        this, this.config?.authorSigners, opts.authorAgentAddress, 'assertionFinalize', SEAL_CAPABILITY_GAP_CODE,
+        this, this.config?.authorSigners, authorAgent, 'assertionFinalize', SEAL_CAPABILITY_GAP_CODE,
       );
-      authorAddress = opts.authorAgentAddress;
-    } else if (nodeHeldAuthor !== undefined) {
-      // Authors held on the node (nodeHeldAuthor): the default agent signs with its key on the node.
-      authorAddress = nodeHeldAuthor;
-      authorSigner = await registeredAgentAuthorSigner(this, this.config?.authorSigners, authorAddress, 'assertionFinalize', SEAL_CAPABILITY_GAP_CODE);
+      authorAddress = authorAgent;
     } else {
       // Publisher-wallet fallback: use the daemon's own publisher EOA
       // as the author. This preserves Phase 4 mode (a) — node admin
@@ -3975,21 +3972,19 @@ export class PublishMethods extends DKGAgentBase {
     // into is resolved separately at publish time (targetOnChainCgId/v10CgId).
 
     const schemeVersion = opts?.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
-    const nodeHeldAuthor = nodeHeldDefaultAuthor(this.config, this.chain, this.localAgents, this.defaultAgentAddress);
+    // The agent named as author, else, with authors held on the node (nodeHeldAuthor), the default agent.
+    const authorAgent = opts?.authorAgentAddress ?? nodeHeldDefaultAuthor(this.config, this.chain, this.localAgents, this.defaultAgentAddress);
     let authorAddress: string;
     let authorSigner: AuthorSigner | undefined;
     let preSigned: PreSignedAuthorAttestation | undefined;
     if (opts?.preSignedAuthorAttestation != null) {
       preSigned = opts.preSignedAuthorAttestation;
       authorAddress = preSigned.address;
-    } else if (opts?.authorAgentAddress != null) {
+    } else if (authorAgent != null) {
       authorSigner = await registeredAgentAuthorSigner(
-        this, this.config?.authorSigners, opts.authorAgentAddress, 'Selection-based VM publish',
+        this, this.config?.authorSigners, authorAgent, 'Selection-based VM publish',
       );
-      authorAddress = opts.authorAgentAddress;
-    } else if (nodeHeldAuthor !== undefined) {
-      authorAddress = nodeHeldAuthor;
-      authorSigner = await registeredAgentAuthorSigner(this, this.config?.authorSigners, authorAddress, 'Selection-based VM publish');
+      authorAddress = authorAgent;
     } else {
       const fallbackAddress = await this.publisher.publisherFallbackAuthorAddress();
       if (!fallbackAddress) {
