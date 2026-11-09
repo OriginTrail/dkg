@@ -404,6 +404,4 @@
 .v10-wm-nav { display: flex; gap: var(--space-12); padding: var(--space-16); }
 
 .v10-assertion-scroll { flex: 1; overflow: auto; }
-.v10-assertion-result { padding: var(--space-6) var(--space-16); font-size: var(--fs-label); color: var(--text-success); }
-.v10-assertion-result[data-tone="warning"] { color: var(--text-warning); }
-.v10-assertion-result[data-tone="danger"] { color: var(--text-danger); }
+.v10-assertion-result { padding: var(--space-6) var(--space-16); }

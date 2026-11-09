@@ -161,7 +161,7 @@ function LayerActionFeedback({ outcome }: { outcome: ActionOutcome }) {
     <div
       data-testid={outcome.tone === 'danger' ? 'layer-action-error' : 'layer-action-result'}
       data-tone={outcome.tone}
-      className="v10-layer-action-result"
+      className="action-outcome v10-layer-action-result"
     >
       <StatusGlyph tone={outcome.tone} /> {outcome.text}
     </div>

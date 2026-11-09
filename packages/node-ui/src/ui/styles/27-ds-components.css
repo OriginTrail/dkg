@@ -511,6 +511,12 @@ button:not(.ds-btn) > .lucide-refresh-cw { margin-right: var(--space-6); }
 .ds-spin { animation: ds-spin 1s linear infinite; }
 @keyframes ds-spin { to { transform: rotate(360deg); } }
 
+/* Action outcome: what a promote or publish came to (lib/actionOutcome.ts).
+   The one place its tones are set; each consumer keeps its own spacing. */
+.action-outcome { font-size: var(--fs-label); color: var(--text-success); }
+.action-outcome[data-tone="warning"] { color: var(--text-warning); }
+.action-outcome[data-tone="danger"] { color: var(--text-danger); }
+
 /* Operation tone: the layer an operation writes to (op-type-colors.ts picks
    the tone). The one place these colours are set; Observability and the
    Transactions panel read --op-text, --op-bg and --op-rule. */
