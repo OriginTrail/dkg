@@ -697,7 +697,7 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     try {
       let overrides = {};
       if (mode === 'declared-child') {
-        const child = await f.manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', source: 'export function run() { return 42; }' });
+        const child = await f.manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', requiredTools: [], source: 'export function run() { return 42; }' });
         const childOperation = { graphId: graph, operationIri: 'urn:child:declared-only' };
         await f.manager.programs.approve({ ...childOperation, program: child, allowedCallers: [caller], typescript: { children: [] } });
         const saved = await f.manager.programs.getSource(f.program);
