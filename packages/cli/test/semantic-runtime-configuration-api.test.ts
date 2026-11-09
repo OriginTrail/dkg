@@ -717,7 +717,7 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     } finally { vi.unstubAllGlobals(); }
   });
 
-  it.each(['complete', 'oversized', 'declared-child', 'new-call', 'missing-acknowledgement', 'revoke', 'expire', 'epoch'])('reconciles native results without dispatching new work (%s)', async mode => {
+  it.each(['complete', 'oversized', 'loop-terminal', 'declared-child', 'new-call', 'missing-acknowledgement', 'revoke', 'expire', 'epoch'])('reconciles native results without dispatching new work (%s)', async mode => {
     const extraCall = mode === 'new-call';
     const n8nTool = 'urn:dkg:tool:n8n', workflowId = 'native-inspection';
     const definition = { versionId: 'published-native-1', nodes: [{ id: 'component', name: 'Component',
@@ -728,7 +728,7 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       properties: { ok: { type: 'boolean' }, itemsJson: string, portsJson: string, error: string } };
     const inputSchema = { type: 'object', additionalProperties: false, required: ['text'], properties: { text: string } };
     const n8n = { toolIri: n8nTool, workflowId, workflowSha256: n8nWorkflowSha256(definition), inputSchema, outputSchema,
-      result: { nodes: ['Component'] } };
+      result: { nodes: ['Component'], ...(mode === 'loop-terminal' ? { sinks: [{ node: 'Component', port: 1, name: 'terminal false' }] } : {}) } };
     const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
       export async function run(input: unknown) {
         const value = await invoke_tool('${n8nTool}', input);
@@ -750,8 +750,10 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       }
       if (interrupted) throw new Error('interrupted-after-durable-ack');
       const snapshot = structuredClone(definition); snapshot.nodes[0]!.parameters = {} as any;
+      const runs = mode === 'loop-terminal' ? [1, 2].map(value => ({ data: { main: [[], [{ json: { value } }]] } }))
+        : [{ data: { main: [Array.from({ length: mode === 'oversized' ? 201 : 1 }, () => ({ json: { value: 12 } }))] } }];
       return Response.json({ id: '42', workflowId, workflowVersionId: definition.versionId, status: 'success', workflowData: snapshot,
-        data: { resultData: { runData: { Component: [{ data: { main: [Array.from({ length: mode === 'oversized' ? 201 : 1 }, () => ({ json: { value: 12 } }))] } }] } } } });
+        data: { resultData: { runData: { Component: runs } } } });
     }));
     try {
       let overrides = {};
@@ -795,7 +797,8 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       } else {
         const result = await f.client.programs.invoke(prepared);
         expect(result.outputs).toMatchObject([{ n8nExecutionId: '42', output: mode === 'oversized'
-          ? { ok: false, itemsJson: '[]', error: expect.stringContaining('twenty records') } : { ok: true, itemsJson: '[{"value":12}]' } }]);
+          ? { ok: false, itemsJson: '[]', error: expect.stringContaining('twenty records') }
+          : { ok: true, itemsJson: mode === 'loop-terminal' ? '[{"value":1},{"value":2}]' : '[{"value":12}]' } }]);
         expect(await f.client.programs.invoke(prepared)).toEqual(result);
         const stored = await f.store.query(`SELECT ?output WHERE { GRAPH ?g { <${result.executionIri}> <${SR}output> ?output } }`);
         expect(JSON.stringify(stored)).toContain('n8nExecutionId');

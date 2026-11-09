@@ -14,29 +14,39 @@ export function collectN8nExecutionResult(grant: SemanticN8nGrant, execution: Re
     if (!Array.isArray(values) || values.length > 256 || !values.every(n8nRecord)) throw new Error('N8N_EXECUTION_DATA_INVALID');
     return values;
   };
-  const omitted = new Set<string>(), counts = new Map<string, number[]>();
+  const omitted = new Set<string>(), counts = new Map<string, number[]>(), collected = new Map<string, unknown[][]>();
   const outputs = (name: string): unknown[][] => {
-    const last = runs(name).at(-1);
-    if (!last || !n8nRecord(last.data)) return [];
-    const main = last.data.main;
-    if (!Array.isArray(main) || main.length > 4) throw new Error('N8N_EXECUTION_DATA_INVALID');
-    counts.set(name, main.map(port => Array.isArray(port) ? port.length : 0));
-    return main.map(port => {
-      if (port === null) return [];
-      if (!Array.isArray(port)) throw new Error('N8N_EXECUTION_DATA_INVALID');
-      // A completed oversized result is a confirmed rejection, not an uncertain effect.
-      if (port.length > 200) { omitted.add(name); return []; }
-      return port.map(item => {
-        if (!n8nRecord(item) || !n8nRecord(item.json)) throw new Error('N8N_EXECUTION_DATA_INVALID');
-        return item.json;
+    const cached = collected.get(name);
+    if (cached) return cached;
+    const result: unknown[][] = [], sizes: number[] = [];
+    // Terminal branches can emit on every iteration. Preserve run order and port
+    // identity: a Loop Over Items done port already contains its completed batch.
+    for (const run of runs(name)) {
+      if (!n8nRecord(run.data)) continue;
+      const main = run.data.main;
+      if (!Array.isArray(main) || main.length > 4) throw new Error('N8N_EXECUTION_DATA_INVALID');
+      main.forEach((port, index) => {
+        result[index] ??= []; sizes[index] ??= 0;
+        if (port === null) return;
+        if (!Array.isArray(port)) throw new Error('N8N_EXECUTION_DATA_INVALID');
+        const count = sizes[index]! + port.length; sizes[index] = count;
+        // Bound retained records across all runs, while counting omitted output.
+        if (count > 200) { omitted.add(name); result[index] = []; return; }
+        for (const item of port) {
+          if (!n8nRecord(item) || !n8nRecord(item.json)) throw new Error('N8N_EXECUTION_DATA_INVALID');
+          result[index]!.push(item.json);
+        }
       });
-    });
+    }
+    counts.set(name, sizes); collected.set(name, result);
+    return result;
   };
   const failed = execution.status === 'error';
   const sinks = grant.result.sinks;
   const selected = sinks ? sinks.flatMap(s => outputs(s.node)[s.port] ?? []) : grant.result.nodes.flatMap(name => outputs(name)[0] ?? []);
   const ports = sinks && sinks.length > 1 ? Object.fromEntries(sinks.map(s => [s.name, outputs(s.node)[s.port] ?? []])) : grant.result.ports && grant.result.ports.length > 1
     ? Object.fromEntries(grant.result.ports.map((name, i) => [name, outputs(grant.result!.nodes[0]!)[i] ?? []])) : {};
+  const recordCount = Object.keys(ports).length ? Object.values(ports).reduce((sum, port) => sum + port.length, 0) : selected.length;
   const itemsJson = JSON.stringify(Object.keys(ports).length ? [] : selected), portsJson = JSON.stringify(ports);
   const trace = grant.result.traceNodes?.map(name => {
     const records = runs(name), main = outputs(name);
@@ -45,7 +55,7 @@ export function collectN8nExecutionResult(grant: SemanticN8nGrant, execution: Re
       ...(omitted.has(name) ? { outputOmitted: 'record-limit' } : { outputHash: createHash('sha256').update(canonicalizeJson(main as CanonicalJsonValue, { maxBytes: 1_048_576, maxDepth: 30 })).digest('hex') }) };
   });
   const oversized = omitted.size > 0 || itemsJson.length > 8192 || portsJson.length > 8192
-    || selected.length > 20 || Object.values(ports).some(port => port.length > 20);
+    || recordCount > 20;
   const result: Record<string, unknown> = { ok: !failed && !oversized,
     itemsJson: failed || oversized ? '[]' : itemsJson,
     portsJson: failed || oversized ? '{}' : portsJson,
