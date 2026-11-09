@@ -24,9 +24,9 @@ import { LiftJobPayloadUnreadableError } from '../src/lift-job-payload-unreadabl
 import { lifecycleKeyOfJob } from '../src/lift-job-store-selectors.js';
 import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 import {
-  DAY, NOW, at, createRetentionTemplates, fin, keyedQuads, present, seedWalletLock, stampKeyed, type KeyedSpec, type RetentionTemplates,
+  DAY, NOW, at, createRetentionTemplates, fin, keyedQuads, present, seedWalletLock, spyStore, stampKeyed, type KeyedSpec, type RetentionTemplates, type SpyHooks,
 } from './_helpers/lift-retention-fixtures.js';
-import { drain, expectKeySuffix, newRetention } from './_helpers/lift-retention-sweep.js';
+import { drain, expectKeySuffix, newRetention, publisherOver, removedJobIds } from './_helpers/lift-retention-sweep.js';
 
 const HOUR = 60 * 60 * 1000;
 const INTEGER = '^^<http://www.w3.org/2001/XMLSchema#integer>';
@@ -317,10 +317,10 @@ describe('a record the sweep reads through another job\'s subject', () => {
 });
 
 describe('records of one key that finished at the same instant', () => {
-  // The key's order is by acceptance (then job id); the scan walks by finish time. The rows of ONE finish time come by subject only when they are more than a batch
-  // (the group is walked across batches, ORDER BY STR(?job)); inside one batch they come in the engine's order. So a pass lets a key's records go only up to the first
-  // one whose finish time is not STRICTLY later than the one before it: a record that tied with an older one may be met first, and then it waits, with every record
-  // behind it. A strict `>` there is what these cases pin.
+  // The key's order is by acceptance (then job id); the scan walks by finish time and the rows of ONE finish time by subject (the tie walk across batches reads them so,
+  // and every batch is judged so, #3554). So a pass lets a key's records go only up to the first one the walk meets no later than the one before it: a record that tied
+  // with an older one and sorts before it by subject is met first, and then it waits, with every record behind it. Comparing the finish time and then the subject is
+  // what these cases pin.
 
   it('the scan meets the newer of two tied records first: it is kept, the older one goes, and the newer one goes in the next pass', async () => {
     // b-old accepted on day 10, a-new on day 20, both finished on day 30: the tie walk meets a-new first (subject order), with b-old still in front of it in the key
@@ -359,18 +359,42 @@ describe('records of one key that finished at the same instant', () => {
     expect(await idsOf(w)).toEqual(['b3']);
   });
 
-  it('the scan meets the OLDER of two tied records first, a batch apart: delete takes both in one pass, in order; report names the older one only', async () => {
+  it('the scan meets the OLDER of two tied records first, a batch apart: delete takes both in one pass, in order, and report names both (#3554)', async () => {
     // a-old accepted on day 10, b-new on day 20, both finished on day 30. Delete removes a-old in batch 1, so b-new leads the key when batch 2 meets it. Report removes
-    // nothing: a-old is still in front of b-new and the tie keeps b-new. This is the one place report can name fewer records than the first delete pass removes; it
-    // never names one that delete keeps, and delete never removes one out of order.
+    // nothing, so a-old is still in front of b-new when batch 2 meets it: the walk met a-old first (it sorts first by subject), so b-new is in the run and goes as well.
+    // Comparing finish times alone kept b-new in report, which then named fewer records than the first delete pass removed.
     const order = ['a-old', 'b-new'];
     const specs = [fin('a-old', 'k', 10, 30), fin('b-new', 'k', 20, 30)];
     const w = await world(specs);
     expect(deletedIds(await walk(newRetention(w.publisher, { batchSize: 1 }), w, order, 'delete'))).toEqual(['a-old', 'b-new']);
     const reportWorld = await world(specs);
     const report = await drain(newRetention(reportWorld.publisher, { mode: 'report', batchSize: 1 }));
-    expect(wouldDeleteIds(report)).toEqual(['a-old']);
-    expect(kept(report)).toEqual({ older_sibling_pending: 1 });
+    expect(wouldDeleteIds(report)).toEqual(['a-old', 'b-new']);
+    expect(kept(report)).toEqual({});
+  });
+
+  it.each(['the engine\'s', 'the reverse'] as const)('inside one batch, tied rows in %s subject order are judged by subject: both modes take them oldest first, one hold each (#3554)', async (engine) => {
+    // The same two records, one batch, one candidate per hold. The scan's ORDER BY ?finalizedAt leaves two rows of one finish time in any order the engine likes, and one
+    // that answers b-new first must change nothing: a batch judges its rows by finish time and then by subject, the order the key rule compares them in. Judged in the
+    // answer's order, b-new would go in the first hold while a-old, older in its key, was still there.
+    const order = ['a-old', 'b-new'];
+    const specs = [fin('a-old', 'k', 10, 30), fin('b-new', 'k', 20, 30)];
+    const reversed: SpyHooks = engine === 'the engine\'s' ? {} : {
+      rewrite: async (entry, run) => {
+        const answer = await run();
+        if (entry.source !== 'publisher.asyncLift.retention.scan' || answer.type !== 'bindings') return answer;
+        const at = (row: Record<string, string>) => Number(/^"(\d+)"/.exec(row['finalizedAt'] ?? '')?.[1]);
+        return { ...answer, bindings: [...answer.bindings].sort((x, y) => at(x) - at(y) || (x['job']! < y['job']! ? 1 : -1)) };
+      },
+    };
+    for (const mode of ['delete', 'report'] as const) {
+      const w = await world(specs);
+      const spy = spyStore(w.store, reversed);
+      const results = await walk(newRetention(publisherOver(spy.store), { mode, sliceSize: 1 }), w, order, `${engine} ${mode}`);
+      expect(results.reduce((n, r) => n + r.holds, 0), mode).toBe(2);
+      if (mode === 'delete') expect(removedJobIds(spy.log), mode).toEqual(['a-old', 'b-new']);
+      expect(mode === 'delete' ? deletedIds(results) : wouldDeleteIds(results), mode).toEqual(['a-old', 'b-new']);
+    }
   });
 });
 

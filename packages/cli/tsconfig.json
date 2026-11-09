@@ -15,6 +15,7 @@
     { "path": "../node-ui" },
     { "path": "../adapter-openclaw" },
     { "path": "../local-llm" },
-    { "path": "../mcp-dkg" }
+    { "path": "../mcp-dkg" },
+    { "path": "../rdf-utils" }
   ]
 }

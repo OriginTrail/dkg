@@ -39,7 +39,7 @@ describe('the retention rows of the tagging table', () => {
     const scan = PUBLISHER_TAGGING_ROWS.find((row) => row.id === 'retention-scan')!;
     expect(scan).toMatchObject({ lane: 'background', sources: [`${R}scan`] });
     const control = PUBLISHER_TAGGING_ROWS.find((row) => row.id === 'control-path')!;
-    for (const source of [...CONTROL_SOURCES, 'publisher.asyncLift.clear.siblings']) expect(control.sources, source).toContain(source);
+    for (const source of [...CONTROL_SOURCES, 'publisher.asyncLift.clear.siblings', 'publisher.asyncLift.clear.keys']) expect(control.sources, source).toContain(source);
     expect(PUBLISHER_ROW_SOURCES.get(`${R}scan`)!.lane).toBe('background');
     for (const source of CONTROL_SOURCES) expect(PUBLISHER_ROW_SOURCES.get(source)!.lane, source).toBe('control');
   });
@@ -107,18 +107,19 @@ describe.each(STACKS)('publisher retention boundary oracle: %s stack', (stack) =
 });
 
 describe('the traces compared with the base SHA leave out only the calls the PR adds', () => {
-  it('drops the bulk clear\'s sibling reads from the lane traces and nothing else, and those reads exist in the workload', async () => {
-    expect([...ADDED_LABELS]).toEqual(['publisher.asyncLift.clear.siblings']);
+  it('drops the bulk clear\'s sibling and stored-key reads from the lane traces and nothing else, and those reads exist in the workload', async () => {
+    expect([...ADDED_LABELS]).toEqual(['publisher.asyncLift.clear.siblings', 'publisher.asyncLift.clear.keys']);
     const run = await runPublisherWorkload('atomic');
     const added = run.calls.filter((call) => ADDED_LABELS.has(call.source ?? ''));
     expect(added.length).toBeGreaterThan(0);
     const withoutAdded = run.calls.filter((call) => !ADDED_LABELS.has(call.source ?? ''));
     expect(laneTrace(run.calls)).toEqual(laneTrace(withoutAdded));
     expect(sourceTrace(run.calls)).toEqual(sourceTrace(withoutAdded));
-    expect(Object.keys(sourceTrace(run.calls)).some((key) => key.includes('clear.siblings'))).toBe(false);
+    expect(Object.keys(sourceTrace(run.calls)).some((key) => key.includes('clear.siblings') || key.includes('clear.keys'))).toBe(false);
+    expect(new Set(added.map((call) => call.source))).toEqual(ADDED_LABELS);
     // and each of them is a control call that resolves to the caller's lane with the path off, like every tagged call
     for (const call of added) {
-      expect(call.options).toEqual(controlStoreOptions('publisher', 'publisher.asyncLift.clear.siblings'));
+      expect(call.options).toEqual(controlStoreOptions('publisher', call.source!));
       expect(resolveLane(call, false)).toBe(call.ambient ?? 'normal');
     }
   });

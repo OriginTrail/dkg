@@ -7,7 +7,7 @@ import { withContextGraphReadinessMutationLock, type ContextGraphSubscriptionSta
 import { reduceContextGraphPlaneEvidence, type ContextGraphReadinessPatch } from './context-graph-readiness-policy.js';
 
 type FencedProof<T> =
-  | { readonly proven: false; readonly retryable?: boolean }
+  | { readonly proven: false; readonly retryable?: boolean; readonly final?: boolean; readonly stage?: string }
   | { readonly proven: true; readonly value: T };
 const UNPROVEN = { proven: false } as const;
 
@@ -62,6 +62,8 @@ export async function withProvenEmptyPrivateVmReadiness<T>(input: {
           return {
             proven: false as const,
             ...(completion.retryable === undefined ? {} : { retryable: completion.retryable }),
+            ...(completion.final === undefined ? {} : { final: completion.final }),
+            ...(completion.stage === undefined ? {} : { stage: completion.stage }),
           };
         }
         // A backend may ignore its abort signal and invoke this much later.

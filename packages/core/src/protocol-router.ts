@@ -235,7 +235,7 @@ export interface DuplexStreamRequest<T> {
   dispose?: () => Promise<void>;
 }
 
-interface OutboundStreamOpenOptions {
+interface OutboundStreamOpenOptions extends Pick<TryReuseExistingConnectionOptions, 'isConclusiveFailure'> {
   resolverTimeoutMs: number;
   excludeConnections?: WeakSet<ReusableConnection>;
   /** Ordinary sends enable this on a later retry after a normal dial failed. */
@@ -711,19 +711,18 @@ export class ProtocolRouter {
   /**
    * Check a peer's current protocol capability without sending an application
    * request. Identify records can lag a handler registered after connection;
-   * multistream negotiation reflects the live handler table. A successful
-   * probe opens and immediately aborts the stream before any payload bytes.
+   * multistream negotiation reflects the live handler table. The stream opens
+   * as a duplex stream's does, on an open relay circuit too once a dial found
+   * no direct route; a refusal on an open connection is the answer. A
+   * successful probe aborts the stream before any payload bytes.
    */
   async probeProtocol(peerIdStr: string, protocolId: string, timeoutMs = 3_000, parentSignal?: AbortSignal): Promise<ProtocolProbeOutcome> {
     const lifecycle = startRequestAbortLifecycle(timeoutMs, [parentSignal, this.node.stopSignal]);
     const signal = lifecycle.signal;
     try {
-      await this.requirePeerAccepted(peerIdStr, protocolId, 'outbound', { signal, timeoutMs });
-      // Match send()'s resolver contract before opening a stream. For the
-      // connected peers this probe targets, its live-connection step is fast;
-      // it also primes a route if the connection closes during admission.
-      await this.peerResolver?.resolve(peerIdStr, { signal, perStepTimeoutMs: timeoutMs });
-      const stream = await this.network.dialProtocol(peerIdStr, protocolId, { signal, timeoutMs });
+      const openStream = await this.createAdmittedPeerStreamOperation(peerIdStr, protocolId, signal, timeoutMs);
+      const { stream } = await openStream({ resolverTimeoutMs: timeoutMs, afterDialFailure: 'reuse-limited',
+        cancelledResolution: 'throw', isConclusiveFailure: isProtocolUnsupportedError });
       try {
         stream.abort(new Error('protocol capability probe complete'));
       } catch {
@@ -888,6 +887,7 @@ export class ProtocolRouter {
         reuseLimitedDespiteDirectAddrs: (connection) => route.reuseLimited(connection, options.resolverTimeoutMs),
         allowLimitedWithDirectAddrs: options.allowLimitedWithDirectAddrs,
         excludeConnections: options.excludeConnections,
+        isConclusiveFailure: options.isConclusiveFailure,
       };
       let reused = await tryReuseExistingConnection(getConnections, protocolId, signal, reuseOptions);
       if (!reused && this.peerResolver && !signal.aborted) {
@@ -1460,6 +1460,8 @@ interface TryReuseExistingConnectionOptions {
    * latched a half-dead connection for the whole retry budget.
    */
   excludeConnections?: WeakSet<ReusableConnection>;
+  /** A negotiation failure that ends the open instead of trying another connection or the dial. */
+  isConclusiveFailure?: (error: unknown) => boolean;
 }
 
 /**
@@ -1580,13 +1582,11 @@ export async function tryReuseExistingConnection(
         continue;
       }
       return { stream: s, connection: conn };
-    } catch {
-      // Try the next candidate connection (if any), then fall
-      // through to dialProtocol on overall miss. Swallowing here is
-      // safe — every error class that's actually fatal to the send
-      // (transport down, peer gone) will surface again on
-      // dialProtocol, which has the full address-resolution +
-      // backoff path to handle it correctly.
+    } catch (error) {
+      // A probe ends on its answer. Otherwise try the next connection, then
+      // dialProtocol: an error fatal to a send (transport down, peer gone)
+      // surfaces again there, with address resolution and backoff.
+      if (options.isConclusiveFailure?.(error)) throw error;
       continue;
     }
   }
