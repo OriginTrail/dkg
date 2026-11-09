@@ -51,7 +51,7 @@ import { formatDateTime } from '../lib/format.js';
 import { PageHeader } from '../components/ds/PageHeader.js';
 import { StatTile } from '../components/ds/StatTile.js';
 import { NetworkConnections } from './Network.js';
-import { useObservabilityStore, writeTabToAddress } from '../stores/observability.js';
+import { useObservabilityTab } from '../hooks/useObservabilityTab.js';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
 
@@ -167,8 +167,7 @@ function PeriodSelect({ value, onChange }: { value: string; onChange: (v: string
 }
 
 export function ObservabilitySection() {
-  const { tab, setTab } = useObservabilityStore();
-  useEffect(() => writeTabToAddress(tab), [tab]);
+  const [tab, setTab] = useObservabilityTab();
 
   return (
     <div>

@@ -729,7 +729,7 @@ export function DashboardView() {
             </p>
           ) : (
             <div className="v10-cg-table">
-              <div className="v10-cg-colhead">
+              <div className="v10-cg-colhead ds-table-head">
                 <span className="v10-cg-cell v10-cg-name">Name</span>
                 <span className="v10-cg-cell v10-cg-type">Type</span>
                 <span className="v10-cg-cell v10-cg-size">Size</span>

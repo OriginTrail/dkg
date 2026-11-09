@@ -6,6 +6,7 @@
  * Anything else round-trips through `/open/<encoded tab id>`.
  */
 import { PLACES, decodeTabId, type PlaceId } from './tab-target.js';
+import { rememberedObservabilityTab, searchForTab } from './observabilityTab.js';
 
 export interface TabRoute { id: string; label: string }
 
@@ -27,6 +28,12 @@ export function tabIdToPath(id: string): string {
     default: break;
   }
   return `/open/${enc(id)}`;
+}
+
+/** Where switching to a tab goes: its path, plus Observability's last tab. */
+export function tabIdToHref(id: string): string {
+  const path = tabIdToPath(id);
+  return id === 'operations' ? path + searchForTab(rememberedObservabilityTab()) : path;
 }
 
 /** The tab a path stands for, or null when the path isn't a tab. */

@@ -35,13 +35,18 @@ test.describe('Left Panel Navigation (rc.12)', () => {
   });
 
   test('Public Context Graphs renders the catalogue', async ({ leftPanel, page }) => {
-    // The catalogue renders EITHER discovered public CGs OR the empty-state
-    // hint — both are valid on a real node depending on what's been synced.
-    const emptyState = page.getByText(/Public Context Graphs appear here/i);
-    const catalogueRows = leftPanel.root.locator('.v10-tree-section');
-    await expect
-      .poll(async () => (await emptyState.isVisible().catch(() => false)) || (await catalogueRows.count()) > 0)
-      .toBe(true);
+    // Only the Public Context Graphs group counts: its disclosed body shows
+    // either discovered public Context Graphs or the empty hint, depending on
+    // what the node has synced. My Context Graphs rows don't satisfy it.
+    const header = leftPanel.root.getByRole('button', { name: 'Public Context Graphs', exact: true });
+    await expect(header).toBeVisible();
+    if ((await header.getAttribute('aria-expanded')) !== 'true') await header.click();
+    await expect(header).toHaveAttribute('aria-expanded', 'true');
+    const bodyId = await header.getAttribute('aria-controls');
+    expect(bodyId).toBeTruthy();
+    const body = page.locator(`[id="${bodyId}"]`);
+    const content = body.locator('.v10-tree-section-label, .v10-tree-hint');
+    await expect(content.first()).toBeVisible();
   });
 
   test('switching back to Context Graphs mode restores project list', async ({ leftPanel }) => {

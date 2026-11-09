@@ -17,8 +17,7 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
 import { useShellRouting } from './hooks/useShellRouting.js';
 import { NodeUnavailableView } from './components/NodeUnavailableView.js';
 import { ApiTokenPrompt } from './components/ApiTokenPrompt.js';
-import { useObservabilityStore } from './stores/observability.js';
-import { PLACES } from './lib/tab-target.js';
+import { observabilityHref } from './lib/observabilityTab.js';
 import { tabIdToPath } from './lib/tab-routes.js';
 
 function useLiveStatus() {
@@ -259,16 +258,9 @@ function AppShell() {
   );
 }
 
-/** Old address: Network is a tab in Observability now. */
+/** Old address: Network is a tab in Observability now. The address opens the tab. */
 function NetworkRoute() {
-  const openTab = useTabsStore((s) => s.openTab);
-
-  useLayoutEffect(() => {
-    useObservabilityStore.getState().setTab('network');
-    openTab({ id: 'operations', label: PLACES.operations.label, closable: true });
-  }, [openTab]);
-
-  return <Navigate to={`${PLACES.operations.path}?tab=network`} replace />;
+  return <Navigate to={observabilityHref('network')} replace />;
 }
 
 /** Old address: Agent hub is the right panel. AppShell opens it once it has mounted. */
