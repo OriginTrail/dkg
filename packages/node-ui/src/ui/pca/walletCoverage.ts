@@ -3,13 +3,25 @@
  * PCA covers, and the one summary derived from that. Pure (no React), so the precedence
  * is stated once and tested directly; presentation (text, tone) maps from the state.
  */
-import type { ResolvedPcaAccount } from '../hooks/usePcaOverview.js';
+import type { PcaSnapshot } from '../api.js';
 import { isPcaSpendable } from './coverage.js';
 import { isPcaExpired } from './pca-primitives.js';
 import { eqAddress } from '../web3/address.js';
 import { formatBps } from '../lib/format.js';
 
-type CoverageAccount = Pick<ResolvedPcaAccount, 'accountId' | 'snapshot' | 'walletProbes'>;
+/** One wallet's registration on one PCA. `registered: null` = couldn't determine. */
+export interface CoverageProbe {
+  wallet: string;
+  registered: boolean | null;
+}
+
+/** What the coverage model needs from a PCA. The overview hook's resolved account extends it. */
+export interface CoverageAccount {
+  accountId: string;
+  snapshot: PcaSnapshot | null;
+  /** One probe per node publishing wallet. */
+  walletProbes: CoverageProbe[];
+}
 
 /** One publishing wallet, in precedence order: covered, then inactive, then unknown. */
 export type WalletCoverage =

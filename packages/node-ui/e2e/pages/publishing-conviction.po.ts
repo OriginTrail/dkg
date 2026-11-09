@@ -1,6 +1,5 @@
 import { type Page, type Locator } from '@playwright/test';
 import { sel } from '../helpers/selectors.js';
-import { fetchApiInPage } from '../helpers/page-api.js';
 
 /**
  * Page object for the GREENFIELD Publisher Conviction (PCA) tab
@@ -105,24 +104,22 @@ export class PublishingConvictionPage {
     return this.unavailable.isVisible().catch(() => false);
   }
 
-  /** Track a known PCA by accountId. The Overview's ID field only checks
-   *  approval (it adds the PCA when a wallet is approved), so this seeds the id into
-   *  the PCA store's saved list, under the same scoped key the app uses
-   *  (`dkg-pca:<chainId>:<nft>:<token>`), then reloads the Overview. */
+  /** Add a known PCA to the list by accountId, the way a user does: type it beside
+   *  "Already have a PCA?", press Check, and in Get added either let an approved
+   *  wallet add it automatically or press "Add PCA #N to your list". */
   async trackAccount(accountId: string) {
-    const contracts = await fetchApiInPage<{ chainId: string | number; nft: string; token: string }>(
-      this.page, '/api/pca/contracts',
-    );
-    if (!contracts.ok || !contracts.json) throw new Error(`/api/pca/contracts failed (${contracts.status})`);
-    const { chainId, nft, token } = contracts.json;
-    const key = `dkg-pca:${[String(chainId), nft, token].map((v) => v.toLowerCase()).join(':')}`;
-    await this.page.evaluate(({ key, accountId }) => {
-      const saved = JSON.parse(localStorage.getItem(key) ?? '{}') as { trackedIds?: string[] };
-      const trackedIds = Array.from(new Set([...(saved.trackedIds ?? []), accountId]));
-      localStorage.setItem(key, JSON.stringify({ ...saved, trackedIds }));
-    }, { key, accountId });
-    await this.page.reload();
-    await this.open();
+    await this.checkInput.first().fill(accountId);
+    await this.checkSubmit.first().click();
+    const dialog = this.page.getByTestId('pca-get-sponsored');
+    await dialog.waitFor({ state: 'visible' });
+    const add = dialog.getByTestId('pca-sponsor-track');
+    // The check is done when there's a result, an Add offer, or the PCA is already in the list.
+    await dialog
+      .locator('[data-testid="pca-sponsor-track"], [data-testid="pca-sponsor-tracked"], .v10-pca-approve-results')
+      .first()
+      .waitFor({ state: 'visible', timeout: 15_000 });
+    if (await add.isVisible()) await add.click();
+    await dialog.getByRole('button', { name: 'Close', exact: true }).click();
     await this.accountCard.first().waitFor({ state: 'visible', timeout: 15_000 });
   }
 

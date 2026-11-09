@@ -35,6 +35,25 @@ function faucetUrl(chainId: string | null | undefined): string | undefined {
 interface ProbeError {
   message: string;
   retry: boolean;
+  /** The PCA itself was read (only its approval check is unsupported), so it can still be added. */
+  trackableId?: string;
+}
+
+/**
+ * Put a PCA that was read but covers nothing here (or can't be checked) in the list,
+ * read-only, so its funding, expiry and owner stay reachable. It claims no coverage.
+ */
+function AddToListAction({ accountId, trackedNote }: { accountId: string; trackedNote: string }) {
+  const trackAccount = usePcaStore((s) => s.trackAccount);
+  const tracked = usePcaStore((s) => s.trackedIds.includes(accountId));
+  if (tracked) return <p className="v10-pca-detail-hint" data-testid="pca-sponsor-tracked">{trackedNote}</p>;
+  return (
+    <div className="v10-pca-overview-cta-group">
+      <button type="button" className="v10-pca-card-btn ds-btn ds-sm" data-testid="pca-sponsor-track" onClick={() => trackAccount(accountId)}>
+        Add PCA #{accountId} to your list
+      </button>
+    </div>
+  );
 }
 
 interface ProbeRow {
@@ -104,7 +123,6 @@ export function GetSponsoredPanel({
   const faucet = isTestnetChain(chainId) ? faucetUrl(chainId) : undefined;
 
   const trackAccount = usePcaStore((s) => s.trackAccount);
-  const trackedIds = usePcaStore((s) => s.trackedIds);
   const { copied, copy } = useCopy();
 
   // GAP-3 discovery (#1344) — surface which PCA(s) already sponsor this node's wallets
@@ -170,6 +188,8 @@ export function GetSponsoredPanel({
             ? 'This node can’t check PCA approval, so we can’t confirm which wallets are covered. You can still publish. To check approval, update the node or ask the PCA owner.'
             : `Couldn’t check PCA #${id} right now.`,
           retry: !allAdapterGap,
+          // A capability gap still read the PCA itself; a transient failure proves nothing.
+          ...(allAdapterGap ? { trackableId: id } : {}),
         });
         setProbed(null);
         return;
@@ -314,6 +334,12 @@ export function GetSponsoredPanel({
             <div className="v10-pca-retry-block">
               <p className="v10-modal-error ds-card-nested" role="alert">{probeError.message}</p>
               {probeError.retry && <RetryButton onClick={() => void check()} />}
+              {probeError.trackableId && (
+                <AddToListAction
+                  accountId={probeError.trackableId}
+                  trackedNote={`PCA #${probeError.trackableId} is in your list. This node can’t check whether it covers your wallets.`}
+                />
+              )}
             </div>
           )}
           {probed && (
@@ -331,22 +357,10 @@ export function GetSponsoredPanel({
               {/* The PCA exists but approves none of these wallets yet: it can still go in the
                   list, read-only, to view its funding, expiry and owner. It covers nothing. */}
               {approvedCount === 0 && (
-                trackedIds.includes(probed.accountId) ? (
-                  <p className="v10-pca-detail-hint" data-testid="pca-sponsor-tracked">
-                    PCA #{probed.accountId} is in your list. It gives no discount until the owner approves these wallets.
-                  </p>
-                ) : (
-                  <div className="v10-pca-overview-cta-group">
-                    <button
-                      type="button"
-                      className="v10-pca-card-btn ds-btn ds-sm"
-                      data-testid="pca-sponsor-track"
-                      onClick={() => trackAccount(probed.accountId)}
-                    >
-                      Add PCA #{probed.accountId} to your list
-                    </button>
-                  </div>
-                )
+                <AddToListAction
+                  accountId={probed.accountId}
+                  trackedNote={`PCA #${probed.accountId} is in your list. It gives no discount until the owner approves these wallets.`}
+                />
               )}
             </div>
           )}

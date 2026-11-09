@@ -8,20 +8,15 @@ import {
 import { usePcaStore } from '../stores/pca.js';
 import { healthForSnapshot, type PcaHealthState } from '../pca/health.js';
 import { classifyCoverage } from '../pca/coverage.js';
-import { nodeCoverage, type NodeCoverage } from '../pca/walletCoverage.js';
+import { nodeCoverage, type CoverageAccount, type CoverageProbe, type NodeCoverage } from '../pca/walletCoverage.js';
 import { eqAddress as eq } from '../web3/address.js';
 
 /** Per-(node wallet) registration probe against one account. `null` = couldn't determine. */
-export interface PcaWalletProbe {
-  wallet: string;
-  registered: boolean | null;
-}
+export type PcaWalletProbe = CoverageProbe;
 
 export type PcaClassification = 'owned' | 'approved' | 'unknown';
 
-export interface ResolvedPcaAccount {
-  accountId: string;
-  snapshot: PcaSnapshot | null;
+export interface ResolvedPcaAccount extends CoverageAccount {
   error: unknown;
   /** The daemon returned 404 — the tracked id no longer exists (offer Remove). */
   notFound: boolean;

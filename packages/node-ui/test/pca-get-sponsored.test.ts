@@ -284,8 +284,14 @@ describe('GetSponsoredPanel', () => {
     // Capability gap → NOT the transient copy, and NO false "0 of N approved".
     expect(container.textContent).not.toContain('right now.');
     expect(container.textContent).not.toContain('Approved on PCA #7: 0 of');
-    // Not tracked (no wallet approved on the wholesale-inconclusive path).
+    // Not tracked by itself (no wallet approved on the wholesale-inconclusive path)...
     expect(usePcaStore.getState().trackedIds).not.toContain('7');
+    // ...but the PCA itself was read, so it can be added read-only, with coverage still unknown.
+    const add = container.querySelector('[data-testid="pca-sponsor-track"]') as HTMLButtonElement;
+    expect(add.textContent).toBe('Add PCA #7 to your list');
+    await act(async () => { add.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(usePcaStore.getState().trackedIds).toContain('7');
+    await waitForText(container, 'This node can’t check whether it covers your wallets.');
     await unmount();
   });
 
@@ -318,6 +324,8 @@ describe('GetSponsoredPanel', () => {
     await act(async () => { checkBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 
     await waitForText(container, 'Couldn’t check PCA #7 right now.');
+    // A transient failure proves nothing about the PCA, so there's nothing to add.
+    expect(container.querySelector('[data-testid="pca-sponsor-track"]')).toBeNull();
     expect(container.textContent).not.toContain('This node can’t check PCA approval');
     await unmount();
   });
