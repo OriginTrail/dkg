@@ -165,13 +165,19 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     try {
       for (const row of repository.activatedWorkflows()) {
         const a = activation(row.ka_ref); if (!a.active) continue;
-        let compiled, workflow;
+        let compiled, workflow, capabilities;
         try {
-          ({ compiled, workflow } = await get(row.ka_ref)); eventAuthorized(row.ka_ref, compiled);
-          validateStudioCapabilities(compiled.definition, await listCapabilities());
+          ({ compiled, workflow } = await get(row.ka_ref));
+          capabilities = await listCapabilities();
+        } catch { continue; } // Unavailable inspection is not evidence of revoked authority.
+        try {
+          eventAuthorized(row.ka_ref, compiled);
+          validateStudioCapabilities(compiled.definition, capabilities);
           if (!workflow.approved) throw reject('Event workflow approval changed.');
-        } catch {
-          try { await activate({ kaRef: row.ka_ref, active: false, activationId: randomUUID() }, () => {}); } catch {}
+        } catch (error) {
+          if (['INVALID_WORKFLOW', 'WORKFLOW_CAPABILITY_CHANGED'].includes(error.code)) {
+            try { await activate({ kaRef: row.ka_ref, active: false, activationId: randomUUID() }, () => {}); } catch {}
+          }
           continue;
         }
         if (compiled.mode !== 'schedule') continue;

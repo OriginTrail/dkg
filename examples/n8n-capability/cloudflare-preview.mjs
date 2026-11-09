@@ -1,9 +1,10 @@
 import http from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
+import { matchCapabilityRoute } from './capability-routes.mjs';
 
-const capability = '/spike/ka/accounts/account-a/capabilities';
 const identities = new Set(['Bearer l1-owner-a', 'Bearer l1-viewer-a']);
+const kitPolicy = { methods: ['GET'], role: 'member', bodyLimit: 0, exportHeader: false };
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon',
@@ -24,32 +25,31 @@ export function createPreviewHandler(directory, { send = fetch, clock = Date.now
       if (req.headers.origin && req.headers.origin !== origin) return json(res, 403, { error: 'Preview origin required' });
       const url = new URL(req.url, origin);
       const path = url.pathname;
-      const event = /^\/spike\/ka\/events\/[a-f0-9-]{36}$/.test(path);
-      const ka = event || ['', '/invoke', '/inspect', '/workflows', '/workflows/save', '/workflows/run',
-        '/studio', '/studio/save', '/studio/run', '/studio/invoke', '/studio/activation', '/studio/history'].some(suffix => path === capability + suffix);
+      const matched = matchCapabilityRoute(path)?.route;
+      const ka = matched?.preview === true;
       const kit = path.startsWith('/v1/');
       if (ka || kit) {
+        const policy = ka ? matched : kitPolicy, event = policy.role === 'delegated';
         if (!event && !identities.has(req.headers.authorization)) return json(res, 403, { error: 'Use a public account-A kit selector' });
-        const invoke = event || ka && ['/invoke', '/workflows/save', '/workflows/run', '/studio/save', '/studio/run', '/studio/activation'].some(suffix => path.endsWith(suffix));
-        if (req.method !== (invoke ? 'POST' : 'GET')) return json(res, 405, { error: 'Method unavailable in this preview' });
-        if (invoke && !event && req.headers.authorization !== 'Bearer l1-owner-a') return json(res, 403, { error: 'Invocation denied' });
+        if (!policy.methods.includes(req.method)) return json(res, 405, { error: 'Method unavailable in this preview' });
+        const ownerAccess = req.headers.authorization === 'Bearer l1-owner-a';
+        if (policy.role === 'owner' && !ownerAccess) return json(res, 403, { error: 'Invocation denied' });
         let body;
-        if (invoke) {
+        if (policy.bodyLimit) {
           const now = clock();
           while (writes[0] < now - 60_000) writes.shift();
           if (writes.length >= 20) return json(res, 429, { error: 'Preview invocation limit reached; retry in a minute' });
-          if (Number(req.headers['content-length'] ?? 0) > 16384) return json(res, 413, { error: 'Input too large' });
+          if (Number(req.headers['content-length'] ?? 0) > policy.bodyLimit) return json(res, 413, { error: 'Input too large' });
           writes.push(now); // Reserve admission before another request can await its body.
           const chunks = []; let bytes = 0;
-          for await (const chunk of req) { bytes += chunk.length; if (bytes > 16384) return json(res, 413, { error: 'Input too large' }); chunks.push(chunk); }
+          for await (const chunk of req) { bytes += chunk.length; if (bytes > policy.bodyLimit) return json(res, 413, { error: 'Input too large' }); chunks.push(chunk); }
           body = Buffer.concat(chunks);
         }
-        const ownerHistory = path === capability + '/studio/history' && req.headers.authorization === 'Bearer l1-owner-a';
         const upstream = await send(`${ka ? 'http://127.0.0.1:4631' : 'http://127.0.0.1:4610'}${path}${url.search}`, {
           method: req.method, redirect: 'error', signal: AbortSignal.timeout(60_000),
           headers: { ...(!event ? { authorization: req.headers.authorization } : {}), origin: 'http://127.0.0.1:4620',
-            ...(invoke ? { 'content-type': 'application/json' } : {}),
-            ...((invoke || ownerHistory) && !event && typeof req.headers['x-dkg-export-token'] === 'string' ? { 'x-dkg-export-token': req.headers['x-dkg-export-token'] } : {}) }, ...(body ? { body } : {}),
+            ...(policy.bodyLimit ? { 'content-type': 'application/json' } : {}),
+            ...(policy.exportHeader && ownerAccess && typeof req.headers['x-dkg-export-token'] === 'string' ? { 'x-dkg-export-token': req.headers['x-dkg-export-token'] } : {}) }, ...(body ? { body } : {}),
         });
         const data = await upstream.arrayBuffer();
         res.writeHead(upstream.status, { 'content-type': upstream.headers.get('content-type') ?? 'application/json',
