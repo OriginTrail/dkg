@@ -11,6 +11,7 @@
 import { ethers } from 'ethers';
 import {
   BUYER_GRANT_TYPES,
+  SERVICE_CLASS_QUERY,
   subscriptionIdOf,
   type BuyerGrant,
   type MarketplaceChainAdapter,
@@ -68,6 +69,8 @@ export async function subscriptionView(chain: MarketplaceChainAdapter, s: Subscr
       return {
         budgetIndex,
         serviceId: b.serviceId,
+        // As the chain stored it: a top-up repeats it, whatever the catalog says of the service now.
+        serviceClass: b.serviceClass === SERVICE_CLASS_QUERY ? 'query' : 'inference',
         ...amount('value', b.value),
         ...amount('maxPricePerUnit', b.maxPricePerUnit),
         ...amount('used', used),
