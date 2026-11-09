@@ -94,7 +94,8 @@ function environment() {
     if(action==='unpublish'){w.active=false;delete w.activeVersion;return Response.json(w);}
     return Response.json(w);
   };
-  const provider=createStudioProvider({state,config,graphId,owner,headerCredential:{id:'fixture-header',name:'Fixture'},credentials:{},fetchImpl});
+  const openProvider=()=>createStudioProvider({state,config,graphId,owner,headerCredential:{id:'fixture-header',name:'Fixture'},credentials:{},fetchImpl});
+  let provider=openProvider();
   const sources=new Map(), approvals=new Map(),outputs=new Map(),invocations=[]; let inventory=catalog;
   const client={programs:{
     async getSource({programIri}){const s=sources.get(programIri);if(!s)throw Object.assign(Error('missing'),{code:'PROGRAM_NOT_FOUND',status:404});return s;},
@@ -105,8 +106,9 @@ function environment() {
       const value={kind:'n8n-result',n8nExecutionId:'42',workflowSha256:c.grant.workflowSha256,output:{ok:true,itemsJson:v.inputs[0].itemsJson,portsJson:'{}',error:'',traceJson:JSON.stringify(c.grant.result.traceNodes.map(node=>({node,status:'completed',items:[1],outputHash:'a'.repeat(64)})))}};
       const executionIri='urn:sr:execution:'+v.invocationId,rawOutputs=[JSON.stringify(value)];outputs.set(executionIri,rawOutputs);return {...v,executionIri,rawOutputs,outputs:[value],persisted:true};},
   }};
-  const service=createStudioService({graphId,owner,client,provider,exportTokenFile,listCapabilities:async()=>inventory,loadOutputs:async iri=>outputs.get(iri)});
-  return {provider,service,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,setCatalog:v=>{inventory=v;},loseNextCreate:()=>{loseCreate=true;},
+  const openService=()=>createStudioService({graphId,owner,client,provider,exportTokenFile,listCapabilities:async()=>inventory,loadOutputs:async iri=>outputs.get(iri)});
+  let service=openService();
+  return {get provider(){return provider;},get service(){return service;},restart(){service.stop();provider.close();provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,setCatalog:v=>{inventory=v;},loseNextCreate:()=>{loseCreate=true;},
     close(){service.stop();provider.close();rmSync(state,{recursive:true,force:true});}};
 }
 test('a lost native create acknowledgement is reconciled by name without a second create',async()=>{
@@ -150,5 +152,37 @@ test('a timer cannot invoke downstream actions after a component is revoked',asy
     f.setCatalog(catalog.map(c=>({...c,available:false})));
     await f.service.poll();assert.equal(f.invocations.length,0);assert.equal([...f.native.values()][0].active,false);
     assert.equal((await f.service.history(w.kaRef)).activation.active,false);
+  } finally { f.close(); }
+});
+
+for (const mode of ['webhook', 'schedule']) test(`pending fifth ${mode} retains recovery after quota and poll`, async () => {
+  const f = environment();
+  try {
+    const w = await f.service.save(definition([mode, 'edit-fields'], [[0,0,1,0]]), () => {});
+    await f.service.activate({kaRef:w.kaRef,sourceHash:w.sourceHash,active:true,activationId:randomUUID()},()=>{});
+    const row = f.provider.row(w.kaRef), a = JSON.parse(row.activation_json);
+    a.count = 5; f.provider.db.prepare('UPDATE workflows SET activation_json=? WHERE ka_ref=?').run(JSON.stringify(a), w.kaRef);
+    const invocationId = randomUUID(), executionId = mode === 'webhook' ? invocationId : '5';
+    f.provider.db.prepare('INSERT INTO events(provider_id,execution_id,ka_ref,invocation_id,input_json) VALUES(?,?,?,?,?)')
+      .run(row.provider_id, executionId, w.kaRef, invocationId, '[{}]');
+    if (mode === 'schedule') {
+      const native = f.native.get(row.provider_id), workflowData = {...native.activeVersion, settings:native.settings};
+      const trigger = workflowData.nodes.find(n => n.name.endsWith(' trigger')).name;
+      for (const id of ['5','6']) f.executions.set(id, {id,workflowId:row.provider_id,status:'success',startedAt:new Date(a.startedAt+1).toISOString(),workflowData,
+        data:{resultData:{runData:{[trigger]:[{data:{main:[[{json:{}}]]}}]}}}});
+    }
+    f.restart();
+    await f.service.poll();
+    assert.equal(f.provider.row(w.kaRef).event_key, row.event_key);
+    assert.equal(JSON.parse(f.provider.row(w.kaRef).activation_json).active, true);
+    if (mode === 'webhook') {
+      await assert.rejects(f.service.event(row.event_key,{invocationId:randomUUID(),items:[{}]}),/limit/);
+      await f.service.event(row.event_key,{invocationId,items:[{}]});
+    }
+    assert.equal(f.invocations.length,1); assert.equal(f.invocations[0].invocationId,invocationId);
+    assert.ok(f.provider.db.prepare('SELECT receipt_json FROM events WHERE execution_id=?').get(executionId).receipt_json);
+    assert.equal(f.provider.db.prepare('SELECT count(*) AS n FROM events').get().n,1);
+    f.setCatalog(catalog.map(c=>({...c,available:false}))); await f.service.poll();
+    assert.equal(f.provider.row(w.kaRef).event_key,null);
   } finally { f.close(); }
 });

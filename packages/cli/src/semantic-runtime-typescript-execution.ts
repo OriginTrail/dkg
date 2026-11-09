@@ -20,7 +20,11 @@ import { createProgramToolDispatcher, invokeBoundSemanticProgram } from './seman
  */
 function nativeContinuationEffects(store: SemanticRuntimeStore, executionIri: string, binding: SemanticProgramBinding): Set<string> | null {
   const grant = binding.n8n;
-  if (!grant?.result || binding.typescript?.children.length) return null;
+  if (!grant?.result) return null;
+  // Declared child pins are also used by native Studio wrappers. Only actual
+  // native tool calls may be inspected; a mixed execution remains held.
+  const trace = readProgramTrace(store, executionIri);
+  if (!trace?.calls.length || trace.calls.some(call => call.kind !== 'tool' || call.target !== grant.toolIri)) return null;
   const effects = store.effectsForExecution(executionIri);
   if (!effects.length || !effects.some(e => ['unknown', 'reconciling', 'manual_review_required'].includes(e.state))) return null;
   for (const effect of effects) {
@@ -133,7 +137,7 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
   let executionAuthorityRequired = priorExecution !== null;
   // A prior failed/paused invocation may disclose authorized diagnostics only:
   // the existing-state branch below rejects it before guest or receipt work.
-  const expectedStatus = priorExecution?.status ?? 'active';
+  let expectedStatus = priorExecution?.status ?? 'active';
   let joiningInvocation = false;
   const checkCapability = () => {
     if (executionAuthorityRequired) {
@@ -216,7 +220,11 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
     const manifest = new TextEncoder().encode(artifact.manifest), planId = hashCanonicalPlan(manifest);
     runtime.store.registerStrategyArtifact({ artifactHash: planId, strategyId: program.programIri, version: program.version,
       canonicalPlan: manifest, sourceRef: program.programIri, reviewState: 'approved', createdAt: Date.now() });
-    if (continuation) runtime.store.setExecutionStatus(executionIri, 'active');
+    if (continuation) {
+      await check();
+      runtime.store.setExecutionStatus(executionIri, 'active');
+      expectedStatus = 'active';
+    }
     else runtime.store.createExecution({ executionId: executionIri, planId, partitionId: hashParts([graph]),
       status: 'active', graphRevision: identity, policyEpoch: 1n, rootProcessId: executionIri, leaseEpoch: 0n });
     const authority = {

@@ -6,6 +6,7 @@ import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { canonicalizeJson, sparqlIri, type CanonicalJsonValue } from '@origintrail-official/dkg-core';
 import type { RuntimeAdapterOperation, SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
 import { Parser } from 'n3';
+import { exactStoredTripleKey as tripleKey } from './semantic-runtime-rdf.js';
 
 export type AssetLayer = 'wm' | 'swm' | 'vm';
 interface Triple { subject: string; predicate: string; object: string }
@@ -34,7 +35,10 @@ function normalizeTriple(q: Triple): Triple {
     : term.value;
   return { subject: parsed[0].subject.value, predicate: parsed[0].predicate.value, object };
 }
-const tripleKey = (q: Triple) => { const n = normalizeTriple(q); return canonical([n.subject, n.predicate, n.object]); };
+
+// Keep input serialization stable for existing effect request digests. Store equivalence
+// applies only to readback, never to the journaled input identity.
+const inputTripleKey = (q: Triple) => canonical([q.subject, q.predicate, q.object]);
 
 /** Destination and identity come only from the approved execution, never tool input. */
 export function createAssetCreationAdapter(
@@ -121,7 +125,7 @@ export function createAssetCreationAdapter(
         if (canonical([...new Set(written.map(tripleKey))].sort()) !== canonical([...expected].sort())) throw new Error('ASSET_CONTENT_CONFLICT');
         await authorize();
         save({ phase: 'finalize' });
-        await agent.assertion.finalize(contextGraphId, name, lane);
+        await agent.assertion.finalize(contextGraphId, name, { ...lane, authorAgentAddress: agentAddress });
         history = await agent.assertion.history(contextGraphId, name, lane);
       } else if (canonical([...actual].sort()) !== canonical([...expected].sort())) {
         throw new Error('ASSET_CONTENT_CONFLICT');
@@ -167,7 +171,7 @@ export function createAssetCreationAdapter(
           || [q.subject, q.predicate, q.object].some((term) => typeof term !== 'string' || term.length > 16_384)) throw new Error('INVALID_ASSET_TRIPLE');
         return normalizeTriple(q);
       });
-      return { quads: [...new Map(normalized.map((q) => [tripleKey(q), q])).values()].sort((a, b) => tripleKey(a).localeCompare(tripleKey(b))) };
+      return { quads: [...new Map(normalized.map((q) => [inputTripleKey(q), q])).values()].sort((a, b) => inputTripleKey(a).localeCompare(inputTripleKey(b))) };
     },
     dispatch: run,
     resume: run,
