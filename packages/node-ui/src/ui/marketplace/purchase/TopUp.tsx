@@ -8,12 +8,15 @@
 // first answer and adds nothing. When the outcome is unknown (no answer, or a
 // failure the node does not explain), the form offers only Retry, which sends
 // that same request with that same key, until the node answers it: the
-// top-up went through, or the node refused it. Meanwhile the request waits in
-// the tab's session storage, so closing the form or reloading the page brings
-// it back rather than opening a new top-up. What the budget holds is read
-// beside Retry for the operator to see, never as leave to send another: a
-// budget that does not show the top-up yet may still receive it.
-import React, { useEffect, useState } from 'react';
+// top-up went through, or the node refused it. From the moment Confirm is
+// pressed, before the budget is read for the first send, the request and its
+// key wait in the tab's session storage, so closing the form, opening another
+// one or reloading the page brings it back rather than opening a new top-up.
+// A form closed before its first send sends nothing: the form that brings the
+// top-up back sends it, on Retry. What the budget holds is read beside Retry
+// for the operator to see, never as leave to send another: a budget that does
+// not show the top-up yet may still receive it.
+import React, { useEffect, useRef, useState } from 'react';
 import { copy } from '../copy.generated.js';
 import { isMarketplaceError, marketplaceApi } from '../api/client.js';
 import type { CatalogAnswer, FundedAnswer, ServiceRequest, Subscription, TopUpRequest } from '../api/types.js';
@@ -26,7 +29,11 @@ import { usePreview } from './usePreview.js';
 /** What a top-up's dry run is asked about: the subscription, and what to add. */
 interface Addition { subscriptionId: string; services: ServiceRequest[] }
 
-/** A confirmed top-up: the request as sent, with its key, and the budget's value just before the first send, in wei. */
+/**
+ * A confirmed top-up: the request as sent, with its key, and the budget's
+ * value before the first send, in wei: as the form showed it at Confirm,
+ * until the read just before the first send replaces it.
+ */
 interface Attempt { subscriptionId: string; request: TopUpRequest; before: string }
 
 /** Where a top-up waits for the node's answer: one per subscription and service. */
@@ -109,6 +116,9 @@ export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
   const [phase, setPhase] = useState<Phase>(() => (pending ? { kind: 'unknown', attempt: pending, err: null, read: { state: 'checking' } } : { kind: 'compose', err: null }));
   // A refused send asks for a fresh dry run before the next one.
   const [round, setRound] = useState(0);
+  // Whether the form is still open: one closed while the budget is read before a first send does not send it.
+  const open = useRef(true);
+  useEffect(() => { open.current = true; return () => { open.current = false; }; }, []);
   // A top-up whose outcome is unknown is fixed: no dry run, no edit, Retry instead of Confirm.
   const fixed = phase.kind === 'unknown' || (phase.kind === 'sending' && phase.retry);
   const value = weiOfTrac(amount);
@@ -158,18 +168,34 @@ export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
   const confirm = async () => {
     const asked = dryRun.current;
     if (!asked || !ready) return;
+    // A top-up of this budget that already waits for the node's answer is the one to send, as it was confirmed, with its key.
+    const waiting = pendingOf(asked.request.subscriptionId, serviceId);
+    if (waiting) {
+      setAmount(tracOfWei(waiting.request.services[0].value));
+      setCap(microOfWei(waiting.request.services[0].maxPricePerUnit));
+      setPhase({ kind: 'unknown', attempt: waiting, err: null, read: { state: 'checking' } });
+      return;
+    }
+    // The confirmed top-up and its key wait for the node's answer from here on, before anything else is awaited.
+    const reserved: Attempt = {
+      subscriptionId: asked.request.subscriptionId, request: { services: asked.request.services, idempotencyKey: randomUUID() }, before: budget?.value ?? '0',
+    };
+    keepPending(reserved);
     setPhase({ kind: 'sending', retry: false });
-    let attempt: Attempt;
+    let before: bigint;
     try {
       // The budget as it stands, to show beside Retry should the answer be lost.
-      const before = await budgetValueOf(asked.request.subscriptionId, subscription.epoch, serviceId);
-      attempt = { subscriptionId: asked.request.subscriptionId, request: { services: asked.request.services, idempotencyKey: randomUUID() }, before: before.toString() };
+      before = await budgetValueOf(reserved.subscriptionId, subscription.epoch, serviceId);
     } catch (e) {
-      // Nothing was sent.
+      if (!open.current) return;
+      // Nothing was sent, so nothing waits for an answer.
+      forgetPending(reserved);
       setPhase({ kind: 'compose', err: e });
       return;
     }
-    await deliver(attempt, false);
+    // Closed meanwhile, the form sends nothing: the top-up waits, with its key, for the form that brings it back.
+    if (!open.current) return;
+    await deliver({ ...reserved, before: before.toString() }, false);
   };
   const retry = () => { if (phase.kind === 'unknown') void deliver(phase.attempt, true); };
   const readAgain = () => setPhase((p) => (p.kind === 'unknown' ? { ...p, read: { state: 'checking' } } : p));

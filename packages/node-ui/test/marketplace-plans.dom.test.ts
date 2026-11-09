@@ -140,7 +140,7 @@ type FirstSend =
  * `refuseCaller` set, every top-up gets that answer before its key is looked
  * at, as a token that is not the node admin's does. Reads of the
  * subscriptions show what landed; with `holdChecks` on, those after a top-up
- * wait for `release()`.
+ * wait for `release()`, and with `holdReads` on, every one does.
  */
 function topUpNode() {
   const requests: Array<{ method: string; url: string; body: unknown }> = [];
@@ -156,6 +156,7 @@ function topUpNode() {
     first: [] as FirstSend[],
     refuseCaller: null as (() => Response) | null,
     holdChecks: false,
+    holdReads: false,
     /** The subscriptions read once fails, as a node error. */
     failNextRead: false,
     /** The transactions whose answers were lost land. */
@@ -202,7 +203,7 @@ function topUpNode() {
       return new Response(how === 'cut' ? text.slice(0, Math.floor(text.length / 2)) : text, { status: 200 });
     }
     if (method === 'GET' && url.startsWith('/api/marketplace/subscriptions')) {
-      if (control.holdChecks && toppedUp) await new Promise<void>((resolve) => held.push(resolve));
+      if (control.holdReads || (control.holdChecks && toppedUp)) await new Promise<void>((resolve) => held.push(resolve));
       return read(input, init);
     }
     return node(input, init);
@@ -432,6 +433,82 @@ describe('marketplace Plans', () => {
     expect(sent[1].body).toEqual(sent[0].body);
     expect(node.landings).toBe(1);
     expect(sessionStorage.length).toBe(0);
+  });
+
+  for (const closedRead of ['answers', 'fails'] as const) {
+    it(`keeps one top-up, with one key, when another top-up replaces its form while the budget is read before the first send (the read ${closedRead})`, async () => {
+      const node = topUpNode();
+      const c = await topUpLlama();
+      node.holdReads = true;
+      await click(byTestId(c, 'mkt-topup-confirm'));
+      expect(node.waiting).toBe(1);
+      // Another service's top-up replaces the form while that read waits, and then the first one opens again.
+      await click(byTestId(c, `mkt-addon-${FIXTURE_IDS.mistral24b}`));
+      expect(byTestId(c, 'mkt-topup')?.textContent).toContain('Add mistral-small-24b-instruct to epoch 664');
+      await click(byTestId(c, `mkt-topup-${FIXTURE_IDS.llama8b}`));
+      // It comes back as it was confirmed, with Retry alone: no Confirm, so no second key.
+      expect(byTestId(c, 'mkt-topup')?.getAttribute('data-phase')).toBe('unknown');
+      expect(byTestId(c, 'mkt-topup-confirm')).toBeNull();
+      expect((byTestId(c, 'mkt-topup-amount') as HTMLInputElement).value).toBe('0.5');
+      // The closed form's read comes back first: that form sends nothing and leaves the top-up waiting.
+      node.failNextRead = closedRead === 'fails';
+      node.holdReads = false;
+      node.release();
+      await waitForText(c, 'The budget holds 0.5 TRAC: it does not show the top-up');
+      await flush(50);
+      expect(topUps(node.requests)).toHaveLength(0);
+      expect(sessionStorage.length).toBe(1);
+      await click(byTestId(c, 'mkt-topup-retry'));
+      await waitForText(c, 'llama-3.1-8b-instruct topped up · tx');
+      const sent = topUps(node.requests);
+      expect(sent).toHaveLength(1);
+      expect(keyOf(sent[0])).toMatch(UUID_V4);
+      expect(node.landings).toBe(1);
+      expect(sessionStorage.length).toBe(0);
+    });
+  }
+
+  it('sends nothing, and keeps nothing waiting, when the budget cannot be read before the first send', async () => {
+    const node = topUpNode();
+    const c = await topUpLlama();
+    node.failNextRead = true;
+    await click(byTestId(c, 'mkt-topup-confirm'));
+    await waitUntil(() => byTestId(c, 'mkt-topup')?.getAttribute('data-phase') === 'compose', 'the form to compose again');
+    expect(byTestId(c, 'mkt-error-card')?.getAttribute('data-code')).toBe('HTTP_500');
+    expect(topUps(node.requests)).toHaveLength(0);
+    expect(sessionStorage.length).toBe(0);
+    expect((byTestId(c, 'mkt-topup-confirm') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('sends the first form\'s top-up, under its key, when a second form of the same budget is confirmed while the first one reads the budget', async () => {
+    const node = topUpNode();
+    const world = fixtureWorld();
+    const form = () => render(React.createElement(TopUp, {
+      catalog: world.catalog(true), subscription: world.current, serviceId: FIXTURE_IDS.llama8b, onDone: () => undefined, onCancel: () => undefined,
+    }));
+    const first = await form();
+    const second = await form();
+    await type(byTestId(first, 'mkt-topup-amount'), '0.5');
+    await type(byTestId(second, 'mkt-topup-amount'), '0.7');
+    await flush(300);
+    await waitForText(first, 'Costs 0.5 TRAC');
+    await waitForText(second, 'Costs 0.7 TRAC');
+    node.holdReads = true;
+    await click(byTestId(first, 'mkt-topup-confirm'));
+    await click(byTestId(second, 'mkt-topup-confirm'));
+    // The second form takes up the first one's top-up as it was confirmed, rather than one of its own.
+    expect(byTestId(second, 'mkt-topup')?.getAttribute('data-phase')).toBe('unknown');
+    expect((byTestId(second, 'mkt-topup-amount') as HTMLInputElement).value).toBe('0.5');
+    node.holdReads = false;
+    node.release();
+    await waitForText(first, 'llama-3.1-8b-instruct topped up · tx');
+    await click(byTestId(second, 'mkt-topup-retry'));
+    await waitForText(second, 'llama-3.1-8b-instruct topped up · tx');
+    const sent = topUps(node.requests);
+    expect(sent).toHaveLength(2);
+    expect(sent[1].body).toEqual(sent[0].body);
+    expect((sent[0].body as { services: Array<{ value: string }> }).services[0].value).toBe('500000000000000000');
+    expect(node.landings).toBe(1);
   });
 
   const silentOnTheKey: Array<[string, () => Response]> = [
