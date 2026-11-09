@@ -5,8 +5,10 @@
 // a broken primitive or a removed token shows up here, not when someone next
 // opens the page.
 import { act } from 'react';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { STATES, forcedSelector } from '../src/ui/design-system-states.js';
+import { STATES } from '../src/ui/design-system-states.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -49,12 +51,24 @@ describe('design system page', () => {
     expect(table.querySelectorAll('td[data-state="Loading"] [aria-busy="true"]').length).toBe(2);
   });
 
-  it('copies hover and focus rules onto the forcing classes', () => {
-    expect(forcedSelector('.ds-btn:hover:not(:disabled)')).toBe('.ds-btn.dsp-hover:not(:disabled)');
-    expect(forcedSelector('.a:focus-visible, .b, .c:focus')).toBe('.a.dsp-focus, .c.dsp-focus');
-    expect(forcedSelector(':where(input:not([type="range"]), select):focus-visible')).toBe(':where(input:not([type="range"]), select).dsp-focus');
-    expect(forcedSelector('.a:focus-within')).toBe('');
-    expect(forcedSelector('.a:disabled, .b')).toBe('');
+  it('previews hover and focus through the components\' own selectors, with no stylesheet rewriting', () => {
+    const css = readFileSync(join(__dirname, '../src/ui/styles/27-ds-components.css'), 'utf8');
+    for (const selector of [
+      '.ds-btn:is(:hover, .dsp-hover):not(:disabled)',
+      '.ds-btn:is(:focus-visible, .dsp-focus)',
+      '.ds-btn.ds-primary:is(:hover, .dsp-hover):not(:disabled)',
+      '.ds-tab:is(:hover, .dsp-hover)',
+      '.ds-seg-item:is(:focus-visible, .dsp-focus)',
+      '.ds-filter:is(:hover, .dsp-hover)',
+      '.ds-entity-chip.interactive:is(:hover, .dsp-hover)',
+      '.ds-input:is(:focus-visible, .dsp-focus)',
+      '.ds-toggle:is(:focus-visible, .dsp-focus)',
+    ]) expect(css, selector).toContain(selector);
+    // A component hover or focus rule without its preview class would show a stale cell.
+    const bare = [...css.matchAll(/^\.ds-(?:btn|tab|seg-item|filter|toggle|entity-chip|input)[^{\n]*:(?:hover|focus-visible)(?![^{]*dsp-)[^{]*\{/gm)].map((m) => m[0]);
+    expect(bare).toEqual([]);
+    const source = readFileSync(join(__dirname, '../src/ui/design-system-states.tsx'), 'utf8');
+    expect(source).not.toMatch(/document\.styleSheets|cssRules|<style>/);
   });
 
   it('switches theme on the document and remembers it', async () => {

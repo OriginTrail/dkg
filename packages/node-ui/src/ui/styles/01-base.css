@@ -43,7 +43,8 @@ input, textarea {
   padding: var(--space-6) 10px;
   outline: none;
 }
-input:focus, textarea:focus { border-color: var(--border-strong); }
+/* .dsp-focus: the reference page previews this look (design-system-states.tsx). */
+input:is(:focus, .dsp-focus), textarea:is(:focus, .dsp-focus) { border-color: var(--border-strong); }
 input::placeholder { color: var(--text-tertiary); }
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }

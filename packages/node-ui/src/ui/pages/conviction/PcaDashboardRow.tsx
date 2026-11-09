@@ -2,7 +2,7 @@ import React from 'react';
 import { ArrowRight } from 'lucide-react';
 import { RetryButton } from '../../components/Pca/RetryButton.js';
 import { useAgentsStore } from '../../stores/agents.js';
-import { useTabsStore } from '../../stores/tabs.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { usePcaOverview } from '../../hooks/usePcaOverview.js';
 import { usePcaScopeBootstrap } from '../../hooks/usePcaScopeBootstrap.js';
 import { formatBps } from '../../lib/format.js';
@@ -20,7 +20,6 @@ function pct(bps: number | null): string {
 export function PcaDashboardRow() {
   usePcaScopeBootstrap();
   const role = useAgentsStore((s) => (s.nodeStatus as { nodeRole?: string } | null)?.nodeRole);
-  const openTab = useTabsStore((s) => s.openTab);
   const { covered, bestCoveringDiscountBps, walletsInconclusive, refresh } = usePcaOverview();
 
   return (

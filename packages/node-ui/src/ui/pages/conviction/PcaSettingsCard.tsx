@@ -1,7 +1,7 @@
 import React from 'react';
 import { ArrowRight } from 'lucide-react';
 import { useAgentsStore } from '../../stores/agents.js';
-import { useTabsStore } from '../../stores/tabs.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { usePcaOverview } from '../../hooks/usePcaOverview.js';
 import { usePcaScopeBootstrap } from '../../hooks/usePcaScopeBootstrap.js';
 import { RetryButton } from '../../components/Pca/RetryButton.js';
@@ -20,7 +20,6 @@ function pct(bps: number | null): string {
  */
 export function PcaSettingsCard() {
   usePcaScopeBootstrap();
-  const openTab = useTabsStore((s) => s.openTab);
   const role = useAgentsStore((s) => (s.nodeStatus as { nodeRole?: string } | null)?.nodeRole);
   const { accounts, covered, bestCoveringDiscountBps, walletsInconclusive, refresh } = usePcaOverview();
   const tracked = accounts.length;

@@ -6,9 +6,8 @@ import type { AgentInfo, ConnectionRow, PeerInfo } from './types.js';
 import { Badge } from '../../ds/Badge.js';
 import { humanizeStatus } from '../../../lib/formatLabels.js';
 import { Loading } from '../../ds/Loading.js';
-import { useTabsStore } from '../../../stores/tabs.js';
-import { useObservabilityStore } from '../../../stores/observability.js';
-import { PLACES } from '../../../lib/tab-target.js';
+import { useNavigate } from 'react-router-dom';
+import { observabilityHref } from '../../../lib/observabilityTab.js';
 
 // Per-peer card: header + meta + agents-as-chips. Nodes are
 // infrastructure; agents live on them. Up to 3 chips inline, with a
@@ -143,11 +142,9 @@ export function NetworkTab(props: {
   onRefresh: () => void;
 }) {
   const { peerAgents, connections, loading, onRefresh } = props;
-  const openTab = useTabsStore((s) => s.openTab);
-  const openConnectionDetails = () => {
-    useObservabilityStore.getState().setTab('network');
-    openTab({ id: 'operations', label: PLACES.operations.label, closable: true });
-  };
+  const navigate = useNavigate();
+  // The address opens Observability on Network, and showing the page follows from it.
+  const openConnectionDetails = () => navigate(observabilityHref('network'));
   const [connectedExpanded, setConnectedExpanded] = useState(true);
   const [recentlySeenExpanded, setRecentlySeenExpanded] = useState(false);
 

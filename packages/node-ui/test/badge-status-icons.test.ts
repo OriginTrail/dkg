@@ -9,7 +9,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Badge } from '../src/ui/components/ds/Badge.js';
 import { DiscountAppliedBadge, EligibilityVerdictBanner, HealthChip, HEALTH_CHIP_META } from '../src/ui/components/Pca/index.js';
-import { StatusBadge } from '../src/ui/pages/Operations.js';
+import { OperationStatusBadge as StatusBadge } from '../src/ui/components/OperationStatusBadge.js';
 
 const render = (el: React.ReactElement) => renderToStaticMarkup(el);
 const count = (html: string, needle: string) => html.split(needle).length - 1;

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAgentsStore } from '../../stores/agents.js';
-import { useTabsStore } from '../../stores/tabs.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { pcaStorageScopeForContracts, usePcaStore } from '../../stores/pca.js';
 import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
 import { usePcaOverview, type ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
@@ -48,7 +48,6 @@ export function ConvictionOverview() {
     ? nodeStatus.nodeRole
     : undefined;
 
-  const openTab = useTabsStore((s) => s.openTab);
   const trackAccount = usePcaStore((s) => s.trackAccount);
   const untrackAccount = usePcaStore((s) => s.untrackAccount);
   const setPcaScope = usePcaStore((s) => s.setScope);

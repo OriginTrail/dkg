@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTabsStore } from '../stores/tabs.js';
+import { useLayoutStore, useShellPanels } from '../stores/layout.js';
 import { useProjectsStore } from '../stores/projects.js';
 import { isPassiveCatalogueGraph } from '../lib/contextGraphSidebar.js';
 import { pathToTab, tabIdToPath } from '../lib/tab-routes.js';
@@ -22,24 +23,64 @@ import { tabContextGraphId } from '../lib/tab-target.js';
  *   the address already shows the tab (it was the address that activated
  *   it) nothing is pushed. Paths that aren't tabs are left alone.
  *
+ *   Remembered locations: each tab's last query string (an Observability
+ *   tab, a graph view) is kept here, so switching back to a tab returns to
+ *   where it was. Route encoders stay pure.
+ *
+ *   Panels: going anywhere shows the page. Every address change, the path
+ *   or only the query string, collapses the expanded right panel and closes a
+ *   floating one. Arriving from the old /agent-hub address is the one
+ *   navigation that opens the panel instead. Choosing the tab already open
+ *   doesn't change the address; lib/shellNavigation handles that case.
+ *
  * Tab metadata and order stay in the store; this hook only connects the
  * active tab to the address.
  */
 export function useShellRouting(): void {
-  const { pathname } = useLocation();
+  const { pathname, search, key, state } = useLocation();
+  const { narrow } = useShellPanels();
   const navigate = useNavigate();
   const activeTabId = useTabsStore((s) => s.activeTabId);
   // The address as rendered: tab actions compare against it before pushing.
   const here = useRef(pathname);
   here.current = pathname;
   const restored = useRef(false);
+  const rememberedSearch = useRef(new Map<string, string>());
+
+  // Remember where each tab was.
+  useEffect(() => {
+    const route = pathToTab(pathname);
+    if (route) rememberedSearch.current.set(route.id, search);
+  }, [pathname, search]);
+
+  // Going anywhere shows the page.
+  useEffect(() => {
+    const layout = useLayoutStore.getState();
+    const routeState = state as { openAgents?: boolean; agentsOpened?: boolean } | null;
+    if (routeState?.openAgents) {
+      // Wide screens get the panel expanded, narrow ones the floating panel. Both steps
+      // set a state rather than toggle one, so running this twice (StrictMode replays
+      // mount effects) leaves the panel open.
+      layout.openRight();
+      if (!narrow) layout.setRightExpanded(true);
+      // Mark the entry as handled rather than clearing it, so the replace (or two, under
+      // StrictMode) is recognised below and doesn't count as going somewhere.
+      navigate(pathname + search, { replace: true, state: { agentsOpened: true } });
+      return;
+    }
+    if (routeState?.agentsOpened) return;
+    layout.revealCentre();
+    // Only a new address counts: a new history entry, or a path or query string that
+    // changed without one (an entry pushed outside the router has no key).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, pathname, search]);
 
   // Tab → address
   useEffect(() => useTabsStore.subscribe((state, prev) => {
     if (state.activeTabId === prev.activeTabId) return;
     if (!pathToTab(here.current)) return; // a path that isn't a tab
-    const target = tabIdToPath(state.activeTabId);
-    if (target !== here.current) navigate(target);
+    const path = tabIdToPath(state.activeTabId);
+    if (path !== here.current) navigate(path + (rememberedSearch.current.get(state.activeTabId) ?? ''));
   }), [navigate]);
 
   // Address → tab (after restoring a saved workspace once)

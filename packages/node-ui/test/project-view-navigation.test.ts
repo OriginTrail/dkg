@@ -209,10 +209,10 @@ vi.mock('../src/ui/hooks/useAgents.js', () => ({
 }));
 
 vi.mock('../src/ui/stores/tabs.js', () => ({
-  useTabsStore: (selector?: (state: { openTab: typeof tabsStoreMock.openTab }) => unknown) => {
+  useTabsStore: Object.assign((selector?: (state: { openTab: typeof tabsStoreMock.openTab }) => unknown) => {
     const state = { openTab: tabsStoreMock.openTab };
     return selector ? selector(state) : state;
-  },
+  }, { getState: () => ({ activeTabId: 'dashboard', openTab: (...a: unknown[]) => (tabsStoreMock.openTab as (...x: unknown[]) => unknown)(...a) }) }),
 }));
 
 vi.mock('../src/ui/components/Modals/ImportFilesModal.js', () => ({

@@ -397,6 +397,10 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
    reachable (and dismissable) via its existing toggle.
      · ≤ 860px  float the side rails as overlay drawers; center goes full-width
      · ≤ 600px  let the header scroll horizontally instead of clipping */
+/* A closed side panel stays mounted so it keeps its state; it just isn't shown. */
+.v10-app-body > .v10-panel-left[hidden],
+.v10-app-body > .v10-panel-right[hidden] { display: none; }
+
 @media (max-width: 860px) {
   .v10-app-body { position: relative; }
   .v10-app-body > .v10-panel-left,

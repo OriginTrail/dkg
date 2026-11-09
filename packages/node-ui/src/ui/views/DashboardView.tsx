@@ -2,7 +2,7 @@ import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react'
 import { Lock, Globe, Share2, TrendingUp, UsersRound, Wallet, Check, Diamond, RefreshCw } from 'lucide-react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
-import { useTabsStore } from '../stores/tabs.js';
+import { chooseTab as openTab } from '../lib/shellNavigation.js';
 import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
 import { useMyContextGraphs } from '../hooks/useMyContextGraphs.js';
 import { useMemoryEntities } from '../hooks/useMemoryEntities.js';
@@ -23,6 +23,7 @@ import { Count } from '../components/ds/Badge.js';
 import { Loading } from '../components/ds/Loading.js';
 import { formatNumber, truncateAddress } from '../lib/format.js';
 import { PageHeader } from '../components/ds/PageHeader.js';
+import { StatTile } from '../components/ds/StatTile.js';
 
 // Single user-facing description shown inside the My Context Graphs
 // card (one line, no separate footnote — round-2 feedback: the split
@@ -99,28 +100,6 @@ function abbrev(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`.replace('.0', '');
   return `${(n / 1_000_000).toFixed(1)}M`.replace('.0', '');
-}
-
-function StatCard({
-  label, value, sub, accentColor, children, icon, className,
-}: {
-  label: string;
-  value?: React.ReactNode;
-  sub?: React.ReactNode;
-  accentColor?: string;
-  children?: React.ReactNode;
-  icon?: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <div className={`stat-card ds-card v10-anim-mount${className ? ` ${className}` : ''}`}>
-      {accentColor && <div className="accent" style={{ background: accentColor }} />}
-      <div className="stat-label">{icon}{label}</div>
-      {value != null && value !== '' && <div className="stat-value">{value}</div>}
-      {children}
-      {sub != null && sub !== '' && <div className="stat-sub">{sub}</div>}
-    </div>
-  );
 }
 
 // 3-segment proportion bar (WM/SWM/VM). A 1px inter-segment + track
@@ -476,7 +455,6 @@ export function DashboardView() {
   const { data: status } = useFetch(api.fetchStatus, [], 10_000);
   const { data: econ } = useFetch(api.fetchEconomics, [], 60_000);
   const { data: wb, loading: wbLoading, error: wbError } = useFetch(api.fetchWalletsBalances, [], 30_000);
-  const { openTab } = useTabsStore();
   const { setActiveProject } = useProjectsStore();
   const { myCgs, identity, identityLoading, cgsError, identityError, inventoryLoading, inventoryError, retry } = useMyContextGraphs();
   const inventoryFailed = Boolean(inventoryError);
@@ -630,7 +608,8 @@ export function DashboardView() {
         </div>
       ) : null}
       <div className="v10-dash-stats v10-dash-stats-3">
-        <StatCard
+        <StatTile
+          className="v10-anim-mount"
           label="My Context Graphs"
           icon={<Share2 size={14} aria-hidden />}
           value={cgsResolving ? <span className="v10-stat-loading">loading…</span> : graphCount}
@@ -643,8 +622,9 @@ export function DashboardView() {
               refreshing={identityLoading || Boolean(identityError)}
             />
           ) : null}
-        </StatCard>
-        <StatCard
+        </StatTile>
+        <StatTile
+          className="v10-anim-mount"
           label="Context Graph size"
           icon={<TrendingUp size={14} aria-hidden />}
         >
@@ -684,8 +664,9 @@ export function DashboardView() {
                   : 'Totals across all your Context Graphs, summed over Working, Shared Working & Verifiable Memory. Knowledge Assets are entities that have been published to Verifiable Memory.')
               : emptyInventoryMessage}
           </div>
-        </StatCard>
-        <StatCard
+        </StatTile>
+        <StatTile
+          className="v10-anim-mount"
           label="Collaborating agents"
           icon={<UsersRound size={14} aria-hidden />}
           value={!agg.hasCgs
@@ -707,7 +688,7 @@ export function DashboardView() {
               <AgentDotStack agents={agg.agentList.map(uri => ({ uri }))} max={8} size={22} />
             </div>
           )}
-        </StatCard>
+        </StatTile>
       </div>
 
       <div className="v10-dash-grid v10-dash-grid-2">
@@ -729,7 +710,7 @@ export function DashboardView() {
             </p>
           ) : (
             <div className="v10-cg-table">
-              <div className="v10-cg-colhead">
+              <div className="v10-cg-colhead ds-table-head">
                 <span className="v10-cg-cell v10-cg-name">Name</span>
                 <span className="v10-cg-cell v10-cg-type">Type</span>
                 <span className="v10-cg-cell v10-cg-size">Size</span>

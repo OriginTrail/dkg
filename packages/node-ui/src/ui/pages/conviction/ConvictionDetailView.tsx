@@ -33,7 +33,7 @@ import { Loading } from '../../components/ds/Loading.js';
 import { bpsToPercent } from '../../lib/format.js';
 import { ExternalMark } from '../../components/ds/ExternalMark.js';
 import { Breadcrumbs } from '../../components/ds/Breadcrumbs.js';
-import { useTabsStore } from '../../stores/tabs.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
   return formatExpiryShort(expiresAtTimestamp) ?? 'Expiry unknown';
@@ -196,7 +196,6 @@ function DetailBody({
   const ownerNoticeRepeats = !connectedWallet && access.mode === 'external' && !walletsUnreadable
     && !wallets.some((w) => eqAddress(w, snapshot.owner));
 
-  const openTab = useTabsStore.getState().openTab;
   return (
     <div className="v10-pca-detail" data-testid="pca-detail">
       <div className="ds-crumbs-bar">

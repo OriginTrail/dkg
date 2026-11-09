@@ -542,7 +542,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
             <div style={{ marginTop: 8, overflowX: 'auto', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-control)' }}>
               <div className="ds-table-scroll"><table className="v10-ka-triples-table">
                 <thead>
-                  <tr><th>Subject</th><th>Predicate</th><th>Object</th></tr>
+                  <tr><th className="ds-table-head">Subject</th><th className="ds-table-head">Predicate</th><th className="ds-table-head">Object</th></tr>
                 </thead>
                 <tbody>
                   {entityTriples.slice(0, 50).map((t, i) => (

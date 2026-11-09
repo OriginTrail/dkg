@@ -12,6 +12,7 @@ import { LAYER_CONFIG } from '../helpers.js';
 import { EmptyState, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { FileText, RefreshCw } from 'lucide-react';
 import { StatusGlyph } from '../../../components/ds/Badge.js';
+import { failed, outcomeColor, succeeded, succeededWithWarning, type ActionOutcome } from '../../../lib/actionOutcome.js';
 
 export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = false, onComplete, scrollKey }: {
   contextGraphId: string;
@@ -38,9 +39,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
   const refresh = useCallback(() => { invalidateQueryCache(contextGraphId); loadPage(); }, [contextGraphId, loadPage]);
   useMemoryGraphEvents(contextGraphId, loadPage, { layers: [layer] });
   const [busy, setBusy] = useState<string | null>(null);
-  const [result, setResult] = useState<string | null>(null);
-  const [resultWarn, setResultWarn] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [outcome, setOutcome] = useState<ActionOutcome | null>(null);
 
   const handlePromote = useCallback(async (assertion: AssertionInfo) => {
     // PR #710 Fix D — busy / React keys must use `graphUri`, not
@@ -48,9 +47,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
     // otherwise both highlight as busy on a single click. `graphUri`
     // is produced by the daemon and uniquely identifies the row.
     setBusy(assertion.graphUri);
-    setResult(null);
-    setResultWarn(false);
-    setError(null);
+    setOutcome(null);
     try {
       // No client-side CG pre-registration: atomic WM→SWM sharing is off-chain,
       // and /vm/publish owns register-then-mint (it registers ONLY after
@@ -69,24 +66,23 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         // Issue #864 — fan the promote response through the central
         // describe helper so 0-count returns get an actionable hint
         // instead of the misleading "Promoted 0 triples" toast.
-        const outcome = describePromoteResult(assertion.name, res);
-        setResult(outcome.message);
+        setOutcome(succeeded(describePromoteResult(assertion.name, res).message));
       } else {
         // Publish THIS assertion as one Knowledge Asset (Design B, any entity
         // count) via the direct canonical publish API, preserving 207 partial handling.
         const res = await knowledgeAssetPublish(contextGraphId, assertion.name, assertion.subGraph ? { subGraphName: assertion.subGraph } : {});
-        setResultWarn(Boolean(res.contextGraphError));
-        setResult(
+        setOutcome(succeededWithWarning(
           res.contextGraphError
             ? `Published ${assertion.name} on-chain — ${partialPublishWarning(res.contextGraphError)}`
             : `Published ${assertion.name} to Verifiable Memory`,
-        );
+          Boolean(res.contextGraphError),
+        ));
       }
       refresh();
       onComplete();
     } catch (err: any) {
       const typed = describePromoteError(assertion.name, err);
-      setError(typed ? typed.message : (err?.message ?? 'Action failed'));
+      setOutcome(failed(typed ? typed.message : (err?.message ?? 'Action failed')));
     } finally {
       setBusy(null);
     }
@@ -94,9 +90,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
 
   const handlePromoteAll = useCallback(async () => {
     setBusy('__all__');
-    setResult(null);
-    setResultWarn(false);
-    setError(null);
+    setOutcome(null);
     // Issue #864 (Codex review on #874) — track the in-flight
     // assertion so mid-loop failures surface "<name>: …" instead of
     // "selected assertion …".
@@ -107,9 +101,9 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
       // explicit row actions and are not silently admitted to this batch.
       const bulkAssertions = await listAssertions(contextGraphId, layer, { includeCounts: false });
       if (bulkAssertions.length === 0) {
-        setResult(layer === 'wm'
+        setOutcome(succeeded(layer === 'wm'
           ? 'No user Knowledge Assets are ready to share.'
-          : 'No user Knowledge Assets are ready to publish.');
+          : 'No user Knowledge Assets are ready to publish.'));
         return;
       }
       // No client-side CG pre-registration (see handleAction): atomic sharing is
@@ -132,9 +126,9 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         const sharedCount = bulkAssertions.length - noopCount;
         if (sharedCount > 0) {
           const tail = noopCount > 0 ? ` (${noopCount} already shared or still committing)` : '';
-          setResult(`Shared ${sharedCount} complete Knowledge Asset${sharedCount !== 1 ? 's' : ''}${tail}`);
+          setOutcome(succeeded(`Shared ${sharedCount} complete Knowledge Asset${sharedCount !== 1 ? 's' : ''}${tail}`));
         } else {
-          setResult('No Knowledge Assets were newly shared — all were already in Shared Memory or still committing.');
+          setOutcome(succeeded('No Knowledge Assets were newly shared — all were already in Shared Memory or still committing.'));
         }
       } else {
         // Publish each shared assertion as its own Knowledge Asset (Design B) via the
@@ -146,11 +140,9 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         if (r.published > 0) {
           const tail = r.failures.length ? ` (${r.failures.length} could not be published)` : '';
           const partialTail = r.partial > 0 ? ` — ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
-          setResultWarn(r.partial > 0 || Boolean(unknownNote));
-          setResult(`Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}${unknownTail}`);
+          setOutcome(succeededWithWarning(`Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}${unknownTail}`, r.partial > 0 || Boolean(unknownNote)));
         } else if (unknownNote && r.failures.length === 0) {
-          setResultWarn(true);
-          setResult(unknownNote);
+          setOutcome(succeededWithWarning(unknownNote, true));
         } else {
           throw new Error(`${r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed'}${unknownTail}`);
         }
@@ -159,7 +151,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
       onComplete();
     } catch (err: any) {
       const typed = describePromoteError(currentAssertion ?? 'selected assertion', err);
-      setError(typed ? typed.message : (err?.message ?? 'Action failed'));
+      setOutcome(failed(typed ? typed.message : (err?.message ?? 'Action failed')));
     } finally {
       setBusy(null);
     }
@@ -221,20 +213,13 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
           </button>
         )}
       </div>
-      {result && (
+      {outcome && (
         <div
           data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
-          style={{ padding: '6px 16px', fontSize: 'var(--fs-label)', color: resultWarn ? 'var(--text-warning)' : 'var(--text-success)' }}
+          data-tone={outcome.tone}
+          style={{ padding: '6px 16px', fontSize: 'var(--fs-label)', color: outcomeColor(outcome.tone) }}
         >
-          <StatusGlyph tone={resultWarn ? 'warning' : 'success'} /> {result}
-        </div>
-      )}
-      {error && (
-        <div
-          data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
-          style={{ padding: '6px 16px', fontSize: 'var(--fs-label)', color: 'var(--text-danger)' }}
-        >
-          <StatusGlyph tone="danger" /> {error}
+          <StatusGlyph tone={outcome.tone} /> {outcome.text}
         </div>
       )}
       {assertions.map(a => (

@@ -7,7 +7,7 @@ import { buildVmFacts, vmSubjectsOf } from '../vm-facts.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
-import { useTabsStore } from '../../../stores/tabs.js';
+import { chooseTab as openTab } from '../../../lib/shellNavigation.js';
 import type { SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
 import { LAYER_VAR } from '../../../layer-colors.js';
 import { LayerGlyph, StatusGlyph } from '../../../components/ds/Badge.js';
@@ -512,7 +512,6 @@ export function DocumentsList({
   contextGraphId?: string;
   scrollKey?: string;
 }) {
-  const openTab = useTabsStore(s => s.openTab);
 
   const docs = useMemo(() => {
     return entities.filter(e => e.properties.has(SOURCE_CONTENT_TYPE));
