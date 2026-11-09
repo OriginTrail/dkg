@@ -159,14 +159,14 @@ function AppShell() {
         {narrow && (leftOpen || rightOpen) && (
           <button type="button" className="v10-panel-scrim" aria-label="Close panel" onClick={closeNarrowPanel} />
         )}
-        {leftOpen && (
-          <>
-            <div className="v10-panel-left" role="complementary" aria-label="Context Graphs and node" style={{ width: leftWidth }}>
-              <PanelLeft />
-            </div>
-            <div className="v10-resize-handle-h" ref={leftHandle} />
-          </>
+        {/* On a narrow screen a closed panel stays mounted but hidden, so a resize
+            or opening the other panel keeps what's in it (a chat draft, a form). */}
+        {(narrow || leftOpen) && (
+          <div className="v10-panel-left" role="complementary" aria-label="Context Graphs and node" style={{ width: leftWidth }} hidden={!leftOpen}>
+            <PanelLeft />
+          </div>
         )}
+        {leftOpen && <div className="v10-resize-handle-h" ref={leftHandle} />}
 
         <div className="v10-center-region" style={{ flex: 1, minWidth: 0, display: expanded ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
@@ -176,13 +176,11 @@ function AppShell() {
           <PanelBottom />
         </div>
 
-        {rightOpen && (
-          <>
-            {!expanded && <div className="v10-resize-handle-h" ref={rightHandle} />}
-            <div id="agents-panel" tabIndex={-1} className="v10-panel-right" role="complementary" aria-label="Agents" style={expanded ? { flex: 1, minWidth: 0 } : { width: rightWidth }}>
-              <PanelRight />
-            </div>
-          </>
+        {rightOpen && !expanded && <div className="v10-resize-handle-h" ref={rightHandle} />}
+        {(narrow || rightOpen) && (
+          <div id="agents-panel" tabIndex={-1} className="v10-panel-right" role="complementary" aria-label="Agents" style={expanded ? { flex: 1, minWidth: 0 } : { width: rightWidth }} hidden={!rightOpen}>
+            <PanelRight />
+          </div>
         )}
       </div>
     </div>

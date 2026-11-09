@@ -67,9 +67,10 @@ export function useShellRouting(): void {
     }
     if (clearingAgentsState.current) { clearingAgentsState.current = false; return; }
     layout.revealCentre();
-    // Only a new address counts, so this keys on the location alone.
+    // Only a new address counts: a new history entry, or a path or query string that
+    // changed without one (an entry pushed outside the router has no key).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [key, pathname, search]);
 
   // Tab → address
   useEffect(() => useTabsStore.subscribe((state, prev) => {
