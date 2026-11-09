@@ -255,13 +255,16 @@ describe('the OpenAI-compatible backend', () => {
 });
 
 describe('the journal and the lock', () => {
-  it('keeps what was appended, and skips a torn last line', async () => {
+  it('keeps what was appended, skips a torn last line, and keeps an append made after it', async () => {
     const journal = new Journal<{ n: number }>(join(dir, 'sub', 'log.jsonl'));
     expect(await journal.read()).toEqual([]);
     await journal.append({ n: 1 });
     await journal.append({ n: 2 });
     await writeFile(journal.file, `${await readFile(journal.file, 'utf8')}{"n":`);
     expect(await journal.read()).toEqual([{ n: 1 }, { n: 2 }]);
+    // Opened again, as after a restart: an append after the torn line, then opened once more.
+    await new Journal<{ n: number }>(journal.file).append({ n: 3 });
+    expect(await new Journal<{ n: number }>(journal.file).read()).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }]);
   });
 
   it('repairs a torn last line before the next append, so that append survives a reload', async () => {

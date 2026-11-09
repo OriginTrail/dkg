@@ -65,6 +65,11 @@ let tamper: ((answer: ServeResponse) => ServeResponse) | undefined;
 let reachable: boolean;
 /** How far the router's clock runs ahead of this host's, in milliseconds. */
 let routerSkew: number;
+/** The second seller, once a test adds it (`addSellerTwo`). */
+let sellerTwo: Seller | undefined;
+const SELLER_TWO = new ethers.Wallet(`0x${'77'.repeat(32)}`);
+const SELLER_TWO_ID = 99n;
+const SELLER_TWO_PEER = 'seller-two-peer';
 let DOMAIN: MarketplaceDomain | undefined;
 let caller: { key: AccessKey };
 const call = (chat: unknown = CHAT, g: Gateway = gateway) => g.chatCompletion(caller, chat);
@@ -91,21 +96,22 @@ async function setUp(value = 10n ** 6n, models: string[] = [MODEL]): Promise<voi
     seller: seller.gate.identityId, serviceId: serviceIdOf(m), serviceClass: 1, unit: 'token', pricePerUnit: PRICE, epoch, capacity: null,
     model: m, provenance: 'upstream-claimed', peerId: 'seller-peer', signedAt: 1,
   })));
+  const sellerAt = (peer: string) => (peer === SELLER_TWO_PEER ? sellerTwo! : seller);
   router = new Router({
     chain,
     offers: async () => offers,
-    quote: async (_peer, services) => {
+    quote: async (peer, services) => {
       if (!reachable) throw new Error('unreachable');
-      return seller.quote({ services });
+      return sellerAt(peer).quote({ services });
     },
     clock: () => Date.now() + routerSkew,
   });
   keys = new AccessKeys(join(dir, 'buyer'));
   gatewayDeps = {
     chain, buyerWallet: NODE.address, store: buyer.store, router, keys, dir: join(dir, 'buyer'),
-    send: async (_peer, payload) => {
+    send: async (peer, payload) => {
       if (!reachable) throw new Error('unreachable');
-      const answer = await seller.serve(decodeMessage(payload));
+      const answer = await sellerAt(peer).serve(decodeMessage(payload));
       return encodeMessage(tamper ? tamper(answer) : answer);
     },
     modelOf: async (serviceId) => offers.find((o) => o.serviceId === serviceId)?.model,
@@ -113,6 +119,37 @@ async function setUp(value = 10n ** 6n, models: string[] = [MODEL]): Promise<voi
   gateway = new Gateway(gatewayDeps);
   await gateway.load();
   caller = { key: (await keys.make({ label: 'test-agent', budget: 10n ** 30n, services: null, rps: 1_000, expiresAt: null }, 0)).key };
+}
+
+/**
+ * A second seller of MODEL on the same chain, as another Core Node: its own identity, operational wallet, peer and
+ * ledger. Its offer joins the router's list.
+ */
+async function addSellerTwo(): Promise<Seller> {
+  mock.seedIdentity(SELLER_TWO.address, SELLER_TWO_ID);
+  const own = new Proxy(chain, {
+    get(target, prop) {
+      if (prop === 'getIdentityId') return async () => SELLER_TWO_ID;
+      if (prop === 'signTypedDataAs') {
+        return async (_signer: string, domain: ethers.TypedDataDomain, types: Record<string, ethers.TypedDataField[]>, value: Record<string, unknown>) =>
+          SELLER_TWO.signTypedData(domain, types, value);
+      }
+      const member = Reflect.get(target, prop, target);
+      return typeof member === 'function' ? member.bind(target) : member;
+    },
+  });
+  sellerTwo = new Seller({
+    chain: own, dir: join(dir, 'seller-two'), signer: SELLER_TWO.address, peerId: SELLER_TWO_PEER, stopServingSeconds: 180, tickSeconds: 300,
+    services: [{ model: MODEL, serviceId: SERVICE, pricePerUnit: PRICE, capacity: null, provenance: 'upstream-claimed', connector: backend }],
+  });
+  await sellerTwo.load();
+  await sellerTwo.tick();
+  const { epoch } = await chain.getEpochTimes();
+  offers.push(await signOffer(own, SELLER_TWO.address, (await chain.getMarketplaceContracts()).requestDomain, {
+    seller: SELLER_TWO_ID, serviceId: SERVICE, serviceClass: 1, unit: 'token', pricePerUnit: PRICE, epoch, capacity: null,
+    model: MODEL, provenance: 'upstream-claimed', peerId: SELLER_TWO_PEER, signedAt: 1,
+  }));
+  return sellerTwo;
 }
 
 beforeEach(async () => {
@@ -123,6 +160,7 @@ beforeEach(async () => {
   tamper = undefined;
   reachable = true;
   routerSkew = 0;
+  sellerTwo = undefined;
   completion = { content: 'synthetic answer', promptTokens: 7, completionTokens: 5 };
 });
 afterEach(async () => {
@@ -331,18 +369,37 @@ describe('access keys', () => {
     await expect(keys.make({ label: 'x', budget: 1n, services: null, rps: 0, expiresAt: null }, now)).rejects.toThrow(/rps/);
   });
 
-  it("keep one key's calls on two services at once within its budget", async () => {
+  it("keep one key's overlapping calls on two services within its budget, the first answer held while the second starts", async () => {
     const other = 'urn:test:model:gateway-two';
     await setUp(10n ** 6n, [MODEL, other]);
-    // A call may cost 430 wei (43 units: 18 bytes, 24 of allowance, 1 token), and costs all of it: the backend
-    // overruns, and the seller cuts the answer to the request's units. The key's budget fits one such call, not two.
-    completion = { content: 'a long synthetic answer', promptTokens: 30, completionTokens: 100 };
-    const { key } = await keys.make({ label: 'tight', budget: 500n, services: null, rps: 1_000, expiresAt: null }, 0);
-    const chat = { ...CHAT, max_tokens: 1 };
-    const answers = await Promise.all([gateway.chatCompletion({ key }, chat), gateway.chatCompletion({ key }, { ...chat, model: other })]);
-    expect(answers.map((a) => a.status).sort()).toEqual([200, 402]);
-    expect(answers.map((a) => body(a).error?.code ?? body(a).marketplace.value).sort()).toEqual(['430', 'key_budget']);
-    expect((await keys.list()).find((k) => k.keyId === key.keyId)).toMatchObject({ spent: '430', reserved: '0' });
+    // A call may cost 620 wei (62 units: 18 bytes, 24 of allowance, 20 tokens) and costs 600 (60 units). The key's
+    // budget, 700 wei, fits one such call, not two.
+    completion = { content: 'synthetic answer', promptTokens: 40, completionTokens: 20 };
+    const { key } = await keys.make({ label: 'tight', budget: 700n, services: null, rps: 1_000, expiresAt: null }, 0);
+    let entered!: () => void;
+    const inBackend = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(backend, 'complete').mockImplementationOnce(async () => {
+      entered();
+      await held;
+      return completion;
+    });
+    const serves = vi.spyOn(seller, 'serve');
+    const first = gateway.chatCompletion({ key }, CHAT);
+    await inBackend;
+    // The second runs while the first is held: until it is answered, or until it reaches the seller behind the first.
+    let settled = false;
+    const second = gateway.chatCompletion({ key }, { ...CHAT, model: other }).finally(() => { settled = true; });
+    await vi.waitFor(() => {
+      if (!settled && serves.mock.calls.length < 2) throw new Error('the second call is still on its way');
+    });
+    release();
+    const answers = await Promise.all([first, second]);
+    expect(answers.map((a) => a.status)).toEqual([200, 402]);
+    expect(answers[0]).toMatchObject({ body: { marketplace: { serviceId: SERVICE, value: '600' } } });
+    expect(answers[1]).toMatchObject({ body: { error: { code: 'key_budget' } } });
+    expect((await keys.list()).find((k) => k.keyId === key.keyId)).toMatchObject({ spent: '600', reserved: '0' });
   });
 
   it('settle a reservation once, carry the open ones through a fold, and read the costs of older journals', async () => {
@@ -651,18 +708,18 @@ describe('landing, reconciliation and pruning', () => {
   });
 
   describe('a call whose outcome is not known', () => {
-    /** The seller serves each call sent and keeps its receipt, and the answer is lost on the way back. */
+    /** The seller serves each call sent and keeps its receipt, and its answer never comes back: the send times out. */
     const losingAnswers = () => {
       const send = gatewayDeps.send;
       gatewayDeps.send = async (peer, payload, messageId) => {
         await send(peer, payload, messageId);
-        throw new Error('the stream was reset');
+        throw new Error('timed out');
       };
       return () => { gatewayDeps.send = send; };
     };
     const keyOf = async (all: AccessKeys, keyId: string) => (await all.list()).find((k) => k.keyId === keyId)!;
 
-    it('stays held at its most and reserved against its key, through a restart, so no new call passes the budget', async () => {
+    it('stays held at its most and reserved against its key, through a restart, so no call routed to another seller passes the budget', async () => {
       await setUp();
       // A call may cost 620 wei and costs 120; the key's budget fits one call's most, not two.
       const { key } = await keys.make({ label: 'tight', budget: 1_000n, services: null, rps: 1_000, expiresAt: null }, 0);
@@ -678,11 +735,15 @@ describe('landing, reconciliation and pruning', () => {
       await restarted.load();
       expect(restarted.heldValue(subscriptionId, 0)).toBe(620n);
       expect(await keyOf(restarted.keys, key.keyId)).toMatchObject({ spent: '0', reserved: '620' });
-      // A new request, once the router takes the seller again after its ten minutes out, cannot take the key past
-      // its budget; a key with room is served, and the held value counts both calls.
-      routerSkew = UNREACHABLE_MS;
+      // The first seller is left out for ten minutes, and another serves the service. A new request through it
+      // cannot take the key past its budget; a key with room is served by it, and the held value counts both calls.
+      const two = await addSellerTwo();
+      const quotes = vi.spyOn(two, 'quote');
       expect(body(await restarted.chatCompletion({ key }, CHAT)).error.code).toBe('key_budget');
-      expect((await restarted.chatCompletion(caller, CHAT)).status).toBe(200);
+      expect(quotes).toHaveBeenCalled();
+      const served = await restarted.chatCompletion(caller, CHAT);
+      expect(served).toMatchObject({ status: 200, body: { marketplace: { seller: Number(SELLER_TWO_ID), value: '120' } } });
+      expect(two.ledger.inState('served')).toHaveLength(1);
       expect(restarted.heldValue(subscriptionId, 0)).toBe(740n);
     });
 
