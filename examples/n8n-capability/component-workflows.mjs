@@ -18,29 +18,86 @@ export function wire(connections, from, to, output = 0, input = 0) {
   outputs[output].push({ node: to, type: 'main', index: input });
 }
 
+const singlePiece = (node, outputs = 1) => ({ nodes: [node], connections: {}, entry: node.name,
+  exits: Array(outputs).fill(node.name), resultNode: node.name });
+
+function withFileInput(piece, name) {
+  const input = nativeNode(name + ' file input', 'convertToFile', { operation: 'toBinary', sourceProperty: 'file.base64', binaryPropertyName: 'data',
+    options: { fileName: expression('$json.file.name'), mimeType: expression('$json.file.mimeType || "application/octet-stream"') } });
+  const connections = { ...piece.connections };
+  wire(connections, input.name, piece.entry);
+  return { ...piece, nodes: [input, ...piece.nodes], connections, entry: input.name };
+}
+
+function withFileOutput(piece, name, param) {
+  const output = nativeNode(name + ' file output', 'extractFromFile', { operation: 'binaryToPropery', binaryPropertyName: 'data', destinationKey: 'file.base64', options: { keepSource: 'json' } });
+  const metadata = editNode(name + ' attachment', `({ file: { ...$json.file, name: ${param('name')}, mimeType: 'application/octet-stream' } })`);
+  const connections = { ...piece.connections };
+  wire(connections, piece.resultNode, output.name); wire(connections, output.name, metadata.name);
+  return { ...piece, nodes: [...piece.nodes, output, metadata], connections,
+    exits: piece.exits.map(() => metadata.name), resultNode: metadata.name };
+}
+
+function fileFormatPiece(name, param, descriptor, parameters, preserveBinary = false) {
+  // n8n marks operation selectors noDataExpression. Emit a complete routed piece
+  // with fixed-operation actions; no provisional node is constructed or removed.
+  const formats = descriptor.parameters.format.options, type = descriptor.nodeType.split('.').at(-1);
+  const route = nativeNode(name + ' format', 'switch', { mode: 'expression', numberOutputs: formats.length,
+    output: expression(`${JSON.stringify(formats)}.indexOf(${param('format')})`) });
+  const done = preserveBinary ? nativeNode(name, 'set', { mode: 'raw', jsonOutput: expression('$json'),
+    options: { stripBinary: false }, includeOtherFields: true }) : editNode(name, '$json');
+  const actions = formats.map(format => nativeNode(name + ' ' + format, type, { operation: format, ...parameters }));
+  const connections = {};
+  for (const [index, action] of actions.entries()) {
+    wire(connections, route.name, action.name, index); wire(connections, action.name, done.name);
+  }
+  return { nodes: [route, done, ...actions], connections, entry: route.name, exits: [done.name], resultNode: done.name };
+}
+
+function googleSheetsPiece(name, param, credentials) {
+  const create = nativeNode(name, 'googleSheets', { authentication: 'oAuth2', resource: 'spreadsheet', operation: 'create',
+    title: expression(param('title')), sheetsUi: { sheetValues: [{ title: 'Export' }] }, options: {} }, credentials);
+  const aggregate = nativeNode(name + ' input', 'aggregate', { aggregate: 'aggregateAllItemData', destinationFieldName: 'rows', include: 'allFields', options: {} });
+  const restore = editNode(name + ' rows', `({ rows: $('${aggregate.name}').first(0, $runIndex).json.rows })`);
+  const split = nativeNode(name + ' split rows', 'splitOut', { fieldToSplitOut: 'rows', include: 'noOtherFields', options: { destinationFieldName: 'row' } });
+  const values = editNode(name + ' values', '$json.row');
+  const write = nativeNode(name + ' append', 'googleSheets', { authentication: 'oAuth2', resource: 'sheet', operation: 'append',
+    documentId: { __rl: true, mode: 'id', value: expression(`$('${name}').first(0, $runIndex).json.spreadsheetId`) },
+    sheetName: { __rl: true, mode: 'id', value: expression(`String($('${name}').first(0, $runIndex).json.sheets[0].properties.sheetId)`) },
+    columns: { mappingMode: 'autoMapInputData', value: {} }, options: { cellFormat: 'RAW', handlingExtraData: 'insertInNewColumn' } }, credentials);
+  const done = { ...editNode(name + ' sheet link', `({ spreadsheetId: $('${name}').first(0, $runIndex).json.spreadsheetId, spreadsheetUrl: $('${name}').first(0, $runIndex).json.spreadsheetUrl })`), executeOnce: true };
+  const nodes = [aggregate, create, restore, split, values, write, done], connections = {};
+  nodes.slice(0, -1).forEach((node, i) => wire(connections, node.name, nodes[i + 1].name));
+  return { nodes, connections, entry: aggregate.name, exits: [done.name], resultNode: done.name };
+}
+
+function dkgPiece(id, name, credentials) {
+  const connections = {};
+  const request = nativeNode(name + ' request', 'httpRequest', {
+    method: 'POST', url: 'http://127.0.0.1:4631/spike/ka/internal/dkg-component',
+    authentication: 'genericCredentialType', genericAuthType: 'httpHeaderAuth',
+    sendBody: true, specifyBody: 'json',
+    jsonBody: expression(`({ effectId: $('Receive input').first().json.body.invocationId, workflowId: String($workflow.id), executionId: String($execution.id), blockId: ${JSON.stringify(name.replace(/^Block /,''))}, items: $input.all().map(i => i.json) })`),
+    options: { timeout: id === 'invoke-dkg-program' ? 45000 : 14000, redirect: { redirect: { followRedirects: false } }, response: { response: { responseFormat: 'json' } } },
+  }, { executeOnce: true, retryOnFail: true, maxTries: 2, waitBetweenTries: 1000, credentials: { httpHeaderAuth: credentials.httpHeaderAuth } });
+  const split = nativeNode(name + ' records', 'splitOut', { fieldToSplitOut: 'items', include: 'noOtherFields', options: { destinationFieldName: 'value' } });
+  const result = editNode(name, '$json.value');
+  wire(connections,request.name,split.name);wire(connections,split.name,result.name);
+  return { nodes:[request,split,result],connections,entry:request.name,exits:[result.name],resultNode:result.name,traceNode:request.name };
+}
+
 /** One reviewed native component, with transport-only file conversion where needed. */
 export function componentPiece(id, name, param, { credentials = {} } = {}) {
   const descriptor = component(id), type = descriptor.nodeType.split('.').at(-1);
   const p = key => expression(param(key)), value = key => expression(`$json[${param(key)}]`);
   const resolved = key => `(${resolveComponentValueSource})(${param(key)}, $json)`;
-  const nodes = [], connections = {};
+  const nodeCredentials = descriptor.connection && credentials[descriptor.connection]
+    ? { credentials: { [descriptor.connection]: credentials[descriptor.connection] } } : {};
   let parameters = {};
   const condition = () => ({ options: { caseSensitive: true, leftValue: '', typeValidation: 'loose', version: 2 },
     conditions: [{ id: 'equals', leftValue: value('field'), rightValue: p('equals'), operator: { type: 'string', operation: 'equals' } }], combinator: 'and' });
   switch (id) {
-    case 'dkg-read': case 'dkg-write': case 'invoke-dkg-program': {
-      const request = nativeNode(name + ' request', 'httpRequest', {
-        method: 'POST', url: 'http://127.0.0.1:4631/spike/ka/internal/dkg-component',
-        authentication: 'genericCredentialType', genericAuthType: 'httpHeaderAuth',
-        sendBody: true, specifyBody: 'json',
-        jsonBody: expression(`({ effectId: $('Receive input').first().json.body.invocationId, workflowId: String($workflow.id), executionId: String($execution.id), blockId: ${JSON.stringify(name.replace(/^Block /,''))}, items: $input.all().map(i => i.json) })`),
-        options: { timeout: id === 'invoke-dkg-program' ? 45000 : 14000, redirect: { redirect: { followRedirects: false } }, response: { response: { responseFormat: 'json' } } },
-      }, { executeOnce: true, retryOnFail: true, maxTries: 2, waitBetweenTries: 1000, credentials: { httpHeaderAuth: credentials.httpHeaderAuth } });
-      const split = nativeNode(name + ' records', 'splitOut', { fieldToSplitOut: 'items', include: 'noOtherFields', options: { destinationFieldName: 'value' } });
-      const result = editNode(name, '$json.value');
-      wire(connections,request.name,split.name);wire(connections,split.name,result.name);
-      return { nodes:[request,split,result],connections,entry:request.name,exits:[result.name],resultNode:result.name,traceNode:request.name };
-    }
+    case 'dkg-read': case 'dkg-write': case 'invoke-dkg-program': return dkgPiece(id, name, credentials);
     case 'edit-fields': parameters = { mode: 'raw', jsonOutput: expression(`({ ...(${param('keepInput')} === 'yes' ? $json : {}), ...${resolved('fields')} })`), options: {} }; break;
     case 'filter': case 'if': parameters = { conditions: condition(), options: {} }; break;
     case 'sort': parameters = { type: 'simple', sortFieldsUi: { sortField: [{ fieldName: p('field'), order: p('direction') }] }, options: {} }; break;
@@ -51,21 +108,25 @@ export function componentPiece(id, name, param, { credentials = {} } = {}) {
     case 'summarize': parameters = { fieldsToSummarize: { values: [{ aggregation: 'sum', field: p('field') }] }, options: {} }; break;
     case 'rename-keys': parameters = { keys: { key: [{ currentKey: p('from'), newKey: p('to') }] }, additionalOptions: {} }; break;
     case 'date-time': parameters = { operation: 'formatDate', date: value('field'), format: 'custom', customFormat: p('format'), outputFieldName: 'formattedDate', options: { includeInputFields: true } }; break;
-    case 'extract-file': parameters = { operation: p('format'), binaryPropertyName: 'data', destinationKey: 'text', options: { headerRow: true, includeEmptyCells: true, enableBOM: true, relaxQuotes: false } }; break;
-    case 'convert-file': parameters = { operation: p('format'), binaryPropertyName: 'data', options: { fileName: p('name') } }; break;
+    case 'extract-file': return withFileInput(fileFormatPiece(name, param, descriptor, { binaryPropertyName: 'data', destinationKey: 'text',
+      options: { headerRow: true, includeEmptyCells: true, enableBOM: true, relaxQuotes: false } }), name);
+    case 'convert-file': return withFileOutput(fileFormatPiece(name, param, descriptor,
+      { binaryPropertyName: 'data', options: { fileName: p('name') } }, true), name, param);
     case 'xml': parameters = { mode: 'xmlToJson', dataPropertyName: p('field'), options: {} }; break;
     case 'html': parameters = { operation: 'extractHtmlContent', sourceData: 'json', dataPropertyName: p('field'), extractionValues: { values: [{ key: 'text', cssSelector: p('selector'), returnValue: 'text' }] }, options: {} }; break;
     case 'markdown': parameters = { mode: 'markdownToHtml', markdown: value('field'), destinationKey: 'html', options: {} }; break;
     case 'crypto': parameters = { action: 'hash', type: 'SHA256', value: value('field'), dataPropertyName: 'hash', encoding: 'hex' }; break;
-    case 'compression': parameters = { operation: 'compress', binaryPropertyName: 'data', outputFormat: 'zip', fileName: p('name'), binaryPropertyOutput: 'data' }; break;
+    case 'compression': return withFileOutput(withFileInput(singlePiece(nativeNode(name, type,
+      { operation: 'compress', binaryPropertyName: 'data', outputFormat: 'zip', fileName: p('name'), binaryPropertyOutput: 'data' })), name), name, param);
     case 'http-request': parameters = { method: p('method'), url: p('url'),
       sendQuery: true, specifyQuery: 'json', jsonQuery: expression(`JSON.stringify(${resolved('query')})`),
       sendHeaders: true, specifyHeaders: 'json', jsonHeaders: expression(`JSON.stringify(${resolved('headers')})`),
       sendBody: expression(`!['GET', 'HEAD'].includes(${param('method')})`),
       specifyBody: 'json', jsonBody: expression(resolved('body')),
       options: { timeout: 8000, redirect: { redirect: { followRedirects: false } }, response: { response: { responseFormat: 'json' } } } }; break;
-    case 'google-sheets': parameters = { authentication: 'oAuth2', resource: 'spreadsheet', operation: 'create', title: p('title'), sheetsUi: { sheetValues: [{ title: 'Export' }] }, options: {} }; break;
-    case 'google-drive': parameters = { resource: 'file', operation: 'upload', inputDataFieldName: 'data', name: p('name'), driveId: { __rl: true, mode: 'list', value: 'My Drive' }, folderId: { __rl: true, mode: 'id', value: 'root' }, options: {} }; break;
+    case 'google-sheets': return googleSheetsPiece(name, param, nodeCredentials);
+    case 'google-drive': return withFileInput(singlePiece(nativeNode(name, type, { resource: 'file', operation: 'upload', inputDataFieldName: 'data',
+      name: p('name'), driveId: { __rl: true, mode: 'list', value: 'My Drive' }, folderId: { __rl: true, mode: 'id', value: 'root' }, options: {} }, nodeCredentials)), name);
     case 'switch': parameters = { mode: 'expression', numberOutputs: 2, output: expression(`String($json[${param('field')}]) === String(${param('equals')}) ? 0 : 1`) }; break;
     case 'merge': parameters = { mode: 'append', numberInputs: 2, options: {} }; break;
     case 'merge-fields': parameters = { mode: 'combine', combineBy: 'combineByFields',
@@ -82,58 +143,10 @@ export function componentPiece(id, name, param, { credentials = {} } = {}) {
     case 'stop-error': parameters = { errorType: 'errorMessage', errorMessage: p('message') }; break;
     case 'wait': parameters = { resume: 'timeInterval', amount: p('seconds'), unit: 'seconds' }; break;
     case 'schedule': parameters = { rule: { interval: [{ field: 'minutes', minutesInterval: Number(param('minutes')) }] } }; break;
-    case 'webhook': {
-      const pass = editNode(name, '$json');
-      return { nodes: [pass], connections, entry: name, exits: [name], resultNode: name };
-    }
+    case 'webhook': return singlePiece(editNode(name, '$json'));
     default: throw new Error('Unsupported component template.');
   }
-  const nodeCredentials = descriptor.connection && credentials[descriptor.connection]
-    ? { credentials: { [descriptor.connection]: credentials[descriptor.connection] } } : {};
-  nodes.push(nativeNode(name, type, parameters, nodeCredentials));
-  let entry = name, resultNode = name;
-  // File operation selectors are marked noDataExpression by n8n. Route to native
-  // fixed-operation nodes instead of passing an expression that n8n leaves literal.
-  if (id === 'extract-file' || id === 'convert-file') {
-    nodes.pop();
-    const formats = descriptor.parameters.format.options;
-    const route = nativeNode(name + ' format', 'switch', { mode: 'expression', numberOutputs: formats.length,
-      output: expression(`${JSON.stringify(formats)}.indexOf(${param('format')})`) });
-    const done = editNode(name, '$json');
-    if (id === 'convert-file') { done.parameters.includeOtherFields = true; done.parameters.options.stripBinary = false; }
-    nodes.push(route, done); entry = route.name;
-    for (const [index, format] of formats.entries()) {
-      const action = nativeNode(name + ' ' + format, type, { ...parameters, operation: format });
-      nodes.push(action); wire(connections, route.name, action.name, index); wire(connections, action.name, done.name);
-    }
-  }
-  if (descriptor.input === 'file') {
-    const input = nativeNode(name + ' file input', 'convertToFile', { operation: 'toBinary', sourceProperty: 'file.base64', binaryPropertyName: 'data',
-      options: { fileName: expression('$json.file.name'), mimeType: expression('$json.file.mimeType || "application/octet-stream"') } });
-    nodes.unshift(input); wire(connections, input.name, entry); entry = input.name;
-  }
-  if (id === 'convert-file' || id === 'compression') {
-    const output = nativeNode(name + ' file output', 'extractFromFile', { operation: 'binaryToPropery', binaryPropertyName: 'data', destinationKey: 'file.base64', options: { keepSource: 'json' } });
-    const metadata = editNode(name + ' attachment', `({ file: { ...$json.file, name: ${param('name')}, mimeType: 'application/octet-stream' } })`);
-    nodes.push(output, metadata); wire(connections, name, output.name); wire(connections, output.name, metadata.name); resultNode = metadata.name;
-  }
-  if (id === 'google-sheets') {
-    const aggregate = nativeNode(name + ' input', 'aggregate', { aggregate: 'aggregateAllItemData', destinationFieldName: 'rows', include: 'allFields', options: {} });
-    nodes.unshift(aggregate); wire(connections, aggregate.name, name); entry = aggregate.name;
-    const restore = editNode(name + ' rows', `({ rows: $('${aggregate.name}').first(0, $runIndex).json.rows })`);
-    const split = nativeNode(name + ' split rows', 'splitOut', { fieldToSplitOut: 'rows', include: 'noOtherFields', options: { destinationFieldName: 'row' } });
-    const values = editNode(name + ' values', '$json.row');
-    const write = nativeNode(name + ' append', 'googleSheets', { authentication: 'oAuth2', resource: 'sheet', operation: 'append',
-      documentId: { __rl: true, mode: 'id', value: expression(`$('${name}').first(0, $runIndex).json.spreadsheetId`) },
-      sheetName: { __rl: true, mode: 'id', value: expression(`String($('${name}').first(0, $runIndex).json.sheets[0].properties.sheetId)`) },
-      columns: { mappingMode: 'autoMapInputData', value: {} }, options: { cellFormat: 'RAW', handlingExtraData: 'insertInNewColumn' } }, nodeCredentials);
-    const done = editNode(name + ' sheet link', `({ spreadsheetId: $('${name}').first(0, $runIndex).json.spreadsheetId, spreadsheetUrl: $('${name}').first(0, $runIndex).json.spreadsheetUrl })`);
-    done.executeOnce = true;
-    nodes.push(restore, split, values, write, done);
-    const chain = [name, restore.name, split.name, values.name, write.name, done.name];
-    chain.slice(0, -1).forEach((from, i) => wire(connections, from, chain[i + 1])); resultNode = done.name;
-  }
-  return { nodes, connections, entry, exits: descriptor.outputs.map(() => resultNode), resultNode };
+  return singlePiece(nativeNode(name, type, parameters, nodeCredentials), descriptor.outputs.length);
 }
 
 export function echoSubworkflow() {

@@ -93,7 +93,10 @@ export function createStudioService({ graphId, owner, client, repository, provid
     assertDkgEnabled(compiled.definition);
     if (plan.kind === 'native-n8n') native().installGrant(compiled.grant);
     if (compiled.definition.nodes.some(n => isDkg(n.componentId))) components().grant(workflow, invocationId, input, actor);
-    const invoke = () => client.programs.invoke({ graphId, operationIri: workflow.kaRef, invocationId, inputs: [input] });
+    const invoke = () => {
+      if (compiled.mode === 'schedule') eventAuthorized(workflow.kaRef, compiled);
+      return client.programs.invoke({ graphId, operationIri: workflow.kaRef, invocationId, inputs: [input] });
+    };
     let result;
     try { result = await invoke(); }
     catch (error) {
@@ -131,6 +134,16 @@ export function createStudioService({ graphId, owner, client, repository, provid
     if (!active.active || active.expiresAt < Date.now()) throw reject('This event workflow is inactive.');
     if (compiled.requiresExportAuthorization && (!exportTokenFile || active.exportFingerprint !== fingerprint(exportTokenFile))) throw reject('The operator export authorization changed.');
   }
+  async function reconcileUnpublication(ref) {
+    const pending = repository.row(ref)?.unpublish_pending;
+    if (!pending) return;
+    await native().setPublished(ref, false);
+    repository.completeUnpublication(ref, pending);
+  }
+  async function deactivate(ref, activationId, mode) {
+    repository.deactivate(ref, activationId, mode === 'schedule');
+    await reconcileUnpublication(ref);
+  }
   async function activate(value, authorize) {
     if (!value || Object.keys(value).some(k => !['kaRef', 'sourceHash', 'active', 'activationId'].includes(k)) || typeof value.active !== 'boolean') throw reject('Choose an activation state.');
     const activationId = workflowUuid(value.activationId);
@@ -139,9 +152,11 @@ export function createStudioService({ graphId, owner, client, repository, provid
     if (activation(value.kaRef).activationId === activationId) {
       const current = activation(value.kaRef);
       if (value.active && current.active && current.expiresAt > Date.now() && compiled.mode === 'schedule') await native().setPublished(workflow.kaRef, true);
+      if (!current.active) await reconcileUnpublication(workflow.kaRef);
       return (await get(value.kaRef)).workflow;
     }
     if (value.active) {
+      await reconcileUnpublication(workflow.kaRef);
       if (!workflow.approved) throw reject('This graph is not approved.');
       validateStudioCapabilities(compiled.definition, await listCapabilities());
       if (workflow.requiresExportAuthorization) authorize();
@@ -150,8 +165,7 @@ export function createStudioService({ graphId, owner, client, repository, provid
       repository.setActivation(workflow.kaRef, a, randomUUID());
       if (compiled.mode === 'schedule') await native().setPublished(workflow.kaRef, true);
     } else {
-      if (compiled.mode === 'schedule') await native().setPublished(workflow.kaRef, false);
-      repository.setActivation(workflow.kaRef, { active: false, activationId });
+      await deactivate(workflow.kaRef, activationId, compiled.mode);
     }
     return (await get(workflow.kaRef)).workflow;
   }
@@ -187,6 +201,11 @@ export function createStudioService({ graphId, owner, client, repository, provid
   async function poll() {
     if (polling || stopped) return; polling = true;
     try {
+      // Inactive workflows can still need provider cleanup. It does not require
+      // current source/catalog availability and never restores local authority.
+      for (const row of repository.pendingUnpublications()) {
+        try { await reconcileUnpublication(row.ka_ref); } catch { /* Retain cleanup for the next poll/restart. */ }
+      }
       for (const row of repository.activatedWorkflows()) {
         const a = activation(row.ka_ref); if (!a.active) continue;
         let compiled, workflow, capabilities;
@@ -200,7 +219,7 @@ export function createStudioService({ graphId, owner, client, repository, provid
           if (!workflow.approved) throw reject('Event workflow approval changed.');
         } catch (error) {
           if (['INVALID_WORKFLOW', 'WORKFLOW_CAPABILITY_CHANGED'].includes(error.code)) {
-            try { await activate({ kaRef: row.ka_ref, active: false, activationId: randomUUID() }, () => {}); } catch {}
+            try { await deactivate(row.ka_ref, randomUUID(), compiled.mode); } catch {}
           }
           continue;
         }

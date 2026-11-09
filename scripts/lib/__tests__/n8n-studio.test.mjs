@@ -207,6 +207,92 @@ for (const mode of ['webhook', 'schedule']) for (const loss of ['expired', 'appr
   });
 }
 
+for (const failure of ['reject', 'lost-ack', 'changed-pin']) test(`schedule deactivation survives ${failure}, restart and cleanup retry without dispatch`, async () => {
+  const f = environment();
+  try {
+    const w = await f.service.save(definition(['schedule', 'google-sheets'], [[0,0,1,0]]), () => {});
+    await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+    const row = f.repository.row(w.kaRef), native = f.native.get(row.provider_id), original = structuredClone(native.activeVersion);
+    f.executions.set('7', timerExecution(f, row, '7'));
+    f.repository.reserveEvent({ kaRef: w.kaRef, providerId: row.provider_id, executionId: '7', invocationId: randomUUID() }, () => {});
+    const pending = f.repository.pendingEvents(w.kaRef);
+    if (failure === 'changed-pin') native.activeVersion.nodes[0].parameters.changed = true;
+    else f.setUnpublishFailure(failure);
+    const request = { kaRef: w.kaRef, active: false, activationId: randomUUID() };
+    await assert.rejects(f.service.activate(request, () => {}));
+    assert.equal(f.repository.activation(w.kaRef).active, false);
+    assert.equal(f.repository.row(w.kaRef).event_key, null);
+    assert.equal(f.repository.row(w.kaRef).unpublish_pending, request.activationId);
+    assert.equal((await f.service.history(w.kaRef, () => true)).eventPath, undefined);
+    await assert.rejects(f.service.event(row.event_key, { invocationId: randomUUID(), items: [{}] }), /Inactive/);
+    f.restart();
+    if (failure !== 'lost-ack') {
+      await f.service.poll();
+      assert.equal(f.repository.row(w.kaRef).unpublish_pending, request.activationId);
+      await assert.rejects(f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {}));
+      assert.equal(f.repository.activation(w.kaRef).active, false);
+    }
+    assert.equal(f.repository.activation(w.kaRef).active, false);
+    await assert.rejects(f.service.run({ kaRef: w.kaRef, sourceHash: w.sourceHash, itemsJson: '[{}]', invocationId: randomUUID() }, () => {}), /Activate/);
+    assert.equal(f.invocations.length, 0);
+    f.setUnpublishFailure(null); native.activeVersion = original;
+    // Explicit retry and background reconciliation must both work after reopen.
+    if (failure === 'lost-ack') await f.service.activate(request, () => {});
+    else await f.service.poll();
+    assert.equal(f.repository.row(w.kaRef).unpublish_pending, null);
+    assert.equal(native.active, false);
+    assert.equal(f.repository.activation(w.kaRef).active, false);
+    assert.deepEqual(f.repository.pendingEvents(w.kaRef), pending);
+    await f.service.poll(); assert.equal(f.invocations.length, 0);
+  } finally { f.close(); }
+});
+
+test('schedule deactivation fences an invocation already awaiting catalog inspection', async () => {
+  const f = environment(); let release;
+  try {
+    const w = await f.service.save(definition(['schedule', 'edit-fields'], [[0,0,1,0]]), () => {});
+    await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+    let entered;
+    const reached = new Promise(resolve => { entered = resolve; });
+    const wait = new Promise(resolve => { release = resolve; });
+    f.beforeNextCatalog(async () => { entered(); await wait; });
+    const refused = assert.rejects(f.service.run({ kaRef: w.kaRef, sourceHash: w.sourceHash,
+      itemsJson: '[{}]', invocationId: randomUUID() }, () => {}), /inactive/);
+    await reached; f.setUnpublishFailure('reject');
+    await assert.rejects(f.service.activate({ kaRef: w.kaRef, active: false, activationId: randomUUID() }, () => {}));
+    release(); await refused;
+    assert.equal(f.invocations.length, 0);
+  } finally { release?.(); f.close(); }
+});
+
+for (const loss of ['expired', 'approval', 'export', 'component']) test(`confirmed ${loss} revocation persists despite failed schedule unpublication`, async () => {
+  const f = environment();
+  try {
+    const w = await f.service.save(definition(['schedule', 'google-sheets'], [[0,0,1,0]]), () => {});
+    await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+    const row = f.repository.row(w.kaRef), native = f.native.get(row.provider_id);
+    f.executions.set('7', timerExecution(f, row, '7')); f.setUnpublishFailure('reject');
+    if (loss === 'expired') f.repository.setActivation(w.kaRef, { ...f.repository.activation(w.kaRef), expiresAt: Date.now() - 1 }, row.event_key);
+    if (loss === 'approval') f.approvals.get(w.kaRef).binding.enabled = false;
+    if (loss === 'export') writeFileSync(f.exportTokenFile, 'revoked-export');
+    if (loss === 'component') f.setCatalog(catalog.map(c => ({ ...c, available: false })));
+    await f.service.poll();
+    assert.equal(f.repository.activation(w.kaRef).active, false);
+    assert.equal(f.repository.row(w.kaRef).event_key, null);
+    assert.ok(f.repository.row(w.kaRef).unpublish_pending);
+    f.restart(); f.setUnpublishFailure(null);
+    f.approvals.get(w.kaRef).binding.enabled = true; f.setCatalog(catalog);
+    writeFileSync(f.exportTokenFile, 'operator-unit-fixture-only');
+    // Cleanup is independent of DKG/catalog inspection once authority is revoked.
+    f.client.programs.getSource = async () => { throw new Error('source inspection unavailable'); };
+    await f.service.poll();
+    assert.equal(f.repository.row(w.kaRef).unpublish_pending, null);
+    assert.equal(native.active, false);
+    assert.equal(f.repository.activation(w.kaRef).active, false);
+    assert.equal(f.invocations.length, 0);
+  } finally { f.close(); }
+});
+
 for (const interrupted of [false, true]) test(`normalized timer ${interrupted ? 'recovers after restart' : 'is delivered once'}`, async () => {
   const f = environment();
   try {
