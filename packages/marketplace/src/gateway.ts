@@ -86,10 +86,14 @@ import {
   encodeMessage,
   inferenceBodyFromWire,
   receiptFromWire,
+  receiptToWire,
   requestToWire,
   resultCommitmentOf,
+  serveResponseFromWire,
   type InferenceBody,
-  type ServeResponse,
+  type ReceiptWire,
+  type ServeAnswerReceived,
+  type ServeResponseReceived,
 } from './wire.js';
 
 /** Calls stop at this share of a budget's value. */
@@ -518,10 +522,11 @@ export class Gateway {
   ): Promise<GatewayAnswer> {
     const router = this.deps.router;
     const started = Date.now();
-    let answer: ServeResponse;
+    let answer: ServeResponseReceived;
     try {
       answer = await this.sendServe(route.peerId, message, kept.callId);
     } catch {
+      // No answer, or none that reads as one: the seller may have served it, and it counts as such.
       router.unreachable(route.seller);
       await this.keepUnsettled({ ...kept, problem: 'unanswered' });
       return fail(503, 'seller_unreachable', 'the seller did not answer; try again', { serviceId: c.serviceId });
@@ -538,8 +543,9 @@ export class Gateway {
     // The key's reservation is the call's while it is held; checked, its receipt settles it below.
     const reserved = this.book.isKeyHeld(kept.callId) ? request.maxValueWei : 0n;
     await this.keep({
-      ...kept, receipt: answer.receipt, receiptSignature: answer.receiptSignature, state: checked.problem ? 'refused' : 'held',
-      ...(checked.problem ? { problem: checked.problem } : {}),
+      // A checked receipt is kept as decoded; a refused one as its seller sent it, whatever its shape.
+      ...kept, receipt: checked.receipt ? receiptToWire(checked.receipt) : (answer.receipt as ReceiptWire), receiptSignature: answer.receiptSignature,
+      state: checked.problem ? 'refused' : 'held', ...(checked.problem ? { problem: checked.problem } : {}),
     });
     if (checked.problem) {
       router.failed(route.seller, c.times.epoch);
@@ -565,13 +571,13 @@ export class Gateway {
     };
   }
 
-  /** The checks of the module comment: `problem` names the first that failed. */
+  /** The checks of the module comment, of a receipt as it came: decoded first, then `problem` names the first that failed. */
   private async checkReceipt(
     domain: MarketplaceDomain,
     request: ServiceRequest,
     callId: string,
     budgetIndex: number,
-    answer: Extract<ServeResponse, { ok: true }>,
+    answer: ServeAnswerReceived,
   ): Promise<{ receipt?: QueryInferenceReceipt; problem?: string }> {
     let receipt: QueryInferenceReceipt;
     try {
@@ -583,9 +589,7 @@ export class Gateway {
     if (answer.budgetIndex !== budgetIndex) return { problem: 'other_budget' };
     if (receipt.units > request.maxUnits) return { problem: 'units_over_max' };
     if (receipt.valueWei !== receipt.units * request.pricePerUnit || receipt.valueWei > request.maxValueWei) return { problem: 'value_mismatch' };
-    if (typeof answer.result?.content !== 'string' || receipt.resultCommitment !== resultCommitmentOf(answer.result.content)) {
-      return { problem: 'result_mismatch' };
-    }
+    if (receipt.resultCommitment !== resultCommitmentOf(answer.result.content)) return { problem: 'result_mismatch' };
     const signer = receiptSignerOf(domain, receipt, answer.receiptSignature);
     if (!signer) return { problem: 'bad_signature' };
     const verdict = await this.deps.chain.verifyACKIdentityDetailed(signer, request.seller);
@@ -594,12 +598,15 @@ export class Gateway {
     return { receipt };
   }
 
-  /** One `serve`, with one retry under a new message id when the messenger lost the first answer. */
-  private async sendServe(peerId: string, message: Uint8Array, callId: string): Promise<ServeResponse> {
+  /**
+   * One `serve`, with one retry under a new message id when the messenger lost the first answer. The answer is read
+   * with `serveResponseFromWire`, so one that is not a serve answer throws as no answer does.
+   */
+  private async sendServe(peerId: string, message: Uint8Array, callId: string): Promise<ServeResponseReceived> {
     for (let attempt = 0; ; attempt++) {
       const bytes = await this.deps.send(peerId, message, `${callId}:${attempt}`);
       if (attempt === 0 && new TextDecoder().decode(bytes) === 'RESPONSE_GONE') continue;
-      return decodeMessage(bytes) as ServeResponse;
+      return serveResponseFromWire(decodeMessage(bytes));
     }
   }
 

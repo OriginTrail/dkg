@@ -32,6 +32,7 @@ import {
   decodeMessage,
   encodeMessage,
   SIGNER_TTL_MS,
+  UNREACHABLE_MS,
   hashOffer,
   receiptFromWire,
   serviceIdOf,
@@ -41,7 +42,6 @@ import {
   type GatewayAnswer,
   type GatewayDeps,
   type Offer,
-  type QuoteResponse,
   type ServeResponse,
 } from '../src/index.js';
 
@@ -91,7 +91,7 @@ async function setUp(value = 10n ** 6n, models: string[] = [MODEL]): Promise<voi
     offers: async () => offers,
     quote: async (_peer, services) => {
       if (!reachable) throw new Error('unreachable');
-      return seller.quote({ services }) as Promise<QuoteResponse>;
+      return seller.quote({ services });
     },
   });
   keys = new AccessKeys(join(dir, 'buyer'));
@@ -191,6 +191,19 @@ describe('a call through the gateway', () => {
     DOMAIN = (await chain.getMarketplaceContracts()).requestDomain;
     tamper = t;
     expect(body(await call())).toMatchObject({ problem });
+  });
+
+  it.each([
+    ['a result without text', (a: ServeResponse) => ({ ...a, result: { content: 7 } })],
+    ['a refusal with an unknown code', () => ({ ok: false, code: 'NoSuchCode', retry: true })],
+    ['no ok', () => ({ answer: 'synthetic answer' })],
+  ])('takes an answer with %s as no answer: the call stays held, and the seller is left out', async (_what, t) => {
+    await setUp();
+    tamper = t as unknown as (a: ServeResponse) => ServeResponse;
+    expect(await call()).toMatchObject({ status: 503, body: { error: { code: 'seller_unreachable' } } });
+    expect(gateway.heldValue(subscriptionIdOf(NODE.address, (await chain.getEpochTimes()).epoch), 0)).toBe(620n);
+    tamper = undefined;
+    expect(body(await call()).error.code).toBe('no_seller');
   });
 
   it("keeps a receipt whose signer the chain could not check, and retries a lost answer once", async () => {
@@ -329,6 +342,7 @@ describe('the router', () => {
     quote: async (peer, services) => {
       quoted.push(peer);
       if (peer === 'peer-3') throw new Error('unreachable');
+      if (peer === 'peer-11') return { seller: '11', epoch: 1, offers: 'none' };
       const id = peer.slice(5);
       return { seller: id, epoch: 1, offers: services.map((s) => ({ serviceId: s, pricePerUnit: String(list.find((o) => String(o.seller) === id)!.pricePerUnit), available: true, capacity: null })) };
     },
@@ -414,6 +428,17 @@ describe('the router', () => {
     clock += 5 * 60_000;
     await router.pick(SERVICE, 1, 100n);
     expect(quoted.filter((p) => p === 'peer-2')).toHaveLength(2);
+  });
+
+  it('leaves out for ten minutes a seller whose quote does not read as one', async () => {
+    list = [offer(11n, 10n)];
+    const router = routerWith();
+    expect(await router.pick(SERVICE, 1, 100n)).toBeNull();
+    expect(await router.pick(SERVICE, 1, 100n)).toBeNull();
+    expect(quoted).toEqual(['peer-11']);
+    clock += UNREACHABLE_MS;
+    expect(await router.pick(SERVICE, 1, 100n)).toBeNull();
+    expect(quoted).toEqual(['peer-11', 'peer-11']);
   });
 
   it('leaves out an unreachable seller for ten minutes and a failed one for the epoch', async () => {
