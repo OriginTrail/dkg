@@ -8,6 +8,7 @@ import { PanelRight } from './components/Shell/PanelRight.js';
 import { ContextGraphDialogs } from './components/Shell/ContextGraphDialogs.js';
 import { useLayoutStore, useShellPanels, maxBottomHeight } from './stores/layout.js';
 import { useTabsStore } from './stores/tabs.js';
+import { chooseTab as openTab } from './lib/shellNavigation.js';
 import { detectMockMode, isUsingMocks, subscribeMockMode } from './api-wrapper.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from './lib/contextGraphPrimer.js';
 import { applyTheme } from './lib/applyTheme.js';
@@ -209,7 +210,6 @@ function AgentHubRoute() {
 }
 
 function ContextGraphPrimerRoute() {
-  const openTab = useTabsStore((s) => s.openTab);
 
   useLayoutEffect(() => {
     openTab(CONTEXT_GRAPH_PRIMER_TAB);

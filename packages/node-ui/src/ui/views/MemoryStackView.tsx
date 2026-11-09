@@ -16,7 +16,7 @@
 import React, { useMemo } from 'react';
 import type { ContextGraph } from '../stores/projects.js';
 import { refreshContextGraphInventory, useContextGraphInventory } from '../hooks/useContextGraphInventory.js';
-import { useTabsStore } from '../stores/tabs.js';
+import { chooseTab as openTab } from '../lib/shellNavigation.js';
 import { useMemoryEntities, type MemoryEntity, type TrustLevel } from '../hooks/useMemoryEntities.js';
 import { useMemoryCounts } from './project/helpers.js';
 import { relativeTime } from '../hooks/useProjectActivity.js';
@@ -100,7 +100,6 @@ export function MemoryStackView() {
 
 function MemoryStackRow({ cg }: { cg: ContextGraph }) {
   const memory = useMemoryEntities(cg.id);
-  const { openTab } = useTabsStore();
   // GH #819 round 3 (Codex sweep 1 🔴 #2) — per-layer buckets use
   // the OR-rule admission (drop if subject OR resource-object moved
   // past t.layer; matches the per-layer Triples tab the layer-card

@@ -10,7 +10,7 @@ import React from 'react';
 import { useMemoryEntities } from '../hooks/useMemoryEntities.js';
 import { useProjectProfile, ProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { useAgents, AgentsContext } from '../hooks/useAgents.js';
-import { useTabsStore } from '../stores/tabs.js';
+import { chooseTab as openTab } from '../lib/shellNavigation.js';
 import { useProjectsStore } from '../stores/projects.js';
 import { AgentProfileView } from './AgentProfileView.js';
 import { MemoryReadStatus } from './MemoryReadStatus.js';
@@ -28,7 +28,6 @@ export const AgentProfilePage: React.FC<AgentProfilePageProps> = ({
   const profile = useProjectProfile(contextGraphId);
   const agentsData = useAgents(contextGraphId);
   const memory = useMemoryEntities(contextGraphId);
-  const { openTab } = useTabsStore();
   const { setActiveProject } = useProjectsStore();
 
   const selectEntity = React.useCallback((uri: string) => {
