@@ -4,17 +4,13 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body, #root {
   height: 100%;
-  background: var(--bg-root);
+  background-color: var(--app-canvas);
   color: var(--text-primary);
   font-family: var(--font-sans);
-  /* Body base 13 → 14 (PR8). PR7's surgical 10→11 bumps on a handful of
-     classes weren't enough — the long tail of inherited 13px chrome
-     still read as footnotes on a real laptop screen. Bumping the base
-     lifts every un-pinned surface (paragraph bodies, modal copy, form
-     labels, tooltips) via the cascade. Explicit "keep" overrides below
-     prevent the very largest surfaces (stat hero numbers, dashboard
-     title) from ballooning. */
-  font-size: 14px;
+  /* Readability pass: Geist plus a 16px body base keeps the dense node UI
+     legible without flattening its metadata hierarchy. Explicit sizes use
+     the shared scale in 00-theme.css. */
+  font-size: var(--font-size-body);
   line-height: 1.5;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
@@ -34,7 +30,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 input, textarea {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--font-size-label);
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   color: var(--text-primary);

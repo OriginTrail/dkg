@@ -18,12 +18,12 @@
   gap: 10px;
 }
 .v10-pca-publish-conditions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.v10-pca-publish-cond { font-size: 11px; color: var(--text-secondary); }
+.v10-pca-publish-cond { font-size: var(--font-size-caption); color: var(--text-secondary); }
 .v10-pca-publish-cond[data-tone='success'] { color: var(--text-success); }
 .v10-pca-publish-cond[data-tone='warn'] { color: var(--text-warning); }
 .v10-pca-publish-cond[data-tone='neutral'] { color: var(--text-tertiary); }
 .v10-pca-publish-wallets { display: flex; flex-direction: column; gap: 6px; }
-.v10-pca-publish-foot { margin: 0; font-size: 11px; color: var(--text-tertiary); line-height: 1.5; }
+.v10-pca-publish-foot { margin: 0; font-size: var(--font-size-caption); color: var(--text-tertiary); line-height: 1.5; }
 
 /* ----- E2 predictive bell alerts ----- */
 .v10-pca-alert-row {
@@ -33,14 +33,14 @@
 }
 .v10-pca-alert-row[data-severity='danger'] { border-left-color: var(--text-danger); }
 .v10-pca-alert-row[data-severity='warn'] { border-left-color: var(--text-warning); }
-.v10-pca-alert-title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
-.v10-pca-alert-msg { font-size: 11px; color: var(--text-secondary); line-height: 1.45; margin-top: 2px; }
+.v10-pca-alert-title { font-size: var(--font-size-label); font-weight: 600; color: var(--text-primary); }
+.v10-pca-alert-msg { font-size: var(--font-size-caption); color: var(--text-secondary); line-height: 1.45; margin-top: 2px; }
 .v10-pca-alert-action {
   margin-top: 4px;
   border: none;
   background: transparent;
   color: var(--text-link);
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   padding: 0;
   cursor: pointer;
 }

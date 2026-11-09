@@ -31,6 +31,16 @@ export const MEMBER_LIST_ROOT_PREDICATES: readonly string[] = Object.freeze([
   DKG_ONTOLOGY.DKG_REVOKED_AGENT,
 ]);
 
+/**
+ * Every root predicate that says who may access a graph: the member list and
+ * the legacy identity-id participants. A graph's own `_meta` is the only graph
+ * that states them.
+ */
+export const ACCESS_ROW_ROOT_PREDICATES: ReadonlySet<string> = new Set([
+  ...MEMBER_LIST_ROOT_PREDICATES,
+  DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID,
+]);
+
 /** The subject prefix of a graph's agent delegations. */
 export function memberDelegationPrefix(contextGraphId: string): string {
   return `did:dkg:agent-delegation:${contextGraphId}:`;

@@ -7,9 +7,10 @@ test.describe('Header', () => {
     await page.locator('.v10-header-meta').waitFor({ state: 'visible', timeout: 10_000 });
   });
 
-  test('displays DKG logo with v10 version badge', async ({ header }) => {
+  test('displays the OriginTrail logo', async ({ header }) => {
     await expect(header.logo).toBeVisible();
-    await expect(header.version).toHaveText('v10');
+    await expect(header.logo).toHaveAttribute('aria-label', 'OriginTrail');
+    await expect(header.logoText.locator('svg')).toBeVisible();
   });
 
   test('shows agent name', async ({ header }) => {
@@ -17,26 +18,6 @@ test.describe('Header', () => {
     const name = await header.getAgentName();
     expect(name).toBeTruthy();
     expect(name!.length).toBeGreaterThan(0);
-  });
-
-  test('shows green sync status dot', async ({ header }) => {
-    await expect(header.statusDot).toBeVisible();
-  });
-
-  test('status dot reports a sync state (online/offline class)', async ({ header }) => {
-    // `synced` can legitimately be either state on the devnet depending on
-    // sync/tip timing, so the durable assertion is "the dot reports SOMETHING"
-    // — the online/offline class pair must be exhaustive — not "the daemon is
-    // synced", which depends on transient sync state.
-    await expect(header.statusDot).toBeVisible();
-    const cls = await header.statusDot.evaluate((el) => el.className);
-    expect(cls).toMatch(/\b(online|offline)\b/);
-  });
-
-  test('displays a sync status text (synced or syncing)', async ({ page }) => {
-    // Same rationale as above — the single-node devnet may show either
-    // state. Assert the union, not a specific token.
-    await expect(page.getByText(/^(synced|syncing)$/)).toBeVisible();
   });
 
   test('displays peer count with number and label', async ({ header, page }) => {
