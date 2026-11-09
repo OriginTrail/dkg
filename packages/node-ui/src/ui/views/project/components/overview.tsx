@@ -400,7 +400,7 @@ export function ProjectOverviewCard({
         ? 'Live memory counts are unavailable.'
         : memory.partial || hasUnavailableLayer
           ? 'One or more layer counts are currently a lower bound.'
-          : 'Canonical current-layer entity counts.';
+          : 'Entities in each memory layer now.';
   const totalEntitiesValue = allLayerCountsUnavailable ? 'Unavailable' : formatNumber(layerSum);
   // Triples: canonical project-wide total via `useCanonicalTriples`
   // (GH #819 helper — single source of truth for all aggregate

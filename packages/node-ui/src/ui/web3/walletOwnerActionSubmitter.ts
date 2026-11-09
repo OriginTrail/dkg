@@ -167,7 +167,7 @@ function loadContext(deps: WalletOwnerActionSubmitterDeps): WalletTxContext {
   });
   const bootstrap = deps.bootstrap ?? useWalletStore.getState().bootstrap;
   if (!bootstrap) {
-    throw connectionPolicy.unavailableError('PCA contract addresses are not bootstrapped yet.');
+    throw connectionPolicy.unavailableError('The node hasn’t sent the PCA contract details yet. Reload the page and try again.');
   }
   const runtimeDeps: BrowserWalletRuntimeDeps<PcaContracts> = {
     bootstrap,

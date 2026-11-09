@@ -245,7 +245,7 @@ export function formatJoinRequestError(err: unknown): string {
   if (err instanceof HttpError && err.status === 502) {
     const perPeer = readPerPeerErrors(err.body);
     if (perPeer.length === 0) {
-      return 'Request signed, but we couldn\'t deliver it to any reachable curator. ' +
+      return 'Request signed, but it couldn\'t reach any curator. ' +
         'Try again in a moment once your node has discovered more peers, or ask the curator for an updated invite.';
     }
     const reasons = perPeer.join('; ');

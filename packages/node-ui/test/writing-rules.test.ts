@@ -39,7 +39,7 @@ const PENDING = new Set<string>([]);
 
 const VISIBLE_ATTRIBUTES = new Set([
   'alt', 'aria-description', 'aria-label', 'body', 'caption', 'confirmLabel', 'cancelLabel', 'description',
-  'detail', 'empty', 'emptyText', 'error', 'heading', 'help', 'helperText', 'hint', 'label', 'message',
+  'detail', 'empty', 'emptyText', 'error', 'footnote', 'heading', 'help', 'helperText', 'hint', 'label', 'message',
   'note', 'placeholder', 'reason', 'subtitle', 'summary', 'text', 'title', 'tooltip',
 ]);
 const VISIBLE_CALL = /^(toast|notify|alert|confirm|set(Error|Notice|Message|Warning)\w*)$|\.(toast|notify)$/;

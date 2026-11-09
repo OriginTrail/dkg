@@ -979,7 +979,7 @@ describe('Context Graph IA and Overview', () => {
     }
     expect(container.textContent).not.toContain('Topical partitions inside this Context Graph.');
     expect(container.textContent).not.toContain('Total facts stored across all memory layers.');
-    expect(container.textContent).not.toContain('Canonical current-layer entity counts.');
+    expect(container.textContent).not.toContain('Entities in each memory layer now.');
     expect(container.querySelectorAll('.v10-stat-strip-hint')).toHaveLength(0);
 
     await act(async () => root.unmount());

@@ -238,7 +238,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
   return (
     <LayerActionShell
       title="Share complete Knowledge Assets"
-      footnote="Shares each complete owning Knowledge Asset atomically to Shared Working Memory."
+      footnote="Shares each Knowledge Asset as a whole: all of it reaches Shared Working Memory, or none of it does."
       context={<>Shares all eligible complete Working Memory Knowledge Assets in this Context Graph, including assets outside the loaded preview.</>}
       result={result}
       error={error}

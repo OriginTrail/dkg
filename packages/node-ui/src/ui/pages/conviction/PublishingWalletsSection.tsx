@@ -60,11 +60,11 @@ export function PublishingWalletsSection({
         reg === true
           ? `${addr} is an approved publishing wallet here.`
           : reg === false
-            ? `${addr} is NOT approved here.`
-            : `Couldn’t determine whether ${addr} is approved here — retry.`,
+            ? `${addr} isn’t approved here.`
+            : `Couldn’t check whether ${addr} is approved here. Try again.`,
       );
     } catch (err) {
-      setProbeResult(describePcaError(err, { accountId })?.message ?? 'Probe failed.');
+      setProbeResult(describePcaError(err, { accountId })?.message ?? 'Couldn’t check this wallet.');
     }
   };
   const runRemove = async (addr: string) => {
