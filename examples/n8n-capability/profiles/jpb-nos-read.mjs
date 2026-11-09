@@ -21,6 +21,8 @@ export async function readJpbThroughNos(call, payload) {
   const response = await call('query', { contextGraphId: graph, view: 'working-memory', includeContextGraphPartitions: true, sparql });
   const rows = response.result?.bindings;
   if (!Array.isArray(rows) || rows.length !== 3) fail('Saved ERP selection is missing, duplicated or truncated.');
+  if (new Set(rows.map(row => iriValue(row.recordVersion))).size !== selected.length)
+    fail('Saved ERP selection is missing, duplicated or truncated.');
   const readAt = new Date().toISOString();
   const responseSha256 = createHash('sha256').update(JSON.stringify(rows)).digest('hex');
   const records = rows.map(row => {
