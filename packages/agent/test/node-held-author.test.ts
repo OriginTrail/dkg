@@ -14,6 +14,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
+import { buildAuthorAttestationTypedData } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { agentFromPrivateKey, generateCustodialAgent, registerSelfSovereignAgent } from '../src/agent-keystore.js';
@@ -27,7 +28,7 @@ import {
 } from '../src/node-held-author.js';
 import { isNodeHeldCurator } from '../src/external-author-curator.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
-import { CG, ExternallySignedMockChain, LocallySignedMockChain, NAME, payer, q, silentLog } from './_helpers/external-signers.js';
+import { CG, ExternallySignedMockChain, KAV_ADDRESS, LocallySignedMockChain, NAME, payer, q, silentLog } from './_helpers/external-signers.js';
 
 const external = { operationalSigning: () => ({ external: true, payerAddresses: [payer.address] }) };
 const keyless = (name: string) => registerSelfSovereignAgent(name, ethers.Wallet.createRandom().signingKey.publicKey);
@@ -211,6 +212,70 @@ describe('a node whose authors are held on it, without a network', () => {
     for (const [config, chain] of [[{ nodeHeldAuthor: false }, external], [{}, external], [undefined, external], [on, {}]] as const) {
       expect(isNodeHeldCurator(config, chain, untouchable, member.agentAddress, payer.address)).toBe(false);
       expect(nodeHeldDefaultAuthor(config, chain, untouchable, member.agentAddress)).toBeUndefined();
+    }
+  });
+
+  it('signs a selection publish without a named agent as the default agent, in its namespace, and as a named agent when one is named', async () => {
+    const member = generateCustodialAgent('member');
+    const named = generateCustodialAgent('named');
+    const chain = { ...external, getEvmChainId: async () => 31337n, getKnowledgeAssetsLifecycleAddress: async () => KAV_ADDRESS };
+    // The signer pays only, so the publisher has no author to fall back on.
+    const selecting = (nodeHeldAuthor: boolean) => Object.assign(nodeWith([member, named], member.agentAddress, nodeHeldAuthor, chain), {
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      reconciledKaAuthors: new Set<string>(),
+      publisher: { publisherFallbackAuthorAddress: async () => undefined },
+    });
+    const quads = [q('urn:node-held-author:selection', 'urn:value', '"v1"')];
+    const node = selecting(true);
+    for (const [authorAgentAddress, author] of [[undefined, member.agentAddress], [named.agentAddress, named.agentAddress]] as const) {
+      const attestation = await node._buildPrecomputedAttestationForSelection(CG, quads, { graphScoped: true, authorAgentAddress });
+      expect(attestation.authorAddress).toBe(author);
+      expect(attestation.reservedKaId >> 96n).toBe(BigInt(author));
+      const typed = buildAuthorAttestationTypedData({
+        chainId: 31337n,
+        kav10Address: KAV_ADDRESS,
+        merkleRoot: attestation.expectedMerkleRoot,
+        authorAddress: author,
+        reservedKaId: attestation.reservedKaId,
+      });
+      const signature = ethers.Signature.from({ r: ethers.hexlify(attestation.signature.r), yParityAndS: ethers.hexlify(attestation.signature.vs) });
+      expect(ethers.verifyTypedData(typed.domain, typed.types, typed.message, signature)).toBe(author);
+    }
+    // Off, such a publish has no author, as before.
+    await expect(selecting(false)._buildPrecomputedAttestationForSelection(CG, quads, { graphScoped: true }))
+      .rejects.toThrow(/no publisher signer is available/);
+  });
+
+  it('sets up a curated graph\'s sender keys as a key held on the node that is on its roster, and refuses when none is', async () => {
+    const author = generateCustodialAgent('default-author');
+    const member = generateCustodialAgent('member');
+    // On the roster, with its key on another node.
+    const outside = generateCustodialAgent('outside');
+    const curated = (roster: ReadonlyArray<{ agentAddress: string }>, nodeHeldAuthor = true) => Object.assign(nodeWith([author, member], author.agentAddress, nodeHeldAuthor), {
+      resolveOnChainAccessPolicyState: async () => 1,
+      resolveWorkspaceAgentRecipientsForCurrentAuthority: async () => ({
+        requiresEncryption: true,
+        recipients: roster.map(({ agentAddress }) => ({ agentAddress, recipientKeyId: `${agentAddress}#x25519`, peerId: '12D3KooWNodeHeldRosterPeer' })),
+      }),
+      swmSenderKeySendStates: new Map(),
+      prunePendingSenderKeysForEpochRotation: () => 0,
+      saveSwmSenderKeyState: async () => {},
+      createAndDistributeSwmSenderKeyEpoch: vi.fn(async ({ sender }: { sender: { agentAddress: string } }) => ({
+        senderAgentAddress: sender.agentAddress, epochId: 'epoch-1', chainKey: new Uint8Array(32).fill(7),
+      })),
+    });
+    const setUp = (node: ReturnType<typeof curated>) => node._resolveCuratedChainKeyContext(CG, undefined, undefined, undefined, 'node-held-author');
+
+    // The default agent is not on the roster; the other key held on the node is, and sets up the sender keys.
+    const node = curated([member, outside]);
+    await expect(setUp(node)).resolves.toMatchObject({ senderAddress: member.agentAddress, aeadCgId: CG });
+    expect(node.createAndDistributeSwmSenderKeyEpoch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      sender: expect.objectContaining({ agentAddress: member.agentAddress, privateKey: member.privateKey }),
+    }));
+    // No key held on the node is on the roster, or the setting is off: the default agent sends, and is refused as before.
+    for (const refused of [curated([outside]), curated([member, outside], false)]) {
+      await expect(setUp(refused)).rejects.toThrow(`sender ${author.agentAddress} is not in the recipient set`);
+      expect(refused.createAndDistributeSwmSenderKeyEpoch).not.toHaveBeenCalled();
     }
   });
 });
