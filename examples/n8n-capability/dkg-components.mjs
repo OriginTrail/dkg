@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { configuredDkgProfile, requireDkgProfile } from './dkg-profile.mjs';
 import { dkgComponentOperations, componentFailure as fail } from './dkg-component-operations.mjs';
+import { migrateDkgInvocationMetadata } from './dkg-component-schema.mjs';
 
 export const isDkg = (id) => ["dkg-read", "dkg-write", "invoke-dkg-program"].includes(id);
 const hash = (v) =>
@@ -45,8 +46,7 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
   approvedInputs ??= profile?.loadInputs() ?? [];
   db.exec(`CREATE TABLE IF NOT EXISTS dkg_component_runs(id TEXT PRIMARY KEY, ka_ref TEXT NOT NULL, source_hash TEXT NOT NULL, input TEXT NOT NULL, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS dkg_component_calls(id TEXT PRIMARY KEY, request_hash TEXT NOT NULL, result TEXT, response TEXT);`);
-  db.exec('CREATE TABLE IF NOT EXISTS dkg_component_profiles (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, revision TEXT NOT NULL)');
-  db.exec('CREATE TABLE IF NOT EXISTS dkg_component_actors (id TEXT PRIMARY KEY, actor TEXT NOT NULL)');
+  migrateDkgInvocationMetadata(db);
   db.exec('CREATE TABLE IF NOT EXISTS dkg_component_writes (id TEXT PRIMARY KEY, request TEXT NOT NULL, evidence TEXT NOT NULL, receipt TEXT)');
   db.exec('CREATE TABLE IF NOT EXISTS dkg_component_native_executions (id TEXT PRIMARY KEY, effect_id TEXT NOT NULL, workflow_id TEXT NOT NULL, execution_id TEXT NOT NULL)');
   // Retain operation evidence in result; only response is returned to native callers.
@@ -67,16 +67,12 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
     if (profile?.requiresNosActor && (!actor || actor.role !== 'owner' || actor.accountId !== profile.accountId))
       throw fail('Authenticated nOS owner required.');
     const actorText = JSON.stringify(actor ?? null);
-    const existingActor = db.prepare('SELECT actor FROM dkg_component_actors WHERE id=?').get(invocationId);
-    const existingRun = db.prepare('SELECT id FROM dkg_component_runs WHERE id=?').get(invocationId);
-    if ((existingActor && existingActor.actor !== actorText) || (profile?.requiresNosActor && existingRun && !existingActor))
+    const old = db.prepare('SELECT * FROM dkg_component_runs WHERE id=?').get(invocationId);
+    if (old && (old.actor !== null && old.actor !== actorText || profile?.requiresNosActor && old.actor === null))
       throw fail('This invocation belongs to a different account or principal.');
     assertDkgEnabled(workflow.definition, profile);
     profile.validateInput(workflow.definition, input, approvedInputs);
-    const encoded = JSON.stringify(input),
-      old = db
-        .prepare("SELECT * FROM dkg_component_runs WHERE id=?")
-        .get(invocationId);
+    const encoded = JSON.stringify(input);
     if (
       old &&
       (old.ka_ref !== workflow.kaRef ||
@@ -86,22 +82,17 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
       throw fail(
         "Invocation identity belongs to different workflow or inputs.",
       );
-    const scope = db.prepare('SELECT * FROM dkg_component_profiles WHERE id=?').get(invocationId);
-    if (old && (!scope || scope.profile_id !== profile.id || scope.revision !== profile.revision))
+    if (old && (old.profile_id !== profile.id || old.profile_revision !== profile.revision))
       throw fail('Invocation identity belongs to a different execution profile or an unscoped legacy run.');
+    if (old && old.actor === null) throw fail('Unscoped legacy invocation has no recorded ownership.');
     if (!old) assertNoPendingWrite(workflow, invocationId);
-    db.exec('SAVEPOINT dkg_profile_grant');
-    try {
-      db.prepare('INSERT OR IGNORE INTO dkg_component_actors VALUES (?,?)').run(invocationId, actorText);
-      db.prepare('INSERT OR IGNORE INTO dkg_component_profiles VALUES (?,?,?)').run(invocationId, profile.id, profile.revision);
-      db.prepare('INSERT INTO dkg_component_runs VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET expires=excluded.expires')
-        .run(invocationId, workflow.kaRef, workflow.sourceHash, encoded, Date.now() + 600000);
-      db.exec('RELEASE dkg_profile_grant');
-    } catch (error) {
-      db.exec('ROLLBACK TO dkg_profile_grant');
-      db.exec('RELEASE dkg_profile_grant');
-      throw error;
-    }
+    const stored = db.prepare(`INSERT INTO dkg_component_runs
+      (id,ka_ref,source_hash,input,expires,profile_id,profile_revision,actor) VALUES (?,?,?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET expires=excluded.expires
+      WHERE ka_ref=excluded.ka_ref AND source_hash=excluded.source_hash AND input=excluded.input
+        AND profile_id=excluded.profile_id AND profile_revision=excluded.profile_revision AND actor=excluded.actor`)
+      .run(invocationId, workflow.kaRef, workflow.sourceHash, encoded, Date.now() + 600000, profile.id, profile.revision, actorText);
+    if (stored.changes !== 1) throw fail('Invocation identity belongs to different workflow, inputs, profile or principal.');
   }
   async function call(value, workflow, nativeId, receivedInput) {
     if (
@@ -142,8 +133,10 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
       throw fail(
         "Run the approved workflow as its account owner before accessing DKG.",
       );
-    const savedActor = db.prepare('SELECT actor FROM dkg_component_actors WHERE id=?').get(id);
-    const actor = savedActor ? JSON.parse(savedActor.actor) : null;
+    if (run.profile_id !== profile.id || run.profile_revision !== profile.revision)
+      throw fail('Invocation execution profile mismatch.');
+    if (run.actor === null) throw fail('Unscoped legacy invocation has no recorded ownership.');
+    const actor = JSON.parse(run.actor);
     if (profile.requiresNosActor) {
       if (!actor || actor.accountId !== profile.accountId || actor.role !== 'owner') throw fail('No authenticated execution owner.');
       await profile.authorize(actor);
@@ -161,9 +154,6 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
       JSON.stringify(rows).length > 8192
     )
       throw fail("Bounded DKG component input required.");
-    const scope = db.prepare('SELECT * FROM dkg_component_profiles WHERE id=?').get(id);
-    if (!scope || scope.profile_id !== profile.id || scope.revision !== profile.revision)
-      throw fail('Invocation execution profile mismatch.');
     profile.validateNode(node, rows, input);
     const key = id + ":" + node.id,
       requestHash = hash(value),

@@ -209,6 +209,7 @@ Set `NOS_STUDIO_SESSION_FILE` to an absolute operator-owned JSON file:
 {
   "accountId": "account-example",
   "controlPlaneUrl": "http://127.0.0.1:4610",
+  "runnerBindingRevision": "jpb-runner-v1",
   "secretFile": "/private/studio.secret"
 }
 ```
@@ -219,6 +220,16 @@ trusted nOS account/principal/role headers, rejects fixture bearers in this mode
 and records the authenticated owner with each invocation. Every component call,
 including a cached retry, rechecks owner membership through nOS. Neither the
 workflow document nor n8n can supply the approving identity.
+
+The JPB nOS profile requires an explicit `runnerBindingRevision`. Change this
+operator-owned revision whenever the runner/node binding behind the control plane
+changes, even if its URL stays the same. The account, normalized control-plane URL
+and binding revision are pinned with the shared business policy and the nOS
+transport implementation. A changed connection requires newly installed component
+revisions and workflow approval; existing invocations cannot reuse their cached
+reads or resume pending writes through that connection. Credential rotation alone
+does not change the connection identity. SSH scripts contribute only to the SSH
+profile revision; both transports compose their policy from `jpb-policy.mjs`.
 
 Each companion state belongs to one account. A persisted `nos-account.json`
 prevents rebinding or reopening it as a kit-only service. To deliberately migrate
@@ -234,6 +245,13 @@ revision after switching transports. Old invocations cannot be rebound to a new
 account, principal or profile. The JPB nOS example exposes the reviewed mapped
 PLCA demo calculator; its assumptions remain explicit and are not measured LCA
 factors or a certified impact assessment.
+
+The invocation journal stores profile ID/revision and owner alongside the run.
+Startup migrates existing profile/actor records into that row in one transaction;
+missing metadata remains null and cannot be supplied by a retry. Existing scoped
+runs retain their cached component responses, pending writes and native execution
+binding. Complete the upgrade with the companion stopped; older binaries use the
+superseded metadata tables. Keep the database backup for a binary rollback.
 
 For managed nodes nOS checks the existing job/account/ready state. An existing
 external demo node uses an explicit development runner binding, not an inferred

@@ -169,7 +169,7 @@ test('unscoped legacy invocations are never silently rebound to a profile', () =
   const db = new DatabaseSync(':memory:');
   try {
     const store = dkgComponentStore(db, () => assert.fail('unexpected transport'), [], profile);
-    db.prepare('INSERT INTO dkg_component_runs VALUES (?,?,?,?,?)').run(id, workflow.kaRef, workflow.sourceHash, JSON.stringify(input), Date.now()+600000);
+    db.prepare('INSERT INTO dkg_component_runs (id,ka_ref,source_hash,input,expires) VALUES (?,?,?,?,?)').run(id, workflow.kaRef, workflow.sourceHash, JSON.stringify(input), Date.now()+600000);
     assert.throws(() => store.grant(workflow, id, input), /unscoped legacy/);
   } finally { db.close(); }
 });

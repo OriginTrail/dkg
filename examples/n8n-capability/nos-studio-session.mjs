@@ -7,6 +7,9 @@ export function loadNosStudioSession(file = process.env.NOS_STUDIO_SESSION_FILE)
   if (!isAbsolute(file)) throw new Error('Absolute operator Studio configuration required.');
   const config = JSON.parse(readFileSync(file, 'utf8'));
   const url = new URL(config.controlPlaneUrl);
+  if (config.runnerBindingRevision !== undefined && (typeof config.runnerBindingRevision !== 'string'
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(config.runnerBindingRevision)))
+    throw new Error('Invalid runnerBindingRevision.');
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(config.accountId ?? '') ||
       url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) ||
       url.href !== url.origin + '/' || !isAbsolute(config.secretFile ?? ''))
@@ -35,6 +38,7 @@ export function loadNosStudioSession(file = process.env.NOS_STUDIO_SESSION_FILE)
     };
   };
   return { accountId: config.accountId, controlPlaneUrl: url.origin, secret,
+    runnerBindingRevision: config.runnerBindingRevision,
     prepareStateBinding,
     bindState: state => prepareStateBinding(state)(),
     actor(headers) {
