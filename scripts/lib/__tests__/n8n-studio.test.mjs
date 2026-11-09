@@ -3,7 +3,6 @@ import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import vm from 'node:vm';
-import { component } from '../../../examples/n8n-capability/component-registry.mjs';
 import { compileStudio, normalizeStudio, readStudio, studioProgramSource, validateStudioCapabilities } from '../../../examples/n8n-capability/studio-definition.mjs';
 import { compileStudio as compileStudioV1, studioProgramSource as studioProgramSourceV1 } from '../../../examples/n8n-capability/studio-definition-v1.mjs';
 
