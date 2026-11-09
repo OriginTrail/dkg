@@ -22,6 +22,9 @@ export interface WritePreflightHost {
 /** What a probe call may carry besides the context graph id. */
 export interface WritePreflightProbeOptions {
   callerAgentAddress?: string | null;
+  /** Daemon writability checks may omit content discovery when fresh facts suffice.
+   * Full probes remain the default; omitted content is unknown, not false. */
+  contentCheck?: 'always' | 'when-needed-for-write';
   /**
    * Called when the caller's authorization consulted the chain (an on-chain identity-ID entry of
    * the allowlist). Such an answer can change without any local write, so a result cache must not keep it.
@@ -130,10 +133,13 @@ export async function probeContextGraphWritePreflight(
     // definitive deny) and `storeUnavailable` carries the first failure
     // message for diagnostics, while the in-memory registry state always
     // survives.
+    // The daemon can defer the content read until authorization and the
+    // final subscription snapshot establish whether it is needed at all.
+    const deferContent = opts?.contentCheck === 'when-needed-for-write';
     const [existsRead, hasLocalContentRead, persistedSubscriptionRead, declarationRead] =
       await Promise.allSettled([
         host.contextGraphExists(contextGraphId),
-        host.contextGraphHasLocalContent(contextGraphId),
+        deferContent ? Promise.resolve(undefined) : host.contextGraphHasLocalContent(contextGraphId),
         persistedSubscriptionPromise,
         declarationPromise,
       ]);
@@ -152,7 +158,7 @@ export async function probeContextGraphWritePreflight(
     const exists = existsRead.status === 'fulfilled'
       ? existsRead.value
       : noteStoreFailure('existence', existsRead.reason);
-    const hasLocalContent = hasLocalContentRead.status === 'fulfilled'
+    let hasLocalContent = hasLocalContentRead.status === 'fulfilled'
       ? hasLocalContentRead.value
       : noteStoreFailure('content', hasLocalContentRead.reason);
     const persistedSubscription = persistedSubscriptionRead.status === 'fulfilled'
@@ -233,12 +239,31 @@ export async function probeContextGraphWritePreflight(
       }
     }
 
-    const inMemorySubscription = subscriptions.current(contextGraphId);
+    let inMemorySubscription = subscriptions.current(contextGraphId);
+    // Authorization may have awaited an allowlist/chain read. Decide only
+    // from the subscription that exists now, not a snapshot from probe start.
+    // These are the exact positive facts the daemon needs for a synced graph;
+    // content cannot add writability evidence in this case.
+    const contentIsRedundant = !storeUnavailable && exists === true && declarationFound === true
+      && accessPolicy !== undefined && (!checksum || callerAuthorized === true)
+      && inMemorySubscription?.subscribed === true && inMemorySubscription.synced === true;
+    if (deferContent && !contentIsRedundant) {
+      try {
+        hasLocalContent = await host.contextGraphHasLocalContent(contextGraphId);
+      } catch (err) {
+        noteStoreFailure('content', err);
+      }
+      inMemorySubscription = subscriptions.current(contextGraphId);
+    }
+    // No await between deciding to omit content and copying this snapshot.
+
     return {
       // Required typed boundary: `storeAvailable` is the inverse of
       // `storeUnavailable`, emitted unconditionally so consumers cannot read
       // any store-derived fact below without first establishing the store was
-      // up. The optional `storeUnavailable`/`storeErrorMessage` pair is kept
+      // up for every attempted read. The writability mode can omit a
+      // redundant content read; it never suppresses an attempted read failure.
+      // The optional `storeUnavailable`/`storeErrorMessage` pair is kept
       // for the 503-diagnostics path (unchanged wire behaviour).
       storeAvailable: !storeUnavailable,
       ...(exists !== undefined ? { exists } : {}),

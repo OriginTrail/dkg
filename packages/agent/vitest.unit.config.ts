@@ -49,6 +49,7 @@ export default defineConfig({
       "test/exact-batch-stream-pipeline.test.ts",
       "test/host-mode-reconcile-priority.test.ts",
       "test/write-preflight-attribution.test.ts",
+      "test/write-preflight-content-demand.test.ts",
       // S4a: which writes move the policy generation, what makes two probe calls interchangeable.
       "test/write-preflight-generation.test.ts",
       "test/write-preflight-identity-agent.test.ts",
@@ -502,6 +503,7 @@ export default defineConfig({
       "test/store-admission-retry.test.ts",
       "test/private-read-chain-authority.test.ts",
       "test/knowledge-asset-draft-read-authority.test.ts",
+      "test/descriptor-read-cancellation.test.ts",
       "test/context-graph-authority-retry.test.ts",
       "test/context-graph-access-policy-state.test.ts",
       "test/context-graph-live-authority-fold.test.ts",

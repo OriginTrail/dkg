@@ -375,7 +375,7 @@ describe('a batch', () => {
     await serve(seller, 2);
     later(31);
     const submit = vi.spyOn(chain, 'submitReceiptBatch').mockImplementationOnce(async (_groups, opts) => {
-      await opts!.onBroadcast!({ txHash: ethers.id('lost'), nonce: 0, wallet: SELLER.address });
+      await opts!.onBroadcast!({ txHash: ethers.id('lost'), nonce: 0, wallet: SELLER.address, signedTx: ethers.id('lost, signed') });
       throw new Error('timed out');
     });
     seller.lander.landNow();
@@ -389,7 +389,7 @@ describe('a batch', () => {
     expect(await counts(seller)).toMatchObject({ served: 2 });
 
     submit.mockImplementationOnce(async (_groups, opts) => {
-      await opts!.onBroadcast!({ txHash: ethers.id('reverted'), nonce: 1, wallet: SELLER.address });
+      await opts!.onBroadcast!({ txHash: ethers.id('reverted'), nonce: 1, wallet: SELLER.address, signedTx: ethers.id('reverted, signed') });
       throw Object.assign(new Error('reverted'), { receipt: { status: 0 } });
     });
     seller.lander.landNow();
@@ -402,7 +402,7 @@ describe('a batch', () => {
     await serve(seller, 1, 2);
     later(31);
     submit.mockImplementationOnce(async (_groups, opts) => {
-      await opts!.onBroadcast!({ txHash: ethers.id('no nonce'), wallet: SELLER.address });
+      await opts!.onBroadcast!({ txHash: ethers.id('no nonce'), wallet: SELLER.address, signedTx: ethers.id('no nonce, signed') });
       throw new Error('timed out');
     });
     seller.lander.landNow();
@@ -434,6 +434,23 @@ describe('a batch', () => {
       summary: { counts: { landed: 2, sent: 0 }, counted: '400' },
       batches: [{ state: 'landed', counted: '400' }],
     });
+  });
+
+  it('does not send a sped-up batch again as first signed: it was on the network', async () => {
+    const seller = await started();
+    await serve(seller, 1);
+    later(31);
+    vi.spyOn(chain, 'submitReceiptBatch').mockImplementationOnce(async (_groups, opts) => {
+      await opts!.onBroadcast!({ txHash: ethers.id('stuck'), nonce: 0, wallet: SELLER.address, signedTx: ethers.id('stuck, signed') });
+      await opts!.onBeforeReplacementBroadcast!({ txHash: ethers.id('faster'), nonce: 0, replacesTxHashes: [ethers.id('stuck')] });
+      throw new Error('timed out');
+    });
+    seller.lander.landNow();
+    expect(await seller.lander.tick()).toMatchObject({ waiting: true });
+    const rebroadcast = vi.spyOn(chain, 'rebroadcastReceiptBatch');
+    await seller.lander.resolve();
+    expect(rebroadcast).not.toHaveBeenCalled();
+    expect(seller.ledger.pendingBatches()).toMatchObject([{ hashes: [ethers.id('stuck'), ethers.id('faster')] }]);
   });
 
   it('is resolved by a speed-up that landed', async () => {
@@ -478,6 +495,66 @@ describe('after a crash, and at the epoch end', () => {
     expect(submit).not.toHaveBeenCalled();
     expect(await counts(restarted)).toMatchObject({ landed: 3, sent: 0 });
     expect(await chain.budgetUsed(subscriptionId, 0)).toBe(3n * CALL_VALUE);
+  });
+
+  it('sends a batch recorded but never broadcast again after a restart, as it was signed, and it lands once', async () => {
+    const seller = await started();
+    await serve(seller, 2);
+    later(31);
+    // The node stops right after the batch is recorded, before its transaction reaches the network. The wallet sends
+    // nothing else, so its nonce stays at the batch's.
+    const record = seller.ledger.recordSent.bind(seller.ledger);
+    vi.spyOn(seller.ledger, 'recordSent').mockImplementationOnce(async (batch) => {
+      await record(batch);
+      throw new Error('the node stopped');
+    });
+    seller.lander.landNow();
+    expect(await seller.lander.tick()).toEqual({ sent: [], refused: 0, waiting: false });
+    const [pending] = seller.ledger.pendingBatches();
+    expect(pending).toMatchObject({ nonce: 0, signedTx: expect.stringMatching(/^0x/) });
+    expect(await chain.getMinedNonce(SELLER.address)).toBe(0);
+
+    const restarted = sellerWith();
+    await restarted.load();
+    const submit = vi.spyOn(chain, 'submitReceiptBatch');
+    const rebroadcast = vi.spyOn(chain, 'rebroadcastReceiptBatch');
+    // A send that fails is tried again at the next tick.
+    rebroadcast.mockRejectedValueOnce(new Error('the endpoint is away')).mockRejectedValueOnce('the endpoint is still away');
+    await restarted.lander.resolve();
+    await restarted.lander.resolve();
+    expect(logs.slice(-2)).toEqual([
+      expect.stringMatching(/a receipt batch was not sent again: the endpoint is away/),
+      expect.stringMatching(/a receipt batch was not sent again: the endpoint is still away/),
+    ]);
+    await restarted.tick();
+    expect(rebroadcast).toHaveBeenLastCalledWith(pending!.signedTx);
+    await restarted.lander.resolve();
+    expect(submit).not.toHaveBeenCalled();
+    expect(await counts(restarted)).toMatchObject({ landed: 2, sent: 0 });
+    expect(restarted.ledger.batch(pending!.batchId)).toMatchObject({ state: 'landed', txHash: pending!.hashes[0] });
+    expect(await chain.budgetUsed(subscriptionId, 0)).toBe(2n * CALL_VALUE);
+    // Its nonce used, the same transaction sent once more is refused, and lands nothing.
+    await expect(chain.rebroadcastReceiptBatch(pending!.signedTx!)).rejects.toThrow(/nonce too low/);
+    expect(await chain.budgetUsed(subscriptionId, 0)).toBe(2n * CALL_VALUE);
+  });
+
+  it('leaves a batch recorded without its signed transaction, as records from before it was kept, to its nonce', async () => {
+    const seller = await started();
+    await serve(seller, 1);
+    later(31);
+    const record = seller.ledger.recordSent.bind(seller.ledger);
+    vi.spyOn(seller.ledger, 'recordSent').mockImplementationOnce(async ({ signedTx: _signed, ...batch }) => {
+      await record(batch);
+      throw new Error('the node stopped');
+    });
+    seller.lander.landNow();
+    await seller.lander.tick();
+    const rebroadcast = vi.spyOn(chain, 'rebroadcastReceiptBatch');
+    await seller.lander.resolve();
+    expect(rebroadcast).not.toHaveBeenCalled();
+    expect(seller.ledger.pendingBatches()).toHaveLength(1);
+    // A transaction the chain did not sign cannot be sent again.
+    await expect(chain.rebroadcastReceiptBatch('0x00')).rejects.toThrow(/not a receipt batch/);
   });
 
   it('misses what did not land, prunes the ended epoch to a summary, and reads it back', async () => {

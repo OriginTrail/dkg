@@ -9,14 +9,14 @@
   gap: 6px;
 }
 .v10-subgraph-explorer-title {
-  font-size: 16px;
+  font-size: var(--font-size-heading-sm);
   font-weight: 700;
   letter-spacing: 0.01em;
   color: var(--text-primary);
 }
 .v10-subgraph-explorer-intro {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--font-size-label);
   line-height: 1.55;
   color: var(--text-secondary);
   max-width: 760px;
@@ -58,7 +58,7 @@
   background: rgba(255,255,255,0.01);
 }
 .v10-subgraph-cross-layer-lede {
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   color: var(--text-tertiary);
   letter-spacing: 0.01em;
   /* #11 polish (ui-locked) — +2px below the lede so the count
@@ -76,7 +76,7 @@
   align-items: center;
   gap: 6px;
   border: 1px solid var(--border-subtle);
-  font-size: 12px;
+  font-size: var(--font-size-label);
   color: var(--text-primary);
   background: var(--bg-elevated);
   /* #6 polish — cells become interactive buttons (ui-locked).
@@ -101,12 +101,12 @@
   opacity: 0.5;
 }
 .v10-subgraph-cross-layer-cell-icon {
-  font-size: 13px;
+  font-size: var(--font-size-ui);
   line-height: 1;
 }
 .v10-subgraph-cross-layer-cell-label {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   font-weight: 600;
   letter-spacing: 0.01em;
 }
@@ -117,7 +117,7 @@
 }
 .v10-subgraph-cross-layer-arrow {
   color: var(--text-tertiary);
-  font-size: 12px;
+  font-size: var(--font-size-label);
 }
 /* PR #793 round 2 (ui-locked option c) — demoted from
    clickable pill chrome to inline caption-style metadata. The
@@ -139,7 +139,7 @@
   background: transparent;
   border-radius: 0;
   font-family: var(--font-sans); /* was: --font-mono */
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   color: var(--text-tertiary);
   cursor: default;               /* not a clickable widget */
   transition: color 0.15s;
@@ -155,7 +155,7 @@
 }
 .v10-subgraph-active-layer-pill-label {
   text-transform: uppercase;
-  font-size: 9px;
+  font-size: var(--font-size-micro);
   font-weight: 700;
   letter-spacing: 0.08em;
   color: var(--text-tertiary);
@@ -208,7 +208,7 @@
 .v10-ka-verify-promote .v10-ka-verify-arrow { color: #f59e0b; }
 .v10-ka-verify-publish .v10-ka-verify-arrow { color: #22c55e; }
 .v10-ka-verify-title {
-  font-size: 13px; font-weight: 700;
+  font-size: var(--font-size-ui); font-weight: 700;
   color: var(--text-primary);
   letter-spacing: 0.01em;
 }
@@ -216,7 +216,7 @@
   display: block; width: 100%;
   padding: 8px 12px;
   border: none; border-radius: 6px;
-  font-size: 12px; font-weight: 700;
+  font-size: var(--font-size-label); font-weight: 700;
   letter-spacing: 0.02em;
   cursor: pointer;
   font-family: var(--font-sans);
@@ -234,13 +234,13 @@
 .v10-ka-verify-btn:disabled { opacity: 0.45; cursor: default; }
 .v10-ka-verify-hint {
   margin-top: 8px;
-  font-size: 10px; color: var(--text-tertiary); line-height: 1.5;
+  font-size: var(--font-size-meta); color: var(--text-tertiary); line-height: 1.5;
 }
 .v10-ka-verify-err {
   margin-top: 8px; padding: 6px 8px;
   background: rgba(239,68,68,0.12);
   border-radius: 4px;
-  color: var(--text-danger); font-size: 11px;
+  color: var(--text-danger); font-size: var(--font-size-caption);
   font-family: var(--font-mono);
 }
 .v10-ka-verify-ok {
@@ -258,10 +258,10 @@
   display: flex; justify-content: space-between; align-items: center;
   padding: 4px 0;
   border-bottom: 1px dashed rgba(255,255,255,0.06);
-  font-size: 11px;
+  font-size: var(--font-size-caption);
 }
 .v10-ka-verify-ok-row:last-child { border-bottom: none; }
-.v10-ka-verify-ok-lbl { color: var(--text-tertiary); text-transform: uppercase; font-size: 9px; letter-spacing: 0.08em; }
+.v10-ka-verify-ok-lbl { color: var(--text-tertiary); text-transform: uppercase; font-size: var(--font-size-micro); letter-spacing: 0.08em; }
 .v10-ka-verify-ok-val { color: var(--text-primary); font-weight: 600; }
 .v10-ka-verify-ok-val.mono {
   font-family: var(--font-mono); font-variant-numeric: tabular-nums;
