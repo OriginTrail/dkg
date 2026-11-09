@@ -30,6 +30,19 @@ export async function mockQuietNode(page: Page): Promise<void> {
       } });
       return;
     }
+    if (url.pathname === '/api/local-agent-integrations') {
+      // One connected chat agent, so the agent panel shows a composer.
+      await route.fulfill({ json: { integrations: [{
+        id: 'openclaw', name: 'Test agent', description: 'A chat agent for shell checks', enabled: true, status: 'ready',
+        capabilities: { localChat: true, chatAttachments: true },
+        runtime: { status: 'ready', ready: true },
+      }] } });
+      return;
+    }
+    if (url.pathname === '/api/openclaw-channel/health') {
+      await route.fulfill({ json: { ok: true, bridge: { ok: true }, gateway: { ok: true } } });
+      return;
+    }
     await route.fulfill({ json: {
       contextGraphs: [], events: [], agents: [], notifications: [], peers: [], items: [], badgeCount: 0,
     } });

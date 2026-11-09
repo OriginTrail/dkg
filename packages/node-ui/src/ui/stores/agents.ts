@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import type { NodeStatus } from '../api.js';
 
 export interface AgentInfo {
   name: string;
@@ -12,13 +13,13 @@ export interface AgentInfo {
 interface AgentsState {
   agents: AgentInfo[];
   activeAgentName: string | null;
-  nodeStatus: any | null;
+  nodeStatus: NodeStatus | null;
   /** Failed status checks in a row; a good status clears it. */
   nodeStatusFailures: number;
 
   setAgents: (a: AgentInfo[]) => void;
   setActiveAgent: (name: string) => void;
-  setNodeStatus: (s: any) => void;
+  setNodeStatus: (s: NodeStatus) => void;
   recordNodeStatusFailure: () => void;
   clearNodeStatusFailures: () => void;
 }
