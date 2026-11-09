@@ -10,7 +10,7 @@
  * `type` values, unknown extra keys, broken cross-links, or missing `index.md`.
  * Those are surfaced as `warnings`, never `errors`. Only rules 1 and 2 produce
  * hard errors; reserved-file structure issues are reported as warnings to keep
- * the consumer lenient (see ADR 0005 / CONTEXT.md).
+ * the consumer lenient (see ADR 0009 / CONTEXT.md).
  */
 
 import { parseDocument, OkfDocumentError } from './document.js';

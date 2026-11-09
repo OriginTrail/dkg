@@ -172,7 +172,7 @@ export class RemoteSparqlSource implements GraphDataSource {
         continue;
       }
 
-      const litMatch = trimmed.match(/^<([^>]+)>\s+<([^>]+)>\s+"(.+)"(?:\^\^<([^>]+)>|@(\S+))?\s*\.$/);
+      const litMatch = trimmed.match(/^<([^>]+)>\s+<([^>]+)>\s+"(.*)"(?:\^\^<([^>]+)>|@(\S+))?\s*\.$/);
       if (litMatch) {
         triples.push({
           subject: litMatch[1],

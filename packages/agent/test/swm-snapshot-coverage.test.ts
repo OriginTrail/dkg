@@ -95,13 +95,14 @@ function ambiguousDescriptorManifestScenario(): SnapshotCoverageScenario & {
   const validMeta = [...validKa.meta, ...residueKa.meta];
   const expectedCoverage: SwmSnapshotCoverage = {
     contextGraphId: COVERAGE_CG, peerIdSuffix: '7c7c7c7c',
-    snapshotsResolved: 0, snapshotsTotal: 2, manifestComplete: true,
-    descriptorsAuthoritative: false, missingCount: 2, missingSample: [], materializationFailures: 0,
+    snapshotsResolved: 1, snapshotsTotal: 2, manifestComplete: true,
+    descriptorsAuthoritative: false, missingCount: 1, missingSample: [], materializationFailures: 0,
   };
   return {
     contextGraphId: COVERAGE_CG,
     remotePeerId: 'peer-head-residue-7c7c7c7c',
-    // One conflicting head invalidates the complete descriptor set, including the first KA.
+    // One conflicting head is set aside; the descriptor set stops being
+    // authoritative, but the first KA still materializes.
     servedMeta: [...validMeta, {
       subject: residueKa.headSubject,
       predicate: 'http://dkg.io/ontology/assertionVersion',
@@ -230,9 +231,10 @@ describe('public SWM snapshot coverage (#2050)', () => {
     expect(summary.swmCoverage).toEqual(expectedCoverage);
   });
 
-  it('withholds resolution and metadata when a complete manifest has an ambiguous descriptor', async () => {
+  it('withholds resolution and metadata for an ambiguous descriptor and materializes the rest', async () => {
     const { expectedCoverage, expectedValidCoverage, validMeta, shares, ...source } =
       ambiguousDescriptorManifestScenario();
+    const [validKa] = shares;
     expect(() => parseGraphScopedSwmRecoveryDescriptors({
       contextGraphId: source.contextGraphId, metaQuads: source.servedMeta,
     })).toThrow(/ambiguous assertionVersion/);
@@ -259,10 +261,12 @@ describe('public SWM snapshot coverage (#2050)', () => {
       ctx, ...source, onReplaceGraph: graph => { replacedGraphs.push(graph); },
     });
     expect(snapshotFetches).toEqual([]);
-    expect(replacedGraphs).toEqual([]);
-    expect(summary.insertedDataTriples).toBe(0);
+    // Only the ambiguous head is set aside: the other KA is written with its
+    // own metadata, and nothing of the ambiguous one is.
+    expect(replacedGraphs).toEqual([validKa!.assertionGraph]);
+    expect(summary.insertedDataTriples).toBe(validKa!.payload.length);
+    expect(summary.insertedMetaTriples).toBe(validKa!.meta.length);
     expect(summary.swmCoverage).toEqual(expectedCoverage);
     expect(summary.failedPhases).toBeGreaterThanOrEqual(1);
-    expect(summary.insertedMetaTriples).toBe(0);
   });
 });

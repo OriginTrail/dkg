@@ -133,3 +133,19 @@ By participating in this project, you agree to abide by the [Code of Conduct](ht
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [Apache License 2.0](https://github.com/OriginTrail/dkg/blob/main/LICENSE).
+
+## Public documentation
+
+For a feature or integration change, follow [Documentation maintenance](../scripts/docs/README.md). Update the public guide, relevant agent procedure, capability/release status, and operational contract together. Run `node scripts/docs/check.mjs` with Node.js 22.13+; record any runtime validation separately from source review.
+
+### Investigation material
+
+Keep machine-specific working plans and raw operational evidence in ignored local
+storage, such as `.ai/`. Public commits, PR descriptions and issue comments should
+contain sanitized findings and reproducible methods. Omit personal filesystem
+paths, internal hostnames, real peer identifiers, private network/access details
+and deployment-specific resource limits unless explicitly approved for publication.
+
+Review every commit being published as well as the final diff. Deleting a file in
+a later commit does not remove its earlier contents from Git history. Correcting
+already-published history requires separate coordination with maintainers.

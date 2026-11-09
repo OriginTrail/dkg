@@ -146,17 +146,17 @@ test('one poller observes the definition and the synced flag against their own d
   });
   // Not done before the later deadline is settled.
   assert.equal(fold([[20_000, listing(false, true)], [62_000, listing(false, true)]]).done, false);
-  // The registered graph, no definition and never synced: both are #3264, with the deadlines' listings as evidence.
-  const gap = fold([[30_000, listing(false, false)], [60_000, listing(false, false)], [90_000, listing(false, false)]]);
-  const gapVerdicts = subscriptionVerdicts(gap, { registered: true, ...deadlines });
-  assert.equal(gapVerdicts.definition.verdict, 'xfail');
-  assert.match(gapVerdicts.definition.text, /^holds no definition 90 s after it subscribed: its listing has no access policy/);
-  assert.deepEqual(gapVerdicts.synced, { verdict: 'xfail', text: 'lists it as subscribed=true synced=false 60 s after it subscribed; it holds no definition of the graph' });
-  // The definition held but the graph never synced: a failure, not #3264, and the definition shows as XPASS.
+  // The registered graph, no definition and never synced: both fail, with the deadlines' listings as evidence.
+  const missing = fold([[30_000, listing(false, false)], [60_000, listing(false, false)], [90_000, listing(false, false)]]);
+  const missingVerdicts = subscriptionVerdicts(missing, { registered: true, ...deadlines });
+  assert.equal(missingVerdicts.definition.verdict, 'fail');
+  assert.match(missingVerdicts.definition.text, /^holds no definition 90 s after it subscribed: its listing has no access policy/);
+  assert.deepEqual(missingVerdicts.synced, { verdict: 'fail', text: 'lists it as subscribed=true synced=false 60 s after it subscribed' });
+  // The definition held but the graph never synced: the synced flag fails, the definition is a quiet precondition.
   const held = fold([[5_000, listing(true, false)], [60_000, listing(true, false)], [90_000, listing(true, false)]]);
   assert.deepEqual(subscriptionVerdicts(held, { registered: true, ...deadlines }), {
-    definition: { verdict: 'xpass', text: 'holds the definition 5 s after it subscribed' },
-    synced: { verdict: 'fail', text: 'lists it as subscribed=true synced=false 60 s after it subscribed; it holds the definition, so this is not #3264' },
+    definition: { verdict: 'none', text: '' },
+    synced: { verdict: 'fail', text: 'lists it as subscribed=true synced=false 60 s after it subscribed' },
   });
   // A success seen only at the deadline is late.
   const late = fold([[61_000, listing(false, true)], [91_000, listing(true, true)]]);

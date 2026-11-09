@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import type { LiftJob } from '../src/index.js';
 import { createRunnerPublisher as createPublisher } from './_helpers/async-lift-runner-fixture.js';
 import { AsyncLiftRunner } from '../src/index.js';
@@ -340,6 +341,23 @@ describe('AsyncLiftRunner', () => {
     await start;
 
     expect(sleepCalls).toContainEqual([50]);
+  });
+
+  it('tells the usage line which wallets run workers while it runs, and none once stopped', async () => {
+    asyncAdmissionUsage.setLiftWallets([]);
+    const runner = new AsyncLiftRunner({
+      publisher: createPublisher({ processNext: async () => null }),
+      walletIds: ['wallet-1', 'wallet-2'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 50,
+    });
+    expect(asyncAdmissionUsage.take().liftWallets).toBe(0);
+
+    await runner.start();
+    expect(asyncAdmissionUsage.take().liftWallets).toBe(2);
+
+    await runner.stop();
+    expect(asyncAdmissionUsage.take().liftWallets).toBe(0);
   });
 
   it('rejects startup without wallets', async () => {

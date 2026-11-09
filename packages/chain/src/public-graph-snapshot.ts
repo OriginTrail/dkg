@@ -76,16 +76,23 @@ export interface PublicGraphSnapshotScope {
   onChainId: string;
   now?: number;
 }
-/** The wire boundary owns byte size, UTF-8 and JSON decoding only. */
-export function decodePublicGraphSnapshot(
-  bytes: Uint8Array,
-  expected: PublicGraphSnapshotScope,
-): AcceptedPublicGraphSnapshot {
+/** The single wire boundary owns byte size, fatal UTF-8 and JSON decoding. */
+function parsePublicGraphSnapshotResponse(bytes: Uint8Array): unknown {
   if (!bytes.length || bytes.length > PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES)
     throw new Error("Snapshot size exceeds bound");
-  return normalizePublicGraphSnapshot(
-    JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)), expected,
-  );
+  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+}
+export function decodePublicGraphSnapshot(bytes: Uint8Array, expected: PublicGraphSnapshotScope): AcceptedPublicGraphSnapshot {
+  return normalizePublicGraphSnapshot(parsePublicGraphSnapshotResponse(bytes), expected);
+}
+/** A refusal contains no graph facts; every snapshot retains canonical validation. */
+export function decodePublicGraphSnapshotResponse(bytes: Uint8Array, expected: PublicGraphSnapshotScope):
+  { kind: 'unavailable' } | { kind: 'snapshot'; snapshot: AcceptedPublicGraphSnapshot } {
+  const value = parsePublicGraphSnapshotResponse(bytes);
+  if (value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === 1 && 'unavailable' in value && value.unavailable === true)
+    return { kind: 'unavailable' };
+  return { kind: 'snapshot', snapshot: normalizePublicGraphSnapshot(value, expected) };
 }
 /** Validate and detach either an adapter result or a decoded peer object. */
 export function normalizePublicGraphSnapshot(

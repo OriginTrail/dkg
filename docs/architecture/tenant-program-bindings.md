@@ -215,6 +215,27 @@ Each creation effect gets a deterministic asset name. Repeating the same invocat
 
 An ambiguous share, seal or publication is not blindly resubmitted. A retry checks the original asset's assertion/layer and completes only after matching evidence; unresolved publication requires publisher/operator recovery. Earlier lifecycle stages may already have succeeded when an invocation fails; revocation stops subsequent stages, not completed writes. Keep the original UUID during recovery. This feature is asset creation only; it does not grant arbitrary SPARQL UPDATE, mutation of an existing asset, cross-tenant writes, or a new catalog-installation API.
 
+### Recovery after an interrupted execution
+
+A terminal receipt journal records completed guest outputs before the Execution
+asset's persistence finishes. Retrying the **same invocation UUID** can complete
+that receipt after restart without running the guest or its asset/model effects
+again. Timestamp readback compares exact millisecond instants, so Oxigraph's
+`.300Z` to `.3Z` normalization also recovers receipts journaled by older builds.
+Different instants, nonzero submillisecond changes and different RDF content
+still conflict. Recovery preserves the journal, asset identity, current authority
+checks and uncertain-mutation guards.
+
+A TypeScript process killed **before** it records terminal outputs has no durable
+JavaScript continuation. Its same-ID retry returns `INVOCATION_NOT_RETRYABLE`;
+it does not resume the workflow or repeat its effects. The operator must inspect
+the execution trace, durable effect records and destination state to reconcile
+what already happened. Keep the original UUID and records during that investigation;
+do not delete the journal or automatically mint another UUID to retry a write.
+Only explicitly approved new work may use a new UUID after reconciliation. This
+is a manual recovery boundary, not a claim of automatic workflow continuation.
+
+
 ## Raw SPARQL reads without a query catalog
 
 `dkg/sparql-read@1` accepts one SPARQL string from the approved S-expression source. It supports `SELECT`, `ASK`, `CONSTRUCT`, and `DESCRIBE` through the existing DKG scoped-query engine. An unsupported query shape fails closed. It does not accept graph, layer, agent, endpoint, or dataset overrides. Ordinary SPARQL parameters/VALUES can be written into the approved source; this API does not yet interpolate invocation inputs, LLM output, or another delegate's result into the query.

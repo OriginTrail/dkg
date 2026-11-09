@@ -26,6 +26,14 @@ export function createCoreChainCacheContentPeers(ports: {
     connect: (peer, probeSignal) => ports.connect(peer, probeSignal),
     authenticate: (peer, probeSignal) => ports.admit(peer, probeSignal),
   }, signal);
+  let pending: Promise<void> | undefined;
+  let done = false;
+  const advance = () => pending ??= (async () => {
+    const batch = await probes.next();
+    signal.throwIfAborted();
+    if (batch.done) done = true;
+    else { batches.push(batch.value); selected.push(...batch.value); }
+  })().finally(() => { pending = undefined; });
   return {
     selected,
     async *batches() {
@@ -33,10 +41,10 @@ export function createCoreChainCacheContentPeers(ports: {
       for (;;) {
         signal.throwIfAborted();
         if (index < batches.length) { yield batches[index++]; continue; }
-        const batch = await probes.next();
-        signal.throwIfAborted();
-        if (batch.done) return;
-        batches.push(batch.value); selected.push(...batch.value);
+        if (done) return;
+        // Concurrent recovery lanes observe the same admitted batch. Advancing
+        // twice here would skip hints for one lane and duplicate registry work.
+        await advance();
       }
     },
   };

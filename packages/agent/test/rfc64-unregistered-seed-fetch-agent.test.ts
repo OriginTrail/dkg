@@ -22,10 +22,12 @@ import type { DKGAgent } from '../src/dkg-agent.js';
 import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import {
   RFC64_UNREGISTERED_AUTHORITY_COMPAT_NEGATIVE_TTL_MS_V1,
+  RFC64_UNREGISTERED_AUTHORITY_FETCH_MAX_PEERS_V1,
   RFC64_UNREGISTERED_AUTHORITY_RESERVED_NON_CORE_PEERS_V1,
   Rfc64SeedFetchMethods,
 } from '../src/dkg-agent-rfc64-seed-fetch.js';
 import {
+  RFC64_UNREGISTERED_AUTHORITY_FANOUT_TIMEOUT_MS_V1,
   RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1,
   RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1,
 } from '../src/rfc64/unregistered-authority-transport-v1.js';
@@ -816,5 +818,103 @@ describe('Rfc64SeedFetchMethods replica fetch outcomes', () => {
       .toEqual(['peer-edge-author', 'peer-core-a']);
     expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: graphs[0]! }))
       .toEqual(['peer-core-a', 'peer-edge-author']);
+  });
+
+  /** Connected peers of a node and a service that only the author can answer. */
+  function peersAndAuthor(input: Readonly<{
+    readonly cores: readonly string[];
+    readonly edges: readonly string[];
+    readonly author?: string;
+    readonly seed?: Awaited<ReturnType<typeof mintSeed>>;
+    readonly onFetch?: () => void;
+  }>) {
+    const libp2p = {
+      peerId: { toString: () => 'peer-self' },
+      getPeers: () => [...input.cores, ...input.edges].map((peerId) => ({ toString: () => peerId })),
+    };
+    const fetchUnregisteredAuthorityFromPeers = vi.fn(async ({ peerIds }: { peerIds: readonly string[] }) => {
+      input.onFetch?.();
+      return input.author !== undefined && input.seed !== undefined && peerIds.includes(input.author)
+        ? {
+            remotePeerId: input.author,
+            seed: { canonicalBytes: input.seed.canonicalEnvelopeBytes, policyDigest: input.seed.policyDigest },
+          }
+        : null;
+    });
+    const fetch = createFetchAgent({
+      service: { fetchUnregisteredAuthorityFromPeers },
+      libp2p,
+      corePeerIds: input.cores,
+    });
+    const askedPerCall = () => fetchUnregisteredAuthorityFromPeers.mock.calls.map(([call]) => [...call.peerIds]);
+    return { ...fetch, fetchUnregisteredAuthorityFromPeers, askedPerCall };
+  }
+
+  it('asks the next windows before a miss, so an author that sorts after the non-core slots is reached at once', async () => {
+    // The Base mainnet edge: four cores (none speaks the seed exchange), four
+    // public edges without the seed, and the author of a new graph, which this
+    // node dialed, sorting after all of them. The first window keeps four
+    // slots for non-cores in peer-id order, so it never holds the author.
+    const cores = ['peer-core-0', 'peer-core-1', 'peer-core-2', 'peer-core-3'];
+    const edges = ['peer-edge-a', 'peer-edge-b', 'peer-edge-c', 'peer-edge-d', 'peer-edge-z'];
+    const seed = await mintSeed();
+    const { agent, persist, fetchUnregisteredAuthorityFromPeers, askedPerCall } = peersAndAuthor({
+      cores, edges, author: 'peer-edge-z', seed,
+    });
+
+    await expect(agent.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(CONTEXT_GRAPH_ID))
+      .resolves.toBe('fetched');
+
+    expect(fetchUnregisteredAuthorityFromPeers).toHaveBeenCalledTimes(2);
+    expect(askedPerCall()).toEqual([
+      [...cores, 'peer-edge-a', 'peer-edge-b', 'peer-edge-c', 'peer-edge-d'],
+      ['peer-edge-z'],
+    ]);
+    expect(persist).toHaveBeenCalledOnce();
+    // The author leads the next window, the metadata bootstrap's included.
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID })[0])
+      .toBe('peer-edge-z');
+  });
+
+  it('asks each connected peer once and at most the fetch bound of peers before it reports a miss', async () => {
+    const few = peersAndAuthor({ cores: ['peer-core-0'], edges: ['peer-edge-a', 'peer-edge-b'] });
+    await expect(few.agent.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(CONTEXT_GRAPH_ID))
+      .resolves.toBe('not-found');
+    // Every connected peer fits one window: the rotation offers no new peer.
+    expect(few.askedPerCall()).toEqual([['peer-core-0', 'peer-edge-a', 'peer-edge-b']]);
+    expect(String(few.log.debug.mock.calls.at(-1)?.[1])).toContain('none of 3 connected peer(s)');
+
+    const cores = ['peer-core-0', 'peer-core-1', 'peer-core-2', 'peer-core-3'];
+    const edges = Array.from({ length: 60 }, (_, index) => `peer-edge-${String(index).padStart(2, '0')}`);
+    const many = peersAndAuthor({ cores, edges });
+    await expect(many.agent.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(CONTEXT_GRAPH_ID))
+      .resolves.toBe('not-found');
+    const asked = many.askedPerCall().flat();
+    expect(asked).toHaveLength(RFC64_UNREGISTERED_AUTHORITY_FETCH_MAX_PEERS_V1);
+    expect(new Set(asked).size).toBe(asked.length);
+    for (const call of many.askedPerCall()) {
+      expect(call.length).toBeGreaterThan(0);
+      expect(call.length).toBeLessThanOrEqual(RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1);
+    }
+    // The cores are asked in the first window only; the edges follow in order.
+    expect(asked.slice(0, cores.length)).toEqual(cores);
+    expect(asked.slice(cores.length)).toEqual(edges.slice(0, RFC64_UNREGISTERED_AUTHORITY_FETCH_MAX_PEERS_V1 - cores.length));
+  });
+
+  it('starts no window once the fan-out budget is spent', async () => {
+    const cores = ['peer-core-0', 'peer-core-1', 'peer-core-2', 'peer-core-3'];
+    const edges = ['peer-edge-a', 'peer-edge-b', 'peer-edge-c', 'peer-edge-d', 'peer-edge-z'];
+    const seed = await mintSeed();
+    let nowMs = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
+    const slow = peersAndAuthor({
+      cores, edges, author: 'peer-edge-z', seed,
+      onFetch: () => { nowMs += RFC64_UNREGISTERED_AUTHORITY_FANOUT_TIMEOUT_MS_V1; },
+    });
+
+    await expect(slow.agent.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(CONTEXT_GRAPH_ID))
+      .resolves.toBe('not-found');
+    expect(slow.fetchUnregisteredAuthorityFromPeers).toHaveBeenCalledOnce();
+    expect(slow.persist).not.toHaveBeenCalled();
   });
 });

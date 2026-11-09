@@ -59,9 +59,9 @@ describe('bounded query response capability discovery', () => {
       expectedQuadCount: 1, outputGraph: '', profile: 'bounded-single-result', queryOptions,
     })).resolves.toEqual([quad]);
     for (const query of [outerQuery, changelogQuery, indexedQuery, innerQuery]) {
-      expect(query).toHaveBeenCalledTimes(4);
+      expect(query).toHaveBeenCalledTimes(3);
       expect(query.mock.calls.map(([, options]) => options?.maxResponseBytes))
-        .toEqual([1024, 64 * 1024, 8 * 1024 * 1024, 64 * 1024]);
+        .toEqual([1024, 8 * 1024 * 1024, 64 * 1024]);
       for (const [, options] of query.mock.calls) expect(options).toMatchObject(queryOptions);
     }
   });

@@ -381,6 +381,7 @@ function processDurableBatch(
     && totalFetchedDataQuads === 0
     && !verifiedFullyPrivateResponse
     && !cleanEmptySinceBatchDelta
+    && mode.kind !== 'heldMetadata'
     ? 1
     : 0;
   if (metaOnlyResponses > 0) {
@@ -413,7 +414,7 @@ function processDurableBatch(
 }
 
 function durableIntegrityMode(mode: DurableBatchVerificationMode): DurableIntegrityVerificationMode {
-  if (mode.kind === 'fullSnapshot') return mode;
+  if (mode.kind === 'fullSnapshot' || mode.kind === 'heldMetadata') return mode;
   if (mode.kind === 'changelogPage') {
     return { kind: 'changelogPage', changedDataGraphs: new Set(mode.changedDataGraphs) };
   }

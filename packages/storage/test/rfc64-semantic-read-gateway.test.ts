@@ -26,9 +26,12 @@ import {
   MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1,
   OxigraphStore,
   OxigraphWorkerStore,
+  Rfc64ExactBindingsReadResultErrorV1,
   Rfc64SemanticReadCapabilityResultErrorV1,
   createManagedOxigraphSparqlStoreV1,
   SparqlHttpStore,
+  SparqlTsvResultsShapeError,
+  StoreOperationTimeoutError,
   Rfc64SemanticReadGatewayErrorV1,
   SyncSemanticStoreV1,
   type QueryOptions,
@@ -303,6 +306,45 @@ describe('SyncSemanticStoreV1', () => {
     expectGatewayResultError(error);
     expect((error as Error & { cause: unknown }).cause)
       .toBeInstanceOf(Rfc64SemanticReadCapabilityResultErrorV1);
+  });
+
+  it('classifies malformed managed TSV as an exact-bindings result error', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(
+      '?p\t?o\n<urn:predicate>\n',
+      { status: 200, headers: { 'Content-Type': 'text/tab-separated-values' } },
+    ));
+    const managed = createManagedOxigraphSparqlStoreV1({
+      queryEndpoint: 'http://127.0.0.1:7878/query',
+    });
+    const error = await rejected(new SyncSemanticStoreV1(managed).read(
+      requestOf(FIXTURES[0]),
+      { timeoutMs: 1_000 },
+    ));
+
+    expectGatewayResultError(error);
+    const capabilityError = (error as Error & { cause: unknown }).cause;
+    expect(capabilityError).toBeInstanceOf(Rfc64ExactBindingsReadResultErrorV1);
+    expect((capabilityError as Error & { cause: unknown }).cause)
+      .toBeInstanceOf(SparqlTsvResultsShapeError);
+  });
+
+  it('does not translate exact-bindings transport or timeout failures', async () => {
+    const operation = compileRfc64SemanticReadOperationV1(FIXTURES[0].coordinate);
+    const failures = [
+      new Error('transport failed'),
+      new StoreOperationTimeoutError({
+        backend: 'oxigraph-server',
+        operation: 'query',
+        message: 'query timed out',
+      }),
+    ];
+    for (const failure of failures) {
+      const store = certifiedStore(async () => {
+        throw failure;
+      });
+      await expect(executeRfc64ExactBindingsReadCapabilityV1(store, operation))
+        .rejects.toBe(failure);
+    }
   });
 
   it('returns an explicit absent result without invoking the strict record decoder', async () => {

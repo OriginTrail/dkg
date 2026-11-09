@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { GraphScopedDurableManifestPlan } from '../durable-integrity.js';
+import { createGraphScopedDurablePrefix } from '../durable-prefix.js';
+export { manifestGraphsAfter } from '../durable-prefix.js';
 import { estimateQuadHeapBytes } from '../memory-telemetry.js';
 import type { SyncPageProgress } from './page-fetch.js';
 
@@ -32,23 +34,6 @@ export const DEFAULT_DURABLE_DATA_ROUND_BUDGET: DurableDataRoundBudget = Object.
   maxHeapBytes: 128 * 1024 * 1024,
 });
 
-/** The graphs with rows that a round resumed at `resumedFromOffset` reads, in manifest order. */
-export function manifestGraphsAfter(
-  manifest: GraphScopedDurableManifestPlan,
-  resumedFromOffset: number,
-): ReadonlyArray<{ readonly graph: string; readonly rows: number }> {
-  const graphs: Array<{ graph: string; rows: number }> = [];
-  let boundary = 0;
-  for (const descriptor of manifest.descriptors) {
-    if (descriptor.publicTripleCount === 0) continue;
-    boundary += descriptor.publicTripleCount;
-    if (boundary > resumedFromOffset) {
-      graphs.push({ graph: descriptor.assertionGraph, rows: descriptor.publicTripleCount });
-    }
-  }
-  return graphs;
-}
-
 /**
  * The page boundary of one full-graph durable DATA round. It counts the rows a
  * round retains graph by graph, as the bounded planner does: the responder's
@@ -76,33 +61,22 @@ export function createDurableDataRoundBoundary(input: {
 }): (progress: SyncPageProgress) => boolean {
   const budget = input.budget ?? DEFAULT_DURABLE_DATA_ROUND_BUDGET;
   const now = input.now ?? Date.now;
-  let graphs: ReturnType<typeof manifestGraphsAfter> | undefined;
-  const rowsByGraph = new Map<string, number>();
+  let prefix: ReturnType<typeof createGraphScopedDurablePrefix> | undefined;
+  let firstGraphRows = 0;
   let firstGraphHeapBytes = 0;
   return (progress) => {
-    graphs ??= manifestGraphsAfter(input.manifest, progress.resumedFromOffset);
-    const first = graphs[0];
+    prefix ??= createGraphScopedDurablePrefix(input.manifest, progress.resumedFromOffset);
+    prefix.observe(progress.pageQuads);
+    const first = prefix.graphs[0];
     for (const quad of progress.pageQuads) {
-      rowsByGraph.set(quad.graph, (rowsByGraph.get(quad.graph) ?? 0) + 1);
-      if (quad.graph === first?.graph) firstGraphHeapBytes += estimateQuadHeapBytes(quad);
+      if (quad.graph === first?.graph) { firstGraphRows += 1; firstGraphHeapBytes += estimateQuadHeapBytes(quad); }
     }
-    // Leading graphs with every declared row retained; the planner keeps these.
-    let completeGraphs = 0;
-    let completeRows = 0;
-    while (completeGraphs < graphs.length
-      && rowsByGraph.get(graphs[completeGraphs]!.graph) === graphs[completeGraphs]!.rows) {
-      completeRows += graphs[completeGraphs]!.rows;
-      completeGraphs += 1;
-    }
-    // An incomplete round never checkpoints the manifest's end, and never keeps a
-    // last graph that ends exactly at its raw stop offset.
-    const checkpointable = completeGraphs < graphs.length && (completeGraphs > 1
-      || (completeGraphs === 1 && progress.resumedFromOffset + completeRows < progress.nextOffset));
+    const retained = prefix.prefix(progress.nextOffset, false);
+    const checkpointable = retained !== null && !retained.allGraphsComplete && retained.completedGraphCount > 0;
     const due = progress.acceptedQuads >= budget.softRows
       || progress.acceptedHeapBytesEstimate >= budget.softHeapBytes
       || (input.settlementSliceDeadline !== undefined && now() >= input.settlementSliceDeadline);
     if (due && checkpointable) return true;
-    const firstGraphRows = first ? rowsByGraph.get(first.graph) ?? 0 : 0;
     if (
       !(first && firstGraphRows > first.rows)
       && progress.acceptedQuads - firstGraphRows < budget.maxRows

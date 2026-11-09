@@ -6,6 +6,8 @@ export interface ProjectSyncedReadinessPayload {
   sharedMemorySynced: number;
   /** Assets of clean shared-memory rounds that found nothing missing: already held here. */
   sharedMemoryHeldAssets: number;
+  /** Assets of clean durable rounds that found their whole generation stored and current. */
+  durableHeldAssets: number;
   verifiedPrivateOnlyResponses: number;
 }
 
@@ -25,6 +27,10 @@ export function parseProjectSyncedReadinessPayload(
       && (typeof candidate.sharedMemoryHeldAssets !== 'number' || !Number.isFinite(candidate.sharedMemoryHeldAssets))
     ) ||
     (
+      candidate.durableHeldAssets !== undefined
+      && (typeof candidate.durableHeldAssets !== 'number' || !Number.isFinite(candidate.durableHeldAssets))
+    ) ||
+    (
       candidate.verifiedPrivateOnlyResponses !== undefined
       && (
         typeof candidate.verifiedPrivateOnlyResponses !== 'number'
@@ -39,6 +45,7 @@ export function parseProjectSyncedReadinessPayload(
     dataSynced: candidate.dataSynced,
     sharedMemorySynced: candidate.sharedMemorySynced,
     sharedMemoryHeldAssets: candidate.sharedMemoryHeldAssets ?? 0,
+    durableHeldAssets: candidate.durableHeldAssets ?? 0,
     verifiedPrivateOnlyResponses: candidate.verifiedPrivateOnlyResponses ?? 0,
   };
 }

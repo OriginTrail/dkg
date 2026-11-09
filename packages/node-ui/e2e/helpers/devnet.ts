@@ -28,8 +28,8 @@ function readToken(path: string): string {
 }
 
 /** Returns devnet node config when `.devnet/node{N}` exists, else null. */
-export function readDevnetNode(num = 1): DevnetNodeConfig | null {
-  const home = join(REPO_ROOT, '.devnet', `node${num}`);
+export function readDevnetNode(num = 1, devnetDir = join(REPO_ROOT, '.devnet')): DevnetNodeConfig | null {
+  const home = join(devnetDir, `node${num}`);
   const portFile = join(home, 'api.port');
   if (!existsSync(portFile)) return null;
   const apiPort = parseInt(readFileSync(portFile, 'utf8').trim(), 10) || 9201;
@@ -56,9 +56,9 @@ export function isDevnetAvailable(num = 1): boolean {
 
 export async function devnetApiFetch(
   path: string,
-  init: RequestInit & { nodeNum?: number } = {},
+  init: RequestInit & { nodeNum?: number; devnetDir?: string } = {},
 ): Promise<Response> {
-  const node = readDevnetNode(init.nodeNum ?? 1);
+  const node = readDevnetNode(init.nodeNum ?? 1, init.devnetDir);
   if (!node) {
     throw new Error(`Devnet node${init.nodeNum ?? 1} not running`);
   }
@@ -71,7 +71,7 @@ export async function devnetApiFetch(
   if (node.authToken) {
     headers.Authorization = `Bearer ${node.authToken}`;
   }
-  const { nodeNum: _n, ...rest } = init;
+  const { nodeNum: _n, devnetDir: _dir, ...rest } = init;
   return fetch(`http://127.0.0.1:${node.apiPort}${daemonPath}`, { ...rest, headers });
 }
 

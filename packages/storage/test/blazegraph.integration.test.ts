@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { singleAssetTransactionTests } from './_helpers/blazegraph-single-asset-integration.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../src/atomic-asset-group.js';
 import { buildBulkAssetGroupPlan } from '../src/adapters/bulk-asset-group.js';
 import { parseNQuadsTextTolerant } from '../src/nquads-text.js';
@@ -78,6 +79,7 @@ function makeQuads(n: number): Quad[] {
 }
 
 describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', () => {
+  singleAssetTransactionTests(BLAZEGRAPH_URL!);
   let store: BlazegraphStore;
 
   beforeAll(async () => {

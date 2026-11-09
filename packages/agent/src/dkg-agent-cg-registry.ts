@@ -28,7 +28,7 @@ import {
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
   deriveCuratorDidFromCgId,
-  MemoryLayer,
+  MemoryLayer, memoryLayerSlug,
   computeACKDigest,
   encodePublishRequest,
   encodeKAUpdateRequest,
@@ -2397,12 +2397,13 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       try { await this.store.dropGraph(uri); } catch { /* graph may not exist */ }
     }
 
-    // Drop assertion graphs under the sub-graph prefix
-    const sgPrefix = `did:dkg:context-graph:${contextGraphId}/${subGraphName}/assertion/`;
-    const allGraphs = await listGraphsByPrefix(this.store, sgPrefix);
-    for (const g of allGraphs) {
-      if (g.startsWith(sgPrefix)) {
-        try { await this.store.dropGraph(g); } catch { /* graph may not exist */ }
+    // Remove both historical assertions and current per-KA graphs in every memory layer.
+    const sgBase = `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
+    for (const suffix of ['assertion', ...[MemoryLayer.WorkingMemory, MemoryLayer.SharedWorkingMemory,
+      MemoryLayer.VerifiableMemory].map(memoryLayerSlug)]) {
+      const prefix = `${sgBase}/${suffix}/`;
+      for (const graph of await listGraphsByPrefix(this.store, prefix)) {
+        if (graph.startsWith(prefix)) await this.store.dropGraph(graph);
       }
     }
 

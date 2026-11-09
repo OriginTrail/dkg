@@ -2249,6 +2249,77 @@ describe('SparqlHttpStore (test server)', () => {
   });
 });
 
+describe('SparqlHttpStore managed compact SELECT transport', () => {
+  it('streams TSV for managed SELECT, keeps ASK on JSON, and preserves JSON fallback', async () => {
+    const originalFetch = globalThis.fetch;
+    const accepts: string[] = [];
+    let selectCalls = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      const accept = ((init?.headers ?? {}) as Record<string, string>).Accept ?? '';
+      accepts.push(accept);
+      if (accept === 'text/tab-separated-values') {
+        selectCalls += 1;
+        if (selectCalls === 1) {
+          return new Response('?v\n<urn:v>\n', {
+            status: 200,
+            headers: { 'Content-Type': 'text/tab-separated-values; charset=utf-8' },
+          });
+        }
+        return new Response(
+          '{"head":{"vars":["v"]},"results":{"bindings":[{"v":{"type":"uri","value":"urn:fallback"}}]}}',
+          { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+        );
+      }
+      return new Response('{"head":{},"boolean":true}', {
+        status: 200,
+        headers: { 'Content-Type': 'application/sparql-results+json' },
+      });
+    }) as typeof fetch;
+    const managed = createManagedOxigraphSparqlStoreV1({
+      queryEndpoint: 'http://127.0.0.1:7878/query',
+    });
+    try {
+      await expect(managed.query('SELECT ?v WHERE { ?s ?p ?v }')).resolves.toEqual({
+        type: 'bindings', variables: ['v'], bindings: [{ v: 'urn:v' }],
+      });
+      await expect(managed.query('ASK { ?s ?p ?o }')).resolves.toEqual({
+        type: 'boolean', value: true,
+      });
+      await expect(managed.query('SELECT ?v WHERE { ?s ?p ?v }')).resolves.toEqual({
+        type: 'bindings', variables: ['v'], bindings: [{ v: 'urn:fallback' }],
+      });
+      expect(accepts).toEqual([
+        'text/tab-separated-values',
+        'application/sparql-results+json',
+        'text/tab-separated-values',
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await managed.close();
+    }
+  });
+
+  it('leaves generic SPARQL endpoints on JSON', async () => {
+    const originalFetch = globalThis.fetch;
+    let accept = '';
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      accept = ((init?.headers ?? {}) as Record<string, string>).Accept ?? '';
+      return new Response('{"head":{"vars":[]},"results":{"bindings":[]}}', {
+        status: 200,
+        headers: { 'Content-Type': 'application/sparql-results+json' },
+      });
+    }) as typeof fetch;
+    const generic = new SparqlHttpStore({ queryEndpoint: 'http://generic.test/query' });
+    try {
+      await generic.query('SELECT * WHERE { ?s ?p ?o }');
+      expect(accept).toBe('application/sparql-results+json');
+    } finally {
+      globalThis.fetch = originalFetch;
+      await generic.close();
+    }
+  });
+});
+
 describe('SparqlHttpStore RDF term formatting', () => {
   /** Run `work` against a fetch stub and return every request body, in order. */
   async function captureSparql(work: (store: SparqlHttpStore) => Promise<unknown>): Promise<string[]> {

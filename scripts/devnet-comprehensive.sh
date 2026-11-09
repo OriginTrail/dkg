@@ -218,8 +218,8 @@ fi
 # every subscribed member must hold every write within a bound, whoever wrote
 # it: live, at subscribe, after restarts, minutes later, with a member's only
 # sync slot busy, on unregistered, registered and private graphs. It adds three
-# temporary nodes (7 to 10) and removes them again. It runs before the rc.12
-# probes, one of which adds a node 7 of its own, and before the soak.
+# or four temporary nodes (7 to 10) and removes them again. It runs before the
+# rc.12 probes, one of which adds a node 7 of its own, and before the soak.
 register "issue-3251-member-sharing" "issue-3251" "$REPO_ROOT/scripts/devnet-test-issue-3251-member-sharing.mjs"
 
 # Group: rc.12 feature probes

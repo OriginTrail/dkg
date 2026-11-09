@@ -443,11 +443,11 @@ describe('RFC-64 catalog mutation memory on a running agent', () => {
       const markers = persistenceOf(agent).finalizedPrivatePlacementRepairs;
       expect(markers.list()).toEqual([]);
       const stores = watchDurableStores(agent);
-      const lane = vi.mocked((agent as any).resolveRfc64CatalogAuthoringLaneV1);
+      const lane = vi.mocked((agent as any).resolveRfc64CatalogAuthoringLaneDecisionV1);
 
       // The same confirmation is owed again, as after a restart, and the lane no longer accepts it.
       await markers.put(repair);
-      lane.mockReturnValueOnce(null);
+      lane.mockReturnValueOnce({ status: 'inactive' });
       stores.reset();
       await expect(agent.repairRfc64FinalizedPrivateCatalogPlacementV1(repair))
         .rejects.toThrow('RFC-64 finalized-private placement repair lane is inactive');

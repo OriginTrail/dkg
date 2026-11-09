@@ -2801,17 +2801,12 @@ describe('Workspace: conditionalShare (CAS)', () => {
       }],
     };
 
-    try {
-      await publisher.conditionalShare(CONTEXT_GRAPH, [q(ENTITY, 'http://example.org/status', '"traveling"')], opts);
-      expect.unreachable('should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(StaleWriteError);
-      const e = err as InstanceType<typeof StaleWriteError>;
-      expect(e.condition.subject).toBe(ENTITY);
-      expect(e.condition.predicate).toBe('http://example.org/status');
-      expect(e.condition.expectedValue).toBe('"recruiting"');
-      expect(e.actualValue).not.toBeNull();
-    }
+    const result = publisher.conditionalShare(CONTEXT_GRAPH, [q(ENTITY, 'http://example.org/status', '"traveling"')], opts);
+    await expect(result).rejects.toBeInstanceOf(StaleWriteError);
+    await expect(result).rejects.toMatchObject({ condition: {
+      subject: ENTITY, predicate: 'http://example.org/status', expectedValue: '"recruiting"',
+    } });
+    await expect(result).rejects.toHaveProperty('actualValue', expect.anything());
   });
 
   it('supports multiple conditions (all must pass)', async () => {

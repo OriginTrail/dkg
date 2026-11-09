@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { GraphModel } from '../src/core/graph-model.js';
 import { LabelResolver } from '../src/core/label-resolver.js';
 import { PrefixManager } from '../src/core/prefix-manager.js';
 import type { GraphNode } from '../src/core/types.js';
@@ -86,5 +87,28 @@ describe('LabelResolver', () => {
       });
       expect(resolver.resolveNodeLabel(node)).toBe('RDFS Label');
     });
+  });
+});
+
+
+describe('LabelResolver mode and explicit-label precedence', () => {
+  it('resolves type and predicate labels in both modes with explicit label precedence', () => {
+    const prefix = new PrefixManager();
+    const labels = new LabelResolver('humanized', prefix, { predicates: ['urn:title'] });
+    expect(labels.mode).toBe('humanized');
+    expect(labels.resolveTypeLabel('https://schema.org/SocialMediaPosting')).toBe('social media posting');
+    expect(labels.resolvePredicateLabel('urn:some_value')).toBe('some value');
+    expect(labels.resolveUri('')).toBe('');
+    expect(labels.resolveTypeLabel('urn:API')).toBe('API');
+    labels.mode = 'strict';
+    expect(labels.resolveTypeLabel('https://schema.org/Person')).toBe('schema:Person');
+    expect(labels.resolveTypeLabel('urn:Custom')).toBe('Custom');
+    expect(labels.resolvePredicateLabel('urn:predicate')).toBe('predicate');
+    const model = new GraphModel();
+    model.addTriple({ subject: 'urn:subject', predicate: 'urn:title', object: 'Explicit label' });
+    model.addTriple({ subject: 'urn:subject', predicate: 'urn:knows', object: 'urn:other' });
+    labels.updateLabels(model.nodes, model.edges);
+    expect(model.getNode('urn:subject')?.label).toBe('Explicit label');
+    expect([...model.edges.values()][0].label).toBe('knows');
   });
 });

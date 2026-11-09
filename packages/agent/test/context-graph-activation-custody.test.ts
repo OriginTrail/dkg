@@ -182,6 +182,32 @@ describe('persisted activation commits admitted wire adoption after successful e
     expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({ subscribed: false, coreHosted: true, lastReconciledOrdinal: 1 });
     await f.drain();
   });
+  it('rejects a stale activation before the canonical write retires Core custody', async () => {
+    const f = await fixture('host');
+    await expect(f.agent.activatePersistedContextGraphSubscriptionRecord(f.saved, {
+      prepare: async () => {
+        const live = f.state.subscribedContextGraphs.get(LOCAL)!;
+        f.agent.setContextGraphSubscription(LOCAL, { ...live, subscribed: false, pendingMeta: true },
+          { persist: false, deferWireAdoption: true });
+      },
+    })).rejects.toThrow('ownership changed');
+    expect(f.state.subscribedContextGraphs.get(HASH)).toBe(f.originalWire);
+    expect(f.state.subscribedContextGraphs.get(LOCAL)?.pendingMeta).toBe(true);
+    expect(f.state.subscribedContextGraphs.get(LOCAL)?.subscribed).toBe(false);
+    expect(f.remove).not.toHaveBeenCalled();
+    await f.assertHostLive(); await f.drain();
+  });
+
+  it('keeps no-op row identity and independent custody across repeated canonical writes', async () => {
+    const f = await fixture('host');
+    const before = f.state.subscribedContextGraphs.get(LOCAL)!;
+    for (let i = 0; i < 2; i++) {
+      expect(f.agent.setContextGraphSubscription(LOCAL, { ...before },
+        { persist: false, deferWireAdoption: true })).toBe(before);
+    }
+    await f.drain(); f.unchanged(); await f.assertHostLive();
+  });
+
   it('stops dispatch when the native host listener is unwired', async () => {
     const f = await fixture('host');
     f.agent.unwireSwmHostModeHandler(HASH);

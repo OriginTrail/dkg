@@ -19,16 +19,16 @@ export function createGraphs(devnet, edges, { stamp, sub, say }) {
     .sort((a, b) => a - b);
 
   /**
-   * A graph of the owner's, with its sub-graph: { key, id, resolved, private
-   * (its access policy), registered (on chain, as the node answered) }.
+   * A graph of the owner's (or of `by`), with its sub-graph: { key, id,
+   * resolved, private (its access policy), registered (on chain, as the node
+   * answered) }.
    */
-  async function createGraph(key, body) {
-    const { owner } = edges;
-    const id = `${owner.agentAddress}/issue-3251-${key}-${stamp}`;
-    const created = await api(owner, 'POST', '/api/context-graph/create', { id, name: `issue 3251 ${key}`, ...body }, { timeoutMs: 180_000 });
+  async function createGraph(key, body, { by = edges.owner } = {}) {
+    const id = `${by.agentAddress}/issue-3251-${key}-${stamp}`;
+    const created = await api(by, 'POST', '/api/context-graph/create', { id, name: `issue 3251 ${key}`, ...body }, { timeoutMs: 180_000 });
     if (created.json?.created !== id) throw new Error(`graph ${key} was not created: ${brief(created)}`);
     if (body.register && created.json?.registered !== true) throw new Error(`graph ${key} was not registered: ${brief(created)}`);
-    const made = await api(owner, 'POST', '/api/sub-graph/create', { contextGraphId: id, subGraphName: sub }, { timeoutMs: 120_000 });
+    const made = await api(by, 'POST', '/api/sub-graph/create', { contextGraphId: id, subGraphName: sub }, { timeoutMs: 120_000 });
     if (made.json?.created !== sub) throw new Error(`the sub-graph of ${key} was not created: ${brief(made)}`);
     // The graph names of its partitions are built from the id the node resolved.
     const resolved = typeof made.json?.contextGraphId === 'string' && made.json.contextGraphId ? made.json.contextGraphId : id;
@@ -95,5 +95,17 @@ export function createGraphs(devnet, edges, { stamp, sub, say }) {
     return Date.now();
   }
 
-  return { coreNodes, createGraph, keepCoresOut, coresFollowing, subscribe };
+  /** Whether a node follows a graph, by its own listing: { state: 'following' | 'not-following' | …, reason }. */
+  async function following(node, graph) {
+    const answer = await api(node, 'GET', '/api/context-graph/list');
+    return subscriptionState(answer.status, answer.text, graph.id);
+  }
+
+  /** A node stops following a graph; what it holds of it stays. */
+  async function unsubscribe(node, graph) {
+    const answer = await api(node, 'POST', '/api/context-graph/unsubscribe', { contextGraphId: graph.id });
+    if (answer.status !== 200) throw new Error(`${node.label} could not unsubscribe from ${graph.key}: ${brief(answer)}`);
+  }
+
+  return { coreNodes, createGraph, keepCoresOut, coresFollowing, following, subscribe, unsubscribe };
 }

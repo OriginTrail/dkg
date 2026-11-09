@@ -52,9 +52,9 @@ not guarantees: ACK collection, store admission, nonce lanes and chain finality
 can dominate even when RPC admission is fast. More wallets improve throughput
 only while these resources have capacity.
 
-For a worked example, the six-wallet, 57-job report in
-[#2949](https://github.com/OriginTrail/dkg/issues/2949) observed roughly 5,300
-extra requests, or about **93 per publish**, over about 2 rps of quiet traffic.
+For a worked example, one reported run on 10.0.20 with six wallets and 57 jobs
+observed roughly 5,300 extra requests, or about **93 per publish**, over about
+2 rps of quiet traffic.
 That cost includes re-driven passes; it is an aggregate from that run, not a
 universal per-publish constant. With `W=6`, `N=57`, `M=6`, `C=93` and `B=2`, the
 10 rps default leaves 8 rps for publishing: roughly 5.2 publishes/minute and a
@@ -62,7 +62,7 @@ request-only burst drain time of at least 663 seconds. A target of `D=30` second
 per executing publish requires about `2 + 6*93/30 = 20.6` rps before headroom.
 Re-measure `C` on the current build before choosing an override. This calculation
 does not validate a higher rate on a particular provider or reproduce that
-incident's job outcomes.
+run's job outcomes.
 
 A larger queue does not raise throughput. Increase it only if instantaneous
 queue saturation rejects useful work; it can otherwise add wait and cancellation.

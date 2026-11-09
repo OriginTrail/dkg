@@ -35,6 +35,81 @@ function adapter(
 }
 
 describe('canonical finalization receipt capability', () => {
+  it('retains V9 first-matching update verification without admitting it as canonical creation', async () => {
+    const storageInterface = new ethers.Interface(loadAbi('KnowledgeAssetsStorage'));
+    const storageAddress = '0x3333333333333333333333333333333333333333';
+    const encode = (id: bigint, root: Uint8Array) => {
+      const encoded = storageInterface.encodeEventLog(storageInterface.getEvent('KnowledgeBatchUpdated')!,
+        [id, ethers.hexlify(root), 1024n, 100n]);
+      return { address: storageAddress, topics: encoded.topics, data: encoded.data };
+    };
+    const receipt = { hash: TX_HASH, status: 1, from: PUBLISHER, blockNumber: 123,
+      blockHash: BLOCK_HASH, index: 4,
+      logs: [encode(KA_ID + 1n, new Uint8Array(32)), encode(KA_ID, MERKLE_ROOT),
+        encode(KA_ID, new Uint8Array(32))] };
+    const readReceipt = vi.fn(async () => receipt);
+    const chain = adapter({ contracts: { knowledgeAssetsStorage: { interface: storageInterface,
+      target: storageAddress, getAddress: async () => storageAddress } },
+      getTransactionReceiptWithFailover: readReceipt, readContract: vi.fn(async () => PUBLISHER) });
+    await expect(chain.verifyKAUpdate(TX_HASH, KA_ID, PUBLISHER)).resolves.toEqual({
+      verified: true, onChainMerkleRoot: MERKLE_ROOT, blockNumber: 123,
+      blockHash: BLOCK_HASH, txIndex: 4, merkleRootCount: undefined });
+    expect(readReceipt).toHaveBeenCalledOnce();
+    await expect(chain.resolveCanonicalFinalizationReceipt(TX_HASH,
+      { includeKnowledgeAssetUpdates: true })).resolves.toEqual({ status: 'rejected' });
+  });
+
+  it('authenticates V10 updates only with explicit confirmation opt-in', async () => {
+    const storageInterface = new ethers.Interface(loadAbi('DKGKnowledgeAssets'));
+    const storageAddress = '0x3333333333333333333333333333333333333333';
+    const encoded = storageInterface.encodeEventLog(storageInterface.getEvent('KnowledgeAssetUpdated')!,
+      [KA_ID, AUTHOR, 'update-operation', ethers.hexlify(MERKLE_ROOT), 1024n, 100n]);
+    const receipt = { hash: TX_HASH, status: 1, from: PUBLISHER, blockNumber: 123,
+      blockHash: BLOCK_HASH, index: 4,
+      logs: [{ address: storageAddress, topics: encoded.topics, data: encoded.data }] };
+    const finalizedTimestamp = vi.fn(async () => 1_234_567);
+    const roots = [{ publisher: PUBLISHER, merkleRoot: ethers.hexlify(MERKLE_ROOT) }];
+    const readReceipt = vi.fn(async () => receipt);
+    const history = vi.fn(async (_contract: unknown, _label: string, _method: string, args: readonly unknown[]) =>
+      (args[1] as { blockTag: number }).blockTag === 122 ? roots.slice(0, 1) : roots);
+    roots.push({ ...roots[0] });
+    const chain = adapter({ contracts: { knowledgeAssetStorage: { interface: storageInterface, target: storageAddress,
+      getAddress: async () => storageAddress } }, readContractWithOptions: history,
+      getTransactionReceiptWithFailover: readReceipt, getFinalizedBlockTimestamp: finalizedTimestamp }, true);
+    await expect(chain.resolveCanonicalFinalizationReceipt(TX_HASH)).resolves.toEqual({ status: 'rejected' });
+    await expect(chain.resolvePublishByTxHash(TX_HASH)).resolves.toBeNull();
+    readReceipt.mockClear();
+    const options = { includeKnowledgeAssetUpdates: true, expectedBlockNumber: 123 };
+    await expect(chain.resolveCanonicalFinalizationReceipt(TX_HASH, options)).resolves.toEqual({ status: 'confirmed',
+      receipt: { txHash: TX_HASH, blockNumber: 123, blockHash: BLOCK_HASH, txIndex: 4,
+        merkleRoot: MERKLE_ROOT, publisherAddress: PUBLISHER, authorAddress: AUTHOR,
+        batchId: KA_ID, kaId: KA_ID, startKAId: KA_ID, endKAId: KA_ID,
+        knowledgeAssetsContract: storageAddress, assertionVersion: 2n } });
+    expect(readReceipt).toHaveBeenCalledExactlyOnceWith(TX_HASH, { signal: undefined,
+      logLabel: 'canonical finalization receipt' });
+    // An identical prior root is excluded, but two matching appends within this block are ambiguous.
+    roots.push({ ...roots[0] });
+    await expect(chain.resolveCanonicalFinalizationReceipt(TX_HASH, options)).resolves.toEqual({ status: 'rejected' });
+    roots.pop();
+    expect(finalizedTimestamp).toHaveBeenCalledWith(123, BLOCK_HASH, options);
+    receipt.logs[0].address = AUTHOR;
+    await expect(chain.resolveCanonicalFinalizationReceipt(TX_HASH, options)).resolves.toEqual({ status: 'rejected' });
+    receipt.logs[0].address = storageAddress;
+    receipt.logs.push({ ...receipt.logs[0] });
+    await expect(chain.verifyKAUpdate(TX_HASH, KA_ID, PUBLISHER)).resolves.toMatchObject({
+      verified: true, merkleRootCount: 2n });
+    await expect(chain.resolveCanonicalFinalizationReceipt(TX_HASH, options)).resolves.toEqual({ status: 'rejected' });
+    receipt.logs.pop();
+    receipt.logs[0].data = '0x';
+    await expect(chain.resolveCanonicalFinalizationReceipt(TX_HASH, options)).resolves.toEqual({ status: 'rejected' });
+    receipt.logs[0].data = encoded.data;
+    const unavailable = new Error('finalized header unavailable');
+    finalizedTimestamp.mockRejectedValueOnce(unavailable);
+    await expect(chain.resolveCanonicalFinalizationReceipt(TX_HASH, options)).rejects.toBe(unavailable);
+    Reflect.set(chain, 'contracts', {});
+    await expect(chain.resolveCanonicalFinalizationReceipt(TX_HASH, options)).resolves.toEqual({ status: 'rejected' });
+  });
+
   it('distinguishes pending transactions from unknown hashes', async () => {
     const pending = adapter({
       getTransactionWithFailover: vi.fn(async () => ({ hash: TX_HASH })),

@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import ts from 'typescript';
 import { parse } from 'yaml';
 import { CI_LANES, WORKSPACE_OWNING_EVM_SCOPES, WORKSPACE_OWNING_LANES, WORKSPACE_RULES, needsSharedBuild, planCi } from '../ci-delta.mjs';
 import { COVERAGE_JOBS } from '../ci-lanes.mjs';
@@ -199,6 +202,9 @@ test('repository support paths route to the lanes that execute them', () => {
     ['scripts/devnet-test-invite-flow.sh', []],
     ['scripts/import-ontology.mjs', []],
     ['scripts/repro/wm-persistence-regression.mjs', []],
+    ['scripts/repro/async-queue-contention.mjs', []],
+    ['scripts/repro/async-queue-contention/verdict.mjs', []],
+    ['scripts/lib/__tests__/async-queue-contention-verdict.test.mjs', []],
     ['scripts/repro/rfc64-catalog-durable-head.mts', ['tornado_blazegraph', 'tornado_agent']],
     ['scripts/devnet-publish-helpers.sh', ['bura_cli']],
     // The chain lane runs the ABI sync script (sync-chain-abis.unit.test.ts).
@@ -364,7 +370,7 @@ test('each changed path gets one routing decision with a fixed precedence', () =
   }
   // 4. A path claimed only by a trigger is routed by it alone.
   const imageContract = pullRequestPlan([change('blazegraph-image.json')]);
-  assert.deepEqual(selectedLanes(imageContract), ['bura_cli', 'bura_blazegraph_arm64']);
+  assert.deepEqual(selectedLanes(imageContract), ['tornado_blazegraph', 'bura_cli', 'bura_blazegraph_arm64']);
   assert.equal(imageContract.buildChecks, false);
   // 5. Everything else fails closed.
   assert.match(pullRequestPlan([change('new-root-tool.ts')]).reasons[0], /^Unclassified path changed/);
@@ -390,6 +396,8 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   const loadedBy = trace.loaded;
 
   for (const [target, requirement, why] of [
+    ['packages/node-ui/e2e/bootstrap-devnet-runtime.ts', 'kosava_node_ui_e2e', 'the bootstrap failure child fixture imports production orchestration'],
+    ['packages/node-ui/e2e/helpers/devnet.ts', 'kosava_node_ui_e2e', 'bootstrap orchestration reads the selected directory through its devnet helper'],
     ['packages/node-ui/src/ui/agent-identity-api.ts', 'evm:chain', 'the wallet integration suite loads shared identity transport through the API'],
     ['packages/node-ui/src/ui/assertion-identity.ts', 'evm:chain', 'the wallet integration suite loads the API assertion decoder'],
     ['packages/node-ui/src/ui/assertions-page.ts', 'evm:chain', 'the wallet integration suite loads shared assertion discovery through the API'],
@@ -534,6 +542,66 @@ test('the Blazegraph lane covers agent live suites and scoped query catalogs', (
   assert.equal(pullRequestPlan([change('packages/network-sim/src/index.ts')]).lanes.tornado_blazegraph, false);
 });
 
+// The share promote lookup differential provisions the image pinned in blazegraph-image.json. The one reader of that file is
+// packages/cli/blazegraph-image-metadata.cjs, which validates the whole contract, so the step runs the reader instead of interpreting the
+// JSON itself. The step's script runs here against a copy of the reader, a contract fixture and stub docker/curl/pnpm/sleep commands.
+function runPromoteLookupStep(t, contract, { readiness = true } = {}) {
+  const job = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')).jobs['tornado-blazegraph'];
+  const step = job.steps.find(({ name = '' }) => name.startsWith('Share promote lookup live differential on the provisioned Blazegraph image'));
+  assert.ok(step, 'the Blazegraph job runs the share promote lookup differential on the provisioned image');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'promote-lookup-step-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const file of ['packages/cli/blazegraph-image-metadata.cjs', 'packages/storage/blazegraph-namespace-contract.cjs']) {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.cpSync(path.join(REPO_ROOT, file), path.join(root, file));
+  }
+  fs.writeFileSync(path.join(root, 'blazegraph-image.json'), JSON.stringify(contract));
+  const bin = path.join(root, 'bin');
+  fs.mkdirSync(bin);
+  const calls = path.join(root, 'calls.log');
+  const stub = (name, body) => fs.writeFileSync(path.join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  stub('docker', 'echo "docker $*" >> "$CALLS"\nif [ "$1" = port ]; then printf "0.0.0.0:49321\\n[::]:49321\\n"; fi\nexit 0');
+  stub('curl', `echo "curl $*" >> "$CALLS"\nexit ${readiness ? 0 : 22}`);
+  stub('sleep', 'exit 0');
+  stub('pnpm', 'echo "pnpm $* URL=$BLAZEGRAPH_TEST_URL REQUIRE_U001F_COLLAPSE=$BLAZEGRAPH_REQUIRE_U001F_COLLAPSE" >> "$CALLS"\nexit 0');
+  fs.writeFileSync(path.join(root, 'step.sh'), step.run);
+  const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', 'step.sh'], {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CALLS: calls, GITHUB_RUN_ID: '42', GITHUB_RUN_ATTEMPT: '2' },
+  });
+  return { ...result, calls: fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean) : [] };
+}
+
+test('the share promote lookup step reads the pinned Blazegraph image through its canonical reader', (t) => {
+  const contract = { image: 'example.invalid/blazegraph:9@sha256:abc', containerPort: 9999, dataPath: '/data' };
+  const container = 'dkg-ci-promote-lookup-blazegraph-42-2';
+  const ok = runPromoteLookupStep(t, contract);
+  assert.equal(ok.status, 0, ok.stderr + ok.stdout);
+  assert.deepEqual(ok.calls, [
+    `docker run -d --name ${container} -p 127.0.0.1::9999 example.invalid/blazegraph:9@sha256:abc`,
+    `docker port ${container} 9999/tcp`,
+    'curl -sf -o /dev/null --max-time 2 http://127.0.0.1:49321/bigdata/status',
+    'pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts test-live/async-promote-bounded-lookup.blazegraph.test.ts'
+      + ' URL=http://127.0.0.1:49321/bigdata/namespace/kb/sparql REQUIRE_U001F_COLLAPSE=1',
+    `docker rm -f ${container}`,
+  ]);
+
+  // The reader rejects a contract it does not accept, so the step stops before any container exists; a private
+  // interpretation of the JSON would pass the string port straight to docker.
+  const invalid = runPromoteLookupStep(t, { ...contract, containerPort: '9999' });
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /containerPort must be an integer from 1 through 65535/);
+  assert.deepEqual(invalid.calls, []);
+
+  // A pinned image that never serves still fails the step with the container removed.
+  const unready = runPromoteLookupStep(t, contract, { readiness: false });
+  assert.equal(unready.status, 1);
+  assert.match(unready.stdout, /::error::Pinned Blazegraph image did not serve \/bigdata\/status within 120s/);
+  assert.equal(unready.calls.at(-1), `docker rm -f ${container}`);
+  assert.equal(unready.calls.some((call) => call.startsWith('pnpm')), false);
+});
+
 test('primary persistence integration keeps the Agent wrapper in the Agent layer', () => {
   const wrapper = 'packages/agent/src/internal/context-graph-cache-invalidating-store.ts';
   const traceTest = (file, lane) => traceLaneLoads(new Map([
@@ -593,7 +661,8 @@ test('identity-wallet browser actions select the real-EVM chain scope', () => {
 
 test('Blazegraph provisioning changes include the native arm64 contract lane', () => {
   const rootContract = pullRequestPlan([change('blazegraph-image.json')]);
-  assert.deepEqual(selectedLanes(rootContract), ['bura_cli', 'bura_blazegraph_arm64']);
+  // The Blazegraph job also runs the share promote lookup differential on the pinned image, so a bump of it re-runs that lane.
+  assert.deepEqual(selectedLanes(rootContract), ['tornado_blazegraph', 'bura_cli', 'bura_blazegraph_arm64']);
   // The arm64 job's contract check runs the CLI's metadata parser, which
   // loads the storage package's namespace contract.
   assert.ok(pullRequestPlan([change('packages/storage/blazegraph-namespace-contract.cjs')]).lanes.bura_blazegraph_arm64);
@@ -610,4 +679,127 @@ test('Blazegraph provisioning changes include the native arm64 contract lane', (
     'kosava_supporting',
     'kosava_hardhat_plugins',
   ]);
+});
+
+// The publisher queue graph coverage test
+// (packages/publisher/test/async-lift-queue-graph-coverage.test.ts) scans every
+// workspace's src for the queue's graph IRIs, graph constants and source
+// labels. A path pattern cannot see what a file says, and widening the
+// publisher lane to all of agent and cli src would send it to every agent-only
+// or cli-only PR, so this scan stands in for the content check: the build job
+// runs it on every PR that changes code, and it fails until a file that names
+// the queue selects the lane that runs the coverage test.
+const QUEUE_GRAPH_LANE = 'tornado_publisher';
+const QUEUE_GRAPH_COVERAGE_TEST = 'packages/publisher/test/async-lift-queue-graph-coverage.test.ts';
+const QUEUE_GRAPH_STRING = /urn:dkg:publisher|publisher\.(?:asyncLift\.|queueUsage\.lift)/;
+const QUEUE_GRAPH_IDENTIFIERS = new Set([
+  'DEFAULT_CONTROL_GRAPH_URI', 'DEFAULT_WALLET_LOCK_GRAPH_URI', 'DEFAULT_JOURNAL_GRAPH_URI', 'DEFAULT_GRAPH_URI',
+]);
+
+// What the code of one file names of the publisher queue: string and template
+// literals and identifiers, never comments.
+function queueVocabulary(file, text) {
+  const hits = [];
+  const kind = file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const visit = (node) => {
+    if (ts.isStringLiteralLike(node) || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) {
+      if (QUEUE_GRAPH_STRING.test(node.text)) hits.push(node.text);
+    } else if (ts.isIdentifier(node) && QUEUE_GRAPH_IDENTIFIERS.has(node.text)) {
+      hits.push(node.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ts.createSourceFile(file, text, ts.ScriptTarget.Latest, false, kind));
+  return hits;
+}
+
+// The files of `files` that name the queue and whose change does not select
+// the lane that runs the coverage test.
+function queueGraphRoutingGaps(files, read) {
+  return files
+    .filter((file) => queueVocabulary(file, read(file)).length > 0)
+    .filter((file) => !pullRequestPlan([change(file)]).lanes[QUEUE_GRAPH_LANE]);
+}
+
+test('a source file that names a publisher queue graph or label selects the lane that runs the coverage test', () => {
+  const read = (file) => fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
+  const sources = Object.keys(WORKSPACE_RULES)
+    .filter((workspace) => fs.existsSync(path.join(REPO_ROOT, workspace, 'src')))
+    .flatMap((workspace) => sourceFiles(`${workspace}/src`))
+    .filter((file) => /\.(?:ts|tsx|mts)$/.test(file) && !file.endsWith('.d.ts'));
+  // The cheap text filter first; the code scan decides.
+  const naming = sources.filter((file) => /urn:dkg:publisher|publisher\.(?:asyncLift|queueUsage)|_GRAPH_URI/.test(read(file)))
+    .filter((file) => queueVocabulary(file, read(file)).length > 0);
+  // The scan sees the one reference outside the publisher package and the queue's own definitions.
+  assert.ok(naming.includes('packages/cli/src/daemon/chain-reset-wipe.ts'), 'the cli chain-reset wipe names the queue prefix');
+  assert.ok(naming.includes('packages/publisher/src/async-lift-control-plane.ts'), 'the queue defines its graph IRIs');
+  assert.deepEqual(queueGraphRoutingGaps(naming, read), [],
+    'add each of these files to the publisher queue graph coverage trigger in PATH_TRIGGERS (ci-routing.mjs)');
+
+  // The one file outside the publisher package that names the queue is routed by its trigger, and the storage
+  // routing test the coverage test reads by the storage rule: each adds the publisher lane to its package's rule.
+  const wipe = pullRequestPlan([change('packages/cli/src/daemon/chain-reset-wipe.ts')]);
+  assert.match(wipe.reasons.join('\n'), /publisher queue graph coverage test/);
+  assert.ok(wipe.lanes.tornado_publisher && wipe.lanes.bura_cli);
+  assert.ok(pullRequestPlan([change('packages/storage/test/store-control-routing.test.ts')]).lanes.tornado_publisher);
+  assert.ok(pullRequestPlan([change(QUEUE_GRAPH_COVERAGE_TEST)]).lanes.tornado_publisher);
+
+  // The trigger is not widened: the rest of agent and cli src stays off the publisher lane, and only a file
+  // that names the queue (the scan above) is added to it.
+  for (const file of [
+    'packages/agent/src/internal/context-graph-cache-invalidating-store.ts',
+    'packages/agent/src/dkg-agent-publish.ts',
+    'packages/cli/src/daemon/resource-usage-log.ts',
+    'packages/cli/src/publisher-runner.ts',
+    'packages/cli/src/daemon/routes/publisher.ts',
+  ]) {
+    assert.equal(pullRequestPlan([change(file)]).lanes.tornado_publisher, false, file);
+  }
+});
+
+test('the queue scan sees the references a new agent or cli file would add, and not a comment', () => {
+  const planted = {
+    'packages/agent/src/planted-iri.ts': "const journal = 'urn:dkg:publisher:journal';",
+    'packages/agent/src/planted-template.ts': 'const g = `urn:dkg:publisher:${name}`;',
+    'packages/cli/src/daemon/planted-label.ts': "await store.query(q, { source: 'publisher.asyncLift.sneaky' });",
+    'packages/cli/src/planted-queue-usage.ts': "const s = 'publisher.queueUsage.liftJournal';",
+    'packages/agent/src/planted-constant.ts': "import { DEFAULT_WALLET_LOCK_GRAPH_URI } from './x.js'; use(DEFAULT_WALLET_LOCK_GRAPH_URI);",
+    'packages/agent/src/planted-comment.ts': "// the queue lives in urn:dkg:publisher:control-plane, see publisher.asyncLift.getStatus\n/* DEFAULT_GRAPH_URI */\nexport {};",
+    'packages/agent/src/planted-unrelated.ts': "const g = 'urn:dkg:agent:cg';",
+  };
+  const read = (file) => planted[file];
+  // None of them is a file a trigger names, so none selects the lane by its path: the gaps are what the scan reports,
+  // and the routing test above fails with exactly this list for a file like them.
+  assert.deepEqual(queueGraphRoutingGaps(Object.keys(planted), read), [
+    'packages/agent/src/planted-iri.ts',
+    'packages/agent/src/planted-template.ts',
+    'packages/cli/src/daemon/planted-label.ts',
+    'packages/cli/src/planted-queue-usage.ts',
+    'packages/agent/src/planted-constant.ts',
+  ]);
+  // A file that is routed (the one the trigger names, and any publisher file) is not a gap.
+  assert.deepEqual(queueGraphRoutingGaps(['packages/cli/src/daemon/chain-reset-wipe.ts'], () => "const p = 'urn:dkg:publisher:';"), []);
+  assert.deepEqual(queueGraphRoutingGaps(['packages/publisher/src/x.ts'], () => "const p = 'publisher.asyncLift.x';"), []);
+});
+
+test('the queue scan runs in the build job of every PR that changes code, and reads what the coverage test reads', () => {
+  const ci = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
+  assert.equal(ci.jobs.build.if, "needs.changes.outputs.run_node == 'true'");
+  assert.ok(ci.jobs.build.steps.some(({ run = '' }) => run.trim() === 'pnpm run test:scripts'));
+  const scripts = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')).scripts;
+  assert.match(scripts['test:scripts'], /scripts\/lib\/__tests__\/\*\.test\.mjs/);
+  // Every code change that does not select the publisher lane still plans the build job, so the scan runs.
+  for (const file of ['packages/agent/src/planted-iri.ts', 'packages/cli/src/daemon/planted-label.ts', 'packages/node-ui/src/planted.ts']) {
+    const plan = pullRequestPlan([change(file, 'A')]);
+    assert.equal(plan.mode, 'delta', file);
+    assert.equal(needsSharedBuild(plan), true, file);
+  }
+  // The scan's vocabulary is the coverage test's: its graph IRIs, constants and label patterns.
+  const coverage = fs.readFileSync(path.join(REPO_ROOT, QUEUE_GRAPH_COVERAGE_TEST), 'utf8');
+  for (const needle of [
+    'urn:dkg:publisher:control-plane', 'urn:dkg:publisher:wallet-locks', 'urn:dkg:publisher:journal', "'urn:dkg:publisher:'",
+    ...QUEUE_GRAPH_IDENTIFIERS, 'asyncLift\\.', 'queueUsage\\.lift',
+  ]) {
+    assert.ok(coverage.includes(needle), `the coverage test no longer names ${needle}; keep this scan in step`);
+  }
 });

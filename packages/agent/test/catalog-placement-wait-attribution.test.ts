@@ -58,11 +58,12 @@ async function startPlacementAgent(name: string, peers: readonly string[] = []) 
   });
   // Keep the ordinary projection from placing the row first: only the confirmed repair may.
   vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1').mockResolvedValue(null);
-  const realLane = (agent as any).resolveRfc64CatalogAuthoringLaneV1.bind(agent);
-  vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1').mockImplementation(
+  const realLane = (agent as any).resolveRfc64CatalogAuthoringLaneDecisionV1.bind(agent);
+  vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneDecisionV1').mockImplementation(
     (contextGraphId: unknown, subGraphName: unknown) => {
-      const lane = realLane(contextGraphId, subGraphName);
-      return lane === null ? null : { ...lane, acceptsFinalizedVmRepair: true };
+      const decision = realLane(contextGraphId, subGraphName);
+      return decision.status === 'active'
+        ? { ...decision, lane: { ...decision.lane, acceptsFinalizedVmRepair: true } } : decision;
     },
   );
   const clock = { now: 0 };
@@ -223,6 +224,8 @@ describe('catalog placement wait attribution', () => {
     const { agent, clock, placementLines, repairs } = await startPlacementAgent('placement-wait-queue');
     const { seal } = await seedInventoryAssetV1(agent, 'queued', 82n);
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    // Deferred startup discovery completed an empty pass on the test clock.
+    expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.finalizedPrivatePlacement.lastPassDurationMs).toBe(0);
     const blocker = Object.freeze({
       version: 1 as const,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -260,23 +263,26 @@ describe('catalog placement wait attribution', () => {
 
     await repairs().put(blocker);
     const blocked = agent.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair: blocker });
-    expect(blocked.accepted).toBe(true);
-    await blockerEntered;
-    // The observer returns while its placement is queued behind the blocker.
-    await observe(agent, 'queued', seal, 'job-queued');
-    clock.now = 30_000;
-    expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.finalizedPrivatePlacement).toEqual({
-      depth: 1,
-      pending: 2,
-      oldestPendingAgeMs: 30_000,
-      waiters: 2,
-      oldestWaiterAgeMs: 30_000,
-      passRunning: true,
-      lastPassDurationMs: null,
-      cooldownSkips: 0,
-      failures: { failedMarkers: 0, parkedMarkers: 0, oldestFailureAgeMs: null, maxConsecutiveFailures: 0, kinds: [] },
-    });
-    releaseBlocker();
+    try {
+      expect(blocked.accepted).toBe(true);
+      await blockerEntered;
+      // The observer returns while its placement is queued behind the blocker.
+      await observe(agent, 'queued', seal, 'job-queued');
+      clock.now = 30_000;
+      expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.finalizedPrivatePlacement).toEqual({
+        depth: 1,
+        pending: 2,
+        oldestPendingAgeMs: 30_000,
+        waiters: 2,
+        oldestWaiterAgeMs: 30_000,
+        passRunning: true,
+        lastPassDurationMs: 0,
+        cooldownSkips: 0,
+        failures: { failedMarkers: 0, parkedMarkers: 0, oldestFailureAgeMs: null, maxConsecutiveFailures: 0, kinds: [] },
+      });
+    } finally {
+      releaseBlocker();
+    }
     await blocked.whenAttempted;
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
 

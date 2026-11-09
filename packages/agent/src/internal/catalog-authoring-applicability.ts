@@ -1,3 +1,4 @@
+import { isRfc64PublicOnlyAuthoringExclusionV1 } from '../rfc64/catalog-rollout-authority-v1.js';
 import { assertContextGraphIdV1, type NetworkIdV1 } from '@origintrail-official/dkg-core';
 import type { ResolvedDKGAgentConfig } from '../dkg-agent-types.js';
 import type { Rfc64PublicCatalogServiceV1 } from '../rfc64/public-catalog-service-v1.js';
@@ -30,7 +31,7 @@ export function catalogAuthoringApplicability(
   if (service === undefined) return { status: 'unavailable', error: new SwmCatalogAuthorityNotReady('service-unavailable') };
   const accepted = networkId === undefined ? null : service.acceptedPolicySnapshot(networkId as NetworkIdV1, contextGraphId);
   if (accepted === null) return { status: 'unavailable', error: new SwmCatalogAuthorityNotReady('policy-not-accepted') };
-  return accepted.policy.accessPolicy === 1
+  return isRfc64PublicOnlyAuthoringExclusionV1(policy, contextGraphId, accepted.policy.accessPolicy)
     ? { status: 'excluded', reason: 'public-only' }
     : { status: 'required', authority };
 }

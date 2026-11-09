@@ -29,6 +29,7 @@ import {
   readNodeRoleFromConfigSync,
   type AutoUpdateConfig,
 } from '../config.js';
+import { resolveRetentionConfigOrExit } from '../retention-config.js';
 import { ApiClient, type DaemonStatusResponse } from '../api-client.js';
 import {
   STORE_QUADS_REFRESH_AFTER_MS,
@@ -39,16 +40,6 @@ import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
-import {
-  runDaemon,
-  checkForNpmVersionUpdate,
-  performNpmUpdate,
-  performNpmUpdateEdge,
-  getCurrentCliVersion,
-  DAEMON_EXIT_CODE_RESTART,
-  resolveStandaloneInstall,
-  decodeForcedExitCode,
-} from '../daemon.js';
 import {
   isLivenessProbeEnabled,
   startLivenessWatcher,
@@ -263,6 +254,7 @@ program
   .command('daemon-worker', { hidden: true })
   .description('Internal: run daemon worker process')
   .action(async () => {
+    const { runDaemon } = await import('../daemon.js');
     await runDaemon(false);
   });
 
@@ -270,6 +262,7 @@ program
   .command('daemon-foreground-worker', { hidden: true })
   .description('Internal: run foreground daemon worker process')
   .action(async () => {
+    const { runDaemon } = await import('../daemon.js');
     await runDaemon(true);
   });
 
@@ -300,7 +293,10 @@ program
       process.exit(1);
     }
 
-    exitOnStoreConfigErrors(await loadConfig(), (message) => console.error(message));
+    const bootConfig = await loadConfig();
+    exitOnStoreConfigErrors(bootConfig, (message) => console.error(message));
+    // OT-RFC-73 P10b: a bad queue-retention value is refused here, naming the key, before a detached daemon could hide it.
+    resolveRetentionConfigOrExit(bootConfig.queueRetention, (message) => console.error(message));
 
     const pid = await readPid();
     if (pid && isProcessRunning(pid)) {

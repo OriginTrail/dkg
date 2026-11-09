@@ -55,6 +55,51 @@ describe('snapshot admission racing historical graph discovery', () => {
     expect(agent.getSubscribedContextGraphs().get(graph)?.onChainHash).toBe(ethers.id(graph));
   });
 
+  it.each(['inventory', 'transfer'] as const)('allows metadata refresh during inventory but fences it during %s', async stage => {
+    const { agent, snapshot } = await fixture();
+    agent.subscribeToContextGraph(graph, { onChainId: '1', syncMode: 'always-on' });
+    const before = agent.getSubscribedContextGraphs().get(graph)!;
+    agent.setContextGraphSubscription(graph, { ...before, onChainHash: ethers.id(graph),
+      metaSynced: false, pendingMeta: true });
+    const ready = () => agent.markContextGraphSubscriptionState(graph, {
+      metaSynced: true, pendingMeta: false, synced: true,
+    });
+    vi.spyOn(agent.router, 'send').mockImplementation(async () => {
+      if (stage === 'inventory') ready();
+      return Buffer.from(JSON.stringify(snapshot()));
+    });
+    const fetch = vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async ({ policy, options }) => {
+      if (stage === 'transfer') ready();
+      const uals = exactAssetUalsForSelection(policy.selection);
+      return { applied: 0, committedExactAssetUals: options?.isCurrent?.() ? uals : [] } as Awaited<ReturnType<typeof agent.syncExactKnowledgeAssetsFromPeerDetailed>>;
+    });
+    const result = agent.syncPublicGraphSnapshot({ contextGraphId: graph, onChainId: '1',
+      trustedCorePeerIds: ['core'], mode: 'core-cache' });
+    if (stage === 'inventory') await expect(result).resolves.toMatchObject({ committed: 1, current: true });
+    else await expect(result).rejects.toThrow('Snapshot job ownership changed');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['admit', 'unsubscribe', 'resubscribe', 'rebind'] as const)('fences %s during startup source discovery', async change => {
+    const { agent, snapshot } = await fixture();
+    vi.spyOn(agent.router, 'send').mockImplementation(async () => {
+      agent.subscribeToContextGraph(graph, { onChainId: change === 'rebind' ? '2' : '1' });
+      if (change === 'unsubscribe' || change === 'resubscribe') agent.unsubscribeFromContextGraph(graph);
+      if (change === 'resubscribe') agent.subscribeToContextGraph(graph, { onChainId: '1' });
+      return Buffer.from(JSON.stringify(snapshot()));
+    });
+    const fetch = vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async ({ policy }) => ({
+      applied: 0, committedExactAssetUals: exactAssetUalsForSelection(policy.selection),
+    } as Awaited<ReturnType<typeof agent.syncExactKnowledgeAssetsFromPeerDetailed>>));
+    const result = agent.syncPublicGraphSnapshot({ contextGraphId: graph, onChainId: '1',
+      trustedCorePeerIds: ['core'], mode: 'core-cache' });
+    await expect(result).rejects.toMatchObject({
+      message: 'No configured core supplied a valid public snapshot',
+      cause: { message: 'Snapshot job ownership changed' },
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it.each(['unsubscribe', 'resubscribe', 'rebind'] as const)('still cancels on %s during a batch', async change => {
     const { agent } = await fixture();
     vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async () => {

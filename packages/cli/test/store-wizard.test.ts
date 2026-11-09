@@ -758,3 +758,217 @@ describe('applyStoreFlagsToConfig', () => {
     expect(calls[0].url).toBe('http://server.test/query');
   });
 });
+
+// ---------------------------------------------------------------------
+// store.controlReservedSlots (OT-RFC-73 P14)
+// ---------------------------------------------------------------------
+
+// The documented off switch for the async queues' store control path is a key of the `store` block. A helper that
+// rewrites the block must carry it over, or a re-run of `dkg init` or of a setup command with `--store` turns the
+// path back on at the next restart. Any value is carried verbatim, a malformed one included: the daemon refuses
+// that and keeps the path off, while a dropped key would mean the default (on for Blazegraph and managed
+// oxigraph-server on more than 2 CPUs).
+describe('store.controlReservedSlots survives a rewrite of the store block (OT-RFC-73 P14)', () => {
+  const url = 'http://blaze.test/sparql';
+  const reachable = () => mockFetch(() => new Response(JSON.stringify({ boolean: true }), { status: 200 })).fn;
+  const VALUES = [0, '0', 'share:1', 'on', null] as const;
+  const withSlots = (store: { backend: string; options?: Record<string, unknown> }, value: unknown) =>
+    ({ ...store, controlReservedSlots: value }) as NonNullable<DkgConfig['store']>;
+  const sparqlHttp = (queryEndpoint: string) =>
+    ({ backend: 'sparql-http', options: { queryEndpoint, updateEndpoint: queryEndpoint, managedByDkg: false } });
+
+  it.each(VALUES)('dkg init keeps %j when Enter keeps the same Blazegraph URL', async (value) => {
+    const result = await promptStoreBackend({
+      ask: mockAsk(['', '']),
+      existingStore: withSlots({ backend: 'blazegraph', options: { url } }, value),
+      fetch: reachable(),
+      log: () => {},
+    });
+    expect(result.storeBlock).toEqual({ backend: 'blazegraph', options: { url, managedByDkg: false }, controlReservedSlots: value });
+  });
+
+  it.each([
+    ['oxigraph-server', ['1'], { backend: 'oxigraph-server', options: {} }],
+    ['sparql-http', ['sparql-http', 'http://server.test/query'], sparqlHttp('http://server.test/query')],
+    ['another Blazegraph URL', ['', 'http://other.test/sparql'], { backend: 'blazegraph', options: { url: 'http://other.test/sparql', managedByDkg: false } }],
+  ] as const)('dkg init keeps it when the operator picks %s', async (_name, answers, block) => {
+    const result = await promptStoreBackend({
+      ask: mockAsk([...answers]),
+      existingStore: withSlots({ backend: 'blazegraph', options: { url } }, 0),
+      fetch: reachable(),
+      log: () => {},
+    });
+    expect(result.storeBlock).toEqual({ ...block, controlReservedSlots: 0 });
+  });
+
+  it('dkg init keeps it on an oxigraph-server Enter-through, beside the server options', async () => {
+    const existingStore = withSlots({ backend: 'oxigraph-server', options: { port: 7979 } }, 'share:1,publisher:2');
+    const result = await promptStoreBackend({ ask: mockAsk(['']), existingStore, log: () => {} });
+    expect(result.storeBlock).toEqual(existingStore);
+  });
+
+  it('dkg init keeps it when Docker provisions the Blazegraph', async () => {
+    const provisioned = 'http://127.0.0.1:9999/bigdata/namespace/mynode/sparql';
+    const result = await promptStoreBackend({
+      ask: mockAsk(['blazegraph', ' ', 'y']),
+      existingStore: withSlots({ backend: 'oxigraph-server', options: {} }, 0),
+      isDockerAvailable: async () => true,
+      provisionBlazegraphDocker: async () => ({
+        url: provisioned, port: 9999, containerName: 'dkg-blazegraph-mynode', managedByDkg: true, reused: false, namespaceCreated: true,
+      }),
+      log: () => {},
+    });
+    expect(result.storeBlock).toEqual({ backend: 'blazegraph', options: { url: provisioned, managedByDkg: true }, controlReservedSlots: 0 });
+  });
+
+  it('dkg init drops it with the block when the operator picks the embedded store, which never uses the path', async () => {
+    const result = await promptStoreBackend({
+      ask: mockAsk(['oxigraph']),
+      existingStore: withSlots({ backend: 'blazegraph', options: { url } }, 0),
+      log: () => {},
+    });
+    expect(result.storeBlock).toBeNull();
+  });
+
+  it.each(VALUES)('--store blazegraph with the same --store-url keeps %j', async (value) => {
+    const store = newMockConfig({ name: 'dkg-node', store: withSlots({ backend: 'blazegraph', options: { url } }, value) } as DkgConfig);
+    await applyStoreFlagsToConfig({ ...mockConfigIO(store), storeFlag: 'blazegraph', storeUrlFlag: url, fetch: reachable(), log: () => {} });
+    expect(store.saved.map((saved) => saved.store)).toEqual([
+      { backend: 'blazegraph', options: { url, managedByDkg: false }, controlReservedSlots: value },
+    ]);
+  });
+
+  it.each([
+    ['sparql-http', 'http://server.test/query', sparqlHttp('http://server.test/query')],
+    ['oxigraph-server', undefined, { backend: 'oxigraph-server', options: {} }],
+  ] as const)('--store %s keeps it too', async (storeFlag, storeUrlFlag, block) => {
+    const store = newMockConfig({ name: 'dkg-node', store: withSlots({ backend: 'blazegraph', options: { url } }, 0) } as DkgConfig);
+    await applyStoreFlagsToConfig({ ...mockConfigIO(store), storeFlag, storeUrlFlag, fetch: reachable(), log: () => {} });
+    expect(store.saved.map((saved) => saved.store)).toEqual([{ ...block, controlReservedSlots: 0 }]);
+  });
+
+  it('--store oxigraph-server keeps it beside the existing server options', async () => {
+    const existing = withSlots({ backend: 'oxigraph-server', options: { port: 7979 } }, '0');
+    const store = newMockConfig({ name: 'dkg-node', store: existing } as DkgConfig);
+    await applyStoreFlagsToConfig({ ...mockConfigIO(store), storeFlag: 'oxigraph-server', log: () => {} });
+    expect(store.saved.map((saved) => saved.store)).toEqual([existing]);
+  });
+});
+
+// ---------------------------------------------------------------------
+// Every other store setting (#3565)
+// ---------------------------------------------------------------------
+
+// `store.changelog` and `store.graphSetIndex` sit in the same block as `controlReservedSlots`, and so would any key a
+// later release adds. Both apply to every backend, so a rewrite keeps every key but `backend` and `options`, which the
+// helpers rewrite. Switching to the embedded store still clears the block, since the local default has no block to hold
+// them, and the helpers then name what it drops.
+describe('every store setting survives a rewrite of the store block (#3565)', () => {
+  const url = 'http://blaze.test/sparql';
+  const reachable = () => mockFetch(() => new Response(JSON.stringify({ boolean: true }), { status: 200 })).fn;
+  const SETTINGS: ReadonlyArray<Record<string, unknown>> = [
+    { changelog: true },
+    { changelog: false },
+    { graphSetIndex: false },
+    { graphSetIndex: { enabled: true, revalidateMs: 0 } },
+  ];
+  const ALL = { changelog: true, graphSetIndex: { enabled: false }, controlReservedSlots: 0, keyFromALaterRelease: 'kept' };
+  const withSettings = (store: { backend: string; options?: Record<string, unknown> }, settings: Record<string, unknown>) =>
+    ({ ...store, ...settings }) as NonNullable<DkgConfig['store']>;
+  const sparqlHttp = (queryEndpoint: string) =>
+    ({ backend: 'sparql-http', options: { queryEndpoint, updateEndpoint: queryEndpoint, managedByDkg: false } });
+
+  it.each(SETTINGS)('dkg init keeps %j when Enter keeps the same Blazegraph URL', async (settings) => {
+    const result = await promptStoreBackend({
+      ask: mockAsk(['', '']),
+      existingStore: withSettings({ backend: 'blazegraph', options: { url } }, settings),
+      fetch: reachable(),
+      log: () => {},
+    });
+    expect(result.storeBlock).toEqual({ backend: 'blazegraph', options: { url, managedByDkg: false }, ...settings });
+  });
+
+  it.each([
+    ['oxigraph-server', ['1'], { backend: 'oxigraph-server', options: {} }],
+    ['sparql-http', ['sparql-http', 'http://server.test/query'], sparqlHttp('http://server.test/query')],
+    ['another Blazegraph URL', ['', 'http://other.test/sparql'], { backend: 'blazegraph', options: { url: 'http://other.test/sparql', managedByDkg: false } }],
+  ] as const)('dkg init keeps them all when the operator picks %s', async (_name, answers, block) => {
+    const result = await promptStoreBackend({
+      ask: mockAsk([...answers]),
+      existingStore: withSettings({ backend: 'blazegraph', options: { url } }, ALL),
+      fetch: reachable(),
+      log: () => {},
+    });
+    expect(result.storeBlock).toEqual({ ...block, ...ALL });
+  });
+
+  it.each(['oxigraph', 'oxigraph-worker', 'oxigraph-persistent'] as const)(
+    'dkg init keeps them on an Enter-through of an explicit %s block, beside its options',
+    async (backend) => {
+      const existingStore = withSettings({ backend, options: { path: '/custom/store' } }, ALL);
+      const result = await promptStoreBackend({ ask: mockAsk(['']), existingStore, log: () => {} });
+      expect(result.storeBlock).toEqual(existingStore);
+    },
+  );
+
+  it('dkg init keeps them when Docker provisions the Blazegraph', async () => {
+    const provisioned = 'http://127.0.0.1:9999/bigdata/namespace/mynode/sparql';
+    const result = await promptStoreBackend({
+      ask: mockAsk(['blazegraph', ' ', 'y']),
+      existingStore: withSettings({ backend: 'oxigraph-server', options: {} }, ALL),
+      isDockerAvailable: async () => true,
+      provisionBlazegraphDocker: async () => ({
+        url: provisioned, port: 9999, containerName: 'dkg-blazegraph-mynode', managedByDkg: true, reused: false, namespaceCreated: true,
+      }),
+      log: () => {},
+    });
+    expect(result.storeBlock).toEqual({ backend: 'blazegraph', options: { url: provisioned, managedByDkg: true }, ...ALL });
+  });
+
+  it('dkg init drops them with the block when the operator picks the embedded store, and names them', async () => {
+    const lines: string[] = [];
+    const result = await promptStoreBackend({
+      ask: mockAsk(['oxigraph']),
+      existingStore: withSettings({ backend: 'blazegraph', options: { url } }, { changelog: true, graphSetIndex: false }),
+      log: (line) => lines.push(line),
+    });
+    expect(result.storeBlock).toBeNull();
+    expect(lines).toContain(
+      '  The local default store has no store block, so its settings are dropped: store.changelog, store.graphSetIndex.',
+    );
+  });
+
+  it('dkg init says nothing about settings when the cleared block had none', async () => {
+    const lines: string[] = [];
+    await promptStoreBackend({ ask: mockAsk(['oxigraph']), existingStore: { backend: 'blazegraph', options: { url } }, log: (line) => lines.push(line) });
+    expect(lines.join('\n')).not.toContain('settings are dropped');
+  });
+
+  it.each(SETTINGS)('--store blazegraph with the same --store-url keeps %j', async (settings) => {
+    const store = newMockConfig({ name: 'dkg-node', store: withSettings({ backend: 'blazegraph', options: { url } }, settings) } as DkgConfig);
+    await applyStoreFlagsToConfig({ ...mockConfigIO(store), storeFlag: 'blazegraph', storeUrlFlag: url, fetch: reachable(), log: () => {} });
+    expect(store.saved.map((saved) => saved.store)).toEqual([
+      { backend: 'blazegraph', options: { url, managedByDkg: false }, ...settings },
+    ]);
+  });
+
+  it.each([
+    ['sparql-http', 'http://server.test/query', sparqlHttp('http://server.test/query')],
+    ['oxigraph-server', undefined, { backend: 'oxigraph-server', options: {} }],
+  ] as const)('--store %s keeps them all', async (storeFlag, storeUrlFlag, block) => {
+    const store = newMockConfig({ name: 'dkg-node', store: withSettings({ backend: 'blazegraph', options: { url } }, ALL) } as DkgConfig);
+    await applyStoreFlagsToConfig({ ...mockConfigIO(store), storeFlag, storeUrlFlag, fetch: reachable(), log: () => {} });
+    expect(store.saved.map((saved) => saved.store)).toEqual([{ ...block, ...ALL }]);
+  });
+
+  it('--store oxigraph clears the block and names the settings it drops', async () => {
+    const store = newMockConfig({ name: 'dkg-node', store: withSettings({ backend: 'blazegraph', options: { url } }, { changelog: true }) } as DkgConfig);
+    const lines: string[] = [];
+    await applyStoreFlagsToConfig({ ...mockConfigIO(store), storeFlag: 'oxigraph', log: (line) => lines.push(line) });
+    expect(store.saved.map((saved) => saved.store)).toEqual([undefined]);
+    expect(lines).toEqual([
+      '  Removing existing store block (--store oxigraph → local default).',
+      '  The local default store has no store block, so its settings are dropped: store.changelog.',
+    ]);
+  });
+});

@@ -82,14 +82,14 @@ export class OxigraphSource implements GraphDataSource {
 
     const results = this._store.query(sparql);
 
-    // Oxigraph returns an array of Map<Variable, Term> for SELECT
+    // Oxigraph returns an array of Map<string, Term> for SELECT
     const bindings: SparqlBinding[] = [];
     const variableSet = new Set<string>();
 
     for (const row of results) {
       const binding: SparqlBinding = {};
       for (const [variable, term] of row) {
-        const varName = variable.value;
+        const varName = variable;
         variableSet.add(varName);
         binding[varName] = this.termToString(term);
       }

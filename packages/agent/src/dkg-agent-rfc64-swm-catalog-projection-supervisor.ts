@@ -48,12 +48,13 @@ import {
   type CatalogPlacementWaiterObserverV1,
   type FinalizedPrivatePlacementQueueStatusV1,
 } from './internal/catalog-placement-timing.js';
+import type { FinalizedPlacementAuthorityV1 } from './internal/finalized-placement-decision.js';
 import { retainOwedPlacementSealV1 } from './internal/owed-placement-seals.js';
 import type { FinalizedRowHealCountsV1 } from './internal/finalized-row-heal.js';
 
 // Match the default background store lane; repair fanout must not flood its queue.
 const MAX_CONCURRENT_REPAIRS_V1 = 1;
-const DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1 = 5_000;
+export const DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1 = 5_000;
 
 export type Rfc64PublicCatalogAuthorRepairOutcomeV1 =
   | 'pending'
@@ -129,12 +130,13 @@ interface ProjectionOwnerDependenciesV1 {
   readonly listDurableInventoryScopes: () => readonly Readonly<{ contextGraphId: ContextGraphIdV1; authorAddress: EvmAddressV1 }>[];
   readonly listLocalAuthorAddresses: () => readonly EvmAddressV1[];
   readonly acceptsPublicRootLane: (contextGraphId: ContextGraphIdV1) => boolean;
-  readonly acceptsFinalizedPrivateLane: (contextGraphId: ContextGraphIdV1) => boolean;
+  readonly readFinalizedPlacementAuthority: (contextGraphId: string) => FinalizedPlacementAuthorityV1;
   /** GH#3134 — the sweep counts of finalized assets' inventory rows, once the node has run a sweep. */
   readonly readFinalizedRowHealCounts?: () => FinalizedRowHealCountsV1 | undefined;
   readonly readRepairRevision: (
     contextGraphId: ContextGraphIdV1, authorAddress: EvmAddressV1,
   ) => CatalogRepairRevisionHintV1 | null;
+  readonly listFinalizedPrivateRepairsAsync: (signal: AbortSignal) => Promise<readonly Rfc64FinalizedPrivatePlacementRepairV1[]>;
   readonly listFinalizedPrivateRepairs: () => readonly Readonly<
     Rfc64FinalizedPrivatePlacementRepairV1
   >[];
@@ -194,7 +196,8 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       localAuthors.map(authorAddress => ({ contextGraphId: policyEnvelope.payload.contextGraphId as ContextGraphIdV1, authorAddress })));
     discoverDurableCatalogRepairsV1(() => candidates, repairs, newPendingRepairV1, error => { throw error; });
     this.#discoverDurableRepairs(repairs, ctx);
-    const hasFinalizedPrivateRepairs = this.#dependencies.listFinalizedPrivateRepairs().length > 0;
+    // Discover even an empty private queue in the background, never by decoding
+    // its durable markers on the startup caller's stack.
     const existing = this.#state;
     if (existing !== undefined) {
       if (existing.runner.closed || existing.privatePlacement.closed) return;
@@ -222,10 +225,9 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         }
       }
       if (publicRepairRequested) existing.runner.request();
-      if (hasFinalizedPrivateRepairs) existing.privatePlacement.requestPass();
+      existing.privatePlacement.requestPass();
       return;
     }
-    if (repairs.length === 0 && !hasFinalizedPrivateRepairs && !this.#discoveryPending) return;
     const retryIntervalMs = partition?.retryIntervalMs
       ?? DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1;
     this.#state = this.#createState(
@@ -235,7 +237,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       ctx,
     );
     if (repairs.length > 0 || this.#discoveryPending) this.#state.runner.request();
-    if (hasFinalizedPrivateRepairs) this.#state.privatePlacement.requestPass();
+    this.#state.privatePlacement.requestPass();
   }
 
   request(params: Readonly<{
@@ -596,9 +598,10 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
       readonly repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>;
       readonly ctx?: OperationContext;
     }>,
+    observer?: CatalogPlacementWaiterObserverV1,
   ): Rfc64FinalizedPrivatePlacementRepairRequestV1 {
     return projectionOwnerV1(this).requestFinalizedPrivate({
-      repair: params.repair,
+      repair: params.repair, observer,
       ctx: params.ctx ?? createOperationContext('system'),
     });
   }

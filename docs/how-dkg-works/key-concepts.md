@@ -7,7 +7,9 @@ doc_type: concept
 
 # Key Concepts
 
-DKG V10 is easiest to understand as a 3-layer memory system with increasing scope and trust. Agents start with private working notes, share selected knowledge with peers, and publish durable records when the knowledge is worth anchoring.
+The DKG is a neuro-symbolic AI network built around knowledge that participants can share, inspect, and use together. These concepts describe how you join that network, organize a collaboration, contribute evidence, and give useful results a durable provenance record.
+
+Your node and agent participate together. A **Context Graph** gives their work a shared scope; **Knowledge Assets** carry individual contributions; the **memory layers** let those contributions move from private drafts to collaboration and publication.
 
 ![DKG key concepts](../.gitbook/assets/DKG-memory-layers.png)
 
@@ -17,21 +19,32 @@ flowchart LR
   SWM --> VM["Verifiable Memory<br/>chain-anchored Knowledge Assets"]
 ```
 
+For the complete working environment, start with [Node + agent](node-and-agent.md).
+
 ## Core concepts
 
-<table><thead><tr><th width="220">Concept</th><th>Role</th></tr></thead><tbody><tr><td><strong>DKG network</strong></td><td>The peer-to-peer and on-chain system where agents exchange, verify, and finalize knowledge.</td></tr><tr><td><strong>DKG node</strong></td><td>Local daemon that owns storage, networking, auth, wallets, API routes, the Node UI, and agent integrations.</td></tr><tr><td><strong>Context Graph</strong></td><td>A scoped knowledge domain. The Node UI may call this a project.</td></tr><tr><td><strong>Memory layers</strong></td><td>Working Memory is private, Shared Working Memory is peer-visible, Verifiable Memory is network-stored and chain-anchored.</td></tr><tr><td><strong>Knowledge Assets</strong></td><td>Published RDF statements with ownership, provenance, and cryptographic integrity.</td></tr><tr><td><strong>Agents</strong></td><td>OpenClaw, Hermes, MCP clients, and custom agents use the node as their shared context layer.</td></tr><tr><td><strong>Conviction</strong></td><td>TRAC commitment mechanisms that align publishers and stakers with long-term network use.</td></tr></tbody></table>
+| Concept | Role in the network |
+| --- | --- |
+| DKG network | Connect participants and their knowledge through peer exchange, graph relationships, and verifiable publication |
+| Node + agent | Combine an agent's investigation and tool use with a node's knowledge, access, and network operations |
+| Context Graph | Bring a collaboration's knowledge, participants, and policies into one scope |
+| Knowledge Asset | Contribute a named unit of graph knowledge that can be shared, cited, and checked |
+| Memory layers | Choose when work remains private, becomes shared, or gains an on-chain commitment |
+| Neuro-symbolic AI | Combine model capabilities with explicit relationships, queries, and evidence; extend toward graph reasoning and learning |
+| Conviction | Support sustained network participation through publisher and staker commitments |
+
 
 ### Agent
 
-An agent is a software actor that reads, writes, shares, queries, or publishes through a node. The node maps agents to credentials and permissions instead of letting every tool invent its own persistence or trust rules.
+An agent investigates tasks and contributes knowledge through a node. It can retrieve another participant's evidence, connect graph relationships, and record new findings. The node maps each agent to its credentials and permissions, so several agents can collaborate while keeping their authority and authorship distinct.
 
 ### DKG Network
 
-The DKG network combines local nodes, peer-to-peer exchange, and on-chain commitments. It lets agents write knowledge as graph data, replicate selected data to peers, and finalize selected records as verifiable Knowledge Assets.
+The [DKG network](dkg-network.md) connects contributions from independently operated nodes. Peer exchange makes shared knowledge available to authorized participants; publication adds commitments that let readers check a record's origin and content. This gives people and agents a foundation for building on work produced outside their own application.
 
 ### DKG Node
 
-A DKG node is the local gateway into the network. It owns local graph storage, API routes, auth, wallets, peer networking, Context Graph subscriptions, the Node UI, and integrations such as MCP, Hermes, and OpenClaw. A DKG node can perform the function of a Core Node or an Edge Node.
+A [DKG node](dkg-node.md) connects agents and applications to that network. It manages graph storage, identity, access, subscriptions, peer connections, and publication through supported tools and APIs. A node can run as a Core Node or an Edge Node; its agent runtime is a separate choice.
 
 ### Core Node and Edge Node
 
@@ -39,7 +52,7 @@ Core Nodes provide resilient network infrastructure and use an on-chain node pro
 
 ### Context Graph
 
-A Context Graph is similar to what you may know as a project or workspace in tools like Claude Code, Codex, Cursor, or similar agent products. More specifically, a Context Graph is a scoped knowledge domain. A team, application, research effort, customer workspace, or agent swarm can each use a separate Context Graph so memory, membership, access policy, and publication policy stay bounded.
+A [Context Graph](context-graphs.md) brings knowledge together around a project, team, research effort, or application. It gives participants a common scope for connecting their contributions and applying access and publication policies. The Node UI may call it a project; authorized participants can work with it from different nodes and frameworks.
 
 ### Curator
 
@@ -47,11 +60,11 @@ A Curator controls a curated Context Graph. Curators define who can write, who c
 
 ### Integration
 
-An integration connects an outside workflow to a DKG node through a public interface: HTTP API, CLI, MCP, or another supported surface. Good integrations use public node contracts and do not import private monorepo internals.
+An integration lets an existing agent or application use DKG knowledge and contribute its own. Choose HTTP, CLI, MCP, or a framework adapter according to the workflow. The [connection guide](../integrations/README.md) distinguishes callable memory tools, automatic memory integration, and chat transport.
 
 ### Knowledge Asset
 
-A Knowledge Asset is published graph data with provenance and integrity commitments. It is the durable unit that survives beyond local memory and can be independently verified. Each publish mints one Knowledge Asset as a single ERC-721 token, which can describe multiple related entities.
+A Knowledge Asset starts as a named Working Memory draft. Sealing commits to its content; sharing exposes it through SWM; a first on-chain publication mints one ERC-721 token, which can describe multiple related entities. Published updates retain the asset identity. See [Knowledge Assets](knowledge-assets.md).
 
 ### UAL
 
@@ -69,4 +82,8 @@ A Staker locks TRAC to support network infrastructure. V10 Staking Conviction re
 
 SHARE moves selected local knowledge into Shared Working Memory so peers can see it. PUBLISH finalizes selected shared knowledge into Verifiable Memory and creates durable on-chain commitments.
 
-Use SHARE for collaboration. Use PUBLISH for finality.
+Use SHARE when participants should work with the knowledge. Use PUBLISH when they need a durable, independently checkable record. Access policy still determines who can read it.
+
+### Neuro-symbolic AI
+
+Models interpret questions, propose hypotheses, and help select useful actions. Graph knowledge exposes relationships and evidence that can be queried and inspected. The DKG brings these together across a network of contributions. The [roadmap](roadmap-and-convergence.md#reasoning-and-learning-over-shared-knowledge) develops this direction through explicit graph reasoning, GNNs, and knowledge and inference services; consult [availability](../references/availability.md) for the reviewed release surface.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import type { ReplacementBroadcastSignal } from '../src/chain-adapter.js';
@@ -131,6 +131,10 @@ describe('transaction fee pricing at preparation', () => {
 });
 
 describe('V10 write speed-up through the adapter', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   async function strandedPublish(signer: ethers.Wallet) {
     const signedTx = await signer.signTransaction({
       type: 2,
@@ -179,6 +183,36 @@ describe('V10 write speed-up through the adapter', () => {
       if (ethers.Transaction.from(signedTx).maxFeePerGas! > 4_900_000n) chain.mined = txHash;
     };
     return { chain, sent };
+  }
+
+  /**
+   * A V10 publish of `original` that opted in to the speed-up, where every replacement
+   * broadcast is refused, as for a wallet that cannot pay a replacement's fee. `outcome`
+   * settles with the error the publish fails with; `broadcastAt` holds the clock reading at
+   * each broadcast, the original's first.
+   */
+  function publishRefusingReplacements(
+    adapter: EVMChainAdapter,
+    signer: ethers.Wallet,
+    original: Awaited<ReturnType<typeof strandedPublish>>,
+  ) {
+    const broadcastAt: number[] = [];
+    (adapter as any).broadcastSignedTransactionWithRetries = async (_signedTx: string, txHash: string) => {
+      broadcastAt.push(Date.now());
+      if (txHash !== original.txHash) {
+        throw Object.assign(new Error('insufficient funds for gas * price + value'), { code: 'INSUFFICIENT_FUNDS' });
+      }
+    };
+    const outcome: Promise<unknown> = (adapter as any).dispatchSerializedV10Write(
+      signer,
+      'publish',
+      undefined,
+      async () => original,
+      () => { throw new Error('null receipt'); },
+      undefined,
+      async () => {},
+    ).catch((err: unknown) => err);
+    return { outcome, broadcastAt };
   }
 
   it('replaces the stranded publish at its nonce and returns the replacement receipt', async () => {
@@ -251,34 +285,51 @@ describe('V10 write speed-up through the adapter', () => {
     expect(chain.nonceReads).toBe(0);
   });
 
+  // CI, 2026-10-24: on real timers the sleep to the first deadline can end just before
+  // Date.now() reaches it. The check then due found the original underpriced and replaced it
+  // once more, a fourth broadcast (the next test). Fake timers move the clock with the sleeps.
   it('surfaces the receipt timeout, never the replacement broadcast error', async () => {
+    vi.useFakeTimers({ now: 0 });
     const adapter = new EVMChainAdapter(config({ receiptTimeoutMs: 1_000 }));
     const signer = new ethers.Wallet(PRIVATE_KEY);
     const original = await strandedPublish(signer);
-    const events: string[] = [];
-    stubGnosis(adapter, events);
-    (adapter as any).broadcastSignedTransactionWithRetries = async (_signedTx: string, txHash: string) => {
-      events.push(`broadcast:${txHash}`);
-      if (txHash !== original.txHash) {
-        throw Object.assign(new Error('insufficient funds for gas * price + value'), { code: 'INSUFFICIENT_FUNDS' });
-      }
-    };
+    stubGnosis(adapter, []);
 
-    const failure = await (adapter as any).dispatchSerializedV10Write(
-      signer,
-      'publish',
-      undefined,
-      async () => original,
-      () => { throw new Error('null receipt'); },
-      undefined,
-      async () => {},
-    ).catch((err: unknown) => err);
+    const { outcome, broadcastAt } = publishRefusingReplacements(adapter, signer, original);
+    await vi.advanceTimersByTimeAsync(3_000);
+    const failure = await outcome;
     // The timeout still names the transaction an endpoint is known to hold. Each refused
     // replacement was given its own window in case an earlier endpoint took it.
     expect(failure).toMatchObject({ code: 'RPC_TIMEOUT', txHash: original.txHash });
     expect(String((failure as Error).message)).toContain('timed out waiting for a receipt after 1000ms');
     expect(String((failure as Error).message)).toContain('deadline renewed 2x');
-    expect(events).toHaveLength(3);
+    expect(broadcastAt).toEqual([0, 1_000, 2_000]);
+  });
+
+  // A check that falls due before the deadline replaces the underpriced original at once. That
+  // replacement renews no deadline, so the wait still ends after three receipt timeouts.
+  it('replaces an underpriced original once a check is due, without renewing the deadline', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const adapter = new EVMChainAdapter(config({ receiptTimeoutMs: 1_000 }));
+    const signer = new ethers.Wallet(PRIVATE_KEY);
+    const original = await strandedPublish(signer);
+    stubGnosis(adapter, []);
+    // The first receipt lookup answers after the first check is due, a quarter of the timeout.
+    const [endpoint] = (adapter as any).providers;
+    const getTransactionReceipt = endpoint.getTransactionReceipt;
+    let lookups = 0;
+    endpoint.getTransactionReceipt = async (hash: string) => {
+      lookups += 1;
+      if (lookups === 1) await new Promise((resolve) => setTimeout(resolve, 300));
+      return getTransactionReceipt(hash);
+    };
+
+    const { outcome, broadcastAt } = publishRefusingReplacements(adapter, signer, original);
+    await vi.advanceTimersByTimeAsync(3_000);
+    const failure = await outcome;
+    expect(failure).toMatchObject({ code: 'RPC_TIMEOUT', txHash: original.txHash });
+    expect(String((failure as Error).message)).toContain('deadline renewed 2x');
+    expect(broadcastAt).toEqual([0, 300, 1_000, 2_000]);
   });
 
   it('replaces a stuck standalone write, which keeps the receipt it is waited for', async () => {

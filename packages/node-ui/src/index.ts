@@ -51,6 +51,7 @@ export type {
   ContextGraphAutomaticApprovalCommitInput,
   ContextGraphAutomaticApprovalRepairInput,
   ContextGraphAutomaticApprovalRepairRecord,
+  ContextGraphAutomaticApprovalReleaseInput,
   ContextGraphMemberPrincipalType,
   ContextGraphMemberStatus,
   ContextGraphMemberRow,
@@ -61,7 +62,7 @@ export type {
 export { StructuredLogger } from './structured-logger.js';
 export { OperationTracker } from './operation-tracker.js';
 export { MetricsCollector } from './metrics-collector.js';
-export type { MetricsSource } from './metrics-collector.js';
+export type { MetricsSource, StoreCountSnapshot } from './metrics-collector.js';
 export { handleNodeUIRequest } from './api.js';
 export { scopeNotifications, PCA_COST_COVERED_TYPE } from './notifications-scope.js';
 export type {

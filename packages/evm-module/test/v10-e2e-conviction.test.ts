@@ -263,9 +263,9 @@ describe('V10 E2E Conviction System', function () {
       // ---- Step 1: Conviction NFT account creation ----
       //
       // v4.0.0 — The NFT's `createAccount` pulls `committedTRAC` from
-      // msg.sender into the CSS vault directly (fail-closed transferFrom)
-      // and writes the full amount across the 12-epoch lock window via
-      // `EpochStorage.addTokensToEpochRange`. The contract NEVER holds TRAC.
+      // msg.sender into the CSS vault directly (fail-closed transferFrom).
+      // Since PublishingConviction 10.2.0 it books nothing to the staker
+      // pool: the account pays when it draws. The contract NEVER holds TRAC.
       const creator = getDefaultKACreator(accounts);
       await Token.connect(accounts[0]).transfer(creator.address, COMMITTED_TRAC);
       await Token.connect(creator).approve(await NFT.getAddress(), COMMITTED_TRAC);
@@ -361,13 +361,13 @@ describe('V10 E2E Conviction System', function () {
 
       // ---- Step 6: publish() (conviction path) ----
       //
-      // 10.0.8: the conviction branch draws the discounted amount from the
-      // PCA's window budget and emits NOTHING to the staker pool at publish
-      // time — the base commitment's emission schedule was written at
-      // createAccount. We capture the receipt and assert ZERO
-      // `TokensAddedToEpochRange` events on this tx (any event would mean a
-      // direct-spend fallthrough or a double-emission regression), and that
-      // the budget draw landed on `windowSpent`.
+      // 10.2.0: the conviction branch draws the discounted amount from the
+      // PCA's window budget and books exactly that to the staker pool, over
+      // the KA's epochs, as a wallet publish books its payment. We capture
+      // the receipt and assert the `TokensAddedToEpochRange` events sum to the
+      // discounted cost within the KA's epochs (the full amount would mean a
+      // direct-spend fallthrough, twice the cost a double-count), and that
+      // the draw landed on `windowSpent`.
       const tx = await KAV10.connect(creator).publish(p);
       const receipt = await tx.wait();
       expect(receipt!.status).to.equal(1);
@@ -400,9 +400,16 @@ describe('V10 E2E Conviction System', function () {
           // not the event we're after
         }
       }
-      // 10.0.8: ZERO pool emissions on the publish tx — the budget draw is
-      // the only accounting effect (see Step 6 comment above).
-      expect(tokensAddedEvents.length).to.equal(0);
+      // The publish books the discounted cost once, on the staker shard,
+      // within the KA's epochs (see Step 6 comment above).
+      let booked = 0n;
+      for (const ev of tokensAddedEvents) {
+        expect(ev.shardId).to.equal(1n);
+        expect(ev.startEpoch >= currentEpoch).to.equal(true);
+        expect(ev.endEpoch <= currentEpoch + BigInt(epochs)).to.equal(true);
+        booked += ev.tokenAmount;
+      }
+      expect(booked).to.equal(expectedDiscounted);
       // Budget draw: the discounted cost landed on the paying account's
       // current (first) billing window.
       const PCS = await hre.ethers.getContract<PublishingConvictionStorage>(
@@ -412,11 +419,9 @@ describe('V10 E2E Conviction System', function () {
       expect(await PCS.windowSpent(payingAccountId, 0n)).to.equal(
         expectedDiscounted,
       );
-      // Double-count guard is now STRUCTURAL: the conviction branch has no
-      // emission call at all — KAV10 skips `_distributeTokens` on this
-      // branch AND the NFT's `coverPublishingCost` no longer emits the base
-      // portion (it was scheduled at createAccount). Zero events above is
-      // the whole proof.
+      // Double-count guard: KAV10 skips `_distributeTokens` on this branch,
+      // so the NFT's `coverPublishingCost` is the only booking, and the sum
+      // above equals the discounted cost exactly.
       void kav10AddrLower;
 
       // ---- Step 7: KA registered in KAS; publisher of record is msg.sender ----
@@ -456,13 +461,10 @@ describe('V10 E2E Conviction System', function () {
 
       // ---- Step 10: Double-count guard already pinned at Step 6 ----
       //
-      // Step 6 asserted ZERO `TokensAddedToEpochRange` events on the
-      // publish tx (10.0.8: the base commitment's emission is scheduled at
-      // createAccount; a publish only draws the budget). A regression that
-      // re-enabled `_distributeTokens` on the conviction branch — or
-      // re-added the base-portion emission in `coverPublishingCost` —
-      // would make the event count non-zero. The zero-event assertion is
-      // the canonical guard.
+      // Step 6 asserted that the publish tx's `TokensAddedToEpochRange`
+      // events sum to exactly the discounted cost. A regression that
+      // re-enabled `_distributeTokens` on the conviction branch would book
+      // more than that. The sum assertion is the canonical guard.
 
       // ---- Step 11: KA retrieval via public reader ----
       const retrievedKa = await DKGKnowledgeAssets.getKnowledgeAsset(kaId);

@@ -1,0 +1,96 @@
+{
+  "verifiedAt": "2026-10-20T12:35:46.613Z",
+  "nativeSourceWorker": "packages/agent/src/source-worker.ts",
+  "broker": "real local Kafka-compatible broker",
+  "dkg": "real HTTP lifecycle on an isolated mock-chain node",
+  "contextGraphId": "0x45f50557675fcbce7d2976c5f8178cce37f6ea52/kafka-source-poc",
+  "messages": 5,
+  "partitions": 2,
+  "distinctKAs": 5,
+  "replayedWithoutNewKAs": 5,
+  "lostResponseRecovered": true,
+  "failedOffsetCommitRecovered": true,
+  "iterations": [
+    {
+      "status": "failed",
+      "error": "KAFKA_COMMIT_FAILED"
+    },
+    {
+      "status": "completed",
+      "processed": 2,
+      "created": 2,
+      "reused": 0
+    },
+    {
+      "status": "completed",
+      "processed": 2,
+      "created": 1,
+      "reused": 1
+    },
+    {
+      "status": "completed",
+      "processed": 1,
+      "created": 1,
+      "reused": 0
+    }
+  ],
+  "receipts": [
+    {
+      "name": "kafka-record-91aa12d24d95038c9416cefa1589f99cae599102e40cf6067e70abee7cfd9ca0",
+      "assertion": "67e00d71548d9f81705218c9924ae0f0eaecb33f621299ad585f5e89021249b1",
+      "assertionGraph": "did:dkg:context-graph:0x45f50557675fcbce7d2976c5f8178cce37f6ea52/kafka-source-poc/_working_memory/0x45f50557675fcbce7d2976c5f8178cce37f6ea52/14",
+      "reused": false
+    },
+    {
+      "name": "kafka-record-5aa28d9a09ae8a74adbae2f8e1a3e667e2b423eca7e511fb6ed4f5c7e4333e92",
+      "assertion": "7e8fc9f620b8c5c0ded744eb6d5812762cca126797823be7ce12d242a1153ccb",
+      "assertionGraph": "did:dkg:context-graph:0x45f50557675fcbce7d2976c5f8178cce37f6ea52/kafka-source-poc/_working_memory/0x45f50557675fcbce7d2976c5f8178cce37f6ea52/15",
+      "reused": false
+    },
+    {
+      "name": "kafka-record-0d01b3289c0c8c012f5f06e5fefd7451c860cba23247ca67251ec2639b61839b",
+      "assertion": "d4ceed0e0d5ab9eec77448291d91c5e5f13cabfe3d4d1a31442c647ef90ae689",
+      "assertionGraph": "did:dkg:context-graph:0x45f50557675fcbce7d2976c5f8178cce37f6ea52/kafka-source-poc/_working_memory/0x45f50557675fcbce7d2976c5f8178cce37f6ea52/13",
+      "reused": true
+    },
+    {
+      "name": "kafka-record-4a2d52dbcd5edb685aa5f9fdef1a0638c95d51a79bc495b9bb8f4ec578006b15",
+      "assertion": "6cef0e0db2dfdc5e1a392462e47ba25f8cdbd94b312a7131b9da3e8d30298fc8",
+      "assertionGraph": "did:dkg:context-graph:0x45f50557675fcbce7d2976c5f8178cce37f6ea52/kafka-source-poc/_working_memory/0x45f50557675fcbce7d2976c5f8178cce37f6ea52/16",
+      "reused": false
+    },
+    {
+      "name": "kafka-record-cb3ac5c644b302a29a63682ee26cc1294b6c9cb8e81c3e8055fdd6db121c5411",
+      "assertion": "8d209fa6279bb5a374cf4ccfb18fd76e347f95caba5218f150a238f349c20737",
+      "assertionGraph": "did:dkg:context-graph:0x45f50557675fcbce7d2976c5f8178cce37f6ea52/kafka-source-poc/_working_memory/0x45f50557675fcbce7d2976c5f8178cce37f6ea52/17",
+      "reused": false
+    }
+  ],
+  "sourceDefinition": {
+    "id": "kafka-integration",
+    "kind": "kafka",
+    "clusterId": "local-kafka-poc",
+    "brokers": [
+      "127.0.0.1:19092"
+    ],
+    "topic": "dkg-source-poc-mvgo2bzc",
+    "groupId": "dkg-source-poc-mvgo2bzc",
+    "ssl": false,
+    "fromBeginning": true,
+    "maxMessages": 2,
+    "maxBatchBytes": 24000,
+    "readTimeoutMs": 5000,
+    "agentAddress": "0x45f50557675fcbce7d2976c5f8178cce37f6ea52",
+    "contextGraphId": "0x45f50557675fcbce7d2976c5f8178cce37f6ea52/kafka-source-poc",
+    "mapping": [
+      {
+        "field": "exampleId",
+        "predicate": "https://example.com/test/exampleId"
+      }
+    ]
+  },
+  "sourceWorkerCanaryCommit": "693be6317ba8d6db6aefc6b6ff3c77f52ef535cd",
+  "daemonVersion": "10.0.6",
+  "nativeCliVersion": "10.0.6",
+  "nativeCliLoaderVerified": true
+}

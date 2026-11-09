@@ -1,0 +1,32 @@
+{
+  "command": [
+    "pnpm",
+    "--dir",
+    "packages/agent",
+    "exec",
+    "vitest",
+    "run",
+    "--config",
+    "vitest.unit.config.ts",
+    "test/rfc64-catalog-head-replay-peers.test.ts",
+    "-t",
+    "GH\\-3502:\\ a\\ change\\ before\\ the\\ first\\ replay\\ after\\ an\\ empty\\ owner\\ restart\\ triggers\\ the\\ real\\ notice\\ receiver",
+    "--reporter=json",
+    "--outputFile=<report>"
+  ],
+  "exitCode": 0,
+  "rawReportSha256": "0c90f89ef3bf7dffc17230378436127278365c87a94792f75fbee28dd6890caa",
+  "assertions": [
+    {
+      "ancestorTitles": [
+        "an agent answering a peer's replay request it cannot serve now"
+      ],
+      "fullName": "an agent answering a peer's replay request it cannot serve now GH-3502: a change before the first replay after an empty owner restart triggers the real notice receiver",
+      "status": "passed",
+      "title": "GH-3502: a change before the first replay after an empty owner restart triggers the real notice receiver",
+      "duration": 1639.177291,
+      "failureMessages": [],
+      "meta": {}
+    }
+  ]
+}

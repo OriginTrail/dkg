@@ -724,7 +724,7 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
             claimRevision: this.claimContextGraphSubscriptionPersistRevision.bind(this),
             retireRuntime: this.deleteContextGraphSubscription.bind(this),
             refreshMembership: (sourceId) => this.scheduleRfc64CatalogResponsibilityReconciliationV1(sourceId),
-            clearStatus: (sourceId) => this.updateContextGraphSubscriptionRehydrationStatusAfterClear([sourceId]),
+            clearStatus: (sourceId) => this.recordContextGraphSubscriptionClear([sourceId]),
           }),
         });
     } catch (error) {

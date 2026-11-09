@@ -5,6 +5,7 @@ import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { canonicalizeJson, type CanonicalJsonValue } from '@origintrail-official/dkg-core';
 import { ProgramTraceRecorder, readProgramTrace, hashCanonicalPlan, type SemanticRuntimeConfig, type SemanticProgramBinding, type SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
 import { canonicalProgramInputs } from './semantic-runtime-bound-invocation.js';
+import { assertExecutionCapabilityAuthorized } from './semantic-runtime-invocation-policy.js';
 import { programBindingDigest } from './semantic-runtime-program-bindings.js';
 import { ConfiguredSemanticRuntimeService, SemanticInvocationResult, SemanticProgramError, StoredSemanticProgram, TypeScriptComposition } from './semantic-runtime-types.js';
 import { SR, hashParts, historyIsAtLayer, literalQuad, safeMessage, sameSet, sourceHashOf } from './semantic-runtime-values.js';
@@ -127,7 +128,24 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
   try { inputJson = canonicalProgramInputs(inputs); }
   catch { throw new SemanticProgramError('INVALID_PROGRAM_INPUTS', 'inputs must be a JSON array of at most 64 KiB and depth 20', 400); }
   const budget: TypeScriptComposition['budget'] = parent?.budget ?? { calls: 0, maximum: grant.maxCalls, deadline: Date.now() + grant.timeoutMs, cancelled: false };
+  const executionIri = `urn:sr:execution:${invocationId}`;
+  const priorExecution = runtime.store.execution(executionIri);
+  let executionAuthorityRequired = priorExecution !== null;
+  // A prior failed/paused invocation may disclose authorized diagnostics only:
+  // the existing-state branch below rejects it before guest or receipt work.
+  const expectedStatus = priorExecution?.status ?? 'active';
+  let joiningInvocation = false;
+  const checkCapability = () => {
+    if (executionAuthorityRequired) {
+      // A joined invocation can finish while its caller awaits grant checks;
+      // this branch only reads its result and cannot start receipt mutations.
+      const status = joiningInvocation && runtime.store.execution(executionIri)?.status === 'completed'
+        ? 'completed' : expectedStatus;
+      assertExecutionCapabilityAuthorized(runtime, executionIri, status);
+    }
+  };
   const check = async () => {
+    checkCapability();
     if (budget.uncertainEffect) throw budget.uncertainEffect;
     if (budget.cancelled || Date.now() > budget.deadline) throw new SemanticProgramError('PROGRAM_EXECUTION_CANCELLED', 'Execution is cancelled or expired', 409);
     await authorized();
@@ -145,12 +163,14 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
       }
     };
     checkChildren(binding, [operationKey]);
+    checkCapability();
   };
   const identity = hashParts(['typescript-v1', digest, caller.toLowerCase(), inputJson, ...(parent?.ancestors ?? [])]);
   const key = `${graph}\0${invocationId}`;
   const existing = runtime.inFlight.get(key);
   if (existing) {
     if (existing.requestIdentity !== identity) throw new SemanticProgramError('INVOCATION_LAYER_CONFLICT', 'Invocation already has different inputs or authority', 409);
+    joiningInvocation = true;
     await check();
     return existing.promise;
   }
@@ -159,7 +179,7 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
     const program = await validateTypeScriptProgram(agent, runtime, binding, check);
     const executor = agent.listLocalAgents().find(item => item.agentAddress.toLowerCase() === binding.executorAgentAddress.toLowerCase());
     if (!executor || !agent.getCustodialAgentPrivateKey(executor.agentAddress)) throw new SemanticProgramError('TARGET_EXECUTOR_NOT_LOCAL', 'Executor is unavailable', 409);
-    const executionIri = `urn:sr:execution:${invocationId}`, name = `semantic-execution-${invocationId}`;
+    const name = `semantic-execution-${invocationId}`;
     const layer = binding.executionLayer ?? 'wm';
     const previous = runtime.store.execution(executionIri);
     const history = await agent.assertion.history(graph, name, { agentAddress: executor.agentAddress });
@@ -205,6 +225,7 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
     };
     const dispatchTool = createProgramToolDispatcher(runtime, resolved, authority, executionIri, invocationId, check,
       { binding, digest, assertAuthorized: check });
+    executionAuthorityRequired = true;
     const childExecutions: string[] = [], startedAt = new Date();
     const trace = new ProgramTraceRecorder(runtime.store, executionIri);
     try {
@@ -260,13 +281,13 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
       return { ...(mayReadTrace ? { trace: trace.trace } : {}), invocationId, executionIri, executionLayer: layer, ...(persistence.ual ? { executionUal: persistence.ual } : {}), outputs: [output], persisted: true };
     } catch (error) {
       trace.finish(error);
-      if (!journal.terminal) runtime.store.setExecutionStatus(executionIri, 'failed');
       const failure = error instanceof SemanticProgramError ? error : budget.uncertainEffect
         ?? new SemanticProgramError('TYPESCRIPT_EXECUTION_FAILED', safeMessage(error), 422);
       // A revoked grant must not leak earlier successful reads through diagnostics.
       failure.trace = undefined;
-      try { await authorized(); if (mayReadTrace) failure.trace = trace.trace; }
+      try { await check(); if (mayReadTrace) failure.trace = trace.trace; }
       catch { failure.trace = undefined; }
+      if (!journal.terminal) runtime.store.setExecutionStatus(executionIri, 'failed');
       throw failure;
     }
   };

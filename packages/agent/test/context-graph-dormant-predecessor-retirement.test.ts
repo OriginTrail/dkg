@@ -187,7 +187,7 @@ describe('durable dormant name predecessor retirement', () => {
     const f = await fixture([predecessor({ coreHosted: true })]);
     const saved: ContextGraphSubscriptionRecord = { ...predecessor(), id: LOCAL };
     await f.agent.activatePersistedContextGraphSubscriptionRecord(saved, {
-      prepare: async subscription => f.agent.persistContextGraphSubscriptionStrict(LOCAL, subscription),
+      prepare: async (_subscription, persistRepair) => { await persistRepair(); },
     });
     await f.drain();
     f.agent.unsubscribeFromContextGraph(LOCAL); await f.drain();

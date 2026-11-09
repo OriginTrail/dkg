@@ -35,6 +35,15 @@ describe('write preflight failure attribution', () => {
     expect(h.subscriptionStore.load).toHaveBeenCalledTimes(1);
     expect(h.store.query).toHaveBeenCalledTimes(1);
   });
+  it('labels the declaration read with its own source', async () => {
+    const h = harness();
+    await probe(h);
+    expect(h.store.query).toHaveBeenCalledTimes(1);
+    expect(h.store.query).toHaveBeenCalledWith(
+      expect.stringContaining('SELECT ?kind ?value'),
+      { source: 'agent.writePreflight.declaration' },
+    );
+  });
   it('retains all independent failed sites, with no first-cause claim or raw error', async () => {
     const secret = new Error('https://user:secret@provider/private?token=abc');
     const h = harness({ existence: secret, content: timeout(), subscription: secret, declaration: secret });

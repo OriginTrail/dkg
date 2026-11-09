@@ -2,7 +2,7 @@
  * Always-reported state summary for `dkg doctor` (OT-RFC-41 §4.7.0).
  *
  * The state summary gathered from a mix of:
- *   - `~/.dkg/config.json` + `~/.dkg/daemon.pid` + `~/.dkg/previous-version`
+ *   - `~/.dkg/config.json` (or `config.yaml`) + `~/.dkg/daemon.pid` + `~/.dkg/previous-version`
  *   - `~/.dkg/auto-update/{last-check,last-error}.json`
  *   - `GET /api/status` (added by §4.9 — populates daemon.commit, distTag, buildTime, installMode)
  *   - `/proc/<pid>/cmdline` (Linux) / `ps -o command=` (macOS) — daemon entryPoint
@@ -15,6 +15,7 @@
  */
 import { join } from 'node:path';
 import type { DoctorDeps, LocalInstallMode, StateSummary } from './types.js';
+import { readConfigMapping } from './config-file.js';
 import { inspectNodeRuntime } from '../node-runtime-preflight.js';
 
 const AUTO_UPDATE_LAST_CHECK_FILE = 'auto-update/last-check.json';
@@ -92,21 +93,12 @@ async function resolveDaemonEntryPoint(
 }
 
 /**
- * Read and parse `~/.dkg/config.json`. Returns `{}` on missing /
- * malformed config — checks downstream report explicit findings
- * for those conditions.
+ * Read and parse the node config (`config.json`, else `config.yaml`).
+ * Returns `{}` on missing / malformed config — checks downstream report
+ * explicit findings for those conditions.
  */
 async function readDkgConfig(deps: DoctorDeps): Promise<Record<string, unknown>> {
-  const raw = await deps.readFile(join(deps.dkgHome, 'config.json'));
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw);
-    return typeof parsed === 'object' && parsed !== null
-      ? (parsed as Record<string, unknown>)
-      : {};
-  } catch {
-    return {};
-  }
+  return (await readConfigMapping(deps))?.config ?? {};
 }
 
 async function readPid(deps: DoctorDeps): Promise<number | null> {

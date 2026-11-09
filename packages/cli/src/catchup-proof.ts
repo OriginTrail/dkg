@@ -47,7 +47,8 @@ export interface CatchupPlaneCompletionEvidence {
    * gossip, by another lane, before a restart), so the round inserted nothing.
    * As strong as `verifiedDataPeers`, which proves the same of a peer whose
    * content arrived in this round; kept apart so it never counts as data
-   * received. Shared memory only.
+   * received. On the durable plane, a peer whose whole generation was already
+   * stored here and current on chain.
    */
   heldContentPeers?: number;
   emptyPeers: number;
@@ -190,7 +191,9 @@ export function catchupPeerPlaneEvidence(
   return {
     verifiedDataPeers: (plane.insertedDataTriples ?? 0) > 0 ? 1 : 0,
     verifiedPrivateOnlyPeers: (plane.verifiedPrivateOnlyResponses ?? 0) > 0 ? 1 : 0,
-    heldContentPeers: options.plane === 'shared-memory' && sharedMemoryRoundFoundNothingMissing(plane) ? 1 : 0,
+    heldContentPeers: (options.plane === 'shared-memory'
+      ? sharedMemoryRoundFoundNothingMissing(plane)
+      : (plane.verifiedHeldAssets ?? 0) > 0) ? 1 : 0,
     emptyPeers: (plane.emptyResponses ?? 0) > 0 ? 1 : 0,
     authorityEmptyPeers: options.fromAuthority && carriedNoData && answered ? 1 : 0,
   };

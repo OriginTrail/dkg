@@ -8,17 +8,6 @@ import { refuseUnlistedWorkspaceSigner } from './internal/context-graph-authorit
  * 1:1 move; methods take `this: DKGAgent` so cross-calls resolve against the
  * composed class.
  */
-
-
-// SPDX-License-Identifier: Apache-2.0
-/**
- * Workspace-encryption / sender-key subsystem extracted from dkg-agent.ts as
- * a mixin holder: recipient/gate resolution, on-chain access-policy reads,
- * SWM sender-key epoch creation + distribution, pending-package queueing,
- * encrypt/decrypt of workspace payloads, and sender-key state persistence.
- * 1:1 move; methods take `this: DKGAgent` so cross-calls resolve against the
- * composed class.
- */
 import { collectProjectedDelegatees } from './internal/workspace-projected-delegatees.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { hasVerifiedEncryptionCustody } from './encryption-key-enrollment.js';
@@ -34,6 +23,7 @@ import type { RegisteredContextGraphAuthority } from './registered-context-graph
 import { resolveSwmMemberRecoveryAuthorityDecision, resolveSwmRegisteredAuthorityDecision, resolveSwmTransportAuthorityDecision, type SwmRegisteredAuthorityReadOptions, type SwmTransportAuthority } from './internal/context-graph-authority/swm-transport-authority.js';
 import { noRosterFrom } from './internal/context-graph-authority/unanswered-authority-read.js';
 import { FANOUT_RESPONSE_REJECTED, FANOUT_RESPONSE_RETRYABLE } from './swm/substrate-fanout.js';
+import { refuseUnlistedWorkspaceSigner } from './internal/context-graph-authority/approved-member-metadata-pending.js';
 import { SyncTargetSupersededError } from './sync/error-tags.js';
 import { resolveAssetUalFromKaIdentity } from './ka-identity.js';
 
@@ -1574,8 +1564,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         }
         return {
           resolution: { requiresEncryption: true, recipients: [firstRecipient, ...remainingRecipients] },
-          stayedCurrent: () => projection.recipientKeyRouteFence.hasPendingWrites !== true
-            && attemptRevision === projection.recipientKeyRouteFence.revision
+          stayedCurrent: () => projection.recipientKeyRouteFence.isCurrentFor(attemptRevision, participantAgents)
             && attemptGate === projection.peerGateRevision.read(input.contextGraphId),
         };
       };
