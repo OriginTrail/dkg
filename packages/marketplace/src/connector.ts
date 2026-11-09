@@ -42,12 +42,19 @@ export class UpstreamError extends Error {
 
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 
+/** Drops trailing slashes in one pass; a regular expression for this is slow on a long run of slashes. */
+function withoutTrailingSlashes(url: string): string {
+  let end = url.length;
+  while (end > 0 && url[end - 1] === '/') end -= 1;
+  return url.slice(0, end);
+}
+
 export function connectorOf(settings: ConnectorSettings): Connector {
   const base = new URL(settings.baseUrl);
   if (settings.kind === 'llamacpp' && !LOOPBACK.has(base.hostname)) {
     throw new Error(`a llama.cpp backend is served on loopback only, not ${base.hostname}`);
   }
-  const endpoint = `${settings.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const endpoint = `${withoutTrailingSlashes(settings.baseUrl)}/chat/completions`;
   return {
     kind: settings.kind,
     async complete({ messages, maxTokens }) {

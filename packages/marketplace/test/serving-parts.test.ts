@@ -135,7 +135,7 @@ describe('offers', () => {
 describe('the OpenAI-compatible backend', () => {
   let server: Server;
   let base: string;
-  let seen: { auth?: string; body?: Record<string, unknown> };
+  let seen: { auth?: string; body?: Record<string, unknown>; path?: string };
   let reply: { status: number; body: unknown };
 
   beforeEach(async () => {
@@ -144,7 +144,7 @@ describe('the OpenAI-compatible backend', () => {
     server = createServer(async (req: IncomingMessage, res) => {
       let text = '';
       for await (const chunk of req) text += chunk;
-      seen = { auth: req.headers.authorization, body: JSON.parse(text) };
+      seen = { auth: req.headers.authorization, body: JSON.parse(text), path: req.url };
       res.writeHead(reply.status, { 'content-type': 'application/json' }).end(JSON.stringify(reply.body));
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -158,6 +158,12 @@ describe('the OpenAI-compatible backend', () => {
       .toEqual({ content: 'synthetic answer', promptTokens: 3, completionTokens: 2 });
     expect(seen.body).toMatchObject({ model: 'test-model', max_tokens: 7, stream: false });
     expect(seen.auth).toBeUndefined();
+    expect(seen.path).toBe('/v1/chat/completions');
+  });
+
+  it('drops trailing slashes from the base URL', async () => {
+    await connectorOf({ kind: 'llamacpp', baseUrl: `${base}///`, model: 'test-model' }).complete({ messages: [], maxTokens: 1 });
+    expect(seen.path).toBe('/v1/chat/completions');
   });
 
   it("sends an upstream's key from its environment variable, and fails without text and counts", async () => {
