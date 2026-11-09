@@ -405,6 +405,14 @@ export interface ServiceRequest {
 
 export interface FundingRequest { epoch: 'current' | 'next' | number; source: SourceRequest; services: ServiceRequest[] }
 
+/**
+ * A top-up of a subscription: what to add, and its key, a UUID v4 made once
+ * per confirmed top-up. The node carries a key out once: a repeat of the
+ * request gets the first answer, and the key with another body is refused
+ * with IdempotencyKeyReused (409).
+ */
+export interface TopUpRequest { services: ServiceRequest[]; idempotencyKey: string }
+
 export interface PlanRequest { services: ServiceRequest[]; source: SourceRequest; renew: boolean; renewUntilEpoch?: number }
 
 export interface KeyRequest { label: string; budget: string; services?: string[] | null; rps?: number; expiresAt?: number | null }

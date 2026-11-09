@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmtMicro, microOfWei, weiOfMicro } from '../src/ui/marketplace/amounts.js';
+import { fmtMicro, microOfWei, tracOfWei, weiOfMicro, weiOfTrac } from '../src/ui/marketplace/amounts.js';
 import { lineFor } from '../src/ui/marketplace/purchase/Composer.js';
 import type { Offer, Service } from '../src/ui/marketplace/api/types.js';
 
@@ -17,6 +17,15 @@ describe('marketplace amounts', () => {
     expect(microOfWei('123456000000')).toBe('0.123456');
     expect(microOfWei('10')).toBe('0.00000000001');
     expect(microOfWei('1200000000000')).toBe('1.2');
+  });
+
+  it('writes an amount in TRAC exactly, for a value to edit, and reads it back to the wei', () => {
+    for (const wei of [1n, 5n * 10n ** 17n, 10n ** 18n, 123_456_789_012_345_678n, 3n * 10n ** 18n + 7n]) {
+      expect(weiOfTrac(tracOfWei(wei))).toBe(wei);
+    }
+    expect(tracOfWei('500000000000000000')).toBe('0.5');
+    expect(tracOfWei('2000000000000000000')).toBe('2');
+    expect(tracOfWei('1')).toBe('0.000000000000000001');
   });
 
   it('cuts a price to four places for display only', () => {

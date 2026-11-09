@@ -2,10 +2,20 @@
 import React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PlansView } from '../src/ui/marketplace/views/PlansView.js';
-import { FIXTURE_IDS, fixtureFetch } from '../src/ui/marketplace/api/fixtures.js';
-import { MISSING_COPY, byTestId, click, flush, render, type, unmountAll, useFixtureNode, waitForText } from './helpers/marketplace-render.js';
+import { TopUp } from '../src/ui/marketplace/purchase/TopUp.js';
+import { FIXTURE_IDS, fixtureFetch, fixtureWorld } from '../src/ui/marketplace/api/fixtures.js';
+import { MISSING_COPY, buttonWithText, byTestId, click, flush, reloadPage, render, type, unmountAll, useFixtureNode, waitForText } from './helpers/marketplace-render.js';
 
 const plans = () => React.createElement(PlansView);
+
+async function waitUntil(check: () => boolean, what: string, timeoutMs = 2_000): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (check()) return;
+    await flush(10);
+  }
+  throw new Error(`Timed out waiting for ${what}`);
+}
 
 /** The fixture node, keeping what each write sent. */
 function recordWrites(scenario: 'active' | 'none'): Array<{ method: string; url: string; body: unknown }> {
@@ -65,36 +75,69 @@ function editedNode(scenario: 'active' | 'none', edit: (method: string, url: str
   return writes;
 }
 
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+/** A refusal as the node's marketplace routes send it. */
+const refusal = (status: number, code: string, args: string[] = []) => json({ error: `${code}(${args.join(', ')})`, code, ...(args.length ? { args } : {}), retryable: false }, status);
+
+/** How the first send of a top-up's key goes. */
+type FirstSend =
+  /** The node takes the key, the transaction lands, and the answer comes back. */
+  | 'answer'
+  /** The node takes the key, but its answer never comes back; the transaction lands at `land()`. */
+  | 'lose'
+  /** This answer comes back instead, from in front of the node or as its refusal, and the key is not taken. */
+  | (() => Response);
+
 /**
- * The fixture node, keeping every request, whose top-ups go through `answer`:
- * `commit()` lands the top-up and gives the node's answer, which `answer` may
- * return, replace or lose. Reads of the subscriptions then show what landed;
- * with `holdChecks` on, those after a top-up wait for `release()`.
+ * The fixture node, keeping every request, with top-ups as its contract has
+ * them: each idempotency key is carried out once, a repeat of a key gets the
+ * first answer (and waits for it while the transaction is on its way), and a
+ * key sent with another body is refused with IdempotencyKeyReused. `first`
+ * says how each key's first send goes, in turn (then 'answer'); with
+ * `refuseCaller` set, every top-up gets that answer before its key is looked
+ * at, as a token that is not the node admin's does. Reads of the
+ * subscriptions show what landed; with `holdChecks` on, those after a top-up
+ * wait for `release()`.
  */
-function topUpNode(answer: (commit: () => Promise<Response>) => Promise<Response>) {
+function topUpNode() {
   const requests: Array<{ method: string; url: string; body: unknown }> = [];
   const node = fixtureFetch('active');
   let landed: Json | null = null;
+  let landings = 0;
   let toppedUp = false;
+  const keys = new Map<string, { body: string; answer: Promise<string> }>();
+  const onTheirWay: Array<() => void> = [];
   const held: Array<() => void> = [];
   const control = {
     requests,
+    first: [] as FirstSend[],
+    refuseCaller: null as (() => Response) | null,
     holdChecks: false,
     /** The subscriptions read once fails, as a node error. */
     failNextRead: false,
+    /** The transactions whose answers were lost land. */
+    land() { for (const l of onTheirWay.splice(0)) l(); },
     release() { for (const r of held.splice(0)) r(); },
     get waiting() { return held.length; },
+    /** How many top-ups landed on chain. */
+    get landings() { return landings; },
+  };
+  const commit = async (input: RequestInfo | URL, init?: RequestInit): Promise<string> => {
+    const answer = await (await node(input, init)).text();
+    landed = (JSON.parse(answer) as { subscription: Json }).subscription;
+    landings += 1;
+    return answer;
   };
   const read = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     if (control.failNextRead) {
       control.failNextRead = false;
-      return new Response(JSON.stringify({ error: 'store unavailable' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      return json({ error: 'store unavailable' }, 500);
     }
     const res = await node(input, init);
     if (!landed) return res;
     const body = await res.json() as { subscriptions: Json[] };
     body.subscriptions = body.subscriptions.map((s) => (s.subscriptionId === landed!.subscriptionId ? landed! : s));
-    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    return json(body);
   };
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const method = init?.method ?? 'GET';
@@ -102,11 +145,17 @@ function topUpNode(answer: (commit: () => Promise<Response>) => Promise<Response
     requests.push({ method, url, body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined });
     if (method === 'POST' && url.endsWith('/top-up')) {
       toppedUp = true;
-      return answer(async () => {
-        const res = await node(input, init);
-        landed = ((await res.clone().json()) as { subscription: Json }).subscription;
-        return res;
-      });
+      if (control.refuseCaller) return control.refuseCaller();
+      const raw = String(init?.body);
+      const key = (JSON.parse(raw) as { idempotencyKey?: string }).idempotencyKey ?? '';
+      const taken = keys.get(key);
+      if (taken) return taken.body === raw ? new Response(await taken.answer, { status: 200 }) : refusal(409, 'IdempotencyKeyReused');
+      const how = control.first.shift() ?? 'answer';
+      if (typeof how === 'function') return how();
+      const answer = how === 'answer' ? commit(input, init) : new Promise<string>((resolve) => { onTheirWay.push(() => { void commit(input, init).then(resolve); }); });
+      keys.set(key, { body: raw, answer });
+      if (how === 'lose') throw new TypeError('Failed to fetch');
+      return new Response(await answer, { status: 200 });
     }
     if (method === 'GET' && url.startsWith('/api/marketplace/subscriptions')) {
       if (control.holdChecks && toppedUp) await new Promise<void>((resolve) => held.push(resolve));
@@ -117,7 +166,9 @@ function topUpNode(answer: (commit: () => Promise<Response>) => Promise<Response
   return control;
 }
 
-const topUps = (requests: Array<{ method: string; url: string }>) => requests.filter((r) => r.method === 'POST' && r.url.endsWith('/top-up'));
+const topUps = (requests: Array<{ method: string; url: string; body?: unknown }>) => requests.filter((r) => r.method === 'POST' && r.url.endsWith('/top-up'));
+const keyOf = (r: { body?: unknown }) => (r.body as { idempotencyKey: string }).idempotencyKey;
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 /** Open the top-up of the budget at its soft ceiling, for 0.5 TRAC, once its dry run is in. */
 async function topUpLlama(): Promise<HTMLElement> {
@@ -181,7 +232,7 @@ describe('marketplace Plans', () => {
     await waitForText(c, 'llama-3.1-8b-instruct topped up');
     const subscription = `/api/marketplace/subscriptions/${'0x' + '98'.repeat(32)}`;
     const services = [{ serviceId: FIXTURE_IDS.llama8b, serviceClass: 'inference', value: '500000000000000000', maxPricePerUnit: '1200000000000' }];
-    expect(writes.filter((w) => w.url === `${subscription}/top-up`)).toEqual([{ method: 'POST', url: `${subscription}/top-up`, body: { services } }]);
+    expect(writes.filter((w) => w.url === `${subscription}/top-up`)).toEqual([{ method: 'POST', url: `${subscription}/top-up`, body: { services, idempotencyKey: expect.stringMatching(UUID_V4) } }]);
     const dryRuns = writes.filter((w) => w.url === `${subscription}/top-up/preview`);
     expect(dryRuns.at(-1)).toEqual({ method: 'POST', url: `${subscription}/top-up/preview`, body: { services } });
     expect(writes.findIndex((w) => w.url === `${subscription}/top-up`)).toBeGreaterThan(writes.lastIndexOf(dryRuns.at(-1)!));
@@ -207,73 +258,194 @@ describe('marketplace Plans', () => {
     });
   }
 
-  it('looks a top-up up on the node when its answer is lost, and shows that it landed without sending another', async () => {
-    const node = topUpNode(async (commit) => { await commit(); throw new TypeError('Failed to fetch'); });
+  it('offers only Retry of the same top-up when its answer is lost and it lands later, and the node adds it once', async () => {
+    const node = topUpNode();
+    node.first.push('lose');
     const c = await topUpLlama();
-    const confirmBtn = () => byTestId(c, 'mkt-topup-confirm') as HTMLButtonElement | null;
-    node.holdChecks = true;
-    await click(confirmBtn());
-    await waitForText(c, 'The node did not say whether the top-up went through: checking the subscription');
-    expect(node.waiting).toBe(1);
-    expect(confirmBtn()?.disabled).toBe(true);
-    await click(confirmBtn());
+    await click(byTestId(c, 'mkt-topup-confirm'));
+    // The answer is lost and the transaction is still on its way: the budget holds what it did.
+    await waitForText(c, 'The budget holds 0.5 TRAC: it does not show the top-up, which may still land.');
+    expect(byTestId(c, 'mkt-topup')?.getAttribute('data-phase')).toBe('unknown');
+    expect(byTestId(c, 'mkt-topup-unsure')?.getAttribute('data-state')).toBe('missing');
+    expect(byTestId(c, 'mkt-topup-confirm')).toBeNull();
+    expect(byTestId(c, 'mkt-preview')).toBeNull();
+    expect((byTestId(c, 'mkt-topup-amount') as HTMLInputElement).disabled).toBe(true);
+
+    // Closed and opened again, the form brings back the same top-up, with Retry alone.
+    await click(buttonWithText(c, 'Cancel'));
+    expect(byTestId(c, 'mkt-topup')).toBeNull();
+    await click(byTestId(c, `mkt-topup-${FIXTURE_IDS.llama8b}`));
+    await waitForText(c, 'The budget holds 0.5 TRAC: it does not show the top-up');
+    expect(byTestId(c, 'mkt-topup-confirm')).toBeNull();
+    expect((byTestId(c, 'mkt-topup-amount') as HTMLInputElement).value).toBe('0.5');
     expect(topUps(node.requests)).toHaveLength(1);
 
-    node.release();
-    await waitForText(c, 'llama-3.1-8b-instruct topped up: the budget now holds 1 TRAC');
-    expect(confirmBtn()).toBeNull();
-    expect(topUps(node.requests)).toHaveLength(1);
-    const sentAt = node.requests.indexOf(topUps(node.requests)[0]);
-    expect(node.requests.slice(sentAt + 1).some((r) => r.method === 'GET' && r.url === '/api/marketplace/subscriptions?epoch=664')).toBe(true);
+    // The transaction lands: the budget shows it, but only the node's answer ends the top-up.
+    node.land();
+    await click(byTestId(c, 'mkt-topup-check'));
+    await waitForText(c, 'The budget holds 1 TRAC, up from 0.5: it shows the top-up.');
+    expect(byTestId(c, 'mkt-topup-sent')).toBeNull();
+    expect(byTestId(c, 'mkt-topup-confirm')).toBeNull();
+
+    await click(byTestId(c, 'mkt-topup-retry'));
+    await waitForText(c, 'llama-3.1-8b-instruct topped up · tx 0xc2c2…c2c2');
+    const sent = topUps(node.requests);
+    expect(sent).toHaveLength(2);
+    expect(keyOf(sent[0])).toMatch(UUID_V4);
+    expect(sent[1].body).toEqual(sent[0].body);
+    expect(node.landings).toBe(1);
+    expect(sessionStorage.length).toBe(0);
   });
 
-  it('keeps Confirm off while the subscription cannot be read after a lost answer, and checks again on request', async () => {
-    const node = topUpNode(async (commit) => { await commit(); throw new TypeError('Failed to fetch'); });
+  it('keeps a top-up whose answer was lost across a reload of the page, and Retry sends it again as it was', async () => {
+    const node = topUpNode();
+    node.first.push('lose');
+    let c = await topUpLlama();
+    await click(byTestId(c, 'mkt-topup-confirm'));
+    await waitForText(c, 'it does not show the top-up');
+    await reloadPage();
+
+    c = await render(plans());
+    await waitForText(c, 'This budget is at its soft ceiling');
+    await click(byTestId(c, `mkt-topup-${FIXTURE_IDS.llama8b}`));
+    await waitForText(c, 'The budget holds 0.5 TRAC: it does not show the top-up');
+    expect(byTestId(c, 'mkt-topup-confirm')).toBeNull();
+    // A Retry sent before the transaction lands waits for the node's first answer.
+    await click(byTestId(c, 'mkt-topup-retry'));
+    expect((byTestId(c, 'mkt-topup-retry') as HTMLButtonElement).disabled).toBe(true);
+    node.land();
+    await waitForText(c, 'llama-3.1-8b-instruct topped up · tx');
+    const sent = topUps(node.requests);
+    expect(sent).toHaveLength(2);
+    expect(sent[1].body).toEqual(sent[0].body);
+    expect(node.landings).toBe(1);
+    expect(sessionStorage.length).toBe(0);
+  });
+
+  it('reads the budget again on request after a lost answer, with Retry alone while it cannot be read', async () => {
+    const node = topUpNode();
+    node.first.push('lose');
     const c = await topUpLlama();
     node.holdChecks = true;
     await click(byTestId(c, 'mkt-topup-confirm'));
+    await waitForText(c, 'Reading the budget…');
+    expect(node.waiting).toBe(1);
     node.failNextRead = true;
     node.release();
-    await waitForText(c, 'The subscription could not be read: check again before sending another.');
+    await waitForText(c, 'The budget could not be read.');
     expect(byTestId(c, 'mkt-topup-unsure')?.getAttribute('data-state')).toBe('unread');
-    await flush(300);
-    expect((byTestId(c, 'mkt-topup-confirm') as HTMLButtonElement).disabled).toBe(true);
+    expect(byTestId(c, 'mkt-topup-confirm')).toBeNull();
     node.holdChecks = false;
+    node.land();
     await click(byTestId(c, 'mkt-topup-check'));
-    await waitForText(c, 'llama-3.1-8b-instruct topped up: the budget now holds 1 TRAC');
-    expect(topUps(node.requests)).toHaveLength(1);
+    await waitForText(c, 'The budget holds 1 TRAC, up from 0.5');
+    await click(byTestId(c, 'mkt-topup-retry'));
+    await waitForText(c, 'llama-3.1-8b-instruct topped up · tx');
+    expect(topUps(node.requests).map(keyOf)).toEqual([keyOf(topUps(node.requests)[0]), keyOf(topUps(node.requests)[0])]);
+    expect(node.landings).toBe(1);
   });
 
-  it('lets another top-up go after a failure the node does not explain, once the subscription shows the first did not land', async () => {
-    let lost = true;
-    const node = topUpNode(async (commit) => {
-      if (!lost) return commit();
-      lost = false;
-      return new Response(JSON.stringify({ error: 'upstream timed out' }), { status: 504, headers: { 'Content-Type': 'application/json' } });
-    });
+  it('sends the same top-up again on Retry after a failure the node does not explain, never a new one', async () => {
+    const node = topUpNode();
+    node.first.push(() => json({ error: 'upstream timed out' }, 504));
     const c = await topUpLlama();
     await click(byTestId(c, 'mkt-topup-confirm'));
-    await waitForText(c, 'The subscription does not show the top-up. It may still land: check again before sending another.');
+    await waitForText(c, 'The budget holds 0.5 TRAC: it does not show the top-up');
+    expect(byTestId(c, 'mkt-error-card')?.getAttribute('data-code')).toBe('HTTP_504');
+    await flush(300);
+    expect(byTestId(c, 'mkt-topup-confirm')).toBeNull();
+    // No dry run opens another top-up meanwhile.
+    const sentAt = node.requests.indexOf(topUps(node.requests)[0]);
+    expect(node.requests.slice(sentAt + 1).some((r) => r.url.endsWith('/top-up/preview'))).toBe(false);
+    await click(byTestId(c, 'mkt-topup-retry'));
+    await waitForText(c, 'llama-3.1-8b-instruct topped up · tx');
+    const sent = topUps(node.requests);
+    expect(sent).toHaveLength(2);
+    expect(sent[1].body).toEqual(sent[0].body);
+    expect(node.landings).toBe(1);
+  });
+
+  const silentOnTheKey: Array<[string, () => Response]> = [
+    ['NodeAdminRequired', () => refusal(403, 'NodeAdminRequired')],
+    ['IdempotencyKeyReused', () => refusal(409, 'IdempotencyKeyReused')],
+    ['Unauthorized', () => json({ error: 'Unauthorized' }, 401)],
+    ['HTTP_429', () => json({ error: 'Too many requests' }, 429)],
+  ];
+  for (const [code, answer] of silentOnTheKey) {
+    it(`keeps the top-up unknown when a Retry meets a refusal that says nothing of its key (${code})`, async () => {
+      const node = topUpNode();
+      node.first.push('lose');
+      const c = await topUpLlama();
+      await click(byTestId(c, 'mkt-topup-confirm'));
+      await waitForText(c, 'it does not show the top-up');
+      node.refuseCaller = answer;
+      await click(byTestId(c, 'mkt-topup-retry'));
+      await waitUntil(() => !!byTestId(c, 'mkt-topup-unsure')?.querySelector(`[data-code="${code}"]`), `the ${code} refusal beside Retry`);
+      expect(byTestId(c, 'mkt-topup')?.getAttribute('data-phase')).toBe('unknown');
+      expect(byTestId(c, 'mkt-topup-confirm')).toBeNull();
+      expect(sessionStorage.length).toBe(1);
+      node.refuseCaller = null;
+      node.land();
+      await click(byTestId(c, 'mkt-topup-retry'));
+      await waitForText(c, 'llama-3.1-8b-instruct topped up · tx');
+      expect(new Set(topUps(node.requests).map(keyOf)).size).toBe(1);
+      expect(node.landings).toBe(1);
+    });
+  }
+
+  it('ends a top-up the node refuses outright on Retry: the next one is new, with a new key, after a fresh dry run', async () => {
+    const node = topUpNode();
+    node.first.push(() => json({ error: 'upstream timed out' }, 504), () => refusal(409, 'LimitExceeded', ['maxCostPerEpoch', '1', '2']));
+    const c = await topUpLlama();
+    await click(byTestId(c, 'mkt-topup-confirm'));
+    await waitForText(c, 'it does not show the top-up');
+    await click(byTestId(c, 'mkt-topup-retry'));
+    await waitForText(c, 'This costs more than the account\'s limit per epoch');
+    expect(byTestId(c, 'mkt-topup')?.getAttribute('data-phase')).toBe('compose');
+    expect(sessionStorage.length).toBe(0);
     await flush(300);
     await waitForText(c, 'Costs 0.5 TRAC from the buyer wallet for epoch 664');
-    expect((byTestId(c, 'mkt-topup-confirm') as HTMLButtonElement).disabled).toBe(false);
     await click(byTestId(c, 'mkt-topup-confirm'));
     await waitForText(c, 'llama-3.1-8b-instruct topped up · tx');
-    const [first, second] = topUps(node.requests).map((r) => node.requests.indexOf(r));
-    expect(second).toBeDefined();
-    const between = node.requests.slice(first + 1, second);
-    expect(between.some((r) => r.method === 'GET' && r.url.startsWith('/api/marketplace/subscriptions'))).toBe(true);
-    expect(between.some((r) => r.method === 'POST' && r.url.endsWith('/top-up/preview'))).toBe(true);
+    const keys = topUps(node.requests).map(keyOf);
+    expect(keys).toHaveLength(3);
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).not.toBe(keys[0]);
+    expect(keys[2]).toMatch(UUID_V4);
+  });
+
+  it('keeps a top-up of unknown outcome in the page when the browser refuses session storage', async () => {
+    const refuse = () => { throw new DOMException('denied', 'SecurityError'); };
+    const spies = (['getItem', 'setItem', 'removeItem'] as const).map((m) => vi.spyOn(Storage.prototype, m).mockImplementation(refuse));
+    try {
+      const node = topUpNode();
+      node.first.push('lose');
+      const c = await topUpLlama();
+      await click(byTestId(c, 'mkt-topup-confirm'));
+      await waitForText(c, 'it does not show the top-up');
+      await click(buttonWithText(c, 'Cancel'));
+      await click(byTestId(c, `mkt-topup-${FIXTURE_IDS.llama8b}`));
+      await waitForText(c, 'it does not show the top-up');
+      expect(byTestId(c, 'mkt-topup-confirm')).toBeNull();
+      node.land();
+      await click(byTestId(c, 'mkt-topup-retry'));
+      await waitForText(c, 'llama-3.1-8b-instruct topped up · tx');
+      expect(node.landings).toBe(1);
+      // Answered, it is gone from the page: a form for the same budget opens on a new top-up.
+      const world = fixtureWorld();
+      const fresh = await render(React.createElement(TopUp, {
+        catalog: world.catalog(true), subscription: world.current, serviceId: FIXTURE_IDS.llama8b, onDone: () => undefined, onCancel: () => undefined,
+      }));
+      expect(byTestId(fresh, 'mkt-topup')?.getAttribute('data-phase')).toBe('compose');
+      expect(byTestId(fresh, 'mkt-topup-confirm')).toBeTruthy();
+    } finally {
+      for (const s of spies) s.mockRestore();
+    }
   });
 
   it('asks for a fresh dry run after a refusal, without looking the top-up up', async () => {
-    let refused = true;
-    const node = topUpNode(async (commit) => {
-      if (!refused) return commit();
-      refused = false;
-      return new Response(JSON.stringify({ error: 'LimitExceeded(maxCostPerEpoch, 1, 2)', code: 'LimitExceeded', args: ['maxCostPerEpoch', '1', '2'], retryable: false }),
-        { status: 409, headers: { 'Content-Type': 'application/json' } });
-    });
+    const node = topUpNode();
+    node.first.push(() => refusal(409, 'LimitExceeded', ['maxCostPerEpoch', '1', '2']));
     const c = await topUpLlama();
     await click(byTestId(c, 'mkt-topup-confirm'));
     await waitForText(c, 'LimitExceeded');

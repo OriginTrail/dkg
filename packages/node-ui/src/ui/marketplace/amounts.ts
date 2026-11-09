@@ -43,6 +43,9 @@ export function fmtMicro(weiPerUnit: string | bigint): string {
 /** µTRAC per unit from wei per unit, exact to the wei: a value to edit, which `weiOfMicro` reads back unchanged. */
 export const microOfWei = (weiPerUnit: string | bigint): string => decimalOf(weiPerUnit, 12, 12);
 
+/** TRAC from wei, exact to the wei: a value to edit, which `weiOfTrac` reads back unchanged. */
+export const tracOfWei = (wei: string | bigint): string => decimalOf(wei, 18, 18);
+
 /** `$0.56` / `$0.00007`: more places for a sub-cent value. */
 function fmtUsd(usd: number): string {
   if (usd === 0) return '$0.00';

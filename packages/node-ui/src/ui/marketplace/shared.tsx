@@ -27,6 +27,7 @@ const CODE_COPY: Record<string, string> = {
   SubscriptionAlreadyFunded: 'err.subscription.funded',
   SubscriptionEnded: 'err.subscription.ended',
   NotSubscriptionBuyer: 'err.subscription.buyer',
+  IdempotencyKeyReused: 'err.topup.key',
   ERC20InsufficientBalance: 'err.wallet.trac',
   InsufficientAllowance: 'err.account.allowance',
   LimitExceeded: 'err.grant.limit',

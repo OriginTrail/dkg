@@ -40,8 +40,18 @@ export async function unmountAll(): Promise<void> {
     container.remove();
   }
   localStorage.clear();
+  sessionStorage.clear();
   vi.unstubAllGlobals();
   forgetPlaygroundKey();
+}
+
+/** The tab reloads: every view goes, the node stays as it is, and so does the tab's session storage. */
+export async function reloadPage(): Promise<void> {
+  const kept = Array.from({ length: sessionStorage.length }, (_, i) => sessionStorage.key(i)!).map((k) => [k, sessionStorage.getItem(k)!] as const);
+  const node = globalThis.fetch;
+  await unmountAll();
+  for (const [k, v] of kept) sessionStorage.setItem(k, v);
+  vi.stubGlobal('fetch', node);
 }
 
 export async function waitForText(container: HTMLElement, text: string, timeoutMs = 2_000): Promise<void> {

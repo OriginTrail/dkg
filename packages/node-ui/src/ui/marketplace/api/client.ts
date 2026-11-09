@@ -8,7 +8,7 @@ import type {
   AccountsAnswer, ActivityAnswer, BuyerLimits, CatalogAnswer, ChatCompletion, Consent, Contracts, FundedAnswer,
   Funding, FundingRequest, GatewayModels, GatewayRefusalBody, Key, KeyRequest, KeysAnswer, LandNowAnswer, MadeKey,
   Offering, Plan, PlanRequest, Preview, ReconciliationAnswer, SellerStatus, ServiceDetail, ServiceRequest,
-  Storefront, SubscriptionsAnswer, Tx,
+  Storefront, SubscriptionsAnswer, TopUpRequest, Tx,
 } from './types.js';
 
 const MARKETPLACE_BASE = '/api/marketplace';
@@ -131,7 +131,8 @@ export const marketplaceApi = {
   fund: (request: FundingRequest) => call<FundedAnswer>('POST', '/subscriptions', request),
   /** A dry run of a top-up: what it would cost from the subscription's source, and the refusal it would meet. Sends nothing. */
   topUpPreview: (subscriptionId: string, services: ServiceRequest[]) => call<Preview>('POST', `/subscriptions/${subscriptionId}/top-up/preview`, { services }),
-  topUp: (subscriptionId: string, services: ServiceRequest[]) => call<FundedAnswer>('POST', `/subscriptions/${subscriptionId}/top-up`, { services }),
+  /** A top-up, sent as given: a repeat with the same key gets the first answer and adds nothing. */
+  topUp: (subscriptionId: string, request: TopUpRequest) => call<FundedAnswer>('POST', `/subscriptions/${subscriptionId}/top-up`, request),
   /** The standing plan; null while there is none. */
   plan: async (): Promise<Plan | null> => {
     try {
