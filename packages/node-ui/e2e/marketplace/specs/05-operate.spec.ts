@@ -5,7 +5,7 @@
  * on chain; the batch appears, and on the buyer node the reconciliation
  * matches the landed receipt to the one it held, and the call reads as landed.
  */
-import type { ActivityAnswer, ReconciliationAnswer, SellerStatus } from '../../../src/ui/marketplace/api/types.js';
+import type { ActivityAnswer, ReconciliationAnswer, SellerStatus, SubscriptionsAnswer } from '../../../src/ui/marketplace/api/types.js';
 import { test, expect } from '../fixtures.js';
 import { epochTimes, nodeOk, readSetup } from '../devnet.js';
 import { CHAT, SERVICES, STUB_UNITS, UI, callValueOf, microOf, tracOf } from '../topology.js';
@@ -62,6 +62,12 @@ test.describe('Operate', () => {
       timeout: 90_000,
       intervals: [3_000],
     }).toEqual(['landed']);
+    // The budget counts the receipt as held until the gateway's next tick sees it landed.
+    await expect.poll(async () => {
+      const { subscriptions } = await nodeOk<SubscriptionsAnswer>(buyer.node, 'GET', '/api/marketplace/subscriptions');
+      const budget = subscriptions.find((s) => s.epoch === epoch)?.budgets.find((b) => b.serviceId === CHAT.serviceId);
+      return budget ? `${budget.used} used, ${budget.held} held` : 'no budget';
+    }, { message: "the buyer's budget moves the receipt from held to used", timeout: 90_000, intervals: [3_000] }).toBe(`${value} used, 0 held`);
 
     const plans = await market.open('plans', UI.buyer);
     await expect(plans).toHaveAttribute('data-state', 'active');
