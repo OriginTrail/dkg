@@ -143,13 +143,13 @@
 .v10-bottom-table { width: 100%; border-collapse: collapse; font-size: var(--fs-label); }
 .v10-bottom-head-row { border-bottom: 1px solid var(--border-subtle); text-align: left; }
 .ds-table-head.v10-bottom-th { padding: var(--space-6) var(--space-12); }
-.v10-bottom-td-mono.v10-bottom-td-mono.v10-bottom-td-mono { padding: var(--space-8) var(--space-12); font-family: var(--font-mono); color: var(--text-secondary); }
-.v10-bottom-td.v10-bottom-td.v10-bottom-td { padding: var(--space-8) var(--space-12); }
-.v10-bottom-td-muted.v10-bottom-td-muted.v10-bottom-td-muted { padding: var(--space-8) var(--space-12); color: var(--text-secondary); }
-.v10-bottom-td-id.v10-bottom-td-id.v10-bottom-td-id { padding: var(--space-8) var(--space-12); font-family: var(--font-mono); color: var(--text-tertiary); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v10-bottom-td-mono { padding: var(--space-8) var(--space-12); font-family: var(--font-mono); color: var(--text-secondary); }
+.v10-bottom-td { padding: var(--space-8) var(--space-12); }
+.v10-bottom-td-muted { padding: var(--space-8) var(--space-12); color: var(--text-secondary); }
+.v10-bottom-td-id { padding: var(--space-8) var(--space-12); font-family: var(--font-mono); color: var(--text-tertiary); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .v10-bottom-none { font-family: var(--font-sans); font-style: italic; color: var(--text-tertiary); }
-.v10-bottom-detail-row.v10-bottom-detail-row.v10-bottom-detail-row { background: var(--shade); }
-.v10-bottom-detail-cell.v10-bottom-detail-cell.v10-bottom-detail-cell { padding: var(--space-8) var(--space-16); }
+.v10-bottom-detail-row { background: var(--shade); }
+.v10-bottom-detail-cell { padding: var(--space-8) var(--space-16); }
 .v10-bottom-detail { display: flex; flex-wrap: wrap; gap: var(--space-16); font-size: var(--fs-label); color: var(--text-secondary); }
 .v10-bottom-mono { font-family: var(--font-mono); }
 .v10-bottom-detail-error { color: var(--text-danger); }

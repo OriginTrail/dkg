@@ -706,7 +706,6 @@ export function SubGraphMiniCard({
         ? undefined
         : {
             '--sg-color': card.color,
-            borderColor: card.color + '55',
           } as React.CSSProperties}
     >
       <div className="v10-sgov-card-head">

@@ -338,7 +338,7 @@
 .v10-tree-item.v10-tree-item-static { cursor: default; }
 .v10-tree-item-meta { font-size: var(--fs-label); color: var(--text-tertiary); margin-left: var(--space-4); }
 .ds-btn.v10-new-project-btn.v10-new-project-flush { margin: 0; }
-.v10-tree-item.v10-tree-item-empty.v10-tree-item-empty { cursor: default; color: var(--text-tertiary); font-style: italic; }
+.v10-tree-item.v10-tree-item-empty { cursor: default; color: var(--text-tertiary); font-style: italic; }
 
 /* ── Node unavailable ── */
 .v10-unavailable { align-items: center; justify-content: center; padding: var(--space-24); }

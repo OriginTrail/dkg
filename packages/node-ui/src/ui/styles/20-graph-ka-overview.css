@@ -259,6 +259,10 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   overflow: hidden;
   transition: border-color var(--motion-base) ease, transform var(--motion-base) ease, box-shadow var(--motion-base) ease;
 }
+/* A named sub-graph card's border is its colour at a third strength. */
+.v10-sgov-card:not(.root) {
+  border-color: color-mix(in srgb, var(--sg-color) 33.3%, transparent);
+}
 .v10-sgov-card:hover {
   transform: translateY(-1px);
   box-shadow: 0 8px 24px -12px var(--sg-color, var(--identity-fallback));

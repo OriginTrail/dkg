@@ -243,6 +243,7 @@
   box-shadow: 0 0 10px -2px currentColor;
 }
 .v10-vm-legend-swatch-agent { border-radius: 50%; }
+.v10-vm-legend-swatch-anchor { color: var(--text-on-identity); box-shadow: 0 0 0 2px var(--swatch-ring); }
 .v10-vm-legend-label {
   color: var(--text-primary);
   font-size: var(--fs-label);

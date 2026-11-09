@@ -505,7 +505,7 @@ select.input {
 .settings-select-row { display: flex; align-items: center; gap: var(--space-8); }
 .settings-select { width: 160px; }
 .settings-saved { font-size: var(--fs-micro); color: var(--text-success); font-weight: 600; }
-.mono.settings-micro.settings-micro { font-size: var(--fs-micro); color: var(--text-tertiary); }
+.mono.settings-micro { font-size: var(--fs-micro); color: var(--text-tertiary); }
 .settings-warning { margin-top: var(--space-8); padding: var(--pad-nested); border-radius: var(--radius-nested); background: var(--warning-bg); border: 1px solid var(--warning-border); }
 .settings-warning-title { font-size: var(--fs-label); color: var(--text-warning); font-weight: 600; margin-bottom: var(--space-4); }
 .settings-warning-text { font-size: var(--fs-label); color: var(--text-secondary); line-height: var(--lh-body); margin-bottom: var(--space-8); }
@@ -516,7 +516,7 @@ select.input {
 .settings-note { font-size: var(--fs-label); color: var(--text-secondary); margin-top: var(--space-4); }
 .settings-block { margin-bottom: var(--space-8); }
 .settings-meta-row { display: flex; gap: var(--space-16); margin-top: -6px; }
-.mono.settings-meta.settings-meta, .settings-meta { font-size: var(--fs-label); color: var(--text-secondary); }
+.settings-meta { font-size: var(--fs-label); color: var(--text-secondary); }
 .settings-danger-note { padding: var(--space-8) var(--space-12); border-radius: var(--radius-nested); background: var(--danger-bg); border: 1px solid var(--danger-border); }
 .settings-danger-title { font-size: var(--fs-micro); font-weight: 700; color: var(--text-danger); margin-bottom: var(--space-2); }
 .settings-warn-note { padding: var(--space-8) var(--space-12); border-radius: var(--radius-nested); background: var(--warning-bg); border: 1px solid var(--warning-border); }
@@ -526,8 +526,8 @@ select.input {
 .settings-danger-actions { display: flex; gap: var(--space-8); flex-wrap: wrap; align-items: center; }
 
 /* ── Network table ── */
-.mono.v10-network-id.v10-network-id.v10-network-id { font-size: var(--fs-label); }
-.v10-network-name.v10-network-name.v10-network-name { font-weight: 600; }
+.mono.v10-network-id { font-size: var(--fs-label); }
+.v10-network-name { font-weight: 600; }
 
 .ds-btn.settings-shutdown { background: var(--warning-bg); border-color: var(--warning-border); color: var(--text-warning); }
 .ds-btn.settings-shutdown-confirm { background: var(--danger-bg-strong); border-color: var(--accent-red); color: var(--text-danger); }

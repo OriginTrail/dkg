@@ -145,6 +145,7 @@
   transform: rotate(180deg);
 }
 .v10-select-menu {
+  position: fixed;
   max-height: 240px;
   overflow-y: auto;
   list-style: none;
@@ -157,6 +158,7 @@
 }
 .v10-select-menu:focus { outline: none; }
 .v10-select-menu-above {
+  transform: translateY(-100%);
   margin-top: -4px;
 }
 .v10-select-menu-below {
