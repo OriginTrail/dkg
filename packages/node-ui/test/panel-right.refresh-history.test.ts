@@ -46,7 +46,9 @@ vi.mock('../src/ui/api-wrapper.js', () => ({
 
 describe('PanelRight chat history rehydration on mount (issue #255)', () => {
   afterEach(() => vi.unstubAllGlobals());
-  beforeEach(() => {
+  beforeEach(async () => {
+    // Conversations live in a store that outlives the panel, so each test starts clean.
+    (await import('../src/ui/stores/agentConversations.js')).resetAgentConversations();
     vi.stubGlobal('EventSource', class { addEventListener() {} close() {} });
     vi.clearAllMocks();
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;

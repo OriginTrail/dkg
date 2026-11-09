@@ -1,7 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown } from 'lucide-react';
-import { usePanelVisible } from './PanelVisibility.js';
 
 export interface SelectOption {
   value: string;
@@ -40,9 +39,6 @@ export function Select({
   prefixIcon,
 }: SelectProps) {
   const [open, setOpen] = useState(false);
-  // The menu is portalled outside the panel, so it closes when the panel hides.
-  const panelVisible = usePanelVisible();
-  useEffect(() => { if (!panelVisible) setOpen(false); }, [panelVisible]);
   const [position, setPosition] = useState<MenuPosition | null>(null);
   const [highlight, setHighlight] = useState<number>(() => {
     const idx = options.findIndex((o) => o.value === value);
