@@ -50,8 +50,8 @@ test.describe('Operations View (rc.12 Observability)', () => {
       texts.push((await options.nth(i).textContent())!.trim());
     }
     expect(texts).toContain('All statuses');
-    expect(texts).toContain('success');
-    expect(texts).toContain('error');
+    expect(texts).toContain('Done');
+    expect(texts).toContain('Failed');
   });
 
   test('Operation ID search input accepts text', async ({ page }) => {
