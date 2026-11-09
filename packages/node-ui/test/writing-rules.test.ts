@@ -48,45 +48,90 @@ const clean = (text: string) => text.replace(/&apos;/g, "'").replace(/\s+/g, ' '
 
 const isComparison = (node: ts.Node) => ts.isBinaryExpression(node)
   && [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken].includes(node.operatorToken.kind);
-const isCode = (node: ts.Node) => ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node) || ts.isCallExpression(node) || isComparison(node);
+/** Nested JSX is read by the main walk, comparisons are code, and objects are read by their visible property names. */
+const isCode = (node: ts.Node) => ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node) || isComparison(node)
+  || ts.isObjectLiteralExpression(node);
 
 /** One piece of visible text and where it is (`file:line`). */
 type Line = { text: string; where: string };
 type Add = (text: string, at: ts.Node) => void;
+type FunctionWithBody = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction;
 
-/** The `const` declarations in a file, by name, so visible text kept in a constant can be followed to its value. */
-const constantsIn = (file: ts.SourceFile) => {
-  const byName = new Map<string, ts.Expression[]>();
+/** One file on its own, with a type checker, so each name can be followed to the declaration it refers to. */
+const parse = (fileName: string, source: string) => {
+  const kind = fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, kind);
+  const options: ts.CompilerOptions = { noLib: true, noResolve: true, types: [], jsx: ts.JsxEmit.Preserve };
+  const host = ts.createCompilerHost(options);
+  host.getSourceFile = (name) => (name.replace(/\\/g, '/').endsWith(fileName.replace(/\\/g, '/')) ? file : undefined);
+  host.fileExists = (name) => name.replace(/\\/g, '/').endsWith(fileName.replace(/\\/g, '/'));
+  host.readFile = () => source;
+  host.writeFile = () => undefined;
+  const checker = ts.createProgram({ rootNames: [fileName], options, host }).getTypeChecker();
+  return { file, checker };
+};
+
+/** The `return` values of a function, not counting functions nested inside it. */
+const returnsOf = (fn: FunctionWithBody): ts.Expression[] => {
+  if (!fn.body) return [];
+  if (!ts.isBlock(fn.body)) return [fn.body];
+  const found: ts.Expression[] = [];
   const visit = (node: ts.Node) => {
-    if (ts.isVariableDeclarationList(node) && node.flags & ts.NodeFlags.Const) {
-      for (const declaration of node.declarations) {
-        if (ts.isIdentifier(declaration.name) && declaration.initializer) {
-          byName.set(declaration.name.text, [...(byName.get(declaration.name.text) ?? []), declaration.initializer]);
-        }
-      }
-    }
-    ts.forEachChild(node, visit);
+    if (ts.isReturnStatement(node) && node.expression) found.push(node.expression);
+    else if (!ts.isFunctionLike(node)) ts.forEachChild(node, visit);
   };
-  visit(file);
-  return byName;
+  ts.forEachChild(fn.body, visit);
+  return found;
+};
+
+const isFunctionWithBody = (node: ts.Node | undefined): node is FunctionWithBody => !!node
+  && (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node));
+
+/**
+ * What a name refers to in this file: the value of a `const`, or a local function.
+ * Imports, parameters and `let` are not followed.
+ */
+const declared = (name: ts.Identifier, checker: ts.TypeChecker) => {
+  const symbol = checker.getSymbolAtLocation(name);
+  if (!symbol || symbol.flags & ts.SymbolFlags.Alias) return [];
+  return (symbol.declarations ?? []).flatMap((declaration): { at: ts.Node; value?: ts.Expression; fn?: FunctionWithBody }[] => {
+    if (ts.isFunctionDeclaration(declaration)) return [{ at: declaration, fn: declaration }];
+    if (ts.isVariableDeclaration(declaration) && declaration.initializer
+      && ts.isVariableDeclarationList(declaration.parent) && declaration.parent.flags & ts.NodeFlags.Const) {
+      const init = declaration.initializer;
+      return [isFunctionWithBody(init) ? { at: declaration, fn: init } : { at: declaration, value: init }];
+    }
+    return [];
+  });
 };
 
 /**
- * Every literal inside an expression, including those inside a template's
- * `${…}` parts and in the value of a `const` the expression names.
- * Nested JSX is read by the main walk; calls and comparisons are code.
+ * Every literal inside an expression: template text and the literals inside its
+ * `${…}` parts, the value of a `const` it names, and what a local function it calls
+ * returns. A condition (`a ? …`, `a && …`) and the arguments of a call are code.
  */
-const literals = (node: ts.Node, add: Add, constants: Map<string, ts.Expression[]>, following = new Set<string>()) => {
+const literals = (node: ts.Node, add: Add, checker: ts.TypeChecker, following: ReadonlySet<ts.Node> = new Set()) => {
+  const read = (next: ts.Node, via = following) => literals(next, add, checker, via);
   if (ts.isStringLiteralLike(node)) add(node.text, node);
   else if (ts.isTemplateExpression(node)) {
     add([node.head.text, ...node.templateSpans.map((span) => span.literal.text)].join(' '), node);
-    node.templateSpans.forEach((span) => literals(span.expression, add, constants, following));
+    node.templateSpans.forEach((span) => read(span.expression));
   } else if (ts.isIdentifier(node)) {
-    if (following.has(node.text)) return;
-    const next = new Set(following).add(node.text);
-    constants.get(node.text)?.forEach((value) => literals(value, add, constants, next));
+    for (const { at, value } of declared(node, checker)) {
+      if (value && !following.has(at)) read(value, new Set(following).add(at));
+    }
+  } else if (ts.isCallExpression(node)) {
+    if (!ts.isIdentifier(node.expression)) return;
+    for (const { at, fn } of declared(node.expression, checker)) {
+      if (fn && !following.has(at)) returnsOf(fn).forEach((value) => read(value, new Set(following).add(at)));
+    }
+  } else if (ts.isConditionalExpression(node)) {
+    read(node.whenTrue);
+    read(node.whenFalse);
+  } else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+    read(node.right);
   } else if (!isCode(node)) {
-    ts.forEachChild(node, (child) => literals(child, add, constants, following));
+    ts.forEachChild(node, (child) => read(child));
   }
 };
 
@@ -94,20 +139,19 @@ const literals = (node: ts.Node, add: Add, constants: Map<string, ts.Expression[
 export const visibleLines = (source: string, fileName = 'file.tsx'): Line[] => {
   const lines: Line[] = [];
   const seen = new Set<string>();
-  const kind = fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
-  const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, kind);
+  const { file, checker } = parse(fileName, source);
   const add: Add = (raw, at) => {
     const text = clean(raw);
     if (!text) return;
-    const start = at.getStart(file) + Math.max(at.getText(file).search(/\S/), 0);
-    const where = `${fileName}:${file.getLineAndCharacterOfPosition(start).line + 1}`;
+    const from = at.getSourceFile();
+    const start = at.getStart(from) + Math.max(at.getText(from).search(/\S/), 0);
+    const where = `${fileName}:${from.getLineAndCharacterOfPosition(start).line + 1}`;
     const key = `${text}\0${where}`;
     if (seen.has(key)) return;
     seen.add(key);
     lines.push({ text, where });
   };
-  const constants = constantsIn(file);
-  const read = (node: ts.Node) => literals(node, add, constants);
+  const read = (node: ts.Node) => literals(node, add, checker);
   const visit = (node: ts.Node) => {
     if (ts.isJsxText(node)) add(node.text, node);
     else if (ts.isJsxExpression(node) && node.expression && !ts.isJsxAttribute(node.parent)) read(node.expression);
@@ -181,14 +225,39 @@ describe('writing rules', () => {
     expect(problemsIn(lines).map((problem) => `${problem.where} ${problem.use}`).sort()).toEqual(['example.tsx:2 node', 'example.tsx:3 node']);
   });
 
+  it('follows what a local helper returns, but not its conditions', () => {
+    const lines = visibleLines(`
+      function hint() { return 'Check the daemon'; }
+      const label = (mode: string) => mode === 'daemon' ? 'Node wallet' : 'Your wallet';
+      function outer() { const inner = () => 'Not returned by outer'; return 'Shown'; }
+      setError(hint());
+      export const View = () => <p>{label(mode)}{outer()}</p>;
+    `, 'example.tsx');
+    expect(lines.map((line) => line.text).sort()).toEqual(['Check the daemon', 'Node wallet', 'Shown', 'Your wallet']);
+    expect(problemsIn(lines).map((problem) => `${problem.where} ${problem.use}`)).toEqual(['example.tsx:2 node']);
+  });
+
+  it('follows each name to its own declaration', () => {
+    const lines = visibleLines(`
+      function internal() { const text = 'daemon'; return text; }
+      export function View() { const text = 'Connected'; return <p>{text}</p>; }
+      const shadowed = 'Outer daemon';
+      export function Inner() { const shadowed = 'Inner text'; return <p>{shadowed}</p>; }
+    `, 'example.tsx');
+    expect(lines.map((line) => line.text).sort()).toEqual(['Connected', 'Inner text']);
+  });
+
   it('says where each piece of text is', () => {
     const lines = visibleLines('const a = 1;\nexport const View = () => (\n  <p>\n    Shown text\n  </p>\n);\n', 'view.tsx');
     expect(lines).toEqual([{ text: 'Shown text', where: 'view.tsx:4' }]);
   });
 
   it('finds real text in the UI', () => {
-    // The last two are kept in constants (walletSurfaceCopy, ownerNote) before they reach the screen.
-    for (const known of ['Retry loading agent', 'Copy UAL', 'Context Graph', 'Your connected wallet isn’t needed here', 'Managed by this node']) {
+    // Two are kept in constants (walletSurfaceCopy, ownerNote) and one comes from a helper (formatJoinRequestError).
+    for (const known of [
+      'Retry loading agent', 'Copy UAL', 'Context Graph', 'Your connected wallet isn’t needed here', 'Managed by this node',
+      'out-of-date network setting',
+    ]) {
       expect([...allText].some((line) => line.includes(known)), known).toBe(true);
     }
   });
