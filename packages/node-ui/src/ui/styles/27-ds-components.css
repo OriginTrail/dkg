@@ -379,7 +379,8 @@
 .ds-entity-chip.interactive:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 /* Light: the selected segment is the white surface lifted off a grey track. */
-body.light .ds-seg-item.active {
+body.light .ds-seg-item.active,
+body.light .ds-seg-item[aria-pressed="true"] {
   background: var(--bg-surface);
   box-shadow: 0 0 0 1px var(--border-default), var(--shadow-xs);
 }

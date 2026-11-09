@@ -58,7 +58,7 @@ function isTextContentType(ct: string) { return TEXT_CONTENT_TYPES.some(t => ct.
 // headers. `docRef` is the full `urn:dkg:file:keccak256:<hex>` urn, or — when
 // the document has no source file — the entity uri, which does not start with
 // `urn:dkg:file:` and drives the "source not available" empty state.
-function DocumentViewer({ docRef, contentType: expectedContentType, contextGraphId }: { docRef: string; contentType: string; contextGraphId?: string }) {
+export function DocumentViewer({ docRef, contentType: expectedContentType, contextGraphId }: { docRef: string; contentType: string; contextGraphId?: string }) {
   const { tabs, activeTabId } = useTabsStore();
   const [content, setContent] = useState<string | null>(null);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
@@ -156,7 +156,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType, contextGraph
           <div
             role="group"
             aria-label="Document view mode"
-            className="v10-doc-modes"
+            className="v10-doc-modes ds-seg"
           >
             {(['formatted', 'raw'] as const).map(mode => {
               const active = viewMode === mode;
@@ -166,7 +166,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType, contextGraph
                   type="button"
                   aria-pressed={active}
                   onClick={() => setViewMode(mode)}
-                  className={active ? 'v10-doc-mode v10-doc-mode-active' : 'v10-doc-mode'}
+                  className="ds-seg-item"
                 >
                   {mode === 'formatted' ? 'Formatted' : 'Raw'}
                 </button>
