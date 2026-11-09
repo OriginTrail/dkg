@@ -20,9 +20,11 @@
  * - **The job.** At every tick the buyer decides from the chain alone: it funds
  *   the current epoch when it has no subscription, funds the next one within
  *   `prefundLeadSeconds` of the boundary, and tops up a subscription with the
- *   plan's services it lacks. A crash or a failed send heals at the next tick,
- *   since a buyer has one subscription per epoch. A renewal that fails raises
- *   an alert, once per epoch and refusal code.
+ *   plan's services it lacks. It funds or tops up the epoch under way only
+ *   while enough of it is left (`renewsEpochUnderWay`): a subscription costs
+ *   its full value however little of its epoch is left. A crash or a failed
+ *   send heals at the next tick, since a buyer has one subscription per epoch.
+ *   A renewal that fails raises an alert, once per epoch and refusal code.
  *
  * Every funding is bounded by the plan, which names each epoch's budgets and
  * the last epoch to fund; by the grant's limit and expiry for an account; and
@@ -48,6 +50,21 @@ import type { BuyerStore } from './store.js';
 
 /** No funding is sent this close to an epoch's end: it could land in the next one. */
 export const END_MARGIN_SECONDS = 30;
+
+/**
+ * The share of an epoch, and the least time, that must be left of the epoch under way for the renewal job to fund
+ * it or add to it. A subscription costs its full value however little of its epoch is left, and calls stop a few
+ * minutes before the end (the sellers' 180 s, and the gateway's margin before that); closer to the end the job
+ * waits for the next epoch, which it prefunds `prefundLeadSeconds` ahead.
+ */
+export const RENEWAL_MIN_SHARE = 0.25;
+export const RENEWAL_MIN_SECONDS = 900;
+
+/** Whether the renewal job funds, or adds to, the epoch under way at `times`. */
+export function renewsEpochUnderWay(times: EpochTimes): boolean {
+  const left = times.endsAt - times.now;
+  return left >= Math.max(RENEWAL_MIN_SECONDS, (times.endsAt - times.startsAt) * RENEWAL_MIN_SHARE);
+}
 
 /** A refusal the buyer's checks found, named after the contract error it stands for. */
 export class MarketplaceRefusal extends Error {
@@ -189,7 +206,7 @@ export class Buyer {
     const left = times.endsAt - times.now;
     const epochs = left <= this.config.prefundLeadSeconds ? [times.epoch, times.epoch + 1] : [times.epoch];
     for (const epoch of epochs) {
-      if (epoch > plan.renewUntilEpoch || (epoch === times.epoch && left < END_MARGIN_SECONDS)) continue;
+      if (epoch > plan.renewUntilEpoch || (epoch === times.epoch && !renewsEpochUnderWay(times))) continue;
       try {
         await this.renew(plan, epoch);
         this.renewals.set(epoch, { at: times.now, refusal: null });
