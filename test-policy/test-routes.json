@@ -87,6 +87,19 @@
     "command": "pnpm --dir packages/adapter-hermes test:py"
   },
   {
+    "pattern": "examples/n8n-capability/*.test.mjs",
+    "lane": "scripts",
+    "reason": "Studio and native workflow regression suites execute directly in the root scripts lane, including preview admission and cross-graph export authorization.",
+    "cadence": "required",
+    "command": "pnpm test:scripts",
+    "layer": "Studio and native workflow regression fixtures",
+    "prerequisites": [
+      "pnpm frozen install",
+      "built workspace dependencies",
+      "Node with built-in SQLite"
+    ]
+  },
+  {
     "pattern": "scripts/lib/__tests__/*.test.mjs",
     "lane": "scripts",
     "reason": "Repository tooling checks run in build gate",
