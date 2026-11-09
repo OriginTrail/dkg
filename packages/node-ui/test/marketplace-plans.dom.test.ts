@@ -65,6 +65,71 @@ function editedNode(scenario: 'active' | 'none', edit: (method: string, url: str
   return writes;
 }
 
+/**
+ * The fixture node, keeping every request, whose top-ups go through `answer`:
+ * `commit()` lands the top-up and gives the node's answer, which `answer` may
+ * return, replace or lose. Reads of the subscriptions then show what landed;
+ * with `holdChecks` on, those after a top-up wait for `release()`.
+ */
+function topUpNode(answer: (commit: () => Promise<Response>) => Promise<Response>) {
+  const requests: Array<{ method: string; url: string; body: unknown }> = [];
+  const node = fixtureFetch('active');
+  let landed: Json | null = null;
+  let toppedUp = false;
+  const held: Array<() => void> = [];
+  const control = {
+    requests,
+    holdChecks: false,
+    /** The subscriptions read once fails, as a node error. */
+    failNextRead: false,
+    release() { for (const r of held.splice(0)) r(); },
+    get waiting() { return held.length; },
+  };
+  const read = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    if (control.failNextRead) {
+      control.failNextRead = false;
+      return new Response(JSON.stringify({ error: 'store unavailable' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+    }
+    const res = await node(input, init);
+    if (!landed) return res;
+    const body = await res.json() as { subscriptions: Json[] };
+    body.subscriptions = body.subscriptions.map((s) => (s.subscriptionId === landed!.subscriptionId ? landed! : s));
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method ?? 'GET';
+    const url = String(input);
+    requests.push({ method, url, body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined });
+    if (method === 'POST' && url.endsWith('/top-up')) {
+      toppedUp = true;
+      return answer(async () => {
+        const res = await node(input, init);
+        landed = ((await res.clone().json()) as { subscription: Json }).subscription;
+        return res;
+      });
+    }
+    if (method === 'GET' && url.startsWith('/api/marketplace/subscriptions')) {
+      if (control.holdChecks && toppedUp) await new Promise<void>((resolve) => held.push(resolve));
+      return read(input, init);
+    }
+    return node(input, init);
+  });
+  return control;
+}
+
+const topUps = (requests: Array<{ method: string; url: string }>) => requests.filter((r) => r.method === 'POST' && r.url.endsWith('/top-up'));
+
+/** Open the top-up of the budget at its soft ceiling, for 0.5 TRAC, once its dry run is in. */
+async function topUpLlama(): Promise<HTMLElement> {
+  const c = await render(plans());
+  await waitForText(c, 'This budget is at its soft ceiling');
+  await click(byTestId(c, `mkt-topup-${FIXTURE_IDS.llama8b}`));
+  await type(byTestId(c, 'mkt-topup-amount'), '0.5');
+  await flush(300);
+  await waitForText(c, 'Costs 0.5 TRAC from the buyer wallet for epoch 664');
+  return c;
+}
+
 /** Caps in wei per unit, by service, on this node's subscriptions and plan. */
 function withCaps(caps: Record<string, string>) {
   const cap = (x: Json) => { if (typeof x.serviceId === 'string' && caps[x.serviceId]) { x.maxPricePerUnit = caps[x.serviceId]; x.maxPricePerUnitTrac = '0.0'; } };
@@ -141,6 +206,85 @@ describe('marketplace Plans', () => {
       expect(new Set(sentCaps)).toEqual(new Set([cap]));
     });
   }
+
+  it('looks a top-up up on the node when its answer is lost, and shows that it landed without sending another', async () => {
+    const node = topUpNode(async (commit) => { await commit(); throw new TypeError('Failed to fetch'); });
+    const c = await topUpLlama();
+    const confirmBtn = () => byTestId(c, 'mkt-topup-confirm') as HTMLButtonElement | null;
+    node.holdChecks = true;
+    await click(confirmBtn());
+    await waitForText(c, 'The node did not say whether the top-up went through: checking the subscription');
+    expect(node.waiting).toBe(1);
+    expect(confirmBtn()?.disabled).toBe(true);
+    await click(confirmBtn());
+    expect(topUps(node.requests)).toHaveLength(1);
+
+    node.release();
+    await waitForText(c, 'llama-3.1-8b-instruct topped up: the budget now holds 1 TRAC');
+    expect(confirmBtn()).toBeNull();
+    expect(topUps(node.requests)).toHaveLength(1);
+    const sentAt = node.requests.indexOf(topUps(node.requests)[0]);
+    expect(node.requests.slice(sentAt + 1).some((r) => r.method === 'GET' && r.url === '/api/marketplace/subscriptions?epoch=664')).toBe(true);
+  });
+
+  it('keeps Confirm off while the subscription cannot be read after a lost answer, and checks again on request', async () => {
+    const node = topUpNode(async (commit) => { await commit(); throw new TypeError('Failed to fetch'); });
+    const c = await topUpLlama();
+    node.holdChecks = true;
+    await click(byTestId(c, 'mkt-topup-confirm'));
+    node.failNextRead = true;
+    node.release();
+    await waitForText(c, 'The subscription could not be read: check again before sending another.');
+    expect(byTestId(c, 'mkt-topup-unsure')?.getAttribute('data-state')).toBe('unread');
+    await flush(300);
+    expect((byTestId(c, 'mkt-topup-confirm') as HTMLButtonElement).disabled).toBe(true);
+    node.holdChecks = false;
+    await click(byTestId(c, 'mkt-topup-check'));
+    await waitForText(c, 'llama-3.1-8b-instruct topped up: the budget now holds 1 TRAC');
+    expect(topUps(node.requests)).toHaveLength(1);
+  });
+
+  it('lets another top-up go after a failure the node does not explain, once the subscription shows the first did not land', async () => {
+    let lost = true;
+    const node = topUpNode(async (commit) => {
+      if (!lost) return commit();
+      lost = false;
+      return new Response(JSON.stringify({ error: 'upstream timed out' }), { status: 504, headers: { 'Content-Type': 'application/json' } });
+    });
+    const c = await topUpLlama();
+    await click(byTestId(c, 'mkt-topup-confirm'));
+    await waitForText(c, 'The subscription does not show the top-up. It may still land: check again before sending another.');
+    await flush(300);
+    await waitForText(c, 'Costs 0.5 TRAC from the buyer wallet for epoch 664');
+    expect((byTestId(c, 'mkt-topup-confirm') as HTMLButtonElement).disabled).toBe(false);
+    await click(byTestId(c, 'mkt-topup-confirm'));
+    await waitForText(c, 'llama-3.1-8b-instruct topped up · tx');
+    const [first, second] = topUps(node.requests).map((r) => node.requests.indexOf(r));
+    expect(second).toBeDefined();
+    const between = node.requests.slice(first + 1, second);
+    expect(between.some((r) => r.method === 'GET' && r.url.startsWith('/api/marketplace/subscriptions'))).toBe(true);
+    expect(between.some((r) => r.method === 'POST' && r.url.endsWith('/top-up/preview'))).toBe(true);
+  });
+
+  it('asks for a fresh dry run after a refusal, without looking the top-up up', async () => {
+    let refused = true;
+    const node = topUpNode(async (commit) => {
+      if (!refused) return commit();
+      refused = false;
+      return new Response(JSON.stringify({ error: 'LimitExceeded(maxCostPerEpoch, 1, 2)', code: 'LimitExceeded', args: ['maxCostPerEpoch', '1', '2'], retryable: false }),
+        { status: 409, headers: { 'Content-Type': 'application/json' } });
+    });
+    const c = await topUpLlama();
+    await click(byTestId(c, 'mkt-topup-confirm'));
+    await waitForText(c, 'LimitExceeded');
+    expect(byTestId(c, 'mkt-error-card')?.getAttribute('data-code')).toBe('LimitExceeded');
+    expect(byTestId(c, 'mkt-topup-unsure')).toBeNull();
+    const sentAt = node.requests.indexOf(topUps(node.requests)[0]);
+    expect(node.requests.slice(sentAt + 1).some((r) => r.method === 'GET' && r.url.startsWith('/api/marketplace/subscriptions'))).toBe(false);
+    await flush(300);
+    await waitForText(c, 'Costs 0.5 TRAC from the buyer wallet for epoch 664');
+    expect((byTestId(c, 'mkt-topup-confirm') as HTMLButtonElement).disabled).toBe(false);
+  });
 
   it('adds a budget at the dearest seller\'s price to the wei', async () => {
     const price = '3123456789012';
