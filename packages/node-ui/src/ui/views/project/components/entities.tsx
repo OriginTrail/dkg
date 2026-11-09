@@ -39,6 +39,15 @@ export function isQueryCatalogConfigurationEntity(entity: MemoryEntity): boolean
   return entity.types.some(type => QUERY_CATALOG_CONFIGURATION_TYPES.has(type));
 }
 
+/**
+ * What an entity list covers. One memory layer (a WM/SWM/VM tab): every row
+ * carries that layer's badge. Several layers (a sub-graph): each row shows
+ * its own entity's layer, and the empty state shows `emptyIcon`.
+ */
+type EntityListScope =
+  | { layerKey: 'wm' | 'swm' | 'vm'; emptyIcon?: never }
+  | { layerKey?: undefined; emptyIcon: ReactNode };
+
 export function EntityList({
   entities,
   layerKey,
@@ -49,12 +58,8 @@ export function EntityList({
   sortLabel,
   headerExtra,
   timestampPredicate,
-  perEntityTrustBadge = false,
-}: {
+}: EntityListScope & {
   entities: MemoryEntity[];
-  layerKey: 'wm' | 'swm' | 'vm';
-  /** The empty state's icon, when it isn't the layer's own glyph (a sub-graph's icon). */
-  emptyIcon?: ReactNode;
   onSelectEntity: (uri: string) => void;
   onOpenAgent?: (uri: string) => void;
   /** Skip the internal triple-count sort — caller already ordered `entities`. */
@@ -69,15 +74,12 @@ export function EntityList({
    *  as a relative timestamp on each entity card. Pass `binding.timelinePredicate`
    *  for sub-graphs that have one. */
   timestampPredicate?: string;
-  /** When true, render the trailing trust badge from each entity's own
-   *  `trustLevel` (cross-layer view — e.g. Subgraph Explorer detail).
-   *  When false (default), every row uses `layerKey` (the
-   *  WM/SWM/VM layer-tab convention). */
-  perEntityTrustBadge?: boolean;
 }) {
   const profile = useProjectProfileContext();
   const agents = useAgentsContext();
-  const noun = layerNoun(layerKey, entities.length).toLowerCase();
+  // A cross-layer list counts entities: only a Verifiable Memory tab says Knowledge Assets.
+  const nounFor = (count: number) => (layerKey ? layerNoun(layerKey, count) : count === 1 ? 'Entity' : 'Entities').toLowerCase();
+  const noun = nounFor(entities.length);
   const sorted = useMemo(() => {
     if (externallySorted) return entities;
     const copy = [...entities];
@@ -89,17 +91,15 @@ export function EntityList({
     return copy;
   }, [entities, externallySorted]);
 
-  const trustLabel = layerKey === 'vm' ? 'Verifiable' : layerKey === 'swm' ? 'Shared' : 'Working';
-
   if (entities.length === 0) {
     return (
       <div className="v10-entity-list empty">
         <EmptyState
           compact
-          tone={toneForLayer(layerKey)}
-          icon={emptyIcon ?? <LayerGlyph layer={layerKey} />}
-          title={`No ${layerNoun(layerKey, 2).toLowerCase()} yet`}
-          description={`This view will fill when matching ${layerNoun(layerKey, 2).toLowerCase()} are available.`}
+          tone={layerKey ? toneForLayer(layerKey) : 'neutral'}
+          icon={layerKey ? <LayerGlyph layer={layerKey} /> : emptyIcon}
+          title={`No ${nounFor(2)} yet`}
+          description={`This view will fill when matching ${nounFor(2)} are available.`}
         />
       </div>
     );
@@ -152,14 +152,14 @@ export function EntityList({
                 <span className="v10-entity-card-triples">{tripleCount} triples</span>
               </div>
             </div>
-            {perEntityTrustBadge ? (() => {
-              const badge = TRUST_BADGE_CONFIG[e.trustLevel];
+            {(() => {
+              const badge = layerKey
+                ? { layerKey, label: LAYER_CONFIG[layerKey].trustLabel }
+                : TRUST_BADGE_CONFIG[e.trustLevel];
               return (
-                <LayerBadge layer={badge.layerKey} label={badge.label} size="sm" className={`v10-trust-badge ${badge.layerKey}`} title={`${badge.label} Memory`} />
+                <LayerBadge layer={badge.layerKey} label={badge.label} size="sm" className={`v10-trust-badge ${badge.layerKey}`} title={layerKey ? undefined : `${badge.label} Memory`} />
               );
-            })() : (
-              <LayerBadge layer={layerKey} label={trustLabel} size="sm" className={`v10-trust-badge ${layerKey}`} />
-            )}
+            })()}
           </div>
         );
       })}

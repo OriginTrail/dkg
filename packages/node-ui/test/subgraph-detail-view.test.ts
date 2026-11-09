@@ -1097,9 +1097,9 @@ describe('SubGraphDetailView tabs', () => {
     });
   });
 
-  // S3 — per-row trust badge keyed to e.trustLevel (not the fixed
-  // `layerKey` SubGraphDetailView passes to EntityList). Pre-fix
-  // every row read "Working" even on SWM/VM entities.
+  // S3 — per-row trust badge keyed to e.trustLevel: SubGraphDetailView
+  // passes no `layerKey`, so EntityList treats it as a cross-layer list.
+  // Pre-fix every row read "Working" even on SWM/VM entities.
   it('renders the per-row trust badge from entity.trustLevel on the Entities tab', async () => {
     const wmRow = {
       uri: 'urn:e:wm-row', label: 'WM row', types: ['http://schema.org/Thing'],
