@@ -33,17 +33,19 @@ export interface ChainFeeFloor {
 }
 
 /**
- * Gnosis RPCs suggest tips of 1 to 100 wei, and blocks routinely include them.
- * Yet in the fee history of 2026-10-20 some blocks included nothing below
- * 0.01, 0.22 or 0.35 gwei, so not every producer takes a 100-wei tip; 1 gwei is
- * above every such minimum sampled, and is also ethers' own fallback tip. A
- * `maxFeePerGas` of at least 2 gwei leaves the base fee 1 gwei of room above
- * that tip: more than 25 times both spikes above. At a publish's ~1M gas this
- * costs about 0.001 xDAI.
+ * Keep base-fee headroom independent of the producer tip. Gnosis RPCs can
+ * suggest tips of just 1 to 100 wei; forcing a 1 gwei tip makes even an idle
+ * chain expensive. The 2 gwei ceiling still covers the historical base-fee
+ * spikes above without paying that ceiling: EIP-1559 charges the block's
+ * base fee plus the suggested tip, bounded by maxFeePerGas.
+ *
+ * A low suggested tip may wait for a willing producer. This floor protects
+ * against base-fee spikes, not producer-specific minimum tips. Missing RPC
+ * advice retains the conservative fallback below; operator caps still apply.
  */
 const GNOSIS_FEE_FLOOR: ChainFeeFloor = {
   maxFeePerGasWei: 2n * GWEI,
-  maxPriorityFeePerGasWei: GWEI,
+  maxPriorityFeePerGasWei: 0n,
 };
 
 /**

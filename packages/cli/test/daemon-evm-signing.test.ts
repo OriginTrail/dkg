@@ -155,8 +155,42 @@ describe('daemon EVM signing', () => {
     expect(signing.mode).toBe('remote');
     if (signing.mode !== 'remote') return;
     expect(signing.authorSigners).toBeUndefined();
+    expect(signing.nodeHeldAuthor).toBeUndefined();
     expect(Object.keys(signing.chainSigning)).toEqual(['signers']);
     expect(lines.join('\n')).toContain('Author keys: none configured');
+  });
+
+  it('hands the agent authors held on the node with payers only, and refuses them beside an author connection', async () => {
+    const dir = await tempDir();
+    const fake = await fakeSigner();
+    const tokens = await tokenFiles(dir);
+    const lines: string[] = [];
+    const signing = await resolveDaemonEvmSigning({
+      config: { nodeRole: 'edge', chain: { signer: { type: 'remote', url: fake.url, authTokenFile: tokens.payer, nodeHeldAuthor: true } } },
+      chainType: 'evm',
+      dataDir: dir,
+      log: (line) => lines.push(line),
+    });
+    expect(signing.mode).toBe('remote');
+    if (signing.mode !== 'remote') return;
+    expect(signing.nodeHeldAuthor).toBe(true);
+    expect(signing.authorSigners).toBeUndefined();
+    expect(Object.keys(signing.chainSigning)).toEqual(['signers']);
+    expect(signing.addresses.wallets.map((w) => w.address)).toEqual(payers.map((payer) => payer.address));
+    expect(lines.join('\n')).toContain('Author keys: held on the node (chain.signer.nodeHeldAuthor)');
+    signing.release();
+
+    const before = fake.requests.length;
+    await expect(resolveDaemonEvmSigning({
+      config: {
+        nodeRole: 'edge',
+        chain: { signer: { type: 'remote', url: fake.url, authTokenFile: tokens.payer, author: { authTokenFile: tokens.author }, nodeHeldAuthor: true } },
+      },
+      chainType: 'evm',
+      dataDir: dir,
+      log: () => {},
+    })).rejects.toThrow(/nodeHeldAuthor .* cannot be combined with author/);
+    expect(fake.requests.length).toBe(before);
   });
 
   it('refuses core nodes, the mock chain and the async publisher runtime before any key exists', async () => {
