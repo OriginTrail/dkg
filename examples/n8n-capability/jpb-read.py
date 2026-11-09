@@ -38,5 +38,6 @@ for row in rows:
         'evidence':{'contextGraphId':graph,'snapshot':term(row['snapshot']),'sourceEvidence':term(row['sourceEvidence']),'capturedAt':term(row['evidenceCapturedAt']),'responseSha256':response_hash,'readAt':observed,
             'selection':'pinned-snapshot; not latest SQL state'},
         'meaning':'planned-route-reference; not operation execution'})
+assert sorted(r['recordId'] for r in records)==sorted(selected), 'Selected routing record identities are missing or duplicated'
 assert len(records)==3 and sorted(r['operationCode'] for r in records)==['CUT','EBAVM','USILU'], 'Selected routing rows are missing or duplicated'
 print(json.dumps({'records':records,'source':{'node':'JPB','peerId':status['peerId'],'contextGraphId':graph,'orderNo':'62633','querySha256':hashlib.sha256(sparql.encode()).hexdigest(),'readAt':observed,'responseSha256':response_hash,'freshSqlFetch':False,'selection':'pinned-snapshot','snapshot':snapshot}},ensure_ascii=False))
