@@ -81,7 +81,7 @@ export function fixtureWorld(nowMs = Date.now()) {
   });
   const offers: Record<string, Offer[]> = {
     [I.qwen14b]: [offer(I.qwen14b, I.sellerA, '0.6', '0.6', 'weights-pinned', 312), offer(I.qwen14b, I.sellerB, '0.7', '0.65', 'weights-pinned', 488)],
-    [I.qwen7b]: [offer(I.qwen7b, I.sellerA, '0.3', '0.32', 'weights-pinned', 205), offer(I.qwen7b, I.sellerB, '0.35', null, 'weights-pinned', null)],
+    [I.qwen7b]: [offer(I.qwen7b, I.sellerA, '0.3', '0.32', 'weights-pinned', 205), offer(I.qwen7b, I.sellerB, '0.35', '0.35', 'weights-pinned', null)],
     [I.llama8b]: [offer(I.llama8b, I.sellerB, '1.1', '1.1', 'upstream-claimed', 640)],
     [I.mistral24b]: [offer(I.mistral24b, I.sellerA, '3.3', '3.0', 'upstream-claimed', null, null)],
   };

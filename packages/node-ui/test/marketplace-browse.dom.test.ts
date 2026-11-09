@@ -41,6 +41,23 @@ describe('marketplace Browse: catalog, service page, storefront, playground', ()
     expect(c.textContent).not.toContain(MISSING_COPY);
   });
 
+  it('names the next epoch\'s price only where it changes', async () => {
+    useFixtureNode('active');
+    const c = await render(browse());
+    await waitForText(c, 'qwen2.5-7b-instruct');
+    await click(byTestId(c, `mkt-card-${FIXTURE_IDS.qwen7b}`));
+    // Seller 12 moves from 0.3 to 0.32 µTRAC; seller 31 names the same price for the next epoch as for this one.
+    await waitForText(c, 'next epoch 0.32 µTRAC');
+    expect(byTestId(c, 'mkt-provider-12')?.textContent).toContain('next epoch 0.32 µTRAC');
+    expect(byTestId(c, 'mkt-provider-31')?.textContent).not.toContain('next epoch');
+    // So on a storefront: seller 31's qwen2.5-14b moves from 0.7 to 0.65, its other two offers stay.
+    await click(byTestId(c, 'mkt-open-seller-31'));
+    await waitForText(c, 'Served value by epoch');
+    expect(byTestId(c, `mkt-store-offer-${FIXTURE_IDS.qwen14b}`)?.textContent).toContain('next epoch 0.65 µTRAC');
+    expect(byTestId(c, `mkt-store-offer-${FIXTURE_IDS.qwen7b}`)?.textContent).not.toContain('next epoch');
+    expect(byTestId(c, `mkt-store-offer-${FIXTURE_IDS.llama8b}`)?.textContent).not.toContain('next epoch');
+  });
+
   it('chats through the gateway with a key of its own and shows what each answer cost', async () => {
     useFixtureNode('active');
     const c = await render(browse());
