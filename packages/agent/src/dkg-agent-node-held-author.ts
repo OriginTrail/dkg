@@ -10,6 +10,8 @@ import type { AgentKeyRecord } from './agent-keystore.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import { isNodeHeldAgent, localAgentRecord, nodeHeldAuthorEnabled, nodeHeldDefaultAgent } from './node-held-author.js';
+// dkg-agent.ts takes the config check from here too, on one import line: it is at its file-size budget.
+export { assertNodeHeldAuthorConfig } from './node-held-author.js';
 
 export class NodeHeldAuthorMethods extends DKGAgentBase {
   /**
