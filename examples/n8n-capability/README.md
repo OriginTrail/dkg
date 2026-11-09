@@ -375,3 +375,23 @@ that become ambiguous are blocked for inspection; they are never automatically
 redispatched. A successful completed retry returns the persisted result after
 current authorization checks. Private KA receipts establish provenance and
 matching content, not independently verified execution of an external service.
+
+
+### Operator output authority and embedded helpers
+
+Native installations must include `resultSha256`, computed by
+`n8nResultSha256(reviewedGrant)` from the reviewed result selector and output schema.
+The pin covers nodes, ports, sinks, trace nodes and observation policy. The companion
+installs it from its operator-owned component manifest and generated Studio grants.
+Tenants cannot change the projection by approving a different grant for the same
+workflow digest. Missing pins deny native execution; an existing installation with
+a different pin requires operator review instead of being silently widened.
+Do not populate this field from an unreviewed tenant request.
+
+Execute Sub-workflow now embeds the complete helper JSON without a database ID.
+The parent digest covers the helper's output and effects. The runtime rejects
+mutable database, URL/file and expression-selected helpers, recursively, before
+native or legacy adapter dispatch. Historical templates remain readable but their
+unpinned helper executions are refused. Install the current component and save a
+new Studio revision to use it; helper-containing Studio graphs use compiler
+contract 5, preserving older source serialization and invocation identities.

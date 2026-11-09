@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { RuntimeAdapterOperation, SemanticN8nConfig, SemanticN8nGrant } from '@origintrail-official/dkg-semantic-runtime';
-import { assertN8nValue, n8nExecutionMatches, n8nRecord, n8nWorkflowSha256, validateN8nConfig, validateN8nGrant } from './semantic-runtime-n8n-contract.js';
+import { assertN8nEmbeddedWorkflows, assertN8nValue, n8nExecutionMatches, n8nRecord, n8nWorkflowSha256, validateN8nConfig, validateN8nGrant } from './semantic-runtime-n8n-contract.js';
 
 class N8nDispatchError extends Error {
   constructor(readonly mayHaveExecuted: boolean, code: string) { super(code); }
@@ -58,7 +58,7 @@ export function createN8nWorkflowAdapter(
     id: 'n8n/workflow', version: '1', witInterface: 'origintrail:semantic-runtime/n8n-workflow@0.1.0',
     implementationVersion: 'n8n-workflow-poc-v1',
     implementationHash: createHash('sha256').update(readFileSync(new URL(import.meta.url)))
-      .update(configuration).update(JSON.stringify(grant)).digest('hex'),
+      .update(assertN8nEmbeddedWorkflows.toString()).update(configuration).update(JSON.stringify(grant)).digest('hex'),
     enabled: matches, effectClass: 'external-workflow', verb: 'invoke',
     idempotencyClass: 'non_repeatable', reconciliationRule: 'inspect-n8n-execution-without-repeating-dispatch',
     validateInput(input) { assertN8nValue(grant.inputSchema, input, 'INPUT'); return structuredClone(input); },
@@ -77,6 +77,7 @@ export function createN8nWorkflowAdapter(
           || !published.versionId || n8nWorkflowSha256(published) !== grant.workflowSha256) {
           throw new Error('N8N_WORKFLOW_NOT_PINNED');
         }
+        assertN8nEmbeddedWorkflows(published);
         const webhookHeaders = { authorization: `Bearer ${token(installation!.webhookTokenFile)}` };
         await assertAuthorized();
         if (!matches()) throw new Error('N8N_WORKFLOW_NOT_INSTALLED');

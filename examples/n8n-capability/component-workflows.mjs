@@ -19,7 +19,7 @@ export function wire(connections, from, to, output = 0, input = 0) {
 }
 
 /** One reviewed native component, with transport-only file conversion where needed. */
-export function componentPiece(id, name, param, { credentials = {}, subworkflowId = 'nos_component_echo_v1' } = {}) {
+export function componentPiece(id, name, param, { credentials = {} } = {}) {
   const descriptor = component(id), type = descriptor.nodeType.split('.').at(-1);
   const p = key => expression(param(key)), value = key => expression(`$json[${param(key)}]`);
   const resolved = key => `(${resolveComponentValue.toString()})(${param(key)}, $json)`;
@@ -57,7 +57,11 @@ export function componentPiece(id, name, param, { credentials = {}, subworkflowI
     case 'merge': parameters = { mode: 'append', numberInputs: 2, options: {} }; break;
     case 'compare-datasets': parameters = { mergeByFields: { values: [{ field1: p('field'), field2: p('field') }] }, resolve: 'includeBoth', options: {} }; break;
     case 'loop-items': parameters = { batchSize: p('batchSize'), options: {} }; break;
-    case 'execute-workflow': parameters = { source: 'database', workflowId: { __rl: true, mode: 'id', value: subworkflowId }, mode: 'once', workflowInputs: { mappingMode: 'passThrough', value: {} }, options: { waitForSubWorkflow: true } }; break;
+    case 'execute-workflow': {
+      const { id: _databaseId, ...embedded } = echoSubworkflow();
+      parameters = { source: 'parameter', workflowJson: JSON.stringify(embedded), mode: 'once',
+        options: { waitForSubWorkflow: true } }; break;
+    }
     case 'stop-error': parameters = { errorType: 'errorMessage', errorMessage: p('message') }; break;
     case 'wait': parameters = { resume: 'timeInterval', amount: p('seconds'), unit: 'seconds' }; break;
     case 'schedule': parameters = { rule: { interval: [{ field: 'minutes', minutesInterval: Number(param('minutes')) }] } }; break;

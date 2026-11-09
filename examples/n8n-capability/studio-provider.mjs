@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { compileStudio } from './studio-definition.mjs';
-import { n8nWorkflowSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
+import { n8nWorkflowSha256, n8nResultSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 
 /** The operator owns provisioning. Neither this API key nor credential data reaches a KA or browser. */
 export function createStudioProvider({ state, config, graphId, owner, headerCredential, credentials, fetchImpl = fetch }) {
@@ -32,8 +32,10 @@ export function createStudioProvider({ state, config, graphId, owner, headerCred
     const flows = config.n8nNative.workflows;
     const current = flows.find(w => w.workflowId === grant.workflowId && w.contextGraphId === graphId && w.executorAgentAddress === owner);
     if (current && current.workflowSha256 !== grant.workflowSha256) throw error('An installed native workflow revision changed.');
+    const resultSha256 = n8nResultSha256(grant);
+    if (current && current.resultSha256 !== resultSha256) throw error('The installed output contract requires operator review.');
     if (!current) { if (flows.length >= 64) throw error('The native installation inventory is full.');
-      flows.push({ contextGraphId: graphId, executorAgentAddress: owner, workflowId: grant.workflowId, workflowSha256: grant.workflowSha256 }); }
+      flows.push({ contextGraphId: graphId, executorAgentAddress: owner, workflowId: grant.workflowId, workflowSha256: grant.workflowSha256, resultSha256 }); }
   };
   for (const saved of db.prepare('SELECT grant_json FROM workflows WHERE grant_json IS NOT NULL').all()) installGrant(JSON.parse(saved.grant_json));
   async function provision(definition) {

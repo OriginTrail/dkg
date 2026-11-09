@@ -65,3 +65,38 @@ test('configured data cannot terminate a native expression template', () => {
   assert.equal(literal.includes('}}'), false); assert.equal(literal.includes('{{'), false);
   assert.equal(JSON.stringify(vm.runInNewContext(literal)), JSON.stringify(value));
 });
+
+test('embedded helper output and effects are part of standalone and Studio approval', async () => {
+  const { compileStudio, readStudio, studioProgramSource } = await import('../../../examples/n8n-capability/studio-definition.mjs');
+  const { standaloneComponentWorkflow: legacy } = await import('../../../examples/n8n-capability/component-workflows-v1.mjs');
+  const { compileStudio: legacyStudio } = await import('../../../examples/n8n-capability/studio-definition-v1.mjs');
+  const { n8nWorkflowSha256, assertN8nEmbeddedWorkflows } = await import('../../../packages/cli/dist/semantic-runtime-n8n-contract.js');
+  const definition = { id: '00000000-0000-4000-8000-000000000009', name: 'Pinned helper', entryId: 'helper',
+    nodes: [{ id: 'helper', componentId: 'execute-workflow', kaRef: 'urn:demo:n8n:component:execute-workflow:unit', sourceHash: 'a'.repeat(64), params: {}, x: 0, y: 0 }], edges: [] };
+  const options = { graphId: 'unit', owner: '0x' + '1'.repeat(40), headerCredential: { id: 'test', name: 'Test' } };
+  const current = compileStudio(definition, options);
+  assert.equal(current.compiler, 5); assert.equal(readStudio(studioProgramSource(current)).kaRef, current.kaRef);
+  const oldSource = studioProgramSource({ ...current, compiler: 4 });
+  assert.equal(studioProgramSource(readStudio(oldSource)), oldSource);
+  assert.notEqual(readStudio(oldSource).kaRef, current.kaRef);
+  for (const workflow of [standaloneComponentWorkflow('execute-workflow', 'standalone', options.headerCredential), compileStudio(definition, options).workflow]) {
+    assertN8nEmbeddedWorkflows(workflow);
+    const parentHash = n8nWorkflowSha256(workflow);
+    const external = echoSubworkflow();
+    external.nodes.push({ name: 'New external effect', type: 'n8n-nodes-base.httpRequest', parameters: { method: 'POST', url: 'https://example.org' } });
+    assert.notEqual(n8nWorkflowSha256(external), n8nWorkflowSha256(echoSubworkflow()));
+    assert.equal(n8nWorkflowSha256(workflow), parentHash); // No database reference is executed.
+    const call = workflow.nodes.find(n => n.type === 'n8n-nodes-base.executeWorkflow');
+    assert.equal(call.parameters.source, 'parameter'); assert.equal(call.parameters.workflowId, undefined);
+    const reviewed = JSON.parse(call.parameters.workflowJson);
+    const { id: _databaseId, ...embedded } = echoSubworkflow();
+    assert.deepEqual(reviewed, embedded); assert.equal(reviewed.id, undefined);
+    for (const change of [child => { child.nodes[1].parameters = { alteredOutput: true }; }, child => { child.nodes.push(external.nodes.at(-1)); }]) {
+      const changed = structuredClone(workflow), changedCall = changed.nodes.find(n => n.type === 'n8n-nodes-base.executeWorkflow');
+      const child = JSON.parse(changedCall.parameters.workflowJson); change(child); changedCall.parameters.workflowJson = JSON.stringify(child);
+      assert.notEqual(n8nWorkflowSha256(changed), parentHash);
+    }
+  }
+  for (const workflow of [legacy('execute-workflow', 'old', options.headerCredential), legacyStudio(definition, options).workflow])
+    assert.throws(() => assertN8nEmbeddedWorkflows(workflow), /N8N_SUBWORKFLOW_NOT_PINNED/);
+});
