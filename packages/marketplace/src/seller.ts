@@ -35,7 +35,7 @@
  *   fails as a whole is tried again soon, and never past the final tick.
  */
 import { join } from 'node:path';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import {
   QUERY_INFERENCE_RECEIPT_TYPES,
@@ -51,7 +51,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { MarketplaceRefusal } from './buyer.js';
 import { UpstreamError, type Connector } from './connector.js';
-import { KeyedLock } from './journal.js';
+import { KeyedLock, setAside, writeDurably } from './journal.js';
 import { DEFAULT_LANDING, Lander, nextLandingAt, secondsToNextTick, secondsToRetry, type LandingReport, type LandingSettings } from './landing.js';
 import { SellerLedger, type ServedCall } from './ledger.js';
 import { offerQuads, signOffer, type OfferQuad } from './offers.js';
@@ -131,7 +131,7 @@ export class Seller {
   constructor(private readonly deps: SellerDeps) {
     this.services = new Map(deps.services.map((s) => [s.serviceId.toLowerCase(), s]));
     this.landing = deps.landing ?? DEFAULT_LANDING;
-    this.ledger = new SellerLedger(deps.dir);
+    this.ledger = new SellerLedger(deps.dir, deps.log);
     this.lander = new Lander({ chain: deps.chain, ledger: this.ledger, settings: this.landing, ...(deps.log ? { log: deps.log } : {}) });
   }
 
@@ -188,14 +188,36 @@ export class Seller {
     });
   }
 
-  /** Read the ledger and the frozen prices. Call once before serving. */
+  /**
+   * Read the ledger and the frozen prices. Call once before serving. A prices
+   * file that is empty or not prices, as a power loss during a write can leave
+   * it, is moved aside and logged, and the seller starts with none: this
+   * epoch's prices are frozen again from the settings. A ledger that cannot be
+   * read starts empty (`SellerLedger.load`). A prices file it cannot read at
+   * all, or a read error that may pass, fails the load.
+   */
   async load(): Promise<void> {
     await this.ledger.load();
+    const file = join(this.deps.dir, 'seller-prices.json');
+    let text: string;
     try {
-      this.prices = JSON.parse(await readFile(join(this.deps.dir, 'seller-prices.json'), 'utf8'));
+      text = await readFile(file, 'utf8');
     } catch (err) {
       if ((err as { code?: string }).code !== 'ENOENT') throw err;
+      return;
     }
+    const prices = pricesFrom(text);
+    if (prices) {
+      this.prices = prices;
+      return;
+    }
+    let where: string;
+    try {
+      where = `it was moved to ${await setAside(file)}`;
+    } catch (err) {
+      where = `it could not be moved aside (${messageOf(err)})`;
+    }
+    this.deps.log?.(`[marketplace] the seller's prices ${file} could not be read; ${where}, and this epoch's prices are frozen again from the settings`);
   }
 
   /** The gate, the offers of the current and the next epoch, then landing. Returns the seconds to the next tick. */
@@ -422,13 +444,10 @@ export class Seller {
     });
   }
 
-  /** Keep a price for an epoch on disk: written beside the prices file, then renamed over it. Under the prices lock. */
+  /** Keep a price for an epoch on disk: written beside the prices file, synced, then renamed over it. Under the prices lock. */
   private async storePrice(serviceId: string, epoch: number, price: bigint): Promise<void> {
     const prices = { ...this.prices, [serviceId]: { ...this.prices[serviceId], [String(epoch)]: price.toString() } };
-    await mkdir(this.deps.dir, { recursive: true });
-    const file = join(this.deps.dir, 'seller-prices.json');
-    await writeFile(`${file}.tmp`, `${JSON.stringify(prices, null, 2)}\n`, { mode: 0o600 });
-    await rename(`${file}.tmp`, file);
+    await writeDurably(join(this.deps.dir, 'seller-prices.json'), `${JSON.stringify(prices, null, 2)}\n`);
     this.prices = prices;
   }
 
@@ -441,6 +460,25 @@ export class Seller {
 
 function answerOf(call: ServedCall): ServeAnswer {
   return { ok: true, result: call.result, receipt: call.receipt, receiptSignature: call.receiptSignature, budgetIndex: call.budgetIndex };
+}
+
+/** The frozen prices a prices file holds: service id => epoch => wei per unit. `null` when it holds anything else. */
+function pricesFrom(text: string): Record<string, Record<string, string>> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+  if (!isRecord(parsed)) return null;
+  for (const byEpoch of Object.values(parsed)) {
+    if (!isRecord(byEpoch)) return null;
+    for (const [epoch, price] of Object.entries(byEpoch)) {
+      if (!/^\d+$/.test(epoch) || typeof price !== 'string' || !/^\d+$/.test(price)) return null;
+    }
+  }
+  return parsed as Record<string, Record<string, string>>;
 }
 
 const minBig = (a: bigint, b: bigint) => (a < b ? a : b);

@@ -7,8 +7,8 @@
  * Node gate, shares its offers, signed and naming the node's peer id, into the
  * Marketplace Context Graph and lands its receipts. Offers are shared once the
  * graph admits the node, each copy as its own Knowledge Asset, and at once
- * when it does. A setting it cannot use leaves selling off, logged, and the
- * boot goes on.
+ * when it does. A setting it cannot use, or seller files it cannot read,
+ * leave selling off, logged, and the boot goes on.
  */
 import { join } from 'node:path';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
@@ -85,7 +85,12 @@ export async function startMarketplaceSeller(options: MarketplaceSellerOptions):
     } : {}),
     log,
   });
-  await seller.load();
+  try {
+    await seller.load();
+  } catch (err) {
+    log(`[marketplace] the seller's files under ${join(dataDir, 'marketplace')} could not be read (${err instanceof Error ? err.message : String(err)}): selling stays off`);
+    return undefined;
+  }
   const dispose = agent.registerMarketplaceHandlers({
     quote: async (payload) => encodeMessage(await seller.quote(decodeMessage(payload))),
     serve: async (payload) => {
