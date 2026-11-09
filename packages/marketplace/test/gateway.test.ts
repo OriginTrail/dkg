@@ -324,6 +324,8 @@ describe('the router', () => {
   };
   let clock: number;
   let quoted: string[];
+  /** The epoch the sellers quote for. */
+  let quotedEpoch: number;
   let list: Offer[];
   /** The wallets the chain was asked about, in order; while `chainDown`, every read fails. */
   let identityReads: string[];
@@ -344,13 +346,13 @@ describe('the router', () => {
       if (peer === 'peer-3') throw new Error('unreachable');
       if (peer === 'peer-11') return { seller: '11', epoch: 1, offers: 'none' };
       const id = peer.slice(5);
-      return { seller: id, epoch: 1, offers: services.map((s) => ({ serviceId: s, pricePerUnit: String(list.find((o) => String(o.seller) === id)!.pricePerUnit), available: true, capacity: null })) };
+      return { seller: id, epoch: quotedEpoch, offers: services.map((s) => ({ serviceId: s, pricePerUnit: String(list.find((o) => String(o.seller) === id)!.pricePerUnit), available: true, capacity: null })) };
     },
     pinned: async () => pinned,
     clock: () => clock,
   });
 
-  beforeEach(() => { clock = 0; quoted = []; list = []; identityReads = []; chainDown = false; wallets.clear(); });
+  beforeEach(() => { clock = 0; quoted = []; quotedEpoch = 1; list = []; identityReads = []; chainDown = false; wallets.clear(); });
 
   it('keeps only the offers an operational wallet of their seller signed, asking the chain once per wallet for five minutes', async () => {
     const stranger = ethers.Wallet.createRandom();
@@ -428,6 +430,20 @@ describe('the router', () => {
     clock += 5 * 60_000;
     await router.pick(SERVICE, 1, 100n);
     expect(quoted.filter((p) => p === 'peer-2')).toHaveLength(2);
+  });
+
+  it("asks again right after an epoch's boundary, while the last epoch's quote is within its five minutes", async () => {
+    list = [offer(2n, 20n), offer(2n, 20n, { epoch: 2 })];
+    const router = routerWith();
+    expect(await router.pick(SERVICE, 1, 100n)).toEqual({ seller: 2n, peerId: 'peer-2', pricePerUnit: 20n });
+    // A minute on, the next epoch starts: the quote for epoch 1 is kept for epoch 1 only.
+    clock += 60_000;
+    quotedEpoch = 2;
+    expect(await router.pick(SERVICE, 2, 100n)).toEqual({ seller: 2n, peerId: 'peer-2', pricePerUnit: 20n });
+    expect(quoted).toEqual(['peer-2', 'peer-2']);
+    // Within its five minutes, the new quote is kept.
+    expect(await router.pick(SERVICE, 2, 100n)).toMatchObject({ seller: 2n });
+    expect(quoted).toEqual(['peer-2', 'peer-2']);
   });
 
   it('leaves out for ten minutes a seller whose quote does not read as one', async () => {

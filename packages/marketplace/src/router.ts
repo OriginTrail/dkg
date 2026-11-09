@@ -5,9 +5,10 @@
  *   1. Candidates: the epoch's offers at or under the budget's price cap, from
  *      sellers in the sharding table.
  *   2. Order: pinned sellers, then price, then this node's measured latency.
- *   3. Quotes from the first three, kept five minutes, each from the peer its
- *      offer names, which must answer as the offer's seller. A quote that does
- *      not read as one (`quoteResponseFromWire`) counts as no answer.
+ *   3. Quotes from the first three, kept five minutes, and only for their own
+ *      epoch, each from the peer its offer names, which must answer as the
+ *      offer's seller. A quote that does not read as one
+ *      (`quoteResponseFromWire`) counts as no answer.
  *   4. It stays with the seller that answered, so each seller gets one run of
  *      nonces, and moves on when a seller is unreachable, for ten minutes, or
  *      returns a receipt that fails the buyer's checks, for the rest of the epoch.
@@ -89,7 +90,7 @@ export class Router {
       return (this.latency.get(a.seller.toString()) ?? Infinity) - (this.latency.get(b.seller.toString()) ?? Infinity);
     });
     for (const offer of candidates.slice(0, QUOTED_CANDIDATES)) {
-      const quote = await this.quoteOf(offer.seller, offer.peerId, serviceId, now);
+      const quote = await this.quoteOf(offer.seller, offer.peerId, serviceId, epoch, now);
       const quoted = quote?.offers.find((q) => q.serviceId === serviceId);
       if (!quote || quote.epoch !== epoch || !quoted?.available || BigInt(quoted.pricePerUnit) > maxPricePerUnit) continue;
       this.sticky.set(serviceId, offer.seller);
@@ -159,10 +160,11 @@ export class Router {
     this.latency.set(seller.toString(), before === undefined ? ms : (before * 3 + ms) / 4);
   }
 
-  private async quoteOf(seller: bigint, peerId: string, serviceId: string, now: number): Promise<QuoteResponse | null> {
+  /** The seller's quote for `serviceId` in `epoch`: the one kept, while it is for that epoch and within its five minutes, or a new one. */
+  private async quoteOf(seller: bigint, peerId: string, serviceId: string, epoch: number, now: number): Promise<QuoteResponse | null> {
     const key = `${seller}:${serviceId}`;
     const kept = this.quotes.get(key);
-    if (kept && now - kept.at < QUOTE_TTL_MS) return kept.quote;
+    if (kept && kept.quote.epoch === epoch && now - kept.at < QUOTE_TTL_MS) return kept.quote;
     try {
       // A quote that does not read as one counts as no answer.
       const quote = quoteResponseFromWire(await this.deps.quote(peerId, [serviceId]));
