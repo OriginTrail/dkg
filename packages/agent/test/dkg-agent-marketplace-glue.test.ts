@@ -35,16 +35,13 @@ interface SendOpts {
 }
 
 describe("an agent's chain marketplace", () => {
-  it('is the chain itself when the chain has the marketplace and the Conviction Account reads', () => {
-    const chain = {
-      chainId: 'evm:31337',
-      getMarketplaceContracts: vi.fn(),
-      getPublishingConvictionAccountInfo: vi.fn(),
-    };
-    expect(methods.marketplaceChain.call({ chain } as never)).toBe(chain);
-    // Only the methods' presence is checked: nothing is read from the chain.
-    expect(chain.getMarketplaceContracts).not.toHaveBeenCalled();
-    expect(chain.getPublishingConvictionAccountInfo).not.toHaveBeenCalled();
+  it("is what the chain's marketplaceChain() hands out", () => {
+    const marketplace = { getMarketplaceContracts: vi.fn(), getPublishingConvictionAccountInfo: vi.fn() };
+    const chain = { chainId: 'evm:31337', marketplaceChain: vi.fn(() => marketplace) };
+    expect(methods.marketplaceChain.call({ chain } as never)).toBe(marketplace);
+    // Asking for the marketplace reads nothing from the chain.
+    expect(marketplace.getMarketplaceContracts).not.toHaveBeenCalled();
+    expect(marketplace.getPublishingConvictionAccountInfo).not.toHaveBeenCalled();
   });
 
   it('is the mock chain itself, as the daemon and its tests are handed it', () => {
@@ -56,8 +53,8 @@ describe("an agent's chain marketplace", () => {
     expect(methods.marketplaceChain.call({ chain: new NoChainAdapter() } as never)).toBeNull();
   });
 
-  it('is null when the chain has the marketplace contracts but no Conviction Account reads', () => {
-    const chain = { chainId: 'evm:31337', getMarketplaceContracts: vi.fn() };
+  it('is null for a chain without marketplaceChain(), whatever methods it has', () => {
+    const chain = { chainId: 'evm:31337', getMarketplaceContracts: vi.fn(), getPublishingConvictionAccountInfo: vi.fn() };
     expect(methods.marketplaceChain.call({ chain } as never)).toBeNull();
   });
 });

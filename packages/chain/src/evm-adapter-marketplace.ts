@@ -26,6 +26,7 @@ import { loadAbi } from './evm-adapter-abi.js';
 import { enrichEvmError } from './evm-adapter-errors.js';
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import type { EvmSigner } from './evm-signer.js';
+import type { EVMChainAdapter } from './evm-adapter.js';
 import {
   BUYER_GRANT_TYPES,
   compactSignature,
@@ -40,6 +41,7 @@ import {
   type EpochFunding,
   type EpochTimes,
   type EpochTotals,
+  type MarketplaceChainAdapter,
   type MarketplaceContracts,
   type MarketplaceWriteOptions,
   type NodeEpoch,
@@ -141,6 +143,11 @@ function requireToken(token: Contract | undefined): Contract {
 }
 
 export class MarketplaceMethods extends EVMChainAdapterBase {
+  /** The marketplace: the adapter itself, whose mixins implement all of it (evm-adapter.ts). */
+  marketplaceChain(this: EVMChainAdapter): MarketplaceChainAdapter {
+    return this;
+  }
+
   async getMarketplaceContracts(): Promise<MarketplaceContracts> {
     await this.init();
     const contracts = await Promise.all([
