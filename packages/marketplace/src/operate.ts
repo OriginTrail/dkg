@@ -7,7 +7,8 @@
  * wallets' ETH, its offerings with their backends' state and this and the next
  * epoch's prices, this epoch's ledger and next landing, its recent batches,
  * its served value and the pool so far, and each ended epoch's pool and gross.
- * Beside the shape, `lastLanding` says what the last landing tick did. Amounts
+ * Beside the shape, `lastLanding` says what the last landing tick did, and each
+ * offering's `listing` whether its offer is listed and why not. Amounts
  * are decimal strings of wei with `…Trac` siblings (`…Ether` for ETH); times
  * are chain seconds.
  */
@@ -56,10 +57,14 @@ export function landingView(report: LandingReport) {
   };
 }
 
-/** One of the seller's services (`Offering`): its backend's state, and this and the next epoch's price. */
+/**
+ * One of the seller's services (`Offering`): its backend's state, this and the next epoch's price, and its offer
+ * in Verifiable Memory (`listing`: listed or not, its asset and last epoch, and why a run failed); `null` without one.
+ */
 export async function offeringView(seller: Seller, serviceId: string) {
   const { price, nextPrice } = await seller.pricesOf(serviceId);
-  return { serviceId: serviceId.toLowerCase(), connector: seller.backendOf(serviceId), ...amount('price', price), ...amount('nextPrice', nextPrice) };
+  const listing = seller.offers ? seller.offers.listingOf(serviceId, (await seller.chain.getEpochTimes()).epoch) : null;
+  return { serviceId: serviceId.toLowerCase(), connector: seller.backendOf(serviceId), ...amount('price', price), ...amount('nextPrice', nextPrice), listing };
 }
 
 /** Operate (`SellerStatus`), with the last landing tick's report beside it. */

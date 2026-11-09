@@ -33,7 +33,7 @@ import {
   decodeMessage,
   encodeMessage,
   serviceIdOf,
-  signOffer,
+  signServiceOffer,
   type AccessKey,
   type Connector,
   type GatewayDeps,
@@ -78,9 +78,9 @@ async function setUp(): Promise<void> {
   await seller.load();
   await seller.tick();
   const domain = (await chain.getMarketplaceContracts()).requestDomain;
-  const offers = [await signOffer(chain, NODE.address, domain, {
-    seller: seller.gate.identityId, serviceId: serviceIdOf(MODEL), serviceClass: 1, unit: 'token', pricePerUnit: PRICE, epoch, capacity: null,
-    model: MODEL, provenance: 'upstream-claimed', peerId: 'seller-peer', signedAt: 1,
+  const offers = [await signServiceOffer(chain, NODE.address, domain, {
+    seller: seller.gate.identityId, serviceId: serviceIdOf(MODEL), serviceClass: 1, unit: 'token', model: MODEL, provenance: 'upstream-claimed',
+    capacity: null, peerId: 'seller-peer', pricePerUnit: PRICE, priceEpoch: epoch, validUntilEpoch: epoch + 12, withdrawn: false, signedAt: 1,
   })];
   routerOf = () => new Router({ chain, offers: async () => offers, quote: async (_peer, services) => seller.quote({ services }) as Promise<QuoteResponse> });
   keys = new AccessKeys(join(dir, 'buyer'));

@@ -218,7 +218,7 @@ type Probe = ContextGraphWritePreflightProbe;
 export interface CoalescingProbeAgent {
   probeContextGraphWritePreflight: (
     contextGraphId: string,
-    opts?: { callerAgentAddress?: string | null; onChainLookup?: () => void },
+    opts?: { callerAgentAddress?: string | null; onChainLookup?: () => void; contentCheck?: 'always' | 'when-needed-for-write' },
   ) => Promise<Probe>;
   writePreflightIdentity?: (
     contextGraphId: string,
@@ -358,7 +358,7 @@ export async function probeWritePreflight(
   const identity = config.coalescing ? identityOf(agent, contextGraphId, callerAgentAddress) : undefined;
   if (identity === undefined) {
     counters.direct += 1;
-    return { probe: await agent.probeContextGraphWritePreflight(contextGraphId, { callerAgentAddress }), fastAccepted: noop };
+    return { probe: await agent.probeContextGraphWritePreflight(contextGraphId, { callerAgentAddress, contentCheck: 'when-needed-for-write' }), fastAccepted: noop };
   }
 
   const state = stateOf(agent);
@@ -381,6 +381,7 @@ export async function probeWritePreflight(
     // A synchronous throw of the probe call becomes the flight's rejection, as for a rejected promise.
     started.promise = new Promise<Probe>((resolve) => resolve(agent.probeContextGraphWritePreflight(contextGraphId, {
       callerAgentAddress,
+      contentCheck: 'when-needed-for-write',
       onChainLookup: () => { started.chainDerived = true; },
     }))).finally(() => {
       // A newer flight may have taken the key; only the flight that holds it releases it.

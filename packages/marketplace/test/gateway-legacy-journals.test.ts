@@ -68,8 +68,11 @@ describe('buyer journals written before the ledger', () => {
   it('are read back: each key and what it spent, each call and what it holds, the epoch made final', async () => {
     const { keys, gateway } = await start();
     expect(await keys.list()).toEqual([
-      { keyId: MAIN, label: 'test-agent', budget: (10n ** 30n).toString(), spent: '860', services: null, rps: 1_000, expiresAt: null, revoked: false, lastUsedAt: ISSUED_AT },
-      { keyId: REVOKED, label: 'revoked', budget: '50', spent: '7', services: null, rps: 1, expiresAt: null, revoked: true, lastUsedAt: 4 },
+      {
+        keyId: MAIN, label: 'test-agent', budget: (10n ** 30n).toString(), spent: '860', reserved: String(4n * MOST), services: null, rps: 1_000, expiresAt: null,
+        revoked: false, lastUsedAt: ISSUED_AT,
+      },
+      { keyId: REVOKED, label: 'revoked', budget: '50', spent: '7', reserved: '0', services: null, rps: 1, expiresAt: null, revoked: true, lastUsedAt: 4 },
     ]);
     // The four calls whose cost is not known hold their most value, against the key and the budget.
     expect(keys.reservedOf(MAIN)).toBe(4n * MOST);

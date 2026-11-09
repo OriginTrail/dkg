@@ -15,12 +15,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import { ethers } from 'ethers';
 import { ChainRpcTransportError, MockChainAdapter, marketplaceChainOf, type MarketplaceChainAdapter } from '@origintrail-official/dkg-chain';
-import { AccessKeys, Buyer, BuyerStore, Gateway, Router, Seller, parsePlan, signOffer } from '@origintrail-official/dkg-marketplace';
+import { AccessKeys, Buyer, BuyerStore, Gateway, Router, Seller, parsePlan, signServiceOffer } from '@origintrail-official/dkg-marketplace';
 import { ApiClient } from '../src/api-client.js';
 import { registerMarketplaceCommand } from '../src/commands/marketplace.js';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { startMarketplaceBuyer, startMarketplaceGateway } from '../src/daemon/marketplace-buyer.js';
-import { subscribeWhenAdmitted } from '../src/daemon/marketplace-context-graph.js';
+import { offerAssetsIn, subscribeWhenAdmitted } from '../src/daemon/marketplace-context-graph.js';
 import { handleMarketplaceRoutes } from '../src/daemon/routes/marketplace.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
@@ -127,12 +127,15 @@ describe('the gateway routes', () => {
   it('make and revoke keys for the node admin only, and show them without their secrets', async () => {
     expect(await api('POST', '/api/marketplace/keys', { label: 'x', budget: '1' }, agentToken)).toMatchObject({ status: 403, body: { code: 'NodeAdminRequired' } });
     const made = await api('POST', '/api/marketplace/keys', { label: 'test-agent', budget: '1000', rps: 2 });
-    expect(made).toMatchObject({ status: 200, body: { label: 'test-agent', budget: '1000', rps: 2, revoked: false } });
+    expect(made).toMatchObject({ status: 200, body: { label: 'test-agent', budget: '1000', spent: '0', reserved: '0', rps: 2, revoked: false } });
     expect(made.body.secret).toMatch(/^dkgmk_[0-9a-f]{48}$/);
     // Their labels and budgets are the admin's business.
     expect(await api('GET', '/api/marketplace/keys', undefined, agentToken)).toMatchObject({ status: 403, body: { code: 'NodeAdminRequired' } });
+    // What a call not yet settled holds of the key's budget is shown beside what its calls cost.
+    expect(await gateway!.keys.reserve(made.body.keyId, 400n)).toBe(true);
     const listed = await api('GET', '/api/marketplace/keys');
-    expect(listed.body.keys).toHaveLength(1);
+    expect(listed.body.keys).toEqual([expect.objectContaining({ keyId: made.body.keyId, budget: '1000', spent: '0', reserved: '400' })]);
+    gateway!.keys.release(made.body.keyId, 400n);
     expect(JSON.stringify(listed.body)).not.toContain(made.body.secret);
     expect(await api('POST', `/api/marketplace/keys/${made.body.keyId}/revoke`, {}, agentToken)).toMatchObject({ status: 403 });
     expect(await api('POST', `/api/marketplace/keys/${made.body.keyId}/revoke`, {})).toMatchObject({ status: 200, body: { revoked: true } });
@@ -161,9 +164,9 @@ describe('the catalog routes', () => {
     await mock.ensureProfile();
     own = await chain.getIdentityId();
     const { epoch } = await chain.getEpochTimes();
-    const offers = [await signOffer(chain, SIGNER.address, (await chain.getMarketplaceContracts()).requestDomain, {
-      seller: own, serviceId: A, serviceClass: 1, unit: 'token', pricePerUnit: 10n, epoch, capacity: null, model: 'urn:test:model:a',
-      provenance: 'upstream-claimed', peerId: 'seller-peer', signedAt: 1,
+    const offers = [await signServiceOffer(chain, SIGNER.address, (await chain.getMarketplaceContracts()).requestDomain, {
+      seller: own, serviceId: A, serviceClass: 1, unit: 'token', model: 'urn:test:model:a', provenance: 'upstream-claimed', capacity: null,
+      peerId: 'seller-peer', pricePerUnit: 10n, priceEpoch: epoch, validUntilEpoch: epoch + 12, withdrawn: false, signedAt: 1,
     })];
     gateway = new Gateway({
       chain, buyerWallet: SIGNER.address, store: buyer!.store, keys: new AccessKeys(dir),
@@ -489,6 +492,82 @@ describe('the Marketplace Context Graph at boot', () => {
     await vi.advanceTimersByTimeAsync(3_600_000);
     expect(waiting.resolveContextGraphSubscriptionBootstrapAuthority).toHaveBeenCalledTimes(1);
     expect(waiting.subscribeToContextGraph).not.toHaveBeenCalled();
+  });
+
+  it("publishes an offer's asset once the graph admits the node, reopening and rewriting a sealed one whole, and finishes a catalog record", async () => {
+    const quads = [{ subject: 'urn:test:offer', predicate: 'urn:test:p', object: '"1"', graph: '' }];
+    const steps: string[] = [];
+    let state: string | undefined;
+    let status = 'confirmed';
+    const step = (name: string) => vi.fn(async (...args: unknown[]) => { steps.push(`${name}${args[2] === 'swm' || args[2] === 'vm' ? `:${args[2]}` : ''}`); });
+    const node = {
+      assertion: {
+        history: vi.fn(async () => (state === undefined ? null : { state })),
+        pullFrom: step('pullFrom'), discard: step('discard'), create: step('create'), write: step('write'), promote: step('promote'),
+      },
+      publishFromFinalizedAssertion: vi.fn(async () => ({ status, kaId: 42n })),
+      recoverRfc64ConfirmedCatalogObligationV1: vi.fn(async () => undefined),
+    };
+    let admitted = false;
+    const assets = offerAssetsIn(node as unknown as DKGAgent, 'graph', () => admitted);
+    // The graph names the target, so the seller keeps what it published by graph.
+    expect(assets.contextGraphId).toBe('graph');
+    await expect(assets.publish('offer-a', quads)).rejects.toMatchObject({ code: 'MARKETPLACE_NOT_ADMITTED' });
+    admitted = true;
+    const published: Record<string, string[]> = {};
+    for (const each of [undefined, 'promoted', 'published', 'finalized', 'created', 'discarded']) {
+      state = each;
+      steps.length = 0;
+      expect(await assets.publish('offer-a', quads)).toEqual({ kaId: 42n });
+      published[String(each)] = [...steps];
+    }
+    expect(published).toEqual({
+      undefined: ['create', 'write', 'promote'],
+      promoted: ['pullFrom:swm', 'discard', 'create', 'write', 'promote'],
+      published: ['pullFrom:vm', 'discard', 'create', 'write', 'promote'],
+      finalized: ['pullFrom:vm', 'discard', 'create', 'write', 'promote'],
+      created: ['discard', 'create', 'write', 'promote'],
+      discarded: ['create', 'write', 'promote'],
+    });
+    expect(node.assertion.write).toHaveBeenLastCalledWith('graph', 'offer-a', quads);
+    status = 'tentative';
+    await expect(assets.publish('offer-a', quads)).rejects.toThrow(/not confirmed on chain \(tentative\)/);
+    await assets.recover({ version: 1 });
+    expect(node.recoverRfc64ConfirmedCatalogObligationV1).toHaveBeenCalledWith({ version: 1 });
+  });
+
+  it('finishes a promote an earlier publish left unfinished, then stages the offer anew and publishes it', async () => {
+    const quads = [{ subject: 'urn:test:offer', predicate: 'urn:test:p', object: '"2"', graph: '' }];
+    const steps: string[] = [];
+    // A promote that failed after its intent was kept: the draft is frozen until the promote runs again.
+    let state = 'created';
+    let unfinished = true;
+    const mutation = (name: string) => vi.fn(async (...args: unknown[]) => {
+      if (unfinished) {
+        throw Object.assign(new Error('Assertion "offer-a" has an unfinished promote; retry assertionPromote before mutating its draft'), { code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+      }
+      steps.push(`${name}${args[2] === 'swm' ? ':swm' : ''}`);
+    });
+    const node = {
+      assertion: {
+        history: vi.fn(async () => ({ state })),
+        pullFrom: mutation('pullFrom'), discard: mutation('discard'), create: mutation('create'), write: mutation('write'),
+        promote: vi.fn(async () => {
+          steps.push(unfinished ? 'promote, finishing the one left' : 'promote');
+          unfinished = false;
+          state = 'promoted';
+        }),
+      },
+      publishFromFinalizedAssertion: vi.fn(async () => ({ status: 'confirmed', kaId: 42n })),
+      recoverRfc64ConfirmedCatalogObligationV1: vi.fn(async () => undefined),
+    };
+    const assets = offerAssetsIn(node as unknown as DKGAgent, 'graph', () => true);
+    expect(await assets.publish('offer-a', quads)).toEqual({ kaId: 42n });
+    expect(steps).toEqual(['promote, finishing the one left', 'pullFrom:swm', 'discard', 'create', 'write', 'promote']);
+    expect(node.assertion.write).toHaveBeenLastCalledWith('graph', 'offer-a', quads);
+    // Any other error fails the publish as it is.
+    node.assertion.discard.mockRejectedValueOnce(Object.assign(new Error('store unavailable'), { code: 'STORE_UNAVAILABLE' }));
+    await expect(assets.publish('offer-a', quads)).rejects.toThrow('store unavailable');
   });
 });
 

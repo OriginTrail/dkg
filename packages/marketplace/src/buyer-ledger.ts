@@ -32,7 +32,7 @@ import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CallBook, type HeldReceipt } from './gateway-book.js';
 import { Journal, KeyedLock } from './journal.js';
-import type { AccessKey } from './keys.js';
+import type { KeptKey } from './keys.js';
 import type { ReconciledRow } from './reconcile.js';
 
 export const BUYER_LEDGER_FILE = 'buyer-ledger.jsonl';
@@ -68,13 +68,13 @@ type Entry =
   | CallRecord
   | { type: 'final'; epoch: number; rows: ReconciledRow[] };
 
-/** A key as the ledger holds it: as the node API shows it, with its secret's hash. */
+/** A key as the ledger holds it: as the node API shows it but `reserved`, with its secret's hash. */
 interface HeldKey {
-  key: AccessKey;
+  key: KeptKey;
   hash: Buffer;
 }
 
-const keyOf = (r: KeyRecord): AccessKey => ({
+const keyOf = (r: KeyRecord): KeptKey => ({
   keyId: r.keyId, label: r.label, budget: r.budget, spent: r.spent ?? '0', services: r.services, rps: r.rps, expiresAt: r.expiresAt,
   revoked: false, lastUsedAt: r.lastUsedAt ?? null,
 });
@@ -119,7 +119,7 @@ export class BuyerLedger {
 
   // ---------------------------------------------------------------- keys
 
-  async keyList(): Promise<AccessKey[]> {
+  async keyList(): Promise<KeptKey[]> {
     await this.load();
     return [...this.keys.values()].map((k) => ({ ...k.key }));
   }
@@ -130,13 +130,13 @@ export class BuyerLedger {
     return [...this.keys.values()];
   }
 
-  async makeKey(record: KeyRecord): Promise<AccessKey> {
+  async makeKey(record: KeyRecord): Promise<KeptKey> {
     await this.load();
     await this.write({ type: 'key', ...record });
     return { ...this.keys.get(record.keyId)!.key };
   }
 
-  async revokeKey(keyId: string, at: number): Promise<AccessKey | null> {
+  async revokeKey(keyId: string, at: number): Promise<KeptKey | null> {
     await this.load();
     if (!this.keys.has(keyId)) return null;
     await this.write({ type: 'revoke', keyId, at });

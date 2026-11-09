@@ -33,17 +33,17 @@ import {
   decodeMessage,
   encodeMessage,
   SIGNER_TTL_MS,
-  hashOffer,
+  UNREACHABLE_MS,
+  hashServiceOffer,
   receiptFromWire,
   serviceIdOf,
-  signOffer,
+  signServiceOffer,
   type Connector,
   type AccessKey,
   type GatewayAnswer,
   type GatewayDeps,
-  type Offer,
-  type QuoteResponse,
   type ServeResponse,
+  type ServiceOffer,
 } from '../src/index.js';
 
 const NODE = new ethers.Wallet(`0x${'22'.repeat(32)}`);
@@ -60,7 +60,7 @@ let router: Router;
 let gateway: Gateway;
 let gatewayDeps: GatewayDeps;
 let keys: AccessKeys;
-let offers: Offer[];
+let offers: ServiceOffer[];
 let tamper: ((answer: ServeResponse) => ServeResponse) | undefined;
 let reachable: boolean;
 let DOMAIN: MarketplaceDomain | undefined;
@@ -86,16 +86,16 @@ async function setUp(value = 10n ** 6n, models: string[] = [MODEL]): Promise<voi
   await seller.load();
   await seller.tick();
   const domain = (await chain.getMarketplaceContracts()).requestDomain;
-  offers = await Promise.all(models.map((m) => signOffer(chain, NODE.address, domain, {
-    seller: seller.gate.identityId, serviceId: serviceIdOf(m), serviceClass: 1, unit: 'token', pricePerUnit: PRICE, epoch, capacity: null,
-    model: m, provenance: 'upstream-claimed', peerId: 'seller-peer', signedAt: 1,
+  offers = await Promise.all(models.map((m) => signServiceOffer(chain, NODE.address, domain, {
+    seller: seller.gate.identityId, serviceId: serviceIdOf(m), serviceClass: 1, unit: 'token', model: m, provenance: 'upstream-claimed',
+    capacity: null, peerId: 'seller-peer', pricePerUnit: PRICE, priceEpoch: epoch, validUntilEpoch: epoch + 12, withdrawn: false, signedAt: 1,
   })));
   router = new Router({
     chain,
     offers: async () => offers,
     quote: async (_peer, services) => {
       if (!reachable) throw new Error('unreachable');
-      return seller.quote({ services }) as Promise<QuoteResponse>;
+      return seller.quote({ services });
     },
   });
   keys = new AccessKeys(join(dir, 'buyer'));
@@ -195,6 +195,19 @@ describe('a call through the gateway', () => {
     DOMAIN = (await chain.getMarketplaceContracts()).requestDomain;
     tamper = t;
     expect(body(await call())).toMatchObject({ problem });
+  });
+
+  it.each([
+    ['a result without text', (a: ServeResponse) => ({ ...a, result: { content: 7 } })],
+    ['a refusal with an unknown code', () => ({ ok: false, code: 'NoSuchCode', retry: true })],
+    ['no ok', () => ({ answer: 'synthetic answer' })],
+  ])('takes an answer with %s as no answer: the call stays held, and the seller is left out', async (_what, t) => {
+    await setUp();
+    tamper = t as unknown as (a: ServeResponse) => ServeResponse;
+    expect(await call()).toMatchObject({ status: 503, body: { error: { code: 'seller_unreachable' } } });
+    expect(gateway.heldValue(subscriptionIdOf(NODE.address, (await chain.getEpochTimes()).epoch), 0)).toBe(620n);
+    tamper = undefined;
+    expect(body(await call()).error.code).toBe('no_seller');
   });
 
   it("keeps a receipt whose signer the chain could not check, and retries a lost answer once", async () => {
@@ -305,17 +318,20 @@ describe('the router', () => {
   /** Each seller's operational wallet, made at runtime; the chain below maps it to the seller. */
   const wallets = new Map<bigint, ethers.HDNodeWallet>();
   const walletOf = (seller: bigint) => wallets.get(seller) ?? wallets.set(seller, ethers.Wallet.createRandom()).get(seller)!;
-  /** An offer of `seller` in epoch 1, naming `peer-<seller>`, signed at 1 by the seller's wallet. */
-  const offer = (seller: bigint, price: bigint, over: { epoch?: number; by?: ethers.HDNodeWallet; peerId?: string; signedAt?: number } = {}): Offer => {
+  /** An offer of `seller` from epoch 1 on, naming `peer-<seller>`, signed at 1 by the seller's wallet. */
+  const offer = (seller: bigint, price: bigint, over: { epoch?: number; by?: ethers.HDNodeWallet; peerId?: string; signedAt?: number } = {}): ServiceOffer => {
     const unsigned = {
-      seller, serviceId: SERVICE, serviceClass: 1, unit: 'token' as const, pricePerUnit: price, epoch: over.epoch ?? 1, capacity: null,
-      model: MODEL, provenance: 'upstream-claimed' as const, peerId: over.peerId ?? `peer-${seller}`, signedAt: over.signedAt ?? 1,
+      seller, serviceId: SERVICE, serviceClass: 1, unit: 'token' as const, model: MODEL, provenance: 'upstream-claimed' as const, capacity: null,
+      peerId: over.peerId ?? `peer-${seller}`, pricePerUnit: price, priceEpoch: over.epoch ?? 1, validUntilEpoch: 12, withdrawn: false,
+      signedAt: over.signedAt ?? 1,
     };
-    return { ...unsigned, signature: (over.by ?? walletOf(seller)).signingKey.sign(hashOffer(domain, unsigned)).serialized };
+    return { ...unsigned, signature: (over.by ?? walletOf(seller)).signingKey.sign(hashServiceOffer(domain, unsigned)).serialized };
   };
   let clock: number;
   let quoted: string[];
-  let list: Offer[];
+  /** The epoch the sellers quote for. */
+  let quotedEpoch: number;
+  let list: ServiceOffer[];
   /** The wallets the chain was asked about, in order; while `chainDown`, every read fails. */
   let identityReads: string[];
   let chainDown: boolean;
@@ -333,14 +349,15 @@ describe('the router', () => {
     quote: async (peer, services) => {
       quoted.push(peer);
       if (peer === 'peer-3') throw new Error('unreachable');
+      if (peer === 'peer-11') return { seller: '11', epoch: 1, offers: 'none' };
       const id = peer.slice(5);
-      return { seller: id, epoch: 1, offers: services.map((s) => ({ serviceId: s, pricePerUnit: String(list.find((o) => String(o.seller) === id)!.pricePerUnit), available: true, capacity: null })) };
+      return { seller: id, epoch: quotedEpoch, offers: services.map((s) => ({ serviceId: s, pricePerUnit: String(list.find((o) => String(o.seller) === id)!.pricePerUnit), available: true, capacity: null })) };
     },
     pinned: async () => pinned,
     clock: () => clock,
   });
 
-  beforeEach(() => { clock = 0; quoted = []; list = []; identityReads = []; chainDown = false; wallets.clear(); });
+  beforeEach(() => { clock = 0; quoted = []; quotedEpoch = 1; list = []; identityReads = []; chainDown = false; wallets.clear(); });
 
   it('keeps only the offers an operational wallet of their seller signed, asking the chain once per wallet for five minutes', async () => {
     const stranger = ethers.Wallet.createRandom();
@@ -418,6 +435,39 @@ describe('the router', () => {
     clock += 5 * 60_000;
     await router.pick(SERVICE, 1, 100n);
     expect(quoted.filter((p) => p === 'peer-2')).toHaveLength(2);
+  });
+
+  it("asks again right after an epoch's boundary, while the last epoch's quote is within its five minutes", async () => {
+    // One offer prices both epochs.
+    list = [offer(2n, 20n)];
+    const router = routerWith();
+    expect(await router.pick(SERVICE, 1, 100n)).toEqual({ seller: 2n, peerId: 'peer-2', pricePerUnit: 20n });
+    // A minute on, the next epoch starts: the quote for epoch 1 is kept for epoch 1 only.
+    clock += 60_000;
+    quotedEpoch = 2;
+    expect(await router.pick(SERVICE, 2, 100n)).toEqual({ seller: 2n, peerId: 'peer-2', pricePerUnit: 20n });
+    expect(quoted).toEqual(['peer-2', 'peer-2']);
+    // Within its five minutes, the new quote is kept.
+    expect(await router.pick(SERVICE, 2, 100n)).toMatchObject({ seller: 2n });
+    expect(quoted).toEqual(['peer-2', 'peer-2']);
+  });
+
+  it('leaves out for ten minutes a seller whose quote does not read as one', async () => {
+    list = [offer(11n, 10n)];
+    const router = routerWith();
+    expect(await router.pick(SERVICE, 1, 100n)).toBeNull();
+    expect(await router.pick(SERVICE, 1, 100n)).toBeNull();
+    expect(quoted).toEqual(['peer-11']);
+    clock += UNREACHABLE_MS;
+    expect(await router.pick(SERVICE, 1, 100n)).toBeNull();
+    expect(quoted).toEqual(['peer-11', 'peer-11']);
+  });
+
+  it('routes a call past a seller whose quote does not read as one, to the next seller', async () => {
+    list = [offer(11n, 10n), offer(2n, 20n)];
+    const router = routerWith();
+    expect((await router.pick(SERVICE, 1, 100n))?.seller).toBe(2n);
+    expect(quoted).toEqual(['peer-11', 'peer-2']);
   });
 
   it('leaves out an unreachable seller for ten minutes and a failed one for the epoch', async () => {

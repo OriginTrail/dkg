@@ -99,6 +99,29 @@ describe('access keys in memory', () => {
     expect((await keys.list())[0]).toMatchObject({ spent: '25' });
   });
 
+  it('show what calls not yet settled hold of each key, beside what they cost, wherever a key is shown', async () => {
+    const keys = new AccessKeys(dir);
+    const { secret, key } = await keys.make(scopes(100n), 1);
+    expect(key).toMatchObject({ budget: '100', spent: '0', reserved: '0' });
+    expect(await keys.reserve(key.keyId, 60n)).toBe(true);
+    expect(await keys.list()).toEqual([expect.objectContaining({ spent: '0', reserved: '60' })]);
+    expect(await keys.check(secret, 2)).toMatchObject({ ok: true, key: { reserved: '60' } });
+    // The call cost 25; another, whose cost is not known yet, is read back at load.
+    await charge(keys, key.keyId, 25n, 3);
+    keys.release(key.keyId, 60n);
+    keys.hold(key.keyId, 30n);
+    expect((await keys.list())[0]).toMatchObject({ spent: '25', reserved: '30' });
+    // What it has left is budget − spent − reserved: 45.
+    expect(await keys.reserve(key.keyId, 46n)).toBe(false);
+    expect(await keys.reserve(key.keyId, 45n)).toBe(true);
+    expect(await keys.revoke(key.keyId, 4)).toMatchObject({ revoked: true, spent: '25', reserved: '75' });
+    keys.release(key.keyId, 75n);
+    expect((await keys.list())[0]).toMatchObject({ reserved: '0' });
+    // Reservations are kept in memory: a key read from the ledger again holds none until its calls are held again.
+    keys.hold(key.keyId, 5n);
+    expect((await new AccessKeys(dir).list())[0]).toMatchObject({ spent: '25', reserved: '0' });
+  });
+
   it('keep the journal as it is when making an epoch final fails, and make it final at the next try', async () => {
     const keys = new AccessKeys(dir);
     const { key } = await keys.make(scopes(1_000n), 1);
