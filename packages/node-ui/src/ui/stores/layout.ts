@@ -14,13 +14,10 @@ interface LayoutState {
   bottomHeight: number;
   /** The one panel open on a narrow screen. Never saved, so desktop panels keep their state. */
   narrowPanel: 'left' | 'right' | null;
-  /** A dialog opened from a side panel is showing, so navigating mustn't close that panel. */
-  narrowPanelHeld: boolean;
 
   toggleLeft: () => void;
   toggleRight: () => void;
   closeNarrowPanel: () => void;
-  holdNarrowPanel: (held: boolean) => void;
   toggleBottom: () => void;
   toggleBottomMaximised: () => void;
   toggleLeftSectionMyProjects: () => void;
@@ -188,7 +185,6 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
   rightWidth: initial.rightWidth,
   bottomHeight: initial.bottomHeight,
   narrowPanel: null,
-  narrowPanelHeld: false,
 
   toggleLeft: () => {
     if (isNarrowViewport()) {
@@ -207,7 +203,6 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
     persist(snapshot(get()));
   },
   closeNarrowPanel: () => set({ narrowPanel: null }),
-  holdNarrowPanel: (held) => set({ narrowPanelHeld: held }),
   toggleBottom: () => {
     set((s) => ({ bottomCollapsed: !s.bottomCollapsed, bottomMaximised: false }));
     persist(snapshot(get()));

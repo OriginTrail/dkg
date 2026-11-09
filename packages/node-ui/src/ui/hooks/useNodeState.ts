@@ -1,6 +1,7 @@
 import { useAgentsStore } from '../stores/agents.js';
 import { api } from '../api-wrapper.js';
-import { NODE_STATUS_POLL_MS, headerNodeStatus, isNodeStatusFailure } from '../lib/formatPeerStatus.js';
+import { headerNodeStatus } from '../lib/formatPeerStatus.js';
+import { NODE_STATUS_POLL_MS, isNodeStatusFailure } from '../lib/nodeStatusPolicy.js';
 import { useVisibilityPolling } from './useVisibilityPolling.js';
 
 /** The live node status, shared so the header and Settings can't disagree. */

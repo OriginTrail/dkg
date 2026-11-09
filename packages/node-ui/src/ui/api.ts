@@ -1,4 +1,4 @@
-import { NODE_STATUS_POLL_MS } from './lib/formatPeerStatus.js';
+import { NODE_STATUS_POLL_MS } from './lib/nodeStatusPolicy.js';
 import { randomUUID } from './lib/randomUUID.js';
 import { executeQuery, invalidateQueryCache, fetchContextGraphs } from './query-api.js';
 export * from './query-api.js';
