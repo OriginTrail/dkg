@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { canonicalizeJson } from '../../packages/core/dist/index.js';
 import { component, normalizeComponentInput } from './component-registry.mjs';
 import { normalizeStudio } from './studio-definition.mjs';
@@ -9,13 +8,6 @@ export const id = v => typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,1
 export const hash = v => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
 export const closed = (v, keys) => record(v) && Object.keys(v).every(k => keys.includes(k));
 export const canonical = v => canonicalizeJson(v, { maxBytes: 16_384, maxDepth: 12 });
-/** Hash the normalized wire input, without storing arguments or depending on today's profile. */
-export function nativeInputDigest(input) {
-  if (!closed(input, ['itemsJson', 'paramsJson', 'executionId'])
-    || !['itemsJson', 'paramsJson', 'executionId'].every(key => typeof input[key] === 'string'))
-    throw fail('STUDIO_NATIVE_UNCONFIRMED');
-  return createHash('sha256').update(canonical(input)).digest('hex');
-}
 const allowed = new Set(['edit-fields', 'filter', 'sort', 'limit', 'remove-duplicates', 'split-out', 'aggregate',
   'summarize', 'rename-keys', 'date-time', 'if', 'switch', 'merge', 'merge-fields', 'compare-datasets', 'stop-error']);
 

@@ -55,9 +55,8 @@ async function nativeFixture(t) {
       try {
         const admitted = observer.mcp.run(owner.accountId, body.invocationId);
         assert.equal(admitted.status, 'unconfirmed');
-        assert.equal(admitted.version_id, 'v1');
-        assert.equal(admitted.execution_id, null);
-        assert.equal(admitted.input_sha256, createHash('sha256').update(canonical(body.input)).digest('hex'));
+        assert.deepEqual(admitted.checkpoint, { executionId: null, versionId: 'v1', runKey: body.invocationId,
+          inputDigest: createHash('sha256').update(canonical(body.input)).digest('hex') });
       } finally { observer.close(); }
       state.execution = { id: '42', workflowId: f.compiled.grant.workflowId, workflowVersionId: 'v1', status: 'running', workflowData: f.published,
         data: { resultData: { runData: {
@@ -166,7 +165,7 @@ test('withdrawal during pending readback suppresses output and steps while durab
   c.runner.inspect = async () => { started.resolve(); return inspection.promise; };
   const pending = s.readRun({ runKey: 'run-one' }, actor);
   await started.promise;
-  assert.equal(other.mcp.activeAgentRun(owner.accountId).run_key, 'run-one');
+  assert.equal(other.mcp.activeAgentRun(owner.accountId).runKey, 'run-one');
   withdrawing.withdraw({ kaRef: f.input().kaRef, workflowSha256: f.input().workflowSha256 }, owner);
   inspection.resolve({ status: 'succeeded', output: { items: [{ result: 'private-output' }], ports: {} },
     steps: [{ output: { result: 'private-step-output' } }] });
@@ -222,31 +221,43 @@ test('native HTTP dispatch checks acknowledgement and verifies exact execution/v
   delete published.nodes[0].parameters.unreviewed;
   const input = runInput(f.input('native-run'), workflow, null);
   assert.equal(await runner.dispatch(workflow, 'native-run', input), '42');
-  const checkpoint = { execution_id: '42', version_id: 'v1', input_sha256: createHash('sha256').update(canonical(input)).digest('hex') };
+  const checkpoint = { executionId: '42', versionId: 'v1', runKey: 'native-run',
+    inputDigest: createHash('sha256').update(canonical(input)).digest('hex') };
   execution = { id: '42', workflowId: 'native-one', status: 'running' };
-  assert.equal((await runner.inspect(workflow, checkpoint, 'native-run')).status, 'running');
+  assert.equal((await runner.inspect(workflow, checkpoint)).status, 'running');
   execution = { id: '42', workflowId: 'native-one', workflowVersionId: 'v1', status: 'success', workflowData: published,
     data: { resultData: { runData: {
       'Receive input': [{ data: { main: [[{ json: { body: { invocationId: 'native-run', input } } }]] } }],
       [compiled.grant.result.nodes[0]]: [{ data: { main: [[{ json: { answer: 42 } }]] } }],
     } } } };
-  assert.deepEqual((await runner.inspect(workflow, checkpoint, 'native-run')).output.items, [{ answer: 42 }]);
+  assert.deepEqual((await runner.inspect(workflow, checkpoint)).output.items, [{ answer: 42 }]);
   const received = execution.data.resultData.runData['Receive input'][0].data.main[0][0].json.body;
+  assert.deepEqual(await runner.verifyCallback(workflow, checkpoint), received);
+  // Both verification paths consume exactly the same persistence-independent
+  // contract. No separately supplied run key or SQL-shaped alias is accepted.
+  for (const changed of [{ executionId: '43' }, { versionId: 'v2' }, { runKey: 'wrong-run' },
+    { inputDigest: 'b'.repeat(64) }, { inputDigest: null }]) {
+    await assert.rejects(runner.inspect(workflow, { ...checkpoint, ...changed }), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
+    await assert.rejects(runner.verifyCallback(workflow, { ...checkpoint, ...changed }), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
+  }
+  execution.status = 'running';
+  await assert.rejects(runner.verifyCallback(workflow, { ...checkpoint, inputDigest: null }), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
+  execution.status = 'success';
   for (const invalid of [undefined, { ...input, itemsJson: '[{"value":"another-input"}]' },
     { ...input, paramsJson: '{}' }, { ...input, executionId: 'other' }]) {
     received.input = invalid;
-    await assert.rejects(runner.inspect(workflow, checkpoint, 'native-run'), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
+    await assert.rejects(runner.inspect(workflow, checkpoint), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
+    await assert.rejects(runner.verifyCallback(workflow, checkpoint), { code: 'STUDIO_NATIVE_UNCONFIRMED' });
   }
   received.input = input;
-  await assert.rejects(runner.inspect(workflow, checkpoint, 'wrong-run'));
-  execution.workflowVersionId = 'v2'; await assert.rejects(runner.inspect(workflow, checkpoint, 'native-run'));
+  execution.workflowVersionId = 'v2'; await assert.rejects(runner.inspect(workflow, checkpoint));
   execution.workflowVersionId = 'v1';
   execution.data.resultData.runData[compiled.grant.result.nodes[0]][0].data.main[0] = Array.from({ length: 21 }, () => ({ json: { answer: 42 } }));
-  assert.equal((await runner.inspect(workflow, checkpoint, 'native-run')).status, 'failed');
+  assert.equal((await runner.inspect(workflow, checkpoint)).status, 'failed');
   execution.data.resultData.runData[compiled.grant.result.nodes[0]] = 'malformed';
-  assert.equal((await runner.inspect(workflow, checkpoint, 'native-run')).status, 'failed');
+  assert.equal((await runner.inspect(workflow, checkpoint)).status, 'failed');
   execution.workflowVersionId = 'v1'; execution.status = 'error';
-  assert.equal((await runner.inspect(workflow, checkpoint, 'native-run')).status, 'failed');
+  assert.equal((await runner.inspect(workflow, checkpoint)).status, 'failed');
   assert.equal(count, 1);
 });
 for (const status of ['success', 'error', 'canceled', 'crashed']) test(`native ${status} requires exact unique admitted input after restart before releasing capacity`, async t => {
@@ -298,13 +309,13 @@ test('migration never invents an admitted input digest for legacy runs or releas
   f.repository.db.exec('ALTER TABLE studio_tool_runs DROP COLUMN input_sha256');
   const before = f.repository.mcp.run(owner.accountId, 'run-one');
   f.restart(); s = service();
-  const { input_sha256, ...after } = f.repository.mcp.run(owner.accountId, 'run-one');
-  assert.equal(input_sha256, null);
+  const after = f.repository.mcp.run(owner.accountId, 'run-one');
+  assert.equal(after.checkpoint.inputDigest, null);
   assert.deepEqual(after, before);
   state.execution.status = 'success';
   assert.equal((await s.readRun({ runKey: 'run-one' }, actor)).output, undefined);
   assert.equal((await s.run(f.input(), actor)).status, 'running');
-  assert.equal(f.repository.mcp.run(owner.accountId, 'run-one').input_sha256, null);
+  assert.equal(f.repository.mcp.run(owner.accountId, 'run-one').checkpoint.inputDigest, null);
   await assert.rejects(s.run(f.input('second'), actor), { code: 'STUDIO_BUSY' });
   assert.equal(state.posts, 1);
 });

@@ -51,5 +51,5 @@ test('MCP eligibility requires completed owner save and survives repository reop
   assert.equal(service.get(pin, owner).approved, true);
   assert.equal((await service.run(input, owner)).status, 'running');
   assert.equal(dispatches, 1);
-  assert.equal(f.repository.mcp.run(owner.accountId, input.runKey).execution_id, '42');
+  assert.equal(f.repository.mcp.run(owner.accountId, input.runKey).checkpoint.executionId, '42');
 });
