@@ -944,7 +944,7 @@ function OperationsTab() {
     [selectedOp],
   );
   const { data: statusData } = useFetch(fetchStatus, [], 30_000);
-  const explorerUrl = statusData?.blockExplorerUrl;
+  const explorerUrl = statusData?.blockExplorerUrl ?? undefined;
 
   const operations = data?.operations ?? [];
   const total = data?.total ?? 0;

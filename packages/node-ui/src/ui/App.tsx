@@ -69,12 +69,21 @@ function useDragResize(onDrag: (delta: number) => void, axis: 'x' | 'y') {
   return useCallback((node: HTMLDivElement | null) => setHandle(node), []);
 }
 
+/** True from the first render where `value` is true, and from then on. */
+function useOnceTrue(value: boolean): boolean {
+  const seen = useRef(false);
+  if (value) seen.current = true;
+  return seen.current;
+}
+
 function AppShell() {
   useNodeStatusPolling();
   useKeyboardShortcuts();
   useShellRouting();
   const { bottomCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
   const { narrow, leftOpen, rightOpen } = useShellPanels();
+  const leftMounted = useOnceTrue(narrow || leftOpen);
+  const rightMounted = useOnceTrue(narrow || rightOpen);
   const closeNarrowPanel = useLayoutStore((s) => s.closeNarrowPanel);
   const { pathname } = useLocation();
   // Going somewhere, or resizing past the breakpoint, shows the page, not a floating panel.
@@ -148,9 +157,10 @@ function AppShell() {
         {narrow && (leftOpen || rightOpen) && (
           <button type="button" className="v10-panel-scrim" aria-label="Close panel" onClick={closeNarrowPanel} />
         )}
-        {/* On a narrow screen a closed panel stays mounted but hidden, so a resize
-            or opening the other panel keeps what's in it (a chat draft, a form). */}
-        {(narrow || leftOpen) && (
+        {/* Once a side panel has mounted it stays mounted, hidden while closed, so
+            closing it, a resize or opening the other panel keeps what's in it
+            (a chat draft, queued files, a form). */}
+        {leftMounted && (
           <div className="v10-panel-left" style={{ width: leftWidth }} hidden={!leftOpen}>
             <PanelLeft />
           </div>
@@ -166,7 +176,7 @@ function AppShell() {
         </div>
 
         {rightOpen && <div className="v10-resize-handle-h" ref={rightHandle} />}
-        {(narrow || rightOpen) && (
+        {rightMounted && (
           <div className="v10-panel-right" style={{ width: rightWidth }} hidden={!rightOpen}>
             <PanelRight />
           </div>
