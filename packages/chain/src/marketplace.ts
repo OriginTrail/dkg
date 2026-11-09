@@ -410,9 +410,9 @@ export interface MarketplaceChain {
   getBaseFee?(): Promise<bigint | null>;
   // KnowledgeAssetsLifecycle: a seller's offer is a Knowledge Asset, kept by extending its lifetime.
   /**
-   * `extendKnowledgeAssetLifetime(kaId, epochs, tokenAmount)`, from `opts.from` or the primary wallet, which
-   * pays the ask for the asset's bytes over `epochs` more epochs (at least 1 wei), approved first. Anyone may
-   * extend any asset; it takes no ACKs and no Conviction discount.
+   * `extendKnowledgeAssetLifetime(kaId, epochs, tokenAmount)`, from `opts.from` or else the wallet a publish
+   * would pay from (gas, and the TRAC it costs), which pays the ask for the asset's bytes over `epochs` more
+   * epochs (at least 1 wei), approved first. Anyone may extend any asset; no ACKs, no Conviction discount.
    */
   extendKnowledgeAssetLifetime?(kaId: bigint, epochs: number, opts?: MarketplaceWriteOptions): Promise<KnowledgeAssetExtension>;
 }

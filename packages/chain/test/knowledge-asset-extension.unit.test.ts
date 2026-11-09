@@ -3,9 +3,11 @@
  * `extendKnowledgeAssetLifetime`, which keeps a seller's offer asset stored:
  *   - on the EVM adapter, paid at the rate `KnowledgeAssetsLifecycle` asks of
  *     an extension (ask × bytes × epochs / 1024, at least 1 wei), approved to
- *     the lifecycle contract first, sent from the wallet asked for, and
- *     answered with the end epoch read after it (its contract calls stubbed;
- *     the cli's serving test extends a real asset on Hardhat);
+ *     the lifecycle contract first, sent from the wallet asked for or else the
+ *     one a publish would pay from (gas, and the TRAC the extension costs), and
+ *     answered with the end epoch read after it (its contract calls and the
+ *     wallets' balances stubbed; the cli's serving test extends a real asset
+ *     on Hardhat);
  *   - on the mock, charged at 1 wei per KiB and epoch, and refused once the
  *     asset has expired;
  *   - absent on NoChainAdapter, as every marketplace method is.
@@ -18,15 +20,24 @@ import { NoChainAdapter } from '../src/no-chain-adapter.js';
 import { marketplaceChainOf } from '../src/marketplace.js';
 
 const KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+const SECOND_KEY = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b63b91100';
 const LIFECYCLE = ethers.getAddress('0x00000000000000000000000000000000000000a1');
+const ONE = 10n ** 18n;
 
-/** An EVM adapter whose chain reads and sends are stubbed: the asset holds `byteSize` bytes through `endEpoch`, at `ask`. */
-function stubbedAdapter(ask: bigint, byteSize: bigint, endEpoch: bigint) {
-  const adapter = new EVMChainAdapter({ rpcUrl: 'http://127.0.0.1:59998', privateKey: KEY, hubAddress: '0x0000000000000000000000000000000000000001', chainId: 'evm:31337' });
+/**
+ * An EVM adapter whose chain reads and sends are stubbed: the asset holds `byteSize` bytes through `endEpoch`, at
+ * `ask`. Each wallet holds what `funding` says by its lowercased address, and 1 ETH and 1 TRAC otherwise.
+ */
+function stubbedAdapter(ask: bigint, byteSize: bigint, endEpoch: bigint, wallets: { additionalKeys?: string[]; funding?: Map<string, { native: bigint; trac: bigint }> } = {}) {
+  const adapter = new EVMChainAdapter({
+    rpcUrl: 'http://127.0.0.1:59998', privateKey: KEY, hubAddress: '0x0000000000000000000000000000000000000001', chainId: 'evm:31337',
+    ...(wallets.additionalKeys ? { additionalKeys: wallets.additionalKeys } : {}),
+  });
   const calls: { approvals: unknown[][]; sends: unknown[][] } = { approvals: [], sends: [] };
   const context = { byteSize, endEpoch };
   Object.assign(adapter, {
     init: async () => undefined,
+    getWalletFunding: async (address: string) => wallets.funding?.get(address.toLowerCase()) ?? { native: ONE, trac: ONE },
     contracts: { knowledgeAssetStorage: {}, askStorage: {} },
     readContract: async (_c: unknown, label: string) => (label === 'askStorage.getStakeWeightedAverageAsk' ? ask : undefined),
     readKnowledgeAssetUpdateContext: async () => ({ ...context }),
@@ -60,6 +71,25 @@ describe('extendKnowledgeAssetLifetime on the EVM adapter', () => {
       .rejects.toThrow(/not one of this node's operational wallets/);
     Object.assign(adapter, { contracts: { knowledgeAssetStorage: {} } });
     await expect(adapter.extendKnowledgeAssetLifetime(42n, 1)).rejects.toThrow(/AskStorage not available/);
+  });
+
+  it('sends from the wallet a publish would pay from: one with gas and the TRAC it costs, past a primary without TRAC', async () => {
+    const tokenAmount = (10n ** 15n * 2_048n * 12n) / 1024n;
+    const primary = new ethers.Wallet(KEY).address;
+    const second = new ethers.Wallet(SECOND_KEY).address;
+    const funding = new Map([[primary.toLowerCase(), { native: ONE, trac: 0n }], [second.toLowerCase(), { native: ONE, trac: tokenAmount }]]);
+    const { adapter, calls } = stubbedAdapter(10n ** 15n, 2_048n, 13n, { additionalKeys: [SECOND_KEY], funding });
+    expect((await adapter.extendKnowledgeAssetLifetime(42n, 12)).endEpoch).toBe(25);
+    expect(calls.approvals.map(([signer]) => (signer as { address: string }).address)).toEqual([second]);
+    expect(calls.sends.map((send) => send[3])).toEqual([{ from: second }]);
+    // The wallet asked for sends, funded or not.
+    await adapter.extendKnowledgeAssetLifetime(42n, 12, { from: primary });
+    expect(calls.sends.map((send) => send[3])).toEqual([{ from: second }, { from: primary }]);
+    // TRAC short in every wallet: the best-funded one sends, not the next in turn, and the contract says whether
+    // its TRAC and the graph's escrow do.
+    funding.set(second.toLowerCase(), { native: 2n * ONE, trac: tokenAmount - 1n });
+    await adapter.extendKnowledgeAssetLifetime(42n, 12);
+    expect(calls.sends.map((send) => send[3])).toEqual([{ from: second }, { from: primary }, { from: second }]);
   });
 });
 
