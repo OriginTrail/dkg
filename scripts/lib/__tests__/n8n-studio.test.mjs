@@ -181,6 +181,104 @@ test('a timer cannot invoke downstream actions after a component is revoked',asy
   } finally { f.close(); }
 });
 
+function timerExecution(f, row, id, normalized = true) {
+  const native = f.native.get(row.provider_id), a = JSON.parse(row.activation_json);
+  const workflowData = structuredClone({ ...native.activeVersion, settings: native.settings });
+  const trigger = workflowData.nodes.find(n => n.name.endsWith(' trigger')).name;
+  if (normalized) for (const node of workflowData.nodes) {
+    if (typeof node.parameters.jsonOutput === 'string' && node.parameters.jsonOutput.startsWith('='))
+      node.parameters.jsonOutput = node.parameters.jsonOutput.slice(1);
+    if (node.type === 'n8n-nodes-base.httpRequest') {
+      delete node.parameters.specifyBody; delete node.parameters.jsonBody;
+    }
+  }
+  return { id, workflowId: row.provider_id, workflowVersionId: native.activeVersion.versionId,
+    status: 'success', startedAt: new Date(a.startedAt + 1).toISOString(), workflowData,
+    data: { resultData: { runData: { [trigger]: [{ data: { main: [[{ json: { tick: id } }]] } }] } } } };
+}
+
+for (const interrupted of [false, true]) test(`normalized timer ${interrupted ? 'recovers after restart' : 'is delivered once'}`, async () => {
+  const f = environment();
+  try {
+    const w = await f.service.save(definition(['schedule', 'http-request'], [[0,0,1,0]]), () => {});
+    await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+    const row = f.provider.row(w.kaRef), execution = timerExecution(f, row, '7');
+    f.executions.set('7', execution);
+    const invoke = f.client.programs.invoke, attempts = [], cached = new Map();
+    let loseReply = interrupted;
+    f.client.programs.invoke = async value => {
+      attempts.push(value.invocationId);
+      if (!cached.has(value.invocationId)) cached.set(value.invocationId, await invoke(value));
+      if (loseReply) { loseReply = false; throw new Error('response lost after downstream execution'); }
+      return cached.get(value.invocationId);
+    };
+    await f.service.poll();
+    assert.equal(f.invocations.length, 1, 'normalized native evidence must admit the timer');
+    const first = f.provider.db.prepare('SELECT * FROM events WHERE execution_id=?').get('7');
+    assert.equal(first.invocation_id, f.invocations[0].invocationId);
+    assert.equal(!!first.receipt_json, !interrupted);
+    f.restart();
+    await f.service.poll(); await f.service.poll();
+    assert.equal(f.invocations.length, 1, 'the simulated downstream runtime executes each invocation once');
+    assert.deepEqual(attempts, Array(interrupted ? 2 : 1).fill(first.invocation_id));
+    const completed = f.provider.db.prepare('SELECT * FROM events WHERE execution_id=?').get('7');
+    assert.equal(completed.invocation_id, first.invocation_id); assert.ok(completed.receipt_json);
+    assert.equal(JSON.parse(f.provider.row(w.kaRef).activation_json).count, 1);
+  } finally { f.close(); }
+});
+
+test('timer admission rejects changed versions, published digests, identities, structure and scope', async () => {
+  const f = environment();
+  try {
+    const w = await f.service.save(definition(['schedule', 'http-request'], [[0,0,1,0]]), () => {});
+    await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+    const row = f.provider.row(w.kaRef), native = f.native.get(row.provider_id);
+    const original = structuredClone(native.activeVersion);
+    for (const change of [
+      e => { e.workflowVersionId = 'foreign-version'; },
+      e => { delete e.workflowVersionId; },
+      e => { e.workflowId = 'foreign-workflow'; },
+      e => { e.id = '999'; },
+      e => { e.status = 'running'; },
+      e => { e.startedAt = 'not-a-date'; },
+      e => { e.workflowData.nodes[0].type = 'n8n-nodes-base.httpRequest'; },
+      e => { e.workflowData.nodes[0].credentials = { httpHeaderAuth: { id: 'foreign' } }; },
+      e => { e.workflowData.connections = {}; },
+      e => { e.data.resultData.runData = { 'foreign trigger': [{ data: { main: [[{ json: {} }]] } }] }; },
+      () => { native.activeVersion.nodes[0].parameters.changed = true; },
+      () => { native.active = false; },
+    ]) {
+      native.activeVersion = structuredClone(original); native.active = true;
+      const e = timerExecution(f, row, '7'); change(e); f.executions.set('7', e);
+      await f.service.poll();
+      assert.equal(f.invocations.length, 0);
+      assert.equal(f.provider.db.prepare('SELECT count(*) AS n FROM events').get().n, 0);
+    }
+    native.activeVersion = original; native.active = true;
+    f.executions.set('7', timerExecution(f, row, '7'));
+    await f.service.poll(); assert.equal(f.invocations.length, 1);
+  } finally { f.close(); }
+});
+
+test('failed quota persistence rolls back webhook reservation before dispatch', async () => {
+  const f = environment();
+  try {
+    const w = await f.service.save(definition(['webhook', 'edit-fields'], [[0,0,1,0]]), () => {});
+    await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+    const row = f.provider.row(w.kaRef), value = { invocationId: randomUUID(), items: [{ value: 1 }] };
+    f.provider.db.exec("CREATE TRIGGER fail_event_count BEFORE UPDATE OF activation_json ON workflows BEGIN SELECT RAISE(ABORT, 'count unavailable'); END");
+    await assert.rejects(f.service.event(row.event_key, value), /count unavailable/);
+    assert.equal(f.invocations.length, 0);
+    assert.equal(f.provider.db.prepare('SELECT count(*) AS n FROM events').get().n, 0);
+    assert.equal(JSON.parse(f.provider.row(w.kaRef).activation_json).count, 0);
+    f.provider.db.exec('DROP TRIGGER fail_event_count');
+    const receipt = await f.service.event(row.event_key, value);
+    assert.deepEqual(await f.service.event(row.event_key, value), receipt);
+    assert.equal(f.invocations.length, 1);
+    assert.equal(JSON.parse(f.provider.row(w.kaRef).activation_json).count, 1);
+  } finally { f.close(); }
+});
+
 for (const mode of ['webhook', 'schedule']) test(`pending fifth ${mode} retains recovery after quota and poll`, async () => {
   const f = environment();
   try {
@@ -192,10 +290,7 @@ for (const mode of ['webhook', 'schedule']) test(`pending fifth ${mode} retains 
     f.provider.db.prepare('INSERT INTO events(provider_id,execution_id,ka_ref,invocation_id,input_json) VALUES(?,?,?,?,?)')
       .run(row.provider_id, executionId, w.kaRef, invocationId, '[{}]');
     if (mode === 'schedule') {
-      const native = f.native.get(row.provider_id), workflowData = {...native.activeVersion, settings:native.settings};
-      const trigger = workflowData.nodes.find(n => n.name.endsWith(' trigger')).name;
-      for (const id of ['5','6']) f.executions.set(id, {id,workflowId:row.provider_id,status:'success',startedAt:new Date(a.startedAt+1).toISOString(),workflowData,
-        data:{resultData:{runData:{[trigger]:[{data:{main:[[{json:{}}]]}}]}}}});
+      for (const id of ['5','6']) f.executions.set(id, timerExecution(f, row, id));
     }
     f.restart();
     await f.service.poll();
