@@ -19,12 +19,12 @@ import {
   MarketplaceRefusal,
   Router,
   catalogView,
-  hashOffer,
+  hashServiceOffer,
   resolveFx,
   sellerView,
   serviceDetailView,
   serviceIdOf,
-  type Offer,
+  type ServiceOffer,
 } from '../src/index.js';
 
 const NODE = new ethers.Wallet(`0x${'22'.repeat(32)}`);
@@ -45,13 +45,15 @@ let domain: MarketplaceDomain;
 /** Each seller's operational wallet, made at runtime and known to the mock chain as the seller's. */
 let wallets: Map<bigint, ethers.HDNodeWallet>;
 
-const offer = (seller: bigint, serviceId: string, pricePerUnit: bigint, at = epoch, signedAt = 1): Offer => {
+/** A seller's offer of a service from this epoch on, with the next epoch's price when it differs. */
+const offer = (seller: bigint, serviceId: string, pricePerUnit: bigint, next?: bigint, signedAt = 1): ServiceOffer => {
   const unsigned = {
-    seller, serviceId, serviceClass: SERVICE_CLASS_INFERENCE, unit: 'token' as const, pricePerUnit, epoch: at, capacity: null,
-    model: serviceId === A ? 'urn:test:model:catalog-a' : 'urn:test:model:catalog-b', provenance: 'upstream-claimed' as const, peerId: `peer-${seller}`,
-    signedAt,
+    seller, serviceId, serviceClass: SERVICE_CLASS_INFERENCE, unit: 'token' as const,
+    model: serviceId === A ? 'urn:test:model:catalog-a' : 'urn:test:model:catalog-b', provenance: 'upstream-claimed' as const, capacity: null,
+    peerId: `peer-${seller}`, pricePerUnit, priceEpoch: epoch, ...(next === undefined ? {} : { nextPricePerUnit: next }), validUntilEpoch: epoch + 12,
+    withdrawn: false, signedAt,
   };
-  return { ...unsigned, signature: wallets.get(seller)!.signingKey.sign(hashOffer(domain, unsigned)).serialized };
+  return { ...unsigned, signature: wallets.get(seller)!.signingKey.sign(hashServiceOffer(domain, unsigned)).serialized };
 };
 
 beforeEach(async () => {
@@ -66,9 +68,9 @@ beforeEach(async () => {
   for (const [id, wallet] of wallets) mock.seedIdentity(wallet.address, id);
   vi.spyOn(chain, 'isShardingTableMember').mockImplementation(async (id) => id !== OUTSIDE);
   const offers = [
-    // The next epoch's price set again, before that epoch starts: the later copy replaces the first, whatever the order read.
-    offer(own, A, 10n), offer(own, A, 12n, epoch + 1, 2), offer(own, A, 11n, epoch + 1, 1),
-    offer(OTHER, A, 8n, epoch, 2), offer(OTHER, A, 9n, epoch, 1), offer(OTHER, B, 5n),
+    // The next epoch's price set again, before that epoch starts: the later offer replaces the first, whatever the order read.
+    offer(own, A, 10n, 12n, 2), offer(own, A, 10n, 11n, 1),
+    offer(OTHER, A, 8n, undefined, 2), offer(OTHER, A, 9n, undefined, 1), offer(OTHER, B, 5n),
     offer(OUTSIDE, A, 1n),
     // Not signed by a wallet of its seller: left out everywhere.
     { ...offer(OTHER, B, 1n), seller: own },
@@ -107,7 +109,9 @@ describe('the catalog', () => {
       serviceId: A, serviceClass: 'inference', label: 'urn:test:model:catalog-a',
       offers: [
         {
-          serviceId: A, seller: Number(OTHER), epoch, unit: 'token', pricePerUnit: '8', pricePerUnitTrac: ethers.formatEther(8n), provenance: 'upstream-claimed',
+          // Its schedule prices the next epoch too, at the same price.
+          serviceId: A, seller: Number(OTHER), epoch, unit: 'token', pricePerUnit: '8', pricePerUnitTrac: ethers.formatEther(8n),
+          nextPricePerUnit: '8', nextPricePerUnitTrac: ethers.formatEther(8n), provenance: 'upstream-claimed',
           available: true, quotedAt: expect.any(Number), measured: { latencyMs: 120, tokensPerSecond: null },
         },
         {

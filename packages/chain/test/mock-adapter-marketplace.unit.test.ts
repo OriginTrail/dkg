@@ -74,6 +74,34 @@ describe('mock marketplace: wallet subscriptions', () => {
       .toBe('BudgetTermsChanged');
   });
 
+  it('records a top-up after its checks and before it changes anything, and reads back its outcome', async () => {
+    const { epoch } = await chain.getEpochTimes();
+    await chain.approveServiceSubscriptionsWallet(150n * TRAC);
+    const { subscriptionId } = await chain.fundFromWallet({ epoch, sessionKey: SESSION.address, planDigest: PLAN, budgets: [budget(SERVICE_A, 100n * TRAC)] });
+    // Over the allowance: refused as a simulation is, before the hook.
+    const hook = vi.fn();
+    expect(await revertName(chain.topUpFromWallet(subscriptionId, [budget(SERVICE_A, 60n * TRAC)], PLAN, { onBroadcast: hook }))).toBe('ERC20InsufficientAllowance');
+    expect(hook).not.toHaveBeenCalled();
+    // A hook that throws sends nothing.
+    await expect(chain.topUpFromWallet(subscriptionId, [budget(SERVICE_A, TRAC)], PLAN, { onBroadcast: () => { throw new Error('the journal is full'); } }))
+      .rejects.toThrow(/journal/);
+    expect((await chain.getBudgets(subscriptionId))[0]!.value).toBe(100n * TRAC);
+    expect(await chain.getMinedNonce(SIGNER.address)).toBe(0);
+
+    const signals: Array<{ txHash: string; nonce?: number; wallet: string; value: bigint }> = [];
+    const topUp = await chain.topUpFromWallet(subscriptionId, [budget(SERVICE_A, 10n * TRAC)], PLAN, {
+      onBroadcast: async (s) => { signals.push({ ...s, value: (await chain.getBudgets(subscriptionId))[0]!.value }); },
+    });
+    expect(signals).toEqual([{ txHash: topUp.hash, nonce: 0, wallet: SIGNER.address, value: 100n * TRAC }]);
+    expect(await chain.getMinedNonce(SIGNER.address)).toBe(1);
+    expect(await chain.getTopUpOutcome(topUp.hash)).toEqual({ toppedUp: topUp });
+    expect(await chain.getTopUpOutcome(ethers.ZeroHash)).toBeNull();
+    // An account's top-up goes through the same hook.
+    const accounts = await chain.topUpFromAccount(ethers.ZeroHash, [budget(SERVICE_A, TRAC)], PLAN, { onBroadcast: hook }).catch((e: { revert?: { name?: string } }) => e.revert?.name);
+    expect(accounts).toBe('SubscriptionNotFound');
+    expect(hook).not.toHaveBeenCalled();
+  });
+
   it('refuses what the funding rules refuse', async () => {
     const { epoch } = await chain.getEpochTimes();
     await chain.approveServiceSubscriptionsWallet(1_000n * TRAC);

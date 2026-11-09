@@ -13,13 +13,10 @@
  *   current epoch's is frozen the first time it is used and kept on disk. The
  *   next epoch's can be set ahead of it, until that epoch starts; the settings'
  *   price applies to epochs neither frozen nor set.
- * - **Offers.** At every tick it shares an offer for each service, for the
- *   current and the next epoch, into the Marketplace Context Graph: each names
- *   the node's peer id, and the receipts' operational wallet signs it. One
- *   whose price changed is shared again, signed later: buyers keep the newest.
- *   So is each one half an epoch after its last copy, which shared memory
- *   keeps for a limited time. Each copy is shared on its own, one at a time,
- *   and counts as shared once its share returns.
+ * - **Offers.** Each service's offer is a Knowledge Asset in the Marketplace
+ *   Context Graph's Verifiable Memory, kept by the offer job (offer-job.ts):
+ *   it names the node's peer id, and the receipts' operational wallet signs
+ *   it. The job runs at every tick, beside the landing and never inside it.
  * - **Each call** is checked, cheapest check first, then
  *   served by the service's backend, cut to the units the request allows, and
  *   its receipt signed by an operational wallet. A request whose units cannot
@@ -37,16 +34,16 @@
  * - **The end of the epoch.** Within `stopServingSeconds` of it, new calls are
  *   refused: their receipts could not land in time.
  * - **The job.** Ticks every `tickSeconds` from the epoch's start, and once
- *   more `finalLandingSeconds` before its end: the gate, the offers, then
- *   landing, each on its own, so one failing leaves the others. A tick that
- *   fails as a whole is tried again soon, and never past the final tick.
+ *   more `finalLandingSeconds` before its end: the gate, then the offer job
+ *   started beside landing, each on its own, so one failing leaves the others.
+ *   A tick that fails as a whole is tried again soon, and never past the final
+ *   tick.
  */
 import { join } from 'node:path';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import {
   QUERY_INFERENCE_RECEIPT_TYPES,
-  SERVICE_CLASS_INFERENCE,
   hashQueryInferenceReceipt,
   hashServiceRequest,
   recoverSigner,
@@ -61,7 +58,7 @@ import { UpstreamError, type Connector } from './connector.js';
 import { KeyedLock } from './journal.js';
 import { DEFAULT_LANDING, Lander, nextLandingAt, secondsToNextTick, secondsToRetry, type LandingReport, type LandingSettings } from './landing.js';
 import { SellerLedger, type ServedCall } from './ledger.js';
-import { offerQuads, signOffer, type OfferQuad } from './offers.js';
+import { OfferJob, type OfferAssets } from './offer-job.js';
 import {
   WireError,
   inputUnitsBound,
@@ -110,8 +107,8 @@ export interface SellerDeps {
   tickSeconds: number;
   /** The landing loop's settings; the defaults otherwise. */
   landing?: LandingSettings;
-  /** Shares one offer, its quads, into the Marketplace Context Graph's shared memory: one call per copy. */
-  shareOffer?: (quads: OfferQuad[]) => Promise<void>;
+  /** Where the offers are published: the Marketplace Context Graph's Verifiable Memory. Without it, none are. */
+  offers?: OfferAssets;
   log?: (message: string) => void;
 }
 
@@ -121,6 +118,8 @@ export class Seller {
   readonly services: ReadonlyMap<string, SellerService>;
   readonly ledger: SellerLedger;
   readonly lander: Lander;
+  /** The offer job, when the seller has somewhere to publish its offers. */
+  readonly offers: OfferJob | undefined;
   /** What the last tick's landing did. */
   lastLanding: LandingReport | undefined;
   private readonly landing: LandingSettings;
@@ -133,8 +132,6 @@ export class Seller {
   private readonly backends = new Map<string, 'up' | 'down'>();
   /** The chain's time as the last tick read it, and when, by this host's clock. */
   private lastTimes: { times: EpochTimes; at: number } | undefined;
-  /** service id and epoch => the price and `signedAt` of its offer as last shared. */
-  private readonly shared = new Map<string, { price: bigint; signedAt: number }>();
   private running = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private ticking: Promise<void> | undefined;
@@ -144,6 +141,18 @@ export class Seller {
     this.landing = deps.landing ?? DEFAULT_LANDING;
     this.ledger = new SellerLedger(deps.dir);
     this.lander = new Lander({ chain: deps.chain, ledger: this.ledger, settings: this.landing, ...(deps.log ? { log: deps.log } : {}) });
+    this.offers = deps.offers && new OfferJob({
+      chain: deps.chain, dir: deps.dir, assets: deps.offers, signer: deps.signer, peerId: deps.peerId, tickSeconds: deps.tickSeconds,
+      seller: {
+        gate: () => ({ identityId: this.identityId, open: this.open, domain: this.domain }),
+        services: () => [...this.services.values()],
+        prices: async (serviceId, epoch) => {
+          const service = this.serviceOf(serviceId);
+          return { price: await this.priceFor(service, epoch, epoch), nextPrice: await this.priceFor(service, epoch + 1, epoch) };
+        },
+      },
+      ...(deps.log ? { log: deps.log } : {}),
+    });
   }
 
   /** The identity it serves as, and whether it serves now. */
@@ -199,9 +208,10 @@ export class Seller {
     });
   }
 
-  /** Read the ledger and the frozen prices. Call once before serving. */
+  /** Read the ledger, the frozen prices and the offers published. Call once before serving. */
   async load(): Promise<void> {
     await this.ledger.load();
+    await this.offers?.load();
     try {
       this.prices = JSON.parse(await readFile(join(this.deps.dir, 'seller-prices.json'), 'utf8'));
     } catch (err) {
@@ -209,17 +219,14 @@ export class Seller {
     }
   }
 
-  /** The gate, the offers of the current and the next epoch, then landing. Returns the seconds to the next tick. */
+  /** The gate, the offer job started beside landing, then landing. Returns the seconds to the next tick. */
   async tick(): Promise<number> {
     const started = Date.now();
     await this.readGate();
     const times = await this.deps.chain.getEpochTimes();
     this.lastTimes = { times, at: Date.now() };
-    if (this.open && this.deps.shareOffer) {
-      // One tick shares at a time: a tick at once with another would sign the same copies, at the same chain time.
-      await this.lock.run('offers', () => this.shareNewOffers(times))
-        .catch((err: unknown) => this.deps.log?.(`[marketplace] the offers were not shared: ${messageOf(err)}`));
-    }
+    // Not awaited: a publish waits for ACKs and a transaction, and landing never waits for it.
+    this.offers?.poke();
     this.lastLanding = await this.lander.tick(this.open).catch((err: unknown) => {
       this.deps.log?.(`[marketplace] landing failed: ${messageOf(err)}`);
       return undefined;
@@ -254,6 +261,7 @@ export class Seller {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     await this.ticking;
+    await this.offers?.stop();
   }
 
   /** The gate: this node's identity and its place in the sharding table. Reads that fail keep the last ones' answer. */
@@ -412,31 +420,6 @@ export class Seller {
     };
     await this.ledger.recordServed(served);
     return answerOf(served);
-  }
-
-  /**
-   * Share the offers due: each service's, for this epoch and the next, when it was not shared at its price yet, or
-   * half an epoch after its last copy. Shared memory drops a copy a while after it is written (30 days by default),
-   * so the offer always has one younger than half an epoch. Each is signed at the chain's time, and later than the
-   * one before it, since buyers keep the newest. Each is shared on its own: one that fails stops the rest, which the
-   * next tick shares, and those before it stay shared.
-   */
-  private async shareNewOffers(times: EpochTimes): Promise<void> {
-    for (const epoch of [times.epoch, times.epoch + 1]) {
-      for (const s of this.services.values()) {
-        const price = await this.priceFor(s, epoch, times.epoch);
-        const key = `${s.serviceId}:${epoch}`;
-        const last = this.shared.get(key);
-        if (last?.price === price && times.now - last.signedAt < (times.endsAt - times.startsAt) / 2) continue;
-        const signedAt = Math.max(times.now, (last?.signedAt ?? 0) + 1);
-        await this.deps.shareOffer!(offerQuads(await signOffer(this.deps.chain, this.deps.signer, this.domain!, {
-          seller: this.identityId, serviceId: s.serviceId, serviceClass: SERVICE_CLASS_INFERENCE, unit: 'token',
-          pricePerUnit: price, epoch, capacity: s.capacity, model: s.model, provenance: s.provenance,
-          ...(s.tokenizerBundle ? { tokenizerBundle: s.tokenizerBundle } : {}), peerId: this.deps.peerId, signedAt,
-        })));
-        this.shared.set(key, { price, signedAt });
-      }
-    }
   }
 
   /** The price of `service` in `epoch`, frozen and stored once the epoch is current. */

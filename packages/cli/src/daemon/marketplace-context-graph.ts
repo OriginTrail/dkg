@@ -2,29 +2,47 @@
 
 /**
  * The daemon's marketplace in the Marketplace Context Graph (OT-RFC-27).
- * Under the RFC-64 catalog, which carries a graph's shared memory between
- * nodes, only Knowledge Assets in the graph's root scope travel, and only on
- * a node that has accepted the graph's policy. So the seller writes each copy
- * of an offer as its own asset, and the seller and the buyer's gateway each
- * subscribe to the graph once it admits the node, as the subscribe route
- * admits a caller.
+ * Each seller's offers are Knowledge Assets in the graph's Verifiable Memory,
+ * one per service, which the graph's catalog carries to every node it admits.
+ * The seller and the buyer's gateway each subscribe to the graph once it
+ * admits the node, as the subscribe route admits a caller.
  */
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import type { OfferQuad } from '@origintrail-official/dkg-marketplace';
+import type { OfferAssets, OfferQuad } from '@origintrail-official/dkg-marketplace';
 import { CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS } from './context-graph-readiness-repeat.js';
 import { readLocalAgentSubscriptionAdmission } from './context-graph-subscription-admission.js';
 
 /**
- * One offer, the quads of one subject, as its own Knowledge Asset in the
- * graph's shared memory, named after that subject: created, written and
- * shared, which seals it as the node's own, with no transaction. An asset
- * shared once is not written again, so every copy is a new one.
+ * Publish `quads` as the asset `name` in the graph's Verifiable Memory, as the
+ * node's default agent: staged (created, written and shared, which seals it),
+ * then published in one transaction, the sync publish. Writes add to a draft,
+ * so a sealed version is first reopened from the layer it is in and its draft
+ * discarded, then the whole offer written anew; publishing it updates the same
+ * asset. Only a confirmed publish counts.
  */
-export async function shareOfferAsset(agent: DKGAgent, contextGraphId: string, quads: OfferQuad[]): Promise<void> {
-  const name = `offer-${quads[0]!.subject.split(':').pop()}`;
+export async function publishOfferAsset(agent: DKGAgent, contextGraphId: string, name: string, quads: OfferQuad[]): Promise<{ kaId: bigint }> {
+  const state = (await agent.assertion.history(contextGraphId, name))?.state;
+  if (state === 'promoted' || state === 'published' || state === 'finalized') {
+    await agent.assertion.pullFrom(contextGraphId, name, state === 'promoted' ? 'swm' : 'vm', { onConflict: 'replace' });
+  }
+  if (state !== undefined && state !== 'discarded') await agent.assertion.discard(contextGraphId, name);
   await agent.assertion.create(contextGraphId, name);
   await agent.assertion.write(contextGraphId, name, quads);
-  if (!(await agent.assertion.promote(contextGraphId, name)).shareOperationId) throw new Error(`${name} was not shared`);
+  await agent.assertion.promote(contextGraphId, name);
+  const published = await agent.publishFromFinalizedAssertion(contextGraphId, name);
+  if (published.status !== 'confirmed') throw new Error(`${name} was not confirmed on chain (${published.status})`);
+  return { kaId: published.kaId };
+}
+
+/** Where a seller's offers go: the graph's Verifiable Memory, once `admitted()` says the graph admits the node. */
+export function offerAssetsIn(agent: DKGAgent, contextGraphId: string, admitted: () => boolean): OfferAssets {
+  return {
+    publish: async (name, quads) => {
+      if (!admitted()) throw Object.assign(new Error(`"${contextGraphId}" has not admitted this node yet`), { code: 'MARKETPLACE_NOT_ADMITTED' });
+      return publishOfferAsset(agent, contextGraphId, name, quads);
+    },
+    recover: (evidence) => agent.recoverRfc64ConfirmedCatalogObligationV1(evidence),
+  };
 }
 
 /**

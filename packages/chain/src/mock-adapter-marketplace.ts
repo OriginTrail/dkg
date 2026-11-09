@@ -61,6 +61,8 @@ import {
   type Subscription,
   type SubscriptionFunding,
   type SubscriptionTopUp,
+  type TopUpOutcome,
+  type TopUpSendOptions,
   type WalletFundingRequest,
   type WindowAllowance,
 } from './marketplace.js';
@@ -153,12 +155,13 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
     allowances: new Map<string, bigint>(),
     /** accountId => what services spent of its base allowance and of its top-up buffer. */
     spent: new Map<bigint, { window: bigint; topUp: bigint }>(),
-    /** transaction hash => the batch it landed. */
+    /** transaction hash => the batch it landed; and the top-up it landed. */
     batches: new Map<string, ReceiptBatch>(),
+    topUps: new Map<string, SubscriptionTopUp>(),
     /** signed transaction => the batch, hash and nonce it was signed with; and the hashes mined as reverted. */
     signed: new Map<string, { groups: ReceiptGroup[]; hash: string; nonce: number }>(),
     reverted: new Set<string>(),
-    /** wallet => how many of its batches were sent: its next nonce. */
+    /** wallet => how many of its batches and hooked top-ups were sent: its next nonce. */
     sent: new Map<string, number>(),
   };
   /** The base fee the mock's latest block reports, in wei. */
@@ -257,8 +260,13 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
     return this.fund(request, request.accountId, this.senderOf(opts));
   }
 
-  async topUpFromAccount(subscriptionId: string, additions: ServiceBudget[], planDigest: string, opts?: MarketplaceWriteOptions): Promise<SubscriptionTopUp> {
-    return this.topUp(subscriptionId, additions, planDigest, true, this.senderOf(opts));
+  async topUpFromAccount(subscriptionId: string, additions: ServiceBudget[], planDigest: string, opts?: TopUpSendOptions): Promise<SubscriptionTopUp> {
+    return this.topUp(subscriptionId, additions, planDigest, true, this.senderOf(opts), opts);
+  }
+
+  async getTopUpOutcome(txHash: string): Promise<TopUpOutcome> {
+    const toppedUp = this.marketplace.topUps.get(txHash);
+    return toppedUp ? { toppedUp: { ...toppedUp } } : null;
   }
 
   async previewCost(accountId: bigint, value: bigint): Promise<{ cost: bigint; discountBps: number }> {
@@ -285,8 +293,8 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
     return this.fund(request, 0n, this.senderOf(opts));
   }
 
-  async topUpFromWallet(subscriptionId: string, additions: ServiceBudget[], planDigest: string, opts?: MarketplaceWriteOptions): Promise<SubscriptionTopUp> {
-    return this.topUp(subscriptionId, additions, planDigest, false, this.senderOf(opts));
+  async topUpFromWallet(subscriptionId: string, additions: ServiceBudget[], planDigest: string, opts?: TopUpSendOptions): Promise<SubscriptionTopUp> {
+    return this.topUp(subscriptionId, additions, planDigest, false, this.senderOf(opts), opts);
   }
 
   async approveServiceSubscriptionsWallet(amount: bigint, opts?: MarketplaceWriteOptions): Promise<TxResult> {
@@ -611,22 +619,23 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
     return this.marketplace.replacedGrantEnds.get(key(accountId, buyer, nonce)) ?? 0;
   }
 
-  /** Spend `cost` from the account's base allowance, then from its top-up buffer. */
-  private async spend(accountId: bigint, cost: bigint, epoch: number): Promise<{ fromWindow: bigint; fromTopUp: bigint }> {
+  /** Spend `cost` from the account's base allowance, then from its top-up buffer; with `apply` false, only check it. */
+  private async spend(accountId: bigint, cost: bigint, epoch: number, apply = true): Promise<{ fromWindow: bigint; fromTopUp: bigint }> {
     const allowance = await this.currentWindowAllowance(accountId);
     const fromWindow = cost < allowance.baseRemaining ? cost : allowance.baseRemaining;
     const fromTopUp = cost - fromWindow;
     if (fromTopUp > allowance.topUpBuffer) revert('InsufficientAllowance', accountId, epoch, cost, allowance.baseRemaining + allowance.topUpBuffer);
+    if (!apply) return { fromWindow, fromTopUp };
     const spent = this.marketplace.spent.get(accountId) ?? { window: 0n, topUp: 0n };
     this.marketplace.spent.set(accountId, { window: spent.window + fromWindow, topUp: spent.topUp + fromTopUp });
     return { fromWindow, fromTopUp };
   }
 
-  /** Take `value` of the allowance `buyer` granted `ServiceSubscriptionsWallet`, as its `transferFrom` does. */
-  private pull(buyer: string, value: bigint): void {
+  /** Take `value` of the allowance `buyer` granted `ServiceSubscriptionsWallet`, as its `transferFrom` does; with `apply` false, only check it. */
+  private pull(buyer: string, value: bigint, apply = true): void {
     const allowance = this.marketplace.allowances.get(key(buyer)) ?? 0n;
     if (allowance < value) revert('ERC20InsufficientAllowance', ADDRESSES.serviceSubscriptionsWallet, allowance, value);
-    this.marketplace.allowances.set(key(buyer), allowance - value);
+    if (apply) this.marketplace.allowances.set(key(buyer), allowance - value);
   }
 
   private book(epoch: number, fromAccount: boolean, amount: bigint): void {
@@ -683,6 +692,7 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
     planDigest: string,
     fromAccount: boolean,
     buyer: string,
+    opts?: TopUpSendOptions,
   ): Promise<SubscriptionTopUp> {
     const { epoch: current, now } = await this.getEpochTimes();
     const s = this.marketplace.subscriptions.get(key(subscriptionId));
@@ -720,14 +730,22 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
     if (value > UINT96_MAX || s.value + value > UINT96_MAX) revert('InvalidFundingRequest', 'value');
 
     let cost = value;
-    let spent = { fromWindow: 0n, fromTopUp: 0n };
     if (grant) {
       cost = (await this.previewCost(s.accountId, value)).cost;
       if (s.cost + cost > grant.maxCostPerEpoch) revert('LimitExceeded', 'maxCostPerEpoch', grant.maxCostPerEpoch, s.cost + cost);
-      spent = await this.spend(s.accountId, cost, current);
+      await this.spend(s.accountId, cost, current, false);
     } else {
-      this.pull(buyer, value);
+      this.pull(buyer, value, false);
     }
+    // Checked in full, as a simulation: now the hook, then the broadcast, with the wallet's next nonce.
+    const tx = this.txResult(true);
+    if (opts?.onBroadcast) {
+      const nonce = this.marketplace.sent.get(buyer) ?? 0;
+      await opts.onBroadcast({ txHash: tx.hash, nonce, wallet: buyer });
+      this.marketplace.sent.set(buyer, nonce + 1);
+    }
+    const spent = grant ? await this.spend(s.accountId, cost, current) : { fromWindow: 0n, fromTopUp: 0n };
+    if (!grant) this.pull(buyer, value);
     this.book(s.epoch, fromAccount, cost);
     for (const [i, v] of added) stored[i]!.value += v;
     stored.push(...appended);
@@ -735,7 +753,8 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
       budgetCount: stored.length, value: s.value + value, cost: s.cost + cost, planDigest,
       spentFromWindow: s.spentFromWindow + spent.fromWindow, spentFromTopUp: s.spentFromTopUp + spent.fromTopUp,
     });
-    return { ...this.txResult(true), value, cost };
+    this.marketplace.topUps.set(tx.hash, { ...tx, value, cost });
+    return { ...tx, value, cost };
   }
 
   /** Add a counted group's served value, at its subscription's discount, to the node's and the epoch's totals. */

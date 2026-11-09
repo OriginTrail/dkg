@@ -13,17 +13,19 @@
  *      nonces, and moves on when a seller is unreachable, for ten minutes, or
  *      returns a receipt that fails the buyer's checks, for the rest of the epoch.
  *
- * Every offer the buyer reads comes through `offersOf`, which keeps only
- * those the chain says an operational wallet of their seller signed: the
- * wallet's identity is `IdentityStorage.getIdentityId`, the read the
- * settlement makes of a batch's sender. The chain's answer for a wallet is
- * kept five minutes; a read that fails keeps nothing, and its offers are left
- * out until the chain answers. Of a seller's offers for one service and epoch
- * it keeps the newest of those, by `signedAt`, so a price set again replaces
- * the one before.
+ * Every offer the buyer reads comes through `offersOf`, from the Marketplace
+ * Context Graph's Verifiable Memory, which keeps only those the chain says an
+ * operational wallet of their seller signed: the wallet's identity is
+ * `IdentityStorage.getIdentityId`, the read the settlement makes of a batch's
+ * sender. The chain's answer for a wallet is kept five minutes; a read that
+ * fails keeps nothing, and its offers are left out until the chain answers.
+ * Of a seller's offers for one service it keeps the newest of those, by
+ * `signedAt`, and only then reads what that one says of each epoch: none once
+ * it is withdrawn or past its last epoch, so an older copy never brings an
+ * offer back.
  */
 import type { MarketplaceChainAdapter, MarketplaceDomain } from '@origintrail-official/dkg-chain';
-import { offerSignerOf, type Offer } from './offers.js';
+import { offerIn, serviceOfferSignerOf, type Offer, type ServiceOffer } from './offers.js';
 import { quoteResponseFromWire, type QuoteResponse } from './wire.js';
 
 export const QUOTE_TTL_MS = 5 * 60_000;
@@ -40,8 +42,8 @@ export interface Route {
 
 export interface RouterDeps {
   chain: Pick<MarketplaceChainAdapter, 'getMarketplaceContracts' | 'getIdentityIdForAddress' | 'isShardingTableMember'>;
-  /** The offers of the given epochs, from the Marketplace Context Graph, their signatures not checked. */
-  offers(epochs: number[]): Promise<Offer[]>;
+  /** The offers in the Marketplace Context Graph's Verifiable Memory, their signatures not checked. */
+  offers(): Promise<ServiceOffer[]>;
   /** A seller's answer to `quote`, as it came: the router reads it with `quoteResponseFromWire`. */
   quote(peerId: string, services: string[]): Promise<unknown>;
   /** Sellers tried first for a service: the standing plan's pinned seller. */
@@ -114,23 +116,23 @@ export class Router {
   }
 
   /**
-   * The offers of `epochs` that an operational wallet of their seller signed, as the chain says now: per seller,
-   * service and epoch, the newest such offer. Newest first, a tie broken by the signature, the first that holds is
-   * kept, so an offer someone else signed never hides the seller's own.
+   * What the offers an operational wallet of their seller signed, as the chain says now, say of `epochs`: per
+   * seller and service, the newest such offer, for each of those epochs it prices. Newest first, a tie broken by
+   * the signature, the first that holds is kept, so an offer someone else signed never hides the seller's own.
    */
   async offersOf(epochs: number[]): Promise<Offer[]> {
-    const offers = await this.deps.offers(epochs);
+    const offers = await this.deps.offers();
     this.domain ??= (await this.deps.chain.getMarketplaceContracts()).requestDomain;
     const now = this.clock();
     for (const [wallet, read] of this.signers) if (now - read.at >= SIGNER_TTL_MS) this.signers.delete(wallet);
-    const kept = new Map<string, Offer>();
+    const kept = new Map<string, ServiceOffer>();
     for (const offer of [...offers].sort((a, b) => b.signedAt - a.signedAt || b.signature.localeCompare(a.signature))) {
-      const key = `${offer.seller}:${offer.serviceId}:${offer.epoch}`;
+      const key = `${offer.seller}:${offer.serviceId}`;
       if (kept.has(key)) continue;
-      const signer = offerSignerOf(this.domain, offer);
+      const signer = serviceOfferSignerOf(this.domain, offer);
       if (signer && (await this.identityOf(signer, now)) === offer.seller) kept.set(key, offer);
     }
-    return [...kept.values()];
+    return [...kept.values()].flatMap((offer) => epochs.map((epoch) => offerIn(offer, epoch)).filter((o): o is Offer => o !== null));
   }
 
   /** What the last quote from `seller` said of `serviceId`, and when it came, in seconds; `undefined` while none has. */

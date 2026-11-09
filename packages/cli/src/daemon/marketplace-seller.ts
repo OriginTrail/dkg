@@ -4,11 +4,11 @@
  * The daemon's marketplace seller (OT-RFC-27): built at boot when
  * `marketplace.seller.enabled` is set and the chain has the marketplace. It
  * answers `quote` and `serve` over the messenger, and its job checks the Core
- * Node gate, shares its offers, signed and naming the node's peer id, into the
- * Marketplace Context Graph and lands its receipts. Offers are shared once the
- * graph admits the node, each copy as its own Knowledge Asset, and at once
- * when it does. A setting it cannot use leaves selling off, logged, and the
- * boot goes on.
+ * Node gate, keeps its offers, signed and naming the node's peer id, in the
+ * Marketplace Context Graph's Verifiable Memory, one Knowledge Asset per
+ * service, and lands its receipts. Offers are published once the graph admits
+ * the node, and at once when it does. A setting it cannot use leaves selling
+ * off, logged, and the boot goes on.
  */
 import { join } from 'node:path';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
@@ -22,7 +22,7 @@ import {
   resolveSellerConfig,
   type MarketplaceConfig,
 } from '@origintrail-official/dkg-marketplace';
-import { shareOfferAsset, subscribeWhenAdmitted } from './marketplace-context-graph.js';
+import { offerAssetsIn, subscribeWhenAdmitted } from './marketplace-context-graph.js';
 
 export interface MarketplaceSellerOptions {
   config: { marketplace?: unknown };
@@ -77,12 +77,7 @@ export async function startMarketplaceSeller(options: MarketplaceSellerOptions):
     tickSeconds: resolved.tickSeconds,
     landing: resolved.landing,
     ...(options.wallets ? { wallets: options.wallets } : {}),
-    ...(contextGraphId ? {
-      shareOffer: async (quads) => {
-        if (!admitted) throw new Error(`"${contextGraphId}" has not admitted this node yet`);
-        await shareOfferAsset(agent, contextGraphId, quads);
-      },
-    } : {}),
+    ...(contextGraphId ? { offers: offerAssetsIn(agent, contextGraphId, () => admitted) } : {}),
     log,
   });
   await seller.load();
@@ -103,7 +98,7 @@ export async function startMarketplaceSeller(options: MarketplaceSellerOptions):
     log,
     onAdmitted: () => {
       admitted = true;
-      void seller.tick().catch(() => undefined);
+      seller.offers?.poke(true);
     },
   }) : undefined;
   log(`[marketplace] selling ${services.length} service(s); receipts signed by ${signer}`);

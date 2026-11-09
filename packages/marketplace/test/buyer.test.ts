@@ -4,7 +4,7 @@
  * and from an account, top-ups and their dry runs, the checks before sending,
  * and the job that funds, prefunds and tops up from what the chain shows.
  */
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -297,6 +297,169 @@ describe('topping up', () => {
 
     for (const send of sends) expect(send).not.toHaveBeenCalled();
     expect(await state()).toEqual(before);
+  });
+});
+
+describe('topping up under an idempotency key', () => {
+  const KEY = '5b0a1c3e-9d2f-4e6a-8b7c-1d2e3f4a5b6c';
+  const lost = () => Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+
+  async function funded(buyer: Buyer): Promise<string> {
+    const { epoch } = await chain.getEpochTimes();
+    return (await buyer.fund({ epoch, source: { kind: 'wallet' }, services: [service(A, 100n * TRAC)] })).subscriptionId;
+  }
+  const valueOfA = async (subscriptionId: string) => (await chain.getBudgets(subscriptionId))[0]!.value;
+
+  it('answers a retry after a lost answer from its record, in this process and after a restart, and sends one top-up', async () => {
+    const buyer = buyerWith();
+    const subscriptionId = await funded(buyer);
+    const first = await buyer.topUp(subscriptionId, [service(A, 10n * TRAC)], KEY);
+    const sends = vi.spyOn(chain, 'topUpFromWallet');
+    expect(await buyer.topUp(subscriptionId, [service(A, 10n * TRAC)], KEY)).toEqual(first);
+    expect(await buyerWith().topUp(subscriptionId, [service(A, 10n * TRAC)], KEY)).toEqual(first);
+    expect(sends).not.toHaveBeenCalled();
+    expect(await valueOfA(subscriptionId)).toBe(110n * TRAC);
+    // A request without a key is a new top-up, as before.
+    await buyer.topUp(subscriptionId, [service(A, 10n * TRAC)]);
+    expect(await valueOfA(subscriptionId)).toBe(120n * TRAC);
+  });
+
+  it('makes a repeat wait for the first while it is in flight, and refuses the key with another request', async () => {
+    const buyer = buyerWith();
+    const subscriptionId = await funded(buyer);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const send = chain.topUpFromWallet.bind(chain);
+    const sends = vi.spyOn(chain, 'topUpFromWallet').mockImplementation(async (...args) => {
+      await held;
+      return send(...args);
+    });
+    const first = buyer.topUp(subscriptionId, [service(A, 10n * TRAC)], KEY);
+    const repeat = buyer.topUp(subscriptionId, [service(A, 10n * TRAC)], KEY);
+    let answered = false;
+    void repeat.then(() => { answered = true; });
+    expect(await refusal(buyer.topUp(subscriptionId, [service(A, 11n * TRAC)], KEY))).toEqual({ code: 'IdempotencyKeyReused', args: [KEY] });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(answered).toBe(false);
+    release();
+    expect(await repeat).toEqual(await first);
+    expect(sends).toHaveBeenCalledTimes(1);
+    expect(await valueOfA(subscriptionId)).toBe(110n * TRAC);
+    // Recorded, the key still binds its first request.
+    expect(await refusal(buyer.topUp(subscriptionId, [service(A, 10n * TRAC), service(B, TRAC)], KEY))).toEqual({ code: 'IdempotencyKeyReused', args: [KEY] });
+    // A first request the checks refuse sends and records nothing: its repeat is checked again.
+    const other = '0f1e2d3c-4b5a-4968-a7b6-c5d4e3f2a1b0';
+    expect((await refusal(buyer.topUp(`0x${'ab'.repeat(32)}`, [service(A, TRAC)], other)))?.code).toBe('SubscriptionNotFound');
+    expect((await refusal(buyer.topUp(`0x${'ab'.repeat(32)}`, [service(A, TRAC)], other)))?.code).toBe('SubscriptionNotFound');
+  });
+
+  it('answers a key whose top-up landed with success, though the subscription would now refuse it', async () => {
+    const accountId = await grantedAccount(100n * TRAC);
+    const buyer = buyerWith();
+    const { epoch } = await chain.getEpochTimes();
+    const { subscriptionId } = await buyer.fund({ epoch, source: { kind: 'account', accountId }, services: [service(A, 100n * TRAC)] });
+    const first = await buyer.topUp(subscriptionId, [service(A, 40n * TRAC)], KEY);
+    // A new top-up of the same would pass the grant's limit.
+    expect((await refusal(buyer.topUp(subscriptionId, [service(A, 40n * TRAC)])))?.code).toBe('LimitExceeded');
+    expect(await buyer.topUp(subscriptionId, [service(A, 40n * TRAC)], KEY)).toEqual(first);
+    // And once the subscription has ended.
+    const times = await chain.getEpochTimes();
+    vi.spyOn(chain, 'getEpochTimes').mockResolvedValue({ ...times, now: times.endsAt });
+    expect(await buyerWith().topUp(subscriptionId, [service(A, 40n * TRAC)], KEY)).toEqual(first);
+    expect((await chain.getSubscription(subscriptionId))!.cost).toBe(98n * TRAC);
+  });
+
+  it('settles a top-up sent before a crash by its hash: landed, pending, or never sent', async () => {
+    const buyer = buyerWith();
+    const subscriptionId = await funded(buyer);
+    const send = chain.topUpFromWallet.bind(chain);
+    // Sent, and the node went down before the answer: the record holds its hash.
+    vi.spyOn(chain, 'topUpFromWallet').mockImplementationOnce(async (...args) => {
+      await send(...args);
+      throw lost();
+    });
+    expect(refusalOf(await buyer.topUp(subscriptionId, [service(A, 10n * TRAC)], KEY).catch((e: unknown) => e))).toBeNull();
+    const restarted = buyerWith();
+    const landed = await restarted.topUp(subscriptionId, [service(A, 10n * TRAC)], KEY);
+    expect(landed).toMatchObject({ value: 10n * TRAC, success: true });
+    expect(await valueOfA(subscriptionId)).toBe(110n * TRAC);
+
+    // Recorded, then lost before its broadcast: pending while its nonce is open, never sent once the wallet's nonce passes it.
+    const key = '0f1e2d3c-4b5a-4968-a7b6-c5d4e3f2a1b0';
+    const hash = `0x${'ee'.repeat(32)}`;
+    vi.spyOn(chain, 'topUpFromWallet').mockImplementationOnce(async (_id, _additions, _digest, opts) => {
+      await opts!.onBroadcast!({ txHash: hash, nonce: 7, wallet: SIGNER.address });
+      throw lost();
+    });
+    expect(refusalOf(await restarted.topUp(subscriptionId, [service(A, 5n * TRAC)], key).catch((e: unknown) => e))).toBeNull();
+    expect(await refusal(restarted.topUp(subscriptionId, [service(A, 5n * TRAC)], key))).toEqual({ code: 'TopUpPending', args: [key, hash] });
+    vi.spyOn(chain, 'getMinedNonce').mockResolvedValue(8);
+    expect(await refusal(restarted.topUp(subscriptionId, [service(A, 5n * TRAC)], key))).toEqual({ code: 'TopUpNotSent', args: [hash] });
+    // The answer is recorded: the chain is not asked again.
+    const reads = vi.spyOn(chain, 'getTopUpOutcome');
+    expect(await refusal(buyerWith().topUp(subscriptionId, [service(A, 5n * TRAC)], key))).toEqual({ code: 'TopUpNotSent', args: [hash] });
+    expect(reads).not.toHaveBeenCalled();
+    expect(await valueOfA(subscriptionId)).toBe(110n * TRAC);
+  });
+
+  it('follows a speed-up by its hash, records a top-up mined and reverted, and refuses a second broadcast under one key', async () => {
+    const buyer = buyerWith();
+    const subscriptionId = await funded(buyer);
+    const [original, faster] = [`0x${'e1'.repeat(32)}`, `0x${'e2'.repeat(32)}`];
+    vi.spyOn(chain, 'topUpFromWallet').mockImplementationOnce(async (_id, _additions, _digest, opts) => {
+      await opts!.onBroadcast!({ txHash: original, nonce: 0, wallet: SIGNER.address });
+      await opts!.onBeforeReplacementBroadcast!({ txHash: faster, nonce: 0, replacesTxHashes: [original] });
+      throw lost();
+    });
+    await buyer.topUp(subscriptionId, [service(A, 10n * TRAC)], KEY).catch(() => undefined);
+    const toppedUp = { hash: faster, blockNumber: 9, success: true, value: 10n * TRAC, cost: 10n * TRAC };
+    const outcome = vi.spyOn(chain, 'getTopUpOutcome').mockImplementation(async (hash) => (hash === faster ? { toppedUp } : null));
+    expect(await buyerWith().topUp(subscriptionId, [service(A, 10n * TRAC)], KEY)).toEqual(toppedUp);
+    expect(outcome.mock.calls.map(([hash]) => hash)).toEqual([original, faster]);
+    outcome.mockRestore();
+
+    // Mined and reverted: refused under its key from then on. One mined but not decoded is refused as reverted.
+    const reverted = '0f1e2d3c-4b5a-4968-a7b6-c5d4e3f2a1b0';
+    vi.spyOn(chain, 'topUpFromWallet').mockImplementationOnce(async (_id, _additions, _digest, opts) => {
+      await opts!.onBroadcast!({ txHash: `0x${'e3'.repeat(32)}`, nonce: 1, wallet: SIGNER.address });
+      throw Object.assign(new Error('transaction reverted'), { receipt: { status: 0 } });
+    });
+    expect((await refusal(buyer.topUp(subscriptionId, [service(A, TRAC)], reverted)))).toBeNull();
+    expect(await refusal(buyer.topUp(subscriptionId, [service(A, TRAC)], reverted))).toEqual({ code: 'TopUpReverted', args: [] });
+    vi.spyOn(chain, 'getTopUpOutcome').mockResolvedValueOnce({ reverted: true });
+    const third = '9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d';
+    vi.spyOn(chain, 'topUpFromWallet').mockImplementationOnce(async (_id, _additions, _digest, opts) => {
+      await opts!.onBroadcast!({ txHash: `0x${'e4'.repeat(32)}`, nonce: 2, wallet: SIGNER.address });
+      throw lost();
+    });
+    await buyer.topUp(subscriptionId, [service(A, TRAC)], third).catch(() => undefined);
+    expect(await refusal(buyer.topUp(subscriptionId, [service(A, TRAC)], third))).toEqual({ code: 'TopUpReverted', args: [`0x${'e4'.repeat(32)}`] });
+
+    // A send that broadcast twice under one key: the second is refused before it goes.
+    const twice = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    vi.spyOn(chain, 'topUpFromWallet').mockImplementationOnce(async (_id, _additions, _digest, opts) => {
+      await opts!.onBroadcast!({ txHash: `0x${'e5'.repeat(32)}`, nonce: 3, wallet: SIGNER.address });
+      await opts!.onBroadcast!({ txHash: `0x${'e6'.repeat(32)}`, nonce: 4, wallet: SIGNER.address });
+      throw new Error('unreachable');
+    });
+    await expect(buyer.topUp(subscriptionId, [service(A, TRAC)], twice)).rejects.toThrow(/was sent already/);
+  });
+
+  it('drops the keys of subscriptions that ended before the last epoch, and reads its record again after a failed read', async () => {
+    const buyer = buyerWith();
+    const subscriptionId = await funded(buyer);
+    await buyer.topUp(subscriptionId, [service(A, 10n * TRAC)], KEY);
+    const file = join(dir, 'top-ups.jsonl');
+    expect((await readFile(file, 'utf8')).trim().split('\n')).toHaveLength(2);
+    const times = await chain.getEpochTimes();
+    // Two epochs on, a new buyer reads the record and drops the old key; the read that failed is made again.
+    vi.spyOn(chain, 'getEpochTimes').mockRejectedValueOnce(new Error('rpc down'))
+      .mockResolvedValue({ ...times, epoch: times.epoch + 2, now: times.endsAt + 30 * DAY });
+    const next = buyerWith();
+    await expect(next.topUp(subscriptionId, [service(A, 10n * TRAC)], KEY)).rejects.toThrow('rpc down');
+    // The key is gone: the request is checked as a new one, and the subscription has ended.
+    expect((await refusal(next.topUp(subscriptionId, [service(A, 10n * TRAC)], KEY)))?.code).toBe('SubscriptionEnded');
+    expect(await readFile(file, 'utf8')).toBe('');
   });
 });
 

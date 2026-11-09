@@ -133,6 +133,12 @@ export interface SubscriptionTopUp extends TxResult {
   cost: bigint;
 }
 
+/** A Knowledge Asset's lifetime extension: its transaction, the TRAC it paid, and the asset's new end epoch. */
+export interface KnowledgeAssetExtension extends TxResult {
+  tokenAmount: bigint;
+  endEpoch: number;
+}
+
 /** `ServiceSubscriptions.currentWindowAllowance`. */
 export interface WindowAllowance {
   window: number;
@@ -234,6 +240,18 @@ export interface ReceiptBatchSendOptions {
 /** What became of a batch's transaction: it landed, with its groups; it reverted; or `null` while it is not mined. */
 export type ReceiptBatchOutcome = { landed: ReceiptBatch } | { reverted: true } | null;
 
+/**
+ * A top-up's send, from `from`: with `onBroadcast`, recorded before it is broadcast as a receipt batch is, by its
+ * wallet and nonce. A top-up is never sent again from its signed bytes, so its hook is not given them.
+ */
+export type TopUpSendOptions = MarketplaceWriteOptions & Omit<ReceiptBatchSendOptions, 'onBroadcast'> & {
+  /** Awaited once the top-up is signed, before it is broadcast, with the wallet and nonce it took; a throw sends nothing. */
+  onBroadcast?: (signal: PreBroadcastSignal & { wallet: string }) => Promise<void> | void;
+};
+
+/** What became of a top-up's transaction: it landed, with its event; it reverted; or `null` while it is not mined. */
+export type TopUpOutcome = { toppedUp: SubscriptionTopUp } | { reverted: true } | null;
+
 /** A batch that landed: its `ReceiptBatchAccepted` event and its groups. */
 export interface ReceiptBatch extends TxResult {
   gasUsed: bigint;
@@ -332,12 +350,14 @@ export interface MarketplaceChain {
   /** The buyer's consent to `terms`, by the wallet `terms.buyer`: a 64-byte signature. Sends nothing. */
   signBuyerGrant?(terms: BuyerGrantTerms): Promise<{ digest: string; signature: string }>;
   fundFromAccount?(request: AccountFundingRequest, opts?: MarketplaceWriteOptions): Promise<SubscriptionFunding>;
-  topUpFromAccount?(subscriptionId: string, additions: ServiceBudget[], planDigest: string, opts?: MarketplaceWriteOptions): Promise<SubscriptionTopUp>;
+  topUpFromAccount?(subscriptionId: string, additions: ServiceBudget[], planDigest: string, opts?: TopUpSendOptions): Promise<SubscriptionTopUp>;
+  /** What became of a top-up sent with `onBroadcast`, by its hash or a speed-up's. */
+  getTopUpOutcome?(txHash: string): Promise<TopUpOutcome>;
   previewCost?(accountId: bigint, value: bigint): Promise<{ cost: bigint; discountBps: number }>;
   currentWindowAllowance?(accountId: bigint): Promise<WindowAllowance>;
   // ServiceSubscriptionsWallet, and the Token allowance it pulls payments under.
   fundFromWallet?(request: WalletFundingRequest, opts?: MarketplaceWriteOptions): Promise<SubscriptionFunding>;
-  topUpFromWallet?(subscriptionId: string, additions: ServiceBudget[], planDigest: string, opts?: MarketplaceWriteOptions): Promise<SubscriptionTopUp>;
+  topUpFromWallet?(subscriptionId: string, additions: ServiceBudget[], planDigest: string, opts?: TopUpSendOptions): Promise<SubscriptionTopUp>;
   /** `Token.approve(ServiceSubscriptionsWallet, amount)`. */
   approveServiceSubscriptionsWallet?(amount: bigint, opts?: MarketplaceWriteOptions): Promise<TxResult>;
   /** `Token.allowance(owner, ServiceSubscriptionsWallet)`. */
@@ -410,6 +430,13 @@ export interface MarketplaceChain {
   getMinedNonce?(address: string): Promise<number>;
   /** The latest block's base fee in wei; `null` on a chain without one. */
   getBaseFee?(): Promise<bigint | null>;
+  // KnowledgeAssetsLifecycle: a seller's offer is a Knowledge Asset, kept by extending its lifetime.
+  /**
+   * `extendKnowledgeAssetLifetime(kaId, epochs, tokenAmount)`, from `opts.from` or the primary wallet, which
+   * pays the ask for the asset's bytes over `epochs` more epochs (at least 1 wei), approved first. Anyone may
+   * extend any asset; it takes no ACKs and no Conviction discount.
+   */
+  extendKnowledgeAssetLifetime?(kaId: bigint, epochs: number, opts?: MarketplaceWriteOptions): Promise<KnowledgeAssetExtension>;
 }
 
 /**
@@ -417,7 +444,8 @@ export interface MarketplaceChain {
  * uses, and the node's identity: its id, the sharding table, which keys are an
  * identity's operational keys, the identity a wallet is an operational key of
  * (`IdentityStorage.getIdentityId`, the settlement's read of a batch's
- * sender), and typed-data signing with its wallets.
+ * sender), typed-data signing with its wallets, and a Knowledge Asset's
+ * update context, whose end epoch an offer is valid through.
  */
 export type MarketplaceChainAdapter = Required<MarketplaceChain> & Required<Pick<ChainAdapter,
   | 'getPublishingConvictionAccountInfo'
@@ -430,6 +458,7 @@ export type MarketplaceChainAdapter = Required<MarketplaceChain> & Required<Pick
   | 'isShardingTableMember'
   | 'verifyACKIdentityDetailed'
   | 'signTypedDataAs'
+  | 'getKnowledgeAssetUpdateContext'
 >>;
 
 /** `chain` as a `MarketplaceChainAdapter`, or `null` when it has no marketplace (no chain). */
