@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import { usePcaOverview } from './usePcaOverview.js';
 import { usePcaScopeBootstrap } from './usePcaScopeBootstrap.js';
 import { PCA_CAP_NEAR_THRESHOLD, PCA_EXPIRING_SOON_SECONDS } from '../pca/health.js';
+import { isPcaDead } from '../pca/pca-primitives.js';
 
 export type PcaAlertKind = 'expired' | 'expiring' | 'cap-near' | 'fallthrough';
 
@@ -38,7 +39,7 @@ export function usePcaAlerts(): PcaAlert[] {
       if (!s) continue;
       const id = a.accountId;
       const hasExpiry = typeof s.expiresAtTimestamp === 'number' && s.expiresAtTimestamp > 0;
-      const expired = (hasExpiry && nowSec >= s.expiresAtTimestamp) || !!s.fullySwept;
+      const expired = isPcaDead(s, nowSec);
 
       if (expired) {
         out.push({ id: `pca-${id}-expired`, accountId: id, kind: 'expired', severity: 'danger', title: `PCA #${id} has expired`, message: 'Publishes no longer get its discount. Create a new PCA to keep it.' });

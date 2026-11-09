@@ -3,33 +3,25 @@ import { useAgentsStore } from '../../stores/agents.js';
 import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { pcaStorageScopeForContracts, usePcaStore } from '../../stores/pca.js';
 import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
-import { usePcaOverview, type ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
+import { usePcaOverview } from '../../hooks/usePcaOverview.js';
 import { useDiscoveredPcas } from '../../hooks/useDiscoveredPcas.js';
 import { useConnectedWalletPcas } from '../../hooks/useConnectedWalletPcas.js';
 import { listPcaContracts } from '../../api.js';
 import { WalletConnectControl, WalletRow, RetryButton } from '../../components/Pca/index.js';
-import { isPcaSpendable } from '../../pca/coverage.js';
-import { isPcaExpired } from '../../pca/pca-primitives.js';
+import { walletCoverageRow, summarizeCoverage } from '../../pca/walletCoverage.js';
 import { PcaAccountList, type PcaListAccount } from './PcaAccountList.js';
 import { CreatePcaModal } from './CreatePcaModal.js';
 import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 import { GetSponsoredPanel } from './GetSponsoredPanel.js';
-import { eqAddress as eq } from '../../web3/address.js';
 import { resolvePcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { Badge } from '../../components/ds/Badge.js';
 import { PcaPrimerLink } from './PcaPrimer.js';
 import { Loading } from '../../components/ds/Loading.js';
 import { Plus } from 'lucide-react';
-import { formatBps, formatNodeRole } from '../../lib/format.js';
+import { formatNodeRole } from '../../lib/format.js';
 import { PageHeader } from '../../components/ds/PageHeader.js';
 
 type WalletBootstrapStatus = 'idle' | 'loading' | 'ready' | 'error';
-
-function inactiveLabel(account: ResolvedPcaAccount): string {
-  return account.snapshot && isPcaExpired(account.snapshot)
-    ? `PCA #${account.accountId}, which has expired`
-    : `PCA #${account.accountId}, which has no TRAC left this epoch`;
-}
 
 /**
  * S1 Conviction Overview. Answers three questions in order: do I have a discount, how
@@ -61,7 +53,7 @@ export function ConvictionOverview() {
   const connectedWalletPcas = useConnectedWalletPcas();
   const [bootstrapNonce, setBootstrapNonce] = useState(0);
   const overview = usePcaOverview(30_000, connectedWalletPcas.ids);
-  const { accounts, loading, refresh, walletsInconclusive, bestCoveringDiscountBps } = overview;
+  const { accounts, loading, refresh, walletsInconclusive } = overview;
   const primaryWallet = overview.wallets[0];
 
   useEffect(() => {
@@ -122,70 +114,20 @@ export function ConvictionOverview() {
   );
 
   const onManage = (id: string) => openTab({ id: `conviction:${id}`, label: `PCA #${id}`, closable: true });
-  const walletCoverageRows = useMemo(
-    () =>
-      overview.wallets.map((wallet) => {
-        const approvedOn = (spendable: boolean) => enhancedAccounts.find((account) =>
-          account.snapshot &&
-          isPcaSpendable(account.snapshot) === spendable &&
-          account.walletProbes.some((probe) => eq(probe.wallet, wallet) && probe.registered === true),
-        );
-        const covering = approvedOn(true);
-        if (covering) {
-          return { wallet, status: `Covered by PCA #${covering.accountId}`, tone: 'success' as const };
-        }
-        const inactive = approvedOn(false);
-        if (inactive) {
-          return {
-            wallet,
-            status: `Approved on PCA #${inactive.accountId}, which isn't active: pays the full fee`,
-            tone: 'warn' as const,
-            inactive,
-          };
-        }
-        const unknown = walletsInconclusive || enhancedAccounts.some((account) =>
-          account.walletProbes.some((probe) => eq(probe.wallet, wallet) && probe.registered == null),
-        );
-        if (unknown) return { wallet, status: "Couldn't check", tone: 'warn' as const, unknown: true };
-        return { wallet, status: 'Not covered: pays the full fee', tone: 'neutral' as const };
-      }),
-    [enhancedAccounts, overview.wallets, walletsInconclusive],
-  );
-  const coveredCount = walletCoverageRows.filter((row) => row.tone === 'success').length;
-  const hasCoveredWallet = coveredCount > 0;
-  const anyUnknown = walletCoverageRows.some((row) => 'unknown' in row);
-  const inactiveAccount = walletCoverageRows.map((row) => ('inactive' in row ? row.inactive : undefined)).find(Boolean);
-
+  // One typed coverage state per publishing wallet (from the overview's single aggregate).
+  const coverage = overview.coverage.wallets;
   const retryWalletBootstrap = useCallback(() => setBootstrapNonce((n) => n + 1), []);
   const switchNetwork = useCallback(() => {
     void switchToExpectedChain();
   }, [switchToExpectedChain]);
 
   const firstLoad = loading && accounts.length === 0 && overview.wallets.length === 0;
-  const walletTotal = overview.wallets.length;
-  // #9 - never say "None" while the wallets or the PCA lookup can't be read.
-  const unconfirmed = !hasCoveredWallet && (walletsInconclusive || !!discoveredLookupError);
-  const discountValue = hasCoveredWallet
-    ? bestCoveringDiscountBps != null ? formatBps(bestCoveringDiscountBps) : '—'
-    : unconfirmed
-      ? 'Unknown'
-      : inactiveAccount
-        ? 'None'
-        : 'None yet';
-  const discountSub = hasCoveredWallet
-    ? coveredCount === walletTotal
-      ? `All ${walletTotal} publishing wallets covered`
-      : `${coveredCount} of ${walletTotal} publishing wallets covered`
-    : walletsInconclusive
-      ? "Couldn't read this node's wallets, so we can't confirm your discount."
-      : discoveredLookupError
-        ? "Couldn't check this node's PCAs. You may still have a discount."
-        : inactiveAccount
-          ? `Your wallets are on ${inactiveLabel(inactiveAccount)}. They pay the full fee.`
-          : walletTotal === 0 && accounts.length > 0
-            ? "This node didn't report any publishing wallets."
-            : "This node's publishing wallets pay the full TRAC fee.";
-  const showWalletRows = walletCoverageRows.some((row) => row.tone !== 'neutral');
+  const summary = summarizeCoverage(overview.coverage, {
+    walletsInconclusive,
+    lookupError: !!discoveredLookupError,
+    accountCount: accounts.length,
+  });
+  const { hasCoveredWallet, anyUnknown, showWalletRows } = summary;
   const showWaysIn = !hasCoveredWallet && !walletsInconclusive && !firstLoad;
   // The lookup notice above has its own Retry, which re-reads everything.
   const showRetry = (walletsInconclusive || anyUnknown) && !discoveredLookupError;
@@ -271,8 +213,8 @@ export function ConvictionOverview() {
               <Loading label="Checking your discount…" />
             ) : (
               <>
-                <div className="stat-value" data-testid="pca-discount-value">{discountValue}</div>
-                <div className="stat-sub">{discountSub}</div>
+                <div className="stat-value" data-testid="pca-discount-value">{summary.value}</div>
+                <div className="stat-sub">{summary.sub}</div>
               </>
             )}
           </div>
@@ -295,9 +237,10 @@ export function ConvictionOverview() {
         {showWalletRows && (
           <>
             <div className="v10-pca-wallet-list">
-              {walletCoverageRows.map((row) => (
-                <WalletRow key={row.wallet} address={row.wallet} status={row.status} statusTone={row.tone} />
-              ))}
+              {coverage.map((c) => {
+                const row = walletCoverageRow(c);
+                return <WalletRow key={c.wallet} address={c.wallet} status={row.status} statusTone={row.tone} />;
+              })}
             </div>
             <p className="v10-pca-overview-caveat">The discount follows the wallet that signs each publish.</p>
           </>

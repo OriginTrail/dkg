@@ -7,20 +7,16 @@ import {
 } from '../api.js';
 import { usePcaStore } from '../stores/pca.js';
 import { healthForSnapshot, type PcaHealthState } from '../pca/health.js';
-import { classifyCoverage, isPcaSpendable } from '../pca/coverage.js';
+import { classifyCoverage } from '../pca/coverage.js';
+import { nodeCoverage, type CoverageAccount, type CoverageProbe, type NodeCoverage } from '../pca/walletCoverage.js';
 import { eqAddress as eq } from '../web3/address.js';
 
 /** Per-(node wallet) registration probe against one account. `null` = couldn't determine. */
-export interface PcaWalletProbe {
-  wallet: string;
-  registered: boolean | null;
-}
+export type PcaWalletProbe = CoverageProbe;
 
 export type PcaClassification = 'owned' | 'approved' | 'unknown';
 
-export interface ResolvedPcaAccount {
-  accountId: string;
-  snapshot: PcaSnapshot | null;
+export interface ResolvedPcaAccount extends CoverageAccount {
   error: unknown;
   /** The daemon returned 404 — the tracked id no longer exists (offer Remove). */
   notFound: boolean;
@@ -67,6 +63,8 @@ export interface PcaOverview {
    */
   bestCoveringDiscountBps: number | null;
   covered: boolean;
+  /** One coverage state per publishing wallet; the same aggregate `covered` and the discount come from. */
+  coverage: NodeCoverage;
 }
 
 async function resolveAccount(accountId: string, wallets: string[]): Promise<ResolvedPcaAccount> {
@@ -235,6 +233,7 @@ function subscribeOverview(key: string, ids: string[], intervalMs: number, cb: (
 }
 
 const EMPTY_ACCOUNTS: ResolvedPcaAccount[] = [];
+const EMPTY_WALLETS: string[] = [];
 
 /**
  * The S1 overview resolution engine + the single source of truth for the
@@ -266,34 +265,26 @@ export function usePcaOverview(intervalMs = 30_000, extraIds: string[] = []): Pc
   const loading = entry ? entry.loading : true;
   const error = entry?.error ?? null;
 
-  const { bestCoveringDiscountBps, covered } = useMemo(() => {
-    let best: number | null = null;
-    for (const a of accounts) {
-      if (!a.snapshot || a.approvedCount <= 0) continue;
-      // U2 (via shared isPcaSpendable, #1344) — exclude expired/swept + zero-budget so
-      // the dashboard/settings don't advertise a discount S5 treats as not-covering.
-      if (!isPcaSpendable(a.snapshot)) continue;
-      const bps = a.snapshot.discountBps;
-      if (typeof bps === 'number' && (best == null || bps > best)) best = bps;
-    }
-    return { bestCoveringDiscountBps: best, covered: best != null };
-  }, [accounts]);
-
-  const wallets = entry?.data?.wallets ?? [];
+  const wallets = entry?.data?.wallets ?? EMPTY_WALLETS;
   const walletsError = entry?.data?.walletsError ?? false;
+  const walletsInconclusive = walletsError && wallets.length === 0;
+  // U2 (#1344) — coverage and the best discount come from ONE pure aggregate, which uses the
+  // shared isPcaSpendable, so no surface advertises a discount S5 treats as not-covering.
+  const coverage = useMemo(() => nodeCoverage(wallets, accounts, walletsInconclusive), [wallets, accounts, walletsInconclusive]);
   return {
     accounts,
     wallets,
     walletsError,
     // T2 — unreadable wallets (error + empty) vs a genuine 0-wallet node (no error).
-    walletsInconclusive: walletsError && wallets.length === 0,
+    walletsInconclusive,
     loading,
     error,
     refresh: () => {
       const e = ENTRIES.get(idsKey);
       if (e) loadEntry(e);
     },
-    bestCoveringDiscountBps,
-    covered,
+    bestCoveringDiscountBps: coverage.bestCoveringDiscountBps,
+    covered: coverage.covered,
+    coverage,
   };
 }

@@ -494,3 +494,112 @@ describe('ConvictionOverview — S1 discovery', () => {
     await unmount();
   });
 });
+
+describe('ConvictionOverview — discount summary', () => {
+  const WALLET1 = '0xB7c2000000000000000000000000000000000A12';
+  const summaryOf = (c: HTMLElement) => ({
+    value: c.querySelector('[data-testid="pca-discount-value"]')?.textContent,
+    sub: c.querySelector('[data-testid="pca-discount-value"]')?.nextElementSibling?.textContent,
+  });
+  const approve = (approved: string[], over: Record<string, unknown> = {}) => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0, WALLET1], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      const base = { ...snapFixture(id), owner: '0xSOMEONEELSE0000000000000000000000000000', ...over };
+      if (key) return { ...base, probedKey: { key, registered: approved.some((w) => w.toLowerCase() === key.toLowerCase()) } };
+      return base;
+    });
+    usePcaStore.setState({ trackedIds: ['7'], createPending: null });
+  };
+
+  it('shows the discount and that every publishing wallet is covered', async () => {
+    approve([WALLET0, WALLET1]);
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'All 2 publishing wallets covered');
+    expect(summaryOf(container)).toEqual({ value: '30%', sub: 'All 2 publishing wallets covered' });
+    await unmount();
+  });
+
+  it('counts only the covered wallets when some are not approved', async () => {
+    approve([WALLET0]);
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, '1 of 2 publishing wallets covered');
+    expect(summaryOf(container).value).toBe('30%');
+    expect(container.textContent).toContain('Covered by PCA #7');
+    expect(container.textContent).toContain('Not covered: pays the full fee');
+    await unmount();
+  });
+
+  it('never advertises a discount from an expired PCA the wallets are approved on', async () => {
+    approve([WALLET0, WALLET1], { expiresAtTimestamp: 1000 });
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'which has expired');
+    expect(summaryOf(container)).toEqual({ value: 'None', sub: 'Your wallets are on PCA #7, which has expired. They pay the full fee.' });
+    expect(container.querySelector('[data-testid="pca-discount-value"]')?.textContent).not.toBe('30%');
+    await unmount();
+  });
+});
+
+describe('ConvictionOverview — failed approval checks', () => {
+  it('keeps the headline uncertain when only the per-wallet approval checks fail', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      if (key) throw new Error('probe failed');
+      return { ...snapFixture(id), owner: '0xSOMEONEELSE0000000000000000000000000000' };
+    });
+    usePcaStore.setState({ trackedIds: ['7'], createPending: null });
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'You may still have a discount');
+    const value = container.querySelector('[data-testid="pca-discount-value"]');
+    expect(value?.textContent).toBe('Unknown');
+    expect(value?.nextElementSibling?.textContent).toBe("Couldn't check whether a PCA covers this node's wallets. You may still have a discount.");
+    expect(container.textContent).not.toContain('pay the full TRAC fee');
+    await unmount();
+  });
+});
+
+describe('ConvictionOverview — Already have a PCA? hands the ID to Get added', () => {
+  it('checks the typed ID in Get added, can add an unapproved PCA, and reopens without a stale ID', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      const base = { ...snapFixture(id), owner: '0xSOMEONEELSE0000000000000000000000000000' };
+      return key ? { ...base, probedKey: { key, registered: false, adapterSupported: true } } : base;
+    });
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'Already have a PCA?');
+
+    const input = container.querySelector('[data-testid="pca-check-input"]') as HTMLInputElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '7');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      (container.querySelector('[data-testid="pca-check-submit"]') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    // Get added opens with #7 already checked: no typing in the dialog.
+    await waitForText(document.body, 'Approved on PCA #7: 0 of 1 wallets');
+    const dialogInput = () => document.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement | null;
+    expect(dialogInput()?.value).toBe('7');
+    expect(usePcaStore.getState().trackedIds).not.toContain('7'); // nothing approved, so not added by itself
+
+    // The PCA exists, so it can still go in the list, read-only.
+    await act(async () => {
+      (document.querySelector('[data-testid="pca-sponsor-track"]') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(usePcaStore.getState().trackedIds).toContain('7');
+    await waitForText(document.body, 'PCA #7 is in your list');
+
+    // Close, then reopen from the Get added card: the dialog starts empty.
+    await act(async () => {
+      (Array.from(document.querySelectorAll('button')).find((b) => b.textContent === 'Close') as HTMLButtonElement)
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(dialogInput()).toBeNull();
+    await act(async () => {
+      (container.querySelector('button[aria-label="Get added to a PCA"]') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await waitForText(document.body, 'Have a PCA ID?');
+    expect(dialogInput()?.value).toBe('');
+    await unmount();
+  });
+});

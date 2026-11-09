@@ -74,7 +74,13 @@ describe('PcaAccountList', () => {
   it('offers Approve wallets on an owned PCA with none approved, and shows the ID as plain text', async () => {
     const c = await renderList([account({ approvedCount: 0 })]);
     expect(c.textContent).toContain('None approved');
-    expect(buttons(c)).toEqual(['Approve wallets']);
+    // Approve wallets is added; Manage stays, so the PCA page (top-up, removal) is still reachable.
+    expect(buttons(c)).toEqual(['Approve wallets', 'Manage']);
+    await act(async () => {
+      (Array.from(c.querySelectorAll('button')).find((b) => b.textContent === 'Manage') as HTMLButtonElement)
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(handlers.onManage).toHaveBeenCalledWith('12');
     // View or Manage is the one way in; the ID is not a second button.
     expect(c.querySelector('[data-account="12"] td:first-child button')).toBeNull();
     expect(c.querySelector('[data-account="12"] td:first-child strong')?.textContent).toBe('#12');
