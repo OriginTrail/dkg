@@ -373,10 +373,11 @@ function isUpdateQuad(quad: Quad): boolean {
 
 /**
  * Store `quads` through `insert`, with the node fields of agent profiles among
- * them applied as this module describes. Quads of any other kind go to `insert`
- * unchanged. Resolves with what `insert` stored. `syncPage` says the quads are a
- * page of a sync, which may stop inside a subject; `listedPeersOnly` says they
- * are a gossiped profile.
+ * them applied as this module describes. The `agents` graph holds agents, so its
+ * quads about any other subject are not stored. Quads of any other kind go to
+ * `insert` unchanged. Resolves with what `insert` stored. `syncPage` says the
+ * quads are a page of a sync, which may stop inside a subject; `listedPeersOnly`
+ * says they are a gossiped profile.
  */
 export async function storeAgentProfileQuads(
   store: TripleStore,
@@ -389,6 +390,7 @@ export async function storeAgentProfileQuads(
   const updates = new Map<string, Quad[]>();
   const others: Quad[] = [];
   for (const quad of quads) {
+    if (quad.graph === AGENTS_DATA_GRAPH && !quad.subject.startsWith(AGENT_SUBJECT_PREFIX)) continue;
     if (!isUpdateQuad(quad)) {
       others.push(quad);
       continue;
@@ -397,7 +399,7 @@ export async function storeAgentProfileQuads(
     if (update === undefined) updates.set(quad.subject, [quad]);
     else update.push(quad);
   }
-  if (updates.size === 0) return insert(others);
+  if (updates.size === 0) return others.length > 0 ? insert(others) : [];
   const state = stateOf(store);
   return oneAtATime(state, async () => {
     const held = await readHeldNodeFields(store, [...updates.keys()], storeOptions);
@@ -424,7 +426,7 @@ export async function storeAgentProfileQuads(
  * sender as their one peer, and the date of a peer is this node's to set. Of an
  * agent this node knows already, only the update's node fields count: the rest
  * arrives with a sync, and taking it from every heartbeat would grow the subject's
- * triples without bound.
+ * triples without bound. Quads about anything but an agent are not a profile.
  */
 export function gossipedAgentProfileQuads(
   quads: readonly Quad[],
@@ -438,10 +440,11 @@ export function gossipedAgentProfileQuads(
     if (quad.predicate === PEER_ID) (literalBody(quad.object) === fromPeerId ? namesSender : namesAnother).add(rootOf(quad.subject));
   }
   const fromItsPeer = (root: string): boolean => fromPeerId === undefined
-    || (!namesAnother.has(root) && (namesSender.has(root) || !root.startsWith(AGENT_SUBJECT_PREFIX)));
+    || (!namesAnother.has(root) && namesSender.has(root));
   return quads.filter((quad) => (
-    quad.predicate !== AGENT_DATED_PEER_PREDICATE
+    quad.subject.startsWith(AGENT_SUBJECT_PREFIX)
+    && quad.predicate !== AGENT_DATED_PEER_PREDICATE
     && fromItsPeer(rootOf(quad.subject))
-    && (!knownAgent || (NODE_FIELDS.has(quad.predicate) && quad.subject.startsWith(AGENT_SUBJECT_PREFIX)))
+    && (!knownAgent || NODE_FIELDS.has(quad.predicate))
   ));
 }
