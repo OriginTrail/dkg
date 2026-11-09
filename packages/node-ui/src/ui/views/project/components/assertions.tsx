@@ -216,6 +216,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
       {outcome && (
         <div
           data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
+          data-tone={outcome.tone}
           style={{ padding: '6px 16px', fontSize: 'var(--fs-label)', color: outcomeColor(outcome.tone) }}
         >
           <StatusGlyph tone={outcome.tone} /> {outcome.text}

@@ -58,7 +58,7 @@ test.describe('Network tab in Observability (/ui/network)', () => {
     await expect(card).toBeVisible();
     // Either the empty-state copy renders (single-node devnet) or
     // a real `.data-table` does. Both are valid.
-    const empty = card.locator('.empty-state-title', { hasText: 'No active connections' });
+    const empty = card.locator('.v10-empty-state-title', { hasText: 'No active connections' });
     const table = card.locator('table.data-table');
     await expect(empty.or(table).first()).toBeVisible();
   });
@@ -68,7 +68,7 @@ test.describe('Network tab in Observability (/ui/network)', () => {
       .locator('.card')
       .filter({ has: page.locator('.card-title', { hasText: 'Discovered agents' }) });
     await expect(card).toBeVisible();
-    const empty = card.locator('.empty-state-title', { hasText: 'No agents discovered' });
+    const empty = card.locator('.v10-empty-state-title', { hasText: 'No agents discovered' });
     const table = card.locator('table.data-table');
     await expect(empty.or(table).first()).toBeVisible();
   });

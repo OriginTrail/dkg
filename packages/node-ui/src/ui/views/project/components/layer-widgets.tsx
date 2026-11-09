@@ -155,6 +155,7 @@ function LayerActionFeedback({ outcome }: { outcome: ActionOutcome }) {
   return (
     <div
       data-testid={outcome.tone === 'danger' ? 'layer-action-error' : 'layer-action-result'}
+      data-tone={outcome.tone}
       style={{ fontSize: 'var(--fs-label)', color: outcomeColor(outcome.tone), marginBottom: 8 }}
     >
       <StatusGlyph tone={outcome.tone} /> {outcome.text}

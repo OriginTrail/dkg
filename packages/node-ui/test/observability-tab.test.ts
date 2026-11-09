@@ -5,15 +5,10 @@ import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate, type NavigateFunction } from 'react-router-dom';
-import {
-  observabilityHref,
-  rememberObservabilityTab,
-  searchForTab,
-  tabFromSearch,
-} from '../src/ui/lib/observabilityTab.js';
+import { observabilityHref, searchForTab, tabFromSearch } from '../src/ui/lib/observabilityTab.js';
 import { useObservabilityTab } from '../src/ui/hooks/useObservabilityTab.js';
 import { useShellRouting } from '../src/ui/hooks/useShellRouting.js';
-import { tabIdToHref } from '../src/ui/lib/tab-routes.js';
+import { tabIdToPath } from '../src/ui/lib/tab-routes.js';
 import { useTabsStore } from '../src/ui/stores/tabs.js';
 
 describe('Observability tab in the address', () => {
@@ -30,12 +25,8 @@ describe('Observability tab in the address', () => {
     expect(observabilityHref('network')).toBe('/observability?tab=network');
   });
 
-  it('reopens Observability on the tab last shown', () => {
-    rememberObservabilityTab('logs');
-    expect(tabIdToHref('operations')).toBe('/observability?tab=logs');
-    rememberObservabilityTab('operations');
-    expect(tabIdToHref('operations')).toBe('/observability');
-    expect(tabIdToHref('settings')).toBe('/settings');
+  it('keeps route encoding pure: a tab always maps to the same path', () => {
+    expect(tabIdToPath('operations')).toBe('/observability');
   });
 });
 
@@ -71,13 +62,11 @@ function mount(entries: string[], index = entries.length - 1) {
 describe('Observability tab routing', () => {
   beforeEach(() => {
     useTabsStore.setState({ tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }], activeTabId: 'dashboard' });
-    rememberObservabilityTab('operations');
   });
   afterEach(() => { act(() => root?.unmount()); root = null; });
 
   it('shows the tab an address names, even when another tab was shown before', () => {
-    rememberObservabilityTab('logs');
-    mount(['/observability?tab=network']);
+    mount(['/observability?tab=logs', '/settings', '/observability?tab=network']);
     expect(seen.tab).toBe('network');
     expect(seen.search).toBe('?tab=network');
   });
@@ -113,5 +102,15 @@ describe('Observability tab routing', () => {
     act(() => { useTabsStore.getState().setActiveTab('operations'); });
     expect(seen.path).toBe('/observability');
     expect(seen.tab).toBe('errors');
+  });
+
+  it('remembers each tab on its own, and a new shell starts clean', () => {
+    mount(['/observability?tab=errors']);
+    act(() => { useTabsStore.getState().openTab({ id: 'settings', label: 'Settings', closable: true }); });
+    act(() => { root?.unmount(); });
+    mount(['/settings']);
+    act(() => { useTabsStore.getState().setActiveTab('operations'); });
+    expect(seen.path).toBe('/observability');
+    expect(seen.tab).toBe('operations');
   });
 });

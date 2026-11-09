@@ -24,6 +24,8 @@ interface LayoutState {
   toggleRight: () => void;
   setRightExpanded: (expanded: boolean) => void;
   closeNarrowPanel: () => void;
+  /** Show the centre: collapse the expanded right panel and close a floating one. */
+  revealCentre: () => void;
   holdNarrowPanel: (held: boolean) => void;
   toggleBottom: () => void;
   toggleBottomMaximised: () => void;
@@ -221,6 +223,7 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
     persist(snapshot(get()));
   },
   closeNarrowPanel: () => set({ narrowPanel: null }),
+  revealCentre: () => set({ rightExpanded: false, narrowPanel: null }),
   holdNarrowPanel: (held) => set({ narrowPanelHeld: held }),
   toggleBottom: () => {
     set((s) => ({ bottomCollapsed: !s.bottomCollapsed, bottomMaximised: false }));

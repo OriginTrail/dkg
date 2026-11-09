@@ -29,8 +29,3 @@ export function searchForTab(tab: ObservabilityTab, search = ''): string {
 export function observabilityHref(tab: ObservabilityTab): string {
   return PLACES.operations.path + searchForTab(tab);
 }
-
-// The tab last shown, so reopening Observability from the tab bar returns to it.
-let lastTab: ObservabilityTab = DEFAULT_TAB;
-export function rememberObservabilityTab(tab: ObservabilityTab): void { lastTab = tab; }
-export function rememberedObservabilityTab(): ObservabilityTab { return lastTab; }
