@@ -116,6 +116,48 @@ test('Google writes require authorization before provisioning or invoking',async
     assert.equal(f.calls.length,0);
   }finally{f.close();}
 });
+test('fresh catalog policy fences save approval and persists export restrictions across reopen', async () => {
+  const f = environment(), graph = definition(['webhook', 'edit-fields'], [[0,0,1,0]]);
+  const deny = () => { throw new Error('export key required'); };
+  const protectedCatalog = catalog.map(c => ({ ...c, requiresExportAuthorization: c.descriptor.id === 'edit-fields' }));
+  try {
+    // The first inspection is unprotected; the post-provision inspection is protected.
+    f.beforeNextCatalog(() => f.beforeNextCatalog(() => f.setCatalog(protectedCatalog)));
+    await assert.rejects(f.service.save(graph, deny), /export key required/);
+    assert.equal(f.approvals.size, 0);
+    assert.equal(f.repository.list().length, 0);
+    const saved = await f.service.save(graph, () => {});
+    assert.equal(saved.requiresExportAuthorization, true);
+    f.setCatalog(catalog); f.restart();
+    await assert.rejects(f.service.save(graph, deny), /export key required/);
+    await assert.rejects(f.service.run({ kaRef: saved.kaRef, sourceHash: saved.sourceHash, itemsJson: '[{}]', invocationId: randomUUID() }, deny), /export key required/);
+    await assert.rejects(f.service.activate({ kaRef: saved.kaRef, active: true, activationId: randomUUID() }, deny), /export key required/);
+    assert.equal(f.invocations.length, 0);
+    await f.service.activate({ kaRef: saved.kaRef, active: true, activationId: randomUUID() }, () => {});
+    assert.equal((await f.service.history(saved.kaRef, needsExport => !needsExport)).eventPath, undefined);
+    assert.ok((await f.service.history(saved.kaRef, needsExport => needsExport)).eventPath);
+    writeFileSync(f.exportTokenFile, 'revoked-export');
+    await assert.rejects(f.service.event(f.repository.row(saved.kaRef).event_key, { invocationId: randomUUID(), items: [{}] }), /export authorization changed/);
+    assert.equal(f.invocations.length, 0);
+  } finally { f.close(); }
+});
+test('current capability policy gates run, activation and event disclosure without a persisted export flag', async () => {
+  const f = environment();
+  try {
+    const saved = await f.service.save(definition(['webhook', 'edit-fields'], [[0,0,1,0]]), () => {});
+    await f.service.activate({ kaRef: saved.kaRef, active: true, activationId: randomUUID() }, () => {});
+    assert.equal(saved.requiresExportAuthorization, false);
+    f.setCatalog(catalog.map(c => ({ ...c, requiresExportAuthorization: c.descriptor.id === 'edit-fields' })));
+    const deny = () => { throw new Error('export key required'); };
+    await assert.rejects(f.service.run({ kaRef: saved.kaRef, sourceHash: saved.sourceHash, itemsJson: '[{}]', invocationId: randomUUID() }, deny), /export key required/);
+    await assert.rejects(f.service.activate({ kaRef: saved.kaRef, active: true, activationId: randomUUID() }, deny), /export key required/);
+    assert.equal((await f.service.history(saved.kaRef, needsExport => !needsExport)).eventPath, undefined);
+    await assert.rejects(f.service.event(f.repository.row(saved.kaRef).event_key, { invocationId: randomUUID(), items: [{}] }), /export authorization changed/);
+    f.setCatalog(catalog.map(c => ({ ...c, available: false })));
+    assert.equal((await f.service.history(saved.kaRef, () => assert.fail('unavailable selection cannot be disclosed'))).eventPath, undefined);
+    assert.equal(f.invocations.length, 0);
+  } finally { f.close(); }
+});
 test('activation retries retain event identity and count; webhook receipt replay rejects changed inputs',async()=>{
   const f=environment();try{const w=await f.service.save(definition(['webhook','edit-fields'],[[0,0,1,0]]),()=>{});
     const activationId=randomUUID();await f.service.activate({kaRef:w.kaRef,sourceHash:w.sourceHash,active:true,activationId},()=>{});
@@ -247,16 +289,19 @@ for (const failure of ['reject', 'lost-ack', 'changed-pin']) test(`schedule deac
   } finally { f.close(); }
 });
 
-for (const loss of ['deactivation', 'expiry', 'replacement']) test('unprotected webhook rechecks ' + loss + ' after catalog inspection', async t => {
+for (const mode of ['webhook', 'schedule']) for (const loss of ['deactivation', 'expiry', 'replacement']) test('unprotected ' + mode + ' rechecks ' + loss + ' after catalog inspection', async t => {
   const f = environment(), entered = Promise.withResolvers(), resume = Promise.withResolvers();
   try {
-    const w = await f.service.save(definition(['webhook', 'http-request'], [[0,0,1,0]]), () => assert.fail('unexpected export authorization'));
+    const w = await f.service.save(definition([mode, 'http-request'], [[0,0,1,0]]), () => assert.fail('unexpected export authorization'));
     assert.equal(w.requiresExportAuthorization, false);
     await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const key = f.repository.row(w.kaRef).event_key;
-    // event() inspects once, then run() inspects again after reserving the event.
+    const row = f.repository.row(w.kaRef);
+    if (mode === 'schedule') f.executions.set('7', timerExecution(f, row, '7'));
+    // Intake inspects once, then execution inspects again after reservation.
     f.beforeNextCatalog(() => f.beforeNextCatalog(async () => { entered.resolve(); await resume.promise; }));
-    const denied = assert.rejects(f.service.event(key, { invocationId: randomUUID(), items: [{}] }), /inactive|activation changed/);
+    const denied = mode === 'webhook'
+      ? assert.rejects(f.service.event(row.event_key, { invocationId: randomUUID(), items: [{}] }), /inactive|activation changed/)
+      : f.service.poll();
     await entered.promise;
     if (loss === 'expiry') {
       const expiresAt = f.repository.activation(w.kaRef).expiresAt;
@@ -269,25 +314,54 @@ for (const loss of ['deactivation', 'expiry', 'replacement']) test('unprotected 
     assert.equal(f.invocations.length, 0);
     assert.equal(f.repository.pendingEvents(w.kaRef).length, 1);
     // Explicit owner runs are independent of delegated webhook authority.
-    assert.equal((await f.service.run({ kaRef: w.kaRef, sourceHash: w.sourceHash, itemsJson: '[{}]', invocationId: randomUUID() }, () => {})).persisted, true);
-    assert.equal(f.invocations.length, 1);
+    if (mode === 'webhook') {
+      assert.equal((await f.service.run({ kaRef: w.kaRef, sourceHash: w.sourceHash, itemsJson: '[{}]', invocationId: randomUUID() }, () => {})).persisted, true);
+      assert.equal(f.invocations.length, 1);
+    }
   } finally { resume.resolve(); t.mock.restoreAll(); f.close(); }
 });
 
-test('webhook reconciliation rechecks activation after an acknowledged dispatch', async () => {
+for (const mode of ['webhook', 'schedule']) test(mode + ' reconciliation rechecks activation after an acknowledged dispatch', async () => {
   const f = environment(); let attempts = 0;
   try {
-    const w = await f.service.save(definition(['webhook', 'edit-fields'], [[0,0,1,0]]), () => {});
+    const w = await f.service.save(definition([mode, 'edit-fields'], [[0,0,1,0]]), () => {});
     await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const key = f.repository.row(w.kaRef).event_key;
+    const row = f.repository.row(w.kaRef);
+    if (mode === 'schedule') f.executions.set('7', timerExecution(f, row, '7'));
     f.client.programs.invoke = async () => {
       attempts++;
       await f.service.activate({ kaRef: w.kaRef, active: false, activationId: randomUUID() }, () => {});
       throw Object.assign(new Error('inspect the durable acknowledgement'), { code: 'INVOCATION_REQUIRES_RECONCILIATION' });
     };
-    await assert.rejects(f.service.event(key, { invocationId: randomUUID(), items: [{}] }), /inactive|activation changed/);
+    if (mode === 'webhook') await assert.rejects(f.service.event(row.event_key, { invocationId: randomUUID(), items: [{}] }), /inactive|activation changed/);
+    else await f.service.poll();
     assert.equal(attempts, 1);
     assert.equal(f.repository.pendingEvents(w.kaRef).length, 1);
+  } finally { f.close(); }
+});
+
+for (const mode of ['webhook', 'schedule']) test(mode + ' reconciliation retains export policy discovered after event reservation', async () => {
+  const f = environment(); let attempts = 0;
+  const protectedCatalog = catalog.map(c => ({ ...c, requiresExportAuthorization: c.descriptor.id === 'edit-fields' }));
+  try {
+    const saved = await f.service.save(definition([mode, 'edit-fields'], [[0,0,1,0]]), () => {});
+    assert.equal(saved.requiresExportAuthorization, false);
+    f.setCatalog(protectedCatalog);
+    await f.service.activate({ kaRef: saved.kaRef, active: true, activationId: randomUUID() }, () => {});
+    const row = f.repository.row(saved.kaRef);
+    if (mode === 'schedule') f.executions.set('7', timerExecution(f, row, '7'));
+    f.setCatalog(catalog);
+    f.beforeNextCatalog(() => f.beforeNextCatalog(() => f.setCatalog(protectedCatalog)));
+    f.client.programs.invoke = async () => {
+      attempts++;
+      writeFileSync(f.exportTokenFile, 'revoked-during-dispatch');
+      throw Object.assign(new Error('inspect the durable acknowledgement'), { code: 'INVOCATION_REQUIRES_RECONCILIATION' });
+    };
+    if (mode === 'webhook') await assert.rejects(f.service.event(row.event_key, { invocationId: randomUUID(), items: [{}] }), /export authorization changed/);
+    else await f.service.poll();
+    assert.equal(attempts, 1);
+    assert.equal(f.repository.pendingEvents(saved.kaRef).length, 1);
+    assert.equal(f.repository.activation(saved.kaRef).count, 1);
   } finally { f.close(); }
 });
 
@@ -498,20 +572,24 @@ test('timer intake fetches off-page pending details once and preserves candidate
   } finally { f.close(); }
 });
 
-test('failed quota persistence rolls back webhook reservation before dispatch', async () => {
+for (const mode of ['webhook', 'schedule']) test('failed quota persistence rolls back ' + mode + ' reservation before dispatch', async () => {
   const f = environment();
   try {
-    const w = await f.service.save(definition(['webhook', 'edit-fields'], [[0,0,1,0]]), () => {});
+    const w = await f.service.save(definition([mode, 'edit-fields'], [[0,0,1,0]]), () => {});
     await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
     const row = f.repository.row(w.kaRef), value = { invocationId: randomUUID(), items: [{ value: 1 }] };
+    if (mode === 'schedule') f.executions.set('7', timerExecution(f, row, '7'));
     f.repository.db.exec("CREATE TRIGGER fail_event_count BEFORE UPDATE OF activation_json ON workflows BEGIN SELECT RAISE(ABORT, 'count unavailable'); END");
-    await assert.rejects(f.service.event(row.event_key, value), /count unavailable/);
+    if (mode === 'webhook') await assert.rejects(f.service.event(row.event_key, value), /count unavailable/);
+    else await f.service.poll();
     assert.equal(f.invocations.length, 0);
     assert.equal(f.repository.db.prepare('SELECT count(*) AS n FROM events').get().n, 0);
     assert.equal(JSON.parse(f.repository.row(w.kaRef).activation_json).count, 0);
     f.repository.db.exec('DROP TRIGGER fail_event_count');
-    const receipt = await f.service.event(row.event_key, value);
-    assert.deepEqual(await f.service.event(row.event_key, value), receipt);
+    if (mode === 'webhook') {
+      const receipt = await f.service.event(row.event_key, value);
+      assert.deepEqual(await f.service.event(row.event_key, value), receipt);
+    } else { await f.service.poll(); await f.service.poll(); }
     assert.equal(f.invocations.length, 1);
     assert.equal(JSON.parse(f.repository.row(w.kaRef).activation_json).count, 1);
   } finally { f.close(); }
@@ -567,8 +645,14 @@ for (const protectedComponent of ['google-sheets', 'google-drive', 'edit-fields'
     const w = await f.service.save(graph, () => {});
     await f.service.activate({kaRef:w.kaRef,active:true,activationId:randomUUID()},()=>{});
     f.client.programs.listApprovals = async () => [];
-    bridge = createCapabilityBridge({ graphId, owner, config:f.config, client:f.client, exportTokenFile:f.exportTokenFile,
-      agent:{query:async()=>({bindings:[]})}, studioOptions:{state:f.state,headerCredential:{id:'fixture-header',name:'Fixture'},credentials:{}} });
+    for (const c of catalog) {
+      f.sources.set(c.kaRef, { sourceHash: c.sourceHash, authorAgentAddress: owner, version: '1.0.0' });
+      f.approvals.set(c.kaRef, { binding: { enabled: true, contextGraphId: graphId, operationIri: c.kaRef,
+        executorAgentAddress: owner, allowedCallerAgentAddresses: [owner], n8n: {},
+        program: { contextGraphId: graphId, programIri: c.kaRef, programLayer: 'wm', sourceHash: c.sourceHash, authorAgentAddress: owner } } });
+    }
+    bridge = createCapabilityBridge({ graphId, owner, config:f.config, client:f.client, definitions:catalog, exportTokenFile:f.exportTokenFile,
+      agent:{query:async()=>({bindings:catalog.map(c=>({program:c.kaRef}))})}, studioOptions:{state:f.state,headerCredential:{id:'fixture-header',name:'Fixture'},credentials:{}} });
     writeFileSync(join(f.state, 'public-origin'), 'http://127.0.0.1:4621');
     const preview = createPreviewHandler(f.state, { send: async (url, options) => {
       const target = new URL(url), req = Readable.from([]);
