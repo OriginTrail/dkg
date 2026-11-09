@@ -457,6 +457,13 @@ describe('the router', () => {
     expect(quoted).toEqual(['peer-11', 'peer-11']);
   });
 
+  it('routes a call past a seller whose quote does not read as one, to the next seller', async () => {
+    list = [offer(11n, 10n), offer(2n, 20n)];
+    const router = routerWith();
+    expect((await router.pick(SERVICE, 1, 100n))?.seller).toBe(2n);
+    expect(quoted).toEqual(['peer-11', 'peer-2']);
+  });
+
   it('leaves out an unreachable seller for ten minutes and a failed one for the epoch', async () => {
     list = [offer(3n, 10n), offer(2n, 20n)];
     const router = routerWith();

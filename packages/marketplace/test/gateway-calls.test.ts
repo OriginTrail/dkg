@@ -468,3 +468,19 @@ describe("a receipt's time", () => {
     expect(gateway.heldValue(subscriptionIdOf(NODE.address, epoch), 0)).toBe(MOST);
   });
 });
+
+describe('an answer that is not one', () => {
+  it("of null counts as no answer, toward its seller's bound of unsettled calls", async () => {
+    await setUp();
+    const { epoch } = await chain.getEpochTimes();
+    tamper = () => null as unknown as ServeResponse;
+    // The seller stays reachable, so only the bound takes it out of routing.
+    vi.spyOn(deps.router, 'unreachable').mockImplementation(() => {});
+    for (let i = 0; i < MAX_UNSETTLED_PER_SELLER; i++) {
+      expect(await call()).toMatchObject({ status: 503, body: { error: { code: 'seller_unreachable' } } });
+    }
+    expect(await call()).toMatchObject({ status: 503, body: { error: { code: 'no_seller' } } });
+    expect(gateway.heldValue(subscriptionIdOf(NODE.address, epoch), 0)).toBe(BigInt(MAX_UNSETTLED_PER_SELLER) * MOST);
+    expect((await gateway.activity()).calls[0]).toMatchObject({ state: 'held', problem: 'unanswered', value: String(MOST) });
+  });
+});
