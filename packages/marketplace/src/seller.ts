@@ -27,6 +27,10 @@
  *   the answer is an error and no result. A repeat of a call already served
  *   gets the stored answer. Calls on one subscription run one at a time, so a
  *   nonce is claimed once and a budget's check counts every call before it.
+ *   A call that waited for the ones before it meets the stop time and its
+ *   expiry again. Its backend has until the request expires, and work that
+ *   ends after that is refused as `Expired`, never signed or kept: settlement
+ *   takes no receipt completed after its request's expiry.
  * - **The end of the epoch.** Within `stopServingSeconds` of it, new calls are
  *   refused: their receipts could not land in time.
  * - **The job.** Ticks every `tickSeconds` from the epoch's start, and once
@@ -302,6 +306,7 @@ export class Seller {
 
     const chain = this.deps.chain;
     const times = await chain.getEpochTimes();
+    const readAt = Date.now();
     // 1. Not too near the epoch's end, at this epoch's price.
     if (times.endsAt - times.now <= this.deps.stopServingSeconds) return refusal('EpochEnding');
     const service = this.services.get(request.serviceId);
@@ -327,11 +332,17 @@ export class Seller {
     }
     // One call at a time per subscription: its nonces are one set, whatever the budget.
     return this.lock.run(request.subscriptionId, async () => {
+      // A call that waited for the ones before it, at the chain's time now as this host counts it from the read: 1 and 4 again.
+      const now = times.now + Math.floor((Date.now() - readAt) / 1_000);
+      if (times.endsAt - now <= this.deps.stopServingSeconds) return refusal('EpochEnding');
+      if (now >= request.expiry) return refusal('Expired');
       // 6. A nonce new to the ledger. 7. Budget left, less this seller's receipts not landed, covers the call.
       if (this.ledger.nonceUsed(request.subscriptionId, request.nonce.toString())) return refusal('NonceUsed');
       const left = await chain.budgetLeft(request.subscriptionId, budgetIndex);
       if (left - this.ledger.unlanded(request.subscriptionId, budgetIndex) < request.maxValueWei) return refusal('BudgetExhausted');
-      return this.run(service, request, call, requestDigest, budgetIndex, times.epoch);
+      // The backend has until the request expires, by this host's clock.
+      const deadline = AbortSignal.timeout(Math.max(0, readAt + (request.expiry - times.now) * 1_000 - Date.now()));
+      return this.run(service, request, call, requestDigest, budgetIndex, times.epoch, deadline);
     });
   }
 
@@ -343,6 +354,7 @@ export class Seller {
     requestDigest: string,
     budgetIndex: number,
     epoch: number,
+    deadline: AbortSignal,
   ): Promise<ServeResponse> {
     const unitCap = minBig(request.maxUnits, request.maxValueWei / request.pricePerUnit);
     let completion;
@@ -350,14 +362,20 @@ export class Seller {
       completion = await service.connector.complete({
         messages: call.body.messages,
         maxTokens: Number(minBig(BigInt(call.body.max_tokens), unitCap)),
+        signal: deadline,
       });
       this.backends.set(service.serviceId, 'up');
     } catch (err) {
+      // The request ran out of time, not the backend.
+      if (deadline.aborted) return refusal('Expired');
       this.backends.set(service.serviceId, 'down');
       // The backend's detail (a missing key's variable, an address) stays in the log.
       this.deps.log?.(`[marketplace] the backend of ${service.model} failed: ${err instanceof UpstreamError ? err.message : String(err)}`);
       return refusal('UpstreamError');
     }
+    // Settlement takes no receipt completed after its request's expiry: work that ends later is not signed or kept.
+    const completedAt = Math.max((await this.deps.chain.getEpochTimes()).now, request.issuedAt);
+    if (completedAt > request.expiry) return refusal('Expired');
     const input = BigInt(completion.promptTokens);
     if (input >= unitCap) return refusal('UnitsTooFew');
     const output = minBig(BigInt(completion.completionTokens), unitCap - input);
@@ -368,7 +386,7 @@ export class Seller {
       resultCommitment: resultCommitmentOf(content),
       units,
       valueWei: units * request.pricePerUnit,
-      completedAt: Math.max((await this.deps.chain.getEpochTimes()).now, request.issuedAt),
+      completedAt,
     };
     const receiptSignature = await this.deps.chain.signTypedDataAs(this.deps.signer, this.domain!, QUERY_INFERENCE_RECEIPT_TYPES, { ...receipt });
     const served: ServedCall = {

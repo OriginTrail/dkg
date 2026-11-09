@@ -7,6 +7,8 @@
  *     environment variable the settings name, and is never stored;
  *   - `llamacpp`, local weights behind llama.cpp's server, on loopback only.
  * It returns the text and what the backend counted: input and output tokens.
+ * A call ends at its settings' timeout, or sooner when the caller's `signal`
+ * aborts it, as the seller's does at the request's expiry.
  */
 import type { ChatMessage } from './wire.js';
 
@@ -18,7 +20,7 @@ export interface Completion {
 
 export interface Connector {
   readonly kind: 'openai' | 'llamacpp';
-  complete(call: { messages: ChatMessage[]; maxTokens: number }): Promise<Completion>;
+  complete(call: { messages: ChatMessage[]; maxTokens: number; signal?: AbortSignal }): Promise<Completion>;
 }
 
 export interface ConnectorSettings {
@@ -57,16 +59,17 @@ export function connectorOf(settings: ConnectorSettings): Connector {
   const endpoint = `${withoutTrailingSlashes(settings.baseUrl)}/chat/completions`;
   return {
     kind: settings.kind,
-    async complete({ messages, maxTokens }) {
+    async complete({ messages, maxTokens, signal }) {
       const key = settings.apiKeyEnv ? process.env[settings.apiKeyEnv] : undefined;
       if (settings.apiKeyEnv && !key) throw new UpstreamError(`${settings.apiKeyEnv} is not set`);
+      const timeout = AbortSignal.timeout(settings.timeoutMs ?? 60_000);
       let res: Response;
       try {
         res = await fetch(endpoint, {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...(key ? { authorization: `Bearer ${key}` } : {}) },
           body: JSON.stringify({ model: settings.model, messages, max_tokens: maxTokens, temperature: 0, stream: false }),
-          signal: AbortSignal.timeout(settings.timeoutMs ?? 60_000),
+          signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
         });
       } catch (err) {
         throw new UpstreamError(`the backend did not answer: ${err instanceof Error ? err.message : String(err)}`);

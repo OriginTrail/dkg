@@ -20,10 +20,11 @@
  *      UTF-8 bytes, which a tokenizer never exceeds, plus `max_tokens` and an
  *      allowance per message; `maxValueWei` those units at the quoted price;
  *   8. the seller's answer, and its receipt's checks: it answers this request,
- *      `units` within `maxUnits`, `valueWei` the units at the price, the result
- *      is what it commits to, and an operational key of the seller's Core Node
- *      signed it. A receipt that fails takes the seller out of routing for the
- *      epoch, and the call fails;
+ *      `units` within `maxUnits`, `valueWei` the units at the price, completed
+ *      between the request's issue and its expiry, as settlement requires, the
+ *      result is what it commits to, and an operational key of the seller's
+ *      Core Node signed it. A receipt that fails takes the seller out of
+ *      routing for the epoch, and the call fails;
  *   9. the receipt is kept before the answer goes back.
  * Calls on one budget run one at a time, from the ceiling to the receipt.
  *
@@ -440,6 +441,7 @@ export class Gateway {
     if (answer.budgetIndex !== budgetIndex) return { problem: 'other_budget' };
     if (receipt.units > request.maxUnits) return { problem: 'units_over_max' };
     if (receipt.valueWei !== receipt.units * request.pricePerUnit || receipt.valueWei > request.maxValueWei) return { problem: 'value_mismatch' };
+    if (receipt.completedAt < request.issuedAt || receipt.completedAt > request.expiry) return { problem: 'outside_time' };
     if (typeof answer.result?.content !== 'string' || receipt.resultCommitment !== resultCommitmentOf(answer.result.content)) {
       return { problem: 'result_mismatch' };
     }

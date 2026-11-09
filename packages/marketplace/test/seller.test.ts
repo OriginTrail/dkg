@@ -58,13 +58,15 @@ let dir: string;
 let mock: MockChainAdapter;
 let chain: MarketplaceChainAdapter;
 let domain: MarketplaceDomain;
-let backend: { next: Completion | Error; calls: number };
+/** The stub backend: its next answer, how many calls it took, and what it does first, given the call's signal. */
+let backend: { next: Completion | Error; calls: number; during?: (signal: AbortSignal) => Promise<void> };
 let shared: OfferQuad[][];
 
 const connector: Connector = {
   kind: 'openai',
-  async complete() {
+  async complete({ signal }) {
     backend.calls++;
+    await backend.during?.(signal!);
     if (backend.next instanceof Error) throw backend.next;
     return backend.next;
   },
@@ -396,6 +398,65 @@ describe('a call', () => {
     const later = wire(await requestFor(id, { nonce: 1n }));
     vi.spyOn(chain, 'getSubscription').mockRejectedValueOnce(new Error('socket hang up'));
     expect(await seller.serve(later)).toEqual({ ok: false, code: 'Unavailable', retry: true });
+  });
+
+  it('refuses work that ends after its request expired, and neither signs nor keeps it', async () => {
+    const id = await fund();
+    const request = await requestFor(id);
+    // The backend answers 601 seconds on, past the request's ten minutes.
+    const real = chain.getEpochTimes.bind(chain);
+    backend.during = async () => {
+      vi.spyOn(chain, 'getEpochTimes').mockImplementation(async () => {
+        const times = await real();
+        return { ...times, now: times.now + 601 };
+      });
+    };
+    const sign = vi.spyOn(chain, 'signTypedDataAs');
+    expect(await seller.serve(wire(request))).toEqual({ ok: false, code: 'Expired', retry: false });
+    expect(sign).not.toHaveBeenCalled();
+    expect(seller.ledger.served(hashServiceRequest(domain, request))).toBeUndefined();
+    expect(seller.ledger.nonceUsed(id, '0')).toBe(false);
+    expect(seller.backendOf(A)).toBe('up');
+  });
+
+  type Waited = (times: { now: number; endsAt: number }) => number;
+  it.each<[string, Waited, string]>([
+    ['its request expired', () => 601, 'Expired'],
+    ["the epoch's stop time came", (times) => times.endsAt - times.now - 100, 'EpochEnding'],
+  ])('refuses a call when %s while it waited for the one before it, without its backend', async (_when, waited, code) => {
+    const id = await fund();
+    const times = await chain.getEpochTimes();
+    const realNow = Date.now.bind(Date);
+    let skew = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + skew);
+    const budgets = vi.spyOn(chain, 'getBudgets');
+    let release!: () => void;
+    const busy = new Promise<void>((resolve) => { release = resolve; });
+    backend.during = () => busy;
+    // The first call's request lasts to the epoch's end, the second's ten minutes.
+    const first = seller.serve(wire(await requestFor(id, { expiry: times.endsAt })));
+    await vi.waitFor(() => expect(backend.calls).toBe(1));
+    const second = seller.serve(wire(await requestFor(id, { nonce: 1n })));
+    // The second passes its checks and waits for the first, which takes `waited` seconds.
+    await vi.waitFor(() => expect(budgets).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setImmediate(resolve));
+    skew = waited(times) * 1_000;
+    release();
+    expect(codeOf(await first)).toBe('ok');
+    expect(await second).toMatchObject({ ok: false, code });
+    expect(backend.calls).toBe(1);
+  });
+
+  it("stops its backend when the request expires, and does not count the backend as down", async () => {
+    const id = await fund();
+    const { now } = await chain.getEpochTimes();
+    let reason: unknown;
+    backend.during = (signal) => new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => { reason = signal.reason; reject(new UpstreamError('the backend did not answer')); });
+    });
+    expect(await seller.serve(wire(await requestFor(id, { expiry: now + 2 })))).toEqual({ ok: false, code: 'Expired', retry: false });
+    expect((reason as Error).name).toBe('TimeoutError');
+    expect(seller.backendOf(A)).toBe('up');
   });
 
   it('refuses a call issued after the grant its subscription was funded under ended', async () => {

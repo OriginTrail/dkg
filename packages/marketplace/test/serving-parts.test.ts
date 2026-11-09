@@ -136,7 +136,7 @@ describe('the OpenAI-compatible backend', () => {
   let server: Server;
   let base: string;
   let seen: { auth?: string; body?: Record<string, unknown>; path?: string };
-  let reply: { status: number; body: unknown };
+  let reply: { status: number; body: unknown; delayMs?: number };
 
   beforeEach(async () => {
     seen = {};
@@ -145,6 +145,7 @@ describe('the OpenAI-compatible backend', () => {
       let text = '';
       for await (const chunk of req) text += chunk;
       seen = { auth: req.headers.authorization, body: JSON.parse(text), path: req.url };
+      if (reply.delayMs) await new Promise((resolve) => setTimeout(resolve, reply.delayMs));
       res.writeHead(reply.status, { 'content-type': 'application/json' }).end(JSON.stringify(reply.body));
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -159,6 +160,12 @@ describe('the OpenAI-compatible backend', () => {
     expect(seen.body).toMatchObject({ model: 'test-model', max_tokens: 7, stream: false });
     expect(seen.auth).toBeUndefined();
     expect(seen.path).toBe('/v1/chat/completions');
+  });
+
+  it("ends a call when the caller's signal aborts, before its own timeout", async () => {
+    reply.delayMs = 500;
+    const backend = connectorOf({ kind: 'llamacpp', baseUrl: base, model: 'test-model' });
+    await expect(backend.complete({ messages: [], maxTokens: 1, signal: AbortSignal.timeout(20) })).rejects.toThrow(/did not answer/);
   });
 
   it('drops trailing slashes from the base URL', async () => {

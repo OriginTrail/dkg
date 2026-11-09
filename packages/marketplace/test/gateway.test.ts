@@ -193,6 +193,21 @@ describe('a call through the gateway', () => {
     expect(body(await call())).toMatchObject({ problem });
   });
 
+  it.each([
+    ['after its request expired', 2 ** 39],
+    ['before its request was issued', 0],
+  ])('refuses a receipt its seller signed but completed %s', async (_when, completedAt) => {
+    await setUp();
+    const domain = (await chain.getMarketplaceContracts()).requestDomain;
+    tamper = (a) => {
+      if (!a.ok) return a;
+      const receipt = { ...a.receipt, completedAt };
+      // Signed again by the seller's operational key, so only its time is wrong.
+      return { ...a, receipt, receiptSignature: NODE.signingKey.sign(hashQueryInferenceReceipt(domain, receiptFromWire(receipt))).serialized };
+    };
+    expect(body(await call())).toMatchObject({ error: { code: 'bad_receipt' }, problem: 'outside_time' });
+  });
+
   it("keeps a receipt whose signer the chain could not check, and retries a lost answer once", async () => {
     await setUp();
     vi.spyOn(chain, 'verifyACKIdentityDetailed').mockResolvedValueOnce({ valid: false, reason: 'rpc-error' });
