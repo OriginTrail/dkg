@@ -1450,8 +1450,8 @@ export class ApiClient {
   }
 
   async marketplace<T = unknown>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body: unknown = {}): Promise<T> {
-    const route = `/api/marketplace${path}`; // A marketplace route (OT-RFC-27); its answer as the daemon sends it.
-    return method === 'GET' ? this.get<T>(route) : method === 'DELETE' ? this.del<T>(route) : method === 'PUT' ? this.put<T>(route, body) : this.post<T>(route, body);
+    const route = `/api/marketplace${path}`;
+    return { GET: () => this.get<T>(route), DELETE: () => this.del<T>(route), PUT: () => this.put<T>(route, body), POST: () => this.post<T>(route, body) }[method]();
   }
 
   // ─── Node operational wallets (Identity operational keys) ────────────
