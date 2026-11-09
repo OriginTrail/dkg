@@ -44,7 +44,8 @@ import { HARDHAT_KEYS, makeAdapterConfig, mintTokens } from '../../chain/test/ha
 const MODEL = 'urn:test:model:landing';
 const SERVICE = serviceIdOf(MODEL);
 const PRICE = 1_000n;
-const BODY = { messages: [{ role: 'user' as const, content: 'synthetic question' }], max_tokens: 8 };
+// An empty question: its input bound, 24 units, is under the smallest cap a case sets (25 units).
+const BODY = { messages: [{ role: 'user' as const, content: '' }], max_tokens: 8 };
 /** Each call: 6 units in and 4 out, 10,000 wei at the price. */
 const backend: Connector = { kind: 'openai', complete: async () => ({ content: 'synthetic answer', promptTokens: 6, completionTokens: 4 }) };
 // Hardhat's base fee is above the testnet ceilings; these tests take any.
@@ -205,20 +206,20 @@ describe('landing on Hardhat', () => {
   });
 
   it('counts the receipts of two sellers over one budget in the order they landed', async () => {
-    // A budget of 30,000 wei; each seller serves two calls of 10,000.
-    await fund(HARDHAT_KEYS.EXTRA2, 30_000n);
+    // A budget of 35,000 wei; each seller serves two calls of 10,000, each allowed 25,000.
+    await fund(HARDHAT_KEYS.EXTRA2, 35_000n);
     const first = await sellerOf(HARDHAT_KEYS.CORE_OP);
     const second = await sellerOf(HARDHAT_KEYS.REC1_OP);
     expect(second.gate).toMatchObject({ open: true });
     await giveScore(first.gate.identityId);
     await giveScore(second.gate.identityId);
-    await serve(first, 2, 0, 10n);
-    await serve(second, 2, 0, 10n);
+    await serve(first, 2, 0, 25n);
+    await serve(second, 2, 0, 25n);
     await travelBy(31);
     second.lander.landNow();
     expect(await second.lander.tick()).toMatchObject({ sent: [{ items: 2, value: 20_000n, counted: 20_000n }] });
     first.lander.landNow();
-    expect(await first.lander.tick()).toMatchObject({ sent: [{ items: 2, value: 20_000n, counted: 10_000n }] });
+    expect(await first.lander.tick()).toMatchObject({ sent: [{ items: 2, value: 20_000n, counted: 15_000n }] });
     expect(await buyerChain.budgetLeft(subscriptionId, 0)).toBe(0n);
   });
 

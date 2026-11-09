@@ -11,10 +11,10 @@
  *
  * A session key is written before the funding that names it is sent, so a
  * crash never leaves a funded subscription whose key is lost. Each file is
- * replaced whole (written aside, then renamed), with mode 0600.
+ * replaced whole (written aside, on disk, then renamed), with mode 0600.
  */
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
 import {
@@ -24,6 +24,7 @@ import {
   sealNodeKey,
   type NodeKeystore,
 } from '@origintrail-official/dkg-core';
+import { writeDurably } from './journal.js';
 import { parsePlan, planToWire, type StandingPlan } from './plan.js';
 
 /** A stored session key: its address in the clear, its key sealed, as a `wallets.json` entry is. */
@@ -41,12 +42,6 @@ async function readJson<T>(file: string): Promise<T | null> {
   }
 }
 
-async function writeAtomically(file: string, text: string): Promise<void> {
-  const aside = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  await writeFile(aside, text, { mode: 0o600 });
-  await rename(aside, file);
-}
-
 export class BuyerStore {
   /**
    * @param dir where the buyer's files go
@@ -61,7 +56,7 @@ export class BuyerStore {
 
   async writePlan(plan: StandingPlan): Promise<void> {
     await mkdir(this.dir, { recursive: true });
-    await writeAtomically(join(this.dir, 'plan.json'), `${JSON.stringify(planToWire(plan), null, 2)}\n`);
+    await writeDurably(join(this.dir, 'plan.json'), `${JSON.stringify(planToWire(plan), null, 2)}\n`);
   }
 
   /** The subscription's session key: the one stored for it, or a fresh one, stored before it is returned. */
@@ -74,7 +69,7 @@ export class BuyerStore {
     const wallet = new ethers.Wallet(ethers.hexlify(randomBytes(32)));
     keys[id] = { address: wallet.address, keystore: sealNodeKey(wallet.privateKey, secret, process.env[NODE_KEY_PASSPHRASE_ENV]) };
     await mkdir(this.dir, { recursive: true });
-    await writeAtomically(join(this.dir, 'session-keys.json'), `${JSON.stringify(keys, null, 2)}\n`);
+    await writeDurably(join(this.dir, 'session-keys.json'), `${JSON.stringify(keys, null, 2)}\n`);
     return wallet;
   }
 
@@ -87,7 +82,7 @@ export class BuyerStore {
     const fundings = (await readJson<Record<string, number>>(join(this.dir, 'fundings.json'))) ?? {};
     fundings[subscriptionId.toLowerCase()] = blockNumber;
     await mkdir(this.dir, { recursive: true });
-    await writeAtomically(join(this.dir, 'fundings.json'), `${JSON.stringify(fundings, null, 2)}\n`);
+    await writeDurably(join(this.dir, 'fundings.json'), `${JSON.stringify(fundings, null, 2)}\n`);
   }
 
   /** The stored session key's address, without opening it; `null` when none is stored. */

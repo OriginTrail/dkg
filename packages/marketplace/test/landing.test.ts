@@ -42,7 +42,8 @@ const BUYER = ethers.getAddress(`0x${'b1'.repeat(20)}`);
 const MODEL = 'urn:test:model:landing';
 const A = serviceIdOf(MODEL);
 const PRICE = 10n;
-const BODY = { messages: [{ role: 'user' as const, content: 'synthetic question' }], max_tokens: 50 };
+// A short question: its input bound, 25 units, is under the smallest cap a case sets (30 units).
+const BODY = { messages: [{ role: 'user' as const, content: 'q' }], max_tokens: 50 };
 const HOUR = 3_600;
 const EPOCH = 30 * 86_400;
 /** Each call: 12 units in, 8 out, at 10 wei. */

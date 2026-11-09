@@ -15,10 +15,14 @@
  * An ended epoch is pruned once none of its batches is still `sent`: its calls
  * give way to a summary, and its batches that landed are kept, which is what
  * Operate shows. Writes and pruning take turns.
+ *
+ * A journal that cannot be read is moved aside, and the ledger starts empty in
+ * a new one; entries that lack the shape of their type are left out, after a
+ * copy of the journal as it was. Each is logged.
  */
 import { join } from 'node:path';
-import { Journal, KeyedLock } from './journal.js';
-import type { ReceiptWire, ServiceRequestWire } from './wire.js';
+import { Journal, KeyedLock, setAside } from './journal.js';
+import { receiptFromWire, requestFromWire, type ReceiptWire, type ServiceRequestWire } from './wire.js';
 
 /** One served call, as the ledger keeps it. */
 export interface ServedCall {
@@ -33,6 +37,8 @@ export interface ServedCall {
   receipt: ReceiptWire;
   receiptSignature: string;
   result: { content: string };
+  /** The peer that sent the call, as its connection authenticated it: the only one its answer goes to again. */
+  peerId?: string;
 }
 
 export type ReceiptState = 'served' | 'sent' | 'landed' | 'refused' | 'missed';
@@ -93,8 +99,13 @@ interface CallState {
 
 const isOpen = (state: ReceiptState) => state === 'served' || state === 'sent';
 
+/** Read errors that may pass, for which the journal stays where it is and the load fails. */
+const PASSING_READ_ERRORS = new Set(['EAGAIN', 'EBUSY', 'EINTR', 'EIO', 'EMFILE', 'ENFILE', 'ENOMEM']);
+
+const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
 export class SellerLedger {
-  private readonly journal: Journal<Entry>;
+  private readonly journal: Journal<unknown>;
   private readonly lock = new KeyedLock();
   private readonly calls = new Map<string, CallState>();
   private readonly batches = new Map<string, BatchRecord>();
@@ -103,12 +114,39 @@ export class SellerLedger {
   /** subscription id and budget index => the value of its receipts served or sent. */
   private readonly open = new Map<string, bigint>();
 
-  constructor(dir: string) {
+  constructor(dir: string, private readonly log?: (message: string) => void) {
     this.journal = new Journal(join(dir, 'seller-ledger.jsonl'));
   }
 
+  /**
+   * Read the journal back. One that cannot be read is moved aside and the
+   * ledger starts empty, in a new one: its calls are in the copy. Entries that
+   * lack the shape of their type are left out, and the journal is written
+   * again without them, after a copy of it as it was. A read error that may
+   * pass (the disk, or too many open files) fails the load and moves nothing.
+   */
   async load(): Promise<void> {
-    for (const entry of await this.journal.read()) this.apply(entry);
+    const file = this.journal.file;
+    let entries: unknown[];
+    try {
+      entries = await this.journal.read();
+    } catch (err) {
+      if (PASSING_READ_ERRORS.has((err as { code?: string }).code ?? '')) throw err;
+      const aside = await setAside(file);
+      this.log?.(`[marketplace] the seller's ledger ${file} could not be read (${messageOf(err)}); it was moved to ${aside}, and the ledger starts empty`);
+      return;
+    }
+    const kept = entries.filter(wellFormed);
+    for (const entry of kept) this.apply(entry);
+    const left = entries.length - kept.length;
+    if (left === 0) return;
+    try {
+      const aside = await setAside(file, 'copy');
+      await this.journal.replace(kept);
+      this.log?.(`[marketplace] ${left} entries of the seller's ledger could not be read and were left out; the journal as it was is at ${aside}`);
+    } catch (err) {
+      this.log?.(`[marketplace] ${left} entries of the seller's ledger could not be read and were left out, but the journal was not copied and written again: ${messageOf(err)}`);
+    }
   }
 
   // -------------------------------------------------------------- reads
@@ -223,7 +261,7 @@ export class SellerLedger {
         const { summary, batches } = this.epochReport(epoch);
         kept.push({ type: 'summary', summary, batches: batches.filter((b) => b.state === 'landed').map((b) => ({ ...b, digests: [] })) });
       }
-      for (const entry of await this.journal.read()) {
+      for (const entry of (await this.journal.read()).filter(wellFormed)) {
         const epoch = this.epochOf(entry);
         if (entry.type !== 'summary' && !(epoch !== undefined && ended.has(epoch))) kept.push(entry);
       }
@@ -321,5 +359,54 @@ export class SellerLedger {
   private addOpen(call: ServedCall, sign: bigint): void {
     const key = `${call.subscriptionId}:${call.budgetIndex}`;
     this.open.set(key, (this.open.get(key) ?? 0n) + sign * BigInt(call.receipt.valueWei));
+  }
+}
+
+// ----------------------------------------------------- entries read back
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+const isString = (v: unknown): v is string => typeof v === 'string';
+const isWhole = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v);
+const isDecimal = (v: unknown): v is string => typeof v === 'string' && /^\d+$/.test(v);
+const isStrings = (v: unknown): v is string[] => Array.isArray(v) && v.every(isString);
+const isNonce = (v: unknown) => v === null || isWhole(v);
+
+/** A served call as landing reads it: its request and receipt as the wire takes them. */
+function isServedCall(e: Record<string, unknown>): boolean {
+  try {
+    requestFromWire(e.request);
+    receiptFromWire(e.receipt);
+  } catch {
+    return false;
+  }
+  return isString(e.requestDigest) && isString(e.subscriptionId) && isWhole(e.budgetIndex) && isWhole(e.epoch)
+    && isString(e.signature) && isString(e.receiptSignature) && isRecord(e.result) && isString(e.result.content)
+    && (e.peerId === undefined || isString(e.peerId));
+}
+
+function isBatchRecord(b: unknown): boolean {
+  return isRecord(b) && isString(b.batchId) && isWhole(b.epoch) && isWhole(b.at) && isStrings(b.hashes) && isString(b.wallet)
+    && isNonce(b.nonce) && isStrings(b.digests) && isWhole(b.items) && ['sent', 'landed', 'reverted'].includes(b.state as string);
+}
+
+/**
+ * Whether an entry read back from the journal has the shape its type needs:
+ * one that does not would stop every tick that reads it. An entry of a type
+ * this version does not know is kept, and ignored.
+ */
+function wellFormed(e: unknown): e is Entry {
+  if (!isRecord(e)) return false;
+  switch (e.type) {
+    case 'served': return isServedCall(e);
+    case 'sent': return isString(e.batchId) && isWhole(e.epoch) && isWhole(e.at) && isString(e.hash) && isString(e.wallet) && isNonce(e.nonce) && isStrings(e.digests);
+    case 'speedup': return isString(e.batchId) && isString(e.hash);
+    case 'landed':
+      return (e.batchId === null || isString(e.batchId)) && isStrings(e.digests) && isRecord(e.counted) && Object.values(e.counted).every(isDecimal)
+        && (e.tx === null || (isRecord(e.tx) && isString(e.tx.hash) && isWhole(e.tx.blockNumber) && isDecimal(e.tx.gasUsed)));
+    case 'reverted': return isString(e.batchId);
+    case 'refused': return isString(e.digest) && isString(e.fault);
+    case 'missed': return isStrings(e.digests);
+    case 'summary': return isRecord(e.summary) && isWhole(e.summary.epoch) && isRecord(e.summary.counts) && Array.isArray(e.batches) && e.batches.every(isBatchRecord);
+    default: return isString(e.type);
   }
 }
