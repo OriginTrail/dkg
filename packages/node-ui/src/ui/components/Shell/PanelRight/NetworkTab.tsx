@@ -8,7 +8,6 @@ import { humanizeStatus } from '../../../lib/formatLabels.js';
 import { Loading } from '../../ds/Loading.js';
 import { useNavigate } from 'react-router-dom';
 import { observabilityHref } from '../../../lib/observabilityTab.js';
-import { useLayoutStore } from '../../../stores/layout.js';
 
 // Per-peer card: header + meta + agents-as-chips. Nodes are
 // infrastructure; agents live on them. Up to 3 chips inline, with a
@@ -144,12 +143,8 @@ export function NetworkTab(props: {
 }) {
   const { peerAgents, connections, loading, onRefresh } = props;
   const navigate = useNavigate();
-  // Shows the page first: when Observability is already open, only the query string
-  // changes, so no tab activation would collapse the expanded or floating panel.
-  const openConnectionDetails = () => {
-    useLayoutStore.getState().revealCentre();
-    navigate(observabilityHref('network'));
-  };
+  // The address opens Observability on Network, and showing the page follows from it.
+  const openConnectionDetails = () => navigate(observabilityHref('network'));
   const [connectedExpanded, setConnectedExpanded] = useState(true);
   const [recentlySeenExpanded, setRecentlySeenExpanded] = useState(false);
 

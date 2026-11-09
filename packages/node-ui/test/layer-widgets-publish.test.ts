@@ -198,6 +198,44 @@ describe('PublishVmWidget — publish outcome unknown', () => {
   });
 });
 
+describe('PublishVmWidget — completion follows the execution path', () => {
+  const run = async (onComplete: () => void) => {
+    const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg', onComplete }));
+    await clickPublish(container); await flush();
+    const btn = container.querySelector('[data-testid="widget-publish-vm-btn"]') as HTMLButtonElement;
+    return { container, unmount, btn };
+  };
+
+  it('completes a resolved publish that carries a warning', async () => {
+    apiMocks.publishAssertionsToVm.mockResolvedValue({ published: 1, total: 2, partial: 1, partialError: 'x', failures: [] });
+    const onComplete = vi.fn();
+    const { container, unmount, btn } = await run(onComplete);
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.getAttribute('data-tone')).toBe('warning');
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(btn.disabled).toBe(false);
+    await unmount();
+  });
+
+  it('completes a resolved no-op', async () => {
+    apiMocks.listAssertions.mockResolvedValue([]);
+    apiMocks.publishAssertionsToVm.mockResolvedValue({ published: 0, total: 0, partial: 0, failures: [] });
+    const onComplete = vi.fn();
+    const { unmount } = await run(onComplete);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    await unmount();
+  });
+
+  it('does not complete a rejected publish, and leaves the button usable', async () => {
+    apiMocks.publishAssertionsToVm.mockRejectedValue(new Error('VM publish tx reverted'));
+    const onComplete = vi.fn();
+    const { container, unmount, btn } = await run(onComplete);
+    expect(container.querySelector('[data-testid="layer-action-error"]')).toBeTruthy();
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(btn.disabled).toBe(false);
+    await unmount();
+  });
+});
+
 describe('PublishVmWidget — S5 publish CTA gate (#1382)', () => {
   const publishBtn = (c: HTMLElement) =>
     c.querySelector('[data-testid="widget-publish-vm-btn"]') as HTMLButtonElement;
