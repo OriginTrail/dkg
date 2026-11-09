@@ -80,6 +80,19 @@ describe('access keys in memory', () => {
     expect((await keys.list())[0]).toMatchObject({ spent: '25' });
   });
 
+  it('keep the journal as it is when a compaction fails, and compact at the next charge', async () => {
+    const keys = new AccessKeys(dir, 3);
+    const { key } = await keys.make(scopes(1_000n), 1);
+    const replace = vi.spyOn(Journal.prototype, 'replace').mockRejectedValueOnce(Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }));
+    // The third charge compacts, and that fails: the charge still counts.
+    for (let i = 0; i < 3; i++) await keys.charge(key.keyId, 1n, 10 + i);
+    expect(replace).toHaveBeenCalledTimes(1);
+    expect(await lines()).toHaveLength(4);
+    expect((await keys.list())[0]).toMatchObject({ spent: '3' });
+    await keys.charge(key.keyId, 1n, 20);
+    expect(await lines()).toEqual([expect.objectContaining({ type: 'make', spent: '4', lastUsedAt: 20 })]);
+  });
+
   it('read the journal again at the next use when a read fails', async () => {
     const keys = new AccessKeys(dir);
     vi.spyOn(Journal.prototype, 'read').mockRejectedValueOnce(Object.assign(new Error('EACCES'), { code: 'EACCES' }));
