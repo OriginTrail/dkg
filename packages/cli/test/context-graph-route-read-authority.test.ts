@@ -168,6 +168,32 @@ describe('caller-bound graph reads', () => {
     expect(h.ctx.res.listenerCount('close')).toBe(0);
   });
 
+  it.each([false, true])('cancels a held descriptor lookup on disconnect (operator=%s)', async operator => {
+    const route = routes.find(row => row.name === 'KA lifecycle')!;
+    const h = fixture(route, decisions.allowed, operator);
+    let started!: () => void;
+    const entered = new Promise<void>(resolve => { started = resolve; });
+    let release!: () => void;
+    let signal: AbortSignal | undefined;
+    h.agent.assertion.history = vi.fn((_cg: string, _name: string, options?: { signal?: AbortSignal }) => {
+      signal = options?.signal;
+      started();
+      return new Promise((resolve, reject) => {
+        release = () => resolve(null);
+        signal?.addEventListener('abort', () => reject(signal!.reason), { once: true });
+      });
+    }) as unknown as typeof h.agent.assertion.history;
+    const handling = route.run(h.ctx);
+    await entered;
+    h.ctx.req.emit('aborted');
+    try { expect(signal?.aborted).toBe(true); }
+    finally { release(); await handling; }
+    expect(h.res.statusCode).not.toBe(200);
+    expect(h.authority).toHaveBeenCalledTimes(operator ? 0 : 1);
+    expect(h.ctx.req.listenerCount('aborted')).toBe(0);
+    expect(h.ctx.res.listenerCount('close')).toBe(0);
+  });
+
   it('authorizes the same normalized CG used to filter publisher inventory', async () => {
     const route = { name: 'publisher CG alias', path: `/api/publisher/jobs?contextGraphId=did:dkg:context-graph:${CG}`, run: handlePublisherRoutes };
     const h = fixture(route, decisions.denied);

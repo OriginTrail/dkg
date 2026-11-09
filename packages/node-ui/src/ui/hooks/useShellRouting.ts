@@ -1,21 +1,26 @@
 import { useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTabsStore } from '../stores/tabs.js';
+import { MARKETPLACE_TABS, MARKETPLACE_TAB_IDS, marketplaceEnabled } from '../marketplace/tabs.js';
 
 // Map between deep-link URL paths and centre-tab IDs. Keeping this here
 // (rather than inside `useTabsStore`) lets the route layer stay a thin
 // adapter — the store is still the source of truth for which tabs are
 // open, but a fresh navigation to e.g. `/observability` opens that tab on
 // mount and clicking the tab pushes the corresponding URL.
+const MARKETPLACE_ROUTES = Object.values(MARKETPLACE_TABS);
+
 export const URL_PATH_TO_TAB: Record<string, { id: string; label: string }> = {
   '/observability': { id: 'operations', label: 'Observability' },
   '/operations': { id: 'operations', label: 'Observability' },
   '/settings': { id: 'settings', label: 'Settings' },
+  ...Object.fromEntries(MARKETPLACE_ROUTES.map((t) => [t.path, { id: t.id, label: t.label }])),
 };
 export const TAB_TO_URL_PATH: Record<string, string> = {
   operations: '/observability',
   settings: '/settings',
   dashboard: '/',
+  ...Object.fromEntries(MARKETPLACE_ROUTES.map((t) => [t.id, t.path])),
 };
 
 /**
@@ -48,7 +53,9 @@ export function useShellRouting(): void {
 
   useEffect(() => {
     const match = URL_PATH_TO_TAB[pathname];
-    if (match) {
+    // Marketplace deep links open only once the section is enabled
+    // (`?marketplace` on the same URL enables it).
+    if (match && (!MARKETPLACE_TAB_IDS.includes(match.id) || marketplaceEnabled())) {
       openTab({ id: match.id, label: match.label, closable: true });
     }
   }, [pathname, openTab]);

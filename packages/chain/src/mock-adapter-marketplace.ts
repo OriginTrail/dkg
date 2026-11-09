@@ -47,6 +47,7 @@ import {
   type EpochFunding,
   type EpochTimes,
   type EpochTotals,
+  type KnowledgeAssetExtension,
   type MarketplaceChain,
   type MarketplaceChainAdapter,
   type MarketplaceContracts,
@@ -129,6 +130,8 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
   abstract getIdentityId(options?: IdentityReadOptions): Promise<bigint>;
   abstract getEvmChainId(): Promise<bigint>;
   abstract getPublishingConvictionAccountInfo(accountId: bigint): Promise<V10PublishingConvictionAccountInfo | null>;
+  /** On MockChainAdapter, beside the Knowledge Assets it extends (mock-adapter.ts). */
+  abstract extendKnowledgeAssetLifetime(kaId: bigint, epochs: number, opts?: MarketplaceWriteOptions): Promise<KnowledgeAssetExtension>;
   abstract signTypedDataAs(
     address: string,
     domain: ethers.TypedDataDomain,
@@ -162,6 +165,9 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
     spent: new Map<bigint, { window: bigint; topUp: bigint }>(),
     /** transaction hash => the batch it landed. */
     batches: new Map<string, ReceiptBatch>(),
+    /** signed transaction => the batch, hash and nonce it was signed with; and the hashes mined as reverted. */
+    signed: new Map<string, { groups: ReceiptGroup[]; hash: string; nonce: number }>(),
+    reverted: new Set<string>(),
     /** wallet => how many of its batches were sent: its next nonce. */
     sent: new Map<string, number>(),
   };
@@ -352,6 +358,21 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
   // --------------------------------------------- QueryInferenceSettlement
 
   async submitReceiptBatch(groups: ReceiptGroup[], opts: ReceiptBatchSendOptions = {}): Promise<ReceiptBatch> {
+    return this.landBatch(groups, this.txResult(true).hash, this.marketplace.sent.get(ethers.getAddress(this.signerAddress)) ?? 0, opts);
+  }
+
+  async rebroadcastReceiptBatch(signedTx: string): Promise<void> {
+    const signed = this.marketplace.signed.get(signedTx);
+    if (!signed) throw new Error('not a receipt batch this chain signed');
+    // At most once: refused, as a node refuses it, once its nonce is used. One that would revert is mined reverted.
+    if ((this.marketplace.sent.get(ethers.getAddress(this.signerAddress)) ?? 0) !== signed.nonce) throw new Error('nonce too low');
+    await this.landBatch(signed.groups, signed.hash, signed.nonce).catch(() => {
+      this.marketplace.sent.set(ethers.getAddress(this.signerAddress), signed.nonce + 1);
+      this.marketplace.reverted.add(signed.hash);
+    });
+  }
+
+  private async landBatch(groups: ReceiptGroup[], hash: string, nonce: number, opts: ReceiptBatchSendOptions = {}): Promise<ReceiptBatch> {
     const seller = await this.getIdentityId();
     if (seller === 0n) revert('ProfileDoesntExist', 0n);
     const { epoch, now } = await this.getEpochTimes();
@@ -414,11 +435,12 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
         value, counted, stakeFactor18: SCALE18, groupDigest: receiptsDigest(groupDigests),
       });
     });
-    // Checked in full, as a simulation: now the hook, then the broadcast.
+    // Checked in full, as a simulation: now signed, the hook, then the broadcast.
     const wallet = ethers.getAddress(this.signerAddress);
-    const nonce = this.marketplace.sent.get(wallet) ?? 0;
-    const tx = this.txResult(true);
-    await opts.onBroadcast?.({ txHash: tx.hash, nonce, wallet });
+    const tx = { ...this.txResult(true), hash };
+    const signedTx = ethers.hexlify(ethers.toUtf8Bytes(`mock receipt batch ${hash}`));
+    this.marketplace.signed.set(signedTx, { groups, hash, nonce });
+    await opts.onBroadcast?.({ txHash: hash, nonce, wallet, signedTx });
     this.marketplace.sent.set(wallet, nonce + 1);
     for (const [nonceKey, batchNonces] of nonces) {
       const stored = this.marketplace.usedNonces.get(nonceKey) ?? new Set<bigint>();
@@ -443,6 +465,7 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
   }
 
   async getReceiptBatchOutcome(txHash: string): Promise<ReceiptBatchOutcome> {
+    if (this.marketplace.reverted.has(txHash)) return { reverted: true };
     const batch = this.marketplace.batches.get(txHash);
     return batch ? { landed: { ...batch, groups: batch.groups.map((g) => ({ ...g })) } } : null;
   }

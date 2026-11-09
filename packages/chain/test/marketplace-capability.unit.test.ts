@@ -16,15 +16,16 @@ const MARKETPLACE_METHODS = [
   'fundFromWallet', 'topUpFromWallet', 'approveServiceSubscriptionsWallet', 'getServiceSubscriptionsWalletAllowance',
   'getSubscription', 'getBudgets', 'subscriptionExists', 'getGrant', 'grantEnd', 'grantNonce', 'getServiceSpending',
   'maxBudgetsPerSubscription', 'getAccountBuyers', 'listBuyerAccounts',
-  'submitReceiptBatch', 'getReceiptBatchOutcome', 'listReceiptsLanded', 'budgetLeft', 'stakeFactor', 'epochPool', 'queryInferenceGross',
+  'submitReceiptBatch', 'rebroadcastReceiptBatch', 'getReceiptBatchOutcome', 'listReceiptsLanded', 'budgetLeft', 'stakeFactor', 'epochPool', 'queryInferenceGross',
   'batchState', 'nonceWord', 'budgetUsed', 'fundingIn', 'getEpochTotals', 'getNodeEpoch',
   'getShardingTableNodeId', 'getNodeEpochScore', 'profileExists', 'getNodeStake', 'getMinimumStake',
-  'getProtocolTreasury', 'getWalletBalances', 'getMinedNonce', 'getBaseFee',
+  'getProtocolTreasury', 'getWalletBalances', 'getMinedNonce', 'getBaseFee', 'extendKnowledgeAssetLifetime',
 ] as const;
 const ADAPTER_METHODS = [
   'getPublishingConvictionAccountInfo', 'getConvictionAccountLockDurationEpochs', 'getPublishingConvictionAgents',
   'listNodePublishingConvictionAccounts', 'getPublishingConvictionContracts',
   'getIdentityId', 'getIdentityIdForAddress', 'isShardingTableMember', 'verifyACKIdentityDetailed', 'signTypedDataAs',
+  'getKnowledgeAssetUpdateContext',
 ] as const;
 
 const SIGNER = ethers.Wallet.createRandom();
