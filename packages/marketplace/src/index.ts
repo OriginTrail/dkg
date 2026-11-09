@@ -18,6 +18,7 @@ export * from './wire.js';
 export * from './journal.js';
 export * from './connector.js';
 export * from './offers.js';
+export * from './offer-job.js';
 export * from './ledger.js';
 export * from './landing.js';
 export * from './seller.js';

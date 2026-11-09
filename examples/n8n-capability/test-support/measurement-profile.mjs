@@ -28,11 +28,11 @@ export default {
     if (result.graph !== graph || !isDeepStrictEqual(result.measurements, measurements)) throw new Error('source mismatch');
     return result.measurements;
   },
-  evidence(rows, context, read, input, programOutput) {
-    const calculated = programOutput?.rawOutputs?.[0];
-    if (programOutput && (programOutput.rawOutputs?.length !== 1 || !calculated || !isDeepStrictEqual(programOutput.result, calculated)))
+  evidence(rows, context, read, input, programContext) {
+    const calculated = programContext?.rawOutputs?.[0];
+    if (programContext && (programContext.rawOutputs?.length !== 1 || !calculated || !isDeepStrictEqual(rows[0]?.result, calculated)))
       throw new Error('verified Program output mismatch');
-    const records = programOutput ? calculated.samples : rows;
+    const records = programContext ? calculated.samples : rows;
     if (!isDeepStrictEqual(records, read.measurements)) throw new Error('provenance mismatch');
     const value = { kind: 'Measurements', records, execution: context.executionIri, result: calculated?.sum ?? null };
     const payload = JSON.stringify(value), digest = createHash('sha256').update(payload).digest('hex');

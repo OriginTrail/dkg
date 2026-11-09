@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -62,6 +62,38 @@ test('SSH-only changes cannot alter or prevent nOS profile construction', t => {
   assert.equal(f.read().revision, native);
   appendFileSync(join(f.dir, 'profiles/jpb-policy.mjs'), '\n// Reviewed common policy change\n');
   assert.notEqual(f.read().revision, native);
+});
+
+test('both profile revisions pin the common read specification and normalization policy', t => {
+  const f = fixture(t), initial = { nos: f.read().revision, ssh: f.read('jpb').revision };
+  const file = join(f.dir, 'profiles/jpb-read-spec.json'), spec = JSON.parse(readFileSync(file, 'utf8'));
+  spec.records[0].partition = 'reviewed-fixture-partition';
+  writeFileSync(file, JSON.stringify(spec));
+  const revised = { nos: f.read().revision, ssh: f.read('jpb').revision };
+  assert.notEqual(revised.nos, initial.nos); assert.notEqual(revised.ssh, initial.ssh);
+  assert.equal(f.run(`
+    import assert from 'node:assert/strict';
+    import { writeFileSync } from 'node:fs';
+    const { jpbReadSpec, jpbReadPolicyRevision } = await import(${JSON.stringify(f.url('profiles/jpb-read-policy.mjs'))});
+    const { readJpbThroughNos } = await import(${JSON.stringify(f.url('profiles/jpb-nos-read.mjs'))});
+    const { remoteScripts } = await import(${JSON.stringify(f.url('jpb-output.mjs'))});
+    const { createJpbPolicy } = await import(${JSON.stringify(f.url('profiles/jpb-policy.mjs'))});
+    assert.ok(jpbReadSpec.query.sparql.includes('reviewed-fixture-partition'));
+    let query;
+    await assert.rejects(readJpbThroughNos(async (_path, body) => { query = body; return {}; }, { orderNo: jpbReadSpec.orderNo }));
+    assert.deepEqual(query, jpbReadSpec.query);
+    assert.ok(remoteScripts['jpb-read.py'].includes(Buffer.from(JSON.stringify(jpbReadSpec)).toString('base64')));
+    assert.equal(Object.isFrozen(jpbReadSpec.records[0]), true);
+    const revision = createJpbPolicy().revision;
+    writeFileSync(${JSON.stringify(file)}, JSON.stringify({ ...jpbReadSpec, orderNo: 'changed-on-disk' }));
+    assert.equal(createJpbPolicy().revision, revision);
+    assert.equal(jpbReadSpec.orderNo, '62633');
+    assert.match(jpbReadPolicyRevision, /^[a-f0-9]{64}$/);
+    console.log('verified');
+  `), 'verified');
+  writeFileSync(file, JSON.stringify(spec));
+  appendFileSync(join(f.dir, 'profiles/jpb-read-policy.mjs'), '\n// Reviewed normalization revision\n');
+  assert.notEqual(f.read().revision, revised.nos); assert.notEqual(f.read('jpb').revision, revised.ssh);
 });
 
 test('changed nOS connection fences cached reads and pending writes after journal reopen', t => {

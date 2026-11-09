@@ -188,6 +188,26 @@ test('fabricated Program output cannot be accepted', async () => {
     assert.equal(calls.length, 2);
   } finally { db.close(); }
 });
+test('Invoke-to-Write requires its journalled presentation even without a Program receipt field', async t => {
+  const db = new DatabaseSync(':memory:'), calls = [], contexts = [];
+  t.after(() => db.close());
+  const scoped = { ...profile, evidence(rows, context, read, input, programContext) {
+    contexts.push(programContext);
+    return profile.evidence(rows, context, read, input, programContext);
+  } };
+  const store = dkgComponentStore(db, transport(calls), [], scoped);
+  store.grant(workflow, id, input);
+  const source = await store.call(request('read', [{}]), workflow, 'native');
+  const result = await store.call(request('invoke', source.items), workflow, 'native');
+  const withoutReceipt = structuredClone(result.items); delete withoutReceipt[0].programExecution;
+  for (const items of [withoutReceipt, measurements])
+    await assert.rejects(store.call(request('write', items), workflow, 'native'), /Program output differs/);
+  assert.deepEqual(contexts, []);
+  assert.deepEqual(calls.map(c => c.operation), ['read', 'invoke']);
+  await store.call(request('write', result.items), workflow, 'native');
+  const journal = JSON.parse(db.prepare('SELECT result FROM dkg_component_calls WHERE id=?').get(id + ':invoke').result);
+  assert.deepEqual(contexts, [{ blockId: 'invoke', receipt: journal.items[0].programExecution, rawOutputs: journal.rawOutputs }]);
+});
 test('wrong destination or digest never produces a successful write receipt', async () => {
   for (const override of [{ contextGraphId: 'urn:foreign' }, { digest: '0'.repeat(64) }, { readbackVerified: false }]) {
     const db = new DatabaseSync(':memory:'), calls = [];

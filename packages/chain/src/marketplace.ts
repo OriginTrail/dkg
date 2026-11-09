@@ -133,6 +133,12 @@ export interface SubscriptionTopUp extends TxResult {
   cost: bigint;
 }
 
+/** A Knowledge Asset's lifetime extension: its transaction, the TRAC it paid, and the asset's new end epoch. */
+export interface KnowledgeAssetExtension extends TxResult {
+  tokenAmount: bigint;
+  endEpoch: number;
+}
+
 /** `ServiceSubscriptions.currentWindowAllowance`. */
 export interface WindowAllowance {
   window: number;
@@ -222,8 +228,11 @@ export interface LandedGroup extends ReceiptsLanded {
  * hash of each speed-up before that is broadcast.
  */
 export interface ReceiptBatchSendOptions {
-  /** Awaited once the batch is signed, before it is broadcast, with the wallet and nonce it took; a throw sends nothing. */
-  onBroadcast?: (signal: PreBroadcastSignal & { wallet: string }) => Promise<void> | void;
+  /**
+   * Awaited once the batch is signed, before it is broadcast, with the wallet and nonce it took and the signed
+   * transaction, which `rebroadcastReceiptBatch` can send again; a throw sends nothing.
+   */
+  onBroadcast?: (signal: PreBroadcastSignal & { wallet: string; signedTx: string }) => Promise<void> | void;
   /** Awaited before each same-nonce replacement of a stuck batch is broadcast; a throw sends no replacement. */
   onBeforeReplacementBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void;
 }
@@ -361,6 +370,11 @@ export interface MarketplaceChain {
    * batch that is mined and reverts rejects with `receipt.status` 0.
    */
   submitReceiptBatch?(groups: ReceiptGroup[], opts?: ReceiptBatchSendOptions): Promise<ReceiptBatch>;
+  /**
+   * Send a batch's signed transaction again, as `onBroadcast` was given it: the same hash and nonce, so it lands
+   * at most once. One the network already holds is no error; its outcome is read with `getReceiptBatchOutcome`.
+   */
+  rebroadcastReceiptBatch?(signedTx: string): Promise<void>;
   getReceiptBatchOutcome?(txHash: string): Promise<ReceiptBatchOutcome>;
   /**
    * The groups landed for the subscription (`ReceiptsLanded`, its id indexed),
@@ -402,6 +416,13 @@ export interface MarketplaceChain {
   getMinedNonce?(address: string): Promise<number>;
   /** The latest block's base fee in wei; `null` on a chain without one. */
   getBaseFee?(): Promise<bigint | null>;
+  // KnowledgeAssetsLifecycle: a seller's offer is a Knowledge Asset, kept by extending its lifetime.
+  /**
+   * `extendKnowledgeAssetLifetime(kaId, epochs, tokenAmount)`, from `opts.from` or else the wallet a publish
+   * would pay from (gas, and the TRAC it costs), which pays the ask for the asset's bytes over `epochs` more
+   * epochs (at least 1 wei), approved first. Anyone may extend any asset; no ACKs, no Conviction discount.
+   */
+  extendKnowledgeAssetLifetime?(kaId: bigint, epochs: number, opts?: MarketplaceWriteOptions): Promise<KnowledgeAssetExtension>;
 }
 
 /**
@@ -409,7 +430,8 @@ export interface MarketplaceChain {
  * uses, and the node's identity: its id, the sharding table, which keys are an
  * identity's operational keys, the identity a wallet is an operational key of
  * (`IdentityStorage.getIdentityId`, the settlement's read of a batch's
- * sender), and typed-data signing with its wallets.
+ * sender), typed-data signing with its wallets, and a Knowledge Asset's
+ * update context, whose end epoch an offer is valid through.
  */
 export type MarketplaceChainAdapter = Required<MarketplaceChain> & Required<Pick<ChainAdapter,
   | 'getPublishingConvictionAccountInfo'
@@ -422,6 +444,7 @@ export type MarketplaceChainAdapter = Required<MarketplaceChain> & Required<Pick
   | 'isShardingTableMember'
   | 'verifyACKIdentityDetailed'
   | 'signTypedDataAs'
+  | 'getKnowledgeAssetUpdateContext'
 >>;
 
 /** `chain` as a `MarketplaceChainAdapter`, or `null` when it has no marketplace (no chain). */

@@ -136,7 +136,7 @@ describe('the marketplace buyer on Hardhat', () => {
     expect(current.body.txHash).toMatch(/^0x[0-9a-f]{64}$/);
     const id = subscriptionIdOf(NODE, times.epoch);
     expect(current.body.subscription).toMatchObject({ subscriptionId: id, epoch: times.epoch, endsAt: times.endsAt, cost: String(100n * TRAC) });
-    // The session key was stored before the funding named it.
+    // The subscription names the session key the node stored for it; the buyer's unit test checks it is stored before the send.
     expect(current.body.subscription.sessionKey).toBe(await buyer.store.sessionKeyAddress(id));
 
     const next = await api('POST', '/api/marketplace/subscriptions', { ...request, epoch: 'next' });

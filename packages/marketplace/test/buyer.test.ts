@@ -61,6 +61,14 @@ async function grantedAccount(maxCostPerEpoch = 1_000n * TRAC, expiresIn = 90 * 
   return accountId;
 }
 
+/** What another store over the buyer's directory holds for the epoch's subscription: the stored key's address, and the key it opens. */
+async function keyOnDisk(epoch: number): Promise<{ stored: string | null; opened: string | null }> {
+  const subscriptionId = subscriptionIdOf(SIGNER.address, epoch);
+  const fresh = new BuyerStore(dir);
+  const stored = await fresh.sessionKeyAddress(subscriptionId);
+  return { stored, opened: stored === null ? null : (await fresh.sessionKeyFor(subscriptionId)).address };
+}
+
 const planWire = (extra: Partial<StandingPlanWire> = {}): StandingPlanWire => ({
   services: [{ serviceId: A, serviceClass: 'inference', value: String(100n * TRAC), maxPricePerUnit: String(10n ** 9n) }],
   source: { kind: 'wallet' },
@@ -87,10 +95,18 @@ describe('funding from the wallet', () => {
     const request = { epoch, source: { kind: 'wallet' as const }, services: [service(A, 100n * TRAC)] };
 
     expect(await buyer.dryRun(request)).toEqual({ epoch, source: { kind: 'wallet' }, value: 100n * TRAC, cost: 100n * TRAC, discountBps: 0 });
+    // What is on disk as the funding is sent, read by another store over the same directory.
+    const send = chain.fundFromWallet.bind(chain);
+    const atSend: Array<{ named: string; stored: string | null; opened: string | null }> = [];
+    vi.spyOn(chain, 'fundFromWallet').mockImplementation(async (funding, opts) => {
+      atSend.push({ named: funding.sessionKey, ...(await keyOnDisk(funding.epoch)) });
+      return send(funding, opts);
+    });
     const funded = await buyer.fund(request);
     const subscriptionId = subscriptionIdOf(SIGNER.address, epoch);
     expect(funded.subscriptionId).toBe(subscriptionId);
-    expect((await chain.getSubscription(subscriptionId))!.sessionKey).toBe(await store.sessionKeyAddress(subscriptionId));
+    const { sessionKey } = (await chain.getSubscription(subscriptionId))!;
+    expect(atSend).toEqual([{ named: sessionKey, stored: sessionKey, opened: sessionKey }]);
     // The block it was funded in, where reading what landed for it starts.
     expect(await store.fundingBlock(subscriptionId)).toBe(funded.blockNumber);
     // The plan runs through epoch 3: three epochs of 100 TRAC approved, one spent.
@@ -123,6 +139,20 @@ describe('funding from the wallet', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  it('sends nothing, from the wallet or an account, when the session key cannot be stored', async () => {
+    const accountId = await grantedAccount();
+    const buyer = buyerWith();
+    const { epoch } = await chain.getEpochTimes();
+    const sends = (['fundFromWallet', 'fundFromAccount', 'approveServiceSubscriptionsWallet'] as const).map((name) => vi.spyOn(chain, name));
+    vi.spyOn(store, 'sessionKeyFor').mockRejectedValue(new Error('the disk is full'));
+    for (const source of [{ kind: 'wallet' as const }, { kind: 'account' as const, accountId }]) {
+      await expect(buyer.fund({ epoch, source, services: [service(A, TRAC)] })).rejects.toThrow('the disk is full');
+    }
+    for (const send of sends) expect(send).not.toHaveBeenCalled();
+    expect(await chain.subscriptionExists(subscriptionIdOf(SIGNER.address, epoch))).toBe(false);
+    expect(await keyOnDisk(epoch)).toEqual({ stored: null, opened: null });
+  });
+
   it('refuses a value above the wallet TRAC, and a paused or inactive pool, without sending', async () => {
     const buyer = buyerWith();
     const { epoch } = await chain.getEpochTimes();
@@ -147,7 +177,16 @@ describe('funding from an account', () => {
     expect(check).toMatchObject({ value: 100n * TRAC, cost: 70n * TRAC, discountBps: 3000 });
     expect(check.refusal).toBeUndefined();
 
+    // As from the wallet: the key the funding names is on disk before it is sent.
+    const send = chain.fundFromAccount.bind(chain);
+    const atSend: Array<{ named: string; stored: string | null; opened: string | null }> = [];
+    vi.spyOn(chain, 'fundFromAccount').mockImplementation(async (funding, opts) => {
+      atSend.push({ named: funding.sessionKey, ...(await keyOnDisk(funding.epoch)) });
+      return send(funding, opts);
+    });
     await buyer.fund({ epoch, source, services: [service(A, 100n * TRAC)] });
+    const { sessionKey } = (await chain.getSubscription(subscriptionIdOf(SIGNER.address, epoch)))!;
+    expect(atSend).toEqual([{ named: sessionKey, stored: sessionKey, opened: sessionKey }]);
     await buyer.fund({ epoch: epoch + 1, source, services: [service(A, 100n * TRAC)] });
     const next = await chain.getSubscription(subscriptionIdOf(SIGNER.address, epoch + 1));
     expect(next).toMatchObject({ accountId, epoch: epoch + 1, cost: 70n * TRAC });
