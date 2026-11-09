@@ -1712,7 +1712,7 @@ export function SubGraphDetailView({
             <EntityList
               entities={sortedEntities}
               layerKey="wm"
-              layerIcon={icon}
+              emptyIcon={icon}
               onSelectEntity={onSelectEntity}
               externallySorted
               sortLabel={sortLabel}

@@ -1,5 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { useFetch } from '../../../hooks.js';
+import { LayerGlyph } from '../../../components/ds/Badge.js';
 import { listAssertionsPage, fetchAssertionPageCounts } from '../../../assertions-page.js';
 import {
   invalidateQueryCache, listAssertions, promoteAssertion, describePromoteResult,
@@ -8,7 +9,6 @@ import {
 } from '../../../api.js';
 import { useMemoryGraphEvents } from '../../../hooks/useNodeEvents.js';
 import { truncateMiddle } from '../../../lib/truncate.js';
-import { LAYER_CONFIG } from '../helpers.js';
 import { EmptyState, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 
 export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = false, onComplete, scrollKey }: {
@@ -165,7 +165,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         <EmptyState
           compact
           tone={toneForLayer(layer)}
-          icon={LAYER_CONFIG[layer].icon}
+          icon={<LayerGlyph layer={layer} />}
           title="Loading assertions..."
         />
       </div>
@@ -179,7 +179,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
       <div className="v10-layer-empty-shell" style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
         <EmptyState
           tone={toneForLayer(layer)}
-          icon={LAYER_CONFIG[layer].icon}
+          icon={<LayerGlyph layer={layer} />}
           title={layer === 'swm'
             ? 'No Shared Working Memory assertions listed yet.'
             : 'No Working Memory assertions yet.'}
