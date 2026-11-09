@@ -7,6 +7,8 @@ import { LAYER_CONFIG, entityMeta, layerNoun, VM_TRIPLE_STAT } from '../helpers.
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { useVmPublishGate } from '../../../pages/conviction/useVmPublishGate.js';
 import { PublishEligibilityChipView } from '../../../pages/conviction/PublishEligibilityChip.js';
+import { PcaPrimerLink } from '../../../pages/conviction/PcaPrimer.js';
+import { usePcaAvailability } from '../../../hooks/usePcaAvailability.js';
 import { DiscountAppliedBadge } from '../../../components/Pca/index.js';
 import { X } from 'lucide-react';
 import { StatusGlyph } from '../../../components/ds/Badge.js';
@@ -258,6 +260,20 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
   );
 }
 
+/** No PCA tracked: says this publish pays the full TRAC fee and offers the primer. Its own
+ *  component so the availability probe only runs when the line could show; hidden while the
+ *  probe runs and on networks without PCAs. */
+function PcaFeeNote() {
+  const { status } = usePcaAvailability();
+  if (status !== 'available') return null;
+  return (
+    <p className="v10-pca-fee-note" data-testid="pca-fee-note">
+      <span>This publish pays the full TRAC fee. A PCA can cut it by up to 75%.</span>
+      <PcaPrimerLink />
+    </p>
+  );
+}
+
 /** SWM → VM publish CTA. Consumes the PCA spend-gate (`useVmPublishGate`) for the DANGER
  *  gate + the eligibility chip, and owns the confirmed post-publish discount badge (B8). */
 export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }: LayerActionProps) {
@@ -322,7 +338,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
           {/* S5 — the PCA fall-through chip, fed STRAIGHT from the gate's single eligibility
               read (no prop re-listing). id=verdictId so the button can reference it. Shown
               only when a PCA is tracked. */}
-          {gate.chipVisible && <PublishEligibilityChipView {...gate.eligibility} id={verdictId} />}
+          {gate.chipVisible ? <PublishEligibilityChipView {...gate.eligibility} id={verdictId} /> : <PcaFeeNote />}
           {/* SR-only cause for the policy gate — referenced by aria-describedby so the
               announced reason matches the visual state. */}
           {gate.blocked && <span id={reasonId} className="v10-sr-only">{gate.reason}</span>}

@@ -2,6 +2,8 @@
 
 /* ----- S5 publish-CTA chip + preflight popover (E1) ----- */
 .v10-pca-publish-chip { position: relative; margin-bottom: var(--space-8); }
+/* No PCA tracked: a quiet line that this publish pays the full fee, plus the primer button. Not a warning. */
+.v10-pca-fee-note { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); margin: 0 0 var(--space-8); font-size: var(--fs-label); color: var(--text-tertiary); line-height: var(--lh-body); }
 
 /* ----- E2 predictive bell alerts ----- */
 .v10-pca-alert-row {

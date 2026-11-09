@@ -422,10 +422,10 @@ export function describePcaError(
         message = 'Enter a TRAC amount greater than 0.';
         break;
       case 'PrimaryNodeNotInShardingTable':
-        message = "That primary node isn't a staked node in the sharding table.";
+        message = "That primary node isn't an active Core node.";
         break;
       case 'ZeroPrimaryNode':
-        message = 'Choose a staked node as the primary node.';
+        message = 'Choose an active Core node as the primary node.';
         break;
       case 'PrimaryNodeUnchanged':
         message = "That's already this account's primary node.";

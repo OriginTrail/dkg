@@ -35,6 +35,11 @@ vi.mock('../src/ui/api.js', async (orig) => ({
 vi.mock('../src/ui/hooks/usePublishEligibility.js', () => ({
   usePublishEligibility: eligMock.usePublishEligibility,
 }));
+// R2 — the full-fee line under the CTA shows only where PCAs exist on the network.
+const availMock = vi.hoisted(() => ({ status: 'loading' as 'loading' | 'available' | 'unavailable', calls: 0 }));
+vi.mock('../src/ui/hooks/usePcaAvailability.js', () => ({
+  usePcaAvailability: () => { availMock.calls += 1; return { status: availMock.status, recheck: () => {} }; },
+}));
 
 const { PromoteWidget, PublishVmWidget, LayerWidgetStrip } = await import('../src/ui/views/project/components/layer-widgets.js');
 const { usePcaStore } = await import('../src/ui/stores/pca.js');
@@ -65,6 +70,8 @@ beforeEach(() => {
   // Default: an inconclusive verdict never gates (fail-open) — so the B8 badge tests
   // publish freely. Gate tests override per-verdict.
   eligMock.usePublishEligibility.mockReturnValue({ verdict: 'unknown', ownerPublish: false, anyGasFunded: false } as any);
+  availMock.status = 'loading';
+  availMock.calls = 0;
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
@@ -380,6 +387,39 @@ describe('PublishVmWidget — S5 publish CTA gate (#1382)', () => {
     expect(container.querySelector('[data-testid="pca-publish-eligibility"]')).toBeNull();
     // …so the button must not reference it (OVs0A: describedByIds are atomic with targets).
     expect(publishBtn(container).getAttribute('aria-describedby')).toBeNull();
+    await unmount();
+  });
+
+  it('no PCA tracked on a PCA network → a quiet full-fee line with the primer button', async () => {
+    usePcaStore.setState({ trackedIds: [] });
+    availMock.status = 'available';
+    const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+    const note = container.querySelector('[data-testid="pca-fee-note"]')!;
+    expect(note.className).toBe('v10-pca-fee-note');
+    expect(note.textContent).toContain('This publish pays the full TRAC fee. A PCA can cut it by up to 75%.');
+    expect(note.querySelector('[data-testid="pca-primer-link"]')?.textContent).toBe('What is a PCA?');
+    // Not a warning: no status glyph, and the button is not described by it.
+    expect(note.querySelector('.ds-status-glyph')).toBeNull();
+    expect(publishBtn(container).getAttribute('aria-describedby')).toBeNull();
+    await unmount();
+  });
+
+  it('hides the full-fee line while the probe runs and where PCAs are unavailable', async () => {
+    usePcaStore.setState({ trackedIds: [] });
+    for (const status of ['loading', 'unavailable'] as const) {
+      availMock.status = status;
+      const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+      expect(container.querySelector('[data-testid="pca-fee-note"]')).toBeNull();
+      await unmount();
+    }
+  });
+
+  it('a tracked PCA shows the chip instead, and never runs the availability probe', async () => {
+    availMock.status = 'available';
+    setVerdict('eligible');
+    const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+    expect(container.querySelector('[data-testid="pca-fee-note"]')).toBeNull();
+    expect(availMock.calls).toBe(0);
     await unmount();
   });
 });

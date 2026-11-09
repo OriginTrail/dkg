@@ -24,13 +24,13 @@ export const HEALTH_CHIP_META: Record<PcaHealthState, HealthMeta> = {
     glyph: <StatusGlyph tone="pending" />,
     label: 'Expiring soon',
     tone: 'warning',
-    hint: 'The lock period ends soon. Topping up doesn’t extend it. Renew to keep the discount.',
+    hint: 'This PCA ends soon. Topping up doesn’t make it last longer. Renew to keep the discount.',
   },
   expired: {
     glyph: <StatusGlyph tone="danger" />,
     label: 'Expired',
     tone: 'danger',
-    hint: 'The lock period has ended, so publishes no longer get this discount. Renew to continue.',
+    hint: 'This PCA has ended, so publishes no longer get its discount. Renew to continue.',
   },
   insolvent: {
     glyph: <StatusGlyph tone="warning" />,

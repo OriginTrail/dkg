@@ -111,7 +111,7 @@ export function PrimaryNodePicker({
     if (!raw) return;
     const match = nodes.find((n) => n.identityId === raw || n.nodeId.toLowerCase() === raw.toLowerCase());
     if (!match) {
-      setPasteErr('Not a staked sharding-table node.');
+      setPasteErr('Not an active Core node.');
       return;
     }
     select(match);
@@ -138,10 +138,10 @@ export function PrimaryNodePicker({
       </p>
 
       {loading ? (
-        <Loading label="Loading staked nodes…" />
+        <Loading label="Loading Core nodes…" />
       ) : error ? (
         <div className="v10-modal-warning ds-card-nested" role="alert" data-testid="pca-primary-node-error">
-          Couldn’t load the staked-node list — a primary node is required to create.{' '}
+          Couldn’t load the list of Core nodes. A primary node is required to create a PCA.{' '}
           <button
             type="button"
             className="v10-pca-card-btn ds-btn"
@@ -159,7 +159,7 @@ export function PrimaryNodePicker({
           )}
         </div>
       ) : nodes.length === 0 ? (
-        <p className="v10-pca-create-hint" role="status">No staked nodes found.</p>
+        <p className="v10-pca-create-hint" role="status">No Core nodes found.</p>
       ) : (
         <>
           <div className={['v10-pca-node-picker-combo', selectedSummary ? 'has-selection' : ''].filter(Boolean).join(' ')}>
@@ -169,7 +169,7 @@ export function PrimaryNodePicker({
               aria-expanded={open}
               aria-controls={open ? listboxId : undefined}
               aria-autocomplete="list"
-              aria-label="Search staked nodes"
+              aria-label="Search Core nodes"
               aria-describedby={selectedSummaryId}
               aria-required={required}
               aria-invalid={required && value === ''}
@@ -181,7 +181,7 @@ export function PrimaryNodePicker({
               className="v10-form-input ds-input"
               data-testid="pca-primary-node-search"
               value={query}
-              placeholder={selectedSummary ?? 'Search staked nodes by id…'}
+              placeholder={selectedSummary ?? 'Search Core nodes by ID…'}
               autoComplete="off"
               onFocus={() => setOpen(true)}
               onChange={(e) => {
@@ -192,7 +192,7 @@ export function PrimaryNodePicker({
               onKeyDown={onKeyDown}
             />
             {open && (
-              <ul role="listbox" id={listboxId} aria-label="Staked sharding-table nodes" className="v10-pca-node-picker-list">
+              <ul role="listbox" id={listboxId} aria-label="Active Core nodes" className="v10-pca-node-picker-list">
                 {shown.map((n, i) => {
                   const selected = n.identityId === value;
                   const isOwn = ownIdentityId != null && n.identityId === ownIdentityId;
