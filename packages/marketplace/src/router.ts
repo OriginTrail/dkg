@@ -10,6 +10,8 @@
  *   4. It stays with the seller that answered, so each seller gets one run of
  *      nonces, and moves on when a seller is unreachable, for ten minutes, or
  *      returns a receipt that fails the buyer's checks, for the rest of the epoch.
+ *      A seller that refuses a call for good (a refusal not to retry) goes to
+ *      the back of the order for ten minutes: tried only when no other can serve.
  *
  * Every offer the buyer reads comes through `offersOf`, which keeps only
  * those the chain says an operational wallet of their seller signed: the
@@ -51,6 +53,7 @@ export class Router {
   private readonly quotes = new Map<string, { at: number; quote: QuoteResponse }>();
   private readonly sticky = new Map<string, bigint>();
   private readonly unreachableUntil = new Map<string, number>();
+  private readonly demotedUntil = new Map<string, number>();
   private readonly failedIn = new Map<string, number>();
   private readonly latency = new Map<string, number>();
   /** wallet => the identity the chain says it signs for, and when that was read. */
@@ -73,13 +76,13 @@ export class Router {
     const candidates: Offer[] = [];
     for (const o of offers) if (await this.deps.chain.isShardingTableMember(o.seller)) candidates.push(o);
     const rank = (o: Offer) => [
+      (this.demotedUntil.get(o.seller.toString()) ?? 0) > now ? 1 : 0,
       o.seller === this.sticky.get(serviceId) ? 0 : 1,
       pinned.includes(o.seller) ? 0 : 1,
     ];
     candidates.sort((a, b) => {
       const [ra, rb] = [rank(a), rank(b)];
-      if (ra[0] !== rb[0]) return ra[0]! - rb[0]!;
-      if (ra[1] !== rb[1]) return ra[1]! - rb[1]!;
+      for (let i = 0; i < ra.length; i++) if (ra[i] !== rb[i]) return ra[i]! - rb[i]!;
       if (a.pricePerUnit !== b.pricePerUnit) return a.pricePerUnit < b.pricePerUnit ? -1 : 1;
       return (this.latency.get(a.seller.toString()) ?? Infinity) - (this.latency.get(b.seller.toString()) ?? Infinity);
     });
@@ -96,6 +99,12 @@ export class Router {
   /** A seller that did not answer: left out for ten minutes. */
   unreachable(seller: bigint): void {
     this.unreachableUntil.set(seller.toString(), this.clock() + UNREACHABLE_MS);
+    this.forget(seller);
+  }
+
+  /** A seller that refused a call for good: behind every other seller for ten minutes, and no longer the one it stays with. */
+  demote(seller: bigint): void {
+    this.demotedUntil.set(seller.toString(), this.clock() + UNREACHABLE_MS);
     this.forget(seller);
   }
 
