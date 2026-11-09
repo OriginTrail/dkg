@@ -58,15 +58,7 @@ describe('node status failure count', () => {
     expect(useAgentsStore.getState().nodeStatusFailures).toBe(0);
   });
 
-  it('clears on a 401, which proves the node is running', () => {
-    const store = useAgentsStore.getState();
-    store.recordNodeStatusFailure();
-    store.recordNodeStatusFailure();
-    store.clearNodeStatusFailures();
-    store.recordNodeStatusFailure();
-    expect(useAgentsStore.getState().nodeStatusFailures).toBe(1);
-    store.clearNodeStatusFailures();
-  });
+  // A 401 clearing the count is checked through the real poll in node-status-polling.dom.test.ts.
 });
 
 describe('formatPeerStatusTooltip (BUG-020)', () => {
