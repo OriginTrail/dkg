@@ -325,6 +325,17 @@ describe('a call', () => {
     expect(codeOf(await restarted.serve(wire({ ...request, maxUnits: 999n })))).toBe('NonceUsed');
   });
 
+  it.each([40, 60])('serves a request that lasts %i days, its receipt completed before it expires', async (days) => {
+    // No timer runs to a request's expiry: one past the longest a timer can wait (about 24.8 days) would fire at once.
+    const id = await fund();
+    const { now } = await chain.getEpochTimes();
+    const request = await requestFor(id, { expiry: now + days * 86_400 });
+    const answer = await seller.serve(wire(request)) as ServeAnswer;
+    expect(answer.ok).toBe(true);
+    expect(receiptFromWire(answer.receipt).completedAt).toBeLessThanOrEqual(request.expiry);
+    expect(backend.calls).toBe(1);
+  });
+
   it('cuts an overrun to the units the request allows, and refuses an input that leaves none', async () => {
     const id = await fund();
     backend.next = { content: 'abcdefghij', promptTokens: 10, completionTokens: 100 };
