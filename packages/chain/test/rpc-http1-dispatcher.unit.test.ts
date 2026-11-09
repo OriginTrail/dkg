@@ -235,14 +235,13 @@ describe('chain RPC fetches against a server that offers HTTP/2 (#2828)', () => 
     expect(server.httpVersions).toEqual([RUNNING_FETCH_NEGOTIATES_HTTP2 ? '2.0' : '1.1', '1.1', '1.1']);
   });
 
-  // test-disable-allow: D1 #2828 -- owner=branarakic lane=chain-rpc-node26 expires=2026-10-26 Needs undici 8 fetch; runs on Node 26 in chain-rpc-node26.yml.
-  it.runIf(RUNNING_FETCH_NEGOTIATES_HTTP2)(
+  it(
     'go through a dispatcher the application installed, with its own TLS trust',
     async () => {
       server.httpVersions.length = 0;
       // Loading fetch's classes installs Node's default dispatcher.
       void globalThis.Response;
-      const nodeDefault = slots[FETCH_GLOBAL_DISPATCHER] as TestDispatcher;
+      const nodeDefault = slots[RUNNING_FETCH_GLOBAL_DISPATCHER] as TestDispatcher;
       // An application's undici Agent that trusts the test certificate; nothing else in the process does.
       const Agent = nodeDefault.constructor as new (options: object) => TestDispatcher;
       const custom = new Agent({ connect: { ca: [server.cert] } });
@@ -254,18 +253,17 @@ describe('chain RPC fetches against a server that offers HTTP/2 (#2828)', () => 
 
       try {
         await withGlobalDispatcher(installed, () =>
-          readRpc(chainRpcFetch(server.url, { method: 'POST', body: RPC_BODY })));
+          readRpc(chainRpcFetch(server.url, { method: 'POST', body: RPC_BODY })), RUNNING_FETCH_GLOBAL_DISPATCHER);
       } finally {
         await custom.close();
       }
 
-      expect(seenAllowH2).toEqual([false]);
+      expect(seenAllowH2).toEqual([RUNNING_FETCH_NEGOTIATES_HTTP2 ? false : undefined]);
       expect(server.httpVersions.at(-1)).toBe('1.1');
     },
   );
 
-  // test-disable-allow: D1 #2828 -- owner=branarakic lane=chain-rpc-node26 expires=2026-10-26 Needs undici 8 fetch; runs on Node 26 in chain-rpc-node26.yml.
-  it.runIf(RUNNING_FETCH_NEGOTIATES_HTTP2)(
+  it(
     'go through the proxy of NODE_USE_ENV_PROXY',
     async () => {
       server.httpVersions.length = 0;
@@ -283,8 +281,7 @@ describe('chain RPC fetches against a server that offers HTTP/2 (#2828)', () => 
     },
   );
 
-  // test-disable-allow: D1 #2828 -- owner=branarakic lane=chain-rpc-node26 expires=2026-10-26 Needs undici 8 fetch; runs on Node 26 in chain-rpc-node26.yml.
-  it.runIf(RUNNING_FETCH_NEGOTIATES_HTTP2)(
+  it(
     'stay on HTTP/1.1 when a chain RPC call is the first request of a fresh process',
     async () => {
       server.httpVersions.length = 0;

@@ -6,7 +6,9 @@ import {
   parseContextGraphUri,
   SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, storeLaneInflightLimit, isStoreResponseTooLargeError, type TripleStore } from '@origintrail-official/dkg-storage';
+import type { QueryMaterializationBudget } from '@origintrail-official/dkg-query';
+import { QueryResultTooLargeError } from './query-result-too-large-error.js';
 import { runBoundedOperation } from './bounded-operation.js';
 import { strip } from './dkg-agent-utils.js';
 import { everyWithConcurrency } from './map-with-concurrency.js';
@@ -30,23 +32,35 @@ export interface UnscopedQueryAdmissionDependencies {
  */
 export async function canReadUnscopedQuery(
   deps: UnscopedQueryAdmissionDependencies,
-  opts: { signal?: AbortSignal } = {},
+  opts: {
+    signal?: AbortSignal;
+    maxResponseBytes?: number;
+    materializationBudget?: QueryMaterializationBudget;
+  } = {},
 ): Promise<boolean> {
   return runBoundedOperation(async (signal) => {
     signal.throwIfAborted();
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-    const [result, storedIds] = await Promise.all([
+    const [result, storedIds] = await readAdmissionCatalog(opts.maxResponseBytes, () => Promise.all([
       deps.store.query(
         `SELECT ?cg WHERE {
           GRAPH <${ontologyGraph}> {
             ?cg <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "private"
           }
         }`,
-        { source: 'agent.query.privateGraphAccessPolicy', signal },
+        {
+          source: 'agent.query.privateGraphAccessPolicy',
+          signal,
+          maxResponseBytes: opts.maxResponseBytes,
+        },
       ),
-      new GraphManager(deps.store).listStoredContextGraphOwnerCandidates({ signal }),
-    ]);
+      new GraphManager(deps.store).listStoredContextGraphOwnerCandidates({
+        signal,
+        maxResponseBytes: opts.maxResponseBytes,
+      }, opts.materializationBudget),
+    ]));
     signal.throwIfAborted();
+    opts.materializationBudget?.consume(result);
     if (result.type !== 'bindings') {
       throw new Error('Cannot authorize unscoped query: invalid access-policy discovery result');
     }
@@ -79,7 +93,8 @@ export async function canReadUnscopedQuery(
       ? await deps.prepareReadChecks(ids, signal)
       : deps.canReadContextGraph;
     signal.throwIfAborted();
-    return await everyWithConcurrency(ids, 4, async (id, _index, readSignal) => {
+    const readWidth = Math.min(4, storeLaneInflightLimit(deps.store) ?? 4);
+    return await everyWithConcurrency(ids, readWidth, async (id, _index, readSignal) => {
       readSignal.throwIfAborted();
       const allowed = await canRead(id, readSignal);
       readSignal.throwIfAborted();
@@ -90,4 +105,13 @@ export async function canReadUnscopedQuery(
     label: 'Unscoped query admission; specify contextGraphId to limit the dataset',
     signal: opts.signal,
   });
+}
+
+async function readAdmissionCatalog<T>(maxResponseBytes: number | undefined, read: () => Promise<T>): Promise<T> {
+  try { return await read(); } catch (error) {
+      // These two reads use the caller's limit. Fixed internal authority limits
+      // and later permission reads retain their own failure classification.
+      if (maxResponseBytes !== undefined && isStoreResponseTooLargeError(error)) throw new QueryResultTooLargeError(error);
+      throw error;
+  }
 }

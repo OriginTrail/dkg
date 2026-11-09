@@ -1,11 +1,13 @@
 /**
  * §4.7.2 Check: configuration sanity.
  *
- * Validates `~/.dkg/config.json` against an opportunistic schema +
- * semantic constraints. Reports:
+ * Validates the node config the daemon loads (`~/.dkg/config.json`, or
+ * `~/.dkg/config.yaml` when there is no `config.json`) against an
+ * opportunistic schema + semantic constraints. Reports:
  *   - Deprecated fields set to non-empty values (warnings).
  *   - Semantic violations (e.g. `apiPort` out of range) (errors).
  *   - `nodeRole` not in `{ "edge", "core" }` (error).
+ *   - `core.authorityIndex`, which the daemon refuses to load (error).
  *   - Missing config file (warning — the daemon will use defaults
  *     but `dkg init` was never run).
  *
@@ -17,6 +19,7 @@
 import { join } from 'node:path';
 import {
   AUTO_UPDATE_GIT_ONLY_FIELDS,
+  assertAuthorityIndexConfigPlacement,
   validateStoreConfig,
   parseAutoUpdateVerifyTagSignature,
   type DkgConfig,
@@ -26,13 +29,90 @@ import {
   formatAutoUpdateTagVerificationWarning,
   resolveAutoUpdateGitRefPlan,
 } from '../../auto-update-ref.js';
+import {
+  configFileLabel,
+  isConfigMapping,
+  parseConfigText,
+  resolveConfigFile,
+  type ConfigFileSource,
+} from '../config-file.js';
 import type { DoctorDeps, Finding } from '../types.js';
+
+type ParsedConfig = { config: Record<string, unknown> } | { finding: Finding };
+
+function parseJsonConfig(source: ConfigFileSource, raw: string): ParsedConfig {
+  try {
+    const obj = parseConfigText(source, raw);
+    if (!isConfigMapping(obj)) {
+      throw new Error('config.json is not a JSON object');
+    }
+    return { config: obj };
+  } catch (err: any) {
+    return {
+      finding: {
+        check: 'config-sanity',
+        severity: 'error',
+        message: `Config file is malformed JSON: ${source.path}`,
+        advisory: `Fix or restore the file: ${err?.message ?? err}. The daemon will refuse to start until JSON parses cleanly.`,
+        subject: source.path,
+      },
+    };
+  }
+}
+
+/**
+ * The daemon refuses to start on a YAML syntax error, but starts with
+ * defaults when the document is empty or not a mapping.
+ */
+function parseYamlConfig(source: ConfigFileSource, raw: string): ParsedConfig {
+  let doc: unknown;
+  try {
+    doc = parseConfigText(source, raw);
+  } catch (err: any) {
+    // js-yaml puts a code frame after the first line of its message; the
+    // report prints the advisory as one line.
+    const reason = String(err?.message ?? err).split('\n', 1)[0];
+    return {
+      finding: {
+        check: 'config-sanity',
+        severity: 'error',
+        message: `Config file is malformed YAML: ${source.path}`,
+        advisory: `Fix or restore the file: ${reason}. The daemon will refuse to start until YAML parses cleanly.`,
+        subject: source.path,
+      },
+    };
+  }
+  if (doc === undefined || doc === null) {
+    return {
+      finding: {
+        check: 'config-sanity',
+        severity: 'warning',
+        message: `Config file has no settings: ${source.path}`,
+        advisory: "The daemon starts with defaults while the file is empty. Add your settings, or run 'dkg init' to bootstrap the node config.",
+        subject: source.path,
+      },
+    };
+  }
+  if (!isConfigMapping(doc)) {
+    return {
+      finding: {
+        check: 'config-sanity',
+        severity: 'error',
+        message: `Config file is malformed YAML: ${source.path}`,
+        advisory: 'Fix or restore the file: config.yaml is not a YAML mapping. The daemon ignores it and starts with defaults until it is one.',
+        subject: source.path,
+      },
+    };
+  }
+  return { config: doc };
+}
 
 export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]> {
   const findings: Finding[] = [];
-  const configPath = join(deps.dkgHome, 'config.json');
+  const source = resolveConfigFile(deps);
 
-  if (!deps.exists(configPath)) {
+  if (!source) {
+    const configPath = join(deps.dkgHome, 'config.json');
     findings.push({
       check: 'config-sanity',
       severity: 'warning',
@@ -43,6 +123,7 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
     return findings;
   }
 
+  const configPath = source.path;
   const raw = await deps.readFile(configPath);
   if (raw === null) {
     findings.push({
@@ -55,26 +136,28 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
     return findings;
   }
 
-  let parsed: Record<string, unknown>;
-  try {
-    const obj = JSON.parse(raw);
-    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
-      throw new Error('config.json is not a JSON object');
-    }
-    parsed = obj as Record<string, unknown>;
-  } catch (err: any) {
-    findings.push({
-      check: 'config-sanity',
-      severity: 'error',
-      message: `Config file is malformed JSON: ${configPath}`,
-      advisory: `Fix or restore the file: ${err?.message ?? err}. The daemon will refuse to start until JSON parses cleanly.`,
-      subject: configPath,
-    });
+  const result = source.format === 'json' ? parseJsonConfig(source, raw) : parseYamlConfig(source, raw);
+  if ('finding' in result) {
+    findings.push(result.finding);
     return findings;
   }
+  const parsed = result.config;
 
   for (const error of validateStoreConfig(parsed, deps.platform)) {
     findings.push({ check: 'config-sanity', severity: 'error', message: error.message, subject: error.field });
+  }
+
+  // `loadConfig` throws on this too, so the daemon refuses to start.
+  try {
+    assertAuthorityIndexConfigPlacement(parsed);
+  } catch {
+    findings.push({
+      check: 'config-sanity',
+      severity: 'error',
+      message: 'core.authorityIndex is not supported',
+      advisory: `Move authorityIndex to the top level of ${configFileLabel(deps, configPath)}; core-snapshot mode is an edge-node option. The daemon will refuse to start until it moves.`,
+      subject: 'core.authorityIndex',
+    });
   }
 
   // nodeRole sanity
@@ -142,7 +225,7 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
         check: 'config-sanity',
         severity: 'warning',
         message: `Deprecated autoUpdate field is set: autoUpdate.${field}`,
-        advisory: `The '${field}' field is inert unless autoUpdate.source is 'git'. Remove it from npm-mode ~/.dkg/config.json — the daemon will continue to ignore it, but its presence is misleading to anyone reading the file.`,
+        advisory: `The '${field}' field is inert unless autoUpdate.source is 'git'. Remove it from npm-mode ${configFileLabel(deps, configPath)} — the daemon will continue to ignore it, but its presence is misleading to anyone reading the file.`,
         subject: `autoUpdate.${field}`,
       });
     }

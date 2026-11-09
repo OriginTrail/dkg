@@ -9,6 +9,7 @@ members = [
   "crates/dkg-strategy-compiler",
   "crates/dkg-runtime-kernel",
   "crates/dkg-runtime-codec",
+  "crates/dkg-runtime-executor",
   "crates/dkg-runtime-wasm",
   "crates/dkg-runtime-component",
   "crates/dkg-safe-llm-runner",
@@ -31,6 +32,7 @@ dkg-strategy-compiler = { path = "crates/dkg-strategy-compiler" }
 dkg-runtime-kernel = { path = "crates/dkg-runtime-kernel" }
 dkg-runtime-codec = { path = "crates/dkg-runtime-codec" }
 dkg-runtime-wasm = { path = "crates/dkg-runtime-wasm" }
+dkg-runtime-executor = { path = "crates/dkg-runtime-executor" }
 minicbor = { version = "=2.3.0", features = ["alloc", "derive"] }
 lexpr = { version = "=0.2.7", default-features = false }
 sha2 = { version = "=0.10.9", default-features = false }

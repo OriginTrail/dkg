@@ -1,5 +1,6 @@
 export * from './types.js';
 export { gzipBounded, gunzipBounded, BoundedGzipLimitError, BoundedGzipCapacityError, type BoundedGzipOptions } from './bounded-gzip.js';
+export { workerThreadEnv } from './worker-thread-env.js';
 export * from './constants.js';
 export * from './storage-ack-protocols.js';
 export * from './context-graph-storage-uri.js';
@@ -444,6 +445,7 @@ export {
   PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
   ASYNC_PUBLISH_FOREIGN_AUTHOR_CODE,
   RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE,
+  SWM_INVENTORY_HANDOFF_PENDING_CODE,
   isRfc64LegacySwmBoundaryRetirementInProgressError,
   QUERY_ACCESS_DENIED_CODE,
   QUERY_ACCESS_DENIED_MESSAGE,
@@ -485,6 +487,7 @@ export {
   buildAssertionPublishReceiptQuads,
   parseAssertionSealQuads,
   parseGraphScopedAssertionSealCandidate,
+  parseGraphScopedAssertionSealStructure,
   type GraphScopedAssertionSealCandidate,
   type AssertionSealBuildArgs,
   type AssertionSeal,
@@ -541,3 +544,9 @@ export * from './bulk-graph-wire.js';
 export * from './bulk-graph-transport.js';
 
 export { ProtocolReadLimitError } from './bounded-stream-read.js';
+
+export * from './async-admission-usage.js';
+export * from './async-admission-diagnostic-context.js';
+
+// Exact store readback form; unlike the hash canonicalizer, rejects precision loss.
+export { canonicalizeAuthorSealStoreXsdDateTimeValue as canonicalizeExactStoreDateTime } from './xsd-date-time.js';

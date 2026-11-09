@@ -1,5 +1,7 @@
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
+  canonicalGraphScopedAuthorSealFromAssertionSealV1,
+  computeCanonicalGraphScopedAuthorSealDigestV1,
   buildAssertionSealQuads,
   contextGraphAssertionUri,
   contextGraphMetaUri,
@@ -24,7 +26,7 @@ const ASSERTION_COORDINATE = 'asset';
 const META_GRAPH = contextGraphMetaUri(CONTEXT_GRAPH_ID);
 const KA_NUMBER = 7n;
 
-function sealQuads(authorSpelling: string): Quad[] {
+function sealQuads(authorSpelling: string, version = 1n): Quad[] {
   const assertionUri = contextGraphAssertionUri(
     CONTEXT_GRAPH_ID,
     authorSpelling,
@@ -33,7 +35,7 @@ function sealQuads(authorSpelling: string): Quad[] {
   return buildAssertionSealQuads({
     assertionUri,
     metaGraph: META_GRAPH,
-    merkleRoot: new Uint8Array(32).fill(0xab),
+    merkleRoot: new Uint8Array(32).fill(version === 1n ? 0xab : 0xcd),
     authorAddress: CHECKSUMMED_AUTHOR,
     authorAttestationR: new Uint8Array(32).fill(0x11),
     authorAttestationVS: new Uint8Array(32).fill(0x22),
@@ -44,7 +46,7 @@ function sealQuads(authorSpelling: string): Quad[] {
     finalizedAtIso: '2026-09-01T00:00:00.000Z',
     contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
     kaUal: `did:dkg:20430/${LOWERCASE_AUTHOR}/${KA_NUMBER}`,
-    assertionVersion: 1n,
+    assertionVersion: version,
     publicTripleCount: 1,
     privateTripleCount: 0,
   }) as Quad[];
@@ -160,4 +162,20 @@ describe('RFC-64 archived author seal resolver', () => {
     const torn = archivedSealQuads(LOWERCASE_AUTHOR).slice(0, 3);
     await expect(resolveArchived(torn)).resolves.toBeUndefined();
   });
+});
+
+it('selects the owed archived digest over a newer active seal and refuses an unknown digest', async () => {
+  const store = new OxigraphStore();
+  try {
+    const oldQuads = sealQuads(LOWERCASE_AUTHOR);
+    const old = (await resolve(oldQuads))!;
+    const digest = computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(old.seal));
+    await store.insert([...sealQuads(LOWERCASE_AUTHOR, 2n), ...oldQuads.map(quad => ({ ...quad,
+      subject: `${quad.subject}/_recovery_seal`, graph: contextGraphPrivateUri(CONTEXT_GRAPH_ID) }))]);
+    const params = { store, contextGraphId: CONTEXT_GRAPH_ID, agentAddress: LOWERCASE_AUTHOR,
+      assertionCoordinate: ASSERTION_COORDINATE, source: 'test.owed.exact-archive' };
+    expect((await resolveDurableGraphScopedAuthorSealCandidateV1(params))?.seal.assertionVersion).toBe('2');
+    expect((await resolveDurableGraphScopedAuthorSealCandidateV1({ ...params, sealDigest: digest }))?.seal).toEqual(old.seal);
+    expect(await resolveDurableGraphScopedAuthorSealCandidateV1({ ...params, sealDigest: `0x${'fe'.repeat(32)}` })).toBeUndefined();
+  } finally { await store.close(); }
 });

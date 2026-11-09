@@ -741,14 +741,13 @@ export async function persistProjectSyncedReadiness(input: {
   dataSynced: number;
   sharedMemorySynced: number;
   sharedMemoryHeldAssets?: number;
+  /** Assets of a clean durable round that found its whole generation stored and current. */
+  durableHeldAssets?: number;
   verifiedPrivateOnlyResponses?: number;
 }): Promise<boolean> {
   const contextGraphId = input.contextGraphId.trim();
-  const verifiedPrivateOnlyResponses = input.verifiedPrivateOnlyResponses ?? 0;
-  const durableCompleted = (Number.isFinite(input.dataSynced) && input.dataSynced > 0) || (
-    Number.isFinite(verifiedPrivateOnlyResponses)
-    && verifiedPrivateOnlyResponses > 0
-  );
+  const durableCompleted = [input.dataSynced, input.verifiedPrivateOnlyResponses ?? 0, input.durableHeldAssets ?? 0]
+    .some((count) => Number.isFinite(count) && count > 0);
   const sharedMemoryCompleted = [input.sharedMemorySynced, input.sharedMemoryHeldAssets ?? 0]
     .some((count) => Number.isFinite(count) && count > 0);
   if (

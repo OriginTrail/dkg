@@ -5,8 +5,8 @@
  * drift apart, each reading the same job and each free to disagree about it.
  *
  * The precedence, read top to bottom:
- *   1. {@link isProvenIneffectiveLiftFailure} — does the failure code PROVE the transaction had
- *      no effect? Then nothing below needs to account for it.
+ *   1. {@link isProvenIneffectiveLiftFailure} — does the failure code PROVE its transaction had no
+ *      effect? Then nothing below accounts for that one (2 still covers an older open hash).
  *   2. {@link isHeldForChainProof} — otherwise, is a transaction unaccounted for? A held job is
  *      never republished, keeps its lifecycle subject, and survives bulk cleanup.
  *   3. {@link classifyRetryAction} — the WRITE decision for a retry pass, over the job alone.
@@ -32,6 +32,7 @@ import {
 } from './async-lift-publisher-utils.js';
 import { knowledgeAssetAgentAddressesEqual } from '@origintrail-official/dkg-core';
 import { getLiftJobFailurePolicy, isTerminalLiftJobState } from './lift-job.js';
+import { carriesOpenInheritedHash } from './lift-job-tx-hash-accounting.js';
 import type { LiftJobFailureCode, PersistedLiftJob } from './lift-job.js';
 import type {
   PendingTransactionClearOverride,
@@ -71,11 +72,7 @@ export function hasBroadcastEvidence(job: PersistedFailedJob): boolean {
   // established the transaction's fate and released the job on the strength of it, the hash stays
   // for audit but stops holding anything: continuing to read it as unaccounted would strand the
   // job forever, because it can never be proven a second time — nothing new was ever sent.
-  const recovery = job.recovery;
-  if (!recovery?.txHashChecked) return false;
-  // Only a RESET record can carry the accounted mark; a finalized-from-chain record is not a
-  // job that is still waiting on anything.
-  return recovery.action !== 'reset_to_accepted' || recovery.txHashAccounted !== true;
+  return carriesOpenInheritedHash(job);
 }
 
 /**
@@ -109,7 +106,9 @@ export function isProvenIneffectiveLiftFailure(code: LiftJobFailureCode): boolea
  * re-submit publishes the same KA a second time.
  */
 export function isHeldForChainProof(job: PersistedFailedJob): boolean {
-  return hasBroadcastEvidence(job) && !isProvenIneffectiveLiftFailure(job.failure.code);
+  if (!hasBroadcastEvidence(job)) return false;
+  // #3591 — a proof of no effect covers the failed attempt's own transaction, never an earlier one.
+  return !isProvenIneffectiveLiftFailure(job.failure.code) || carriesOpenInheritedHash(job);
 }
 
 /**
@@ -321,15 +320,24 @@ export function selectLifecycleBindingJobs(
 /**
  * #1837 — the single terminal-clear authority, reused by both `clear(status)` (bulk, through
  * {@link isBulkClearableTerminalLiftJob}) and `clearTerminalJob(jobId)` so they cannot drift. A job
- * is clearable iff it is in a native terminal state (finalized|failed) AND is not a
- * `retry_recovery`-failed job — those may still carry a pending on-chain tx that periodic recovery
- * will finalize, so ordinary and bulk cleanup do not remove them. The separately authorized,
- * exact-job override below is their deliberate operator/owner exit. A `retry_recovery`-failed job
- * is therefore treated as NONTERMINAL-for-routine-cleanup.
+ * is clearable iff it is in a native terminal state (finalized|failed) AND is not a failed job
+ * {@link needsPendingTransactionOverride} names. A `retry_recovery` failure may still carry a
+ * pending on-chain tx that periodic recovery will finalize. Deleting a job held for chain proof
+ * turns admission's `LiftJobPendingChainProofError` back into a fresh job for the same KA (#3573:
+ * this half once applied to bulk cleanup only). The separately authorized, exact-job override
+ * below is their deliberate operator/owner exit; such a job is NONTERMINAL-for-routine-cleanup.
+ *
+ * A job whose failure PROVES its transaction had no effect is not held, so routine cleanup of
+ * reverted and unfunded attempts keeps working. Nothing is lost either way: the #1829 journal is
+ * append-only and a clear never touches it, so the txHash outlives the job record.
  */
 export function isClearableTerminalLiftJob(job: PersistedLiftJob): boolean {
-  return isTerminalLiftJobState(job.status)
-    && !(isFailedJob(job) && job.failure.resolution === 'retry_recovery');
+  return isTerminalLiftJobState(job.status) && !needsPendingTransactionOverride(job);
+}
+
+/** #3573 — a failed job a clear removes only with the pending-transaction override: recovery owns it, or it is held. */
+export function needsPendingTransactionOverride(job: PersistedLiftJob): boolean {
+  return isFailedJob(job) && (job.failure.resolution === 'retry_recovery' || isHeldForChainProof(job));
 }
 
 /**
@@ -444,12 +452,12 @@ function ownsLiftJobAdmissionLane(job: PersistedLiftJob, agentAddress: string | 
  * What the TARGETED by-id clear may remove.
  *
  * #1837's base predicate treats transaction-bearing jobs as nonterminal-for-cleanup, because
- * periodic recovery may still finalize them from chain. That is right for bulk cleanup. The
- * explicit agent-owner/node-operator override is the exit for one exact closed-run record:
- * it accepts a pre-broadcast `validated` record, a `retry_recovery` failure, or a live
- * `broadcast`/`included` record. The append-only journal remains, and no broad clear receives this
- * authority. A `claimed` record stays denied because it can still be running before validation;
- * an operator must stop the runner and let that claim resolve before clearing it.
+ * periodic recovery may still finalize them from chain, and a job held for chain proof (#3573).
+ * The explicit agent-owner/node-operator override is the exit for one exact closed-run record: it
+ * accepts a pre-broadcast `validated` record, a failure {@link needsPendingTransactionOverride}
+ * names, or a live `broadcast`/`included` record. The append-only journal remains, and no broad
+ * clear receives this authority. A `claimed` record stays denied because it can still be running
+ * before validation; an operator must stop the runner and let that claim resolve before clearing it.
  *
  * The exception is named rather than expressed as the base predicate's complement: written that
  * way it would silently absorb every future reason a terminal job becomes protected. Additions to
@@ -493,24 +501,15 @@ export function isTargetedClearableLiftJob(
       return false;
   }
   if (job.status === 'validated' || job.status === 'broadcast' || job.status === 'included') return true;
-  return isTerminalLiftJobState(job.status)
-    && isFailedJob(job)
-    && job.failure.resolution === 'retry_recovery';
+  return needsPendingTransactionOverride(job);
 }
 
 /**
- * What BULK `clear(status)` may delete: terminal-clearable, MINUS a job {@link isHeldForChainProof}.
- *
- * Deleting a held job turns admission's `LiftJobPendingChainProofError` back into a fresh job for
- * the same KA, so bulk cleanup is safe by default and the targeted lane above is where an operator
- * accepts that risk deliberately, for one named job.
- *
- * A job whose failure PROVES its transaction had no effect is not held, so routine cleanup of
- * reverted and unfunded attempts keeps working. Nothing is lost either way: the #1829 journal is
- * append-only and a clear never touches it, so the txHash outlives the job record.
+ * What BULK `clear(status)` may delete: exactly what the by-id clear may without the override (never
+ * a held job), before the bulk lane's sibling guard (async-lift-guarded-clear.ts).
  */
 export function isBulkClearableTerminalLiftJob(job: PersistedLiftJob): boolean {
-  return isClearableTerminalLiftJob(job) && !(isFailedJob(job) && isHeldForChainProof(job));
+  return isClearableTerminalLiftJob(job);
 }
 
 /**
@@ -878,12 +877,11 @@ export type ChainProofDisposition =
  * The dispatcher's decision table, over the job and the chain's verdict alone.
  *
  * `reverted` is the only verdict whose disposition depends on the JOB, and the question it asks is
- * whose transaction reverted. A job that failed from 'broadcast'/'included' signed that one
- * itself, so `tx_reverted` is a true statement about it and releases the hold the registry's way.
- * A job holding an INHERITED hash failed before signing anything — the reverted transaction
- * belongs to an earlier attempt, `LIFT_JOB_FAILURE_ALLOWED_STATES` rejects `tx_reverted` from a
- * pre-send state for exactly that reason, and the honest release is the same reset a proven
- * absence gets.
+ * whose transaction reverted. A job whose evidence is its own 'broadcast'/'included' record signed
+ * that one itself, so `tx_reverted` is a true statement about it and releases the hold the
+ * registry's way. A job asked about an INHERITED hash signed nothing, or had its own attempt refused
+ * (#3591) — the reverted transaction belongs to an earlier attempt, so `tx_reverted` is not true of
+ * this one, and the honest release is the same reset a proven absence gets.
  *
  * `unrecognized` sits with `pending`/`inconclusive` and not with the absences: a mined transaction
  * carrying no publish this adapter can parse is a fact about THAT transaction, not proof that no
@@ -907,7 +905,8 @@ export function decideChainProofDisposition(
       // the operator's by-id clear as the exit.
       return queuedLiftOperationKind(job) === 'update' ? { action: 'hold' } : { action: 'reset' };
     case 'reverted':
-      if (job.failure.failedFromState === 'broadcast' || job.failure.failedFromState === 'included') {
+      if (job.failure.failedFromState === 'included'
+        || (job.failure.failedFromState === 'broadcast' && job.broadcast?.txHash === getLiftJobTransactionEvidence(job))) {
         return { action: 'refail_reverted', failedFromState: job.failure.failedFromState };
       }
       // r16 (3814610383) — the INHERITED-hash fall-through re-queues the job, and re-queuing an

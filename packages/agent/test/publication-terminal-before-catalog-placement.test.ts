@@ -1,3 +1,4 @@
+import { confirmedPublicationCatalogConfigV1 } from './support/confirmed-publication-harness.js';
 /**
  * GH#3081 — a confirmed publication is terminal once its catalog placement is durably owed, not
  * once the placement was attempted.
@@ -14,14 +15,23 @@
  * the time the row let pass before the terminal record was written.
  */
 import { describe, expect, it, vi } from 'vitest';
+import { assertionLifecycleUri, contextGraphMetaUri, canonicalGraphScopedAuthorSealFromAssertionSealV1 } from '@origintrail-official/dkg-core';
+import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
+import { ConfirmedCatalogObligationErrorV1 } from '../src/confirmed-catalog-obligation-error.js';
 
+const supersededPublications = vi.hoisted(() => new Set<string>());
 vi.mock('../src/named-ka-publish-recovery.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../src/named-ka-publish-recovery.js')>(),
   // The chain normalization needs an adapter bound to the asset's chain; it answers here as it
   // does for a publish that is the asset's current version. Everything after it is real.
   normalizeRecoveredNamedKaPublish: async (
     input: Parameters<typeof recoveredNamedKaPublishV1>[0],
-  ) => recoveredNamedKaPublishV1(input),
+  ) => {
+    const recovered = recoveredNamedKaPublishV1(input);
+    return { ...recovered, materialization: { ...recovered.materialization,
+      superseded: supersededPublications.has(input.request.kaUal!) } };
+  },
 }));
 
 import {
@@ -413,6 +423,40 @@ describe('a confirmed publication and its catalog placement', () => {
     expect(fixture.catalogRows()).toBe('1');
   }, 120_000);
 
+  it.each([false, true])('retains owned confirmed evidence across catalog disable=%s for a synchronous observer-only retry', async disable => {
+    const fixture = await startPlacementAgentV1({ name: 'sync-marker-refusal-evidence' });
+    const asset = await seedPlacementAssetV1(fixture.agent, 'sync-refused', 97n);
+    const transaction = { txHash: `0x${'97'.repeat(32)}`, blockNumber: 17, batchId: 97n, kaId: 97n };
+    fixture.failMarkerWrite = new Error('closed marker connection');
+    let pending: ConfirmedCatalogObligationErrorV1 | undefined;
+    try { await confirmedSynchronousPublishTailV1(fixture.agent, asset, transaction); }
+    catch (error) { if (!(error instanceof ConfirmedCatalogObligationErrorV1)) throw error; pending = error; }
+    expect(pending).toBeInstanceOf(ConfirmedCatalogObligationErrorV1);
+    if (pending === undefined) throw new Error('confirmation incorrectly completed');
+    expect(pending.transaction).toEqual(transaction);
+    expect(Object.isFrozen(pending.transaction)).toBe(true);
+    expect(pending.seal).toEqual(canonicalGraphScopedAuthorSealFromAssertionSealV1(asset.seal));
+    const retry = pending.retryInput;
+    retry.seal.merkleRoot.fill(0);
+    expect(pending.retryInput.seal.merkleRoot).toEqual(asset.seal.merkleRoot);
+    expect(fixture.markers()).toEqual([]);
+    const config = (fixture.agent as unknown as { config: ReturnType<typeof confirmedPublicationCatalogConfigV1> }).config;
+    const enabled = { ...config };
+    if (disable) { Object.assign(config, confirmedPublicationCatalogConfigV1(false)); fixture.lane.inactive = true; }
+    fixture.failMarkerWrite = undefined;
+    await fixture.agent.observeRfc64ConfirmedVmV1(pending.retryInput);
+    if (disable) {
+      expect(fixture.markers()).toEqual([expect.objectContaining({ version: 2, assertionVersion: '1',
+        seal: canonicalGraphScopedAuthorSealFromAssertionSealV1(asset.seal) })]);
+      expect(fixture.catalogRows()).toBeNull();
+      Object.assign(config, enabled); fixture.lane.inactive = false;
+      for (const repair of fixture.markers()) fixture.agent.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair });
+    }
+    await fixture.agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(fixture.markers()).toEqual([]);
+    expect(fixture.catalogRows()).toBe('1');
+  }, 120_000);
+
   /**
    * Two publications, both terminal: the first one's placement is parked, and the second one's is
    * owed and queued behind it, not started.
@@ -511,65 +555,99 @@ describe('a confirmed publication and its catalog placement', () => {
     }
   }, 120_000);
 
-  it('retries a failed public catalog removal before finalizing the recovered publication', async () => {
-    const fixture = await startPlacementAgentV1({ name: 'terminal-public-removal-fails' });
-    const { agent } = fixture;
-    const asset = await seedPlacementAssetV1(agent, 'public-unremoved', 98n);
-    fixture.lane.acceptsFinalizedVmRepair = false;
-    const path = createPublicationPathV1(fixture);
-    const jobId = await path.failAfterBroadcast(asset);
-    const remove = vi.spyOn(agent, 'commitRfc64ConfirmedInventoryRemovalV1').mockRejectedValue(new Error('inventory store refused removal'));
-    fixture.clock.now = 1_000;
-    expect(await path.publisher.recover()).toBe(0);
-    expect((await path.job(jobId))?.status).toBe('failed');
-    expect(remove).toHaveBeenCalledOnce();
-    expect(fixture.events()).not.toContain('recovery-finalized:repair-public-unremoved');
-
-    remove.mockRestore();
-    // A failed tx-bearing claim retains the ordinary chain-proof retry backoff.
-    fixture.clock.now = 60_000;
-    expect(await path.publisher.recover()).toBe(1);
-    expect((await path.job(jobId))?.status).toBe('finalized');
-    expect(fixture.events()).toContain('recovery-finalized:repair-public-unremoved');
-  }, 120_000);
-
-  it('keeps a publication recoverable until its catalog placement is durably owed', async () => {
+  it.each([false, true])('retains confirmed tx evidence across catalog disable=%s until its marker commits without another broadcast', async disable => {
     const fixture = await startPlacementAgentV1({ name: 'terminal-marker-write-fails' });
-    const { agent } = fixture;
-    const asset = await seedPlacementAssetV1(agent, 'unrecorded', 97n);
+    const asset = await seedPlacementAssetV1(fixture.agent, 'unrecorded', 97n);
     const path = createPublicationPathV1(fixture);
     fixture.failMarkerWrite = new Error('the marker store refused the write');
+    const jobId = await path.enqueue(asset);
+    await path.broadcast('wallet-1');
+    await path.publisher.drainDetachedExecutions();
+    expect(await path.publisher.recover()).toBe(0);
+    const held = await path.job(jobId);
+    expect(held?.status).not.toBe('finalized');
+    expect(held?.broadcast?.txHash ?? held?.recovery?.txHashChecked).toBe(asset.txHash);
+    expect(fixture.markers()).toEqual([]);
+    expect(fixture.counts().repairs).toBe(0);
+    const config = (fixture.agent as unknown as { config: ReturnType<typeof confirmedPublicationCatalogConfigV1> }).config;
+    const enabled = { ...config };
+    if (disable) { Object.assign(config, confirmedPublicationCatalogConfigV1(false)); fixture.lane.inactive = true; }
+    // Even the disabled retry must retain the confirmed job while the marker store refuses it.
+    expect(await path.publisher.recover()).toBe(0);
+    expect((await path.job(jobId))?.status).not.toBe('finalized');
+    fixture.failMarkerWrite = undefined;
+    expect(await path.publisher.recover()).toBe(1);
+    if (disable) {
+      expect(fixture.markers()).toEqual([expect.objectContaining({ version: 2, assertionVersion: '1' })]);
+      expect((await path.job(jobId))?.status).toBe('finalized');
+      expect(fixture.catalogRows()).toBeNull();
+      Object.assign(config, enabled); fixture.lane.inactive = false;
+      for (const repair of fixture.markers()) fixture.agent.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair });
+    }
+    await fixture.agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect((await path.job(jobId))?.status).toBe('finalized');
+    expect(fixture.catalogRows()).toBe('1');
+    expect(fixture.markers()).toEqual([]);
+    expect(fixture.events().filter((event) => event.startsWith('executor-'))).toHaveLength(1);
+    expect(await path.broadcast('wallet-1')).toBeNull();
+  }, 120_000);
 
+  it('retains a superseded queued confirmation until its original seal is durably owed', async () => {
+    const fixture = await startPlacementAgentV1({ name: 'superseded-marker-write-fails' });
+    const { agent } = fixture;
+    const asset = await seedPlacementAssetV1(agent, 'superseded', 99n);
+    // Only the chain proof is staged: queue persistence, both completion tails,
+    // the original marker and the newer lifecycle are stored by their real owners.
+    const chain = (agent as unknown as { readonly chain: ChainAdapter }).chain;
+    Object.assign(chain, { getKAContextGraphId: vi.fn(async () => 1n) });
+    const path = createPublicationPathV1(fixture);
+    fixture.failMarkerWrite = new Error('the marker store refused the original confirmation');
     const jobId = await path.enqueue(asset);
     await path.broadcast('wallet-1');
     await path.publisher.drainDetachedExecutions();
     expect(await path.publisher.recover()).toBe(0);
 
-    expect((await path.job(jobId))?.status).toBe('broadcast');
-    // Neither completion path can discharge an obligation whose marker was never written.
-    expect(fixture.events()).toEqual([
-      'executor-settled:repair-unrecorded',
-      'finality-observed:repair-unrecorded',
-      'vm-materialization:promoted',
-    ]);
-    expect(fixture.markers()).toEqual([]);
-    expect(fixture.catalogRows()).toBeNull();
-    expect(fixture.counts().repairs).toBe(0);
-    expect(fixture.queue()?.pending ?? 0).toBe(0);
-    // Both observations say so, once each.
-    expect(fixture.warnings().filter((line) => line.includes('finalized-private placement was not recorded'))).toEqual([
-      'Confirmed queued publish but RFC-64 finalized-private placement was not recorded, so nothing owes it: '
-      + 'the marker store refused the write',
-      'Confirmed queued publish but RFC-64 finalized-private placement was not recorded, so nothing owes it: '
-      + 'the marker store refused the write',
-    ]);
+    fixture.lane.inactive = true;
     fixture.failMarkerWrite = undefined;
-    fixture.clock.now += 2_000;
-    expect(await path.publisher.recover()).toBe(1);
-    expect((await path.job(jobId))?.status).toBe('finalized');
-    expect(fixture.events()).toContain('marker-stored:repair-unrecorded');
-    expect(fixture.events()).toContain('recovery-finalized:repair-unrecorded');
+    const newer = { ...asset, seal: { ...asset.seal, assertionVersion: '2' } };
+    await confirmedSynchronousPublishTailV1(agent, newer);
+    await applyPublishedNamedKaVmLifecycle(agent.store, {
+      contextGraphId: CONTEXT_GRAPH_ID, agentAddress: AUTHOR,
+      name: asset.assertionCoordinate, publishedUal: asset.seal.kaUal!,
+      merkleRoot: `0x${'f1'.repeat(32)}`, packedKaId: asset.seal.reservedKaId,
+    });
+    const readLifecycle = () => agent.store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
+      GRAPH <${contextGraphMetaUri(CONTEXT_GRAPH_ID)}> {
+        BIND(<${assertionLifecycleUri(CONTEXT_GRAPH_ID, AUTHOR, asset.assertionCoordinate)}> AS ?s) ?s ?p ?o
+      }
+    }`);
+    const newerLifecycle = await readLifecycle();
+    fixture.failMarkerWrite = new Error('the marker store still refuses the original confirmation');
+    supersededPublications.add(asset.seal.kaUal!);
+    try {
+      expect(await path.publisher.recover()).toBe(0);
+      const held = await path.job(jobId);
+      expect(held?.status).not.toBe('finalized');
+      expect(held?.broadcast?.txHash ?? held?.recovery?.txHashChecked).toBe(asset.txHash);
+      expect(fixture.markers().map((repair) => repair.assertionVersion)).toEqual(['2']);
+      expect(await readLifecycle()).toEqual(newerLifecycle);
 
+      fixture.failMarkerWrite = undefined;
+      expect(await path.publisher.recover()).toBe(1);
+      expect((await path.job(jobId))?.status).toBe('finalized');
+      expect(fixture.markers()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ version: 2, assertionVersion: '1',
+          seal: canonicalGraphScopedAuthorSealFromAssertionSealV1(asset.seal) }),
+        expect.objectContaining({ version: 2, assertionVersion: '2' }),
+      ]));
+      expect(await readLifecycle()).toEqual(newerLifecycle);
+      expect(fixture.events().filter((event) => event.startsWith('executor-'))).toHaveLength(1);
+      expect(fixture.events().filter((event) => event.startsWith('vm-materialization:'))).toHaveLength(1);
+      expect(await path.broadcast('wallet-1')).toBeNull();
+    } finally {
+      supersededPublications.delete(asset.seal.kaUal!);
+      await path.publisher.drainDetachedExecutions();
+    }
   }, 120_000);
 });
 

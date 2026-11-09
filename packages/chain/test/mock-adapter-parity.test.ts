@@ -68,7 +68,7 @@ const EVM_METHODS = collectMethodNames(EVMChainAdapter);
 const MOCK_METHODS = collectMethodNames(MockChainAdapter);
 const NO_CHAIN_METHODS = collectMethodNames(NoChainAdapter);
 
-// Normal protected prototype methods that are deliberately outside the
+// Normal protected/private prototype methods that are deliberately outside the
 // ChainAdapter API. Keeping this boundary explicit prevents production method
 // shape from being chosen merely to evade the runtime parity audit.
 const EVM_INTERNAL_METHODS = new Set<string>([
@@ -81,6 +81,11 @@ const EVM_INTERNAL_METHODS = new Set<string>([
   // The mock implements that public reader directly from its in-memory event
   // state and has no ethers TransactionReceipt to project.
   'projectCanonicalFinalizationReceipt',
+  // TS-private receipt facts/history beneath the verifier and confirmation reader.
+  // TypeScript erases private visibility on the prototype; the mock implements
+  // the public capabilities from its event state without ethers logs or root history.
+  'firstMatchingUpdateReceiptFacts',
+  'authenticateUpdateReceipt',
   // Physical EVM contract-binding and one-log generation fences. These are
   // protected implementation details rather than ChainAdapter capabilities;
   // the mock has neither Hub-bound contract handles nor a persisted one-log.
@@ -117,6 +122,10 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'signMessageAs',          // pool-specific wallet-key signing; mock has no adapter-held private keys
   'getOperationalPrivateKey', // mock has no wallet keys
   'operationalSigning',     // optional; absent, an adapter is taken to sign with local wallets, as the mock's do
+  // #3591 — the async publisher's claim gate reads a refused wallet's balances through this. The
+  // mock holds no wallet balances; the publisher's reader treats the absent method as unreadable,
+  // which never keeps a wallet out.
+  'readPublisherWalletBalances',
   'getRequiredPublishTokenAmount', // TODO: missing on mock, cross-check below
   // Snapshot reuse requires a finalized block hash plus the exact physical
   // DKGKnowledgeAssets address and binding generation. Mock snapshots

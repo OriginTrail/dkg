@@ -10,4 +10,3 @@ export interface DetailedDurableSyncResult {
   /** Present when a clean legacy response proved the exact filter was ignored. */
   readonly exactResponderCapability?: ExactAssetResponderCapability;
 }
-

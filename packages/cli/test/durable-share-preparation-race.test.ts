@@ -122,7 +122,7 @@ it('preserves the draft when ownership cannot be read before real finalization',
   const { store, agent, publisher, finalized } = await setup();
   const query = store.query.bind(store);
   vi.spyOn(store, 'query').mockImplementation(async (...args) => {
-    if (args[1]?.source === 'publisher.asyncPromote.findActiveConflict') throw new Error('owner read unavailable');
+    if (args[1]?.source === 'publisher.asyncPromote.ownershipReader') throw new Error('owner read unavailable');
     return query(...args);
   });
   const materialize = vi.spyOn(publisher, 'materializeCanonicalWorkingMemory');

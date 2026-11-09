@@ -26,7 +26,10 @@ export type Rfc64CatalogHeadReplayQueueAdmissionV1 = Readonly<{
  * named the policy this node holds for the graph, so it follows the graph.
  * That is recorded first, whether or not this node can serve the replay now,
  * so a peer answered busy, or one whose replay fails, is still among the
- * graph's followers, the peers a share into the graph goes to directly.
+ * graph's followers, the peers a share into the graph goes to directly. A
+ * peer the request made a follower, one this node did not count among them
+ * before (after this node restarted, say), is passed to `onNewFollower`: the
+ * notices of the changes before it did not go to it.
  */
 export function answerRfc64CatalogHeadReplayRequestV1<
   Admission extends Rfc64CatalogHeadReplayQueueAdmissionV1,
@@ -38,14 +41,19 @@ export function answerRfc64CatalogHeadReplayRequestV1<
   readonly acceptedPolicyDigest: string | undefined;
   /** Queue the replay, or answer busy. */
   readonly queue: () => Admission;
+  /** The peer was not among the graph's followers before this request. */
+  readonly onNewFollower?: (contextGraphId: string, peerId: string) => void;
   readonly log: Readonly<{ info(message: string): void; warn(message: string): void }>;
 }): Admission {
-  noteCatalogHeadReplayFollower(
+  const { contextGraphId } = input.request;
+  const known = input.followers.followers(contextGraphId).includes(input.remotePeerId);
+  const recorded = noteCatalogHeadReplayFollower(
     input.followers,
     input.acceptedPolicyDigest,
     input.request,
     input.remotePeerId,
   );
+  if (recorded && !known) input.onNewFollower?.(contextGraphId, input.remotePeerId);
   const admission = input.queue();
   if (admission.status === 'busy' || !admission.newlyQueued) return admission;
   const peer = input.remotePeerId.slice(-8);

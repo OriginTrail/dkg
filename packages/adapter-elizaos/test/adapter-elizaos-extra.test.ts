@@ -1,25 +1,8 @@
-/**
- * packages/adapter-elizaos — extra QA coverage.
- *
- * Findings covered (see .test-audit/BUGS_FOUND.md):
- *
- *   K-11 TEST-DEBT + SPEC-GAP
- *        `adapter-elizaos` currently ships only smoke tests. Spec
- *        §09A_FRAMEWORK_ADAPTERS mandates that chat-turn persistence
- *        flow through the DKG node's memory surface. The plugin exposes
- *        NO such hook today — no action, no service method, no
- *        dedicated capability routes chat turns into the node. The
- *        tests below document:
- *          1. the missing chat-persistence hook (RED — prod bug evidence),
- *          2. the service lifecycle contract that is exercisable today,
- *          3. action-handler behaviour contracts for all five actions
- *             (callback semantics, required-argument errors).
- *
- *        // PROD-BUG: no chat-persistence hook surface — see BUGS_FOUND.md K-11
- *
- * Per QA policy: no production-code edits.
- */
-import { describe, it, expect } from 'vitest';
+/** Exact contracts for a stopped ElizaOS service. Initialized paths live in behavior.test.ts. */
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+
+// These surface/stopped-service tests must not construct an external DKG node.
+vi.mock('@origintrail-official/dkg-agent', () => ({ DKGAgent: { create: vi.fn() } }));
 import {
   dkgPlugin,
   dkgPublish,
@@ -43,11 +26,11 @@ function makeRuntime(settings: Record<string, string> = {}): IAgentRuntime {
   return {
     getSetting: (k: string) => settings[k],
     character: { name: 'test-char' },
-  } as unknown as IAgentRuntime;
+  };
 }
 
 function makeMessage(text: string): Memory {
-  return { content: { text }, id: 'mem-1', userId: 'u', roomId: 'r' } as unknown as Memory;
+  return { content: { text }, agentId: 'agent', userId: 'u', roomId: 'r' };
 }
 
 interface CallbackRecord {
@@ -56,12 +39,14 @@ interface CallbackRecord {
 }
 function makeCallback(): CallbackRecord {
   const calls: Array<{ text: string }> = [];
-  const cb = ((resp: { text: string }) => {
-    calls.push(resp);
-    return Promise.resolve([] as Memory[]);
-  }) as unknown as HandlerCallback;
+  const cb: HandlerCallback = (resp) => { calls.push(resp); };
   return { calls, cb };
 }
+
+beforeEach(async () => {
+  await dkgService.cleanup!();
+  expect(getAgent()).toBeNull();
+});
 
 // K-11 (chat-persistence hook) sentinel removed — the plugin does not yet
 // expose a persist-chat action or `hooks.onChatTurn` / `onAssistantReply`;
@@ -84,11 +69,7 @@ describe('[adapter-elizaos] positive controls (actions surface)', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 describe('dkgService lifecycle contract', () => {
   it('getAgent() returns null before initialize() has ever run', () => {
-    // The service module is singleton-scoped; prior tests in this run
-    // may have initialized it. If so, we just assert the getter is
-    // still a function on the module (positive control).
-    const agent = getAgent();
-    expect(agent === null || typeof agent === 'object').toBe(true);
+    expect(getAgent()).toBeNull();
   });
 
   it('cleanup() on uninitialized service is a no-op', async () => {
@@ -106,7 +87,7 @@ describe('dkgService lifecycle contract', () => {
 // Action contract — required-argument errors are routed through callback
 // ─────────────────────────────────────────────────────────────────────────────
 describe('action error-routing contract - never throws, always calls back', () => {
-  const state: State = {} as unknown as State;
+  const state: State = {};
   const opts = {} as Record<string, unknown>;
   const runtime = makeRuntime();
 
@@ -120,33 +101,33 @@ describe('action error-routing contract - never throws, always calls back', () =
   async function assertHandlerContract(
     handler: (r: IAgentRuntime, m: Memory, s: State, o: Record<string, unknown>, cb: HandlerCallback) => Promise<boolean>,
     text: string,
+    errorPrefix: string,
   ) {
     const { calls, cb } = makeCallback();
     const ok = await handler(runtime, makeMessage(text), state, opts, cb);
-    expect(typeof ok).toBe('boolean');
+    expect(ok).toBe(false);
     expect(calls).toHaveLength(1);
-    expect(typeof calls[0].text).toBe('string');
-    expect(calls[0].text.length).toBeGreaterThan(0);
+    expect(calls[0].text).toBe(`${errorPrefix}: DKG node not started — is DKGService initialized?`);
   }
 
   it('DKG_PUBLISH - errors routed via callback, never thrown', async () => {
-    await assertHandlerContract(dkgPublish.handler, 'publish to DKG');
+    await assertHandlerContract(dkgPublish.handler, 'publish to DKG', 'DKG publish failed');
   });
 
   it('DKG_QUERY - errors routed via callback, never thrown', async () => {
-    await assertHandlerContract(dkgQuery.handler, 'query the DKG');
+    await assertHandlerContract(dkgQuery.handler, 'query the DKG', 'DKG query failed');
   });
 
   it('DKG_SEND_MESSAGE - errors routed via callback, never thrown', async () => {
-    await assertHandlerContract(dkgSendMessage.handler, 'say hi');
+    await assertHandlerContract(dkgSendMessage.handler, 'say hi', 'Message send failed');
   });
 
   it('DKG_INVOKE_SKILL - errors routed via callback, never thrown', async () => {
-    await assertHandlerContract(dkgInvokeSkill.handler, 'invoke something');
+    await assertHandlerContract(dkgInvokeSkill.handler, 'invoke something', 'Skill invocation failed');
   });
 
   it('DKG_FIND_AGENTS - errors routed via callback, never thrown', async () => {
-    await assertHandlerContract(dkgFindAgents.handler, 'find agents with skill: ImageAnalysis');
+    await assertHandlerContract(dkgFindAgents.handler, 'find agents with skill: ImageAnalysis', 'Agent discovery failed');
   });
 });
 
@@ -156,23 +137,15 @@ describe('action error-routing contract - never throws, always calls back', () =
 // ─────────────────────────────────────────────────────────────────────────────
 describe('dkgKnowledgeProvider graceful-degradation contract', () => {
   it('returns null when no agent has been initialized', async () => {
-    // getAgent() is a real function; if no test path has booted the
-    // singleton, the provider must degrade to `null`, not throw.
+    // The beforeEach explicitly establishes the stopped-service precondition.
     const result = await dkgKnowledgeProvider.get!(
       makeRuntime(),
       makeMessage('tell me about blockchains'),
     );
-    expect(result === null || typeof result === 'string').toBe(true);
-  });
-
-  it('returns null when the message has no search-worthy keywords', async () => {
-    const result = await dkgKnowledgeProvider.get!(
-      makeRuntime(),
-      makeMessage('a of in the'),
-    );
-    // All tokens are stop-words or <3 chars ⇒ provider short-circuits.
     expect(result).toBeNull();
   });
+
+
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

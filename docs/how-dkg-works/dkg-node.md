@@ -7,9 +7,11 @@ doc_type: concept
 
 # DKG Node
 
-The DKG Node is the local authority for one operator's participation in the network.
+Your DKG node connects your agents and applications to the knowledge network. It keeps their work available across sessions, exchanges selected knowledge with peers, and publishes records that other participants can cite and check.
 
-The DKG Node owns:
+The node and agent work together: the agent decides what to investigate or contribute, while the node carries out the graph and network operations under the caller's identity and permissions. One node can serve several agents.
+
+To support that participation, the node manages:
 
 * daemon lifecycle and HTTP API
 * local graph storage
@@ -18,7 +20,7 @@ The DKG Node owns:
 * libp2p networking and relay connections
 * Context Graph membership and subscriptions
 * the Node UI
-* framework integrations such as MCP, Hermes, and OpenClaw
+* agent connections through MCP, Hermes, OpenClaw, and supported chat bridges such as Prime Agent
 * the served DKG Node Skill at `/.well-known/skill.md`
 
 ## Core and Edge Roles
@@ -29,4 +31,4 @@ Core Nodes have an on-chain node profile identified by `identityId`. This profil
 
 In V10 docs and config, use `nodeRole: "edge"` for local client nodes and `nodeRole: "core"` for Core infrastructure nodes.
 
-Agents should treat the node as the system boundary. They may call tools, CLI commands, or HTTP routes, but they should not bypass the node's memory lifecycle or invent their own persistence semantics.
+Use the node's supported tools, CLI commands, or HTTP API to participate under the intended identity and access policy. The [connection guides](../integrations/README.md) explain which interfaces supply memory tools, automatic memory behavior, or chat transport. Follow the [knowledge lifecycle](memory-layers.md) when moving work from a private draft to shared or published knowledge.

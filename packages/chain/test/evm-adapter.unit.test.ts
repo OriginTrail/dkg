@@ -4807,6 +4807,14 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect((a as any).provider.getBalance.calls.length).toBeGreaterThan(afterFirst); // forceRefresh re-reads
   });
 
+  it('readPublisherWalletBalances reads fresh native and TRAC balances past the cache (#3591)', async () => {
+    const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), 5n); tracByAddr.set(lc(walletA.address), 7n);
+    expect(await a.readPublisherWalletBalances(walletA.address)).toEqual({ native: 5n, trac: 7n });
+    nativeByAddr.set(lc(walletA.address), 9n);
+    expect(await a.readPublisherWalletBalances(walletA.address)).toEqual({ native: 9n, trac: 7n });
+  });
+
   it('rotates among the FUNDED subset when a middle wallet is unfunded (preserves #953 concurrency)', async () => {
     const { a, wallets, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner(), undefined, [THIRD_PK]);
     expect(wallets.length).toBe(3);

@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
+import { startEmbeddingFixture } from './helpers/embedding-http-fixture.js';
 import { RpcRequestGovernor } from '@origintrail-official/dkg-chain';
 import {
   LIVE_DAEMON_RPC_REQUEST_BUDGET,
@@ -54,3 +55,34 @@ it('admits a background request from the first moment under the suite-chain requ
   await expect(governor.acquireImmediately('background')).resolves.toBeUndefined();
   expect(governor.snapshot()).toMatchObject({ backgroundAdmitted: 1, rejected: 0 });
 });
+
+it('embedding fixture accepts valid requests and closes without a hidden failure', async () => {
+  const fixture = await startEmbeddingFixture();
+  try {
+    const response = await fetch(`${fixture.config.baseURL}/embeddings`, { method: 'POST',
+      headers: { authorization: `Bearer ${fixture.config.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: 'hello', dimensions: 1536 }),
+    });
+    expect(response.status).toBe(200);
+    expect((await response.json() as { data: { embedding: number[] }[] }).data[0].embedding).toHaveLength(1536);
+    expect(fixture.inputs).toEqual(['hello']);
+  } finally { await fixture.close(); }
+});
+for (const damage of ['method', 'authorization', 'route', 'input', 'dimensions']) {
+  it(`embedding fixture reports ${damage} assertion failures even if its HTTP error is tolerated`, async () => {
+    const fixture = await startEmbeddingFixture();
+    try {
+      const response = await fetch(`${fixture.config.baseURL}/${damage === 'route' ? 'wrong' : 'embeddings'}`, {
+        method: damage === 'method' ? 'PUT' : 'POST',
+        headers: { authorization: damage === 'authorization' ? 'Bearer wrong' : `Bearer ${fixture.config.apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: damage === 'input' ? [] : 'hello', dimensions: damage === 'dimensions' ? 2 : 1536 }),
+      });
+      expect(response.status).toBe(500);
+      await response.text();
+    } finally {
+      await expect(fixture.close()).rejects.toMatchObject({
+        errors: [expect.objectContaining({ code: 'ERR_ASSERTION' })],
+      });
+    }
+  });
+}

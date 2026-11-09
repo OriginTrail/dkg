@@ -1,0 +1,16 @@
+[package]
+name = "dkg-runtime-executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dkg-runtime-types.workspace = true
+dkg-runtime-kernel.workspace = true
+dkg-strategy-compiler.workspace = true
+dkg-ir.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

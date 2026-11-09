@@ -110,6 +110,31 @@ selected layer of the same Context Graph. The response contains `executionIri`,
 Reusing the same invocation UUID resumes the durable effect journal and does
 not repeat an already completed LLM call. A retry cannot change either layer.
 
+## RDF file input
+
+Commands with `--file` accept N-Quads (`.nq`), N-Triples (`.nt`), Turtle (`.ttl`),
+TriG (`.trig`), JSON quad arrays (`.json`), and JSON-LD (`.jsonld`). JSON-LD
+supports inline `@context`, lists, named graphs and typed/language literals.
+Relative identifiers resolve against the input file's `file:` URL unless an
+inline `@base` overrides it. Expansion that would discard statements fails.
+
+JSON-LD named graphs can be stored in Working Memory with `dkg ka create --no-finalize`.
+A default-finalizing create rejects them before contacting the daemon: sealing, SWM
+sharing and VM publication do not yet preserve named-graph identity. Rewrite the
+document into the default graph to use those transitions.
+
+JSON-LD ingestion does not fetch remote contexts or `@import` URLs. Embed the
+required context inline before importing a file. Existing simple quad arrays
+remain supported in both `.json` and `.jsonld` files.
+
+## Async queue settings
+
+The async share and publish queues need no changes on most nodes. The four
+settings an operator might change are the store control path, write preflight
+sharing, share retries and finished-job cleanup. Each is read once at daemon
+start. Their defaults, how to change them and the log line that confirms each
+are in [Async Queue Operations](../../docs/use-dkg/async-queue-operations.md).
+
 ## Running a Core Node (relay operator)
 
 A Core Node is a publicly-reachable host that runs a libp2p circuit-relay v2
@@ -304,6 +329,7 @@ modes auto-renewal can't recover from:
 | `dkg stop` | Graceful daemon shutdown |
 | `dkg status` | Node health, peer count, identity |
 | `dkg logs` | Tail the daemon log |
+| `dkg debug cpu-profile [--seconds <n>]` | Record a CPU profile of the running node (node-admin token; 10 s default, 60 s max) and print where the node wrote it |
 | `dkg peers` | List connected peers and transport info |
 | `dkg peer info <peer-id>` | Inspect a peer's identity and addresses |
 | `dkg send <name> <msg>` | Encrypted direct message to a peer |
@@ -319,9 +345,9 @@ modes auto-renewal can't recover from:
 | `dkg ka import-file <name> -c <cg> --input-file <file>` | Import a document into WM through extraction |
 | `dkg ka extraction-status <name> -c <cg>` | Check document extraction status |
 | `dkg ka finalize <name> -c <cg>` | Seal a WM draft; existing root-scoped SWM assets remain read-only |
-| `dkg ka share <name> -c <cg> [--entity <uri...>]` | Share finalized WM to Shared Working Memory |
+| `dkg ka share <name> -c <cg>` | Share finalized WM to Shared Working Memory (the whole Knowledge Asset) |
 | `dkg ka share-async <name> -c <cg>` | Enqueue async WM-to-SWM share |
-| `dkg ka share-jobs [--context-graph-id <cg>]` | List async SWM share jobs |
+| `dkg ka share-jobs [--context-graph-id <cg>] [--state <states>] [--limit <n>] [--json]` | List async SWM share jobs (the complete list, or up to `--limit`). `--page-size <n>` and/or `--cursor <cursor>` print one page instead, and `--all [--page-size <n>]` pages through every job; `--limit` cannot be combined with a paging flag, nor `--all` with `--cursor` ([Listing async jobs](../../docs/references/cli.md#listing-async-jobs)) |
 | `dkg ka publish <name> -c <cg>` | Synchronously publish an already finalized and fully shared KA from SWM to VM |
 | `dkg ka publish-async <name> -c <cg> [--publisher-node-identity-id 0]` | Enqueue VM publish for an already finalized and fully shared KA |
 | `dkg ka pull-from <name> -c <cg> --layer swm\|vm` | Seed WM from SWM or VM |
@@ -336,7 +362,7 @@ modes auto-renewal can't recover from:
 | `dkg subscribe <cg>` | Subscribe to a context graph and sync its data |
 | `dkg sync` | Catch up on data from peers |
 | `dkg index [directory]` | Index a code repository into the dev-coordination CG |
-| `dkg publisher ...` | Inspect/control async publisher jobs and wallets; `publisher publish-async` remains an operational alias for `ka publish-async` |
+| `dkg publisher ...` | Inspect/control async publisher jobs and wallets; `publisher publish-async` remains an operational alias for `ka publish-async`; `publisher jobs` pages with the same `--page-size`/`--cursor`/`--all` |
 | `dkg auth show` | Display the current API auth token |
 | `dkg auth rotate` | Generate a new API auth token |
 | `dkg wallet` | Show operational wallet addresses and balances |
@@ -500,6 +526,8 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 - `GET /api/peers`, `GET /api/connections`, `GET /api/agents` — network introspection
 - `GET /api/wallets/balances`, `GET /api/chain/rpc-health` — wallet and chain health
 - `GET /api/diagnostics/backpressure` — node-admin scheduler pressure snapshot
+- `POST /api/diagnostics/cpu-profile` — node-admin CPU profile of the daemon's main thread, written to `<DKG home>/diagnostics` ([Troubleshooting](../../docs/use-dkg/troubleshooting.md#slow-or-stalled-node-record-a-cpu-profile))
+- `POST /api/knowledge-assets/{name}/swm/share-async`, `GET /api/knowledge-assets/swm/share-jobs`, `GET /api/publisher/jobs`, `GET /api/publisher/stats` — async share and publish queues (client contract: [Async Share and Publish Jobs](../../docs/build/async-jobs.md); paging: [Listing async jobs](../../docs/references/api.md#listing-async-jobs))
 - `GET /api/events` — Server-Sent Events stream for real-time notifications
 
 `GET /api/info` retains its legacy `chain.rpcUrl`, `chain.rpcUrls`, and
@@ -516,8 +544,8 @@ credentials. The public Hub contract address remains available, while
 All endpoints (except public paths like `/api/status`, `/api/chain/rpc-health`, and `/.well-known/skill.md`) require an API token via `Authorization: Bearer <token>` header.
 
 `GET /api/diagnostics/backpressure` specifically requires the node-level admin
-token; agent-scoped tokens cannot inspect node-wide scheduler work. See the
-[backpressure observability operator guide](../../docs/use-dkg/backpressure-observability.md)
+token; agent-scoped tokens cannot inspect node-wide scheduler work. See
+[Monitor Store and Queue Pressure](../../docs/use-dkg/backpressure-observability.md)
 for state definitions, log behavior, metrics, and response safety boundaries.
 
 The full API surface — including request bodies, response shapes, and error codes — is documented in [`skills/dkg-node/SKILL.md`](./skills/dkg-node/SKILL.md).

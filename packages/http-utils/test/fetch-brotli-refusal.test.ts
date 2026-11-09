@@ -337,12 +337,15 @@ describe('refuseBrotliResponses with an onConnect / onHeaders handler (undici 6)
     expect(abort.mock.calls[0]![0]).toMatchObject({ host: 'rpc.example.invalid:8545' });
   });
 
-  it('throws the refusal from onHeaders when no onConnect ran, which undici turns into an abort', () => {
+  it.each([
+    ['https://node.example.invalid/', 'node.example.invalid'],
+    ['mailto:node@example.invalid', 'an unknown host'],
+  ])('throws the refusal before onConnect, using only the origin host (%s)', (origin, host) => {
     const { dispatch, dispatched } = captureDispatch();
-    refuseBrotliResponses(dispatch)({ origin: new URL('https://node.example.invalid/') }, {});
+    refuseBrotliResponses(dispatch)({ origin: new URL(origin) }, {});
 
     expect(() => dispatched[0]!.handler.onHeaders!(200, ['content-encoding', 'br'], () => undefined, 'OK'))
-      .toThrow(new BrotliResponseRefusedError('node.example.invalid'));
+      .toThrow(new BrotliResponseRefusedError(host));
   });
 
   it('rethrows an error to undici when the handler has no onError, and forwards nothing it lacks', () => {
@@ -440,6 +443,7 @@ describe('refuseBrotliResponses request headers', () => {
     [{ 'accept-encoding': '*;q=0.5' }, { 'accept-encoding': '*;q=0.5, br;q=0' }],
     [{ 'accept-encoding': ['br', 'gzip'], 'x-trace': 'br' }, { 'accept-encoding': ['identity', 'gzip'], 'x-trace': 'br' }],
     [['accept-encoding', 'zstd, br', 'x-trace', 'br'], ['accept-encoding', 'zstd', 'x-trace', 'br']],
+    [['Accept-Encoding', 'br', 'accept-encoding', 'br, gzip'], ['Accept-Encoding', 'identity', 'accept-encoding', 'gzip']],
   ])('rewrites %j to %j in a copy', (headers, expected) => {
     const options = { origin: 'https://rpc.example.invalid', headers };
     const sent = dispatchedOptions(options);

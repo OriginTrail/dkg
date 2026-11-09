@@ -572,6 +572,7 @@ describe('process probe classification (injected ps, lsof and /proc)', () => {
       process: { pid: 4100, start: 'Wed Sep 3 23:14:58 2026', ppid: 1, argv: null, command: '/opt/oxigraph serve' },
     });
     expect(await answering('    1 Z    Wed Sep  3 23:14:58 2026     [oxigraph]\n')(4100)).toEqual({ state: 'gone' });
+    expect(await answering('    1 ?E   Wed Sep  3 23:14:58 2026     (oxigraph)\n')(4100)).toEqual({ state: 'gone' });
     expect(await answering('garbage\n')(4100)).toMatchObject({ state: 'unknown' });
   });
 

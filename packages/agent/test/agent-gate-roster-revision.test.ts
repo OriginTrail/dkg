@@ -101,7 +101,7 @@ async function open(options: {
 }
 
 describe('agent gate: writes that cannot change its roster (GH#3069)', () => {
-  const unrelated: Array<[string, Write]> = [
+  const unrelated: Array<[string, Write, boolean?]> = [
     ['an agent is allowed into another context graph', (s) => s.insert([fact(ALLOWED, JOINER, OTHER_META, OTHER_DID)])],
     ['a member of another context graph is revoked', (s) => s.insert([fact(REVOKED, MEMBER, OTHER_META, OTHER_DID)])],
     ['the roster of another context graph is replaced', (s) => s.replaceSubject!(OTHER_META, OTHER_DID, [
@@ -118,7 +118,7 @@ describe('agent gate: writes that cannot change its roster (GH#3069)', () => {
     ['knowledge-asset metadata is deleted from its own meta graph', (s) => s.deleteByPatternWithoutCount!({
       graph: META_GRAPH, subject: KA_UAL })],
     ['an assertion layer is deleted from its own meta graph', (s) => s.deleteByPatternWithoutCount!({
-      graph: META_GRAPH, subject: KA_GRAPH, predicate: MEMORY_LAYER })],
+      graph: META_GRAPH, subject: KA_GRAPH, predicate: MEMORY_LAYER }), false],
     ['a knowledge asset and its metadata are replaced together', (s) => s.replaceGraphAndSubject!(
       `${CG_DID}/_shared_memory/b`, [quad('urn:x:doc', NAME, `${CG_DID}/_shared_memory/b`)],
       META_GRAPH, KA_UAL, [quad(KA_UAL, NAME, META_GRAPH)])],
@@ -130,7 +130,7 @@ describe('agent gate: writes that cannot change its roster (GH#3069)', () => {
       { subject: '_:b0', predicate: ALLOWED, object: literal(JOINER), graph: KA_GRAPH }])],
   ];
 
-  it.each(unrelated)('answers from one read when %s during it', async (_label, write) => {
+  it.each(unrelated)('answers from one read when %s during it', async (_label, write, changesNodeWideRevision = true) => {
     const { gate, landDuringFirstRead, rosterReads, projection } = await open();
     const rosterRevision = projection.peerGateRevision.read(CG);
     const nodeWideRevision = projection.readAuthorityFactsRevision;
@@ -140,8 +140,10 @@ describe('agent gate: writes that cannot change its roster (GH#3069)', () => {
 
     expect(rosterReads).toHaveBeenCalledTimes(1);
     expect(projection.peerGateRevision.read(CG)).toBe(rosterRevision);
-    // Each of these moves the node-wide revision, which the gate used to compare.
-    expect(projection.readAuthorityFactsRevision).not.toBe(nodeWideRevision);
+    // Most still move the broader revision. Exact non-authority lifecycle removals
+    // now retain that projection too (#3252), while the agent-gate result stays stable.
+    if (changesNodeWideRevision) expect(projection.readAuthorityFactsRevision).not.toBe(nodeWideRevision);
+    else expect(projection.readAuthorityFactsRevision).toBe(nodeWideRevision);
   });
 });
 

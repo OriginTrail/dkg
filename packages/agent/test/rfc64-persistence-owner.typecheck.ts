@@ -21,6 +21,8 @@ persistence.inventory.purgeNextStartupStaleCandidateBatch();
 persistence.inventory.compareAndSwapSwmAuthorInventoryV1({});
 // @ts-expect-error SWM inventory lifecycle belongs exclusively to persistence
 persistence.swmAuthorInventory.close();
+// @ts-expect-error owed share inventory lifecycle belongs exclusively to persistence
+await persistence.owedShareInventories.close();
 
 // @ts-expect-error public inventory foundations do not expose sibling-resource authority
 ownedInventory.controlObjectStoreOwnership;

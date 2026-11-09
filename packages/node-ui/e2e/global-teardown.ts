@@ -12,53 +12,67 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { PlaywrightManagedMarker } from './bootstrap-devnet.js';
+import { promisify, stripVTControlCharacters } from 'node:util';
+import { execFile } from 'node:child_process';
+import type { PlaywrightManagedMarker } from './bootstrap-devnet-runtime.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '../../..');
 const DEVNET_DIR = resolve(REPO_ROOT, '.devnet');
-const MARKER_FILE = resolve(DEVNET_DIR, '.playwright-managed');
-
-function readMarker(): PlaywrightManagedMarker | null {
-  if (!existsSync(MARKER_FILE)) return null;
+function readMarker(markerFile: string): PlaywrightManagedMarker | null {
+  if (!existsSync(markerFile)) return null;
   try {
-    return JSON.parse(readFileSync(MARKER_FILE, 'utf8')) as PlaywrightManagedMarker;
+    return JSON.parse(readFileSync(markerFile, 'utf8')) as PlaywrightManagedMarker;
   } catch {
     return null;
   }
 }
 
-function stopPid(pid: number, label: string): void {
+async function stopPid(pid: number, label: string): Promise<void> {
   try {
     process.kill(pid, 'SIGTERM');
-    console.log(`[playwright] stopped ${label} (PID ${pid})`);
   } catch {
-    /* already exited */
+    return; // already exited
   }
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    try { process.kill(pid, 0); } catch {
+      console.log(`[playwright] stopped ${label} (PID ${pid})`);
+      return;
+    }
+    await new Promise(resolveWait => setTimeout(resolveWait, 100));
+  }
+  throw new Error(`Owned ${label} (PID ${pid}) did not exit after SIGTERM`);
 }
 
-function stopNode(nodeIndex: number): void {
-  const pidfile = resolve(DEVNET_DIR, `node${nodeIndex}`, 'devnet.pid');
+export async function stopManagedNode(devnetDir: string, nodeIndex: number): Promise<void> {
+  if (!existsSync(resolve(devnetDir, `node${nodeIndex}`))) return;
+  // The existing scoped stop discovers supervisor/worker/store descendants by
+  // DKG_HOME as well as PID files. Cancellation can precede daemon.pid creation.
+  const { stdout } = await promisify(execFile)('bash', [resolve(REPO_ROOT, 'scripts/devnet.sh'), 'stop-node', String(nodeIndex)], {
+    env: { ...process.env, DEVNET_DIR: devnetDir }, timeout: 30_000,
+  });
+  console.log(stdout.trim());
+}
+
+async function stopHardhat(devnetDir: string): Promise<void> {
+  const pidfile = resolve(devnetDir, 'hardhat.pid');
   if (!existsSync(pidfile)) return;
-  const pid = parseInt(readFileSync(pidfile, 'utf8').trim(), 10);
+  // Playwright forces terminal colors; older devnet launchers printed numeric
+  // child.pid with ANSI colors into this file. Accept that owned legacy PID.
+  const pid = Number(stripVTControlCharacters(readFileSync(pidfile, 'utf8')).trim());
   if (Number.isFinite(pid) && pid > 0) {
-    stopPid(pid, `node${nodeIndex}`);
+    await stopPid(pid, 'Hardhat');
   }
   try { rmSync(pidfile, { force: true }); } catch { /* best-effort */ }
 }
 
-function stopHardhat(): void {
-  const pidfile = resolve(DEVNET_DIR, 'hardhat.pid');
-  if (!existsSync(pidfile)) return;
-  const pid = parseInt(readFileSync(pidfile, 'utf8').trim(), 10);
-  if (Number.isFinite(pid) && pid > 0) {
-    stopPid(pid, 'Hardhat');
-  }
-  try { rmSync(pidfile, { force: true }); } catch { /* best-effort */ }
-}
-
-export default async function globalTeardown(): Promise<void> {
-  const marker = readMarker();
+export async function cleanupManagedDevnet(
+  devnetDir: string,
+  { stopNode = stopManagedNode }: { stopNode?: typeof stopManagedNode } = {},
+): Promise<void> {
+  const markerFile = resolve(devnetDir, '.playwright-managed');
+  const marker = readMarker(markerFile);
   if (!marker) {
     console.log('[playwright] no managed-devnet marker -- leaving any running devnet alone');
     return;
@@ -73,7 +87,7 @@ export default async function globalTeardown(): Promise<void> {
 
   if (startedNodes.length === 0) {
     console.log('[playwright] marker present but all nodes were pre-existing -- nothing to stop');
-    try { rmSync(MARKER_FILE, { force: true }); } catch { /* best-effort */ }
+    try { rmSync(markerFile, { force: true }); } catch { /* best-effort */ }
     return;
   }
 
@@ -82,17 +96,19 @@ export default async function globalTeardown(): Promise<void> {
     (preExisting.size ? ` (leaving pre-existing: ${[...preExisting].join(', ')})` : ''),
   );
 
-  try {
-    for (const nodeIndex of startedNodes) {
-      stopNode(nodeIndex);
-    }
-    // Only stop Hardhat when we started a fresh cluster (no pre-existing nodes).
-    if (preExisting.size === 0) {
-      stopHardhat();
-    }
-  } finally {
-    try { rmSync(MARKER_FILE, { force: true }); } catch { /* best-effort */ }
+  // Try every owned process even if one does not exit. Preserve the marker on
+  // failure so the workflow cleanup can retry without losing ownership.
+  const results = await Promise.allSettled(startedNodes.map(index => stopNode(devnetDir, index)));
+  if (preExisting.size === 0 && !marker.preExistingHardhat) {
+    results.push(...await Promise.allSettled([stopHardhat(devnetDir)]));
   }
+  const failures = results.filter(result => result.status === 'rejected');
+  if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'Managed devnet cleanup failed');
+  rmSync(markerFile, { force: true });
 
   console.log('[playwright] managed devnet teardown complete');
+}
+
+export default async function globalTeardown(): Promise<void> {
+  await cleanupManagedDevnet(DEVNET_DIR);
 }

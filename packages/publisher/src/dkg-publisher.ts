@@ -12,6 +12,7 @@ import { tryCreateShareCompletionEvidence } from './share-completion-evidence.js
 import { preparePromoteRecoveryBinding, assertPromoteRecoveryBinding, type PromoteRecoveryAdmission } from './promote-recovery-binding.js';
 import { throwIfCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import { readAssertionLifecycleRecord, resolveAssertionReadAuthor, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
+import { readAssertionLifecycleSubjects } from './assertion-lifecycle-subjects.js';
 import { assertExpectedKaSlotMatchesLifecycle, assertExpectedKaSlotMatchesAllocation } from './assertion-reserved-slot.js';
 import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './assertion-ka-slot-ownership.js';
 import { assertWorkingMemoryLifecycleMutable } from './working-memory-lifecycle.js';
@@ -416,6 +417,7 @@ export interface DurableRootPromotionAtomicCompanionResolver {
 }
 
 export interface DKGPublisherConfig {
+  storageAckCopyCleanupWriter?: import('./storage-ack-copy-cleanup.js').StorageAckCopyCleanupWriter;
   store: TripleStore;
   /** Trusted queue ownership scope, explicitly supplied by the composing agent. */
   promoteOwnershipReader?: PromoteOwnershipReader;
@@ -448,14 +450,9 @@ export interface DKGPublisherConfig {
   workspaceAgentRecipientResolver?: WorkspaceAgentRecipientResolver;
   /** Encrypts private/agent-gated SWM gossip with the node's Sender Key epoch state. */
   workspaceSenderKeyEncryptor?: WorkspaceSenderKeyEncryptor;
-  /** Optional out-of-Oxigraph store for immutable public SWM operation snapshots. */
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
-  /**
-   * OT-RFC-43 Option 1 — when present, the publisher allocates a deterministic
-   * packed reservedKaId for each V10 mint (and reconciles the per-author floor
-   * against the chain on first use). Omit for mock/no-chain or pre-Option-1
-   * flows; the real EVM adapter then throws on the missing reservedKaId.
-   */
+  /** Allocate packed mint IDs and reconcile the author floor on first use.
+   * Optional for mocks; real EVM publishing requires a reserved ID. */
   kaAllocator?: KaIdAllocator;
   /**
    * Synchronous root-only resolver for metadata that must share the SWM graph's
@@ -1094,7 +1091,7 @@ export class DKGPublisher implements Publisher {
     this.setWorkspaceAgentRecipientResolver(config.workspaceAgentRecipientResolver);
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;
-    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle);
+    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle, config.storageAckCopyCleanupWriter);
     this.publisherPlanner = new PublisherPlanner({
       chain: this.chain,
       resolvePublisherAddressSelection: (contextGraphId, options) =>
@@ -3530,46 +3527,19 @@ export class DKGPublisher implements Publisher {
     // graph (intentional local-only publish). NOT used on the
     // chain-failure path — that re-throws and never reaches a store
     // write.
-    const finalizeIntentionalLocalPublish = async (reasonLog: string) => {
+    // Initial graph-scoped publication is a VM writer too. Share the update/recovery/
+    // catalog lock, acquired only for local mutation, never across chain work.
+    const withPublishMaterializationLock = <T>(write: () => Promise<T>): Promise<T> => graphPublish
+      ? withMaterializationLock(options.targetMetaGraphUri ?? this.graphManager.metaGraphUri(contextGraphId),
+        graphPublish.scope.ual, write)
+      : write();
+    const finalizeIntentionalLocalPublish = (reasonLog: string) => withPublishMaterializationLock(async () => {
       for (const km of kaMetadata) {
         km.kcUal = ual;
       }
-      // RC11 / PR3: write the KC + KA metadata + tentative status quad
-      // alongside the public quads so downstream consumers
-      // (`access-handler`, `assertion-history`, the `verifiable-memory`
-      // view) can still locate this publish by its tentative UAL.
-      // Pre-PR2 this was the responsibility of the chain-failure
-      // catch block via `generateTentativeMetadata`. PR2 deleted that
-      // unconditional catch (failed *chain* publishes now write
-      // nothing locally), but the two intentional-local branches
-      // (`no on-chain CG id`, `chain not V10-ready`) both need the metadata
-      // to keep the local data-graph queryable. Replicating the
-      // tentative-metadata generation here scopes the metadata write
-      // exclusively to those intentional-skip branches and keeps the
-      // chain-failure path inert.
-      // RC11 / PR2 (review fix): preserve the exact provenance + meta-graph
-      // routing the pre-PR2 catch block did. Two strictly-additive
-      // requirements relative to the minimal call above:
-      //
-      //   1. `authorAddress` — feeds the KC row's `prov:wasAttributedTo`
-      //      so downstream consumers (`access-handler`,
-      //      `assertion-history`, the verifiable-memory view) can still
-      //      attribute the publish locally before any chain confirmation.
-      //      The on-chain `KnowledgeBatch.authorAddress` is canonical only
-      //      once the publish confirms; until then this is a self-claim.
-      //      `publisherSigner` may be undefined (no-chain / no-key path) —
-      //      skip the field in that case. (The former `dkg:Publication`
-      //      mirror keyed on `publishOperationId` was dropped — RFC
-      //      ka-metadata-trim Phase 1, zero readers.)
-      //
-      //   2. `targetMetaGraphUri` remap — every generated meta quad sits
-      //      in the default `did:dkg:context-graph:<id>/_meta` graph. If
-      //      the caller supplied a `targetMetaGraphUri` (e.g. for SWM /
-      //      private-channel meta isolation) the pre-PR2 path remapped
-      //      them; without this, intentional-local publishes targeting a
-      //      non-default meta graph would silently drop their `_meta`
-      //      triples into the wrong graph and become invisible to the
-      //      caller's own meta-graph queries.
+      // Intentional-local publishes persist tentative metadata and private slices.
+      // Chain failures never enter this branch. Preserve author attribution and
+      // caller-selected metadata routing so local reads retain the same identity.
       const commonMeta = {
         ual,
         contextGraphId,
@@ -3639,7 +3609,7 @@ export class DKGPublisher implements Publisher {
       // B3: only now that the local publish has persisted do we refresh the
       // public catalog entry (CLEAR/REPLACE — see persistCatalogEntry).
       await persistCatalogEntry();
-    };
+    });
 
     // GH #1013 — record WHY a local-only publish skipped chain so the async
     // lift can tell an honest local finalization (no chain) from a publish
@@ -4090,13 +4060,6 @@ export class DKGPublisher implements Publisher {
             q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
           );
         }
-        if (graphPublish) {
-          await replaceLocallyTrustedKnowledgeAssetControls(
-            this.store,
-            graphPublish.scope.ual,
-            confirmedQuads,
-          );
-        }
         // RC11 / PR2: write the published public quads into the root
         // data graph ONLY after the chain has confirmed (KCCreated
         // returned via `createKnowledgeAssets`). Pre-PR2 this insert
@@ -4120,32 +4083,42 @@ export class DKGPublisher implements Publisher {
             )
           : contextGraphLayerUri(contextGraphId, MemoryLayer.VerifiableMemory, vmAuthor, vmNumber, options.subGraphName);
         const vmQuads = normalizedQuads.map((q) => ({ ...q, graph: vmGraph }));
-        this.log.info(ctx, `Storing ${vmQuads.length} triples in ${vmGraph} (post-confirmation)`);
-        if (graphPublish) {
-          await this.replaceExactKnowledgeAssetGraph(
-            vmGraph,
-            vmQuads,
-            'Graph-scoped confirmed publish',
-          );
-        } else {
-          await this.store.insert(vmQuads);
-        }
-        await this.store.insert(confirmedQuads);
-        // GH #1078 — supersede/persist private slices only now that the chain
-        // has confirmed (before returning 'confirmed', so no read sees the KA
-        // confirmed without its private data).
-        await persistFinalizedPrivateSlices();
-        if (!graphPublish) {
-          await stampTrustLevel(
-            this.store,
-            vmGraph,
-            collectTrustSubjectsForRoots(
+        const persistConfirmedVm = async () => {
+          if (graphPublish) {
+            await replaceLocallyTrustedKnowledgeAssetControls(
+              this.store,
+              graphPublish.scope.ual,
+              confirmedQuads,
+            );
+          }
+          this.log.info(ctx, `Storing ${vmQuads.length} triples in ${vmGraph} (post-confirmation)`);
+          if (graphPublish) {
+            await this.replaceExactKnowledgeAssetGraph(
+              vmGraph,
               vmQuads,
-              manifestEntries.map((entry) => entry.rootEntity),
-            ),
-            TrustLevel.SelfAttested,
-          );
-        }
+              'Graph-scoped confirmed publish',
+            );
+          } else {
+            await this.store.insert(vmQuads);
+          }
+          await this.store.insert(confirmedQuads);
+          // GH #1078 — supersede/persist private slices only now that the chain
+          // has confirmed (before returning 'confirmed', so no read sees the KA
+          // confirmed without its private data).
+          await persistFinalizedPrivateSlices();
+          if (!graphPublish) {
+            await stampTrustLevel(
+              this.store,
+              vmGraph,
+              collectTrustSubjectsForRoots(
+                vmQuads,
+                manifestEntries.map((entry) => entry.rootEntity),
+              ),
+              TrustLevel.SelfAttested,
+            );
+          }
+        };
+        await withPublishMaterializationLock(persistConfirmedVm);
 
         // RFC ka-metadata-trim Phase 1: the off-chain AuthorshipProof block
         // (`dkg:authoredBy` bnode + signature quads, spec §9.0.6) is no
@@ -6432,7 +6405,7 @@ export class DKGPublisher implements Publisher {
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
     const res = await this.store.query(
-      `ASK { GRAPH <${metaGraph}> { <${lifecycleUri}> <${SWM_SHARE_COMPLETE_PRED}> ?o } }`,
+      `ASK { GRAPH <${metaGraph}> { <${lifecycleUri}> <${SWM_SHARE_COMPLETE_PRED}> ?o } }`, { source: 'publisher.hasSwmShareComplete' },
     );
     return res.type === 'boolean' && res.value;
   }
@@ -7731,10 +7704,10 @@ export class DKGPublisher implements Publisher {
   ): Promise<string> {
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
 
-    // Clear any stale lifecycle data from a previous create/discard cycle
-    // so re-using the same assertion name doesn't leave orphaned triples.
-    // This removes the assertion entity AND its prov:Activity event
-    // sub-entities (whose URIs are prefixed with the lifecycle URI).
+    // Clear supported lifecycle data from a previous create/discard cycle
+    // so re-using the same assertion name clears its previous event history.
+    // This removes the assertion entity AND provenance-linked event
+    // sub-entities within its URI prefix; unknown unlinked rows are preserved.
     //
     // OT-RFC-43 A2 — but PRESERVE the KA's persistent identity + per-layer
     // pointers (dkg:kaId / dkg:reservedUal / dkg:{wm,swm,vm}CurrentAssertion /
@@ -7809,9 +7782,7 @@ export class DKGPublisher implements Publisher {
       await assertKaSlotOwnershipAvailable(this.store, contextGraphId, agentAddress, name, kaNumber, subGraphName);
     }
 
-    const staleEvents = await this.store.query(
-      `SELECT DISTINCT ?s WHERE { GRAPH <${metaGraph}> { ?s ?p ?o . FILTER(STR(?s) = "${lifecycleSubject}" || STRSTARTS(STR(?s), "${lifecycleSubject}/")) } }`,
-    );
+    const staleEvents = await readAssertionLifecycleSubjects(this.store, metaGraph, lifecycleSubject);
     if (staleEvents.type === 'bindings') {
       for (const row of staleEvents.bindings) {
         const subj = row['s'];

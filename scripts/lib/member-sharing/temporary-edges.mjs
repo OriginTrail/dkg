@@ -4,11 +4,14 @@
 // the topology between them is, and the cleanup after them.
 //
 // Each node is an explicit record: { number, role ('owner' | 'member1' |
-// 'member2'), member (not the owner), subject (how a sentence names it),
-// label (`node<N> (<role>)`), relay (the relay a member dials the owner
-// through), overrides (its config from the first start), env (its daemon's
-// environment), peerId, agentAddress }; member 2's also `trace`, the file its
-// node writes its sync admission trace to (DKG_SYNC_ADMISSION_TRACE).
+// 'member2' | 'feeder'), member (a member of the graphs), subject (how a
+// sentence names it), label (`node<N> (<role>)`), relay (the relay a member
+// dials the owner through, and the feeder's), overrides (its config from the
+// first start), env (its daemon's environment), peerId, agentAddress };
+// member 2's also `trace`, the file its node writes its sync admission trace
+// to (DKG_SYNC_ADMISSION_TRACE). The feeder, when a fourth node number is
+// free, holds the large graph of a later attempt of case 6 and serves it to
+// member 2; it runs only while case 6 needs it, fresh for each attempt.
 
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -28,6 +31,9 @@ const DEAD_DIRECT_ADDRESS = '/ip4/127.0.0.1/tcp/9';
 const OWN_MARK = '.issue-3251-member-sharing';
 
 export class TemporaryEdges {
+  // idle: may start; ready: author; needs-stop: permanent owner fallback with
+  // unresolved shutdown; fallback: no feeder work may be started again.
+  #feederState = 'idle';
   /** `log` is { say, note } of the report. */
   constructor(devnet, { stamp, log }) {
     this.devnet = devnet;
@@ -36,6 +42,7 @@ export class TemporaryEdges {
     this.owner = null;
     this.member1 = null;
     this.member2 = null;
+    this.feeder = null;
     // Every node this run added: the cleanup stops and removes these only.
     this.started = [];
     // The starts still running, each with what cancels it.
@@ -44,10 +51,20 @@ export class TemporaryEdges {
 
   get nodes() { return [this.owner, this.member1, this.member2]; }
   get members() { return [this.member1, this.member2]; }
+  /** The node that writes case 6's next large graph: the feeder while it runs, else the owner. */
+  get largeAuthor() { return this.#feederState === 'ready' ? this.feeder : this.owner; }
+  get feederUp() { return this.#feederState === 'ready'; }
+  get feederRunning() { return this.#feederState === 'ready' || this.#feederState === 'needs-stop'; }
   /** Whether a node number is one of the temporary nodes. */
-  isTemporary(number) { return this.nodes.some(node => node?.number === number); }
+  isTemporary(number) {
+    return this.nodes.some(node => node?.number === number)
+      || (this.feeder?.number === number && this.claims(this.feeder));
+  }
 
-  ownMark(number) { return join(this.devnet.nodeDir(number), OWN_MARK); }
+  /** The name of the file that marks a node folder as this suite's: a suite built on this class names its own, so that no suite takes another's nodes for its own. */
+  get markName() { return OWN_MARK; }
+
+  ownMark(number) { return join(this.devnet.nodeDir(number), this.markName); }
 
   /** Whether a node's folder carries this run's claim: addnode wrote it there, so this run created the folder. */
   claims(node) {
@@ -62,9 +79,17 @@ export class TemporaryEdges {
    */
   removeOwnNode(number) {
     const { devnet } = this;
+    if (!existsSync(this.ownMark(number))) return `node${number} has no suite claim; it is left as it is`;
     devnet.devnetShSync(['stop-node', String(number)]);
     const end = Date.now() + 30_000;
     while (devnet.nodePorts(number).some(devnet.listening) && Date.now() < end) spawnSync('sleep', ['1']);
+    return this.removeStoppedOwnNode(number);
+  }
+
+  /** Remove a claimed directory only after its caller has stopped and drained the daemon. */
+  removeStoppedOwnNode(number) {
+    const { devnet } = this;
+    if (!existsSync(this.ownMark(number))) return `node${number} has no suite claim; it is left as it is`;
     const busy = devnet.nodePorts(number).filter(devnet.listening);
     if (busy.length) return `node${number} still listens on port(s) ${busy.join(', ')} after it was stopped; its folder is kept`;
     rmSync(devnet.nodeDir(number), { recursive: true, force: true });
@@ -89,11 +114,14 @@ export class TemporaryEdges {
   }
 
   /**
-   * The temporary nodes: the first three free numbers of 7, 8, 9, 10, or the
-   * three of `explicit` (MEMBER_SHARING_NODES), which must all be free. An
+   * The temporary nodes: the first three free numbers of 7, 8, 9, 10 for the
+   * owner and the members, and a fourth free one for the feeder; or the three
+   * or four of `explicit` (MEMBER_SHARING_NODES), which must all be free.
+   * Without a fourth number the owner holds the large graphs itself. An
    * earlier suite can leave a node folder or a running node behind; such a
-   * number is left alone. Member 1 reserves on node 1 (`relay1`), member 2 on
-   * node 2 (`relay2`), the owner on both. Returns { taken } or { problem }.
+   * number is left alone. Member 1 reserves on node 1 (`relay1`), member 2
+   * and the feeder on node 2 (`relay2`), the owner on both. Returns { taken }
+   * or { problem }.
    */
   allocate({ explicit, relay1, relay2 }) {
     const candidates = explicit ? explicit.split(',').map(Number) : NODE_CANDIDATES;
@@ -104,12 +132,12 @@ export class TemporaryEdges {
       if (why) taken.push(`node${number}: ${why}`);
       else free.push(number);
     }
-    if (explicit ? taken.length > 0 || free.length !== 3 : free.length < 3) {
-      return { problem: `no three free node numbers among ${candidates.join(', ')} (${taken.join('; ') || 'MEMBER_SHARING_NODES must name three'})` };
+    if (explicit ? taken.length > 0 || ![3, 4].includes(free.length) : free.length < 3) {
+      return { problem: `no three free node numbers among ${candidates.join(', ')} (${taken.join('; ') || 'MEMBER_SHARING_NODES must name three or four'})` };
     }
-    const [owner, member1, member2] = free;
+    const [owner, member1, member2, feeder] = free;
     const record = (number, role, subject, relay, overrides, env = {}) => ({
-      number, role, member: role !== 'owner', subject, label: `node${number} (${role})`, relay, overrides, env, peerId: null, agentAddress: null,
+      number, role, member: role.startsWith('member'), subject, label: `node${number} (${role})`, relay, overrides, env, peerId: null, agentAddress: null,
     });
     // Reachable through relays only: the owner through node 1 and node 2, member 1
     // through node 1 (the devnet's relay for an Edge), member 2 through node 2.
@@ -123,8 +151,8 @@ export class TemporaryEdges {
     // slots. So they are pinned to its policy.
     // Case 6 needs to know which admission holds its slot, and when: the node
     // writes its admission trace into its folder. Its catch-up asks one peer at
-    // a time (the owner first), so that the large graph's transfer from the
-    // owner is the pull that takes its general slot (busy-member.mjs).
+    // a time, so that the large graph's transfer from the node that holds it
+    // is the pull that takes its general slot (busy-member.mjs).
     const trace = join(this.devnet.nodeDir(member2), 'sync-admissions.jsonl');
     this.member2 = {
       ...record(member2, 'member2', 'member2', relay2,
@@ -135,7 +163,111 @@ export class TemporaryEdges {
         }),
       trace,
     };
+    // The large graphs of case 6's later attempts come from the feeder, which
+    // member 2 reaches the way it reaches the owner: through node 2. A node
+    // writes more slowly the more it holds, and the owner's writes are among
+    // those case 6 waits for, so another large graph does not go to the owner
+    // when a feeder can take it.
+    this.feeder = feeder === undefined ? null
+      : record(feeder, 'feeder', 'the feeder', relay2, { relay: relay2, announceAddresses: [DEAD_DIRECT_ADDRESS, `${relay2}/p2p-circuit`] });
     return { taken };
+  }
+
+  /**
+   * Starts the feeder and has member 2 dial it; throws when either fails. A
+   * feeder member 2 cannot dial is stopped again (feederRunning says whether
+   * that worked); the cleanup removes it either way.
+   */
+  async #startFeeder() {
+    try {
+      await this.start(this.feeder);
+      this.#feederState = 'needs-stop';
+      await this.dial(this.member2, this.feeder);
+      this.#feederState = 'ready';
+    } catch (error) {
+      // addnode can launch the daemon before readiness or identity fails.
+      // Only our current claim permits rollback; a competing suite stays untouched.
+      this.#feederState = this.claims(this.feeder) ? 'needs-stop' : 'fallback';
+      await this.#stopFeeder().catch(() => {});
+      throw error;
+    }
+  }
+
+  /** Own the retry lifecycle and return the author; failed activation is never reused. */
+  async prepareLargeGraphAuthor(attempt, beforeRelease) {
+    if (attempt === 1 || !this.feeder || ['needs-stop', 'fallback'].includes(this.#feederState)) return this.owner;
+    try {
+      if (this.feederRunning) {
+        await beforeRelease();
+        await this.#renewFeeder();
+      } else await this.#startFeeder();
+      return this.feeder;
+    } catch (error) {
+      this.#feederState = this.feederRunning ? 'needs-stop' : 'fallback';
+      this.log.note(`the feeder could not be set up (${error?.message ?? error}): the owner writes the large graphs of case 6's later attempts`);
+      return this.owner;
+    }
+  }
+
+  /** Audit the outgoing participant before removing evidence; always attempt shutdown twice. */
+  async finishFeeder(beforeRelease, failed) {
+    if (!this.feederRunning) return;
+    try {
+      await beforeRelease();
+    } finally {
+      const error = await this.#stopFeeder().catch(() => this.#stopFeeder()).then(() => null, cause => cause);
+      if (error) failed(error);
+    }
+  }
+
+  async redialFeeder() {
+    if (this.largeAuthor === this.feeder) await this.dial(this.member2, this.feeder);
+  }
+
+  /**
+   * Replaces the feeder with a fresh one on the same number: the one that ran
+   * is stopped and its folder removed, with all it held, and a new one starts
+   * (startFeeder). A node writes more slowly the more it holds, and its store
+   * stalls under the large graphs of several attempts, so each later attempt
+   * gets a feeder that holds nothing yet. Throws when it cannot be removed or
+   * started.
+   */
+  async #renewFeeder() {
+    const { feeder } = this;
+    await this.#stopFeeder();
+    if (existsSync(this.devnet.nodeDir(feeder.number))) {
+      if (!this.claims(feeder)) throw new Error(`node${feeder.number} is no longer this run's; it is left as it is`);
+      const problem = this.removeStoppedOwnNode(feeder.number);
+      if (problem) { this.#feederState = 'needs-stop'; throw new Error(problem); }
+    }
+    // Without its folder the number is free again: another suite may take it
+    // before the new feeder's addnode does, and the cleanup must not remove
+    // that suite's node. start() records the new feeder once its addnode has
+    // claimed the folder.
+    this.started = this.started.filter(node => node !== feeder);
+    feeder.peerId = null;
+    feeder.agentAddress = null;
+    await this.#startFeeder();
+  }
+
+  /**
+   * Stops a running feeder, so that the cases after case 6 run with the owner
+   * and the members alone. A stop that fails leaves it marked running, and
+   * stopFeeder may be called again.
+   */
+  async #stopFeeder() {
+    if (!this.feederRunning) return;
+    this.#feederState = 'needs-stop';
+    if (!this.claims(this.feeder)) {
+      throw new Error(`node${this.feeder.number} is no longer this run's; it is left as it is`);
+    }
+    await this.stop(this.feeder);
+    const stopped = await waitFor(async () => {
+      const busy = this.devnet.nodePorts(this.feeder.number).filter(this.devnet.listening);
+      return { ok: busy.length === 0, busy };
+    }, 30_000);
+    if (!stopped.ok) throw new Error(`node${this.feeder.number} still listens on port(s) ${stopped.busy.join(', ')} after it was stopped`);
+    this.#feederState = 'fallback';
   }
 
   /**
@@ -158,7 +290,7 @@ export class TemporaryEdges {
       added = await this.devnet.devnetSh(['addnode', String(node.number), 'edge'], {
         ...node.env,
         DEVNET_ADDNODE_CONFIG_OVERRIDES: JSON.stringify(node.overrides),
-        DEVNET_ADDNODE_MARK_NAME: OWN_MARK,
+        DEVNET_ADDNODE_MARK_NAME: this.markName,
         DEVNET_ADDNODE_MARK_TEXT: `${this.stamp} ${node.role} starting`,
       }, undefined, { signal: pending.signal });
     } finally {
@@ -183,13 +315,16 @@ export class TemporaryEdges {
   }
 
   /** A member dials the owner through its relay; the owner's reservation there may need a moment. */
-  async dialOwner(member) {
-    const multiaddr = `${member.relay}/p2p-circuit/p2p/${this.owner.peerId}`;
+  dialOwner(member) { return this.dial(member, this.owner); }
+
+  /** A member dials another node through the member's relay, on which that node holds a reservation. */
+  async dial(member, to) {
+    const multiaddr = `${member.relay}/p2p-circuit/p2p/${to.peerId}`;
     const dialed = await waitFor(async () => {
       const answer = await this.devnet.api(member, 'POST', '/api/connect', { multiaddr }, { timeoutMs: 30_000 });
       return { ok: answer.status === 200 && answer.json?.connected !== false, why: brief(answer) };
     }, 120_000, 3000);
-    if (!dialed.ok) throw new Error(`${member.label} could not dial the owner through the relay: ${dialed.why}`);
+    if (!dialed.ok) throw new Error(`${member.label} could not dial ${to.subject} through the relay: ${dialed.why}`);
   }
 
   async stop(node) {
@@ -263,6 +398,14 @@ export class TemporaryEdges {
     }
     const kept = join(this.devnet.dir, 'issue-3251-member-sharing', this.stamp);
     for (const node of this.started) {
+      // Only a folder that still carries this run's claim is stopped and
+      // removed: a number whose folder this run gave up (a feeder it replaced)
+      // may be another suite's by now, and one without a folder has nothing to
+      // stop.
+      if (!this.claims(node)) {
+        if (existsSync(this.devnet.nodeDir(node))) this.log.say(`node${node.number} is not this run's any more; it is left as it is`);
+        continue;
+      }
       this.devnet.devnetShSync(['stop-node', String(node.number)]);
       if (failed && existsSync(this.devnet.logFile(node))) {
         mkdirSync(kept, { recursive: true });

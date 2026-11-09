@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { markCoreTrustedGraph, queryWithPublicSnapshotTrust } from '../../agent/src/public-snapshot-evidence.js';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
@@ -14,9 +14,7 @@ import {
   shadowContextGraphIdsFromMetricSubscriptionCandidates,
 } from '../src/daemon/metrics-queries.js';
 
-// Guards the shared COUNT parser the daemon's metric getters depend on. The
-// getters themselves are intentionally uncached (metricsSource is consumed only
-// by the 30s MetricsCollector tick, so each snapshot re-reads the store fresh).
+// Guards the shared COUNT parser the daemon's reconciled metric snapshot uses.
 describe('parseRdfInt', () => {
   it('parses RDF typed-integer literals and bare numbers, defaulting to 0', () => {
     expect(parseRdfInt('"1000"^^<http://www.w3.org/2001/XMLSchema#integer>')).toBe(1000);
@@ -249,38 +247,40 @@ describe('countContextGraphsFromGraphUris', () => {
 });
 
 describe('createStoreCountMetrics', () => {
-  it('reads each count with its own source label', async () => {
-    const query = vi.fn(async () => ({ bindings: [{ c: '"5"^^<http://www.w3.org/2001/XMLSchema#integer>' }] }));
-    const metrics = createStoreCountMetrics(query);
-    expect(await Promise.all([metrics.getTotalTriples(), metrics.getTotalKCs(), metrics.getTotalKAs(),
-      metrics.getConfirmedKCs(), metrics.getTentativeKCs()])).toEqual([5, 5, 5, 5, 5]);
-    expect(query.mock.calls.map(([, options]) => (options as { source: string }).source)).toEqual([
-      'daemon.metrics.totalTriples', 'daemon.metrics.totalKCs', 'daemon.metrics.totalKAs',
-      'daemon.metrics.confirmedKCs', 'daemon.metrics.tentativeKCs',
-    ]);
-  });
-
   it('keeps counting after a core-cache job, leaving the marked graph out as unscoped reads do', async () => {
     const store = new OxigraphStore();
     try {
       const engine = new DKGQueryEngine(store);
       // The composition agent.query uses for a query without a context graph.
-      const metrics = createStoreCountMetrics((sparql) => queryWithPublicSnapshotTrust(store, engine, sparql, {}, undefined));
+      let now = 1_000;
+      const metrics = createStoreCountMetrics(
+        (sparql) => queryWithPublicSnapshotTrust(store, engine, sparql, {}, undefined),
+        { now: () => now, reconcileIntervalMs: 300 },
+      );
       const DKG = 'http://dkg.io/ontology/';
       await store.insert([
         { subject: 'did:dkg:evm:31337/0xab/1', predicate: `${DKG}status`, object: '"confirmed"', graph: 'did:dkg:context-graph:local/_meta' },
         { subject: 'did:dkg:evm:31337/0xab/1/1', predicate: `${DKG}partOf`, object: 'did:dkg:evm:31337/0xab/1', graph: 'did:dkg:context-graph:local/_meta' },
+        { subject: 'did:dkg:evm:31337/0xab/1/2', predicate: `${DKG}partOf`, object: 'did:dkg:evm:31337/0xab/1', graph: 'did:dkg:context-graph:local/_meta' },
         { subject: 'did:dkg:evm:31337/0xcd/2', predicate: `${DKG}status`, object: '"tentative"', graph: 'did:dkg:context-graph:imported/_meta' },
         { subject: 'did:dkg:evm:31337/0xcd/2', predicate: `${DKG}rootEntity`, object: 'urn:entity', graph: 'did:dkg:context-graph:imported/_meta' },
       ]);
-      const read = async () => ({
-        triples: await metrics.getTotalTriples(), kcs: await metrics.getTotalKCs(), kas: await metrics.getTotalKAs(),
-        confirmed: await metrics.getConfirmedKCs(), tentative: await metrics.getTentativeKCs(),
-      });
-      expect(await read()).toEqual({ triples: 4, kcs: 2, kas: 2, confirmed: 1, tentative: 1 });
+      const read = async () => {
+        const counts = await metrics.getStoreCountSnapshot();
+        return {
+          triples: counts.totalTriples, kcs: counts.totalKCs, kas: counts.totalKAs,
+          confirmed: counts.confirmedKCs, tentative: counts.tentativeKCs,
+        };
+      };
+      expect(await read()).toEqual({ triples: 5, kcs: 2, kas: 3, confirmed: 1, tentative: 1 });
+      // The real query engine normalizes ASK to `{ bindings: [{ result: 'true' }] }`.
+      // Prove that shape authorizes reuse without another exact COUNT.
+      now += 30;
+      expect(await read()).toEqual({ triples: 5, kcs: 2, kas: 3, confirmed: 1, tentative: 1 });
       await markCoreTrustedGraph(store, 'imported');
-      // Two local triples plus the trust marker; nothing from the marked graph.
-      expect(await read()).toEqual({ triples: 3, kcs: 1, kas: 1, confirmed: 1, tentative: 0 });
+      now += 270;
+      // Three local triples plus the trust marker; nothing from the marked graph.
+      expect(await read()).toEqual({ triples: 4, kcs: 1, kas: 2, confirmed: 1, tentative: 0 });
     } finally {
       await store.close();
     }

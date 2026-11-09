@@ -18,6 +18,8 @@ flowchart LR
   SWM --> VM["explicit dkg ka publish or publish-async"]
 ```
 
+Start with the [worked OKF tutorial](../build/okf-tutorial.md) for a supplied bundle, expected query result, and export workflow. The commands below are the detailed reference for this source revision; inspect `dkg okf <command> --help` on an older installed release.
+
 ## Import
 
 ```bash

@@ -47,6 +47,19 @@ async function settle<T>(job: Promise<T>, stepMs = 500, maxSteps = 2_000) {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('public snapshot exact recovery pacing', () => {
+  it('prefers the peer that completed the prior batch while retaining fallback providers', async () => {
+    const calls: string[] = [];
+    vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async request => {
+      calls.push(request.remotePeerId);
+      if (request.remotePeerId === 'partial-core' && calls.length === 1) return outcome();
+      if (request.remotePeerId === 'complete-core' && calls.length === 3) return outcome();
+      return outcome({ committedExactAssetUals: selected(request), disposition: 'found', streamOutcome: 'complete' });
+    });
+    const result = await recover({ peers: ['partial-core', 'complete-core'] });
+    expect(result.committed).toEqual(new Set(uals));
+    expect(calls).toEqual(['partial-core', 'complete-core', 'complete-core', 'partial-core']);
+  });
+
   it('asks a peer whose stream broke again only after it has served the graph', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const calls: Array<{ peer: string; transport: string | undefined; at: number }> = [];

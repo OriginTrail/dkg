@@ -1,3 +1,4 @@
+import { pinnedPrivatePlacementAuthorityV1 } from './support/finalized-placement-decision-fixture.js';
 /**
  * GH#3081 — the catalog placement timing: how the time from one observer call to the end of its
  * placement attempt is split, that a wait hears exactly the attempt that released its own waiter
@@ -47,6 +48,21 @@ function fields(message: string): Record<string, string> {
 }
 
 describe('catalog placement timing', () => {
+  it('includes queue listing in successful and failed pass durations', () => {
+    const { timing, clock } = harness();
+    timing.passReading();
+    clock.now = 100;
+    timing.passStarted(new Set(['repair']));
+    clock.now = 120;
+    timing.passEnded();
+    expect(timing.queueStatus({ count: 0, oldestRequestedAt: undefined }, false).lastPassDurationMs).toBe(120);
+    clock.now = 200;
+    timing.passReading();
+    clock.now = 250;
+    timing.passEnded();
+    expect(timing.queueStatus({ count: 0, oldestRequestedAt: undefined }, false).lastPassDurationMs).toBe(50);
+  });
+
   it('splits an observer wait into request, queue and the phases of the attempt that released it', async () => {
     const { timing, clock, lines, log } = harness();
     const wait = timing.beginWait(ASSET, createOperationContext('publishFromSWM', 'job-7'));
@@ -557,11 +573,12 @@ describe('catalog placement timing through the finalized-private supervisor', ()
       listDurableInventoryScopes: () => [],
       listLocalAuthorAddresses: () => [AUTHOR],
       acceptsPublicRootLane: () => true,
-      acceptsFinalizedPrivateLane: () => true,
+      readFinalizedPlacementAuthority: () => pinnedPrivatePlacementAuthorityV1(repairMarker()),
       readRepairRevision: () => ({ scopeIdentity: 'scope-1', headRevision: 'head-1' }),
       readPrivateFailure: () => null,
       writePrivateFailures: () => {},
       listFinalizedPrivateRepairs: () => markers,
+      listFinalizedPrivateRepairsAsync: async () => markers,
       repairFinalizedPrivatePlacement: repair,
       reconcile: async () => null,
       warn: () => {},

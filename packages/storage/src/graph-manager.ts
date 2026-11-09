@@ -1,3 +1,4 @@
+import { listStoredContextGraphOwnerCandidates } from './stored-context-graph-owners.js';
 import type { Quad, QueryOptions, TripleStore } from './triple-store.js';
 import {
   contextGraphDataUri,
@@ -216,11 +217,12 @@ async function listDeclaredSlashContextGraphs(
   for (let offset = 0; offset < candidateUris.length; offset += MAX_CONTEXT_GRAPH_DECLARATION_BATCH) {
     const values = candidateUris
       .slice(offset, offset + MAX_CONTEXT_GRAPH_DECLARATION_BATCH)
-      .map((uri) => `<${uri}>`)
+      // Bind metadata before lookup; late string filters also visit unrelated graphs.
+      .map((uri) => `(<${uri}> <${uri}/_meta>)`)
       .join(' ');
     const result = await store.query(
       `SELECT DISTINCT ?ctxGraph WHERE {
-        VALUES ?ctxGraph { ${values} }
+        VALUES (?ctxGraph ?metaGraph) { ${values} }
         VALUES ?rootType { ${rootTypes} }
         {
           GRAPH <${SYSTEM_ONTOLOGY_GRAPH}> {
@@ -238,7 +240,6 @@ async function listDeclaredSlashContextGraphs(
           GRAPH ?metaGraph {
             ?ctxGraph <${RDF_TYPE}> ?rootType .
           }
-          FILTER(STR(?metaGraph) = CONCAT(STR(?ctxGraph), "/_meta"))
         }
       }`,
       options,
@@ -969,28 +970,9 @@ export class ContextGraphManager {
    * persisted storage graphs. This is an inventory boundary only: callers
    * still resolve read authority for every returned candidate.
    */
-  async listStoredContextGraphOwnerCandidates(options: QueryOptions = {}): Promise<string[]> {
-    options.signal?.throwIfAborted();
-    const graphUris = await listGraphsByPrefix(this.store, CG_PREFIX, {
-      ...options,
-      source: options.source ?? 'storage.contextGraphOwnerCandidates',
-    });
-    const candidates = new Set<string>();
-    let visited = 0;
-    for (const graph of graphUris) {
-      // Preserve cancellation responsiveness without imposing a cardinality
-      // limit: ordinary per-KA graph growth can legitimately be large.
-      if (visited++ % 512 === 511) await new Promise<void>((resolve) => setImmediate(resolve));
-      options.signal?.throwIfAborted();
-      if (!graph.startsWith(CG_PREFIX)) continue;
-      const owners = contextGraphStorageOwnerCandidates(graph);
-      if (owners === undefined) {
-        throw new Error('Cannot authorize unscoped query: unrecognized stored Context Graph owner');
-      }
-      for (const id of owners) candidates.add(id);
-    }
-    options.signal?.throwIfAborted();
-    return [...candidates];
+  async listStoredContextGraphOwnerCandidates(options: QueryOptions = {},
+    materializationMeter?: { consumeBytes(bytes: number): void }): Promise<string[]> {
+    return listStoredContextGraphOwnerCandidates(this.store, options, materializationMeter);
   }
 
   /**

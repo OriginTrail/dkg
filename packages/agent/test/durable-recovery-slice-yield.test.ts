@@ -10,7 +10,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import { SYNC_PAGE_SIZE } from '../src/dkg-agent-constants.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { DurableRecoveryRunner, type DurableRecoveryRunnerDependencies } from '../src/sync/durable-recovery-runner.js';
-import { runDurableSync, type DurableMetaContinuation } from '../src/sync/requester/durable-sync.js';
+import { runGraphOwnedDurableSyncDetailed, type DurableMetaContinuation } from '../src/sync/requester/durable-sync.js';
 import { deleteSyncPageCheckpoint, fetchSyncPages } from '../src/sync/requester/page-fetch.js';
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
 import type { DurableBatchVerificationMode } from '../src/sync-verify-worker.js';
@@ -124,13 +124,14 @@ async function recoverWithSpentSlices(peer: ReturnType<typeof servingPeer>) {
   const info: string[] = [];
   const dataRounds: Array<{ manifestBound: boolean; bounded: boolean }> = [];
   const dataCheckpoints: Array<{ offset: number; terminal: boolean }> = [];
-  const round = (durableMetaContinuation: DurableMetaContinuation) => runDurableSync({
+  const round = (durableMetaContinuation: DurableMetaContinuation) => runGraphOwnedDurableSyncDetailed({
     ctx,
     remotePeerId: PEER,
-    contextGraphIds: [CG],
+    contextGraphId: CG,
     durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
     settlementSliceDeadline: Date.now(),
-    durableMetaContinuation,
+    recovery: { meta: durableMetaContinuation, holdings: {} },
+    contentProofs: { assertOwnership() {}, prove: async () => ({ assertCurrent() {}, close() {}, retain() {}, held: new Set(writes) }) },
     fetchSyncPages: (request) => {
       if (request.phase === 'data') {
         dataRounds.push({
@@ -196,7 +197,10 @@ async function recoverWithSpentSlices(peer: ReturnType<typeof servingPeer>) {
     isPrivateContextGraph: async () => false,
     orderPeerIds: (peerIds) => [...peerIds],
     isSyncCapable: async () => true,
-    executeSlice: (_peerId, continuation) => round(continuation),
+    executeSlice: async (_peerId, { meta: continuation }) => {
+      const detailed = await round(continuation);
+      return detailed;
+    },
     logDebug: () => {},
     logInfo: (message) => { info.push(message); },
     logWarn: (message) => { info.push(message); },

@@ -23,7 +23,7 @@ function node(overrides: Record<string, unknown> = {}) {
   Object.assign(agent, {
     defaultAgentAddress: OWNER, config: {}, log: { info() {}, warn() {}, debug() {}, error() {} },
     store, queryEngine: { query }, subscribedContextGraphs: new Map(),
-    resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', source: 'system', reason: 'test', metadataBootstrap: 'eligible' }),
+    resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public', source: 'system', reason: 'test', metadataBootstrap: 'eligible' }),
     resolveSharedMemoryReadAdmission: async () => ({ outcome: 'allowed' }),
     ...overrides,
   });
@@ -55,6 +55,17 @@ describe('a count the node refuses to read', () => {
     expect(await agent.query(COUNT, { contextGraphId: 'cg-1', callerAgentAddress: OTHER,
       includeContextGraphPartitions: true, includeSharedMemoryMeta: true })).toEqual(NO_DATA_COUNT);
     expect(query).not.toHaveBeenCalled();
+  });
+
+  it('applies shared-memory admission to the typed statistics operation', async () => {
+    const admission = vi.fn(async () => ({ outcome: 'denied' }));
+    const execute = vi.fn(async () => []);
+    const { agent } = node({ resolveSharedMemoryReadAdmission: admission,
+      queryEngine: { readContextGraphNamedGraphStats: (_cg: string, _options: unknown,
+        gate: import('@origintrail-official/dkg-query').NamedGraphStatsBatchGate) => gate('shared-memory', execute) } });
+    expect(await agent.readContextGraphNamedGraphStats('cg-1', { callerAgentAddress: OTHER })).toEqual([]);
+    expect(admission).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('forwards metadata expansion only after shared-memory admission succeeds', async () => {

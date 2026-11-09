@@ -1,11 +1,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, expect, it } from 'vitest';
-import { activeDefaultStoreWorkPriority, withDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
+import { activeDefaultStoreWorkPriority, controlStoreOptions, withDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
 import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection } from '../src/async-lift-journal-completion.js';
 import { withKeyedLocks } from '../src/keyed-lock.js';
 import type { AdmissionJournalEntry } from '../src/lift-job.js';
 import { DEFAULT_JOURNAL_GRAPH_URI, JOURNAL_AT, JOURNAL_JOB_ID, JOURNAL_KIND, JOURNAL_SEQ, parseIntegerLiteral, parseLiteral } from '../src/async-lift-control-plane.js';
 import { completesWithin, fixture, gate, observe } from './_helpers/journal-completion.js';
+import { resolveLane } from './_helpers/queue-boundary-oracle.js';
 
 function facts(jobId: string, lineageKey = 'test-lineage'): Omit<AdmissionJournalEntry, 'seq' | 'at'> {
   return { jobId, lineageKey, kind: 'admission' };
@@ -292,14 +293,19 @@ describe('journal completion ownership boundaries', () => {
     await completion.drain();
   });
 
-  it('retains caller async-local storage and store priority across deferred dispatch', async () => {
+  // OT-RFC-73 S1 (D-4, #3286): the journal's two store calls run after canonical release, in the caller's own async
+  // context. The caller's async-local storage and ambient lane still flow into that deferred dispatch (with the
+  // control path OFF the ambient lane is what decides, exactly as before), but the queue tag no longer depends on
+  // them: both calls carry the control options explicitly, so with the path ON they resolve to the publisher's
+  // control path whatever lane the caller, or the code that released the section, was running in.
+  it('carries the control options explicitly across deferred dispatch and retains the caller context for the path-off lane', async () => {
     const f = fixture();
     const completion = new AsyncLiftJournalCompletion(f.store, 'urn:test:priority');
     const context = new AsyncLocalStorage<string>();
     const gateHeld = gate();
     const seen: unknown[] = [];
-    f.hooks.read = async () => { seen.push('MAX', context.getStore(), activeDefaultStoreWorkPriority()); };
-    f.hooks.insert = async () => { seen.push('INSERT', context.getStore(), activeDefaultStoreWorkPriority()); };
+    f.hooks.read = async (options) => { seen.push('MAX', context.getStore(), activeDefaultStoreWorkPriority(), options); };
+    f.hooks.insert = async (_entry, options) => { seen.push('INSERT', context.getStore(), activeDefaultStoreWorkPriority(), options); };
     const operation = context.run('request', () => withDefaultStoreWorkPriority('background', () =>
       runCanonical(completion, async (section) => {
         section.append(facts('job'), () => {});
@@ -308,6 +314,15 @@ describe('journal completion ownership boundaries', () => {
     await gateHeld.reached;
     withDefaultStoreWorkPriority('ack', gateHeld.release);
     await operation;
-    expect(seen).toEqual(['MAX', 'request', 'background', 'INSERT', 'request', 'background']);
+    const max = controlStoreOptions('publisher', 'publisher.asyncLift.allocateJournalSeq');
+    const insert = controlStoreOptions('publisher', 'publisher.asyncLift.appendJournalEntry');
+    expect(seen).toEqual(['MAX', 'request', 'background', max, 'INSERT', 'request', 'background', insert]);
+    // The exact options set no priority, and the lane they resolve to is the queue's, not the ambient one.
+    expect(max).toEqual({ source: 'publisher.asyncLift.allocateJournalSeq', controlQueue: 'publisher' });
+    expect(insert).toEqual({ source: 'publisher.asyncLift.appendJournalEntry', controlQueue: 'publisher' });
+    for (const options of [max, insert]) {
+      expect(resolveLane({ options, ambient: 'background' }, true)).toBe('control:publisher');
+      expect(resolveLane({ options, ambient: 'background' }, false)).toBe('background');
+    }
   });
 });

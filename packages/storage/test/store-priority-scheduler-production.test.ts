@@ -55,3 +55,17 @@ describe('production store scheduler timeout diagnostics', () => {
     }
   });
 });
+
+describe('production external-store capacity', () => {
+  afterEach(() => { vi.unstubAllEnvs(); vi.resetModules(); });
+
+  it('applies the explicit policy to the shared adapter scheduler', async () => {
+    vi.stubEnv('DKG_STORE_CONCURRENCY_POLICY', 'configured');
+    vi.stubEnv('DKG_STORE_MAX_CONCURRENT', '6');
+    vi.resetModules();
+    const { externalStorePriorityScheduler } = await import('../src/store-priority-scheduler.js');
+    expect(externalStorePriorityScheduler.snapshot).toMatchObject({
+      maxConcurrent: 6, normalInflightLimit: 4, ackReservedSlots: 1, healthReservedSlots: 1,
+    });
+  });
+});

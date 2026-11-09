@@ -64,17 +64,28 @@ export const GRAPH_OWNER_CONNECT_ATTEMPTS = 2;
  * not tried again for this long, so later shares do not wait for them.
  */
 export const GRAPH_OWNER_RETRY_AFTER_MS = 60_000;
+/**
+ * A peer a connection failed to counts as unreachable for this long, longer
+ * than the pause before it is tried again: an owner whose peers all failed
+ * within it is not resolved, and its phonebook entry is worth looking up again.
+ */
+export const GRAPH_OWNER_FAILURE_MEMORY_MS = 10 * 60_000;
 
 /** What the owner route uses of the agent. */
 export interface GraphOwnerRoutePorts {
-  /** The peers of the graph's owner; empty when this node owns the graph or none is known. */
+  /** The peers of the graph's owner, newest first; empty when this node owns the graph or none is current. */
   ownerPeerIds(contextGraphId: string, signal: AbortSignal): Promise<readonly string[]>;
   isConnected(peerId: string): boolean;
   /** Connect to the peer, through a relay when that is the only route; true once it takes shares. */
   connect(peerId: string, signal: AbortSignal): Promise<boolean>;
   /** False while the peer is not to be tried again after a failed connection. */
   mayConnect(peerId: string): boolean;
+  /** A connection to the peer failed lately, whether or not it may be tried again. */
+  failedRecently(peerId: string): boolean;
+  /** The peers in the order to try them: any that no connection failed to, then the longest-failed. */
+  inConnectOrder(peerIds: readonly string[]): readonly string[];
   connectFailed(peerId: string): void;
+  connectSucceeded(peerId: string): void;
   /** Make the peer a follower of the graph, so that the share's fan-out sends to it. */
   noteFollower(contextGraphId: string, peerId: string): void;
 }
@@ -85,8 +96,9 @@ export interface GraphOwnerRoutePorts {
  * peers this node can connect to. One deadline bounds the owner's lookup and
  * the connection attempts together; the share goes out without the owner when
  * it passes. A peer a connection failed to is left out for
- * {@link GRAPH_OWNER_RETRY_AFTER_MS}. Returns the peers it made followers;
- * never throws.
+ * {@link GRAPH_OWNER_RETRY_AFTER_MS}, and then goes behind every peer not tried
+ * yet, so that dead peers listed ahead of a live one cannot use up the attempts
+ * of every pass. Returns the peers it made followers; never throws.
  */
 export async function routeShareToGraphOwner(
   ports: GraphOwnerRoutePorts,
@@ -100,7 +112,7 @@ export async function routeShareToGraphOwner(
   ).catch(() => null) ?? [];
   let routed = owners.filter((peerId) => ports.isConnected(peerId));
   if (routed.length === 0) {
-    const candidates = owners.filter((peerId) => ports.mayConnect(peerId));
+    const candidates = ports.inConnectOrder(owners.filter((peerId) => ports.mayConnect(peerId)));
     for (const peerId of candidates.slice(0, options.attempts ?? GRAPH_OWNER_CONNECT_ATTEMPTS)) {
       if (deadline.aborted) break;
       const reached = await resolveWithinAbort(
@@ -108,6 +120,7 @@ export async function routeShareToGraphOwner(
         deadline,
       ).catch(() => false);
       if (reached === true) {
+        ports.connectSucceeded(peerId);
         routed = [peerId];
         break;
       }
@@ -140,13 +153,13 @@ export class GraphOwnerPeers {
   /**
    * The owner's peers. Peers that were found are reused for
    * {@link GRAPH_OWNER_PEERS_TTL_MS}. An owner that was not found (none known,
-   * or the lookup failed or ran out of time) is looked up again after
-   * {@link GRAPH_OWNER_RETRY_AFTER_MS}: an Edge's phonebook can learn it at any
-   * time, and in between shares do not wait for the lookup.
+   * or the lookup failed or ran out of time), or whose peers have all failed, is
+   * looked up again after {@link GRAPH_OWNER_RETRY_AFTER_MS}: an Edge's phonebook
+   * can learn it at any time, and in between shares do not wait for the lookup.
    */
   async of(contextGraphId: string, signal?: AbortSignal): Promise<readonly string[]> {
     const cached = this.#byGraph.get(contextGraphId);
-    const reuseFor = cached?.peerIds.length === 0 ? GRAPH_OWNER_RETRY_AFTER_MS : GRAPH_OWNER_PEERS_TTL_MS;
+    const reuseFor = cached?.peerIds.every((peerId) => this.failedRecently(peerId)) ? GRAPH_OWNER_RETRY_AFTER_MS : GRAPH_OWNER_PEERS_TTL_MS;
     if (cached !== undefined && this.#now() - cached.at < reuseFor) return cached.peerIds;
     const peerIds = await this.#resolve(contextGraphId, signal).catch((): readonly string[] => []);
     this.#byGraph.delete(contextGraphId);
@@ -160,10 +173,29 @@ export class GraphOwnerPeers {
     return failedAt === undefined || this.#now() - failedAt >= GRAPH_OWNER_RETRY_AFTER_MS;
   }
 
+  /** A connection to the peer failed less than {@link GRAPH_OWNER_FAILURE_MEMORY_MS} ago. */
+  failedRecently(peerId: string): boolean {
+    const failedAt = this.#failedAt.get(peerId);
+    return failedAt !== undefined && this.#now() - failedAt < GRAPH_OWNER_FAILURE_MEMORY_MS;
+  }
+
+  /** The peers, in their order, ahead of those a connection failed to, the longest-failed first. */
+  inConnectOrder(peerIds: readonly string[]): readonly string[] {
+    const failedAt = (peerId: string): number => this.#failedAt.get(peerId) ?? Number.NEGATIVE_INFINITY;
+    return peerIds
+      .map((peerId, index) => ({ peerId, index }))
+      .sort((left, right) => (failedAt(left.peerId) - failedAt(right.peerId)) || left.index - right.index)
+      .map(({ peerId }) => peerId);
+  }
+
   connectFailed(peerId: string): void {
     this.#failedAt.delete(peerId);
     if (this.#failedAt.size >= MAX_CACHED_GRAPHS) this.#failedAt.delete(this.#failedAt.keys().next().value as string);
     this.#failedAt.set(peerId, this.#now());
+  }
+
+  connectSucceeded(peerId: string): void {
+    this.#failedAt.delete(peerId);
   }
 }
 

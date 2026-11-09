@@ -1,6 +1,7 @@
 import { collectInventoryScopes, encodeInventory, verifyInventoryScope } from './inventory-scope.mjs';
 import { collectCatalogs } from './catalog-collector.mjs';
 import { loadCampaign } from './campaign-manifest.mjs';
+import { getAllJobPages } from './job-pages.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -15,10 +16,15 @@ const dir = path.resolve('.tmp/2963/evidence', arm, label); fs.mkdirSync(dir, { 
 const save = (name, value) => fs.writeFileSync(path.join(dir, name + '.json'), JSON.stringify(value, null, 2));
 let status;
 const token = await loadApiClientToken(new DkgHomeFiles(home));
-for (const route of ['/api/status', '/api/publisher/jobs?limit=1000', '/api/knowledge-assets/swm/share-jobs']) {
+const get = async (route) => {
   const r = await fetch(`http://127.0.0.1:${cfg.apiPort}${route}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(60000) });
-  const captured = { status: r.status, value: await r.json() };
-  save(route.split('?')[0].replaceAll('/', '-'), captured);
+  return { status: r.status, value: await r.json() };
+};
+// Both job lists are read a page at a time and saved in the shape of the complete route, `{ status, value: { jobs } }`.
+// A walk that ends on `complete` holds the jobs listed for the whole walk; that never proves a missing job is absent.
+for (const route of ['/api/status', '/api/publisher/jobs', '/api/knowledge-assets/swm/share-jobs']) {
+  const captured = route === '/api/status' ? await get(route) : await getAllJobPages(get, route);
+  save(route.replaceAll('/', '-'), captured);
   if (route === '/api/status') status = captured;
 }
 const db = new Database(path.join(home, 'rfc64-sync/inventory-v1.sqlite3'), { readonly: true });

@@ -767,7 +767,10 @@ describe('recent shared-memory pull runtime (#3251)', () => {
         isConnected: (peerId: string) => dialed.includes(peerId),
         connect: async (peerId: string) => { dialed.push(peerId); return true; },
         mayConnect: () => true,
+        failedRecently: () => false,
+        inConnectOrder: (peerIds: readonly string[]) => peerIds,
         connectFailed: () => {},
+        connectSucceeded: () => {},
         noteFollower: (_contextGraphId: string, peerId: string) => { followers.push(peerId); },
       });
       const pulled: string[] = [];

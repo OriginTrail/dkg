@@ -1,3 +1,4 @@
+import { quarantineUnusableSwmHistory } from './swm-history-admission.js';
 import { snapshotOperation, type WorkspaceSnapshotScope } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -396,7 +397,7 @@ async function recoverContextGraphSwmUnlocked(
       completed: false,
     };
   }
-  const metaQuads = deps.includeRootScope === false
+  let metaQuads = deps.includeRootScope === false
     ? meta.quads.filter((quad) => (
       isNamedSubgraphSharedMemoryMetaGraph(deps.contextGraphId, quad.graph)
     ))
@@ -425,6 +426,10 @@ async function recoverContextGraphSwmUnlocked(
     registeredSubGraphNames: recoveryRegistered,
     excludedSubGraphNames: excluded,
   });
+
+  // Admit history before any incremental or final apply can replace active heads.
+  metaQuads = quarantineUnusableSwmHistory(metaQuads, graphScopedDescriptors.flatMap(descriptor =>
+    descriptor.equivalentOperationSubjects.map(subject => ({ graph: descriptor.metaGraph, subject }))));
 
   // Classify legacy roots from metadata alone. The verifier does not need data
   // rows to derive entityCreators, and this lets a rootless-only CG avoid the

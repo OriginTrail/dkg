@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { MemoryLayer, contextGraphLayerUri } from '@origintrail-official/dkg-core';
 import {
   OxigraphStore,
   type TripleStore,
@@ -20,6 +21,20 @@ async function removeTempSubGraph(store: TripleStore): Promise<void> {
 }
 
 describe('removeSubGraph graph-set maintenance', () => {
+  it('removes every canonical memory layer and legacy assertions, retaining neighboring subgraphs', async () => {
+    const store = new OxigraphStore();
+    const layers = [MemoryLayer.WorkingMemory, MemoryLayer.SharedWorkingMemory, MemoryLayer.VerifiableMemory];
+    const removed = layers.map(layer => contextGraphLayerUri('review-cg', layer, '0x00000000000000000000000000000000000000ef', 7, 'temp'));
+    removed.push('did:dkg:context-graph:review-cg/temp/assertion/legacy/7');
+    const retained = layers.map(layer => contextGraphLayerUri('review-cg', layer, '0x00000000000000000000000000000000000000ef', 7, 'temp-other'));
+    try {
+      await store.insert([...removed, ...retained].map(graph => ({ graph, subject: 'urn:s', predicate: 'urn:p', object: '"value"' })));
+      await removeTempSubGraph(store);
+      for (const graph of removed) expect(await store.countQuads(graph)).toBe(0);
+      for (const graph of retained) expect(await store.countQuads(graph)).toBe(1);
+    } finally { await store.close(); }
+  });
+
   it('declares the context-graph meta graph on the server-side deregistration update', async () => {
     const inner = new OxigraphStore();
     const updateCalls: Array<{ sparql: string; options?: UpdateOptions }> = [];

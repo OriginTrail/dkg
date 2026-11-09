@@ -94,7 +94,7 @@ it.each([false, true])('one-shot sharing preserves uncertainty and stops before 
   expect(record.status).toBe(503);
   expect(JSON.parse(record.body)).toMatchObject({ created: true, partial: true, admissionOutcome: 'indeterminate',
     jobId: 'original-uncertain-job', statusPath: '/api/knowledge-assets/swm/share-jobs/original-uncertain-job',
-    recovery: expect.stringContaining('Observe this job ID') });
+    recovery: 'Poll this job ID; do not resend. A missing status response does not prove non-admission; if every reply was lost, reconcile the share.' });
   expect(publishFromFinalizedAssertion).not.toHaveBeenCalled();
   expect(promote).not.toHaveBeenCalled();
 });

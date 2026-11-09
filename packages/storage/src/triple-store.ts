@@ -1,9 +1,9 @@
+import type { MeasuredGraphInventory } from './graph-inventory-materialization.js';
 /**
  * TripleStore — pure SPARQL 1.1 interface for any RDF repository.
  * No vendor-specific methods. Any SPARQL-capable store (Oxigraph, Blazegraph,
  * Neptune, GraphDB, Jena, etc.) can implement this interface.
  */
-
 import { dirname, join } from 'node:path';
 import {
   DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES,
@@ -71,6 +71,7 @@ export const STORE_WORK_PRIORITIES = Object.freeze([
   'background',
 ] as const);
 export type StoreWorkPriority = (typeof STORE_WORK_PRIORITIES)[number];
+export type StoreControlQueue = 'share' | 'publisher';
 
 export function isStoreWorkPriority(value: unknown): value is StoreWorkPriority {
   return typeof value === 'string'
@@ -106,6 +107,8 @@ export interface QueryOptions {
    * may use `background`.
    */
   priority?: StoreWorkPriority;
+  /** Control work of this async queue: runs on its own scheduler when that path is on (store-control-path.ts). */
+  controlQueue?: StoreControlQueue;
   /**
    * Best-effort caller cancellation. Async backends should reject promptly when
    * aborted; synchronous embedded backends may only observe the signal before
@@ -113,8 +116,9 @@ export interface QueryOptions {
    */
   signal?: AbortSignal;
   /**
-   * Optional pre-parse cap for remote response bodies. HTTP adapters stream
-   * and reject above this bound before JSON/N-Quads materialization.
+   * Optional cap for one query response. HTTP adapters reject while streaming
+   * before JSON/N-Quads materialization; local worker adapters reject before
+   * copying a normalized result into the daemon process.
    */
   maxResponseBytes?: number;
   /** Independent bound on hydrated literal bytes; defaults to maxResponseBytes. */
@@ -322,6 +326,8 @@ export interface TripleStore {
    */
   readonly graphEnumerationVisibility?: (graph: string) => boolean;
   listGraphs(options?: QueryOptions): Promise<string[]>;
+  /** Internal measured enumeration; decorators retain source cost across projections. */
+  readGraphInventory?(prefix: string | undefined, options?: QueryOptions): Promise<MeasuredGraphInventory>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
   deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number>;

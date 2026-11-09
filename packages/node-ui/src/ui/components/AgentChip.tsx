@@ -52,8 +52,7 @@ function initials(name: string): string {
  * N6 polish (item 4) — when we fall back to a raw identifier (no
  * resolved agent profile available), truncate so libp2p peer ids
  * (`12D3K…b9a3`) and eth addresses (`0xaaaa…bbbb`) don't blow the
- * pill layout. Pattern matches plan S13 (`agent-docs/context-graph-
- * implementation-plan.md`): head 6 + ellipsis + tail 4. Short
+ * pill layout. Use head 6 + ellipsis + tail 4. Short
  * identifiers (<= head+tail+1) render unchanged so we never insert
  * an ellipsis that hides nothing.
  */

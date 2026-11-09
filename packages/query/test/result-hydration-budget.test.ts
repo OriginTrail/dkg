@@ -11,7 +11,9 @@ it('separates caller-result hydration from bounded metadata reads while preservi
   });
   await reads.query('result');
   await reads.catalog.query('metadata');
-  await reads.shared.query('shared');
+  const discovery = await reads.shared.measure(lane => lane.query('shared'));
+  expect(reads.shared.replay(discovery)).toEqual({ type: 'bindings', bindings: [] });
+  expect(discovery.byteCount).toBe(Buffer.byteLength(JSON.stringify({ type: 'bindings', bindings: [] })));
   const calls = query.mock.calls as unknown as Array<[string, Record<string, unknown>]>;
   expect(calls[0][1]).toMatchObject({ maxResponseBytes: 256 * 1024, maxLiteralHydrationBytes: 16_384, signal: controller.signal });
   expect(calls[1][1]).toMatchObject({ maxResponseBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES,

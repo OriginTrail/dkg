@@ -7,28 +7,33 @@ import { test, expect } from '../../fixtures/base.js';
 import {
   waitForDevnetStatus,
   devnetApiFetch,
-  requireDevnetPrecondition,
   requireDevnetNode,
 } from '../../helpers/devnet.js';
 import {
   listContextGraphs,
+  waitForContextGraph,
   runWmSwmVmPipeline,
   createWmAssertion,
   buildTestQuads,
   promoteAssertion,
 } from '../../helpers/devnet-publish.js';
 
+import { PRIMARY_CG, UI_NODE } from '../../helpers/real-node.js';
+import { requireSeededUserGraph } from '../../helpers/lifecycle-fixture.js';
+
 test.describe.configure({ mode: 'serial' });
 
 const run: { cgId?: string; cgName?: string; label?: string; assertionName?: string; kaId?: string } = {};
 
 test.beforeAll(async () => {
-  await requireDevnetNode(test, 1);
-  await waitForDevnetStatus(1);
-  const cgs = await listContextGraphs(1);
-  requireDevnetPrecondition(test, cgs.length === 0, 'No context graphs on devnet');
-  run.cgId = cgs[0]!.id;
-  run.cgName = cgs[0]!.name;
+  await requireDevnetNode(test, UI_NODE);
+  await waitForDevnetStatus(UI_NODE);
+  await waitForContextGraph(PRIMARY_CG, UI_NODE);
+  // The daemon lists system graphs too (often Agent Registry first). The UI
+  // intentionally hides those. Bind to the fixture by ID, never list order.
+  const graph = requireSeededUserGraph(await listContextGraphs(UI_NODE), PRIMARY_CG);
+  run.cgId = graph.id;
+  run.cgName = graph.name;
 });
 
 test.describe('WM → SWM → VM API pipeline', () => {
@@ -37,6 +42,7 @@ test.describe('WM → SWM → VM API pipeline', () => {
     const name = `e2e-wm-only-${stamp}`;
     const res = await createWmAssertion({
       contextGraphId: run.cgId!,
+      nodeNum: UI_NODE,
       name,
       quads: buildTestQuads(run.cgId!, stamp, `WM Only ${stamp}`),
       alsoShareSwm: false,
@@ -49,17 +55,18 @@ test.describe('WM → SWM → VM API pipeline', () => {
     const name = `e2e-swm-${stamp}`;
     const create = await createWmAssertion({
       contextGraphId: run.cgId!,
+      nodeNum: UI_NODE,
       name,
       quads: buildTestQuads(run.cgId!, stamp, `SWM Test ${stamp}`),
       alsoShareSwm: false,
     });
     expect(create.ok).toBe(true);
-    const promote = await promoteAssertion({ contextGraphId: run.cgId!, assertionName: name });
+    const promote = await promoteAssertion({ contextGraphId: run.cgId!, assertionName: name, nodeNum: UI_NODE });
     expect(promote.ok).toBe(true);
   });
 
   test('full WM → SWM → VM pipeline mints a confirmed on-chain kaId', async () => {
-    const result = await runWmSwmVmPipeline({ contextGraphId: run.cgId! });
+    const result = await runWmSwmVmPipeline({ contextGraphId: run.cgId!, nodeNum: UI_NODE });
     expect(result.assertionName).toBeTruthy();
     run.label = result.label;
     run.assertionName = result.assertionName;
@@ -91,13 +98,23 @@ test.describe('WM → SWM → VM API pipeline', () => {
 
 test.describe('WM → SWM → VM UI verification', () => {
   test('published entity label appears in VM layer after refresh', async ({ shell, leftPanel, page }) => {
-    test.skip(!run.label || !run.cgName, 'Pipeline did not produce a label');
+    expect(run.label, 'Pipeline must produce a label').toBeTruthy();
+    expect(run.cgName, 'Seeded user graph must be ready').toBeTruthy();
     await shell.goto();
     await leftPanel.expandProject(run.cgName!);
     await page.locator('[data-layer="vm"]').click();
+    // Observe a newly issued VM read, so a stale rendered label cannot stand
+    // in for the refresh. The VM graph filter excludes VM metadata; WM/SWM
+    // reads have different filters and must not satisfy this readiness check.
+    const refreshed = page.waitForRequest(request => {
+      if (!request.url().endsWith('/api/query') || request.method() !== 'POST') return false;
+      const body = request.postDataJSON();
+      return body.contextGraphId === run.cgId && body.sparql?.includes('_verifiable_memory_meta');
+    });
     await page.getByRole('button', { name: 'Refresh Context Graph data' }).click();
-    await page.waitForTimeout(3000);
-    await expect(page.getByText(run.label!, { exact: false })).toBeVisible({ timeout: 15_000 });
+    const response = await (await refreshed).response();
+    expect(response?.ok(), 'Refresh must complete a successful VM read').toBe(true);
+    await expect(page.getByText(run.label!, { exact: true })).toBeVisible({ timeout: 15_000 });
   });
 
   test('operations view loads after publish activity', async ({ shell, header, page }) => {
@@ -109,10 +126,12 @@ test.describe('WM → SWM → VM UI verification', () => {
 
 test.describe('KA update (devnet API)', () => {
   test('update endpoint requires a precomputed attestation for on-chain update', async () => {
-    test.skip(!run.cgId || !run.kaId, 'Pipeline did not produce a kaId');
+    expect(run.cgId, 'Seeded user graph must be ready').toBeTruthy();
+    expect(run.kaId, 'Pipeline must produce a kaId').toBeTruthy();
     const stamp = Date.now();
     const res = await devnetApiFetch('/api/update', {
       method: 'POST',
+      nodeNum: UI_NODE,
       body: JSON.stringify({
         contextGraphId: run.cgId,
         kaId: run.kaId,

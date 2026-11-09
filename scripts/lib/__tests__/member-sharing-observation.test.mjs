@@ -82,7 +82,7 @@ const writesApi = accepts => async (node, method, path, body) => {
   throw new Error(`unexpected ${method} ${path}`);
 };
 
-test('the observation layer keeps each member\'s history with the definition; a definition obtained and lost is not #3264', async () => {
+test('the observation layer keeps each member\'s history with the definition; a refused write fails whatever that history', async () => {
   // Neither member is seen holding the definition while its subscription is observed. Member 1 then obtains it:
   // the node accepts its root write. It loses it again before its sub-graph write, which is refused as a write to
   // an unknown graph. Member 2 never obtains it: both of its writes are refused. Member 3's subscription was never
@@ -115,10 +115,7 @@ test('the observation layer keeps each member\'s history with the definition; a 
   }
   const verdict = text => lines.find(line => line.includes(text))?.match(/^ {2}\[(\w+)\]/)?.[1];
   assert.equal(verdict('"member1 live root (1)"'), 'PASS', lines.join('\n'));
-  assert.equal(verdict('"member1 live sub-graph (2)"'), 'FAIL', lines.join('\n'));
-  assert.ok(lines.find(line => line.includes('"member1 live sub-graph (2)"')).endsWith('the author held the definition before and lost it, so this is not #3264'));
-  assert.equal(verdict('"member2 live root (3)"'), 'XFAIL', lines.join('\n'));
-  assert.equal(verdict('"member2 live sub-graph (4)"'), 'XFAIL', lines.join('\n'));
-  // No known history: no exemption.
-  assert.equal(verdict('"member3 live root (5)"'), 'FAIL', lines.join('\n'));
+  for (const write of ['"member1 live sub-graph (2)"', '"member2 live root (3)"', '"member2 live sub-graph (4)"', '"member3 live root (5)"']) {
+    assert.equal(verdict(write), 'FAIL', lines.join('\n'));
+  }
 });

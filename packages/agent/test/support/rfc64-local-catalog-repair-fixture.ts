@@ -5,6 +5,8 @@ import { join } from 'node:path';
 
 import {
   assertCanonicalGraphScopedAuthorSealV1,
+  assertUnsignedContextGraphPolicyEnvelopeV1,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
   buildAssertionSealQuads,
   buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
@@ -17,8 +19,10 @@ import {
   type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
   type Digest32V1,
+  type DecimalU64V1,
   type EvmAddressV1,
   type NetworkIdV1,
+  TypedEventBus, generateEd25519Keypair,
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
@@ -28,15 +32,18 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
+  DKGPublisher,
   computeFlatKCRootV10,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
-import { afterEach, expect } from 'vitest';
+import { afterEach, expect, vi } from 'vitest';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 import { DKGAgent } from '../../src/index.js';
 import type {
+  Rfc64CatalogActivationInputV1,
   Rfc64PublicCatalogActivationInputV1,
 } from '../../src/rfc64/public-catalog-activation-config-v1.js';
 import {
@@ -93,6 +100,7 @@ afterEach(async () => {
 
 interface StartRepairAgentOptionsV1 {
   readonly name: string;
+  readonly nodeRole?: 'core' | 'edge';
   readonly dataDir?: string;
   readonly storePath?: string;
   /** Replaces the in-memory store, for example with {@link scheduledRepairStoreV1}. */
@@ -101,6 +109,8 @@ interface StartRepairAgentOptionsV1 {
   readonly autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
   readonly bootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
   readonly activation?: Rfc64PublicCatalogActivationInputV1;
+  readonly rollout?: Rfc64CatalogActivationInputV1['rollout'];
+  readonly catalogActivation?: Rfc64CatalogActivationInputV1;
   readonly beforeStart?: (agent: DKGAgent) => void | Promise<void>;
 }
 
@@ -116,7 +126,7 @@ export async function startRepairAgentV1(
     listenHost: '127.0.0.1',
     listenPort: 0,
     bootstrapPeers: [],
-    nodeRole: 'edge',
+    nodeRole: options.nodeRole ?? 'edge',
     store: options.store ?? new OxigraphStore(options.storePath),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
@@ -124,13 +134,14 @@ export async function startRepairAgentV1(
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
-    syncContextGraphs: options.syncContextGraphs
-      ?? (options.activation !== undefined && options.activation.enabled !== false
+    rfc64CatalogActivation: options.catalogActivation ?? (options.rollout === undefined ? undefined : { rollout: options.rollout }),
+    syncContextGraphs: options.syncContextGraphs === undefined
+      ? (options.activation !== undefined && options.activation.enabled !== false
         ? options.activation.bootstrap?.acceptedPublicPolicies.map(
           ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
         ) ?? []
-        : []),
-    ...(options.activation === undefined ? {} : {
+        : []) : [...options.syncContextGraphs],
+    ...(options.activation === undefined && options.catalogActivation?.deploymentProfile === undefined ? {} : {
       networkIdentity: {
         networkId: await computeNetworkId(),
         chainId: NATIVE_DEPLOYMENT.networkId,
@@ -202,8 +213,8 @@ export function catalogScopeDigestV1(): Digest32V1 {
     ownershipTransitionDigest: null,
     subGraphName: null,
     authorAddress: AUTHOR,
-    era: '0',
-    bucketCount: '1',
+    era: '0' as DecimalU64V1,
+    bucketCount: '1' as DecimalU64V1,
   });
 }
 
@@ -216,9 +227,11 @@ export function bootstrapConfigV1(
     contextGraphId: CONTEXT_GRAPH_ID,
     ownerAddress: AUTHOR,
   });
+  const policyEnvelope = unsignedOpenContextGraphPolicyEnvelopeV1(policy);
+  assertUnsignedContextGraphPolicyEnvelopeV1(policyEnvelope);
   return {
     acceptedPublicPolicies: [{
-      policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+      policyEnvelope,
       targets: includeRemoteTarget ? [{
         authorAddress: AUTHOR,
         providers: ['12D3KooWRepairProvider'],
@@ -231,10 +244,11 @@ export function bootstrapConfigV1(
 export async function authorSealV1(
   kaNumber: bigint,
   assertionVersion = '1',
+  quads: readonly Quad[] = PROJECTION_QUADS,
 ): Promise<CanonicalGraphScopedAuthorSealV1> {
   const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
   const assertionMerkleRoot = ethers.hexlify(
-    computeFlatKCRootV10([...PROJECTION_QUADS], []),
+    computeFlatKCRootV10([...quads], []),
   ) as Digest32V1;
   const typedData = buildAuthorAttestationTypedData({
     chainId: BigInt(NATIVE_DEPLOYMENT.assertedAtChainId),
@@ -261,7 +275,7 @@ export async function authorSealV1(
     contentScopeVersion: '2',
     kaUal: `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`,
     assertionVersion,
-    publicTripleCount: String(PROJECTION_QUADS.length),
+    publicTripleCount: String(quads.length),
     privateTripleCount: '0',
     privateMerkleRoot: null,
   } as unknown as CanonicalGraphScopedAuthorSealV1;
@@ -311,6 +325,12 @@ export async function seedDurableWorkspaceAssetV1(
   agent: DKGAgent,
   suffix: string,
   reservedKaId: bigint,
+  accessPolicy: 'public' | 'ownerOnly' = 'public',
+  options: Readonly<{
+    seal?: CanonicalGraphScopedAuthorSealV1;
+    quads?: readonly Quad[];
+    shareOperationId?: string;
+  }> = {},
 ): Promise<Readonly<{
   seal: AssertionSeal;
   scopeDigest: Digest32V1;
@@ -318,8 +338,8 @@ export async function seedDurableWorkspaceAssetV1(
   shareOperationId: string;
 }>> {
   const assertionCoordinate = `repair-${suffix}`;
-  const shareOperationId = `repair-operation-${suffix}`;
-  const canonicalSeal = await authorSealV1(reservedKaId);
+  const shareOperationId = options.shareOperationId ?? `repair-operation-${suffix}`;
+  const canonicalSeal = options.seal ?? await authorSealV1(reservedKaId);
   const seal = assertionSealV1(canonicalSeal);
   const assertionUri = contextGraphAssertionUri(
     CONTEXT_GRAPH_ID,
@@ -338,7 +358,7 @@ export async function seedDurableWorkspaceAssetV1(
     kav10Address: seal.kav10Address,
     reservedKaId: seal.reservedKaId!,
     finalizedAtIso: seal.finalizedAtIso,
-    contentScopeVersion: seal.contentScopeVersion!,
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
     kaUal: seal.kaUal!,
     assertionVersion: seal.assertionVersion!,
     publicTripleCount: seal.publicTripleCount!,
@@ -352,10 +372,10 @@ export async function seedDurableWorkspaceAssetV1(
     shareOperationId,
     kaUal: canonicalSeal.kaUal,
     assertionVersion: canonicalSeal.assertionVersion,
-    quads: PROJECTION_QUADS,
+    quads: options.quads ?? PROJECTION_QUADS,
     privateTripleCount: 0,
     publisherPeerId: agent.peerId,
-    accessPolicy: 'public',
+    accessPolicy,
     agentAddress: AUTHOR,
     timestamp: new Date('2026-07-19T12:35:00.000Z'),
   });
@@ -379,7 +399,39 @@ export async function seedDurableWorkspaceAssetV1(
       ownershipTransitionDigest: null,
       subGraphName: null,
       authorAddress: AUTHOR,
-      era: '0',
+      era: '0' as DecimalU64V1,
     }),
+  });
+}
+
+/** Real initial publisher and VM writes; only chain confirmation and ACKs are hermetic. */
+export async function publishInitialCatalogAssetV1(agent: DKGAgent,
+  seal: CanonicalGraphScopedAuthorSealV1, quads: readonly Quad[], onConfirmed: () => void) {
+  const chain = new MockChainAdapter(NETWORK_ID, AUTHOR);
+  chain.seedIdentity(AUTHOR, 1n); chain.minimumRequiredSignatures = 1;
+  vi.spyOn(chain, 'getEvmChainId').mockResolvedValue(BigInt(NATIVE_DEPLOYMENT.assertedAtChainId));
+  vi.spyOn(chain, 'getKnowledgeAssetsLifecycleAddress').mockResolvedValue(NATIVE_DEPLOYMENT.assertedAtKav10Address);
+  const create = chain.createKnowledgeAssets.bind(chain);
+  vi.spyOn(chain, 'createKnowledgeAssets').mockImplementation(async input => {
+    const result = await create(input);
+    // The mock appends a transaction index to its hash; the production reader expects 32 bytes.
+    const receipt = { ...result, txHash: ethers.keccak256(ethers.toUtf8Bytes(result.txHash)) };
+    onConfirmed(); return receipt;
+  });
+  const publisher = new DKGPublisher({ store: agent.store, chain, eventBus: new TypedEventBus(),
+    keypair: await generateEd25519Keypair(), publisherPrivateKey: AUTHOR_WALLET.privateKey,
+    publisherNodeIdentityId: 1n });
+  return publisher.publish({ contextGraphId: CONTEXT_GRAPH_ID, onChainContextGraphId: '1',
+    quads: [...quads], publisherPeerId: 'initial-catalog-fixture', accessPolicy: 'public',
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION, kaUal: seal.kaUal,
+    assertionVersion: seal.assertionVersion, publicTripleCount: Number(seal.publicTripleCount), privateTripleCount: 0,
+    precomputedAttestation: { expectedMerkleRoot: ethers.getBytes(seal.assertionMerkleRoot), authorAddress: AUTHOR,
+      reservedKaId: BigInt(seal.reservedKaId), schemeVersion: Number(seal.authorSchemeVersion), signature: { r: ethers.getBytes(seal.authorAttestationR),
+        vs: ethers.getBytes(seal.authorAttestationVS) } },
+    v10ACKProvider: async () => {
+      const signature = ethers.Signature.from(await AUTHOR_WALLET.signMessage('mock-initial-ack'));
+      return [{ peerId: 'mock-initial-core', nodeIdentityId: 1n,
+        signatureR: ethers.getBytes(signature.r), signatureVS: ethers.getBytes(signature.yParityAndS) }];
+    },
   });
 }

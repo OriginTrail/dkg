@@ -686,6 +686,29 @@ describe('import artifact daemon routes', () => {
   // shape: cross-agent reads succeed (200) when bytes are local, fail
   // cleanly (404) when bytes haven't been replicated, and the existing
   // 403 path stays in force for any other policy combo (covered above).
+  it('treats Markdown maxBytes as a whole-file acceptance cap, without truncating', async () => {
+    const markdown = 'x\n'.repeat(5 * 1024 * 1024 / 2);
+    const entry = await fileStore.put(Buffer.from(markdown), 'text/markdown');
+    const contextGraphId = 'cg-whole-markdown';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const { agent } = makeAgent({
+      contextGraphId, assertionName, assertionUri,
+      fileHash: entry.keccak256, markdownHash: entry.keccak256,
+      markdownForm: `urn:dkg:file:${entry.keccak256}`,
+      onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+    });
+    await startRoutes({ agent });
+    const path = '/api/knowledge-assets/import-artifact/read-markdown';
+    const smallCap = await post(path, { contextGraphId, assertionUri, maxBytes: 1024 });
+    expect(smallCap.status).toBe(413);
+    expect(smallCap.body.markdown).toBeUndefined();
+    expect(smallCap.body.bytes).toBe(Buffer.byteLength(markdown));
+    const accepted = await post(path, { contextGraphId, assertionUri, maxBytes: 5 * 1024 * 1024 });
+    expect(accepted.status).toBe(200);
+    expect(accepted.body.markdown).toBe(markdown);
+  });
+
   it('allows non-owner reads on public + open CGs when bytes are locally available (#872)', async () => {
     const entry = await fileStore.put(Buffer.from('# Public Imported\n'), 'text/markdown');
     const contextGraphId = 'cg-public-open-bytes-local';

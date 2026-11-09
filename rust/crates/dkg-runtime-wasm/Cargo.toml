@@ -9,12 +9,12 @@ rust-version.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+dkg-runtime-executor.workspace = true
 dkg-runtime-types.workspace = true
 dkg-runtime-kernel.workspace = true
 dkg-runtime-codec.workspace = true
 dkg-strategy-compiler.workspace = true
 dkg-ir.workspace = true
-sha2.workspace = true
 wasm-bindgen.workspace = true
 
 [dev-dependencies]

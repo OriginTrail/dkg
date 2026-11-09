@@ -12,7 +12,7 @@
  */
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { BoundedStdioServerTransport } from './bounded-stdio-transport.js';
 import { loadConfig, describeConfig } from './config.js';
 import { DkgClient } from './client.js';
 import { registerReadTools } from './tools.js';
@@ -63,7 +63,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
 
   await loadAdapters(server, client, config);
 
-  const transport = new StdioServerTransport();
+  const transport = new BoundedStdioServerTransport();
   await server.connect(transport);
 }
 

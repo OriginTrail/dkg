@@ -1,3 +1,4 @@
+import { isQueryResultTooLargeError } from '@origintrail-official/dkg-agent';
 import { startRequestAbortLifecycle, resolveWithinAbort, isQueryAccessDeniedError, QUERY_ACCESS_DENIED_CODE, QUERY_ACCESS_DENIED_MESSAGE } from '@origintrail-official/dkg-core';
 import { randomUUID } from 'node:crypto';
 import { authenticatedAgentAddress } from '../../auth.js';
@@ -74,7 +75,7 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
       jsonResponse(res, 503, { code: 'QUERY_DEADLINE_EXCEEDED', error: 'Local query deadline exceeded', retryable: true });
       return;
     }
-    if ((error as { code?: string })?.code === 'STORE_RESPONSE_TOO_LARGE') {
+    if (isQueryResultTooLargeError(error) || (error as { code?: string })?.code === 'STORE_RESPONSE_TOO_LARGE') {
       jsonResponse(res, 422, { code: 'QUERY_RESULT_TOO_LARGE', error: 'Store response exceeds the byte bound' });
       return;
     }

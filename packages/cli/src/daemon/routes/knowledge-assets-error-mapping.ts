@@ -1,6 +1,11 @@
+import { CATALOG_PUBLICATION_ADMISSION_CODE, isRetryableContextGraphAuthorityUnavailableError } from '@origintrail-official/dkg-agent';
 import { classifyPromoteAdmissionError } from './promote-admission-response.js';
 import type { AssertionFailureResponse } from './assertion-failure-response.js';
-import { classifyPromoteRecoveryError, type PromoteRecoveryContext } from './promote-recovery-response.js';
+import {
+  RECIPIENT_AUTHORITY_SITES,
+  classifyPromoteRecoveryError,
+  type PromoteRecoveryContext,
+} from './promote-recovery-response.js';
 export { respondPromoteRecoveryError } from './promote-recovery-response.js';
 import type { RequestContext } from './context.js';
 import {
@@ -18,7 +23,38 @@ import {
   classifyReconcileUnavailable,
   classifyStoreUnavailable,
   classifyChainRpcTransportStatus,
+  sanitizeRpcMessage,
 } from '../http-utils.js';
+
+/** Seconds a client waits before sending a publish whose graph authority was briefly unavailable again. */
+const PUBLISH_AUTHORITY_RETRY_AFTER_SECONDS = '1';
+
+/**
+ * GH#3044 — the graph's authority could not be read, or did not hold still
+ * while the recipient keys of a private graph resolved, although the publish
+ * read it again within its bound. This happens before anything is signed or
+ * sent, so the same publish may be sent again (the async lane retries it as
+ * `authority_unavailable`): a retryable 503, not a server error. The reason
+ * and the check that refused go to the daemon log as closed-set tokens.
+ */
+export function respondRetryablePublishAuthorityError(
+  res: RequestContext["res"],
+  e: any,
+  context: { contextGraphId: string; name: string; subGraphName?: string },
+): boolean {
+  if (!isRetryableContextGraphAuthorityUnavailableError(e)) return false;
+  const site = typeof e.site === 'string' && RECIPIENT_AUTHORITY_SITES.has(e.site) ? e.site : undefined;
+  process.stderr.write(`[DKG-Daemon] ${JSON.stringify({
+    event: 'knowledge_asset_publish_authority_unavailable',
+    code: e.code,
+    causeReason: e.reason,
+    ...(site ? { causeSite: site } : {}),
+    ...context,
+  })}\n`);
+  jsonResponse(res, 503, { code: e.code, error: sanitizeRpcMessage(e.message ?? String(e)), retryable: true },
+    undefined, { 'Retry-After': PUBLISH_AUTHORITY_RETRY_AFTER_SECONDS });
+  return true;
+}
 
 /**
  * GH#1778 — shared 409 mapping for the ambiguous-author VM-publish error, used
@@ -138,4 +174,11 @@ export function classifyAssertionError(e: any, context?: PromoteRecoveryContext)
 export function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
   const failure = classifyAssertionError(e, context);
   jsonResponse(res, failure.status, failure.body, undefined, failure.headers);
+}
+
+/** Only pre-publication immutable-identity failures receive this client classification. */
+export function respondCatalogPublicationAdmissionError(res: RequestContext['res'], error: unknown): boolean {
+  if (typeof error !== 'object' || error === null || !('code' in error) || error.code !== CATALOG_PUBLICATION_ADMISSION_CODE) return false;
+  jsonResponse(res, 400, { code: CATALOG_PUBLICATION_ADMISSION_CODE, error: error instanceof Error ? error.message : String(error) });
+  return true;
 }

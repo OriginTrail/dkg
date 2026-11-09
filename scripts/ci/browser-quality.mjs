@@ -1,33 +1,28 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import { playwrightExecutions } from '../lib/playwright-executions.mjs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export function summarizeBrowserQuality(report) {
   const summary = { cases: 0, firstAttemptFailed: 0, recoveredOnRetry: 0, failed: 0, skipped: 0, retries: 0, firstAttemptFailures: [] };
-  function visit(suite) {
-    for (const spec of suite.specs ?? []) {
-      for (const test of spec.tests ?? []) {
-        summary.cases++;
-        const results = test.results ?? [];
-        if (!results.length) throw new Error(`browser test has no attempt results: ${spec.title}`);
-        const expected = test.expectedStatus ?? 'passed';
-        const unexpected = (status) => status !== 'skipped' && status !== expected;
-        const firstFailed = unexpected(results[0].status);
-        if (firstFailed) {
-          summary.firstAttemptFailed++;
-          summary.firstAttemptFailures.push({ file: spec.file, title: spec.title, ...(spec.id ? { id: spec.id } : {}), ...(test.projectName ? { project: test.projectName } : {}), status: results[0].status });
-        }
-        const last = results.at(-1).status;
-        if (firstFailed && last === expected) summary.recoveredOnRetry++;
-        if (unexpected(last)) summary.failed++;
-        if (last === 'skipped') summary.skipped++;
-        summary.retries += Math.max(0, results.length - 1);
-      }
+  for (const test of playwrightExecutions(report)) {
+    summary.cases++;
+    const results = test.attempts;
+    if (!results.length) throw new Error(`browser test has no attempt results: ${test.title}`);
+    const expected = test.expectedStatus ?? 'passed';
+    const unexpected = (status) => status !== 'skipped' && status !== expected;
+    const firstFailed = unexpected(results[0].status);
+    if (firstFailed) {
+      summary.firstAttemptFailed++;
+      summary.firstAttemptFailures.push({ file: test.file, title: test.title, ...(test.id ? { id: test.id } : {}), ...(test.project ? { project: test.project } : {}), status: results[0].status });
     }
-    for (const child of suite.suites ?? []) visit(child);
+    const last = results.at(-1).status;
+    if (firstFailed && last === expected) summary.recoveredOnRetry++;
+    if (unexpected(last)) summary.failed++;
+    if (last === 'skipped') summary.skipped++;
+    summary.retries += Math.max(0, results.length - 1);
   }
-  visit(report);
   if (summary.cases === 0) throw new Error('browser report has no test cases');
   return summary;
 }

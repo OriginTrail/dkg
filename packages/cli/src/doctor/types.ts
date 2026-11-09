@@ -78,7 +78,7 @@ export interface StateSummary {
      * daemon is unreachable.
      */
     installMode: 'npm-global' | 'npm-local' | 'monorepo' | 'unknown' | null;
-    /** ~/.dkg/config.json#nodeRole — defaults to `edge`. */
+    /** `nodeRole` from ~/.dkg/config.json (or config.yaml) — defaults to `edge`. */
     nodeRole: 'edge' | 'core' | null;
     /** Reason the daemon is unreachable when version/commit/etc. are null. */
     unreachableReason?: string;
