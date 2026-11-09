@@ -76,11 +76,14 @@ export function normalizeStudio(value) {
 }
 
 export function validateStudioCapabilities(definition, capabilities) {
-  for (const n of definition.nodes) {
+  const selected = definition.nodes.map(n => {
     const c = capabilities.find(c => c.kaRef === n.kaRef && c.sourceHash === n.sourceHash && c.descriptor?.id === n.componentId
       && (n.componentId !== 'run-program' || c.operationIri === n.params.operationIri));
     if (!c?.available || n.componentId === 'run-program' && n.params.version !== c.version) throw Object.assign(new Error('A selected KA version is unavailable. Refresh the catalog and choose an approved revision.'), { code: 'WORKFLOW_CAPABILITY_CHANGED', status: 409 });
-  }
+    return c;
+  });
+  return { selected, requiresExportAuthorization: selected.some(c => c.requiresExportAuthorization)
+    || definition.nodes.some(n => component(n.componentId).writes) };
 }
 
 export function compileStudio(value, { graphId, owner, headerCredential, credentials = {}, fixture = false, providerId } = {}) {

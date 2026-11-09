@@ -32,7 +32,7 @@ async function execute(definition, items, programFn = input => ({ result: input.
   const output = await host.execute(artifact, JSON.stringify([input]), { children: [], maxCalls: 256, maxConcurrency: 1, timeoutMs: 30000 }, async effect => {
     const node = compiled.ordered.find(n => n.kaRef === effect.program);
     let value;
-    if (node.componentId === 'run-program') value = programFn(effect.args[0]);
+    if (node.componentId === 'run-program') value = await programFn(effect.args[0]);
     else {
       const v = normalizeComponentInput(component(node.componentId), effect.args[0]);
       const params = JSON.parse(v.paramsJson), rows = JSON.parse(v.itemsJson).map(item => resolveComponentValue(params.fields, item));
@@ -101,7 +101,11 @@ test('pins program version, source and approved operation separately', () => {
   const selected = compileStudio(graph([program]));
   const cap = { kind: 'program', kaRef: program.kaRef, sourceHash: program.sourceHash, descriptor: component('run-program'),
     version: program.params.version, operationIri: program.params.operationIri, available: true };
-  validateStudioCapabilities(selected.definition, [cap]);
+  assert.deepEqual(validateStudioCapabilities(selected.definition, [cap]), { selected: [cap], requiresExportAuthorization: false });
+  const otherOperation = { ...cap, operationIri: 'urn:other:operation', requiresExportAuthorization: true };
+  const otherDescriptor = { ...cap, descriptor: component('google-sheets'), requiresExportAuthorization: true };
+  assert.equal(validateStudioCapabilities(selected.definition, [otherOperation, otherDescriptor, cap]).requiresExportAuthorization, false);
+  assert.equal(validateStudioCapabilities(selected.definition, [{ ...cap, requiresExportAuthorization: true }]).requiresExportAuthorization, true);
   for (const patch of [{ version: '2.0.0' }, { sourceHash: 'f'.repeat(64) }, { operationIri: 'urn:foreign:operation' }, { available: false }])
     assert.throws(() => validateStudioCapabilities(selected.definition, [{ ...cap, ...patch }]), /unavailable/);
   const changed = structuredClone(program); changed.params.version = '2.0.0';
@@ -140,6 +144,36 @@ test('catalog exposes only enabled, source-matching, caller-approved local Progr
   }
   current = { ...binding, n8n: { workflowId: 'external-side-effect' } };
   assert.equal((await list())[0].requiresExportAuthorization, true);
+});
+
+for (const inputMode of ['each-item', 'all-items']) test(`every offered Program language executes with mapped ${inputMode} arguments`, async () => {
+  const owner = '0x' + '1'.repeat(40), graphId = 'program-test';
+  const sources = ['sexpr-v1', 'typescript-v1', 'future-language', undefined].map((language, i) => ({
+    language, programIri: 'urn:test:language:' + i, authorAgentAddress: owner, version: '1.0.0',
+    source: language === 'typescript-v1' ? 'export function run(input: any) { return { mapped: input.value }; }' : '(+ 1 2)',
+  })).map(source => ({ ...source, sourceHash: sha(source.source) }));
+  const list = createProgramCatalog({ graphId, owner, definitions: [], client: { programs: {
+    listApprovals: async () => sources.map(source => ({ operationIri: source.programIri, binding: {
+      contextGraphId: graphId, operationIri: source.programIri, enabled: true, executorAgentAddress: owner,
+      allowedCallerAgentAddresses: [owner], program: { ...source, contextGraphId: graphId, programLayer: 'wm' }, typescript: { children: [] },
+    } })),
+    getSource: async pin => sources.find(source => source.programIri === pin.programIri),
+  } } });
+  const offered = await list();
+  assert.deepEqual(offered.map(c => c.language), ['typescript-v1']);
+  const childHost = new TypeScriptProgramHost();
+  try {
+    for (const cap of offered) {
+      const node = { ...program, kaRef: cap.kaRef, sourceHash: cap.sourceHash,
+        params: { operationIri: cap.operationIri, version: cap.version, inputMode, inputMapping: { value: '{{ $json }}' } } };
+      const compiled = compileStudio(graph([node]));
+      validateStudioCapabilities(compiled.definition, [cap]);
+      const artifact = await childHost.compile(sources.find(source => source.programIri === cap.kaRef).source);
+      const proof = await execute(graph([node]), [{ value: 7 }], async input => JSON.parse(await childHost.execute(artifact,
+        JSON.stringify([input]), { children: [], maxCalls: 1, maxConcurrency: 1, timeoutMs: 30000 }, () => assert.fail('unexpected effect'))));
+      assert.deepEqual(JSON.parse(proof.receipt.output.itemsJson), [{ mapped: inputMode === 'each-item' ? { value: 7 } : [{ value: 7 }] }]);
+    }
+  } finally { await childHost.stop(); }
 });
 
 for (const mixed of [false, true]) test(`Studio service saves and runs a ${mixed ? 'mixed' : 'pure Program'} revision without native provisioning`, async () => {

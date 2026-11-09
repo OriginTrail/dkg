@@ -335,11 +335,13 @@ and run its saved version. The selected program is inspected with the same
 
 The selector reads current, enabled local approvals for the original account
 owner and exact private Working Memory source pins in this PoC's Context Graph.
+It offers `typescript-v1` Programs, which accept the mapped runtime argument.
+S-expression Programs are excluded because they do not accept runtime arguments.
 Program IRI, approved operation, version and source hash are saved together.
 It does not upload arbitrary editor code or grant additional tools. New versions
 use new Program IRIs; versions with the same label and author share a selector
 group, while the hash and IRI identify each selected revision. The PoC installs
-two pure **Scale number** examples (1.0.0 and 2.0.0). Other owner-approved Programs
+two pure **Scale number** examples (1.0.0 and 2.0.0). Other compatible owner-approved Programs
 in the same graph appear automatically. **Program KA example** demonstrates
 Edit Fields → Run Program KA → Edit Fields and produces `answer: 42`.
 
