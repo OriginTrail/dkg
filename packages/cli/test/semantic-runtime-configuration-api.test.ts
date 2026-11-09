@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { n8nWorkflowSha256 } from '../src/semantic-runtime-n8n-contract.js';
+import { n8nResultSha256, n8nWorkflowSha256 } from '../src/semantic-runtime-n8n-contract.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -659,6 +659,64 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     } finally { vi.unstubAllGlobals(); }
   });
 
+  it.each(['direct', 'copy', 'sink', 'trace', 'safe', 'safe-sink', 'safe-trace', 'missing-pin'])('binds native tenant output to operator authority (%s)', async mode => {
+    const workflowId = 'output-authority', toolIri = 'urn:dkg:tool:n8n';
+    const definition = { versionId: 'reviewed-1', nodes: ['Component', 'Receive input', 'Header copy'].map(name => ({
+      id: name, name, type: 'n8n-nodes-base.set', typeVersion: 3.4, parameters: {} })), connections: {}, settings: {} };
+    const string = { type: 'string', maxLength: 8192 };
+    const outputSchema = { type: 'object', additionalProperties: false, required: ['ok', 'itemsJson', 'portsJson', 'error'],
+      properties: { ok: { type: 'boolean' }, itemsJson: string, portsJson: string, error: string, traceJson: string } };
+    const inputSchema = { type: 'object', properties: {}, required: [], additionalProperties: false };
+    const safeResult = { nodes: ['Component'], ...(mode === 'safe-sink' ? { sinks: [{ node: 'Component', port: 0, name: 'safe' }] } : {}),
+      ...(mode === 'safe-trace' ? { traceNodes: ['Component'] } : {}) };
+    const result = mode === 'direct' ? { nodes: ['Receive input'] } : mode === 'copy' ? { nodes: ['Header copy'] }
+      : mode === 'sink' ? { nodes: ['Header copy'], sinks: [{ node: 'Header copy', port: 0, name: 'copied' }] }
+      : mode === 'trace' ? { nodes: ['Component'], traceNodes: ['Header copy'] } : safeResult;
+    const n8n = { toolIri, workflowId, workflowSha256: n8nWorkflowSha256(definition), inputSchema, outputSchema, result };
+    const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
+      export function run(input: unknown) { return invoke_tool('${toolIri}', input); }`, { graphId: graph, n8n }, [toolIri]);
+    const apiTokenFile = join(f.target.dir, 'output-api'), webhookTokenFile = join(f.target.dir, 'output-webhook');
+    const credential = 'fictional-output-test-token';
+    writeFileSync(apiTokenFile, 'fictional-output-api-token'); writeFileSync(webhookTokenFile, credential);
+    f.target.config.semanticRuntime.n8nNative = { baseUrl: 'http://127.0.0.1:5679', apiTokenFile, webhookTokenFile,
+      workflows: [{ contextGraphId: graph, executorAgentAddress: owner, workflowId, workflowSha256: n8n.workflowSha256,
+        ...(mode === 'missing-pin' ? {} : { resultSha256: n8nResultSha256({ result: safeResult, outputSchema } as any) }) }] };
+    let posts = 0;
+    const fetch = vi.fn(async (url: URL, _init: RequestInit) => {
+      const path = new URL(String(url)).pathname;
+      if (path.startsWith('/api/v1/workflows/')) return Response.json({ ...definition, id: workflowId, active: true });
+      if (path.startsWith('/webhook/')) { posts++; return Response.json({ executionId: '42' }); }
+      const run = (json: unknown) => [{ data: { main: [[{ json }]] } }];
+      return Response.json({ id: '42', workflowId, workflowVersionId: definition.versionId, status: 'success', workflowData: definition,
+        data: { resultData: { runData: { Component: run({ value: 'safe' }), 'Receive input': run({ headers: { authorization: 'Bearer ' + credential } }),
+          'Header copy': run({ copied: credential }) } } } });
+    });
+    vi.stubGlobal('fetch', fetch);
+    try {
+      if (!mode.startsWith('safe')) {
+        await expect(f.approve()).rejects.toThrow('adapter is unavailable');
+        // Existing tenant approvals must also obey a subsequently tightened installation.
+        const installed = f.target.config.semanticRuntime.n8nNative.workflows[0]!;
+        const pin = installed.resultSha256;
+        installed.resultSha256 = n8nResultSha256(n8n as any);
+        await f.approve();
+        installed.resultSha256 = pin;
+      } else await f.approve();
+      await f.client.routes.create({ ...f.operation, targetPeerId: f.agent.peerId });
+      if (mode.startsWith('safe')) {
+        const receipt = await f.client.programs.invoke({ ...f.operation, inputs: [{}] });
+        expect(receipt.outputs).toMatchObject([{ output: { itemsJson: '[{"value":"safe"}]' } }]);
+        expect(JSON.stringify(receipt)).not.toContain(credential); expect(posts).toBe(1);
+      } else {
+        const error = await f.client.programs.invoke({ ...f.operation, inputs: [{}] }).catch(e => e);
+        expect(error).toBeInstanceOf(Error); expect(String(error)).not.toContain(credential);
+        expect(posts).toBe(0); expect(fetch).not.toHaveBeenCalled();
+      }
+      const rows = await f.store.query(`SELECT ?output WHERE { GRAPH ?g { ?s <${SR}output> ?output } }`);
+      expect(JSON.stringify(rows)).not.toContain(credential);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it.each(['complete', 'declared-child', 'new-call', 'missing-acknowledgement', 'revoke', 'expire', 'epoch'])('reconciles native results without dispatching new work (%s)', async mode => {
     const extraCall = mode === 'new-call';
     const n8nTool = 'urn:dkg:tool:n8n', workflowId = 'native-inspection';
@@ -680,7 +738,7 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     const apiTokenFile = join(f.target.dir, 'native-api'), webhookTokenFile = join(f.target.dir, 'native-webhook');
     writeFileSync(apiTokenFile, 'unit-native-api-fixture'); writeFileSync(webhookTokenFile, 'unit-native-webhook-fixture');
     f.target.config.semanticRuntime.n8nNative = { baseUrl: 'http://127.0.0.1:5679', apiTokenFile, webhookTokenFile,
-      workflows: [{ contextGraphId: graph, executorAgentAddress: owner, workflowId, workflowSha256: n8n.workflowSha256 }] };
+      workflows: [{ contextGraphId: graph, executorAgentAddress: owner, workflowId, workflowSha256: n8n.workflowSha256, resultSha256: n8nResultSha256(n8n as any) }] };
     let dispatches = 0, interrupted = true, publishedVersion = definition.versionId;
     vi.stubGlobal('fetch', vi.fn(async (url: URL, _init: RequestInit) => {
       const u = new URL(String(url));

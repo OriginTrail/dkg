@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SemanticN8nGrant, SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
 import { createNativeN8nWorkflowAdapter } from '../src/semantic-runtime-n8n-native-adapter.js';
 import { collectN8nExecutionResult } from '../src/semantic-runtime-n8n-results.js';
-import { n8nObservationScope, n8nWorkflowSha256, n8nPinnedExecutionMatches, validateN8nGrant } from '../src/semantic-runtime-n8n-contract.js';
+import { n8nObservationScope, n8nResultSha256, n8nPinnedExecutionMatches, n8nWorkflowSha256, validateN8nGrant } from '../src/semantic-runtime-n8n-contract.js';
 
 const graph = 'native-n8n-poc', owner = '0x' + '1'.repeat(40), workflowId = 'native';
 const objectSchema = (properties: Record<string, any>) => ({ type: 'object' as const, properties, required: Object.keys(properties), additionalProperties: false as const });
@@ -29,7 +29,7 @@ function fixture() {
   const grant: SemanticN8nGrant = { toolIri: 'urn:dkg:tool:n8n', workflowId, workflowSha256: n8nWorkflowSha256(definition),
     inputSchema, outputSchema, result: { nodes: ['Component'], allowObservation: true } };
   const config = { baseUrl: 'http://127.0.0.1:45670', apiTokenFile, webhookTokenFile,
-    workflows: [{ contextGraphId: graph, executorAgentAddress: owner, workflowId, workflowSha256: grant.workflowSha256 }] };
+    workflows: [{ contextGraphId: graph, executorAgentAddress: owner, workflowId, workflowSha256: grant.workflowSha256, resultSha256: n8nResultSha256(grant) }] };
   let execution: any = { id: '42', workflowId, status: 'success', workflowVersionId: 'v1', workflowData: structuredClone(definition),
     data: { resultData: { runData: { Component: [{ data: { main: [[{ json: { name: 'Ana' } }]] } }], [scope]: [{ data: { main: [[{ json: {} }]] } }],
       'Receive input': [{ data: { main: [[{ json: { headers: { authorization: 'never-leak-fixture' } } }]] } }] } } } };
@@ -165,6 +165,40 @@ describe('native n8n component execution receipts', () => {
     for (const result of [{ nodes: [] }, { nodes: ['Component'], url: 'foreign' }, { nodes: ['A', 'B'], ports: ['a', 'b'] }, { nodes: ['Component'], traceNodes: ['../secret'] }])
       expect(() => validateN8nGrant({ ...f.grant, result })).toThrow('INVALID_N8N_GRANT');
   });
+});
+
+// The installation pin is independent of tenant-controlled approval fields.
+it.each(['nodes', 'ports', 'sinks', 'trace', 'schema'])('rejects altered native output contract before provider dispatch (%s)', async kind => {
+  const f = fixture();
+  if (kind === 'nodes') f.grant.result!.nodes = ['Receive input'];
+  if (kind === 'ports') f.grant.result!.ports = ['first', 'second'];
+  if (kind === 'sinks') f.grant.result!.sinks = [{ node: 'Component', port: 1, name: 'copy' }];
+  if (kind === 'trace') f.grant.result!.traceNodes = ['Receive input'];
+  if (kind === 'schema') f.grant.outputSchema = { ...f.grant.outputSchema, required: ['ok'] };
+  await expect(f.adapter().dispatch(authorization, input)).rejects.toThrow('N8N_WORKFLOW_NOT_INSTALLED');
+  expect(f.fetch).not.toHaveBeenCalled();
+});
+
+it.each(['database', 'url', 'localFile', 'expression', 'nested', 'embedded-id'])('refuses unpinned %s helpers before effects', async source => {
+  const f = fixture();
+  const child = { nodes: [{ name: 'effect', type: 'n8n-nodes-base.executeWorkflow', parameters: { source: 'database', workflowId: 'mutable' } }], connections: {} };
+  f.definition.nodes.push({ id: 'child', name: 'Child', type: 'n8n-nodes-base.executeWorkflow', typeVersion: 1.4,
+    parameters: source === 'expression' ? { source: 'parameter', workflowJson: '={{ $json.workflow }}' }
+      : source === 'nested' ? { source: 'parameter', workflowJson: JSON.stringify(child) }
+        : source === 'embedded-id' ? { source: 'parameter', workflowJson: JSON.stringify({ id: 'mutable', nodes: [], connections: {} }) } : { source, workflowId: 'mutable' } });
+  f.grant.workflowSha256 = n8nWorkflowSha256(f.definition); f.config.workflows[0]!.workflowSha256 = f.grant.workflowSha256;
+  await expect(f.adapter().dispatch(authorization, input)).rejects.toThrow('N8N_SUBWORKFLOW_NOT_PINNED');
+  expect(f.posts()).toBe(0);
+});
+
+it('withholds acknowledged output after the operator output policy changes', async () => {
+  const f = fixture(); f.setFailRead(true);
+  await expect(f.adapter().dispatch(authorization, input)).rejects.toThrow('N8N_INVOCATION_FAILED');
+  expect(f.posts()).toBe(1); f.setFailRead(false);
+  f.config.workflows[0]!.resultSha256 = 'f'.repeat(64);
+  f.fetch.mockClear();
+  await expect(f.adapter().resume!(authorization, input)).rejects.toThrow('N8N_WORKFLOW_NOT_INSTALLED');
+  expect(f.fetch).not.toHaveBeenCalled();
 });
 
 it('verifies the captured n8n 2.43.8 Studio Read Write execution with the published definition pin', () => {

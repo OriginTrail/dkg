@@ -48,10 +48,11 @@ export function validateN8nConfig(value: unknown): asserts value is SemanticN8nC
     || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) throw new Error('INVALID_N8N_CONFIGURATION');
   const seen = new Set<string>();
   for (const item of value.workflows) {
-    if (!n8nRecord(item) || !closed(item, ['contextGraphId', 'executorAgentAddress', 'workflowId', 'workflowSha256'])
+    if (!n8nRecord(item) || !closed(item, ['contextGraphId', 'executorAgentAddress', 'workflowId', 'workflowSha256', 'resultSha256'])
       || typeof item.contextGraphId !== 'string' || !validateContextGraphId(item.contextGraphId).valid
       || typeof item.executorAgentAddress !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(item.executorAgentAddress)
-      || !id(item.workflowId) || !hash(item.workflowSha256)) throw new Error('INVALID_N8N_CONFIGURATION');
+      || !id(item.workflowId) || !hash(item.workflowSha256)
+      || item.resultSha256 !== undefined && !hash(item.resultSha256)) throw new Error('INVALID_N8N_CONFIGURATION');
     const key = JSON.stringify([item.contextGraphId, item.executorAgentAddress.toLowerCase(), item.workflowId]);
     if (seen.has(key)) throw new Error('INVALID_N8N_CONFIGURATION');
     seen.add(key);
@@ -113,4 +114,26 @@ export function assertN8nValue(schema: SemanticQueryOutputSchema, value: unknown
     canonicalizeJson(value as CanonicalJsonValue, { maxBytes: 16_384, maxDepth: 12 });
     assertSemanticQueryOutput({ outputSchema: schema, outputSchemaSha256: queryOutputSchemaSha256(schema) }, value);
   } catch { throw new Error(`INVALID_N8N_${kind}`); }
+}
+
+/** Operator authority covers all returned projections, trace selectors and output schema. */
+export function n8nResultSha256(grant: Pick<SemanticN8nGrant, 'result' | 'outputSchema'>): string {
+  if (!grant.result) throw new Error('INVALID_N8N_GRANT');
+  return createHash('sha256').update(canonicalizeJson({ result: grant.result, outputSchema: grant.outputSchema } as CanonicalJsonValue, { maxBytes: 65_536, maxDepth: 30 })).digest('hex');
+}
+
+/** A parent pin must cover every executed helper before any effect is admitted. */
+export function assertN8nEmbeddedWorkflows(workflow: Record<string, unknown>, depth = 0): void {
+  if (depth > 8) throw new Error('N8N_SUBWORKFLOW_NOT_PINNED');
+  n8nWorkflowSha256(workflow);
+  for (const node of workflow.nodes as Record<string, unknown>[]) {
+    if (node.type !== 'n8n-nodes-base.executeWorkflow') continue;
+    const p = node.parameters;
+    if (!n8nRecord(p) || p.source !== 'parameter' || typeof p.workflowJson !== 'string'
+      || p.workflowJson.length > 262_144 || p.workflowJson.startsWith('=')) throw new Error('N8N_SUBWORKFLOW_NOT_PINNED');
+    let child: unknown;
+    try { child = JSON.parse(p.workflowJson); } catch { throw new Error('N8N_SUBWORKFLOW_NOT_PINNED'); }
+    if (!n8nRecord(child) || child.id !== undefined) throw new Error('N8N_SUBWORKFLOW_NOT_PINNED');
+    assertN8nEmbeddedWorkflows(child, depth + 1);
+  }
 }

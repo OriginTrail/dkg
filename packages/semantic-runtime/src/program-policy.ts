@@ -80,6 +80,8 @@ export interface SemanticN8nConfig {
     executorAgentAddress: string;
     workflowId: string;
     workflowSha256: string;
+    /** Required for native result collection: operator-approved output contract digest. */
+    resultSha256?: string;
   }>;
 }
 
