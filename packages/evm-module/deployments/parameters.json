@@ -30,6 +30,14 @@
                 "W1": "0",
                 "W2": "2"
             }
+        },
+        "ServiceSubscriptionsStorage": {
+            "maxBudgetsPerSubscription": "16"
+        },
+        "QueryInferenceStorage": {
+            "maxItemsPerBatch": "256",
+            "maxGroupsPerBatch": "32",
+            "lambdaBps": "5000"
         }
     },
     "devnet": {
@@ -107,6 +115,14 @@
                 "W1": "0",
                 "W2": "2"
             }
+        },
+        "ServiceSubscriptionsStorage": {
+            "maxBudgetsPerSubscription": "16"
+        },
+        "QueryInferenceStorage": {
+            "maxItemsPerBatch": "256",
+            "maxGroupsPerBatch": "32",
+            "lambdaBps": "5000"
         }
     },
     "mainnet": {
