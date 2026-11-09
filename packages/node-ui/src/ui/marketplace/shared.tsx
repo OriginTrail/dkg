@@ -136,12 +136,22 @@ export function AdminCard({ what }: { what: string }): React.ReactElement {
   );
 }
 
-export interface Loaded<T> { data: T | null; err: unknown; loading: boolean; reload: () => void }
+/**
+ * Where a read stands, by its latest answer: none yet; answered with `value`,
+ * which may be null (a node without a plan answers so); or failed, with the
+ * last answer before, if there was one, as `stale`.
+ */
+export type ReadStatus<T> =
+  | { state: 'unresolved' }
+  | { state: 'resolved'; value: T }
+  | { state: 'failed'; err: unknown; stale: T | null };
+
+/** A read: its status, and the same as `data` (the last good answer), `err` (the latest failure) and whether one is on its way. */
+export interface Loaded<T> { status: ReadStatus<T>; data: T | null; err: unknown; loading: boolean; reload: () => void }
 
 /** Load once on mount, keep the last good answer through a failed reload. */
 export function useLoad<T>(load: () => Promise<T>): Loaded<T> {
-  const [data, setData] = useState<T | null>(null);
-  const [err, setErr] = useState<unknown>(null);
+  const [status, setStatus] = useState<ReadStatus<T>>({ state: 'unresolved' });
   const [loading, setLoading] = useState(true);
   const inflight = useRef(false);
   const alive = useRef(true);
@@ -152,12 +162,15 @@ export function useLoad<T>(load: () => Promise<T>): Loaded<T> {
     inflight.current = true;
     setLoading(true);
     loadRef.current()
-      .then((d) => { if (alive.current) { setData(d); setErr(null); } })
-      .catch((e: unknown) => { if (alive.current) setErr(e); })
+      .then((value) => { if (alive.current) setStatus({ state: 'resolved', value }); })
+      .catch((err: unknown) => {
+        if (alive.current) setStatus((s) => ({ state: 'failed', err, stale: s.state === 'resolved' ? s.value : s.state === 'failed' ? s.stale : null }));
+      })
       .finally(() => { inflight.current = false; if (alive.current) setLoading(false); });
   }, []);
   useEffect(() => { alive.current = true; reload(); return () => { alive.current = false; }; }, [reload]);
-  return { data, err, loading, reload };
+  const data = status.state === 'resolved' ? status.value : status.state === 'failed' ? status.stale : null;
+  return { status, data, err: status.state === 'failed' ? status.err : null, loading, reload };
 }
 
 /** `in 3 h` / `5 min ago` from chain seconds. */
