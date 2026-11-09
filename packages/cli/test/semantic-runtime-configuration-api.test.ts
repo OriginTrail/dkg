@@ -658,7 +658,7 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     } finally { vi.unstubAllGlobals(); }
   });
 
-  it.each(['complete', 'declared-child', 'revoked', 'new-call', 'missing-acknowledgement'])('reconciles native results without dispatching new work (%s)', async mode => {
+  it.each(['complete', 'declared-child', 'new-call', 'missing-acknowledgement', 'revoke', 'expire', 'epoch'])('reconciles native results without dispatching new work (%s)', async mode => {
     const extraCall = mode === 'new-call';
     const n8nTool = 'urn:dkg:tool:n8n', workflowId = 'native-inspection';
     const definition = { versionId: 'published-native-1', nodes: [{ id: 'component', name: 'Component',
@@ -719,13 +719,14 @@ describe('TypeScript direct tools through shared authorization and effects', () 
         expect(dispatches).toBe(1);
         return;
       }
-      interrupted = false;
-      if (mode === 'revoked') {
-        expect(f.target.runtime!.store.revokeCapability(`urn:sr:capability:${prepared.invocationId}`, Date.now())).toBe(true);
-        await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'PROGRAM_AUTHORITY_REVOKED' });
+      if (['revoke', 'expire', 'epoch'].includes(mode)) {
+        invalidateExecutionCapability(f.target, prepared.invocationId, mode as AuthorityChange);
+        await restartNode(f.target);
+        await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ status: 403 });
         expect(dispatches).toBe(1);
         return;
       }
+      interrupted = false;
       publishedVersion = 'foreign-version';
       await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
       expect(dispatches).toBe(1);
