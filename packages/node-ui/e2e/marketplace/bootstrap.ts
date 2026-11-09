@@ -19,21 +19,25 @@
  */
 import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Address } from 'viem';
 import type { CatalogAnswer, Funding, SellerStatus } from '../../src/ui/marketplace/api/types.js';
 import { bootstrapDevnet } from '../bootstrap-devnet-runtime.js';
 import {
-  DEVNET_DIR, DEVNET_SCRIPT, REPO_ROOT, SETUP_FILE, chainUp, contextGraphOnChain, devnetEnv, fundWallet, nodeCall, nodeOk,
+  DEVNET_DIR, REPO_ROOT, SETUP_FILE, chainUp, contextGraphOnChain, devnetEnv, fundWallet, nodeCall, nodeOk,
   nodeUp, statusOf, waitFor, type MarketplaceSetup,
 } from './devnet.js';
 import { MARKETPLACE_CG, NODES, NUM_NODES, PORTS, SERVICES, WEI_PER_TRAC } from './topology.js';
 
 const log = (message: string) => console.log(`[marketplace-setup] ${message}`);
 
+/** The default suite's devnet script, which this lane drives with its own ports. */
+const DEVNET_SH = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../scripts/devnet.sh');
+
 function runDevnet(args: string[]): Promise<number> {
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawn('bash', [DEVNET_SCRIPT, ...args], { cwd: REPO_ROOT, env: devnetEnv(), stdio: ['ignore', 'inherit', 'inherit'] });
+    const child = spawn('bash', [DEVNET_SH, ...args], { cwd: REPO_ROOT, env: devnetEnv(), stdio: ['ignore', 'inherit', 'inherit'] });
     child.on('error', rejectRun);
     child.on('exit', (code) => resolveRun(typeof code === 'number' ? code : 1));
   });

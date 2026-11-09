@@ -16,7 +16,6 @@ import { DOCKER_NAME_PREFIX, PORTS } from './topology.js';
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
 /** The devnet's directory: the default suite's, so its bootstrap, teardown and Vite config find it. */
 export const DEVNET_DIR = resolve(REPO_ROOT, '.devnet');
-export const DEVNET_SCRIPT = resolve(REPO_ROOT, 'scripts/devnet.sh');
 const CONTRACTS_FILE = resolve(REPO_ROOT, 'packages/evm-module/deployments/localhost_contracts.json');
 export const RPC_URL = `http://127.0.0.1:${PORTS.hardhat}`;
 
