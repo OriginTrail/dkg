@@ -30,12 +30,18 @@ export function fmtTrac(wei: string | bigint): string {
   return s === '0' && v > 0n ? '<0.0001' : s;
 }
 
-/** `0.6` µTRAC per unit from wei per unit (1 µTRAC per token is 1 TRAC per million tokens). */
+/**
+ * `0.6` µTRAC per unit from wei per unit (1 µTRAC per token is 1 TRAC per
+ * million tokens), cut to four places: for display only, never to read back.
+ */
 export function fmtMicro(weiPerUnit: string | bigint): string {
   const v = big(weiPerUnit);
   const s = decimalOf(v, 12, 4);
   return s === '0' && v > 0n ? '<0.0001' : s;
 }
+
+/** µTRAC per unit from wei per unit, exact to the wei: a value to edit, which `weiOfMicro` reads back unchanged. */
+export const microOfWei = (weiPerUnit: string | bigint): string => decimalOf(weiPerUnit, 12, 12);
 
 /** `$0.56` / `$0.00007`: more places for a sub-cent value. */
 function fmtUsd(usd: number): string {

@@ -7,7 +7,7 @@ import React, { useEffect, useState } from 'react';
 import { copy } from '../copy.generated.js';
 import { isMarketplaceOff, marketplaceApi } from '../api/client.js';
 import type { CatalogAnswer, Plan, Subscription } from '../api/types.js';
-import { fmtMicro, fmtTrac, modelName, sumWei } from '../amounts.js';
+import { fmtMicro, fmtTrac, microOfWei, modelName, sumWei } from '../amounts.js';
 import { ErrorCard, OffCard, refusalKey, relAt, sellerName, useLoad } from '../shared.js';
 import { useMarketplaceDraftStore } from '../draftStore.js';
 import { FundFlow } from '../purchase/FundFlow.js';
@@ -20,10 +20,10 @@ import { Treasury } from '../purchase/Treasury.js';
 
 type Flow = { kind: 'fund'; epoch: 'current' | 'next'; serviceId?: string } | { kind: 'plan' } | { kind: 'top-up'; serviceId: string };
 
-/** A draft from the plan, or a fresh one with `serviceId` picked. */
+/** A draft from the plan, or a fresh one with `serviceId` picked. Each cap is the plan's to the wei, so an edit elsewhere saves it unchanged. */
 function draftOf(catalog: CatalogAnswer, plan: Plan | null, epoch: 'current' | 'next', serviceId?: string): Draft {
   const lines = plan
-    ? plan.services.map((s) => ({ serviceId: s.serviceId, valueTrac: s.valueTrac.replace(/\.0$/, ''), capMicro: fmtMicro(s.maxPricePerUnit), pinned: s.pinnedSeller ?? null }))
+    ? plan.services.map((s) => ({ serviceId: s.serviceId, valueTrac: s.valueTrac.replace(/\.0$/, ''), capMicro: microOfWei(s.maxPricePerUnit), pinned: s.pinnedSeller ?? null }))
     : [];
   const extra = serviceId && !lines.some((l) => l.serviceId === serviceId) ? catalog.services.find((s) => s.serviceId === serviceId) : undefined;
   return {

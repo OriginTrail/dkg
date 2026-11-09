@@ -8,7 +8,7 @@ import React from 'react';
 import { copy } from '../copy.generated.js';
 import { needsNodeAdmin } from '../api/client.js';
 import type { CatalogAnswer, Funding, FundingRequest, Offer, Preview, Service, ServiceRequest, SourceRequest } from '../api/types.js';
-import { fmtCount, fmtMicro, fmtTrac, modelName, unitsOf, usdOf, weiOfMicro, weiOfTrac } from '../amounts.js';
+import { fmtCount, fmtMicro, fmtTrac, microOfWei, modelName, unitsOf, usdOf, weiOfMicro, weiOfTrac } from '../amounts.js';
 import { ErrorCard, refusalKey, relAt, sellerName } from '../shared.js';
 
 export interface Line { serviceId: string; valueTrac: string; capMicro: string; pinned: number | null }
@@ -29,7 +29,7 @@ function priceIn(o: Offer, epoch: 'current' | 'next'): bigint {
 /** A new line: one TRAC, capped at the dearest seller's price, so every seller qualifies. */
 export function lineFor(s: Service, epoch: 'current' | 'next', valueTrac = '1'): Line {
   const top = s.offers.reduce((m, o) => (priceIn(o, epoch) > m ? priceIn(o, epoch) : m), 0n);
-  return { serviceId: s.serviceId, valueTrac, capMicro: fmtMicro(top), pinned: null };
+  return { serviceId: s.serviceId, valueTrac, capMicro: microOfWei(top), pinned: null };
 }
 
 /** The lines as the node takes them, or null while any is not a positive amount. */

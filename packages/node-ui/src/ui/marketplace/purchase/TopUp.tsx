@@ -6,7 +6,7 @@ import React, { useState } from 'react';
 import { copy } from '../copy.generated.js';
 import { marketplaceApi } from '../api/client.js';
 import type { CatalogAnswer, FundedAnswer, ServiceRequest, Subscription } from '../api/types.js';
-import { fmtHex, fmtMicro, fmtTrac, modelName, usdOf, weiOfMicro, weiOfTrac } from '../amounts.js';
+import { fmtHex, fmtTrac, microOfWei, modelName, usdOf, weiOfMicro, weiOfTrac } from '../amounts.js';
 import { ErrorCard } from '../shared.js';
 import { PreviewLine, lineFor } from './Composer.js';
 import { usePreview } from './usePreview.js';
@@ -20,16 +20,17 @@ export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
   const budget = subscription.budgets.find((b) => b.serviceId === serviceId);
   const service = catalog.services.find((s) => s.serviceId === serviceId);
   const [amount, setAmount] = useState('1');
-  const [cap, setCap] = useState(budget ? fmtMicro(budget.maxPricePerUnit) : service ? lineFor(service, 'current').capMicro : '');
+  // A budget the subscription has keeps its cap: shown exactly, and sent back as the node stores it, in wei.
+  const [cap, setCap] = useState(budget ? microOfWei(budget.maxPricePerUnit) : service ? lineFor(service, 'current').capMicro : '');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<unknown>(null);
   const [sent, setSent] = useState<FundedAnswer | null>(null);
   // A failed send asks for a fresh dry run before the next one: the transaction may have gone out.
   const [round, setRound] = useState(0);
   const value = weiOfTrac(amount);
-  const capWei = weiOfMicro(cap);
+  const capWei = budget ? budget.maxPricePerUnit : weiOfMicro(cap)?.toString() ?? null;
   const request: TopUpRequest | null = value && capWei
-    ? { subscriptionId: subscription.subscriptionId, services: [{ serviceId, serviceClass: service?.serviceClass ?? 'inference', value: value.toString(), maxPricePerUnit: capWei.toString() }] }
+    ? { subscriptionId: subscription.subscriptionId, services: [{ serviceId, serviceClass: service?.serviceClass ?? 'inference', value: value.toString(), maxPricePerUnit: capWei }] }
     : null;
   const dryRun = usePreview(request, (r) => marketplaceApi.topUpPreview(r.subscriptionId, r.services), { retain: 'none', round });
   const name = modelName(service?.label ?? serviceId);

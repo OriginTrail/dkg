@@ -48,6 +48,33 @@ function holdDryRuns(scenario: 'active' | 'none') {
 
 const fundings = (writes: Array<{ method: string; url: string }>) => writes.filter((w) => w.method === 'POST' && w.url === '/api/marketplace/subscriptions');
 
+type Json = Record<string, unknown>;
+
+/** The fixture node with each answer passed through `edit` first, keeping each write. */
+function editedNode(scenario: 'active' | 'none', edit: (method: string, url: string, body: Json) => void): Array<{ method: string; url: string; body: unknown }> {
+  const writes: Array<{ method: string; url: string; body: unknown }> = [];
+  const node = fixtureFetch(scenario);
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method ?? 'GET';
+    if (method !== 'GET') writes.push({ method, url: String(input), body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined });
+    const res = await node(input, init);
+    const body = await res.json() as Json;
+    edit(method, String(input), body);
+    return new Response(JSON.stringify(body), { status: res.status, headers: { 'Content-Type': 'application/json' } });
+  });
+  return writes;
+}
+
+/** Caps in wei per unit, by service, on this node's subscriptions and plan. */
+function withCaps(caps: Record<string, string>) {
+  const cap = (x: Json) => { if (typeof x.serviceId === 'string' && caps[x.serviceId]) { x.maxPricePerUnit = caps[x.serviceId]; x.maxPricePerUnitTrac = '0.0'; } };
+  return (method: string, url: string, body: Json) => {
+    if (method !== 'GET') return;
+    if (url.startsWith('/api/marketplace/subscriptions')) for (const s of (body.subscriptions as Json[]) ?? []) for (const b of s.budgets as Json[]) cap(b);
+    if (url === '/api/marketplace/plan') for (const s of (body.services as Json[]) ?? []) cap(s);
+  };
+}
+
 describe('marketplace Plans', () => {
   afterEach(unmountAll);
 
@@ -93,6 +120,67 @@ describe('marketplace Plans', () => {
     const dryRuns = writes.filter((w) => w.url === `${subscription}/top-up/preview`);
     expect(dryRuns.at(-1)).toEqual({ method: 'POST', url: `${subscription}/top-up/preview`, body: { services } });
     expect(writes.findIndex((w) => w.url === `${subscription}/top-up`)).toBeGreaterThan(writes.lastIndexOf(dryRuns.at(-1)!));
+  });
+
+  for (const cap of ['123456000000', '10']) {
+    it(`tops up a budget with its own cap to the wei (${cap} wei per token)`, async () => {
+      const writes = editedNode('active', withCaps({ [FIXTURE_IDS.llama8b]: cap }));
+      const c = await render(plans());
+      await waitForText(c, 'This budget is at its soft ceiling');
+      await click(byTestId(c, `mkt-topup-${FIXTURE_IDS.llama8b}`));
+      const capInput = byTestId(c, 'mkt-topup-cap') as HTMLInputElement;
+      expect(capInput.disabled).toBe(true);
+      expect(capInput.value).toBe(cap === '10' ? '0.00000000001' : '0.123456');
+      await type(byTestId(c, 'mkt-topup-amount'), '0.5');
+      await flush(300);
+      await waitForText(c, 'Costs 0.5 TRAC from the buyer wallet for epoch 664');
+      await click(byTestId(c, 'mkt-topup-confirm'));
+      await waitForText(c, 'llama-3.1-8b-instruct topped up');
+      const sentCaps = writes.filter((w) => w.url.includes('/top-up')).map((w) => (w.body as { services: Array<{ maxPricePerUnit: string }> }).services[0].maxPricePerUnit);
+      expect(sentCaps.length).toBeGreaterThanOrEqual(2);
+      expect(new Set(sentCaps)).toEqual(new Set([cap]));
+    });
+  }
+
+  it('adds a budget at the dearest seller\'s price to the wei', async () => {
+    const price = '3123456789012';
+    const writes = editedNode('active', (method, url, body) => {
+      if (method !== 'GET' || url !== '/api/marketplace/catalog') return;
+      for (const s of body.services as Json[]) {
+        if (s.serviceId !== FIXTURE_IDS.mistral24b) continue;
+        for (const o of s.offers as Json[]) o.pricePerUnit = price;
+        s.priceMin = price; s.priceMax = price;
+      }
+    });
+    const c = await render(plans());
+    await waitForText(c, 'Not on your plan yet');
+    await click(byTestId(c, `mkt-addon-${FIXTURE_IDS.mistral24b}`));
+    expect((byTestId(c, 'mkt-topup-cap') as HTMLInputElement).value).toBe('3.123456789012');
+    await flush(300);
+    await waitForText(c, 'Costs 1 TRAC from the buyer wallet for epoch 664');
+    await click(byTestId(c, 'mkt-topup-confirm'));
+    await waitForText(c, 'topped up');
+    expect(writes.filter((w) => w.url.endsWith('/top-up')).map((w) => (w.body as { services: Array<{ maxPricePerUnit: string }> }).services[0].maxPricePerUnit)).toEqual([price]);
+  });
+
+  it('saves an edit to one line of the plan with every other cap unchanged to the wei', async () => {
+    const writes = editedNode('active', withCaps({ [FIXTURE_IDS.qwen14b]: '123456000000', [FIXTURE_IDS.qwen7b]: '10' }));
+    const c = await render(plans());
+    await waitForText(c, 'Epoch 665 is funded');
+    await click(byTestId(c, 'mkt-change-plan'));
+    expect((byTestId(c, `mkt-cap-${FIXTURE_IDS.qwen14b}`) as HTMLInputElement).value).toBe('0.123456');
+    expect((byTestId(c, `mkt-cap-${FIXTURE_IDS.qwen7b}`) as HTMLInputElement).value).toBe('0.00000000001');
+    await type(byTestId(c, `mkt-value-${FIXTURE_IDS.llama8b}`), '0.75');
+    await click(byTestId(c, 'mkt-compose-continue'));
+    await click(byTestId(c, 'mkt-gate-confirm'));
+    await flush(50);
+    const saved = writes.filter((w) => w.method === 'PUT' && w.url === '/api/marketplace/plan');
+    expect(saved).toHaveLength(1);
+    const services = (saved[0].body as { services: Array<{ serviceId: string; value: string; maxPricePerUnit: string }> }).services;
+    expect(Object.fromEntries(services.map((s) => [s.serviceId, s.maxPricePerUnit]))).toEqual({
+      [FIXTURE_IDS.qwen14b]: '123456000000', [FIXTURE_IDS.qwen7b]: '10', [FIXTURE_IDS.llama8b]: '1200000000000',
+    });
+    expect(services.find((s) => s.serviceId === FIXTURE_IDS.llama8b)?.value).toBe('750000000000000000');
   });
 
   it('walks a node that never subscribed through compose, one confirmation and a key', async () => {
