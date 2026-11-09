@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { loadDkgProfile, profileParameters } from './dkg-profile.mjs';
-import { dkgComponentStore } from './dkg-components.mjs';
+import { dkgComponentStore } from './test-support/dkg-component-store-fixture.mjs';
 import profile, { measurements } from './test-support/measurement-profile.mjs';
 const id = '11223344-1234-4234-8234-123456789abc';
 const block = (id, componentId) => ({ id, componentId, params: Object.fromEntries(Object.entries(profileParameters(profile, componentId)).map(([k,v]) => [k,v.default])) });
@@ -98,7 +100,7 @@ test('authenticated execution pins its principal and rechecks revocation before 
 test('write recovery retains its exact payload and refuses unjournalled legacy recovery', async () => {
   const db = new DatabaseSync(':memory:'), calls = [], scoped = { ...profile };
   try {
-    const store = dkgComponentStore(db, transport(calls, true), [], scoped);
+    let store = dkgComponentStore(db, transport(calls, true), [], scoped);
     store.grant(workflow, id, input);
     const source = await store.call(request('read', [{}]), workflow, 'native');
     const calculated = await store.call(request('invoke', source.items), workflow, 'native');
@@ -114,10 +116,13 @@ test('write recovery retains its exact payload and refuses unjournalled legacy r
     assert.throws(() => store.grant(workflow, '11223344-1234-4234-8234-123456789abd', input), { code: 'DKG_WRITE_PENDING' });
     db.prepare('INSERT INTO dkg_component_writes VALUES (?,?,?,?)').run(saved.id, saved.request, saved.evidence, saved.receipt);
     scoped.evidence = () => { throw new Error('Recovery must not rebuild the write payload'); };
+    // Upgrade an uncertain write from the old schema without allowing another create.
+    db.exec('ALTER TABLE dkg_component_calls DROP COLUMN response');
+    store = dkgComponentStore(db, transport(calls, true), [], scoped);
     const recovery = store.writeRecovery(workflow, id, 'native', '42');
     const receipt = await store.call(recovery.request, workflow, 'native');
     assert.deepEqual(calls.at(-1).payload, { ...JSON.parse(saved.evidence).payload, allowCreate: false });
-    assert.deepEqual(JSON.parse(db.prepare('SELECT receipt FROM dkg_component_writes WHERE id=?').get(saved.id).receipt), receipt);
+    assert.deepEqual(JSON.parse(db.prepare('SELECT response FROM dkg_component_calls WHERE id=?').get(saved.id).response), receipt);
     assert.equal(store.writeRecovery(workflow, id, 'native', '42').pending, false);
   } finally { db.close(); }
 });
@@ -200,7 +205,7 @@ test('wrong destination or digest never produces a successful write receipt', as
   }
 });
 test('core runtime and editor registry contain no domain-specific imports or constants', () => {
-  for (const file of ['dkg-components.mjs', 'dkg-program.mjs', 'dkg-profile.mjs', 'component-registry.mjs', 'studio-service.mjs'])
+  for (const file of ['dkg-components.mjs', 'dkg-component-operations.mjs', 'dkg-program.mjs', 'dkg-profile.mjs', 'component-registry.mjs', 'studio-service.mjs'])
     assert.doesNotMatch(readFileSync(new URL(file, import.meta.url), 'utf8'), /jpb|dmaast|holos|62633|100\.113\.215\.1|PLCA/i, file);
 });
 
@@ -216,5 +221,62 @@ test('write receipts must identify the exact requested asset name', async () => 
     const source = await store.call(request('read', [{}]), workflow, 'native');
     const calculated = await store.call(request('invoke', source.items), workflow, 'native');
     await assert.rejects(store.call(request('write', calculated.items), workflow, 'native'), /exact evidence/);
+  } finally { db.close(); }
+});
+
+test('completed Read, Invoke and Write replay exact journalled responses after reopen and authority checks', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dkg-response-')), file = join(dir, 'journal.sqlite'), calls = [];
+  const actor = { id: 'owner', accountId: 'response-test', role: 'owner' };
+  let revoked = false, db = new DatabaseSync(file);
+  const scoped = { ...profile, requiresNosActor: true, accountId: actor.accountId,
+    authorize() { if (revoked) throw new Error('owner revoked'); } };
+  try {
+    let store = dkgComponentStore(db, transport(calls), [], scoped);
+    store.grant(workflow, id, input, actor);
+    const requests = [request('read', [{}])], responses = [];
+    responses.push(await store.call(requests[0], workflow, 'native'));
+    requests.push(request('invoke', responses[0].items));
+    responses.push(await store.call(requests[1], workflow, 'native'));
+    requests.push(request('write', responses[1].items));
+    responses.push(await store.call(requests[2], workflow, 'native'));
+    db.close(); db = new DatabaseSync(file);
+    store = dkgComponentStore(db, () => assert.fail('completed replay cannot dispatch'), [], {
+      ...scoped, readItems: () => assert.fail('completed Read cannot be remapped'),
+      evidence: () => assert.fail('completed Write cannot rebuild evidence'),
+    });
+    db.exec("CREATE TRIGGER no_write_recompletion BEFORE UPDATE ON dkg_component_writes BEGIN SELECT RAISE(ABORT, 'completed Write must use its stored response'); END");
+    for (let i = 0; i < requests.length; i++) {
+      assert.deepEqual(await store.call(requests[i], workflow, 'native'), responses[i]);
+      assert.deepEqual(JSON.parse(db.prepare('SELECT response FROM dkg_component_calls WHERE id=?').get(id + ':' + requests[i].blockId).response), responses[i]);
+      await assert.rejects(store.call({ ...requests[i], items: [{ changed: true }] }, workflow, 'native'), /different inputs/);
+    }
+    revoked = true;
+    for (const value of requests) await assert.rejects(store.call(value, workflow, 'native'), /owner revoked/);
+    assert.deepEqual(calls.map(c => c.operation), ['read', 'invoke', 'write']);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('older completed journals adopt responses without dispatch and consume the persisted write receipt', async () => {
+  const db = new DatabaseSync(':memory:'), calls = [];
+  try {
+    let store = dkgComponentStore(db, transport(calls), [], profile);
+    store.grant(workflow, id, input);
+    const source = await store.call(request('read', [{}]), workflow, 'native');
+    const calculated = await store.call(request('invoke', source.items), workflow, 'native');
+    const receipt = await store.call(request('write', calculated.items), workflow, 'native');
+    receipt.items[0].historicalReceiptField = 'preserve original response';
+    db.prepare('UPDATE dkg_component_writes SET receipt=? WHERE id=?').run(JSON.stringify(receipt), id + ':write');
+    // Model the pre-response schema, including its operation-specific result column.
+    if (db.prepare('PRAGMA table_info(dkg_component_calls)').all().some(c => c.name === 'response'))
+      db.exec('ALTER TABLE dkg_component_calls DROP COLUMN response');
+    store = dkgComponentStore(db, () => assert.fail('migration cannot dispatch'), [], profile);
+    for (const [value, response] of [[request('read', [{}]), source], [request('invoke', source.items), calculated],
+      [request('write', calculated.items), receipt]])
+      assert.deepEqual(await store.call(value, workflow, 'native'), response);
+    assert.equal(store.writeRecovery(workflow, id, 'native', '42').pending, false);
+    db.prepare('UPDATE dkg_component_calls SET response=NULL WHERE id=?').run(id + ':write');
+    db.prepare('UPDATE dkg_component_writes SET receipt=NULL WHERE id=?').run(id + ':write');
+    await assert.rejects(store.call(request('write', calculated.items), workflow, 'native'), /legacy write has no saved receipt/);
+    assert.deepEqual(calls.map(c => c.operation), ['read', 'invoke', 'write']);
   } finally { db.close(); }
 });

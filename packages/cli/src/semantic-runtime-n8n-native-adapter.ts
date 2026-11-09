@@ -129,10 +129,14 @@ export function createNativeN8nWorkflowAdapter(
           const observed = n8nRecord(input) && typeof input.executionId === 'string' ? input.executionId : '';
           if (observed && (!grant.result!.allowObservation || !/^\d{1,20}$/.test(observed))) throw new Error('INVALID_N8N_INPUT');
           if (observed && !(prepared.published.nodes as Record<string, unknown>[]).some(node => node.name === n8nObservationScope(graph, executor, grant.workflowId))) throw new Error('N8N_OBSERVATION_SCOPE_MISMATCH');
+          const webhook = observed ? undefined : {
+            url: new URL(`/webhook/dkg-capability-${grant.workflowId}`, prepared.origin),
+            headers: { authorization: `Bearer ${secret(installation!.webhookTokenFile)}` },
+          };
           await authorized();
           mayHaveExecuted = true;
-          const response = observed ? { executionId: observed } : await request(new URL(`/webhook/dkg-capability-${grant.workflowId}`, prepared.origin),
-            { authorization: `Bearer ${secret(installation!.webhookTokenFile)}` }, signal, { invocationId: authorization.effectId, input });
+          const response = observed ? { executionId: observed } : await request(webhook!.url,
+            webhook!.headers, signal, { invocationId: authorization.effectId, input });
           if (typeof response.executionId !== 'string' || !/^\d{1,20}$/.test(response.executionId)
             || Object.keys(response).some(key => key !== 'executionId')) throw new Error('N8N_RESPONSE_INVALID');
           saved = { kind: 'n8n-native-v1', workflowId: grant.workflowId, workflowSha256: grant.workflowSha256,

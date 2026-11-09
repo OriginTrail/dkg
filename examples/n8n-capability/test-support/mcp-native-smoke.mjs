@@ -14,6 +14,7 @@ if (!process.argv[2]) throw Error('Supply a fresh local setup-n8n state director
 process.env.NOS_DKG_PROFILE_MODULE = fileURLToPath(new URL('./agent-read-profile.mjs', import.meta.url));
 const { default: profile, calls } = await import('./agent-read-profile.mjs');
 const { component } = await import('../component-registry.mjs');
+const { createStudioRepository } = await import('../studio-repository.mjs');
 const { createStudioProvider } = await import('../studio-provider.mjs');
 const { createStudioMcpService } = await import('../studio-mcp-service.mjs');
 const { createStudioMcpHttp } = await import('../studio-mcp-http.mjs');
@@ -37,7 +38,8 @@ const server = createServer(async (req, res) => {
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const origin = 'http://127.0.0.1:' + server.address().port;
-const provider = createStudioProvider({ state: join(state, 'mcp-smoke-' + randomUUID()), graphId: 'mcp-smoke', owner: '0x' + 'a'.repeat(40),
+const repository = createStudioRepository(join(state, 'mcp-smoke-' + randomUUID()));
+const provider = createStudioProvider({ repository, graphId: 'mcp-smoke', owner: '0x' + 'a'.repeat(40),
   config: { n8nNative: { ...installation, workflows: [] } },
   // Resolve the credential already provisioned by setup, below.
   headerCredential: await (async () => {
@@ -98,4 +100,4 @@ try {
     absentInProgressRunData: missingProgress, output: result.output, steps: result.steps };
   writeFileSync(join(state, 'mcp-smoke-result.json'), JSON.stringify(evidence, null, 2));
   console.log(JSON.stringify(evidence));
-} finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); provider.close(); }
+} finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); repository.close(); }

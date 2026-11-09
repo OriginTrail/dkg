@@ -22,7 +22,7 @@ test('saved Studio DKG Read/Write callbacks accept normalized execution paramete
     const approval = f.approvals.get(w.kaRef);
     assert.equal(approval.typescript.children.length, 0);
     assert.deepEqual(f.sources.get(w.kaRef).permittedPrograms, []);
-    const native = f.native.get(f.provider.row(w.kaRef).provider_id);
+    const native = f.native.get(f.repository.row(w.kaRef).provider_id);
     const snapshot = structuredClone({ ...native.activeVersion, settings: native.settings });
     // n8n normalizes HTTP Request body/header parameters in execution snapshots.
     for (const node of snapshot.nodes.filter(n => n.type === 'n8n-nodes-base.httpRequest'))
@@ -35,6 +35,10 @@ test('saved Studio DKG Read/Write callbacks accept normalized execution paramete
     const invoke = f.client.programs.invoke;
     // The real save/run path creates the profile grant before dispatch.
     f.client.programs.invoke = async value => {
+      execution.data = { executionData: { nodeExecutionStack: [{
+        node: snapshot.nodes.find(node => node.name === 'Receive input'),
+        data: { main: [[{ json: { body: { invocationId: 'urn:sr:effect:' + value.invocationId + ':0', input: value.inputs[0] } } }]] },
+      }] }, resultData: { runData: {} } };
       const read = await f.service.dkgComponent(request('n0', [{}]));
       assert.deepEqual(read.items, measurements);
       const write = await f.service.dkgComponent(request('n1', read.items));

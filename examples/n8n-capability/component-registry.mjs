@@ -12,7 +12,7 @@ const json = (label, value) => ({ type: 'json', label, default: value, maxLength
 const sample = [{ name: 'Ana', value: 12, active: true }, { name: 'Luka', value: 7, active: false }];
 const entry = (id, name, category, nodeType, parameters = {}, extra = {}) => ({
   id, name, category, nodeType: `n8n-nodes-base.${nodeType}`, version: 1,
-  input: 'items', outputs: ['main'], parameters, sampleItems: sample, mode: 'action', ...extra,
+  input: 'items', outputs: ['main'], parameters, sampleItems: sample, mode: 'action', requiresExportAuthorization: false, ...extra,
 });
 
 export const componentRegistry = [
@@ -51,10 +51,10 @@ export const componentRegistry = [
       outputMapping: { ...json('Returned result · $json is the Program output array', '{{ $json }}'), shape: 'any' },
     }, { version: 2, connection: 'httpHeaderAuth', sampleItems: [{}] }),
     entry('dkg-write', 'DKG Write', 'DKG', 'httpRequest', profileParameters(configuredDkgProfile, 'dkg-write'),
-      { version: 2, connection: 'httpHeaderAuth', writes: true, sampleItems: [{}] }),
+      { version: 2, connection: 'httpHeaderAuth', writes: true, requiresExportAuthorization: false, sampleItems: [{}] }),
   ] : []),
-  entry('google-sheets', 'Google Sheets', 'Integrations', 'googleSheets', { title: text('New spreadsheet title', 'nOS workflow export', { maxLength: 80 }) }, { connection: 'googleSheetsOAuth2Api', writes: true }),
-  entry('google-drive', 'Google Drive', 'Integrations', 'googleDrive', { name: text('Drive file name', 'nOS-export.txt', { maxLength: 80 }) }, { input: 'file', connection: 'googleDriveOAuth2Api', writes: true, sampleItems: [{ file: { name: 'hello.txt', mimeType: 'text/plain', base64: 'SGVsbG8gREtHCg==' } }] }),
+  entry('google-sheets', 'Google Sheets', 'Integrations', 'googleSheets', { title: text('New spreadsheet title', 'nOS workflow export', { maxLength: 80 }) }, { connection: 'googleSheetsOAuth2Api', writes: true, requiresExportAuthorization: true }),
+  entry('google-drive', 'Google Drive', 'Integrations', 'googleDrive', { name: text('Drive file name', 'nOS-export.txt', { maxLength: 80 }) }, { input: 'file', connection: 'googleDriveOAuth2Api', writes: true, requiresExportAuthorization: true, sampleItems: [{ file: { name: 'hello.txt', mimeType: 'text/plain', base64: 'SGVsbG8gREtHCg==' } }] }),
   entry('if', 'IF', 'Flow', 'if', { field: field('Field', 'name'), equals: text('Equals', 'Ana') }, { outputs: ['true', 'false'], mode: 'branch' }),
   entry('switch', 'Switch', 'Flow', 'switch', { field: field('Field', 'name'), equals: text('First route equals', 'Ana') }, { outputs: ['match', 'other'], mode: 'branch' }),
   entry('merge', 'Merge', 'Flow', 'merge', {}, { inputs: 2, mode: 'join' }),
@@ -71,6 +71,13 @@ export const componentRegistry = [
   entry('schedule', 'Schedule Trigger', 'Events', 'scheduleTrigger', { minutes: number('Interval in minutes', 5, 1, 1440) }, { input: 'event', mode: 'schedule' }),
   entry('wait', 'Wait', 'Events', 'wait', { seconds: number('Seconds to wait', 1, 1, 3) }, { mode: 'wait' }),
 ].map(value => Object.freeze(value));
+
+/** Registry policy is authoritative even for older installed descriptors. Unknown writers fail closed. */
+export const componentNeedsExport = descriptor => componentRegistry.find(c => c.id === descriptor?.id)?.requiresExportAuthorization
+  ?? descriptor?.requiresExportAuthorization ?? !!descriptor?.writes;
+
+/** Host authorization metadata is outside the immutable guest input contract. */
+export function componentExecutionDescriptor({ requiresExportAuthorization: _policy, ...descriptor }) { return descriptor; }
 
 export function component(id) {
   if (id === 'run-program') return programDescriptor;
@@ -149,6 +156,6 @@ export function componentProgramSource(id) {
   const descriptor = component(id);
   if (descriptor.version === 1) return componentProgramSourceV1(id);
   return `// nos-n8n-component-v2:${id}\nimport { invoke_tool } from '@origintrail-official/dkg-graph-computer/program';\n`
-    + `const descriptor = ${JSON.stringify(descriptor)};\n${componentValidationSource()}`
+    + `const descriptor = ${JSON.stringify(componentExecutionDescriptor(descriptor))};\n${componentValidationSource()}`
     + `export function run(input: unknown) { return invoke_tool('urn:dkg:tool:n8n', normalize(descriptor, input)); }\n`;
 }

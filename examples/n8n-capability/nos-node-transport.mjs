@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { parseRdfLiteralTerm, canonicalizeRdfObjectTerm } from '../../packages/rdf-utils/dist/index.js';
+import { parseRdfLiteralTerm, canonicalizeRdfObjectTerm, parseWritableRdfTerm } from '../../packages/rdf-utils/dist/index.js';
 
 const fail = message => Object.assign(new Error(message), { status: 409, code: 'DKG_COMPONENT_UNCONFIRMED' });
 export function createNosNodeClient(session, actor, send = fetch) {
@@ -55,16 +55,21 @@ export async function invokeNosProgram(call, request) {
 
 export async function writeNosEvidence(call, payload, graph) {
   if (!/^[A-Za-z0-9._:-]{1,256}$/.test(payload.name)) throw fail('Invalid evidence name.');
+  const resource = (value, predicate = false) => {
+    const parsed = typeof value === 'string' && parseWritableRdfTerm(value);
+    if (!parsed || parsed.kind === 'literal' || predicate && parsed.kind !== 'iri') throw fail('Invalid evidence RDF resource.');
+    return [parsed.kind, parsed.value];
+  };
   // Compare decoded lexical values without discarding datatype or language.
   const term = value => {
     if (typeof value !== 'string') throw fail('Invalid evidence RDF term.');
-    if (!value.startsWith('"')) return ['iri', value];
+    if (!value.startsWith('"')) return resource(value);
     const literal = parseRdfLiteralTerm(value, { combineSurrogatePairs: true });
     if (!literal) throw fail('Invalid evidence RDF literal.');
     if (literal.kind === 'language') return ['literal', { ...literal, language: literal.language.toLowerCase() }];
     return ['literal', canonicalizeRdfObjectTerm(value)];
   };
-  const quads = rows => [...new Set(rows.map(q => JSON.stringify([q.subject, q.predicate, term(q.object)])))].sort();
+  const quads = rows => [...new Set(rows.map(q => JSON.stringify([resource(q.subject), resource(q.predicate, true), term(q.object)])))].sort();
   const expected = quads(payload.quads); // Reject malformed input before creation.
   const path = 'knowledge-assets/' + payload.name, query = { contextGraphId: graph };
   let metadata, created = false;

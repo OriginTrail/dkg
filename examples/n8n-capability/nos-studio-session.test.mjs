@@ -144,3 +144,25 @@ test('node writer preserves RDF datatype, language, lexical value and literal id
   ] }, 'study'), /Invalid evidence RDF literal/);
   assert.equal(calls, 0);
 });
+
+test('node writer reconciles equivalent bracketed and bare IRIs in every position', async () => {
+  for (const bracketedRequest of [true, false]) {
+    const shape = (q, brackets) => Object.fromEntries(Object.entries(q).map(([key, value]) => [key, brackets ? `<${value}>` : value]));
+    const bare = { subject: 'urn:test:s', predicate: 'urn:test:p', object: 'urn:test:o' };
+    const payload = { name: 'iri-result', digest: 'b'.repeat(64), allowCreate: true, quads: [shape(bare, bracketedRequest)] };
+    let exists = false, creates = 0, readback = shape(bare, !bracketedRequest);
+    const call = async path => {
+      if (path === 'knowledge-assets') { creates++; exists = true; throw new Error('reply lost after sealing'); }
+      if (!exists) throw Object.assign(new Error('missing'), { status: 404 });
+      return path.endsWith('/wm/quads') ? { quads: [readback] } : { status: 'wm-sealed' };
+    };
+    await assert.rejects(writeNosEvidence(call, payload, 'study'), /reply lost/);
+    const retry = { ...payload, allowCreate: false };
+    assert.equal((await writeNosEvidence(call, retry, 'study')).readbackVerified, true);
+    for (const field of ['subject', 'predicate', 'object']) {
+      readback = shape({ ...bare, [field]: 'urn:test:different' }, !bracketedRequest);
+      await assert.rejects(writeNosEvidence(call, retry, 'study'), /differs/);
+    }
+    assert.equal(creates, 1);
+  }
+});

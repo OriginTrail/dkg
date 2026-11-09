@@ -26,7 +26,9 @@ function nativeContinuationEffects(store: SemanticRuntimeStore, executionIri: st
   const calls = readProgramCallHistory(store, executionIri);
   if (!calls.length || calls.some(call => call.kind !== 'tool' || call.target !== grant.toolIri)) return null;
   const effects = store.effectsForExecution(executionIri);
-  if (!effects.length || !effects.some(e => ['unknown', 'reconciling', 'manual_review_required'].includes(e.state))) return null;
+  // A crash can happen after the last effect commits but before journal.prepare().
+  // Its succeeded result remains replayable under the same inspection-only fence.
+  if (!effects.length) return null;
   for (const effect of effects) {
     if (effect.adapterId !== 'n8n/workflow' || effect.resource !== grant.toolIri
       || !['succeeded', 'unknown', 'reconciling', 'manual_review_required'].includes(effect.state)) return null;

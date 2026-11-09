@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:http';
+import { createStudioRepository } from './studio-repository.mjs';
 import { createStudioProvider } from './studio-provider.mjs';
 import { compileStudio, normalizeStudio } from './studio-definition.mjs';
 import { createStudioMcpService } from './studio-mcp-service.mjs';
@@ -28,14 +29,14 @@ async function fixture(t, runner) {
   const config = { n8nNative: { workflows: [], baseUrl: 'http://127.0.0.1:1', apiTokenFile: join(state, 'api'), webhookTokenFile: join(state, 'webhook') } };
   writeFileSync(config.n8nNative.apiTokenFile, 'fixture-api-token'.repeat(3));
   writeFileSync(config.n8nNative.webhookTokenFile, 'fixture-hook-token'.repeat(3));
-  let provider;
-  const open = () => provider = createStudioProvider({ state, config, graphId: 'test', owner: '0x' + 'a'.repeat(40), fetchImpl: async () => Response.json(published) });
-  open(); t.after(() => provider.close());
+  let provider, repository;
+  const open = () => { repository = createStudioRepository(state); return provider = createStudioProvider({ repository, config, graphId: 'test', owner: '0x' + 'a'.repeat(40), fetchImpl: async () => Response.json(published) }); };
+  open(); t.after(() => repository.close());
   await provider.recordSavedNative(compiled);
   const input = (runKey = 'run-one') => ({ kaRef: compiled.kaRef, workflowSha256: compiled.grant.workflowSha256, runKey, arguments: { value: 'sensitive-input' } });
   const service = () => createStudioMcpService({ provider, installation: config.n8nNative, accountId: owner.accountId, profile: null, ...(runner ? { runner } : {}) });
   return { state, compiled, published, config, input, get provider() { return provider; }, service,
-    restart() { provider.close(); open(); return service(); } };
+    restart() { repository.close(); open(); return service(); } };
 }
 function controllable() {
   let count = 0, status = 'running', loseAck = false, badPin = false;

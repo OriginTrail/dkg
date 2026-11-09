@@ -55,8 +55,8 @@ export default {
     return {
       payload: componentEvidence(evidenceRows, context, read, JSON.parse(input.itemsJson)[0].workbook ?? [], programOutput),
       recordCount: evidenceRows.length,
-      summary: { plcaCalculated: programOutput?.result?.assessment?.calculated === true,
-        ...(programOutput ? { assessment: programOutput.result.assessment, programExecution: programOutput.programExecution } : {}) },
+      summary: { plcaCalculated: programOutput?.rawOutputs?.[0]?.assessment?.calculated === true,
+        ...(programOutput ? { assessment: programOutput.rawOutputs[0].assessment, programExecution: programOutput.programExecution } : {}) },
     };
   },
   transport(payload, operation) {

@@ -10,6 +10,7 @@ process.env.NOS_DKG_PROFILE_MODULE = fileURLToPath(new URL('./test-support/agent
 const { default: profile, calls } = await import('./test-support/agent-read-profile.mjs');
 const { profileParameters } = await import('./dkg-profile.mjs');
 const { compileStudio } = await import('./studio-definition.mjs');
+const { createStudioRepository } = await import('./studio-repository.mjs');
 const { createStudioProvider } = await import('./studio-provider.mjs');
 const { createStudioMcpService } = await import('./studio-mcp-service.mjs');
 const { handleDkgComponentCallback } = await import('./bridge.mjs');
@@ -44,8 +45,9 @@ test('native DKG callback uses the admitted pins, typed profile and full agent a
   const compiled = compileStudio({ id: '123e4567-e89b-42d3-a456-426614174099', name: 'Read a sample', entryId: 'read', nodes: [node], edges: [] },
     { graphId: 'test', owner: '0x' + 'a'.repeat(40), fixture: true, headerCredential: { id: 'test', name: 'test' }, providerId: 'native-read' });
   const published = { ...compiled.workflow, id: 'native-read', versionId: 'v1', active: true };
-  const provider = createStudioProvider({ state, config: { n8nNative: { workflows: [] } }, graphId: 'test', owner: '0x' + 'a'.repeat(40) });
-  t.after(() => { if (provider.db.isOpen) provider.close(); });
+  const repository = createStudioRepository(state);
+  const provider = createStudioProvider({ repository, config: { n8nNative: { workflows: [] } }, graphId: 'test', owner: '0x' + 'a'.repeat(40) });
+  t.after(() => { if (provider.db.isOpen) repository.close(); });
   const runKey = '123e4567-e89b-42d3-a456-426614174088';
   let inputEvidence;
   provider.api = async path => path.startsWith('/workflows') ? published : { id: '42', workflowId: 'native-read', workflowVersionId: 'v1', status: 'running', workflowData: published,
@@ -84,9 +86,10 @@ test('native DKG callback uses the admitted pins, typed profile and full agent a
   assert.throws(() => s.withdraw({ ...pin, workflowSha256: '0'.repeat(64) }, owner), { code: 'STUDIO_NATIVE_PIN_CHANGED' });
   assert.equal(s.withdraw(pin, owner).approved, false);
   profile.revision = revision;
-  provider.close();
-  const reopened = createStudioProvider({ state, config: { n8nNative: { workflows: [] } }, graphId: 'test', owner: '0x' + 'a'.repeat(40) });
-  t.after(() => reopened.close());
+  repository.close();
+  const reopenedRepository = createStudioRepository(state);
+  const reopened = createStudioProvider({ repository: reopenedRepository, config: { n8nNative: { workflows: [] } }, graphId: 'test', owner: '0x' + 'a'.repeat(40) });
+  t.after(() => reopenedRepository.close());
   const restored = createStudioMcpService({ provider: reopened, accountId: actor.accountId, profile,
     runner: { async inspect() { return { status: 'succeeded', output: { secret: 'retained' } }; } } });
   assert.equal(restored.list(owner).length, 0);

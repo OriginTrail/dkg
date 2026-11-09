@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { component, componentValidationSource } from './component-registry.mjs';
+import { component, componentNeedsExport, componentExecutionDescriptor, componentValidationSource } from './component-registry.mjs';
 import { programRecordsSource, runProgramStepsSource } from './guest-sources/program-v1.mjs';
 
 export const PROGRAM_STUDIO_MARKER = '// nos-program-studio-v1:';
@@ -35,49 +35,11 @@ export function compileProgramWorkflow(definition) {
   const revision = createHash('sha256').update(JSON.stringify({ compiler: 'program-v1', definition })).digest('hex');
   return { definition, ordered, kaRef: `urn:demo:nos:studio:${definition.id}:${revision.slice(0, 20)}`,
     workflowName: 'nOS Program workflow ' + revision, mode: 'action', executor: 'dkg',
-    requiresExportAuthorization: definition.nodes.some(n => component(n.componentId).writes) };
-}
-
-/** Compiled with static child declarations; invoke_program retains caller identity and host-selected child IDs. */
-export async function runProgramSteps(input, nodes, invoke, normalize, resolve, records) {
-  let items = records(JSON.parse(input.itemsJson));
-  let ok = true, error = '';
-  const steps = [];
-  // Validate the root parameters as well as the incoming record set.
-  const checked = normalize(nodes[0].descriptor, input);
-  if (checked.paramsJson !== JSON.stringify(nodes[0].params) || checked.executionId) throw new Error('Use the saved workflow parameters.');
-  for (const node of nodes) {
-    const results = [];
-    let status = 'skipped';
-    if (ok && (items.length || node.componentId === 'run-program' && node.params.inputMode === 'all-items')) {
-      status = 'completed';
-      if (node.componentId === 'run-program') {
-        // Resolve every mapping before invoking this block, so a missing field cannot partially dispatch its batch.
-        const args = node.params.inputMode === 'all-items'
-          ? [resolve(node.params.inputMapping, items)]
-          : items.map(item => resolve(node.params.inputMapping, item));
-        if (JSON.stringify(args).length > 8192) throw new Error('Mapped program input exceeds 8 KiB.');
-        for (const arg of args) results.push(await invoke(node.kaRef, [arg]));
-        items = records(results.flatMap(value => Array.isArray(value) ? value : [value]));
-      } else {
-        const value = await invoke(node.kaRef, [normalize(node.descriptor, {
-          itemsJson: JSON.stringify(items), paramsJson: JSON.stringify(node.params), executionId: '',
-        })]);
-        if (value?.kind !== 'n8n-result' || typeof value.output?.ok !== 'boolean') throw new Error('The n8n child returned an invalid result.');
-        results.push(value);
-        ok = value.output.ok;
-        if (!ok) { status = 'failed'; error = String(value.output.error).slice(0, 512); items = []; }
-        else items = records(JSON.parse(value.output.itemsJson));
-      }
-    }
-    steps.push({ nodeId: node.id, kaRef: node.kaRef, status, results });
-  }
-  return { kind: 'nos-program-workflow-result', steps,
-    output: { ok, itemsJson: JSON.stringify(items), portsJson: '{}', error } };
+    requiresExportAuthorization: definition.nodes.some(n => componentNeedsExport(component(n.componentId))) };
 }
 
 export function programWorkflowSource(compiled) {
-  const nodes = compiled.ordered.map(node => ({ ...node, descriptor: component(node.componentId) }));
+  const nodes = compiled.ordered.map(node => ({ ...node, descriptor: componentExecutionDescriptor(component(node.componentId)) }));
   return PROGRAM_STUDIO_MARKER + Buffer.from(JSON.stringify(compiled.definition)).toString('base64') + '\n'
     + `import { invoke_program } from '@origintrail-official/dkg-graph-computer/program';\n${componentValidationSource()}`
     + `const records = ${programRecordsSource};\nconst execute = ${runProgramStepsSource};\n`

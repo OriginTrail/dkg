@@ -38,3 +38,57 @@ test('migrates legacy executor metadata without changing native grants, revision
     }
   } finally { rmSync(state, { recursive: true, force: true }); }
 });
+
+test('event reservations share one quota across connections and retain identity, inputs and completed receipts', () => {
+  const state = mkdtempSync(join(tmpdir(), 'studio-events-'));
+  const first = createStudioRepository(state), second = createStudioRepository(state);
+  try {
+    first.ensure({ kaRef: 'flow', workflowName: 'Event workflow' });
+    first.db.prepare('UPDATE workflows SET provider_id=? WHERE ka_ref=?').run('native', 'flow');
+    first.setActivation('flow', { active: true, count: 0, expiresAt: Date.now() + 60000 }, 'secret-event-key');
+    const request = i => ({ kaRef: 'flow', providerId: 'native', executionId: String(i), invocationId: 'invocation-' + i, inputJson: '[{}]' });
+    assert.throws(() => first.reserveEvent(request(0), () => { throw new Error('authority revoked'); }), /revoked/);
+    assert.equal(second.pendingEvents('flow').length, 0);
+    assert.equal(second.activation('flow').count, 0);
+    for (let i = 1; i <= 5; i++) (i % 2 ? first : second).reserveEvent(request(i), () => {});
+    assert.equal(first.activation('flow').count, 5);
+    assert.throws(() => second.reserveEvent(request(6), () => {}), /limit/);
+    assert.equal(first.pendingEvents('flow').length, 5);
+    const fifth = second.reserveEvent({ ...request(5), invocationId: 'must-not-replace' }, () => {});
+    assert.equal(fifth.invocationId, 'invocation-5');
+    assert.throws(() => first.reserveEvent({ ...request(5), inputJson: '[{"changed":true}]' }, () => {}), /different input/);
+    assert.throws(() => first.completeEvent({ ...fifth, invocationId: 'foreign' }, { verified: true }), /identity/);
+    first.completeEvent(fifth, { verified: true });
+    const replay = second.reserveEvent(request(5), () => {});
+    assert.deepEqual(replay.receipt, { verified: true });
+    assert.throws(() => second.completeEvent(replay, { verified: false }), /receipt changed/);
+    assert.throws(() => second.reserveEvent(request(5), () => { throw new Error('authority revoked'); }), /revoked/);
+    assert.equal(first.activation('flow').count, 5);
+    assert.equal(first.pendingEvents('flow').length, 4);
+    assert.equal(second.eventHistory('flow').length, 5);
+  } finally { first.close(); second.close(); rmSync(state, { recursive: true, force: true }); }
+});
+
+
+test('native provisioning survives reopen and never replaces a create, identity or granted revision', () => {
+  const state = mkdtempSync(join(tmpdir(), 'studio-provisioning-'));
+  let repository = createStudioRepository(state);
+  try {
+    repository.ensure({ kaRef: 'flow', workflowName: 'Native workflow' });
+    repository.beginNativeCreate('flow');
+    repository.close(); repository = createStudioRepository(state);
+    assert.equal(repository.nativeRevision('flow').creating, true);
+    assert.throws(() => repository.beginNativeCreate('flow'), /unconfirmed/);
+    repository.nativeCreated('flow', 'native');
+    assert.throws(() => repository.nativeCreated('flow', 'other'), /identity changed/);
+    const grant = { workflowId: 'native', workflowSha256: 'a'.repeat(64) };
+    repository.nativeGranted('flow', grant);
+    repository.saved('flow', 'native-n8n', false);
+    repository.close(); repository = createStudioRepository(state);
+    assert.deepEqual(repository.nativeRevision('flow'), { providerId: 'native', creating: false, grant });
+    repository.nativeGranted('flow', grant);
+    assert.throws(() => repository.nativeGranted('flow', { ...grant, workflowSha256: 'b'.repeat(64) }), /grant changed/);
+    assert.throws(() => repository.saved('flow', 'dkg-program', false), /executor changed/);
+    assert.deepEqual(repository.nativeRevision('flow').grant, grant);
+  } finally { repository.close(); rmSync(state, { recursive: true, force: true }); }
+});

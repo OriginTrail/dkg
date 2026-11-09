@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { programRequest, programResult } from './dkg-program.mjs';
-import { dkgComponentStore } from './dkg-components.mjs';
+import { dkgComponentStore } from './test-support/dkg-component-store-fixture.mjs';
 import { component } from './component-registry.mjs';
 import { compileStudio } from './studio-definition.mjs';
 

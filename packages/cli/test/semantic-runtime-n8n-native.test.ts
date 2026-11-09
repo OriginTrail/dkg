@@ -59,6 +59,37 @@ function fixture() {
 }
 
 describe('native n8n component execution receipts', () => {
+  it.each(['missing', 'short', 'multiline', 'oversized'])('classifies a %s webhook credential as a local pre-dispatch failure', async mode => {
+    const f = fixture(), adapter = f.adapter();
+    if (mode === 'missing') rmSync(f.config.webhookTokenFile);
+    else writeFileSync(f.config.webhookTokenFile, mode === 'short' ? 'short'
+      : mode === 'multiline' ? 'fictional-first-line\nfictional-second-line' : 'x'.repeat(8193));
+    const error = await adapter.dispatch(authorization, input).catch(error => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(adapter.couldHaveReachedTarget(error)).toBe(false);
+    expect(f.fetch).toHaveBeenCalledTimes(1); // The valid API credential completed workflow preflight.
+    expect(f.posts()).toBe(0);
+    expect(f.store.adapterCheckpoint(authorization.effectId)).toBeUndefined();
+  });
+  it('keeps a lost acknowledgement after dispatch uncertain without inventing a checkpoint', async () => {
+    const f = fixture(), adapter = f.adapter(), send = f.fetch.getMockImplementation()!;
+    f.fetch.mockImplementation(async (url, options) => {
+      if (String(url).includes('/webhook/')) throw new Error('acknowledgement lost');
+      return send(url, options);
+    });
+    const error = await adapter.dispatch(authorization, input).catch(error => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(adapter.couldHaveReachedTarget(error)).toBe(true);
+    expect(f.posts()).toBe(1);
+    expect(f.store.adapterCheckpoint(authorization.effectId)).toBeUndefined();
+    await expect(adapter.resume!(authorization, input)).rejects.toThrow('INSPECTION_REQUIRED');
+    expect(f.posts()).toBe(1);
+  });
+  it('does not require a webhook credential to inspect an already observed execution', async () => {
+    const f = fixture(); rmSync(f.config.webhookTokenFile);
+    expect((await f.adapter().dispatch(authorization, { ...input, executionId: '42' })).status).toBe('succeeded');
+    expect(f.posts()).toBe(0);
+  });
   it('journals the provider ID before reading native output and returns actual records', async () => {
     const f = fixture(), value = await f.adapter().dispatch(authorization, input);
     const result = JSON.parse(value.output);

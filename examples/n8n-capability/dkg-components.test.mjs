@@ -1,14 +1,14 @@
 import { JPB_SOURCE, JPB_TARGET, JPB_WORKBOOK } from './profiles/jpb-evidence.mjs';
 import './test-support/select-jpb-profile.mjs';
+import { dkgComponentStore } from './test-support/dkg-component-store-fixture.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import {
-  dkgComponentStore,
   validateDkgTopology,
 } from "./dkg-components.mjs";
 import { compileStudio } from "./studio-definition.mjs";
-import { component } from "./component-registry.mjs";
+import { component, componentNeedsExport } from "./component-registry.mjs";
 process.env.NOS_JPB_READ_ENABLED = "1";
 process.env.NOS_JPB_WRITE_ENABLED = "1";
 const id = "11223344-1234-4234-8234-123456789abc";
@@ -73,6 +73,18 @@ const written = (p) => ({
   name: p.name,
   readbackVerified: true,
   metadata: { status: "wm-sealed", reservedUal: "did:dkg:base:8453/example/1" },
+});
+test('registry separates write capability from export authority, including legacy descriptors', () => {
+  for (const [id, required] of [['dkg-write', false], ['google-sheets', true], ['google-drive', true]]) {
+    const descriptor = component(id);
+    assert.equal(descriptor.writes, true);
+    assert.equal(descriptor.requiresExportAuthorization, required);
+    assert.equal(componentNeedsExport(descriptor), required);
+    const { requiresExportAuthorization: _policy, ...legacy } = descriptor;
+    assert.equal(componentNeedsExport(legacy), required);
+  }
+  assert.equal(componentNeedsExport({ id: 'unrecognized-writer', writes: true }), true);
+  assert.equal(componentNeedsExport({ ...component('google-sheets'), requiresExportAuthorization: false }), true);
 });
 test("native HTTP DKG components are actual connected steps with one batched write and credential references", () => {
   const c = compileStudio(def, {
@@ -303,12 +315,14 @@ test("native lookup filters names and fails closed if pagination is incomplete",
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { createStudioProvider } = await import("./studio-provider.mjs");
+  const { createStudioRepository } = await import("./studio-repository.mjs");
   const dir = mkdtempSync(join(tmpdir(), "jpb-provider-"));
   const tokenFile = join(dir, "test-token");
   writeFileSync(tokenFile, "test-only");
   let requests = 0;
+  const repository = createStudioRepository(dir);
   const provider = createStudioProvider({
-    state: dir,
+    repository,
     graphId: "g",
     owner: "a",
     headerCredential: { id: "ref", name: "ref" },
@@ -332,7 +346,7 @@ test("native lookup filters names and fails closed if pagination is incomplete",
     await assert.rejects(provider.provision(def), /lookup is incomplete/);
     assert.equal(requests, 8);
   } finally {
-    provider.close();
+    repository.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });
