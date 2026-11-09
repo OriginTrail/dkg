@@ -66,10 +66,22 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     }
   });
 
-  test('expanding Public Graphs keeps the My Context Graphs list available', async ({ leftPanel }) => {
+  test('expanding Public Graphs leaves My Context Graphs expanded, with both lists on show', async ({ leftPanel }) => {
+    const mine = leftPanel.root
+      .locator(sel.leftPanel.peerGroup)
+      .filter({ has: leftPanel.page.locator(sel.leftPanel.peerGroupLabel, { hasText: /^My Context Graphs$/ }) })
+      .first();
+    const discovered = leftPanel.publicGraphsSection();
+    await expect(mine.locator(sel.leftPanel.peerGroupHeader)).toHaveAttribute('aria-expanded', 'true');
     await leftPanel.switchToMode('oracle');
-    await leftPanel.switchToMode('explorer');
-    expect((await leftPanel.getProjectNames()).length).toBeGreaterThanOrEqual(2);
+    // Nothing is opened again: both sections stay as that one click left them.
+    await expect(discovered.locator(sel.leftPanel.peerGroupHeader)).toHaveAttribute('aria-expanded', 'true');
+    await expect(mine.locator(sel.leftPanel.peerGroupHeader)).toHaveAttribute('aria-expanded', 'true');
+    const myRows = mine.locator(sel.leftPanel.peerGroupBody).locator(sel.leftPanel.section);
+    for (const name of [PRIMARY_CG, SECONDARY_CG]) await expect(myRows.filter({ hasText: name }).first()).toBeVisible();
+    // Public Graphs lists the graphs the node discovered, or says there are none yet.
+    const discoveredBody = discovered.locator(sel.leftPanel.peerGroupBody);
+    await expect(discoveredBody.locator(`${sel.leftPanel.section}, ${sel.leftPanel.emptyCard}`).first()).toBeVisible();
   });
 
   test('New button opens create modal', async ({ leftPanel, createProjectModal }) => {
