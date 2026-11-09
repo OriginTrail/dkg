@@ -3,7 +3,7 @@
 // labeled as such. Nothing on this page sends a request.
 import React, { useState } from 'react';
 import { copy } from './copy.generated.js';
-import { MarketplaceError } from './api/client.js';
+import { errorOf } from './api/client.js';
 import { FIXTURE_IDS, FIXTURE_SECRET, fixtureWorld } from './api/fixtures.js';
 import type { MadeKey, Preview, ServiceRequest } from './api/types.js';
 import { fmtCount, fmtTrac, modelName } from './amounts.js';
@@ -24,6 +24,7 @@ function Sect({ title, children }: { title: string; children: React.ReactNode })
   );
 }
 
+/** Refusals in both of the node's shapes, as it sends them: the status, the body, and the Retry-After header. */
 const REFUSALS: Array<[number, unknown, string | null]> = [
   [503, { error: 'The marketplace is off on this node', code: 'MarketplaceOff', retryable: true }, null],
   [403, { error: 'A node-admin token is required', code: 'NodeAdminRequired', retryable: false }, null],
@@ -112,11 +113,7 @@ export function MarketplaceGalleryView(): React.ReactElement {
         </Sect>
 
         <Sect title={copy('gallery.sect.refusals')}>
-          {REFUSALS.map(([status, body, retryAfter], i) => {
-            const err = body as { error: unknown };
-            const code = typeof err.error === 'string' ? (body as { code: string }).code : (err.error as { code: string }).code;
-            return <ErrorCard key={i} err={new MarketplaceError({ status, code, message: code, retryable: status === 503, retryAfter: retryAfter ? Number(retryAfter) : null, body })} />;
-          })}
+          {REFUSALS.map(([status, body, retryAfter], i) => <ErrorCard key={i} err={errorOf(status, body, retryAfter)} />)}
         </Sect>
 
         <Sect title={copy('gallery.sect.states')}>
