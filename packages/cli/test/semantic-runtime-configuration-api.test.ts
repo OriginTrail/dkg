@@ -713,7 +713,7 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     } finally { vi.unstubAllGlobals(); }
   });
 
-  it.each(['complete', 'oversized', 'escaped-envelope', 'restart-before-callback', 'restart-before-receipt', 'succeeded-revoked', 'loop-terminal', 'declared-child', 'mixed-child', 'new-call', 'missing-acknowledgement', 'revoke', 'expire', 'epoch'])('reconciles native results without dispatching new work (%s)', async mode => {
+  it.each(['complete', 'oversized', 'escaped-envelope', 'restart-before-callback', 'restart-before-receipt', 'succeeded-revoked', 'loop-terminal', 'declared-child', 'mixed-child', 'new-call', 'missing-acknowledgement', 'credential-missing', 'credential-short', 'revoke', 'expire', 'epoch'])('preserves native dispatch and recovery boundaries (%s)', async mode => {
     const extraCall = mode === 'new-call';
     const n8nTool = 'urn:dkg:tool:n8n', workflowId = 'native-inspection';
     const definition = { versionId: 'published-native-1', nodes: [{ id: 'component', name: 'Component',
@@ -770,8 +770,38 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       await f.approve(overrides);
       await f.client.routes.create({ ...f.operation, targetPeerId: f.agent.peerId });
       const prepared = f.client.programs.prepareInvocation({ ...f.operation, inputs: [{ text: 'original' }] });
+      if (mode.startsWith('credential-')) {
+        if (mode === 'credential-missing') rmSync(webhookTokenFile); else writeFileSync(webhookTokenFile, 'short');
+        const error = await f.client.programs.invoke(prepared).catch(error => error);
+        expect(error).toBeInstanceOf(Error);
+        expect(error.code).not.toBe('INVOCATION_REQUIRES_RECONCILIATION');
+        const executionIri = `urn:sr:execution:${prepared.invocationId}`;
+        const effects = f.target.runtime!.store.effectsForExecution(executionIri);
+        expect(effects).toHaveLength(1);
+        expect(effects[0].state).toBe('failed');
+        expect(f.target.runtime!.store.effectTransitions(effects[0].effectId).at(-1)).toMatchObject({
+          state: 'failed', evidenceRef: 'adapter-definitive-failure',
+        });
+        expect(f.target.runtime!.store.adapterCheckpoint(effects[0].effectId)).toBeNull();
+        expect(dispatches).toBe(0);
+        writeFileSync(webhookTokenFile, 'unit-native-webhook-fixture');
+        await restartNode(f.target);
+        await expect(f.client.programs.invoke(prepared)).rejects.toBeInstanceOf(Error);
+        expect(f.target.runtime!.store.effectsForExecution(executionIri)[0].state).toBe('failed');
+        expect(dispatches).toBe(0);
+        interrupted = false;
+        const fresh = f.client.programs.prepareInvocation({ ...f.operation, inputs: [{ text: 'original' }] });
+        expect((await f.client.programs.invoke(fresh)).outputs).toMatchObject([{ n8nExecutionId: '42' }]);
+        expect(dispatches).toBe(1);
+        return;
+      }
       await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
       expect(dispatches).toBe(1);
+      if (mode === 'missing-acknowledgement') {
+        const effects = f.target.runtime!.store.effectsForExecution(`urn:sr:execution:${prepared.invocationId}`);
+        expect(effects).toHaveLength(1); expect(effects[0].state).toBe('unknown');
+        expect(f.target.runtime!.store.adapterCheckpoint(effects[0].effectId)).toBeNull();
+      }
       const oldRuntime = f.target.runtime!;
       await oldRuntime.stop(); runtimes.delete(oldRuntime); f.target.runtime = null;
       await f.target.boot(true);

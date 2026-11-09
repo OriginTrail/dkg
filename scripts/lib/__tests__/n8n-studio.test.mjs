@@ -214,6 +214,25 @@ test('timer admission rejects changed versions, published digests, identities, s
   } finally { f.close(); }
 });
 
+test('timer intake fetches off-page pending details once and preserves candidate order', async () => {
+  const f = environment();
+  try {
+    const w = await f.service.save(definition(['schedule', 'edit-fields'], [[0,0,1,0]]), () => {});
+    await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+    const row = f.provider.row(w.kaRef), invocationId = randomUUID();
+    f.provider.repository.reserveEvent({ kaRef: w.kaRef, providerId: row.provider_id, executionId: '7', invocationId }, () => {});
+    for (const id of ['9', '8', '7']) f.executions.set(id, timerExecution(f, row, id));
+    f.setExecutionPage(['9', '8']);
+    f.restart(); await f.service.poll();
+    assert.deepEqual(f.invocations.map(v => JSON.parse(v.inputs[0].itemsJson)[0].tick), ['7', '8', '9']);
+    assert.equal(f.invocations[0].invocationId, invocationId);
+    for (const id of ['7', '8', '9']) assert.equal(f.calls.filter(([method, path]) => method === 'GET' && path === '/executions/' + id).length, 1);
+    assert.equal(f.provider.repository.pendingEvents(w.kaRef).length, 0);
+    assert.equal(f.provider.repository.activation(w.kaRef).count, 3);
+    await f.service.poll(); assert.equal(f.invocations.length, 3);
+  } finally { f.close(); }
+});
+
 test('failed quota persistence rolls back webhook reservation before dispatch', async () => {
   const f = environment();
   try {

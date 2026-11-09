@@ -5,7 +5,6 @@ import { guestRevisionHashes } from './test-fixtures/guest-revisions.mjs';
 import { normalizeComponentInput } from './component-registry.mjs';
 import { normalizeComponentInput as legacyNormalize } from './component-registry-v1.mjs';
 import { resolveComponentValue, validateComponentUrl } from './component-values.mjs';
-import { runProgramSteps } from './program-workflow.mjs';
 import { programRecords } from './program-block.mjs';
 
 test('preserves deployed component, native expression and Studio source bytes and identities', async () => {
@@ -16,7 +15,7 @@ test('preserves deployed component, native expression and Studio source bytes an
 
 test('host function formatting or loader rewrites cannot change persisted guest sources', async () => {
   const expected = await guestRevisionHashes();
-  const helpers = [normalizeComponentInput, legacyNormalize, resolveComponentValue, validateComponentUrl, runProgramSteps, programRecords];
+  const helpers = [normalizeComponentInput, legacyNormalize, resolveComponentValue, validateComponentUrl, programRecords];
   try {
     for (const helper of helpers) helper.toString = () => 'function transformedHostHelper() { /* loader-specific names */ }';
     assert.deepEqual(await guestRevisionHashes(), expected);

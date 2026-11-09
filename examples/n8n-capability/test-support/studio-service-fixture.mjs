@@ -18,11 +18,11 @@ export function environment() {
   const state=mkdtempSync(join(tmpdir(),'studio-unit-')), token=join(state,'fixture-api'), exportTokenFile=join(state,'fixture-export');
   writeFileSync(token,'unit-test-fixture-only');writeFileSync(exportTokenFile,'operator-unit-fixture-only');
   const config={n8nNative:{baseUrl:'http://127.0.0.1:45678',apiTokenFile:token,webhookTokenFile:token,workflows:[]}};
-  const native=new Map(),calls=[], executions=new Map();let loseCreate=false;
+  const native=new Map(),calls=[], executions=new Map();let loseCreate=false, executionPage=null;
   const fetchImpl=async(url,options)=>{
     const path=new URL(url).pathname.replace('/api/v1',''),method=options.method;calls.push([method,path]);
     const body=options.body?JSON.parse(options.body):undefined;
-    if(path==='/executions') return Response.json({data:[...executions.values()]});
+    if(path==='/executions') return Response.json({data:[...executions.values()].filter(e=>!executionPage||executionPage.includes(e.id))});
     if(path.startsWith('/executions/')) return Response.json(executions.get(path.split('/')[2]));
     if(path==='/workflows'&&method==='GET') return Response.json({data:[...native.values()]});
     if(path==='/workflows'&&method==='POST'){const value={...body,id:'provider_'+(native.size+1),active:false,versionId:'version1'};native.set(value.id,value);if(loseCreate){loseCreate=false;throw Error('lost-ack');}return Response.json(value);}
@@ -47,6 +47,6 @@ export function environment() {
   }};
   const openService=()=>createStudioService({graphId,owner,client,provider,exportTokenFile,listCapabilities:async()=>inventory,loadOutputs:async iri=>outputs.get(iri)});
   let service=openService();
-  return {state,get provider(){return provider;},get service(){return service;},restart(){service.stop();provider.close();provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,fetchImpl,setCatalog:v=>{inventory=v;},loseNextCreate:()=>{loseCreate=true;},
+  return {state,get provider(){return provider;},get service(){return service;},restart(){service.stop();provider.close();provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,fetchImpl,setExecutionPage:ids=>{executionPage=ids;},setCatalog:v=>{inventory=v;},loseNextCreate:()=>{loseCreate=true;},
     close(){service.stop();provider.close();rmSync(state,{recursive:true,force:true});}};
 }
