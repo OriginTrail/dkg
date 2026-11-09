@@ -1,5 +1,6 @@
 import { studioExecutionPlan, prepareStudioExecution } from './studio-execution-plan.mjs';
 import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { component, normalizeComponentInput } from './component-registry.mjs';
 import { component as componentV1, normalizeComponentInput as normalizeComponentInputV1 } from './component-registry-v1.mjs';
@@ -12,8 +13,9 @@ const reject = message => Object.assign(new Error(message), { code: 'INVALID_WOR
 const eventUuid = (ref, id) => { const b = createHash('sha256').update(ref + ':' + id).digest(); b[6] = (b[6] & 15) | 64; b[8] = (b[8] & 63) | 128;
   const h = b.toString('hex'); return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`; };
 
-export function createStudioService({ graphId, owner, client, provider, listCapabilities, loadOutputs, exportTokenFile }) {
-  const repository = provider.repository;
+export function createStudioService({ graphId, owner, client, repository, provider, listCapabilities, loadOutputs, exportTokenFile }) {
+  const native = () => { if (!provider) throw reject('Native execution is not configured.'); return provider; };
+  const fingerprint = path => createHash('sha256').update(readFileSync(path, 'utf8').trim()).digest('hex');
   const saving = new Map(); let polling = false, stopped = false;
   async function approved(kaRef, sourceHash) {
     try { const a = await client.programs.getApproval({ graphId, operationIri: kaRef }); return a.binding.enabled && a.binding.program.sourceHash === sourceHash; }
@@ -48,7 +50,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     if (needsExport()) authorize();
     const key = JSON.stringify(definition); if (saving.has(key)) return saving.get(key);
     const pending = (async () => {
-      const { compiled, plan } = await prepareStudioExecution(definition, graphId, provider.provision);
+      const { compiled, plan } = await prepareStudioExecution(definition, graphId, definition => native().provision(definition));
       repository.ensure(compiled);
       const sourceText = plan.upload.source;
       const sourceHash = createHash('sha256').update(sourceText).digest('hex');
@@ -83,6 +85,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     const descriptor = { ...(compiled.legacy ? componentV1 : component)(root.componentId), ...(compiled.mode === 'schedule' ? { mode: 'action' } : {}) };
     let input; try { input = (compiled.legacy ? normalizeComponentInputV1 : normalizeComponentInput)(descriptor, { itemsJson: value.itemsJson, paramsJson: JSON.stringify(root.params), executionId: '' }); }
     catch (e) { throw reject(e.message); }
+    if (plan.kind === 'native-n8n') native().installGrant(compiled.grant);
     const invoke = () => client.programs.invoke({ graphId, operationIri: workflow.kaRef, invocationId, inputs: [input] });
     let result;
     try { result = await invoke(); }
@@ -105,7 +108,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
   function eventAuthorized(ref, compiled) {
     const active = activation(ref);
     if (!active.active || active.expiresAt < Date.now()) throw reject('This event workflow is inactive.');
-    if (compiled.requiresExportAuthorization && (!exportTokenFile || active.exportFingerprint !== provider.fingerprint(exportTokenFile))) throw reject('The operator export authorization changed.');
+    if (compiled.requiresExportAuthorization && (!exportTokenFile || active.exportFingerprint !== fingerprint(exportTokenFile))) throw reject('The operator export authorization changed.');
   }
   async function activate(value, authorize) {
     if (!value || Object.keys(value).some(k => !['kaRef', 'sourceHash', 'active', 'activationId'].includes(k)) || typeof value.active !== 'boolean') throw reject('Choose an activation state.');
@@ -114,7 +117,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     if (!['schedule', 'webhook'].includes(compiled.mode)) throw reject('Start with a Webhook or Schedule Trigger to activate events.');
     if (activation(value.kaRef).activationId === activationId) {
       const current = activation(value.kaRef);
-      if (value.active && current.active && current.expiresAt > Date.now() && compiled.mode === 'schedule') await provider.setPublished(workflow.kaRef, true);
+      if (value.active && current.active && current.expiresAt > Date.now() && compiled.mode === 'schedule') await native().setPublished(workflow.kaRef, true);
       return (await get(value.kaRef)).workflow;
     }
     if (value.active) {
@@ -122,11 +125,11 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
       validateStudioCapabilities(compiled.definition, await listCapabilities());
       if (workflow.requiresExportAuthorization) authorize();
       const a = { active: true, activationId, startedAt: Date.now(), expiresAt: Date.now() + 30 * 60 * 1000, count: 0,
-        ...(workflow.requiresExportAuthorization ? { exportFingerprint: provider.fingerprint(exportTokenFile) } : {}) };
+        ...(workflow.requiresExportAuthorization ? { exportFingerprint: fingerprint(exportTokenFile) } : {}) };
       repository.setActivation(workflow.kaRef, a, randomUUID());
-      if (compiled.mode === 'schedule') await provider.setPublished(workflow.kaRef, true);
+      if (compiled.mode === 'schedule') await native().setPublished(workflow.kaRef, true);
     } else {
-      if (compiled.mode === 'schedule') await provider.setPublished(workflow.kaRef, false);
+      if (compiled.mode === 'schedule') await native().setPublished(workflow.kaRef, false);
       repository.setActivation(workflow.kaRef, { active: false, activationId });
     }
     return (await get(workflow.kaRef)).workflow;
@@ -182,7 +185,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
         }
         if (compiled.mode !== 'schedule') continue;
         const pendingExecutionIds = repository.pendingEvents(row.ka_ref).map(event => event.executionId);
-        for await (const { executionId, items } of provider.timerEvents({ grant: compiled.grant,
+        for await (const { executionId, items } of native().timerEvents({ grant: compiled.grant,
           startedAt: a.startedAt, pendingExecutionIds })) {
           try {
             const event = repository.reserveEvent({ kaRef: row.ka_ref, providerId: row.provider_id,

@@ -7,6 +7,7 @@ import { persistProgramKnowledgeAsset } from '../../packages/cli/dist/semantic-r
 import { createWorkflowService } from './workflow-service.mjs';
 import { WORKFLOW_PREFIX } from './workflow-definition.mjs';
 import { createStudioProvider } from './studio-provider.mjs';
+import { createStudioRepository } from './studio-repository.mjs';
 import { createStudioService } from './studio-service.mjs';
 import { normalizeComponentInput } from './component-registry.mjs';
 import { STUDIO_PREFIX } from './studio-definition.mjs';
@@ -37,11 +38,19 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     for (const row of resultRows(result)) {
       const kaRef = iriValue(row.program);
       const definition = definitions.find(item => item.kaRef === kaRef);
-      const binding = config.programBindings?.find(item => item.operationIri === kaRef && item.contextGraphId === graphId && item.enabled && item.n8n);
       if (!definition) continue;
+      let binding;
+      try { binding = (await client.programs.getApproval({ graphId, operationIri: kaRef })).binding; }
+      catch (error) { if (error.status !== 404) throw error; }
       const source = await client.programs.getSource({ graphId, programIri: kaRef, programLayer: 'wm' });
-      if (binding && source.sourceHash !== binding.program.sourceHash) continue;
-      const available = !!binding && definition?.enabled !== false;
+      const sameOwner = address => typeof address === 'string' && address.toLowerCase() === owner.toLowerCase();
+      const available = definition.enabled !== false && binding?.enabled === true && !!binding.n8n
+        && binding.contextGraphId === graphId && binding.operationIri === kaRef
+        && sameOwner(binding.executorAgentAddress) && binding.allowedCallerAgentAddresses?.some(sameOwner) === true
+        && binding.program?.contextGraphId === graphId && binding.program.programIri === kaRef && binding.program.programLayer === 'wm'
+        && binding.program.sourceHash === source.sourceHash
+        && typeof source.authorAgentAddress === 'string'
+        && binding.program.authorAgentAddress?.toLowerCase() === source.authorAgentAddress.toLowerCase();
       capabilities.push({ kaRef, graphId, sourceHash: source.sourceHash, name: source.label ?? 'n8n capability', version: source.version,
         kind: definition?.kind ?? 'text', available,
         ...(definition.retired ? { retired: true } : {}),
@@ -67,8 +76,9 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     },
     loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner),
   });
-  const provider = studioOptions ? createStudioProvider({ ...studioOptions, config, graphId, owner }) : null;
-  const studio = provider ? createStudioService({ graphId, owner, client, provider, exportTokenFile,
+  const repository = studioOptions ? createStudioRepository(studioOptions.state) : null;
+  const provider = repository && config.n8nNative ? createStudioProvider({ ...studioOptions, repository, config, graphId, owner }) : null;
+  const studio = repository ? createStudioService({ graphId, owner, client, repository, provider, exportTokenFile,
     listCapabilities: async () => [...await list(), ...await listPrograms()],
     loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner) }) : null;
   async function invoke(capability, input, invocationId) {
@@ -159,5 +169,5 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     }
     return true;
   }
-  return { list, listPrograms, invoke, workflows, studio, handle, close() { studio?.stop(); provider?.close(); } };
+  return { list, listPrograms, invoke, workflows, studio, handle, close() { studio?.stop(); repository?.close(); } };
 }

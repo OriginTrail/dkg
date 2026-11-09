@@ -12,6 +12,7 @@ import { createRequire } from 'node:module';
 import vm from 'node:vm';
 import { componentRegistry, component } from '../../../examples/n8n-capability/component-registry.mjs';
 import { compileStudio, normalizeStudio, readStudio, studioProgramSource, validateStudioCapabilities } from '../../../examples/n8n-capability/studio-definition.mjs';
+import { createStudioRepository } from '../../../examples/n8n-capability/studio-repository.mjs';
 import { createStudioProvider } from '../../../examples/n8n-capability/studio-provider.mjs';
 import { createStudioService } from '../../../examples/n8n-capability/studio-service.mjs';
 import { compileStudio as compileStudioV1, studioProgramSource as studioProgramSourceV1 } from '../../../examples/n8n-capability/studio-definition-v1.mjs';
@@ -119,7 +120,8 @@ function environment() {
     if(action==='unpublish'){w.active=false;delete w.activeVersion;return Response.json(w);}
     return Response.json(w);
   };
-  const openProvider=()=>createStudioProvider({state,config,graphId,owner,headerCredential:{id:'fixture-header',name:'Fixture'},credentials:{},fetchImpl});
+  let repository=createStudioRepository(state);
+  const openProvider=()=>createStudioProvider({repository,config,graphId,owner,headerCredential:{id:'fixture-header',name:'Fixture'},credentials:{},fetchImpl});
   let provider=openProvider();
   const sources=new Map(), approvals=new Map(),outputs=new Map(),invocations=[]; let inventory=catalog, catalogFailure;
   const client={programs:{
@@ -131,13 +133,14 @@ function environment() {
       const value={kind:'n8n-result',n8nExecutionId:'42',workflowSha256:c.grant.workflowSha256,output:{ok:true,itemsJson:v.inputs[0].itemsJson,portsJson:'{}',error:'',traceJson:JSON.stringify(c.grant.result.traceNodes.map(node=>({node,status:'completed',items:[1],outputHash:'a'.repeat(64)})))}};
       const executionIri='urn:sr:execution:'+v.invocationId,rawOutputs=[JSON.stringify(value)];outputs.set(executionIri,rawOutputs);return {...v,executionIri,rawOutputs,outputs:[value],persisted:true};},
   }};
-  const openService=()=>createStudioService({graphId,owner,client,provider,exportTokenFile,listCapabilities:async()=>{if(catalogFailure){const error=catalogFailure;catalogFailure=undefined;throw error;}return inventory;},loadOutputs:async iri=>outputs.get(iri)});
+  const openService=()=>createStudioService({graphId,owner,client,repository,provider,exportTokenFile,listCapabilities:async()=>{if(catalogFailure){const error=catalogFailure;catalogFailure=undefined;throw error;}return inventory;},loadOutputs:async iri=>outputs.get(iri)});
   let service=openService();
-  return {state,get provider(){return provider;},get service(){return service;},restart(){service.stop();provider.close();provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,setExecutionPage:ids=>{executionPage=ids;},setCatalog:v=>{inventory=v;},failNextCatalog:error=>{catalogFailure=error;},loseNextCreate:()=>{loseCreate=true;},
-    close(){service.stop();provider.close();rmSync(state,{recursive:true,force:true});}};
+  return {state,get repository(){return repository;},get provider(){return provider;},get service(){return service;},restart(){service.stop();repository.close();repository=createStudioRepository(state);provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,fetchImpl,setExecutionPage:ids=>{executionPage=ids;},setCatalog:v=>{inventory=v;},failNextCatalog:error=>{catalogFailure=error;},loseNextCreate:()=>{loseCreate=true;},
+    close(){service.stop();repository.close();rmSync(state,{recursive:true,force:true});}};
 }
 test('a lost native create acknowledgement is reconciled by name without a second create',async()=>{
   const f=environment();try{f.loseNextCreate();await assert.rejects(f.provider.provision(definition()),/lost-ack/);
+    f.restart();
     const saved=await f.provider.provision(definition());assert.equal(saved.grant.workflowId,'provider_1');
     assert.equal(f.calls.filter(([m,p])=>m==='POST'&&p==='/workflows').length,1);
     assert.equal(f.config.n8nNative.workflows.length,1);
@@ -203,12 +206,12 @@ for (const mode of ['webhook', 'schedule']) for (const stage of ['source', 'appr
     try {
       const w = await f.service.save(definition([mode, 'edit-fields'], [[0,0,1,0]]), () => {});
       await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-      const row = f.provider.row(w.kaRef), invocationId = randomUUID(), items = [{ name: 'retry' }];
-      f.provider.repository.reserveEvent({ kaRef: w.kaRef, providerId: row.provider_id,
+      const row = f.repository.row(w.kaRef), invocationId = randomUUID(), items = [{ name: 'retry' }];
+      f.repository.reserveEvent({ kaRef: w.kaRef, providerId: row.provider_id,
         executionId: mode === 'schedule' ? '7' : invocationId, invocationId,
         ...(mode === 'webhook' ? { inputJson: JSON.stringify(items) } : {}) }, () => {});
       if (mode === 'schedule') f.executions.set('7', timerExecution(f, row, '7'));
-      const before = f.provider.repository.activation(w.kaRef), pending = f.provider.repository.pendingEvents(w.kaRef);
+      const before = f.repository.activation(w.kaRef), pending = f.repository.pendingEvents(w.kaRef);
       const timeout = Object.assign(new Error('temporary inspection timeout'), { code: 'ETIMEDOUT', status: 503 });
       if (stage === 'catalog') f.failNextCatalog(timeout);
       else {
@@ -217,16 +220,16 @@ for (const mode of ['webhook', 'schedule']) for (const stage of ['source', 'appr
       }
       const calls = f.calls.length;
       await f.service.poll();
-      assert.deepEqual(f.provider.repository.activation(w.kaRef), before);
-      assert.equal(f.provider.row(w.kaRef).event_key, row.event_key);
-      assert.deepEqual(f.provider.repository.pendingEvents(w.kaRef), pending);
+      assert.deepEqual(f.repository.activation(w.kaRef), before);
+      assert.equal(f.repository.row(w.kaRef).event_key, row.event_key);
+      assert.deepEqual(f.repository.pendingEvents(w.kaRef), pending);
       assert.equal(f.native.get(row.provider_id).active, true);
       assert.equal(f.calls.length, calls); assert.equal(f.invocations.length, 0);
       f.restart(); await f.service.poll();
       if (mode === 'webhook') await f.service.event(row.event_key, { invocationId, items });
       assert.equal(f.invocations.length, 1); assert.equal(f.invocations[0].invocationId, invocationId);
-      assert.equal(f.provider.repository.pendingEvents(w.kaRef).length, 0);
-      assert.equal(f.provider.repository.activation(w.kaRef).count, 1);
+      assert.equal(f.repository.pendingEvents(w.kaRef).length, 0);
+      assert.equal(f.repository.activation(w.kaRef).count, 1);
     } finally { f.close(); }
   });
 }
@@ -237,14 +240,14 @@ for (const mode of ['webhook', 'schedule']) for (const loss of ['expired', 'appr
     try {
       const w = await f.service.save(definition([mode, loss === 'export' ? 'google-sheets' : 'edit-fields'], [[0,0,1,0]]), () => {});
       await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-      const row = f.provider.row(w.kaRef);
-      if (loss === 'expired') f.provider.repository.setActivation(w.kaRef,
-        { ...f.provider.repository.activation(w.kaRef), expiresAt: Date.now() - 1 }, row.event_key);
+      const row = f.repository.row(w.kaRef);
+      if (loss === 'expired') f.repository.setActivation(w.kaRef,
+        { ...f.repository.activation(w.kaRef), expiresAt: Date.now() - 1 }, row.event_key);
       if (loss === 'approval') f.approvals.get(w.kaRef).binding.enabled = false;
       if (loss === 'export') writeFileSync(f.exportTokenFile, 'rotated-fictional-export-authorization');
       await f.service.poll();
-      assert.equal(f.provider.repository.activation(w.kaRef).active, false);
-      assert.equal(f.provider.row(w.kaRef).event_key, null);
+      assert.equal(f.repository.activation(w.kaRef).active, false);
+      assert.equal(f.repository.row(w.kaRef).event_key, null);
       if (mode === 'schedule') assert.equal(f.native.get(row.provider_id).active, false);
       assert.equal(f.invocations.length, 0);
     } finally { f.close(); }
@@ -256,7 +259,7 @@ for (const interrupted of [false, true]) test(`normalized timer ${interrupted ? 
   try {
     const w = await f.service.save(definition(['schedule', 'http-request'], [[0,0,1,0]]), () => {});
     await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const row = f.provider.row(w.kaRef), execution = timerExecution(f, row, '7');
+    const row = f.repository.row(w.kaRef), execution = timerExecution(f, row, '7');
     f.executions.set('7', execution);
     const invoke = f.client.programs.invoke, attempts = [], cached = new Map();
     let loseReply = interrupted;
@@ -268,16 +271,16 @@ for (const interrupted of [false, true]) test(`normalized timer ${interrupted ? 
     };
     await f.service.poll();
     assert.equal(f.invocations.length, 1, 'normalized native evidence must admit the timer');
-    const first = f.provider.db.prepare('SELECT * FROM events WHERE execution_id=?').get('7');
+    const first = f.repository.db.prepare('SELECT * FROM events WHERE execution_id=?').get('7');
     assert.equal(first.invocation_id, f.invocations[0].invocationId);
     assert.equal(!!first.receipt_json, !interrupted);
     f.restart();
     await f.service.poll(); await f.service.poll();
     assert.equal(f.invocations.length, 1, 'the simulated downstream runtime executes each invocation once');
     assert.deepEqual(attempts, Array(interrupted ? 2 : 1).fill(first.invocation_id));
-    const completed = f.provider.db.prepare('SELECT * FROM events WHERE execution_id=?').get('7');
+    const completed = f.repository.db.prepare('SELECT * FROM events WHERE execution_id=?').get('7');
     assert.equal(completed.invocation_id, first.invocation_id); assert.ok(completed.receipt_json);
-    assert.equal(JSON.parse(f.provider.row(w.kaRef).activation_json).count, 1);
+    assert.equal(JSON.parse(f.repository.row(w.kaRef).activation_json).count, 1);
   } finally { f.close(); }
 });
 
@@ -286,7 +289,7 @@ test('timer admission rejects changed versions, published digests, identities, s
   try {
     const w = await f.service.save(definition(['schedule', 'http-request'], [[0,0,1,0]]), () => {});
     await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const row = f.provider.row(w.kaRef), native = f.native.get(row.provider_id);
+    const row = f.repository.row(w.kaRef), native = f.native.get(row.provider_id);
     const original = structuredClone(native.activeVersion);
     for (const change of [
       e => { e.workflowVersionId = 'foreign-version'; },
@@ -306,7 +309,7 @@ test('timer admission rejects changed versions, published digests, identities, s
       const e = timerExecution(f, row, '7'); change(e); f.executions.set('7', e);
       await f.service.poll();
       assert.equal(f.invocations.length, 0);
-      assert.equal(f.provider.db.prepare('SELECT count(*) AS n FROM events').get().n, 0);
+      assert.equal(f.repository.db.prepare('SELECT count(*) AS n FROM events').get().n, 0);
     }
     native.activeVersion = original; native.active = true;
     f.executions.set('7', timerExecution(f, row, '7'));
@@ -319,16 +322,16 @@ test('timer intake fetches off-page pending details once and preserves candidate
   try {
     const w = await f.service.save(definition(['schedule', 'edit-fields'], [[0,0,1,0]]), () => {});
     await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const row = f.provider.row(w.kaRef), invocationId = randomUUID();
-    f.provider.repository.reserveEvent({ kaRef: w.kaRef, providerId: row.provider_id, executionId: '7', invocationId }, () => {});
+    const row = f.repository.row(w.kaRef), invocationId = randomUUID();
+    f.repository.reserveEvent({ kaRef: w.kaRef, providerId: row.provider_id, executionId: '7', invocationId }, () => {});
     for (const id of ['9', '8', '7']) f.executions.set(id, timerExecution(f, row, id));
     f.setExecutionPage(['9', '8']);
     f.restart(); await f.service.poll();
     assert.deepEqual(f.invocations.map(v => JSON.parse(v.inputs[0].itemsJson)[0].tick), ['7', '8', '9']);
     assert.equal(f.invocations[0].invocationId, invocationId);
     for (const id of ['7', '8', '9']) assert.equal(f.calls.filter(([method, path]) => method === 'GET' && path === '/executions/' + id).length, 1);
-    assert.equal(f.provider.repository.pendingEvents(w.kaRef).length, 0);
-    assert.equal(f.provider.repository.activation(w.kaRef).count, 3);
+    assert.equal(f.repository.pendingEvents(w.kaRef).length, 0);
+    assert.equal(f.repository.activation(w.kaRef).count, 3);
     await f.service.poll(); assert.equal(f.invocations.length, 3);
   } finally { f.close(); }
 });
@@ -338,17 +341,17 @@ test('failed quota persistence rolls back webhook reservation before dispatch', 
   try {
     const w = await f.service.save(definition(['webhook', 'edit-fields'], [[0,0,1,0]]), () => {});
     await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const row = f.provider.row(w.kaRef), value = { invocationId: randomUUID(), items: [{ value: 1 }] };
-    f.provider.db.exec("CREATE TRIGGER fail_event_count BEFORE UPDATE OF activation_json ON workflows BEGIN SELECT RAISE(ABORT, 'count unavailable'); END");
+    const row = f.repository.row(w.kaRef), value = { invocationId: randomUUID(), items: [{ value: 1 }] };
+    f.repository.db.exec("CREATE TRIGGER fail_event_count BEFORE UPDATE OF activation_json ON workflows BEGIN SELECT RAISE(ABORT, 'count unavailable'); END");
     await assert.rejects(f.service.event(row.event_key, value), /count unavailable/);
     assert.equal(f.invocations.length, 0);
-    assert.equal(f.provider.db.prepare('SELECT count(*) AS n FROM events').get().n, 0);
-    assert.equal(JSON.parse(f.provider.row(w.kaRef).activation_json).count, 0);
-    f.provider.db.exec('DROP TRIGGER fail_event_count');
+    assert.equal(f.repository.db.prepare('SELECT count(*) AS n FROM events').get().n, 0);
+    assert.equal(JSON.parse(f.repository.row(w.kaRef).activation_json).count, 0);
+    f.repository.db.exec('DROP TRIGGER fail_event_count');
     const receipt = await f.service.event(row.event_key, value);
     assert.deepEqual(await f.service.event(row.event_key, value), receipt);
     assert.equal(f.invocations.length, 1);
-    assert.equal(JSON.parse(f.provider.row(w.kaRef).activation_json).count, 1);
+    assert.equal(JSON.parse(f.repository.row(w.kaRef).activation_json).count, 1);
   } finally { f.close(); }
 });
 
@@ -357,27 +360,27 @@ for (const mode of ['webhook', 'schedule']) test(`pending fifth ${mode} retains 
   try {
     const w = await f.service.save(definition([mode, 'edit-fields'], [[0,0,1,0]]), () => {});
     await f.service.activate({kaRef:w.kaRef,sourceHash:w.sourceHash,active:true,activationId:randomUUID()},()=>{});
-    const row = f.provider.row(w.kaRef), a = JSON.parse(row.activation_json);
-    a.count = 5; f.provider.db.prepare('UPDATE workflows SET activation_json=? WHERE ka_ref=?').run(JSON.stringify(a), w.kaRef);
+    const row = f.repository.row(w.kaRef), a = JSON.parse(row.activation_json);
+    a.count = 5; f.repository.db.prepare('UPDATE workflows SET activation_json=? WHERE ka_ref=?').run(JSON.stringify(a), w.kaRef);
     const invocationId = randomUUID(), executionId = mode === 'webhook' ? invocationId : '5';
-    f.provider.db.prepare('INSERT INTO events(provider_id,execution_id,ka_ref,invocation_id,input_json) VALUES(?,?,?,?,?)')
+    f.repository.db.prepare('INSERT INTO events(provider_id,execution_id,ka_ref,invocation_id,input_json) VALUES(?,?,?,?,?)')
       .run(row.provider_id, executionId, w.kaRef, invocationId, '[{}]');
     if (mode === 'schedule') {
       for (const id of ['5','6']) f.executions.set(id, timerExecution(f, row, id));
     }
     f.restart();
     await f.service.poll();
-    assert.equal(f.provider.row(w.kaRef).event_key, row.event_key);
-    assert.equal(JSON.parse(f.provider.row(w.kaRef).activation_json).active, true);
+    assert.equal(f.repository.row(w.kaRef).event_key, row.event_key);
+    assert.equal(JSON.parse(f.repository.row(w.kaRef).activation_json).active, true);
     if (mode === 'webhook') {
       await assert.rejects(f.service.event(row.event_key,{invocationId:randomUUID(),items:[{}]}),/limit/);
       await f.service.event(row.event_key,{invocationId,items:[{}]});
     }
     assert.equal(f.invocations.length,1); assert.equal(f.invocations[0].invocationId,invocationId);
-    assert.ok(f.provider.db.prepare('SELECT receipt_json FROM events WHERE execution_id=?').get(executionId).receipt_json);
-    assert.equal(f.provider.db.prepare('SELECT count(*) AS n FROM events').get().n,1);
+    assert.ok(f.repository.db.prepare('SELECT receipt_json FROM events WHERE execution_id=?').get(executionId).receipt_json);
+    assert.equal(f.repository.db.prepare('SELECT count(*) AS n FROM events').get().n,1);
     f.setCatalog(catalog.map(c=>({...c,available:false}))); await f.service.poll();
-    assert.equal(f.provider.row(w.kaRef).event_key,null);
+    assert.equal(f.repository.row(w.kaRef).event_key,null);
   } finally { f.close(); }
 });
 
@@ -424,10 +427,79 @@ for (const protectedComponent of ['google-sheets', 'google-drive', 'edit-fields'
       const allowed=role==='owner'&&(protectedComponent==='edit-fields'||token===secret);
       assert.equal(typeof body.eventPath==='string',allowed);
       if(allowed)delegatedPath=body.eventPath;
-      else assert.ok(!JSON.stringify(body).includes(f.provider.row(w.kaRef).event_key));
+      else assert.ok(!JSON.stringify(body).includes(f.repository.row(w.kaRef).event_key));
     }
     // Possession of an explicitly disclosed URL remains a delegated invocation capability.
     const receipt=await f.service.event(delegatedPath.split('/').at(-1),{invocationId:randomUUID(),items:[{value:1}]});
     assert.equal(receipt.readbackVerified,true);assert.equal(f.invocations.length,1);
   } finally {bridge?.close();f.close();}
+});
+
+
+for (const mode of ['manual', 'webhook', 'schedule']) for (const revoked of ['caller', 'executor', 'enabled', 'missing']) {
+  test(`current component ${revoked} revocation blocks saved ${mode} Studio dispatch`, async () => {
+    const f = environment(); let bridge;
+    try {
+      const graph = mode === 'manual' ? definition(['edit-fields'], []) : definition([mode, 'edit-fields'], [[0,0,1,0]]);
+      const definitions = graph.nodes.map(n => ({ kind: 'component', kaRef: n.kaRef, descriptor: component(n.componentId) }));
+      const bindings = definitions.map(d => ({ contextGraphId: graphId, operationIri: d.kaRef, enabled: true,
+        executorAgentAddress: owner, allowedCallerAgentAddresses: [owner], n8n: {},
+        program: { contextGraphId: graphId, programIri: d.kaRef, programLayer: 'wm', sourceHash: 'a'.repeat(64), authorAgentAddress: owner } }));
+      // Installation remains unchanged when the live approval is revoked.
+      f.config.programBindings = structuredClone(bindings);
+      for (const binding of bindings) {
+        f.approvals.set(binding.operationIri, { binding });
+        f.sources.set(binding.operationIri, { ...binding.program, version: '1.0.0' });
+      }
+      f.client.programs.listApprovals = async () => [];
+      bridge = createCapabilityBridge({ graphId, owner, client: f.client, config: f.config, definitions,
+        agent: { query: async () => ({ bindings: definitions.map(d => ({ program: d.kaRef })) }) },
+        studioOptions: { state: f.state, headerCredential: { id: 'fixture-header', name: 'Fixture' }, credentials: {}, fetchImpl: f.fetchImpl } });
+      const saved = await bridge.studio.save(graph, () => {});
+      let eventKey;
+      if (mode !== 'manual') {
+        await bridge.studio.activate({ kaRef: saved.kaRef, active: true, activationId: randomUUID() }, () => {});
+        eventKey = (await bridge.studio.history(saved.kaRef, () => true)).eventPath.split('/').at(-1);
+      }
+      const selected = bindings.at(-1);
+      if (revoked === 'caller') selected.allowedCallerAgentAddresses = [];
+      if (revoked === 'executor') selected.executorAgentAddress = '0x' + '2'.repeat(40);
+      if (revoked === 'enabled') selected.enabled = false;
+      if (revoked === 'missing') f.approvals.delete(selected.operationIri);
+      const changed = e => e.code === 'WORKFLOW_CAPABILITY_CHANGED';
+      await assert.rejects(bridge.studio.run({ kaRef: saved.kaRef, sourceHash: saved.sourceHash, itemsJson: '[{}]', invocationId: randomUUID() }, () => {}), changed);
+      if (mode === 'webhook') await assert.rejects(bridge.studio.event(eventKey, { invocationId: randomUUID(), items: [{}] }), changed);
+      if (mode !== 'manual') {
+        await bridge.studio.poll();
+        const history = await bridge.studio.history(saved.kaRef);
+        assert.equal(history.activation.active, false);
+        assert.equal(history.executions.length, 0);
+      }
+      assert.equal(f.invocations.length, 0);
+      assert.equal(f.calls.some(([, path]) => path.startsWith('/executions')), false);
+      assert.equal(f.config.programBindings.at(-1).enabled, true);
+      assert.deepEqual(f.config.programBindings.at(-1).allowedCallerAgentAddresses, [owner]);
+    } finally { bridge?.close(); f.close(); }
+  });
+}
+
+
+test('reopening Studio restores only the native grant selected for an authorized run', async () => {
+  const f = environment();
+  try {
+    const saved = await f.service.save(definition(), () => {});
+    const grant = f.repository.nativeRevision(saved.kaRef).grant;
+    f.config.n8nNative.workflows = [];
+    f.restart();
+    assert.deepEqual(f.config.n8nNative.workflows, []);
+    assert.equal('db' in f.provider || 'repository' in f.provider || 'close' in f.provider, false);
+    assert.equal((await f.service.list()).length, 1);
+    assert.deepEqual(f.config.n8nNative.workflows, []);
+    await f.service.run({ kaRef: saved.kaRef, sourceHash: saved.sourceHash, itemsJson: '[{}]', invocationId: randomUUID() }, () => {});
+    assert.equal(f.config.n8nNative.workflows[0].workflowId, grant.workflowId);
+    assert.equal(f.config.n8nNative.workflows[0].workflowSha256, grant.workflowSha256);
+    f.config.n8nNative.workflows[0].workflowSha256 = 'f'.repeat(64);
+    await assert.rejects(f.service.run({ kaRef: saved.kaRef, sourceHash: saved.sourceHash, itemsJson: '[{}]', invocationId: randomUUID() }, () => {}), /revision changed/);
+    assert.equal(f.invocations.length, 1);
+  } finally { f.close(); }
 });

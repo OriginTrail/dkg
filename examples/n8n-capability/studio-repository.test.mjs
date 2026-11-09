@@ -68,3 +68,27 @@ test('event reservations share one quota across connections and retain identity,
     assert.equal(second.eventHistory('flow').length, 5);
   } finally { first.close(); second.close(); rmSync(state, { recursive: true, force: true }); }
 });
+
+
+test('native provisioning survives reopen and never replaces a create, identity or granted revision', () => {
+  const state = mkdtempSync(join(tmpdir(), 'studio-provisioning-'));
+  let repository = createStudioRepository(state);
+  try {
+    repository.ensure({ kaRef: 'flow', workflowName: 'Native workflow' });
+    repository.beginNativeCreate('flow');
+    repository.close(); repository = createStudioRepository(state);
+    assert.equal(repository.nativeRevision('flow').creating, true);
+    assert.throws(() => repository.beginNativeCreate('flow'), /unconfirmed/);
+    repository.nativeCreated('flow', 'native');
+    assert.throws(() => repository.nativeCreated('flow', 'other'), /identity changed/);
+    const grant = { workflowId: 'native', workflowSha256: 'a'.repeat(64) };
+    repository.nativeGranted('flow', grant);
+    repository.saved('flow', 'native-n8n', false);
+    repository.close(); repository = createStudioRepository(state);
+    assert.deepEqual(repository.nativeRevision('flow'), { providerId: 'native', creating: false, grant });
+    repository.nativeGranted('flow', grant);
+    assert.throws(() => repository.nativeGranted('flow', { ...grant, workflowSha256: 'b'.repeat(64) }), /grant changed/);
+    assert.throws(() => repository.saved('flow', 'dkg-program', false), /executor changed/);
+    assert.deepEqual(repository.nativeRevision('flow').grant, grant);
+  } finally { repository.close(); rmSync(state, { recursive: true, force: true }); }
+});
