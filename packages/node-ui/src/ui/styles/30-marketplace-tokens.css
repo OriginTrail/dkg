@@ -1,12 +1,17 @@
 /* Marketplace design tokens. Scoped to the section's roots (.mktx for the
    component gallery, .mkt-frame for each surface) so they never re-theme the
    shell. Layer 1 holds primitives, Layer 2 the semantic names every component
-   binds to; no color, spacing or radius literals elsewhere. */
+   binds to; no color, spacing or radius literals elsewhere.
+
+   The type scale and the mono stack are the app's own, from 00-theme.css.
+   The colors stay here: the section keeps its dark palette in both themes,
+   while the shell's surface, text and border tokens switch to light ones. */
 
 .mktx, .mkt-frame {
   /* ---------- Layer 1 · primitives ---------- */
   /* Dark surfaces stay near-black over the ambient canvas; the upper text
-     ramp stays near-white. */
+     ramp stays near-white. They equal the shell's dark values, but not its
+     light ones, so they are not taken from it. */
   --gray-0:rgba(3,2,5,.68); --gray-1:rgba(15,12,18,.92);
   --gray-2:rgba(24,19,29,.94); --gray-3:rgba(32,25,39,.96);
   --gray-5:#9d96a6; --gray-6:#bdb6c6;
@@ -45,10 +50,13 @@
   --gauge-mid:var(--amber-500);           /* nearing the soft ceiling */
   --gauge-over:var(--red-500);            /* at the soft ceiling */
 
-  /* type — Geist for product UI; sizes preserve hierarchy with a readable floor */
+  /* type — Geist for product UI; sizes preserve hierarchy with a readable floor.
+     --font-mono (digests, keys, µ values) is the app's, unchanged here. The
+     section's own stack keeps 'Segoe UI' before the generic fallback. */
   --font-ui:'Geist Variable',-apple-system,'Segoe UI',sans-serif;
-  --font-mono:'SF Mono',ui-monospace,Menlo,monospace; /* digests, keys, µ values */
-  --fs-xs:13px; --fs-sm:14px; --fs-md:16px; --fs-lg:18px;
+  --fs-xs:var(--font-size-caption); --fs-sm:var(--font-size-label);
+  --fs-md:var(--font-size-body); --fs-lg:var(--font-size-heading-sm);
+  /* headings above the app's scale */
   --fs-xl:22px; --fs-2xl:26px;
   --lh-tight:1.25; --lh-normal:1.55;
   --fw-regular:400; --fw-semibold:600;
