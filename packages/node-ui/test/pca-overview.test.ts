@@ -494,3 +494,47 @@ describe('ConvictionOverview — S1 discovery', () => {
     await unmount();
   });
 });
+
+describe('ConvictionOverview — discount summary', () => {
+  const WALLET1 = '0xB7c2000000000000000000000000000000000A12';
+  const summaryOf = (c: HTMLElement) => ({
+    value: c.querySelector('[data-testid="pca-discount-value"]')?.textContent,
+    sub: c.querySelector('[data-testid="pca-discount-value"]')?.nextElementSibling?.textContent,
+  });
+  const approve = (approved: string[], over: Record<string, unknown> = {}) => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0, WALLET1], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      const base = { ...snapFixture(id), owner: '0xSOMEONEELSE0000000000000000000000000000', ...over };
+      if (key) return { ...base, probedKey: { key, registered: approved.some((w) => w.toLowerCase() === key.toLowerCase()) } };
+      return base;
+    });
+    usePcaStore.setState({ trackedIds: ['7'], createPending: null });
+  };
+
+  it('shows the discount and that every publishing wallet is covered', async () => {
+    approve([WALLET0, WALLET1]);
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'All 2 publishing wallets covered');
+    expect(summaryOf(container)).toEqual({ value: '30%', sub: 'All 2 publishing wallets covered' });
+    await unmount();
+  });
+
+  it('counts only the covered wallets when some are not approved', async () => {
+    approve([WALLET0]);
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, '1 of 2 publishing wallets covered');
+    expect(summaryOf(container).value).toBe('30%');
+    expect(container.textContent).toContain('Covered by PCA #7');
+    expect(container.textContent).toContain('Not covered: pays the full fee');
+    await unmount();
+  });
+
+  it('never advertises a discount from an expired PCA the wallets are approved on', async () => {
+    approve([WALLET0, WALLET1], { expiresAtTimestamp: 1000 });
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'which has expired');
+    expect(summaryOf(container)).toEqual({ value: 'None', sub: 'Your wallets are on PCA #7, which has expired. They pay the full fee.' });
+    expect(container.querySelector('[data-testid="pca-discount-value"]')?.textContent).not.toBe('30%');
+    await unmount();
+  });
+});

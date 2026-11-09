@@ -17,7 +17,6 @@ import {
   formatWeiToTrac,
   formatExpiryShort,
   RetryButton,
-  truncateAddress,
 } from '../../components/Pca/index.js';
 import { healthForSnapshot } from '../../pca/health.js';
 import { StatStrip } from '../../components/ContextGraphPrimitives.js';
@@ -25,6 +24,7 @@ import { FundingSection } from './FundingSection.js';
 import { PublishingWalletsSection } from './PublishingWalletsSection.js';
 import { LifecycleSection } from './LifecycleSection.js';
 import { eqAddress } from '../../web3/address.js';
+import { ownerGuidance, type OwnerGuidance } from '../../pca/ownerGuidance.js';
 import { resolvePrimaryWalletState, type PcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
 import { Badge, StatusGlyph } from '../../components/ds/Badge.js';
@@ -82,32 +82,15 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
     );
   }
 
-  const ownerInPool = wallets.some((w) => eqAddress(w, snapshot.owner));
-  // Owner can't be classified because this node's wallet list is loading or unreadable (#1470).
-  // `owner` is present here (past the snapshot early-returns), so this is never the no-snapshot
-  // cause — split the two so a still-LOADING read shows a neutral "confirming ownership" affordance
-  // (no false "Couldn't load", no Retry), while a FAILED read keeps the "can't confirm" + Retry.
-  // Both stay `unknown` (never a definitive read-only/external verdict — the daemon-flash fix).
-  const walletsLoading = access.ownerUnknownCause === 'wallets-loading';
-  const walletsUnreadable = access.ownerUnknownCause === 'wallets-unreadable';
-
-  // gateReason stays consumer-built for now (model gateReason deferred to a later step): the
-  // exact same branches, re-expressed on access.mode / access.wrongNetwork — identical values
-  // to the old ownerMode / walletWrongNetwork now that both come from the one model.
-  const owner = truncateAddress(snapshot.owner);
-  const ownerGateReason = walletsLoading
-    ? `Confirming ownership of PCA #${accountId}…`
-    : walletsUnreadable
-    ? `Couldn’t load this node’s wallets, so we can’t confirm who owns PCA #${accountId}.`
-    : access.mode === 'wallet' && access.wrongNetwork
-    ? `The PCA owner wallet is on another network. Switch it to this node’s network to change PCA #${accountId}.`
-    : access.mode === 'wallet'
-    ? `Your connected wallet is the PCA owner wallet, so you can change PCA #${accountId}.`
-    : ownerInPool
-    ? `Only the PCA owner wallet (${owner}) can change PCA #${accountId}. It’s one of this node’s operational wallets, but the node signs PCA changes only with its primary operational wallet.`
-    : connectedWallet
-    ? `You’re connected with a different wallet. Only the PCA owner wallet (${owner}) can change PCA #${accountId}.`
-    : `Only the PCA owner wallet (${owner}) can change PCA #${accountId}.`;
+  // The line, the notice and the disabled-action reason, derived once (#1470 loading vs
+  // unreadable stays a neutral tip vs "can't confirm" + Retry, never a false non-owner).
+  const guidance = ownerGuidance({
+    accountId,
+    owner: snapshot.owner,
+    access,
+    connected: !!connectedWallet,
+    ownerInPool: wallets.some((w) => eqAddress(w, snapshot.owner)),
+  });
 
   return (
     <DetailBody
@@ -118,9 +101,7 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
       explorer={explorer}
       access={access}
       connectedWallet={connectedWallet}
-      ownerOnlyReason={ownerGateReason}
-      walletsLoading={walletsLoading}
-      walletsUnreadable={walletsUnreadable}
+      guidance={guidance}
       onRetryWallets={refreshWallets}
       refresh={refresh}
     />
@@ -135,9 +116,7 @@ function DetailBody({
   explorer,
   access,
   connectedWallet,
-  ownerOnlyReason,
-  walletsLoading,
-  walletsUnreadable,
+  guidance,
   onRetryWallets,
   refresh,
 }: {
@@ -148,11 +127,7 @@ function DetailBody({
   explorer: string | null;
   access: PcaOwnerAccess;
   connectedWallet?: string | null;
-  ownerOnlyReason: string;
-  /** Wallet list still loading (owner unconfirmed) → neutral affordance, no Retry. */
-  walletsLoading: boolean;
-  /** Wallet list read FAILED (owner unconfirmable) → "can't confirm" + Retry. */
-  walletsUnreadable: boolean;
+  guidance: OwnerGuidance;
   onRetryWallets: () => void;
   refresh: () => void;
 }) {
@@ -178,24 +153,9 @@ function DetailBody({
     onWalletProgress: access.mode === 'wallet' ? deviceProgress.onProgress : undefined,
   });
   const health = healthForSnapshot(snapshot);
-  const ownerTitle = access.writesEnabled ? undefined : ownerOnlyReason;
+  const ownerTitle = guidance.disabledReason;
 
   const pct = bpsToPercent(snapshot.discountBps);
-  const walletSurfaceCopy = connectedWallet
-    ? access.mode === 'wallet'
-      ? access.wrongNetwork
-        ? 'Your connected wallet is the PCA owner wallet, but it’s on another network. Switch networks to top up, approve wallets or renew this PCA.'
-        : 'Your connected wallet is the PCA owner wallet. It signs top-ups, wallet approvals, removals and renewals.'
-      : access.mode === 'daemon'
-        ? 'This node owns this PCA and signs changes itself. You don’t need to connect a wallet.'
-        : `Your connected wallet isn’t the PCA owner wallet. To top up, approve wallets or renew this PCA, switch to ${truncateAddress(snapshot.owner)}.`
-    : access.mode === 'external'
-      ? 'To top up, approve wallets or renew this PCA, connect the PCA owner wallet.'
-      : 'To manage a PCA that a wallet owns, connect that wallet.';
-  // Not connected to someone else's PCA: the line above already says what to do, so no warning repeats it.
-  const ownerNoticeRepeats = !connectedWallet && access.mode === 'external' && !walletsUnreadable
-    && !wallets.some((w) => eqAddress(w, snapshot.owner));
-
   return (
     <div className="v10-pca-detail" data-testid="pca-detail">
       <div className="ds-crumbs-bar">
@@ -214,7 +174,7 @@ function DetailBody({
       )}
 
       <div className="v10-modal-tip ds-card-nested v10-pca-wallet-surface" role="status">
-        <p className="v10-pca-wallet-surface-copy">{walletSurfaceCopy}</p>
+        <p className="v10-pca-wallet-surface-copy">{guidance.walletLine}</p>
         {connectedWallet ? <WalletPill /> : <WalletConnectControl testId="pca-wallet-connect" />}
       </div>
 
@@ -226,20 +186,18 @@ function DetailBody({
         />
       )}
 
-      {!access.writesEnabled && !ownerNoticeRepeats && (
-        // Pure LOADING window (#1470): a neutral "confirming ownership" tip — no false "Couldn't
-        // load", no Retry (the balances are auto-fetching); owner controls stay disabled for the
-        // brief window. FAILED/EXTERNAL/wrong-network keep the warning box (+ Retry when unreadable).
-        walletsLoading ? (
-          <div className="v10-modal-tip ds-card-nested" role="status">{ownerOnlyReason}</div>
-        ) : (
-          <div className="v10-pca-retry-block">
-            <div className="v10-modal-warning ds-card-nested v10-pca-notice" role="status">
-              <StatusGlyph tone="warning" /> {ownerOnlyReason}{walletsUnreadable ? null : ' You can still check whether a wallet is approved.'}
-            </div>
-            {walletsUnreadable && <RetryButton onClick={onRetryWallets} />}
+      {/* Loading: a neutral tip, no Retry (the balances are auto-fetching). Otherwise a
+          warning, with Retry when the wallets couldn't be read. */}
+      {guidance.notice?.kind === 'loading' && (
+        <div className="v10-modal-tip ds-card-nested" role="status">{guidance.notice.text}</div>
+      )}
+      {guidance.notice?.kind === 'warning' && (
+        <div className="v10-pca-retry-block">
+          <div className="v10-modal-warning ds-card-nested v10-pca-notice" role="status">
+            <StatusGlyph tone="warning" /> {guidance.notice.text}
           </div>
-        )
+          {guidance.notice.retry && <RetryButton onClick={onRetryWallets} />}
+        </div>
       )}
 
       <StatStrip

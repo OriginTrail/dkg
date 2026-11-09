@@ -107,7 +107,7 @@ function AccountRow({
       <td><Warn on={expiringSoon}>{expiryText(snapshot.expiresAtTimestamp, nowSec)}</Warn></td>
       <td className="ds-num">
         <span className="v10-pca-row-actions">
-          {needsApproval ? (
+          {needsApproval && (
             <button
               type="button"
               className="v10-pca-card-btn ds-btn ds-sm"
@@ -117,11 +117,11 @@ function AccountRow({
             >
               Approve wallets
             </button>
-          ) : (
-            <button type="button" className="v10-pca-card-btn ds-btn ds-sm" onClick={() => onManage(accountId)}>
-              {ownerMode === 'external' ? 'View' : 'Manage'}
-            </button>
           )}
+          {/* Every loaded PCA keeps a way into its page (top-up, wallet removal), approved here or not. */}
+          <button type="button" className="v10-pca-card-btn ds-btn ds-sm" onClick={() => onManage(accountId)}>
+            {ownerMode === 'external' ? 'View' : 'Manage'}
+          </button>
           {ownerMode === 'external' && account.approvedCount === 0 && !walletsInconclusive && (
             <button type="button" className="v10-pca-card-btn ds-btn ds-sm" onClick={() => onRemove(accountId)}>Remove from list</button>
           )}
