@@ -7,10 +7,10 @@
  * before it landed). A batch that reverts puts its receipts back to `served`.
  *
  * One journal, each change appended before it is acted on: a call before its
- * answer goes back, a batch before it is broadcast, with its wallet and nonce,
- * and each speed-up's hash before that is broadcast. So after a crash every
- * `sent` batch can be resolved from the chain, and nothing is lost or sent
- * twice.
+ * answer goes back, a batch before it is broadcast, with its wallet, nonce and
+ * signed transaction, and each speed-up's hash before that is broadcast. So
+ * after a crash every `sent` batch can be resolved from the chain, or sent
+ * again as it was signed, and nothing is lost or sent twice.
  *
  * An ended epoch is pruned once none of its batches is still `sent`: its calls
  * give way to a summary, and its batches that landed are kept, which is what
@@ -46,6 +46,8 @@ export interface BatchRecord {
   hashes: string[];
   wallet: string;
   nonce: number | null;
+  /** Its first transaction as signed, which can be sent again; none in records from before it was kept, nor once pruned. */
+  signedTx?: string;
   /** Its calls' request digests; none once its epoch is pruned. */
   digests: string[];
   items: number;
@@ -76,7 +78,7 @@ export interface LandedTx {
 
 type Entry =
   | ({ type: 'served' } & ServedCall)
-  | { type: 'sent'; batchId: string; epoch: number; at: number; hash: string; wallet: string; nonce: number | null; digests: string[] }
+  | { type: 'sent'; batchId: string; epoch: number; at: number; hash: string; wallet: string; nonce: number | null; digests: string[]; signedTx?: string }
   | { type: 'speedup'; batchId: string; hash: string }
   | { type: 'landed'; batchId: string | null; tx: { hash: string; blockNumber: number; gasUsed: string } | null; digests: string[]; counted: Record<string, string> }
   | { type: 'reverted'; batchId: string }
@@ -181,7 +183,9 @@ export class SellerLedger {
     await this.write({ type: 'served', ...call });
   }
 
-  async recordSent(batch: { batchId: string; epoch: number; at: number; hash: string; wallet: string; nonce: number | null; digests: string[] }): Promise<void> {
+  async recordSent(batch: {
+    batchId: string; epoch: number; at: number; hash: string; wallet: string; nonce: number | null; digests: string[]; signedTx?: string;
+  }): Promise<void> {
     await this.write({ type: 'sent', ...batch });
   }
 
@@ -221,7 +225,7 @@ export class SellerLedger {
       const kept: Entry[] = [];
       for (const epoch of new Set([...this.summaries.keys(), ...ended])) {
         const { summary, batches } = this.epochReport(epoch);
-        kept.push({ type: 'summary', summary, batches: batches.filter((b) => b.state === 'landed').map((b) => ({ ...b, digests: [] })) });
+        kept.push({ type: 'summary', summary, batches: batches.filter((b) => b.state === 'landed').map(({ signedTx: _signed, ...b }) => ({ ...b, digests: [] })) });
       }
       for (const entry of await this.journal.read()) {
         const epoch = this.epochOf(entry);
@@ -269,7 +273,7 @@ export class SellerLedger {
       case 'sent':
         this.batches.set(entry.batchId, {
           batchId: entry.batchId, epoch: entry.epoch, at: entry.at, hashes: [entry.hash], wallet: entry.wallet, nonce: entry.nonce,
-          digests: entry.digests, items: entry.digests.length, state: 'sent',
+          digests: entry.digests, items: entry.digests.length, state: 'sent', signedTx: entry.signedTx,
         });
         for (const d of entry.digests) this.setState(d, 'sent');
         return;

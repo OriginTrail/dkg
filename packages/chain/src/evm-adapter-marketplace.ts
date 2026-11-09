@@ -443,11 +443,18 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     const arg = groups.map(({ subscriptionId, budgetIndex, minCounted, items }) => ({ subscriptionId, budgetIndex, minCounted, items }));
     const sendFrom = async (signer: EvmSigner) => {
       const qs = await this.resolveContract('QueryInferenceSettlement');
+      let signedTx = '';
       return this.dispatchSerializedV10Write(
         signer,
         'receipt batch',
-        opts.onBroadcast ? (signal) => opts.onBroadcast!({ ...signal, wallet: signer.address }) : undefined,
-        async () => this.signPreparedTransaction(await this.prepareAcrossProviders(qs, 'submitReceiptBatch', [arg], signer, 'marketplace submitReceiptBatch')),
+        opts.onBroadcast ? (signal) => opts.onBroadcast!({ ...signal, wallet: signer.address, signedTx }) : undefined,
+        async () => {
+          const signed = await this.signPreparedTransaction(
+            await this.prepareAcrossProviders(qs, 'submitReceiptBatch', [arg], signer, 'marketplace submitReceiptBatch'),
+          );
+          signedTx = signed.signedTx;
+          return signed;
+        },
         (hash) => { throw new Error(`Receipt batch ${hash} was sent but has no receipt`); },
         undefined,
         opts.onBeforeReplacementBroadcast,
@@ -470,6 +477,12 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     const batch = landedBatchOf(receipt);
     if (!batch) throw new Error(`Receipt batch ${receipt.hash} succeeded but logged no ReceiptBatchAccepted`);
     return batch;
+  }
+
+  /** The exact signed bytes, through the write endpoints: one already known is no error. */
+  async rebroadcastReceiptBatch(signedTx: string): Promise<void> {
+    await this.init();
+    await this.broadcastSignedTransactionWithFailover(signedTx, ethers.Transaction.from(signedTx).hash!, 'marketplace receipt batch rebroadcast');
   }
 
   async getReceiptBatchOutcome(txHash: string): Promise<ReceiptBatchOutcome> {

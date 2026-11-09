@@ -245,7 +245,7 @@ describe('mock marketplace: receipt batches', () => {
 
     const signals: unknown[] = [];
     const batch = await chain.submitReceiptBatch(groups, { onBroadcast: async (s) => { signals.push({ ...s, used: await chain.nonceWord(subscriptionId, 7n, 0n) }); } });
-    expect(signals).toEqual([{ txHash: batch.hash, nonce: 0, wallet: SIGNER.address, used: 0n }]);
+    expect(signals).toEqual([{ txHash: batch.hash, nonce: 0, wallet: SIGNER.address, signedTx: expect.stringMatching(/^0x/), used: 0n }]);
     expect(batch.gasUsed).toBeGreaterThan(0n);
     expect(await chain.getReceiptBatchOutcome(batch.hash)).toEqual({ landed: batch });
     expect(await chain.getReceiptBatchOutcome(ethers.ZeroHash)).toBeNull();
@@ -255,6 +255,43 @@ describe('mock marketplace: receipt batches', () => {
     expect((await chain.listReceiptsLanded(ethers.ZeroHash)).groups).toEqual([]);
     expect(await chain.getMinedNonce(SIGNER.address)).toBe(1);
     expect(await chain.getBaseFee()).toBe(10n ** 6n);
+  });
+
+  it('sends a batch signed but never sent again as it was signed: once, and mined reverted when it would revert', async () => {
+    chain.seedIdentity(SIGNER.address, 7n);
+    const { epoch } = await chain.getEpochTimes();
+    await chain.approveServiceSubscriptionsWallet(TRAC);
+    const { subscriptionId } = await chain.fundFromWallet({ epoch, sessionKey: SESSION.address, planDigest: PLAN, budgets: [budget(SERVICE_A, 10_000n)] });
+    const sub = (await chain.getSubscription(subscriptionId))!;
+    const { requestDomain } = await chain.getMarketplaceContracts();
+    const groupOf = (nonce: bigint) => {
+      const r: ServiceRequest = {
+        subscriptionId, serviceId: SERVICE_A, seller: 7n, nonce, pricePerUnit: 10n, maxUnits: 10n, maxValueWei: 100n,
+        issuedAt: sub.startsAt, expiry: sub.startsAt + 600,
+      };
+      const receipt = { requestDigest: hashServiceRequest(requestDomain, r), resultCommitment: ethers.keccak256('0x02'), units: 10n, valueWei: 100n, completedAt: r.issuedAt };
+      return [{ subscriptionId, budgetIndex: 0, minCounted: 0n, items: [receiptItemOf(r, receipt, signServiceRequest(SESSION.privateKey, requestDomain, r))] }];
+    };
+    // Signed, its hook stops the node: nothing sent, its nonce unused.
+    const stopped = async (nonce: bigint) => {
+      let signal: { txHash: string; signedTx: string } | undefined;
+      await expect(chain.submitReceiptBatch(groupOf(nonce), { onBroadcast: (s) => { signal = s; throw new Error('the node stopped'); } })).rejects.toThrow(/stopped/);
+      return signal!;
+    };
+    const first = await stopped(0n);
+    expect(await chain.getReceiptBatchOutcome(first.txHash)).toBeNull();
+    await chain.rebroadcastReceiptBatch(first.signedTx);
+    expect(await chain.getReceiptBatchOutcome(first.txHash)).toMatchObject({ landed: { hash: first.txHash, itemCount: 1 } });
+    expect(await chain.getMinedNonce(SIGNER.address)).toBe(1);
+    await expect(chain.rebroadcastReceiptBatch(first.signedTx)).rejects.toThrow(/nonce too low/);
+    await expect(chain.rebroadcastReceiptBatch('0x00')).rejects.toThrow(/not a receipt batch/);
+    // One that would revert now, its epoch over, is mined reverted: its nonce used, its receipt not landed.
+    const late = await stopped(1n);
+    chain.__advanceEpoch();
+    await chain.rebroadcastReceiptBatch(late.signedTx);
+    expect(await chain.getReceiptBatchOutcome(late.txHash)).toEqual({ reverted: true });
+    expect(await chain.getMinedNonce(SIGNER.address)).toBe(2);
+    expect(await chain.nonceWord(subscriptionId, 7n, 0n)).toBe(1n);
   });
 
   it('refuses a batch from a node with no profile, and one out of bounds', async () => {
