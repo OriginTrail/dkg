@@ -52,7 +52,8 @@ const MODEL_B = 'urn:test:model:b';
 const A = serviceIdOf(MODEL_A);
 const B = serviceIdOf(MODEL_B);
 const PRICE = 10n;
-const BODY = { messages: [{ role: 'user' as const, content: 'synthetic question' }], max_tokens: 50 };
+// A short question: its input bound, 25 units, is under the smallest cap a case sets (30 units).
+const BODY = { messages: [{ role: 'user' as const, content: 'q' }], max_tokens: 50 };
 
 let dir: string;
 let mock: MockChainAdapter;
