@@ -103,11 +103,24 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
       ...await programWorkflowReceipt(compiled, result, input, loadOutputs) };
     const output = result.outputs[0];
     if (output?.kind !== 'n8n-result' || output.workflowSha256 !== compiled.grant.workflowSha256 || !output.output || typeof output.output.traceJson !== 'string') throw new Error('Native graph evidence is incomplete.');
+    const write = dkg.writeRecovery(workflow, invocationId, compiled.grant.workflowId, output.n8nExecutionId);
+    let dkgRecovery;
+    if (write && (write.pending || output.output.ok === false)) {
+      // The native receipt may already be terminal. Reconcile only the journalled
+      // write through the same current authority/pin checks as its callback.
+      // call() sees the original journal entry and can only use allowCreate:false.
+      const receipt = await dkgComponent(write.request);
+      const current = await get(workflow.kaRef, workflow.sourceHash);
+      if (!current.workflow.approved) throw reject('Workflow approval is unavailable.');
+      validateStudioCapabilities(current.compiled.definition, await listCapabilities());
+      dkgRecovery = { status: 'confirmed', invocationId, n8nExecutionId: output.n8nExecutionId,
+        blockId: write.request.blockId, requestHash: write.requestHash, receipt };
+    }
     const trace = JSON.parse(output.output.traceJson);
     return { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, invocationId, executionIri: result.executionIri,
       n8nExecutionId: output.n8nExecutionId, workflowSha256: output.workflowSha256, output: output.output,
       steps: compiled.definition.nodes.map((n, i) => ({ nodeId: n.id, componentId: n.componentId, kaRef: n.kaRef, ...trace[i] })),
-      persisted: true, readbackVerified: true };
+      ...(dkgRecovery ? { dkgRecovery } : {}), persisted: true, readbackVerified: true };
   }
   function eventAuthorized(ref, compiled, reserved = false) {
     const active = activation(ref);

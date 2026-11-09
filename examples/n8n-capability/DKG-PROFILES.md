@@ -214,6 +214,24 @@ name and refuses another create. This differs intentionally from the existing
 Workflows release publisher's `saved` draft contract; `nos-publish-adapter.mjs`
 continues to expose that contract and is not used to manufacture a sealed receipt.
 
+A Write journals its original callback, exact evidence payload and confirmed
+receipt in the companion SQLite database. If both native HTTP attempts fail,
+**Run with the same invocation ID** can reconcile that journal even after the
+native adapter has persisted a terminal failed execution. Reconciliation repeats
+the current owner, workflow/source, profile and native-execution checks and uses
+`allowCreate: false`; it does not dispatch another workflow. While a write is
+unconfirmed, a new invocation of that saved workflow is refused.
+
+The Run API returns `DKG_WRITE_PENDING` with the original `invocationId` while
+readback is unavailable. Retain that identity and the original inputs for retry.
+After confirmation, `dkgRecovery.status: "confirmed"` and its `receipt` describe
+the recovered write. The original `output` and step trace still describe the
+native failure; recovery does not claim that n8n completed successfully or alter
+the persisted Graph Computer receipt. The write receipt is stored in the
+companion journal and identifies the sealed asset whose contents were read back.
+An unresolved legacy write without a saved request remains blocked for operator
+reconciliation; it is never reconstructed from new inputs or silently recreated.
+
 Local integration verification (fictional HTTP node, no JPB data or connection):
 
 ```sh

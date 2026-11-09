@@ -20,6 +20,17 @@ const SR = 'https://origintrail.io/semantic-runtime/v1#';
 const prefix = '/spike/ka/accounts/' + (nosStudioSession?.accountId ?? 'account-a') + '/capabilities';
 const json = (res, status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); };
 
+/** Shared by the bridge and transport-level regression fixtures. */
+export async function handleDkgComponentCallback(req, res, studio, config) {
+  try {
+    const token=readFileSync(config.n8nNative.webhookTokenFile,'utf8').trim();
+    const expected=Buffer.from('Bearer '+token), supplied=Buffer.from(String(req.headers.authorization??''));
+    if(!studio || req.method!=='POST' || req.headers.origin || token.length<32 || expected.length!==supplied.length || !timingSafeEqual(expected,supplied)) { json(res,403,{error:'Native DKG component access denied'});return true; }
+    let body='',size=0;for await(const chunk of req) {size+=chunk.length;if(size>16384)throw Object.assign(new Error('Bounded DKG batch required'),{status:413});body+=chunk;}
+    json(res,200,await studio.dkgComponent(JSON.parse(body)));
+  } catch(e) { json(res,e.status??409,{code:e.code??'DKG_COMPONENT_UNCONFIRMED',error:e.message}); }
+}
+
 export function createCapabilityBridge({ agent, client, graphId, owner, config, definitions = [], exportTokenFile, studioOptions }) {
   if (!nosStudioSession && studioOptions && existsSync(join(studioOptions.state, 'nos-account.json')))
     throw new Error('This state requires its authenticated nOS account configuration.');
@@ -98,13 +109,7 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
   async function handle(req, res, path) {
     if (!path.startsWith('/spike/ka/')) return false;
     if(path === '/spike/ka/internal/dkg-component') {
-      try {
-        const token=readFileSync(config.n8nNative.webhookTokenFile,'utf8').trim();
-        const expected=Buffer.from('Bearer '+token), supplied=Buffer.from(String(req.headers.authorization??''));
-        if(!studio || req.method!=='POST' || req.headers.origin || token.length<32 || expected.length!==supplied.length || !timingSafeEqual(expected,supplied)) { json(res,403,{error:'Native DKG component access denied'});return true; }
-        let body='',size=0;for await(const chunk of req) {size+=chunk.length;if(size>16384)throw Object.assign(new Error('Bounded DKG batch required'),{status:413});body+=chunk;}
-        json(res,200,await studio.dkgComponent(JSON.parse(body)));
-      } catch(e) { json(res,e.status??409,{code:e.code??'DKG_COMPONENT_UNCONFIRMED',error:e.message}); }
+      await handleDkgComponentCallback(req, res, studio, config);
       return true;
     }
     if (path === '/spike/ka/demo-data' && ['GET', 'POST'].includes(req.method)) {
@@ -196,7 +201,9 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
         json(res, 200, await invoke(selected, value.input, value.invocationId));
       } else json(res, 405, { error: 'Method unavailable' });
     } catch (error) { json(res, error.status ?? 400, { code: error.code ?? 'POC_REQUEST_REJECTED',
-      error: ['INVALID_WORKFLOW', 'WORKFLOW_CAPABILITY_CHANGED'].includes(error.code) ? error.message : 'The DKG request did not confirm a result' }); }
+      ...(error.code === 'DKG_WRITE_PENDING' ? { invocationId: error.invocationId, n8nExecutionId: error.n8nExecutionId } : {}),
+      error: error.code === 'DKG_WRITE_PENDING' ? 'The DKG write is unconfirmed. Retry this invocation; do not start another run.'
+        : ['INVALID_WORKFLOW', 'WORKFLOW_CAPABILITY_CHANGED'].includes(error.code) ? error.message : 'The DKG request did not confirm a result' }); }
     return true;
   }
   return { list, listPrograms, invoke, workflows, studio, handle, close() { studio?.stop(); provider?.close(); } };
