@@ -18,6 +18,7 @@ export function createStudioRepository(state) {
     if (!columns.some(c => c.name === 'executor')) db.exec('ALTER TABLE workflows ADD COLUMN executor TEXT');
     if (!columns.some(c => c.name === 'requires_export')) db.exec('ALTER TABLE workflows ADD COLUMN requires_export INTEGER NOT NULL DEFAULT 0');
     if (!columns.some(c => c.name === 'unpublish_pending')) db.exec('ALTER TABLE workflows ADD COLUMN unpublish_pending TEXT');
+    if (!columns.some(c => c.name === 'activation_revision')) db.exec('ALTER TABLE workflows ADD COLUMN activation_revision INTEGER NOT NULL DEFAULT 0');
     if (!db.prepare('PRAGMA table_info(events)').all().some(c => c.name === 'input_json')) db.exec('ALTER TABLE events ADD COLUMN input_json TEXT');
     for (const saved of db.prepare('SELECT ka_ref,grant_json FROM workflows WHERE executor IS NULL AND grant_json IS NOT NULL').all()) {
       const grant = JSON.parse(saved.grant_json), program = grant.kind === 'program-workflow-v1';
@@ -68,16 +69,20 @@ export function createStudioRepository(state) {
   const activation = ref => { const value = row(ref); return value?.activation_json ? JSON.parse(value.activation_json) : { active: false }; };
   const eventValue = value => value && ({ kaRef: value.ka_ref, providerId: value.provider_id, executionId: value.execution_id,
     invocationId: value.invocation_id, receipt: value.receipt_json ? JSON.parse(value.receipt_json) : null });
-  function setActivation(ref, value, eventKey = null) {
-    const result = db.prepare(`UPDATE workflows SET activation_json=?,event_key=? WHERE ka_ref=?
-      AND (?=0 OR unpublish_pending IS NULL)`).run(JSON.stringify(value), eventKey, ref, value.active ? 1 : 0);
-    if (result.changes !== 1) invalid('Native schedule cleanup is pending. Retry activation after cleanup.');
+  function setActivation(ref, value, eventKey = null, expectedRevision = row(ref)?.activation_revision) {
+    if (!Number.isSafeInteger(expectedRevision)) invalid('The workflow activation changed.');
+    const result = db.prepare(`UPDATE workflows SET activation_json=?,event_key=?,activation_revision=activation_revision+1 WHERE ka_ref=?
+      AND activation_revision=? AND (?=0 OR unpublish_pending IS NULL)`)
+      .run(JSON.stringify(value), eventKey, ref, expectedRevision, value.active ? 1 : 0);
+    if (result.changes !== 1) invalid('The workflow activation changed or native schedule cleanup is pending. Retry activation.');
   }
-  function deactivate(ref, activationId, unpublish) {
+  function deactivate(ref, activationId, unpublish, expectedRevision = null) {
     // Revoke event access and retain cleanup together, before any provider await.
-    db.prepare(`UPDATE workflows SET activation_json=?,event_key=NULL,
-      unpublish_pending=CASE WHEN ? THEN ? ELSE unpublish_pending END WHERE ka_ref=?`)
-      .run(JSON.stringify({ active: false, activationId }), unpublish ? 1 : 0, activationId, ref);
+    const result = db.prepare(`UPDATE workflows SET activation_json=?,event_key=NULL,activation_revision=activation_revision+1,
+      unpublish_pending=CASE WHEN ? THEN ? ELSE unpublish_pending END WHERE ka_ref=?
+      AND (? IS NULL OR activation_revision=?)`)
+      .run(JSON.stringify({ active: false, activationId }), unpublish ? 1 : 0, activationId, ref, expectedRevision, expectedRevision);
+    return result.changes === 1;
   }
   /** Authorization is synchronous, so admission, replay and quota see one database state. */
   function reserveEvent({ kaRef, providerId, executionId, invocationId, inputJson }, authorize) {
