@@ -139,15 +139,19 @@ export function PlansView(): React.ReactElement {
   const planPending = planned.loading && plan === null && planRead.state !== 'failed';
   const reloadAll = () => { cat.reload(); subs.reload(); planned.reload(); funding.reload(); activity.reload(); };
   const close = () => { setFlow(null); reloadAll(); };
-  // The confirmations that wait for the user that no flow on show shows. When they change, one failed or settled out of
-  // sight, and the page is read again.
+  // The confirmations that wait for the user with no flow on show for them, and those whose plan the node took.
   const waiting = useSyncExternalStore(fundings.subscribe, fundings.waiting).filter((id) => id !== shown?.confirmed);
-  const waitingKey = waiting.join(',');
-  const seen = useRef(waitingKey);
+  const completed = useSyncExternalStore(fundings.subscribe, fundings.completed);
+  // The page is read again when one starts to wait out of sight (its funding may have landed), and once the node took a
+  // plan out of sight: after the write, not as a Retry sends it. The flow on show reads the page again when it is done.
+  const seenWaiting = useRef(new Set(waiting));
+  const seenCompleted = useRef(completed.length);
   useEffect(() => {
-    if (seen.current === waitingKey) return;
-    seen.current = waitingKey;
-    reloadAll();
+    const started = waiting.some((id) => !seenWaiting.current.has(id));
+    const saved = completed.slice(seenCompleted.current).some((id) => id !== shown?.confirmed);
+    seenWaiting.current = new Set(waiting);
+    seenCompleted.current = completed.length;
+    if (started || saved) reloadAll();
   });
   // The flow on show made a confirmation; the onboarding one is on show with no flow asked for, and is one from here.
   const confirmed = (id: number) => setFlow((f) => ({ ...(f ?? { kind: 'fund', epoch: 'current' }), confirmed: id }));

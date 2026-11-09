@@ -74,6 +74,8 @@ const waitsForUser = (c: Confirmed): boolean => c.kind === 'unknown' || (c.kind 
 
 const held = new Map<number, Confirmed>();
 let waiting: readonly number[] = [];
+/** The confirmations whose plan the node took, in the order it took them. */
+let completed: readonly number[] = [];
 /** Bumped when the page forgets everything: work begun before then changes nothing. */
 let generation = 0;
 const listeners = new Set<() => void>();
@@ -96,7 +98,9 @@ async function savePlan(id: number, confirming: Confirming, funded: Funded | nul
     if (gen === generation) put(id, { kind: 'plan', confirming, funded, save: 'failed', err: e });
     return;
   }
-  if (gen === generation) put(id, { kind: 'plan', confirming, funded, save: 'saved', err: null });
+  if (gen !== generation) return;
+  completed = [...completed, id];
+  put(id, { kind: 'plan', confirming, funded, save: 'saved', err: null });
 }
 
 /** Read the epoch's subscription after a funding whose outcome is unknown, and go on as it says. */
@@ -149,6 +153,9 @@ export const fundings = {
   /** The confirmations that wait for the user, oldest first: a funding of unknown outcome, or a plan not saved. */
   waiting: (): readonly number[] => waiting,
 
+  /** The confirmations whose plan the node took, in the order it took them: a page read after the last one shows it. */
+  completed: (): readonly number[] => completed,
+
   /** Take a confirmation over: its funding and then its plan, or the plan alone. Returns its id. */
   confirm(confirming: Confirming): number {
     const id = confirmationTicket();
@@ -189,4 +196,5 @@ export function forgetFundings(): void {
   generation += 1;
   held.clear();
   waiting = [];
+  completed = [];
 }

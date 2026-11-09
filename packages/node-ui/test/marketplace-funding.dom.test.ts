@@ -103,7 +103,8 @@ function fundingNode() {
  * write. A funding of the next epoch lands at once, but its answer waits for
  * `release()`. A plan saved is the plan read after it; with `cutPlanAnswers`,
  * a save lands but its answer stops partway; `failPlanReads` reads of the
- * plan, and `failPlanSaves` saves, fail first, as a node error.
+ * plan, and `failPlanSaves` saves, fail first, as a node error; with
+ * `holdPlanSaves`, saves wait for `releasePlans()`.
  */
 function heldNextNode() {
   const writes: Write[] = [];
@@ -111,7 +112,8 @@ function heldNextNode() {
   let next: Json | null = null;
   let plan: Json | null = null;
   const held: Array<() => void> = [];
-  const control = { cutPlanAnswers: false, failPlanReads: 0, failPlanSaves: 0 };
+  const control = { cutPlanAnswers: false, failPlanReads: 0, failPlanSaves: 0, holdPlanSaves: false, planReads: 0 };
+  const heldPlans: Array<() => void> = [];
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const method = init?.method ?? 'GET';
     const url = String(input);
@@ -128,6 +130,8 @@ function heldNextNode() {
       const landed = next && (asked === null || Number(asked) === next.epoch) ? [next] : [];
       return json({ subscriptions: [...subscriptions.filter((s) => s.epoch !== 665), ...landed] });
     }
+    if (method === 'GET' && url === '/api/marketplace/plan') control.planReads += 1;
+    if (method === 'PUT' && url === '/api/marketplace/plan' && control.holdPlanSaves) await new Promise<void>((resolve) => { heldPlans.push(resolve); });
     if (method === 'PUT' && url === '/api/marketplace/plan' && control.failPlanSaves > 0) {
       control.failPlanSaves -= 1;
       return json({ error: 'disk full', code: 'Error', retryable: false }, 500);
@@ -147,6 +151,8 @@ function heldNextNode() {
     writes,
     control,
     release() { for (const r of held.splice(0)) r(); },
+    /** Let the plan saves held so far go to the node. */
+    releasePlans() { for (const r of heldPlans.splice(0)) r(); },
     get waiting() { return held.length; },
     /** Whether the plan the node holds now renews. */
     get planRenews() { return plan?.renew; },
@@ -344,6 +350,27 @@ describe('marketplace funding whose answer is lost or comes late', () => {
       expect(node.planValues?.[FIXTURE_IDS.llama8b]).toBe('600000000000000000');
     });
   }
+
+  it('reads the plan again once a Retry of it has landed, so a change starts from the plan saved', async () => {
+    const node = heldNextNode();
+    const c = await fundNextHeld(node);
+    await click(byTestId(c, `mkt-addon-${FIXTURE_IDS.mistral24b}`));
+    node.control.failPlanSaves = 1;
+    node.release();
+    await waitForText(c, 'The epoch is funded, but the plan was not saved');
+    // The Retry's save is slow to land: nothing is read meanwhile that it has not written.
+    node.control.holdPlanSaves = true;
+    await click(byTestId(c, 'mkt-plan-retry'));
+    await flush(50);
+    expect(node.planValues?.[FIXTURE_IDS.llama8b]).toBeUndefined();
+    const readsBefore = node.control.planReads;
+    node.control.holdPlanSaves = false;
+    node.releasePlans();
+    await waitUntil(() => node.control.planReads > readsBefore, 'the plan to be read again after the save');
+    await flush(50);
+    await click(byTestId(c, 'mkt-change-plan'));
+    expect((byTestId(c, `mkt-value-${FIXTURE_IDS.llama8b}`) as HTMLInputElement).value).toBe('0.6');
+  });
 
   it('reads the epoch again on request when it cannot be read, offering nothing that sends meanwhile', async () => {
     const node = fundingNode();
