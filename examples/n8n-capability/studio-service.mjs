@@ -142,10 +142,26 @@ export function createStudioService({ graphId, owner, client, repository, provid
     if (!active.active || active.expiresAt < Date.now()) throw reject('This event workflow is inactive.');
     if (compiled.requiresExportAuthorization && (!exportTokenFile || active.exportFingerprint !== fingerprint(exportTokenFile))) throw reject('The operator export authorization changed.');
   }
+  // Order provider changes without delaying the synchronous local revocation.
+  const publications = new Map();
+  async function setPublished(ref, active, expectedRevision) {
+    const previous = publications.get(ref);
+    const pending = (async () => {
+      await previous?.catch(() => {});
+      if (active) {
+        const row = repository.row(ref), current = activation(ref);
+        if (row?.activation_revision !== expectedRevision || !current.active || current.expiresAt < Date.now())
+          throw reject('This event activation changed.');
+      }
+      await native().setPublished(ref, active);
+    })();
+    publications.set(ref, pending);
+    try { await pending; } finally { if (publications.get(ref) === pending) publications.delete(ref); }
+  }
   async function reconcileUnpublication(ref) {
     const pending = repository.row(ref)?.unpublish_pending;
     if (!pending) return;
-    await native().setPublished(ref, false);
+    await setPublished(ref, false);
     repository.completeUnpublication(ref, pending);
   }
   async function deactivate(ref, activationId, mode, expectedRevision) {
@@ -160,7 +176,8 @@ export function createStudioService({ graphId, owner, client, repository, provid
     if (!['schedule', 'webhook'].includes(compiled.mode)) throw reject('Start with a Webhook or Schedule Trigger to activate events.');
     if (activation(value.kaRef).activationId === activationId) {
       const current = activation(value.kaRef);
-      if (value.active && current.active && current.expiresAt > Date.now() && compiled.mode === 'schedule') await native().setPublished(workflow.kaRef, true);
+      if (value.active && current.active && current.expiresAt > Date.now() && compiled.mode === 'schedule')
+        await setPublished(workflow.kaRef, true, repository.row(workflow.kaRef).activation_revision);
       if (!current.active) await reconcileUnpublication(workflow.kaRef);
       return (await get(value.kaRef)).workflow;
     }
@@ -172,7 +189,7 @@ export function createStudioService({ graphId, owner, client, repository, provid
       const a = { active: true, activationId, startedAt: Date.now(), expiresAt: Date.now() + 30 * 60 * 1000, count: 0,
         ...(workflow.requiresExportAuthorization ? { exportFingerprint: fingerprint(exportTokenFile) } : {}) };
       repository.setActivation(workflow.kaRef, a, randomUUID(), revision);
-      if (compiled.mode === 'schedule') await native().setPublished(workflow.kaRef, true);
+      if (compiled.mode === 'schedule') await setPublished(workflow.kaRef, true, revision + 1);
     } else {
       await deactivate(workflow.kaRef, activationId, compiled.mode);
     }
