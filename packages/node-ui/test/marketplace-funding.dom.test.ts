@@ -101,7 +101,9 @@ function fundingNode() {
 /**
  * The fixture node with this epoch funded and the next one not, keeping each
  * write. A funding of the next epoch lands at once, but its answer waits for
- * `release()`. A plan saved is the plan read after it.
+ * `release()`. A plan saved is the plan read after it; with `cutPlanAnswers`,
+ * a save lands but its answer stops partway, and `failPlanReads` reads of
+ * the plan fail first, as a node error.
  */
 function heldNextNode() {
   const writes: Write[] = [];
@@ -109,6 +111,7 @@ function heldNextNode() {
   let next: Json | null = null;
   let plan: Json | null = null;
   const held: Array<() => void> = [];
+  const control = { cutPlanAnswers: false, failPlanReads: 0 };
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const method = init?.method ?? 'GET';
     const url = String(input);
@@ -127,15 +130,22 @@ function heldNextNode() {
     }
     if (method === 'PUT' && url === '/api/marketplace/plan') {
       plan = await (await node(input, init)).json() as Json;
-      return json(plan);
+      return control.cutPlanAnswers ? new Response(JSON.stringify(plan).slice(0, 12), { status: 200 }) : json(plan);
+    }
+    if (method === 'GET' && url === '/api/marketplace/plan' && control.failPlanReads > 0) {
+      control.failPlanReads -= 1;
+      return json({ error: 'database is locked', code: 'Error', retryable: false }, 500);
     }
     if (method === 'GET' && url === '/api/marketplace/plan' && plan) return json(plan);
     return node(input, init);
   });
   return {
     writes,
+    control,
     release() { for (const r of held.splice(0)) r(); },
     get waiting() { return held.length; },
+    /** Whether the plan the node holds now renews. */
+    get planRenews() { return plan?.renew; },
     /** The plan the node holds now, by service: each budget's value. */
     get planValues() { return plan && Object.fromEntries((plan.services as Json[]).map((s) => [s.serviceId, s.value])); },
   };
@@ -265,6 +275,31 @@ describe('marketplace funding whose answer is lost or comes late', () => {
     expect(planSaves(node.writes)).toHaveLength(1);
     expect(node.planValues?.[FIXTURE_IDS.llama8b]).toBe('750000000000000000');
   });
+
+  for (const [readBack, failPlanReads] of [['at once', 0], ['only once a read succeeds', 1]] as const) {
+    it(`keeps a plan whose save answer was cut off, read back ${readBack}, over an older funding's plan`, async () => {
+      const node = heldNextNode();
+      const c = await fundNextHeld(node);
+      // While the funding's answer is on its way, a plan that does not renew is saved; its answer stops partway.
+      await click(byTestId(c, 'mkt-change-plan'));
+      await click(byTestId(c, 'mkt-renew')?.querySelector('input'));
+      await click(byTestId(c, 'mkt-compose-continue'));
+      node.control.cutPlanAnswers = true;
+      node.control.failPlanReads = failPlanReads;
+      await click(byTestId(c, 'mkt-gate-confirm'));
+      await waitUntil(() => planSaves(node.writes).length === 1 && node.control.failPlanReads === 0, 'the plan save and its read back');
+      await flush(50);
+      expect(node.planRenews).toBe(false);
+      // The older funding's answer comes back: its plan, which renews, does not go over the one the node holds.
+      node.control.cutPlanAnswers = false;
+      node.release();
+      await flush(50);
+      await flush(50);
+      expect(fundings(node.writes)).toHaveLength(1);
+      expect(planSaves(node.writes)).toHaveLength(1);
+      expect(node.planRenews).toBe(false);
+    });
+  }
 
   it('still saves the plan of a funding whose answer comes after a top-up replaced its form, and leaves that form open', async () => {
     const node = heldNextNode();

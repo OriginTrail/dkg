@@ -132,6 +132,8 @@ describe('marketplace plan composition and funding', () => {
     const c = await render(plans());
     await waitForText(c, 'Epoch 665 is funded');
     await click(byTestId(c, 'mkt-change-plan'));
+    // A changed plan: read back after the failed save, the node still holds the one before.
+    await type(byTestId(c, `mkt-value-${FIXTURE_IDS.llama8b}`), '0.75');
     await click(byTestId(c, 'mkt-compose-continue'));
     expect(byTestId(c, 'mkt-confirm-gate')?.textContent).toContain('One confirmation — the plan');
     await click(byTestId(c, 'mkt-gate-confirm'));
