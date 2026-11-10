@@ -1,4 +1,4 @@
-import { ASSERTION_NAMED_GRAPH_PREFIX, contextGraphDataUri, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { ASSERTION_NAMED_GRAPH_PREFIX, READ_GRAPH_SEGMENT, contextGraphDataUri, validateSubGraphName } from '@origintrail-official/dkg-core';
 import type { ContentPartition } from './content-partition-policy.js';
 
 function isDraft(tail: string): boolean {
@@ -97,7 +97,12 @@ function isStagingGraphTail(tail: string): boolean {
   return /^(?:[^/]+\/)?_(?:shared|verifiable)_memory\/staging(?:\/|$)/.test(tail);
 }
 
+/** Read graphs and their state are node-local derived data, never content. */
+function isReadGraphTail(tail: string): boolean {
+  return tail.split('/').includes(READ_GRAPH_SEGMENT);
+}
 
 export function isExcludedContentGraphTail(tail: string): boolean {
-  return isMetadataGraphTail(tail) || isPrivateGraphTail(tail) || isRulesGraphTail(tail) || isStagingGraphTail(tail);
+  return isMetadataGraphTail(tail) || isPrivateGraphTail(tail) || isRulesGraphTail(tail) || isStagingGraphTail(tail)
+    || isReadGraphTail(tail);
 }

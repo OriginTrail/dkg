@@ -9,10 +9,12 @@ import {
   Rfc64InventoryRollbackRefusedErrorV1,
 } from '@origintrail-official/dkg-agent/rfc64/inventory-v1/rollback';
 import { compareSemver } from './npm-registry.js';
+import { dropReadGraphsForRollback } from './rollback-read-graphs.js';
 
 // A store that a newer release migrated must be handed back in a form the
 // rollback target opens, or the target stops at start. Each store whose
-// migrated form an older release refuses is readied here.
+// migrated form an older release refuses is readied here, and the triple
+// store's read graphs are dropped.
 
 export interface RollbackStoresIo {
   log(message: string): void;
@@ -147,8 +149,9 @@ export async function prepareRollbackStores(
   stoppedState = `Nothing was changed. The daemon is stopped: run "dkg start" to start ${currentVersion} again.`,
 ): Promise<PreparedRollbackStores | null> {
   const target = targetName(targetVersion);
+  let prepared: Awaited<ReturnType<typeof prepareRfc64InventoryForRollbackV1>>;
   try {
-    const prepared = await prepareRfc64InventoryForRollbackV1(dataDir, inventoryUserVersionFor(targetVersion), {
+    prepared = await prepareRfc64InventoryForRollbackV1(dataDir, inventoryUserVersionFor(targetVersion), {
       removeConfirmedCatalogPlacements: readsOnlyLegacyPlacementRepairs(targetVersion),
     });
     if (prepared.removedConfirmedCatalogPlacements.length > 0) {
@@ -165,7 +168,6 @@ export async function prepareRollbackStores(
           + `for ${target}; the replaced schema v${prepared.fromVersion} database is kept at ${prepared.keptPath}.`,
       );
     }
-    return prepared;
   } catch (error) {
     if (error instanceof Rfc64InventoryRollbackRefusedErrorV1) {
       for (const line of refusalLines(error, targetVersion, currentVersion, stoppedState)) io.error(line);
@@ -175,4 +177,18 @@ export async function prepareRollbackStores(
     }
     return null;
   }
+  // The inventory lease is held, so no daemon writes the triple store while its read graphs are dropped.
+  try {
+    const dropped = await dropReadGraphsForRollback(dataDir, (message) => io.log(message));
+    if (dropped !== null) {
+      io.log(`Dropped ${dropped} read-graph partition graph(s) for ${target}; read graphs are rebuilt from the stored data.`);
+    }
+  } catch (error) {
+    prepared.release();
+    io.error(`Rollback stopped: the read graphs could not be dropped: ${error instanceof Error ? error.message : String(error)}.`);
+    io.error(`The version was not switched. Run "dkg rollback" again once the triple store can be opened, `
+      + `or "dkg start" to start ${currentVersion} again.`);
+    return null;
+  }
+  return prepared;
 }

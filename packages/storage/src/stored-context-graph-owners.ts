@@ -1,8 +1,16 @@
 import { readGraphInventoryByPrefix } from './graph-inventory-materialization.js';
 // SPDX-License-Identifier: Apache-2.0
-import { contextGraphStorageOwnerCandidates } from '@origintrail-official/dkg-core';
+import { contextGraphStorageOwnerCandidates, READ_GRAPH_SEGMENT } from '@origintrail-official/dkg-core';
+import { isReadGraphPartitionGraph } from './graph-enumeration-visibility.js';
 import type { QueryOptions, TripleStore } from './triple-store.js';
 const CG_PREFIX = 'did:dkg:context-graph:';
+
+/** A graph in a read-graph partition is owned by the context graph whose partition holds it. */
+function ownerStorageUri(graph: string): string {
+  if (!isReadGraphPartitionGraph(graph)) return graph;
+  const segments = graph.slice(CG_PREFIX.length).split('/');
+  return CG_PREFIX + segments.slice(0, segments.indexOf(READ_GRAPH_SEGMENT, 1)).join('/');
+}
 
 /** Read and meter the complete inventory before projecting possible owners. */
 export async function listStoredContextGraphOwnerCandidates(store: TripleStore, options: QueryOptions,
@@ -21,7 +29,7 @@ export async function listStoredContextGraphOwnerCandidates(store: TripleStore, 
       if (visited++ % 512 === 511) await new Promise<void>((resolve) => setImmediate(resolve));
       options.signal?.throwIfAborted();
       if (!graph.startsWith(CG_PREFIX)) continue;
-      const owners = contextGraphStorageOwnerCandidates(graph);
+      const owners = contextGraphStorageOwnerCandidates(ownerStorageUri(graph));
       if (owners === undefined) {
         throw new Error('Cannot authorize unscoped query: unrecognized stored Context Graph owner');
       }

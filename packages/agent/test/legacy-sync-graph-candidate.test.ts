@@ -25,6 +25,9 @@ describe('legacy sync graph namespace eligibility', () => {
     `${cg}/child/_working_memory`,
     `${cg}/child/_shared_memory`,
     `${cg}/_private/draft`,
+    `${cg}/_read/cg/_verifiable_memory`,
+    `${cg}/_read/state`,
+    `${cg}/code/_read/sub/code/_shared_memory`,
     'did:dkg:context-graph:someone-else/assertion/1',
   ])('rejects reserved or foreign graph %s', (graph) => {
     expect(isLegacySyncGraphCandidateV1(graph, contextGraphId, 'durable-data')).toBe(false);

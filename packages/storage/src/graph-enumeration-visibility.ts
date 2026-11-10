@@ -1,3 +1,4 @@
+import { isReadGraphPartitionIri, READ_GRAPH_SEGMENT } from '@origintrail-official/dkg-core';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 import type { TripleStore } from './triple-store.js';
 
@@ -7,5 +8,21 @@ export function composeGraphEnumerationVisibility(inner: TripleStore, visible: (
   return innerVisible ? (graph: string) => innerVisible(graph) && visible(graph) : undefined;
 }
 
-/** The same named-graph visibility policy is exposed by embedded and worker Oxigraph. */
-export const oxigraphGraphEnumerationVisibility = (graph: string): boolean => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph);
+const READ_GRAPH_PARTITION_MARK = `/${READ_GRAPH_SEGMENT}`;
+
+/** A graph in some context graph's reserved read-graph partition (`{cg}/_read` and below). */
+export function isReadGraphPartitionGraph(graph: string): boolean {
+  // The substring test keeps whole-catalog filtering cheap; the exact test decides.
+  return graph.includes(READ_GRAPH_PARTITION_MARK) && isReadGraphPartitionIri(graph);
+}
+
+/**
+ * Graphs that storage keeps for itself and never lists: the staging graphs of
+ * atomic writes, and every context graph's read-graph partition.
+ */
+export function isStorageHiddenGraph(graph: string): boolean {
+  return isAtomicGraphReplaceStagingGraph(graph) || isReadGraphPartitionGraph(graph);
+}
+
+/** The named-graph visibility policy that every adapter exposes. */
+export const storeGraphEnumerationVisibility = (graph: string): boolean => Boolean(graph) && !isStorageHiddenGraph(graph);
