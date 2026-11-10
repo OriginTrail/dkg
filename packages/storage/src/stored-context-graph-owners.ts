@@ -5,13 +5,6 @@ import { isReadGraphPartitionGraph } from './graph-enumeration-visibility.js';
 import type { QueryOptions, TripleStore } from './triple-store.js';
 const CG_PREFIX = 'did:dkg:context-graph:';
 
-/** A graph in a read-graph partition is owned by the context graph whose partition holds it. */
-function ownerStorageUri(graph: string): string {
-  if (!isReadGraphPartitionGraph(graph)) return graph;
-  const segments = graph.slice(CG_PREFIX.length).split('/');
-  return CG_PREFIX + segments.slice(0, segments.indexOf(READ_GRAPH_SEGMENT, 1)).join('/');
-}
-
 /** Read and meter the complete inventory before projecting possible owners. */
 export async function listStoredContextGraphOwnerCandidates(store: TripleStore, options: QueryOptions,
   materializationMeter?: { consumeBytes(bytes: number): void }): Promise<string[]> {
@@ -37,4 +30,11 @@ export async function listStoredContextGraphOwnerCandidates(store: TripleStore, 
     }
     options.signal?.throwIfAborted();
     return [...candidates];
+}
+
+/** A graph in a read-graph partition is owned by the context graph whose partition holds it. */
+function ownerStorageUri(graph: string): string {
+  if (!isReadGraphPartitionGraph(graph)) return graph;
+  const segments = graph.slice(CG_PREFIX.length).split('/');
+  return CG_PREFIX + segments.slice(0, segments.indexOf(READ_GRAPH_SEGMENT, 1)).join('/');
 }
