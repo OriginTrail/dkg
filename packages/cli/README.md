@@ -67,10 +67,11 @@ execution returns HTTP 503 with `Retry-After: 1` and
 ## API query time limit
 
 `POST /api/query` has a time limit of its own: 30 s by default, set with
-`DKG_API_QUERY_TIME_LIMIT_MS` before the daemon starts (an integer up to
+`DKG_API_QUERY_TIME_LIMIT_MS` before the daemon starts (an integer from 1000 to
 600000; `0` turns the node's limit off). The daemon logs the effective limit
 once at boot; an invalid value keeps the default, with a warning. A request may
-lower it with `timeoutMs` in its body, never raise it; a larger value gets 400.
+lower it with `timeoutMs` in its body, an integer from 1000, never raise it;
+any other value gets 400.
 
 At the limit the node stops the query's work in the store, not only its wait,
 and a caller that disconnects first stops it too:
@@ -84,10 +85,14 @@ and a caller that disconnects first stops it too:
 
 A query its limit ended returns HTTP 504 with
 `code: "QUERY_TIME_LIMIT_EXCEEDED"`, `timeLimitMs`, and `stopped`, which says
-whether the store stopped the query or may still be running it. Replacing the
-worker store reloads the whole store file, so every other store operation waits
-for that reload: on a large store a stop costs seconds. `POST
-/api/query/bounded` stops its work at its own deadline the same way.
+whether the store stopped the query or may still be running it.
+
+On the `oxigraph-worker` store this has a cost for every limited query, not
+only a stopped one: the query runs alone, and waits first for any pending write
+to reach disk, which is a dump of the whole store. A stop reloads the whole
+store file. Other store operations wait meanwhile; on a large store either
+takes seconds. `POST /api/query/bounded` keeps its own short deadline, which
+ends only the wait.
 
 ## RDF file input
 

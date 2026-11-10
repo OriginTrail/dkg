@@ -7,6 +7,7 @@ import { OxigraphWorkerStore, QueryWorkStoppedError, type QueryOptions } from '@
 import {
   DEFAULT_API_QUERY_TIME_LIMIT_MS,
   MAX_API_QUERY_TIME_LIMIT_MS,
+  MIN_API_QUERY_TIME_LIMIT_MS,
   configureApiQueryTimeLimit,
   getApiQueryTimeLimitMs,
   requestQueryTimeLimitMs,
@@ -86,7 +87,8 @@ describe('the node time limit for /api/query', () => {
     expect(resolveApiQueryTimeLimitMs(' ')).toEqual({ limitMs: 30_000, valid: true });
     expect(resolveApiQueryTimeLimitMs('8000')).toEqual({ limitMs: 8_000, valid: true });
     expect(resolveApiQueryTimeLimitMs('0')).toEqual({ limitMs: null, valid: true });
-    for (const raw of ['-1', '1.5', '8s', String(MAX_API_QUERY_TIME_LIMIT_MS + 1)]) {
+    expect(resolveApiQueryTimeLimitMs(String(MIN_API_QUERY_TIME_LIMIT_MS))).toEqual({ limitMs: 1_000, valid: true });
+    for (const raw of ['-1', '1.5', '8s', '999', String(MAX_API_QUERY_TIME_LIMIT_MS + 1)]) {
       expect(resolveApiQueryTimeLimitMs(raw)).toEqual({ limitMs: 30_000, valid: false });
     }
   });
@@ -105,6 +107,10 @@ describe('the node time limit for /api/query', () => {
     expect(requestQueryTimeLimitMs(undefined, 30_000)).toEqual({ ok: true, limitMs: 30_000 });
     expect(requestQueryTimeLimitMs(8_000, 30_000)).toEqual({ ok: true, limitMs: 8_000 });
     expect(requestQueryTimeLimitMs(30_001, 30_000)).toMatchObject({ ok: false });
+    // No request can have the node stop, and reload, its store many times a second.
+    expect(requestQueryTimeLimitMs(MIN_API_QUERY_TIME_LIMIT_MS - 1, 30_000)).toEqual({
+      ok: false, error: 'timeoutMs must be an integer from 1000 to 30000',
+    });
     for (const bad of [0, -5, 1.5, '8000', true]) expect(requestQueryTimeLimitMs(bad, 30_000)).toMatchObject({ ok: false });
     expect(requestQueryTimeLimitMs(undefined, null)).toEqual({ ok: true, limitMs: null });
     expect(requestQueryTimeLimitMs(MAX_API_QUERY_TIME_LIMIT_MS, null)).toEqual({ ok: true, limitMs: MAX_API_QUERY_TIME_LIMIT_MS });
@@ -127,15 +133,15 @@ describe('/api/query answers for its time limit', () => {
     const res = new ResponseStub();
     const track = tracker();
     const startedAt = performance.now();
-    await handleQueryRoutes(routeContext('/api/query', new RequestStub({ sparql: 'SELECT ?s WHERE { ?s ?p ?o }', timeoutMs: 60 }), res, { query }, track));
+    await handleQueryRoutes(routeContext('/api/query', new RequestStub({ sparql: 'SELECT ?s WHERE { ?s ?p ?o }', timeoutMs: 1_000 }), res, { query }, track));
 
-    expect(performance.now() - startedAt).toBeGreaterThanOrEqual(55);
+    expect(performance.now() - startedAt).toBeGreaterThanOrEqual(990);
     expect(seen.options?.signal.aborted).toBe(true);
     expect(res.statusCode).toBe(504);
     expect(JSON.parse(res.body)).toEqual({
       code: 'QUERY_TIME_LIMIT_EXCEEDED',
-      error: 'The query ran past its time limit of 60 ms, and the node stopped it.',
-      timeLimitMs: 60,
+      error: 'The query ran past its time limit of 1000 ms, and the node stopped it.',
+      timeLimitMs: 1_000,
       stopped: true,
       retryable: false,
     });
@@ -146,19 +152,19 @@ describe('/api/query answers for its time limit', () => {
   it('says so when the store could not stop the query', async () => {
     const { query } = waitingAgent((reason) => reason);
     const res = new ResponseStub();
-    await handleQueryRoutes(routeContext('/api/query', new RequestStub({ sparql: 'SELECT ?s WHERE { ?s ?p ?o }', timeoutMs: 40 }), res, { query }));
+    await handleQueryRoutes(routeContext('/api/query', new RequestStub({ sparql: 'SELECT ?s WHERE { ?s ?p ?o }', timeoutMs: 1_000 }), res, { query }));
     expect(res.statusCode).toBe(504);
-    expect(JSON.parse(res.body)).toMatchObject({ code: 'QUERY_TIME_LIMIT_EXCEEDED', stopped: false, timeLimitMs: 40 });
+    expect(JSON.parse(res.body)).toMatchObject({ code: 'QUERY_TIME_LIMIT_EXCEEDED', stopped: false, timeLimitMs: 1_000 });
     expect(JSON.parse(res.body).error).toContain('may still be running');
   });
 
   it('refuses a timeoutMs above the node limit before any store work', async () => {
-    configureApiQueryTimeLimit('1000', { info() {}, warn() {} });
+    configureApiQueryTimeLimit('2000', { info() {}, warn() {} });
     const query = vi.fn();
     const res = new ResponseStub();
-    await handleQueryRoutes(routeContext('/api/query', new RequestStub({ sparql: 'SELECT ?s WHERE { ?s ?p ?o }', timeoutMs: 1_001 }), res, { query }));
+    await handleQueryRoutes(routeContext('/api/query', new RequestStub({ sparql: 'SELECT ?s WHERE { ?s ?p ?o }', timeoutMs: 2_001 }), res, { query }));
     expect(res.statusCode).toBe(400);
-    expect(JSON.parse(res.body)).toEqual({ error: 'timeoutMs must be an integer from 1 to 1000' });
+    expect(JSON.parse(res.body)).toEqual({ error: 'timeoutMs must be an integer from 1000 to 2000' });
     expect(query).not.toHaveBeenCalled();
   });
 
@@ -204,10 +210,10 @@ describe('/api/query answers for its time limit', () => {
       const res = new ResponseStub();
       const heavy = 'SELECT (COUNT(*) AS ?n) WHERE { GRAPH <urn:g> { ?a <urn:p> ?b . ?c <urn:p> ?d . ?e <urn:p> ?f } }';
       const startedAt = performance.now();
-      await handleQueryRoutes(routeContext('/api/query', new RequestStub({ sparql: heavy, timeoutMs: 300 }), res, agent));
-      expect(performance.now() - startedAt).toBeLessThan(5_000);
+      await handleQueryRoutes(routeContext('/api/query', new RequestStub({ sparql: heavy, timeoutMs: 1_000 }), res, agent));
+      expect(performance.now() - startedAt).toBeLessThan(10_000);
       expect(res.statusCode).toBe(504);
-      expect(JSON.parse(res.body)).toMatchObject({ code: 'QUERY_TIME_LIMIT_EXCEEDED', stopped: true, timeLimitMs: 300 });
+      expect(JSON.parse(res.body)).toMatchObject({ code: 'QUERY_TIME_LIMIT_EXCEEDED', stopped: true, timeLimitMs: 1_000 });
 
       const after = new ResponseStub();
       const cheapStartedAt = performance.now();
@@ -223,16 +229,15 @@ describe('/api/query answers for its time limit', () => {
 });
 
 describe('/api/query/bounded', () => {
-  it('hands its deadline to the store as the work deadline', async () => {
+  // Its deadline is at most 2 s, shorter than a worker reload or a managed
+  // restart costs, so it ends only the wait.
+  it('does not hand its short deadline to the store as a work deadline', async () => {
     const query = vi.fn(async () => ({ bindings: [] }));
     const res = new ResponseStub();
-    const startedAt = performance.now();
     await handleBoundedQueryRoutes(routeContext('/api/query/bounded', new RequestStub({
       version: 1, contextGraphId: 'cg', sparql: 'SELECT ?s WHERE { ?s ?p ?o }', maxRows: 5, timeoutMs: 1_500,
     }), res, { query }));
     expect(res.statusCode).toBe(200);
-    const deadline = ((query.mock.calls[0] as unknown[])[1] as QueryOptions).workDeadline!;
-    expect(deadline - startedAt).toBeGreaterThan(1_000);
-    expect(deadline - startedAt).toBeLessThanOrEqual(1_550);
+    expect(((query.mock.calls[0] as unknown[])[1] as QueryOptions).workDeadline).toBeUndefined();
   });
 });

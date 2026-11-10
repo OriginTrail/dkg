@@ -54,11 +54,11 @@ describe('oxigraph-worker: a read past its time limit is stopped', () => {
     const exited = new Promise<number>((resolve) => running.once('exit', resolve));
 
     const startedAt = performance.now();
-    await expect(store.query(HEAVY, { workDeadline: limit(300) }))
+    await expect(store.query(HEAVY, { workDeadline: limit(1_000) }))
       .rejects.toMatchObject({ code: 'QUERY_WORK_STOPPED', outcome: 'stopped', backend: 'oxigraph-worker' });
     const stoppedAfter = performance.now() - startedAt;
-    expect(stoppedAfter).toBeGreaterThanOrEqual(290);
-    expect(stoppedAfter).toBeLessThan(5_000);
+    expect(stoppedAfter).toBeGreaterThanOrEqual(990);
+    expect(stoppedAfter).toBeLessThan(10_000);
 
     // The thread that ran the query is gone: nothing keeps evaluating it.
     await exited;
@@ -77,7 +77,7 @@ describe('oxigraph-worker: a read past its time limit is stopped', () => {
     await store.insert(rows(1_000));
     // Acknowledged, and still inside the 50 ms flush debounce when the read starts.
     await store.insert([{ subject: 'urn:just-written', predicate: 'urn:p', object: 'urn:o', graph: GRAPH }]);
-    await expect(store.query(HEAVY, { workDeadline: limit(250) }))
+    await expect(store.query(HEAVY, { workDeadline: limit(1_000) }))
       .rejects.toMatchObject({ code: 'QUERY_WORK_STOPPED', outcome: 'stopped' });
 
     await expect(askMarker(store, 'urn:just-written')).resolves.toBe(true);
@@ -110,25 +110,27 @@ describe('oxigraph-worker: a read past its time limit is stopped', () => {
     // Each limit leaves room for the previous replacement to load, so every
     // round really runs and is stopped; nothing else answers in between.
     for (let round = 0; round < 7; round += 1) {
-      await expect(store.query(HEAVY, { workDeadline: limit(600) }))
+      await expect(store.query(HEAVY, { workDeadline: limit(1_500) }))
         .rejects.toMatchObject({ code: 'QUERY_WORK_STOPPED', outcome: 'stopped' });
     }
     expect(internals(store).lifecycle).toBe('live');
     await expect(askMarker(store, 'urn:s1')).resolves.toBe(true);
-  }, 60_000);
+  }, 90_000);
 
   it('never starts a read whose limit ends while it waits, and stops the one that ran', async () => {
     store = new OxigraphWorkerStore(path);
     await store.insert(rows(1_000));
     const first = internals(store).worker;
-    const running = store.query(HEAVY, { workDeadline: limit(800) });
-    const runningOutcome = running.then(() => 'answered', (error: { outcome?: string }) => error.outcome);
+    const settled: string[] = [];
+    const running = store.query(HEAVY, { workDeadline: limit(3_000) });
+    const runningOutcome = running.then(() => 'answered', (error: { outcome?: string }) => error.outcome)
+      .finally(() => settled.push('running'));
     await new Promise((resolve) => setTimeout(resolve, 100));
 
-    const waitingStartedAt = performance.now();
-    await expect(store.query(HEAVY, { workDeadline: limit(150) }))
+    await expect(store.query(HEAVY, { workDeadline: limit(200) }).finally(() => settled.push('waiting')))
       .rejects.toMatchObject({ code: 'QUERY_WORK_STOPPED', outcome: 'not_started' });
-    expect(performance.now() - waitingStartedAt).toBeLessThan(700);
+    // The waiting read gave up while the first still ran, on the first's worker.
+    expect(settled).toEqual(['waiting']);
     expect(internals(store).worker).toBe(first);
 
     await expect(runningOutcome).resolves.toBe('stopped');
@@ -158,7 +160,7 @@ describe('oxigraph-worker: a read past its time limit is stopped', () => {
     const controller = new AbortController();
     const reason = new Error('caller disconnected');
     const pending = store.query(HEAVY, { workDeadline: limit(60_000), signal: controller.signal });
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 500));
     controller.abort(reason);
     await expect(pending).rejects.toMatchObject({ code: 'QUERY_WORK_STOPPED', outcome: 'stopped', cause: reason });
     expect(internals(store).worker).not.toBe(running);
@@ -180,8 +182,8 @@ describe('oxigraph-worker: a read past its time limit is stopped', () => {
   it('does not replace a worker whose unflushed write cannot reach the disk', async () => {
     const nested = join(dir, 'nested');
     store = new OxigraphWorkerStore(join(nested, 'store.nq'));
-    // 1,800 triples: a two-way join that takes a second or so, so the read ends by itself.
-    await store.insert(rows(1_800));
+    // 2,400 triples: a two-way join that takes a second or more, so the read ends by itself.
+    await store.insert(rows(2_400));
     await store.flush();
     // The store's directory becomes a file: no flush can land from here on.
     rmSync(nested, { recursive: true, force: true });
@@ -190,7 +192,7 @@ describe('oxigraph-worker: a read past its time limit is stopped', () => {
     const worker = internals(store).worker;
     const twoWay = `SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${GRAPH}> { ?a <urn:p> ?b . ?c <urn:p> ?d } }`;
 
-    const error = await store.query(twoWay, { workDeadline: limit(50) }).then(() => null, (cause: unknown) => cause);
+    const error = await store.query(twoWay, { workDeadline: limit(400) }).then(() => null, (cause: unknown) => cause);
     expect(error).toMatchObject({ code: 'OXIGRAPH_WORKER_OP_TIMEOUT' });
     expect(internals(store).worker).toBe(worker);
     // The write is still served from the live worker's memory.

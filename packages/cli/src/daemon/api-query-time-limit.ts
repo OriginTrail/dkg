@@ -12,8 +12,13 @@ import { jsonResponse } from './http-utils.js';
  * 504 that says so. `DKG_API_QUERY_TIME_LIMIT_MS` sets the limit once, at
  * startup; a request's `timeoutMs` may only lower it. `0` turns the node's
  * limit off, and then only a request's own `timeoutMs` sets one.
+ *
+ * A stop can cost a reload of the worker store or a restart of a managed
+ * store, so no limit is shorter than MIN_API_QUERY_TIME_LIMIT_MS: a caller
+ * cannot have the node stop, and reload, many times a second.
  */
 export const DEFAULT_API_QUERY_TIME_LIMIT_MS = 30_000;
+export const MIN_API_QUERY_TIME_LIMIT_MS = 1_000;
 export const MAX_API_QUERY_TIME_LIMIT_MS = 600_000;
 export const QUERY_TIME_LIMIT_EXCEEDED_CODE = 'QUERY_TIME_LIMIT_EXCEEDED';
 
@@ -31,7 +36,9 @@ export function resolveApiQueryTimeLimitMs(raw: string | undefined): { limitMs: 
   if (!/^\d+$/.test(text)) return { limitMs: DEFAULT_API_QUERY_TIME_LIMIT_MS, valid: false };
   const value = Number(text);
   if (value === 0) return { limitMs: null, valid: true };
-  if (value > MAX_API_QUERY_TIME_LIMIT_MS) return { limitMs: DEFAULT_API_QUERY_TIME_LIMIT_MS, valid: false };
+  if (value < MIN_API_QUERY_TIME_LIMIT_MS || value > MAX_API_QUERY_TIME_LIMIT_MS) {
+    return { limitMs: DEFAULT_API_QUERY_TIME_LIMIT_MS, valid: false };
+  }
   return { limitMs: value, valid: true };
 }
 
@@ -41,7 +48,7 @@ export function configureApiQueryTimeLimit(raw: string | undefined, logger: ApiQ
   if (!valid) {
     logger.warn(
       `Invalid DKG_API_QUERY_TIME_LIMIT_MS=${JSON.stringify(raw?.trim().slice(0, 32))}; expected 0 or an integer `
-      + `up to ${MAX_API_QUERY_TIME_LIMIT_MS}. Falling back to ${DEFAULT_API_QUERY_TIME_LIMIT_MS} ms.`,
+      + `from ${MIN_API_QUERY_TIME_LIMIT_MS} to ${MAX_API_QUERY_TIME_LIMIT_MS}. Falling back to ${DEFAULT_API_QUERY_TIME_LIMIT_MS} ms.`,
     );
   }
   nodeTimeLimitMs = limitMs;
@@ -62,8 +69,9 @@ export function requestQueryTimeLimitMs(
 ): { ok: true; limitMs: number | null } | { ok: false; error: string } {
   if (timeoutMs === undefined || timeoutMs === null) return { ok: true, limitMs: nodeLimitMs };
   const ceiling = nodeLimitMs ?? MAX_API_QUERY_TIME_LIMIT_MS;
-  if (typeof timeoutMs !== 'number' || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > ceiling) {
-    return { ok: false, error: `timeoutMs must be an integer from 1 to ${ceiling}` };
+  if (typeof timeoutMs !== 'number' || !Number.isInteger(timeoutMs)
+      || timeoutMs < MIN_API_QUERY_TIME_LIMIT_MS || timeoutMs > ceiling) {
+    return { ok: false, error: `timeoutMs must be an integer from ${MIN_API_QUERY_TIME_LIMIT_MS} to ${ceiling}` };
   }
   return { ok: true, limitMs: timeoutMs };
 }
