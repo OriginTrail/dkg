@@ -196,32 +196,37 @@ describe(`a graph catalog larger than any caller limit, on ${engine}`, () => {
     };
     const LOW_CEILING_BYTES = 1024 * 1024;
     const vm: FixtureRead = { view: 'verifiable-memory' };
+    const failure = (read: Promise<unknown>) => read.then(() => undefined, (error: unknown) => error);
+    // The node's limit, by name and size: never a caller-size error, which the route would answer 413.
+    function expectNodeSideLimit(error: unknown, limitBytes: number) {
+      expect(error).toMatchObject({ code: 'STORE_INTERNAL_LIMIT', limitName: CEILING_NAME, limitBytes });
+      expect((error as { actualBytes: number }).actualBytes).toBeGreaterThan(limitBytes);
+      expect(isStoreResponseTooLargeError(error)).toBe(false);
+      expect(isQueryMaterializationTooLargeError(error)).toBe(false);
+    }
 
     it.each([
       ['a cold catalog index', () => new GraphSetIndexStore(inner)],
       ['no catalog index', () => inner],
     ] as const)('fails a read with %s past the ceiling as a node-side limit, not the caller\'s size', async (_stack, store) => {
       const reader = new DKGQueryEngine(store());
-      const error: unknown = await withCeiling(LOW_CEILING_BYTES, () => reader.query(FIXTURE_QUERIES.SELECT,
-        requestOptions(vm))).then(() => undefined, (failure: unknown) => failure);
-      expect(error).toMatchObject({ code: 'STORE_INTERNAL_LIMIT', limitName: CEILING_NAME, limitBytes: LOW_CEILING_BYTES });
-      expect((error as { actualBytes: number }).actualBytes).toBeGreaterThan(LOW_CEILING_BYTES);
-      expect(isStoreResponseTooLargeError(error)).toBe(false);
-      expect(isQueryMaterializationTooLargeError(error)).toBe(false);
+      expectNodeSideLimit(await failure(withCeiling(LOW_CEILING_BYTES,
+        () => reader.query(FIXTURE_QUERIES.SELECT, requestOptions(vm)))), LOW_CEILING_BYTES);
     });
 
     // Last: it adds graphs to the store.
-    it('keeps answering from a warm catalog when the store grows past the ceiling', async () => {
+    it('fails a read as a node-side limit when a warm catalog revalidates past the ceiling', async () => {
       const reader = new DKGQueryEngine(new GraphSetIndexStore(inner, { revalidateMs: 1 }));
-      const read = async () => answer('SELECT', await reader.query(FIXTURE_QUERIES.SELECT, requestOptions(vm)));
-      expect(await read()).toEqual(expected('SELECT', vm));
-      // The warm catalog is within the ceiling; the next full read is not, as on a node whose store grew past it.
+      const read = () => reader.query(FIXTURE_QUERIES.SELECT, requestOptions(vm));
+      expect(answer('SELECT', await read())).toEqual(expected('SELECT', vm));
+      // The warm catalog is within the ceiling; its next revalidation is not, as on a node whose store grew past it.
       await inner.insert(Array.from({ length: 40 }, (_, n) => ({
         graph: `${UNRELATED_GRAPH_PREFIXES[0]}_shared_memory/0x00000000000000000000000000000000000000ff/${n}`,
         subject: `urn:fixture:growth:${n}`, predicate: 'http://schema.org/name', object: `"growth ${n}"`,
       })));
       await new Promise(resolve => setTimeout(resolve, 5));
-      expect(await withCeiling(fixture.catalogBytes + 1024, read)).toEqual(expected('SELECT', vm));
+      const ceiling = fixture.catalogBytes + 1024;
+      expectNodeSideLimit(await failure(withCeiling(ceiling, read)), ceiling);
     });
   });
 });
