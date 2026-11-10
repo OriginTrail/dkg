@@ -1,5 +1,5 @@
 import { raceStoreWorkAgainstAbort } from '../abortable-store-work-lifecycle.js';
-import { QueryWorkStoppedError, remainingWorkMs } from '../query-work-stop.js';
+import { QueryWorkStoppedError, boundByWorkDeadline } from '../query-work-stop.js';
 import { asAbortError, createOxigraphWorkerTimeoutError } from './oxigraph-worker-timeout.js';
 
 /**
@@ -139,11 +139,7 @@ export async function runStoppableRead<T>(
   options: { readonly signal?: AbortSignal; readonly workDeadline?: number },
 ): Promise<T> {
   const { signal } = options;
-  const boundMs = (): number => {
-    const remaining = remainingWorkMs(options.workDeadline) ?? 0;
-    if (host.operationTimeoutMs <= 0) return remaining;
-    return remaining > 0 ? Math.min(remaining, host.operationTimeoutMs) : host.operationTimeoutMs;
-  };
+  const boundMs = (): number => boundByWorkDeadline(host.operationTimeoutMs, options.workDeadline);
   const timeoutError = () => createOxigraphWorkerTimeoutError(method, boundMs());
   let release: () => void;
   try {

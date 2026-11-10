@@ -56,7 +56,10 @@ updates can move entries between pages. Browse counts and pages must not be
 used as proof of complete recovery, absence or an atomic authorization snapshot.
 
 The deadline is 1–2,000 ms. Cancellation propagates through authority checks,
-store admission and store reads. It is best effort on synchronous embedded
+store admission and store reads. The deadline is also the reads' work deadline:
+a store that can stop a running read stops it there (the disk-persisted
+`oxigraph-worker` store, Blazegraph and the managed Oxigraph server; see the
+CLI README, "API query time limit"). It is best effort on synchronous embedded
 backends, which may only observe an abort after returning. Disconnects stop
 queued/in-flight cancellable work. Deadline failures return 503
 `QUERY_DEADLINE_EXCEEDED`; other unavailability retains the existing typed

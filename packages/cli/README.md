@@ -64,6 +64,31 @@ the effective lane once at boot. A background query that is shed before
 execution returns HTTP 503 with `Retry-After: 1` and
 `code: "STORE_SCHEDULER_BUSY"`.
 
+## API query time limit
+
+`POST /api/query` has a time limit of its own: 30 s by default, set with
+`DKG_API_QUERY_TIME_LIMIT_MS` before the daemon starts (an integer up to
+600000; `0` turns the node's limit off). The daemon logs the effective limit
+once at boot; an invalid value keeps the default, with a warning. A request may
+lower it with `timeoutMs` in its body, never raise it; a larger value gets 400.
+
+At the limit the node stops the query's work in the store, not only its wait,
+and a caller that disconnects first stops it too:
+
+| Store | How the query is stopped |
+| --- | --- |
+| `oxigraph-worker` (on disk) | The query runs alone in the worker; the worker first writes any unflushed write to disk, and is replaced if the query is still running at its limit. The replacement loads the store file again, and operations that arrived meanwhile run on it. |
+| `blazegraph` | The limit is sent as the query's server deadline, and the query is cancelled by its engine id when the limit passes or the caller leaves. |
+| `oxigraph-server` (managed) | The limit is the request's client deadline; work still running then is ended by the supervised restart. |
+| `oxigraph-worker` in memory or read-only, `oxigraph`, `oxigraph-persistent`, other `sparql-http` endpoints | Not stopped: only the wait ends. For an endpoint, configure its own query timeout. |
+
+A query its limit ended returns HTTP 504 with
+`code: "QUERY_TIME_LIMIT_EXCEEDED"`, `timeLimitMs`, and `stopped`, which says
+whether the store stopped the query or may still be running it. Replacing the
+worker store reloads the whole store file, so every other store operation waits
+for that reload: on a large store a stop costs seconds. `POST
+/api/query/bounded` stops its work at its own deadline the same way.
+
 ## RDF file input
 
 Commands with `--file` accept N-Quads (`.nq`), N-Triples (`.nt`), Turtle (`.ttl`),

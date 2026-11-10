@@ -58,3 +58,26 @@ export function remainingWorkMs(workDeadline: number | undefined): number | unde
   if (workDeadline === undefined || !Number.isFinite(workDeadline)) return undefined;
   return Math.max(1, Math.ceil(workDeadline - performance.now()));
 }
+
+/** A store's own bound for a read in ms (0 = none), shortened to the read's work deadline. */
+export function boundByWorkDeadline(boundMs: number, workDeadline: number | undefined): number {
+  const remaining = remainingWorkMs(workDeadline);
+  if (remaining === undefined) return boundMs;
+  return boundMs > 0 ? Math.min(boundMs, remaining) : remaining;
+}
+
+/**
+ * For a store that stops a read once its caller leaves or its work deadline
+ * passes: the error the read rejects with. Any other failure is returned as is.
+ */
+export function workStoppedError(
+  backend: string,
+  error: unknown,
+  options: { readonly signal?: AbortSignal; readonly workDeadline?: number },
+  outcome: QueryWorkStopOutcome = 'stopped',
+): unknown {
+  const callerLeft = options.signal?.aborted === true;
+  const limitPassed = options.workDeadline !== undefined && performance.now() >= options.workDeadline;
+  if (!callerLeft && !limitPassed) return error;
+  return new QueryWorkStoppedError(backend, outcome, callerLeft ? options.signal!.reason : error);
+}

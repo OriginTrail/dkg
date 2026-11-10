@@ -110,13 +110,11 @@ import {
 } from '../rfc64-exact-bindings-read-capability.js';
 import { CANCEL_ON_ABORT, ABANDONED_READ_DRAIN_BUDGET_BYTES, raceCallerAbandon,
   snapshotManagedRecoveryCapability, normalizeManagedSparqlRecoveryV1, type SparqlHttpReadPolicy,
-  type SparqlHttpManagedRecoveryV1 } from './managed-sparql-recovery.js';
+  type SparqlHttpManagedRecoveryV1, SparqlHttpLogicalMutationScopeV1, runSparqlHttpCountedDeleteV1 } from './managed-sparql-recovery.js';
 export { ABANDONED_READ_DRAIN_BUDGET_BYTES } from './managed-sparql-recovery.js';
 export type { SparqlHttpRecoveryState, SparqlHttpManagedRecoveryV1 } from './managed-sparql-recovery.js';
-import { ManagedWorkRecoveryCoordinatorV1 } from
-  '../managed-work-recovery-coordinator.js';
-import { SparqlHttpLogicalMutationScopeV1,
-  runSparqlHttpCountedDeleteV1 } from './managed-sparql-recovery.js';
+import { ManagedWorkRecoveryCoordinatorV1 } from '../managed-work-recovery-coordinator.js';
+import { boundByWorkDeadline, workStoppedError } from '../query-work-stop.js';
 import { runSparqlHttpAuthorCommitV1 } from './sparql-http-author-commit.js';
 
 /** Every SPARQL statement this adapter builds by interpolation. */
@@ -544,8 +542,10 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     // Content-Type lacks a charset parameter as ISO-8859-1 (servlet default),
     // mojibake-ing any non-ASCII character in the query. UTF-8 is what the
     // SPARQL protocol prescribes.
-    const timeoutSignal = AbortSignal.timeout(this.timeout);
-    const deadline = this.now() + this.timeout;
+    // A work deadline shortens the client deadline, and so the managed restart that reclaims abandoned work.
+    const timeoutMs = boundByWorkDeadline(this.timeout, options?.workDeadline);
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const deadline = this.now() + timeoutMs;
     const recoveryToken = this.managedAbandonedWorkRecovery.begin(recoveryAtStart);
     // What a managed Oxigraph does after its client has gone depends on the
     // answer: a streamed SELECT/CONSTRUCT stops when it next writes to the
@@ -669,7 +669,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
           backend: this.managedOxigraph ? 'oxigraph-server' : 'sparql-http',
           operation,
           storeOperation,
-          timeoutMs: this.timeout,
+          timeoutMs,
           cause: error,
         });
       }
@@ -1063,7 +1063,10 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
     refuseWithheldGraphQuery(options, 'SparqlHttpStore');
-    return this.queryWithOperation(sparql, options);
+    const read = this.queryWithOperation(sparql, options);
+    // Past its work deadline a managed read is reclaimed by a supervised restart (postQuery).
+    return options?.workDeadline === undefined || !this.onClientTimeout ? read
+      : read.catch((error: unknown) => { throw workStoppedError('oxigraph-server', error, options); });
   }
 
   private async queryWithOperation(

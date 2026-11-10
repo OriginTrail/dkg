@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { prepareSparql, prepareSparqlQuery } from '@origintrail-official/dkg-rdf-utils/sparql';
-import { QueryWorkStoppedError, remainingWorkMs } from '../query-work-stop.js';
+import { boundByWorkDeadline, workStoppedError } from '../query-work-stop.js';
 
 /**
  * Blazegraph's per-request server-side query deadline. The deployed 2.1.x
@@ -48,12 +48,6 @@ export const SERVER_QUERY_DEADLINE_FACTOR = 4;
 const WORK_DEADLINE_SERVER_MARGIN_MS = 1_000;
 const CANCEL_REQUEST_TIMEOUT_MS = 5_000;
 
-/** The client deadline of a read: the store's own, or the read's work deadline when sooner. */
-export function blazegraphClientDeadlineMs(operationTimeoutMs: number, workDeadline: number | undefined): number {
-  const remaining = remainingWorkMs(workDeadline);
-  return remaining === undefined ? operationTimeoutMs : Math.min(operationTimeoutMs, remaining);
-}
-
 /**
  * Stopping a Blazegraph read with a work deadline.
  *
@@ -86,7 +80,7 @@ export class BlazegraphReadStop {
     this.queryId = hinted?.queryId ?? null;
     this.serverDeadlineMs = Math.min(
       operationTimeoutMs * SERVER_QUERY_DEADLINE_FACTOR,
-      blazegraphClientDeadlineMs(operationTimeoutMs, workDeadline) + WORK_DEADLINE_SERVER_MARGIN_MS,
+      boundByWorkDeadline(operationTimeoutMs, workDeadline) + WORK_DEADLINE_SERVER_MARGIN_MS,
     );
   }
 
@@ -111,11 +105,10 @@ export class BlazegraphReadStop {
     this.#detach = null;
   }
 
-  /** The error a stopped read rejects with: its caller left or its limit passed. */
-  failed(error: unknown, callerSignal: AbortSignal | undefined): unknown {
-    const ended = callerSignal?.aborted === true || performance.now() >= this.workDeadline;
-    if (!ended) return error;
-    return new QueryWorkStoppedError('blazegraph', this.#dispatched ? 'stopped' : 'not_started', callerSignal?.aborted ? callerSignal.reason : error);
+  /** The error a read rejects with: stopped when its caller left or its limit passed. */
+  failed(error: unknown, signal: AbortSignal | undefined): unknown {
+    return workStoppedError('blazegraph', error, { signal, workDeadline: this.workDeadline },
+      this.#dispatched ? 'stopped' : 'not_started');
   }
 }
 

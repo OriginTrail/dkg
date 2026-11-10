@@ -35,9 +35,8 @@ import {
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
 import { blazegraphSchedulers, type BlazegraphStoreOptions } from './blazegraph-scheduler.js';
-import {
-  BlazegraphReadStop, MAX_QUERY_MILLIS_HEADER, SERVER_QUERY_DEADLINE_FACTOR, blazegraphClientDeadlineMs,
-} from './blazegraph-read-stop.js';
+import { BlazegraphReadStop, MAX_QUERY_MILLIS_HEADER, SERVER_QUERY_DEADLINE_FACTOR } from './blazegraph-read-stop.js';
+import { boundByWorkDeadline } from '../query-work-stop.js';
 export type { BlazegraphStoreOptions } from './blazegraph-scheduler.js';
 import { isAtomicGraphReplaceStagingGraph } from '../atomic-graph-replace.js';
 import {
@@ -286,7 +285,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       return Promise.reject(new Error('Mutations are not allowed inside a query read admission'));
     }
     const deadline = createStoreOperationDeadline(
-      blazegraphClientDeadlineMs(this.operationTimeoutMs, options?.workDeadline),
+      boundByWorkDeadline(this.operationTimeoutMs, options?.workDeadline),
       options?.signal,
       operation,
     );
