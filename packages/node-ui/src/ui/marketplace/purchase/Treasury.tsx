@@ -134,7 +134,11 @@ export function Treasury({ funding, onChanged }: { funding: Funding; onChanged: 
         <span className="mkt-muted mkt-xs" data-copy="treasury.wallet.note">{copy('treasury.wallet.note')}</span>
       </div>
       <h3 data-copy="treasury.accounts">{copy('treasury.accounts')}</h3>
-      {funding.accounts.length === 0 && <div className="mkt-muted mkt-xs" data-copy="treasury.accounts.none">{copy('treasury.accounts.none')}</div>}
+      {funding.accountsPending
+        ? funding.accountsError
+          ? <div className="mkt-muted mkt-xs" data-copy="treasury.accounts.failed">{copy('treasury.accounts.failed', { error: funding.accountsError })}</div>
+          : <div className="mkt-muted mkt-xs" data-copy="treasury.accounts.pending">{copy('treasury.accounts.pending')}</div>
+        : funding.accounts.length === 0 && <div className="mkt-muted mkt-xs" data-copy="treasury.accounts.none">{copy('treasury.accounts.none')}</div>}
       {funding.accounts.map((a) => <AccountRow key={a.accountId} a={a} buyerWallet={w.address} onChanged={onChanged} />)}
       <p className="mkt-muted mkt-xs" data-copy="treasury.note">{copy('treasury.note')}</p>
     </div>

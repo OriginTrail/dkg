@@ -75,6 +75,36 @@ describe('marketplace Treasury', () => {
     expect(c.textContent).not.toContain(MISSING_COPY);
   });
 
+  it('says the accounts are still being looked up while the node reads the list, not that there are none', async () => {
+    recordNode();
+    const pending = await render(React.createElement(Treasury, { funding: { ...fundingWith([]), accountsPending: true }, onChanged: () => undefined }));
+    expect(pending.querySelector('[data-copy="treasury.accounts.pending"]')).not.toBeNull();
+    expect(pending.querySelector('[data-copy="treasury.accounts.none"]')).toBeNull();
+    expect(pending.textContent).not.toContain(MISSING_COPY);
+
+    // The list read last stays on show while the next one is read.
+    const stale = await render(React.createElement(Treasury, { funding: { ...fundingWith([owned]), accountsPending: true }, onChanged: () => undefined }));
+    expect(stale.querySelector('[data-copy="treasury.accounts.pending"]')).not.toBeNull();
+    expect(row(stale, '7')).not.toBeNull();
+
+    const none = await render(React.createElement(Treasury, { funding: { ...fundingWith([]), accountsPending: false }, onChanged: () => undefined }));
+    expect(none.querySelector('[data-copy="treasury.accounts.none"]')).not.toBeNull();
+    expect(none.querySelector('[data-copy="treasury.accounts.pending"]')).toBeNull();
+  });
+
+  it('says why the last look-up of the accounts failed while the node looks them up again', async () => {
+    recordNode();
+    const c = await render(React.createElement(Treasury, {
+      funding: { ...fundingWith([]), accountsPending: true, accountsError: 'upstream timeout' },
+      onChanged: () => undefined,
+    }));
+    const failed = c.querySelector('[data-copy="treasury.accounts.failed"]');
+    expect(failed?.textContent).toContain('upstream timeout');
+    expect(c.querySelector('[data-copy="treasury.accounts.pending"]')).toBeNull();
+    expect(c.querySelector('[data-copy="treasury.accounts.none"]')).toBeNull();
+    expect(c.textContent).not.toContain(MISSING_COPY);
+  });
+
   it('changes the limits on the account picked, for the buyer wallet the node names, with the exact limit and expiry', async () => {
     const sent = recordNode();
     const onChanged = vi.fn();

@@ -26,7 +26,8 @@ export interface MarketplaceConfig {
   /**
    * The Marketplace Context Graph, where sellers share their offers and buyers read them. A graph that admits every
    * node: registered on chain as public, or in its owner's wallet namespace (`0x<owner>/<name>`), whose owner's
-   * signed policy a node fetches from its peers. A node shares into it and reads it once it is admitted.
+   * signed policy a node fetches from its peers. A node shares into it and reads it once it is admitted. Unset, the
+   * daemon uses the graph its network config names (`network/<name>.json#marketplace.contextGraphId`; testnet's).
    */
   contextGraphId?: string;
   /** Selling: off unless `seller.enabled`, and only while the node is a Core Node. */
