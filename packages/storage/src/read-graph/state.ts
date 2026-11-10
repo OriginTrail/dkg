@@ -30,7 +30,10 @@ import {
   readGraphStateGraphIri,
   sparqlString,
 } from '@origintrail-official/dkg-core';
+import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { READ_GRAPH_MEMBERSHIP_RULE_VERSION } from './membership.js';
+
+const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
 /** The states a stored row can have. A read graph without a row is absent. */
 export const READ_GRAPH_STATES = Object.freeze(['building', 'ready', 'dirty', 'repairing', 'rebuilding'] as const);
@@ -304,17 +307,20 @@ export function readGraphStateMarkAllDirty(): string {
 }
 
 /**
- * Replace a read graph's row, whatever it holds, with `row`: two operations,
- * the removal and then the insertion. Unfenced, so it is for start-up, before
- * any work on the read graph, under its lock.
+ * Replace a read graph's row, whatever it holds, with `row`: two operations.
+ * The first removes the read graph's row fields from every state graph, a
+ * misplaced copy in another context graph's included; the second inserts
+ * `row` in its own state graph. Unfenced, so it is for start-up, before any
+ * work on the read graph, under its lock.
  */
 export function readGraphStateReset(row: ReadGraphStateRow): string {
   const checked = checkedRow(row);
   const stateGraph = stateGraphOf(checked.readGraph);
   const fields = ROW_FIELDS.map((field) => `<${READ_GRAPH_STATE_PREDICATES[field]}>`).join(' ');
-  return `DELETE { GRAPH <${stateGraph}> { <${checked.readGraph}> ?readGraphResetPredicate ?readGraphResetValue } } WHERE {\n`
+  return `DELETE { GRAPH ?stateGraph { <${checked.readGraph}> ?readGraphResetPredicate ?readGraphResetValue } } WHERE {\n`
     + `  VALUES ?readGraphResetPredicate { ${fields} }\n`
-    + `  GRAPH <${stateGraph}> { <${checked.readGraph}> ?readGraphResetPredicate ?readGraphResetValue }\n};\n`
+    + `  GRAPH ?stateGraph { <${checked.readGraph}> ?readGraphResetPredicate ?readGraphResetValue }\n`
+    + `  ${IN_STATE_GRAPH}\n};\n`
     + `INSERT DATA { GRAPH <${stateGraph}> { ${rowTriples(checked, ROW_FIELDS)} } }`;
 }
 
@@ -327,10 +333,9 @@ function parseRow(readGraph: string, found: readonly Readonly<Record<string, str
     const list = values(name);
     return list.length === 1 && list[0] !== undefined ? list[0] : undefined;
   };
-  const state = one('state');
   const row = {
     readGraph,
-    state: state !== undefined ? literalValue(state) : undefined,
+    state: stateValue(one('state')),
     generation: integerValue(one('generation')),
     ruleVersion: integerValue(one('ruleVersion')),
     builderVersion: integerValue(one('builderVersion')),
@@ -340,15 +345,27 @@ function parseRow(readGraph: string, found: readonly Readonly<Record<string, str
   return row as ReadGraphStateRow;
 }
 
-/** The lexical value of a literal binding, in either of the forms the result decoders produce. */
-function literalValue(value: string): string {
-  const quoted = /^"((?:[^"\\]|\\.)*)"(?:\^\^<[^<>]*>|@[A-Za-z0-9-]+)?$/.exec(value);
-  return quoted ? quoted[1]!.replace(/\\(.)/g, '$1') : value;
+/**
+ * A binding's value, only in the term forms the row's statements write and
+ * match: a plain literal for the state, an `xsd:integer` for the numbers, or
+ * the bare lexical form some decoders give. Any other term (a language tag, a
+ * string where a number belongs) leaves the row damaged.
+ */
+function stateValue(binding: string | undefined): string | undefined {
+  if (binding === undefined) return undefined;
+  if (!binding.startsWith('"')) return binding;
+  const literal = parseRdfLiteralTerm(binding);
+  return literal?.kind === 'plain' ? literal.value : undefined;
 }
 
-function integerValue(value: string | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  const lexical = literalValue(value);
+function integerValue(binding: string | undefined): number | undefined {
+  if (binding === undefined) return undefined;
+  let lexical = binding;
+  if (binding.startsWith('"')) {
+    const literal = parseRdfLiteralTerm(binding);
+    if (literal?.kind !== 'typed' || literal.datatype !== XSD_INTEGER) return undefined;
+    lexical = literal.value;
+  }
   if (!/^[1-9][0-9]*$/.test(lexical)) return undefined;
   const parsed = Number(lexical);
   return Number.isSafeInteger(parsed) ? parsed : undefined;

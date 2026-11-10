@@ -140,9 +140,12 @@ const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
   ['X6 DESCRIBE over GRAPH', 'describe', 'DESCRIBE ?s WHERE { GRAPH ?g { ?s <urn:p> <urn:x> } }'],
 ];
 
-/** Every store refuses a read-graph name. A store that restricts its dataset answers the rest; any other answers GRAPH only. */
+/**
+ * Every store refuses a read-graph name and a dataset the query names. A store
+ * that restricts its dataset answers the rest; any other answers GRAPH only.
+ */
 function expected(kind: Kind): 'exact' | 'refused' {
-  if (kind === 'names') return 'refused';
+  if (kind === 'names' || kind === 'dataset') return 'refused';
   if (ENGINE === 'oxigraph') return 'exact';
   return kind === 'graph' ? 'exact' : 'refused';
 }
@@ -203,7 +206,7 @@ describe(`unscoped queries on ${ENGINE} with read graphs planted`, () => {
     const { engine } = planted.get(variant)!;
     if (expected(kind) === 'refused') {
       const error = await engine.query(query).then(() => undefined, (reason: unknown) => reason);
-      expect(error).toBeInstanceOf(kind === 'names' ? ScopedQueryViolationError : UnscopedReadGraphQueryError);
+      expect(error).toBeInstanceOf(ENGINE === 'blazegraph' && kind !== 'names' ? UnscopedReadGraphQueryError : ScopedQueryViolationError);
       return;
     }
     expect(normalize(await engine.query(query))).toBe(normalize(await truth.query(query)));

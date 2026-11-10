@@ -204,7 +204,7 @@ describe('DKGQueryEngine on a store that cannot restrict its dataset', () => {
 });
 
 describe('DKGQueryEngine on a store that restricts its dataset', () => {
-  it('keeps leaving read graphs out by dataset, and runs default-graph patterns as they are', async () => {
+  it('keeps leaving read graphs out by dataset, for every unscoped query', async () => {
     const planted = new OxigraphStore();
     try {
       await planted.insert([...MEMBERS, ...READ_GRAPHS]);
@@ -217,7 +217,7 @@ describe('DKGQueryEngine on a store that restricts its dataset', () => {
       expect(graphs.bindings.map(row => row.g).sort()).toEqual([LOOK_ALIKE, SWM, VM].sort());
       expect(seen.at(-1)?.withheldGraphRoots).toEqual([]);
       await engine.query('SELECT ?s WHERE { ?s ?p ?o }');
-      expect(seen.at(-1)?.withheldGraphRoots).toBeUndefined();
+      expect(seen.at(-1)?.withheldGraphRoots).toEqual([]);
     } finally {
       await planted.close();
     }

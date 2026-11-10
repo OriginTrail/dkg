@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readGraphIri, readGraphStateGraphIri, readScope, MemoryLayer } from '@origintrail-official/dkg-core';
 import {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
@@ -28,7 +28,7 @@ import {
   readGraphPartitionMaintenanceStore,
   storeMayHoldReadGraphPartitions,
 } from '../src/read-graph-partition-store.js';
-import { sparqlNamesReadGraphPartition } from '../src/read-graph-partition-reference.js';
+import { sparqlNamesReadGraphPartition, sparqlUpdateMayWriteReadGraphPartition } from '../src/read-graph-partition-reference.js';
 import {
   clearReadGraphPartitionsNote,
   mayHoldReadGraphPartitions,
@@ -130,6 +130,14 @@ describe('read-graph partition names in storage', () => {
     expect(sparqlNamesReadGraphPartition(`PREFIX r: <${ROOT}/_> INSERT DATA { GRAPH r:read { <urn:s> <urn:p> "v" } }`)).toBe(true);
     expect(sparqlNamesReadGraphPartition(`prefix r: <${ROOT}/_re> CLEAR GRAPH r:ad\\/state`)).toBe(true);
     expect(sparqlNamesReadGraphPartition(`PREFIX r: <${ROOT}/_> CLEAR GRAPH r:reader`)).toBe(false);
+    // An UPDATE that writes through a graph variable cannot be shown to stay outside.
+    expect(sparqlUpdateMayWriteReadGraphPartition('DELETE { GRAPH ?g { ?s ?p ?o } } WHERE { GRAPH ?g { ?s ?p ?o } }')).toBe(true);
+    expect(sparqlUpdateMayWriteReadGraphPartition('delete where { graph $g { ?s ?p ?o } }')).toBe(true);
+    expect(sparqlUpdateMayWriteReadGraphPartition('INSERT { GRAPH ?g { <urn:s> <urn:p> 1 } } WHERE { VALUES ?g { <urn:g> } }')).toBe(true);
+    expect(sparqlUpdateMayWriteReadGraphPartition(`INSERT { GRAPH <${ASSET}> { ?s ?p ?o } } WHERE { GRAPH ?g { ?s ?p ?o } }`)).toBe(false);
+    expect(sparqlUpdateMayWriteReadGraphPartition(`INSERT DATA { GRAPH <${ASSET}> { <urn:s> <urn:p> "GRAPH ?g" } }`)).toBe(false);
+    expect(sparqlUpdateMayWriteReadGraphPartition(`DROP GRAPH <${STATE}>`)).toBe(true);
+    expect(sparqlUpdateMayWriteReadGraphPartition('INSERT { GRAPH ?g { <urn:s> <urn:p> "open } }')).toBe(true);
     expect(sparqlNamesReadGraphPartition(`PREFIX r: <${ROOT}/> CLEAR GRAPH r:reader`)).toBe(false);
   });
 });
@@ -150,10 +158,21 @@ describe('the read-graph partition guard', () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     opened.push(store);
     await store.insert(memberQuads);
+    const adapter = readGraphPartitionMaintenanceStore(store);
+    await adapter.insert(plantedQuads);
+    const stored = async () => Promise.all([...PARTITION_GRAPHS, ...memberQuads.map(quad => quad.graph)]
+      .map(graph => adapter.countQuads(graph)));
+    const before = await stored();
+    const writeMethods = ['insert', 'delete', 'deleteByPattern', 'deleteByPatternWithoutCount', 'deleteBySubjectPrefix',
+      'dropGraph', 'createGraph', 'replaceGraph', 'replaceAssetGroup', 'replaceGraphAndSubject', 'replaceSubject',
+      'replaceSubjectAndInsert', 'rfc64AuthorCommitCasV1', 'update'] as const;
+    const writes = writeMethods.map(name => vi.spyOn(adapter as unknown as Record<string, () => unknown>, name));
+    const reads = vi.spyOn(adapter, 'query');
     const asset = { graphUri: ASSET, graphQuads: [quad(ASSET)], metaGraphUri: META, metadataSubject: 'urn:m', metadataQuads: [quad(META, 'urn:m')] };
+    const computed = 'INSERT { GRAPH ?g { <urn:s> <urn:p> "bad" } } WHERE { BIND(IRI("did:dkg:context-graph:x/_read/stray") AS ?g) }';
     const refusals: Array<[string, () => Promise<unknown>]> = [
       ['insert', () => store.insert([quad(ASSET), quad(VM_READ)])],
-      ['delete', () => store.delete([quad(STATE)])],
+      ['delete', () => store.delete([quad(STATE, VM_READ, '"ready"')])],
       ['deleteByPattern', () => store.deleteByPattern({ graph: VM_READ })],
       ['deleteByPattern', () => store.deleteByPatternWithoutCount!({ graph: SWM_READ })],
       ['deleteBySubjectPrefix', () => store.deleteBySubjectPrefix(VM_READ, 'urn:')],
@@ -169,8 +188,11 @@ describe('the read-graph partition guard', () => {
       ['replaceSubjectAndInsert', () => store.replaceSubjectAndInsert!(STATE, VM_READ, [quad(STATE, VM_READ)], [quad(STATE, 'urn:n')])],
       ['update', () => store.update!(`DROP SILENT GRAPH <${STATE}>`)],
       ['update', () => store.update!('CLEAR SILENT DEFAULT', { touchedGraphs: [VM_READ] })],
-      ['query', () => store.query(`INSERT DATA { GRAPH <${STRAY}> { <urn:s> <urn:p> "v" } }`)],
       ['update', () => store.update!(`PREFIX r: <${ROOT}/_> INSERT DATA { GRAPH r:read { <urn:s> <urn:p> "v" } }`)],
+      ['update', () => store.update!(computed)],
+      ['update', () => store.update!('DELETE WHERE { GRAPH ?g { ?s ?p ?o } }')],
+      ['query', () => store.query(`INSERT DATA { GRAPH <${STRAY}> { <urn:s> <urn:p> "v" } }`)],
+      ['query', () => store.query(computed)],
     ];
     for (const [operation, write] of refusals) {
       const error = await write().then(() => undefined, (caught: unknown) => caught);
@@ -178,8 +200,10 @@ describe('the read-graph partition guard', () => {
       expect((error as ReadGraphPartitionWriteError).code).toBe(READ_GRAPH_PARTITION_WRITE_CODE);
       expect(isStoreOperationNotStarted(error, operation as Parameters<typeof isStoreOperationNotStarted>[1]), operation).toBe(true);
     }
-    expect(await store.countQuads()).toBe(memberQuads.length);
-    expect(await readGraphPartitionMaintenanceStore(store).countQuads()).toBe(memberQuads.length);
+    // Refused before dispatch: no write reached the adapter, and nothing it holds changed.
+    for (const spy of writes) expect(spy).not.toHaveBeenCalled();
+    expect(reads.mock.calls.filter(([sparql]) => /\b(INSERT|DELETE|DROP|CLEAR)\b/i.test(sparql))).toEqual([]);
+    expect(await stored()).toEqual(before);
   });
 
   it('checks every graph an RFC-64 author commit names', async () => {
@@ -206,6 +230,8 @@ describe('the read-graph partition guard', () => {
     opened.push(store);
     await store.insert(memberQuads);
     await store.update!(`INSERT DATA { GRAPH <${ASSET}> { <urn:s> <urn:p> "w" } }`, { touchedGraphs: [ASSET] });
+    // A graph variable that only reads is no write target.
+    await store.update!(`INSERT { GRAPH <${ASSET}> { ?s <urn:copy> ?o } } WHERE { GRAPH ?g { ?s <urn:p> ?o } FILTER(?g = <${SWM}>) }`);
     await store.update!(`DELETE DATA { GRAPH <${ASSET}> { <urn:s> <urn:p> "w" } }`);
     await store.replaceSubject!(META, 'urn:m', [quad(META, 'urn:m', '"x"')]);
     expect(await store.deleteByPattern({ graph: SWM })).toBe(1);

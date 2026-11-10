@@ -438,6 +438,18 @@ describe('dkg rollback drops read-graph partitions', () => {
       + 'opened, or "dkg start" to start 10.0.26 again.');
   });
 
+  it('keeps the note when the store cannot persist the drop', async () => {
+    await writeFile(join(wiring.root, 'read-graph-partitions'), 'note\n');
+    const store = new OxigraphStore();
+    await store.insert([{ graph: READ_GRAPH, subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
+    try {
+      await expect(dropReadGraphsForRollback(wiring.root, () => undefined, async () => ({
+        store, close: async () => { throw new Error('could not write the store file'); },
+      }))).rejects.toThrow('could not write the store file');
+      expect(existsSync(join(wiring.root, 'read-graph-partitions'))).toBe(true);
+    } finally { await store.close(); }
+  });
+
   it('closes the store and keeps the note when the drop fails part-way', async () => {
     await writeFile(join(wiring.root, 'read-graph-partitions'), 'note\n');
     const closed: string[] = [];
