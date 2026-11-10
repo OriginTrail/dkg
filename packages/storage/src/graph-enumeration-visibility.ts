@@ -1,9 +1,4 @@
-import {
-  isReadGraphEligibleContextGraphId,
-  parseReadGraphIri,
-  READ_GRAPH_SEGMENT,
-  readGraphStateGraphIri,
-} from '@origintrail-official/dkg-core';
+import { isReadGraphEligibleContextGraphId, READ_GRAPH_SEGMENT, readGraphStateGraphIri } from '@origintrail-official/dkg-core';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 import type { TripleStore } from './triple-store.js';
 
@@ -14,41 +9,36 @@ export function composeGraphEnumerationVisibility(inner: TripleStore, visible: (
 }
 
 const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
-const READ_GRAPH_PARTITION_MARK = `/${READ_GRAPH_SEGMENT}/`;
+const READ_GRAPH_PARTITION_MARK = `/${READ_GRAPH_SEGMENT}`;
 
 /**
- * The context graph whose read-graph partition holds a graph: one of its read
- * graphs, or the state graph that records them. Undefined for any other IRI
- * with a `_read` segment, such as a graph of an older context graph whose ID
- * has one: that names an ordinary graph.
+ * The context graph whose read-graph partition (`{cg}/_~read` and every graph
+ * below it) holds a graph, or undefined for a graph outside every partition.
+ * No context-graph ID can contain the partition segment and no sub-graph name
+ * can start with `_`, so its first occurrence ends the context-graph ID.
  */
 export function readGraphPartitionOwner(graph: string): string | undefined {
-  // The substring test keeps whole-catalog filtering cheap; the exact tests decide.
-  if (!graph.includes(READ_GRAPH_PARTITION_MARK)) return undefined;
-  return parseReadGraphIri(graph)?.scope.contextGraphId ?? readGraphStateGraphOwner(graph);
+  // The substring test keeps whole-catalog filtering cheap; the segment test decides.
+  if (!graph.includes(READ_GRAPH_PARTITION_MARK) || !graph.startsWith(CONTEXT_GRAPH_PREFIX)) return undefined;
+  const segments = graph.slice(CONTEXT_GRAPH_PREFIX.length).split('/');
+  const partition = segments.indexOf(READ_GRAPH_SEGMENT, 1);
+  return partition === -1 ? undefined : segments.slice(0, partition).join('/');
 }
 
-/** Whether a graph is a read graph or a read-graph state graph. */
+/** Whether a graph is in some context graph's read-graph partition. */
 export function isReadGraphPartitionGraph(graph: string): boolean {
   return readGraphPartitionOwner(graph) !== undefined;
 }
 
 /** Whether a graph is the read-graph state graph of a context graph that can have read graphs. */
 export function isReadGraphStateGraph(graph: string): boolean {
-  return graph.includes(READ_GRAPH_PARTITION_MARK) && readGraphStateGraphOwner(graph) !== undefined;
-}
-
-function readGraphStateGraphOwner(graph: string): string | undefined {
-  if (!graph.startsWith(CONTEXT_GRAPH_PREFIX)) return undefined;
-  const contextGraphId = graph.slice(CONTEXT_GRAPH_PREFIX.length).split('/').slice(0, -2).join('/');
-  return isReadGraphEligibleContextGraphId(contextGraphId) && readGraphStateGraphIri(contextGraphId) === graph
-    ? contextGraphId
-    : undefined;
+  const owner = readGraphPartitionOwner(graph);
+  return owner !== undefined && isReadGraphEligibleContextGraphId(owner) && readGraphStateGraphIri(owner) === graph;
 }
 
 /**
  * Graphs that storage keeps for itself and never lists: the staging graphs of
- * atomic writes, and the read graphs and state graph of every context graph.
+ * atomic writes, and every context graph's read-graph partition.
  */
 export function isStorageHiddenGraph(graph: string): boolean {
   return isAtomicGraphReplaceStagingGraph(graph) || isReadGraphPartitionGraph(graph);

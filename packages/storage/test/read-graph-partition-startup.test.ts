@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MemoryLayer, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
+import { MemoryLayer, READ_GRAPH_SEGMENT, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
 import { createTripleStore, OxigraphStore, type TripleStore } from '../src/index.js';
 import { readGraphPartitionMaintenanceStore, storeMayHoldReadGraphPartitions } from '../src/read-graph-partition-store.js';
 import { markReadGraphsDirtyAtStart } from '../src/read-graph-partition-startup.js';
@@ -130,20 +130,24 @@ describe('marking read graphs dirty at start', () => {
 
   it('changes only rows in a context graph\'s own state graph', async () => {
     const store = await storeWithRows(row(VM, 'ready', 5));
-    // Ordinary graphs whose IRIs only end like a state graph, written through the guard.
-    const lookAlikes = ['did:dkg:context-graph:a/_x/_read/state', `did:dkg:context-graph:${CG}/_read/project/_read/state`];
-    await store.insert(lookAlikes.flatMap(graph => [VM, 'urn:s'].map(subject =>
-      ({ graph, subject, predicate: READ_GRAPH_STATE_PREDICATES.state, object: '"ready"' }))));
+    // A partition graph of a context graph that can have no read graphs, planted
+    // below the guard, and an ordinary graph with a `_read` segment, written through it.
+    const notState = `did:dkg:context-graph:a/_x/${READ_GRAPH_SEGMENT}/state`;
+    const ordinary = 'did:dkg:context-graph:a/_x/_read/state';
+    const rowsIn = (graph: string) => [VM, 'urn:s'].map(subject =>
+      ({ graph, subject, predicate: READ_GRAPH_STATE_PREDICATES.state, object: '"ready"' }));
+    await readGraphPartitionMaintenanceStore(store).insert(rowsIn(notState));
+    await store.insert(rowsIn(ordinary));
     expect(await markReadGraphsDirtyAtStart(store)).toBe(1);
-    for (const graph of lookAlikes) expect(await stateValues(store, graph), graph).toEqual(['"ready"', '"ready"']);
+    for (const graph of [notState, ordinary]) expect(await stateValues(store, graph), graph).toEqual(['"ready"', '"ready"']);
     expect(await stateValues(store, STATE)).toEqual(['"dirty"']);
-    // A store whose only rows are in such graphs holds no read graphs.
-    const ordinary = await storeWithRows();
-    await ordinary.insert([{ graph: lookAlikes[0]!, subject: 'urn:s', predicate: READ_GRAPH_STATE_PREDICATES.state, object: '"ready"' }]);
+    // A store whose only rows are outside every such state graph holds no read graphs.
+    const plain = await storeWithRows();
+    await readGraphPartitionMaintenanceStore(plain).insert(rowsIn(notState));
     const dir = await dataDir();
-    expect(await markReadGraphsDirtyAtStart(ordinary, { dataDir: dir })).toBe(0);
+    expect(await markReadGraphsDirtyAtStart(plain, { dataDir: dir })).toBe(0);
     expect(mayHoldReadGraphPartitions(dir)).toBe(false);
-    expect(storeMayHoldReadGraphPartitions(ordinary)).toBe(false);
+    expect(storeMayHoldReadGraphPartitions(plain)).toBe(false);
   });
 
   it('marks many read graphs in bounded requests', async () => {

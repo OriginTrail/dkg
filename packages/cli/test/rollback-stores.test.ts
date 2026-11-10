@@ -371,10 +371,10 @@ describe('dkg rollback readies the local stores for the target version', () => {
 });
 
 const MEMBER = 'did:dkg:context-graph:rollback/_verifiable_memory/0xab/1';
-const READ_GRAPH = 'did:dkg:context-graph:rollback/_read/cg/_verifiable_memory';
-const READ_STATE = 'did:dkg:context-graph:rollback/_read/state';
-// A graph of a context graph from before the `_read` reservation, whose ID has the segment.
-const LEGACY = 'did:dkg:context-graph:rollback/_read/project/_verifiable_memory/0xaa/1';
+const READ_GRAPH = 'did:dkg:context-graph:rollback/_~read/cg/_verifiable_memory';
+const READ_STATE = 'did:dkg:context-graph:rollback/_~read/state';
+// A graph of a context graph whose ID has a `_read` segment, named like a read graph would be under it.
+const LEGACY = 'did:dkg:context-graph:rollback/_read/cg/_shared_memory';
 
 /** An embedded store file holding member graphs and a read-graph partition. */
 async function writeStoreWithReadGraphs(): Promise<string> {

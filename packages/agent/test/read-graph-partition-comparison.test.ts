@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MemoryLayer, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
+import { MemoryLayer, READ_GRAPH_SEGMENT, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
   GraphManager,
@@ -30,9 +30,10 @@ import { DKGAgent } from '../src/index.js';
 const CG = 'comparison';
 const ROOT = `did:dkg:context-graph:${CG}`;
 const CHILD = `${CG}/child`;
-// A context graph from before the `_read` reservation, whose ID has the segment.
+// A context graph whose ID has a `_read` segment, as IDs from before the reservation may.
 const LEGACY_CG = `${CG}/_read/project`;
 const LEGACY = `did:dkg:context-graph:${LEGACY_CG}/_verifiable_memory/0xaa/1`;
+const LEGACY_SHARED = `${ROOT}/_read/cg/_shared_memory`;
 const row = (graph: string, subject: string, object = '"v"'): Quad => ({ graph, subject, predicate: 'urn:p', object });
 const MEMBERS: Quad[] = [
   row(`${ROOT}/_verifiable_memory/0xab/1`, 'urn:a'),
@@ -40,9 +41,9 @@ const MEMBERS: Quad[] = [
   row(`${ROOT}/code/_verifiable_memory/0xab/2`, 'urn:c'),
   row(`${ROOT}/_meta`, 'urn:m'),
   row(`did:dkg:context-graph:${CHILD}/_verifiable_memory/0xab/3`, 'urn:d'),
-  // Ordinary graphs that only have a `_read` segment.
-  row(`${ROOT}/_read/stray`, 'urn:x'),
+  // Ordinary graphs of context graphs whose IDs have a `_read` segment, one named like a read graph under it.
   row(LEGACY, 'urn:e'),
+  row(LEGACY_SHARED, 'urn:f'),
 ];
 const READ_GRAPHS: Quad[] = [
   row(readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory }), 'urn:a'),
@@ -51,6 +52,7 @@ const READ_GRAPHS: Quad[] = [
   row(readGraphIri({ scope: readScope(CG), layer: MemoryLayer.WorkingMemory, agentAddress: '0x' + 'a'.repeat(40) }), 'urn:w'),
   row(readGraphIri({ scope: readScope(CHILD), layer: MemoryLayer.VerifiableMemory }), 'urn:d'),
   row(readGraphStateGraphIri(CG), 'urn:state', '"ready"'),
+  row(`${ROOT}/${READ_GRAPH_SEGMENT}/stray`, 'urn:x'),
 ];
 
 let adapters: OxigraphStore[] = [];
@@ -150,7 +152,7 @@ describe('an agent opened on a store that holds read graphs', () => {
         expect(storeMayHoldReadGraphPartitions(agent.store)).toBe(true);
         expect(mayHoldReadGraphPartitions(dataDir)).toBe(true);
         const graphs = await new DKGQueryEngine(agent.store).query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
-        expect(graphs.bindings.map(binding => binding.g)).toEqual(expect.arrayContaining([LEGACY, `${ROOT}/_read/stray`]));
+        expect(graphs.bindings.map(binding => binding.g)).toEqual(expect.arrayContaining([LEGACY, LEGACY_SHARED]));
         expect(graphs.bindings.map(binding => binding.g)).not.toContain(readGraph);
         expect(graphs.bindings.map(binding => binding.g)).not.toContain(readGraphStateGraphIri(CG));
       } finally {

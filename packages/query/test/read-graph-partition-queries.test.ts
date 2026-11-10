@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphSetIndexStore, noteStoreMayHoldReadGraphPartitions, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import { MemoryLayer, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
+import { MemoryLayer, READ_GRAPH_SEGMENT, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { classifyScopedContentGraph, describeScopedContentGraph, isExcludedContentGraph } from '../src/scoped-content-partition.js';
 
@@ -15,7 +15,7 @@ const READ_VM = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.Verifiab
 const READ_SWM = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.SharedWorkingMemory });
 const READ_CODE = readGraphIri({ scope: readScope(CG, 'code'), layer: MemoryLayer.VerifiableMemory });
 const STATE = readGraphStateGraphIri(CG);
-// A context graph from before the `_read` reservation, whose ID has the segment.
+// A context graph whose ID has a `_read` segment, as IDs from before the reservation may.
 const LEGACY_CG = `${CG}/_read/project`;
 const LEGACY = `did:dkg:context-graph:${LEGACY_CG}/_verifiable_memory/0xaa/1`;
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -54,15 +54,16 @@ function normalize(result: { bindings: Array<Record<string, string>>; quads?: Qu
 }
 
 describe('read-graph partitions in content classification', () => {
-  it.each(['_read/state', '_read/cg/_verifiable_memory', '_read/sub/code/_shared_memory',
-    'code/_read/cg/_verifiable_memory', 'child/_read/state'])('excludes %s wherever it excludes metadata', tail => {
+  it.each(['', '/state', '/cg/_verifiable_memory', '/sub/code/_shared_memory', '/stray']
+    .map(rest => `${READ_GRAPH_SEGMENT}${rest}`)
+    .concat([`code/${READ_GRAPH_SEGMENT}/cg/_verifiable_memory`, `child/${READ_GRAPH_SEGMENT}/state`]))('excludes %s wherever it excludes metadata', tail => {
     expect(isExcludedContentGraph(`${ROOT}/${tail}`, ROOT)).toBe(true);
     expect(describeScopedContentGraph(`${ROOT}/${tail}`, CG)).toBeUndefined();
     expect(classifyScopedContentGraph(`${ROOT}/${tail}`, CG, new Set(['code', 'child']), new Set(), new Set())).toBeUndefined();
   });
 
-  it.each(['_reader', 'reader/_verifiable_memory/0xab/1', '_verifiable_memory/0xab/read', '_verifiable_memory/0xab/_read',
-    '_read', '_read/project/_verifiable_memory/0xaa/1'])('keeps look-alike %s', tail => {
+  it.each(['_reader', `${READ_GRAPH_SEGMENT}er`, 'reader/_verifiable_memory/0xab/1', '_verifiable_memory/0xab/read',
+    '_verifiable_memory/0xab/_read', '_read', '_read/state', '_read/project/_verifiable_memory/0xaa/1'])('keeps look-alike %s', tail => {
     expect(isExcludedContentGraph(`${ROOT}/${tail}`, ROOT)).toBe(false);
   });
 
@@ -103,8 +104,8 @@ const NAMING = [
   `SELECT ?o FROM NAMED <${STATE}> WHERE { GRAPH ?g { ?s ?p ?o } }`,
   `SELECT ?o WHERE { VALUES ?g { <${READ_SWM}> } GRAPH ?g { ?s ?p ?o } }`,
   `SELECT ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g = <${READ_CODE}>) }`,
-  `PREFIX r: <${ROOT}/> SELECT ?o WHERE { GRAPH r:_read\\/state { ?s ?p ?o } }`,
-  `SELECT ?o WHERE { GRAPH <${ROOT}/\\u005Fread/state> { ?s ?p ?o } }`,
+  `PREFIX r: <${ROOT}/> SELECT ?o WHERE { GRAPH r:_\\~read\\/state { ?s ?p ?o } }`,
+  `SELECT ?o WHERE { GRAPH <${ROOT}/\\u005F\\u007Eread/state> { ?s ?p ?o } }`,
 ];
 
 describe('queries and read-graph partitions', () => {

@@ -11,18 +11,18 @@ function hasReadGraphSegment(iri: string): boolean {
 }
 
 /**
- * Whether one IRI names a read graph or a read-graph state graph. A relative
- * IRI with a `_read` segment counts, because the base it resolves against is
- * not checked here.
+ * Whether one IRI names a graph in a read-graph partition. A relative IRI
+ * with a `_~read` segment counts, because the base it resolves against is not
+ * checked here.
  */
 function isReadGraphPartitionReference(iri: string): boolean {
   return ABSOLUTE_IRI.test(iri) ? isReadGraphPartitionGraph(iri) : hasReadGraphSegment(iri);
 }
 
 /**
- * Whether lexed SPARQL names a read graph or a read-graph state graph, by IRI
- * or by a prefixed name whose PREFIX is declared in the same text. A BASE with
- * a `_read` segment counts as well, since relative IRIs resolve against it.
+ * Whether lexed SPARQL names a graph in a read-graph partition, by IRI or by a
+ * prefixed name whose PREFIX is declared in the same text. A BASE with
+ * a `_~read` segment counts as well, since relative IRIs resolve against it.
  */
 export function preparedSparqlNamesReadGraphPartition(prepared: ValidPreparedSparql): boolean {
   const prefixes = new Map<string, string>();
@@ -101,7 +101,7 @@ export function preparedSparqlWritesThroughGraphVariable(prepared: ValidPrepared
 
 /**
  * Whether a SPARQL UPDATE may write into a read-graph partition: it names a
- * read graph or state graph, or writes through a graph variable. Text that
+ * graph in one, or writes through a graph variable. Text that
  * cannot be lexed, or that leaves a string open, counts as writing there.
  */
 export function sparqlUpdateMayWriteReadGraphPartition(sparql: string): boolean {

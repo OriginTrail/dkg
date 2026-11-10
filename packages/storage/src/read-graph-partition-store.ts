@@ -48,7 +48,7 @@ function refuseSparql(sparql: string, operation: StoreOperation): void {
 }
 
 /**
- * Every context graph's read-graph partition (`{cg}/_read`) holds node-local
+ * Every context graph's read-graph partition (`{cg}/_~read`) holds node-local
  * derived graphs and their state, and only storage writes there. This
  * decorator sits directly above the adapter. It refuses every write that names
  * a graph in a partition, and answers that such a graph is absent; the
@@ -230,11 +230,11 @@ export function storeMayHoldReadGraphPartitions(store: TripleStore): boolean {
 }
 
 /**
- * Drop every read graph and read-graph state graph. They are hidden from
- * enumeration, so this reads the store's own graph list once. Other graphs
- * stay, whatever their IRIs. State graphs go first, so a drop that stops part
- * way never leaves a state row without its data. Returns the number of graphs
- * dropped.
+ * Drop every graph of every read-graph partition, with their state. The
+ * partition is hidden from enumeration, so this reads the store's own graph
+ * list once. State graphs and other graphs that are not read graphs go first,
+ * so a drop that stops part way never leaves a state row without its data.
+ * Returns the number of graphs dropped.
  */
 export async function dropReadGraphPartitions(store: TripleStore, options: QueryOptions = {}): Promise<number> {
   const target = readGraphPartitionMaintenanceStore(store);
