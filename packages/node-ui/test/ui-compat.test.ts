@@ -226,7 +226,7 @@ describe('right-rail agent shell replaces Agent hub', () => {
     expect(app).toContain('[leftOpen, rightOpen]');
   });
 
-  it('has no Agent hub page: the old address opens the right panel expanded', () => {
+  it('has no Agent hub page (app-agent-hub-route.test.ts covers what the old address opens)', () => {
     expect(panelLeft).not.toContain("id: 'agent-hub'");
     expect(panelLeft).not.toContain('Agent hub');
     expect(panelCenter).not.toContain("activeTabId === 'agent-hub'");

@@ -1,9 +1,10 @@
 import React, { useId, useMemo, useState, useCallback } from 'react';
 import type { ReactNode } from 'react';
+import { LayerGlyph } from '../../../components/ds/Badge.js';
 import { listAssertions, promoteAssertion, describePromoteError, publishAssertionsToVm, partialPublishWarning, outcomeUnknownPublishNote, type ConvictionCostCovered } from '../../../api.js';
 import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
-import { LAYER_CONFIG, entityMeta, layerNoun, VM_TRIPLE_STAT } from '../helpers.js';
+import { entityMeta, layerNoun, VM_TRIPLE_STAT } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { useVmPublishGate } from '../../../pages/conviction/useVmPublishGate.js';
 import { PublishEligibilityChipView } from '../../../pages/conviction/PublishEligibilityChip.js';
@@ -131,16 +132,21 @@ function useLayerAction(
     async (body: () => Promise<ActionOutcome>, formatError: (err: unknown) => string) => {
       setBusy(true);
       setOutcome(null);
+      // Completion follows the execution path: a body that resolves completed (with a
+      // warning or not), one that throws did not. The tone only decides how it looks.
       let next: ActionOutcome;
+      let completed = false;
       try {
         next = await body();
+        completed = true;
       } catch (err) {
         next = failed(formatError(err));
+      } finally {
+        setBusy(false);
       }
       setOutcome(next);
       onResult?.(next);
-      setBusy(false);
-      if (next.tone !== 'danger') onComplete?.();
+      if (completed) onComplete?.();
     },
     [onResult, onComplete],
   );
@@ -155,6 +161,7 @@ function LayerActionFeedback({ outcome }: { outcome: ActionOutcome }) {
   return (
     <div
       data-testid={outcome.tone === 'danger' ? 'layer-action-error' : 'layer-action-result'}
+      data-tone={outcome.tone}
       style={{ fontSize: 'var(--fs-label)', color: outcomeColor(outcome.tone), marginBottom: 8 }}
     >
       <StatusGlyph tone={outcome.tone} /> {outcome.text}
@@ -366,7 +373,7 @@ export function LayerWidgetStrip({ layer, entities, entityCount, actionEntityCou
         <EmptyState
           compact
           tone={toneForLayer(layer)}
-          icon={LAYER_CONFIG[layer].icon}
+          icon={<LayerGlyph layer={layer} />}
           title={`No ${layerNoun(layer, 2).toLowerCase()} yet`}
           description={
             layer === 'wm'

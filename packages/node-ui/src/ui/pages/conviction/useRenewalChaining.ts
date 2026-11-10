@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { listPcaAgents } from '../../api.js';
-import { useTabsStore } from '../../stores/tabs.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 
 export interface RenewApproveState {
   newAccountId: string;
@@ -31,7 +31,6 @@ export function useRenewalChaining(accountId: string): RenewalChaining {
   // LOW#3 — in-flight while resolving the old agents (prevents a no-feedback gap).
   const [renewChaining, setRenewChaining] = useState(false);
   const [renewApprove, setRenewApprove] = useState<RenewApproveState | null>(null);
-  const openTab = useTabsStore((s) => s.openTab);
 
   const onRenewSuccess = (newAccountId: string) => {
     // LOW#3 — close the create modal IMMEDIATELY so its success button can't be

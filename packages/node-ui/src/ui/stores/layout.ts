@@ -17,14 +17,15 @@ interface LayoutState {
   bottomHeight: number;
   /** The one panel open on a narrow screen. Never saved, so desktop panels keep their state. */
   narrowPanel: 'left' | 'right' | null;
-  /** A dialog opened from a side panel is showing, so navigating mustn't close that panel. */
-  narrowPanelHeld: boolean;
 
   toggleLeft: () => void;
   toggleRight: () => void;
   setRightExpanded: (expanded: boolean) => void;
   closeNarrowPanel: () => void;
-  holdNarrowPanel: (held: boolean) => void;
+  /** Show the centre: collapse the expanded right panel and close a floating one. */
+  revealCentre: () => void;
+  /** Open the right panel: floating on a narrow screen, docked otherwise. Already open stays open. */
+  openRight: () => void;
   toggleBottom: () => void;
   toggleBottomMaximised: () => void;
   toggleLeftSectionMyProjects: () => void;
@@ -201,7 +202,6 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
   rightWidth: initial.rightWidth,
   bottomHeight: initial.bottomHeight,
   narrowPanel: null,
-  narrowPanelHeld: false,
 
   toggleLeft: () => {
     if (isNarrowViewport()) {
@@ -221,7 +221,16 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
     persist(snapshot(get()));
   },
   closeNarrowPanel: () => set({ narrowPanel: null }),
-  holdNarrowPanel: (held) => set({ narrowPanelHeld: held }),
+  revealCentre: () => set({ rightExpanded: false, narrowPanel: null }),
+  openRight: () => {
+    if (isNarrowViewport()) {
+      set({ narrowPanel: 'right' });
+      return;
+    }
+    if (!get().rightCollapsed) return;
+    set({ rightCollapsed: false });
+    persist(snapshot(get()));
+  },
   toggleBottom: () => {
     set((s) => ({ bottomCollapsed: !s.bottomCollapsed, bottomMaximised: false }));
     persist(snapshot(get()));

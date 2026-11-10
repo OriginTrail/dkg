@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { useLayoutStore } from './layout.js';
 
 /**
  * Centre tabs — the things you're working on (DESIGN.md · Navigation).
@@ -129,7 +128,6 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   recentlyClosed: initial.recentlyClosed,
 
   openTab: (tab) => {
-    useLayoutStore.getState().setRightExpanded(false); // it covers the centre, so going anywhere brings it back
     const { tabs, activeTabId, recentlyClosed } = get();
     const existing = tabs.find((t) => t.id === tab.id);
     if (existing) {
@@ -164,7 +162,6 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   },
 
   setActiveTab: (id) => {
-    useLayoutStore.getState().setRightExpanded(false); // it covers the centre, so going anywhere brings it back
     if (get().tabs.some((t) => t.id === id)) set({ activeTabId: id });
   },
 

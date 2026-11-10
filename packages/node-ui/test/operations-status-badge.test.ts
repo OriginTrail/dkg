@@ -2,10 +2,10 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import {
-  StatusBadge,
+  OperationStatusBadge as StatusBadge,
   operationStatusLabel,
   operationStatusTone,
-} from '../src/ui/pages/Operations.js';
+} from '../src/ui/components/OperationStatusBadge.js';
 
 describe('operation status badges', () => {
   it('renders cancellation distinctly from failure and warning states', () => {
@@ -25,5 +25,14 @@ describe('operation status badges', () => {
     expect(operationStatusLabel('success')).toBe('Done');
     expect(operationStatusLabel('error')).toBe('Failed');
     expect(operationStatusLabel('in_progress')).toBe('In progress');
+  });
+});
+
+describe('one operation status everywhere', () => {
+  it('the Transactions list uses the shared badge, not its own status colours', async () => {
+    const { readFileSync } = await import('node:fs');
+    const bottom = readFileSync(new URL('../src/ui/components/Shell/PanelBottom.tsx', import.meta.url), 'utf8');
+    expect(bottom).toContain('<OperationStatusBadge status={op.status} />');
+    expect(bottom).not.toMatch(/op\.status === 'success' \? 'var\(--success/);
   });
 });

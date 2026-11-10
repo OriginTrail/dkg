@@ -143,7 +143,7 @@ export function NetworkTab(props: {
 }) {
   const { peerAgents, connections, loading, onRefresh } = props;
   const navigate = useNavigate();
-  // The address opens the Observability tab on its Network tab.
+  // The address opens Observability on Network, and showing the page follows from it.
   const openConnectionDetails = () => navigate(observabilityHref('network'));
   const [connectedExpanded, setConnectedExpanded] = useState(true);
   const [recentlySeenExpanded, setRecentlySeenExpanded] = useState(false);

@@ -31,7 +31,7 @@ import { Loading } from '../../components/ds/Loading.js';
 import { bpsToPercent } from '../../lib/format.js';
 import { ExternalMark } from '../../components/ds/ExternalMark.js';
 import { Breadcrumbs } from '../../components/ds/Breadcrumbs.js';
-import { useTabsStore } from '../../stores/tabs.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
   return formatRelativeExpiry(expiresAtTimestamp).replace(/^Expires in /, '');
@@ -190,7 +190,6 @@ function DetailBody({
       ? 'Connect the PCA owner wallet to manage this account. Provider metadata is display-only.'
       : 'Connect a wallet to view and manage wallet-owned PCAs from this tab.';
 
-  const openTab = useTabsStore.getState().openTab;
   return (
     <div className="v10-pca-detail" data-testid="pca-detail">
       <div className="ds-crumbs-bar">

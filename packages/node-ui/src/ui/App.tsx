@@ -1,12 +1,14 @@
 import React, { useEffect, useLayoutEffect, useRef, useCallback, useState, useSyncExternalStore } from 'react';
-import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import { Header } from './components/Shell/Header.js';
 import { PanelLeft } from './components/Shell/PanelLeft.js';
 import { PanelCenter } from './components/Shell/PanelCenter.js';
 import { PanelBottom } from './components/Shell/PanelBottom.js';
 import { PanelRight } from './components/Shell/PanelRight.js';
+import { ContextGraphDialogs } from './components/Shell/ContextGraphDialogs.js';
 import { useLayoutStore, useShellPanels, maxBottomHeight } from './stores/layout.js';
 import { useTabsStore } from './stores/tabs.js';
+import { chooseTab as openTab } from './lib/shellNavigation.js';
 import { detectMockMode, isUsingMocks, subscribeMockMode } from './api-wrapper.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from './lib/contextGraphPrimer.js';
 import { applyTheme } from './lib/applyTheme.js';
@@ -77,21 +79,16 @@ function AppShell() {
   const { bottomCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
   const { narrow, leftOpen, rightOpen } = useShellPanels();
   const closeNarrowPanel = useLayoutStore((s) => s.closeNarrowPanel);
-  const { pathname, state: routeState } = useLocation();
-  const navigate = useNavigate();
-  // Going somewhere, or resizing past the breakpoint, shows the page, not a floating panel.
-  // Not while a dialog from the panel is open: create and join navigate before their last step.
+  // Resizing past the breakpoint shows the page, not a floating panel. Navigation does the
+  // same in useShellRouting. The create and join dialogs belong to the shell
+  // (ContextGraphDialogs), so closing the panel keeps them.
+  const lastNarrow = useRef(narrow);
   useEffect(() => {
-    if (!useLayoutStore.getState().narrowPanelHeld) closeNarrowPanel();
-  }, [pathname, narrow, closeNarrowPanel]);
-  // Arrived from /agent-hub: wide screens get the panel expanded, narrow ones the floating panel.
-  useEffect(() => {
-    if (!(routeState as { openAgents?: boolean } | null)?.openAgents) return;
-    const layout = useLayoutStore.getState();
-    if (narrow || layout.rightCollapsed) layout.toggleRight();
-    if (!narrow) layout.setRightExpanded(true);
-    navigate(pathname, { replace: true, state: null });
-  }, [routeState, narrow, pathname, navigate]);
+    if (lastNarrow.current === narrow) return; // only a crossing, not the first render
+    lastNarrow.current = narrow;
+    // Shows the page: closes a floating panel, and an expanded one does not carry over.
+    useLayoutStore.getState().revealCentre();
+  }, [narrow, closeNarrowPanel]);
   const [, setVpTick] = useState(0);
 
   useEffect(() => {
@@ -159,10 +156,14 @@ function AppShell() {
       <ApiTokenPrompt />
       <nav aria-label="Skip link"><button type="button" className="ds-skip-link" onClick={() => document.getElementById(expanded ? 'agents-panel' : 'main-content')?.focus()}>Skip to content</button></nav>
       <Header />
+      <ContextGraphDialogs />
       <div className="v10-app-body">
         {narrow && (leftOpen || rightOpen) && (
           <button type="button" className="v10-panel-scrim" aria-label="Close panel" onClick={closeNarrowPanel} />
         )}
+        {/* A closed side panel unmounts, so its polling and listeners stop. What
+            must outlive it lives in the shell: the Context Graph dialogs
+            (ContextGraphDialogs) and agent conversations (stores/agentConversations). */}
         {leftOpen && (
           <>
             <div className="v10-panel-left" role="complementary" aria-label="Context Graphs and node" style={{ width: leftWidth }}>
@@ -204,7 +205,6 @@ function AgentHubRoute() {
 }
 
 function ContextGraphPrimerRoute() {
-  const openTab = useTabsStore((s) => s.openTab);
 
   useLayoutEffect(() => {
     openTab(CONTEXT_GRAPH_PRIMER_TAB);

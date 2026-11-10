@@ -34,7 +34,7 @@ vi.mock('../src/ui/stores/projects.js', () => ({
   useProjectsStore: (sel: (s: any) => unknown) => sel({ setActiveProject: vi.fn() }),
 }));
 vi.mock('../src/ui/stores/tabs.js', () => ({
-  useTabsStore: () => ({ openTab: vi.fn() }),
+  useTabsStore: Object.assign(() => ({ openTab: vi.fn() }), { getState: () => ({ activeTabId: 'dashboard', openTab: vi.fn() }) }),
 }));
 
 // Imported AFTER the mocks are declared (hoisting keeps the mocks first).

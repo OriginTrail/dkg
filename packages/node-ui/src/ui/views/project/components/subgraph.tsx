@@ -1711,13 +1711,11 @@ export function SubGraphDetailView({
           <div className="v10-layer-expand-body entities-tab" data-cg-scroll-key={`subgraph:${slug}:items`}>
             <EntityList
               entities={sortedEntities}
-              layerKey="wm"
-              layerIcon={icon}
+              emptyIcon={icon}
               onSelectEntity={onSelectEntity}
               externallySorted
               sortLabel={sortLabel}
               timestampPredicate={timelinePredicate}
-              perEntityTrustBadge
 
               headerExtra={
                 <label className="v10-entity-list-sort">

@@ -1,4 +1,4 @@
-import { NODE_STATUS_POLL_MS } from './lib/formatPeerStatus.js';
+import { NODE_STATUS_POLL_MS } from './lib/nodeStatusPolicy.js';
 import { randomUUID } from './lib/randomUUID.js';
 import { executeQuery, invalidateQueryCache, fetchContextGraphs } from './query-api.js';
 export * from './query-api.js';
@@ -95,7 +95,26 @@ export class LocalAgentApiError extends Error {
 }
 
 // --- Status ---
-export const fetchStatus = () => getWithTimeout<any>('/api/status', NODE_STATUS_POLL_MS);
+/** The fields of `/api/status` the UI reads. Every field is optional: older nodes omit some. */
+export interface NodeStatus {
+  name?: string;
+  peerId?: string;
+  nodeRole?: string;
+  networkId?: string | number;
+  networkName?: string;
+  storeBackend?: string;
+  /** Unique remote peers; older nodes report `peerCount` instead. */
+  connectedPeers?: number;
+  peerCount?: number;
+  /** libp2p connections: one peer can hold both a direct and a relayed link. */
+  connections?: { direct?: number; relayed?: number };
+  uptimeMs?: number;
+  blockExplorerUrl?: string | null;
+  hasIdentity?: boolean;
+  identityId?: string;
+}
+
+export const fetchStatus = () => getWithTimeout<NodeStatus>('/api/status', NODE_STATUS_POLL_MS);
 
 // --- LLM Settings ---
 export interface LlmSettingsResponse {

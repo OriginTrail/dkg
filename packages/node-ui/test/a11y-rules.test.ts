@@ -1,23 +1,11 @@
 // The accessibility rules in DESIGN.md that can be read from the code: every
 // control has a name, clickable things work from the keyboard, dialogs are
 // named, and focus stays visible.
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { relative } from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
-
-const UI = join(__dirname, '../src/ui');
-const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (
-  e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]
-));
-const files = walk(UI);
-
-type Jsx = ts.JsxElement | ts.JsxSelfClosingElement;
-const opening = (n: Jsx) => (ts.isJsxElement(n) ? n.openingElement : n);
-const attrsOf = (n: Jsx) => new Map(opening(n).attributes.properties
-  .filter(ts.isJsxAttribute)
-  .map((a) => [a.name.getText(), a]));
-const hasSpread = (n: Jsx) => opening(n).attributes.properties.some(ts.isJsxSpreadAttribute);
+import { UI, attrsOf, hasSpread, opening, uiFiles as files, type Jsx } from './helpers/jsx.js';
 
 /** True when the node puts words on screen, as text or a value worked out at runtime. */
 function hasText(n: ts.Node): boolean {
