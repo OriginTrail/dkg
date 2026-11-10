@@ -18,6 +18,7 @@ const wiring = vi.hoisted(() => ({
 }));
 
 function leaseState(): string {
+  if (!existsSync(join(wiring.root, 'rfc64-sync'))) return 'no inventory';
   const lease = new DatabaseSync(join(wiring.root, 'rfc64-sync', 'inventory-v1.lease.sqlite3'));
   try {
     lease.exec('PRAGMA busy_timeout = 0');
@@ -413,6 +414,18 @@ describe('dkg rollback drops read-graph partitions', () => {
     );
   });
 
+  it('drops them when there is no inventory to hold', async () => {
+    const path = await writeStoreWithReadGraphs();
+    await writeFile(join(wiring.root, 'read-graph-partitions'), 'note\n');
+    await writeTargetSlot('10.0.26');
+
+    expect(await rollback()).toBeUndefined();
+
+    expect(wiring.calls).toEqual(['stop', 'swap:b', 'no inventory']);
+    expect(await storedGraphs(path)).toEqual([LEGACY, MEMBER].sort());
+    expect(existsSync(join(wiring.root, 'read-graph-partitions'))).toBe(false);
+  });
+
   it('does not open the triple store without the note', async () => {
     const path = await writeStoreWithReadGraphs();
     await writeInventoryV6();
@@ -424,13 +437,16 @@ describe('dkg rollback drops read-graph partitions', () => {
     expect(output.log.join('\n')).not.toContain('read-graph');
   });
 
-  it('keeps the current slot and the note when the read graphs cannot be dropped', async () => {
+  it('keeps the current slot, the note and the inventory when the read graphs cannot be dropped', async () => {
     wiring.store = { backend: 'no-such-backend' };
     await writeFile(join(wiring.root, 'read-graph-partitions'), 'note\n');
     await writeInventoryV6();
+    // 10.0.25 cannot read confirmed placements; they are removed only once the read graphs are gone.
+    addConfirmedPlacement();
     await writeTargetSlot('10.0.25');
 
     expect(await rollback()).toBe(1);
+    expect(confirmedPlacementCount()).toBe(1);
 
     expect(wiring.calls).toEqual(['stop']);
     expect(leaseState()).toBe('lease free');

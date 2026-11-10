@@ -149,10 +149,30 @@ export async function prepareRollbackStores(
   stoppedState = `Nothing was changed. The daemon is stopped: run "dkg start" to start ${currentVersion} again.`,
 ): Promise<PreparedRollbackStores | null> {
   const target = targetName(targetVersion);
+  // The daemon is stopped. Where there is an inventory, its lease is held while
+  // the read graphs are dropped, and the drop comes before the inventory
+  // changes, so a drop that fails leaves both stores as they were.
+  let dropped: number | null | undefined;
+  let dropFailure: { readonly error: unknown } | undefined;
+  const dropReadGraphs = async (): Promise<void> => {
+    try {
+      dropped = await dropReadGraphsForRollback(dataDir, (message) => io.log(message));
+    } catch (error) {
+      dropFailure = { error };
+      throw error;
+    }
+  };
+  const stopForDrop = (error: unknown): null => {
+    io.error(`Rollback stopped: the read graphs could not be dropped: ${error instanceof Error ? error.message : String(error)}.`);
+    io.error(`The version was not switched. Run "dkg rollback" again once the triple store can be opened, `
+      + `or "dkg start" to start ${currentVersion} again.`);
+    return null;
+  };
   let prepared: Awaited<ReturnType<typeof prepareRfc64InventoryForRollbackV1>>;
   try {
     prepared = await prepareRfc64InventoryForRollbackV1(dataDir, inventoryUserVersionFor(targetVersion), {
       removeConfirmedCatalogPlacements: readsOnlyLegacyPlacementRepairs(targetVersion),
+      beforeChange: dropReadGraphs,
     });
     if (prepared.removedConfirmedCatalogPlacements.length > 0) {
       io.log(removedPlacementsLine(prepared.removedConfirmedCatalogPlacements, target));
@@ -169,6 +189,7 @@ export async function prepareRollbackStores(
       );
     }
   } catch (error) {
+    if (dropFailure !== undefined) return stopForDrop(dropFailure.error);
     if (error instanceof Rfc64InventoryRollbackRefusedErrorV1) {
       for (const line of refusalLines(error, targetVersion, currentVersion, stoppedState)) io.error(line);
     } else {
@@ -177,19 +198,17 @@ export async function prepareRollbackStores(
     }
     return null;
   }
-  // The daemon is stopped and the inventory lease, where there is an inventory,
-  // is held: no daemon writes the triple store while its read graphs are dropped.
-  try {
-    const dropped = await dropReadGraphsForRollback(dataDir, (message) => io.log(message));
-    if (dropped !== null) {
-      io.log(`Dropped ${dropped} read-graph partition graph(s) for ${target}; read graphs are rebuilt from the stored data.`);
+  if (dropped === undefined) {
+    // There was no inventory to lease, and nothing has changed yet.
+    try {
+      await dropReadGraphs();
+    } catch (error) {
+      prepared.release();
+      return stopForDrop(error);
     }
-  } catch (error) {
-    prepared.release();
-    io.error(`Rollback stopped: the read graphs could not be dropped: ${error instanceof Error ? error.message : String(error)}.`);
-    io.error(`The version was not switched. Run "dkg rollback" again once the triple store can be opened, `
-      + `or "dkg start" to start ${currentVersion} again.`);
-    return null;
+  }
+  if (typeof dropped === 'number') {
+    io.log(`Dropped ${dropped} read-graph partition graph(s) for ${target}; read graphs are rebuilt from the stored data.`);
   }
   return prepared;
 }
