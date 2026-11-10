@@ -346,9 +346,17 @@ describe('serving between two nodes on Hardhat', () => {
     const rows = await offersInVm(buyerAgent);
     expect(rows.map((o) => o.serviceId).sort()).toEqual([A, B].sort());
     expect(rows.every((o) => serviceOfferSignerOf(domain, o) === SELLER_WALLET)).toBe(true);
-    const shared = await buyerAgent.query(serviceOffersQuery(), { contextGraphId: contextGraph, graphSuffix: '_shared_memory' });
+    // None in shared memory, once a catalog attempt in flight has ended. The buyer's catalog receiver
+    // writes a head's shared-memory rows before its precommit and takes them out when the precommit
+    // refuses, as it does for these nodes: they run on a chain adapter, without the RPC settings the
+    // daemon gives the precommit. The heads it retries still name the offers' rows from before the
+    // publish for several seconds, so a query can meet one in between. A row that stays fails after a minute.
+    const shared = await until(
+      () => buyerAgent.query(serviceOffersQuery(), { contextGraphId: contextGraph, graphSuffix: '_shared_memory' }),
+      (result) => result.bindings.length === 0,
+    );
     expect(shared.bindings).toEqual([]);
-  }, 120_000);
+  }, 180_000);
 
   it('quotes over the messenger, and serves a call with a receipt a Core Node key signed', async () => {
     const quoted = decodeMessage(await buyerAgent.sendMarketplaceMessage(sellerAgent.peerId, 'quote', encodeMessage({ services: [A, B] }), {
