@@ -114,6 +114,13 @@ and suppresses output on subsequent reads. Existing execution reconciliation
 continues to release capacity only when terminal evidence is verified. Re-saving
 the same withdrawn revision does not silently restore it.
 
+DKG run lookup also requires the current profile revision, enabled Read operation
+and account scope, plus fresh profile authorization of the requesting principal
+with its run key and agent context. Eligibility and withdrawal are checked after
+native inspection and again after asynchronous authorization. A removed/changed
+profile or denied authorization suppresses both output and steps; verified
+terminal evidence still releases the account slot.
+
 The adapter permits the explicit Data list and IF, Switch, Merge, Merge by fields,
 Compare Datasets and Stop And Error from #1247. It rejects HTTP, file/export,
 loops, waits/events, subworkflows, Program calls and DKG Write. Data-only workflows

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { BoundedResponseBodyLimitError, readResponseBodyBytesBounded } from '../../packages/http-utils/dist/index.js';
 import { parseRdfLiteralTerm, canonicalizeRdfObjectTerm, parseWritableRdfTerm } from '../../packages/rdf-utils/dist/index.js';
 
 const fail = message => Object.assign(new Error(message), { status: 409, code: 'DKG_COMPONENT_UNCONFIRMED' });
@@ -16,15 +17,14 @@ export function createNosNodeClient(session, actor, send = fetch) {
         method: body === undefined ? 'GET' : 'POST', path,
         ...(body === undefined ? {} : { body }), ...(query ? { query } : {}) }),
     });
-    // Bound while reading, not after materializing an unbounded response.
-    let size = 0; const chunks = [];
-    for await (const chunk of response.body ?? []) {
-      size += chunk.byteLength;
-      if (size > 2 * 1024 * 1024) throw fail('Node response exceeds the Studio limit.');
-      chunks.push(chunk);
+    let bytes;
+    try { bytes = await readResponseBodyBytesBounded(response, 2 * 1024 * 1024); }
+    catch (cause) {
+      if (cause instanceof BoundedResponseBodyLimitError) throw fail('Node response exceeds the Studio limit.');
+      throw cause;
     }
     if (!response.ok) throw Object.assign(fail('nOS did not authorize or confirm the node operation.'), { status: response.status });
-    const answer = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const answer = JSON.parse(Buffer.from(bytes).toString('utf8'));
     if (answer.kind !== 'answer') throw fail('Node outcome is unconfirmed. Retain the invocation identity.');
     if (answer.status < 200 || answer.status >= 300)
       throw Object.assign(fail('The node did not confirm the operation.'), { status: answer.status });

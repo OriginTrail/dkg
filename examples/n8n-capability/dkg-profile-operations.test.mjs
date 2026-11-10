@@ -81,7 +81,7 @@ test('each declared operation validates only its own contract and rejects incomp
     assert.throws(() => validateDkgProfile({ ...common, operations }), /Invalid DKG operation/);
 });
 
-test('legacy JPB profiles retain revisions, descriptors, guest sources, native hashes and enable switches', async () => {
+test('JPB profile pins preserve the SSH baseline and explicitly version the nOS bounded-reader change', async () => {
   const previous = Object.fromEntries(['NOS_JPB_WORKBOOK_INPUT_FILE', 'NOS_JPB_READ_ENABLED', 'NOS_JPB_PROGRAM_ENABLED', 'NOS_JPB_WRITE_ENABLED']
     .map(key => [key, process.env[key]]));
   try {
@@ -90,8 +90,11 @@ test('legacy JPB profiles retain revisions, descriptors, guest sources, native h
     const { createJpbNosProfile } = await import('./profiles/jpb-nos.mjs');
     const nos = createJpbNosProfile({ accountId: 'fingerprint-fixture', controlPlaneUrl: 'http://127.0.0.1:4610',
       runnerBindingRevision: 'fixture-v1', secret: () => 'synthetic-secret' });
-    // Captured from 394ca10fc52b71c800d1959ab3150f877ee04c54 before the operation-contract refactor.
-    const expected = JSON.parse(readFileSync(new URL('./test-fixtures/jpb-profile-revisions.json', import.meta.url), 'utf8'));
+    // Retain the pre-operation-contract baseline; the nOS transport source hash
+    // deliberately changes when it adopts the shared bounded-response reader.
+    const historical = JSON.parse(readFileSync(new URL('./test-fixtures/jpb-profile-revisions.json', import.meta.url), 'utf8'));
+    const expected = { ...historical, 'dmaast-jpb-nos': JSON.parse(readFileSync(new URL('./test-fixtures/jpb-nos-bounded-revision.json', import.meta.url), 'utf8')) };
+    assert.notEqual(nos.revision, historical['dmaast-jpb-nos'].revision);
     const hash = value => createHash('sha256').update(value).digest('hex');
     const flags = { 'dkg-read': 'NOS_JPB_READ_ENABLED', 'invoke-dkg-program': 'NOS_JPB_PROGRAM_ENABLED', 'dkg-write': 'NOS_JPB_WRITE_ENABLED' };
     for (const profile of [ssh, nos]) {

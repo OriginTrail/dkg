@@ -5,6 +5,7 @@ import { nativeInputDigest } from './studio-native-execution.mjs';
 import { createStudioCompiler } from './studio-definition.mjs';
 import { n8nWorkflowSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { createStudioNativeRunner } from './studio-native-runner.mjs';
+import { assertDkgEnabled } from './dkg-components.mjs';
 
 /** Small native admission journal, not a second receipt or workflow engine.
  * Arguments/results remain in n8n; only identity, pins and state live here.
@@ -53,6 +54,15 @@ export function createStudioMcpService({ repository, provider, installation, acc
       ['startedBy', 'agentVersion', 'toolDigest', 'approvalDecisionId'].includes(key))),
     ...(r.checkpoint.executionId ? { n8nExecutionId: r.checkpoint.executionId } : {}),
     createdAt: r.createdAt, updatedAt: r.updatedAt, actions: [] });
+  function assertDisclosureAllowed(ref) {
+    const workflow = saved(ref);
+    if (workflow.withdrawn) throw fail('STUDIO_WORKFLOW_WITHDRAWN');
+    const definition = readOnlyDefinition(workflow.definition, compiler);
+    assertDkgEnabled(definition, profile);
+    const readsDkg = definition.nodes.some(n => n.componentId === 'dkg-read');
+    if (readsDkg && profile.accountId !== accountId) throw fail('STUDIO_READ_PROFILE_REQUIRED');
+    return readsDkg;
+  }
   async function readRun(value, actor) {
     actorCheck(actor);
     if (!closed(value, ['runKey']) || !id(value.runKey)) throw fail('STUDIO_INVALID_RUN', 400);
@@ -65,10 +75,17 @@ export function createStudioMcpService({ repository, provider, installation, acc
     catch { return summary(r); } // No expiry/timer can release a possibly running execution.
     if (['succeeded', 'failed'].includes(observed.status)) update(value.runKey, observed.status);
     r = row(value.runKey);
-    // Withdrawal can commit while native inspection is pending. Reconcile the
-    // terminal slot above, but recheck authority before exposing any results.
-    const withdrawn = saved(r.kaRef).withdrawn;
-    return { ...summary(r), ...(!withdrawn && observed.status === 'succeeded' ? { output: observed.output, ...(observed.steps ? { steps: observed.steps } : {}) } : {}) };
+    // Terminal evidence releases capacity even after profile or account access
+    // changes. Disclosure separately requires today's eligibility and authority.
+    if (observed.status !== 'succeeded') return summary(r);
+    try {
+      if (assertDisclosureAllowed(r.kaRef)) {
+        await profile.authorize({ ...actor, runKey: r.runKey });
+        // Withdrawal/profile changes may occur during the remote authorization.
+        assertDisclosureAllowed(r.kaRef);
+      }
+    } catch { return summary(r); }
+    return { ...summary(r), output: observed.output, ...(observed.steps ? { steps: observed.steps } : {}) };
   }
   async function run(value, actor) {
     actorCheck(actor);

@@ -82,8 +82,8 @@ Write/Invoke parameters or throwing transport placeholders. See
 through the native MCP callback path.
 
 Existing profiles with the original flat three-operation contract are translated
-by `dkg-profile-legacy.mjs`. Their source files, revisions, descriptor parameter
-order, generated guest source and native hashes remain unchanged. Their original
+by `dkg-profile-legacy.mjs`. That translation preserves their revisions, descriptor
+parameter order, generated guest source and native hashes. Their original
 `enabled(componentId)` switches and shared `transport(payload, operation, context)`
 continue to apply. New profiles should use `operations` directly.
 
@@ -272,6 +272,11 @@ revisions and workflow approval; existing invocations cannot reuse their cached
 reads or resume pending writes through that connection. Credential rotation alone
 does not change the connection identity. SSH scripts contribute only to the SSH
 profile revision; both transports compose their policy from `jpb-policy.mjs`.
+The nOS transport now uses the shared bounded-response reader with its existing
+2 MiB ceiling. This source change intentionally creates a new JPB nOS profile
+revision: reinstall the components and explicitly reselect/save/approve affected
+workflows before using it. The SSH revision is unchanged; existing invocation
+identities are not rebound to the new nOS revision.
 Their reviewed read selection, assertion partitions, snapshot, field mapping and
 provenance labels live in `profiles/jpb-read-spec.json`. `jpb-read-policy.mjs`
 constructs the query once; nOS uses it directly and the SSH bundle embeds the

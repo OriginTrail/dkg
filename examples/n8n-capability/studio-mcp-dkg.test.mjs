@@ -176,6 +176,101 @@ test('native DKG callback uses the admitted pins, typed profile and full agent a
   assert.equal(calls.length, 1);
 });
 
+async function retainedRead(t) {
+  const state = mkdtempSync(join(tmpdir(), 'studio-mcp-profile-readback-'));
+  let repository = createStudioRepository(state), reads = 0, posts = 0;
+  t.after(() => { repository.close(); rmSync(state, { recursive: true, force: true }); });
+  const selected = { ...profile, workflowTools: { ...profile.workflowTools }, operations: {
+    'dkg-read': { ...profile.operations['dkg-read'], transport() { reads++; return { graph: 'urn:test:measurements', measurements }; } },
+  } };
+  const compiled = readWorkflow(), published = { ...compiled.workflow, id: 'native-read', versionId: 'v1', active: true };
+  repository.mcp.recordSavedNative(compiled, published);
+  const actor = { id: 'owner', role: 'owner', accountId: profile.accountId, startedBy: 'agent:a',
+    agentVersion: 'v1', toolDigest: 'd'.repeat(64), approvalDecisionId: 'decision-1' };
+  const runKey = 'profile-readback', pin = { kaRef: compiled.kaRef, workflowSha256: compiled.grant.workflowSha256 };
+  const execution = { id: '42', workflowId: 'native-read', workflowVersionId: 'v1', status: 'running', workflowData: published };
+  const native = createStudioNativeRunner({ api: async () => execution });
+  const runner = { ...native, async prepare() { return 'v1'; }, async dispatch(_workflow, invocationId, input) {
+    posts++;
+    execution.data = { resultData: { runData: { 'Receive input': [{ data: { main: [[{ json: { body: { invocationId, input } } }]] } }] } } };
+    return execution.id;
+  } };
+  const open = currentProfile => createStudioMcpService({ repository, runner, accountId: actor.accountId,
+    compiler: createStudioContext({ profile: currentProfile }).compiler, dkg: dkgComponentStore(repository.db, currentProfile) });
+  const service = open(selected);
+  assert.equal((await service.run({ ...pin, runKey, arguments: { sample: 'a' } }, actor)).status, 'running');
+  const result = await service.dkgComponent({ effectId: runKey, workflowId: 'native-read', executionId: '42', blockId: 'read', items: [{ sample: 'a' }] });
+  execution.data.resultData.runData[compiled.grant.result.nodes[0]] = [{ data: { main: [result.items.map(json => ({ json }))] } }];
+  execution.status = 'success';
+  return { selected, actor, runKey, pin, service, runner, get repository() { return repository; },
+    counts: () => ({ reads, posts }), restart(currentProfile) { repository.close(); repository = createStudioRepository(state); return open(currentProfile); } };
+}
+function assertSuppressed(result) {
+  assert.equal(result.status, 'succeeded');
+  assert.equal(Object.hasOwn(result, 'output'), false);
+  assert.equal(Object.hasOwn(result, 'steps'), false);
+}
+
+for (const [name, change] of [
+  ['changed revision', p => ({ ...p, revision: 'f'.repeat(64) })],
+  ['removed profile', () => null],
+  ['disabled read operation', p => ({ ...p, operations: { 'dkg-read': { ...p.operations['dkg-read'], enabled: () => false } } })],
+  ['foreign profile account', p => ({ ...p, accountId: 'foreign-account' })],
+  ['revoked account authorization', p => ({ ...p, async authorize() { throw new Error('owner revoked'); } })],
+]) test(`MCP lookup suppresses DKG results for ${name} after restart while reconciling terminal capacity`, async t => {
+  const f = await retainedRead(t);
+  assert.ok(f.repository.mcp.activeAgentRun(f.actor.accountId));
+  let service = f.restart(change(f.selected));
+  assertSuppressed(await service.readRun({ runKey: f.runKey }, f.actor));
+  assert.equal(f.repository.mcp.activeAgentRun(f.actor.accountId), undefined);
+  assert.equal(f.repository.mcp.run(f.actor.accountId, f.runKey).status, 'succeeded');
+  service = f.restart(change(f.selected));
+  assertSuppressed(await service.readRun({ runKey: f.runKey }, f.actor));
+  const authorizations = [];
+  service = f.restart({ ...f.selected, async authorize(actor) { authorizations.push(actor); await profile.authorize(actor); } });
+  const restored = await service.readRun({ runKey: f.runKey }, f.actor);
+  assert.deepEqual(restored.output.items, measurements); assert.ok(restored.steps.length);
+  assert.deepEqual(authorizations, [{ ...f.actor, runKey: f.runKey }]);
+  assert.deepEqual(f.counts(), { reads: 1, posts: 1 });
+});
+
+test('a changed profile hides already completed DKG output and traces after repository reopen', async t => {
+  const f = await retainedRead(t);
+  const completed = await f.service.readRun({ runKey: f.runKey }, f.actor);
+  assert.deepEqual(completed.output.items, measurements); assert.ok(completed.steps.length);
+  const service = f.restart({ ...f.selected, revision: 'f'.repeat(64) });
+  assert.throws(() => service.get(f.pin, f.actor));
+  assertSuppressed(await service.readRun({ runKey: f.runKey }, f.actor));
+  assert.deepEqual(f.counts(), { reads: 1, posts: 1 });
+});
+
+test('a profile change during native readback suppresses output and releases the verified terminal slot', async t => {
+  const f = await retainedRead(t), started = Promise.withResolvers(), release = Promise.withResolvers();
+  const inspect = f.runner.inspect;
+  f.runner.inspect = async (...args) => { started.resolve(); await release.promise; return inspect(...args); };
+  const pending = f.service.readRun({ runKey: f.runKey }, f.actor);
+  await started.promise;
+  try { f.selected.revision = 'f'.repeat(64); } finally { release.resolve(); }
+  assertSuppressed(await pending);
+  assert.equal(f.repository.mcp.activeAgentRun(f.actor.accountId), undefined);
+  assert.deepEqual(f.counts(), { reads: 1, posts: 1 });
+});
+
+for (const change of ['profile revision', 'withdrawal']) test(`MCP lookup rechecks ${change} after asynchronous profile authorization`, async t => {
+  const f = await retainedRead(t), started = Promise.withResolvers(), release = Promise.withResolvers();
+  f.selected.authorize = async actor => { assert.deepEqual(actor, { ...f.actor, runKey: f.runKey }); started.resolve(); await release.promise; };
+  const pending = f.service.readRun({ runKey: f.runKey }, f.actor);
+  // A missing authorization call must fail the regression rather than hang it.
+  assert.equal(await Promise.race([started.promise.then(() => 'authorized'), pending.then(() => 'disclosed')]), 'authorized');
+  try {
+    if (change === 'profile revision') f.selected.revision = 'f'.repeat(64);
+    else f.service.withdraw(f.pin, { id: f.actor.id, accountId: f.actor.accountId, role: 'owner' });
+  } finally { release.resolve(); }
+  assertSuppressed(await pending);
+  assert.equal(f.repository.mcp.activeAgentRun(f.actor.accountId), undefined);
+  assert.deepEqual(f.counts(), { reads: 1, posts: 1 });
+});
+
 for (const reopen of [false, true]) test(`colon-prefixed MCP run keys bind and read independently${reopen ? ' after repository reopen' : ''}`, async t => {
   const state = mkdtempSync(join(tmpdir(), 'studio-mcp-keys-'));
   t.after(() => rmSync(state, { recursive: true, force: true }));

@@ -1,0 +1,20 @@
+{
+  "revision": "a02b8ed382e1d5d06d1aa763340e4e5798d748df76d658939fecf2965ff5e86a",
+  "components": {
+    "dkg-read": {
+      "sourceHash": "0cbc2abee838740171275ea4c7aed204c747fe6edfc2299235ec92f8535810fd",
+      "nativeHash": "e7f4a473f95cd8001afb2330cb97d443ad49a25ff744c73cacbe3455c469cecf",
+      "descriptorHash": "27e945d12703439596f07affb2e1c22a40baad24ddee3db6c17ffdf2c14cd00b"
+    },
+    "invoke-dkg-program": {
+      "sourceHash": "9d65a0da847c560abe890d775fb97b29b6f4bbfa221e6f723ed67f065abd7fc4",
+      "nativeHash": "03dac338fb29f2134bd10fdb046a28f4ccaa992d5ccbf71d72fdfb110268d5b1",
+      "descriptorHash": "9a686111057711ad54d61dffadab37107bff50e53c0de06de4c61da6508228e2"
+    },
+    "dkg-write": {
+      "sourceHash": "ab4793224cae6f77285e0261e2c792620c66b3bef4eb07319bee1e2bc3587952",
+      "nativeHash": "2780794de49e2f05c39eb7e1acb1208547b1352d6851fb40e5e1da69ba48f982",
+      "descriptorHash": "ac80e8a9e36877bc887d342b20578fa6258dba202cd445235ba997cf4ec8739f"
+    }
+  }
+}
