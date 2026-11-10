@@ -412,6 +412,36 @@ describe('the marketplace routes', () => {
     expect((await api('DELETE', `/api/marketplace/accounts/${accountId}/buyers/${SIGNER.address}`)).status).toBe(200);
     expect((await chain.getGrant(accountId, SIGNER.address))!.revokedAt).toBeGreaterThan(0);
   });
+
+  it('answer an account-list read that failed after the wait as pending, with the RPC URLs of its error stripped', async () => {
+    const listBuyerAccounts = chain.listBuyerAccounts.bind(chain);
+    const fails: Array<(err: Error) => void> = [];
+    chain.listBuyerAccounts = () => new Promise<bigint[]>((_resolve, reject) => { fails.push(reject); });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      // The first view stops waiting after 5 s; the read then fails with an error that names a keyed RPC URL.
+      const first = api('GET', '/api/marketplace/funding');
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await first).toMatchObject({ status: 200, body: { accountsPending: true } });
+      fails[0]!(new Error('RPC_ENDPOINTS_EXHAUSTED: every endpoint failed (https://rpc.example/v2/PRIVATE_KEY_123, https://backup.example/key/SECOND_KEY)'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The next views cannot wait either: they say the last read failed, without the URLs.
+      for (const path of ['/api/marketplace/funding', '/api/marketplace/accounts']) {
+        const answer = api('GET', path);
+        await vi.advanceTimersByTimeAsync(5_000);
+        const { status, body } = await answer;
+        expect(status).toBe(200);
+        expect(body.accountsPending).toBe(true);
+        expect(body.accountsError).toContain('RPC_ENDPOINTS_EXHAUSTED');
+        expect(body.accountsError).toContain('[rpc]');
+        expect(JSON.stringify(body)).not.toMatch(/PRIVATE_KEY_123|SECOND_KEY|rpc\.example|backup\.example/);
+      }
+    } finally {
+      vi.useRealTimers();
+      chain.listBuyerAccounts = listBuyerAccounts;
+    }
+  });
 });
 
 describe("the daemon's buyer at boot", () => {
