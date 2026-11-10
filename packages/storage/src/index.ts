@@ -441,4 +441,24 @@ export {
   type ReadGraphWritePlan,
   type TripleStoreMethodName,
 } from './read-graph/adapter-contract.js';
+export {
+  ReadGraphDeltaFormError,
+  readGraphBackfillBatch,
+  readGraphCopy,
+  readGraphDeltaDelete,
+  readGraphDeltaDeleteBySubjectPrefix,
+  readGraphDeltaDeleteMatching,
+  readGraphFencedDrop,
+  readGraphFirstHolderCountQuery,
+  readGraphInsertQuads,
+  readGraphMissingTripleAsk,
+  readGraphReferenceProcedure,
+  readGraphRepairLeave,
+  readGraphRetraction,
+  readGraphSizeQuery,
+  readGraphUnheldSubjectAsk,
+  renderGraphNameTest,
+  type ReadGraphFence,
+  type ReadGraphTarget,
+} from './read-graph/statements.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';
