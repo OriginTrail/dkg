@@ -4,6 +4,7 @@ import {
   createTripleStore,
   dropReadGraphPartitions,
   mayHoldReadGraphPartitions,
+  withManagedOxigraphRuntimeStoreConfigV1,
   type TripleStore,
   type TripleStoreConfig,
 } from '@origintrail-official/dkg-storage';
@@ -32,7 +33,7 @@ export const openStoppedNodeStore: OpenStoppedNodeStore = async (dataDir, log) =
   const managed = await startManagedOxigraph({ config, dataDir, log });
   if (managed) {
     try {
-      const store = await createTripleStore({ ...managed.storeConfig, changelog: false });
+      const store = await createTripleStore(withManagedOxigraphRuntimeStoreConfigV1(managed.storeConfig, { changelog: false }));
       return { store, close: async () => { try { await store.close(); } finally { await managed.handle.stop(); } } };
     } catch (error) {
       await managed.handle.stop();
