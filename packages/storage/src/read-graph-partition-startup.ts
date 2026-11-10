@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { assertSafeIri, parseReadGraphIri } from '@origintrail-official/dkg-core';
+import { assertSafeIri, parseReadGraphIri, readGraphStateGraphIri } from '@origintrail-official/dkg-core';
 import { isReadGraphStateGraph } from './graph-enumeration-visibility.js';
 import { mayHoldReadGraphPartitions, noteReadGraphPartitions } from './read-graph-partition-marker.js';
 import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore } from './read-graph-partition-store.js';
@@ -8,14 +8,16 @@ import {
   MAX_READ_GRAPH_GENERATION,
   READ_GRAPH_STATE_PREDICATES,
   newReadGraphGeneration,
-  nextReadGraphState,
   parseReadGraphStateRows,
   readGraphStateCompareAndSet,
   readGraphStateRowsQuery,
+  type ReadGraphStateRow,
 } from './read-graph/state.js';
 import type { UpdateOptions, TripleStore } from './triple-store.js';
 
-/** Update operations per request, so a store with many read graphs is marked in bounded requests. */
+/** Rows per mark operation: on Blazegraph one operation costs about as much for one row as for a thousand. */
+const ROWS_PER_OPERATION = 1_000;
+/** Operations per request when damaged rows are created again. */
 const OPERATIONS_PER_REQUEST = 256;
 
 type StateBinding = Readonly<Record<string, string | undefined>>;
@@ -28,9 +30,9 @@ type StateBinding = Readonly<Record<string, string | undefined>>;
  * ends like one is ordinary data and stays as it is. When there are rows, it
  * notes in `dataDir` that the store holds read-graph partitions, for the
  * rollback, and, below the partition guard, moves each row that is not dirty
- * to dirty with the state module's compare-and-set. A damaged row of a read
- * graph is removed from the state graphs that hold it and created again,
- * dirty. Rows found, or a note left by an interrupted drop, also mark the
+ * to dirty with the next generation, one operation per thousand rows that
+ * names each row's state graph and read graph. A damaged row of a read graph
+ * is removed from the state graphs that hold it and created again, dirty. Rows found, or a note left by an interrupted drop, also mark the
  * store for this process as one that may hold partitions. Returns how many
  * read graphs were marked, and reports a non-zero count through `log`.
  */
@@ -55,18 +57,35 @@ export async function markReadGraphsDirtyAtStart(
   // A damaged row, or one whose generation cannot grow, is created again.
   const recreated = [...damaged, ...notDirty.filter(row => row.generation >= MAX_READ_GRAPH_GENERATION).map(row => row.readGraph)]
     .filter(readGraph => parseReadGraphIri(readGraph) !== undefined);
-  const operations = [
-    ...advancing.map(row => readGraphStateCompareAndSet(row, nextReadGraphState(row, { kind: 'mark-dirty' }))),
-    ...recreated.flatMap(readGraph => recreateDirty(readGraph, bindings)),
-  ];
+  const requests: string[] = [];
+  for (let at = 0; at < advancing.length; at += ROWS_PER_OPERATION) {
+    requests.push(markDirty(advancing.slice(at, at + ROWS_PER_OPERATION)));
+  }
+  const recreating = recreated.flatMap(readGraph => recreateDirty(readGraph, bindings));
+  for (let at = 0; at < recreating.length; at += OPERATIONS_PER_REQUEST) {
+    requests.push(recreating.slice(at, at + OPERATIONS_PER_REQUEST).join(';\n'));
+  }
   const marked = advancing.length + recreated.length;
   if (marked === 0) return 0;
   if (!target.update) throw new Error('This store cannot mark its read graphs dirty: it has no update()');
-  for (let at = 0; at < operations.length; at += OPERATIONS_PER_REQUEST) {
-    await target.update(operations.slice(at, at + OPERATIONS_PER_REQUEST).join(';\n'), storeOptions);
-  }
+  for (const request of requests) await target.update(request, storeOptions);
   options.log?.(`Marked ${marked} read graph(s) dirty: this release does not maintain read graphs`);
   return marked;
+}
+
+/** One operation that moves each row, unless it is dirty, to dirty with the next generation, in its own state graph. */
+function markDirty(rows: readonly ReadGraphStateRow[]): string {
+  const p = READ_GRAPH_STATE_PREDICATES;
+  const pairs = rows.map(({ readGraph }) => {
+    const stateGraph = readGraphStateGraphIri(parseReadGraphIri(readGraph)!.scope.contextGraphId);
+    return `(<${assertSafeIri(stateGraph)}> <${assertSafeIri(readGraph)}>)`;
+  }).join(' ');
+  // sparql-scan-allow: R2 -- ?stateGraph and ?readGraph are VALUES-bound to at most 1,000 exact pairs found at start
+  return `DELETE { GRAPH ?stateGraph { ?readGraph <${p.state}> ?state . ?readGraph <${p.generation}> ?generation } }\n`
+    + `INSERT { GRAPH ?stateGraph { ?readGraph <${p.state}> "dirty" . ?readGraph <${p.generation}> ?nextGeneration } }\n`
+    + `WHERE {\n  VALUES (?stateGraph ?readGraph) { ${pairs} }\n`
+    + `  GRAPH ?stateGraph { ?readGraph <${p.state}> ?state . ?readGraph <${p.generation}> ?generation }\n`
+    + `  FILTER(!sameTerm(?state, "dirty"))\n  BIND(?generation + 1 AS ?nextGeneration)\n}`;
 }
 
 /** Remove a read graph's row from the state graphs that hold it, then create it, dirty, in its own. */

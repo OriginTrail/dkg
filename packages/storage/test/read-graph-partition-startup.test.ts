@@ -147,11 +147,11 @@ describe('marking read graphs dirty at start', () => {
   });
 
   it('marks many read graphs in bounded requests', async () => {
-    const graphs = Array.from({ length: 300 }, (_, index) =>
+    const graphs = Array.from({ length: 1_001 }, (_, index) =>
       readGraphIri({ scope: readScope(`many-${index}`), layer: MemoryLayer.VerifiableMemory }));
     const store = await storeWithRows(...graphs.map(graph => row(graph, 'ready', 1)));
     const update = vi.spyOn(readGraphPartitionMaintenanceStore(store), 'update');
-    expect(await markReadGraphsDirtyAtStart(store)).toBe(300);
+    expect(await markReadGraphsDirtyAtStart(store)).toBe(1_001);
     expect(update).toHaveBeenCalledTimes(2);
     expect((await rows(store)).rows.every(({ state, generation }) => state === 'dirty' && generation === 2)).toBe(true);
   });
