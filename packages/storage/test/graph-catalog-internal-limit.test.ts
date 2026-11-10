@@ -230,6 +230,28 @@ describe('a refresh is node work', () => {
     } finally { await store.close(); }
   });
 
+  it("keeps one caller's cancellation out of the scan it shares with callers of other limits", async () => {
+    let release!: () => void;
+    const inner = new OxigraphStore();
+    await inner.insert([q(small)]);
+    const counting = new CountingStore(inner);
+    counting.listGraphsGate = new Promise<void>(resolve => { release = resolve; });
+    const store = new GraphSetIndexStore(counting);
+    try {
+      const first = new AbortController();
+      const firstRead = store.listGraphsByPrefix(`${CG}small/`, { maxResponseBytes: 256, signal: first.signal });
+      const firstRejected = expect(firstRead).rejects.toThrow('first caller left');
+      await vi.waitFor(() => expect(counting.listGraphsCalls).toBe(1));
+      const second = store.listGraphsByPrefix(`${CG}small/`, { maxResponseBytes: 4096, signal: new AbortController().signal });
+      first.abort(new Error('first caller left'));
+      await firstRejected;
+      release();
+      await expect(second).resolves.toEqual([small]);
+      expect(counting.listGraphsCalls).toBe(1);
+      expect(counting.listGraphsOptions[0]?.signal).toBeUndefined();
+    } finally { await store.close(); }
+  });
+
   it('keeps the last catalog and backs off when a warm refresh passes the ceiling', async () => {
     let now = 1_000;
     const inner = new OxigraphStore();

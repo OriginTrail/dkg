@@ -567,8 +567,9 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     options?: QueryOptions,
   ): Promise<ReadonlySet<string>> {
     const priority = refreshPriority(source, options);
-    // A full catalog read is node work under the internal ceiling: one flight key for every caller.
-    const scanOptions = internalCatalogReadOptions(options);
+    // A full catalog read is node work under the internal ceiling: one flight for every caller. It carries
+    // no caller's signal; each caller races its own cancellation in ensureGraphSet.
+    const scanOptions = internalCatalogReadOptions({ ...options, signal: undefined });
     // The coordinator owns the complete promotion policy: lower-priority cold
     // seeds/revalidations cannot capture later normal or ACK readers, while
     // equal/lower-priority callers reuse the best in-flight scan.
@@ -578,9 +579,9 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       } catch (error: unknown) {
         // A failed warm revalidation, even over the internal ceiling, keeps the last catalog (below).
         if (source !== 'revalidate') throw error;
-        // Cancellation, cold seeds, and mutation-dirty rebuilds are strict
-        // correctness paths even if another refresh published in parallel.
-        if (options?.signal?.aborted || !this.catalog.initialized || this.pendingFullRefresh) {
+        // Cold seeds and mutation-dirty rebuilds are strict correctness paths
+        // even if another refresh published in parallel.
+        if (!this.catalog.initialized || this.pendingFullRefresh) {
           throw error;
         }
         // A newer promoted refresh already published a usable graph set. Do
