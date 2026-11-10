@@ -1,5 +1,6 @@
 import { createN8nWorkflowAdapter } from './semantic-runtime-n8n-adapter.js';
 import { createNativeN8nWorkflowAdapter } from './semantic-runtime-n8n-native-adapter.js';
+import { nativeN8nContinuationEffects } from './semantic-runtime-n8n-checkpoint.js';
 import { programToolDefinition } from './semantic-runtime-tool-catalog.js';
 import { createLocalLlmProgramAdapter, type LocalLlmProgramProvider } from './semantic-runtime-local-llm-adapter.js';
 import { createHash } from 'node:crypto';
@@ -344,7 +345,13 @@ export async function resolveProgramTools(context: ProgramToolContext) {
       unavailableReason,
     };
   });
-  return { tools, registry, operatorAddress, operatorIri, policyIri, policyVersion, policyHashHex };
+  const nativeGrant = bound?.binding.n8n;
+  const continuationPolicy = nativeGrant?.result && assetStore
+    ? (executionIri: string): ReadonlyMap<string, string> | null => {
+      const effects = nativeN8nContinuationEffects(assetStore, executionIri, nativeGrant);
+      return effects ? new Map([...effects].map(id => [id, nativeGrant.toolIri])) : null;
+    } : undefined;
+  return { tools, registry, operatorAddress, operatorIri, policyIri, policyVersion, policyHashHex, continuationPolicy };
 }
 
 export async function resolveInternal(context: ProgramResolutionContext): Promise<InternalResolution> {

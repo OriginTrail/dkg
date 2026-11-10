@@ -152,6 +152,10 @@ export class RuntimeAdapterRegistry {
       verb: operation.verb,
     };
   }
+
+  supportsContinuation(id: string, version: string): boolean {
+    return typeof requireRegistry(this).get(adapterKey(id, version))?.resume === 'function';
+  }
 }
 
 export interface RuntimeEffectOutcome {

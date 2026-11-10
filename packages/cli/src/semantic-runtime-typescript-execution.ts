@@ -8,7 +8,6 @@ import { canonicalProgramInputs } from './semantic-runtime-bound-invocation.js';
 import { typeScriptInvocationIdentity } from './semantic-runtime-typescript-identity.js';
 import { assertExecutionCapabilityAuthorized } from './semantic-runtime-invocation-policy.js';
 import { assertChildApprovalsAuthorized } from './semantic-runtime-child-authority.js';
-import { nativeN8nContinuationEffects } from './semantic-runtime-n8n-checkpoint.js';
 import { programBindingDigest } from './semantic-runtime-program-bindings.js';
 import { ConfiguredSemanticRuntimeService, SemanticInvocationResult, SemanticProgramError, StoredSemanticProgram, TypeScriptComposition } from './semantic-runtime-types.js';
 import { SR, hashParts, historyIsAtLayer, literalQuad, safeMessage, sameSet, sourceHashOf } from './semantic-runtime-values.js';
@@ -66,7 +65,7 @@ export async function resolveTypeScriptTools(agent: DKGAgent, runtime: Configure
     executionLayer: binding.executionLayer ?? 'wm', assertAuthorized: check,
     bound: { binding, digest, assertAuthorized: check }, assetStore: runtime.store, localLlmProvider: runtime.localLlmProvider });
   if (resolved.tools.some(tool => !tool.effective)) throw new SemanticProgramError('REQUIRED_TOOL_UNAVAILABLE', 'A requested adapter is unavailable', 409);
-  return { registry: resolved.registry, policyHashHex: resolved.policyHashHex,
+  return { registry: resolved.registry, policyHashHex: resolved.policyHashHex, continuationPolicy: resolved.continuationPolicy,
     public: { contextGraphId: binding.contextGraphId, programIri: program.programIri, programLayer: program.layer,
       executingNode: resolved.operatorIri,
       selectedPolicy: { iri: resolved.policyIri, version: resolved.policyVersion, hash: `sha256:${resolved.policyHashHex}` },
@@ -151,7 +150,8 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
     const previous = runtime.store.execution(executionIri);
     const history = await agent.assertion.history(graph, name, { agentAddress: executor.agentAddress });
     const journal = new ExecutionReceiptJournal(runtime.store, executionIri);
-    let continuation: Set<string> | null = null;
+    let continuation: ReadonlyMap<string, string> | null = null;
+    let resolved: Awaited<ReturnType<typeof resolveTypeScriptTools>> | undefined;
     if (previous && journal.terminal && ['active', 'completed'].includes(previous.status)) {
       const result = await recoverTerminalExecutionReceipt(agent, runtime.store, journal, {
         contextGraphId: graph, name, agentAddress: executor.agentAddress, layer, requestIdentity: identity,
@@ -161,11 +161,13 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
     if (previous) {
       if (previous.graphRevision !== identity) throw new SemanticProgramError('INVOCATION_LAYER_CONFLICT', 'Invocation already has different inputs or authority', 409);
       if (previous.status !== 'completed') {
-        continuation = ['active', 'failed'].includes(previous.status)
-          ? nativeN8nContinuationEffects(runtime.store, executionIri, binding.n8n) : null;
+        if (['active', 'failed'].includes(previous.status)) {
+          resolved = await resolveTypeScriptTools(agent, runtime, binding, program, config, check);
+          continuation = resolved.continuationPolicy?.(executionIri) ?? null;
+        }
         if (!continuation) {
-          // General JavaScript continuations are not durable. Only acknowledged
-          // native effects below have a provider inspection path without POST.
+          // General JavaScript continuations are not durable. Tool resolution
+          // must supply an inspection policy for the exact existing effects.
           if (previous.status === 'active') runtime.store.setExecutionStatus(executionIri, 'failed');
           throw new SemanticProgramError('INVOCATION_NOT_RETRYABLE', 'Interrupted TypeScript execution has no terminal receipt; reconcile its effects before starting new work', 409,
             mayReadTrace ? readProgramTrace(runtime.store, executionIri) : undefined);
@@ -178,7 +180,7 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
           ...(mayReadTrace ? { trace: readProgramTrace(runtime.store, executionIri) } : {}) };
       }
     }
-    const resolved = await resolveTypeScriptTools(agent, runtime, binding, program, config, check);
+    resolved ??= await resolveTypeScriptTools(agent, runtime, binding, program, config, check);
     const artifact = await runtime.typescript!.compile(program.source);
     const manifest = new TextEncoder().encode(artifact.manifest), planId = hashCanonicalPlan(manifest);
     runtime.store.registerStrategyArtifact({ artifactHash: planId, strategyId: program.programIri, version: program.version,
@@ -205,8 +207,8 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
         { ...grant, timeoutMs: Math.max(1, Math.min(grant.timeoutMs, budget.deadline - Date.now())) }, async effect => trace.call(String(effect.id), effect.kind, effect.kind === 'tool' ? effect.tool : effect.program, async call => {
           await check();
           if (++budget.calls > budget.maximum) throw new SemanticProgramError('PROGRAM_CALL_BUDGET_EXCEEDED', 'Program tree exceeds its call budget', 403);
-          if (continuation && (effect.kind !== 'tool' || effect.tool !== binding.n8n!.toolIri
-            || !continuation.has(`urn:sr:effect:${invocationId}:${effect.id}`))) {
+          if (continuation && (effect.kind !== 'tool'
+            || continuation.get(`urn:sr:effect:${invocationId}:${effect.id}`) !== effect.tool)) {
             const failure = new SemanticProgramError('INVOCATION_REQUIRES_RECONCILIATION', 'Continuation may only inspect its original acknowledged effects', 409);
             budget.uncertainEffect = failure;
             throw failure;
@@ -236,7 +238,7 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
           return values.length === 1 ? values[0] : values;
         }));
       await check();
-      if (continuation && [...continuation].some(id => runtime.store.effect(id)?.state !== 'succeeded'))
+      if (continuation && [...continuation.keys()].some(id => runtime.store.effect(id)?.state !== 'succeeded'))
         throw new SemanticProgramError('INVOCATION_REQUIRES_RECONCILIATION', 'Original effects still require reconciliation', 409);
       const quads = buildExecutionQuads({ bound: { binding, digest, assertAuthorized: check }, executionIri, invocationId,
         programIri: program.programIri, operatorIri: `did:dkg:agent:${executor.agentAddress}`, callerIri: `did:dkg:agent:${caller}`,
