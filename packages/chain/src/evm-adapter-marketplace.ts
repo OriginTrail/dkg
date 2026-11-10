@@ -448,7 +448,7 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
         const page = await this.queryEventLogsPage(ss, filter, lo, hi, scanProviders, connected, `${label} BuyerAdded`, preferred);
         preferred = page.provider;
         // topics: the event, the indexed accountId, the indexed buyer.
-        return page.logs.map((log) => BigInt(log.topics[1]!));
+        return page.logs.map((log) => ({ item: BigInt(log.topics[1]!), block: log.blockNumber }));
       },
       (accountId) => accountId.toString(),
     );

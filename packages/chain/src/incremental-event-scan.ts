@@ -3,15 +3,16 @@
 /**
  * An event-log scan that remembers what it read, per key.
  *
- * - The first read of a key covers its range from the anchor (such as the
+ * - The first read of a key covers its range, from the anchor (such as the
  *   contract's deployment block) to the head.
  * - Each later read covers only the blocks after the last block read, plus a
  *   short tail that it reads again in case of a reorg.
- * - What a read finds is kept. A read that fails part-way keeps the pages it
- *   finished, and the next read goes on from there.
+ * - The scan keeps each event with its block. A page that is read again
+ *   replaces the events it held before, so an event that a reorg removed
+ *   drops out. An item stays listed while any event still kept names it.
+ * - A read that fails part-way keeps the pages it finished, and the next read
+ *   goes on from there.
  * - Reads of one key that overlap share one scan.
- *
- * A later read never drops an item an earlier read found: the scan only adds.
  */
 
 export interface IncrementalEventScanRange {
@@ -28,12 +29,23 @@ export interface IncrementalEventScanOptions {
   readonly tailBlocks: number;
 }
 
+/** One event a page held: the item it names, and the block it is in. */
+export interface ScannedEvent<T> {
+  readonly item: T;
+  readonly block: number;
+}
+
+interface KeptEvent<T> extends ScannedEvent<T> {
+  readonly id: string;
+}
+
 interface ScanEntry<T> {
   /** The anchor the kept progress was read from; -1 before the first read. */
   anchor: number;
   /** The last block read; below `anchor` before the first page. */
   through: number;
-  readonly found: Map<string, T>;
+  /** Each event kept, by `${id}@${block}`. */
+  readonly events: Map<string, KeptEvent<T>>;
   running?: Promise<T[]>;
 }
 
@@ -54,22 +66,22 @@ export class IncrementalEventScan<T> {
   }
 
   /**
-   * Everything found for `key` from the anchor up to the head that `range` resolves.
+   * The items named by the events from the anchor up to the head that `range` resolves.
    *
    * @param range - resolves the anchor and the head for this read.
-   * @param readPage - reads one page, both bounds inclusive, and returns what it found there.
-   * @param idOf - names an item, so one found twice is kept once.
+   * @param readPage - reads one page, both bounds inclusive, and returns every event found there.
+   * @param idOf - names an item, so one named by several events is listed once.
    */
   read(
     key: string,
     range: () => Promise<IncrementalEventScanRange>,
-    readPage: (fromBlock: number, toBlock: number) => Promise<Iterable<T>>,
+    readPage: (fromBlock: number, toBlock: number) => Promise<Iterable<ScannedEvent<T>>>,
     idOf: (item: T) => string,
   ): Promise<T[]> {
     let entry = this.#entries.get(key);
     if (entry?.running) return entry.running;
     if (!entry) {
-      entry = { anchor: -1, through: -1, found: new Map() };
+      entry = { anchor: -1, through: -1, events: new Map() };
       this.#entries.set(key, entry);
     }
     const scan = entry;
@@ -80,18 +92,28 @@ export class IncrementalEventScan<T> {
         // does not cover the blocks in between, so read again from the new anchor.
         scan.anchor = anchor;
         scan.through = anchor - 1;
-        scan.found.clear();
+        scan.events.clear();
       } else if (anchor > scan.anchor) {
-        // A later anchor narrows the range. What was read from the earlier one stays valid.
+        // A later anchor narrows the range. What was read from the earlier one stays valid; the
+        // events before the new anchor are outside the range now.
         scan.anchor = anchor;
+        for (const [key, event] of scan.events) if (event.block < anchor) scan.events.delete(key);
       }
       const from = Math.max(anchor, scan.through + 1 - this.#tailBlocks);
       for (let lo = from; lo <= head; lo += this.#pageBlocks) {
         const hi = Math.min(lo + this.#pageBlocks - 1, head);
-        for (const item of await readPage(lo, hi)) scan.found.set(idOf(item), item);
+        const found = await readPage(lo, hi);
+        // The page as read now replaces what it held before, so an event a reorg removed drops out.
+        for (const [key, event] of scan.events) if (event.block >= lo && event.block <= hi) scan.events.delete(key);
+        for (const { item, block } of found) {
+          const id = idOf(item);
+          scan.events.set(`${id}@${block}`, { id, item, block });
+        }
         if (hi > scan.through) scan.through = hi;
       }
-      return [...scan.found.values()];
+      const items = new Map<string, T>();
+      for (const { id, item } of scan.events.values()) if (!items.has(id)) items.set(id, item);
+      return [...items.values()];
     })();
     scan.running = running;
     const settle = (): void => {

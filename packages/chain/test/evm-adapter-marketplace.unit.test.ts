@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * `decodeReceiptBatch` (evm-adapter-marketplace.ts): a landed batch, read from
- * the logs of its receipt.
+ * evm-adapter-marketplace.ts, without a chain:
+ * - `decodeReceiptBatch`: a landed batch, read from the logs of its receipt.
+ * - `listBuyerAccounts`: the adapter keeps its `BuyerAdded` scan between reads,
+ *   so a repeat read covers only the new blocks and the reorg tail.
  */
 import { describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
 import { loadAbi } from '../src/evm-adapter-abi.js';
+import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from '../src/evm-adapter-constants.js';
 import { decodeReceiptBatch } from '../src/evm-adapter-marketplace.js';
 
 describe('decodeReceiptBatch', () => {
@@ -34,5 +38,59 @@ describe('decodeReceiptBatch', () => {
       ],
     });
     expect(decodeReceiptBatch(logs.slice(0, 3), SETTLEMENT)).toBeNull();
+  });
+});
+
+describe('listBuyerAccounts', () => {
+  const BUYER = ethers.getAddress('0x00000000000000000000000000000000000000b1');
+  const SUBSCRIPTIONS = ethers.getAddress('0x00000000000000000000000000000000000000a1');
+  const DEPLOYED = 10_000;
+  const topic = (value: bigint | string) => ethers.zeroPadValue(typeof value === 'bigint' ? ethers.toBeHex(value) : value, 32);
+  const buyerAdded = (accountId: bigint, blockNumber: number) => ({ blockNumber, topics: [ethers.id('BuyerAdded'), topic(accountId), topic(BUYER)] });
+
+  /** An adapter whose chain is `logs` up to `chain.head`, recording each page it reads. */
+  function adapterOver(chain: { head: number; logs: Array<ReturnType<typeof buyerAdded>> }) {
+    const pages: Array<[number, number]> = [];
+    const serviceSubscriptions = { getAddress: async () => SUBSCRIPTIONS, filters: { BuyerAdded: () => ({}) } };
+    const adapter = Object.assign(Object.create(EVMChainAdapter.prototype), {
+      init: async () => undefined,
+      resolveContract: async () => serviceSubscriptions,
+      resolveContractDeployBlock: async () => ({ fromBlock: DEPLOYED, head: chain.head, scanProviders: [] }),
+      queryEventLogsPage: async (_contract: unknown, _filter: unknown, lo: number, hi: number) => {
+        pages.push([lo, hi]);
+        return { logs: chain.logs.filter((l) => l.blockNumber >= lo && l.blockNumber <= hi), provider: {} };
+      },
+    }) as { listBuyerAccounts(buyer: string): Promise<bigint[]> };
+    return { adapter, pages };
+  }
+
+  it('keeps the scan between reads: a repeat read covers only the new blocks and the reorg tail', async () => {
+    const chain = { head: 20_000, logs: [buyerAdded(7n, 12_345)] };
+    const { adapter, pages } = adapterOver(chain);
+    expect(await adapter.listBuyerAccounts(BUYER)).toEqual([7n]);
+    expect(pages).toEqual([[10_000, 19_999], [20_000, 20_000]]);
+
+    pages.length = 0;
+    chain.head = 20_010;
+    chain.logs.push(buyerAdded(9n, 20_005));
+    expect(await adapter.listBuyerAccounts(BUYER)).toEqual([7n, 9n]);
+    expect(pages).toEqual([[20_001 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 20_010]]);
+  });
+
+  it('drops an account whose only BuyerAdded a reorg removed from the tail', async () => {
+    const chain = { head: 20_000, logs: [buyerAdded(7n, 12_345), buyerAdded(9n, 19_990)] };
+    const { adapter } = adapterOver(chain);
+    expect(await adapter.listBuyerAccounts(BUYER)).toEqual([7n, 9n]);
+    chain.logs = chain.logs.filter((l) => l.blockNumber !== 19_990);
+    expect(await adapter.listBuyerAccounts(BUYER)).toEqual([7n]);
+  });
+
+  it('gives each adapter a scan of its own', async () => {
+    const chain = { head: 20_000, logs: [buyerAdded(7n, 12_345)] };
+    const first = adapterOver(chain);
+    await first.adapter.listBuyerAccounts(BUYER);
+    const second = adapterOver(chain);
+    await second.adapter.listBuyerAccounts(BUYER);
+    expect(second.pages[0]).toEqual([DEPLOYED, 19_999]);
   });
 });

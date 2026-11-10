@@ -183,30 +183,55 @@ export async function accountView(buyer: Buyer, accountId: bigint) {
  */
 export const ACCOUNT_LIST_WAIT_MS = 5_000;
 
-/** The account ids each buyer listed last, for a view that cannot wait for a fresh list. */
-const lastAccountIds = new WeakMap<Buyer, bigint[]>();
+/** A buyer's account list: the ids read last, and the read in flight, which every view waiting for the list shares. */
+interface AccountListRefresh {
+  last?: bigint[];
+  running?: Promise<bigint[]>;
+}
 
-/** The ids of the accounts the node owns and of those that granted the buyer wallet, or the last ones read if a fresh read takes longer than `waitMs`. */
-async function accountIdsOf(buyer: Buyer, waitMs: number): Promise<{ ids: bigint[]; pending: boolean }> {
-  const listing = Promise.all([
+const accountListRefreshes = new WeakMap<Buyer, AccountListRefresh>();
+
+/**
+ * The buyer's refresh, with a read of the account ids in flight: the one already running, or a new one. A read that
+ * settles, whether it read the list or failed, lets the next view start another.
+ */
+function refreshAccountIds(buyer: Buyer): { refresh: AccountListRefresh; running: Promise<bigint[]> } {
+  let refresh = accountListRefreshes.get(buyer);
+  if (!refresh) {
+    refresh = {};
+    accountListRefreshes.set(buyer, refresh);
+  }
+  if (refresh.running) return { refresh, running: refresh.running };
+  const owner = refresh;
+  const running = Promise.all([
     buyer.chain.listNodePublishingConvictionAccounts(),
     buyer.chain.listBuyerAccounts(buyer.buyerWallet),
   ]).then(([owned, granted]) => {
     const ids = [...new Set([...owned.map((a) => a.accountId), ...granted])].sort((a, b) => (a < b ? -1 : 1));
-    lastAccountIds.set(buyer, ids);
+    owner.last = ids;
     return ids;
   });
+  owner.running = running;
+  const settle = (): void => {
+    if (owner.running === running) owner.running = undefined;
+  };
+  running.then(settle, settle);
+  return { refresh: owner, running };
+}
+
+/** The ids of the accounts the node owns and of those that granted the buyer wallet, or the last ones read if the read takes longer than `waitMs`. */
+async function accountIdsOf(buyer: Buyer, waitMs: number): Promise<{ ids: bigint[]; pending: boolean }> {
+  const { refresh, running } = refreshAccountIds(buyer);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const waited = new Promise<null>((resolve) => {
     timer = setTimeout(() => resolve(null), waitMs);
     (timer as { unref?: () => void }).unref?.();
   });
   try {
-    const ids = await Promise.race([listing, waited]);
+    const ids = await Promise.race([running, waited]);
     if (ids !== null) return { ids, pending: false };
     // The read goes on and keeps what it reads, so a later view answers from it.
-    listing.catch(() => undefined);
-    return { ids: lastAccountIds.get(buyer) ?? [], pending: true };
+    return { ids: refresh.last ?? [], pending: true };
   } finally {
     clearTimeout(timer);
   }

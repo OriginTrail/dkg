@@ -171,34 +171,42 @@ describe('accounts and funding', () => {
   it('answers without waiting for an account list that takes long to read, and from the last list read', async () => {
     const owned = await mock.createPublishingConvictionAccount(120_000n * TRAC);
     const listBuyerAccounts = chain.listBuyerAccounts.bind(chain);
-    let release!: (ids: bigint[]) => void;
-    const slow = new Promise<bigint[]>((resolve) => { release = resolve; });
-    chain.listBuyerAccounts = () => slow;
+    const listNodeAccounts = chain.listNodePublishingConvictionAccounts.bind(chain);
+    let granted = 0;
+    let owners = 0;
+    const releases: Array<(ids: bigint[]) => void> = [];
+    chain.listBuyerAccounts = () => { granted += 1; return new Promise<bigint[]>((resolve) => { releases.push(resolve); }); };
+    chain.listNodePublishingConvictionAccounts = () => { owners += 1; return listNodeAccounts(); };
+    const settled = () => new Promise((resolve) => setTimeout(resolve, 0));
     try {
-      // No list read yet: the balances come back with no accounts, and the list is pending.
-      const first = await fundingView(buyer, 10);
+      // No list read yet: both views answer with the balances and no accounts, from one shared read.
+      const [first, overlapping] = await Promise.all([fundingView(buyer, 10), accountsView(buyer, 10)]);
       expect(first.accountsPending).toBe(true);
       expect(first.accounts).toEqual([]);
       expect(first.buyerWallet.address).toBe(SIGNER.address);
-      expect((await accountsView(buyer, 10)).accountsPending).toBe(true);
+      expect(overlapping).toEqual({ accounts: [], accountsPending: true });
+      expect([granted, owners]).toEqual([1, 1]);
 
-      // The read finishes after the view answered; a later view that cannot wait answers from it.
-      release([]);
-      await slow;
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      chain.listBuyerAccounts = () => new Promise<bigint[]>(() => undefined);
+      // The read finishes after the views answered. A later view starts the next read and, while it runs,
+      // answers from the list the first one read.
+      releases[0]!([]);
+      await settled();
       const second = await fundingView(buyer, 10);
+      expect([granted, owners]).toEqual([2, 2]);
       expect(second.accountsPending).toBe(true);
       expect(second.accounts.map((a) => a.accountId)).toEqual([String(owned.accountId)]);
+      releases[1]!([]);
+      await settled();
     } finally {
       chain.listBuyerAccounts = listBuyerAccounts;
+      chain.listNodePublishingConvictionAccounts = listNodeAccounts;
     }
     const third = await fundingView(buyer);
     expect(third.accountsPending).toBe(false);
     expect(third.accounts.map((a) => a.accountId)).toEqual([String(owned.accountId)]);
   });
 
-  it('still fails when the account list fails before the wait is over', async () => {
+  it('fails a view whose account list fails before the wait is over, and reads again for the next view', async () => {
     const listBuyerAccounts = chain.listBuyerAccounts.bind(chain);
     chain.listBuyerAccounts = () => Promise.reject(new Error('no backend'));
     try {
@@ -206,6 +214,7 @@ describe('accounts and funding', () => {
     } finally {
       chain.listBuyerAccounts = listBuyerAccounts;
     }
+    expect((await fundingView(buyer)).accountsPending).toBe(false);
   });
 
   it('gives a browser wallet the contracts, the grant domain and its types', async () => {
