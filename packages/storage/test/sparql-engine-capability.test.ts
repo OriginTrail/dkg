@@ -7,6 +7,7 @@ import {
   OxigraphWorkerStore,
   SparqlHttpStore,
   sparqlEngineOf,
+  storeDefaultGraphIsGraphUnion,
   storeRestrictsQueryDataset,
 } from '../src/index.js';
 import { createManagedOxigraphSparqlStoreV1 } from '../src/adapters/sparql-http.js';
@@ -75,5 +76,25 @@ describe('storeRestrictsQueryDataset', () => {
     expect(storeRestrictsQueryDataset(new ChangelogStore(new SparqlHttpStore({ queryEndpoint: endpoint })))).toBe(false);
     expect(storeRestrictsQueryDataset({ restrictsQueryDataset: 'yes' })).toBe(false);
     expect(storeRestrictsQueryDataset(null)).toBe(false);
+  });
+});
+
+describe('storeDefaultGraphIsGraphUnion', () => {
+  it('is true for Blazegraph, also through decorators', () => {
+    expect(storeDefaultGraphIsGraphUnion(new BlazegraphStore(endpoint))).toBe(true);
+    expect(storeDefaultGraphIsGraphUnion(new ChangelogStore(new BlazegraphStore(endpoint)))).toBe(true);
+  });
+
+  it('is false for Oxigraph, every SPARQL HTTP store, and anything that does not say', async () => {
+    const embedded = new OxigraphStore();
+    try {
+      expect(storeDefaultGraphIsGraphUnion(embedded)).toBe(false);
+    } finally {
+      await embedded.close();
+    }
+    expect(storeDefaultGraphIsGraphUnion(new SparqlHttpStore({ queryEndpoint: endpoint }))).toBe(false);
+    expect(storeDefaultGraphIsGraphUnion(createManagedOxigraphSparqlStoreV1({ queryEndpoint: endpoint }))).toBe(false);
+    expect(storeDefaultGraphIsGraphUnion({ defaultGraphIsGraphUnion: 'yes' })).toBe(false);
+    expect(storeDefaultGraphIsGraphUnion(null)).toBe(false);
   });
 });

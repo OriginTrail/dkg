@@ -76,7 +76,7 @@ type Variant = keyof typeof VARIANTS;
  * - graph: only inside GRAPH, by variable or by an IRI outside read-graph partitions;
  * - graph-path: inside GRAPH ?g with a *, + or ? path; graph-group: a GRAPH ?g group without a leading triple pattern;
  * - default: outside GRAPH; default-path: outside GRAPH with a *, + or ? path;
- * - default-star: SELECT * where blank nodes or paths outside GRAPH add variables;
+ * - default-star: SELECT * or COUNT(DISTINCT *) where blank nodes or paths outside GRAPH add variables;
  * - hint: carries a query hint; dataset: names its own dataset; base: declares BASE;
  * - describe: DESCRIBE of IRIs, or of variables of a pattern outside GRAPH; describe-all: DESCRIBE *;
  * - describe-graph: DESCRIBE from a pattern with GRAPH, which the store itself does not answer;
@@ -168,6 +168,7 @@ const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
   ['D30 an inverse path', 'default', 'SELECT ?s ?o WHERE { ?o ^<urn:p> ?s }'],
   ['D31 a blank-node property list', 'default', 'SELECT ?s ?z WHERE { ?s <urn:p> [ <urn:r> ?z ] }'],
   ['D32 SELECT * with a blank node', 'default-star', 'SELECT * WHERE { ?s <urn:p> [ <urn:r> ?z ] }'],
+  ['D44 COUNT(DISTINCT *) with a sequence path', 'default-star', 'SELECT (COUNT(DISTINCT *) AS ?n) WHERE { ?s <urn:p>/<urn:r> ?z }'],
   ['D33 COUNT(*) with OFFSET', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o } OFFSET 0'],
   ['D34 COUNT(*) grouped by subject', 'default', 'SELECT ?s (COUNT(*) AS ?n) WHERE { ?s ?p ?o } GROUP BY ?s'],
   ['D36 COUNT(*) with a constant subject', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:s> ?p ?o }'],
@@ -180,7 +181,8 @@ const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
 
 /**
  * Every store refuses a read-graph name and a dataset the query names. A store
- * that restricts its dataset answers the rest; any other answers GRAPH only.
+ * that restricts its dataset answers the rest. Blazegraph, whose default graph
+ * merges every graph, answers GRAPH, patterns outside it and DESCRIBE.
  */
 function expected(kind: Kind): 'exact' | 'refused' {
   if (kind === 'names' || kind === 'dataset') return 'refused';

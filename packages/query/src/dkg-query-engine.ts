@@ -12,7 +12,7 @@ import { storeOptions } from './query-store-options.js';
 import {
   asGraphWriteRevisionSource, asQueryReadAdmissionCapability,
   isQueryDatasetUnrestrictedError, isSparqlHttpResponseError, preparedSparqlNamesReadGraphPartition, sparqlEngineOf,
-  StoreResponseTooLargeError, storeMayHoldReadGraphPartitions, storeRestrictsQueryDataset,
+  StoreResponseTooLargeError, storeDefaultGraphIsGraphUnion, storeMayHoldReadGraphPartitions, storeRestrictsQueryDataset,
 } from '@origintrail-official/dkg-storage';
 import type {
   SparqlEngineFamily,
@@ -403,7 +403,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         if (withheld.length) assertWithheldGraphQuery(initialGraphScope);
         const hidesReadGraphs = withheld.length === 0 && storeMayHoldReadGraphPartitions(this.store);
         if (hidesReadGraphs && !storeRestrictsQueryDataset(this.store)) {
-          return this.execWithExclusions(hideReadGraphPartitions(initialGraphScope), reads, options?.excludeGraphPrefixes);
+          return this.execWithExclusions(hideReadGraphPartitions(initialGraphScope,
+            { defaultGraphIsGraphUnion: storeDefaultGraphIsGraphUnion(this.store) }), reads, options?.excludeGraphPrefixes);
         }
         const scopeRequired = () => new ScopedQueryViolationError(
           'this store cannot answer that query without a context graph now; give the query a context graph');

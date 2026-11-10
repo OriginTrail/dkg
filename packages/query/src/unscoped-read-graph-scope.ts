@@ -2,6 +2,7 @@
 import { READ_GRAPH_SEGMENT } from '@origintrail-official/dkg-core';
 import { isSparqlKeyword, type PreparedSparqlQuery, type SparqlLexicalToken } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
+import { hasDefaultGraphRead } from './sparql-default-graph-pattern.js';
 import { isRepeatedPathOperator } from './sparql-graph-dataset.js';
 import { transitionGraphScope } from './sparql-query-transition.js';
 import { createVariableAllocator } from './sparql-rewrite-names.js';
@@ -42,17 +43,21 @@ export function readGraphPartitionExclusionFilter(variable: string): string {
  * while the store may hold read-graph partitions:
  * - each `GRAPH ?g { … }` is followed by a filter that leaves the partitions
  *   out, wherever the clause is;
- * - each triple pattern outside GRAPH keeps reading the store's merged default
- *   graph, and only matches a triple that a graph outside the partitions holds
- *   (see `defaultGraphEdits`);
- * - `DESCRIBE` is sent as the store's description, one step out and one step
- *   in, written as a CONSTRUCT.
+ * - on a store whose default graph merges every graph (`defaultGraphIsGraphUnion`),
+ *   each triple pattern outside GRAPH keeps reading that merge, and only
+ *   matches a triple that a graph outside the partitions holds (see
+ *   `defaultGraphEdits`); `DESCRIBE` is sent as the store's description, one
+ *   step out and one step in, written as a CONSTRUCT. On any other store a
+ *   pattern outside GRAPH, and `DESCRIBE`, are refused.
  * A query this cannot keep out of the partitions is refused: one that names its
  * own dataset, declares BASE, carries a query hint (which can change how the store reads its
  * graphs), has a `*`, `+` or `?` path, or has a `GRAPH ?g` group that does not
  * begin with a triple pattern. Read-graph IRIs themselves were refused before.
  */
-export function hideReadGraphPartitions(scope: PreparedSparqlQuery): PreparedSparqlQuery {
+export function hideReadGraphPartitions(
+  scope: PreparedSparqlQuery,
+  store: { readonly defaultGraphIsGraphUnion?: boolean } = {},
+): PreparedSparqlQuery {
   if (scope.hasDatasetClause) throw new UnscopedReadGraphQueryError('A query with FROM or FROM NAMED');
   // Without BASE, a constant graph is an IRI as written or a prefix and local name, which the
   // read-graph name check before this expands in full; GRAPH constants need no filter then.
@@ -66,6 +71,13 @@ export function hideReadGraphPartitions(scope: PreparedSparqlQuery): PreparedSpa
       && (scope.prepared.tokens[index + 1] as { logicalValue: string }).logicalValue === '{'))) {
     throw new UnscopedReadGraphQueryError('A query with a named subquery');
   }
+  // The rewrite outside GRAPH checks each triple with GRAPH ?h, which only covers the default
+  // graph where that graph merges every graph GRAPH ?h reaches.
+  if (!store.defaultGraphIsGraphUnion) {
+    if (scope.operation === 'DESCRIBE') throw new UnscopedReadGraphQueryError('DESCRIBE');
+    if (hasDefaultGraphRead(scope)) throw new UnscopedReadGraphQueryError('A pattern outside GRAPH');
+    return transitionGraphScope(scope, applyEdits(scope.source, graphFilterEdits(scope)));
+  }
   const query = scope.operation === 'DESCRIBE' ? transitionGraphScope(scope, describeAsConstruct(scope))
     : isShortConstruct(scope) ? transitionGraphScope(scope, shortConstructAsLong(scope)) : scope;
   let edits: SourceEdit[];
@@ -75,12 +87,16 @@ export function hideReadGraphPartitions(scope: PreparedSparqlQuery): PreparedSpa
     if (error instanceof UnrewrittenPatternError) throw new UnscopedReadGraphQueryError(error.what);
     throw error;
   }
-  let source = query.source;
+  return transitionGraphScope(query, applyEdits(query.source, edits));
+}
+
+function applyEdits(text: string, edits: SourceEdit[]): string {
+  let source = text;
   // From the end; at one offset, a replacement before an insertion, so the insertion stays in front of it.
   for (const edit of edits.sort((a, b) => b.start - a.start || b.end - a.end)) {
     source = `${source.slice(0, edit.start)}${edit.text}${source.slice(edit.end)}`;
   }
-  return transitionGraphScope(query, source);
+  return source;
 }
 
 const NOT_A_TRIPLE_START = new Set(['FILTER', 'BIND', 'VALUES', 'OPTIONAL', 'MINUS', 'GRAPH', 'SERVICE', 'SELECT']);

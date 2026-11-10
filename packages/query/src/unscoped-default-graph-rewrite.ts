@@ -63,8 +63,8 @@ class DefaultGraphRewriter {
       this.walkPattern(this.scope.operation === 'SELECT', operation, this.tokens.length, where.openingTokenIndex, where.closingTokenIndex);
     }
     this.walkExistsOutside(0, this.tokens.length, where?.openingTokenIndex ?? -1, where?.closingTokenIndex ?? -1);
-    if (this.introducedVariables && this.projectsEverything()) {
-      throw new UnrewrittenPatternError('SELECT * with a blank node or a property path outside GRAPH');
+    if (this.introducedVariables && (this.projectsEverything() || this.countsDistinctSolutions())) {
+      throw new UnrewrittenPatternError('SELECT * or COUNT(DISTINCT *) with a blank node or a property path outside GRAPH');
     }
     return this.edits;
   }
@@ -331,6 +331,12 @@ class DefaultGraphRewriter {
       else return null;
     }
     return key;
+  }
+
+  /** `COUNT(DISTINCT *)` tells solutions apart by every variable, the introduced ones included. */
+  private countsDistinctSolutions(): boolean {
+    return this.tokens.some((_token, index) => this.keyword(index, 'COUNT') && this.symbolAt(index + 1, '(')
+      && this.keyword(index + 2, 'DISTINCT') && this.symbolAt(index + 3, '*'));
   }
 
   private projectsEverything(): boolean {

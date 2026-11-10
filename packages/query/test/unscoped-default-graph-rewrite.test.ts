@@ -10,7 +10,10 @@ function scope(source: string) {
   if (prepared.status !== 'valid') throw new Error('Expected valid test input');
   return prepareGraphScope(prepared);
 }
-const hidden = (source: string) => materializePreparedSparql(hideReadGraphPartitions(scope(source)).prepared);
+// The rewrite outside GRAPH applies on a store whose default graph merges every graph.
+const UNION_STORE = { defaultGraphIsGraphUnion: true } as const;
+const hide = (source: string) => hideReadGraphPartitions(scope(source), UNION_STORE);
+const hidden = (source: string) => materializePreparedSparql(hide(source).prepared);
 const exists = (holder: string, triple: string) =>
   `FILTER EXISTS { GRAPH ${holder} { ${triple} } ${readGraphPartitionExclusionFilter(holder)} }`;
 
@@ -87,8 +90,10 @@ describe('patterns outside GRAPH', () => {
     ['DESCRIBE *', 'DESCRIBE * WHERE { ?s ?p ?o }'],
     ['DESCRIBE of an IRI with WHERE', 'DESCRIBE <urn:a> WHERE { ?s ?p ?o }'],
     ['DESCRIBE with solution modifiers', 'DESCRIBE ?s WHERE { ?s ?p ?o } LIMIT 1'],
+    ['COUNT(DISTINCT *) with a sequence path', 'SELECT (COUNT(DISTINCT *) AS ?n) WHERE { ?s <urn:p>/<urn:q> ?o }'],
+    ['COUNT(DISTINCT *) with a blank node', 'SELECT ?s (COUNT(DISTINCT *) AS ?n) WHERE { ?s <urn:p> [] } GROUP BY ?s'],
   ])('refuses %s', (_label, source) => {
-    expect(() => hideReadGraphPartitions(scope(source))).toThrow(UnscopedReadGraphQueryError);
+    expect(() => hide(source)).toThrow(UnscopedReadGraphQueryError);
   });
 
   it('reach patterns outside GRAPH in the projection, ORDER BY and HAVING', () => {
@@ -101,7 +106,7 @@ describe('patterns outside GRAPH', () => {
 
   it('reads an escaped a as rdf:type and refuses its repetition', () => {
     expect(hidden('SELECT ?s WHERE { ?s \\u0061 <urn:T> }')).toContain('?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <urn:T>');
-    expect(() => hideReadGraphPartitions(scope('SELECT ?s WHERE { ?s \\u0061* ?o }'))).toThrow(UnscopedReadGraphQueryError);
+    expect(() => hide('SELECT ?s WHERE { ?s \\u0061* ?o }')).toThrow(UnscopedReadGraphQueryError);
   });
 
   it('keeps the graph filter when a GRAPH clause touches the patterns after it', () => {
@@ -111,7 +116,8 @@ describe('patterns outside GRAPH', () => {
     expect(text).toContain(exists('?_holder0', '<urn:s> <urn:q> ?z'));
   });
 
-  it('lets SELECT * through when nothing new comes into scope', () => {
+  it('lets SELECT * and COUNT(DISTINCT *) through when nothing new comes into scope', () => {
     expect(hidden('SELECT * WHERE { ?s ?p ?o }')).toContain('FILTER EXISTS');
+    expect(hidden('SELECT (COUNT(DISTINCT *) AS ?n) WHERE { ?s <urn:p> ?o . ?o <urn:q> ?z }')).toContain('FILTER EXISTS');
   });
 });
