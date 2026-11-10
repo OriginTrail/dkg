@@ -67,8 +67,11 @@ describe('a call with tools among sellers that take them and sellers that do not
     return { ...unsigned, signature: wallets.get(seller)!.signingKey.sign(hashServiceOffer(domain, unsigned)).serialized };
   };
 
-  /** A router over sellers 1..`count`; those in `tools` take tool calls, those in `down` do not answer; `asked` counts quotes. */
-  function routerOf(count: number, tools: Set<bigint>, down = new Set<bigint>(), clock?: () => number) {
+  /**
+   * A router over sellers 1..`count`; those in `tools` take tool calls, those in `down` do not answer, and those in
+   * `unavailable` answer that they cannot serve now; `asked` counts quotes.
+   */
+  function routerOf(count: number, tools: Set<bigint>, down = new Set<bigint>(), clock?: () => number, unavailable = new Set<bigint>()) {
     const offers = Array.from({ length: count }, (_, i) => offer(BigInt(i + 1)));
     const asked: bigint[] = [];
     const router = new Router({
@@ -84,7 +87,9 @@ describe('a call with tools among sellers that take them and sellers that do not
         if (down.has(seller)) throw new Error('unreachable');
         return {
           seller: seller.toString(), epoch: 1,
-          offers: services.map((s) => ({ serviceId: s, pricePerUnit: seller.toString(), available: true, capacity: null, ...(tools.has(seller) ? { tools: true } : {}) })),
+          offers: services.map((s) => ({
+            serviceId: s, pricePerUnit: seller.toString(), available: !unavailable.has(seller), capacity: null, ...(tools.has(seller) ? { tools: true } : {}),
+          })),
         };
       },
       ...(clock ? { clock } : {}),
@@ -141,6 +146,23 @@ describe('a call with tools among sellers that take them and sellers that do not
     expect(await routerOf(3, new Set([2n]), new Set([2n])).router.pickFor(SERVICE, 1, 100n, { tools: true })).toEqual({ route: null, reason: 'no_seller' });
     // A text call is served by any of them.
     expect(await routerOf(3, new Set()).router.pickFor(SERVICE, 1, 100n)).toMatchObject({ route: { seller: 1n } });
+  });
+
+  it('is no route for now, not "none takes tools", while the seller that takes them cannot serve: from new quotes, from kept ones, and with none available', async () => {
+    // Seller 1 serves, without tools; seller 2 takes tools, but answers that it cannot serve now.
+    const { router, asked } = routerOf(2, new Set([2n]), new Set(), undefined, new Set([2n]));
+    expect(await router.pickFor(SERVICE, 1, 100n, { tools: true })).toEqual({ route: null, reason: 'no_seller' });
+    expect(asked).toEqual([1n, 2n]);
+    // At once again, from the quotes kept: the same, and nothing asked.
+    asked.length = 0;
+    expect(await router.pickFor(SERVICE, 1, 100n, { tools: true })).toEqual({ route: null, reason: 'no_seller' });
+    expect(asked).toEqual([]);
+    // A text call goes to the one that serves.
+    expect(await router.pick(SERVICE, 1, 100n)).toMatchObject({ seller: 1n });
+    // No seller can serve now: no route for now, with tools or without.
+    const none = routerOf(2, new Set([2n]), new Set(), undefined, new Set([1n, 2n])).router;
+    expect(await none.pickFor(SERVICE, 1, 100n, { tools: true })).toEqual({ route: null, reason: 'no_seller' });
+    expect(await none.pickFor(SERVICE, 1, 100n)).toEqual({ route: null, reason: 'no_seller' });
   });
 
   it('stays no route for now while a seller that may take tools is held out after its quote failed, and goes to it once it is back', async () => {

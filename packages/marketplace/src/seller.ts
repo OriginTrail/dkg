@@ -563,8 +563,8 @@ function resultOf(completion: Completion, allowed: number): ServeResult {
   }
   const reason = completion.finishReason;
   if (reason && CUT_SHORT.has(reason)) return { content: completion.content ?? '', finish_reason: reason };
-  if (completion.toolCalls?.length) return { content: completion.content, tool_calls: completion.toolCalls, finish_reason: 'tool_calls' };
-  return { content: completion.content ?? '' };
+  if (completion.tool_calls) return { content: completion.content, tool_calls: completion.tool_calls, finish_reason: 'tool_calls' };
+  return { content: completion.content };
 }
 
 /** The frozen prices a prices file holds: service id => epoch => wei per unit. `null` when it holds anything else. */

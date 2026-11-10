@@ -65,6 +65,16 @@ export interface ToolCall {
   function: { name: string; arguments: string };
 }
 
+/** One or more tool calls: an answer with tool calls has at least one. */
+export type ToolCalls = [ToolCall, ...ToolCall[]];
+
+/**
+ * A model's answer, as decoding makes every one (`answerFromWire`): text; or one or more tool calls, with text or
+ * none. A backend's completion, an assistant's message in a call's history and a served result are each one, with
+ * what they carry beside it.
+ */
+export type Answer = { content: string; tool_calls?: undefined } | { content: string | null; tool_calls: ToolCalls };
+
 /** A tool the model may call: a function, with a JSON Schema of its arguments. */
 export interface ToolSpec {
   type: 'function';
@@ -74,12 +84,12 @@ export interface ToolSpec {
 export type ToolChoice = 'none' | 'auto' | 'required' | { type: 'function'; function: { name: string } };
 
 /**
- * One message of a call: text from system, user or assistant; an assistant's
- * tool calls, with text or none; or a tool's result, answering one of them.
+ * One message of a call: text from system or user; an assistant's answer
+ * (`Answer`), text or tool calls; or a tool's result, answering one of them.
  */
 export type ChatMessage =
   | { role: 'system' | 'user'; content: string }
-  | { role: 'assistant'; content: string | null; tool_calls?: ToolCall[] }
+  | ({ role: 'assistant' } & Answer)
   | { role: 'tool'; content: string; tool_call_id: string };
 
 /**
@@ -100,12 +110,8 @@ export type FinishReason = 'stop' | 'length' | 'tool_calls' | 'content_filter';
 
 export const FINISH_REASONS: readonly FinishReason[] = ['stop', 'length', 'tool_calls', 'content_filter'];
 
-/** What a served call answers: text, or tool calls with text or none; and why the model stopped, when not `stop`. */
-export interface ServeResult {
-  content: string | null;
-  tool_calls?: ToolCall[];
-  finish_reason?: FinishReason;
-}
+/** What a served call answers (`Answer`), and why the model stopped, when not `stop`. */
+export type ServeResult = Answer & { finish_reason?: FinishReason };
 
 /** How a served call's units split, as the seller's backend counted them within the receipt's units. Not signed. */
 export interface ServeUsage {
@@ -371,7 +377,7 @@ function toolCallId(value: unknown, field: string): string {
 }
 
 /** Tool calls: 1 to `TOOL_LIMITS.toolCalls` function calls, each with an id, a name and its arguments as text. */
-export function toolCallsFromWire(raw: unknown, field = 'tool_calls'): ToolCall[] {
+export function toolCallsFromWire(raw: unknown, field = 'tool_calls'): ToolCalls {
   if (!Array.isArray(raw) || raw.length === 0 || raw.length > TOOL_LIMITS.toolCalls) {
     throw new WireError(`${field} must be a list of 1 to ${TOOL_LIMITS.toolCalls} tool calls`);
   }
@@ -380,7 +386,7 @@ export function toolCallsFromWire(raw: unknown, field = 'tool_calls'): ToolCall[
     if (!isRecord(c) || (c.type !== undefined && c.type !== 'function') || !isRecord(c.function)) throw new WireError(`${at} must be a function call`);
     if (typeof c.function.arguments !== 'string') throw new WireError(`${at}.function.arguments must be text`);
     return { id: toolCallId(c.id, `${at}.id`), type: 'function', function: { name: functionName(c.function.name, `${at}.function.name`), arguments: c.function.arguments } };
-  });
+  }) as ToolCalls;
 }
 
 /** Tools: up to `TOOL_LIMITS.tools` functions, each named once, with only the fields OpenAI defines for one. */
@@ -428,10 +434,10 @@ function messageFromWire(m: unknown, i: number, called: Set<string>): ChatMessag
   if (!isRecord(m)) throw new WireError(`${at} must be a message`);
   if (m.role === 'assistant') {
     // An answer the model gave before, decoded as any answer is (`answerFromWire`): text, or tool calls with text or none.
-    const { content, tool_calls: toolCalls } = answerFromWire(m, at);
-    if (!toolCalls) return { role: 'assistant', content: content! };
-    for (const c of toolCalls) called.add(c.id);
-    return { role: 'assistant', content, tool_calls: toolCalls };
+    const answer = answerFromWire(m, at);
+    if (!answer.tool_calls) return { role: 'assistant', content: answer.content };
+    for (const c of answer.tool_calls) called.add(c.id);
+    return { role: 'assistant', content: answer.content, tool_calls: answer.tool_calls };
   }
   if (m.role === 'tool') {
     if (typeof m.content !== 'string') throw new WireError(`${at} must be a tool's result as text`);
@@ -486,13 +492,17 @@ export function usesTools(body: InferenceBody): boolean {
  * shape: the connector reads a backend's message with it, and the wire a
  * seller's result. `field` names it in errors.
  */
-export function answerFromWire(raw: unknown, field = 'result'): { content: string | null; tool_calls?: ToolCall[] } {
+export function answerFromWire(raw: unknown, field = 'result'): Answer {
   if (!isRecord(raw)) throw new WireError(`${field} must have text content, or tool calls`);
-  const toolCalls = absent(raw.tool_calls) ? undefined : toolCallsFromWire(raw.tool_calls, `${field}.tool_calls`);
-  if (typeof raw.content !== 'string' && !(toolCalls && (raw.content === null || raw.content === undefined))) {
+  if (absent(raw.tool_calls)) {
+    if (typeof raw.content !== 'string') throw new WireError(`${field} must have text content, or tool calls`);
+    return { content: raw.content };
+  }
+  const toolCalls = toolCallsFromWire(raw.tool_calls, `${field}.tool_calls`);
+  if (typeof raw.content !== 'string' && raw.content !== null && raw.content !== undefined) {
     throw new WireError(`${field} must have text content, or tool calls`);
   }
-  return { content: typeof raw.content === 'string' ? raw.content : null, ...(toolCalls ? { tool_calls: toolCalls } : {}) };
+  return { content: typeof raw.content === 'string' ? raw.content : null, tool_calls: toolCalls };
 }
 
 /**

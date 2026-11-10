@@ -42,12 +42,15 @@ import {
   unitsBound,
   usesTools,
   type AccessKey,
+  type ChatMessage,
   type Completion,
   type CompletionCall,
   type Connector,
   type GatewayAnswer,
   type ServeResponse,
   type ServiceOffer,
+  type ToolCalls,
+  type ToolSpec,
 } from '../src/index.js';
 import { UNITS_FOR_TOOLS, UNITS_PER_CALL, UNITS_PER_MESSAGE, UNITS_PER_TOOL, inputUnitsBound } from '../src/seller-bounds.js';
 
@@ -55,11 +58,12 @@ const NODE = new ethers.Wallet(`0x${'22'.repeat(32)}`);
 const MODEL = 'urn:test:model:tools';
 const SERVICE = serviceIdOf(MODEL);
 const PRICE = 10n;
-const QUESTION = { role: 'user', content: 'synthetic question' };
+// Valid fixtures, typed by the contracts they keep; the malformed inputs the decoders refuse are written where they are used.
+const QUESTION = { role: 'user', content: 'synthetic question' } satisfies ChatMessage;
 const CHAT = { model: MODEL, messages: [QUESTION], max_tokens: 20 };
-const TOOLS = [{ type: 'function', function: { name: 'list_deployments', description: 'Lists deployments', parameters: { type: 'object', properties: {} } } }];
-const CALLS = [{ id: 'call_1', type: 'function', function: { name: 'list_deployments', arguments: '{}' } }];
-const TURN = [QUESTION, { role: 'assistant', content: null, tool_calls: CALLS }, { role: 'tool', tool_call_id: 'call_1', content: '[]' }];
+const TOOLS = [{ type: 'function', function: { name: 'list_deployments', description: 'Lists deployments', parameters: { type: 'object', properties: {} } } }] satisfies ToolSpec[];
+const CALLS = [{ id: 'call_1', type: 'function', function: { name: 'list_deployments', arguments: '{}' } }] satisfies ToolCalls;
+const TURN = [QUESTION, { role: 'assistant', content: null, tool_calls: CALLS }, { role: 'tool', tool_call_id: 'call_1', content: '[]' }] satisfies ChatMessage[];
 
 let dir: string;
 beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'marketplace-tools-')); });
@@ -110,14 +114,14 @@ describe('the wire, with tools', () => {
   it('commits to a text result as 10.1.0 did, and to a result with tool calls by bytes no text has', () => {
     expect(resultCommitmentOf({ content: 'answer' })).toBe(ethers.keccak256(ethers.toUtf8Bytes('answer')));
     expect(resultCommitmentOf({ content: 'answer', finish_reason: 'length' })).toBe(resultCommitmentOf('answer'));
-    const calls = resultBytesOf({ content: null, tool_calls: CALLS as never });
+    const calls = resultBytesOf({ content: null, tool_calls: CALLS });
     expect(calls[0]).toBe(0xff);
     expect(new TextDecoder().decode(calls.subarray(1))).toBe('[null,[["call_1","function","list_deployments","{}"]]]');
     // A text that reads as the calls' JSON is not the calls.
-    expect(resultCommitmentOf(new TextDecoder().decode(calls.subarray(1)))).not.toBe(resultCommitmentOf({ content: null, tool_calls: CALLS as never }));
+    expect(resultCommitmentOf(new TextDecoder().decode(calls.subarray(1)))).not.toBe(resultCommitmentOf({ content: null, tool_calls: CALLS }));
     // Every part of a call is committed to.
-    const other = [{ ...CALLS[0], function: { name: 'list_deployments', arguments: '{"all":true}' } }];
-    expect(resultCommitmentOf({ content: null, tool_calls: other as never })).not.toBe(resultCommitmentOf({ content: null, tool_calls: CALLS as never }));
+    const other = [{ ...CALLS[0], function: { name: 'list_deployments', arguments: '{"all":true}' } }] satisfies ToolCalls;
+    expect(resultCommitmentOf({ content: null, tool_calls: other })).not.toBe(resultCommitmentOf({ content: null, tool_calls: CALLS }));
   });
 
   const served = { ok: true, result: { content: null, tool_calls: CALLS, finish_reason: 'tool_calls' }, receipt: {}, receiptSignature: '0x00', budgetIndex: 0 };
@@ -213,7 +217,7 @@ describe('the OpenAI-compatible backend, with tools', () => {
     const backend = connectorOf({ kind: 'openai', baseUrl: base, model: 'test-model' });
     const body = inferenceBodyFromWire({ messages: TURN, max_tokens: 7, tools: TOOLS, tool_choice: 'auto', parallel_tool_calls: false });
     expect(await backend.complete({ messages: body.messages, maxTokens: 7, tools: body.tools, toolChoice: 'auto', parallelToolCalls: false }))
-      .toEqual({ content: null, toolCalls: CALLS, promptTokens: 40, completionTokens: 9 });
+      .toEqual({ content: null, tool_calls: CALLS, promptTokens: 40, completionTokens: 9 });
     expect(seen).toEqual({
       model: 'test-model', messages: TURN, max_tokens: 7, temperature: 0, stream: false, tools: TOOLS, tool_choice: 'auto', parallel_tool_calls: false,
     });
@@ -230,7 +234,7 @@ describe('the OpenAI-compatible backend, with tools', () => {
   it('fails, as nothing served, on tool calls that are not shaped as calls', async () => {
     reply = { choices: [{ message: { content: null, tool_calls: [{ id: 'c', type: 'function', function: { name: 'f' } }] } }], usage: { prompt_tokens: 3, completion_tokens: 2 } };
     const backend = connectorOf({ kind: 'openai', baseUrl: base, model: 'test-model' });
-    await expect(backend.complete({ messages: [{ role: 'user', content: 'q' }], maxTokens: 7, tools: TOOLS as never })).rejects.toThrow(UpstreamError);
+    await expect(backend.complete({ messages: [{ role: 'user', content: 'q' }], maxTokens: 7, tools: TOOLS })).rejects.toThrow(UpstreamError);
   });
 });
 
@@ -305,7 +309,7 @@ describe('a call with tools through the gateway', () => {
     answers = [];
     tamper = undefined;
     quoteTools = undefined;
-    completion = { content: null, toolCalls: CALLS as never, promptTokens: 40, completionTokens: 9 };
+    completion = { content: null, tool_calls: CALLS, promptTokens: 40, completionTokens: 9 };
   });
 
   it("goes to a seller whose quote says it takes them, and the model's calls come back, committed to, with the usage split", async () => {
@@ -367,7 +371,8 @@ describe('a call with tools through the gateway', () => {
     const total = await call({ ...CHAT, tools: TOOLS });
     expect(total.status).toBe(200);
     expect(body(total).usage).toEqual({ total_tokens: 49 });
-    tamper = (a) => (a.ok ? { ...a, result: { ...a.result, tool_calls: [{ ...CALLS[0]!, function: { name: 'list_deployments', arguments: '{"all":true}' } }] as never } } : a);
+    const changedCalls = [{ ...CALLS[0], function: { name: 'list_deployments', arguments: '{"all":true}' } }] satisfies ToolCalls;
+    tamper = (a) => (a.ok ? { ...a, result: { content: a.result.content, tool_calls: changedCalls } } : a);
     const changed = await call({ ...CHAT, tools: TOOLS });
     expect(changed.status).toBe(502);
     expect(body(changed)).toMatchObject({ error: { code: 'bad_receipt' }, problem: 'result_mismatch' });
@@ -377,30 +382,30 @@ describe('a call with tools through the gateway', () => {
     await setUp(true);
     // The backend reached its token limit inside a call's arguments.
     completion = {
-      content: null, toolCalls: [{ id: 'call_1', type: 'function', function: { name: 'list_deployments', arguments: '{"id":' } }] as never,
+      content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'list_deployments', arguments: '{"id":' } }],
       finishReason: 'length', promptTokens: 40, completionTokens: 20,
     };
     const cut = await call({ ...CHAT, tools: TOOLS });
     expect(cut.status).toBe(200);
     expect(body(cut).choices).toEqual([{ index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'length' }]);
-    completion = { content: 'filtered', toolCalls: CALLS as never, finishReason: 'content_filter', promptTokens: 40, completionTokens: 5 };
+    completion = { content: 'filtered', tool_calls: CALLS, finishReason: 'content_filter', promptTokens: 40, completionTokens: 5 };
     expect(body(await call({ ...CHAT, tools: TOOLS })).choices).toEqual([{ index: 0, message: { role: 'assistant', content: 'filtered' }, finish_reason: 'content_filter' }]);
     // A backend that finished returns its calls whole.
-    completion = { content: null, toolCalls: CALLS as never, promptTokens: 40, completionTokens: 9 };
+    completion = { content: null, tool_calls: CALLS, promptTokens: 40, completionTokens: 9 };
     expect(body(await call({ ...CHAT, tools: TOOLS })).choices[0].message.tool_calls).toEqual(CALLS);
   });
 
   it('keeps the calls of a completion whose backend says it stopped for them, or stopped: signed and checked', async () => {
     await setUp(true);
     for (const finishReason of ['tool_calls', 'stop'] as const) {
-      completion = { content: null, toolCalls: CALLS as never, finishReason, promptTokens: 40, completionTokens: 9 };
+      completion = { content: null, tool_calls: CALLS, finishReason, promptTokens: 40, completionTokens: 9 };
       const answer = await call({ ...CHAT, tools: TOOLS });
       // A 200 is a receipt the buyer checked: its seller's signature, over a commitment to these calls.
       expect(answer.status).toBe(200);
       expect(body(answer).choices).toEqual([{ index: 0, message: { role: 'assistant', content: null, tool_calls: CALLS }, finish_reason: 'tool_calls' }]);
       const served = answers.at(-1) as { ok: true; result: unknown; receipt: { resultCommitment: string } };
       expect(served.result).toEqual({ content: null, tool_calls: CALLS, finish_reason: 'tool_calls' });
-      expect(served.receipt.resultCommitment).toBe(resultCommitmentOf({ content: null, tool_calls: CALLS as never }));
+      expect(served.receipt.resultCommitment).toBe(resultCommitmentOf({ content: null, tool_calls: CALLS }));
     }
   });
 
@@ -462,7 +467,7 @@ describe('a call with tools through the gateway', () => {
   it('answers a completion over its units with its text cut short, and no tool calls', async () => {
     await setUp(true);
     // More output than the call's units leave: the seller cuts it, and a cut tool call is no call.
-    completion = { content: 'partial text', toolCalls: CALLS as never, promptTokens: 40, completionTokens: 10_000 };
+    completion = { content: 'partial text', tool_calls: CALLS, promptTokens: 40, completionTokens: 10_000 };
     const answer = await call({ ...CHAT, tools: TOOLS });
     expect(answer.status).toBe(200);
     const choice = body(answer).choices[0];

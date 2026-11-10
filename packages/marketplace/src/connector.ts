@@ -18,18 +18,17 @@
  * temperature of 0, as in 10.1.0. A backend that refuses a call has its own
  * words for why in the error and the seller's log, cut short, the key never.
  */
-import { WireError, answerFromWire, type ChatMessage, type FinishReason, type ToolCall, type ToolChoice, type ToolSpec } from './wire.js';
+import { WireError, answerFromWire, type Answer, type ChatMessage, type FinishReason, type ToolChoice, type ToolSpec } from './wire.js';
 
-export interface Completion {
-  /** The text; `null` when the model only called tools. */
-  content: string | null;
-  /** The tools the model called, when it called any. */
-  toolCalls?: ToolCall[];
-  /** Why the backend stopped, when it says `length` or `content_filter`; `stop` and `tool_calls` go without saying. */
+/**
+ * A backend's answer (`Answer`: text, or the tools the model called, with text or none), and what it counted. Its
+ * `finishReason` is said when the backend says `length` or `content_filter`; `stop` and `tool_calls` go without saying.
+ */
+export type Completion = Answer & {
   finishReason?: FinishReason;
   promptTokens: number;
   completionTokens: number;
-}
+};
 
 export interface CompletionCall {
   messages: ChatMessage[];
@@ -157,7 +156,7 @@ export function connectorOf(settings: ConnectorSettings): Connector {
       } | null;
       const choice = out?.choices?.[0];
       // The answer's text and tool calls as the wire decodes a served result's: one policy for both.
-      let answer: { content: string | null; tool_calls?: ToolCall[] };
+      let answer: Answer;
       try {
         answer = answerFromWire(choice?.message, 'the answer');
       } catch (err) {
@@ -167,13 +166,7 @@ export function connectorOf(settings: ConnectorSettings): Connector {
       const completionTokens = out?.usage?.completion_tokens;
       if (!isCount(promptTokens) || !isCount(completionTokens)) throw new UpstreamError('the backend answered without token counts');
       const finishReason = choice?.finish_reason === 'length' || choice?.finish_reason === 'content_filter' ? choice.finish_reason : undefined;
-      return {
-        content: answer.content,
-        ...(answer.tool_calls ? { toolCalls: answer.tool_calls } : {}),
-        ...(finishReason ? { finishReason } : {}),
-        promptTokens,
-        completionTokens,
-      };
+      return { ...answer, ...(finishReason ? { finishReason } : {}), promptTokens, completionTokens };
     },
   };
 }
