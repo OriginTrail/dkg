@@ -74,14 +74,14 @@ type Variant = keyof typeof VARIANTS;
  * - graph-path: inside GRAPH ?g with a *, + or ? path; graph-group: a GRAPH ?g group without a leading triple pattern;
  * - default: outside GRAPH; default-path: outside GRAPH with a *, + or ? path;
  * - default-star: SELECT * where blank nodes or paths outside GRAPH add variables;
- * - hint: carries a query hint; dataset: names its own dataset;
+ * - hint: carries a query hint; dataset: names its own dataset; base: declares BASE;
  * - describe: DESCRIBE of IRIs, or of variables of a pattern outside GRAPH; describe-all: DESCRIBE *;
  * - describe-graph: DESCRIBE from a pattern with GRAPH, which the store itself does not answer;
  * - names: names a read graph, which every store refuses.
  * A COUNT grouped by a key it does not project is left out: the store itself rejects it.
  */
-type Kind = 'graph' | 'graph-path' | 'graph-group' | 'default' | 'default-path' | 'default-star' | 'hint' | 'dataset' | 'describe'
-  | 'describe-all' | 'describe-graph' | 'names';
+type Kind = 'graph' | 'graph-path' | 'graph-group' | 'default' | 'default-path' | 'default-star' | 'hint' | 'dataset' | 'base'
+  | 'describe' | 'describe-all' | 'describe-graph' | 'names';
 const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
   ['D1 all triples', 'default', 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }'],
   ['D1a all triples, analytic hint', 'hint', `${HINTS} SELECT ?s ?p ?o WHERE { hint:Query hint:analytic "true" . ?s ?p ?o }`],
@@ -145,6 +145,7 @@ const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
   ['Q1 ASK over GRAPH', 'graph', 'ASK { GRAPH ?g { <urn:gone> <urn:p> <urn:x> } }'],
   ['E1 graphs by an empty group', 'graph-group', 'SELECT ?g WHERE { GRAPH ?g { } }'],
   ['H1 a hint inside GRAPH', 'hint', `${HINTS} SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o . hint:Prior hint:runFirst "true" } }`],
+  ['K1 a read graph named through BASE and an empty prefix', 'base', `BASE <${ROOT}/_read#unused> PREFIX r: <> SELECT ?s ?p ?o WHERE { GRAPH r:\\/state { ?s ?p ?o } }`],
   ['F1 FROM NAMED with GRAPH ?g', 'dataset', `SELECT ?g ?s FROM NAMED <${G1}> WHERE { GRAPH ?g { ?s ?p ?o } }`],
   ['C4 CONSTRUCT of every quad', 'graph', 'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }'],
   ['X6 DESCRIBE over GRAPH', 'describe-graph', 'DESCRIBE ?s WHERE { GRAPH ?g { ?s <urn:p> <urn:x> } }'],

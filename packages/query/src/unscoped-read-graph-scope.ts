@@ -48,12 +48,17 @@ export function readGraphPartitionExclusionFilter(variable: string): string {
  * - `DESCRIBE` is sent as the store's description, one step out and one step
  *   in, written as a CONSTRUCT.
  * A query this cannot keep out of the partitions is refused: one that names its
- * own dataset, carries a query hint (which can change how the store reads its
+ * own dataset, declares BASE, carries a query hint (which can change how the store reads its
  * graphs), has a `*`, `+` or `?` path, or has a `GRAPH ?g` group that does not
  * begin with a triple pattern. Read-graph IRIs themselves were refused before.
  */
 export function hideReadGraphPartitions(scope: PreparedSparqlQuery): PreparedSparqlQuery {
   if (scope.hasDatasetClause) throw new UnscopedReadGraphQueryError('A query with FROM or FROM NAMED');
+  // Without BASE, a constant graph is an IRI as written or a prefix and local name, which the
+  // read-graph name check before this expands in full; GRAPH constants need no filter then.
+  if (scope.prepared.tokens.some((_token, index) => isSparqlKeyword(scope.prepared.tokens, index, 'BASE'))) {
+    throw new UnscopedReadGraphQueryError('A query with BASE');
+  }
   if (carriesQueryHint(scope)) throw new UnscopedReadGraphQueryError('A query with a query hint');
   const query = scope.operation === 'DESCRIBE' ? transitionGraphScope(scope, describeAsConstruct(scope))
     : isShortConstruct(scope) ? transitionGraphScope(scope, shortConstructAsLong(scope)) : scope;
@@ -116,9 +121,7 @@ function holdsRepeatedPath(scope: PreparedSparqlQuery, opening: number, closing:
 
 function carriesQueryHint(scope: PreparedSparqlQuery): boolean {
   const { tokens } = scope.prepared;
-  const baseToken = tokens.find((_token, index) => isSparqlKeyword(tokens, index - 1, 'BASE'));
-  const base = baseToken?.kind === 'iri' ? baseToken.logicalValue : undefined;
-  const isHint = (iri: string) => resolve(iri, base).startsWith(QUERY_HINT_NAMESPACE);
+  const isHint = (iri: string) => iri.startsWith(QUERY_HINT_NAMESPACE);
   for (const token of tokens) {
     if (token.kind === 'iri' && isHint(token.logicalValue)) return true;
     if (token.kind !== 'prefixed-name') continue;
@@ -131,14 +134,6 @@ function carriesQueryHint(scope: PreparedSparqlQuery): boolean {
   return false;
 }
 
-function resolve(iri: string, base: string | undefined): string {
-  if (base === undefined || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(iri)) return iri;
-  try {
-    return new URL(iri, base).href;
-  } catch {
-    return iri;
-  }
-}
 
 /**
  * `DESCRIBE` as the store's default description, one step out and one step in

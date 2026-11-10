@@ -101,7 +101,8 @@ describe('unscoped queries the rewrite cannot keep out of read-graph partitions'
     ['a hint IRI', 'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o . <http://www.bigdata.com/queryHints#Prior> <http://www.bigdata.com/queryHints#runFirst> "true" } }'],
     ['the built-in hint prefix', 'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o . hint:Prior hint:runFirst "true" } }'],
     ['a prefix bound to hints', 'PREFIX h: <http://www.bigdata.com/queryHints#> SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o . h:Prior h:runFirst "true" } }'],
-    ['a relative hint IRI', 'BASE <http://www.bigdata.com/> SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o . <queryHints#Prior> <queryHints#runFirst> "true" } }'],
+    ['BASE', 'BASE <http://www.bigdata.com/> SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o . <queryHints#Prior> <queryHints#runFirst> "true" } }'],
+    ['a graph named through BASE and an empty prefix', 'BASE <did:dkg:context-graph:cg/_read#unused> PREFIX r: <> SELECT ?s ?p ?o WHERE { GRAPH r:\\/state { ?s ?p ?o } }'],
     ['a GRAPH clause that names neither an IRI nor a variable', 'SELECT ?s WHERE { GRAPH undeclared:g { ?s ?p ?o } }'],
     ['an empty GRAPH group', 'SELECT ?g WHERE { GRAPH ?g { } }'],
     ['a GRAPH group with only a FILTER', 'SELECT ?g WHERE { GRAPH ?g { FILTER(true) } }'],
@@ -128,7 +129,6 @@ describe('unscoped queries the rewrite cannot keep out of read-graph partitions'
   it('does not take a hint prefix bound elsewhere, or a hint in a string, for a hint', () => {
     expect(refusal('PREFIX hint: <urn:not-hints#> SELECT ?s WHERE { GRAPH ?g { ?s hint:p ?o } }')).toBeUndefined();
     expect(refusal('SELECT ?s WHERE { GRAPH ?g { ?s ?p "http://www.bigdata.com/queryHints#Prior" } }')).toBeUndefined();
-    expect(refusal('BASE <urn:base/> SELECT ?s WHERE { GRAPH ?g { ?s <relative> ?o } }')).toBeUndefined();
     expect(refusal('PREFIX h: <http://www.bigdata.com/> SELECT ?s WHERE { GRAPH ?g { ?s h:other ?o } }')).toBeUndefined();
   });
 
