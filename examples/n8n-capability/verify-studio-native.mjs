@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { createRequire } from 'node:module';
+import { nativeExecutionParser } from './native-verifier-runtime.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { loadStudioContext } from './studio-context.mjs';
 const { registry: { component }, compiler: { compileStudio } } = await loadStudioContext();
@@ -36,7 +36,7 @@ if (process.argv.includes('--prepare')) {
 } else {
   const origin = new URL(process.argv[3] ?? 'http://127.0.0.1:45780');
   if(origin.origin!=='http://127.0.0.1:45780') throw new Error('Fixture loopback origin required.');
-  const require=createRequire('/private/tmp/dkg-n8n-runtime-20261023/node_modules/n8n/package.json'),{parse}=require('flatted');
+  const parse = nativeExecutionParser();
   const db=new DatabaseSync(join(state,'n8n/.n8n/database.sqlite'),{readOnly:true});
   const evidence=[];
   try {

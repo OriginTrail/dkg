@@ -142,13 +142,13 @@ test('authenticated JPB write checks its digest before dispatch and verifies exa
         return Response.json({ kind: 'answer', status: 200, body: path.endsWith('/wm/quads')
           ? { quads: changed ? [] : payload.quads } : { status: 'wm-sealed' } });
       };
-      await assert.rejects(profile.transport({ ...payload, digest: '0'.repeat(64) }, 'write', context), /digest differs/);
+      await assert.rejects(profile.operations['dkg-write'].transport({ ...payload, digest: '0'.repeat(64) }, context), /digest differs/);
       assert.equal(hits, 0);
-      assert.equal((await profile.transport(payload, 'write', context)).readbackVerified, true);
-      await profile.transport({ ...payload, allowCreate: false }, 'write', context);
+      assert.equal((await profile.operations['dkg-write'].transport(payload, context)).readbackVerified, true);
+      await profile.operations['dkg-write'].transport({ ...payload, allowCreate: false }, context);
       assert.equal(creates, 1);
       changed = true;
-      await assert.rejects(profile.transport(payload, 'write', context), /differs/);
+      await assert.rejects(profile.operations['dkg-write'].transport(payload, context), /differs/);
       assert.equal(creates, 1);
       console.log('verified');
     `;

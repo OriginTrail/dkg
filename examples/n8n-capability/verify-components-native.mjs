@@ -2,7 +2,7 @@ import { normalizeN8nResult } from '../../packages/cli/dist/semantic-runtime-n8n
 /** Exercise the actual native engine in a separate credential-free fixture instance. */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { createRequire } from 'node:module';
+import { nativeExecutionParser } from './native-verifier-runtime.mjs';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -17,8 +17,7 @@ const origin = new URL(process.argv[3] ?? 'http://127.0.0.1:45780');
 if (!process.argv[2] || origin.protocol !== 'http:' || origin.hostname !== '127.0.0.1') throw new Error('Supply an isolated local fixture state and loopback URL.');
 const manifest = JSON.parse(readFileSync(join(state, 'components.json'), 'utf8'));
 if (manifest.components.some(c => c.descriptor.connection && c.enabled)) throw new Error('This verifier requires a credential-free fixture, never the owned Google instance.');
-const require = createRequire(process.argv[4] ?? '/private/tmp/dkg-n8n-runtime-20261023/node_modules/n8n/package.json');
-const { parse } = require('flatted');
+const parse = nativeExecutionParser();
 const db = new DatabaseSync(join(state, 'n8n/.n8n/database.sqlite'), { readOnly: true });
 const evidence = [];
 const skipHttp = process.argv.includes('--skip-http');

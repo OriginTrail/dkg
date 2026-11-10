@@ -58,6 +58,26 @@ test('maps native data into a Program and its result into the following native b
   assert.deepEqual(readStudio(studioProgramSource(proof.compiled)).definition, proof.compiled.definition);
 });
 
+test('child receipt reads are bounded and out-of-order completion preserves ordered workflow results', async () => {
+  const proof = await execute(graph([program]), Array.from({ length: 8 }, (_, value) => ({ value })));
+  const gates = Array.from({ length: 4 }, () => Promise.withResolvers());
+  let active = 0, peak = 0, reads = 0;
+  const pending = programWorkflowReceipt(proof.compiled, proof.result, proof.input, async iri => {
+    const index = reads++; peak = Math.max(peak, ++active);
+    if (index < gates.length) await gates[index].promise;
+    active--; return proof.stores.get(iri);
+  });
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(reads, 4); assert.equal(peak, 4);
+  } finally { gates.toReversed().forEach(gate => gate.resolve()); }
+  assert.deepEqual(await pending, proof.receipt); assert.equal(reads, 8); assert.equal(peak, 4);
+  let invalidReads = 0;
+  proof.result.trace.calls.at(-1).target = 'urn:unapproved:child';
+  await assert.rejects(programWorkflowReceipt(proof.compiled, proof.result, proof.input, async () => { invalidReads++; return []; }), /child invocation differs/);
+  assert.equal(invalidReads, 0);
+});
+
 test('runs all-items mode once and preserves typed array input', async () => {
   const selected = structuredClone(program);
   selected.params.inputMode = 'all-items'; selected.params.inputMapping = { records: '{{ $json }}' };

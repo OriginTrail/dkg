@@ -82,10 +82,17 @@ Write/Invoke parameters or throwing transport placeholders. See
 through the native MCP callback path.
 
 Existing profiles with the original flat three-operation contract are translated
-by `dkg-profile-legacy.mjs`. That translation preserves their revisions, descriptor
+once at context/store construction into a validated runtime operation model by
+`dkg-profile-legacy.mjs`. Subsequent operation lookups reuse that model and the same
+shared input loader. That translation preserves their revisions, descriptor
 parameter order, generated guest source and native hashes. Their original
 `enabled(componentId)` switches and shared `transport(payload, operation, context)`
 continue to apply. New profiles should use `operations` directly.
+
+Completed manual Studio replays also reauthorize account-bound profile access
+before disclosing output or traces. Workflow approval, component policy and
+profile pins are rechecked after that asynchronous authorization, even when the
+Program invocation returns its retained receipt without native callbacks.
 
 The transport remains responsible for verification at the actual node and for
 remote idempotency; dependency injection alone does not establish those guarantees.

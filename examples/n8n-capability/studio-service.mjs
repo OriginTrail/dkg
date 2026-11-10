@@ -140,6 +140,18 @@ export function createStudioService({ graphId, owner, client, repository, provid
         blockId: write.request.blockId, requestHash: write.requestHash, receipt };
     }
     const trace = JSON.parse(output.output.traceJson);
+    if (compiled.definition.nodes.some(n => isDkg(n.componentId)) && profile.requiresNosActor) {
+      // Completed Program replay bypasses native callbacks. Its retained output
+      // still requires current node access, independently of Program approval.
+      if (!actor || actor.accountId !== profile.accountId || actor.role !== 'owner') throw componentFailure('Authenticated nOS owner required.');
+      await profile.authorize(actor);
+      const current = await get(workflow.kaRef, workflow.sourceHash);
+      if (!current.workflow.approved) throw reject('Workflow approval is unavailable.');
+      const policy = validateStudioCapabilities(current.compiled.definition, await listCapabilities());
+      assertDkgEnabled(current.compiled.definition, profile);
+      if (actor.accountId !== profile.accountId) throw componentFailure('Authenticated nOS owner required.');
+      if (current.workflow.requiresExportAuthorization || policy.requiresExportAuthorization) authorizeExport();
+    }
     return { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, invocationId, executionIri: result.executionIri,
       n8nExecutionId: output.n8nExecutionId, workflowSha256: output.workflowSha256, output: output.output,
       steps: compiled.definition.nodes.map((n, i) => ({ nodeId: n.id, componentId: n.componentId, kaRef: n.kaRef, ...trace[i] })),

@@ -365,11 +365,15 @@ the Google-connected state:
 node examples/n8n-capability/setup-components-local.mjs /tmp/n8n-component-fixture --fixture --install \
   --node /path/to/node24 --n8n-cli /path/to/n8n/bin/n8n
 # Start fixture n8n on 45780 with broker port 45781, then:
-node examples/n8n-capability/verify-components-native.mjs /tmp/n8n-component-fixture http://127.0.0.1:45780 /path/to/n8n/package.json
+node examples/n8n-capability/verify-components-native.mjs /tmp/n8n-component-fixture http://127.0.0.1:45780 --n8n-package /path/to/n8n/package.json
 node examples/n8n-capability/verify-studio-native.mjs /tmp/n8n-component-fixture --prepare
 # Import/publish the four generated studio-fixtures with the official CLI and restart that fixture.
-node examples/n8n-capability/verify-studio-native.mjs /tmp/n8n-component-fixture http://127.0.0.1:45780
+node examples/n8n-capability/verify-studio-native.mjs /tmp/n8n-component-fixture http://127.0.0.1:45780 --n8n-package /path/to/n8n/package.json
 ```
+
+The component, Studio and HTTP-mapping native verifiers all require
+`--n8n-package /path/to/n8n/package.json` when reading executions. They resolve
+`flatted` from that installation; `--prepare` does not need the runtime package.
 
 The field-join regression runs eight generated Merge cases on n8n 2.43.8 with
 distinct left/right field names, all three join modes, duplicate matches and

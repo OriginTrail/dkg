@@ -88,7 +88,7 @@ const freeze = value => {
 
 /** One operator-selected profile owns descriptors and compilation policy. */
 export function createComponentRegistry(profile = null) {
-  if (profile) validateDkgProfile(profile);
+  if (profile) profile = validateDkgProfile(profile);
   const componentRegistry = freeze(structuredClone(descriptors(profile)));
   const component = id => {
     if (id === 'run-program') return programDescriptor;

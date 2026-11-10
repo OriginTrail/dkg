@@ -6,7 +6,7 @@ import { createStudioCompiler } from './studio-definition.mjs';
 
 export function createStudioContext({ profile = null, session = null } = {}) {
   const registry = createComponentRegistry(profile);
-  return Object.freeze({ session, profile, registry, compiler: createStudioCompiler(registry) });
+  return Object.freeze({ session, profile: registry.profile, registry, compiler: createStudioCompiler(registry) });
 }
 
 export async function loadStudioContext(env = process.env) {

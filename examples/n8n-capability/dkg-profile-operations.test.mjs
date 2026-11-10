@@ -11,6 +11,31 @@ import { dkgComponentStore } from './dkg-components.mjs';
 import measurementProfile, { measurements } from './test-support/measurement-profile.mjs';
 import readProfile from './test-support/agent-read-profile.mjs';
 
+test('legacy profiles normalize once with stable operations, one shared loader and live policy hooks', async () => {
+  let loads = 0, enabled = true, authorized = true, transports = 0;
+  const source = { ...measurementProfile, requiresNosActor: true, accountId: 'fixture-account',
+    loadInputs() { loads++; return []; }, enabled: () => enabled,
+    async authorize() { if (!authorized) throw new Error('revoked'); },
+    transport() { transports++; return { graph: 'urn:test:measurements', measurements }; } };
+  const context = createStudioContext({ profile: source }), runtime = context.profile;
+  assert.notEqual(runtime, source); assert.equal(runtime, context.registry.profile);
+  assert.equal(validateDkgProfile(source), runtime); assert.equal(validateDkgProfile(runtime), runtime);
+  assert.equal(profileOperations(source), runtime.operations);
+  assert.equal(Object.hasOwn(runtime, 'transport'), false);
+  assert.equal(runtime.revision, source.revision);
+  const operations = Object.values(runtime.operations), load = operations[0].loadInputs;
+  assert.ok(operations.every(operation => operation.loadInputs === load));
+  const db = new DatabaseSync(':memory:');
+  try { dkgComponentStore(db, source); assert.equal(loads, 1); } finally { db.close(); }
+  enabled = false; assert.equal(runtime.operations['dkg-read'].enabled(), false);
+  source.enabled = () => true; assert.equal(runtime.operations['dkg-read'].enabled(), true);
+  await runtime.authorize(); authorized = false; await assert.rejects(runtime.authorize(), /revoked/);
+  source.authorize = async () => {}; await runtime.authorize();
+  await runtime.operations['dkg-read'].transport({}, {}); assert.equal(transports, 1);
+  source.revision = 'f'.repeat(64); assert.equal(runtime.revision, source.revision);
+  assert.equal(validateDkgProfile(source).operations, runtime.operations);
+});
+
 test('read-only profile loads without Program, write or shared transport placeholders and advertises only Read', async () => {
   const profile = await loadDkgProfile(fileURLToPath(new URL('./test-support/agent-read-profile.mjs', import.meta.url)));
   assert.deepEqual(Object.keys(profile.operations), ['dkg-read']);

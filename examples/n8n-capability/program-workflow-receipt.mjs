@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { programRecords } from './program-block.mjs';
+import { mapWithConcurrency } from '../../packages/agent/dist/map-with-concurrency.js';
 
 /** Verify every child result against its persisted DKG receipt before exposing downstream output. */
 export async function programWorkflowReceipt(compiled, result, input, loadOutputs) {
@@ -8,7 +9,7 @@ export async function programWorkflowReceipt(compiled, result, input, loadOutput
   if (value?.kind !== 'nos-program-workflow-result' || !Array.isArray(value.steps)
     || value.steps.length !== compiled.ordered.length) throw new Error('Program workflow child evidence is incomplete.');
   let callIndex = 0, items = programRecords(JSON.parse(input.itemsJson)), ok = true, error = '';
-  const steps = [];
+  const steps = [], readbacks = [];
   for (const [i, node] of compiled.ordered.entries()) {
     const step = value.steps[i], previous = items;
     const allItems = node.componentId === 'run-program' && node.params.inputMode === 'all-items';
@@ -20,10 +21,7 @@ export async function programWorkflowReceipt(compiled, result, input, loadOutput
       const call = calls[callIndex++];
       if (call?.target !== node.kaRef || call.status !== 'succeeded' || !/^urn:sr:execution:[a-f0-9-]{36}$/.test(call.executionIri ?? ''))
         throw new Error('Program workflow child invocation differs.');
-      const stored = await loadOutputs(call.executionIri);
-      const parsed = stored.map(raw => { try { return JSON.parse(raw); } catch { return raw; } });
-      const persisted = parsed.length === 1 ? parsed[0] : parsed;
-      if (!isDeepStrictEqual(persisted, output)) throw new Error('Program child receipt readback differs.');
+      readbacks.push({ executionIri: call.executionIri, output });
       childCalls.push(call);
     }
     let status = 'skipped';
@@ -49,6 +47,15 @@ export async function programWorkflowReceipt(compiled, result, input, loadOutput
   }
   const expected = { ok, itemsJson: JSON.stringify(items), portsJson: '{}', error };
   if (callIndex !== calls.length || !isDeepStrictEqual(value.output, expected)) throw new Error('Program workflow output differs from its child receipts.');
+  // First validate all identities and ordered reconstruction. Independent
+  // immutable receipts may then be fetched concurrently; disclose nothing until
+  // every reconstructed child result matches its persisted receipt.
+  await mapWithConcurrency(readbacks, 4, async ({ executionIri, output }) => {
+    const stored = await loadOutputs(executionIri);
+    const parsed = stored.map(raw => { try { return JSON.parse(raw); } catch { return raw; } });
+    const persisted = parsed.length === 1 ? parsed[0] : parsed;
+    if (!isDeepStrictEqual(persisted, output)) throw new Error('Program child receipt readback differs.');
+  });
   return { executor: 'dkg', output: expected, steps: compiled.definition.nodes.map(n => steps.find(s => s.nodeId === n.id)),
     persisted: true, readbackVerified: true };
 }

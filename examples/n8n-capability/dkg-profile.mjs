@@ -5,13 +5,15 @@ import { legacyProfileOperations } from './dkg-profile-legacy.mjs';
 export const dkgOperationIds = ['dkg-read', 'invoke-dkg-program', 'dkg-write'];
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const hooks = ['enabled', 'validateInput', 'validateNode', 'transport'];
-export const profileOperations = profile => profile.operations === undefined ? legacyProfileOperations(profile) : profile.operations;
+const runtimeProfiles = new WeakMap();
+export const profileOperations = profile => requireDkgProfile(profile).operations;
 export function validateDkgProfile(profile) {
+  if (runtimeProfiles.has(profile)) return runtimeProfiles.get(profile);
   if (!profile || typeof profile.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(profile.id)
     || !/^[a-f0-9]{64}$/.test(profile.revision ?? '') || typeof profile.node !== 'string' || !profile.node
     || profile.requiresNosActor && (typeof profile.accountId !== 'string' || !profile.accountId || typeof profile.authorize !== 'function'))
     throw new Error('Invalid DKG execution profile.');
-  const operations = profileOperations(profile);
+  const operations = profile.operations === undefined ? legacyProfileOperations(profile) : profile.operations;
   if (!record(operations) || !Object.keys(operations).length || Object.entries(operations).some(([id, operation]) =>
     !dkgOperationIds.includes(id) || !record(operation) || !record(operation.parameters)
     || hooks.some(key => typeof operation[key] !== 'function')
@@ -20,7 +22,17 @@ export function validateDkgProfile(profile) {
     || id === 'invoke-dkg-program' && (!Array.isArray(operation.programs) || typeof operation.catalogRevision !== 'string' || !operation.catalogRevision)
     || id === 'dkg-write' && (typeof operation.targetGraph !== 'string' || !operation.targetGraph || typeof operation.evidence !== 'function')))
     throw new Error('Invalid DKG operation capabilities.');
-  return profile;
+  let runtime = profile;
+  if (profile.operations === undefined) {
+    runtime = { operations, authorize: (...args) => profile.authorize(...args) };
+    // Compatibility lives at construction. Identity and live authorization
+    // metadata still follow the operator profile, as its dynamic hooks do.
+    for (const key of ['id', 'revision', 'node', 'requiresNosActor', 'accountId', 'workflowTools'])
+      Object.defineProperty(runtime, key, { enumerable: true, get: () => profile[key] });
+  }
+  runtimeProfiles.set(profile, runtime);
+  runtimeProfiles.set(runtime, runtime);
+  return runtime;
 }
 export async function loadDkgProfile(file, context = {}) {
   if (!file) return null;
@@ -37,7 +49,7 @@ export function profileParameters(profile, id) {
     default: profile.revision, maxLength: 64, options: [profile.revision] } };
 }
 export function requireDkgOperation(profile, id) {
-  const operations = profileOperations(requireDkgProfile(profile));
+  const operations = requireDkgProfile(profile).operations;
   if (!Object.hasOwn(operations, id)) throw Object.assign(new Error(id + ' is not supported by this execution profile.'),
     { code: 'DKG_COMPONENT_UNCONFIRMED', status: 409 });
   return operations[id];

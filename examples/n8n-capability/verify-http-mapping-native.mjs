@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createRequire } from 'node:module';
+import { nativeExecutionParser } from './native-verifier-runtime.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import { loadStudioContext } from './studio-context.mjs';
@@ -37,7 +37,7 @@ if (process.argv.includes('--prepare')) {
   for (const f of fixtures) writeFileSync(join(directory, f.workflowId + '.json'), JSON.stringify({ ...f.workflow, id: f.workflowId, versionId: randomUUID() }), { mode: 0o600 });
   console.log(JSON.stringify({ prepared: fixtures.length, directory, ids: fixtures.map(f => f.workflowId) }));
 } else {
-  const require = createRequire('/private/tmp/dkg-n8n-runtime-20261023/node_modules/n8n/package.json'), { parse } = require('flatted');
+  const parse = nativeExecutionParser();
   const db = new DatabaseSync(join(state, 'n8n/.n8n/database.sqlite'), { readOnly: true });
   const evidence = [];
   try {

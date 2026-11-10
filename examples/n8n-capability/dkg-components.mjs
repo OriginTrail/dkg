@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { requireDkgOperation, profileOperations } from './dkg-profile.mjs';
+import { requireDkgOperation, validateDkgProfile } from './dkg-profile.mjs';
 import { dkgComponentOperations, componentFailure as fail } from './dkg-component-operations.mjs';
 import { migrateDkgInvocationMetadata } from './dkg-component-schema.mjs';
 
@@ -42,8 +42,9 @@ export function validateDkgTopology(definition) {
 }
 /** Transport journal only. Scheduling, transformations and joins remain in native n8n. */
 export function dkgComponentStore(db, profile = null) {
+  if (profile) profile = validateDkgProfile(profile);
   const inputSnapshots = new Map(), operationInputs = {};
-  for (const [id, operation] of Object.entries(profile ? profileOperations(profile) : {})) {
+  for (const [id, operation] of Object.entries(profile?.operations ?? {})) {
     if (!inputSnapshots.has(operation.loadInputs)) inputSnapshots.set(operation.loadInputs, operation.loadInputs?.() ?? []);
     operationInputs[id] = inputSnapshots.get(operation.loadInputs);
   }
