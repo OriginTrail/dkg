@@ -7,6 +7,9 @@
  *
  * Two real agents on the shared Hardhat chain, linked over libp2p:
  *   - the curator owns the graph; only its wallet may publish into it;
+ *   - the member is on the graph's on-chain roster, so the graph accepts
+ *     knowledge assets it authors (ContextGraphs 10.1.0: a curated graph takes
+ *     a KA only from a member author), but its wallet may not publish;
  *   - the member creates a knowledge asset in the graph's `reports` sub-graph
  *     through the knowledge-asset API (`POST /api/knowledge-assets`), and
  *     shares it with `POST /api/knowledge-assets/:name/swm/share-async`, which
@@ -130,9 +133,10 @@ describe('a curator publishes a member\'s sub-graph share from shared memory (GH
       new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address, ethers.parseEther('50000000'),
     );
 
+    const curatorChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     curator = await DKGAgent.create({
       name: 'Curator3294', listenHost: '127.0.0.1', listenPort: 0, nodeRole: 'core',
-      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      chainAdapter: curatorChain,
       kaNumberAllocator: makeTestKaNumberAllocator(),
       syncReconcilerEnabled: false, agentProfileHeartbeatMs: 0,
     });
@@ -152,9 +156,15 @@ describe('a curator publishes a member\'s sub-graph share from shared memory (GH
     await member.connectTo(curatorDial);
 
     // The curator owns the graph and its curated publish policy (0): the
-    // member's wallet is not an authorized publisher.
+    // member's wallet is not an authorized publisher. A curated graph binds a
+    // KA only when its author is a member (ContextGraphs 10.1.0), so the
+    // curator puts the member on the graph's on-chain roster. Inviting it
+    // would not: for a public graph that writes only local metadata.
     await curator.createContextGraph({ id: CG, name: 'Curated reports' });
-    await curator.registerContextGraph(CG, { publishPolicy: 0 });
+    const { onChainId } = await curator.registerContextGraph(CG, { publishPolicy: 0 });
+    expect(await curatorChain.isAuthorizedAuthor(BigInt(onChainId), memberAddress)).toBe(false);
+    await curatorChain.addContextGraphParticipantAgent(BigInt(onChainId), memberAddress);
+    expect(await curatorChain.isAuthorizedAuthor(BigInt(onChainId), memberAddress)).toBe(true);
     curator.subscribeToContextGraph(CG);
     await curator.createSubGraph(CG, SUB_GRAPH);
 
