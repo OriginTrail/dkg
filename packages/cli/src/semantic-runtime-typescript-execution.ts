@@ -3,10 +3,12 @@ import { recoverTerminalExecutionReceipt } from './semantic-runtime-terminal-rec
 import { createHash } from 'node:crypto';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { canonicalizeJson, type CanonicalJsonValue } from '@origintrail-official/dkg-core';
-import { ProgramTraceRecorder, readProgramTrace, readProgramCallHistory, hashCanonicalPlan, type SemanticRuntimeConfig, type SemanticProgramBinding, type SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
+import { ProgramTraceRecorder, readProgramTrace, hashCanonicalPlan, type SemanticRuntimeConfig, type SemanticProgramBinding } from '@origintrail-official/dkg-semantic-runtime';
 import { canonicalProgramInputs } from './semantic-runtime-bound-invocation.js';
 import { typeScriptInvocationIdentity } from './semantic-runtime-typescript-identity.js';
 import { assertExecutionCapabilityAuthorized } from './semantic-runtime-invocation-policy.js';
+import { assertChildApprovalsAuthorized } from './semantic-runtime-child-authority.js';
+import { nativeN8nContinuationEffects } from './semantic-runtime-n8n-checkpoint.js';
 import { programBindingDigest } from './semantic-runtime-program-bindings.js';
 import { ConfiguredSemanticRuntimeService, SemanticInvocationResult, SemanticProgramError, StoredSemanticProgram, TypeScriptComposition } from './semantic-runtime-types.js';
 import { SR, hashParts, historyIsAtLayer, literalQuad, safeMessage, sameSet, sourceHashOf } from './semantic-runtime-values.js';
@@ -14,36 +16,6 @@ import { assertBoundQueryDefinition, resolveProgramTools } from './semantic-runt
 import { loadStoredSemanticProgram } from './semantic-runtime-program-source.js';
 import { buildExecutionQuads, loadExecutionOutputs, persistExecutionKnowledgeAsset } from './semantic-runtime-execution-persistence.js';
 import { createProgramToolDispatcher, invokeBoundSemanticProgram } from './semantic-runtime-invocation.js';
-
-/** A failed native-only run can inspect durable provider acknowledgements. Its
- * JavaScript is replayed in inspection-only mode: no new tool/child call may
- * start, and every original effect must be resolved before a receipt is saved.
- */
-function nativeContinuationEffects(store: SemanticRuntimeStore, executionIri: string, binding: SemanticProgramBinding): Set<string> | null {
-  const grant = binding.n8n;
-  if (!grant?.result) return null;
-  // Declared child pins are also used by native Studio wrappers. Only actual
-  // native tool calls may be inspected; a mixed execution remains held.
-  const calls = readProgramCallHistory(store, executionIri);
-  if (!calls.length || calls.some(call => call.kind !== 'tool' || call.target !== grant.toolIri)) return null;
-  const effects = store.effectsForExecution(executionIri);
-  // A crash can happen after the last effect commits but before journal.prepare().
-  // Its succeeded result remains replayable under the same inspection-only fence.
-  if (!effects.length) return null;
-  for (const effect of effects) {
-    if (effect.adapterId !== 'n8n/workflow' || effect.resource !== grant.toolIri
-      || !['succeeded', 'unknown', 'reconciling', 'manual_review_required'].includes(effect.state)) return null;
-    try {
-      const saved = store.adapterCheckpoint(effect.effectId);
-      if (!saved) return null;
-      const value = JSON.parse(new TextDecoder().decode(saved.payload));
-      if (value.kind !== 'n8n-native-v1' || value.workflowId !== grant.workflowId
-        || value.workflowSha256 !== grant.workflowSha256 || typeof value.executionId !== 'string' || !/^\d{1,20}$/.test(value.executionId)
-        || typeof value.versionId !== 'string' || !value.versionId || typeof value.observed !== 'boolean') return null;
-    } catch { return null; }
-  }
-  return new Set(effects.map(e => e.effectId));
-}
 
 export function parseRequestedPermissions(json: string): Record<string, unknown> {
   try {
@@ -157,19 +129,7 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
     if (budget.cancelled || Date.now() > budget.deadline) throw new SemanticProgramError('PROGRAM_EXECUTION_CANCELLED', 'Execution is cancelled or expired', 409);
     await authorized();
     await assertBoundQueryDefinition(agent, binding);
-    const visited = new Set<string>();
-    const checkChildren = (selected: SemanticProgramBinding, ancestors: string[]) => {
-      for (const pin of selected.typescript?.children ?? []) {
-        const key = `${pin.contextGraphId}\0${pin.operationIri}`;
-        if (ancestors.includes(key) || ancestors.length >= 8) throw new SemanticProgramError('PROGRAM_COMPOSITION_LIMIT', 'Program grants are cyclic or too deep', 403);
-        const child = config.programBindings?.find(item => item.contextGraphId === pin.contextGraphId && item.operationIri === pin.operationIri);
-        if (!child?.enabled || programBindingDigest(child) !== pin.bindingDigest
-          || !child.allowedCallerAgentAddresses.some(address => address.toLowerCase() === caller.toLowerCase()))
-          throw new SemanticProgramError('PROGRAM_CHILD_FORBIDDEN', 'A child grant changed or does not authorize the original caller', 403);
-        if (!visited.has(key)) { visited.add(key); checkChildren(child, [...ancestors, key]); }
-      }
-    };
-    checkChildren(binding, [operationKey]);
+    assertChildApprovalsAuthorized(binding, config, caller);
     checkCapability();
   };
   const identity = typeScriptInvocationIdentity(digest, caller, inputJson, parent?.ancestors);
@@ -202,7 +162,7 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
       if (previous.graphRevision !== identity) throw new SemanticProgramError('INVOCATION_LAYER_CONFLICT', 'Invocation already has different inputs or authority', 409);
       if (previous.status !== 'completed') {
         continuation = ['active', 'failed'].includes(previous.status)
-          ? nativeContinuationEffects(runtime.store, executionIri, binding) : null;
+          ? nativeN8nContinuationEffects(runtime.store, executionIri, binding.n8n) : null;
         if (!continuation) {
           // General JavaScript continuations are not durable. Only acknowledged
           // native effects below have a provider inspection path without POST.

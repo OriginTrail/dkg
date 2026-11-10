@@ -211,6 +211,21 @@ describe('native dispatch and durable recovery', () => {
     expect(f.state.dispatches).toBe(1);
   });
 
+  it('refuses continuation with an invalid persisted native version without redispatching', async () => {
+    const f = await nativeFixture(), prepared = await f.start();
+    await interruptInspection(f, prepared);
+    const store = f.target.runtime!.store;
+    const effect = store.effectsForExecution('urn:sr:execution:' + prepared.invocationId)[0];
+    const checkpoint = store.adapterCheckpoint(effect.effectId)!;
+    const saved = JSON.parse(new TextDecoder().decode(checkpoint.payload));
+    store.writeAdapterCheckpoint(effect.effectId, effect.requestDigest,
+      new TextEncoder().encode(JSON.stringify({ ...saved, versionId: '' })), checkpoint.version);
+    await restartNode(f.target);
+    f.state.interrupted = false;
+    await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_NOT_RETRYABLE' });
+    expect(f.state.dispatches).toBe(1);
+  });
+
   it.each([
     { name: 'missing', damage: (path: string) => rmSync(path) },
     { name: 'short', damage: (path: string) => writeFileSync(path, 'short') },

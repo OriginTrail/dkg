@@ -2,6 +2,7 @@ import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
 import { canonicalProgramInputs } from './semantic-runtime-bound-invocation.js';
 import { assertExecutionCapabilityAuthorized } from './semantic-runtime-invocation-policy.js';
+import { assertChildApprovalsAuthorized } from './semantic-runtime-child-authority.js';
 import { programBindingDigest } from './semantic-runtime-program-bindings.js';
 import { typeScriptInvocationIdentity } from './semantic-runtime-typescript-identity.js';
 import { SemanticProgramError, type ConfiguredSemanticRuntimeService } from './semantic-runtime-types.js';
@@ -39,6 +40,7 @@ export function createNativeCallbackAuthority({ agent, runtime, config, graphId,
         if (!snapshot || snapshot.kind !== 'bound-typescript-v1') throw denied();
         const host = runtime(), binding = bindingFor(snapshot.operationIri);
         if (!host || !binding?.enabled || programBindingDigest(binding) !== snapshot.bindingDigest) throw denied();
+        assertChildApprovalsAuthorized(binding, config, caller);
         const execution = host.store.execution(snapshot.executionId), effect = host.store.effect(effectId);
         if (!execution || execution.graphRevision !== snapshot.requestIdentity || !effect
           || effect.executionId !== snapshot.executionId || effect.adapterId !== 'n8n/workflow'

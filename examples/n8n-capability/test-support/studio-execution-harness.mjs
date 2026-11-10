@@ -92,7 +92,8 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
       const writeNode = workflow.activeVersion.nodes.find(n => n.name === 'Block write request');
       let written, error;
       controls.writeRequest = requestFor(body.invocationId, 'write', read.items, executionId);
-      for (let attempt = 0; attempt < (writeNode.retryOnFail ? writeNode.maxTries : 1); attempt++) {
+      if (controls.skipWrite) error = { message: 'Provider stopped before Write' };
+      for (let attempt = 0; !controls.skipWrite && attempt < (writeNode.retryOnFail ? writeNode.maxTries : 1); attempt++) {
         try { written = await callback(controls.writeRequest); break; }
         catch (failure) { error = { message: failure.message }; }
       }
@@ -133,7 +134,7 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
   }
   open();
   return { definition, actor, controls, effects, assets, native, executions, runtimeFetch, profile,
-    requestFor, get service() { return service; }, get provider() { return provider; },
+    requestFor, get service() { return service; }, get provider() { return provider; }, get repository() { return repository; },
     reopen() { service.stop(); repository.close(); open(); },
     close() { service.stop(); repository.close(); Object.assign(profile, original); },
   };

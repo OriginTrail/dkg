@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SemanticN8nGrant, SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
 import { createNativeN8nWorkflowAdapter } from '../src/semantic-runtime-n8n-native-adapter.js';
 import { collectN8nExecutionResult } from '../src/semantic-runtime-n8n-results.js';
+import { decodeNativeN8nCheckpoint, encodeNativeN8nCheckpoint } from '../src/semantic-runtime-n8n-checkpoint.js';
 import { n8nObservationScope, n8nResultSha256, n8nPinnedExecutionMatches, n8nWorkflowSha256, validateN8nGrant } from '../src/semantic-runtime-n8n-contract.js';
 
 const graph = 'native-n8n-poc', owner = '0x' + '1'.repeat(40), workflowId = 'native';
@@ -155,6 +156,25 @@ describe('native n8n component execution receipts', () => {
     expect(f.posts()).toBe(1); f.setFailRead(false);
     expect((await f.adapter().resume!(authorization, input)).status).toBe('succeeded');
     expect(f.posts()).toBe(1);
+  });
+  it('preserves existing checkpoint bytes and rejects an empty or invalid version on adapter resume', async () => {
+    const f = fixture();
+    const saved = { kind: 'n8n-native-v1' as const, workflowId, workflowSha256: f.grant.workflowSha256,
+      executionId: '42', versionId: 'v1', observed: false };
+    const originalBytes = new TextEncoder().encode(JSON.stringify(saved));
+    expect(encodeNativeN8nCheckpoint(saved)).toEqual(originalBytes);
+    expect(decodeNativeN8nCheckpoint(originalBytes, f.grant)).toEqual(saved);
+    f.store.writeAdapterCheckpoint(authorization.effectId, authorization.requestDigest, originalBytes, 0);
+    expect((await f.adapter().resume!(authorization, input)).status).toBe('succeeded');
+    expect(f.posts()).toBe(0);
+    expect(f.store.adapterCheckpoint(authorization.effectId)!.payload).toEqual(Buffer.from(originalBytes));
+    for (const versionId of ['', null, 42]) {
+      const invalidBytes = new TextEncoder().encode(JSON.stringify({ ...saved, versionId }));
+      f.store.writeAdapterCheckpoint(authorization.effectId, authorization.requestDigest, invalidBytes, 0);
+      expect(() => decodeNativeN8nCheckpoint(invalidBytes, f.grant)).toThrow('N8N_CHECKPOINT_INVALID');
+      await expect(f.adapter().resume!(authorization, input)).rejects.toThrow('N8N_CHECKPOINT_INVALID');
+    }
+    expect(f.posts()).toBe(0);
   });
   it('collects every terminal branch iteration once and reports aggregate trace counts', () => {
     const f = fixture();

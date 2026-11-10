@@ -4,7 +4,7 @@ import type { RuntimeAdapterOperation, SemanticN8nConfig, SemanticN8nGrant, Sema
 import { assertN8nEmbeddedWorkflows, n8nResultSha256, assertN8nValue, n8nPinnedExecutionMatches, n8nObservationScope, n8nRecord, n8nWorkflowSha256, validateN8nConfig, validateN8nGrant } from './semantic-runtime-n8n-contract.js';
 import { collectN8nExecutionResult } from './semantic-runtime-n8n-results.js';
 
-type Checkpoint = { kind: 'n8n-native-v1'; workflowId: string; workflowSha256: string; executionId: string; versionId: string; observed: boolean };
+import { decodeNativeN8nCheckpoint, encodeNativeN8nCheckpoint, readNativeN8nCheckpoint, type NativeN8nCheckpoint } from './semantic-runtime-n8n-checkpoint.js';
 type PreparedEffectToken = Parameters<RuntimeAdapterOperation['dispatch']>[0];
 class NativeError extends Error {
   constructor(readonly mayHaveExecuted: boolean, code: string) { super(code); }
@@ -56,33 +56,25 @@ export function createNativeN8nWorkflowAdapter(
       && item.resultSha256 === n8nResultSha256(grant));
   };
   const authorized = async () => { await assertAuthorized(); if (!matches()) throw new Error('N8N_WORKFLOW_NOT_INSTALLED'); };
-  const checkpoint = (effectId: string): Checkpoint | null => {
-    const saved = store.adapterCheckpoint(effectId);
-    if (!saved) return null;
-    const value = JSON.parse(new TextDecoder().decode(saved.payload));
-    if (value.kind !== 'n8n-native-v1' || value.workflowId !== grant.workflowId || value.workflowSha256 !== grant.workflowSha256
-      || typeof value.executionId !== 'string' || !/^\d{1,20}$/.test(value.executionId) || typeof value.versionId !== 'string'
-      || typeof value.observed !== 'boolean') throw new Error('N8N_CHECKPOINT_INVALID');
-    return value;
-  };
-  const persist = (authorization: Readonly<PreparedEffectToken>, value: Checkpoint) => {
+  const checkpoint = (effectId: string) => readNativeN8nCheckpoint(store, effectId, grant);
+  const persist = (authorization: Readonly<PreparedEffectToken>, value: NativeN8nCheckpoint) => {
     const current = store.adapterCheckpoint(authorization.effectId);
     if (current) { if (JSON.stringify(checkpoint(authorization.effectId)) !== JSON.stringify(value)) throw new Error('N8N_CHECKPOINT_CONFLICT'); return; }
-    store.writeAdapterCheckpoint(authorization.effectId, authorization.requestDigest, new TextEncoder().encode(JSON.stringify(value)), 0);
+    store.writeAdapterCheckpoint(authorization.effectId, authorization.requestDigest, encodeNativeN8nCheckpoint(value), 0);
   };
   const preflight = async (signal: AbortSignal) => {
     await authorized();
     const origin = new URL(installation!.baseUrl), headers = { 'X-N8N-API-KEY': secret(installation!.apiTokenFile) };
     const workflow = await request(new URL(`/api/v1/workflows/${grant.workflowId}`, origin), headers, signal);
     const published = n8nRecord(workflow.activeVersion) ? { ...workflow.activeVersion, settings: workflow.settings } : workflow;
-    if (workflow.id !== grant.workflowId || workflow.active !== true || typeof published.versionId !== 'string'
+    if (workflow.id !== grant.workflowId || workflow.active !== true || typeof published.versionId !== 'string' || !published.versionId
       || n8nWorkflowSha256(published) !== grant.workflowSha256) throw new Error('N8N_WORKFLOW_NOT_PINNED');
     assertN8nEmbeddedWorkflows(published);
     const names = new Set((published.nodes as Record<string, unknown>[]).map(node => node.name));
     if ([...grant.result!.nodes, ...grant.result!.traceNodes ?? []].some(name => !names.has(name))) throw new Error('N8N_WORKFLOW_NOT_PINNED');
     return { origin, headers, published };
   };
-  const inspect = async (saved: Checkpoint, signal: AbortSignal, prepared?: Awaited<ReturnType<typeof preflight>>) => {
+  const inspect = async (saved: NativeN8nCheckpoint, signal: AbortSignal, prepared?: Awaited<ReturnType<typeof preflight>>) => {
     const { origin, headers, published } = prepared ?? await preflight(signal);
     let execution: Record<string, unknown> = {};
     for (let attempt = 0; attempt < 60; attempt++) {
@@ -112,6 +104,7 @@ export function createNativeN8nWorkflowAdapter(
     id: 'n8n/workflow', version: '1', witInterface: 'origintrail:semantic-runtime/n8n-workflow@0.1.0',
     implementationVersion: 'n8n-native-components-v1',
     implementationHash: createHash('sha256').update(readFileSync(new URL(import.meta.url)))
+      .update(decodeNativeN8nCheckpoint.toString()).update(encodeNativeN8nCheckpoint.toString()).update(readNativeN8nCheckpoint.toString())
       .update(n8nResultSha256.toString()).update(assertN8nEmbeddedWorkflows.toString())
       .update(collectN8nExecutionResult.toString()).update(n8nPinnedExecutionMatches.toString())
       .update(configuration).update(JSON.stringify(grant)).digest('hex'),

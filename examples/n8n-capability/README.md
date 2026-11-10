@@ -460,7 +460,8 @@ every RDF term, payload SHA-256 and `wm-sealed` status before reporting success.
 
 The component journal binds invocation, native execution, block, input and workflow source hash.
 Program-backed runs also retain the original approval digest and signed invocation identity.
-Every callback checks that binding, the durable runtime effect and its capability (revocation,
+Every callback checks that binding and its recursive child approval pins for the original caller,
+the durable runtime effect and its capability (revocation,
 expiry and policy epoch), including a synchronous check immediately before transport after
 asynchronous authorization. Reapproving identical source cannot revive an older invocation.
 Completed parents permit only cached results or readback of an already journalled write.
