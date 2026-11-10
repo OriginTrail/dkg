@@ -93,7 +93,7 @@ test('actual workflow routes campaign-only diffs through the active trusted cont
     assert.equal(plan.lanes.bura_cli, scenario.selected, scenario.file);
     assert.match(fs.readFileSync(output, 'utf8'), new RegExp(`^bura_cli=${scenario.selected}$`, 'm'));
     if (!scenario.selected) continue;
-    assert.equal(plan.mode, 'full', 'temporary fallback asks the trusted controller to widen the plan');
+    assert.equal(plan.mode, 'delta', 'the trusted controller routes the campaign to the CLI lane itself');
     const needs = gateNeeds(succeeded(Object.keys(gateNeeds())));
     const gate = () => spawnSync(process.execPath, [path.join(controller, 'scripts/ci/assert-ci-results.mjs'), '--workflow', 'primary'], {
       encoding: 'utf8', env: { ...process.env, EVENT_NAME: 'pull_request', PLAN_JSON: JSON.stringify(plan), NEEDS_JSON: JSON.stringify(needs) },
