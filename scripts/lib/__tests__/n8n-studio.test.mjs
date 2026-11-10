@@ -3,6 +3,7 @@ import { Readable } from 'node:stream';
 import { join } from 'node:path';
 import { createCapabilityBridge } from '../../../examples/n8n-capability/bridge.mjs';
 import { createPreviewHandler } from '../../../examples/n8n-capability/cloudflare-preview.mjs';
+import { normalizeN8nResult } from '../../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { collectN8nExecutionResult } from '../../../packages/cli/dist/semantic-runtime-n8n-results.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -31,7 +32,7 @@ test('compiled loop keeps repeated terminal branches and the done output exactly
       { data: { main: [[item(second)], [item(rejected2)]] } },
     ],
   } } } };
-  const result = collectN8nExecutionResult(compiled.grant, execution);
+  const result = collectN8nExecutionResult(normalizeN8nResult(compiled.grant.result), execution);
   assert.equal(result.ok, true);
   assert.deepEqual(JSON.parse(result.portsJson), { 'n0 done': [first, second], 'n1 false': [rejected1, rejected2] });
   assert.deepEqual(JSON.parse(result.traceJson).map(t => t.items), [[2,4], [2,2]]);

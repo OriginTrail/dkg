@@ -334,3 +334,20 @@ test('account bridge can bind fresh state without an adoption flag but refuses a
     }
   } finally { f.close(); rmSync(fresh, { recursive: true, force: true }); }
 });
+
+
+test('manual-only account companion starts no event worker and retains read-only history', async t => {
+  const f = environment(); let bridge;
+  const interval = t.mock.method(globalThis, 'setInterval', () => assert.fail('Account Studio must not start an event worker'));
+  try {
+    bridge = createCapabilityBridge(options(f));
+    const saved = await bridge.studio.save(definition(['edit-fields'], []), () => {});
+    const history = await bridge.studio.history(saved.kaRef, () => assert.fail('No event capability may be disclosed'));
+    assert.deepEqual(history, { activation: { active: false, count: 0, expiresAt: undefined }, executions: [] });
+    await bridge.studio.poll();
+    await assert.rejects(bridge.studio.activate({ kaRef: saved.kaRef, active: true, activationId: randomUUID() }, () => {}), /events are unavailable/);
+    await assert.rejects(bridge.studio.event(randomUUID(), { invocationId: randomUUID(), items: [{}] }), /events are unavailable/);
+    assert.equal(interval.mock.callCount(), 0);
+    assert.equal(f.invocations.length, 0);
+  } finally { interval.mock.restore(); bridge?.close(); f.close(); }
+});

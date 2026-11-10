@@ -586,7 +586,9 @@ owner can receive `eventPath`; protected workflows additionally require the curr
 `x-dkg-export-token` header on the history request. A deliberately shared event URL
 still delegates bounded webhook invocation. Direct service history omits the URL
 unless its caller explicitly supplies a disclosure authorization callback.
-Account-bound nOS Studio remains manual-only and never discloses an event URL.
+Account-bound nOS Studio remains manual-only, starts no event polling worker,
+and never discloses an event URL. Program-only services without a native provider
+also start no event worker; saved execution history remains readable.
 
 Program export analysis resolves each child by both `contextGraphId` and
 `operationIri`, including descendants in other graphs. Unreadable, missing,

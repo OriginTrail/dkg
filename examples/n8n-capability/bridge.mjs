@@ -115,7 +115,7 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     if (session && repository?.hasActiveWorkflows())
       throw new Error('Deactivate legacy schedules before adopting Studio state for an account.');
     const dkg = repository ? dkgComponentStore(repository.db, undefined, undefined, profile) : undefined;
-    studio = repository ? createStudioService({ compiler, graphId, owner, client, repository, provider, dkg, programAuthority, exportTokenFile,
+    studio = repository ? createStudioService({ compiler, graphId, owner, client, repository, provider, dkg, programAuthority, exportTokenFile, eventsEnabled: !session,
       listCapabilities: async () => [...await list(), ...await listPrograms()],
       loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner) }) : null;
     const mcpFlags = studioMcpFlags();

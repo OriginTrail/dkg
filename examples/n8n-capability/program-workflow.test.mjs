@@ -176,7 +176,7 @@ for (const inputMode of ['each-item', 'all-items']) test(`every offered Program 
   } finally { await childHost.stop(); }
 });
 
-for (const mixed of [false, true]) test(`Studio service saves and runs a ${mixed ? 'mixed' : 'pure Program'} revision without native provisioning`, async () => {
+for (const mixed of [false, true]) test(`Studio service saves and runs a ${mixed ? 'mixed' : 'pure Program'} revision without native provisioning`, async t => {
   const definition = mixed ? graph() : graph([program]);
   const state = mkdtempSync(join(tmpdir(), 'studio-program-test-'));
   const graphId = 'program-test', owner = '0x1111111111111111111111111111111111111111';
@@ -210,7 +210,11 @@ for (const mixed of [false, true]) test(`Studio service saves and runs a ${mixed
   repository.nativeCreated('unrelated-native', 'native-elsewhere');
   repository.nativeGranted('unrelated-native', { workflowId: 'native-elsewhere', workflowSha256: 'b'.repeat(64) });
   const nativeCapabilities = definition.nodes.filter(n => n.componentId !== 'run-program').map(n => ({ ...n, kind: 'component', available: true, descriptor: component(n.componentId) }));
-  const openService = () => createStudioService({ graphId, owner, client, repository, listCapabilities: async () => [cap, ...nativeCapabilities], loadOutputs: async iri => receipts.get(iri) });
+  const openService = () => {
+    const interval = t.mock.method(globalThis, 'setInterval', () => assert.fail('Program-only Studio must not start an event worker'));
+    try { return createStudioService({ graphId, owner, client, repository, listCapabilities: async () => [cap, ...nativeCapabilities], loadOutputs: async iri => receipts.get(iri) }); }
+    finally { interval.mock.restore(); }
+  };
   let service = openService();
   try {
     const saved = await service.save(definition, () => { throw new Error('A pure Program does not need Google authorization.'); });

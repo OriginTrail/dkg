@@ -141,7 +141,7 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
     repository = createStudioRepository(state);
     provider = createStudioProvider({ compiler, repository, config, graphId, owner,
       headerCredential: { id: 'test-header', name: 'Test header' }, credentials: {}, fetchImpl });
-    service = createStudioService({ compiler, graphId, owner, repository, provider, dkg: dkgComponentStore(repository.db, undefined, undefined, profile), programAuthority, client, loadOutputs, listCapabilities: async () => catalog });
+    service = createStudioService({ compiler, graphId, owner, repository, provider, eventsEnabled: false, dkg: dkgComponentStore(repository.db, undefined, undefined, profile), programAuthority, client, loadOutputs, listCapabilities: async () => catalog });
   }
   open();
   return { definition, actor, controls, effects, assets, native, executions, runtimeFetch, profile,
