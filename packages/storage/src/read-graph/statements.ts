@@ -15,8 +15,9 @@
  *   {@link readGraphDeltaDeleteBySubjectPrefix}. A form that cannot carry a
  *   write, because of a blank node, throws {@link ReadGraphDeltaFormError};
  *   the write then takes the reference procedure.
- * - Backfill and repair batches and the drop, each fenced by the read graph's
- *   state and generation in its own `WHERE`, so a stale one changes nothing.
+ * - Backfill and repair batches and the drop (whole, or in batches), each
+ *   fenced by the read graph's state and generation in its own `WHERE`, so a
+ *   stale one changes nothing.
  * - Both directions of the check: every triple of a member graph is in R
  *   ({@link readGraphMissingTripleAsk}), and R holds no triple that no member
  *   holds, by counting ({@link readGraphSizeQuery} against the sum of
@@ -32,7 +33,10 @@
  * Every function returns one SPARQL UPDATE operation without a trailing `;`,
  * or one query. Graph names are checked with `assertSafeIri`; the terms of a
  * write are rendered with the adapter's own renderer, so a delta form names
- * the same stored terms as the write it follows.
+ * the same stored terms as the write it follows. A delta form restates terms
+ * in SPARQL text, so it shares the engine's limits on literal syntax with the
+ * write it follows, and a request it cannot carry fails before it commits.
+ * The reference procedure copies on the server and restates no term.
  */
 
 import {
@@ -231,9 +235,22 @@ export function readGraphDeltaDeleteBySubjectPrefix(
     + `  FILTER NOT EXISTS { GRAPH ${HOLDER} { ?s ?p ?o } FILTER(${notIn([graph])} && ${renderGraphNameTest(target.membership, HOLDER)}) }\n}`;
 }
 
-/** One backfill batch, or the copies of a repair for graphs that joined: one fenced copy per member graph. */
-export function readGraphBackfillBatch(readGraph: string, fence: ReadGraphFence, graphs: readonly string[]): string[] {
-  return [...new Set(graphs)].map((graph) => readGraphCopy(readGraph, graph, { fence }));
+/**
+ * One backfill batch, or the copies of a repair for graphs that joined: one
+ * fenced operation that copies every listed member graph, read through a
+ * `VALUES` list of the graphs. One operation per batch keeps the cost per
+ * graph low on engines that pay per operation.
+ */
+export function readGraphBackfillBatch(readGraph: string, fence: ReadGraphFence, graphs: readonly string[]): string {
+  const target = checkedReadGraph(readGraph);
+  const sources = [...new Set(graphs)].map((graph) => `<${checkedGraph(graph)}>`);
+  if (sources.length === 0) throw new Error('A backfill batch needs at least one graph');
+  // sparql-scan-allow: R2 -- ?g is bound by a finite VALUES list of member graph IRIs
+  return `INSERT { GRAPH <${target}> { ?s ?p ?o } }
+WHERE {
+${fenceLines(target, fence)}  VALUES ?g { ${sources.join(' ')} }
+  GRAPH ?g { ?s ?p ?o }
+}`;
 }
 
 /**
@@ -246,10 +263,20 @@ export function readGraphRepairLeave(target: ReadGraphTarget, fence: ReadGraphFe
   return graphs.map((graph) => readGraphRetraction(target, graph, graphs, { fence }));
 }
 
-/** Empty R, fenced: the first step of a rebuild and of a removal. */
-export function readGraphFencedDrop(readGraph: string, fence: ReadGraphFence): string {
+/**
+ * Empty R, fenced: the first step of a rebuild and of a removal. With `limit`,
+ * one batch that removes at most that many triples; send batches until
+ * {@link readGraphSizeQuery} gives 0, so a large read graph never holds the
+ * store's writer for long.
+ */
+export function readGraphFencedDrop(readGraph: string, fence: ReadGraphFence, options: { readonly limit?: number } = {}): string {
   const target = checkedReadGraph(readGraph);
-  return `DELETE { GRAPH <${target}> { ?s ?p ?o } }\nWHERE {\n${fenceLines(target, fence)}  GRAPH <${target}> { ?s ?p ?o }\n}`;
+  if (options.limit === undefined) {
+    return `DELETE { GRAPH <${target}> { ?s ?p ?o } }\nWHERE {\n${fenceLines(target, fence)}  GRAPH <${target}> { ?s ?p ?o }\n}`;
+  }
+  if (!Number.isSafeInteger(options.limit) || options.limit < 1) throw new Error(`Invalid drop batch size: ${options.limit}`);
+  return `DELETE { GRAPH <${target}> { ?s ?p ?o } }\nWHERE {\n${fenceLines(target, fence)}`
+    + `  { SELECT ?s ?p ?o WHERE { GRAPH <${target}> { ?s ?p ?o } } LIMIT ${options.limit} }\n}`;
 }
 
 /** Check direction 2 for one member graph: `true` when `graph` holds a triple that R lacks. */

@@ -135,7 +135,7 @@ async function backfill(engine, from, to, fence) {
   const started = performance.now();
   for (let start = from; start < to; start += 100) {
     const graphs = Array.from({ length: Math.min(100, to - start) }, (_, offset) => member(start + offset));
-    await engine.update(statements.readGraphBackfillBatch(R, fence, graphs).join(' ;\n'));
+    await engine.update(statements.readGraphBackfillBatch(R, fence, graphs));
   }
   return performance.now() - started;
 }
@@ -189,7 +189,7 @@ async function measureSize(engine, size, row) {
     await engine.update([statements.readGraphRetraction(target, graph, [graph]), `DROP SILENT GRAPH <${graph}>`].join(' ;\n'));
   });
   await time(engine, 'backfill batch: 100 graphs, fenced', size, (i) => engine.update(
-    statements.readGraphBackfillBatch(R, row, Array.from({ length: 100 }, (_, offset) => member(600 + i * 100 + offset))).join(' ;\n')));
+    statements.readGraphBackfillBatch(R, row, Array.from({ length: 100 }, (_, offset) => member(600 + i * 100 + offset)))));
   await time(engine, 'check direction 2: one graph', size, (i) => engine.ask(statements.readGraphMissingTripleAsk(R, member(700 + i))));
   await time(engine, 'check direction 1, count: one graph', size, (i) => engine.select(statements.readGraphFirstHolderCountQuery(target, member(800 + i))));
   await time(engine, 'check direction 1, probe: one subject', size, (i) => engine.ask(statements.readGraphUnheldSubjectAsk(target, `urn:s:${i}`)));
@@ -256,7 +256,15 @@ try {
     await measureSize(engine, size, row);
   }
   for (const copies of COPIES) await measureCopies(engine, copies);
-  await time(engine, `fenced drop of the read graph (${await count(engine, statements.readGraphSizeQuery(R))} triples)`, loaded, () => engine.update(statements.readGraphFencedDrop(R, row)), 1);
+  const held = await count(engine, statements.readGraphSizeQuery(R));
+  let batches = 0;
+  await time(engine, `fenced drop of the read graph (${held} triples), in batches of 10,000`, loaded, async () => {
+    while (await count(engine, statements.readGraphSizeQuery(R)) > 0) {
+      await time(engine, 'fenced drop: one batch of 10,000 triples', loaded, () => engine.update(statements.readGraphFencedDrop(R, row, { limit: 10_000 })), 1);
+      batches += 1;
+    }
+  }, 1);
+  console.log(`${String(loaded).padStart(6)}  fenced drop took ${batches} batches`);
 } finally {
   await engine.close();
 }

@@ -3,9 +3,11 @@ import { ADAPTER_SPARQL_TERM_POLICY } from '../src/adapters/sparql-term-policy.j
 import type { GraphNameTest } from '../src/read-graph/membership.js';
 import {
   ReadGraphDeltaFormError,
+  readGraphBackfillBatch,
   readGraphCopy,
   readGraphDeltaDelete,
   readGraphDeltaDeleteMatching,
+  readGraphFencedDrop,
   readGraphReferenceProcedure,
   readGraphRetraction,
   readGraphUnheldSubjectAsk,
@@ -55,5 +57,9 @@ describe('read-graph statements, rendering', () => {
     expect(() => readGraphCopy(G, G)).toThrow(/Not a read graph/);
     expect(() => readGraphCopy(R, 'urn:a b')).toThrow(/Unsafe or empty IRI/);
     expect(readGraphUnheldSubjectAsk(target, 'urn:s')).toContain('GRAPH <did:dkg:context-graph:x/_read/cg/_verifiable_memory> { <urn:s> ?p ?o }');
+    const fence = { state: 'rebuilding' as const, generation: 3 };
+    expect(() => readGraphBackfillBatch(R, fence, [])).toThrow(/at least one graph/);
+    expect(readGraphBackfillBatch(R, fence, [G, G])).toContain(`VALUES ?g { <${G}> }`);
+    for (const limit of [0, 1.5, -1]) expect(() => readGraphFencedDrop(R, fence, { limit }), String(limit)).toThrow(/Invalid drop batch size/);
   });
 });

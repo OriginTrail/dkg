@@ -119,7 +119,7 @@ export function readGraphStatementsConformance(backend: 'oxigraph' | 'blazegraph
         GRAPH <${g(2)}> { <urn:s> <urn:p> <urn:shared> . <urn:s> <urn:p> <urn:only2> }
       }`);
       const building = await setState({ readGraph: R, state: 'building', generation: 41, ruleVersion: 1, builderVersion: 1 });
-      await update(readGraphBackfillBatch(R, building, [g(1), g(2)]).join(' ;\n'));
+      await update(readGraphBackfillBatch(R, building, [g(1), g(2)]));
       expect(await triples(R)).toEqual([t('kept1'), t('only1'), t('only2'), t('shared')]);
       await setState(nextReadGraphState(building, { kind: 'publish-ready' })!, building);
 
@@ -300,18 +300,18 @@ export function readGraphStatementsConformance(backend: 'oxigraph' | 'blazegraph
       const R = readGraphIri(key);
       await update(`INSERT DATA { GRAPH <${g1}> { <urn:a> <urn:b> <urn:c> } GRAPH <${g2}> { <urn:a> <urn:b> <urn:d> } }`);
       const building = await setState({ readGraph: R, state: 'building', generation: 5, ...versions() });
-      await update(readGraphBackfillBatch(R, { state: 'building', generation: 4 }, [g1, g2]).join(' ;\n'));
-      await update(readGraphBackfillBatch(R, { state: 'rebuilding', generation: 5 }, [g1, g2]).join(' ;\n'));
+      await update(readGraphBackfillBatch(R, { state: 'building', generation: 4 }, [g1, g2]));
+      await update(readGraphBackfillBatch(R, { state: 'rebuilding', generation: 5 }, [g1, g2]));
       expect(await triples(R)).toEqual([]);
-      await update(readGraphBackfillBatch(R, building, [g1]).join(' ;\n'));
+      await update(readGraphBackfillBatch(R, building, [g1]));
       expect(await triples(R)).toEqual(['urn:a urn:b urn:c']);
 
       // The sub-graph `code` joins: copy its graph; a stale copy from the earlier generation does nothing.
       const dirty = await setState(nextReadGraphState(building, { kind: 'mark-dirty' })!, building);
       const repairing = await setState(nextReadGraphState(dirty, { kind: 'start-repair', versions: CURRENT_READ_GRAPH_VERSIONS })!, dirty);
-      await update(readGraphBackfillBatch(R, building, [g2]).join(' ;\n'));
+      await update(readGraphBackfillBatch(R, building, [g2]));
       expect(await triples(R)).toEqual(['urn:a urn:b urn:c']);
-      await update(readGraphBackfillBatch(R, repairing, [g2]).join(' ;\n'));
+      await update(readGraphBackfillBatch(R, repairing, [g2]));
       expect(await triples(R)).toEqual(['urn:a urn:b urn:c', 'urn:a urn:b urn:d']);
 
       // The sub-graph leaves while intact: retract it against the membership without it.
@@ -325,6 +325,15 @@ export function readGraphStatementsConformance(backend: 'oxigraph' | 'blazegraph
       expect(await triples(R)).toHaveLength(1);
       await update(readGraphFencedDrop(R, repairing));
       expect(await triples(R)).toEqual([]);
+
+      // A drop in batches removes at most its limit each time, and only for its own state and generation.
+      await update(`INSERT DATA { GRAPH <${R}> { <urn:x> <urn:y> <urn:z1> . <urn:x> <urn:y> <urn:z2> . <urn:x> <urn:y> <urn:z3> } }`);
+      await update(readGraphFencedDrop(R, building, { limit: 2 }));
+      expect(await triples(R)).toHaveLength(3);
+      await update(readGraphFencedDrop(R, repairing, { limit: 2 }));
+      expect(await triples(R)).toHaveLength(1);
+      await update(readGraphFencedDrop(R, repairing, { limit: 2 }));
+      expect(await count(readGraphSizeQuery(R))).toBe(0);
     });
 
     it('leaves the read graph unchanged for a guarded change that does not apply, and for an exact replay', async () => {
@@ -365,12 +374,12 @@ export function readGraphStatementsConformance(backend: 'oxigraph' | 'blazegraph
       const target: ReadGraphTarget = { readGraph: R, membership: readGraphMembership(key, snapshot, identity) };
       await update(`INSERT DATA { ${[1, 2, 3, 4].map((n) => `GRAPH <${g(n)}> { <urn:s:${n}> <urn:p> <urn:o:${n}> . <urn:shared> <urn:p> <urn:o> }`).join(' ')} }`);
       let row = await setState({ readGraph: R, state: 'building', generation: 9, ...versions() });
-      await update(readGraphBackfillBatch(R, row, [g(1), g(2)]).join(' ;\n'));
+      await update(readGraphBackfillBatch(R, row, [g(1), g(2)]));
       // Writes during the backfill keep their own maintenance: one in a copied graph, one in a graph not copied yet.
       await update(spliceReadGraphPlan({ readGraphs: [R], ...readGraphReferenceProcedure(target, [g(1)], []) }, [`DROP SILENT GRAPH <${g(1)}>`]));
       await update(spliceReadGraphPlan({ readGraphs: [R], ...readGraphReferenceProcedure(target, [g(3)], [g(3)]) },
         [`DROP SILENT GRAPH <${g(3)}>`, `INSERT DATA { GRAPH <${g(3)}> { <urn:s:3> <urn:p> <urn:o:new> } }`]));
-      await update(readGraphBackfillBatch(R, row, [g(3), g(4)]).join(' ;\n'));
+      await update(readGraphBackfillBatch(R, row, [g(3), g(4)]));
       expect(await triples(R)).toEqual(await memberUnion(cg, key, snapshot));
       row = await setState(nextReadGraphState(row, { kind: 'publish-ready' })!, row);
 
@@ -382,7 +391,7 @@ export function readGraphStatementsConformance(backend: 'oxigraph' | 'blazegraph
       // A full rebuild clears it: a fenced drop, then a fenced backfill of every member.
       const dirty = await setState(nextReadGraphState(row, { kind: 'mark-dirty' })!, row);
       const rebuilding = await setState(nextReadGraphState(dirty, { kind: 'start-rebuild', versions: CURRENT_READ_GRAPH_VERSIONS })!, dirty);
-      await update([readGraphFencedDrop(R, rebuilding), ...readGraphBackfillBatch(R, rebuilding, [1, 2, 3, 4].map(g))].join(' ;\n'));
+      await update([readGraphFencedDrop(R, rebuilding), readGraphBackfillBatch(R, rebuilding, [1, 2, 3, 4].map(g))].join(' ;\n'));
       await setState(nextReadGraphState(rebuilding, { kind: 'publish-ready' })!, rebuilding);
       expect(await triples(R)).toEqual(await memberUnion(cg, key, snapshot));
       expect(await triples(R)).not.toContain('urn:s:2 urn:p urn:o:2');
