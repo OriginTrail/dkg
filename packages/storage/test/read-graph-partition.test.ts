@@ -104,7 +104,9 @@ describe('read-graph partition names in storage', () => {
     expect(sparqlNamesReadGraphPartition(`DROP GRAPH <${ROOT}/\\u005Fread/state>`)).toBe(true);
     expect(sparqlNamesReadGraphPartition(`BASE <${ROOT}/> DROP GRAPH <_read/state>`)).toBe(true);
     expect(sparqlNamesReadGraphPartition('DROP GRAPH <unterminated')).toBe(false);
-    expect(sparqlNamesReadGraphPartition('DROP GRAPH <unterminated/_read')).toBe(true);
+    // Text it cannot read through counts as naming the partition.
+    expect(sparqlNamesReadGraphPartition('INSERT DATA { GRAPH <urn:g> { <urn:s> <urn:p> "_read } }')).toBe(true);
+    expect(sparqlNamesReadGraphPartition('DROP GRAPH <urn:x\\uZZZZ>')).toBe(true);
     expect(sparqlNamesReadGraphPartition(`INSERT DATA { GRAPH <${ASSET}> { <urn:s> <urn:p> "_read" } }`)).toBe(false);
     expect(sparqlNamesReadGraphPartition(`DROP GRAPH <${ROOT}/_reader/x>`)).toBe(false);
     expect(sparqlNamesReadGraphPartition(`PREFIX r: <${ROOT}/> CLEAR GRAPH r:reader`)).toBe(false);
@@ -163,7 +165,7 @@ describe('the read-graph partition guard', () => {
     opened.push(store);
     await store.insert(memberQuads);
     await store.update!(`INSERT DATA { GRAPH <${ASSET}> { <urn:s> <urn:p> "w" } }`, { touchedGraphs: [ASSET] });
-    await store.query(`DELETE DATA { GRAPH <${ASSET}> { <urn:s> <urn:p> "w" } }`);
+    await store.update!(`DELETE DATA { GRAPH <${ASSET}> { <urn:s> <urn:p> "w" } }`);
     await store.replaceSubject!(META, 'urn:m', [quad(META, 'urn:m', '"x"')]);
     expect(await store.deleteByPattern({ graph: SWM })).toBe(1);
     await readGraphPartitionMaintenanceStore(store).insert(plantedQuads);

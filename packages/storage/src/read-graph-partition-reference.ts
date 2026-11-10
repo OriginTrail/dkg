@@ -45,11 +45,11 @@ export function preparedSparqlNamesReadGraphPartition(prepared: ValidPreparedSpa
 
 /**
  * The same test on SPARQL text. Text that mentions the segment, or carries
- * escapes that could spell it, is lexed; text that cannot be lexed counts as
- * naming the partition.
+ * escapes that could spell it, is lexed; text that cannot be lexed, or that
+ * leaves a string, IRI or comment open, counts as naming the partition.
  */
 export function sparqlNamesReadGraphPartition(sparql: string): boolean {
   if (!sparql.includes(READ_GRAPH_SEGMENT) && !/\\[uU]/.test(sparql)) return false;
   const prepared = prepareSparql(sparql);
-  return prepared.status !== 'valid' || preparedSparqlNamesReadGraphPartition(prepared);
+  return prepared.status !== 'valid' || prepared.unterminated || preparedSparqlNamesReadGraphPartition(prepared);
 }

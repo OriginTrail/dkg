@@ -177,7 +177,8 @@ export async function prepareRollbackStores(
     }
     return null;
   }
-  // The inventory lease is held, so no daemon writes the triple store while its read graphs are dropped.
+  // The daemon is stopped and the inventory lease, where there is an inventory,
+  // is held: no daemon writes the triple store while its read graphs are dropped.
   try {
     const dropped = await dropReadGraphsForRollback(dataDir, (message) => io.log(message));
     if (dropped !== null) {
