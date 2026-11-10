@@ -30,7 +30,7 @@ import {
   readGraphPartitionMaintenanceStore,
   storeMayHoldReadGraphPartitions,
 } from '../src/read-graph-partition-store.js';
-import { sparqlNamesReadGraphPartition, sparqlUpdateMayWriteReadGraphPartition } from '../src/read-graph-partition-reference.js';
+import { sparqlNamesReadGraphPartition, sparqlUpdateMayWriteReadGraphPartition, sparqlUpdateReach } from '../src/read-graph-partition-reference.js';
 import {
   clearReadGraphPartitionsNote,
   mayHoldReadGraphPartitions,
@@ -167,6 +167,13 @@ describe('read-graph partition names in storage', () => {
     expect(sparqlUpdateMayWriteReadGraphPartition(`DROP GRAPH <${STATE}>`)).toBe(true);
     expect(sparqlUpdateMayWriteReadGraphPartition('INSERT { GRAPH ?g { <urn:s> <urn:p> "open } }')).toBe(true);
     expect(sparqlNamesReadGraphPartition(`PREFIX r: <${ROOT}/> CLEAR GRAPH r:reader`)).toBe(false);
+    // Clearing or dropping a whole-store target reaches every graph.
+    for (const sparql of ['CLEAR ALL', 'drop silent named', 'CLEAR DEFAULT', 'DROP # comment\n ALL', 'CLEAR \\u0041LL']) {
+      expect(sparqlUpdateReach(sparql), sparql).toBe('every-graph');
+    }
+    expect(sparqlUpdateReach(`CLEAR GRAPH <${ASSET}>`)).toBe('elsewhere');
+    expect(sparqlUpdateReach(`INSERT DATA { GRAPH <${ASSET}> { <urn:s> <urn:p> "all of it" } }`)).toBe('elsewhere');
+    expect(sparqlUpdateReach(`DROP GRAPH <${STATE}>`)).toBe('partition');
   });
 });
 
@@ -237,23 +244,28 @@ describe('the read-graph partition guard', () => {
     expect(await stored()).toEqual(before);
   });
 
-  it('refuses a pattern delete without a graph while the store may hold partitions', async () => {
+  it('refuses writes that reach every graph while the store may hold partitions', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     opened.push(store);
     await store.insert(memberQuads);
     const adapter = readGraphPartitionMaintenanceStore(store);
     await adapter.insert(plantedQuads);
-    // Before the store may hold partitions, such a delete runs as it always has.
+    // Before the store may hold partitions, such writes run as they always have.
     expect(await store.deleteByPattern({ subject: 'urn:m' })).toBe(1);
+    await store.update!('CLEAR SILENT DEFAULT');
     noteStoreMayHoldReadGraphPartitions(adapter);
-    for (const remove of [
-      () => store.deleteByPattern({ predicate: 'urn:p' }),
-      () => store.deleteByPattern({ graph: '', predicate: 'urn:p' }),
-      () => store.deleteByPatternWithoutCount!({ predicate: 'urn:p' }),
-    ]) {
-      const error = await remove().then(() => undefined, (caught: unknown) => caught);
-      expect(error).toBeInstanceOf(ReadGraphPartitionWriteError);
-      expect(isStoreOperationNotStarted(error, 'deleteByPattern')).toBe(true);
+    const refusals: Array<[Parameters<typeof isStoreOperationNotStarted>[1], () => Promise<unknown>]> = [
+      ['deleteByPattern', () => store.deleteByPattern({ predicate: 'urn:p' })],
+      ['deleteByPattern', () => store.deleteByPattern({ graph: '', predicate: 'urn:p' })],
+      ['deleteByPattern', () => store.deleteByPatternWithoutCount!({ predicate: 'urn:p' })],
+      ['update', () => store.update!('CLEAR ALL')],
+      ['update', () => store.update!('DROP SILENT NAMED')],
+      ['query', () => store.query('CLEAR DEFAULT')],
+    ];
+    for (const [operation, write] of refusals) {
+      const error = await write().then(() => undefined, (caught: unknown) => caught);
+      expect(error, operation).toBeInstanceOf(ReadGraphPartitionWriteError);
+      expect(isStoreOperationNotStarted(error, operation), operation).toBe(true);
     }
     expect(await adapter.countQuads(VM_READ)).toBe(1);
     expect(await adapter.countQuads(STATE)).toBe(1);

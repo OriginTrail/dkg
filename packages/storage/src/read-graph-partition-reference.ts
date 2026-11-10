@@ -99,15 +99,41 @@ export function preparedSparqlWritesThroughGraphVariable(prepared: ValidPrepared
   return false;
 }
 
+const WHOLE_STORE_TARGETS = new Set(['ALL', 'NAMED', 'DEFAULT']);
+
 /**
- * Whether a SPARQL UPDATE may write into a read-graph partition: it names a
- * graph in one, or writes through a graph variable. Text that
- * cannot be lexed, or that leaves a string open, counts as writing there.
+ * Whether a lexed SPARQL UPDATE clears or drops `ALL`, `NAMED` or `DEFAULT`
+ * rather than graphs it names. The first two reach every named graph; on an
+ * engine whose default graph merges the named graphs, the third does too.
  */
-export function sparqlUpdateMayWriteReadGraphPartition(sparql: string): boolean {
-  // A graph variable needs a `?` or `$`, written out or as an escape.
-  if (!mayNameReadGraphPartition(sparql) && !/[?$]/.test(sparql)) return false;
+export function preparedSparqlUpdateReachesEveryGraph(prepared: ValidPreparedSparql): boolean {
+  const { tokens } = prepared;
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (!isSparqlKeyword(tokens, index, 'CLEAR') && !isSparqlKeyword(tokens, index, 'DROP')) continue;
+    const target = tokens[isSparqlKeyword(tokens, index + 1, 'SILENT') ? index + 2 : index + 1];
+    if (target?.kind === 'word' && WHOLE_STORE_TARGETS.has(target.upper)) return true;
+  }
+  return false;
+}
+
+/**
+ * How far a SPARQL UPDATE may write: into a read-graph partition (it names a
+ * graph in one, writes through a graph variable, or cannot be lexed or leaves
+ * a string open), into every graph (it clears or drops a whole-store target),
+ * or only elsewhere.
+ */
+export type SparqlUpdateReach = 'partition' | 'every-graph' | 'elsewhere';
+
+export function sparqlUpdateReach(sparql: string): SparqlUpdateReach {
+  // A graph variable needs a `?` or `$`, and a whole-store target one of its words, written out or as an escape.
+  if (!mayNameReadGraphPartition(sparql) && !/[?$]/.test(sparql) && !/\b(?:all|named|default)\b/i.test(sparql)) return 'elsewhere';
   const prepared = prepareSparql(sparql);
-  if (prepared.status !== 'valid' || prepared.unterminated) return true;
-  return preparedSparqlNamesReadGraphPartition(prepared) || preparedSparqlWritesThroughGraphVariable(prepared);
+  if (prepared.status !== 'valid' || prepared.unterminated) return 'partition';
+  if (preparedSparqlNamesReadGraphPartition(prepared) || preparedSparqlWritesThroughGraphVariable(prepared)) return 'partition';
+  return preparedSparqlUpdateReachesEveryGraph(prepared) ? 'every-graph' : 'elsewhere';
+}
+
+/** Whether a SPARQL UPDATE may write into a read-graph partition, whatever the store holds. */
+export function sparqlUpdateMayWriteReadGraphPartition(sparql: string): boolean {
+  return sparqlUpdateReach(sparql) === 'partition';
 }

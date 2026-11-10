@@ -2,7 +2,7 @@
 import { isSparqlUpdateOperation, parseReadGraphIri } from '@origintrail-official/dkg-core';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './adapters/graph-enumeration-query.js';
 import { composeGraphEnumerationVisibility, isReadGraphPartitionGraph } from './graph-enumeration-visibility.js';
-import { sparqlUpdateMayWriteReadGraphPartition } from './read-graph-partition-reference.js';
+import { sparqlUpdateReach } from './read-graph-partition-reference.js';
 import { describeRfc64AuthorCommitCasV1 } from './rfc64-author-commit-mutation.js';
 import {
   STORE_OPERATION_OUTCOME_TAG,
@@ -53,8 +53,15 @@ function refuseQuads(quads: readonly Quad[], operation: StoreOperation): void {
   for (const quad of quads) refuseGraph(quad.graph, operation);
 }
 
-function refuseSparql(sparql: string, operation: StoreOperation): void {
-  if (sparqlUpdateMayWriteReadGraphPartition(sparql)) throw new ReadGraphPartitionWriteError(operation, undefined);
+/**
+ * An UPDATE that may write into a partition is refused. One that clears or
+ * drops a whole-store target is refused while the store may hold partitions.
+ */
+function refuseSparql(store: TripleStore, sparql: string, operation: StoreOperation): void {
+  const reach = sparqlUpdateReach(sparql);
+  if (reach === 'partition' || (reach === 'every-graph' && storeMayHoldReadGraphPartitions(store))) {
+    throw new ReadGraphPartitionWriteError(operation, undefined);
+  }
 }
 
 /**
@@ -66,7 +73,8 @@ function refuseSparql(sparql: string, operation: StoreOperation): void {
  * on the partition uses {@link readGraphPartitionMaintenanceStore}. A SPARQL
  * UPDATE is refused when its text names a partition graph, or when it writes
  * through a graph variable, whose target only the store would know. A pattern
- * delete without a graph is refused while the store may hold partitions.
+ * delete without a graph, and an UPDATE that clears or drops a whole-store
+ * target, are refused while the store may hold partitions.
  */
 export class ReadGraphPartitionStore implements TripleStoreDecorator {
   readonly innerStore: TripleStore;
@@ -133,7 +141,7 @@ export class ReadGraphPartitionStore implements TripleStoreDecorator {
     };
     if (inner.update) this.update = async (sparql, options) => {
       for (const graph of options?.touchedGraphs ?? []) refuseGraph(graph, 'update');
-      refuseSparql(sparql, 'update');
+      refuseSparql(inner, sparql, 'update');
       return inner.update!(sparql, options);
     };
     if (inner.readGraphInventory) this.readGraphInventory = (prefix, options) => inner.readGraphInventory!(prefix, options);
@@ -165,7 +173,7 @@ export class ReadGraphPartitionStore implements TripleStoreDecorator {
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
-    if (isSparqlUpdateOperation(sparql)) refuseSparql(sparql, 'query');
+    if (isSparqlUpdateOperation(sparql)) refuseSparql(this.innerStore, sparql, 'query');
     return this.innerStore.query(sparql, options);
   }
 
