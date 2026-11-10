@@ -209,6 +209,26 @@ describe('a caller pays for, and is bounded by, what it receives', () => {
       .resolves.toEqual({ graphs: [match], materializedBytes: bytes([match]) });
   });
 
+  it("bounds what a store's own inventory and prefix reads return, whatever it did with byte options", async () => {
+    const wide = Array.from({ length: 20 }, (_, n) => `${target}/_verifiable_memory/b/${n}`);
+    const own = {
+      listGraphs: async () => wide,
+      readGraphInventory: async () => ({ graphs: wide, materializedBytes: bytes(wide) }),
+    } as unknown as TripleStore;
+    const byPrefix = { listGraphs: async () => wide, listGraphsByPrefix: async () => wide } as unknown as TripleStore;
+    for (const read of [
+      () => readGraphInventoryByPrefix(own, `${target}/`, { maxResponseBytes: callerLimit }),
+      () => readGraphInventoryByPrefix(byPrefix, `${target}/`, { maxResponseBytes: callerLimit }),
+      () => readGraphInventory(own, { maxResponseBytes: callerLimit }),
+      () => new GraphSetIndexStore(own, { enabled: false }).readGraphInventory(`${target}/`, { maxResponseBytes: callerLimit }),
+      () => new GraphSetIndexStore(byPrefix, { enabled: false }).readGraphInventory(`${target}/`, { maxResponseBytes: callerLimit }),
+    ]) {
+      await expect(read()).rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE', maxBytes: callerLimit });
+    }
+    setCeiling(bytes(wide) - 1);
+    await expect(readGraphInventory(own)).rejects.toMatchObject({ code: 'STORE_INTERNAL_LIMIT' });
+  });
+
   it("bounds a graph-manager prefix read's slice by the caller's limit on a store without a prefix listing", async () => {
     const bucket = `${CG}swm/_shared_memory`;
     const large = Array.from({ length: 20 }, (_, n) => `${bucket}/0xabc/${n}`);

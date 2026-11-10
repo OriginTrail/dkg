@@ -24,25 +24,27 @@ export function boundGraphInventory<T extends readonly string[]>(inventory: Meas
   if (options?.maxResponseBytes !== undefined) assertMeasuredGraphCatalogWithinResponseLimit(inventory.materializedBytes, options.maxResponseBytes);
   return inventory;
 }
-/** Use the outer visibility boundary; without one, the complete list is read as node work. */
+/**
+ * Every read below bounds what the store returned, whether or not the store honoured the byte
+ * options: a complete list by the internal ceiling, and anything returned by the caller's limit.
+ */
 export async function readGraphInventory(store: TripleStore, options?: QueryOptions): Promise<MeasuredGraphInventory> {
-  if (store.readGraphInventory) return store.readGraphInventory(undefined, options);
-  const complete = measureGraphInventory(await readCompleteGraphCatalog(options, internal => store.listGraphs(internal)));
-  // A store may ignore byte options, so the ceiling also bounds what it returned.
+  const complete = store.readGraphInventory
+    ? await store.readGraphInventory(undefined, options)
+    // Without a visibility boundary the complete list is read as node work.
+    : measureGraphInventory(await readCompleteGraphCatalog(options, internal => store.listGraphs(internal)));
   assertMeasuredGraphCatalogWithinInternalLimit(complete.materializedBytes);
   return boundGraphInventory(complete, options);
 }
-/** One complete inventory read as node work, bounded by the ceiling whatever the store did with byte options. */
+/** One complete inventory read as node work: the internal ceiling is its only byte limit. */
 export async function readCompleteGraphInventory(store: TripleStore, options?: QueryOptions): Promise<MeasuredGraphInventory> {
-  const inventory = await readCompleteGraphCatalog(options, internal => readGraphInventory(store, internal));
-  assertMeasuredGraphCatalogWithinInternalLimit(inventory.materializedBytes);
-  return inventory;
+  return readCompleteGraphCatalog(options, internal => readGraphInventory(store, internal));
 }
 export async function readGraphInventoryByPrefix(store: TripleStore, prefix: string, options?: QueryOptions): Promise<MeasuredGraphInventory> {
-  if (store.readGraphInventory) return store.readGraphInventory(prefix, options);
-  if (store.listGraphsByPrefix) return measureGraphInventory(await store.listGraphsByPrefix(prefix, options));
-  // No prefix listing: the complete list is node work under the ceiling, even if the store ignores byte
-  // options; the caller pays for, and is bounded by, its slice.
+  if (store.readGraphInventory) return boundGraphInventory(await store.readGraphInventory(prefix, options), options);
+  if (store.listGraphsByPrefix) return boundGraphInventory(measureGraphInventory(await store.listGraphsByPrefix(prefix, options)), options);
+  // No prefix listing: the complete list is node work under the ceiling; the caller pays for, and is
+  // bounded by, its slice.
   const graphs = await readCompleteGraphCatalog(options, internal => store.listGraphs(internal));
   assertGraphCatalogWithinInternalLimit(graphs);
   return boundGraphInventory(measureGraphInventory(graphs.filter(graph => graph.startsWith(prefix))), options);
