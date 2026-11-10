@@ -273,15 +273,9 @@ export function canonicalizeSwmAuthorInventoryRowsBytesV1(
   assertSwmAuthorInventoryRowsV1(rows);
   try {
     if (ownedRowSets.has(rows)) {
-      const parts: string[] = [];
-      let bytes = 2;
-      for (const row of rows) {
-        const encoded = ownedRowEncoding(row);
-        bytes += encoded.bytes + (parts.length ? 1 : 0);
-        if (bytes > MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1) throw new Error('row bytes exceed limit');
-        parts.push(encoded.text);
-      }
-      return UTF8.encode(`[${parts.join(',')}]`);
+      const bytes = composeOwnedRowsBytes(rows);
+      rememberRowsBytes(rows, bytes);
+      return bytes.slice();
     }
     return UTF8.encode(canonicalizeJson(rows as unknown as CanonicalJsonValue, {
       maxBytes: MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1,
@@ -348,15 +342,36 @@ function ownedRowEncoding(row: SwmAuthorInventoryRowV1) {
 export function snapshotSwmAuthorInventoryRowsV1(
   input: readonly SwmAuthorInventoryRowV1[],
 ): readonly SwmAuthorInventoryRowV1[] {
-  if (immutableRowsBytesV1.has(input)) return input;
+  if (ownedRowSets.has(input)) return input;
   if (!Array.isArray(input) || input.length > MAX_SWM_AUTHOR_INVENTORY_ROWS_V1) {
     fail('swm-inventory-too-large', 'row set exceeds the v1 row limit');
   }
   const rows = Object.freeze(snapshotDenseDataArray(input, 'SWM inventory rows')
     .map((row) => snapshotSwmAuthorInventoryRowV1(row as SwmAuthorInventoryRowV1)));
+  assertSwmAuthorInventoryRowsV1(rows);
+  let bytes: Uint8Array;
+  try {
+    bytes = composeOwnedRowsBytes(rows);
+  } catch (cause) {
+    fail('swm-inventory-too-large', 'row set exceeds the canonical v1 byte limit', cause);
+  }
+  // Ownership records validation, independently of optional cached derivations.
   ownedRowSets.add(rows);
-  rememberRowsBytes(rows, canonicalizeSwmAuthorInventoryRowsBytesV1(rows));
+  rememberRowsBytes(rows, bytes);
   return rows;
+}
+
+/** Only called after full set validation on codec-owned immutable rows. */
+function composeOwnedRowsBytes(rows: readonly SwmAuthorInventoryRowV1[]): Uint8Array {
+  const parts: string[] = [];
+  let bytes = 2;
+  for (const row of rows) {
+    const encoded = ownedRowEncoding(row);
+    bytes += encoded.bytes + (parts.length ? 1 : 0);
+    if (bytes > MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1) throw new Error('row bytes exceed limit');
+    parts.push(encoded.text);
+  }
+  return UTF8.encode(`[${parts.join(',')}]`);
 }
 
 export function parseCanonicalSwmAuthorInventoryRowsV1(
@@ -579,7 +594,7 @@ export function assertSwmAuthorInventorySnapshotBindingV1(
 function assertSwmAuthorInventoryRowsV1(
   value: unknown,
 ): asserts value is SwmAuthorInventoryRowV1[] {
-  if (immutableRowsBytesV1.has(value as readonly SwmAuthorInventoryRowV1[])) return;
+  if (ownedRowSets.has(value as readonly SwmAuthorInventoryRowV1[])) return;
   if (!Array.isArray(value)) fail('swm-inventory-schema', 'rows must be an array');
   if (value.length > MAX_SWM_AUTHOR_INVENTORY_ROWS_V1) {
     fail('swm-inventory-too-large', 'row set exceeds the v1 row limit');

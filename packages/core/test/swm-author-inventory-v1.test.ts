@@ -241,6 +241,8 @@ describe('SWM author inventory v1', () => {
 
       // Keep every weak key live, and cross the byte budget with one more entry.
       snapshots.push(codec.parseCanonicalSwmAuthorInventoryRowsV1(text));
+      expect(codec.snapshotSwmAuthorInventoryRowsV1(snapshots[0]!)).toBe(snapshots[0]);
+      expect(rowSetEncodings()).toBe(0);
       expect(Buffer.compare(encode(snapshots.at(-1)!), expected)).toBe(0);
       expect(Buffer.compare(encode(snapshots[0]!), expected)).toBe(0);
       // The full-set bytes were evicted; rebuild them from individually owned rows.
