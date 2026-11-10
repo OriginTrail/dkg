@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { KeyedSingleFlight } from './keyed-ttl-single-flight-cache.js';
+
 /**
  * An event-log scan that remembers what it read, per key.
  *
@@ -10,16 +12,34 @@
  * - The scan keeps each event with its block. A page that is read again
  *   replaces the events it held before, so an event that a reorg removed
  *   drops out. An item stays listed while any event still kept names it.
+ * - A head below the last block read (a reorg onto a shorter chain, or a
+ *   backend that lags) drops the events above it, and those blocks are read
+ *   again once the head passes them.
  * - A read that fails part-way keeps the pages it finished, and the next read
  *   goes on from there.
- * - Reads of one key that overlap share one scan.
+ * - Reads of one key that overlap share one scan (`KeyedSingleFlight`).
  */
 
-export interface IncrementalEventScanRange {
+/** How far a key's scan has read: from `anchor` through `through`. */
+export interface IncrementalEventScanProgress {
+  readonly anchor: number;
+  readonly through: number;
+}
+
+/** One event a page held: the item it names, and the block it is in. */
+export interface ScannedEvent<T> {
+  readonly item: T;
+  readonly block: number;
+}
+
+/** What one read covers, and how it reads a page. */
+export interface IncrementalEventScanPlan<T> {
   /** The first block that can hold the events. */
   readonly anchor: number;
   /** The newest block to read up to. */
   readonly head: number;
+  /** Reads one page, both bounds inclusive, and returns every event found there. */
+  readonly readPage: (fromBlock: number, toBlock: number) => Promise<Iterable<ScannedEvent<T>>>;
 }
 
 export interface IncrementalEventScanOptions {
@@ -27,12 +47,6 @@ export interface IncrementalEventScanOptions {
   readonly pageBlocks: number;
   /** Blocks before the last block read that a later read covers again. */
   readonly tailBlocks: number;
-}
-
-/** One event a page held: the item it names, and the block it is in. */
-export interface ScannedEvent<T> {
-  readonly item: T;
-  readonly block: number;
 }
 
 interface KeptEvent<T> extends ScannedEvent<T> {
@@ -46,11 +60,11 @@ interface ScanEntry<T> {
   through: number;
   /** Each event kept, by `${id}@${block}`. */
   readonly events: Map<string, KeptEvent<T>>;
-  running?: Promise<T[]>;
 }
 
 export class IncrementalEventScan<T> {
   readonly #entries = new Map<string, ScanEntry<T>>();
+  readonly #flight = new KeyedSingleFlight<string>();
   readonly #pageBlocks: number;
   readonly #tailBlocks: number;
 
@@ -66,60 +80,64 @@ export class IncrementalEventScan<T> {
   }
 
   /**
-   * The items named by the events from the anchor up to the head that `range` resolves.
+   * The items named by the events from the anchor up to the head of this read.
    *
-   * @param range - resolves the anchor and the head for this read.
-   * @param readPage - reads one page, both bounds inclusive, and returns every event found there.
+   * @param prepare - plans this read: its anchor, its head and its page reader. It gets the key's progress
+   *   once a page has been read, so it can keep that anchor and only look up the head.
    * @param idOf - names an item, so one named by several events is listed once.
    */
   read(
     key: string,
-    range: () => Promise<IncrementalEventScanRange>,
-    readPage: (fromBlock: number, toBlock: number) => Promise<Iterable<ScannedEvent<T>>>,
+    prepare: (progress: IncrementalEventScanProgress | undefined) => Promise<IncrementalEventScanPlan<T>>,
     idOf: (item: T) => string,
   ): Promise<T[]> {
-    let entry = this.#entries.get(key);
-    if (entry?.running) return entry.running;
-    if (!entry) {
-      entry = { anchor: -1, through: -1, events: new Map() };
-      this.#entries.set(key, entry);
+    return this.#flight.run(key, key, () => this.#scan(key, prepare, idOf));
+  }
+
+  async #scan(
+    key: string,
+    prepare: (progress: IncrementalEventScanProgress | undefined) => Promise<IncrementalEventScanPlan<T>>,
+    idOf: (item: T) => string,
+  ): Promise<T[]> {
+    let scan = this.#entries.get(key);
+    if (!scan) {
+      scan = { anchor: -1, through: -1, events: new Map() };
+      this.#entries.set(key, scan);
     }
-    const scan = entry;
-    const running = (async () => {
-      const { anchor, head } = await range();
-      if (scan.anchor < 0 || anchor < scan.anchor) {
-        // The first read, or an anchor below the one the kept progress started at: that progress
-        // does not cover the blocks in between, so read again from the new anchor.
-        scan.anchor = anchor;
-        scan.through = anchor - 1;
-        scan.events.clear();
-      } else if (anchor > scan.anchor) {
-        // A later anchor narrows the range. What was read from the earlier one stays valid; the
-        // events before the new anchor are outside the range now.
-        scan.anchor = anchor;
-        for (const [key, event] of scan.events) if (event.block < anchor) scan.events.delete(key);
+    const progress = scan.anchor >= 0 && scan.through >= scan.anchor ? { anchor: scan.anchor, through: scan.through } : undefined;
+    const { anchor, head, readPage } = await prepare(progress);
+    if (scan.anchor < 0 || anchor < scan.anchor) {
+      // The first read, or an anchor below the one the kept progress started at: that progress
+      // does not cover the blocks in between, so read again from the new anchor.
+      scan.anchor = anchor;
+      scan.through = anchor - 1;
+      scan.events.clear();
+    } else if (anchor > scan.anchor) {
+      // A later anchor narrows the range. What was read from the earlier one stays valid; the
+      // events before the new anchor are outside the range now.
+      scan.anchor = anchor;
+      for (const [eventKey, event] of scan.events) if (event.block < anchor) scan.events.delete(eventKey);
+    }
+    if (head < scan.through) {
+      // The head is below the last block read: drop what was kept above it, and read those blocks
+      // again once the head passes them.
+      for (const [eventKey, event] of scan.events) if (event.block > head) scan.events.delete(eventKey);
+      scan.through = Math.max(head, scan.anchor - 1);
+    }
+    const from = Math.max(anchor, scan.through + 1 - this.#tailBlocks);
+    for (let lo = from; lo <= head; lo += this.#pageBlocks) {
+      const hi = Math.min(lo + this.#pageBlocks - 1, head);
+      const found = await readPage(lo, hi);
+      // The page as read now replaces what it held before, so an event a reorg removed drops out.
+      for (const [eventKey, event] of scan.events) if (event.block >= lo && event.block <= hi) scan.events.delete(eventKey);
+      for (const { item, block } of found) {
+        const id = idOf(item);
+        scan.events.set(`${id}@${block}`, { id, item, block });
       }
-      const from = Math.max(anchor, scan.through + 1 - this.#tailBlocks);
-      for (let lo = from; lo <= head; lo += this.#pageBlocks) {
-        const hi = Math.min(lo + this.#pageBlocks - 1, head);
-        const found = await readPage(lo, hi);
-        // The page as read now replaces what it held before, so an event a reorg removed drops out.
-        for (const [key, event] of scan.events) if (event.block >= lo && event.block <= hi) scan.events.delete(key);
-        for (const { item, block } of found) {
-          const id = idOf(item);
-          scan.events.set(`${id}@${block}`, { id, item, block });
-        }
-        if (hi > scan.through) scan.through = hi;
-      }
-      const items = new Map<string, T>();
-      for (const { id, item } of scan.events.values()) if (!items.has(id)) items.set(id, item);
-      return [...items.values()];
-    })();
-    scan.running = running;
-    const settle = (): void => {
-      if (scan.running === running) scan.running = undefined;
-    };
-    running.then(settle, settle);
-    return running;
+      if (hi > scan.through) scan.through = hi;
+    }
+    const items = new Map<string, T>();
+    for (const { id, item } of scan.events.values()) if (!items.has(id)) items.set(id, item);
+    return [...items.values()];
   }
 }

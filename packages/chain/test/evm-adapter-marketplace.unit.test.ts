@@ -48,33 +48,56 @@ describe('listBuyerAccounts', () => {
   const topic = (value: bigint | string) => ethers.zeroPadValue(typeof value === 'bigint' ? ethers.toBeHex(value) : value, 32);
   const buyerAdded = (accountId: bigint, blockNumber: number) => ({ blockNumber, topics: [ethers.id('BuyerAdded'), topic(accountId), topic(BUYER)] });
 
-  /** An adapter whose chain is `logs` up to `chain.head`, recording each page it reads. */
-  function adapterOver(chain: { head: number; logs: Array<ReturnType<typeof buyerAdded>> }) {
+  /** An adapter whose chain is `logs` up to `chain.head`, recording each page it reads and each lookup it makes. */
+  function adapterOver(chain: { head: number; logs: Array<ReturnType<typeof buyerAdded>>; anchor?: number }) {
     const pages: Array<[number, number]> = [];
+    const lookups = { deployBlock: 0, head: 0 };
     const serviceSubscriptions = { getAddress: async () => SUBSCRIPTIONS, filters: { BuyerAdded: () => ({}) } };
     const adapter = Object.assign(Object.create(EVMChainAdapter.prototype), {
       init: async () => undefined,
       resolveContract: async () => serviceSubscriptions,
-      resolveContractDeployBlock: async () => ({ fromBlock: DEPLOYED, head: chain.head, scanProviders: [] }),
+      resolveContractDeployBlock: async () => {
+        lookups.deployBlock += 1;
+        return { fromBlock: chain.anchor ?? DEPLOYED, head: chain.head, scanProviders: [], ...(chain.anchor === 0 ? { degradedFromGenesis: true } : {}) };
+      },
+      resolveLogScanHead: async () => {
+        lookups.head += 1;
+        return { head: chain.head, scanProviders: [] };
+      },
       queryEventLogsPage: async (_contract: unknown, _filter: unknown, lo: number, hi: number) => {
         pages.push([lo, hi]);
         return { logs: chain.logs.filter((l) => l.blockNumber >= lo && l.blockNumber <= hi), provider: {} };
       },
     }) as { listBuyerAccounts(buyer: string): Promise<bigint[]> };
-    return { adapter, pages };
+    return { adapter, pages, lookups };
   }
 
   it('keeps the scan between reads: a repeat read covers only the new blocks and the reorg tail', async () => {
     const chain = { head: 20_000, logs: [buyerAdded(7n, 12_345)] };
-    const { adapter, pages } = adapterOver(chain);
+    const { adapter, pages, lookups } = adapterOver(chain);
     expect(await adapter.listBuyerAccounts(BUYER)).toEqual([7n]);
     expect(pages).toEqual([[10_000, 19_999], [20_000, 20_000]]);
+    expect(lookups).toEqual({ deployBlock: 1, head: 0 });
 
     pages.length = 0;
     chain.head = 20_010;
     chain.logs.push(buyerAdded(9n, 20_005));
     expect(await adapter.listBuyerAccounts(BUYER)).toEqual([7n, 9n]);
     expect(pages).toEqual([[20_001 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 20_010]]);
+    // A repeat read only looks up the head.
+    expect(lookups).toEqual({ deployBlock: 1, head: 1 });
+  });
+
+  it('does not search for the deploy block again after a read that fell back to genesis', async () => {
+    const chain = { head: 25_000, logs: [buyerAdded(7n, 12_345)], anchor: 0 };
+    const { adapter, pages, lookups } = adapterOver(chain);
+    expect(await adapter.listBuyerAccounts(BUYER)).toEqual([7n]);
+    expect(pages[0]).toEqual([0, 9_999]);
+    pages.length = 0;
+    chain.head = 25_005;
+    expect(await adapter.listBuyerAccounts(BUYER)).toEqual([7n]);
+    expect(lookups).toEqual({ deployBlock: 1, head: 1 });
+    expect(pages).toEqual([[25_001 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 25_005]]);
   });
 
   it('drops an account whose only BuyerAdded a reorg removed from the tail', async () => {

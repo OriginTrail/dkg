@@ -28,7 +28,7 @@ import { enrichEvmError } from './evm-adapter-errors.js';
 import { EVMChainAdapterBase, type ScanProvider } from './evm-adapter-base.js';
 import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
 import type { EvmSigner } from './evm-signer.js';
-import { IncrementalEventScan } from './incremental-event-scan.js';
+import { IncrementalEventScan, type ScannedEvent } from './incremental-event-scan.js';
 import {
   BUYER_GRANT_TYPES,
   compactSignature,
@@ -434,21 +434,32 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
       buyerAccountScans.set(this, scan);
     }
     const filter = ss.filters.BuyerAdded(null, buyer);
-    const connected = new Map<JsonRpcProvider, Contract>();
-    let scanProviders: ReadonlyArray<ScanProvider> = [];
-    let preferred: JsonRpcProvider | undefined;
     const accounts = await scan.read(
       `${address.toLowerCase()}:${buyer.toLowerCase()}`,
-      async () => {
-        const resolved = await this.resolveContractDeployBlock(address, label, 'ServiceSubscriptions');
-        scanProviders = resolved.scanProviders;
-        return { anchor: resolved.fromBlock, head: resolved.head };
-      },
-      async (lo, hi) => {
-        const page = await this.queryEventLogsPage(ss, filter, lo, hi, scanProviders, connected, `${label} BuyerAdded`, preferred);
-        preferred = page.provider;
-        // topics: the event, the indexed accountId, the indexed buyer.
-        return page.logs.map((log) => ({ item: BigInt(log.topics[1]!), block: log.blockNumber }));
+      async (progress) => {
+        // Once the scan has read from its anchor, a later read only needs the head. That also keeps a deploy-block
+        // search that fell back to genesis (which is not cached) from running again on every read.
+        let anchor: number;
+        let head: number;
+        let scanProviders: ReadonlyArray<ScanProvider>;
+        if (progress) {
+          ({ head, scanProviders } = await this.resolveLogScanHead(label));
+          anchor = progress.anchor;
+        } else {
+          const resolved = await this.resolveContractDeployBlock(address, label, 'ServiceSubscriptions');
+          ({ head, scanProviders } = resolved);
+          anchor = resolved.fromBlock;
+        }
+        // The page reader of this read, on the backends it resolved, keeping to the one that last answered.
+        const connected = new Map<JsonRpcProvider, Contract>();
+        let preferred: JsonRpcProvider | undefined;
+        const readPage = async (lo: number, hi: number): Promise<ScannedEvent<bigint>[]> => {
+          const page = await this.queryEventLogsPage(ss, filter, lo, hi, scanProviders, connected, `${label} BuyerAdded`, preferred);
+          preferred = page.provider;
+          // topics: the event, the indexed accountId, the indexed buyer.
+          return page.logs.map((log) => ({ item: BigInt(log.topics[1]!), block: log.blockNumber }));
+        };
+        return { anchor, head, readPage };
       },
       (accountId) => accountId.toString(),
     );
