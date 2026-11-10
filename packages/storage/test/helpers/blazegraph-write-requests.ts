@@ -1,7 +1,8 @@
 import { vi } from 'vitest';
 import { BlazegraphStore } from '../../src/adapters/blazegraph.js';
 import type { AtomicAssetReplacement } from '../../src/atomic-asset-group.js';
-import type { Quad, UpdateOptions } from '../../src/triple-store.js';
+import type { ReadGraphWriteOptions } from '../../src/adapters/read-graph-request.js';
+import type { Quad } from '../../src/triple-store.js';
 import { authorCommitInput } from '../rfc64-author-commit-cas-harness.js';
 
 /**
@@ -35,7 +36,7 @@ const ASSET: AtomicAssetReplacement = {
 export interface BlazegraphWriteCase {
   readonly name: string;
   readonly dataRequest: number;
-  readonly run: (store: BlazegraphStore, options?: UpdateOptions) => Promise<unknown>;
+  readonly run: (store: BlazegraphStore, options?: ReadGraphWriteOptions) => Promise<unknown>;
 }
 
 export const BLAZEGRAPH_WRITE_CASES: readonly BlazegraphWriteCase[] = [
