@@ -34,6 +34,8 @@ const HINTS = 'PREFIX hint: <http://www.bigdata.com/queryHints#>';
 const q = (graph: string, subject: string, predicate: string, object: string): Quad => ({ graph, subject, predicate, object });
 const BASE: Quad[] = [
   q(G1, 'urn:s', 'urn:p', 'urn:x'), q(G1, 'urn:a', 'urn:b', 'urn:c'), q(G1, 'urn:x', 'urn:r', 'urn:z'), q(G1, 'urn:s', 'urn:val', INT(5)),
+  // A subject whose only urn:q match is left in a read graph (STALE): it keeps the negative shapes honest.
+  q(G1, 'urn:v', 'urn:p', 'urn:x'),
   q(G2, 'urn:s', 'urn:q', 'urn:y'), q(G2, 'urn:a', 'urn:b', 'urn:c'), q(G2, 'urn:s', 'urn:val', INT(5)),
   q(GS, 'urn:s', 'urn:t', 'urn:w'), q(GS, 'urn:a', 'urn:b', 'urn:c'),
   q(META, 'urn:ka1', 'urn:status', '"confirmed"'), q(META, 'urn:ka1', 'urn:points', RCG),
@@ -57,7 +59,7 @@ const stateRow = (stateGraph: string, readGraph: string, state: string, generati
 ];
 const STATE = [...stateRow(ST, RCG, 'ready', 3), ...stateRow(ST, RSUB, 'ready', 1), ...stateRow(ST2, R2, 'dirty', 7)];
 // Triples an unmaintained writer deleted from H1 while R2 was dirty: they are left only in R2.
-const STALE = [q(R2, 'urn:gone', 'urn:p', 'urn:x'), q(R2, 'urn:gone', 'urn:val', INT(5))];
+const STALE = [q(R2, 'urn:gone', 'urn:p', 'urn:x'), q(R2, 'urn:gone', 'urn:val', INT(5)), q(R2, 'urn:v', 'urn:q', 'urn:hidden')];
 const VARIANTS = {
   copies: [...BASE, ...COPIES],
   'copies and state': [...BASE, ...COPIES, ...STATE],
@@ -129,6 +131,7 @@ const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
   ['O1 OPTIONAL GRAPH', 'graph', 'SELECT ?s ?h WHERE { GRAPH ?g { ?s <urn:p> <urn:x> } OPTIONAL { GRAPH ?h { ?s <urn:q> ?y } } }'],
   ['N1 NOT EXISTS over GRAPH', 'graph', 'SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:p> ?x } FILTER(NOT EXISTS { GRAPH ?h { ?s <urn:q> ?y } }) }'],
   ['M1 MINUS over GRAPH', 'graph', 'SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } MINUS { GRAPH ?h { ?s <urn:q> ?y } } }'],
+  ['Y1 EXISTS in the projection, outside GRAPH', 'default', 'SELECT ?s (EXISTS { <urn:gone> <urn:p> <urn:x> } AS ?stale) WHERE { GRAPH ?g { ?s <urn:p> <urn:x> } }'],
   ['U1 UNION of GRAPH', 'graph', 'SELECT ?g ?s WHERE { { GRAPH ?g { ?s <urn:p> ?o } } UNION { GRAPH ?g { ?s <urn:t> ?o } } }'],
   ['B1 a computed graph IRI', 'graph', `SELECT ?s WHERE { BIND(IRI(CONCAT("${ROOT}/_", "read/cg/_verifiable_memory")) AS ?g) GRAPH ?g { ?s ?p ?o } }`],
   ['B2 a graph IRI read from data', 'graph', `SELECT ?o WHERE { GRAPH <${META}> { ?k <urn:points> ?g } GRAPH ?g { ?s ?p ?o } }`],
@@ -191,6 +194,21 @@ describe(`unscoped queries on ${ENGINE} with read graphs planted`, () => {
       if (manager && handles.length) await manager.disposeAll(handles);
     }
   }, 60_000);
+
+  it('loses the visible subject of the negative shapes when GRAPH ?h may read a read graph (control)', async () => {
+    const { store } = planted.get('copies, state and a stale triple')!;
+    const subjects = async (engine: Pick<TripleStore, 'query'> | DKGQueryEngine, query: string) => {
+      const result = await engine.query(query);
+      const rows = 'type' in result ? (result.type === 'bindings' ? result.bindings : []) : result.bindings;
+      return rows.map(row => row.s).filter(Boolean);
+    };
+    for (const query of [SHAPES.find(([label]) => label.startsWith('N1'))![2], SHAPES.find(([label]) => label.startsWith('M1'))![2]]) {
+      expect(await subjects(truth, query)).toContain('urn:v');
+      expect(await subjects(planted.get('copies, state and a stale triple')!.engine, query)).toContain('urn:v');
+      // Sent to the store as it is, the hidden match removes the subject.
+      expect(await subjects(store, query)).not.toContain('urn:v');
+    }
+  });
 
   it('plants read graphs that a query sent straight to the store would see', async () => {
     for (const { store } of planted.values()) {
