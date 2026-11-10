@@ -73,6 +73,10 @@ describe('read-graph partitions in content classification', () => {
   });
 });
 
+// Reaches the whole-context-graph read graph through a computed IRI, which no IRI token names.
+const COMPUTED_READ_VM = 'SELECT ?o WHERE { BIND(IRI(CONCAT(STR(<did:dkg:context-graph:read-partition>), '
+  + `"/${READ_GRAPH_SEGMENT.slice(0, 1)}", "${READ_GRAPH_SEGMENT.slice(1)}/cg/_verifiable_memory")) AS ?g) GRAPH ?g { ?s ?p ?o } }`;
+
 // Unscoped shapes that do not name a read graph: each must answer as on a store without read graphs.
 const UNSCOPED = [
   'SELECT ?o WHERE { GRAPH ?g { ?s <urn:p> ?o } }',
@@ -83,7 +87,7 @@ const UNSCOPED = [
   'SELECT ?c WHERE { { SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } } } }',
   'SELECT ?s WHERE { VALUES ?s { <urn:a> } FILTER NOT EXISTS { GRAPH ?g { ?s <urn:p> "missing" } } }',
   'SELECT ?o WHERE { GRAPH ?g { GRAPH ?h { ?s <urn:p> ?o } } }',
-  'SELECT ?o WHERE { BIND(IRI(CONCAT(STR(<did:dkg:context-graph:read-partition>), "/_", "read/cg/_verifiable_memory")) AS ?g) GRAPH ?g { ?s ?p ?o } }',
+  COMPUTED_READ_VM,
   'SELECT ?o WHERE { ?s <urn:p> ?o }',
   'ASK { GRAPH ?g { <urn:a> <urn:p> "vm" } }',
   'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }',
@@ -121,9 +125,10 @@ describe('queries and read-graph partitions', () => {
         expect((await reference.query(sparql)).bindings, sparql).toHaveLength(1);
       }
     }
-    // The read graphs are there: the adapter answers a raw graph query with them.
-    const raw = await planted.query(`SELECT ?o WHERE { GRAPH <${READ_VM}> { ?s ?p ?o } }`);
+    // The read graphs are there: the adapter answers the computed IRI with them.
+    const raw = await planted.query(COMPUTED_READ_VM);
     expect(raw.type === 'bindings' && raw.bindings.length).toBe(2);
+    expect((await new DKGQueryEngine(planted).query(COMPUTED_READ_VM)).bindings).toEqual([]);
   });
 
   it('leaves unscoped queries unchanged on a store that cannot hold read graphs', async () => {
