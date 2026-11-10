@@ -9,6 +9,14 @@
  * It returns the text, or the tools the model called, and what the backend
  * counted: input and output tokens. A call with tools sends them, with
  * `tool_choice` and `parallel_tool_calls`; a call without sends what 10.1.0 sent.
+ *
+ * How the output limit and the temperature are sent is the backend's, per
+ * service (`maxTokensField`, `temperature`). OpenAI's own API
+ * (api.openai.com) gets `max_completion_tokens` and no temperature, which its
+ * reasoning models (GPT-5 and on) need, as they refuse `max_tokens` and any
+ * temperature but the default; every other backend `max_tokens` and a
+ * temperature of 0, as in 10.1.0. A backend that refuses a call has its own
+ * words for why in the error and the seller's log, cut short, the key never.
  */
 import { WireError, answerFromWire, type ChatMessage, type FinishReason, type ToolCall, type ToolChoice, type ToolSpec } from './wire.js';
 
@@ -45,6 +53,49 @@ export interface ConnectorSettings {
   /** The environment variable that holds the upstream's key, if it needs one. */
   apiKeyEnv?: string;
   timeoutMs?: number;
+  /** The field the output limit goes in. By default `max_completion_tokens` for api.openai.com, `max_tokens` elsewhere. */
+  maxTokensField?: MaxTokensField;
+  /** The temperature sent; `null` sends none, for the backend's default. By default none for api.openai.com, 0 elsewhere. */
+  temperature?: number | null;
+}
+
+export type MaxTokensField = 'max_tokens' | 'max_completion_tokens';
+
+export const MAX_TOKENS_FIELDS: readonly MaxTokensField[] = ['max_tokens', 'max_completion_tokens'];
+
+/** OpenAI's own API, whose reasoning models take `max_completion_tokens` and only the default temperature. */
+const OPENAI_API_HOST = 'api.openai.com';
+
+/** How a backend is sent a call's output limit and temperature: its settings, or the defaults for its host. */
+export function requestShapeOf(settings: Pick<ConnectorSettings, 'baseUrl' | 'maxTokensField' | 'temperature'>): {
+  maxTokensField: MaxTokensField;
+  temperature: number | null;
+} {
+  const openai = new URL(settings.baseUrl).hostname.toLowerCase() === OPENAI_API_HOST;
+  return {
+    maxTokensField: settings.maxTokensField ?? (openai ? 'max_completion_tokens' : 'max_tokens'),
+    temperature: settings.temperature !== undefined ? settings.temperature : (openai ? null : 0),
+  };
+}
+
+/** How long a backend's own words for a refusal may be, in the error and the log. */
+const BACKEND_MESSAGE_CHARS = 200;
+
+/**
+ * The backend's words for why it refused a call (OpenAI's `error.message`, or a bare `error` text), on one line,
+ * cut to `BACKEND_MESSAGE_CHARS`, with the key, anything shaped as an API key and any bearer token taken out.
+ * `undefined` when the answer says none.
+ */
+export function backendMessageOf(body: unknown, key: string | undefined): string | undefined {
+  const error = (body as { error?: unknown } | null)?.error;
+  const raw = typeof error === 'string' ? error : (error as { message?: unknown } | undefined)?.message;
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined;
+  // Control characters become spaces, then every run of space is one: the words on one line.
+  const spaced = Array.from(raw, (c) => (c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f ? ' ' : c)).join('');
+  let text = spaced.replace(/\s+/g, ' ').trim();
+  if (key) text = text.split(key).join('[redacted]');
+  text = text.replace(/\bsk-[A-Za-z0-9_*.-]{4,}/g, '[redacted]').replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]');
+  return text.length > BACKEND_MESSAGE_CHARS ? `${text.slice(0, BACKEND_MESSAGE_CHARS - 1)}…` : text;
 }
 
 /** The backend failed or answered without text and token counts: nothing was served. */
@@ -70,6 +121,7 @@ export function connectorOf(settings: ConnectorSettings): Connector {
     throw new Error(`a llama.cpp backend is served on loopback only, not ${base.hostname}`);
   }
   const endpoint = `${withoutTrailingSlashes(settings.baseUrl)}/chat/completions`;
+  const shape = requestShapeOf(settings);
   return {
     kind: settings.kind,
     async complete({ messages, maxTokens, tools, toolChoice, parallelToolCalls }) {
@@ -81,7 +133,9 @@ export function connectorOf(settings: ConnectorSettings): Connector {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...(key ? { authorization: `Bearer ${key}` } : {}) },
           body: JSON.stringify({
-            model: settings.model, messages, max_tokens: maxTokens, temperature: 0, stream: false,
+            model: settings.model, messages, [shape.maxTokensField]: maxTokens,
+            ...(shape.temperature !== null ? { temperature: shape.temperature } : {}),
+            stream: false,
             ...(tools ? {
               tools,
               ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
@@ -93,7 +147,10 @@ export function connectorOf(settings: ConnectorSettings): Connector {
       } catch (err) {
         throw new UpstreamError(`the backend did not answer: ${err instanceof Error ? err.message : String(err)}`);
       }
-      if (!res.ok) throw new UpstreamError(`the backend answered ${res.status}`);
+      if (!res.ok) {
+        const said = backendMessageOf(await res.json().catch(() => null), key);
+        throw new UpstreamError(`the backend answered ${res.status}${said ? `: ${said}` : ''}`);
+      }
       const out = await res.json().catch(() => null) as {
         choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
         usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };

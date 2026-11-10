@@ -5,7 +5,7 @@
  * `enabled` is true.
  */
 import { ethers } from 'ethers';
-import type { ConnectorSettings } from './connector.js';
+import { MAX_TOKENS_FIELDS, type ConnectorSettings } from './connector.js';
 import { DEFAULT_LANDING, type LandingSettings } from './landing.js';
 import { serviceIdOf } from './offers.js';
 import { DEFAULT_STOP_SERVING_SECONDS } from './seller.js';
@@ -200,6 +200,12 @@ export function resolveSellerConfig(config: MarketplaceConfig | undefined): Reso
       throw new Error(`${at}.backend.apiKeyEnv must name an environment variable`);
     }
     if (s.tools !== undefined && typeof s.tools !== 'boolean') throw new Error(`${at}.tools must be true or false`);
+    if (b.maxTokensField !== undefined && !MAX_TOKENS_FIELDS.includes(b.maxTokensField)) {
+      throw new Error(`${at}.backend.maxTokensField must be max_tokens or max_completion_tokens`);
+    }
+    if (b.temperature !== undefined && b.temperature !== null && (typeof b.temperature !== 'number' || !Number.isFinite(b.temperature) || b.temperature < 0 || b.temperature > 2)) {
+      throw new Error(`${at}.backend.temperature must be a number from 0 to 2, or null to send none`);
+    }
     return {
       model: s.model,
       serviceId,
