@@ -2,19 +2,20 @@
 // reveal deeper), the section's off and admin-needed states, one loader hook,
 // relative times, seller names, and the hop to another marketplace tab.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { copy } from './copy.generated.js';
+import { copy, type CopyKey } from './copy.generated.js';
 import { isMarketplaceError } from './api/client.js';
 import { spanOf } from './amounts.js';
 import { MARKETPLACE_TABS } from './tabs.js';
 import { useTabsStore } from '../stores/tabs.js';
 
-/** A refusal's code → its plain words. */
-const CODE_COPY: Record<string, string> = {
+/** A refusal's code → its plain words. The codes are the node's, so any string; the words are the table's. */
+const CODE_COPY: Record<string, CopyKey> = {
   MarketplaceOff: 'err.off',
   // A single route the node lacks; a surface whose loads all meet it shows the absent state instead.
   MarketplaceAbsent: 'err.notfound',
   NodeAdminRequired: 'err.admin',
   Offline: 'err.offline',
+  UnreadableAnswer: 'err.unreadable',
   NotFound: 'err.notfound',
   Unauthorized: 'err.unauthorized',
   InvalidRequest: 'err.invalid',
@@ -27,6 +28,11 @@ const CODE_COPY: Record<string, string> = {
   SubscriptionAlreadyFunded: 'err.subscription.funded',
   SubscriptionEnded: 'err.subscription.ended',
   NotSubscriptionBuyer: 'err.subscription.buyer',
+  IdempotencyKeyReused: 'err.topup.key',
+  TopUpOutcomeUnknown: 'err.topup.pending',
+  TopUpPending: 'err.topup.pending',
+  TopUpNotSent: 'err.topup.notsent',
+  TopUpReverted: 'err.topup.reverted',
   ERC20InsufficientBalance: 'err.wallet.trac',
   InsufficientAllowance: 'err.account.allowance',
   LimitExceeded: 'err.grant.limit',
@@ -50,6 +56,8 @@ const CODE_COPY: Record<string, string> = {
   epoch_ending: 'err.epoch.ending',
   no_subscription: 'err.gw.nosub',
   soft_ceiling: 'err.gw.ceiling',
+  budget_busy: 'err.gw.busy',
+  gateway_busy: 'err.gw.nodebusy',
   key_budget: 'err.gw.keybudget',
   no_seller: 'err.gw.noseller',
   seller_unreachable: 'err.gw.unreachable',
@@ -67,13 +75,19 @@ const CODE_COPY: Record<string, string> = {
 };
 
 /** The copy key for a refusal code; anything unknown reads as a general failure. */
-export const refusalKey = (code: string | null | undefined): string => (code && CODE_COPY[code]) || 'err.generic';
+export const refusalKey = (code: string | null | undefined): CopyKey => (code && CODE_COPY[code]) || 'err.generic';
 
-export interface DescribedError { copyKey: string; message: string; code: string | null; detail: string | null; retryable: boolean; retryAfter: number | null }
+/** Plain words for one reason of a code that covers several, by the code and its first argument. */
+const REASON_COPY: Record<string, CopyKey> = {
+  // A funding of an epoch that is neither the current nor the next one: an epoch boundary passed since its dry run.
+  'InvalidFundingRequest:epoch': 'err.funding.epoch',
+};
+
+export interface DescribedError { copyKey: CopyKey; message: string; code: string | null; detail: string | null; retryable: boolean; retryAfter: number | null }
 
 export function describeError(e: unknown): DescribedError {
   if (isMarketplaceError(e)) {
-    const copyKey = refusalKey(e.code);
+    const copyKey = REASON_COPY[`${e.code}:${e.args[0] ?? ''}`] ?? refusalKey(e.code);
     const detail = e.args.length ? `${e.code}(${e.args.join(', ')})` : e.message !== e.code ? e.message : null;
     return { copyKey, message: copy(copyKey), code: e.code, detail, retryable: e.retryable, retryAfter: e.retryAfter };
   }
@@ -82,7 +96,7 @@ export function describeError(e: unknown): DescribedError {
 
 /** One error card: plain words first, the code one reveal deeper, Retry when the node says it may pass. */
 export function ErrorCard({ err, onRetry, retryKey = 'ctl.retry', children }: {
-  err: unknown; onRetry?: () => void; retryKey?: string; children?: React.ReactNode;
+  err: unknown; onRetry?: () => void; retryKey?: CopyKey; children?: React.ReactNode;
 }): React.ReactElement {
   const d = describeError(err);
   const [open, setOpen] = useState(false);
@@ -119,7 +133,7 @@ export function OffCard({ selling = false, absent = false, testId }: { selling?:
 }
 
 /** A surface that needs the node-admin token, opened with another one. */
-export function AdminCard({ what }: { what: string }): React.ReactElement {
+export function AdminCard({ what }: { what: CopyKey }): React.ReactElement {
   return (
     <div className="mkt-card mkt-seatcard" data-testid="mkt-admin-needed">
       <h2 data-copy="admin.title">{copy('admin.title')}</h2>
@@ -128,28 +142,46 @@ export function AdminCard({ what }: { what: string }): React.ReactElement {
   );
 }
 
-export interface Loaded<T> { data: T | null; err: unknown; loading: boolean; reload: () => void }
+/**
+ * Where a read stands, by its latest answer: none yet; answered with `value`,
+ * which may be null (a node without a plan answers so); or failed, with the
+ * last answer before, if there was one, as `stale`.
+ */
+export type ReadStatus<T> =
+  | { state: 'unresolved' }
+  | { state: 'resolved'; value: T }
+  | { state: 'failed'; err: unknown; stale: T | null };
 
-/** Load once on mount, keep the last good answer through a failed reload. */
+/** A read: its status, and the same as `data` (the last good answer), `err` (the latest failure) and whether one is on its way. */
+export interface Loaded<T> { status: ReadStatus<T>; data: T | null; err: unknown; loading: boolean; reload: () => void }
+
+/**
+ * Load once on mount, keep the last good answer through a failed reload. A
+ * reload while a read is on its way reads again at once: the read before may
+ * answer from before what the reload was asked for (a write that landed
+ * since), so only the latest read asked for is kept.
+ */
 export function useLoad<T>(load: () => Promise<T>): Loaded<T> {
-  const [data, setData] = useState<T | null>(null);
-  const [err, setErr] = useState<unknown>(null);
+  const [status, setStatus] = useState<ReadStatus<T>>({ state: 'unresolved' });
   const [loading, setLoading] = useState(true);
-  const inflight = useRef(false);
+  const latest = useRef(0);
   const alive = useRef(true);
   const loadRef = useRef(load);
   loadRef.current = load;
   const reload = useCallback(() => {
-    if (inflight.current) return;
-    inflight.current = true;
+    const read = ++latest.current;
+    const current = () => alive.current && read === latest.current;
     setLoading(true);
     loadRef.current()
-      .then((d) => { if (alive.current) { setData(d); setErr(null); } })
-      .catch((e: unknown) => { if (alive.current) setErr(e); })
-      .finally(() => { inflight.current = false; if (alive.current) setLoading(false); });
+      .then((value) => { if (current()) setStatus({ state: 'resolved', value }); })
+      .catch((err: unknown) => {
+        if (current()) setStatus((s) => ({ state: 'failed', err, stale: s.state === 'resolved' ? s.value : s.state === 'failed' ? s.stale : null }));
+      })
+      .finally(() => { if (current()) setLoading(false); });
   }, []);
   useEffect(() => { alive.current = true; reload(); return () => { alive.current = false; }; }, [reload]);
-  return { data, err, loading, reload };
+  const data = status.state === 'resolved' ? status.value : status.state === 'failed' ? status.stale : null;
+  return { status, data, err: status.state === 'failed' ? status.err : null, loading, reload };
 }
 
 /** `in 3 h` / `5 min ago` from chain seconds. */

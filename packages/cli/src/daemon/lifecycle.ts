@@ -193,8 +193,7 @@ export {
   createChainDiscoveryScanRunner,
 } from './chain-discovery-scan.js';
 import { createDaemonLocalLlmService } from './local-llm-service.js';
-import { startMarketplaceBuyer, startMarketplaceGateway } from './marketplace-buyer.js';
-import { startMarketplaceSeller } from './marketplace-seller.js';
+import { startMarketplace } from './marketplace-buyer.js';
 import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
 import {
   createTelemetrySettings,
@@ -1886,6 +1885,7 @@ async function runDaemonInnerWithStartupOwnership(
     // network supplies one of them; the agent expects rpcUrl + hubAddress.
     chainConfig: runtimeEvmChainConfig ? { ...runtimeEvmChainConfig, ...evmSigning.chainSigning } : undefined,
     authorSigners: evmSigning.authorSigners,
+    nodeHeldAuthor: evmSigning.nodeHeldAuthor,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
     // RFC ka-metadata-trim P3.3 — lifecycle PROV event writes (default true).
     metadataProvenanceEvents: config.metadata?.provenanceEvents,
@@ -2244,13 +2244,10 @@ async function runDaemonInnerWithStartupOwnership(
     const coverage = await checkpointStartup.complete();
     log(`[bootstrap] Current public coverage: ${coverage.committed}/${coverage.assets}`);
   }
-  // The marketplace buyer (OT-RFC-27), when enabled: its job keeps the standing plan funded.
-  const marketplace = startMarketplaceBuyer({
-    config, agent, wallets: evmSigning.addresses.wallets.map((w) => w.address), dataDir: dkgDir(), dashDb, log,
-  });
-  const marketplaceGateway = marketplace ? await startMarketplaceGateway({ config, agent, buyer: marketplace, dataDir: dkgDir(), log }) : undefined;
-  const marketplaceSeller = await startMarketplaceSeller({
-    config, agent, signer: evmSigning.addresses.wallets[0]?.address, wallets: evmSigning.addresses.wallets.map((w) => w.address), dataDir: dkgDir(), log,
+  // The marketplace (OT-RFC-27), when enabled: the buyer, whose job keeps the standing plan funded, its gateway, and
+  // the seller. A part that fails to start is logged and stays off; the node boots on.
+  const { marketplace, marketplaceGateway, marketplaceSeller } = await startMarketplace({
+    config, network, agent, wallets: evmSigning.addresses.wallets.map((w) => w.address), dataDir: dkgDir(), dashDb, log,
   });
 
   // Classify configured graphs before migrating legacy readiness. Explicit

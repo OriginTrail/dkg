@@ -8,7 +8,7 @@ import type {
   AccountsAnswer, ActivityAnswer, BuyerLimits, CatalogAnswer, ChatCompletion, Consent, Contracts, FundedAnswer,
   Funding, FundingRequest, GatewayModels, GatewayRefusalBody, Key, KeyRequest, KeysAnswer, LandNowAnswer, MadeKey,
   Offering, Plan, PlanRequest, Preview, ReconciliationAnswer, SellerStatus, ServiceDetail, ServiceRequest,
-  Storefront, SubscriptionsAnswer, Tx,
+  Storefront, SubscriptionsAnswer, TopUpAnswer, TopUpRequest, Tx,
 } from './types.js';
 
 const MARKETPLACE_BASE = '/api/marketplace';
@@ -19,7 +19,7 @@ export const ACCESS_KEY_RE = /^dkgmk_[0-9a-f]{48}$/;
 
 type GatewayExtra = Omit<GatewayRefusalBody, 'error'>;
 
-/** A refusal, in either of the node's shapes, or no answer at all (status 0). */
+/** A refusal, in either of the node's shapes; no answer at all (status 0); or a success whose body could not be read. */
 export class MarketplaceError extends Error {
   readonly status: number;
   readonly code: string;
@@ -73,7 +73,8 @@ export function errorOf(status: number, body: unknown, retryAfterHeader: string 
     const { error, ...extra } = body as unknown as GatewayRefusalBody;
     return new MarketplaceError({
       status, code: error.code, message: error.message ?? error.code, retryAfter, extra: extra as GatewayExtra, body,
-      retryable: extra.retry ?? (status === 503 || status === 0),
+      // Busy (503) or too many waiting (429) passes; a refusal that says `retry: false` does not.
+      retryable: extra.retry ?? (status === 503 || status === 429 || status === 0),
     });
   }
   if (isRecord(body) && typeof body.error === 'string') {
@@ -91,8 +92,23 @@ function offline(err: unknown): MarketplaceError {
   return new MarketplaceError({ status: 0, code: 'Offline', message: err instanceof Error ? err.message : String(err), retryable: true });
 }
 
+/**
+ * A success whose body stopped partway or is not JSON: whatever was sent may
+ * have been carried out, but the answer that says so is not there.
+ */
+function unreadable(status: number, err: unknown): MarketplaceError {
+  return new MarketplaceError({ status, code: 'UnreadableAnswer', message: err instanceof Error ? err.message : String(err), retryable: true });
+}
+
 async function answerOf<T>(res: Response, { nodeRoute = false }: { nodeRoute?: boolean } = {}): Promise<T> {
-  const body: unknown = await res.json().catch(() => ({}));
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch (err) {
+    // A success is only as good as its answer, so one that cannot be read is no answer; a refusal is still the refusal its status says.
+    if (res.ok) throw unreadable(res.status, err);
+    body = {};
+  }
   // Every refusal of the node's marketplace routes names its code; a 404 without one is a route the node does not have.
   if (nodeRoute && res.status === 404 && !(isRecord(body) && typeof body.code === 'string')) {
     throw new MarketplaceError({ status: 404, code: 'MarketplaceAbsent', message: 'This node has no marketplace routes', retryable: false, body });
@@ -131,7 +147,8 @@ export const marketplaceApi = {
   fund: (request: FundingRequest) => call<FundedAnswer>('POST', '/subscriptions', request),
   /** A dry run of a top-up: what it would cost from the subscription's source, and the refusal it would meet. Sends nothing. */
   topUpPreview: (subscriptionId: string, services: ServiceRequest[]) => call<Preview>('POST', `/subscriptions/${subscriptionId}/top-up/preview`, { services }),
-  topUp: (subscriptionId: string, services: ServiceRequest[]) => call<FundedAnswer>('POST', `/subscriptions/${subscriptionId}/top-up`, { services }),
+  /** A top-up, sent as given: a repeat with the same key gets the first answer and adds nothing. */
+  topUp: (subscriptionId: string, request: TopUpRequest) => call<TopUpAnswer>('POST', `/subscriptions/${subscriptionId}/top-up`, request),
   /** The standing plan; null while there is none. */
   plan: async (): Promise<Plan | null> => {
     try {

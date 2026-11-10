@@ -3,9 +3,9 @@
 // labeled as such. Nothing on this page sends a request.
 import React, { useState } from 'react';
 import { copy } from './copy.generated.js';
-import { MarketplaceError } from './api/client.js';
+import { errorOf } from './api/client.js';
 import { FIXTURE_IDS, FIXTURE_SECRET, fixtureWorld } from './api/fixtures.js';
-import type { MadeKey, Preview, ServiceRequest } from './api/types.js';
+import type { MadeKey, Preview, ServiceRequest, SourceRequest } from './api/types.js';
 import { fmtCount, fmtTrac, modelName } from './amounts.js';
 import { AdminCard, ErrorCard, OffCard, refusalKey, sellerName } from './shared.js';
 import { PriceLine, ProvBadge, SellerChip } from './views/MarketplaceView.js';
@@ -13,6 +13,7 @@ import { Meters } from './purchase/Meters.js';
 import { Activity } from './purchase/Ledger.js';
 import { ConfirmGate } from './purchase/ConfirmGate.js';
 import { KeyOnce } from './purchase/KeyStep.js';
+import type { Confirming } from './purchase/model.js';
 import { ProgressSteps } from './purchase/ProgressSteps.js';
 
 function Sect({ title, children }: { title: string; children: React.ReactNode }): React.ReactElement {
@@ -24,6 +25,7 @@ function Sect({ title, children }: { title: string; children: React.ReactNode })
   );
 }
 
+/** Refusals in both of the node's shapes, as it sends them: the status, the body, and the Retry-After header. */
 const REFUSALS: Array<[number, unknown, string | null]> = [
   [503, { error: 'The marketplace is off on this node', code: 'MarketplaceOff', retryable: true }, null],
   [403, { error: 'A node-admin token is required', code: 'NodeAdminRequired', retryable: false }, null],
@@ -39,9 +41,13 @@ export function MarketplaceGalleryView(): React.ReactElement {
   const catalog = world.catalog(true);
   const noFx = { ...catalog.fx, tracUsd: null, source: 'none', asOf: null };
   const qwen = catalog.services.find((s) => s.serviceId === FIXTURE_IDS.qwen14b)!;
-  const services: ServiceRequest[] = world.current.budgets.map((b) => ({ serviceId: b.serviceId, serviceClass: 'inference', value: b.value, maxPricePerUnit: b.maxPricePerUnit }));
+  const services: ServiceRequest[] = world.plan(true).services.map((s) => ({ serviceId: s.serviceId, serviceClass: s.serviceClass, value: s.value, maxPricePerUnit: s.maxPricePerUnit }));
   const preview: Preview = { epoch: world.epoch, source: { kind: 'account', accountId: '7', discountBps: 1_000 }, value: world.current.value, valueTrac: world.current.valueTrac, cost: '4500000000000000000', costTrac: '4.5', discountBps: 1_000 };
-  const made: MadeKey = { ...world.keys[0], keyId: FIXTURE_SECRET.slice(0, 14), label: 'my-agent', spent: '0', lastUsedAt: null, secret: FIXTURE_SECRET };
+  const source: SourceRequest = { kind: 'account', accountId: '7' };
+  const confirming: Confirming = {
+    kind: 'fund', request: { epoch: world.epoch, source, services }, preview, plan: { services, source, renew: true, renewUntilEpoch: world.epoch + 6 },
+  };
+  const made: MadeKey = { ...world.keys[0], keyId: FIXTURE_SECRET.slice(0, 14), label: 'my-agent', spent: '0', reserved: '0', lastUsedAt: null, secret: FIXTURE_SECRET };
   const served = world.chat(world.labels[FIXTURE_IDS.qwen14b], FIXTURE_IDS.qwen14b).marketplace;
   const noop = () => undefined;
 
@@ -100,7 +106,7 @@ export function MarketplaceGalleryView(): React.ReactElement {
         </Sect>
 
         <Sect title={copy('gallery.sect.gate')}>
-          <ConfirmGate catalog={catalog} funding={world.funding} preview={preview} services={services} fundsEpoch renew renewUntil={world.epoch + 6} busy={false} err={null} onConfirm={noop} onCancel={noop} />
+          <ConfirmGate catalog={catalog} funding={world.funding} confirming={confirming} busy={false} err={null} onConfirm={noop} onCancel={noop} />
         </Sect>
 
         <Sect title={copy('gallery.sect.key')}>
@@ -112,16 +118,12 @@ export function MarketplaceGalleryView(): React.ReactElement {
         </Sect>
 
         <Sect title={copy('gallery.sect.refusals')}>
-          {REFUSALS.map(([status, body, retryAfter], i) => {
-            const err = body as { error: unknown };
-            const code = typeof err.error === 'string' ? (body as { code: string }).code : (err.error as { code: string }).code;
-            return <ErrorCard key={i} err={new MarketplaceError({ status, code, message: code, retryable: status === 503, retryAfter: retryAfter ? Number(retryAfter) : null, body })} />;
-          })}
+          {REFUSALS.map(([status, body, retryAfter], i) => <ErrorCard key={i} err={errorOf(status, body, retryAfter)} />)}
         </Sect>
 
         <Sect title={copy('gallery.sect.states')}>
           <OffCard /><OffCard selling /><OffCard absent /><AdminCard what="admin.access" />
-          {['empty.activity', 'empty.keys', 'recon.none', 'catalog.empty.offers'].map((k) => (
+          {(['empty.activity', 'empty.keys', 'recon.none', 'catalog.empty.offers'] as const).map((k) => (
             <div key={k} className="mkt-card mkt-muted" style={{ textAlign: 'center' }}>{copy(k)}</div>
           ))}
         </Sect>

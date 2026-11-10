@@ -4,7 +4,8 @@
  * The NeuroSymbolic Marketplace (OT-RFC-27) on the EVM adapter: the methods of
  * `MarketplaceChain` (marketplace.ts) against `ServiceSubscriptions`,
  * `ServiceSubscriptionsWallet`, `ServiceSubscriptionsStorage`,
- * `QueryInferenceSettlement` and `QueryInferenceStorage`.
+ * `QueryInferenceSettlement` and `QueryInferenceStorage`, and the lifetime
+ * extension of a seller's offer asset (`KnowledgeAssetsLifecycle`).
  *
  * Mixin holder in the pattern of `evm-adapter-conviction.ts`, mixed into
  * `EVMChainAdapter` with `applyMixins` (evm-adapter.ts). A receipt batch is
@@ -24,8 +25,10 @@ import { ethers, type Contract, type JsonRpcProvider } from 'ethers';
 import type { TxResult } from './chain-adapter.js';
 import { loadAbi } from './evm-adapter-abi.js';
 import { enrichEvmError } from './evm-adapter-errors.js';
-import { EVMChainAdapterBase } from './evm-adapter-base.js';
+import { EVMChainAdapterBase, type ScanProvider } from './evm-adapter-base.js';
+import { BUYER_SCAN_PAGE_BLOCKS } from './evm-adapter-constants.js';
 import type { EvmSigner } from './evm-signer.js';
+import type { ScannedEvent } from './incremental-event-scan.js';
 import {
   BUYER_GRANT_TYPES,
   compactSignature,
@@ -40,6 +43,7 @@ import {
   type EpochFunding,
   type EpochTimes,
   type EpochTotals,
+  type KnowledgeAssetExtension,
   type MarketplaceContracts,
   type MarketplaceWriteOptions,
   type NodeEpoch,
@@ -59,9 +63,6 @@ import {
 } from './marketplace.js';
 
 type Log = { address: string; topics: ReadonlyArray<string>; data: string };
-
-/** Blocks per `eth_getLogs` page of the `BuyerAdded` scan; the reader fits a page to each RPC's span cap. */
-const BUYER_SCAN_PAGE_BLOCKS = 10_000;
 
 const interfaces = new Map<string, ethers.Interface>();
 
@@ -407,24 +408,46 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     return buyers;
   }
 
-  /** Read in pages from the deployment of the Hub's `ServiceSubscriptions` to the head; nothing is cached. */
+  /**
+   * Read in pages from the deployment of the Hub's `ServiceSubscriptions` to the head. The first read
+   * for a buyer covers the whole range; later reads cover only the blocks since the last one (and a
+   * reorg tail), and overlapping reads share one scan.
+   */
   async listBuyerAccounts(buyer: string): Promise<bigint[]> {
     await this.init();
     const ss = await this.resolveContract('ServiceSubscriptions');
+    const address = await ss.getAddress();
     const label = 'listBuyerAccounts';
-    const { fromBlock, head, scanProviders } = await this.resolveContractDeployBlock(await ss.getAddress(), label, 'ServiceSubscriptions');
     const filter = ss.filters.BuyerAdded(null, buyer);
-    const connected = new Map<JsonRpcProvider, Contract>();
-    const accounts = new Set<bigint>();
-    let preferred: JsonRpcProvider | undefined;
-    for (let lo = fromBlock; lo <= head; lo += BUYER_SCAN_PAGE_BLOCKS) {
-      const page = await this.queryEventLogsPage(
-        ss, filter, lo, Math.min(lo + BUYER_SCAN_PAGE_BLOCKS - 1, head), scanProviders, connected, `${label} BuyerAdded`, preferred,
-      );
-      preferred = page.provider;
-      // topics: the event, the indexed accountId, the indexed buyer.
-      for (const log of page.logs) accounts.add(BigInt(log.topics[1]!));
-    }
+    const accounts = await this.buyerAccountScan.read(
+      `${address.toLowerCase()}:${buyer.toLowerCase()}`,
+      async (progress) => {
+        // Once the scan has read from its anchor, a later read only needs the head. That also keeps a deploy-block
+        // search that fell back to genesis (which is not cached) from running again on every read.
+        let anchor: number;
+        let head: number;
+        let scanProviders: ReadonlyArray<ScanProvider>;
+        if (progress) {
+          ({ head, scanProviders } = await this.resolveLogScanHead(label));
+          anchor = progress.anchor;
+        } else {
+          const resolved = await this.resolveContractDeployBlock(address, label, 'ServiceSubscriptions');
+          ({ head, scanProviders } = resolved);
+          anchor = resolved.fromBlock;
+        }
+        // The page reader of this read, on the backends it resolved, keeping to the one that last answered.
+        const connected = new Map<JsonRpcProvider, Contract>();
+        let preferred: JsonRpcProvider | undefined;
+        const readPage = async (lo: number, hi: number): Promise<ScannedEvent<bigint>[]> => {
+          const page = await this.queryEventLogsPage(ss, filter, lo, hi, scanProviders, connected, `${label} BuyerAdded`, preferred);
+          preferred = page.provider;
+          // topics: the event, the indexed accountId, the indexed buyer.
+          return page.logs.map((log) => ({ item: BigInt(log.topics[1]!), block: log.blockNumber }));
+        };
+        return { anchor, head, readPage };
+      },
+      (accountId) => accountId.toString(),
+    );
     return [...accounts].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   }
 
@@ -443,11 +466,18 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     const arg = groups.map(({ subscriptionId, budgetIndex, minCounted, items }) => ({ subscriptionId, budgetIndex, minCounted, items }));
     const sendFrom = async (signer: EvmSigner) => {
       const qs = await this.resolveContract('QueryInferenceSettlement');
+      let signedTx = '';
       return this.dispatchSerializedV10Write(
         signer,
         'receipt batch',
-        opts.onBroadcast ? (signal) => opts.onBroadcast!({ ...signal, wallet: signer.address }) : undefined,
-        async () => this.signPreparedTransaction(await this.prepareAcrossProviders(qs, 'submitReceiptBatch', [arg], signer, 'marketplace submitReceiptBatch')),
+        opts.onBroadcast ? (signal) => opts.onBroadcast!({ ...signal, wallet: signer.address, signedTx }) : undefined,
+        async () => {
+          const signed = await this.signPreparedTransaction(
+            await this.prepareAcrossProviders(qs, 'submitReceiptBatch', [arg], signer, 'marketplace submitReceiptBatch'),
+          );
+          signedTx = signed.signedTx;
+          return signed;
+        },
         (hash) => { throw new Error(`Receipt batch ${hash} was sent but has no receipt`); },
         undefined,
         opts.onBeforeReplacementBroadcast,
@@ -470,6 +500,26 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     const batch = landedBatchOf(receipt);
     if (!batch) throw new Error(`Receipt batch ${receipt.hash} succeeded but logged no ReceiptBatchAccepted`);
     return batch;
+  }
+
+  /**
+   * The exact signed bytes, through the write endpoints: one already known is no error. Sent in the lane of the
+   * wallet that signed them, as its other writes are, so never between one of those reading its nonce and sending,
+   * and only while that wallet's pending nonce, read where its writes read theirs, has not passed the batch's.
+   */
+  async rebroadcastReceiptBatch(signedTx: string): Promise<void> {
+    await this.init();
+    const tx = ethers.Transaction.from(signedTx);
+    const from = tx.from;
+    const send = async () => {
+      // A pending nonce past the batch's: another transaction holds its nonce, or the batch is out already. Sent now,
+      // it could only be refused, or replace that transaction; its receipts resolve by its nonce either way.
+      if (from && (await this.rpcFailover.pendingNonce(from, 'marketplace wallet pending nonce')) > tx.nonce) return;
+      await this.broadcastSignedTransactionWithFailover(signedTx, tx.hash!, 'marketplace receipt batch rebroadcast');
+    };
+    // A wallet that is not one of this node's has no lane here to share.
+    const signer = from ? this.findSignerByAddress(from) : undefined;
+    await (signer ? this.withSerializedSignerWrite(signer, send, 'receipt batch rebroadcast') : send());
   }
 
   async getReceiptBatchOutcome(txHash: string): Promise<ReceiptBatchOutcome> {
@@ -514,6 +564,41 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     await this.init();
     const block = await this.readTipProvider('marketplace base fee', (p) => p.getBlock('latest'));
     return block?.baseFeePerGas ?? null;
+  }
+
+  // --------------------------------------------- KnowledgeAssetsLifecycle
+
+  /**
+   * Paid at `_validateTokenAmount`'s rate for an extension: ask × bytes × epochs / 1024, and never 0. Sent
+   * from `opts.from`, or else from the wallet a publish would pay from, chosen as a publish's is: among the
+   * operational wallets, one with gas and the TRAC the extension costs, the best-funded when none has.
+   */
+  async extendKnowledgeAssetLifetime(kaId: bigint, epochs: number, opts?: MarketplaceWriteOptions): Promise<KnowledgeAssetExtension> {
+    await this.init();
+    const asked = opts?.from === undefined ? undefined : this.findSignerByAddress(opts.from);
+    if (opts?.from !== undefined && !asked) throw new Error(`Cannot send from ${opts.from}: it is not one of this node's operational wallets`);
+    const { knowledgeAssetStorage: kas, askStorage } = this.contracts;
+    if (!kas || !askStorage) throw new Error('DKGKnowledgeAssets or AskStorage not available: cannot extend a Knowledge Asset');
+    const { byteSize } = await this.readKnowledgeAssetUpdateContext(kas, kaId);
+    const ask = BigInt(await this.readContract(askStorage, 'askStorage.getStakeWeightedAverageAsk', 'getStakeWeightedAverageAsk'));
+    const quoted = (ask * byteSize * BigInt(epochs)) / 1024n;
+    const tokenAmount = quoted > 0n ? quoted : 1n;
+    // Any wallet may extend any asset, and pays from its own TRAC: no Conviction Account covers an extension.
+    const signer = asked ?? await this.selectSigner({
+      txClass: 'rotatable-funded',
+      funding: {
+        kind: 'native+trac',
+        nativeFloorWei: this.minPublisherNativeWei,
+        tracFloorWei: this.minPublisherTracWei,
+        requiredTracWei: tokenAmount,
+        pca: { kind: 'none' },
+      },
+    });
+    const lifecycle = () => this.resolveContract('KnowledgeAssetsLifecycle');
+    await this.ensureV10ApproveTrac(signer, await (await lifecycle()).getAddress(), tokenAmount, 'extend knowledge asset');
+    const receipt = await this.marketplaceSend(lifecycle, 'extendKnowledgeAssetLifetime', [kaId, epochs, tokenAmount], { from: signer.address });
+    const { endEpoch } = await this.readKnowledgeAssetUpdateContext(kas, kaId);
+    return { ...txResultOf(receipt), tokenAmount, endEpoch: Number(endEpoch) };
   }
 
 

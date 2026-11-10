@@ -1,5 +1,8 @@
-import { type Page, type Locator } from '@playwright/test';
+import { expect, type Page, type Locator } from '@playwright/test';
 import { sel } from '../helpers/selectors.js';
+
+/** Matches `text` and nothing longer: a section's header also holds its count. */
+const exactly = (text: string) => new RegExp(`^${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
 
 export class LeftPanelPage {
   readonly page: Page;
@@ -17,20 +20,42 @@ export class LeftPanelPage {
   }
 
   private myCgSections() {
-    return this.root
-      .locator(sel.myContextGraphs.peerGroup)
-      .filter({ has: this.page.getByText('My Context Graphs', { exact: true }) })
-      .first()
+    return this.section('My Context Graphs')
       .locator(sel.myContextGraphs.peerGroupBody)
       .locator(sel.leftPanel.section);
   }
 
-  /** The Public Graphs section alone: its header (with the count) and, while expanded, its body. */
-  publicGraphsSection() {
+  /**
+   * A collapsible sidebar section by its label (Marketplace, My Context
+   * Graphs, Public Graphs, Integrations): its header, with the count where it
+   * has one, and, while expanded, its body.
+   */
+  section(label: string) {
     return this.root
       .locator(sel.leftPanel.peerGroup)
-      .filter({ has: this.page.locator(sel.leftPanel.peerGroupLabel, { hasText: /^Public Graphs$/ }) })
+      .filter({ has: this.page.locator(sel.leftPanel.peerGroupLabel, { hasText: exactly(label) }) })
       .first();
+  }
+
+  /** The button that expands and collapses the section `label`; its `aria-expanded` says which it is. */
+  sectionHeader(label: string) {
+    return this.section(label).locator(sel.leftPanel.peerGroupHeader).first();
+  }
+
+  async isSectionExpanded(label: string) {
+    return (await this.sectionHeader(label).getAttribute('aria-expanded')) === 'true';
+  }
+
+  /** Expand the section `label`, and leave one already expanded as it is: a click on its header would collapse it. */
+  async expandSection(label: string) {
+    const header = this.sectionHeader(label);
+    if (!(await this.isSectionExpanded(label))) await header.click();
+    await expect(header).toHaveAttribute('aria-expanded', 'true');
+  }
+
+  /** The Public Graphs section alone: its header (with the count) and, while expanded, its body. */
+  publicGraphsSection() {
+    return this.section('Public Graphs');
   }
 
   private memoryStackControl() {
@@ -56,19 +81,6 @@ export class LeftPanelPage {
 
   async isMemoryStackVisible() {
     return this.memoryStackControl().isVisible().catch(() => false);
-  }
-
-  async switchToMode(mode: 'explorer' | 'oracle') {
-    const label = mode === 'explorer' ? 'My Context Graphs' : 'Public Graphs';
-    const header = this.root.locator(sel.leftPanel.peerGroupHeader).filter({ hasText: label }).first();
-    if ((await header.getAttribute('aria-expanded')) !== 'true') await header.click();
-  }
-
-  async getActiveMode() {
-    const publicHeader = this.root.locator(sel.leftPanel.peerGroupHeader).filter({ hasText: 'Public Graphs' }).first();
-    return (await publicHeader.getAttribute('aria-expanded')) === 'true'
-      ? 'Public Graphs'
-      : 'My Context Graphs';
   }
 
   async clickNewProject() {

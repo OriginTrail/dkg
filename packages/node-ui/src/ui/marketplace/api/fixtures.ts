@@ -6,9 +6,9 @@
 // service ids are synthetic.
 import type {
   Account, ActivityAnswer, Budget, Call, CatalogAnswer, ChatCompletion, Consent, Contracts, FundedAnswer, Funding,
-  FundingRequest, GatewayModels, Key, KeysAnswer, LandNowAnswer, MadeKey, Offer, Offering, Plan, PlanRequest, Preview,
+  FundingRequest, GatewayModels, Key, KeysAnswer, LandNowAnswer, Listing, MadeKey, Offer, Offering, Plan, PlanRequest, Preview,
   ReconciliationAnswer, SellerStatus, Service, ServiceDetail, ServiceRequest, Source, SourceRequest, Storefront,
-  Subscription,
+  Subscription, TopUpAnswer,
 } from './types.js';
 
 export const FIXTURE_SCENARIOS = ['active', 'none', 'ended', 'off', 'viewer', 'ending'] as const;
@@ -81,7 +81,7 @@ export function fixtureWorld(nowMs = Date.now()) {
   });
   const offers: Record<string, Offer[]> = {
     [I.qwen14b]: [offer(I.qwen14b, I.sellerA, '0.6', '0.6', 'weights-pinned', 312), offer(I.qwen14b, I.sellerB, '0.7', '0.65', 'weights-pinned', 488)],
-    [I.qwen7b]: [offer(I.qwen7b, I.sellerA, '0.3', '0.32', 'weights-pinned', 205), offer(I.qwen7b, I.sellerB, '0.35', null, 'weights-pinned', null)],
+    [I.qwen7b]: [offer(I.qwen7b, I.sellerA, '0.3', '0.32', 'weights-pinned', 205), offer(I.qwen7b, I.sellerB, '0.35', '0.35', 'weights-pinned', null)],
     [I.llama8b]: [offer(I.llama8b, I.sellerB, '1.1', '1.1', 'upstream-claimed', 640)],
     [I.mistral24b]: [offer(I.mistral24b, I.sellerA, '3.3', '3.0', 'upstream-claimed', null, null)],
   };
@@ -94,7 +94,7 @@ export function fixtureWorld(nowMs = Date.now()) {
   const budget = (i: number, [serviceId, value, cap, used, held]: [string, string, string, string, string]): Budget => {
     const v = tracWei(value);
     return {
-      budgetIndex: i, serviceId, ...amount('value', v), ...amount('maxPricePerUnit', microWei(cap)),
+      budgetIndex: i, serviceId, serviceClass: 'inference', ...amount('value', v), ...amount('maxPricePerUnit', microWei(cap)),
       ...amount('used', tracWei(used)), ...amount('held', tracWei(held)), ...amount('left', v - tracWei(used)),
       ...amount('softCeiling', (v * 95n) / 100n),
     };
@@ -204,21 +204,30 @@ export function fixtureWorld(nowMs = Date.now()) {
     ],
   });
   const keys: Key[] = [
-    { keyId: KEY_A, label: 'my-agent', budget: tracWei('2').toString(), spent: tracWei('0.61').toString(), services: null, rps: 5, expiresAt: null, revoked: false, lastUsedAt: now - 300 },
-    { keyId: KEY_B, label: 'ci-bot', budget: tracWei('0.5').toString(), spent: tracWei('0.09').toString(), services: [I.qwen14b, I.qwen7b], rps: 2, expiresAt: now + 23 * DAY, revoked: false, lastUsedAt: now - 3_600 },
-    { keyId: 'dkgmk_9c0d1e2f', label: 'old-demo', budget: tracWei('0.2').toString(), spent: tracWei('0.02').toString(), services: null, rps: 5, expiresAt: null, revoked: true, lastUsedAt: now - 40 * DAY },
+    { keyId: KEY_A, label: 'my-agent', budget: tracWei('2').toString(), spent: tracWei('0.61').toString(), reserved: '0', services: null, rps: 5, expiresAt: null, revoked: false, lastUsedAt: now - 300 },
+    { keyId: KEY_B, label: 'ci-bot', budget: tracWei('0.5').toString(), spent: tracWei('0.09').toString(), reserved: tracWei('0.2').toString(), services: [I.qwen14b, I.qwen7b], rps: 2, expiresAt: now + 23 * DAY, revoked: false, lastUsedAt: now - 3_600 },
+    { keyId: 'dkgmk_9c0d1e2f', label: 'old-demo', budget: tracWei('0.2').toString(), spent: tracWei('0.02').toString(), reserved: '0', services: null, rps: 5, expiresAt: null, revoked: true, lastUsedAt: now - 40 * DAY },
   ];
   const batch = (n: number, minsAgo: number, items: number, value: string, counted: string) => ({
     tx: txHash(0xb0 + n), at: now - minsAgo * 60, items, ...amount('value', tracWei(value)), ...amount('counted', tracWei(counted)), gasUsed: 182_000 + items * 1_900,
   });
-  const offering = (serviceId: string, connector: Offering['connector'], price: string, nextPrice: string): Offering => ({
-    serviceId, connector, ...amount('price', microWei(price)), ...amount('nextPrice', microWei(nextPrice)),
+  const offering = (serviceId: string, connector: Offering['connector'], price: string, nextPrice: string, listing: Listing | null): Offering => ({
+    serviceId, connector, ...amount('price', microWei(price)), ...amount('nextPrice', microWei(nextPrice)), listing,
   });
+  // One offer listed, one this node cannot publish for want of TRAC, and one withdrawn.
+  const listings: Record<string, Listing> = {
+    [I.qwen14b]: { listed: true, kaId: '81', validUntilEpoch: epoch + 2, withdrawn: false },
+    [I.qwen7b]: {
+      listed: false, problem: 'no-trac', retryAt: now + 15 * 60,
+      message: 'No publisher wallet holds enough TRAC to publish to Verifiable Memory',
+    },
+    [I.mistral24b]: { listed: false, kaId: '83', validUntilEpoch: epoch, withdrawn: true },
+  };
   const sellerStatus: SellerStatus = {
     epoch, startsAt, endsAt,
     identityId: I.sellerA, gate, scoredThisEpoch: true,
     wallets: [{ address: I.sellerWallet, eth: '42000000000000000', ethEther: '0.042' }],
-    offerings: [offering(I.qwen14b, 'up', '0.6', '0.6'), offering(I.qwen7b, 'up', '0.3', '0.32'), offering(I.mistral24b, 'down', '3.3', '3.0')],
+    offerings: [offering(I.qwen14b, 'up', '0.6', '0.6', listings[I.qwen14b]), offering(I.qwen7b, 'up', '0.3', '0.32', listings[I.qwen7b]), offering(I.mistral24b, 'down', '3.3', '3.0', listings[I.mistral24b])],
     ledger: {
       served: 412, sent: 380, landed: 360, refused: 2, missed: 0,
       ...amount('heldValue', tracWei('0.0213')), ...amount('landedValue', tracWei('0.23')), ...amount('counted', tracWei('0.2')),
@@ -284,7 +293,7 @@ function previewOf(world: FixtureWorld, r: FundingRequest): Preview {
 
 function budgetsOf(services: ServiceRequest[], from = 0): Budget[] {
   return services.map((s, i) => ({
-    budgetIndex: from + i, serviceId: s.serviceId, ...amount('value', BigInt(s.value)), ...amount('maxPricePerUnit', BigInt(s.maxPricePerUnit)),
+    budgetIndex: from + i, serviceId: s.serviceId, serviceClass: s.serviceClass, ...amount('value', BigInt(s.value)), ...amount('maxPricePerUnit', BigInt(s.maxPricePerUnit)),
     ...amount('used', 0n), ...amount('held', 0n), ...amount('left', BigInt(s.value)), ...amount('softCeiling', (BigInt(s.value) * 95n) / 100n),
   }));
 }
@@ -390,12 +399,12 @@ export function fixtureAnswer(scenario: FixtureScenario, req: FixtureRequest, no
       return { ...b, ...amount('value', value), ...amount('left', BigInt(b.left) + BigInt(add.value)), ...amount('softCeiling', (value * 95n) / 100n) };
     });
     const added = budgetsOf(services.filter((x) => !s.budgets.some((b) => b.serviceId === x.serviceId)), budgets.length);
-    return { status: 200, body: { txHash: txHash(0xc2), blockNumber: 18_204_390, subscription: { ...s, budgets: [...budgets, ...added] } } satisfies FundedAnswer };
+    return { status: 200, body: { txHash: txHash(0xc2), blockNumber: 18_204_390, subscription: { ...s, budgets: [...budgets, ...added] } } satisfies TopUpAnswer };
   }
   if (method === 'PUT' && route === '/plan') return { status: 200, body: planOf(world, body as unknown as PlanRequest) };
   if (method === 'POST' && route === '/keys') {
     const made: MadeKey = {
-      keyId: FIXTURE_SECRET.slice(0, 14), label: String(body.label ?? 'key'), budget: String(body.budget ?? '0'), spent: '0',
+      keyId: FIXTURE_SECRET.slice(0, 14), label: String(body.label ?? 'key'), budget: String(body.budget ?? '0'), spent: '0', reserved: '0',
       services: (body.services as string[] | null | undefined) ?? null, rps: Number(body.rps ?? 5), expiresAt: (body.expiresAt as number | null | undefined) ?? null,
       revoked: false, lastUsedAt: null, secret: FIXTURE_SECRET,
     };

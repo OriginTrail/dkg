@@ -1,8 +1,7 @@
-import React, { useCallback, useId, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Activity,
-  ChevronRight,
   ClipboardList,
   Compass,
   KeyRound,
@@ -35,6 +34,7 @@ import {
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
 import { MARKETPLACE_TABS, MARKETPLACE_TAB_IDS, marketplaceEnabled } from '../../marketplace/tabs.js';
+import { SidebarSection } from './SidebarSection.js';
 
 // Project tree row: a flat, clickable header that opens the project tab.
 // Memory-layer expansion was removed by request — layers are surfaced inside
@@ -218,13 +218,6 @@ export function PanelLeft() {
   const toggleLeftSectionMyProjects = useLayoutStore((s) => s.toggleLeftSectionMyProjects);
   const toggleLeftSectionContextOracle = useLayoutStore((s) => s.toggleLeftSectionContextOracle);
   const toggleLeftSectionIntegrations = useLayoutStore((s) => s.toggleLeftSectionIntegrations);
-  // Stable per-render ids for the section bodies so the chevron buttons
-  // can use `aria-controls` to point at the disclosed region (screen
-  // readers can then programmatically associate trigger ↔ content).
-  const marketplaceBodyId = useId();
-  const myProjectsBodyId = useId();
-  const contextOracleBodyId = useId();
-  const integrationsBodyId = useId();
   const { openTab, activeTabId, setActiveTab } = useTabsStore();
   const { activeProjectId, setActiveProject } = useProjectsStore();
   const { contextGraphs, error: listError, identity: sharedAgent,
@@ -290,42 +283,28 @@ export function PanelLeft() {
         </button>
 
         {showMarketplace && (
-          <div className="v10-peer-group v10-sidebar-group v10-sidebar-marketplace">
-            <button
-              type="button"
-              className={`v10-peer-group-header v10-sidebar-group-header v10-sidebar-product-header ${marketplaceActive ? 'active' : ''}`}
-              aria-expanded={leftSectionMarketplaceOpen}
-              aria-controls={marketplaceBodyId}
-              onClick={toggleLeftSectionMarketplace}
-            >
-              <ShoppingBag size={18} aria-hidden="true" />
-              <span className="v10-peer-group-label">Marketplace</span>
-              <ChevronRight
-                size={14}
-                className={`v10-peer-group-chevron ${leftSectionMarketplaceOpen ? 'expanded' : ''}`}
-                aria-hidden="true"
-              />
-            </button>
-            {leftSectionMarketplaceOpen && (
-              <div
-                id={marketplaceBodyId}
-                className="v10-peer-group-body v10-sidebar-group-body v10-sidebar-marketplace-items"
+          <SidebarSection
+            label="Marketplace"
+            icon={<ShoppingBag size={18} aria-hidden="true" />}
+            active={marketplaceActive}
+            open={leftSectionMarketplaceOpen}
+            onToggle={toggleLeftSectionMarketplace}
+            className="v10-sidebar-marketplace"
+            bodyClassName="v10-sidebar-marketplace-items"
+          >
+            {marketplaceRows.map(({ tab, label, icon }) => (
+              <button
+                key={tab.id}
+                type="button"
+                className={`v10-sidebar-nav-row v10-sidebar-sub-row ${activeTabId === tab.id ? 'active' : ''}`}
+                aria-current={activeTabId === tab.id ? 'page' : undefined}
+                onClick={() => openMarketplaceTab(tab)}
               >
-                {marketplaceRows.map(({ tab, label, icon }) => (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    className={`v10-sidebar-nav-row v10-sidebar-sub-row ${activeTabId === tab.id ? 'active' : ''}`}
-                    aria-current={activeTabId === tab.id ? 'page' : undefined}
-                    onClick={() => openMarketplaceTab(tab)}
-                  >
-                    {icon}
-                    <span>{label}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+                {icon}
+                <span>{label}</span>
+              </button>
+            ))}
+          </SidebarSection>
         )}
 
         {inventoryError && (
@@ -338,175 +317,134 @@ export function PanelLeft() {
 
         <div className="v10-sidebar-divider" />
 
-        <div className="v10-peer-group v10-sidebar-group">
-          <button
-            type="button"
-            className="v10-peer-group-header v10-sidebar-group-header"
-            aria-expanded={leftSectionMyProjectsOpen}
-            aria-controls={myProjectsBodyId}
-            onClick={toggleLeftSectionMyProjects}
-          >
-            <ChevronRight
-              size={14}
-              className={`v10-peer-group-chevron ${leftSectionMyProjectsOpen ? 'expanded' : ''}`}
-              aria-hidden="true"
+        <SidebarSection
+          label="My Context Graphs"
+          count={myProjects.length}
+          open={leftSectionMyProjectsOpen}
+          onToggle={toggleLeftSectionMyProjects}
+        >
+          {contextGraphs.length === 0 && stage <= 1 && !inventoryError && !inventoryLoading ? (
+            <div className="v10-sidebar-empty">
+              <strong>No context graphs yet</strong>
+              <span>
+                {stage === 0
+                  ? 'Connect an agent to get started.'
+                  : 'Create your first graph to give your agent structured memory.'}
+              </span>
+            </div>
+          ) : myProjects.length === 0 ? (
+            <div className="v10-sidebar-empty" role={membershipNote ? 'status' : undefined}>
+              <span>{membershipNote ?? 'No context graphs in this section yet.'}</span>
+            </div>
+          ) : myProjects.map((cg) => (
+            <ProjectTreeItem
+              key={cg.id}
+              cg={cg}
+              isActive={activeProjectId === cg.id}
+              onSelect={() => {
+                setActiveProject(cg.id);
+                openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
+              }}
+              onHide={() => {
+                hideProject(cg.id);
+                if (activeProjectId === cg.id) setActiveProject(null);
+              }}
             />
-            <span className="v10-peer-group-label">My Context Graphs</span>
-            <span className="v10-peer-group-count">{myProjects.length}</span>
-          </button>
-          {leftSectionMyProjectsOpen && (
-            <div id={myProjectsBodyId} className="v10-peer-group-body v10-sidebar-group-body">
-              {contextGraphs.length === 0 && stage <= 1 && !inventoryError && !inventoryLoading ? (
-                <div className="v10-sidebar-empty">
-                  <strong>No context graphs yet</strong>
-                  <span>
-                    {stage === 0
-                      ? 'Connect an agent to get started.'
-                      : 'Create your first graph to give your agent structured memory.'}
-                  </span>
-                </div>
-              ) : myProjects.length === 0 ? (
-                <div className="v10-sidebar-empty" role={membershipNote ? 'status' : undefined}>
-                  <span>{membershipNote ?? 'No context graphs in this section yet.'}</span>
-                </div>
-              ) : myProjects.map((cg) => (
-                <ProjectTreeItem
+          ))}
+
+          {hiddenCount > 0 && (
+            <button
+              type="button"
+              className="v10-tree-show-hidden"
+              onClick={unhideAll}
+              title="Restore all context graphs dismissed from the sidebar"
+            >
+              ↺ Show {hiddenCount} hidden context graph{hiddenCount !== 1 ? 's' : ''}
+            </button>
+          )}
+
+          <div className="v10-sidebar-inline-actions">
+            <button
+              type="button"
+              aria-label="New Context Graph"
+              onClick={() => setShowCreateModal(true)}
+            >
+              <Plus size={15} aria-hidden="true" />
+              New
+            </button>
+            <button
+              type="button"
+              aria-label="Join Context Graph"
+              onClick={() => openJoinModal()}
+            >
+              <LogIn size={15} aria-hidden="true" />
+              Join
+            </button>
+          </div>
+        </SidebarSection>
+
+        <SidebarSection
+          label="Public Graphs"
+          icon={<Compass size={17} aria-hidden="true" />}
+          count={contextOracleProjects.length}
+          open={leftSectionContextOracleOpen}
+          onToggle={toggleLeftSectionContextOracle}
+          bodyClassName="v10-sidebar-public-graphs"
+        >
+          {contextOracleProjects.length > 0 ? contextOracleProjects.map((cg) => {
+            const onHide = () => {
+              hideProject(cg.id);
+              if (activeProjectId === cg.id) setActiveProject(null);
+            };
+            if (classifyContextOracleEntry(cg) === 'catalogue') {
+              return (
+                <OracleCatalogueItem
                   key={cg.id}
                   cg={cg}
-                  isActive={activeProjectId === cg.id}
-                  onSelect={() => {
-                    setActiveProject(cg.id);
-                    openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
+                  isBrowsing={activeTabId === `project:${cg.id}`}
+                  onBrowse={() => {
+                    setActiveProject(null);
+                    openTab({
+                      id: `project:${cg.id}`,
+                      label: cg.name || cg.id.slice(0, 16),
+                      closable: true,
+                    });
                   }}
-                  onHide={() => {
-                    hideProject(cg.id);
-                    if (activeProjectId === cg.id) setActiveProject(null);
-                  }}
+                  onSubscribe={() => openJoinModal(cg.id)}
+                  onHide={onHide}
                 />
-              ))}
-
-              {hiddenCount > 0 && (
-                <button
-                  type="button"
-                  className="v10-tree-show-hidden"
-                  onClick={unhideAll}
-                  title="Restore all context graphs dismissed from the sidebar"
-                >
-                  ↺ Show {hiddenCount} hidden context graph{hiddenCount !== 1 ? 's' : ''}
-                </button>
-              )}
-
-              <div className="v10-sidebar-inline-actions">
-                <button
-                  type="button"
-                  aria-label="New Context Graph"
-                  onClick={() => setShowCreateModal(true)}
-                >
-                  <Plus size={15} aria-hidden="true" />
-                  New
-                </button>
-                <button
-                  type="button"
-                  aria-label="Join Context Graph"
-                  onClick={() => openJoinModal()}
-                >
-                  <LogIn size={15} aria-hidden="true" />
-                  Join
-                </button>
-              </div>
+              );
+            }
+            return (
+              <ProjectTreeItem
+                key={cg.id}
+                cg={cg}
+                isActive={activeProjectId === cg.id}
+                onSelect={() => {
+                  setActiveProject(cg.id);
+                  openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
+                }}
+                onHide={onHide}
+              />
+            );
+          }) : (
+            <div className="v10-sidebar-empty" role={membershipNote ? 'status' : undefined}>
+              <span>{membershipNote ?? 'Discovered public graphs will appear here. Use Join to subscribe by ID.'}</span>
             </div>
           )}
-        </div>
-
-        <div className="v10-peer-group v10-sidebar-group">
-          <button
-            type="button"
-            className="v10-peer-group-header v10-sidebar-group-header v10-sidebar-product-header"
-            aria-expanded={leftSectionContextOracleOpen}
-            aria-controls={contextOracleBodyId}
-            onClick={toggleLeftSectionContextOracle}
-          >
-            <Compass size={17} aria-hidden="true" />
-            <span className="v10-peer-group-label">Public Graphs</span>
-            <span className="v10-peer-group-count">{contextOracleProjects.length}</span>
-            <ChevronRight
-              size={14}
-              className={`v10-peer-group-chevron ${leftSectionContextOracleOpen ? 'expanded' : ''}`}
-              aria-hidden="true"
-            />
-          </button>
-          {leftSectionContextOracleOpen && (
-            <div id={contextOracleBodyId} className="v10-peer-group-body v10-sidebar-group-body v10-sidebar-public-graphs">
-              {contextOracleProjects.length > 0 ? contextOracleProjects.map((cg) => {
-                const onHide = () => {
-                  hideProject(cg.id);
-                  if (activeProjectId === cg.id) setActiveProject(null);
-                };
-                if (classifyContextOracleEntry(cg) === 'catalogue') {
-                  return (
-                    <OracleCatalogueItem
-                      key={cg.id}
-                      cg={cg}
-                      isBrowsing={activeTabId === `project:${cg.id}`}
-                      onBrowse={() => {
-                        setActiveProject(null);
-                        openTab({
-                          id: `project:${cg.id}`,
-                          label: cg.name || cg.id.slice(0, 16),
-                          closable: true,
-                        });
-                      }}
-                      onSubscribe={() => openJoinModal(cg.id)}
-                      onHide={onHide}
-                    />
-                  );
-                }
-                return (
-                  <ProjectTreeItem
-                    key={cg.id}
-                    cg={cg}
-                    isActive={activeProjectId === cg.id}
-                    onSelect={() => {
-                      setActiveProject(cg.id);
-                      openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
-                    }}
-                    onHide={onHide}
-                  />
-                );
-              }) : (
-                <div className="v10-sidebar-empty" role={membershipNote ? 'status' : undefined}>
-                  <span>{membershipNote ?? 'Discovered public graphs will appear here. Use Join to subscribe by ID.'}</span>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+        </SidebarSection>
       </div>
 
       {stage >= 1 && (
         <div className="v10-sidebar-footer">
-          <div className="v10-peer-group v10-sidebar-group">
-            <button
-              type="button"
-              className="v10-peer-group-header v10-sidebar-group-header v10-sidebar-product-header"
-              aria-expanded={leftSectionIntegrationsOpen}
-              aria-controls={integrationsBodyId}
-              onClick={toggleLeftSectionIntegrations}
-            >
-              <ServerCog size={18} aria-hidden="true" />
-              <span className="v10-peer-group-label">Integrations</span>
-              <ChevronRight
-                size={14}
-                className={`v10-peer-group-chevron ${leftSectionIntegrationsOpen ? 'expanded' : ''}`}
-                aria-hidden="true"
-              />
-            </button>
-            {leftSectionIntegrationsOpen && (
-              <div id={integrationsBodyId} className="v10-peer-group-body v10-sidebar-group-body">
-                <IntegrationsSectionBody />
-              </div>
-            )}
-          </div>
+          <SidebarSection
+            label="Integrations"
+            icon={<ServerCog size={18} aria-hidden="true" />}
+            open={leftSectionIntegrationsOpen}
+            onToggle={toggleLeftSectionIntegrations}
+          >
+            <IntegrationsSectionBody />
+          </SidebarSection>
         </div>
       )}
 

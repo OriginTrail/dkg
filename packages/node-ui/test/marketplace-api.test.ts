@@ -4,6 +4,8 @@ import {
   ACCESS_KEY_RE, MarketplaceError, errorOf, isMarketplaceAbsent, isMarketplaceOff, marketplaceApi, marketplaceGateway, needsNodeAdmin,
 } from '../src/ui/marketplace/api/client.js';
 import { FIXTURE_IDS, FIXTURE_SECRET, FIXTURE_SCENARIOS, fixtureAnswer, fixtureFetch, fixtureWorld, tracWei } from '../src/ui/marketplace/api/fixtures.js';
+import { copy } from '../src/ui/marketplace/copy.generated.js';
+import { describeError } from '../src/ui/marketplace/shared.js';
 
 const NOW = Date.UTC(2026, 10, 8, 12, 0, 0);
 const NODE_TOKEN = 'node-admin-token-for-tests';
@@ -110,6 +112,23 @@ describe('marketplace API client', () => {
     expect(needsNodeAdmin(await marketplaceApi.makeKey({ label: 'x', budget: '1' }).catch((e: unknown) => e))).toBe(true);
   });
 
+  it('reads a busy gateway and a top-up of unknown outcome as passing, with Retry-After, unless the refusal says not to', () => {
+    const gateway = (code: string, message: string, more: Record<string, unknown> = {}) => ({ error: { code, message, type: 'marketplace' }, ...more });
+    const budgetBusy = errorOf(429, gateway('budget_busy', 'too many calls wait on this service now; try again shortly'), '5');
+    const gatewayBusy = errorOf(503, gateway('gateway_busy', 'the gateway has as many calls as it takes at once; try again shortly'), '5');
+    const pending = errorOf(503, { error: 'TopUpOutcomeUnknown(k-1)', code: 'TopUpOutcomeUnknown', args: ['k-1'], retryable: true });
+    expect(budgetBusy).toMatchObject({ status: 429, code: 'budget_busy', retryable: true, retryAfter: 5 });
+    expect(gatewayBusy).toMatchObject({ status: 503, code: 'gateway_busy', retryable: true, retryAfter: 5 });
+    expect(pending).toMatchObject({ status: 503, code: 'TopUpOutcomeUnknown', retryable: true });
+    // A refusal that says it will not pass stays so, whatever its status.
+    expect(errorOf(429, gateway('budget_busy', 'busy', { retry: false }), '5')).toMatchObject({ retryable: false, retryAfter: 5 });
+    expect(errorOf(503, gateway('gateway_busy', 'busy', { retry: false }))).toMatchObject({ retryable: false });
+    expect(describeError(budgetBusy)).toMatchObject({ copyKey: 'err.gw.busy', message: 'Too many calls are waiting on this service; try again in a moment', retryAfter: 5 });
+    expect(describeError(gatewayBusy)).toMatchObject({ copyKey: 'err.gw.nodebusy', message: 'This node is taking as many calls as it can; try again in a moment', retryAfter: 5 });
+    expect(describeError(pending)).toMatchObject({ copyKey: 'err.topup.pending', message: copy('err.topup.pending') });
+    expect(copy('err.topup.pending')).toBe('The node cannot tell yet whether this top-up went through');
+  });
+
   it('reads PlanNotFound as no plan, a node without the marketplace routes as absent, and a dead node as an error', async () => {
     stubNode('none');
     expect(await marketplaceApi.plan()).toBeNull();
@@ -134,6 +153,21 @@ describe('marketplace API client', () => {
       .toMatchObject({ code: 'InsufficientAllowance', args: ['7', '664', '5', '2'] });
     vi.stubGlobal('fetch', async () => { throw new TypeError('Failed to fetch'); });
     await expect(marketplaceApi.funding()).rejects.toMatchObject({ status: 0, code: 'Offline', retryable: true });
+  });
+
+  it('takes a success whose body cannot be read for no answer, and a refusal without a readable body for what its status says', async () => {
+    // The body stops partway, or the connection drops while it comes.
+    const cut = () => new Response('{"txHash":"0xc2c2', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    const dropped = () => ({ ok: true, status: 200, headers: new Headers(), json: () => Promise.reject(new TypeError('network error')) }) as unknown as Response;
+    const topUp = { services: [{ serviceId: FIXTURE_IDS.llama8b, serviceClass: 'inference' as const, value: '1', maxPricePerUnit: '1' }], idempotencyKey: '0f8fad5b-d9cb-469f-a165-70867728950e' };
+    for (const answer of [cut, dropped]) {
+      vi.stubGlobal('fetch', async () => answer());
+      await expect(marketplaceApi.topUp(`0x${'98'.repeat(32)}`, topUp)).rejects.toMatchObject({ status: 200, code: 'UnreadableAnswer', retryable: true });
+      await expect(marketplaceGateway.models(FIXTURE_SECRET)).rejects.toMatchObject({ status: 200, code: 'UnreadableAnswer' });
+      vi.unstubAllGlobals();
+    }
+    vi.stubGlobal('fetch', async () => new Response('<html>Bad Gateway</html>', { status: 502 }));
+    await expect(marketplaceApi.funding()).rejects.toMatchObject({ status: 502, code: 'HTTP_502', retryable: true });
   });
 });
 

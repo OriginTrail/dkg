@@ -7,11 +7,12 @@
 import React from 'react';
 import { copy } from '../copy.generated.js';
 import { needsNodeAdmin } from '../api/client.js';
-import type { CatalogAnswer, Funding, FundingRequest, Offer, Preview, Service, ServiceRequest, SourceRequest } from '../api/types.js';
-import { fmtCount, fmtMicro, fmtTrac, microOfWei, modelName, unitsOf, usdOf, weiOfMicro, weiOfTrac } from '../amounts.js';
+import type { CatalogAnswer, Funding, FundingRequest, Fx, Offer, Preview, Service, ServiceRequest, SourceRequest } from '../api/types.js';
+import { fmtCount, fmtHex, fmtMicro, fmtTrac, microOfWei, modelName, unitsOf, usdOf, weiOfMicro, weiOfTrac } from '../amounts.js';
 import { ErrorCard, refusalKey, relAt, sellerName } from '../shared.js';
 
-export interface Line { serviceId: string; valueTrac: string; capMicro: string; pinned: number | null }
+/** One service of the plan. Its class goes with it, so a service the catalog lacks this epoch is saved back as it was. */
+export interface Line { serviceId: string; serviceClass: Service['serviceClass']; valueTrac: string; capMicro: string; pinned: number | null }
 
 export interface Draft {
   epoch: 'current' | 'next';
@@ -29,18 +30,17 @@ function priceIn(o: Offer, epoch: 'current' | 'next'): bigint {
 /** A new line: one TRAC, capped at the dearest seller's price, so every seller qualifies. */
 export function lineFor(s: Service, epoch: 'current' | 'next', valueTrac = '1'): Line {
   const top = s.offers.reduce((m, o) => (priceIn(o, epoch) > m ? priceIn(o, epoch) : m), 0n);
-  return { serviceId: s.serviceId, valueTrac, capMicro: microOfWei(top), pinned: null };
+  return { serviceId: s.serviceId, serviceClass: s.serviceClass, valueTrac, capMicro: microOfWei(top), pinned: null };
 }
 
 /** The lines as the node takes them, or null while any is not a positive amount. */
-export function servicesOf(draft: Draft, catalog: CatalogAnswer): ServiceRequest[] | null {
+export function servicesOf(draft: Draft): ServiceRequest[] | null {
   const out: ServiceRequest[] = [];
   for (const l of draft.lines) {
     const value = weiOfTrac(l.valueTrac);
     const cap = weiOfMicro(l.capMicro);
     if (!value || !cap) return null;
-    const serviceClass = catalog.services.find((s) => s.serviceId === l.serviceId)?.serviceClass ?? 'inference';
-    out.push({ serviceId: l.serviceId, serviceClass, value: value.toString(), maxPricePerUnit: cap.toString(), ...(l.pinned !== null ? { pinnedSeller: l.pinned } : {}) });
+    out.push({ serviceId: l.serviceId, serviceClass: l.serviceClass, value: value.toString(), maxPricePerUnit: cap.toString(), ...(l.pinned !== null ? { pinnedSeller: l.pinned } : {}) });
   }
   return out.length ? out : null;
 }
@@ -67,6 +67,30 @@ export function PreviewLine({ preview, err, busy }: { preview: Preview | null; e
       </div>
       {preview.refusal && <div className="mkt-xs mkt-errline" data-testid="mkt-preview-refusal" data-copy={refusalKey(preview.refusal.code)}>{copy(refusalKey(preview.refusal.code))}{' '}<span className="mkt-mono mkt-muted" data-copy="_data">{preview.refusal.code}</span></div>}
     </div>
+  );
+}
+
+/** A line's budget, about what it is worth, and its cap: the fields of every line, its service in the catalog or not. */
+function Amounts({ line, fx, onChange }: { line: Line; fx: Fx; onChange: (l: Line) => void }): React.ReactElement {
+  const value = weiOfTrac(line.valueTrac);
+  return (
+    <>
+      <label className="mkt-xs">
+        <span data-copy="composer.budget">{copy('composer.budget')}</span>{' '}
+        <input type="text" inputMode="decimal" value={line.valueTrac} aria-label={copy('composer.budget')} data-testid={`mkt-value-${line.serviceId}`}
+          onChange={(e) => onChange({ ...line, valueTrac: e.target.value })} />
+        {' '}<span data-copy="composer.budget.trac">{copy('composer.budget.trac')}</span>
+      </label>
+      <span className="mkt-muted mkt-xs" data-copy="catalog.fx.reference.short">
+        {value ? `${usdOf(value, fx.tracUsd) ?? ''}${fx.tracUsd != null ? ` · ${copy('catalog.fx.reference.short')}` : ''}` : copy('composer.budget.zero')}
+      </span>
+      <label className="mkt-xs">
+        <span data-copy="composer.cap">{copy('composer.cap')}</span>{' '}
+        <input type="text" inputMode="decimal" value={line.capMicro} aria-label={copy('composer.cap')} data-testid={`mkt-cap-${line.serviceId}`}
+          onChange={(e) => onChange({ ...line, capMicro: e.target.value })} />
+        {' '}<span data-copy="composer.cap.unit">{copy('composer.cap.unit')}</span>
+      </label>
+    </>
   );
 }
 
@@ -137,21 +161,7 @@ export function Composer({ catalog, funding, draft, onChange, fundsEpoch, endsAt
             </label>
             {line && (
               <div className="mkt-alloc">
-                <label className="mkt-xs">
-                  <span data-copy="composer.budget">{copy('composer.budget')}</span>{' '}
-                  <input type="text" inputMode="decimal" value={line.valueTrac} aria-label={copy('composer.budget')} data-testid={`mkt-value-${s.serviceId}`}
-                    onChange={(e) => setLine({ ...line, valueTrac: e.target.value })} />
-                  {' '}<span data-copy="composer.budget.trac">{copy('composer.budget.trac')}</span>
-                </label>
-                <span className="mkt-muted mkt-xs" data-copy="catalog.fx.reference.short">
-                  {value ? `${usdOf(value, fx.tracUsd) ?? ''}${fx.tracUsd != null ? ` · ${copy('catalog.fx.reference.short')}` : ''}` : copy('composer.budget.zero')}
-                </span>
-                <label className="mkt-xs">
-                  <span data-copy="composer.cap">{copy('composer.cap')}</span>{' '}
-                  <input type="text" inputMode="decimal" value={line.capMicro} aria-label={copy('composer.cap')} data-testid={`mkt-cap-${s.serviceId}`}
-                    onChange={(e) => setLine({ ...line, capMicro: e.target.value })} />
-                  {' '}<span data-copy="composer.cap.unit">{copy('composer.cap.unit')}</span>
-                </label>
+                <Amounts line={line} fx={fx} onChange={setLine} />
                 <label className="mkt-xs">
                   <span data-copy="composer.pin">{copy('composer.pin')}</span>{' '}
                   <select value={line.pinned ?? ''} data-testid={`mkt-pin-${s.serviceId}`} aria-label={copy('composer.pin')}
@@ -168,6 +178,21 @@ export function Composer({ catalog, funding, draft, onChange, fundsEpoch, endsAt
           </div>
         );
       })}
+      {/* A saved line whose service the catalog lacks this epoch: shown with its saved terms, to keep, edit or remove. */}
+      {draft.lines.filter((l) => !catalog.services.some((s) => s.serviceId === l.serviceId)).map((line) => (
+        <div key={line.serviceId} className="mkt-orow" data-testid={`mkt-line-${line.serviceId}`}>
+          <div className="mkt-fork">
+            <span className="mkt-muted" data-copy="_data"><strong className="mkt-mono" title={line.serviceId}>{fmtHex(line.serviceId)}</strong></span>
+            <span className="mkt-muted mkt-xs" data-copy="composer.unavailable">{copy('composer.unavailable')}</span>
+            <button type="button" className="mkt-linkbtn mkt-xs" data-testid={`mkt-remove-${line.serviceId}`} data-copy="composer.remove"
+              onClick={() => set({ lines: draft.lines.filter((l) => l.serviceId !== line.serviceId) })}>{copy('composer.remove')}</button>
+          </div>
+          <div className="mkt-alloc">
+            <Amounts line={line} fx={fx} onChange={setLine} />
+            {line.pinned !== null && <span className="mkt-muted mkt-xs" data-copy="composer.pin.saved">{copy('composer.pin.saved', { seller: sellerName(line.pinned) })}</span>}
+          </div>
+        </div>
+      ))}
 
       <label className="mkt-fork mkt-xs" data-testid="mkt-renew">
         <input type="checkbox" checked={draft.renew} onChange={(e) => set({ renew: e.target.checked })} />{' '}

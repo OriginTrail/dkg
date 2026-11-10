@@ -18,6 +18,9 @@ describe('marketplace component gallery', () => {
       expect(c.textContent).toContain(text);
     }
     expect(c.querySelectorAll('.mkt-bar').length).toBe(3);
+    // Each refusal reads as the client reads the node's answer.
+    expect(Array.from(c.querySelectorAll('[data-testid="mkt-error-card"]'), (e) => e.getAttribute('data-code')))
+      .toEqual(['MarketplaceOff', 'NodeAdminRequired', 'InsufficientAllowance', 'epoch_ending', 'soft_ceiling', 'bad_receipt']);
     expect(c.textContent).not.toContain(MISSING_COPY);
     expect(fetch).not.toHaveBeenCalled();
   });

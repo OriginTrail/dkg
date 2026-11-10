@@ -44,6 +44,13 @@ export function ProvBadge({ offers }: { offers: Offer[] }): React.ReactElement {
 
 const sellersOf = (offers: Offer[]): number[] => [...new Set(offers.map((o) => o.seller))];
 
+/** The next epoch's price, where it differs from this one's: every offer names one, the same when the price stays. */
+function NextPrice({ offer }: { offer: Offer }): React.ReactElement | null {
+  const next = offer.nextPricePerUnit;
+  if (!next || next === offer.pricePerUnit) return null;
+  return <span className="mkt-muted mkt-xs" data-copy="model.next.epoch"> · {copy('model.next.epoch', { price: fmtMicro(next) })}</span>;
+}
+
 function useAddToPlan(): (serviceId: string) => void {
   const askPlans = useMarketplaceDraftStore((s) => s.askPlans);
   const go = useMarketplaceNav();
@@ -86,7 +93,7 @@ function StorefrontBody({ store, fx, label }: { store: Storefront; fx: Fx; label
           <span>
             <strong title={label(o.serviceId)} data-copy="_data">{label(o.serviceId)}</strong>{' '}
             <PriceLine min={o.pricePerUnit} fx={fx} />
-            {o.nextPricePerUnit && <span className="mkt-muted mkt-xs" data-copy="model.next.epoch"> · {copy('model.next.epoch', { price: fmtMicro(o.nextPricePerUnit) })}</span>}
+            <NextPrice offer={o} />
           </span>
           <ProvBadge offers={[o]} />
         </div>
@@ -136,7 +143,7 @@ function ServicePage({ service, catalog, onBack, onSeller }: { service: Service;
                   <strong>{sellerName(store.identityId)}</strong>
                 </button>{' '}<SellerChip available={o?.available ?? store.available} />{' '}
                 {o && <PriceLine min={o.pricePerUnit} fx={fx} />}
-                {o?.nextPricePerUnit && <span className="mkt-muted mkt-xs" data-copy="model.next.epoch"> · {copy('model.next.epoch', { price: fmtMicro(o.nextPricePerUnit) })}</span>}
+                {o && <NextPrice offer={o} />}
                 <div className="mkt-muted mkt-xs" data-copy="model.measured">
                   {o ? <ProvBadge offers={[o]} /> : null}{' · '}
                   {copy('model.measured', {

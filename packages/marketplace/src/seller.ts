@@ -13,33 +13,39 @@
  *   current epoch's is frozen the first time it is used and kept on disk. The
  *   next epoch's can be set ahead of it, until that epoch starts; the settings'
  *   price applies to epochs neither frozen nor set.
- * - **Offers.** At every tick it shares an offer for each service, for the
- *   current and the next epoch, into the Marketplace Context Graph: each names
- *   the node's peer id, and the receipts' operational wallet signs it. One
- *   whose price changed is shared again, signed later: buyers keep the newest.
- *   So is each one half an epoch after its last copy, which shared memory
- *   keeps for a limited time. Each copy is shared on its own, one at a time,
- *   and counts as shared once its share returns.
+ * - **Offers.** Each service's offer is a Knowledge Asset in the Marketplace
+ *   Context Graph's Verifiable Memory, kept by the offer job (offer-job.ts):
+ *   it names the node's peer id, and the receipts' operational wallet signs
+ *   it. The job runs at every tick, beside the landing and never inside it.
  * - **Each call** is checked, cheapest check first, then
  *   served by the service's backend, cut to the units the request allows, and
  *   its receipt signed by an operational wallet. The call, its result and its
  *   receipt are in the ledger before the answer goes back; if that write fails,
  *   the answer is an error and no result. A repeat of a call already served
- *   gets the stored answer. Calls on one subscription run one at a time, so a
- *   nonce is claimed once and a budget's check counts every call before it.
+ *   gets the stored answer, but only from the peer it was served to: once its
+ *   receipt lands, the request and its signature are public. Calls on one
+ *   subscription run one at a time, so a nonce is claimed once and a budget's
+ *   check counts every call before it.
+ * - **No backend work it is not paid for.** A request is taken only while its
+ *   backend's longest answer, and the receipt after it, still come before the
+ *   request expires, checked again after any wait for the calls before it; a
+ *   receipt is never signed past the expiry, which the chain would refuse. A
+ *   unit cap the input could use up is refused before the backend runs, and
+ *   the backend is asked for no more output than the cap pays for. A call
+ *   whose backend ran but gave nothing to sign is not run again.
  * - **The end of the epoch.** Within `stopServingSeconds` of it, new calls are
  *   refused: their receipts could not land in time.
  * - **The job.** Ticks every `tickSeconds` from the epoch's start, and once
- *   more `finalLandingSeconds` before its end: the gate, the offers, then
- *   landing, each on its own, so one failing leaves the others. A tick that
- *   fails as a whole is tried again soon, and never past the final tick.
+ *   more `finalLandingSeconds` before its end: the gate, then the offer job
+ *   started beside landing, each on its own, so one failing leaves the others.
+ *   A tick that fails as a whole is tried again soon, and never past the final
+ *   tick.
  */
 import { join } from 'node:path';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import {
   QUERY_INFERENCE_RECEIPT_TYPES,
-  SERVICE_CLASS_INFERENCE,
   hashQueryInferenceReceipt,
   hashServiceRequest,
   recoverSigner,
@@ -51,11 +57,13 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { MarketplaceRefusal } from './buyer.js';
 import { UpstreamError, type Connector } from './connector.js';
-import { KeyedLock } from './journal.js';
+import { KeyedLock, setAside, writeDurably } from './journal.js';
 import { DEFAULT_LANDING, Lander, nextLandingAt, secondsToNextTick, secondsToRetry, type LandingReport, type LandingSettings } from './landing.js';
 import { SellerLedger, type ServedCall } from './ledger.js';
-import { offerQuads, signOffer, type OfferQuad } from './offers.js';
+import { OfferJob, type OfferAssets } from './offer-job.js';
+import { inputUnitsBound } from './seller-bounds.js';
 import {
+  PEER_LIMITS,
   WireError,
   quoteRequestFromWire,
   receiptToWire,
@@ -66,11 +74,23 @@ import {
   type InferenceBody,
   type QuoteResponse,
   type ServeAnswer,
+  type ServeRefusal,
   type ServeResponse,
 } from './wire.js';
 
 /** New calls stop this long before an epoch ends. */
 export const DEFAULT_STOP_SERVING_SECONDS = 180;
+/** The longest a service's backend takes to answer, when its settings name no time limit. */
+export const DEFAULT_BACKEND_TIMEOUT_MS = 60_000;
+/**
+ * The longest time limit a backend may have: ten seconds inside the buyer gateway's wait for an answer
+ * (`PEER_LIMITS.serveTimeoutMs`). A slower answer reaches a buyer that has stopped waiting, which still pays for it.
+ */
+export const MAX_BACKEND_TIMEOUT_MS = PEER_LIMITS.serveTimeoutMs - 10_000;
+/** What a call needs after its backend answers, before its request expires: the chain's time, the receipt signed and stored. */
+const RECEIPT_SECONDS = 5;
+/** Calls whose backend ran but gave nothing to sign, kept so a repeat does not run it again: the newest this many. */
+const FAILED_CALLS_KEPT = 10_000;
 
 export interface SellerService {
   /** The model's URN; `serviceId` is its keccak256. */
@@ -82,6 +102,8 @@ export interface SellerService {
   provenance: 'weights-pinned' | 'upstream-claimed';
   tokenizerBundle?: string;
   connector: Connector;
+  /** The connector's time limit: a request that expires sooner, and the receipt after it, is refused. `DEFAULT_BACKEND_TIMEOUT_MS` by default. */
+  backendTimeoutMs?: number;
 }
 
 export interface SellerDeps {
@@ -99,8 +121,8 @@ export interface SellerDeps {
   tickSeconds: number;
   /** The landing loop's settings; the defaults otherwise. */
   landing?: LandingSettings;
-  /** Shares one offer, its quads, into the Marketplace Context Graph's shared memory: one call per copy. */
-  shareOffer?: (quads: OfferQuad[]) => Promise<void>;
+  /** Where the offers are published: the Marketplace Context Graph's Verifiable Memory. Without it, none are. */
+  offers?: OfferAssets;
   log?: (message: string) => void;
 }
 
@@ -110,6 +132,8 @@ export class Seller {
   readonly services: ReadonlyMap<string, SellerService>;
   readonly ledger: SellerLedger;
   readonly lander: Lander;
+  /** The offer job, when the seller has somewhere to publish its offers. */
+  readonly offers: OfferJob | undefined;
   /** What the last tick's landing did. */
   lastLanding: LandingReport | undefined;
   private readonly landing: LandingSettings;
@@ -122,8 +146,8 @@ export class Seller {
   private readonly backends = new Map<string, 'up' | 'down'>();
   /** The chain's time as the last tick read it, and when, by this host's clock. */
   private lastTimes: { times: EpochTimes; at: number } | undefined;
-  /** service id and epoch => the price and `signedAt` of its offer as last shared. */
-  private readonly shared = new Map<string, { price: bigint; signedAt: number }>();
+  /** request digest => the refusal of a call whose backend ran but gave nothing to sign, oldest first. */
+  private readonly failed = new Map<string, ServeRefusal>();
   private running = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private ticking: Promise<void> | undefined;
@@ -131,8 +155,20 @@ export class Seller {
   constructor(private readonly deps: SellerDeps) {
     this.services = new Map(deps.services.map((s) => [s.serviceId.toLowerCase(), s]));
     this.landing = deps.landing ?? DEFAULT_LANDING;
-    this.ledger = new SellerLedger(deps.dir);
+    this.ledger = new SellerLedger(deps.dir, deps.log);
     this.lander = new Lander({ chain: deps.chain, ledger: this.ledger, settings: this.landing, ...(deps.log ? { log: deps.log } : {}) });
+    this.offers = deps.offers && new OfferJob({
+      chain: deps.chain, dir: deps.dir, assets: deps.offers, signer: deps.signer, peerId: deps.peerId, tickSeconds: deps.tickSeconds,
+      seller: {
+        gate: () => ({ identityId: this.identityId, open: this.open, domain: this.domain }),
+        services: () => [...this.services.values()],
+        prices: async (serviceId, epoch) => {
+          const service = this.serviceOf(serviceId);
+          return { price: await this.priceFor(service, epoch, epoch), nextPrice: await this.priceFor(service, epoch + 1, epoch) };
+        },
+      },
+      ...(deps.log ? { log: deps.log } : {}),
+    });
   }
 
   /** The identity it serves as, and whether it serves now. */
@@ -188,27 +224,48 @@ export class Seller {
     });
   }
 
-  /** Read the ledger and the frozen prices. Call once before serving. */
+  /**
+   * Read the ledger, the offers published and the frozen prices. Call once
+   * before serving. A prices file that is empty or not prices, as a power loss
+   * during a write can leave it, is moved aside and logged, and the seller
+   * starts with none: this epoch's prices are frozen again from the settings.
+   * A ledger that cannot be read starts empty (`SellerLedger.load`). A prices
+   * file it cannot read at all, a read error that may pass, or a record of the
+   * offers published that cannot be read (`OfferJob.load`) fails the load.
+   */
   async load(): Promise<void> {
     await this.ledger.load();
+    await this.offers?.load();
+    const file = join(this.deps.dir, 'seller-prices.json');
+    let text: string;
     try {
-      this.prices = JSON.parse(await readFile(join(this.deps.dir, 'seller-prices.json'), 'utf8'));
+      text = await readFile(file, 'utf8');
     } catch (err) {
       if ((err as { code?: string }).code !== 'ENOENT') throw err;
+      return;
     }
+    const prices = pricesFrom(text);
+    if (prices) {
+      this.prices = prices;
+      return;
+    }
+    let where: string;
+    try {
+      where = `it was moved to ${await setAside(file)}`;
+    } catch (err) {
+      where = `it could not be moved aside (${messageOf(err)})`;
+    }
+    this.deps.log?.(`[marketplace] the seller's prices ${file} could not be read; ${where}, and this epoch's prices are frozen again from the settings`);
   }
 
-  /** The gate, the offers of the current and the next epoch, then landing. Returns the seconds to the next tick. */
+  /** The gate, the offer job started beside landing, then landing. Returns the seconds to the next tick. */
   async tick(): Promise<number> {
     const started = Date.now();
     await this.readGate();
     const times = await this.deps.chain.getEpochTimes();
     this.lastTimes = { times, at: Date.now() };
-    if (this.open && this.deps.shareOffer) {
-      // One tick shares at a time: a tick at once with another would sign the same copies, at the same chain time.
-      await this.lock.run('offers', () => this.shareNewOffers(times))
-        .catch((err: unknown) => this.deps.log?.(`[marketplace] the offers were not shared: ${messageOf(err)}`));
-    }
+    // Not awaited: a publish waits for ACKs and a transaction, and landing never waits for it.
+    this.offers?.poke();
     this.lastLanding = await this.lander.tick(this.open).catch((err: unknown) => {
       this.deps.log?.(`[marketplace] landing failed: ${messageOf(err)}`);
       return undefined;
@@ -243,6 +300,7 @@ export class Seller {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     await this.ticking;
+    await this.offers?.stop();
   }
 
   /** The gate: this node's identity and its place in the sharding table. Reads that fail keep the last ones' answer. */
@@ -276,17 +334,20 @@ export class Seller {
 
   // -------------------------------------------------------------- serve
 
-  /** Answer a `serve` message: the result and its receipt, or a refusal. Never throws. */
-  async serve(raw: unknown): Promise<ServeResponse> {
+  /**
+   * Answer a `serve` message from the peer `from`, as its connection
+   * authenticated it: the result and its receipt, or a refusal. Never throws.
+   */
+  async serve(raw: unknown, from: string): Promise<ServeResponse> {
     try {
-      return await this.checkAndServe(raw);
+      return await this.checkAndServe(raw, from);
     } catch (err) {
       this.deps.log?.(`[marketplace] a call could not be served: ${messageOf(err)}`);
       return refusal('Unavailable');
     }
   }
 
-  private async checkAndServe(raw: unknown): Promise<ServeResponse> {
+  private async checkAndServe(raw: unknown, from: string): Promise<ServeResponse> {
     let call: { request: ServiceRequest; signature: string; body: InferenceBody };
     try {
       call = serveRequestFromWire(raw);
@@ -297,11 +358,12 @@ export class Seller {
     // The request as this seller would have been named in it: a request for another seller recovers to another key.
     const request: ServiceRequest = { ...call.request, seller: this.identityId };
     const requestDigest = hashServiceRequest(this.domain, request);
-    const before = this.ledger.served(requestDigest);
-    if (before) return before.signature === call.signature ? answerOf(before) : refusal('BadSignature');
+    const repeat = this.repeatOf(requestDigest, call.signature, from);
+    if (repeat) return repeat;
 
     const chain = this.deps.chain;
     const times = await chain.getEpochTimes();
+    const readAt = Date.now();
     // 1. Not too near the epoch's end, at this epoch's price.
     if (times.endsAt - times.now <= this.deps.stopServingSeconds) return refusal('EpochEnding');
     const service = this.services.get(request.serviceId);
@@ -317,9 +379,9 @@ export class Seller {
     if (request.pricePerUnit > budgets[budgetIndex]!.maxPricePerUnit) return refusal('PriceOverCap');
     // 3. Signed by the subscription's session key, with a low s.
     if (recoverSigner(requestDigest, call.signature) !== ethers.getAddress(subscription.sessionKey)) return refusal('BadSignature');
-    // 4. Issued within the subscription, and not expired.
+    // 4. Issued within the subscription, and not expiring before the backend's longest answer and the receipt after it.
     if (request.issuedAt < subscription.startsAt || request.issuedAt > times.now) return refusal('NotYetValid');
-    if (times.now >= request.expiry) return refusal('Expired');
+    if (this.expiresTooSoon(service, request, times.now)) return refusal('Expired');
     // 5. For an account's subscription, issued while the grant it was funded under lasts.
     if (subscription.accountId !== 0n) {
       const end = await chain.grantEnd(subscription.accountId, subscription.buyer, subscription.grantNonce);
@@ -327,88 +389,111 @@ export class Seller {
     }
     // One call at a time per subscription: its nonces are one set, whatever the budget.
     return this.lock.run(request.subscriptionId, async () => {
+      // A repeat that came while the call it repeats was served gets its answer too.
+      const repeated = this.repeatOf(requestDigest, call.signature, from);
+      if (repeated) return repeated;
       // 6. A nonce new to the ledger. 7. Budget left, less this seller's receipts not landed, covers the call.
       if (this.ledger.nonceUsed(request.subscriptionId, request.nonce.toString())) return refusal('NonceUsed');
       const left = await chain.budgetLeft(request.subscriptionId, budgetIndex);
       if (left - this.ledger.unlanded(request.subscriptionId, budgetIndex) < request.maxValueWei) return refusal('BudgetExhausted');
-      return this.run(service, request, call, requestDigest, budgetIndex, times.epoch);
+      // 4 again, by the time the calls before it took, on this host's clock.
+      if (this.expiresTooSoon(service, request, times.now + Math.ceil((Date.now() - readAt) / 1_000))) return refusal('Expired');
+      // 8. Units for an answer: more than the most the input could take, or the backend would run for nothing to bill.
+      const unitCap = minBig(request.maxUnits, request.maxValueWei / request.pricePerUnit);
+      const room = unitCap - inputUnitsBound(call.body);
+      if (room <= 0n) return refusal('UnitsTooFew');
+      return this.run(service, request, call, { requestDigest, budgetIndex, epoch: times.epoch, unitCap, room, from });
     });
   }
 
-  /** Serve the call, cut to what it allows, sign its receipt and store it all before answering. */
+  /**
+   * Serve the call, cut to what it allows, sign its receipt and store it all before answering. A call whose backend
+   * ran but gave nothing to sign is kept as failed, so a repeat of it does not run the backend again.
+   */
   private async run(
     service: SellerService,
     request: ServiceRequest,
     call: { signature: string; body: InferenceBody },
-    requestDigest: string,
-    budgetIndex: number,
-    epoch: number,
+    at: { requestDigest: string; budgetIndex: number; epoch: number; unitCap: bigint; room: bigint; from: string },
   ): Promise<ServeResponse> {
-    const unitCap = minBig(request.maxUnits, request.maxValueWei / request.pricePerUnit);
+    const { requestDigest, unitCap } = at;
     let completion;
     try {
       completion = await service.connector.complete({
         messages: call.body.messages,
-        maxTokens: Number(minBig(BigInt(call.body.max_tokens), unitCap)),
+        // No more output than the cap pays for once the input takes the most it could.
+        maxTokens: Number(minBig(BigInt(call.body.max_tokens), at.room)),
       });
       this.backends.set(service.serviceId, 'up');
     } catch (err) {
       this.backends.set(service.serviceId, 'down');
       // The backend's detail (a missing key's variable, an address) stays in the log.
       this.deps.log?.(`[marketplace] the backend of ${service.model} failed: ${err instanceof UpstreamError ? err.message : String(err)}`);
-      return refusal('UpstreamError');
+      return this.failedOnce(requestDigest, refusal('UpstreamError'));
     }
-    const input = BigInt(completion.promptTokens);
-    if (input >= unitCap) return refusal('UnitsTooFew');
-    const output = minBig(BigInt(completion.completionTokens), unitCap - input);
-    const content = cutTo(completion.content, completion.completionTokens, Number(output));
-    const units = input + output;
-    const receipt: QueryInferenceReceipt = {
-      requestDigest,
-      resultCommitment: resultCommitmentOf(content),
-      units,
-      valueWei: units * request.pricePerUnit,
-      completedAt: Math.max((await this.deps.chain.getEpochTimes()).now, request.issuedAt),
-    };
-    const receiptSignature = await this.deps.chain.signTypedDataAs(this.deps.signer, this.domain!, QUERY_INFERENCE_RECEIPT_TYPES, { ...receipt });
-    const served: ServedCall = {
-      requestDigest,
-      subscriptionId: request.subscriptionId,
-      budgetIndex,
-      epoch,
-      request: requestToWire(request),
-      signature: call.signature,
-      receipt: receiptToWire(receipt),
-      receiptSignature,
-      result: { content },
-    };
-    await this.ledger.recordServed(served);
-    return answerOf(served);
+    try {
+      const input = BigInt(completion.promptTokens);
+      if (input >= unitCap) return this.failedOnce(requestDigest, refusal('UnitsTooFew'));
+      const completedAt = Math.max((await this.deps.chain.getEpochTimes()).now, request.issuedAt);
+      // The chain refuses a receipt completed after its request's expiry: no receipt, and no answer.
+      if (completedAt > request.expiry) return this.failedOnce(requestDigest, refusal('Expired'));
+      const output = minBig(BigInt(completion.completionTokens), unitCap - input);
+      const content = cutTo(completion.content, completion.completionTokens, Number(output));
+      const units = input + output;
+      const receipt: QueryInferenceReceipt = {
+        requestDigest,
+        resultCommitment: resultCommitmentOf(content),
+        units,
+        valueWei: units * request.pricePerUnit,
+        completedAt,
+      };
+      const receiptSignature = await this.deps.chain.signTypedDataAs(this.deps.signer, this.domain!, QUERY_INFERENCE_RECEIPT_TYPES, { ...receipt });
+      const served: ServedCall = {
+        requestDigest,
+        subscriptionId: request.subscriptionId,
+        budgetIndex: at.budgetIndex,
+        epoch: at.epoch,
+        request: requestToWire(request),
+        signature: call.signature,
+        receipt: receiptToWire(receipt),
+        receiptSignature,
+        result: { content },
+        peerId: at.from,
+      };
+      await this.ledger.recordServed(served);
+      return answerOf(served);
+    } catch (err) {
+      this.deps.log?.(`[marketplace] a call could not be served: ${messageOf(err)}`);
+      return this.failedOnce(requestDigest, refusal('Unavailable'));
+    }
   }
 
   /**
-   * Share the offers due: each service's, for this epoch and the next, when it was not shared at its price yet, or
-   * half an epoch after its last copy. Shared memory drops a copy a while after it is written (30 days by default),
-   * so the offer always has one younger than half an epoch. Each is signed at the chain's time, and later than the
-   * one before it, since buyers keep the newest. Each is shared on its own: one that fails stops the rest, which the
-   * next tick shares, and those before it stay shared.
+   * A call served or tried before: the stored answer, only for the peer it was served to, since the request and its
+   * signature are public once its receipt lands; the stored refusal of one whose backend ran but gave nothing to
+   * sign. `undefined` for a call new to the seller.
    */
-  private async shareNewOffers(times: EpochTimes): Promise<void> {
-    for (const epoch of [times.epoch, times.epoch + 1]) {
-      for (const s of this.services.values()) {
-        const price = await this.priceFor(s, epoch, times.epoch);
-        const key = `${s.serviceId}:${epoch}`;
-        const last = this.shared.get(key);
-        if (last?.price === price && times.now - last.signedAt < (times.endsAt - times.startsAt) / 2) continue;
-        const signedAt = Math.max(times.now, (last?.signedAt ?? 0) + 1);
-        await this.deps.shareOffer!(offerQuads(await signOffer(this.deps.chain, this.deps.signer, this.domain!, {
-          seller: this.identityId, serviceId: s.serviceId, serviceClass: SERVICE_CLASS_INFERENCE, unit: 'token',
-          pricePerUnit: price, epoch, capacity: s.capacity, model: s.model, provenance: s.provenance,
-          ...(s.tokenizerBundle ? { tokenizerBundle: s.tokenizerBundle } : {}), peerId: this.deps.peerId, signedAt,
-        })));
-        this.shared.set(key, { price, signedAt });
-      }
+  private repeatOf(requestDigest: string, signature: string, from: string): ServeResponse | undefined {
+    const served = this.ledger.served(requestDigest);
+    if (served) {
+      if (served.signature !== signature) return refusal('BadSignature');
+      return served.peerId === from ? answerOf(served) : refusal('NonceUsed');
     }
+    return this.failed.get(requestDigest);
+  }
+
+  /** Keep a call whose backend ran but gave nothing to sign, and its refusal: the newest `FAILED_CALLS_KEPT`. */
+  private failedOnce(requestDigest: string, refused: ServeRefusal): ServeRefusal {
+    this.failed.delete(requestDigest);
+    this.failed.set(requestDigest, refused);
+    if (this.failed.size > FAILED_CALLS_KEPT) this.failed.delete(this.failed.keys().next().value!);
+    return refused;
+  }
+
+  /** Whether `request` expires before the service's backend could answer and its receipt be signed, at chain time `now`. */
+  private expiresTooSoon(service: SellerService, request: ServiceRequest, now: number): boolean {
+    const backendSeconds = Math.ceil((service.backendTimeoutMs ?? DEFAULT_BACKEND_TIMEOUT_MS) / 1_000);
+    return request.expiry - now < backendSeconds + RECEIPT_SECONDS;
   }
 
   /** The price of `service` in `epoch`, frozen and stored once the epoch is current. */
@@ -422,13 +507,10 @@ export class Seller {
     });
   }
 
-  /** Keep a price for an epoch on disk: written beside the prices file, then renamed over it. Under the prices lock. */
+  /** Keep a price for an epoch on disk: written beside the prices file, synced, then renamed over it. Under the prices lock. */
   private async storePrice(serviceId: string, epoch: number, price: bigint): Promise<void> {
     const prices = { ...this.prices, [serviceId]: { ...this.prices[serviceId], [String(epoch)]: price.toString() } };
-    await mkdir(this.deps.dir, { recursive: true });
-    const file = join(this.deps.dir, 'seller-prices.json');
-    await writeFile(`${file}.tmp`, `${JSON.stringify(prices, null, 2)}\n`, { mode: 0o600 });
-    await rename(`${file}.tmp`, file);
+    await writeDurably(join(this.deps.dir, 'seller-prices.json'), `${JSON.stringify(prices, null, 2)}\n`);
     this.prices = prices;
   }
 
@@ -441,6 +523,25 @@ export class Seller {
 
 function answerOf(call: ServedCall): ServeAnswer {
   return { ok: true, result: call.result, receipt: call.receipt, receiptSignature: call.receiptSignature, budgetIndex: call.budgetIndex };
+}
+
+/** The frozen prices a prices file holds: service id => epoch => wei per unit. `null` when it holds anything else. */
+function pricesFrom(text: string): Record<string, Record<string, string>> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+  if (!isRecord(parsed)) return null;
+  for (const byEpoch of Object.values(parsed)) {
+    if (!isRecord(byEpoch)) return null;
+    for (const [epoch, price] of Object.entries(byEpoch)) {
+      if (!/^\d+$/.test(epoch) || typeof price !== 'string' || !/^\d+$/.test(price)) return null;
+    }
+  }
+  return parsed as Record<string, Record<string, string>>;
 }
 
 const minBig = (a: bigint, b: bigint) => (a < b ? a : b);

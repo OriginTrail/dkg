@@ -87,6 +87,12 @@ export type Source = { kind: 'wallet' } | { kind: 'account'; accountId: string; 
 export interface Budget {
   budgetIndex: number;
   serviceId: string;
+  /**
+   * As the chain stored it, where the node names it: a top-up repeats it
+   * exactly, whatever the catalog says of the service now. A node that does
+   * not name it leaves the catalog to say.
+   */
+  serviceClass?: 'inference' | 'query';
   value: string;
   valueTrac: string;
   maxPricePerUnit: string;
@@ -137,6 +143,13 @@ export interface Tx { txHash: string; blockNumber: number }
 /** A funding or top-up that was sent; `subscription` is null while the read lags the send. */
 export interface FundedAnswer extends Tx { subscription: Subscription | null }
 
+/**
+ * A top-up that went through. A repeat of its key gets the first answer; one
+ * whose first answer was lost, once the budgets show the top-up, names no
+ * transaction (`txHash` and `blockNumber` null).
+ */
+export interface TopUpAnswer { txHash: string | null; blockNumber: number | null; subscription: Subscription | null }
+
 export interface PlanService {
   serviceId: string;
   serviceClass: 'inference' | 'query';
@@ -185,7 +198,11 @@ export interface Account {
   publisherWallets: string[];
 }
 
-export interface AccountsAnswer { accounts: Account[] }
+/**
+ * `accountsPending`: the node was still reading the account list, and `accounts` is the list it read last.
+ * `accountsError`: why the last read that finished failed, when it did and none has succeeded since.
+ */
+export interface AccountsAnswer { accounts: Account[]; accountsPending?: boolean; accountsError?: string }
 
 export interface Funding {
   buyerWallet: {
@@ -198,6 +215,10 @@ export interface Funding {
     walletContractAllowanceTrac: string;
   };
   accounts: Account[];
+  /** The node was still reading the account list: `accounts` is the list it read last, and may be empty. */
+  accountsPending?: boolean;
+  /** Why the node's last account-list read that finished failed, when it did and none has succeeded since. */
+  accountsError?: string;
   epoch: number;
   epochEndsAt: number;
 }
@@ -250,12 +271,18 @@ export interface Reconciled {
 
 export interface ReconciliationAnswer { epoch: number; final: boolean; rows: Reconciled[] }
 
-/** An access key, never with its secret. Budget and spent are wei. */
+/** An access key, never with its secret. Budget, spent and reserved are wei. */
 export interface Key {
   keyId: string;
   label: string;
   budget: string;
   spent: string;
+  /**
+   * Held for calls whose receipts have not settled: an unanswered call at its
+   * most, until its epoch is final. The gateway takes a call only while spent,
+   * reserved and the call's most value stay within the budget.
+   */
+  reserved: string;
   /** The services it may call; null for every service the subscription funds. */
   services: string[] | null;
   rps: number;
@@ -271,7 +298,28 @@ export interface MadeKey extends Key { secret: string }
 
 // ── seller ──────────────────────────────────────────────────────────────────
 
-/** One of the seller's services: its backend's state, and this and the next epoch's price. */
+/** Why a seller's offer is not listed, or why its last publish or extension failed. */
+export type ListingProblem =
+  | 'not-core-node' | 'not-admitted' | 'no-trac' | 'no-ack-quorum' | 'graph-not-registered' | 'catalog-pending' | 'expired' | 'error';
+
+/**
+ * Whether a service's offer is in the catalog: published to Verifiable
+ * Memory, valid this epoch, not withdrawn, its catalog record kept, and this
+ * node a Core Node.
+ */
+export interface Listing {
+  listed: boolean;
+  kaId?: string;
+  validUntilEpoch?: number;
+  withdrawn?: boolean;
+  problem?: ListingProblem;
+  /** The node's own words for the problem. */
+  message?: string;
+  /** When a failed run is tried again, in chain seconds. */
+  retryAt?: number;
+}
+
+/** One of the seller's services: its backend's state, this and the next epoch's price, and whether its offer is listed. */
 export interface Offering {
   serviceId: string;
   connector: 'up' | 'down';
@@ -279,6 +327,8 @@ export interface Offering {
   priceTrac: string;
   nextPrice: string;
   nextPriceTrac: string;
+  /** Null when the node runs without the module that publishes offers. */
+  listing: Listing | null;
 }
 
 export interface Batch {
@@ -404,6 +454,14 @@ export interface ServiceRequest {
 }
 
 export interface FundingRequest { epoch: 'current' | 'next' | number; source: SourceRequest; services: ServiceRequest[] }
+
+/**
+ * A top-up of a subscription: what to add, and its key, a UUID v4 made once
+ * per confirmed top-up. The node carries a key out once: a repeat of the
+ * request gets the first answer, and the key with another body is refused
+ * with IdempotencyKeyReused (409).
+ */
+export interface TopUpRequest { services: ServiceRequest[]; idempotencyKey: string }
 
 export interface PlanRequest { services: ServiceRequest[]; source: SourceRequest; renew: boolean; renewUntilEpoch?: number }
 

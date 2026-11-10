@@ -4,16 +4,25 @@
 // token's) and keeps its secret in memory, never in storage; the node's own
 // token never goes to the gateway, and one playground key per browser is live. Under each answer, what it cost and who served it; at the soft
 // ceiling, the fork inline: top up, or wait for the next epoch.
-import React, { useState } from 'react';
-import { copy } from '../copy.generated.js';
+import React, { useRef, useState } from 'react';
+import { copy, type CopyKey } from '../copy.generated.js';
 import { isMarketplaceError, marketplaceApi, marketplaceGateway, needsNodeAdmin, type ChatRequest } from '../api/client.js';
 import type { Budget, CatalogAnswer, Served } from '../api/types.js';
 import { fmtCount, fmtTrac, modelName, pctOf } from '../amounts.js';
 import { AdminCard, ErrorCard, describeError, relAt, sellerName, useLoad, useMarketplaceNav } from '../shared.js';
 import { useMarketplaceDraftStore } from '../draftStore.js';
 
-/** The playground's key: in this page's memory only, and good for an hour. */
-let pageKey: { secret: string; keyId: string; expiresAt: number } | null = null;
+/**
+ * The playground's key: in this page's memory only, good for an hour, with
+ * the budget it was made with (wei), and `spent` once the gateway refused a
+ * call as past that budget.
+ */
+interface PageKey { secret: string; keyId: string; expiresAt: number; budget: string; spent: boolean }
+let pageKey: PageKey | null = null;
+/** The key on its way, while one is made: every send, from any mount of the playground, waits for it. */
+let making: Promise<PageKey> | null = null;
+/** Bumped when the page forgets its key: a key made before then is not taken up. */
+let generation = 0;
 const KEY_LIFETIME_SECONDS = 3_600;
 
 /**
@@ -36,29 +45,86 @@ function rememberKeyId(keyId: string): void {
   try { localStorage.setItem(PLAYGROUND_KEY_STORAGE, keyId); } catch { /* storage unavailable: the key still expires within the hour */ }
 }
 
-/** Forget the page's key (tests, and a key the gateway no longer takes). */
-export function forgetPlaygroundKey(): void { pageKey = null; }
+/** Forget the page's key, and any on its way, as a new page does (tests). */
+export function forgetPlaygroundKey(): void {
+  generation += 1;
+  pageKey = null;
+  making = null;
+}
 
-/**
- * The page's key, made on the first send. The key made before it, by this
- * page or an earlier one in this browser, is revoked first; a revoke that
- * fails (that key expired, or was revoked elsewhere) does not stop the new one.
- */
-async function playgroundKey(budget: string): Promise<{ secret: string; keyId: string }> {
+/** The gateway no longer takes `keyId`: the next send makes a new key, unless another send already did. */
+function dropPlaygroundKey(keyId: string): void { if (pageKey?.keyId === keyId) pageKey = null; }
+
+/** The key's budget ran out: the next send makes a new one, from the subscription as it is then. */
+function spendPlaygroundKey(): void { if (pageKey) pageKey = { ...pageKey, spent: true }; }
+
+/** Revoke the key made before, then make the page's key with `budget`. */
+async function makePageKey(budget: string, gen: number): Promise<PageKey> {
   const now = Math.floor(Date.now() / 1000);
-  if (pageKey && pageKey.expiresAt - 60 > now) return pageKey;
   const previous = pageKey?.keyId ?? lastKeyId();
   pageKey = null;
   if (previous) await marketplaceApi.revokeKey(previous).catch(() => undefined);
   const made = await marketplaceApi.makeKey({ label: copy('play.key.label'), budget, services: null, rps: 2, expiresAt: now + KEY_LIFETIME_SECONDS });
-  pageKey = { secret: made.secret, keyId: made.keyId, expiresAt: made.expiresAt ?? now + KEY_LIFETIME_SECONDS };
-  rememberKeyId(made.keyId);
-  return pageKey;
+  const key: PageKey = { secret: made.secret, keyId: made.keyId, expiresAt: made.expiresAt ?? now + KEY_LIFETIME_SECONDS, budget, spent: false };
+  if (gen === generation) {
+    pageKey = key;
+    rememberKeyId(key.keyId);
+  }
+  return key;
+}
+
+/**
+ * The page's key, made on the first send with `budget`, this epoch's
+ * subscription value, and made again once it expires, once its budget is
+ * spent, or once the subscription funds more than it was made with. One key
+ * is made at a time, whichever mount of the playground asks: a send while one
+ * is on its way waits for it, then takes it if it fits, or replaces it. The
+ * key made before, by this page or an earlier one in this browser, is revoked
+ * first; a revoke that fails (that key expired, or was revoked elsewhere)
+ * does not stop the new one. So one playground key is live, and it is the one
+ * remembered.
+ */
+async function playgroundKey(budget: string): Promise<PageKey> {
+  while (making) await making.catch(() => undefined);
+  const now = Math.floor(Date.now() / 1000);
+  if (pageKey && !pageKey.spent && pageKey.expiresAt - 60 > now && BigInt(pageKey.budget) >= BigInt(budget)) return pageKey;
+  const made: Promise<PageKey> = makePageKey(budget, generation).finally(() => { if (making === made) making = null; });
+  making = made;
+  return made;
 }
 
 const KEY_GONE = new Set(['missing_key', 'unknown_key', 'revoked_key', 'expired_key']);
 
-interface Msg { role: 'user' | 'assistant'; content: string; served?: Served; error?: { copyKey: string; code: string } }
+/**
+ * The gateway's refusals given before it calls a seller: the caller's key,
+ * rate and services, the request, the epoch, the subscription and its budget,
+ * a seller to route to, the session key and the key's budget. Nothing was
+ * charged for these. Any other failure of a call that went out (no answer, an
+ * answer that cannot be read, a seller that did not answer or refused, a
+ * receipt that failed its check, a failure the node does not explain) leaves
+ * open whether the call was served and charged.
+ */
+const REFUSED_BEFORE_CALL = new Set([
+  ...KEY_GONE, 'key_rate', 'bad_request', 'service_not_allowed', 'epoch_ending', 'no_subscription', 'no_seller',
+  'soft_ceiling', 'session_key_missing', 'request_too_large', 'key_budget', 'MarketplaceOff',
+]);
+
+/** The gateway's answers that it is too busy to take the call now, before it calls anyone: try again in a moment. */
+const TRY_AGAIN = new Set(['budget_busy', 'gateway_busy']);
+
+/**
+ * A failed send: in plain words, its code, and how it ended: refused before
+ * any call (`uncharged`), too busy to take it now (`busy`, with when to try
+ * again), or of an outcome that may have been charged (`unknown`).
+ */
+interface SendError { copyKey: CopyKey; code: string; outcome: 'uncharged' | 'busy' | 'unknown'; retryAfter: number | null }
+
+/**
+ * A turn of the chat. A user turn that got no answer (refused, cut short by a
+ * fork, or of unknown outcome) stays on show with what came of it, but no later
+ * request carries it: one the gateway refused would be refused again with it.
+ */
+interface Msg { id: number; role: 'user' | 'assistant'; content: string; served?: Served; error?: SendError; unanswered?: boolean }
 type Fork = { kind: 'ceiling'; serviceId: string; nextEpochAt: number | null } | { kind: 'fund'; serviceId: string } | { kind: 'ending'; seconds: number | null };
 
 /** What a budget has for calls: its value left, less what the node holds. */
@@ -71,10 +137,12 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
   const [serviceId, setServiceId] = useState<string>('');
   const [input, setInput] = useState('');
   const [msgs, setMsgs] = useState<Msg[]>([]);
+  const turns = useRef(0);
   const [fork, setFork] = useState<Fork | null>(null);
   const [busy, setBusy] = useState(false);
   const [keyErr, setKeyErr] = useState<unknown>(null);
   const [keyId, setKeyId] = useState<string | null>(pageKey?.keyId ?? null);
+  const [keySpent, setKeySpent] = useState(pageKey?.spent ?? false);
   const [left, setLeft] = useState<Record<string, string>>({});
   const askPlans = useMarketplaceDraftStore((s) => s.askPlans);
   const go = useMarketplaceNav();
@@ -87,29 +155,45 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
   const send = async () => {
     if (sendDisabledKey || busy || !selected || !current) return;
     const content = input.trim();
-    const history = msgs.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content }));
+    // Only answered turns go out again: the answers, and the prompts they answered.
+    const history = msgs.filter((m) => !m.error && !m.unanswered).map((m) => ({ role: m.role, content: m.content }));
     const request: ChatRequest = { model: selected.serviceId, messages: [...history, { role: 'user', content }] };
     setBusy(true); setFork(null); setKeyErr(null);
-    setMsgs((m) => [...m, { role: 'user', content }]);
+    const turn = ++turns.current;
+    const unanswered = (m: Msg[]) => m.map((x) => (x.id === turn ? { ...x, unanswered: true } : x));
+    setMsgs((m) => [...m, { id: turn, role: 'user', content }]);
     setInput('');
+    // Whether a call has gone to the gateway whose outcome a failure would leave open: until one has, nothing can be charged.
+    let called = false;
+    const chat = (secret: string) => { called = true; return marketplaceGateway.chat(secret, request); };
     try {
-      let key = await playgroundKey(current.value);
+      // A spent key is made again from the subscription as the node shows it now: a top-up may have come since.
+      let value = current.value;
+      if (pageKey?.spent) {
+        value = (await marketplaceApi.subscriptions(catalog.epoch)).subscriptions.find((s) => s.epoch === catalog.epoch)?.value ?? value;
+        subs.reload();
+      }
+      let key = await playgroundKey(value);
       setKeyId(key.keyId);
+      setKeySpent(false);
       let answer;
       try {
-        answer = await marketplaceGateway.chat(key.secret, request);
+        answer = await chat(key.secret);
       } catch (err) {
         if (!isMarketplaceError(err) || !KEY_GONE.has(err.code)) throw err;
-        forgetPlaygroundKey();
+        // The gateway refused that key before calling anyone: only the next key's call can be charged.
+        called = false;
+        dropPlaygroundKey(key.keyId);
         key = await playgroundKey(current.value);
         setKeyId(key.keyId);
-        answer = await marketplaceGateway.chat(key.secret, request);
+        answer = await chat(key.secret);
       }
       const served = answer.marketplace;
       setLeft((l) => ({ ...l, [served.serviceId]: served.budgetLeft }));
-      setMsgs((m) => [...m, { role: 'assistant', content: answer.choices[0]?.message.content ?? '', served }]);
+      setMsgs((m) => [...m, { id: ++turns.current, role: 'assistant', content: answer.choices[0]?.message.content ?? '', served }]);
     } catch (err) {
-      if (needsNodeAdmin(err)) { setKeyErr(err); setMsgs((m) => m.slice(0, -1)); setInput(content); return; }
+      if (needsNodeAdmin(err)) { setKeyErr(err); setMsgs((m) => m.filter((x) => x.id !== turn)); setInput(content); return; }
+      setMsgs(unanswered);
       if (isMarketplaceError(err) && err.code === 'soft_ceiling') {
         setFork({ kind: 'ceiling', serviceId: selected.serviceId, nextEpochAt: err.extra.fork?.nextEpochAt ?? err.extra.nextEpochAt ?? null });
         if (err.extra.left !== undefined) setLeft((l) => ({ ...l, [selected.serviceId]: err.extra.left! }));
@@ -118,10 +202,17 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
       } else if (isMarketplaceError(err) && err.code === 'epoch_ending') {
         setFork({ kind: 'ending', seconds: err.retryAfter });
       }
+      if (isMarketplaceError(err) && err.code === 'key_budget') {
+        // The playground key's own budget ran out: the next send makes a new key, from the subscription as the node shows it then.
+        spendPlaygroundKey();
+        setKeySpent(true);
+      }
       // The fork says what happened for these three; anything else is an error bubble.
       if (isMarketplaceError(err) && ['soft_ceiling', 'no_subscription', 'epoch_ending'].includes(err.code)) return;
       const d = describeError(err);
-      setMsgs((m) => [...m, { role: 'assistant', content: '', error: { copyKey: d.copyKey, code: d.code ?? 'Error' } }]);
+      const uncharged = !called || (isMarketplaceError(err) && REFUSED_BEFORE_CALL.has(err.code));
+      const outcome = isMarketplaceError(err) && TRY_AGAIN.has(err.code) ? 'busy' : uncharged ? 'uncharged' : 'unknown';
+      setMsgs((m) => [...m, { id: ++turns.current, role: 'assistant', content: '', error: { copyKey: d.copyKey, code: d.code ?? 'Error', outcome, retryAfter: d.retryAfter } }]);
     } finally {
       setBusy(false);
     }
@@ -174,15 +265,21 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
       </div>
       <div className="mkt-chat">
         {msgs.length === 0 && <div className="mkt-muted mkt-xs" data-copy="play.empty.chat">{copy('play.empty.chat')}</div>}
-        {msgs.map((m, i) => (
-          <div key={i}>
+        {msgs.map((m) => (
+          <div key={m.id}>
             {m.error ? (
-              <div className="mkt-bubble assistant error" role="alert" data-testid="mkt-error-bubble" data-code={m.error.code}>
-                <span data-copy="play.error.bubble">{copy('play.error.bubble', { reason: copy(m.error.copyKey) })}</span>
+              <div className="mkt-bubble assistant error" role="alert" data-testid="mkt-error-bubble" data-code={m.error.code} data-outcome={m.error.outcome}>
+                {m.error.outcome === 'busy' && (
+                  <span data-copy={m.error.copyKey}>
+                    {copy(m.error.copyKey)}{m.error.retryAfter != null && <span data-copy="err.retry.after"> · {copy('err.retry.after', { n: m.error.retryAfter })}</span>}
+                  </span>
+                )}
+                {m.error.outcome === 'uncharged' && <span data-copy="play.error.bubble">{copy('play.error.bubble', { reason: copy(m.error.copyKey) })}</span>}
+                {m.error.outcome === 'unknown' && <span data-copy="play.error.unknown">{copy('play.error.unknown', { reason: copy(m.error.copyKey) })}</span>}
               </div>
             ) : (
               <>
-                <div className={`mkt-bubble ${m.role}`} data-copy="_data">{m.content}</div>
+                <div className={`mkt-bubble ${m.role}`} data-copy="_data" data-unanswered={m.unanswered ? 'true' : undefined}>{m.content}</div>
                 {m.served && (
                   <div className="mkt-muted mkt-xs" data-copy="play.servedby" data-testid="mkt-served">
                     {copy('play.servedby', { seller: sellerName(m.served.seller), units: fmtCount(m.served.units), trac: fmtTrac(m.served.value), left: fmtTrac(m.served.budgetLeft) })}
@@ -225,8 +322,8 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
           {busy ? copy('state.working') : copy('ctl.send')}
         </button>
       </div>
-      <span className="mkt-muted mkt-xs" data-testid="mkt-play-key" data-copy={keyId ? 'play.key.note' : 'play.key.first'}>
-        {keyId ? copy('play.key.note', { key: keyId }) : copy('play.key.first')}
+      <span className="mkt-muted mkt-xs" data-testid="mkt-play-key" data-copy={!keyId ? 'play.key.first' : keySpent ? 'play.key.spent' : 'play.key.note'}>
+        {!keyId ? copy('play.key.first') : keySpent ? copy('play.key.spent', { key: keyId }) : copy('play.key.note', { key: keyId })}
       </span>
     </div>
   );

@@ -8,9 +8,9 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     await leftPanel.waitForProjectsLoaded();
   });
 
-  test('My Context Graphs is expanded by default', async ({ leftPanel }) => {
-    const mode = await leftPanel.getActiveMode();
-    expect(mode?.trim()).toContain('My Context Graphs');
+  test('My Context Graphs is expanded by default, and Public Graphs collapsed', async ({ leftPanel }) => {
+    await expect(leftPanel.sectionHeader('My Context Graphs')).toHaveAttribute('aria-expanded', 'true');
+    await expect(leftPanel.sectionHeader('Public Graphs')).toHaveAttribute('aria-expanded', 'false');
   });
 
   test('Dashboard row is visible', async ({ leftPanel }) => {
@@ -40,8 +40,8 @@ test.describe('Left Panel Navigation (rc.12)', () => {
   });
 
   test('Public Graphs expands and renders the catalogue', async ({ leftPanel }) => {
-    await leftPanel.switchToMode('oracle');
-    expect((await leftPanel.getActiveMode())?.trim()).toContain('Public Graphs');
+    await leftPanel.expandSection('Public Graphs');
+    expect(await leftPanel.isSectionExpanded('Public Graphs')).toBe(true);
     // The catalogue renders EITHER discovered public CGs OR the empty-state
     // hint — both are valid on a real node depending on what's been synced.
     // Only the Public Graphs section counts: My Context Graphs' rows share
@@ -66,10 +66,20 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     }
   });
 
-  test('expanding Public Graphs keeps the My Context Graphs list available', async ({ leftPanel }) => {
-    await leftPanel.switchToMode('oracle');
-    await leftPanel.switchToMode('explorer');
-    expect((await leftPanel.getProjectNames()).length).toBeGreaterThanOrEqual(2);
+  test('expanding Public Graphs leaves My Context Graphs expanded, with both lists on show', async ({ leftPanel }) => {
+    const mine = leftPanel.section('My Context Graphs');
+    const discovered = leftPanel.section('Public Graphs');
+    await expect(leftPanel.sectionHeader('My Context Graphs')).toHaveAttribute('aria-expanded', 'true');
+    await expect(leftPanel.sectionHeader('Public Graphs')).toHaveAttribute('aria-expanded', 'false');
+    await leftPanel.expandSection('Public Graphs');
+    // Nothing is opened again: both sections stay as that one click left them.
+    await expect(leftPanel.sectionHeader('Public Graphs')).toHaveAttribute('aria-expanded', 'true');
+    await expect(leftPanel.sectionHeader('My Context Graphs')).toHaveAttribute('aria-expanded', 'true');
+    const myRows = mine.locator(sel.leftPanel.peerGroupBody).locator(sel.leftPanel.section);
+    for (const name of [PRIMARY_CG, SECONDARY_CG]) await expect(myRows.filter({ hasText: name }).first()).toBeVisible();
+    // Public Graphs lists the graphs the node discovered, or says there are none yet.
+    const discoveredBody = discovered.locator(sel.leftPanel.peerGroupBody);
+    await expect(discoveredBody.locator(`${sel.leftPanel.section}, ${sel.leftPanel.emptyCard}`).first()).toBeVisible();
   });
 
   test('New button opens create modal', async ({ leftPanel, createProjectModal }) => {

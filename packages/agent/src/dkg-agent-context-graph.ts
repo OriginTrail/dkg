@@ -135,7 +135,7 @@ import {
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 import { replaceContextGraphMetadataFact } from './context-graph-metadata-fact.js';
-import { addExternalAuthorCuratorAsParticipant, isExternalAuthorCurator } from './external-author-curator.js';
+import { addExternalAuthorCuratorAsParticipant, isExternalAuthorCurator, isNodeHeldCurator } from './external-author-curator.js';
 import { heldAuthorSigner } from './author-signer.js';
 import { rfc64AuthorDigestSignerV1 } from './rfc64/control-envelope-signer-v1.js';
 import { addRegistrationParticipantAgent, type RegistrationRoster } from './context-graph-registration-roster.js';
@@ -1546,7 +1546,9 @@ export class ContextGraphMethods extends DKGAgentBase {
 
         const normalizedChainSigner = ethers.getAddress(chainSigner);
         const signerIsOwner = normalizedChainSigner.toLowerCase() === publishAuthority.toLowerCase();
-        const externalAuthorCurator = await isExternalAuthorCurator(this.config?.authorSigners, this.chain, ownerAddress, normalizedChainSigner);
+        // An author key that signs no transaction: of the external signer, or held on the node (nodeHeldAuthor).
+        const nodeHeldCurator = isNodeHeldCurator(this.config, this.chain, this.localAgents, ownerAddress, normalizedChainSigner);
+        const externalAuthorCurator = nodeHeldCurator || await isExternalAuthorCurator(this.config?.authorSigners, this.chain, ownerAddress, normalizedChainSigner);
         if (ownerAddress.toLowerCase() !== normalizedChainSigner.toLowerCase() && !externalAuthorCurator) {
           throw new Error(
             `Context graph "${id}" cannot be PCA-registered: local curator ${ownerAddress} differs from registration chain signer ${normalizedChainSigner}. The local curator must control the wallet that will own the on-chain Context Graph NFT.`,
@@ -1575,7 +1577,7 @@ export class ContextGraphMethods extends DKGAgentBase {
             `PCA account ${publishAuthorityAccountId} owner ${publishAuthority} remains the live publish authority.`,
           );
         }
-        if (externalAuthorCurator) participantAgents = await addExternalAuthorCuratorAsParticipant(roster, id, ownerAddress, normalizedChainSigner, (message) => this.log.info(ctx, message));
+        if (externalAuthorCurator) participantAgents = await addExternalAuthorCuratorAsParticipant(roster, id, ownerAddress, normalizedChainSigner, (message) => this.log.info(ctx, message), nodeHeldCurator);
       } else if (publishAuthority && ownerAddress.toLowerCase() !== publishAuthority.toLowerCase()) {
         // EOA mode: publishAuthority is the chain signer; local curator must
         // equal it unless the explicit auto-promotion path below is allowed.

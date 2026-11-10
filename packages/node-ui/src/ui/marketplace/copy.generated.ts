@@ -1,6 +1,8 @@
 // The marketplace section's string table — every string the section shows
-// lives here, and components render through copy(key).
-export const COPY: Record<string, string> = {
+// lives here, and components render through copy(key). Its keys are a closed
+// set, CopyKey: a key the table lacks, or one renamed here, is a type error
+// wherever it is used. The table is edited by hand; no script writes it.
+export const COPY = {
   "onboard.key.title": "Get your key",
   "onboard.key.body": "Works with anything that speaks the OpenAI API — paste the two lines below.",
   "onboard.key.once": "Shown once. Store it now.",
@@ -79,6 +81,7 @@ export const COPY: Record<string, string> = {
   "play.empty.input": "Type something first",
   "play.fork.switch": "or switch to a service with budget left:",
   "play.error.bubble": "{reason} — nothing was charged",
+  "play.error.unknown": "{reason} — whether this call was served and charged is not known: check Recent calls in Plans before sending it again",
   "plans.loading": "Loading your plan…",
   "activity.filter.all": "All",
   "activity.note": "Last 20 this epoch · held until the seller lands it, missed if the epoch ended first",
@@ -152,6 +155,7 @@ export const COPY: Record<string, string> = {
   "play.fork.fund": "No subscription funds this service in this epoch — nothing was charged",
   "play.fork.ending": "The epoch is ending: calls resume when the next one starts, in {n} s",
   "play.key.note": "Calls go through this node's gateway with {key}, this browser's playground key: kept in memory, good for an hour, and revoked when the next one is made",
+  "play.key.spent": "The budget of {key}, this browser's playground key, is spent: your next message makes a new key from this epoch's subscription and revokes this one",
   "play.key.first": "Your first message makes this browser's playground key for the gateway and revokes the one before: kept in memory, good for an hour",
   "admin.title": "This needs the node-admin token",
   "admin.playground": "The playground makes its own access key, which takes the node-admin token. Open the dashboard with that token to chat here.",
@@ -162,11 +166,13 @@ export const COPY: Record<string, string> = {
   "off.absent.title": "The marketplace isn't available on this node",
   "off.absent.body": "This node answers no marketplace routes: it needs a node version that includes the marketplace.",
   "err.generic": "Something went wrong — the node did not say what",
+  "err.unreadable": "The node answered, but its answer could not be read",
   "err.off": "The marketplace is off on this node",
   "err.admin": "This needs the node-admin token",
   "err.notfound": "The node has no such route — it may run an older version",
   "err.unauthorized": "The node did not take this page's token",
   "err.invalid": "The node refused the request as malformed",
+  "err.funding.epoch": "That epoch can no longer be funded — go back for a fresh dry run",
   "err.terms.changed": "A budget's terms changed — check them and try again",
   "err.service.none": "No seller offers this service this epoch",
   "err.seller.none": "No such seller",
@@ -174,6 +180,10 @@ export const COPY: Record<string, string> = {
   "err.subscription.funded": "This epoch is already funded — top it up instead",
   "err.subscription.ended": "That subscription's epoch has ended",
   "err.subscription.buyer": "That subscription belongs to another buyer wallet",
+  "err.topup.key": "The node holds this top-up's key for a different request",
+  "err.topup.pending": "The node cannot tell yet whether this top-up went through",
+  "err.topup.notsent": "The top-up was never sent: nothing was added",
+  "err.topup.reverted": "The chain refused the top-up: nothing was added",
   "err.wallet.trac": "The buyer wallet does not hold enough TRAC",
   "err.account.allowance": "The account's allowance for this window is too small",
   "err.grant.limit": "This costs more than the account's limit per epoch",
@@ -196,9 +206,11 @@ export const COPY: Record<string, string> = {
   "err.epoch.ending": "The epoch is ending: calls resume when the next one starts",
   "err.gw.nosub": "No subscription funds this service in this epoch",
   "err.gw.ceiling": "This budget is at its soft ceiling",
+  "err.gw.busy": "Too many calls are waiting on this service; try again in a moment",
+  "err.gw.nodebusy": "This node is taking as many calls as it can; try again in a moment",
   "err.gw.keybudget": "The key's budget is spent",
   "err.gw.noseller": "No seller serves this service right now",
-  "err.gw.unreachable": "The seller did not answer; try again",
+  "err.gw.unreachable": "The seller did not answer",
   "err.gw.refused": "The seller refused the call",
   "err.gw.receipt": "The seller's receipt failed this node's check",
   "err.gw.notallowed": "This key may not call this service",
@@ -228,8 +240,11 @@ export const COPY: Record<string, string> = {
   "composer.cap.unit": "µTRAC per token",
   "composer.pin": "Seller",
   "composer.pin.any": "cheapest under the cap",
+  "composer.pin.saved": "Pinned to {seller}",
   "composer.units": "≈ {n} tokens at {price} µTRAC, the best price under the cap",
   "composer.units.none": "No seller is answering at or under this cap",
+  "composer.unavailable": "Unavailable: no seller offers it this epoch",
+  "composer.remove": "Remove",
   "composer.renew": "Renew each epoch until epoch",
   "composer.renew.until": "Last epoch to renew",
   "composer.renew.invalid": "The last epoch to renew can't be before this one",
@@ -256,6 +271,12 @@ export const COPY: Record<string, string> = {
   "gate.confirm.plan": "Save the plan",
   "flow.funded": "Epoch {n} is funded with {trac} TRAC",
   "flow.tx": "tx {tx} · block {block}",
+  "flow.unknown": "The node did not say whether the funding of epoch {n} went through. Epoch {n}'s subscription decides: nothing is funded again until it is read.",
+  "flow.unknown.checking": "Reading epoch {n}'s subscription…",
+  "flow.unknown.absent": "No subscription funds epoch {n} yet: the funding has not landed. Retry sends the same funding; an epoch is funded only once.",
+  "flow.unknown.other": "Epoch {n} is funded with {value} TRAC from {source}, but not on the terms confirmed here, so the plan was not saved.",
+  "flow.unknown.unread": "Epoch {n}'s subscription could not be read.",
+  "flow.unknown.again": "Read it again",
   "meter.resets": "Resets {t}",
   "meter.line": "{landed}% landed · {held}% held",
   "meter.routed": "cheapest seller under the cap",
@@ -276,6 +297,8 @@ export const COPY: Record<string, string> = {
   "plan.renews": "The plan renews each epoch until epoch {n}, from {source}",
   "plan.once": "The plan does not renew",
   "plan.none": "No plan saved: funding an epoch saves one",
+  "plan.unread": "The plan could not be read: nothing that saves a plan is offered until it is.",
+  "plan.unknown": "The plan is unknown until the node reads it",
   "topup.title": "Top up {name} for epoch {n}",
   "topup.title.new": "Add {name} to epoch {n}",
   "topup.body": "Paid from {source}, at its discount, in one transaction from this node",
@@ -283,11 +306,17 @@ export const COPY: Record<string, string> = {
   "topup.after": "The budget becomes {trac} TRAC",
   "topup.cta": "Confirm top-up",
   "topup.sent": "{name} topped up · tx {tx}",
-  "topup.unsure.checking": "The node did not say whether the top-up went through: checking the subscription…",
-  "topup.unsure.landed": "{name} topped up: the budget now holds {trac} TRAC",
-  "topup.unsure.missing": "The subscription does not show the top-up. It may still land: check again before sending another.",
-  "topup.unsure.unread": "The subscription could not be read: check again before sending another.",
-  "topup.unsure.again": "Check again",
+  "topup.waiting": "A top-up of {trac} TRAC to {name} for epoch {n} has no answer from the node yet",
+  "topup.waiting.open": "Open it",
+  "topup.sent.shown": "{name} topped up · the budget shows it",
+  "topup.class.unknown": "Neither the subscription nor this epoch's catalog names this service's class, so no top-up can be asked for",
+  "topup.unknown": "The node did not say whether this top-up went through. Retry sends it again with the same key, which the node carries out once: no other top-up of this budget starts until the node answers.",
+  "topup.unknown.checking": "Reading the budget…",
+  "topup.unknown.shows": "The budget holds {now} TRAC, up from {before}: it shows the top-up. Retry to have the node confirm it.",
+  "topup.unknown.missing": "The budget holds {now} TRAC: it does not show the top-up, which may still land.",
+  "topup.unknown.unread": "The budget could not be read.",
+  "topup.unknown.again": "Read the budget again",
+  "topup.unknown.retry": "Retry",
   "ended.title": "No subscription funds epoch {n}",
   "ended.norenew": "The plan does not renew",
   "ended.renewed.until": "The plan renewed until epoch {n}",
@@ -313,6 +342,8 @@ export const COPY: Record<string, string> = {
   "treasury.wallet.note": "This node's buyer wallet funds subscriptions. Send it TRAC and a little ETH, or add it to an account below.",
   "treasury.accounts": "Accounts",
   "treasury.accounts.none": "No account this node owns or may use",
+  "treasury.accounts.pending": "Still looking up the accounts this node owns or may use",
+  "treasury.accounts.failed": "The last look-up of the accounts failed ({error}); looking them up again",
   "treasury.account": "Account {id}",
   "treasury.owned": "owned by this node",
   "treasury.owned.other": "owned elsewhere",
@@ -345,6 +376,8 @@ export const COPY: Record<string, string> = {
   "access.used": "last used {t}",
   "access.used.never": "never used",
   "access.spent": "{spent} of {budget} TRAC spent · {left} TRAC left",
+  "access.spent.reserved": "{spent} of {budget} TRAC spent · {reserved} TRAC reserved · {left} TRAC left",
+  "access.reserved.note": "Reserved is held for calls not yet settled, and counts against the budget: a call that got no answer stays reserved at its most until its epoch is final, about two epochs on.",
   "admin.access": "Access keys are the node admin's alone: open the dashboard with the node-admin token to see, mint or revoke them.",
   "operate.connector.up": "backend up",
   "operate.connector.down": "backend down",
@@ -378,6 +411,18 @@ export const COPY: Record<string, string> = {
   "operate.ended.pool": "pool {trac} TRAC",
   "operate.ops.wallet.eth": "{eth} ETH",
   "operate.identity": "Selling as identity {id}",
+  "operate.listing.listed": "Listed until epoch {n}",
+  "operate.listing.withdrawn": "Withdrawn from the catalog",
+  "operate.listing.none": "Not listed yet",
+  "operate.listing.retry": "trying again at {t}",
+  "operate.listing.not-core-node": "Not listed: this node is not a Core Node",
+  "operate.listing.not-admitted": "Not listed: the Marketplace Context Graph has not admitted this node yet",
+  "operate.listing.no-trac": "Not listed: this node needs TRAC to publish its offer",
+  "operate.listing.no-ack-quorum": "Not listed: too few nodes acknowledged the offer when it was published",
+  "operate.listing.graph-not-registered": "Not listed: the Marketplace Context Graph is not registered on chain",
+  "operate.listing.catalog-pending": "Not listed yet: the offer is published, and the catalog's record of it is being finished",
+  "operate.listing.expired": "Not listed: the offer expired",
+  "operate.listing.error": "Not listed: publishing the offer failed",
   "gallery.banner": "Component gallery · fixture data · not live",
   "gallery.title": "Marketplace component gallery",
   "gallery.sect.calls": "call states — held · landed · missed",
@@ -393,11 +438,16 @@ export const COPY: Record<string, string> = {
   "gallery.sect.states": "off, admin-needed and empty states",
   "gallery.key.gone": "Secret dismissed — only the prefix {key} remains",
   "flow.plan.failed": "The epoch is funded, but the plan was not saved: it won't renew until it is.",
+  "flow.plan.unsaved": "The plan you confirmed was not saved: the node keeps the plan it had.",
   "flow.plan.retry": "Save the plan again"
-};
+} as const satisfies Record<string, string>;
 
-export function copy(key: string, params?: Record<string, string | number>): string {
-  let s = COPY[key] ?? `⟦missing copy: ${key}⟧`;
+/** A key of the string table. A refusal code from the node stays a string until refusalKey maps it to one. */
+export type CopyKey = keyof typeof COPY;
+
+export function copy(key: CopyKey, params?: Record<string, string | number>): string {
+  // A key from outside the type system, as a test's, still says which string is missing.
+  let s: string = (COPY as Record<string, string>)[key] ?? `⟦missing copy: ${key}⟧`;
   if (params) for (const [k, v] of Object.entries(params)) s = s.split(`{${k}}`).join(String(v));
   return s;
 }

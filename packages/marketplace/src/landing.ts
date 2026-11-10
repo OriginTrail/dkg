@@ -24,17 +24,25 @@
  *      within the bounds of `batchState()`; none while the settlement is
  *      paused or not active yet, and a retry is left.
  *   7. Each batch is simulated as it is prepared: a `ReceiptFault` drops its
- *      item and a `GroupFault` its group, at most `maxFaultDrops` times, the
- *      dropped receipts `refused`. Any other refusal leaves a retry.
- *   8. At most `maxBatchesPerTick` are sent, each recorded before it is
- *      broadcast. One that lands marks its receipts `landed`, with what each
- *      group counted; one that reverts puts them back to `served`; one whose
- *      fate is not known yet stays `sent`, and the tick sends no more.
+ *      item and a `GroupFault` its group, the dropped receipts `refused`. A
+ *      group's faults are its own: past `maxFaultDrops` drops in a tick, the
+ *      group waits for a later tick, and the rest of the batch goes on, so one
+ *      buyer's faulting receipts never hold back another's. Any other refusal
+ *      leaves a retry.
+ *   8. At most `maxBatchesPerTick` are sent, each made from the receipts not
+ *      sent, dropped or set aside yet, and recorded before it is broadcast.
+ *      One that lands marks its receipts `landed`, with what each group
+ *      counted; one that reverts puts them back to `served`; one whose fate is
+ *      not known yet stays `sent`, and the tick sends no more.
  * A `sent` batch is resolved by its transactions (the first, or a speed-up).
  * When none is mined but its wallet's nonce has passed it, they are read once
  * more, since one may have been mined in between; if none is, the batch is
  * resolved by the nonce bits of its receipts: set, they landed; clear, they go
- * back to `served`. Otherwise it waits. Ticks take turns, so two never send the same receipts.
+ * back to `served`. Otherwise it waits, and its first transaction, unless it
+ * was sped up, is sent again as it was signed, at every tick: the node may
+ * have stopped after the batch was recorded and before it was broadcast, and
+ * then nothing else would move its nonce. The same hash and nonce land at most
+ * once. Ticks take turns, so two never send the same receipts.
  */
 import { ethers } from 'ethers';
 import {
@@ -62,6 +70,7 @@ export interface LandingSettings {
   endMarginSeconds: number;
   completedMarginSeconds: number;
   maxBatchesPerTick: number;
+  /** Per group (a subscription's budget) and tick. */
   maxFaultDrops: number;
   /** Wei; the second applies in the last stretch. */
   baseFeeCeiling: bigint;
@@ -97,6 +106,11 @@ export type LandingReport =
   | { sent: LandedBatch[]; refused: number; waiting: boolean };
 
 type Group = { subscriptionId: string; budgetIndex: number; calls: ServedCall[] };
+
+/** What one tick's sending has done to its groups: each one's faults dropped, and the groups past `maxFaultDrops`. */
+type TickFaults = { drops: Map<string, number>; setAside: Set<string> };
+
+const groupKey = (g: { subscriptionId: string; budgetIndex: number }) => `${g.subscriptionId.toLowerCase()}:${g.budgetIndex}`;
 
 /** The receipts' order everywhere: oldest completed first, then by nonce. Buyers match landed groups in it. */
 export function byLandingOrder(a: { receipt: { completedAt: number }; request: { nonce: string } }, b: typeof a): number {
@@ -219,8 +233,19 @@ export class Lander {
       return { stopped: 'not-active' };
     }
     const report: Extract<LandingReport, { sent: unknown }> = { sent: [], refused: 0, waiting: false };
-    for (const batch of batchesOf(groups, bounds.maxGroups, bounds.maxItems).slice(0, s.maxBatchesPerTick)) {
-      if (!(await this.send(times, batch, report))) break;
+    const faults: TickFaults = { drops: new Map(), setAside: new Set() };
+    // Each batch from what is left: a group set aside takes none of the batches after it.
+    let unsent = groups;
+    for (let sent = 0; sent < s.maxBatchesPerTick && unsent.length > 0;) {
+      const batch = batchesOf(unsent, bounds.maxGroups, bounds.maxItems)[0]!;
+      const outcome = await this.send(times, batch, report, faults);
+      if (outcome === 'stop') break;
+      if (outcome === 'sent') sent++;
+      const done = new Set(batch.flatMap((g) => g.calls.map((c) => c.requestDigest)));
+      unsent = unsent
+        .filter((g) => !faults.setAside.has(groupKey(g)))
+        .map((g) => ({ ...g, calls: g.calls.filter((c) => !done.has(c.requestDigest)) }))
+        .filter((g) => g.calls.length > 0);
     }
     return report;
   }
@@ -230,7 +255,14 @@ export class Lander {
     for (const batch of ledger.pendingBatches()) {
       let outcome = await this.outcomeOf(batch);
       if (!outcome) {
-        if (batch.nonce === null || (await chain.getMinedNonce(batch.wallet)) <= batch.nonce) continue;
+        if (batch.nonce === null) continue;
+        if ((await chain.getMinedNonce(batch.wallet)) <= batch.nonce) {
+          // Not mined, and nothing else used its nonce: perhaps never sent, as when the node stopped after recording it.
+          // Sent again as it was signed, it lands at most once; the next tick reads what became of it. One sped up was
+          // on the network, and its first bytes would only be refused as underpriced.
+          if (batch.signedTx && batch.hashes.length === 1) await this.rebroadcast(batch.signedTx);
+          continue;
+        }
         // The nonce has passed it: mined since the read above, or never to be.
         outcome = await this.outcomeOf(batch);
         if (!outcome) {
@@ -240,6 +272,14 @@ export class Lander {
       }
       if ('landed' in outcome) await this.landed(batch, outcome.landed);
       else await ledger.recordReverted(batch.batchId);
+    }
+  }
+
+  private async rebroadcast(signedTx: string): Promise<void> {
+    try {
+      await this.deps.chain.rebroadcastReceiptBatch(signedTx);
+    } catch (err) {
+      this.deps.log?.(`[marketplace] a receipt batch was not sent again: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -288,50 +328,72 @@ export class Lander {
     return fresh;
   }
 
-  /** Simulate, drop faults, send and record one batch; `false` ends the tick's sending. */
-  private async send(times: EpochTimes, batch: Group[], report: Extract<LandingReport, { sent: unknown }>): Promise<boolean> {
+  /**
+   * Simulate, drop faults, send and record one batch: `sent`; `empty` when no
+   * group was left to send; `stop`, which ends the tick's sending. A group past
+   * `maxFaultDrops` this tick is set aside, its receipts left `served`, and the
+   * batch goes on without it.
+   */
+  private async send(
+    times: EpochTimes,
+    batch: Group[],
+    report: Extract<LandingReport, { sent: unknown }>,
+    faults: TickFaults,
+  ): Promise<'sent' | 'empty' | 'stop'> {
     const { chain, ledger, settings: s } = this.deps;
     let groups = batch.map((g) => ({ ...g, calls: [...g.calls] }));
-    for (let drops = 0; groups.length > 0; drops++) {
+    while (groups.length > 0) {
       const batchId = ethers.hexlify(ethers.randomBytes(16));
       const digests = groups.flatMap((g) => g.calls.map((c) => c.requestDigest));
       let broadcast = false;
       try {
         const landed = await chain.submitReceiptBatch(groups.map(groupOf), {
           onBroadcast: async (signal) => {
-            await ledger.recordSent({ batchId, epoch: times.epoch, at: times.now, hash: signal.txHash, wallet: signal.wallet, nonce: signal.nonce ?? null, digests });
+            await ledger.recordSent({
+              batchId, epoch: times.epoch, at: times.now, hash: signal.txHash, wallet: signal.wallet, nonce: signal.nonce ?? null, digests,
+              signedTx: signal.signedTx,
+            });
             broadcast = true;
           },
           onBeforeReplacementBroadcast: (signal) => ledger.recordSpeedup(batchId, signal.txHash),
         });
         await this.landed(ledger.batch(batchId)!, landed);
         report.sent.push({ batchId, txHash: landed.hash, items: landed.itemCount, value: landed.value, counted: landed.counted });
-        return true;
+        return 'sent';
       } catch (err) {
         if (broadcast) {
           // Mined and reverted: back to `served`. Not known yet: it stays `sent`, for the next tick to resolve.
           if ((err as { receipt?: { status?: number } }).receipt?.status === 0) await ledger.recordReverted(batchId);
           else report.waiting = true;
-          return false;
+          return 'stop';
         }
         const fault = receiptBatchFaultOf(err);
-        if (fault && drops < s.maxFaultDrops) {
-          const group = groups[fault.groupIndex]!;
-          const dropped = fault.itemIndex === null ? group.calls : [group.calls[fault.itemIndex]!];
-          for (const c of dropped) await ledger.recordRefused(c.requestDigest, fault.fault);
-          report.refused += dropped.length;
-          group.calls = group.calls.filter((c) => !dropped.includes(c));
-          groups = groups.filter((g) => g.calls.length > 0);
+        const group = fault ? groups[fault.groupIndex] : undefined;
+        if (!fault || !group) {
+          this.retry = true;
+          if (enrichEvmError(err) !== 'NoNodeScore') {
+            this.deps.log?.(`[marketplace] a receipt batch was not sent: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          return 'stop';
+        }
+        const key = groupKey(group);
+        const drops = faults.drops.get(key) ?? 0;
+        if (drops >= s.maxFaultDrops) {
+          // Its faults are its own: it waits for a later tick, and the rest of the batch goes on.
+          faults.setAside.add(key);
+          groups = groups.filter((g) => g !== group);
+          this.deps.log?.(`[marketplace] a receipt batch was not sent with the receipts of ${key}: ${fault.fault} after ${drops} dropped this tick; they wait for a later tick`);
           continue;
         }
-        this.retry = true;
-        if (enrichEvmError(err) !== 'NoNodeScore') {
-          this.deps.log?.(`[marketplace] a receipt batch was not sent: ${err instanceof Error ? err.message : String(err)}`);
-        }
-        return false;
+        faults.drops.set(key, drops + 1);
+        const dropped = fault.itemIndex === null ? group.calls : [group.calls[fault.itemIndex]!];
+        for (const c of dropped) await ledger.recordRefused(c.requestDigest, fault.fault);
+        report.refused += dropped.length;
+        group.calls = group.calls.filter((c) => !dropped.includes(c));
+        groups = groups.filter((g) => g.calls.length > 0);
       }
     }
-    return true;
+    return 'empty';
   }
 
   /** A batch that landed: its receipts `landed`, each counted its part of what its group counted, oldest first. */

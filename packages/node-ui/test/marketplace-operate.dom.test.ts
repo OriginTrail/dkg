@@ -3,12 +3,56 @@ import React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OperateView } from '../src/ui/marketplace/views/OperateView.js';
 import { FIXTURE_IDS, fixtureFetch } from '../src/ui/marketplace/api/fixtures.js';
+import { fmtAt } from '../src/ui/marketplace/amounts.js';
 import { MISSING_COPY, byTestId, click, render, type, unmountAll, useFixtureNode, waitForText } from './helpers/marketplace-render.js';
 
 const operate = () => React.createElement(OperateView);
 
+type Json = Record<string, unknown>;
+
+/** The fixture node, its seller's offerings listed as `listings` says, in their order. */
+function listingNode(listings: Array<Json | null>): void {
+  const node = fixtureFetch('active');
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const res = await node(input, init);
+    if ((init?.method ?? 'GET') !== 'GET' || String(input) !== '/api/marketplace/seller') return res;
+    const body = await res.json() as { offerings: Json[] };
+    body.offerings.forEach((o, i) => { o.listing = listings[i]; });
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  });
+}
+
 describe('marketplace Operate', () => {
   afterEach(unmountAll);
+
+  it('says whether each offer is listed: listed, not for want of TRAC with when it is tried again, or withdrawn', async () => {
+    const retryAt = 1_800_000_000;
+    listingNode([
+      { listed: true, kaId: '81', validUntilEpoch: 666, withdrawn: false },
+      { listed: false, problem: 'no-trac', retryAt, message: 'No publisher wallet holds enough TRAC to publish to Verifiable Memory' },
+      { listed: false, kaId: '83', validUntilEpoch: 664, withdrawn: true },
+    ]);
+    const c = await render(operate());
+    await waitForText(c, 'Listed until epoch 666');
+    const line = (serviceId: string) => byTestId(c, `mkt-listing-${serviceId}`);
+    expect(line(FIXTURE_IDS.qwen14b)?.getAttribute('data-state')).toBe('listed');
+    expect(line(FIXTURE_IDS.qwen7b)?.getAttribute('data-state')).toBe('not-listed');
+    // The problem in plain words, then when it is tried again; the node's own words only beneath.
+    const [plain, detail] = Array.from(line(FIXTURE_IDS.qwen7b)?.children ?? []).map((e) => e.textContent);
+    expect(plain).toBe(`Not listed: this node needs TRAC to publish its offer · trying again at ${fmtAt(retryAt)}`);
+    expect(detail).toBe('No publisher wallet holds enough TRAC to publish to Verifiable Memory');
+    expect(line(FIXTURE_IDS.mistral24b)?.getAttribute('data-state')).toBe('withdrawn');
+    expect(line(FIXTURE_IDS.mistral24b)?.textContent).toBe('Withdrawn from the catalog');
+    expect(c.textContent).not.toContain(MISSING_COPY);
+  });
+
+  it('says nothing of listing on a node without the module that publishes offers', async () => {
+    listingNode([null, null, null]);
+    const c = await render(operate());
+    await waitForText(c, 'Your prices');
+    expect(byTestId(c, `mkt-ask-${FIXTURE_IDS.qwen14b}`)).toBeTruthy();
+    expect(c.querySelectorAll('[data-testid^="mkt-listing-"]')).toHaveLength(0);
+  });
 
   it('shows the gate, each offering\'s backend and prices, this epoch\'s ledger, batches and ended epochs', async () => {
     useFixtureNode('active');

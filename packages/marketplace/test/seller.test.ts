@@ -27,17 +27,16 @@ import {
   Seller,
   UpstreamError,
   cutTo,
-  offerSignerOf,
-  offerSubject,
-  offersFromBindings,
   receiptFromWire,
   receiptSignerOf,
   requestToWire,
   resultCommitmentOf,
   serviceIdOf,
+  serviceOfferSignerOf,
+  serviceOffersFromBindings,
   type Completion,
   type Connector,
-  type Offer,
+  type OfferAssets,
   type OfferQuad,
   type SellerService,
   type ServeAnswer,
@@ -52,14 +51,34 @@ const MODEL_B = 'urn:test:model:b';
 const A = serviceIdOf(MODEL_A);
 const B = serviceIdOf(MODEL_B);
 const PRICE = 10n;
-const BODY = { messages: [{ role: 'user' as const, content: 'synthetic question' }], max_tokens: 50 };
+// A short question: its input bound, 25 units, is under the smallest cap a case sets (30 units).
+const BODY = { messages: [{ role: 'user' as const, content: 'q' }], max_tokens: 50 };
 
 let dir: string;
 let mock: MockChainAdapter;
 let chain: MarketplaceChainAdapter;
 let domain: MarketplaceDomain;
 let backend: { next: Completion | Error; calls: number };
-let shared: OfferQuad[][];
+/** Each publish's name and quads; `failing` makes the next ones throw. */
+let published: Array<{ name: string; quads: OfferQuad[] }>;
+let failing: Error | undefined;
+/** Each asset's id by its name, put on the mock chain at its first publish. */
+let kaIds: Map<string, bigint>;
+const offers: OfferAssets = {
+  contextGraphId: 'test-marketplace',
+  publish: async (name, quads) => {
+    if (failing) throw failing;
+    published.push({ name, quads });
+    let kaId = kaIds.get(name);
+    if (kaId === undefined) {
+      kaIds.set(name, kaId = BigInt(kaIds.size + 1));
+      const { epoch } = await chain.getEpochTimes();
+      mock.__registerKC({ kaId, contextGraphId: 1n, merkleRootHex: ethers.ZeroHash, chunks: [], startEpoch: BigInt(epoch), endEpoch: BigInt(epoch + 12) });
+    }
+    return { kaId };
+  },
+  recover: async () => undefined,
+};
 
 const connector: Connector = {
   kind: 'openai',
@@ -74,7 +93,8 @@ function serviceOf(model: string, pricePerUnit = PRICE): SellerService {
   return { model, serviceId: serviceIdOf(model), pricePerUnit, capacity: 4, provenance: 'upstream-claimed', connector };
 }
 
-function sellerWith(over: { stopServingSeconds?: number; price?: bigint } = {}): Seller {
+/** A seller of A and B; with `offers`, one that publishes them. */
+function sellerWith(over: { stopServingSeconds?: number; price?: bigint; offers?: boolean } = {}): Seller {
   return new Seller({
     chain,
     dir,
@@ -83,19 +103,21 @@ function sellerWith(over: { stopServingSeconds?: number; price?: bigint } = {}):
     peerId: 'seller-peer',
     stopServingSeconds: over.stopServingSeconds ?? 180,
     tickSeconds: 300,
-    shareOffer: async (quads) => { shared.push(quads); },
+    ...(over.offers ? { offers } : {}),
   });
 }
 
-/** The offers among shared quads, read back as a buyer's query returns them: a row per subject. */
-function offersIn(quads: OfferQuad[]): Offer[] {
-  const rows = new Map<string, Record<string, string>>();
-  for (const q of quads) {
-    const row = rows.get(q.subject) ?? { offer: q.subject };
-    if (q.predicate.startsWith(MARKETPLACE_NS)) row[q.predicate.slice(MARKETPLACE_NS.length)] = q.object;
-    rows.set(q.subject, row);
-  }
-  return offersFromBindings([...rows.values()]);
+/** The offer a publish's quads hold, read back as a buyer's query returns it. */
+function offerIn(quads: OfferQuad[]) {
+  const row: Record<string, string> = { offer: quads[0]!.subject };
+  for (const q of quads) if (q.predicate.startsWith(MARKETPLACE_NS)) row[q.predicate.slice(MARKETPLACE_NS.length)] = q.object;
+  return serviceOffersFromBindings([row])[0]!;
+}
+
+/** A tick, then a run of the offer job once the tick's own run is done. */
+async function settle(seller: Seller): Promise<void> {
+  await seller.tick();
+  await seller.offers!.run();
 }
 
 /** Fund the current epoch (or the next) for `buyer`, with `budgets` of A and B. */
@@ -131,7 +153,9 @@ beforeEach(async () => {
   chain = marketplaceChainOf(mock)!;
   domain = (await chain.getMarketplaceContracts()).requestDomain;
   backend = { next: { content: 'synthetic answer', promptTokens: 12, completionTokens: 8 }, calls: 0 };
-  shared = [];
+  published = [];
+  failing = undefined;
+  kaIds = new Map();
 });
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -139,135 +163,77 @@ afterEach(async () => {
 });
 
 describe('the gate, quotes and offers', () => {
-  it('serves nothing before its first tick, nor while it is not a Core Node', async () => {
-    const seller = sellerWith();
+  it('serves nothing before its first tick, nor while it is not a Core Node, and publishes no offer then', async () => {
+    const seller = sellerWith({ offers: true });
     await seller.load();
     const id = await fund();
     expect(codeOf(await seller.serve(wire(await requestFor(id))))).toBe('NotServing');
     vi.spyOn(chain, 'isShardingTableMember').mockResolvedValue(false);
-    await seller.tick();
+    await settle(seller);
     expect(seller.gate.open).toBe(false);
-    expect(shared).toEqual([]);
+    expect(published).toEqual([]);
     expect((await seller.quote({ services: [A] })).offers[0]!.available).toBe(false);
   });
 
-  it('shares an offer per service for this epoch and the next, once, signed and naming its peer, and quotes its frozen price', async () => {
-    const seller = sellerWith();
+  it('publishes an offer per service, signed and naming its peer, and quotes its frozen price', async () => {
+    const seller = sellerWith({ offers: true });
     await seller.load();
-    await seller.tick();
-    await seller.tick();
-    // A share per offer, each of one subject.
-    expect(shared).toHaveLength(4);
+    await settle(seller);
+    await settle(seller);
     const { epoch } = await chain.getEpochTimes();
-    const offers = shared.map((quads) => offersIn(quads)[0]!);
-    expect(offers.map((o) => `${o.serviceId}:${o.epoch}`).sort()).toEqual([`${A}:${epoch}`, `${A}:${epoch + 1}`, `${B}:${epoch}`, `${B}:${epoch + 1}`].sort());
-    expect(shared.map((quads) => [...new Set(quads.map((q) => q.subject))])).toEqual(offers.map((o) => [offerSubject(o.signature)]));
-    for (const o of offers) {
-      expect(o).toMatchObject({ seller: seller.gate.identityId, pricePerUnit: PRICE, capacity: 4, peerId: 'seller-peer' });
-      expect(offerSignerOf(domain, o)).toBe(SELLER.address);
+    expect(published.map((p) => p.name).sort()).toEqual([`offer-${A}`, `offer-${B}`].sort());
+    for (const { quads } of published) {
+      const o = offerIn(quads);
+      expect(o).toMatchObject({ seller: seller.gate.identityId, pricePerUnit: PRICE, priceEpoch: epoch, capacity: 4, peerId: 'seller-peer' });
+      expect(serviceOfferSignerOf(domain, o)).toBe(SELLER.address);
     }
     expect(await seller.quote({ services: [A, `0x${'99'.repeat(32)}`] })).toEqual({
       seller: String(seller.gate.identityId), epoch, offers: [{ serviceId: A, pricePerUnit: '10', available: true, capacity: 4 }],
     });
 
-    // A new price applies from the next epoch: this one's stays frozen, on disk.
-    const repriced = sellerWith({ price: 20n });
+    // A new price applies from the next epoch: this one's stays frozen, on disk, and the offer says both.
+    const repriced = sellerWith({ price: 20n, offers: true });
     await repriced.load();
-    await repriced.tick();
+    await settle(repriced);
     expect((await repriced.quote({ services: [A] })).offers[0]!.pricePerUnit).toBe('10');
-    expect(offersIn(shared.slice(4).flat()).filter((o) => o.serviceId === A).map((o) => String(o.pricePerUnit)).sort()).toEqual(['10', '20']);
+    expect(published.slice(2).map((p) => offerIn(p.quads)).map((o) => [o.pricePerUnit, o.nextPricePerUnit])).toEqual([[10n, 20n], [10n, 20n]]);
     await expect(repriced.quote({ services: ['0x01'] })).rejects.toThrow(/32 bytes/);
   });
 
-  it('shares an offer again when its price changes, back to an earlier one too, each copy signed later than the last', async () => {
-    const seller = sellerWith();
-    await seller.load();
-    await seller.tick();
-    const { epoch, startsAt } = await chain.getEpochTimes();
-    const nextOfA = (quads: OfferQuad[]) => offersIn(quads).filter((o) => o.serviceId === A && o.epoch === epoch + 1);
-    await seller.setNextPrice(A, 30n);
-    await seller.tick();
-    await seller.setNextPrice(A, PRICE);
-    await seller.tick();
-    await seller.tick();
-    // Only A's next offer was shared again, once per change.
-    expect(shared).toHaveLength(6);
-    const copies = shared.flatMap(nextOfA);
-    expect(copies.map((o) => o.pricePerUnit)).toEqual([PRICE, 30n, PRICE]);
-    expect(copies[0]!.signedAt).toBeGreaterThanOrEqual(startsAt);
-    expect(copies[1]!.signedAt).toBeGreaterThan(copies[0]!.signedAt);
-    expect(copies[2]!.signedAt).toBeGreaterThan(copies[1]!.signedAt);
-  });
-
-  it('shares its offers again half an epoch after their last copies, which shared memory keeps for a limited time', async () => {
-    const seller = sellerWith();
-    await seller.load();
-    await seller.tick();
-    const real = chain.getEpochTimes.bind(chain);
-    const { startsAt, endsAt } = await real();
-    const half = (endsAt - startsAt) / 2;
-    const first = offersIn(shared[0]!)[0]!.signedAt;
-    const at = (now: number) => vi.spyOn(chain, 'getEpochTimes').mockImplementation(async () => ({ ...(await real()), now }));
-    at(first + half - 1);
-    await seller.tick();
-    expect(shared).toHaveLength(4);
-    at(first + half);
-    await seller.tick();
-    expect(shared).toHaveLength(8);
-    expect(offersIn(shared.slice(4).flat()).map((o) => o.signedAt)).toEqual([first + half, first + half, first + half, first + half]);
-  });
-
-  it('keeps the offers shared before one that fails, and the next tick shares the rest', async () => {
-    let calls = 0;
-    const seller = new Seller({
-      chain, dir, services: [serviceOf(MODEL_A), serviceOf(MODEL_B)], signer: SELLER.address, peerId: 'seller-peer', stopServingSeconds: 180, tickSeconds: 300,
-      shareOffer: async (quads) => {
-        if (++calls === 3) throw new Error('the graph is away');
-        shared.push(quads);
-      },
-    });
-    await seller.load();
-    await seller.tick();
-    expect(shared).toHaveLength(2);
-    await seller.tick();
-    expect(shared).toHaveLength(4);
-    const { epoch } = await chain.getEpochTimes();
-    expect(shared.map((quads) => `${offersIn(quads)[0]!.serviceId}:${offersIn(quads)[0]!.epoch}`).sort())
-      .toEqual([`${A}:${epoch}`, `${A}:${epoch + 1}`, `${B}:${epoch}`, `${B}:${epoch + 1}`].sort());
-  });
-
-  it('shares each offer once when two ticks run at once', async () => {
-    const seller = sellerWith();
+  it('publishes each offer once when two ticks run at once', async () => {
+    const seller = sellerWith({ offers: true });
     await seller.load();
     await Promise.all([seller.tick(), seller.tick()]);
-    expect(shared).toHaveLength(4);
-    expect(new Set(shared.map((quads) => quads[0]!.subject)).size).toBe(4);
+    await seller.offers!.run();
+    expect(published).toHaveLength(2);
   });
 });
 
 describe('the job', () => {
   it('ticks at start and stops', async () => {
-    const seller = sellerWith();
+    const seller = sellerWith({ offers: true });
     await seller.load();
     seller.start();
     seller.start();
     await seller.stop();
     expect(seller.gate.open).toBe(true);
-    expect(shared).toHaveLength(4);
+    expect(published).toHaveLength(2);
     expect(receiptSignerOf(domain, { requestDigest: ethers.ZeroHash, resultCommitment: ethers.ZeroHash, units: 1n, valueWei: 1n, completedAt: 1 }, '0x00')).toBeNull();
   });
 
-  it('lands even when its offers fail to share, logs what failed, and goes on to the next tick', async () => {
+  it('lands even when its offers fail, logs what failed, and goes on to the next tick', async () => {
     const logs: string[] = [];
+    failing = new Error('the graph is away');
     const seller = new Seller({
       chain, dir, services: [serviceOf(MODEL_A)], signer: SELLER.address, peerId: 'seller-peer', stopServingSeconds: 180, tickSeconds: 300,
-      shareOffer: async () => { throw new Error('the graph is away'); },
-      log: (m) => logs.push(m),
+      offers, log: (m) => logs.push(m),
     });
     await seller.load();
     const landing = vi.spyOn(seller.lander, 'tick').mockRejectedValueOnce(new Error('no chain'));
     expect(await seller.tick()).toBeGreaterThan(0);
-    expect(logs).toEqual([expect.stringMatching(/offers were not shared: the graph is away/), expect.stringMatching(/landing failed: no chain/)]);
+    await seller.offers!.run();
+    expect(logs).toContainEqual(expect.stringMatching(/landing failed: no chain/));
+    expect(logs).toContainEqual(expect.stringMatching(/offer of .* was not kept \(error\), tried again in 300 s: the graph is away/));
     expect(landing).toHaveBeenCalledWith(true);
 
     // The job: a tick that fails as a whole is logged and tried again soon; one that runs sets the next too.
@@ -322,6 +288,30 @@ describe('a call', () => {
     expect(backend.calls).toBe(1);
     // The same nonce in another request is refused, after the restart too.
     expect(codeOf(await restarted.serve(wire({ ...request, maxUnits: 999n })))).toBe('NonceUsed');
+  });
+
+  it.each([40, 60])('serves a request that lasts %i days, its receipt completed before it expires', async (days) => {
+    // No timer runs to a request's expiry: one past the longest a timer can wait (about 24.8 days) fires after 1 ms.
+    // So the backend answers only after 50 ms, and a call cut short by such a timer would have failed by then.
+    const id = await fund();
+    const { now } = await chain.getEpochTimes();
+    const request = await requestFor(id, { expiry: now + days * 86_400 });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const complete = connector.complete.bind(connector);
+    const backendCall = vi.spyOn(connector, 'complete').mockImplementationOnce(async (input) => {
+      await held;
+      return complete(input);
+    });
+    const serving = seller.serve(wire(request));
+    await vi.waitFor(() => expect(backendCall).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    release();
+    const answer = await serving as ServeAnswer;
+    backendCall.mockRestore();
+    expect(answer.ok).toBe(true);
+    expect(receiptFromWire(answer.receipt).completedAt).toBeLessThanOrEqual(request.expiry);
+    expect(backend.calls).toBe(1);
   });
 
   it('cuts an overrun to the units the request allows, and refuses an input that leaves none', async () => {
