@@ -302,6 +302,51 @@ export function readGraphStatementsConformance(backend: 'oxigraph' | 'blazegraph
       }), { ...propertyOptions(), numRuns: runs });
     }, 300_000);
 
+    it('names the terms the adapter itself deletes: escaped, typed, tagged and non-ASCII literals', async () => {
+      const cg = freshContextGraph();
+      const root = `did:dkg:context-graph:${cg}`;
+      const g1 = `${root}/_verifiable_memory/${AGENT}/1`, g2 = `${root}/_verifiable_memory/${AGENT}/2`;
+      const key: ReadGraphKey = { scope: readScope(cg), layer: MemoryLayer.VerifiableMemory };
+      const snapshot: ReadGraphRegistrySnapshot = { contextGraphId: cg, subGraphNames: [], childContextGraphRoots: [] };
+      const R = readGraphIri(key);
+      const target: ReadGraphTarget = { readGraph: R, membership: readGraphMembership(key, snapshot, identity) };
+      // The renderer of the adapter under test, as the layer would pass it.
+      const adapterRender = ADAPTER_SPARQL_TERM_POLICY.renderer({ adapter: backend, operation: 'delete' }, () => {});
+      const objects = [
+        '"say \\"hi\\" \\\\ back\\nline\\ttab"',
+        '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        '"2026-11-10"^^<http://www.w3.org/2001/XMLSchema#date>',
+        '"x"@en-GB',
+        '"é ü 中 😀"',
+        'urn:o:plain',
+      ];
+      const quadsOf = (graph: string): Quad[] => objects.map((object, i) => ({ subject: `urn:s:${i % 2}`, predicate: `urn:p:${i}`, object, graph }));
+      // The second member also holds the first two triples, so the read graph keeps them.
+      const seed = async () => {
+        await store.insert([...quadsOf(g1), ...quadsOf(g2).slice(0, 2)]);
+        await update(`${readGraphCopy(R, g1)} ;\n${readGraphCopy(R, g2)}`);
+        expect(await triples(R)).toEqual(await memberUnion(cg, key, snapshot));
+        expect(await triples(R)).toHaveLength(objects.length);
+      };
+
+      // The exact delete's delta runs after the delete; the pattern delete's runs before it.
+      await seed();
+      await store.delete(quadsOf(g1));
+      await update(readGraphDeltaDelete(target, quadsOf(g1), adapterRender)!);
+      expect(await triples(g1)).toEqual([]);
+      expect(await triples(R)).toEqual(await memberUnion(cg, key, snapshot));
+      expect(await triples(R)).toHaveLength(2);
+
+      await seed();
+      for (const object of objects) {
+        await update(readGraphDeltaDeleteMatching(target, g1, { object }, adapterRender));
+        await store.deleteByPattern({ graph: g1, object });
+      }
+      expect(await triples(g1)).toEqual([]);
+      expect(await triples(R)).toEqual(await memberUnion(cg, key, snapshot));
+      expect(await triples(R)).toHaveLength(2);
+    });
+
     it('lets fenced batches, repairs and drops act only for their own state and generation', async () => {
       const cg = freshContextGraph();
       const root = `did:dkg:context-graph:${cg}`;
