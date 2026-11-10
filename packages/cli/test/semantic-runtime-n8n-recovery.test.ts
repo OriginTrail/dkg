@@ -12,7 +12,7 @@ const n8nTool = 'urn:dkg:tool:n8n';
 const nativeSource = `import { invoke_tool } from '${toolApi}';
   export async function run(input: unknown) { return invoke_tool('${n8nTool}', input); }`;
 const run = (value: unknown) => ({ data: { main: [[{ json: { value } }]] } });
-async function nativeFixture({ traceNodes = [] as string[], sinks = undefined as any, source = nativeSource } = {}) {
+async function nativeFixture({ traceNodes = [] as string[], sinks = undefined as any, source = nativeSource, status = 'success' } = {}) {
   const workflowId = 'native-inspection';
   const definition = { versionId: 'published-native-1', nodes: ['Component', ...traceNodes].map(name => ({ id: name, name,
     type: 'n8n-nodes-base.set', typeVersion: 3.4, parameters: { hidden: 'reviewed' } })),
@@ -28,7 +28,7 @@ async function nativeFixture({ traceNodes = [] as string[], sinks = undefined as
   writeFileSync(apiTokenFile, 'unit-native-api-fixture'); writeFileSync(webhookTokenFile, 'unit-native-webhook-fixture');
   f.target.config.semanticRuntime.n8nNative = { baseUrl: 'http://127.0.0.1:5679', apiTokenFile, webhookTokenFile,
     workflows: [{ contextGraphId: graph, executorAgentAddress: owner, workflowId, workflowSha256: n8n.workflowSha256, resultSha256: n8nResultSha256(n8n as any) }] };
-  const state = { dispatches: 0, interrupted: true, loseAcknowledgement: false, publishedVersion: definition.versionId,
+  const state = { status, dispatches: 0, interrupted: true, loseAcknowledgement: false, publishedVersion: definition.versionId,
     runs: [run(12)] as any[] };
   vi.stubGlobal('fetch', vi.fn(async (url: URL) => {
     const u = new URL(String(url));
@@ -40,7 +40,7 @@ async function nativeFixture({ traceNodes = [] as string[], sinks = undefined as
     }
     if (state.interrupted) throw new Error('interrupted-after-durable-ack');
     const snapshot = structuredClone(definition); snapshot.nodes[0]!.parameters = {} as any;
-    return Response.json({ id: '42', workflowId, workflowVersionId: definition.versionId, status: 'success', workflowData: snapshot,
+    return Response.json({ id: '42', workflowId, workflowVersionId: definition.versionId, status: state.status, workflowData: snapshot,
       data: { resultData: { runData: { Component: state.runs } } } });
   }));
   return { ...f, n8n, state, definition, webhookTokenFile,
@@ -69,6 +69,8 @@ async function resumeInspection(f: NativeFixture, prepared: Invocation) {
 }
 async function expectCompleted(f: NativeFixture, prepared: Invocation, output: unknown = { ok: true, itemsJson: '[{"value":12}]' }) {
   const result = await f.client.programs.invoke(prepared);
+  expect(result.invocationId).toBe(prepared.invocationId);
+  expect(result.executionIri).toBe(`urn:sr:execution:${prepared.invocationId}`);
   expect(result.outputs).toMatchObject([{ n8nExecutionId: '42', output }]);
   expect(await f.client.programs.invoke(prepared)).toEqual(result);
   const stored = await f.store.query(`SELECT ?output WHERE { GRAPH ?g { <${result.executionIri}> <${SR}output> ?output } }`);
@@ -99,6 +101,8 @@ async function declareChild(f: NativeFixture, parentSource: (childIri: string) =
 describe('native dispatch and durable recovery', () => {
   it.each([
     { name: 'complete result', options: {}, runs: [run(12)], output: { ok: true, itemsJson: '[{"value":12}]' } },
+    ...['canceled', 'crashed'].map(status => ({ name: status + ' execution', options: { status }, runs: [run(12)],
+      output: { ok: false, itemsJson: '[]', portsJson: '{}', error: expect.stringContaining('stopped this workflow') } })),
     { name: 'oversized result', options: {}, runs: [{ data: { main: [Array.from({ length: 201 }, () => ({ json: { value: 12 } }))] } }],
       output: { ok: false, itemsJson: '[]', error: expect.stringContaining('twenty records') } },
     { name: 'escaped result envelope', options: { traceNodes: Array.from({ length: 8 }, (_, i) => 'Trace' + i) }, runs: [run('\\'.repeat(4000))],

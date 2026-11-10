@@ -1,5 +1,7 @@
 import { createN8nWorkflowAdapter } from './semantic-runtime-n8n-adapter.js';
 import { createNativeN8nWorkflowAdapter } from './semantic-runtime-n8n-native-adapter.js';
+import { isNativeN8nGrant } from './semantic-runtime-n8n-contract.js';
+import { n8nEffectApproval } from './semantic-runtime-n8n-approval.js';
 import { nativeN8nContinuationEffects } from './semantic-runtime-n8n-checkpoint.js';
 import { programToolDefinition } from './semantic-runtime-tool-catalog.js';
 import { createLocalLlmProgramAdapter, type LocalLlmProgramProvider } from './semantic-runtime-local-llm-adapter.js';
@@ -18,7 +20,7 @@ import { programBindingDigest, validateProgramBindings } from './semantic-runtim
 import { assertSemanticQueryDefinition } from './semantic-runtime-query-pins.js';
 import { createRemoteExecuteAdapter } from './semantic-runtime-remote-execute-adapter.js';
 import { createSafeLlmAdapter, type SafeLlmProgram } from './semantic-runtime-safe-llm-adapter.js';
-import { BoundProgramInvocation, ConfiguredSemanticRuntimeService, InternalResolution, SemanticMemoryLayer, SemanticProgramChildInvoker, SemanticProgramError, SemanticProgramResolution, SemanticToolResolution, StoredSemanticProgram } from './semantic-runtime-types.js';
+import { BoundProgramInvocation, ConfiguredSemanticRuntimeService, InternalResolution, type EffectApprovalPolicy, SemanticMemoryLayer, SemanticProgramChildInvoker, SemanticProgramError, SemanticProgramResolution, SemanticToolResolution, StoredSemanticProgram } from './semantic-runtime-types.js';
 import { resolveTypeScriptTools, validateTypeScriptProgram } from './semantic-runtime-typescript-execution.js';
 import { RDF_TYPE, SR, checksumAgentAddress, hashParts, iriValue, isOperatorVmGraph, literalValue, queryOptions, resultRows, sameSet, sourceHashOf } from './semantic-runtime-values.js';
 import { loadStoredSemanticProgram } from './semantic-runtime-program-source.js';
@@ -278,6 +280,8 @@ export async function resolveProgramTools(context: ProgramToolContext) {
     };
   });
   const registry = new RuntimeAdapterRegistry();
+  const effectApprovals = new Map<string, EffectApprovalPolicy>();
+  let continuationPolicy: ((executionIri: string) => ReadonlyMap<string, string> | null) | undefined;
   if (!bound && !config?.programPolicy) {
     registry.register(createInvestigatorAdapter(llmConfig));
     registry.register(createRemoteExecuteAdapter(agent, contextGraphId, operatorAddress, programLayer, executionLayer));
@@ -292,10 +296,18 @@ export async function resolveProgramTools(context: ProgramToolContext) {
     registry.register(createAssetCreationAdapter(agent, contextGraphId, executionLayer, operatorAddress, assetStore, bound.assertAuthorized));
   }
   if (bound?.binding.n8n) {
-    if (bound.binding.n8n.result && !assetStore) throw new SemanticProgramError('N8N_JOURNAL_UNAVAILABLE', 'Native n8n results require durable runtime storage', 409);
-    registry.register(bound.binding.n8n.result
-      ? createNativeN8nWorkflowAdapter(contextGraphId, operatorAddress, bound.binding.n8n, config?.n8nNative ?? config?.n8n, bound.assertAuthorized, assetStore!)
-      : createN8nWorkflowAdapter(contextGraphId, operatorAddress, bound.binding.n8n, config?.n8n, bound.assertAuthorized));
+    const grant = bound.binding.n8n;
+    let adapter;
+    if (isNativeN8nGrant(grant)) {
+      if (!assetStore) throw new SemanticProgramError('N8N_JOURNAL_UNAVAILABLE', 'Native n8n results require durable runtime storage', 409);
+      adapter = createNativeN8nWorkflowAdapter(contextGraphId, operatorAddress, grant, config?.n8nNative ?? config?.n8n, bound.assertAuthorized, assetStore);
+      continuationPolicy = executionIri => {
+        const effects = nativeN8nContinuationEffects(assetStore, executionIri, grant);
+        return effects ? new Map([...effects].map(id => [id, grant.toolIri])) : null;
+      };
+    } else adapter = createN8nWorkflowAdapter(contextGraphId, operatorAddress, grant, config?.n8n, bound.assertAuthorized);
+    registry.register(adapter);
+    effectApprovals.set(grant.toolIri, n8nEffectApproval(grant, bound.digest, adapter.effectClass));
   }
   if (bound?.binding.localLlm) {
     registry.register(createLocalLlmProgramAdapter(contextGraphId, operatorAddress,
@@ -345,13 +357,7 @@ export async function resolveProgramTools(context: ProgramToolContext) {
       unavailableReason,
     };
   });
-  const nativeGrant = bound?.binding.n8n;
-  const continuationPolicy = nativeGrant?.result && assetStore
-    ? (executionIri: string): ReadonlyMap<string, string> | null => {
-      const effects = nativeN8nContinuationEffects(assetStore, executionIri, nativeGrant);
-      return effects ? new Map([...effects].map(id => [id, nativeGrant.toolIri])) : null;
-    } : undefined;
-  return { tools, registry, operatorAddress, operatorIri, policyIri, policyVersion, policyHashHex, continuationPolicy };
+  return { tools, registry, operatorAddress, operatorIri, policyIri, policyVersion, policyHashHex, continuationPolicy, effectApprovals };
 }
 
 export async function resolveInternal(context: ProgramResolutionContext): Promise<InternalResolution> {
@@ -412,7 +418,7 @@ export async function resolveInternal(context: ProgramResolutionContext): Promis
     || compilation.plan.effectUpperBound.some((effect) => !['read', 'asset-creation'].includes(effect)))) {
     throw new SemanticProgramError('PROGRAM_BINDING_TOOL_FORBIDDEN', 'Program uses tools outside the tenant binding', 403);
   }
-  const { tools, registry, operatorAddress, operatorIri, policyIri, policyVersion, policyHashHex } = await resolveProgramTools({ ...context, program, executionLayer });
+  const { tools, registry, operatorAddress, operatorIri, policyIri, policyVersion, policyHashHex, effectApprovals } = await resolveProgramTools({ ...context, program, executionLayer });
   const declaredAdapters = new Set(
     tools.flatMap((tool) => tool.operation && tool.semanticVersion
       ? [`${tool.operation}@${tool.semanticVersion}`]
@@ -457,6 +463,7 @@ export async function resolveInternal(context: ProgramResolutionContext): Promis
     program,
     plan: compilation.plan,
     registry,
+    effectApprovals,
     operatorAddress,
     policyHashHex,
   };

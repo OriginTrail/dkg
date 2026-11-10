@@ -1,5 +1,5 @@
 import { type LocalLlmProgramProvider } from './semantic-runtime-local-llm-adapter.js';
-import { TypeScriptProgramHost, type ProgramExecutionTrace, RuntimeAdapterRegistry, SemanticRuntimeStore, type AdmittedPlanSummary, type SemanticProgramBinding, type SemanticRuntimeHost, type SemanticRuntimeHostOptions } from '@origintrail-official/dkg-semantic-runtime';
+import { TypeScriptProgramHost, type ProgramExecutionTrace, RuntimeAdapterRegistry, SemanticRuntimeStore, type EffectProposal, type AdmittedPlanSummary, type SemanticProgramBinding, type SemanticRuntimeHost, type SemanticRuntimeHostOptions } from '@origintrail-official/dkg-semantic-runtime';
 import { SemanticProgramConfiguration } from './semantic-runtime-configuration.js';
 
 export interface StoredSemanticProgram {
@@ -127,11 +127,14 @@ export interface LocalInvocationScope {
   assertAncestors?: () => Promise<void>;
 }
 
+export type EffectApprovalPolicy = (proposal: EffectProposal, store: SemanticRuntimeStore) => string;
+
 export interface InternalResolution {
   public: SemanticProgramResolution;
   program: StoredSemanticProgram;
   plan: AdmittedPlanSummary;
   registry: RuntimeAdapterRegistry;
+  effectApprovals?: ReadonlyMap<string, EffectApprovalPolicy>;
   operatorAddress: string;
   policyHashHex: string;
 }

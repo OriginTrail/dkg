@@ -96,7 +96,7 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
         try { written = await callback(controls.writeRequest); break; }
         catch (failure) { error = { message: failure.message }; }
       }
-      execution.status = written ? 'success' : 'error';
+      execution.status = controls.terminalStatus ?? (written ? 'success' : 'error');
       const runData = Object.fromEntries([
         ['Receive input', [{ body }]],
         ['Block read request', read.items], ...(written ? [['Block write request', written.items], ['Block write', written.items]] : []),

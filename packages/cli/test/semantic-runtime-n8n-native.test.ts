@@ -2,11 +2,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { SemanticN8nGrant, SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
+import type { SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
 import { createNativeN8nWorkflowAdapter } from '../src/semantic-runtime-n8n-native-adapter.js';
 import { collectN8nExecutionResult } from '../src/semantic-runtime-n8n-results.js';
 import { decodeNativeN8nCheckpoint, encodeNativeN8nCheckpoint } from '../src/semantic-runtime-n8n-checkpoint.js';
-import { n8nObservationScope, n8nResultSha256, n8nPinnedExecutionMatches, n8nWorkflowSha256, validateN8nGrant } from '../src/semantic-runtime-n8n-contract.js';
+import { type NativeN8nGrant, n8nObservationScope, n8nResultSha256, n8nPinnedExecutionMatches, n8nWorkflowSha256, validateN8nGrant } from '../src/semantic-runtime-n8n-contract.js';
 
 const graph = 'native-n8n-poc', owner = '0x' + '1'.repeat(40), workflowId = 'native';
 const objectSchema = (properties: Record<string, any>) => ({ type: 'object' as const, properties, required: Object.keys(properties), additionalProperties: false as const });
@@ -27,7 +27,7 @@ function fixture() {
     { id: 'component', name: 'Component', type: 'n8n-nodes-base.filter', typeVersion: 2.3, parameters: {} },
     { id: 'scope', name: scope, type: 'n8n-nodes-base.set', typeVersion: 3.4, parameters: {} },
   ], connections: {}, settings: { executionOrder: 'v1' } };
-  const grant: SemanticN8nGrant = { toolIri: 'urn:dkg:tool:n8n', workflowId, workflowSha256: n8nWorkflowSha256(definition),
+  const grant: NativeN8nGrant = { toolIri: 'urn:dkg:tool:n8n', workflowId, workflowSha256: n8nWorkflowSha256(definition),
     inputSchema, outputSchema, result: { nodes: ['Component'], allowObservation: true } };
   const config = { baseUrl: 'http://127.0.0.1:45670', apiTokenFile, webhookTokenFile,
     workflows: [{ contextGraphId: graph, executorAgentAddress: owner, workflowId, workflowSha256: grant.workflowSha256, resultSha256: n8nResultSha256(grant) }] };
@@ -99,6 +99,19 @@ describe('native n8n component execution receipts', () => {
     expect(result.output.ok).toBe(true); expect(f.posts()).toBe(1);
     expect(value.output).not.toContain('fixture');
   });
+  it.each(['canceled', 'crashed'])('reconciles pinned %s execution as a failed workflow without redispatch', async status => {
+    const f = fixture(), adapter = f.adapter();
+    f.setFailRead(true);
+    await expect(adapter.dispatch(authorization, input)).rejects.toThrow();
+    f.setFailRead(false); f.execution.status = status;
+    const result = await adapter.reconcile({ effectId: authorization.effectId } as any);
+    expect(result.status).toBe('applied');
+    expect(JSON.parse((result as any).output)).toMatchObject({ n8nExecutionId: '42', output: { ok: false, itemsJson: '[]', portsJson: '{}' } });
+    f.execution.workflowVersionId = 'foreign';
+    expect((await adapter.reconcile({ effectId: authorization.effectId } as any)).status).toBe('unknown');
+    await expect(adapter.resume!(authorization, input)).rejects.toThrow('N8N_EXECUTION_NOT_VERIFIED');
+    expect(f.posts()).toBe(1);
+  });
   it('reads empty native output without requiring a downstream response node', async () => {
     const f = fixture(); f.execution.data.resultData.runData.Component[0].data.main = [[]];
     const result = JSON.parse((await f.adapter().dispatch(authorization, input)).output);
@@ -132,7 +145,7 @@ describe('native n8n component execution receipts', () => {
     expect(f.posts()).toBe(0);
   });
   it('collects both native branch ports and excludes unselected transport data', () => {
-    const f = fixture(); f.grant.result!.ports = ['true', 'false'];
+    const f = fixture(); f.grant.result.ports = ['true', 'false'];
     f.execution.data.resultData.runData.Component[0].data.main = [[{ json: { name: 'Ana' } }], [{ json: { name: 'Luka' } }]];
     const result = collectN8nExecutionResult(f.grant, f.execution);
     expect(result.itemsJson).toBe('[]');
@@ -202,7 +215,7 @@ describe('native n8n component execution receipts', () => {
     expect(JSON.parse(result.traceJson as string)[0].items).toEqual([2, 2]);
   });
   it.each([20, 21, 201])('enforces the aggregate %s-record result across repeated runs', count => {
-    const f = fixture(); f.grant.result!.traceNodes = ['Component'];
+    const f = fixture(); f.grant.result.traceNodes = ['Component'];
     f.execution.data.resultData.runData.Component = [Math.floor(count / 2), Math.ceil(count / 2)]
       .map(length => ({ data: { main: [Array.from({ length }, () => ({ json: { value: 1 } }))] } }));
     const result = collectN8nExecutionResult(f.grant, f.execution);
@@ -217,7 +230,7 @@ describe('native n8n component execution receipts', () => {
     expect(collectN8nExecutionResult(f.grant, f.execution)).toMatchObject({ ok: false, itemsJson: '[]' });
     f.execution.data.resultData.runData.Component = [{ data: { main: [[{ json: { text: '💫'.repeat(2200) } }]] } }];
     expect(collectN8nExecutionResult(f.grant, f.execution)).toMatchObject({ ok: false, itemsJson: '[]' });
-    f.grant.result!.ports = ['true', 'false'];
+    f.grant.result.ports = ['true', 'false'];
     f.execution.data.resultData.runData.Component = [{ data: { main: [10, 11].map(length => Array.from({ length }, () => ({ json: { value: 1 } }))) } }];
     expect(collectN8nExecutionResult(f.grant, f.execution)).toMatchObject({ ok: false, portsJson: '{}' });
   });
@@ -271,10 +284,10 @@ describe('native n8n component execution receipts', () => {
 // The installation pin is independent of tenant-controlled approval fields.
 it.each(['nodes', 'ports', 'sinks', 'trace', 'schema'])('rejects altered native output contract before provider dispatch (%s)', async kind => {
   const f = fixture();
-  if (kind === 'nodes') f.grant.result!.nodes = ['Receive input'];
-  if (kind === 'ports') f.grant.result!.ports = ['first', 'second'];
-  if (kind === 'sinks') f.grant.result!.sinks = [{ node: 'Component', port: 1, name: 'copy' }];
-  if (kind === 'trace') f.grant.result!.traceNodes = ['Receive input'];
+  if (kind === 'nodes') f.grant.result.nodes = ['Receive input'];
+  if (kind === 'ports') f.grant.result.ports = ['first', 'second'];
+  if (kind === 'sinks') f.grant.result.sinks = [{ node: 'Component', port: 1, name: 'copy' }];
+  if (kind === 'trace') f.grant.result.traceNodes = ['Receive input'];
   if (kind === 'schema') f.grant.outputSchema = { ...f.grant.outputSchema, required: ['ok'] };
   await expect(f.adapter().dispatch(authorization, input)).rejects.toThrow('N8N_WORKFLOW_NOT_INSTALLED');
   expect(f.fetch).not.toHaveBeenCalled();
@@ -308,7 +321,7 @@ it.each([201, 10000])('confirms a completed %s-record rejection with bounded out
   const result = await f.adapter().dispatch(authorization, input);
   expect(JSON.parse(result.output).output).toMatchObject({ok:false,itemsJson:'[]',portsJson:'{}',error:expect.stringContaining('twenty records')});
   expect(await f.adapter().resume!(authorization,input)).toEqual(result);expect(f.posts()).toBe(1);
-  f.grant.result!.traceNodes=['Component'];
+  f.grant.result.traceNodes=['Component'];
   const traced=collectN8nExecutionResult(f.grant,f.execution);
   expect(JSON.parse(traced.traceJson as string)).toEqual([{node:'Component',status:'completed',items:[count],outputOmitted:'record-limit'}]);
 });

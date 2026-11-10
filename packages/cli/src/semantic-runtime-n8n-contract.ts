@@ -4,6 +4,9 @@ import { canonicalizeJson, validateContextGraphId, type CanonicalJsonValue } fro
 import type { SemanticN8nConfig, SemanticN8nGrant, SemanticQueryOutputSchema } from '@origintrail-official/dkg-semantic-runtime';
 import { assertSemanticQueryOutput, queryOutputSchemaSha256 } from './semantic-runtime-query-pins.js';
 
+export type NativeN8nGrant = SemanticN8nGrant & { result: NonNullable<SemanticN8nGrant['result']> };
+export const isNativeN8nGrant = (grant: SemanticN8nGrant): grant is NativeN8nGrant => grant.result !== undefined;
+
 export const N8N_TOOL_IRI = 'urn:dkg:tool:n8n';
 export const n8nObservationScope = (graph: string, executor: string, workflow: string): string =>
   'nOS scope ' + createHash('sha256').update(JSON.stringify([graph, executor.toLowerCase(), workflow])).digest('hex').slice(0, 20);
@@ -118,8 +121,7 @@ export function assertN8nValue(schema: SemanticQueryOutputSchema, value: unknown
 }
 
 /** Operator authority covers all returned projections, trace selectors and output schema. */
-export function n8nResultSha256(grant: Pick<SemanticN8nGrant, 'result' | 'outputSchema'>): string {
-  if (!grant.result) throw new Error('INVALID_N8N_GRANT');
+export function n8nResultSha256(grant: Pick<NativeN8nGrant, 'result' | 'outputSchema'>): string {
   return createHash('sha256').update(canonicalizeJson({ result: grant.result, outputSchema: grant.outputSchema } as CanonicalJsonValue, { maxBytes: 65_536, maxDepth: 30 })).digest('hex');
 }
 

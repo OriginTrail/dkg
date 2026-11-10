@@ -1,5 +1,5 @@
-import { readProgramCallHistory, type SemanticN8nGrant, type SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
-import { n8nRecord } from './semantic-runtime-n8n-contract.js';
+import { readProgramCallHistory, type SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
+import { n8nRecord, type NativeN8nGrant } from './semantic-runtime-n8n-contract.js';
 
 export type NativeN8nCheckpoint = {
   kind: 'n8n-native-v1'; workflowId: string; workflowSha256: string;
@@ -13,7 +13,7 @@ export function encodeNativeN8nCheckpoint(value: NativeN8nCheckpoint): Uint8Arra
   return new TextEncoder().encode(JSON.stringify(value));
 }
 
-export function decodeNativeN8nCheckpoint(payload: Uint8Array, grant: SemanticN8nGrant): NativeN8nCheckpoint {
+export function decodeNativeN8nCheckpoint(payload: Uint8Array, grant: NativeN8nGrant): NativeN8nCheckpoint {
   let value: unknown;
   try { value = JSON.parse(new TextDecoder().decode(payload)); }
   catch { throw new Error('N8N_CHECKPOINT_INVALID'); }
@@ -25,7 +25,7 @@ export function decodeNativeN8nCheckpoint(payload: Uint8Array, grant: SemanticN8
   return value as NativeN8nCheckpoint;
 }
 
-export function readNativeN8nCheckpoint(store: SemanticRuntimeStore, effectId: string, grant: SemanticN8nGrant): NativeN8nCheckpoint | null {
+export function readNativeN8nCheckpoint(store: SemanticRuntimeStore, effectId: string, grant: NativeN8nGrant): NativeN8nCheckpoint | null {
   const saved = store.adapterCheckpoint(effectId);
   return saved ? decodeNativeN8nCheckpoint(saved.payload, grant) : null;
 }
@@ -33,8 +33,7 @@ export function readNativeN8nCheckpoint(store: SemanticRuntimeStore, effectId: s
 /** Return only acknowledged native effects eligible for inspection. Mixed
  * execution histories and missing or malformed checkpoints cannot be replayed.
  */
-export function nativeN8nContinuationEffects(store: SemanticRuntimeStore, executionIri: string, grant?: SemanticN8nGrant): Set<string> | null {
-  if (!grant?.result) return null;
+export function nativeN8nContinuationEffects(store: SemanticRuntimeStore, executionIri: string, grant: NativeN8nGrant): Set<string> | null {
   // Declared child pins are not evidence of child calls. Only actual call
   // history decides whether this was an exclusively native execution.
   const calls = readProgramCallHistory(store, executionIri);

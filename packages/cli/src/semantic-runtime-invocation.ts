@@ -1,5 +1,3 @@
-import { computeEffectRequestDigest } from '@origintrail-official/dkg-semantic-runtime';
-import { assertN8nValue } from './semantic-runtime-n8n-contract.js';
 import { ExecutionReceiptJournal } from '@origintrail-official/dkg-semantic-runtime';
 import { recoverTerminalExecutionReceipt } from './semantic-runtime-terminal-receipt.js';
 import { createHash } from 'node:crypto';
@@ -186,7 +184,7 @@ export async function invokeStoredSemanticProgram(
 /** Both language front ends use this broker, capability and durable write journal. */
 export function createProgramToolDispatcher(
   runtime: ConfiguredSemanticRuntimeService,
-  resolved: Pick<InternalResolution, 'public' | 'registry' | 'policyHashHex'>,
+  resolved: Pick<InternalResolution, 'public' | 'registry' | 'policyHashHex' | 'effectApprovals'>,
   authority: import('@origintrail-official/dkg-semantic-runtime').AdmittedPlanAuthority,
   executionIri: string, invocationId: string, assertAuthorized: () => Promise<void>, bound?: BoundProgramInvocation,
 ): (toolIri: string, input: unknown, callId: string) => Promise<string> {
@@ -260,22 +258,7 @@ export function createProgramToolDispatcher(
       throw new SemanticProgramError('UNSUPPORTED_PROGRAM_TOOL', 'Unsupported WASI tool import', 422);
     }
     const effectId = `urn:sr:effect:${invocationId}:${callId}`;
-    // Materialize the owner's approved, schema-bounded workflow grant as an
-    // exact per-effect approval. The broker retains its normal approval checks.
-    let approvalId: string | undefined;
-    if (tool.operation === 'n8n/workflow' && bound?.binding.n8n) {
-      assertN8nValue(bound.binding.n8n.inputSchema, input, 'INPUT');
-      approvalId = `urn:sr:approval:n8n:${hashParts([bound.digest, effectId])}`;
-      if (!runtime.store.approval(approvalId)) runtime.store.putApproval({
-        approvalId, executionId: executionIri, effectClass: descriptor.effectClass,
-        principal: resolved.public.executingNode,
-        requestDigest: computeEffectRequestDigest(tool.operation, tool.semanticVersion!, descriptor.verb, toolIri, input),
-        notBefore: Date.now() - 1000, expiresAt: runtime.store.capability(capabilityId)!.expiresAt,
-        oneShot: true, consumedAt: null,
-      });
-    }
     const proposal = {
-      ...(approvalId ? { approvalId } : {}),
       effectId,
       executionId: executionIri,
       processId: `tool:${tool.operation}`,
@@ -292,10 +275,12 @@ export function createProgramToolDispatcher(
       budgetReservation: 0n,
       now: Date.now(),
     };
+    const approvalId = resolved.effectApprovals?.get(toolIri)?.(proposal, runtime.store);
+    const approvedProposal = approvalId ? { ...proposal, approvalId } : proposal;
     let outcome;
     if (descriptor.effectClass === 'read') {
       try {
-        outcome = await broker.dispatchRead(proposal);
+        outcome = await broker.dispatchRead(approvedProposal);
       } catch (error) {
         throw new SemanticProgramError(
           'QUERY_REQUEST_FAILED',
@@ -304,7 +289,7 @@ export function createProgramToolDispatcher(
         );
       }
     } else {
-      await broker.prepareEffect(proposal);
+      await broker.prepareEffect(approvedProposal);
       outcome = broker.readOutcome(effectId);
       if (outcome?.state === 'prepared') {
         await broker.dispatchPrepared(effectId, Date.now());

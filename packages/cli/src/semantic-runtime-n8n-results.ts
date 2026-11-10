@@ -1,11 +1,10 @@
 import { createHash } from 'node:crypto';
 import { canonicalizeJson, type CanonicalJsonValue } from '@origintrail-official/dkg-core';
-import type { SemanticN8nGrant } from '@origintrail-official/dkg-semantic-runtime';
-import { N8N_VALUE_MAX_BYTES, n8nRecord } from './semantic-runtime-n8n-contract.js';
+import { type NativeN8nGrant, N8N_VALUE_MAX_BYTES, n8nRecord } from './semantic-runtime-n8n-contract.js';
 
 /** Only explicitly selected native nodes can contribute output or diagnostics. */
-export function collectN8nExecutionResult(grant: SemanticN8nGrant, execution: Record<string, unknown>): Record<string, unknown> {
-  if (!grant.result || !n8nRecord(execution.data) || !n8nRecord(execution.data.resultData)
+export function collectN8nExecutionResult(grant: NativeN8nGrant, execution: Record<string, unknown>): Record<string, unknown> {
+  if (!n8nRecord(execution.data) || !n8nRecord(execution.data.resultData)
     || !n8nRecord(execution.data.resultData.runData)) throw new Error('N8N_EXECUTION_DATA_MISSING');
   const runData = execution.data.resultData.runData;
   const runs = (name: string): Record<string, unknown>[] => {
@@ -41,11 +40,11 @@ export function collectN8nExecutionResult(grant: SemanticN8nGrant, execution: Re
     counts.set(name, sizes); collected.set(name, result);
     return result;
   };
-  const failed = execution.status === 'error';
+  const failed = ['error', 'canceled', 'crashed'].includes(String(execution.status));
   const sinks = grant.result.sinks;
   const selected = sinks ? sinks.flatMap(s => outputs(s.node)[s.port] ?? []) : grant.result.nodes.flatMap(name => outputs(name)[0] ?? []);
   const ports = sinks && sinks.length > 1 ? Object.fromEntries(sinks.map(s => [s.name, outputs(s.node)[s.port] ?? []])) : grant.result.ports && grant.result.ports.length > 1
-    ? Object.fromEntries(grant.result.ports.map((name, i) => [name, outputs(grant.result!.nodes[0]!)[i] ?? []])) : {};
+    ? Object.fromEntries(grant.result.ports.map((name, i) => [name, outputs(grant.result.nodes[0]!)[i] ?? []])) : {};
   const recordCount = Object.keys(ports).length ? Object.values(ports).reduce((sum, port) => sum + port.length, 0) : selected.length;
   const itemsJson = JSON.stringify(Object.keys(ports).length ? [] : selected), portsJson = JSON.stringify(ports);
   const trace = grant.result.traceNodes?.map(name => {

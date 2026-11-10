@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import type { RuntimeAdapterOperation, SemanticN8nConfig, SemanticN8nGrant, SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
-import { assertN8nEmbeddedWorkflows, n8nResultSha256, assertN8nValue, n8nPinnedExecutionMatches, n8nObservationScope, n8nRecord, n8nWorkflowSha256, validateN8nConfig, validateN8nGrant } from './semantic-runtime-n8n-contract.js';
+import type { RuntimeAdapterOperation, SemanticN8nConfig, SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
+import { type NativeN8nGrant, assertN8nEmbeddedWorkflows, n8nResultSha256, assertN8nValue, n8nPinnedExecutionMatches, n8nObservationScope, n8nRecord, n8nWorkflowSha256, validateN8nConfig, validateN8nGrant } from './semantic-runtime-n8n-contract.js';
 import { collectN8nExecutionResult } from './semantic-runtime-n8n-results.js';
 
 import { decodeNativeN8nCheckpoint, encodeNativeN8nCheckpoint, readNativeN8nCheckpoint, type NativeN8nCheckpoint } from './semantic-runtime-n8n-checkpoint.js';
@@ -38,11 +38,10 @@ async function request(url: URL, headers: Record<string, string>, signal: AbortS
 
 /** Early acknowledgement + durable provider execution ID; continuation never POSTs again. */
 export function createNativeN8nWorkflowAdapter(
-  graph: string, executor: string, approved: SemanticN8nGrant,
+  graph: string, executor: string, approved: NativeN8nGrant,
   installation: SemanticN8nConfig | undefined, assertAuthorized: () => Promise<void>, store: SemanticRuntimeStore,
 ): RuntimeAdapterOperation<unknown, string> {
   validateN8nGrant(approved);
-  if (!approved.result) throw new Error('INVALID_N8N_GRANT');
   const grant = structuredClone(approved);
   const selectedConfiguration = () => installation && ({ ...installation, workflows: installation.workflows.filter(item =>
     item.contextGraphId === graph && item.executorAgentAddress.toLowerCase() === executor.toLowerCase() && item.workflowId === grant.workflowId) });
@@ -71,7 +70,7 @@ export function createNativeN8nWorkflowAdapter(
       || n8nWorkflowSha256(published) !== grant.workflowSha256) throw new Error('N8N_WORKFLOW_NOT_PINNED');
     assertN8nEmbeddedWorkflows(published);
     const names = new Set((published.nodes as Record<string, unknown>[]).map(node => node.name));
-    if ([...grant.result!.nodes, ...grant.result!.traceNodes ?? []].some(name => !names.has(name))) throw new Error('N8N_WORKFLOW_NOT_PINNED');
+    if ([...grant.result.nodes, ...grant.result.traceNodes ?? []].some(name => !names.has(name))) throw new Error('N8N_WORKFLOW_NOT_PINNED');
     return { origin, headers, published };
   };
   const inspect = async (saved: NativeN8nCheckpoint, signal: AbortSignal, prepared?: Awaited<ReturnType<typeof preflight>>) => {
@@ -85,7 +84,7 @@ export function createNativeN8nWorkflowAdapter(
     }
     if (['new', 'running', 'waiting'].includes(String(execution.status))) throw new Error('N8N_EXECUTION_PENDING');
     if (String(execution.id) !== saved.executionId || execution.workflowId !== grant.workflowId
-      || !['success', 'error'].includes(String(execution.status))
+      || !['success', 'error', 'canceled', 'crashed'].includes(String(execution.status))
       || !n8nPinnedExecutionMatches(published, execution, grant, saved.versionId)) throw new Error('N8N_EXECUTION_NOT_VERIFIED');
     if (saved.observed) {
       const scope = n8nObservationScope(graph, executor, grant.workflowId);
@@ -120,7 +119,7 @@ export function createNativeN8nWorkflowAdapter(
         mayHaveExecuted = !!saved;
         if (!saved) {
           const observed = n8nRecord(input) && typeof input.executionId === 'string' ? input.executionId : '';
-          if (observed && (!grant.result!.allowObservation || !/^\d{1,20}$/.test(observed))) throw new Error('INVALID_N8N_INPUT');
+          if (observed && (!grant.result.allowObservation || !/^\d{1,20}$/.test(observed))) throw new Error('INVALID_N8N_INPUT');
           if (observed && !(prepared.published.nodes as Record<string, unknown>[]).some(node => node.name === n8nObservationScope(graph, executor, grant.workflowId))) throw new Error('N8N_OBSERVATION_SCOPE_MISMATCH');
           const webhook = observed ? undefined : {
             url: new URL(`/webhook/dkg-capability-${grant.workflowId}`, prepared.origin),

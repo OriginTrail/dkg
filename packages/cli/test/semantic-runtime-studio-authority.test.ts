@@ -167,3 +167,36 @@ it('rejects a replacement binding committed while the Write callback awaits acco
     noWrite(h);
   } finally { h.close(); }
 });
+
+it.each(['canceled', 'crashed'])('recovers a journalled Write after native %s without another POST or asset creation', async status => {
+  const { f, h, invocation } = await studio();
+  try {
+    h.controls.interrupted = true;
+    h.controls.loseWriteReply = true;
+    h.controls.terminalStatus = status;
+    await expect(h.service.run(invocation, () => {}, h.actor)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
+    expect(h.assets.size).toBe(1);
+    expect(h.controls.allowCreates.filter(Boolean)).toEqual([true]);
+    expect(h.controls.dispatches).toBe(1);
+    const writeKey = invocation.invocationId + ':write';
+    const pending = h.repository.db.prepare('SELECT * FROM dkg_component_writes WHERE id=?').get(writeKey);
+    expect(h.repository.db.prepare('SELECT response FROM dkg_component_calls WHERE id=?').get(writeKey).response).toBeNull();
+    await restartNode(f.target); h.reopen();
+    h.controls.interrupted = false; h.controls.nodeUnavailable = false;
+    const result = await h.service.run(invocation, () => {}, h.actor);
+    expect(result).toMatchObject({ invocationId: invocation.invocationId, n8nExecutionId: '42', persisted: true,
+      readbackVerified: true, output: { ok: false, itemsJson: '[]' },
+      dkgRecovery: { status: 'confirmed', invocationId: invocation.invocationId, n8nExecutionId: '42' } });
+    expect(result.executionIri).toBe('urn:sr:execution:' + invocation.invocationId);
+    expect(JSON.parse(h.repository.db.prepare('SELECT response FROM dkg_component_calls WHERE id=?').get(writeKey).response)).toEqual(result.dkgRecovery.receipt);
+    expect(h.repository.db.prepare('SELECT request FROM dkg_component_writes WHERE id=?').get(writeKey).request).toBe(pending.request);
+    expect(h.controls.allowCreates.at(-1)).toBe(false);
+    const transportCalls = h.effects.length;
+    await restartNode(f.target); h.reopen();
+    expect(await h.service.run(invocation, () => {}, h.actor)).toEqual(result);
+    expect(h.effects).toHaveLength(transportCalls);
+    expect(h.controls.allowCreates.filter(Boolean)).toEqual([true]);
+    expect(h.assets.size).toBe(1);
+    expect(h.controls.dispatches).toBe(1);
+  } finally { h.close(); }
+});

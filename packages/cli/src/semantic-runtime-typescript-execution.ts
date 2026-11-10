@@ -65,7 +65,7 @@ export async function resolveTypeScriptTools(agent: DKGAgent, runtime: Configure
     executionLayer: binding.executionLayer ?? 'wm', assertAuthorized: check,
     bound: { binding, digest, assertAuthorized: check }, assetStore: runtime.store, localLlmProvider: runtime.localLlmProvider });
   if (resolved.tools.some(tool => !tool.effective)) throw new SemanticProgramError('REQUIRED_TOOL_UNAVAILABLE', 'A requested adapter is unavailable', 409);
-  return { registry: resolved.registry, policyHashHex: resolved.policyHashHex, continuationPolicy: resolved.continuationPolicy,
+  return { registry: resolved.registry, policyHashHex: resolved.policyHashHex, continuationPolicy: resolved.continuationPolicy, effectApprovals: resolved.effectApprovals,
     public: { contextGraphId: binding.contextGraphId, programIri: program.programIri, programLayer: program.layer,
       executingNode: resolved.operatorIri,
       selectedPolicy: { iri: resolved.policyIri, version: resolved.policyVersion, hash: `sha256:${resolved.policyHashHex}` },
