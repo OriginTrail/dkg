@@ -28,7 +28,7 @@ import {
   DEVNET_DIR, REPO_ROOT, SETUP_FILE, chainUp, contextGraphOnChain, devnetEnv, fundWallet, nodeCall, nodeOk,
   nodeUp, statusOf, waitFor, type MarketplaceSetup,
 } from './devnet.js';
-import { MARKETPLACE_CG, NODES, NUM_NODES, PORTS, SERVICES, WEI_PER_TRAC } from './topology.js';
+import { LANDING_INTERVAL_MINUTES, MARKETPLACE_CG, NODES, NUM_NODES, PORTS, SERVICES, WEI_PER_TRAC } from './topology.js';
 
 const log = (message: string) => console.log(`[marketplace-setup] ${message}`);
 
@@ -133,9 +133,11 @@ async function ensureGraph(): Promise<string> {
 /**
  * The seller's and the buyer's `marketplace` blocks. Ticks are short so the
  * specs see a tick's work within seconds. The landing loop keeps its defaults
- * but three: Hardhat's base fee is above the shipped ceilings, a receipt lands
- * at once rather than 30 s after it completed, and no budget lands by itself
- * for being near its limit, so the receipts wait for Land now.
+ * but four: Hardhat's base fee is above the shipped ceilings, a receipt lands
+ * at once rather than 30 s after it completed, no budget lands by itself for
+ * being near its limit, and no regular landing time falls inside the epoch
+ * (`LANDING_INTERVAL_MINUTES`). So the receipts wait for Land now, or for the
+ * epoch's last stretch.
  */
 function marketplaceBlockOf(nodeNum: number): Record<string, unknown> {
   const common = { enabled: true, contextGraphId: MARKETPLACE_CG.id, tickSeconds: 10 };
@@ -151,7 +153,13 @@ function marketplaceBlockOf(nodeNum: number): Record<string, unknown> {
         capacity: 4,
         backend: { kind: 'llamacpp', baseUrl: `http://127.0.0.1:${PORTS.stub}/v1`, model: s.backendModel },
       })),
-      landing: { baseFeeCeilingGwei: 1_000, lastStretchBaseFeeCeilingGwei: 1_000, completedMarginSeconds: 0, nearLimitShare: 0 },
+      landing: {
+        landingIntervalMinutes: LANDING_INTERVAL_MINUTES,
+        baseFeeCeilingGwei: 1_000,
+        lastStretchBaseFeeCeilingGwei: 1_000,
+        completedMarginSeconds: 0,
+        nearLimitShare: 0,
+      },
     },
   };
 }

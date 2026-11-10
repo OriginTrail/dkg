@@ -1,7 +1,9 @@
 /**
  * The epoch's close, last of the specs because it moves the chain's clock.
  * Ten minutes before the end the seller is in its last stretch, and lands
- * the receipt it still holds (the reasoner's call) by itself; the buyer's
+ * the receipt it still holds (the reasoner's call) by itself: the lane's
+ * landing interval is longer than the epoch, so no regular landing time is
+ * crossed on the way and only the last stretch can land it; the buyer's
  * standing plan, inside its prefund lead, funds the next epoch from its
  * source (the Conviction Account the account spec chose, at its discount).
  * Past the end, the buyer's reconciliation of the epoch is final,
@@ -12,7 +14,7 @@
 import type { Plan, ReconciliationAnswer, SellerStatus, SubscriptionsAnswer } from '../../../src/ui/marketplace/api/types.js';
 import { test, expect } from '../fixtures.js';
 import { advanceChainTime, epochTimes, nodeOk, readSetup } from '../devnet.js';
-import { ACCOUNT, CHAT, NEXT_CHAT_PRICE, PLAN, REASONER, UI, microOf, tracOf, weiOfTrac } from '../topology.js';
+import { ACCOUNT, CHAT, LANDING_INTERVAL_MINUTES, NEXT_CHAT_PRICE, PLAN, REASONER, UI, microOf, tracOf, weiOfTrac } from '../topology.js';
 
 test.describe('The epoch closes', () => {
   test('the seller lands what it holds, the plan funds the next epoch, and the ended epoch is final', async ({ market, page }) => {
@@ -34,7 +36,9 @@ test.describe('The epoch closes', () => {
     // Worked out here, not read back from the node: the plan's value less the account's discount.
     const cost = (planValue * BigInt(10_000 - ACCOUNT.discountBps)) / 10_000n;
 
-    // Into the last stretch.
+    // Into the last stretch. The jump crosses no regular landing time, so the seller's landing below
+    // can only be the last stretch's.
+    expect(start.endsAt - start.startsAt, "the lane's landing interval is longer than the epoch").toBeLessThan(LANDING_INTERVAL_MINUTES * 60);
     await advanceChainTime(start.endsAt - 600 - start.now);
     await expect.poll(async () => (await sellerStatus()).ledger.landed, {
       message: 'the seller lands the receipt it held, by itself, in the last stretch',

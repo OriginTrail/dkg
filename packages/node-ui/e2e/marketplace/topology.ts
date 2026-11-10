@@ -108,6 +108,14 @@ export const PLAN = { chatTrac: '1', reasonerTrac: '0.05', topUpTrac: '1' } as c
  */
 export const ACCOUNT = { committedTrac: '100000', discountBps: 3_000 } as const;
 
+/**
+ * The seller's landing interval on this lane: a year, longer than the devnet's
+ * epoch, so no regular landing time falls inside the epoch. Before the last
+ * stretch only Land now lands a receipt, and what lands by itself in the
+ * epoch-close spec is the last stretch's doing.
+ */
+export const LANDING_INTERVAL_MINUTES = 365 * 24 * 60;
+
 /** The chat service's price for the next epoch, which the next-price spec sets on Operate: 150 µTRAC a token. */
 export const NEXT_CHAT_PRICE = 150_000_000_000_000n;
 
