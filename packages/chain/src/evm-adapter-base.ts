@@ -349,8 +349,8 @@ const KA_HIGH_WATER_MAX_SCAN_PAGES = 1_500;
 const KA_HIGH_WATER_DEFAULT_PAGE_SIZE = 2_000;
 
 export { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
-import { BUYER_SCAN_PAGE_BLOCKS, CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
-import { IncrementalEventScan } from './incremental-event-scan.js';
+import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
+import { createBuyerAccountScan } from './buyer-account-scan.js';
 
 // Keep generic Hub binding invalidation responsive for read paths while still
 // replacing four hidden ethers subscription pollers with one owned log poller.
@@ -914,15 +914,8 @@ export class EVMChainAdapterBase {
   protected static readonly SIGNER_IDENTITY_ID_ZERO_TTL_MS = SIGNER_IDENTITY_ID_ZERO_TTL_MS;
 
   protected readonly pcaReadCache = new PcaReadCache();
-
-  /**
-   * The `BuyerAdded` scan behind the marketplace's `listBuyerAccounts`, kept per `ServiceSubscriptions`
-   * address and buyer, so that a repeat read covers only the blocks since the last one.
-   */
-  protected readonly buyerAccountScan = new IncrementalEventScan<bigint>({
-    pageBlocks: BUYER_SCAN_PAGE_BLOCKS,
-    tailBlocks: CG_REGISTRY_REORG_BUFFER_BLOCKS,
-  });
+  /** The marketplace's `BuyerAdded` scan (see `createBuyerAccountScan`). */
+  protected readonly buyerAccountScan = createBuyerAccountScan();
 
   /**
    * #1583 — resolved-address memo for `resolveContract`. Caches the Hub-resolved
