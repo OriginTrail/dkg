@@ -100,7 +100,7 @@ export function compileStudio(value, { graphId, owner, headerCredential, credent
   const nodes = [], connections = {}, pieces = new Map();
   for (const n of definition.nodes) {
     const descriptor = componentExecutionDescriptor(component(n.componentId)), name = 'Block ' + n.id;
-    const piece = componentPiece(n.componentId, name, key => n.componentId === 'schedule' ? JSON.stringify(n.params[key]) : nativeLiteral(n.params[key]), { registry, credentials: { ...credentials, httpHeaderAuth: headerCredential } });
+    const piece = componentPiece(n.componentId, name, key => n.componentId === 'schedule' ? JSON.stringify(n.params[key]) : nativeLiteral(n.params[key]), { registry, blockId: n.id, credentials: { ...credentials, httpHeaderAuth: headerCredential } });
     Object.assign(connections, piece.connections); nodes.push(...piece.nodes);
     if (n.componentId === 'schedule') {
       const event = editNode(name + ' event', '$json'); nodes.push(event);

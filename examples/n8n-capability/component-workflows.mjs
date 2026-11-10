@@ -71,13 +71,14 @@ function googleSheetsPiece(name, param, credentials) {
   return { nodes, connections, entry: aggregate.name, exits: [done.name], resultNode: done.name };
 }
 
-function dkgPiece(id, name, credentials) {
+function dkgPiece(id, name, credentials, blockId) {
+  if (typeof blockId !== 'string' || !/^[a-z][a-z0-9_-]{0,39}$/i.test(blockId)) throw new Error('DKG component block identity required.');
   const connections = {};
   const request = nativeNode(name + ' request', 'httpRequest', {
     method: 'POST', url: 'http://127.0.0.1:4631/spike/ka/internal/dkg-component',
     authentication: 'genericCredentialType', genericAuthType: 'httpHeaderAuth',
     sendBody: true, specifyBody: 'json',
-    jsonBody: expression(`({ effectId: $('Receive input').first().json.body.invocationId, workflowId: String($workflow.id), executionId: String($execution.id), blockId: ${JSON.stringify(name.replace(/^Block /,''))}, items: $input.all().map(i => i.json) })`),
+    jsonBody: expression(`({ effectId: $('Receive input').first().json.body.invocationId, workflowId: String($workflow.id), executionId: String($execution.id), blockId: ${JSON.stringify(blockId)}, items: $input.all().map(i => i.json) })`),
     options: { timeout: id === 'invoke-dkg-program' ? 45000 : 14000, redirect: { redirect: { followRedirects: false } }, response: { response: { responseFormat: 'json' } } },
   }, { executeOnce: true, retryOnFail: true, maxTries: 2, waitBetweenTries: 1000, credentials: { httpHeaderAuth: credentials.httpHeaderAuth } });
   const split = nativeNode(name + ' records', 'splitOut', { fieldToSplitOut: 'items', include: 'noOtherFields', options: { destinationFieldName: 'value' } });
@@ -87,7 +88,7 @@ function dkgPiece(id, name, credentials) {
 }
 
 /** One reviewed native component, with transport-only file conversion where needed. */
-export function componentPiece(id, name, param, { credentials = {}, registry = defaultComponentRegistry } = {}) {
+export function componentPiece(id, name, param, { credentials = {}, registry = defaultComponentRegistry, blockId } = {}) {
   const { component } = registry;
   const descriptor = component(id), type = descriptor.nodeType.split('.').at(-1);
   const p = key => expression(param(key)), value = key => expression(`$json[${param(key)}]`);
@@ -98,7 +99,7 @@ export function componentPiece(id, name, param, { credentials = {}, registry = d
   const condition = () => ({ options: { caseSensitive: true, leftValue: '', typeValidation: 'loose', version: 2 },
     conditions: [{ id: 'equals', leftValue: value('field'), rightValue: p('equals'), operator: { type: 'string', operation: 'equals' } }], combinator: 'and' });
   switch (id) {
-    case 'dkg-read': case 'dkg-write': case 'invoke-dkg-program': return dkgPiece(id, name, credentials);
+    case 'dkg-read': case 'dkg-write': case 'invoke-dkg-program': return dkgPiece(id, name, credentials, blockId);
     case 'edit-fields': parameters = { mode: 'raw', jsonOutput: expression(`({ ...(${param('keepInput')} === 'yes' ? $json : {}), ...${resolved('fields')} })`), options: {} }; break;
     case 'filter': case 'if': parameters = { conditions: condition(), options: {} }; break;
     case 'sort': parameters = { type: 'simple', sortFieldsUi: { sortField: [{ fieldName: p('field'), order: p('direction') }] }, options: {} }; break;
@@ -161,7 +162,7 @@ export function echoSubworkflow() {
 export function standaloneComponentWorkflow(id, workflowId, headerCredential, options = {}) {
   const { component } = options.registry ?? defaultComponentRegistry;
   const descriptor = componentExecutionDescriptor(component(id)), params = key => `$('Prepare input').first().json.params[${JSON.stringify(key)}]`;
-  const piece = componentPiece(id, 'Component', id === 'schedule' ? key => JSON.stringify(descriptor.parameters[key].default) : params, options);
+  const piece = componentPiece(id, 'Component', id === 'schedule' ? key => JSON.stringify(descriptor.parameters[key].default) : params, { ...options, blockId: 'Component' });
   const receive = nativeNode('Receive input', 'webhook', { httpMethod: 'POST', path: 'dkg-capability-' + workflowId,
     authentication: 'headerAuth', responseMode: 'responseNode', options: {} }, { webhookId: workflowId,
     credentials: { httpHeaderAuth: headerCredential } });
