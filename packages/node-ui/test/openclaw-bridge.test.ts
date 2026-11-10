@@ -25,6 +25,8 @@ function readPanelRightSources(): string {
   return [
     readUiFile('components/Shell/PanelRight.tsx'),
     readUiTree('components/Shell/PanelRight'),
+    // The panel's chat (send, stop, history, attachments) runs in this store.
+    readUiFile('stores/agentConversations.ts'),
   ].join('\n');
 }
 
@@ -273,27 +275,29 @@ describe('PanelRight UI - connected agent flow', () => {
 
   it('imports local-agent attachments on send instead of on selection', () => {
     const addAttachmentsBlock = panelRight.slice(
-      panelRight.indexOf('const addAttachmentsForConversation'),
-      panelRight.indexOf('const prepareAttachmentDraftsForSend'),
+      panelRight.indexOf('addAttachments(conversationKey: string'),
+      panelRight.indexOf('removeAttachment(conversationKey: string'),
     );
     const sendLocalMessageBlock = panelRight.slice(
-      panelRight.indexOf('const sendLocalMessage'),
-      panelRight.indexOf('const connectIntegration'),
+      panelRight.indexOf('async function runSend'),
+      panelRight.indexOf('async function persistHermesFailure'),
     );
 
+    expect(addAttachmentsBlock).toContain('status: \'queued\'');
     expect(addAttachmentsBlock).not.toContain('await importFile(');
     // PR3 Codex round-2: processedDrafts is now hoisted above the try block
     // (assigned, not declared with `const`, so the catch path can read it
     // to restore drafts after a failed send). Assert the assignment shape
     // without coupling to the lexical `const`.
-    expect(sendLocalMessageBlock).toContain('processedDrafts = await prepareAttachmentDraftsForSend(conversationKey, drafts);');
+    expect(sendLocalMessageBlock).toContain('processedDrafts = await uploadAttachments(conversationKey, drafts);');
     expect(sendLocalMessageBlock).toContain('if (!text && attachments.length === 0 && importContext.results.length === 0) {');
     expect(panelRight).not.toContain('selectedCompletedAttachments');
   });
 
   it('dedupes selected files per target project instead of globally per conversation', () => {
-    expect(panelRight).toContain('`${draft.contextGraphId}:${draft.file.name}:${draft.file.size}:${draft.file.lastModified}`');
     expect(panelRight).toContain('`${contextGraphId}:${file.name}:${file.size}:${file.lastModified}`');
+    expect(panelRight).toContain('draftKey(draft.contextGraphId, draft.file)');
+    expect(panelRight).toContain('draftKey(contextGraphId, file)');
   });
 
   it('only enables attachment-only sends when at least one draft is sendable', () => {
@@ -355,7 +359,7 @@ describe('PanelRight UI - connected agent flow', () => {
 
   it('merges reloaded local history with live messages', () => {
     expect(panelRight).toContain('function mergeLocalAgentMessages');
-    expect(panelRight).toContain('mergeLocalAgentMessages(prev, loaded)');
+    expect(panelRight).toContain('mergeLocalAgentMessages(c.messages, loaded)');
   });
 
   it('sends connected-agent chat through the local bridge from PanelRight', () => {
