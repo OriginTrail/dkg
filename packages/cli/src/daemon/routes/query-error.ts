@@ -18,6 +18,7 @@ import {
   isQueryResultTooLargeError,
 } from '@origintrail-official/dkg-agent';
 import { jsonResponse } from "../http-utils.js";
+import { isStoreInternalLimit, storeInternalLimitResponseBody } from "../store-internal-limit.js";
 
 /**
  * Recognised structurally rather than by importing `@origintrail-official/dkg-query`.
@@ -123,6 +124,8 @@ function isUnscopedQueryInvalidated(err: unknown): boolean {
  * Answer a failed `/api/query` whose failure has an answer of its own, and say
  * whether it did. `false` leaves the error to the daemon's top-level mapping.
  *
+ * - A node-side store limit was reached: a retryable 503 `STORE_INTERNAL_LIMIT`.
+ *   It is the node's own state, so it is never the caller's 413.
  * - The caller's own SPARQL was rejected: 400, see {@link isClientQueryFailure}.
  * - An unscoped result was withheld: a retryable 503. Losing that check says
  *   nothing about the request and the same query succeeds once the write has
@@ -130,6 +133,12 @@ function isUnscopedQueryInvalidated(err: unknown): boolean {
  *   a 500. The sentence is the one the agent throws.
  */
 export function respondToQueryFailure(res: ServerResponse, err: unknown): boolean {
+  // A node-side limit is the node's own state, never the caller's result size:
+  // it is answered before, and never as, the 413 below.
+  if (isStoreInternalLimit(err)) {
+    jsonResponse(res, 503, storeInternalLimitResponseBody(err), undefined, { "Retry-After": "1" });
+    return true;
+  }
   if (isQueryResultTooLargeError(err)) {
     jsonResponse(res, 413, { error: err.message, code: err.code,
       limitBytes: err.maxBytes, actualBytes: err.actualBytes });
