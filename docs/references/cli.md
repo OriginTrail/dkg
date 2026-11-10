@@ -49,6 +49,7 @@ dkg ka share-jobs ... --all [--page-size <n>]                 # page through the
 dkg ka share-jobs ... --page-size <n> [--cursor <cursor>]     # print one page, then "Next cursor: ..." for the page after it
 dkg ka share-job <job-id>                                     # show one async share job
 dkg ka cancel-share-job <job-id>                              # cancel a share job that is still queued
+dkg ka clear-share-job <job-id>                               # remove one finished share job (running daemon required)
 dkg ka recover-share-job <job-id>                             # queue a failed share job again
 dkg ka publish <name> -c <cg>                                 # sync SWM -> VM publish
 dkg ka publish-async <name> -c <cg> [--publisher-node-identity-id 0]  # enqueue SWM -> VM publish
@@ -82,7 +83,7 @@ dkg publisher stats                      # job counts by status, as JSON
 dkg publisher cancel <job-id>            # remove a job that is still accepted
 dkg publisher retry                      # accept failed jobs again that are safe to re-run
 dkg publisher clear finalized|failed     # bulk clear; keeps jobs whose removal would change which job holds the KA
-# one finished job by ID: POST /api/publisher/clear-job (API only; a held job needs allowPendingTransaction: check its transaction first)
+dkg publisher clear-job <job-id> [--allow-pending-transaction] # remove one job; check its transaction before overriding a hold
 # publisher wallets need native gas plus PCA registration or TRAC; node identity is optional attribution
 
 # Code & memory indexing
@@ -209,7 +210,7 @@ What each job state means, and how a client recovers a job, is in [Async Share a
 
 ## Async publisher commands without the daemon
 
-When the daemon's API cannot be reached, the `dkg publisher` commands open the node's store directly.
+When the daemon's API cannot be reached, the `dkg publisher jobs`, `job`, `stats`, `cancel`, `retry`, and `clear` commands can open the node's store directly. The single-job `clear-job` command requires the running daemon.
 
 They refuse to do that while the node home's `daemon.pid` names a live process. A daemon that is still starting or restarting, or that answers the route with `404`, `405` or `501`, owns the store as much as one that answers. The commands exit with code 1 and print:
 
@@ -220,6 +221,10 @@ Refusing to run "dkg publisher <command>" offline: a daemon appears to be runnin
 Try again once the daemon answers, or stop it first with `dkg stop`. If that PID is not a DKG daemon, remove the stale `daemon.pid` file.
 
 `jobs`, `job` and `stats` open the store read-only. With the file-backed Oxigraph stores (`oxigraph-worker`, the default, and `oxigraph-persistent`) they load the store file and never write it: the file is the same after they run.
+
+## Clearing one finished job
+
+The single-job clear commands require a running daemon and never open the queue store offline. They print `cleared` or `already_absent` and exit successfully; a refused clear exits 1 with the daemon’s reason. `--allow-pending-transaction` abandons tracking, does not cancel an on-chain transaction, and can permit a duplicate publication if the asset is submitted again.
 
 ## Client request timeouts
 
