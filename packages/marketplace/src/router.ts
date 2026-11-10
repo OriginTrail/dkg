@@ -11,7 +11,12 @@
  *      (`quoteResponseFromWire`) counts as no answer.
  *   A call with tools goes only to a seller whose quote says it takes tool
  *   calls for the service; one whose kept quote says it does not goes behind
- *   the others. With none, the pick says so (`tools_unsupported`).
+ *   the others. A seller that answers that it serves but takes none uses up
+ *   no place of the three: the pick reads on, up to `QUOTES_PER_PICK` quotes.
+ *   It says none takes them (`tools_unsupported`) only once every seller's
+ *   quote said it takes none; a seller it did not read, or one that cannot
+ *   serve now but may take them (unreachable, or saying it takes them), makes
+ *   it a pick with no route for now (`no_seller`).
  *   4. It stays with the seller that answered, so each seller gets one run of
  *      nonces, and moves on when a seller is unreachable, for ten minutes, or
  *      returns a receipt that fails the buyer's checks, for the rest of the epoch.
@@ -38,6 +43,11 @@ export const UNREACHABLE_MS = 10 * 60_000;
 /** How long the chain's answer of which identity a wallet signs for is kept. */
 export const SIGNER_TTL_MS = 5 * 60_000;
 const QUOTED_CANDIDATES = 3;
+/**
+ * The most quotes one pick reads, kept or asked. A call with tools reads on past sellers that serve but take none,
+ * which use up none of the `QUOTED_CANDIDATES` places, up to this many in all.
+ */
+export const QUOTES_PER_PICK = 12;
 
 export interface Route {
   seller: bigint;
@@ -108,11 +118,25 @@ export class Router {
       if (a.pricePerUnit !== b.pricePerUnit) return a.pricePerUnit < b.pricePerUnit ? -1 : 1;
       return (this.latency.get(a.seller.toString()) ?? Infinity) - (this.latency.get(b.seller.toString()) ?? Infinity);
     });
+    // `places`: candidates that could not serve, of the three; `read`: every quote this pick read.
+    let places = 0;
+    let read = 0;
     let withoutTools = false;
-    for (const offer of candidates.slice(0, QUOTED_CANDIDATES)) {
+    // A seller not read, or one that cannot serve now and did not say it takes no tools: one that may take them later.
+    let mayLater = false;
+    for (const offer of candidates) {
+      if (places >= QUOTED_CANDIDATES || read >= QUOTES_PER_PICK) {
+        mayLater = true;
+        break;
+      }
+      read += 1;
       const quote = await this.quoteOf(offer.seller, offer.peerId, serviceId, epoch, now);
       const quoted = quote?.offers.find((q) => q.serviceId === serviceId);
-      if (!quote || quote.epoch !== epoch || !quoted?.available || BigInt(quoted.pricePerUnit) > maxPricePerUnit) continue;
+      if (!quote || quote.epoch !== epoch || !quoted?.available || BigInt(quoted.pricePerUnit) > maxPricePerUnit) {
+        places += 1;
+        if (!quote || quote.epoch !== epoch || quoted?.tools === true) mayLater = true;
+        continue;
+      }
       if (needs.tools && quoted.tools !== true) {
         withoutTools = true;
         continue;
@@ -120,7 +144,7 @@ export class Router {
       this.sticky.set(serviceId, offer.seller);
       return { route: { seller: offer.seller, peerId: offer.peerId, pricePerUnit: BigInt(quoted.pricePerUnit) } };
     }
-    return { route: null, reason: withoutTools ? 'tools_unsupported' : 'no_seller' };
+    return { route: null, reason: withoutTools && !mayLater ? 'tools_unsupported' : 'no_seller' };
   }
 
   /** Whether the quote kept from `seller` for `serviceId` in `epoch` says it takes no tool calls. */

@@ -6,7 +6,10 @@
  * takes tools; the router and gateway sending a call with tools only to such
  * a seller, and refusing it before anything is signed when none is; the
  * backend sending tools and reading the calls back; the receipt committing to
- * the calls; the usage split; and access keys' 64-bit ids.
+ * the calls; an answer its backend stopped short returning text alone; a call
+ * kept across the seller's restart; the usage split; and access keys' 64-bit
+ * ids. The router's choice among sellers that take tools and sellers that do
+ * not is in gateway-router.test.ts.
  */
 import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
@@ -240,12 +243,19 @@ describe('a call with tools through the gateway', () => {
   let completion: Completion;
   let seen: CompletionCall[];
   let payloads: string[];
+  let answers: ServeResponse[];
   let tamper: ((answer: ServeResponse) => ServeResponse) | undefined;
   let quoteTools: boolean | undefined;
 
   const backend: Connector = { kind: 'openai', complete: async (c) => { seen.push(c); return completion; } };
   const body = (a: GatewayAnswer) => a.body as any;
   const call = (chat: unknown = CHAT) => gateway.chatCompletion(caller, chat);
+
+  /** The seller, on its directory: a second one there is the first restarted. */
+  const sellerOf = (tools: boolean) => new Seller({
+    chain, dir: join(dir, 'seller'), signer: NODE.address, peerId: 'seller-peer', stopServingSeconds: 180, tickSeconds: 300,
+    services: [{ model: MODEL, serviceId: SERVICE, pricePerUnit: PRICE, capacity: null, provenance: 'upstream-claimed', connector: backend, tools }],
+  });
 
   /** Buyer and seller on one mock chain, as gateway.test.ts sets them up; `tools` is whether the seller's service takes them. */
   async function setUp(tools: boolean): Promise<void> {
@@ -256,10 +266,7 @@ describe('a call with tools through the gateway', () => {
     const buyer = new Buyer({ chain, store: new BuyerStore(join(dir, 'buyer')), config: { enabled: true, buyerWallet: NODE.address, prefundLeadSeconds: 7_200, tickSeconds: 300 } });
     const { epoch } = await chain.getEpochTimes();
     await buyer.fund({ epoch, source: { kind: 'wallet' }, services: [{ serviceId: SERVICE, serviceClass: 1, value: 10n ** 6n, maxPricePerUnit: 100n }] });
-    seller = new Seller({
-      chain, dir: join(dir, 'seller'), signer: NODE.address, peerId: 'seller-peer', stopServingSeconds: 180, tickSeconds: 300,
-      services: [{ model: MODEL, serviceId: SERVICE, pricePerUnit: PRICE, capacity: null, provenance: 'upstream-claimed', connector: backend, tools }],
-    });
+    seller = sellerOf(tools);
     await seller.load();
     await seller.tick();
     const domain = (await chain.getMarketplaceContracts()).requestDomain;
@@ -282,6 +289,7 @@ describe('a call with tools through the gateway', () => {
       send: async (_peer, payload) => {
         payloads.push(new TextDecoder().decode(payload));
         const answer = await seller.serve(decodeMessage(payload), 'buyer-peer');
+        answers.push(answer);
         return encodeMessage(tamper ? tamper(answer) : answer);
       },
       modelOf: async () => MODEL,
@@ -293,6 +301,7 @@ describe('a call with tools through the gateway', () => {
   beforeEach(() => {
     seen = [];
     payloads = [];
+    answers = [];
     tamper = undefined;
     quoteTools = undefined;
     completion = { content: null, toolCalls: CALLS as never, promptTokens: 40, completionTokens: 9 };
@@ -361,6 +370,53 @@ describe('a call with tools through the gateway', () => {
     const changed = await call({ ...CHAT, tools: TOOLS });
     expect(changed.status).toBe(502);
     expect(body(changed)).toMatchObject({ error: { code: 'bad_receipt' }, problem: 'result_mismatch' });
+  });
+
+  it('answers with text alone when the backend stopped before the end, keeping its reason: its calls may be cut short', async () => {
+    await setUp(true);
+    // The backend reached its token limit inside a call's arguments.
+    completion = {
+      content: null, toolCalls: [{ id: 'call_1', type: 'function', function: { name: 'list_deployments', arguments: '{"id":' } }] as never,
+      finishReason: 'length', promptTokens: 40, completionTokens: 20,
+    };
+    const cut = await call({ ...CHAT, tools: TOOLS });
+    expect(cut.status).toBe(200);
+    expect(body(cut).choices).toEqual([{ index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'length' }]);
+    completion = { content: 'filtered', toolCalls: CALLS as never, finishReason: 'content_filter', promptTokens: 40, completionTokens: 5 };
+    expect(body(await call({ ...CHAT, tools: TOOLS })).choices).toEqual([{ index: 0, message: { role: 'assistant', content: 'filtered' }, finish_reason: 'content_filter' }]);
+    // A backend that finished returns its calls whole.
+    completion = { content: null, toolCalls: CALLS as never, promptTokens: 40, completionTokens: 9 };
+    expect(body(await call({ ...CHAT, tools: TOOLS })).choices[0].message.tool_calls).toEqual(CALLS);
+  });
+
+  it('keeps a call with tool calls across the seller\'s restart: a repeat gets the same answer, with no backend call, and its nonce and value stay counted', async () => {
+    await setUp(true);
+    expect((await call({ ...CHAT, tools: TOOLS })).status).toBe(200);
+    const sent = JSON.parse(payloads[0]!);
+    const { subscriptionId, nonce } = sent.request;
+    const restarted = sellerOf(true);
+    await restarted.load();
+    await restarted.tick();
+    expect(await restarted.serve(sent, 'buyer-peer')).toEqual(answers[0]);
+    expect(answers[0]).toMatchObject({ ok: true, result: { content: null, tool_calls: CALLS, finish_reason: 'tool_calls' }, usage: { promptTokens: 40, completionTokens: 9 } });
+    expect(seen).toHaveLength(1);
+    expect(restarted.ledger.nonceUsed(subscriptionId, nonce)).toBe(true);
+    expect(restarted.ledger.unlanded(subscriptionId, 0)).toBe(seller.ledger.unlanded(subscriptionId, 0));
+    expect(restarted.ledger.unlanded(subscriptionId, 0)).toBe(49n * PRICE);
+  });
+
+  it('holds what it reads back as the wire decodes it: a kept result whose tool_calls is null holds none', async () => {
+    await setUp(true);
+    completion = { content: 'text', promptTokens: 7, completionTokens: 5 };
+    expect((await call()).status).toBe(200);
+    const file = join(dir, 'seller', 'seller-ledger.jsonl');
+    const lines = (await readFile(file, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+    const served = lines.find((e) => e.type === 'served');
+    served.result.tool_calls = null;
+    await writeFile(file, `${lines.map((e) => JSON.stringify(e)).join('\n')}\n`);
+    const restarted = sellerOf(true);
+    await restarted.load();
+    expect(restarted.ledger.served(served.requestDigest)!.result).toStrictEqual({ content: 'text' });
   });
 
   it('answers a completion over its units with its text cut short, and no tool calls', async () => {

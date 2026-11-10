@@ -478,22 +478,30 @@ export function usesTools(body: InferenceBody): boolean {
 }
 
 /**
- * A served call's result: text, or tool calls with text or none. A finish
- * reason the wire does not know is dropped: it is not signed, and says nothing
- * the receipt relies on.
+ * A model's answer, as a backend's message or a served call's result carries
+ * it: text, or tool calls with text or none (`content` null then). Tool calls
+ * that are absent, null or an empty list are none. The one decoder of this
+ * shape: the connector reads a backend's message with it, and the wire a
+ * seller's result. `field` names it in errors.
+ */
+export function answerFromWire(raw: unknown, field = 'result'): { content: string | null; tool_calls?: ToolCall[] } {
+  if (!isRecord(raw)) throw new WireError(`${field} must have text content, or tool calls`);
+  const toolCalls = absent(raw.tool_calls) ? undefined : toolCallsFromWire(raw.tool_calls, `${field}.tool_calls`);
+  if (typeof raw.content !== 'string' && !(toolCalls && (raw.content === null || raw.content === undefined))) {
+    throw new WireError(`${field} must have text content, or tool calls`);
+  }
+  return { content: typeof raw.content === 'string' ? raw.content : null, ...(toolCalls ? { tool_calls: toolCalls } : {}) };
+}
+
+/**
+ * A served call's result (`answerFromWire`) and why the model stopped. A
+ * finish reason the wire does not know is dropped: it is not signed, and says
+ * nothing the receipt relies on.
  */
 export function serveResultFromWire(raw: unknown): ServeResult {
-  if (!isRecord(raw)) throw new WireError('result must have text content, or tool calls');
-  const toolCalls = absent(raw.tool_calls) ? undefined : toolCallsFromWire(raw.tool_calls, 'result.tool_calls');
-  if (typeof raw.content !== 'string' && !(toolCalls && (raw.content === null || raw.content === undefined))) {
-    throw new WireError('result must have text content, or tool calls');
-  }
-  const finish = FINISH_REASONS.find((r) => r === raw.finish_reason);
-  return {
-    content: typeof raw.content === 'string' ? raw.content : null,
-    ...(toolCalls ? { tool_calls: toolCalls } : {}),
-    ...(finish ? { finish_reason: finish } : {}),
-  };
+  const answer = answerFromWire(raw);
+  const finish = FINISH_REASONS.find((r) => r === (raw as Record<string, unknown>).finish_reason);
+  return { ...answer, ...(finish ? { finish_reason: finish } : {}) };
 }
 
 /** A served call's usage, or `undefined` when it has none that reads as one: it is not signed. */

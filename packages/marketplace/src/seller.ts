@@ -550,14 +550,17 @@ function answerOf(call: ServedCall): ServeAnswer {
 
 /**
  * A completion as a served call's result, its output cut to `allowed` tokens: text, or the tools the model called.
- * A completion cut short is its text alone, as a tool call cut short is no call.
+ * A completion cut short is its text alone, as a tool call cut short is no call: cut here to the units the request
+ * pays for, or stopped by its backend before the end (`length`, or `content_filter`), whose reason it keeps. Only a
+ * completion its backend finished returns its tool calls.
  */
 function resultOf(completion: Completion, allowed: number): ServeResult {
   if (allowed < completion.completionTokens) {
     return { content: cutTo(completion.content ?? '', completion.completionTokens, allowed), finish_reason: 'length' };
   }
+  if (completion.finishReason) return { content: completion.content ?? '', finish_reason: completion.finishReason };
   if (completion.toolCalls?.length) return { content: completion.content, tool_calls: completion.toolCalls, finish_reason: 'tool_calls' };
-  return { content: completion.content ?? '', ...(completion.finishReason ? { finish_reason: completion.finishReason } : {}) };
+  return { content: completion.content ?? '' };
 }
 
 /** The frozen prices a prices file holds: service id => epoch => wei per unit. `null` when it holds anything else. */

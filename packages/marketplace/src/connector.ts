@@ -10,7 +10,7 @@
  * counted: input and output tokens. A call with tools sends them, with
  * `tool_choice` and `parallel_tool_calls`; a call without sends what 10.1.0 sent.
  */
-import { WireError, toolCallsFromWire, type ChatMessage, type FinishReason, type ToolCall, type ToolChoice, type ToolSpec } from './wire.js';
+import { WireError, answerFromWire, type ChatMessage, type FinishReason, type ToolCall, type ToolChoice, type ToolSpec } from './wire.js';
 
 export interface Completion {
   /** The text; `null` when the model only called tools. */
@@ -99,26 +99,20 @@ export function connectorOf(settings: ConnectorSettings): Connector {
         usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
       } | null;
       const choice = out?.choices?.[0];
-      const content = choice?.message?.content;
-      const calls = choice?.message?.tool_calls;
-      let toolCalls: ToolCall[] | undefined;
-      if (calls !== undefined && calls !== null && !(Array.isArray(calls) && calls.length === 0)) {
-        try {
-          toolCalls = toolCallsFromWire(calls);
-        } catch (err) {
-          throw new UpstreamError(`the backend answered with tool calls that are not shaped as calls: ${err instanceof WireError ? err.message : String(err)}`);
-        }
+      // The answer's text and tool calls as the wire decodes a served result's: one policy for both.
+      let answer: { content: string | null; tool_calls?: ToolCall[] };
+      try {
+        answer = answerFromWire(choice?.message, 'the answer');
+      } catch (err) {
+        throw new UpstreamError(`the backend answered without text or tool calls: ${err instanceof WireError ? err.message : String(err)}`);
       }
       const promptTokens = out?.usage?.prompt_tokens;
       const completionTokens = out?.usage?.completion_tokens;
-      const answered = typeof content === 'string' || (toolCalls !== undefined && (content === null || content === undefined));
-      if (!answered || !isCount(promptTokens) || !isCount(completionTokens)) {
-        throw new UpstreamError('the backend answered without text or tool calls and token counts');
-      }
+      if (!isCount(promptTokens) || !isCount(completionTokens)) throw new UpstreamError('the backend answered without token counts');
       const finishReason = choice?.finish_reason === 'length' || choice?.finish_reason === 'content_filter' ? choice.finish_reason : undefined;
       return {
-        content: typeof content === 'string' ? content : null,
-        ...(toolCalls ? { toolCalls } : {}),
+        content: answer.content,
+        ...(answer.tool_calls ? { toolCalls: answer.tool_calls } : {}),
         ...(finishReason ? { finishReason } : {}),
         promptTokens,
         completionTokens,

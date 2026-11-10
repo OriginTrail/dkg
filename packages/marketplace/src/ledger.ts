@@ -145,7 +145,7 @@ export class SellerLedger {
       this.log?.(`[marketplace] the seller's ledger ${file} could not be read (${messageOf(err)}); it was moved to ${aside}, and the ledger starts empty`);
       return;
     }
-    const kept = entries.filter(wellFormed);
+    const kept = entries.filter(wellFormed).map(decoded);
     for (const entry of kept) this.apply(entry);
     const left = entries.length - kept.length;
     if (left === 0) return;
@@ -400,6 +400,18 @@ function isServedCall(e: Record<string, unknown>): boolean {
 function isBatchRecord(b: unknown): boolean {
   return isRecord(b) && isString(b.batchId) && isWhole(b.epoch) && isWhole(b.at) && isStrings(b.hashes) && isString(b.wallet)
     && isNonce(b.nonce) && isStrings(b.digests) && isWhole(b.items) && ['sent', 'landed', 'reverted'].includes(b.state as string);
+}
+
+/**
+ * An entry as the ledger keeps it: a served call's result and usage as the wire decodes them, so that what it holds is
+ * a `ServeResult` whatever shape the line had (a result's `tool_calls: null`, say, is none). Its fields keep their
+ * places, so a well-formed line written again is the same line. Other entries as they are.
+ */
+function decoded(entry: Entry): Entry {
+  if (entry.type !== 'served') return entry;
+  // `wellFormed` let in only a usage that decodes.
+  const usage = entry.usage === undefined ? undefined : serveUsageFromWire(entry.usage);
+  return { ...entry, result: serveResultFromWire(entry.result), ...(usage ? { usage } : {}) };
 }
 
 /**
