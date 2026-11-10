@@ -67,7 +67,7 @@ interface AgentStub {
   ) => Promise<'registered' | 'unregistered' | null>;
   isLocalFirstUnregisteredContextGraph: (id: string) => Promise<boolean>;
   getContextGraphOnChainId: (id: string) => Promise<string | null>;
-  isContextGraphRegistered: (id: string) => Promise<boolean>;
+  isContextGraphRegistered: (id: string, options?: { signal?: AbortSignal }) => Promise<boolean>;
   getStoredContextGraphRegistrationOptions: (id: string) => Promise<{
     publishPolicy?: number;
     publishAuthorityAccountId?: bigint;
@@ -268,7 +268,7 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
     await expect(callPolicy(stub, 'cg-local-marker-missing')).resolves.toEqual({});
     expect(getContextGraphOnChainId.calls.length).toBeGreaterThan(0);
     expect((stub.isContextGraphRegistered as any).calls).toEqual([
-      ['cg-local-marker-missing'],
+      ['cg-local-marker-missing', { signal: undefined }],
     ]);
   });
 
@@ -309,7 +309,7 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
     });
     const result = await callPolicy(stub, 'cg-unregistered');
     expect(result).toEqual({});
-    expect((stub.isContextGraphRegistered as any).calls.at(-1)).toEqual(['cg-unregistered']);
+    expect((stub.isContextGraphRegistered as any).calls.at(-1)).toEqual(['cg-unregistered', { signal: undefined }]);
     expect((stub.getStoredContextGraphRegistrationOptions as any).calls).toEqual([]);
     expect((stub.readLocalAccessPolicyEnum as any).calls).toEqual([]);
   });
@@ -333,7 +333,7 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
     });
     const result = await callPolicy(stub, 'cg-registered');
     expect(result).toEqual({ accessPolicy: 0, publishPolicy: 1 });
-    expect((stub.isContextGraphRegistered as any).calls.at(-1)).toEqual(['cg-registered']);
+    expect((stub.isContextGraphRegistered as any).calls.at(-1)).toEqual(['cg-registered', { signal: undefined }]);
     expect((stub.getStoredContextGraphRegistrationOptions as any).calls).toEqual([]);
     expect((stub.readLocalAccessPolicyEnum as any).calls.at(-1)).toEqual(['cg-registered']);
     expect(getContextGraphPublishPolicy.calls.at(-1)).toEqual([9n]);
@@ -708,6 +708,22 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
     const result = await callPolicy(stub, 'cg-no-onchain-id');
     expect(result).toEqual({ accessPolicy: 0 });
     expect(getContextGraphPublishPolicy.calls).toEqual([]);
+  });
+
+  it('forwards the policy caller deadline into its local registration gate', async () => {
+    const { signal } = new AbortController();
+    const isContextGraphRegistered = recorder(async (_id: string, options?: { signal?: AbortSignal }) => {
+      expect(options?.signal).toBe(signal);
+      return false;
+    });
+    const stub = makeStub({ isContextGraphRegistered });
+
+    await expect(
+      (DKGAgent.prototype as any).getContextGraphOnChainPolicy.call(stub, 'cg-registration-deadline', { signal }),
+    ).resolves.toEqual({});
+
+    expect(isContextGraphRegistered.calls).toEqual([['cg-registration-deadline', { signal }]]);
+    expect((stub.readLocalAccessPolicyEnum as any).calls).toEqual([]);
   });
 
   it('forwards a caller signal to the on-chain id lookup and the finalized snapshot read', async () => {

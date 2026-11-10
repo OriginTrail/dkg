@@ -212,11 +212,22 @@ describe('physical catalog replay capacity', () => {
 it.each(['clear', 'reset', 'policy replacement'] as const)('retires queued connection demand on %s while the old physical chunk drains', async mode => {
   const held = deferred();
   const requested: string[] = [];
+  const peers = Array.from({ length: 64 }, (_, i) => `budget-${i}`);
+  const heldPeers = new Set(peers.slice(-4));
+  const physical = new Set<string>();
   const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({
-    requestPeer: async (_cg, peer) => { requested.push(peer); await held.promise; return { status: 'completed', targets: [] }; },
+    requestPeer: async (_cg, peer) => {
+      requested.push(peer);
+      // Spend all 64 demand records without requiring 64 concurrent providers.
+      // The final four retain physical custody behind the agent-wide admission gate.
+      if (heldPeers.has(peer)) {
+        physical.add(peer);
+        try { await held.promise; } finally { physical.delete(peer); }
+      }
+      return { status: 'completed', targets: [] };
+    },
     whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target, parityFailed: async () => false,
   });
-  const peers = Array.from({ length: 64 }, (_, i) => `budget-${i}`);
   let fullSettled = false;
   const full = recovery.request({ contextGraphId: 'cg', policyDigest: 'old', kind: 'full-connected-peers', connectedPeerIds: peers });
   void full.then(() => { fullSettled = true; });
@@ -227,6 +238,7 @@ it.each(['clear', 'reset', 'policy replacement'] as const)('retires queued conne
     reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn() });
   try {
     await vi.waitFor(() => expect(requested).toHaveLength(64));
+    expect(physical.size).toBe(4);
     connection.prepareConnectionOpen('queued-65')!.admit();
     await vi.waitFor(() => expect(replay).toHaveBeenCalledOnce());
     expect(connection.status().activePeers).toBe(1);

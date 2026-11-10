@@ -2524,7 +2524,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         scanBudgetMs,
       ),
       readRegistrationStatus: (contextGraphId) => withBudget(
-        () => this.readLocalContextGraphRegistrationStatus(contextGraphId),
+        (signal) => this.readLocalContextGraphRegistrationStatus(contextGraphId, { signal }),
         `local registration status lookup for ${contextGraphId}`,
       ),
       readCurrentOnChainId: (contextGraphId) => withBudget(
