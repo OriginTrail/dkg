@@ -162,6 +162,13 @@
     "command": "pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts"
   },
   {
+    "pattern": "packages/cli/test-live/public-checkpoint-daemon.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Daemon-owned fresh native bootstrap and restart run with the pinned private JVM in the required Blazegraph CI lane",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg exec vitest run --config vitest.native-bootstrap.config.ts"
+  },
+  {
     "pattern": "packages/agent/test-live/**/*.blazegraph.test.ts",
     "lane": "tornado-blazegraph",
     "reason": "Live Blazegraph regressions required in the existing Tornado Blazegraph CI lane",

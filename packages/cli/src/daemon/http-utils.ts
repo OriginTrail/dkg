@@ -29,7 +29,8 @@ import {
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
-import { type DKGAgent } from '@origintrail-official/dkg-agent';
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { isListContextGraphsBudgetExceeded } from '@origintrail-official/dkg-agent/context-graph-list-budget-error';
 import {
   STORE_OPERATION_TIMEOUT_CODE,
   isStoreSchedulerBusyError,
@@ -189,19 +190,25 @@ export function respondIfContextGraphReadAuthorityUnavailable(
   return true;
 }
 
+/** A typed 503 rendering boundary; callers own any request-specific response metadata. */
+export type UnavailableResponseRenderer = (
+  res: ServerResponse,
+  body: Readonly<Record<string, unknown>>,
+  headers: Readonly<Record<string, string>>,
+) => void;
+
+const renderUnavailableResponse: UnavailableResponseRenderer = (res, body, headers) => {
+  jsonResponse(res, 503, body, undefined, headers);
+};
+
 export function respondIfStoreUnavailable(
   res: ServerResponse,
   err: unknown,
+  renderUnavailable: UnavailableResponseRenderer = renderUnavailableResponse,
 ): StoreUnavailableOutcome | null {
   const classified = classifyStoreUnavailable(err);
   if (!classified) return null;
-  jsonResponse(
-    res,
-    503,
-    classified.body,
-    undefined,
-    { 'Retry-After': '1' },
-  );
+  renderUnavailable(res, classified.body, { 'Retry-After': '1' });
   return classified.outcome;
 }
 
@@ -267,6 +274,12 @@ export function respondWithDaemonError(res: ServerResponse, err: any): void {
     jsonResponse(res, 400, noFundedPublisherWalletBody(typeof err?.message === 'string' ? err.message : String(err)));
   } else if (respondIfPcaFundingUnknown(res, err)) {
     // A rethrowing publish path has the same retryable verdict as /vm/publish.
+  } else if (isListContextGraphsBudgetExceeded(err)) {
+    res.setHeader('Retry-After', '1');
+    jsonResponse(res, 503, {
+      error: 'Context graph listing is temporarily busy; retry the request',
+      code: err.code, retryable: true,
+    });
   } else if (respondIfStoreUnavailable(res, err)) {
     // Store admission pressure and adapter deadlines are transient. The typed
     // response preserves whether work never started or may have completed.
@@ -823,13 +836,14 @@ function contextGraphValidationUnavailable(
   attribution: readonly WritePreflightDiagnosticFailure[],
   rescue: WritePreflightRescueOutcome = 'not-attempted',
   observer?: WritePreflightDiagnostics,
+  renderUnavailable: UnavailableResponseRenderer = renderUnavailableResponse,
 ): null {
   const ctx = createOperationContext('resolve');
   recordWritePreflightUnavailable(ctx, attribution, rescue, observer);
-  jsonResponse(res, 503, {
+  renderUnavailable(res, {
     code: "CONTEXT_GRAPH_VALIDATION_UNAVAILABLE",
     error: `Failed to validate contextGraphId against known context graphs: ${message}`,
-  }, undefined, { 'x-dkg-operation-id': ctx.operationId });
+  }, { 'x-dkg-operation-id': ctx.operationId });
   return null;
 }
 
@@ -907,6 +921,8 @@ async function resolveWriteContextGraphIdOnce(
     writePreflightDiagnostics?: WritePreflightDiagnostics;
     /** Set by the re-resolve after a readiness wait: the exact probe must not share one that began before it. */
     freshProbe?: boolean;
+    /** Caller-owned rendering for validation/store unavailability, never permission or readiness refusals. */
+    renderUnavailable?: UnavailableResponseRenderer;
   } = {},
 ): Promise<string | KnownNotWritable | null> {
   if (!validateRequiredContextGraphId(contextGraphId, res)) return null;
@@ -944,7 +960,7 @@ async function resolveWriteContextGraphIdOnce(
     return { notWritable: candidateId, raw };
   }
   if (exactDecision.kind === "validationUnavailable") {
-    return contextGraphValidationUnavailable(res, exactDecision.errorMessage, exactDecision.attribution, 'not-attempted', opts.writePreflightDiagnostics);
+    return contextGraphValidationUnavailable(res, exactDecision.errorMessage, exactDecision.attribution, 'not-attempted', opts.writePreflightDiagnostics, opts.renderUnavailable);
   }
   // Qualified ids are already canonical and unambiguous. Never turn their
   // point-validation into a full ONTOLOGY/AGENTS catalog scan: under store
@@ -960,14 +976,14 @@ async function resolveWriteContextGraphIdOnce(
       opts.chainRescueTimeoutMs,
     );
     if (rescue === 'accepted') return candidateId;
-    return contextGraphValidationUnavailable(res, message, exactDecision.attribution, rescue, opts.writePreflightDiagnostics);
+    return contextGraphValidationUnavailable(res, message, exactDecision.attribution, rescue, opts.writePreflightDiagnostics, opts.renderUnavailable);
   }
   if (
     exactDecision.kind !== "listFallback" &&
     exactDecision.kind !== "listDeferredReject" &&
     exactDecision.kind !== "listUnavailable"
   ) {
-    return contextGraphValidationUnavailable(res, 'exact context graph preflight was inconclusive', [{ site: 'decision', kind: 'incomplete' }], 'not-attempted', opts.writePreflightDiagnostics);
+    return contextGraphValidationUnavailable(res, 'exact context graph preflight was inconclusive', [{ site: 'decision', kind: 'incomplete' }], 'not-attempted', opts.writePreflightDiagnostics, opts.renderUnavailable);
   }
   // Immutable carry-forward for the list leg. Track B (rescue gating): the
   // store-free on-chain rescue may run ONLY on an `unavailable` verdict — the
@@ -1008,7 +1024,7 @@ async function resolveWriteContextGraphIdOnce(
       ...(exactDecision.kind === 'listUnavailable' ? exactDecision.attribution : []),
       { site: 'list', kind: classifyWritePreflightFailure(err) },
     ];
-    return contextGraphValidationUnavailable(res, message, attribution, rescue, opts.writePreflightDiagnostics);
+    return contextGraphValidationUnavailable(res, message, attribution, rescue, opts.writePreflightDiagnostics, opts.renderUnavailable);
   }
 
   const knownIds = contextGraphs
@@ -1025,7 +1041,7 @@ async function resolveWriteContextGraphIdOnce(
     try {
       exactWritable = await contextGraphRowIsWritable(agent, exact);
     } catch (err) {
-      if (respondIfStoreUnavailable(res, err)) return null;
+      if (respondIfStoreUnavailable(res, err, opts.renderUnavailable)) return null;
       const message = err instanceof Error ? err.message : String(err);
       jsonResponse(res, 500, {
         error: `Failed to validate contextGraphId local writability: ${message}`,
@@ -1099,7 +1115,7 @@ async function resolveWriteContextGraphIdOnce(
         return candidateId;
       }
     } catch (err) {
-      if (respondIfStoreUnavailable(res, err)) return null;
+      if (respondIfStoreUnavailable(res, err, opts.renderUnavailable)) return null;
       const message = err instanceof Error ? err.message : String(err);
       jsonResponse(res, 500, {
         error: `Failed to validate contextGraphId local existence: ${message}`,

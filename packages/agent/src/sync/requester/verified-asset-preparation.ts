@@ -9,6 +9,7 @@ import {
   GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES,
   readGraphKnowledgeAssetConfirmationKindV1,
 } from '@origintrail-official/dkg-publisher';
+import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import { parseGraphScopedDescriptor } from '../durable-integrity.js';
 import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
@@ -221,6 +222,5 @@ export function assertNoLegacyRfc64ControlGraphs(
 }
 
 function stripLiteral(raw: string): string {
-  const match = raw.match(/^"(.*)"(?:\^\^.*|@.*)?$/);
-  return match ? match[1]! : raw;
+  return rdfLiteralBody(raw) ?? raw;
 }

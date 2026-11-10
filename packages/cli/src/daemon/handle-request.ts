@@ -319,6 +319,7 @@ import { createRequestActor } from './routes/context.js';
 import type { AllowedHttpAuthentication } from '../auth.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleBackpressureRoutes } from './routes/backpressure.js';
+import { handleCpuProfileRoutes } from './routes/cpu-profile.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
 import { handleOpenclawRoutes } from './routes/openclaw.js';
 import { handleHermesRoutes } from './routes/hermes.js';
@@ -337,6 +338,7 @@ import { handleCclRoutes } from './routes/ccl.js';
 import { handleLocalAgentsRoutes } from './routes/local-agents.js';
 import { handleEpcisRoutes } from './routes/epcis.js';
 import { handlePcaRoutes } from './routes/pca.js';
+import { handleMarketplaceRoutes } from './routes/marketplace.js';
 import { handleOperationalWalletRoutes } from './routes/operational-wallets.js';
 import { handleIdentityWalletRoutes } from './routes/identity-wallets.js';
 import { handleNotificationRoutes } from './routes/notifications.js';
@@ -388,6 +390,9 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   if (res.writableEnded) return;
 
   await handleBackpressureRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleCpuProfileRoutes(ctx);
   if (res.writableEnded) return;
 
   await handleAgentChatRoutes(ctx);
@@ -444,6 +449,9 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   if (res.writableEnded) return;
 
   await handlePcaRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleMarketplaceRoutes(ctx);
   if (res.writableEnded) return;
 
   await handleOperationalWalletRoutes(ctx);

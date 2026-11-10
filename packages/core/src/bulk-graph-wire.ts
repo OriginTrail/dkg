@@ -7,16 +7,20 @@ export const BULK_GRAPH_MAX_ASSETS = 1024;
 export const BULK_GRAPH_FRAME_BYTES = 64 * 1024;
 export const BULK_GRAPH_REQUEST_BYTES = 512 * 1024;
 export const BULK_GRAPH_HEADER_BYTES = 20;
-export const BULK_GRAPH_KIND = Object.freeze({ REQUEST: 1, META: 2, DATA: 3, ASSET_END: 4,
-  CREDIT: 5, COMMIT: 6, CHUNK_END: 7, REFUSE: 8 });
+/** Shared bytes only: FINAL_ACK meaning belongs to the negotiated protocol. */
+export const GRAPH_TRANSFER_KIND = Object.freeze({ REQUEST: 1, META: 2, DATA: 3, ASSET_END: 4,
+  CREDIT: 5, FINAL_ACK: 6, CHUNK_END: 7, REFUSE: 8 });
+const { FINAL_ACK, ...framing } = GRAPH_TRANSFER_KIND;
+export const BULK_GRAPH_KIND = Object.freeze({ ...framing, COMMIT: FINAL_ACK });
+export const PUBLIC_CHECKPOINT_KIND = Object.freeze({ ...framing, PERSISTED: FINAL_ACK });
 export interface BulkGraphFrame { kind: number; index: number; sequence: number; payload: Uint8Array }
 const MAGIC = 0x444b4732;
 export function validateBulkGraphHeader(kind: number, index: number, sequence: number, length: number): void {
   if (![kind,index,sequence,length].every(Number.isSafeInteger) || kind < 1 || kind > 8
     || index < 0 || index > BULK_GRAPH_MAX_ASSETS || sequence < 0 || sequence > 0xffffffff || length < 0)
     throw new Error('Invalid bulk graph frame header');
-  const limit = kind === BULK_GRAPH_KIND.REQUEST ? BULK_GRAPH_REQUEST_BYTES
-    : kind === BULK_GRAPH_KIND.META ? 128 * 1024 : BULK_GRAPH_FRAME_BYTES;
+  const limit = kind === GRAPH_TRANSFER_KIND.REQUEST ? BULK_GRAPH_REQUEST_BYTES
+    : kind === GRAPH_TRANSFER_KIND.META ? 128 * 1024 : BULK_GRAPH_FRAME_BYTES;
   if (length > limit || ([4,5,6].includes(kind) && length !== 0)
     || ([1,2,3,7,8].includes(kind) && length === 0)) throw new Error('Invalid bulk graph frame length');
 }

@@ -59,9 +59,9 @@ Finished jobs stay until they are cleared. `dkg publisher clear finalized|failed
 
 A re-submit of a Knowledge Asset is matched to its newest job, by context graph, name, sub-graph and agent lane. A bulk clear never lets an older failed job become the newest again. So it keeps a finalized job while an older failed job of the same asset remains. It also never removes a held job. It can remove fewer jobs than are listed, and it is slow on a large queue.
 
-`POST /api/publisher/clear-job { "jobId": "…" }` removes one job, even the newest. Clearing a single job is API-only for now. After you clear the newest job, a re-submit can restart an older failed job of the same asset. It also removes a [held](#held-jobs) job: check its transaction first, or a re-submit can publish again.
+`dkg publisher clear-job <job-id>` removes one finished job, even the newest, through the running daemon (API: `POST /api/publisher/clear-job { "jobId": "…" }`). It never opens the store offline; `cleared` and `already_absent` exit 0, while a refusal exits 1 with its reason. After you clear the newest job, a re-submit can restart an older failed job of the same asset. A [held](#held-jobs) job is removed only with `--allow-pending-transaction` (API: `"allowPendingTransaction": true`): check its transaction first, or a re-submit can publish again.
 
-If the daemon does not answer, `dkg publisher cancel`, `retry` and `clear` refuse to write the store directly while the node home's `daemon.pid` names a running process. They print `Refusing to run "dkg publisher <command>" offline` and exit 1. Try again once the daemon answers, or run `dkg stop` first.
+If the daemon does not answer, `dkg publisher cancel`, `retry` and `clear` refuse to write the store directly while the node home's `daemon.pid` names a running process. They print `Refusing to run "dkg publisher <command>" offline` and exit 1. Try again once the daemon answers, or run `dkg stop` first. `jobs`, `job` and `stats` refuse in the same way; with no daemon running they open the store read-only.
 
 Old finalized jobs can also be removed on a timer. This cleanup is off by default; see [Async Queue Operations](async-queue-operations.md#clean-up-finished-jobs).
 
@@ -72,7 +72,7 @@ An update of an already-published KA can only be published as **one above the KA
 Recovery, per KA:
 
 1. If you sent this publish before, read that job first ([Retry safely](../build/async-jobs.md#retry-safely)). If it is `finalized` and carries your seal, the update is published: stop. If it is still running or [held](#held-jobs), wait until it finalizes or fails and is no longer held, then check again.
-2. If a failed job still holds the KA (a corrected publish gets `409` with its `existingJobId`), read it with `GET /api/publisher/job?id=<id>`. A `retryState.waitingReason` of `pending_chain_proof` or `recovery` means it may have sent a transaction, perhaps the one that moved the version on: follow [Held jobs](#held-jobs) and do not clear it. Otherwise clear it by id: `POST /api/publisher/clear-job { "jobId": "…" }`.
+2. If a failed job still holds the KA (a corrected publish gets `409` with its `existingJobId`), read it with `GET /api/publisher/job?id=<id>`. A `retryState.waitingReason` of `pending_chain_proof` or `recovery` means it may have sent a transaction, perhaps the one that moved the version on: follow [Held jobs](#held-jobs) and do not clear it. Otherwise clear it by id: `dkg publisher clear-job <job-id>`.
 3. `POST /api/knowledge-assets/{name}/wm/pull-from { "layer": "swm" }` re-opens the shared content as a draft (add `"onConflict": "replace"` if a WM draft already exists). If the message says the **published version moved on** (the sealed number is *below* the required one), use `"layer": "vm"` instead and re-apply your edits.
 4. `wm/finalize` — check that the returned `assertionVersion` equals the number the message asked for.
 5. `swm/share`, then `vm/publish-async` (or `vm/publish`).
@@ -129,7 +129,7 @@ Retryable jobs that carry no transaction evidence get a blocker too. `not_auto_r
 2. **Tell the three problems apart.** A provider or access problem leaves the record complete (`chain_recheck_pending`): recovery keeps asking and resumes by itself once the lookup works. Missing local evidence shows up as the `missing` gaps above. An operation-specific limit (an UPDATE has no absence proof; a CREATE needs its nonce and pinned asset identity) is why a complete-looking record can still be held.
 3. **Restore the lookup or the capability, or inspect the transaction yourself**, then request only the control that applies. `POST /api/publisher/retry` and a re-submit refuse a held job by design; recovery is the only automatic exit.
 4. **If no adequate proof can be obtained, an operator cannot manufacture a safe retry either.** Keep the hold and its evidence. Elapsed time is not proof of non-effect, and neither is a missing receipt; escalating or deliberately abandoning the job is a decision, not a proof.
-5. **What clearing does.** `POST /api/publisher/clear-job { "jobId": "<id>" }` removes that one record, held or not. `"allowPendingTransaction": true` (node-operator token, or the agent that enqueued the job) is needed only while recovery owns the job or it is still in flight. Clearing **abandons this node's tracking** of the job. It does not cancel a transaction that was already sent, does not prove that none was, and does not authorize a duplicate-safe replacement — a re-submit afterwards mints a **new** job for the Knowledge Asset, which may publish it a second time. A clear never touches the journal, so whatever it recorded about the job (best-effort, named-KA jobs) stays readable. `POST /api/publisher/cancel` removes only a job that is still `accepted` and cannot act on a held one.
+5. **What clearing does.** `dkg publisher clear-job <id> --allow-pending-transaction` (API: `POST /api/publisher/clear-job { "jobId": "<id>", "allowPendingTransaction": true }`) removes that one record. A held job needs the flag (node-operator token, or the agent that enqueued the job), as does a job recovery owns or one still in flight. Without it the clear answers `409` with `reason: "pending_transaction"` for a held job or one recovery owns, and `"nonterminal"` for one still in flight. Clearing **abandons this node's tracking** of the job. It does not cancel a transaction that was already sent, does not prove that none was, and does not authorize a duplicate-safe replacement — a re-submit afterwards mints a **new** job for the Knowledge Asset, which may publish it a second time. A clear never touches the journal, so whatever it recorded about the job (best-effort, named-KA jobs) stays readable. `POST /api/publisher/cancel` removes only a job that is still `accepted` and cannot act on a held one.
 
 ## Publication latency and store pressure
 
@@ -144,6 +144,10 @@ job and wallet ownership writes, and those writes share store capacity with
 other node work. Durable admission and resume wake parked wallet loops; repeated
 notifications coalesce, and ownership checks and error backoff still apply.
 The polling interval remains a fallback, rather than a required delay for new work.
+Idle wallets are offered new work least recently used first: a wake reaches
+them in that order, and their polls fall in one shared window in the same
+order, so sparse work rotates across the wallets instead of always going to the
+first one listed. A busy wallet is never waited for.
 Automatic retry selection uses the persisted retry deadline
 index, and recovery inventories exclude accepted and finalized history.
 Recovery still retains every failed job needed to preserve its proof backoff.
@@ -187,7 +191,16 @@ For TRAC payment, choose one path:
 | PCA-funded | Register the wallet address as a Publishing Conviction Account agent. |
 | Direct spend | Fund the wallet with enough TRAC and native gas. |
 
-If neither path is ready, the daemon can still start and claim jobs, but publish attempts will fail when the transaction reaches the chain.
+If neither path is ready, the daemon can still start, but publish attempts fail when the transaction reaches the chain.
+
+A refusal for funds (`insufficient_funds`) happens before the transaction enters the mempool, so it proves the transaction never took effect. The publisher therefore retries the job by itself on its bounded retry backoff, and keeps the refused wallet out of claims meanwhile:
+
+- The wallet waits 30 seconds, doubling up to 10 minutes while it stays short. After each wait the publisher reads the wallet's balance. The wallet claims again once the balance covers the cost the chain stated for the refused transaction or, when the chain stated none, once its native balance, its TRAC balance or what its Publishing Conviction Account can still cover has grown since the refusal. Registering the wallet as an agent of a funded account counts, with no transfer to the wallet. A balance the publisher cannot read never keeps a wallet out.
+- Only the refused wallet is kept out. Publication costs vary, so a wallet holding less than the stated cost still claims, and may pay for a cheaper job; if it cannot, the chain refuses it too and it is kept out the same way.
+- While no wallet can pay, jobs wait as `accepted` instead of failing. Top up a wallet and they continue.
+- A refused wallet that is not topped up gets one more attempt after an hour, since a stated cost goes stale when gas prices fall.
+
+The exclusion is kept in memory, so after a restart a wallet that is still short is refused once more before it is excluded again. A job that may have sent a transaction is not affected: it stays held until chain proof settles it. A refusal settles only the refused transaction. It does not release a job while an earlier transaction of that job is still unsettled, or when another endpoint may have accepted the same transaction and lost its answer. A job that failed with `insufficient_funds` before this behaviour existed stays failed; re-submitting its request creates a new job.
 
 ## Identity And Attribution
 

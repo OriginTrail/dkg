@@ -41,6 +41,18 @@ export type SparqlLexicalToken =
   })
   | (SparqlLexicalTokenBase & { readonly kind: 'string' });
 
+/** Language tags and named solution-set identifiers are payloads, not keywords. */
+export function isSparqlWordPayload(tokens: readonly SparqlLexicalToken[], index: number): boolean {
+  const previous = tokens[index - 1];
+  return previous?.kind === 'symbol' && (previous.logicalValue === '@' || previous.logicalValue === '%');
+}
+
+/** Match a syntax keyword without interpreting a language tag or named-set identifier as one. */
+export function isSparqlKeyword(tokens: readonly SparqlLexicalToken[], index: number, keyword: string): boolean {
+  const token = tokens[index];
+  return token?.kind === 'word' && token.upper === keyword && !isSparqlWordPayload(tokens, index);
+}
+
 interface PreparedSparqlCommon {
   /** Exact unprocessed input. */
   readonly source: string;

@@ -211,5 +211,29 @@ describe('init wizard chain persistence', () => {
       expect(resolveStoreControlConfig(undefined, { cpus: 8, backend: saved.store!.backend, configured: saved.store!.controlReservedSlots }))
         .toMatchObject({ slots: { share: 0, publisher: 0 }, source: 'config' });
     });
+
+    // #3565: the block's other settings are the operator's too. A re-run that keeps the store keeps all of them.
+    it.each([
+      ['the managed oxigraph-server store', { backend: 'oxigraph-server', options: { port: 7979 } }],
+      ['an explicit embedded store', { backend: 'oxigraph-worker', options: { path: '/custom/store.nq' } }],
+    ])('keeps store.changelog and store.graphSetIndex when a re-run keeps %s', async (_name, block) => {
+      mocks.realStoreWizard = true;
+      const store = { ...block, changelog: true, graphSetIndex: { enabled: false }, controlReservedSlots: 0 };
+      mocks.loadConfig.mockResolvedValue({ name: 'node', apiPort: 9200, networkConfig: 'testnet', store });
+
+      const saved = await runInit();
+      expect(saved.store).toEqual(store);
+    });
+
+    it('keeps store.changelog and store.graphSetIndex when a re-run keeps the Blazegraph store', async () => {
+      const url = 'http://blaze.test/bigdata/namespace/kb/sparql';
+      mocks.realStoreWizard = true;
+      vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ boolean: true }), { status: 200 }));
+      mocks.loadConfig.mockResolvedValue({ name: 'node', apiPort: 9200, networkConfig: 'testnet',
+        store: { backend: 'blazegraph', options: { url }, changelog: true, graphSetIndex: false } });
+
+      const saved = await runInit();
+      expect(saved.store).toEqual({ backend: 'blazegraph', options: { url, managedByDkg: false }, changelog: true, graphSetIndex: false });
+    });
   });
 });

@@ -33,6 +33,8 @@ export type DaemonEvmSigning = (
 ) & {
   /** The external signer's author keys, which never pay: the agent takes them beside its chain configuration. */
   readonly authorSigners?: RemoteAuthorSigners;
+  /** `chain.signer.nodeHeldAuthor`: the signer pays only, and the authors are agent keys held on the node. */
+  readonly nodeHeldAuthor?: true;
   /**
    * Close the connections to the external signer once nothing signs any more,
    * at shutdown. Calling it again does nothing; with local keys it does nothing.
@@ -109,7 +111,10 @@ export async function resolveDaemonEvmSigning(input: ResolveDaemonEvmSigningInpu
   log(`Payer accounts (${signers.operational.length}):`);
   for (const signer of signers.operational) log(`  ${signer.address}`);
   const authors = signers.authors;
-  if (authors === undefined) {
+  if (remote.nodeHeldAuthor === true) {
+    log('Author keys: held on the node (chain.signer.nodeHeldAuthor); the first agent key registered on the node ' +
+      'becomes the default agent and authors node-token requests');
+  } else if (authors === undefined) {
     log('Author keys: none configured (publishing requires an agent with its own key)');
   } else {
     log(`Author keys at ${authors.endpoint}: ${authors.addresses.length}; ` +
@@ -121,5 +126,6 @@ export async function resolveDaemonEvmSigning(input: ResolveDaemonEvmSigningInpu
     addresses: { wallets: signers.operational.map((signer) => ({ address: signer.address })) },
     chainSigning: { signers: signers.operational },
     ...(authors === undefined ? {} : { authorSigners: authors }),
+    ...(remote.nodeHeldAuthor === true ? { nodeHeldAuthor: true as const } : {}),
   };
 }

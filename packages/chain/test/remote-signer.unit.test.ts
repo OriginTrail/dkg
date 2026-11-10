@@ -3,10 +3,11 @@
  * External JSON-RPC signer support: transport (HTTP and HTTP over a unix
  * socket), credentials, verification of every answer, error mapping, the
  * no-retry/no-failover guarantees and the payer/author account split. Runs
- * against an in-process fake signer; no chain is needed.
+ * against an in-process fake signer; no chain is needed. The chain.signer
+ * configuration block is covered in remote-signer-config.unit.test.ts.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,9 +16,8 @@ import {
   RemoteSigner,
   RemoteSignerClient,
 } from '../src/remote-signer.js';
-import { RemoteSignerError, isRemoteSignerError } from '../src/remote-signer-errors.js';
+import { RemoteSignerError } from '../src/remote-signer-errors.js';
 import { connectRemoteSigners } from '../src/remote-signer-connect.js';
-import { connectConfiguredRemoteSigners, resolveChainSignerConfig } from '../src/remote-signer-config.js';
 import { RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import { OperationalKeyUnavailableError, isExternalEvmSigner } from '../src/evm-signer.js';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
@@ -691,128 +691,6 @@ describe('signer connections', () => {
       }
       expect(destroy).toHaveBeenCalledTimes(failure.connections);
       expect(await connectionsLeftOpen(signer)).toBe(0);
-    }
-  });
-});
-
-describe('chain.signer configuration', () => {
-  it('validates the block and treats an absent or local block as local signing', () => {
-    expect(resolveChainSignerConfig(undefined)).toBeUndefined();
-    expect(resolveChainSignerConfig({ type: 'local' })).toBeUndefined();
-    expect(resolveChainSignerConfig({ type: 'remote', socketPath: '/run/signer.sock', authTokenFile: '/etc/token' })).toEqual({
-      type: 'remote', socketPath: '/run/signer.sock', authTokenFile: '/etc/token',
-    });
-    const bad: Array<[unknown, RegExp]> = [
-      [{ type: 'hsm' }, /type must be "local" or "remote"/],
-      [{ type: 'local', url: 'http://x' }, /local signing takes no other settings/],
-      [{ type: 'remote' }, /set url or socketPath/],
-      [{ type: 'remote', url: 'http://x', socketPath: '/s' }, /not both/],
-      [{ type: 'remote', url: 'x://y' }, /http:\/\/ or https:\/\//],
-      [{ type: 'remote', url: 'http://x', authTokenFile: '/a', authTokenEnv: 'B' }, /authTokenFile or authTokenEnv/],
-      [{ type: 'remote', url: 'http://x', authTokenEnv: 'not a name' }, /environment variable name/],
-      [{ type: 'remote', url: 'http://x', addresses: ['0x1'] }, /addresses must be/],
-      [{ type: 'remote', url: 'http://x', timeoutMs: 1.5 }, /timeoutMs/],
-      [{ type: 'remote', url: 'http://x', authtokenfile: '/a' }, /unknown setting\(s\): authtokenfile/],
-      [{ type: 'remote', url: 'http://x', author: {} }, /needs an address/],
-      [{ type: 'remote', url: 'http://x', author: { address: 'nope' } }, /address must be/],
-    ];
-    for (const [raw, message] of bad) {
-      expect(() => resolveChainSignerConfig(raw), JSON.stringify(raw)).toThrow(message);
-    }
-  });
-
-  it('keeps every optional setting, and connects an author block with its own credential', async () => {
-    expect(resolveChainSignerConfig({
-      type: 'remote',
-      url: 'https://signer.internal',
-      authTokenEnv: 'SIGNER_TOKEN',
-      api: 'clef',
-      addresses: [WALLET_A.address],
-      timeoutMs: 5_000,
-      author: { address: WALLET_B.address, authTokenEnv: 'SIGNER_AUTHOR_TOKEN' },
-    })).toEqual({
-      type: 'remote',
-      url: 'https://signer.internal',
-      authTokenEnv: 'SIGNER_TOKEN',
-      api: 'clef',
-      addresses: [WALLET_A.address],
-      timeoutMs: 5_000,
-      author: { address: WALLET_B.address, authTokenEnv: 'SIGNER_AUTHOR_TOKEN' },
-    });
-    expect(() => resolveChainSignerConfig({ type: 'remote', url: 'http://x', api: 'other' })).toThrow(/api must be/);
-
-    const signer = await fakeSigner({
-      credentials: [
-        { token: TOKEN, keys: [KEY_A] },
-        { token: AUTHOR_TOKEN, keys: [KEY_B] },
-      ],
-    });
-    const connected = await connectConfiguredRemoteSigners(
-      resolveChainSignerConfig({
-        type: 'remote', url: signer.url, authTokenEnv: 'SIGNER_TOKEN', author: { authTokenEnv: 'SIGNER_AUTHOR_TOKEN' },
-      })!,
-      { env: { SIGNER_TOKEN: TOKEN, SIGNER_AUTHOR_TOKEN: AUTHOR_TOKEN } },
-    );
-    expect(connected.operational.map((s) => s.address)).toEqual([WALLET_A.address]);
-    expect(connected.authors!.defaultAuthor!.address).toBe(WALLET_B.address);
-  });
-
-  it('reads the bearer token from a file or the environment, and warns on a shared file', async () => {
-    const signer = await fakeSigner();
-    const dir = await shortTempDir();
-    const tokenFile = join(dir, 'token');
-    await writeFile(tokenFile, `${TOKEN}\n`);
-    await chmod(tokenFile, 0o644);
-    const warnings: string[] = [];
-    const viaFile = await connectConfiguredRemoteSigners(
-      resolveChainSignerConfig({ type: 'remote', url: signer.url, authTokenFile: tokenFile })!,
-      { onWarning: (message) => warnings.push(message) },
-    );
-    expect(viaFile.operational).toHaveLength(2);
-    expect(warnings.join('\n')).toMatch(/accessible to other users/);
-    expect(warnings.join('\n')).not.toContain(TOKEN);
-
-    const viaEnv = await connectConfiguredRemoteSigners(
-      resolveChainSignerConfig({ type: 'remote', url: signer.url, authTokenEnv: 'SIGNER_TOKEN' })!,
-      { env: { SIGNER_TOKEN: TOKEN } },
-    );
-    expect(viaEnv.operational).toHaveLength(2);
-    await expect(connectConfiguredRemoteSigners(
-      resolveChainSignerConfig({ type: 'remote', url: signer.url, authTokenEnv: 'SIGNER_TOKEN' })!,
-      { env: {} },
-    )).rejects.toThrow(/SIGNER_TOKEN, which is not set/);
-    await expect(connectConfiguredRemoteSigners(
-      resolveChainSignerConfig({ type: 'remote', url: signer.url, authTokenFile: join(dir, 'absent') })!,
-    )).rejects.toThrow(/cannot read authTokenFile/);
-  });
-
-  it('never writes the token to the console on failures', async () => {
-    const output: string[] = [];
-    for (const level of ['log', 'info', 'warn', 'error', 'debug'] as const) {
-      vi.spyOn(console, level).mockImplementation((...args: unknown[]) => { output.push(args.map(String).join(' ')); });
-    }
-    const signer = await fakeSigner({
-      reject: () => ({ code: -32000, message: `bad request carrying ${TOKEN}` }),
-    });
-    const errors: unknown[] = [];
-    errors.push(await client(signer).listAccounts().catch((e: unknown) => e));
-    errors.push(await new RemoteSignerClient({ url: signer.url, authToken: `${TOKEN}x` }).listAccounts().catch((e: unknown) => e));
-    const hanging = await fakeSigner({ hang: ['eth_accounts'] });
-    errors.push(await client(hanging, { timeoutMs: 50 }).listAccounts().catch((e: unknown) => e));
-    for (const err of errors) {
-      expect(isRemoteSignerError(err)).toBe(true);
-      expect(`${String(err)} ${JSON.stringify(err)} ${(err as Error).stack}`).not.toContain(TOKEN);
-    }
-    expect(output.join('\n')).not.toContain(TOKEN);
-  });
-
-  it('recognizes a remote-signer failure by its code prefix, as a full error or a code-only record', () => {
-    expect(isRemoteSignerError(new RemoteSignerError('REMOTE_SIGNER_TIMEOUT', 'timed out'))).toBe(true);
-    // A record that keeps only the code, and a code another version of this module names.
-    expect(isRemoteSignerError({ code: 'REMOTE_SIGNER_REJECTED' })).toBe(true);
-    expect(isRemoteSignerError({ code: 'REMOTE_SIGNER_SOMETHING_NEWER' })).toBe(true);
-    for (const other of [undefined, null, 'REMOTE_SIGNER_REJECTED', { code: 'RPC_TIMEOUT' }, { code: 7 }, new Error('REMOTE_SIGNER_REJECTED')]) {
-      expect(isRemoteSignerError(other)).toBe(false);
     }
   });
 });

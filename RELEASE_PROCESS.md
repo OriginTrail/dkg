@@ -445,6 +445,22 @@ SLOT="$(readlink -f "$DKG_HOME/releases/current")"
 test -f "$SLOT/packages/node-ui/dist-ui/index.html" && echo "Node UI static bundle ready"
 ```
 
+### 8a) Watch the rollout
+
+A node can pass the checks above within minutes and still need more than an hour to catch up, so keep watching a mainnet rollout until it settles.
+
+All of these checks are read-only:
+
+- **When to check.** At about 20 min, 45 min and 2 h after the first node updates.
+- **What to check.** On every node: version and commit, restarts and out-of-memory kills, errors since the update, the memory trend, and the catch-up counters from #2063 once they exist.
+- **How to read trends.** Judge them on full 10-minute windows over at least 30 minutes. Catch-up noise can ease and then peak again, so one quiet window doesn't mean it has ended.
+- **Rotated logs.** Read rotated log files too. Heavy logging can rotate a log within hours and hide the update line.
+- **Lines that are normal during catch-up.** On their own, these don't point to a regression, and they stop when catch-up ends:
+  - `Deferring durable sync at CG <graph> due to local backpressure`, or a `Sync backpressure rejected` summary: the graph waits for a free sync slot.
+  - `Network identity probe for <peer> failed retryably`: recovery asked a peer it can't reach and moves on to other peers.
+  - `Poll lane collectionUpdates` with `Store scheduler queue wait timeout`, a few per node: the lane scans that range again on a later poll.
+- **When it's settled.** Call the rollout settled at 2 h, or later if a node is still catching up. Treat anything else these checks find, or one of these lines that continues after catch-up has ended, as a possible regression (§9 covers rollback).
+
 ## 9) Rollback
 
 If issues are detected:
