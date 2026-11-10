@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { readGraphIri, readGraphStateGraphIri, readScope, MemoryLayer } from '@origintrail-official/dkg-core';
+import { contextGraphStorageOwnerCandidates, READ_GRAPH_SEGMENT, readGraphIri, readGraphStateGraphIri, readScope, MemoryLayer } from '@origintrail-official/dkg-core';
 import {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
   BlazegraphStore,
@@ -16,7 +16,9 @@ import {
 } from '../src/index.js';
 import {
   isReadGraphPartitionGraph,
+  isReadGraphStateGraph,
   isStorageHiddenGraph,
+  readGraphPartitionOwner,
   storeGraphEnumerationVisibility,
 } from '../src/graph-enumeration-visibility.js';
 import {
@@ -48,18 +50,22 @@ const META = `${ROOT}/_meta`;
 const VM_READ = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory });
 const SWM_READ = readGraphIri({ scope: readScope(CG, 'code'), layer: MemoryLayer.SharedWorkingMemory });
 const STATE = readGraphStateGraphIri(CG);
-const STRAY = `${ROOT}/_read/stray/graph`;
+// A graph under the partition that no read graph is named after is still the partition's.
+const STRAY = `${ROOT}/${READ_GRAPH_SEGMENT}/stray/graph`;
 const PARTITION_GRAPHS = [VM_READ, SWM_READ, STATE, STRAY];
+// Ordinary graphs of context graphs whose IDs have a `_read` segment, one of
+// them named like a read graph would be under that segment.
+const LEGACY_ASSET = `${ROOT}/_read/project/_verifiable_memory/0xaa/1`;
+const LEGACY_SHARED = `${ROOT}/_read/cg/_shared_memory`;
+
+const COMMENTED_GRAPH_VARIABLE = 'DELETE { GRAPH # comment\n ?g { ?s ?p ?o } } WHERE { GRAPH # comment\n ?g { ?s ?p ?o } }';
 
 function quad(graph: string, subject = 'urn:s', object = '"v"'): Quad {
   return { graph, subject, predicate: 'urn:p', object };
 }
 
-const memberQuads = [quad(ASSET), quad(SWM, 'urn:t'), quad(META, 'urn:m')];
-const plantedQuads = [
-  quad(VM_READ), quad(SWM_READ, 'urn:t'), quad(STRAY, 'urn:x'),
-  quad(STATE, VM_READ, '"ready"'),
-];
+const memberQuads = [quad(ASSET), quad(SWM, 'urn:t'), quad(META, 'urn:m'), quad(LEGACY_ASSET, 'urn:l'), quad(LEGACY_SHARED, 'urn:k')];
+const plantedQuads = [quad(VM_READ), quad(SWM_READ, 'urn:t'), quad(STRAY, 'urn:x'), quad(STATE, VM_READ, '"ready"')];
 
 /** The same store contents, with read graphs planted below the guard in one of them. */
 async function storePair(): Promise<{ plain: TripleStore; planted: TripleStore }> {
@@ -78,18 +84,27 @@ afterEach(async () => {
 
 describe('read-graph partition names in storage', () => {
   it('hides the partition and staging graphs, and nothing that only looks alike', () => {
-    for (const graph of [...PARTITION_GRAPHS, `${ROOT}/_read`, `did:dkg:context-graph:a/b/_read/cg/_verifiable_memory`]) {
+    for (const graph of [...PARTITION_GRAPHS, `${ROOT}/${READ_GRAPH_SEGMENT}`, `did:dkg:context-graph:a/b/${READ_GRAPH_SEGMENT}/cg/_verifiable_memory`,
+      `did:dkg:context-graph:a/b/${READ_GRAPH_SEGMENT}/state`, `did:dkg:context-graph:a/_x/${READ_GRAPH_SEGMENT}/state`]) {
       expect(isReadGraphPartitionGraph(graph), graph).toBe(true);
       expect(isStorageHiddenGraph(graph), graph).toBe(true);
       expect(storeGraphEnumerationVisibility(graph), graph).toBe(false);
     }
     expect(isStorageHiddenGraph(`${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}x`)).toBe(true);
-    for (const graph of [ASSET, SWM, META, ROOT, `${ROOT}/_reader/x`, `${ROOT}/read/x`, 'urn:x:_read',
-      'did:dkg:context-graph:_read', `${ROOT}/code/_verifiable_memory/0xabc/1`]) {
+    for (const graph of [ASSET, SWM, META, ROOT, LEGACY_ASSET, LEGACY_SHARED, `${ROOT}/_read`, `${ROOT}/_read/state`,
+      `${ROOT}/${READ_GRAPH_SEGMENT}er/x`, `${ROOT}/read/x`, `urn:x/${READ_GRAPH_SEGMENT}/state`,
+      `did:dkg:context-graph:${READ_GRAPH_SEGMENT}`, `did:dkg:context-graph:${READ_GRAPH_SEGMENT}/state`,
+      `${ROOT}/code/_verifiable_memory/0xabc/1`]) {
       expect(isReadGraphPartitionGraph(graph), graph).toBe(false);
       expect(storeGraphEnumerationVisibility(graph), graph).toBe(true);
     }
     expect(storeGraphEnumerationVisibility('')).toBe(false);
+    // One parse names the owner, and tells state graphs from read graphs.
+    expect(PARTITION_GRAPHS.map(readGraphPartitionOwner)).toEqual([CG, CG, CG, CG]);
+    expect(readGraphPartitionOwner(`did:dkg:context-graph:a/b/${READ_GRAPH_SEGMENT}/state`)).toBe('a/b');
+    expect([LEGACY_ASSET, LEGACY_SHARED].map(readGraphPartitionOwner)).toEqual([undefined, undefined]);
+    expect([STATE, VM_READ, STRAY, `did:dkg:context-graph:a/_x/${READ_GRAPH_SEGMENT}/state`, `${ROOT}/_read/state`]
+      .map(isReadGraphStateGraph)).toEqual([true, false, false, false, false]);
   });
 
   it('has the HTTP adapters refuse any dataset restriction, an empty one too', async () => {
@@ -116,23 +131,36 @@ describe('read-graph partition names in storage', () => {
 
   it('finds partition graphs named in SPARQL text by IRI, prefix or escape', () => {
     expect(sparqlNamesReadGraphPartition(`DROP GRAPH <${VM_READ}>`)).toBe(true);
-    expect(sparqlNamesReadGraphPartition(`PREFIX r: <${ROOT}/> CLEAR GRAPH r:_read`)).toBe(true);
-    expect(sparqlNamesReadGraphPartition(`PREFIX r: <${ROOT}/> CLEAR GRAPH r:\\_read\\/state`)).toBe(true);
-    expect(sparqlNamesReadGraphPartition(`DROP GRAPH <${ROOT}/\\u005Fread/state>`)).toBe(true);
-    expect(sparqlNamesReadGraphPartition(`BASE <${ROOT}/> DROP GRAPH <_read/state>`)).toBe(true);
+    expect(sparqlNamesReadGraphPartition(`PREFIX r: <${ROOT}/> CLEAR GRAPH r:_\\~read`)).toBe(true);
+    expect(sparqlNamesReadGraphPartition(`PREFIX r: <${ROOT}/> CLEAR GRAPH r:\\_\\~read\\/state`)).toBe(true);
+    expect(sparqlNamesReadGraphPartition(`DROP GRAPH <${ROOT}/\\u005F\\u007Eread/state>`)).toBe(true);
+    expect(sparqlNamesReadGraphPartition(`BASE <${ROOT}/> DROP GRAPH <${READ_GRAPH_SEGMENT}/state>`)).toBe(true);
+    expect(sparqlNamesReadGraphPartition(`DROP GRAPH <${STRAY}>`)).toBe(true);
+    // Relative IRIs resolve against a BASE, so one with the segment counts.
+    expect(sparqlNamesReadGraphPartition(`BASE <${ROOT}/${READ_GRAPH_SEGMENT}/> DROP GRAPH <state>`)).toBe(true);
+    expect(sparqlNamesReadGraphPartition(`BASE <${ROOT}/${READ_GRAPH_SEGMENT}/cg> DROP GRAPH <_verifiable_memory>`)).toBe(true);
+    // Graphs of context graphs whose IDs have a `_read` segment are ordinary.
+    expect(sparqlNamesReadGraphPartition(`DROP GRAPH <${LEGACY_SHARED}>`)).toBe(false);
+    expect(sparqlNamesReadGraphPartition(`SELECT * WHERE { GRAPH <${LEGACY_ASSET}> { ?s ?p ?o } }`)).toBe(false);
+    expect(sparqlNamesReadGraphPartition(`PREFIX l: <${ROOT}/_read/project/> SELECT * WHERE { GRAPH l:_verifiable_memory\\/0xaa\\/1 { ?s ?p ?o } }`)).toBe(false);
     expect(sparqlNamesReadGraphPartition('DROP GRAPH <unterminated')).toBe(false);
     // Text it cannot read through counts as naming the partition.
-    expect(sparqlNamesReadGraphPartition('INSERT DATA { GRAPH <urn:g> { <urn:s> <urn:p> "_read } }')).toBe(true);
+    expect(sparqlNamesReadGraphPartition('INSERT DATA { GRAPH <urn:g> { <urn:s> <urn:p> "_~read } }')).toBe(true);
     expect(sparqlNamesReadGraphPartition('DROP GRAPH <urn:x\\uZZZZ>')).toBe(true);
-    expect(sparqlNamesReadGraphPartition(`INSERT DATA { GRAPH <${ASSET}> { <urn:s> <urn:p> "_read" } }`)).toBe(false);
-    expect(sparqlNamesReadGraphPartition(`DROP GRAPH <${ROOT}/_reader/x>`)).toBe(false);
+    expect(sparqlNamesReadGraphPartition(`INSERT DATA { GRAPH <${ASSET}> { <urn:s> <urn:p> "_~read" } }`)).toBe(false);
+    expect(sparqlNamesReadGraphPartition(`DROP GRAPH <${ROOT}/${READ_GRAPH_SEGMENT}er/x>`)).toBe(false);
     // A prefix can split the segment between its namespace and a local name.
-    expect(sparqlNamesReadGraphPartition(`PREFIX r: <${ROOT}/_> INSERT DATA { GRAPH r:read { <urn:s> <urn:p> "v" } }`)).toBe(true);
-    expect(sparqlNamesReadGraphPartition(`prefix r: <${ROOT}/_re> CLEAR GRAPH r:ad\\/state`)).toBe(true);
-    expect(sparqlNamesReadGraphPartition(`PREFIX r: <${ROOT}/_> CLEAR GRAPH r:reader`)).toBe(false);
+    expect(sparqlNamesReadGraphPartition(`PREFIX r: <${ROOT}/_> INSERT DATA { GRAPH r:\\~read\\/state { <urn:s> <urn:p> "v" } }`)).toBe(true);
+    expect(sparqlNamesReadGraphPartition(`prefix r: <${ROOT}/_~re> CLEAR GRAPH r:ad\\/state`)).toBe(true);
+    expect(sparqlNamesReadGraphPartition(`PREFIX r: <${ROOT}/_> CLEAR GRAPH r:\\~reader`)).toBe(false);
     // An UPDATE that writes through a graph variable cannot be shown to stay outside.
     expect(sparqlUpdateMayWriteReadGraphPartition('DELETE { GRAPH ?g { ?s ?p ?o } } WHERE { GRAPH ?g { ?s ?p ?o } }')).toBe(true);
     expect(sparqlUpdateMayWriteReadGraphPartition('delete where { graph $g { ?s ?p ?o } }')).toBe(true);
+    // Comments and escapes between the keyword and the variable change nothing.
+    expect(sparqlUpdateMayWriteReadGraphPartition(COMMENTED_GRAPH_VARIABLE)).toBe(true);
+    expect(sparqlUpdateMayWriteReadGraphPartition('DELETE WHERE { GRAPH \\u003Fg { <urn:s> <urn:p> <urn:o> } }')).toBe(true);
+    expect(sparqlUpdateMayWriteReadGraphPartition(`INSERT DATA { GRAPH <${LEGACY_ASSET}> { <urn:s> <urn:p> "v" } }`)).toBe(false);
+    expect(sparqlUpdateMayWriteReadGraphPartition(`INSERT DATA { GRAPH <${ASSET}> { <urn:s> <urn:p> "v" } } # GRAPH ?g`)).toBe(false);
     expect(sparqlUpdateMayWriteReadGraphPartition('INSERT { GRAPH ?g { <urn:s> <urn:p> 1 } } WHERE { VALUES ?g { <urn:g> } }')).toBe(true);
     expect(sparqlUpdateMayWriteReadGraphPartition(`INSERT { GRAPH <${ASSET}> { ?s ?p ?o } } WHERE { GRAPH ?g { ?s ?p ?o } }`)).toBe(false);
     expect(sparqlUpdateMayWriteReadGraphPartition(`INSERT DATA { GRAPH <${ASSET}> { <urn:s> <urn:p> "GRAPH ?g" } }`)).toBe(false);
@@ -169,7 +197,7 @@ describe('the read-graph partition guard', () => {
     const writes = writeMethods.map(name => vi.spyOn(adapter as unknown as Record<string, () => unknown>, name));
     const reads = vi.spyOn(adapter, 'query');
     const asset = { graphUri: ASSET, graphQuads: [quad(ASSET)], metaGraphUri: META, metadataSubject: 'urn:m', metadataQuads: [quad(META, 'urn:m')] };
-    const computed = 'INSERT { GRAPH ?g { <urn:s> <urn:p> "bad" } } WHERE { BIND(IRI("did:dkg:context-graph:x/_read/stray") AS ?g) }';
+    const computed = `INSERT { GRAPH ?g { <urn:s> <urn:p> "bad" } } WHERE { BIND(IRI("did:dkg:context-graph:x/${READ_GRAPH_SEGMENT}/stray") AS ?g) }`;
     const refusals: Array<[string, () => Promise<unknown>]> = [
       ['insert', () => store.insert([quad(ASSET), quad(VM_READ)])],
       ['delete', () => store.delete([quad(STATE, VM_READ, '"ready"')])],
@@ -188,11 +216,14 @@ describe('the read-graph partition guard', () => {
       ['replaceSubjectAndInsert', () => store.replaceSubjectAndInsert!(STATE, VM_READ, [quad(STATE, VM_READ)], [quad(STATE, 'urn:n')])],
       ['update', () => store.update!(`DROP SILENT GRAPH <${STATE}>`)],
       ['update', () => store.update!('CLEAR SILENT DEFAULT', { touchedGraphs: [VM_READ] })],
-      ['update', () => store.update!(`PREFIX r: <${ROOT}/_> INSERT DATA { GRAPH r:read { <urn:s> <urn:p> "v" } }`)],
+      ['update', () => store.update!(`PREFIX r: <${ROOT}/_> INSERT DATA { GRAPH r:\\~read\\/state { <urn:s> <urn:p> "v" } }`)],
+      ['update', () => store.update!(`BASE <${ROOT}/${READ_GRAPH_SEGMENT}/> INSERT DATA { GRAPH <cg/_verifiable_memory> { <urn:s> <urn:p> "v" } }`)],
+      ['update', () => store.update!(COMMENTED_GRAPH_VARIABLE)],
       ['update', () => store.update!(computed)],
       ['update', () => store.update!('DELETE WHERE { GRAPH ?g { ?s ?p ?o } }')],
       ['query', () => store.query(`INSERT DATA { GRAPH <${STRAY}> { <urn:s> <urn:p> "v" } }`)],
       ['query', () => store.query(computed)],
+      ['query', () => store.query(COMMENTED_GRAPH_VARIABLE)],
     ];
     for (const [operation, write] of refusals) {
       const error = await write().then(() => undefined, (caught: unknown) => caught);
@@ -235,6 +266,11 @@ describe('the read-graph partition guard', () => {
     await store.update!(`DELETE DATA { GRAPH <${ASSET}> { <urn:s> <urn:p> "w" } }`);
     await store.replaceSubject!(META, 'urn:m', [quad(META, 'urn:m', '"x"')]);
     expect(await store.deleteByPattern({ graph: SWM })).toBe(1);
+    // Graphs of context graphs whose IDs have a `_read` segment are written like any other.
+    await store.update!(`INSERT DATA { GRAPH <${LEGACY_ASSET}> { <urn:s> <urn:p> "w" } }`, { touchedGraphs: [LEGACY_ASSET] });
+    await store.replaceGraph!(LEGACY_SHARED, [quad(LEGACY_SHARED, 'urn:y')]);
+    expect(await store.countQuads(LEGACY_ASSET)).toBe(2);
+    expect(await store.deleteByPattern({ graph: LEGACY_SHARED })).toBe(1);
     await readGraphPartitionMaintenanceStore(store).insert(plantedQuads);
     const read = await store.query(`SELECT ?o WHERE { GRAPH <${VM_READ}> { ?s ?p ?o } }`);
     expect(read.type === 'bindings' && read.bindings.length).toBe(1);
@@ -248,7 +284,10 @@ describe('the read-graph partition guard', () => {
       expect(await planted.countQuads(graph), graph).toBe(0);
       expect(await readGraphPartitionMaintenanceStore(planted).hasGraph(graph), graph).toBe(true);
     }
-    expect(await planted.hasGraph(ASSET)).toBe(true);
+    for (const graph of [ASSET, LEGACY_ASSET, LEGACY_SHARED]) {
+      expect(await planted.hasGraph(graph), graph).toBe(true);
+      expect(await planted.countQuads(graph), graph).toBe(1);
+    }
     expect(await planted.listGraphs()).toEqual(await plain.listGraphs());
     expect(await planted.listGraphsByPrefix!(`${ROOT}/`)).toEqual(await plain.listGraphsByPrefix!(`${ROOT}/`));
     expect(await planted.readGraphInventory!(ROOT, {})).toEqual(await plain.readGraphInventory!(ROOT, {}));
@@ -279,7 +318,8 @@ describe('the read-graph partition guard', () => {
     await base.insert([...memberQuads, ...plantedQuads]);
     const indexed = new GraphSetIndexStore(new ReadGraphPartitionStore(base), { revalidateMs: 0 });
     expect(await indexed.listGraphs()).toEqual(expect.not.arrayContaining(PARTITION_GRAPHS));
-    expect(await indexed.listGraphsByPrefix(`${ROOT}/_read`)).toEqual([]);
+    expect(await indexed.listGraphsByPrefix(`${ROOT}/${READ_GRAPH_SEGMENT}`)).toEqual([]);
+    expect((await indexed.listGraphsByPrefix(`${ROOT}/_read/`)).sort()).toEqual([LEGACY_ASSET, LEGACY_SHARED].sort());
     expect(await indexed.hasGraph(VM_READ)).toBe(false);
     expect(indexed.graphEnumerationVisibility?.(VM_READ)).toBe(false);
     expect(indexed.graphEnumerationVisibility?.(ASSET)).toBe(true);
@@ -317,6 +357,7 @@ describe('dropping read-graph partitions', () => {
     expect(dropped.slice(0, 2).sort()).toEqual([STATE, STRAY].sort());
     expect(dropped.slice(2).sort()).toEqual([VM_READ, SWM_READ].sort());
     expect(await adapter.countQuads()).toBe(memberQuads.length);
+    for (const graph of [LEGACY_ASSET, LEGACY_SHARED]) expect(await adapter.countQuads(graph), graph).toBe(1);
     expect((await adapter.listGraphs()).sort()).toEqual((await readGraphPartitionMaintenanceStore(plain).listGraphs()).sort());
     expect(await dropReadGraphPartitions(plain)).toBe(0);
   });
@@ -346,10 +387,14 @@ describe('dropping read-graph partitions', () => {
 
 describe('stored owners of read-graph partitions', () => {
   it('maps a partition graph to the context graph that holds it', async () => {
-    const graphs = [VM_READ, STATE, 'did:dkg:context-graph:org/team/_read/sub/code/_shared_memory'];
+    const graphs = [VM_READ, STATE, STRAY, `did:dkg:context-graph:org/team/${READ_GRAPH_SEGMENT}/sub/code/_shared_memory`];
     const store = { listGraphs: async () => graphs } as unknown as TripleStore;
     const owners = await listStoredContextGraphOwnerCandidates(store, {});
     expect(owners.sort()).toEqual([CG, 'org', 'org/team'].sort());
+    // A graph of a context graph whose ID has a `_read` segment keeps the owners its own IRI gives.
+    const legacy = { listGraphs: async () => [LEGACY_SHARED] } as unknown as TripleStore;
+    expect((await listStoredContextGraphOwnerCandidates(legacy, {})).sort())
+      .toEqual([...contextGraphStorageOwnerCandidates(LEGACY_SHARED)!].sort());
   });
 
   it('reads the same owners with and without planted read graphs', async () => {

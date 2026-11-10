@@ -21,8 +21,9 @@
  * prefixes after the route filter (no `/_meta` and no `/staging/` anywhere in
  * the name), the per-cgId data graphs for a whole-context-graph VM read, and
  * nothing in a registered child context graph. On top of that it never admits
- * a graph with a `_private`, `_rules`, `_read` or `_shared_memory_meta` path
- * segment, nor a bare `…/staging` graph of a shared layer.
+ * a graph with a `_private`, `_rules` or `_shared_memory_meta` path segment or
+ * the read-graph partition segment (`READ_GRAPH_SEGMENT`), nor a bare
+ * `…/staging` graph of a shared layer.
  *
  * Working memory follows the identity rule rather than the caller's spelling:
  * a draft graph belongs to the agent that its address maps to, in any

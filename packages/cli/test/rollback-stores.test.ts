@@ -371,14 +371,16 @@ describe('dkg rollback readies the local stores for the target version', () => {
 });
 
 const MEMBER = 'did:dkg:context-graph:rollback/_verifiable_memory/0xab/1';
-const READ_GRAPH = 'did:dkg:context-graph:rollback/_read/cg/_verifiable_memory';
-const READ_STATE = 'did:dkg:context-graph:rollback/_read/state';
+const READ_GRAPH = 'did:dkg:context-graph:rollback/_~read/cg/_verifiable_memory';
+const READ_STATE = 'did:dkg:context-graph:rollback/_~read/state';
+// A graph of a context graph whose ID has a `_read` segment, named like a read graph would be under it.
+const LEGACY = 'did:dkg:context-graph:rollback/_read/cg/_shared_memory';
 
-/** An embedded store file holding one member graph and a read-graph partition. */
+/** An embedded store file holding member graphs and a read-graph partition. */
 async function writeStoreWithReadGraphs(): Promise<string> {
   const path = join(wiring.root, 'store.nq');
   const store = new OxigraphStore(path);
-  await store.insert([MEMBER, READ_GRAPH, READ_STATE].map((graph) => ({ graph, subject: 'urn:s', predicate: 'urn:p', object: '"v"' })));
+  await store.insert([MEMBER, LEGACY, READ_GRAPH, READ_STATE].map((graph) => ({ graph, subject: 'urn:s', predicate: 'urn:p', object: '"v"' })));
   await store.close();
   wiring.store = { backend: 'oxigraph-persistent', options: { path } };
   return path;
@@ -404,7 +406,7 @@ describe('dkg rollback drops read-graph partitions', () => {
     expect(await rollback()).toBeUndefined();
 
     expect(wiring.calls).toEqual(['stop', 'swap:b', 'lease held']);
-    expect(await storedGraphs(path)).toEqual([MEMBER]);
+    expect(await storedGraphs(path)).toEqual([LEGACY, MEMBER].sort());
     expect(existsSync(join(wiring.root, 'read-graph-partitions'))).toBe(false);
     expect(output.log).toContain(
       'Dropped 2 read-graph partition graph(s) for 10.0.26; read graphs are rebuilt from the stored data.',
@@ -418,7 +420,7 @@ describe('dkg rollback drops read-graph partitions', () => {
 
     expect(await rollback()).toBeUndefined();
 
-    expect(await storedGraphs(path)).toEqual([MEMBER, READ_STATE, READ_GRAPH].sort());
+    expect(await storedGraphs(path)).toEqual([MEMBER, LEGACY, READ_STATE, READ_GRAPH].sort());
     expect(output.log.join('\n')).not.toContain('read-graph');
   });
 
@@ -450,7 +452,7 @@ describe('dkg rollback drops read-graph partitions', () => {
     } finally { await store.close(); }
   });
 
-  it('closes the store and keeps the note when the drop fails part-way', async () => {
+  it('closes the store and keeps the note when the store cannot list its graphs', async () => {
     await writeFile(join(wiring.root, 'read-graph-partitions'), 'note\n');
     const closed: string[] = [];
     const store = new OxigraphStore();
@@ -460,6 +462,35 @@ describe('dkg rollback drops read-graph partitions', () => {
     }))).rejects.toThrow('store went away');
     expect(closed).toEqual(['closed']);
     expect(existsSync(join(wiring.root, 'read-graph-partitions'))).toBe(true);
+  });
+
+  it('keeps the note when the drop fails part-way, and a second run drops the rest', async () => {
+    const note = join(wiring.root, 'read-graph-partitions');
+    await writeFile(note, 'note\n');
+    const store = new OxigraphStore();
+    await store.insert([MEMBER, READ_GRAPH, READ_STATE].map((graph) => ({ graph, subject: 'urn:s', predicate: 'urn:p', object: '"v"' })));
+    const dropGraph = store.dropGraph.bind(store);
+    let drops = 0;
+    store.dropGraph = async (graph, options) => {
+      drops += 1;
+      if (drops === 2) throw new Error('store went away');
+      return dropGraph(graph, options);
+    };
+    const closed: string[] = [];
+    const open = async () => ({ store, close: async () => { closed.push('closed'); } });
+    try {
+      await expect(dropReadGraphsForRollback(wiring.root, () => undefined, open)).rejects.toThrow('store went away');
+      expect(closed).toEqual(['closed']);
+      expect(existsSync(note)).toBe(true);
+      // The state graph went first; the read graph is still there.
+      expect(await store.hasGraph(READ_STATE)).toBe(false);
+      expect(await store.hasGraph(READ_GRAPH)).toBe(true);
+      expect(await dropReadGraphsForRollback(wiring.root, () => undefined, open)).toBe(1);
+      expect(closed).toEqual(['closed', 'closed']);
+      expect(existsSync(note)).toBe(false);
+      expect(await store.hasGraph(READ_GRAPH)).toBe(false);
+      expect(await store.hasGraph(MEMBER)).toBe(true);
+    } finally { await store.close(); }
   });
 });
 
