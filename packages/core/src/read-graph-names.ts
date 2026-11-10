@@ -29,6 +29,7 @@
 import {
   canonicalKnowledgeAssetAgentAddress,
   validateContextGraphId,
+  validateNewContextGraphId,
   validateSubGraphName,
 } from './constants.js';
 import { MemoryLayer, memoryLayerSlug } from './memory-model.js';
@@ -77,12 +78,12 @@ export function readScope(contextGraphId: string, subGraphName?: string): ReadSc
 }
 
 /**
- * Whether a context graph can have read graphs: a valid ID with no
- * `_`-prefixed segment. IDs from before that rule keep working, but get none.
+ * Whether a context graph can have read graphs: its ID passes the rule for new
+ * IDs ({@link validateNewContextGraphId}), so it has no `_`-prefixed segment.
+ * IDs from before that rule keep working, but get none.
  */
 export function isReadGraphEligibleContextGraphId(contextGraphId: string): boolean {
-  return validateContextGraphId(contextGraphId).valid
-    && !contextGraphId.split('/').some((segment) => segment.startsWith('_'));
+  return validateNewContextGraphId(contextGraphId).valid;
 }
 
 /** Whether an agent address can name a working-memory read graph, after canonicalization. */
