@@ -39,9 +39,9 @@ describe("a backend's output limit and temperature", () => {
     expect(seen[0]!.body).toEqual({ model: 'gpt-5.6-sol', messages: CALL.messages, max_completion_tokens: 7, stream: false });
   });
 
-  it('are max_tokens and 0 for any other backend, as in 10.1.0: an Ollama on the tailnet, say', async () => {
+  it('are max_tokens and 0 for any other backend, as in 10.1.0: a local Ollama, say', async () => {
     const seen = stubFetch(200, OK);
-    await connectorOf({ kind: 'openai', baseUrl: 'http://100.87.65.128:11434/v1', model: 'llama3' }).complete(CALL);
+    await connectorOf({ kind: 'openai', baseUrl: 'http://127.0.0.1:11434/v1', model: 'llama3' }).complete(CALL);
     expect(seen[0]!.body).toEqual({ model: 'llama3', messages: CALL.messages, max_tokens: 7, temperature: 0, stream: false });
     expect(Object.keys(seen[0]!.body)).toEqual(['model', 'messages', 'max_tokens', 'temperature', 'stream']);
   });
