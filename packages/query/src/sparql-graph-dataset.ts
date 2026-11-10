@@ -15,6 +15,10 @@ import { sparqlRewriteReady, sparqlRewriteUnsupported, type SparqlRewriteResult 
 /** Complete policy for graph access, dataset scope, and ordered transformations. */
 export interface GraphDatasetPlan {
   readonly graphAccess: GraphAccessMode;
+  /**
+   * Every scoped read carries its dataset: FROM sets the default graph and FROM
+   * NAMED the named graphs to the read's graphs.
+   */
   readonly datasetClauses: readonly ('FROM' | 'FROM NAMED')[];
   readonly preservePattern: boolean;
   readonly bindCallerGraphs: boolean;
@@ -73,17 +77,21 @@ export function planGraphDataset(
   }
   const nestedSelect = hasNestedSelect(scope);
   const repeatedPath = hasRepeatedPath(scope);
-  const graphAccess = scopedDescription || nestedSelect || (engine !== 'oxigraph' && repeatedPath)
-    ? 'dataset' : 'values';
-  // A dataset also scopes reads outside the graph wrapper, including descriptions
-  // and mixed/default expressions. Graphless descriptions need only FROM.
-  const needsDataset = graphAccess === 'dataset' || engine !== 'oxigraph'
+  const oxigraph = engine === 'oxigraph';
+  // On Oxigraph the dataset's named graphs alone select the read's graphs: a list
+  // beside them would cost a dataset lookup per listed graph.
+  const graphAccess = oxigraph ? 'named'
+    : scopedDescription || nestedSelect || repeatedPath ? 'dataset' : 'values';
+  // The dataset also scopes reads outside the graph wrapper: descriptions,
+  // default and mixed expressions. Graphless descriptions need only FROM.
+  const readsDefaultGraph = scope.operation === 'DESCRIBE' || scope.readsOnlyDeclaredNamedSet
     || hasOuterDefaultGraphPattern(scope) || (scope.hasGraphClause && hasTopLevelDefaultGraphPattern(scope));
   return {
     graphAccess,
-    datasetClauses: graphlessDescription ? ['FROM'] : needsDataset ? ['FROM', 'FROM NAMED'] : [],
+    datasetClauses: graphlessDescription ? ['FROM']
+      : !oxigraph || readsDefaultGraph ? ['FROM', 'FROM NAMED'] : ['FROM NAMED'],
     preservePattern: graphlessDescription || scope.readsOnlyDeclaredNamedSet,
-    bindCallerGraphs: !scopedDescription && graphAccess === 'dataset' && engine !== 'oxigraph'
+    bindCallerGraphs: !scopedDescription && graphAccess === 'dataset' && !oxigraph
       && scope.graphVariables.length > 0 && repeatedPath && needsConstantCallerGraphs(scope),
     wrapDescriptionPattern: scopedDescription && scope.where !== null,
   };
@@ -118,7 +126,7 @@ export function applyGraphDataset<Reason extends string>(
 ): SparqlRewriteResult<PreparedSparqlQuery, Reason | 'missing-where'> {
   const plan = planGraphDataset(scope, engine);
   const result = plan.preservePattern ? sparqlRewriteReady(scope) : rewrite(plan.graphAccess);
-  if (plan.datasetClauses.length === 0 || result.kind !== 'ready') return result;
+  if (result.kind !== 'ready') return result;
   let rewritten = result.value;
   if (plan.bindCallerGraphs) rewritten = bindCallerGraphsBeforeRead(rewritten, graphs);
   if (plan.wrapDescriptionPattern && rewritten.where) {
