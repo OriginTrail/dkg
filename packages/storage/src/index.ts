@@ -390,6 +390,16 @@ export { StoreReadTransportFailure, isStoreReadTransportFailure } from './store-
 export { readStoreOperationExecutionGeneration, asStoreRecoveryGenerationReader, type StoreRecoveryGenerationReader, type StoreRecoveryState } from './store-recovery-generation.js';
 
 export { readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
+export {
+  DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
+  STORE_GRAPH_CATALOG_LIMIT_NAME,
+  STORE_GRAPH_CATALOG_MAX_BYTES_ENV,
+  STORE_INTERNAL_LIMIT,
+  StoreInternalLimitError,
+  isStoreInternalLimitError,
+  storeGraphCatalogMaxBytes,
+  type StoreInternalLimitErrorLike,
+} from './graph-catalog-internal-limit.js';
 
 // Read graphs: membership, state rows and the contract with the adapters.
 export {

@@ -321,7 +321,7 @@ export interface TripleStore {
    */
   readonly graphEnumerationVisibility?: (graph: string) => boolean;
   listGraphs(options?: QueryOptions): Promise<string[]>;
-  /** Internal measured enumeration; decorators retain source cost across projections. */
+  /** Measured enumeration: the graphs returned, sized as returned; its full reads run under the internal ceiling. */
   readGraphInventory?(prefix: string | undefined, options?: QueryOptions): Promise<MeasuredGraphInventory>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 

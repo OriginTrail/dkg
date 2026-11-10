@@ -4,7 +4,7 @@ import type { QueryOptions } from '../triple-store.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import oxigraph from 'oxigraph';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
-import { assertGraphCatalogWithinResponseLimit } from '../graph-catalog-response-limit.js';
+import { assertGraphCatalogWithinInternalLimit } from '../graph-catalog-internal-limit.js';
 import { withheldGraphQueryDataset } from './withheld-graph-dataset.js';
 import { existsSync, renameSync } from 'node:fs';
 import { mkdir, open, rename } from 'node:fs/promises';
@@ -611,10 +611,7 @@ export class OxigraphStore implements TripleStore {
     // NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY.
     const result = this.store.query(NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY);
     throwIfAborted(options?.signal);
-    if (typeof result === 'boolean' || typeof result === 'string' || !Array.isArray(result)) {
-      assertGraphCatalogWithinResponseLimit([], options?.maxResponseBytes);
-      return [];
-    }
+    if (typeof result === 'boolean' || typeof result === 'string' || !Array.isArray(result)) return [];
     const graphs = (result as Map<string, OxTerm>[])
       .filter((row): row is Map<string, OxTerm> => row instanceof Map)
       .map((row) => {
@@ -622,7 +619,8 @@ export class OxigraphStore implements TripleStore {
         return g ? g.value : '';
       })
       .filter(this.graphEnumerationVisibility);
-    assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
+    // The complete list is node state: the internal catalog ceiling bounds it, not a caller's limit.
+    assertGraphCatalogWithinInternalLimit(graphs);
     return graphs;
   }
 
