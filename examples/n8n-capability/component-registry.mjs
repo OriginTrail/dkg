@@ -3,7 +3,7 @@ import { resolveComponentValueSource, validateComponentUrlSource, normalizeCompo
 import { resolveComponentValue, validateComponentUrl } from './component-values.mjs';
 import { componentProgramSource as componentProgramSourceV1 } from './component-registry-v1.mjs';
 import { programDescriptor } from './program-block.mjs';
-import { validateDkgProfile, dkgOperationIds, profileParameters } from './dkg-profile.mjs';
+import { validateDkgProfile, dkgOperationIds, profileOperations, profileParameters } from './dkg-profile.mjs';
 const text = (label, value = '', extra = {}) => ({ type: 'string', label, default: value, maxLength: 256, ...extra });
 const field = (label, value) => text(label, value, { pattern: 'field', maxLength: 64 });
 const number = (label, value, min = 1, max = 20) => ({ type: 'integer', label, default: value, min, max });
@@ -15,7 +15,9 @@ const entry = (id, name, category, nodeType, parameters = {}, extra = {}) => ({
   input: 'items', outputs: ['main'], parameters, sampleItems: sample, mode: 'action', requiresExportAuthorization: false, ...extra,
 });
 
-function descriptors(profile) { return [
+function descriptors(profile) {
+  const operations = profile ? profileOperations(profile) : {};
+  return [
   entry('edit-fields', 'Edit Fields', 'Data', 'set', {
     fields: json('Field mappings', { team: 'DKG' }),
     keepInput: choice('Keep other input fields', 'yes', ['yes', 'no']),
@@ -42,14 +44,18 @@ function descriptors(profile) { return [
     query: json('Query parameters', {}), headers: json('Request headers', {}),
     body: { ...json('JSON request body', {}), shape: 'any' },
   }, { sampleItems: [{}], version: 2 }),
-  ...(profile ? [
+  ...(operations['dkg-read'] ? [
     entry('dkg-read', 'DKG Read', 'DKG', 'httpRequest', profileParameters(profile, 'dkg-read'),
-      { version: 2, connection: 'httpHeaderAuth', sampleItems: profile.sampleItems?.['dkg-read'] ?? [{}] }),
+      { version: 2, connection: 'httpHeaderAuth', sampleItems: operations['dkg-read'].sampleItems ?? [{}] }),
+  ] : []),
+  ...(operations['invoke-dkg-program'] ? [
     entry('invoke-dkg-program', 'Invoke DKG Program', 'DKG', 'httpRequest', {
       ...profileParameters(profile, 'invoke-dkg-program'),
       inputs: { ...json('Program arguments · $json is all incoming rows', ['{{ $json }}']), shape: 'any' },
       outputMapping: { ...json('Returned result · $json is the Program output array', '{{ $json }}'), shape: 'any' },
     }, { version: 2, connection: 'httpHeaderAuth', sampleItems: [{}] }),
+  ] : []),
+  ...(operations['dkg-write'] ? [
     entry('dkg-write', 'DKG Write', 'DKG', 'httpRequest', profileParameters(profile, 'dkg-write'),
       { version: 2, connection: 'httpHeaderAuth', writes: true, requiresExportAuthorization: false, sampleItems: [{}] }),
   ] : []),
@@ -87,7 +93,7 @@ export function createComponentRegistry(profile = null) {
   const component = id => {
     if (id === 'run-program') return programDescriptor;
     const value = componentRegistry.find(item => item.id === id);
-    if (!value && !profile && dkgOperationIds.includes(id))
+    if (!value && dkgOperationIds.includes(id))
       throw Object.assign(new Error('This workflow requires its configured DKG execution profile.'), { code: 'WORKFLOW_CAPABILITY_CHANGED', status: 409 });
     if (!value) throw Object.assign(new Error('Unknown component.'), { code: 'INVALID_COMPONENT', status: 400 });
     return value;

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { requireDkgProfile } from './dkg-profile.mjs';
+import { requireDkgOperation, profileOperations } from './dkg-profile.mjs';
 import { dkgComponentOperations, componentFailure as fail } from './dkg-component-operations.mjs';
 import { migrateDkgInvocationMetadata } from './dkg-component-schema.mjs';
 
@@ -9,8 +9,8 @@ const hash = (v) =>
   createHash("sha256").update(JSON.stringify(v)).digest("hex");
 export function assertDkgEnabled(definition, profile = null) {
   for (const node of definition.nodes.filter(n => isDkg(n.componentId))) {
-    requireDkgProfile(profile);
-    if (!profile.enabled(node.componentId)) throw fail(node.componentId + ' is not enabled for this execution profile.');
+    const operation = requireDkgOperation(profile, node.componentId);
+    if (!operation.enabled()) throw fail(node.componentId + ' is not enabled for this execution profile.');
     if (node.params.profileRevision !== profile.revision) throw fail('Execution profile changed. Re-select and save the current component revision.');
   }
 }
@@ -42,8 +42,11 @@ export function validateDkgTopology(definition) {
 }
 /** Transport journal only. Scheduling, transformations and joins remain in native n8n. */
 export function dkgComponentStore(db, transport, approvedInputs, profile = null) {
-  transport ??= profile?.transport;
-  approvedInputs ??= profile?.loadInputs() ?? [];
+  const inputSnapshots = new Map(), operationInputs = {};
+  for (const [id, operation] of Object.entries(profile ? profileOperations(profile) : {})) {
+    if (!inputSnapshots.has(operation.loadInputs)) inputSnapshots.set(operation.loadInputs, approvedInputs ?? operation.loadInputs?.() ?? []);
+    operationInputs[id] = inputSnapshots.get(operation.loadInputs);
+  }
   db.exec(`CREATE TABLE IF NOT EXISTS dkg_component_runs(id TEXT PRIMARY KEY, ka_ref TEXT NOT NULL, source_hash TEXT NOT NULL, input TEXT NOT NULL, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS dkg_component_calls(id TEXT PRIMARY KEY, request_hash TEXT NOT NULL, result TEXT, response TEXT);`);
   migrateDkgInvocationMetadata(db);
@@ -80,7 +83,8 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = null)
     if (old && (old.actor !== null && old.actor !== actorText || profile?.requiresNosActor && old.actor === null))
       throw fail('This invocation belongs to a different account or principal.');
     assertDkgEnabled(workflow.definition, profile);
-    profile.validateInput(workflow.definition, input, approvedInputs);
+    for (const id of new Set(workflow.definition.nodes.filter(n => isDkg(n.componentId)).map(n => n.componentId)))
+      requireDkgOperation(profile, id).validateInput(workflow.definition, input, operationInputs[id]);
     const encoded = JSON.stringify(input);
     if (
       old &&
@@ -163,7 +167,8 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = null)
       JSON.stringify(rows).length > 8192
     )
       throw fail("Bounded DKG component input required.");
-    profile.validateNode(node, rows, input);
+    const capability = requireDkgOperation(profile, node.componentId);
+    capability.validateNode(node, rows, input);
     const key = id + ":" + node.id, requestHash = hash(value);
     const readPrior = () => {
       const prior = db.prepare("SELECT * FROM dkg_component_calls WHERE id=?").get(key);
@@ -205,7 +210,7 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = null)
     const dispatch = async (request, kind, options) => {
       const assertCurrent = await authorize(kind === 'write' && request.allowCreate === false);
       assertCurrent?.();
-      return transport(request, kind, options);
+      return transport ? transport(request, kind, options) : capability.transport(request, options);
     };
     const context = { node, rows, id, key, input, value, workflow, actor, prior, dispatch };
     if (prior?.result && !prior.response) {

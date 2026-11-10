@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { programRequest, programResult } from './dkg-program.mjs';
+import { requireDkgOperation } from './dkg-profile.mjs';
 
 export const componentFailure = message => Object.assign(new Error(message), { status: 409, code: 'DKG_COMPONENT_UNCONFIRMED' });
 const fail = componentFailure;
@@ -8,10 +9,11 @@ const fail = componentFailure;
 export function dkgComponentOperations({ db, profile, assertNoPendingWrite }) {
   return {
     'dkg-read': {
-      legacyResponse: ({ rows, node, prior }) => ({ items: profile.readItems(rows, JSON.parse(prior.result), node) }),
+      legacyResponse: ({ rows, node, prior }) => ({ items: requireDkgOperation(profile, 'dkg-read').readItems(rows, JSON.parse(prior.result), node) }),
       prepare: ({ rows, node, input, actor, dispatch }) => async () => {
-        const result = await dispatch(profile.readRequest(node, rows, input), 'read', { actor });
-        const items = profile.readItems(rows, result, node);
+        const read = requireDkgOperation(profile, 'dkg-read');
+        const result = await dispatch(read.readRequest(node, rows, input), 'read', { actor });
+        const items = read.readItems(rows, result, node);
         if (JSON.stringify(items).length > 8192) throw fail('DKG Read result exceeds the workflow batch limit.');
         return { result, response: { items } };
       },
@@ -33,6 +35,7 @@ export function dkgComponentOperations({ db, profile, assertNoPendingWrite }) {
         return JSON.parse(saved.receipt);
       },
       prepare: ({ node, rows, id, key, input, value, workflow, actor, prior, dispatch }) => {
+        const write = requireDkgOperation(profile, 'dkg-write');
         const definition = workflow.definition;
         const readNode = definition.nodes.find(
           (n) => n.componentId === "dkg-read",
@@ -62,7 +65,7 @@ export function dkgComponentOperations({ db, profile, assertNoPendingWrite }) {
         }
         const savedWrite = db.prepare('SELECT * FROM dkg_component_writes WHERE id=?').get(key);
         const evidence = savedWrite ? JSON.parse(savedWrite.evidence)
-          : profile.evidence(rows, context, JSON.parse(read.result), input, programContext);
+          : write.evidence(rows, context, JSON.parse(read.result), input, programContext);
         const { payload, recordCount, summary = {} } = evidence;
         if (!prior) assertNoPendingWrite(workflow, id);
         // Persist the exact callback AND write payload before the first possible effect.
@@ -75,7 +78,7 @@ export function dkgComponentOperations({ db, profile, assertNoPendingWrite }) {
             throw Object.assign(error, { status: error.status ?? 409, code: 'DKG_WRITE_PENDING', invocationId: id, n8nExecutionId: value.executionId });
           }
           if (
-            result.contextGraphId !== profile.targetGraph ||
+            result.contextGraphId !== write.targetGraph ||
             result.digest !== payload.digest ||
             result.name !== payload.name ||
             result.readbackVerified !== true ||
@@ -89,7 +92,7 @@ export function dkgComponentOperations({ db, profile, assertNoPendingWrite }) {
               {
                 ...summary,
                 node: profile.node,
-                contextGraphId: profile.targetGraph,
+                contextGraphId: write.targetGraph,
                 name: result.name,
                 assetId: result.metadata.reservedUal,
                 layer: "wm",

@@ -46,22 +46,43 @@ must contain selectors only, never secrets or private connection details.
 
 The default export is validated by `dkg-profile.mjs` and contains:
 
-- `id`, SHA-256 `revision`, public `node`, and `targetGraph`.
-- Public `parameters` for all three DKG components and optional `sampleItems`.
-- `programs` and `catalogRevision`: reviewed entries with node, graph, operation,
-  source hash, binding digest and version, using the existing Program entry format.
-- `enabled(componentId)` and `loadInputs()` for operator controls and pinned inputs.
-- `validateInput(definition, input, approvedInputs)` before granting an invocation.
-- `validateNode(node, rows, input)` for dataset, graph and input policy checks.
-- `readRequest(node, rows, input)` and `readItems(inputRows, response, node)`;
+- Common identity: `id`, SHA-256 `revision` and public `node`. Account-bound profiles
+  also declare `requiresNosActor`, `accountId` and `authorize(actor)`.
+- `operations`: only the supported keys from `dkg-read`, `invoke-dkg-program` and
+  `dkg-write`. The registry advertises only those components; missing operations
+  are rejected before dispatch, including when reopening a saved workflow.
+
+Every declared operation owns public `parameters`, optional `sampleItems`,
+`enabled()`, `validateInput(definition, input, approvedInputs)`,
+`validateNode(node, rows, input)` and `transport(payload, { actor })`. Optional
+`loadInputs()` supplies a pinned input snapshot; omission means no approved input
+fixture. Admission validates each selected operation once, and callbacks recheck
+its enable switch and node/input policy before cached responses or effects.
+Transport is selected by the declared operation, never by workflow input.
+
+Additional fields belong only to the operation that uses them:
+
+- Read: `readRequest(node, rows, input)` and `readItems(inputRows, response, node)`;
   `readItems` must verify source scope and return the bounded normalized records.
-- `evidence(rows, context, readResponse, input, programContext)` returning
+- Invoke: `programs` and `catalogRevision`, with the existing reviewed node,
+  graph, operation, source hash, binding digest and version format.
+- Write: `targetGraph` and `evidence(rows, context, readResponse, input, programContext)` returning
   `{ payload: { name, digest, quads }, recordCount, summary }`. It validates domain
   provenance and constructs the domain-specific output. `summary` cannot override
   the core write receipt fields.
-- `transport(payload, operation)` for `read`, `invoke` or `write`. No script or
-  destination is selected by the browser. The write payload includes `allowCreate`;
-  false means reconcile the existing identity, never create another asset.
+  The write transport payload includes `allowCreate`; false means reconcile the
+  existing identity, never create another asset.
+
+A read-only profile needs no Program catalog, destination graph, evidence hook,
+Write/Invoke parameters or throwing transport placeholders. See
+`test-support/agent-read-profile.mjs` for a fictional account-bound example used
+through the native MCP callback path.
+
+Existing profiles with the original flat three-operation contract are translated
+by `dkg-profile-legacy.mjs`. Their source files, revisions, descriptor parameter
+order, generated guest source and native hashes remain unchanged. Their original
+`enabled(componentId)` switches and shared `transport(payload, operation, context)`
+continue to apply. New profiles should use `operations` directly.
 
 The transport remains responsible for verification at the actual node and for
 remote idempotency; dependency injection alone does not establish those guarantees.

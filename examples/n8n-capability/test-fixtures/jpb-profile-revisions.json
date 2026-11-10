@@ -1,0 +1,42 @@
+{
+  "dmaast-jpb": {
+    "revision": "2d768ecb327d513bd56e0fd1d08f1d14cee88dbccbe339e02f1049a553947884",
+    "components": {
+      "dkg-read": {
+        "sourceHash": "ac8465421badf77e43c68b3a58f9bbe474c95c06d26115cc26def6a09d93cd32",
+        "nativeHash": "7c40fdbdf97176b518a286795dfb77f037e0080fb8459ceeb08d1b3f2d09ac0d",
+        "descriptorHash": "b4b37ca00820d7e5a67f44b7c4d9e07990b6c314df3c34d81a8ecf211aa4b721"
+      },
+      "invoke-dkg-program": {
+        "sourceHash": "93ef3a4ef6280065443714d46ebb19fcfe2f520de3923270d2f75df4124521c6",
+        "nativeHash": "95f81d1de2be1c43f37540c83344d114d136f313418ee1489bc374dad054ad6f",
+        "descriptorHash": "08256a62781af58c84c2c075ee1a2345b1b02558967500f3b7855e846f4ef2f9"
+      },
+      "dkg-write": {
+        "sourceHash": "6fac263798b9a93505b3d22a0353044367f12d2cc1d662a056531a54c982cc73",
+        "nativeHash": "587b8c4f261396becde0736363cac225202827af9bd906adc0e5d9539734aa81",
+        "descriptorHash": "cb1cf75bf6ad8c08eca5e3237832c828de1a2a41c819c54378ab1712ad4a3c95"
+      }
+    }
+  },
+  "dmaast-jpb-nos": {
+    "revision": "02c67c87864c594b18bf525476a8aaee36251542bf182aeea3d44271c6721e0d",
+    "components": {
+      "dkg-read": {
+        "sourceHash": "d1d4c0507044e917e66c6d5d179a13a821d34b01d10b09faddcc2e31a0876bb9",
+        "nativeHash": "5cbd78db729095855b3e17e8c8fd8adf49044fe48bd6e1e5c3511435b142d39a",
+        "descriptorHash": "5cd39e5447169101e9889af71cda548925b24bc1749d119f160720659b392d7b"
+      },
+      "invoke-dkg-program": {
+        "sourceHash": "322e5ae33b903640a1d9edd5344d9bb0245fef2528c7a819cbb0985a5f454340",
+        "nativeHash": "0f1af70dcc341ba651f72cf219ceb261efa64a09f54671e10caccab110d4fa40",
+        "descriptorHash": "42a88ee32a82283a66ca92a63d651c204531cf4930cb2b0fe2543315c605b980"
+      },
+      "dkg-write": {
+        "sourceHash": "b6869d1c6f4df2dbb49cd1d952eb15b300a527d81e8b768f917f3c0700b7ab6b",
+        "nativeHash": "03ecbd8917b447f04c1e39a16b182fb6f54f4697772ebfde233b9de404251c3c",
+        "descriptorHash": "3b54f4c2fb41606b125e0793dc78c1864da57b7bd396ae52ff677280fa044103"
+      }
+    }
+  }
+}

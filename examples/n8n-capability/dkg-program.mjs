@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
-import { requireDkgProfile } from './dkg-profile.mjs';
+import { requireDkgOperation } from './dkg-profile.mjs';
 import { resolveComponentValue } from './component-values.mjs';
 import { programRecords } from './program-block.mjs';
 
 export function programRequest(node, rows, parentInvocationId, profile = null) {
-  requireDkgProfile(profile);
-  if (node.params.catalogRevision !== profile.catalogRevision) throw new Error('The approved Program catalog changed. Select and save the current revision.');
-  const selected = profile.programs.find(p => p.id === node.params.program && p.node === node.params.node);
+  const operation = requireDkgOperation(profile, 'invoke-dkg-program');
+  if (node.params.catalogRevision !== operation.catalogRevision) throw new Error('The approved Program catalog changed. Select and save the current revision.');
+  const selected = operation.programs.find(p => p.id === node.params.program && p.node === node.params.node);
   if (!selected) throw new Error('Choose a reviewed Program from the selected execution profile.');
   const inputs = resolveComponentValue(node.params.inputs, rows);
   if (!Array.isArray(inputs) || inputs.length > 8 || JSON.stringify(inputs).length > 8192)

@@ -33,7 +33,8 @@ test('withdrawal while a DKG callback awaits account authorization prevents tran
   let transports = 0, received;
   const checkedProfile = { ...profile,
     async authorize(actor) { await profile.authorize(actor); entered.resolve(); await release.promise; },
-    transport() { transports++; throw new Error('withdrawn callback reached transport'); } };
+    operations: { 'dkg-read': { ...profile.operations['dkg-read'],
+      transport() { transports++; throw new Error('withdrawn callback reached transport'); } } } };
   const s = createStudioMcpService({ repository, accountId: profile.accountId, compiler: createStudioContext({ profile: checkedProfile }).compiler,
     dkg: dkgComponentStore(repository.db, undefined, undefined, checkedProfile),
     runner: { async prepare() { return 'v1'; }, async dispatch(_workflow, invocationId, input) {
@@ -184,10 +185,10 @@ for (const reopen of [false, true]) test(`colon-prefixed MCP run keys bind and r
   repository.mcp.recordSavedNative(compiled, published);
   const actor = { id: 'owner', role: 'owner', accountId: profile.accountId };
   const executions = new Map(), reads = [];
-  const scoped = { ...profile, transport(request, operation, context) {
-    assert.equal(operation, 'read'); reads.push({ request, actor: context.actor });
+  const scoped = { ...profile, operations: { 'dkg-read': { ...profile.operations['dkg-read'], transport(request, context) {
+    reads.push({ request, actor: context.actor });
     return { graph: 'urn:test:measurements', measurements };
-  } };
+  } } } };
   const native = createStudioNativeRunner({ api: async path => executions.get(path.match(/\/executions\/(\d+)/)[1]) });
   const runner = { ...native, async prepare() { return 'v1'; }, async dispatch(_workflow, runKey, input) {
     const id = String(42 + executions.size);
