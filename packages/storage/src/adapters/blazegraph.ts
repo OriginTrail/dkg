@@ -50,7 +50,8 @@ import {
 } from './sparql-statements.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { parseBlazegraphConstructNQuads } from './blazegraph-construct-nquads.js';
-import { refuseReadGraphOperations, withReadGraphOperations, type ReadGraphAdapterCapabilities } from './read-graph-request.js';
+import { refuseReadGraphOperations, withReadGraphOperations } from './read-graph-request.js';
+import type { ReadGraphAdapterCapabilities, ReadGraphCapableAdapter } from '../read-graph/adapter-contract.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
 import { isReadOnlyStoreOperation, type StoreOperation, type StoreOperationOutcome } from '../store-operation-outcome.js';
 import {
@@ -237,7 +238,7 @@ function createStoreOperationDeadline(
  * All operations are translated to standard SPARQL 1.1 Query / Update
  * plus Blazegraph's N-Quads bulk-insert endpoint.
  */
-export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapability {
+export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapability, ReadGraphCapableAdapter {
   private readonly queryAdmission = new QueryReadAdmission<AdmittedReadDeadline>();
 
   withQueryReadAdmission<T>(work: () => Promise<T>, options?: QueryOptions): Promise<T> {

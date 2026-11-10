@@ -1,7 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
-import type { ReadGraphWriteOptions, ReadGraphWritePlan } from '../src/adapters/read-graph-request.js';
+import {
+  missingReadGraphMethods,
+  readGraphCapabilitiesOf,
+  type ReadGraphWriteOptions,
+  type ReadGraphWritePlan,
+} from '../src/read-graph/adapter-contract.js';
 import {
   BLAZEGRAPH_WRITE_CASES,
   recordBlazegraphWrite,
@@ -100,6 +105,7 @@ describe('BlazegraphStore write requests with read-graph operations', () => {
 
   it('declares every write it sends with operations, and that the engine runs one update at a time', () => {
     const store = new BlazegraphStore('http://blazegraph.invalid/sparql');
+    expect(missingReadGraphMethods(store, readGraphCapabilitiesOf(store))).toEqual([]);
     expect([...store.readGraphCapabilities.methods].sort()).toEqual(plannedCases
       .map((c) => c.name.split(' ')[0]!).filter((name, i, all) => all.indexOf(name) === i).sort());
     expect(store.readGraphCapabilities.serialUpdates).toBe(true);

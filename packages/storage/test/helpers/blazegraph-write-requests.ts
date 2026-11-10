@@ -1,7 +1,7 @@
 import { vi } from 'vitest';
 import { BlazegraphStore } from '../../src/adapters/blazegraph.js';
 import type { AtomicAssetReplacement } from '../../src/atomic-asset-group.js';
-import type { ReadGraphWriteOptions } from '../../src/adapters/read-graph-request.js';
+import type { ReadGraphWriteOptions } from '../../src/read-graph/adapter-contract.js';
 import type { Quad } from '../../src/triple-store.js';
 import { authorCommitInput } from '../rfc64-author-commit-cas-harness.js';
 
