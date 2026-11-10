@@ -1,9 +1,14 @@
+const programIriMaxLength = 240;
+export function isProgramReference(value) {
+  return typeof value === 'string' && value.length <= programIriMaxLength && /^[a-z][a-z0-9+.-]*:[^\s<>"{}\\]+$/i.test(value);
+}
+
 /** This block delegates to an approved Graph Computer Program, rather than evaluating editor text. */
 export const programDescriptor = Object.freeze({
   id: 'run-program', name: 'Run Program KA', category: 'Programs', nodeType: 'dkg.program', version: 2,
   input: 'items', outputs: ['main'], mode: 'program', sampleItems: [{ value: 12 }],
   parameters: {
-    operationIri: { type: 'string', label: 'Approved operation', default: 'urn:unselected:program', maxLength: 240 },
+    operationIri: { type: 'string', label: 'Approved operation', default: 'urn:unselected:program', maxLength: programIriMaxLength },
     version: { type: 'string', label: 'Program version', default: '1.0.0', maxLength: 80 },
     inputMode: { type: 'string', label: 'Run mode', default: 'each-item', maxLength: 20, options: ['each-item', 'all-items'] },
     inputMapping: { type: 'json', label: 'Program input mapping', default: '{{ $json }}', maxLength: 1600, shape: 'any' },

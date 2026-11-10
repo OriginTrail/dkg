@@ -81,7 +81,12 @@ export function createStudioRepository(state) {
     if (result.changes !== 1) invalid('The native workflow grant changed.');
     return nativeRevision(ref);
   }
-  const activation = ref => { const value = row(ref); return value?.activation_json ? JSON.parse(value.activation_json) : { active: false }; };
+  const lifecycleValue = value => value && ({ kaRef: value.ka_ref, providerId: value.provider_id,
+    activation: value.activation_json ? JSON.parse(value.activation_json) : { active: false },
+    revision: value.activation_revision, eventKey: value.event_key, pendingUnpublication: value.unpublish_pending });
+  // Decode one row so authority and its revision always describe the same state.
+  const lifecycle = ref => lifecycleValue(row(ref));
+  const activation = ref => lifecycle(ref)?.activation ?? { active: false };
   const eventValue = value => value && ({ kaRef: value.ka_ref, providerId: value.provider_id, executionId: value.execution_id,
     invocationId: value.invocation_id, receipt: value.receipt_json ? JSON.parse(value.receipt_json) : null });
   function setActivation(ref, value, eventKey = null, expectedRevision = row(ref)?.activation_revision) {
@@ -129,14 +134,14 @@ export function createStudioRepository(state) {
     if (result.changes !== 1) invalid('The reserved event identity or completed receipt changed.');
     return receipt;
   }
-  return { db, mcp, row, ensure, saved, completeSave, nativeRevision, beginNativeCreate, nativeCreated, nativeGranted, activation, setActivation, deactivate, reserveEvent, completeEvent,
-    pendingUnpublications: () => db.prepare('SELECT ka_ref FROM workflows WHERE unpublish_pending IS NOT NULL').all(),
+  return { db, mcp, row, ensure, saved, completeSave, nativeRevision, beginNativeCreate, nativeCreated, nativeGranted, lifecycle, activation, setActivation, deactivate, reserveEvent, completeEvent,
+    pendingUnpublications: () => db.prepare('SELECT * FROM workflows WHERE unpublish_pending IS NOT NULL').all().map(lifecycleValue),
     completeUnpublication: (ref, activationId) => db.prepare('UPDATE workflows SET unpublish_pending=NULL WHERE ka_ref=? AND unpublish_pending=?')
       .run(ref, activationId),
     nativeWorkflow: providerId => db.prepare('SELECT ka_ref FROM workflows WHERE provider_id=?').get(providerId),
-    hasActiveWorkflows: () => db.prepare('SELECT activation_json FROM workflows WHERE activation_json IS NOT NULL').all().some(r => JSON.parse(r.activation_json).active),
-    eventWorkflow: key => db.prepare('SELECT * FROM workflows WHERE event_key=?').get(key),
-    activatedWorkflows: () => db.prepare('SELECT * FROM workflows WHERE activation_json IS NOT NULL').all(),
+    hasActiveWorkflows: () => db.prepare('SELECT * FROM workflows WHERE activation_json IS NOT NULL').all().some(r => lifecycleValue(r).activation.active),
+    eventWorkflow: key => lifecycleValue(db.prepare('SELECT * FROM workflows WHERE event_key=?').get(key)),
+    activatedWorkflows: () => db.prepare('SELECT * FROM workflows WHERE activation_json IS NOT NULL').all().map(lifecycleValue),
     pendingEvents: ref => db.prepare('SELECT * FROM events WHERE ka_ref=? AND receipt_json IS NULL').all(ref).map(eventValue),
     eventHistory: ref => db.prepare('SELECT * FROM events WHERE ka_ref=? ORDER BY rowid DESC LIMIT 20').all(ref)
       .map(value => { const event = eventValue(value); return { invocationId: event.invocationId, triggerExecutionId: event.executionId, receipt: event.receipt }; }),

@@ -7,10 +7,11 @@ import { join } from 'node:path';
 import { createProgramCatalog } from './program-catalog.mjs';
 import { createStudioRepository } from './studio-repository.mjs';
 import { createStudioService } from './studio-service.mjs';
+import { compileStudio, normalizeStudio, readStudio, studioProgramSource, validateStudioCapabilities } from './studio-definition.mjs';
 
-function fixture(mode) {
+function fixture(mode, programIri = 'urn:test:root-program') {
   const graphId='graph-a',owner='0x'+'1'.repeat(40),sourceHash='a'.repeat(64), calls=[];
-  const source={programIri:'urn:test:root-program',sourceHash,authorAgentAddress:owner,version:'1.0.0',language:'typescript-v1'};
+  const source={programIri,sourceHash,authorAgentAddress:owner,version:'1.0.0',language:'typescript-v1'};
   const binding=(contextGraphId,operationIri,children=[])=>({contextGraphId,operationIri,enabled:true,executorAgentAddress:owner,
     allowedCallerAgentAddresses:[owner],program:{...source,contextGraphId,programLayer:'wm'},typescript:{children}});
   const root=binding(graphId,'urn:root',[{contextGraphId:'graph-b',operationIri:'urn:shared'}]);
@@ -27,6 +28,33 @@ function fixture(mode) {
   const list=createProgramCatalog({graphId,owner,client,definitions:[{grant:leaf.n8n,requiresExportAuthorization:true}]});
   return {graphId,owner,client,list,calls,source,root};
 }
+function programDefinition(capability) {
+  return { id: randomUUID(), name: 'Selected Program', entryId: 'program', nodes: [{ id: 'program', componentId: 'run-program',
+    kaRef: capability.kaRef, sourceHash: capability.sourceHash, x: 0, y: 0,
+    params: { operationIri: capability.operationIri, version: capability.version, inputMode: 'each-item', inputMapping: '{{ $json }}' } }], edges: [] };
+}
+for (const length of [230, 240]) test(`catalog offers a ${length}-character Program reference that Studio can save and read back`, async () => {
+  const ref = 'urn:' + 'a'.repeat(length - 4), f = fixture('safe', ref);
+  const capabilities = await f.list();
+  assert.equal(capabilities.length, 1);
+  assert.equal(capabilities[0].kaRef, ref);
+  const definition = normalizeStudio(programDefinition(capabilities[0]));
+  validateStudioCapabilities(definition, capabilities);
+  const compiled = compileStudio(definition);
+  assert.deepEqual(readStudio(studioProgramSource(compiled)).definition, definition);
+});
+for (const [name, ref] of [
+  ['241 characters', 'urn:' + 'a'.repeat(237)],
+  ['oversized scheme', 'a'.repeat(239) + ':x'],
+  ['whitespace', 'urn:invalid reference'],
+  ['missing scheme', 'invalid-reference'],
+  ['empty value', 'urn:'],
+]) test(`catalog and Studio reject a Program reference with ${name}`, async () => {
+  const f = fixture('safe', ref);
+  assert.deepEqual(await f.list(), []);
+  const definition = programDefinition({ kaRef: ref, sourceHash: f.source.sourceHash, operationIri: f.root.operationIri, version: f.source.version });
+  assert.throws(() => normalizeStudio(definition), /pinned component KA/);
+});
 for(const mode of ['protected','safe','missing','forbidden','wrong-graph','cycle'])test(`catalog resolves child graph identity and fails closed (${mode})`,async()=>{
   const f=fixture(mode),entries=await f.list();
   assert.equal(entries.length,1);assert.equal(entries[0].requiresExportAuthorization,mode!=='safe');

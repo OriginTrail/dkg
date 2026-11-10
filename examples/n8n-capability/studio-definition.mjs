@@ -6,6 +6,7 @@ import { componentPiece, nativeNode, editNode, wire, expression, nativeLiteral }
 import { n8nWorkflowSha256, n8nObservationScope } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { workflowUuid } from './workflow-definition.mjs';
 import { compileProgramWorkflow, programWorkflowSource, readProgramWorkflow, PROGRAM_STUDIO_MARKER } from './program-workflow.mjs';
+import { isProgramReference } from './program-block.mjs';
 
 export const STUDIO_PREFIX = 'urn:demo:nos:studio:';
 const marker = '// nos-n8n-studio-v2:';
@@ -25,7 +26,7 @@ export function normalizeStudio(value, registry = defaultComponentRegistry) {
     if (n.label !== undefined && (typeof n.label !== 'string' || !n.label.trim() || n.label.length > 80)) fail('Name each step using up to 80 characters.');
     if (n.groupId !== undefined) identifier(n.groupId);
     const descriptor = component(n.componentId);
-    if (typeof n.kaRef !== 'string' || (n.componentId === 'run-program' ? !/^[a-z][a-z0-9+.-]*:[^\s<>"{}\\]{1,220}$/i.test(n.kaRef) : !/^urn:demo:n8n:component:[a-z0-9:-]{1,100}$/.test(n.kaRef))
+    if (typeof n.kaRef !== 'string' || (n.componentId === 'run-program' ? !isProgramReference(n.kaRef) : !/^urn:demo:n8n:component:[a-z0-9:-]{1,100}$/.test(n.kaRef))
       || typeof n.sourceHash !== 'string' || !/^[a-f0-9]{64}$/.test(n.sourceHash)) fail('Choose a pinned component KA.');
     if (![n.x, n.y].every(p => Number.isInteger(p) && p >= 0 && p <= 10000)) fail('Invalid block position.');
     let params;

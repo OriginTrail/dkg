@@ -23,7 +23,6 @@ export function createStudioService({ graphId, owner, client, repository, provid
     try { const a = await client.programs.getApproval({ graphId, operationIri: kaRef }); return a.binding.enabled && a.binding.program.sourceHash === sourceHash; }
     catch (e) { if (e.status === 404) return false; throw e; }
   }
-  const activation = repository.activation;
   async function get(kaRef, sourceHash) {
     if (typeof kaRef !== 'string' || !repository.row(kaRef)?.executor) throw reject('Unknown saved graph.');
     const source = await client.programs.getSource({ graphId, programIri: kaRef, programLayer: 'wm' });
@@ -35,7 +34,7 @@ export function createStudioService({ graphId, owner, client, repository, provid
       ...(compiled.grant?.workflowSha256 ? { workflowSha256: compiled.grant.workflowSha256 } : {}),
       mode: compiled.mode, approved: await approved(kaRef, source.sourceHash),
       requiresExportAuthorization: compiled.requiresExportAuthorization || !!repository.row(kaRef).requires_export,
-      activation: (({ active, count, expiresAt }) => ({ active, count, expiresAt }))(activation(kaRef)), readbackVerified: true } };
+      activation: (({ active, count, expiresAt }) => ({ active, count, expiresAt }))(repository.lifecycle(kaRef).activation), readbackVerified: true } };
   }
   async function list() {
     const workflows = [];

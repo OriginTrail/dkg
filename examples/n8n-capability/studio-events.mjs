@@ -7,7 +7,7 @@ const eventUuid = (ref, id) => { const b = createHash('sha256').update(ref + ':'
   const h = b.toString('hex'); return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`; };
 
 export function eventHistorySnapshot(repository, ref, enabled = true) {
-  const a = repository.activation(ref);
+  const a = repository.lifecycle(ref)?.activation ?? { active: false };
   return { activation: { active: enabled && !!a.active && a.expiresAt > Date.now() && a.count < 5,
     count: a.count ?? 0, expiresAt: a.expiresAt }, executions: repository.eventHistory(ref) };
 }
@@ -17,19 +17,18 @@ export function eventHistorySnapshot(repository, ref, enabled = true) {
  */
 export function createStudioEventController({ repository, provider, lookup, execute,
   listCapabilities, validateStudioCapabilities, exportTokenFile }) {
-  const activation = repository.activation;
   const fingerprint = path => createHash('sha256').update(readFileSync(path, 'utf8').trim()).digest('hex');
   let polling = false, stopped = false;
   function prepareExecution({ compiled, workflow, descriptor }) {
     if (compiled.mode !== 'schedule') return { descriptor };
-    if (!activation(workflow.kaRef).active) throw reject('Activate this Schedule workflow before running it.');
+    if (!repository.lifecycle(workflow.kaRef)?.activation.active) throw reject('Activate this Schedule workflow before running it.');
     return { descriptor: { ...descriptor, mode: 'action' },
       beforeDispatch: requiresExport => eventAuthorized(workflow.kaRef, requiresExport) };
   }
   function eventAuthorized(ref, requiresExportAuthorization, expectedRevision) {
-    const row = repository.row(ref), active = row?.activation_json ? JSON.parse(row.activation_json) : { active: false };
-    if (expectedRevision !== undefined && row?.activation_revision !== expectedRevision) throw reject('The event activation changed.');
-    if (!active.active || active.expiresAt < Date.now()) throw reject('This event workflow is inactive.');
+    const state = repository.lifecycle(ref), active = state?.activation;
+    if (expectedRevision !== undefined && state?.revision !== expectedRevision) throw reject('The event activation changed.');
+    if (!active?.active || active.expiresAt < Date.now()) throw reject('This event workflow is inactive.');
     if (requiresExportAuthorization && (!exportTokenFile || active.exportFingerprint !== fingerprint(exportTokenFile))) throw reject('The operator export authorization changed.');
   }
   async function deliverEvent({ compiled, workflow, activationRevision, providerId, executionId, invocationId, itemsJson, requiresExportAuthorization }) {
@@ -48,8 +47,8 @@ export function createStudioEventController({ repository, provider, lookup, exec
     const pending = (async () => {
       await previous?.catch(() => {});
       if (active) {
-        const row = repository.row(ref), current = activation(ref);
-        if (row?.activation_revision !== expectedRevision || !current.active || current.expiresAt < Date.now())
+        const state = repository.lifecycle(ref), current = state?.activation;
+        if (state?.revision !== expectedRevision || !current?.active || current.expiresAt < Date.now())
           throw reject('This event activation changed.');
       }
       await provider.setPublished(ref, active);
@@ -58,7 +57,7 @@ export function createStudioEventController({ repository, provider, lookup, exec
     try { await pending; } finally { if (publications.get(ref) === pending) publications.delete(ref); }
   }
   async function reconcileUnpublication(ref) {
-    const pending = repository.row(ref)?.unpublish_pending;
+    const pending = repository.lifecycle(ref)?.pendingUnpublication;
     if (!pending) return;
     await setPublished(ref, false);
     repository.completeUnpublication(ref, pending);
@@ -70,13 +69,13 @@ export function createStudioEventController({ repository, provider, lookup, exec
   async function activate(value, authorize) {
     if (!value || Object.keys(value).some(k => !['kaRef', 'sourceHash', 'active', 'activationId'].includes(k)) || typeof value.active !== 'boolean') throw reject('Choose an activation state.');
     const activationId = workflowUuid(value.activationId);
-    const revision = typeof value.kaRef === 'string' ? repository.row(value.kaRef)?.activation_revision : undefined;
+    const revision = typeof value.kaRef === 'string' ? repository.lifecycle(value.kaRef)?.revision : undefined;
     const { compiled, workflow } = await lookup(value.kaRef, value.sourceHash);
     if (!['schedule', 'webhook'].includes(compiled.mode)) throw reject('Start with a Webhook or Schedule Trigger to activate events.');
-    if (activation(value.kaRef).activationId === activationId) {
-      const current = activation(value.kaRef);
+    const state = repository.lifecycle(workflow.kaRef), current = state.activation;
+    if (current.activationId === activationId) {
       if (value.active && current.active && current.expiresAt > Date.now() && compiled.mode === 'schedule')
-        await setPublished(workflow.kaRef, true, repository.row(workflow.kaRef).activation_revision);
+        await setPublished(workflow.kaRef, true, state.revision);
       if (!current.active) await reconcileUnpublication(workflow.kaRef);
       return (await lookup(value.kaRef)).workflow;
     }
@@ -97,21 +96,21 @@ export function createStudioEventController({ repository, provider, lookup, exec
   }
   async function event(key, value) {
     if (!value || Object.keys(value).some(k => !['invocationId', 'items'].includes(k))) throw reject('Supply an event identity and items.');
-    const row = repository.eventWorkflow(key);
-    if (!row) throw reject('Inactive event endpoint.');
-    const { compiled, workflow } = await lookup(row.ka_ref);
+    const state = repository.eventWorkflow(key);
+    if (!state) throw reject('Inactive event endpoint.');
+    const { compiled, workflow } = await lookup(state.kaRef);
     if (compiled.mode !== 'webhook') throw reject('This endpoint is not a webhook.');
     if (!workflow.approved) throw reject('Event workflow approval changed.');
     const policy = validateStudioCapabilities(compiled.definition, await listCapabilities());
     const invocationId = workflowUuid(value.invocationId), itemsJson = JSON.stringify(value.items);
-    return deliverEvent({ compiled, workflow, activationRevision: row.activation_revision, providerId: row.provider_id,
+    return deliverEvent({ compiled, workflow, activationRevision: state.revision, providerId: state.providerId,
       executionId: invocationId, invocationId, itemsJson, requiresExportAuthorization: workflow.requiresExportAuthorization || policy.requiresExportAuthorization });
   }
   async function history(ref, mayDiscloseEvent) {
     const { compiled, workflow } = await lookup(ref);
-    const row = repository.row(ref), a = activation(ref);
+    const state = repository.lifecycle(ref), a = state.activation;
     let disclose = false;
-    if (row.event_key && workflow.approved && a.active && a.expiresAt > Date.now() && mayDiscloseEvent) {
+    if (state.eventKey && workflow.approved && a.active && a.expiresAt > Date.now() && mayDiscloseEvent) {
       const capabilities = await listCapabilities();
       try {
         const policy = validateStudioCapabilities(compiled.definition, capabilities);
@@ -119,41 +118,41 @@ export function createStudioEventController({ repository, provider, lookup, exec
       } catch (error) { if (error.code !== 'WORKFLOW_CAPABILITY_CHANGED') throw error; }
     }
     return { ...eventHistorySnapshot(repository, ref),
-      ...(disclose ? { eventPath: '/spike/ka/events/' + row.event_key } : {}) };
+      ...(disclose ? { eventPath: '/spike/ka/events/' + state.eventKey } : {}) };
   }
   async function poll() {
     if (polling || stopped) return; polling = true;
     try {
       // Inactive workflows can still need provider cleanup. It does not require
       // current source/catalog availability and never restores local authority.
-      for (const row of repository.pendingUnpublications()) {
-        try { await reconcileUnpublication(row.ka_ref); } catch { /* Retain cleanup for the next poll/restart. */ }
+      for (const state of repository.pendingUnpublications()) {
+        try { await reconcileUnpublication(state.kaRef); } catch { /* Retain cleanup for the next poll/restart. */ }
       }
-      for (const row of repository.activatedWorkflows()) {
-        const a = activation(row.ka_ref); if (!a.active) continue;
+      for (const state of repository.activatedWorkflows()) {
+        const a = state.activation; if (!a.active) continue;
         let compiled, workflow, capabilities, requiresExportAuthorization;
         try {
-          ({ compiled, workflow } = await lookup(row.ka_ref));
+          ({ compiled, workflow } = await lookup(state.kaRef));
           capabilities = await listCapabilities();
         } catch { continue; } // Unavailable inspection is not evidence of revoked authority.
         try {
           const policy = validateStudioCapabilities(compiled.definition, capabilities);
           requiresExportAuthorization = workflow.requiresExportAuthorization || policy.requiresExportAuthorization;
-          eventAuthorized(row.ka_ref, requiresExportAuthorization, row.activation_revision);
+          eventAuthorized(state.kaRef, requiresExportAuthorization, state.revision);
           if (!workflow.approved) throw reject('Event workflow approval changed.');
         } catch (error) {
           if (['INVALID_WORKFLOW', 'WORKFLOW_CAPABILITY_CHANGED'].includes(error.code)) {
-            try { await deactivate(row.ka_ref, randomUUID(), compiled.mode, row.activation_revision); } catch {}
+            try { await deactivate(state.kaRef, randomUUID(), compiled.mode, state.revision); } catch {}
           }
           continue;
         }
         if (compiled.mode !== 'schedule') continue;
-        const pendingExecutionIds = repository.pendingEvents(row.ka_ref).map(event => event.executionId);
+        const pendingExecutionIds = repository.pendingEvents(state.kaRef).map(event => event.executionId);
         for await (const { executionId, items } of provider.timerEvents({ grant: compiled.grant,
           startedAt: a.startedAt, pendingExecutionIds })) {
           try {
-            await deliverEvent({ compiled, workflow, activationRevision: row.activation_revision, providerId: row.provider_id,
-              executionId, invocationId: eventUuid(row.ka_ref, executionId), itemsJson: JSON.stringify(items), requiresExportAuthorization });
+            await deliverEvent({ compiled, workflow, activationRevision: state.revision, providerId: state.providerId,
+              executionId, invocationId: eventUuid(state.kaRef, executionId), itemsJson: JSON.stringify(items), requiresExportAuthorization });
           } catch { /* Retain this exact invocation for the next reconciliation poll. */ }
         }
       }

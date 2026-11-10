@@ -77,23 +77,39 @@ test('activation revisions fence stale commits across connections and survive re
   try {
     first.ensure({ kaRef: 'flow', workflowName: 'Event workflow' });
     first.db.prepare('UPDATE workflows SET provider_id=? WHERE ka_ref=?').run('native', 'flow');
-    const initial = first.row('flow').activation_revision;
+    assert.equal(first.lifecycle('unknown'), undefined);
+    assert.deepEqual(first.lifecycle('flow'), { kaRef: 'flow', providerId: 'native', activation: { active: false },
+      revision: 0, eventKey: null, pendingUnpublication: null });
+    const initial = first.lifecycle('flow').revision;
     first.setActivation('flow', { active: true, activationId: 'first', count: 0, expiresAt: Date.now() + 60000 }, 'first-key', initial);
-    const revision = first.row('flow').activation_revision;
+    const active = first.lifecycle('flow'), revision = active.revision;
     first.reserveEvent({ kaRef: 'flow', providerId: 'native', executionId: '1', invocationId: 'event-1' }, () => {});
-    assert.equal(second.row('flow').activation_revision, revision);
-    assert.equal(second.activation('flow').count, 1);
+    const admitted = { ...active, activation: { ...active.activation, count: 1 } };
+    assert.deepEqual(second.lifecycle('flow'), admitted);
+    assert.deepEqual(second.eventWorkflow('first-key'), admitted);
+    assert.deepEqual(second.activatedWorkflows(), [admitted]);
+    assert.equal(active.activation.count, 0);
     second.deactivate('flow', 'revoked', true);
-    second.completeUnpublication('flow', 'revoked');
-    const revoked = second.row('flow');
+    const revoked = { ...admitted, activation: { active: false, activationId: 'revoked' },
+      revision: revision + 1, eventKey: null, pendingUnpublication: 'revoked' };
+    assert.deepEqual(first.lifecycle('flow'), revoked);
+    assert.equal(first.eventWorkflow('first-key'), undefined);
+    assert.equal(first.hasActiveWorkflows(), false);
     assert.throws(() => first.setActivation('flow', { active: true, activationId: 'stale', count: 0 }, 'stale-key', revision), /activation changed/);
     assert.equal(first.deactivate('flow', 'stale-poll', true, revision), false);
-    assert.deepEqual(first.row('flow'), revoked);
+    assert.deepEqual(first.lifecycle('flow'), revoked);
     assert.equal(first.pendingEvents('flow').length, 1);
     second.close(); second = createStudioRepository(state);
-    assert.deepEqual(second.row('flow'), revoked);
-    second.setActivation('flow', { active: true, activationId: 'new', count: 0 }, 'new-key', revoked.activation_revision);
-    assert.equal(first.row('flow').activation_revision, revoked.activation_revision + 1);
+    assert.deepEqual(second.lifecycle('flow'), revoked);
+    assert.deepEqual(second.pendingUnpublications(), [revoked]);
+    second.completeUnpublication('flow', 'stale-poll');
+    assert.deepEqual(second.pendingUnpublications(), [revoked]);
+    second.completeUnpublication('flow', 'revoked');
+    assert.deepEqual(first.lifecycle('flow'), { ...revoked, pendingUnpublication: null });
+    assert.deepEqual(first.pendingUnpublications(), []);
+    second.setActivation('flow', { active: true, activationId: 'new', count: 0 }, 'new-key', revoked.revision);
+    assert.equal(first.lifecycle('flow').revision, revoked.revision + 1);
+    assert.equal(first.hasActiveWorkflows(), true);
   } finally { first.close(); second.close(); rmSync(state, { recursive: true, force: true }); }
 });
 

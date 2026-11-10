@@ -1,4 +1,4 @@
-import { programDescriptor } from './program-block.mjs';
+import { isProgramReference, programDescriptor } from './program-block.mjs';
 import { componentNeedsExport } from './component-registry.mjs';
 
 /** Only current, caller-approved source pins in this PoC's private graph are offered. */
@@ -44,7 +44,8 @@ export function createProgramCatalog({ graphId, owner, client, definitions }) {
       if (source.sourceHash !== ref.sourceHash || source.authorAgentAddress.toLowerCase() !== ref.authorAgentAddress.toLowerCase()) continue;
       // Run Program KA always passes one mapped argument; sexpr-v1 accepts none.
       if (source.language !== 'typescript-v1') continue;
-      if (ref.programIri.length > 240 || b.operationIri.length > 240 || !source.version || source.version.length > 80) continue;
+      if (!isProgramReference(ref.programIri) || b.operationIri.length > programDescriptor.parameters.operationIri.maxLength
+        || !source.version || source.version.length > programDescriptor.parameters.version.maxLength) continue;
       if (programs.length >= 32) throw Object.assign(new Error('The Program selector supports 32 approved versions in this PoC.'), { code: 'INVALID_WORKFLOW', status: 409 });
       programs.push({ kind: 'program', kaRef: ref.programIri, sourceHash: source.sourceHash, graphId,
         operationIri: b.operationIri, authorAgentAddress: source.authorAgentAddress,
