@@ -41,6 +41,10 @@ candidate; publication and production qualification are still pending.
 - **Private members can recover.** Approvals repair missing metadata for
   existing participants, and an empty private graph keeps proving
   membership until synchronization completes (#3689, #3630).
+- **No more event-loop stalls from gossip mesh tags.** Gossipsub no longer
+  tags each mesh peer with every topic it shares in the peer store. On
+  nodes with many subscriptions, those tags made each reconnect block the
+  event loop for seconds (#3755).
 - **Useful operational evidence.** Operators can record a running node's
   CPU profile, inspect rolling prover health, see why a daemon worker
   exited, and correlate queue admission with store waits (#3606, #2627,
@@ -108,6 +112,29 @@ The details follow.
   can try again (#3745).
 - Cancel a Knowledge Asset descriptor read's storage queries when its
   caller times out or disconnects (#3746).
+- Answer the buyer's funding and accounts views within a few seconds: the
+  node keeps each buyer's account list and reads only the blocks it has not
+  seen, instead of scanning the event log on every request (#3750).
+- On Windows, accept a healthy managed Oxigraph server whose socket is
+  reported as established rather than listening, so the node API starts
+  (#3701).
+- Wait up to 120 seconds in `dkg start` for a live worker and a successful
+  status answer, with `--timeout` for longer, so a slow store recovery no
+  longer looks like a failed start (#3707).
+- Keep every older daemon log when a rotation cannot list or move the log
+  files completely (#3705).
+- Answer `GET /api/context-graph/list` with 503, `retryable: true` and
+  `Retry-After` instead of 500 when a listing runs out of its time budget
+  (#3702).
+- Find Claude Desktop's relocated Windows configuration in `dkg mcp setup`
+  and `dkg mcp uninstall`, natively and through WSL (#3704).
+- Show only the graphs you are a member of in the MCP server's default
+  Context Graph listing, by the same rule as **My Context Graphs** in the
+  node UI (#3710).
+- Let a manually registered MCP server find the local node's home and token
+  when no home or workspace configuration is set, so its tools no longer
+  answer 401; an explicit home, workspace configuration or token keeps
+  precedence (#3703).
 
 ### Added
 
@@ -176,6 +203,11 @@ The details follow.
   fresh Edge, with a pinned Java runtime, complete journal verification and
   authenticated catch-up. Automatic/default activation remains disabled;
   existing data directories are not migrated (#3566).
+- `dkg publisher clear-job <job-id>` and `dkg ka clear-share-job <job-id>`
+  remove one finished job from a running node's queue (#3709).
+- The MCP guide explains how to configure a client by hand, which
+  connection settings take precedence, and how to recover from common
+  connection problems (#3711).
 
 ### Changed
 
@@ -197,6 +229,12 @@ The details follow.
   testnet chain, add a testnet smoke test, give the Solidity coverage job
   60 minutes, and extend three dated test exceptions (#3691, #3693, #3719,
   #3725).
+- Add end-to-end tests for the NeuroSymbolic Marketplace through the node
+  UI, on a devnet of their own in CI (#3732).
+- Make the marketplace one complete capability of the chain adapter, share
+  one registered-signer fallback between rotated sends, and move the
+  RPC-usage consumer vocabulary into a module of its own, with no change in
+  behaviour (#3737, #3739, #3740).
 
 ### Before promotion
 
