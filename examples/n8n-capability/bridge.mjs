@@ -1,6 +1,7 @@
 import { createStudioContext } from './studio-context.mjs';
 import { isDkg, dkgComponentStore } from './dkg-components.mjs';
 import { canonicalizeJson } from '../../packages/core/dist/index.js';
+import { mapWithConcurrency } from '../../packages/agent/dist/map-with-concurrency.js';
 import { loadExecutionOutputs } from '../../packages/cli/dist/semantic-runtime-execution-persistence.js';
 import { iriValue, resultRows } from '../../packages/cli/dist/semantic-runtime-values.js';
 import { readFileSync, existsSync } from 'node:fs';
@@ -62,36 +63,36 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     }
     if (!authorized) throw Object.assign(new Error('Operator export authorization required'), { status: 403 });
   }
+  async function loadCapability(definition) {
+    const kaRef = definition.kaRef;
+    const [approval, source] = await Promise.all([
+      client.programs.getApproval({ graphId, operationIri: kaRef }).catch(error => { if (error.status !== 404) throw error; }),
+      client.programs.getSource({ graphId, programIri: kaRef, programLayer: 'wm' }),
+    ]);
+    const binding = approval?.binding;
+    const sameOwner = address => typeof address === 'string' && address.toLowerCase() === owner.toLowerCase();
+    const available = definition.enabled !== false && binding?.enabled === true && !!binding.n8n
+      && binding.contextGraphId === graphId && binding.operationIri === kaRef
+      && sameOwner(binding.executorAgentAddress) && binding.allowedCallerAgentAddresses?.some(sameOwner) === true
+      && binding.program?.contextGraphId === graphId && binding.program.programIri === kaRef && binding.program.programLayer === 'wm'
+      && binding.program.sourceHash === source.sourceHash
+      && typeof source.authorAgentAddress === 'string'
+      && binding.program.authorAgentAddress?.toLowerCase() === source.authorAgentAddress.toLowerCase();
+    return { kaRef, graphId, sourceHash: source.sourceHash, name: source.label ?? 'n8n capability', version: source.version,
+      kind: definition.kind ?? 'text', available,
+      ...(definition.retired ? { retired: true } : {}),
+      ...(definition.kind === 'component' ? { descriptor: definition.descriptor } : {}),
+      ...((definition.requiresExportAuthorization || componentNeedsExport(definition.descriptor) || definition.kind === 'google-sheets-export') ? { requiresExportAuthorization: true } : {}),
+      ...(!available && definition.descriptor?.connection ? { unavailableReason: 'Connect ' + definition.descriptor.name + ' OAuth in local n8n, then refresh the operator installation.' } : {}),
+      ...(definition.kind === 'google-sheets-export' && !available ? { unavailableReason: 'Connect a Google Sheets OAuth credential in n8n to enable this KA.' } : {}) };
+  }
   async function list() {
     const result = await agent.query(`SELECT DISTINCT ?program WHERE { GRAPH ?g {
       ?program a <${SR}Program>; <${SR}requiresTool> <urn:dkg:tool:n8n> . } }`,
     { contextGraphId: graphId, view: 'working-memory', callerAgentAddress: owner });
-    const capabilities = [];
-    for (const row of resultRows(result)) {
-      const kaRef = iriValue(row.program);
-      const definition = definitions.find(item => item.kaRef === kaRef);
-      if (!definition) continue;
-      let binding;
-      try { binding = (await client.programs.getApproval({ graphId, operationIri: kaRef })).binding; }
-      catch (error) { if (error.status !== 404) throw error; }
-      const source = await client.programs.getSource({ graphId, programIri: kaRef, programLayer: 'wm' });
-      const sameOwner = address => typeof address === 'string' && address.toLowerCase() === owner.toLowerCase();
-      const available = definition.enabled !== false && binding?.enabled === true && !!binding.n8n
-        && binding.contextGraphId === graphId && binding.operationIri === kaRef
-        && sameOwner(binding.executorAgentAddress) && binding.allowedCallerAgentAddresses?.some(sameOwner) === true
-        && binding.program?.contextGraphId === graphId && binding.program.programIri === kaRef && binding.program.programLayer === 'wm'
-        && binding.program.sourceHash === source.sourceHash
-        && typeof source.authorAgentAddress === 'string'
-        && binding.program.authorAgentAddress?.toLowerCase() === source.authorAgentAddress.toLowerCase();
-      capabilities.push({ kaRef, graphId, sourceHash: source.sourceHash, name: source.label ?? 'n8n capability', version: source.version,
-        kind: definition?.kind ?? 'text', available,
-        ...(definition.retired ? { retired: true } : {}),
-        ...(definition?.kind === 'component' ? { descriptor: definition.descriptor } : {}),
-        ...((definition?.requiresExportAuthorization || componentNeedsExport(definition?.descriptor) || definition?.kind === 'google-sheets-export') ? { requiresExportAuthorization: true } : {}),
-        ...(!available && definition?.descriptor?.connection ? { unavailableReason: 'Connect ' + definition.descriptor.name + ' OAuth in local n8n, then refresh the operator installation.' } : {}),
-        ...(definition?.kind === 'google-sheets-export' && !available ? { unavailableReason: 'Connect a Google Sheets OAuth credential in n8n to enable this KA.' } : {}) });
-    }
-    return capabilities;
+    const installed = resultRows(result).map(row => definitions.find(item => item.kaRef === iriValue(row.program))).filter(Boolean);
+    // Four capabilities at a time, with two independent metadata reads each.
+    return mapWithConcurrency(installed, 4, loadCapability);
   }
   const workflows = createWorkflowService({ graphId, owner, client, listCapabilities: list,
     listPrograms: async () => resultRows(await agent.query(`SELECT DISTINCT ?program WHERE { GRAPH ?g {
