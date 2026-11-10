@@ -35,6 +35,9 @@ import {
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
 import { blazegraphSchedulers, type BlazegraphStoreOptions } from './blazegraph-scheduler.js';
+import {
+  BlazegraphReadStop, MAX_QUERY_MILLIS_HEADER, SERVER_QUERY_DEADLINE_FACTOR, blazegraphClientDeadlineMs,
+} from './blazegraph-read-stop.js';
 export type { BlazegraphStoreOptions } from './blazegraph-scheduler.js';
 import { isAtomicGraphReplaceStagingGraph } from '../atomic-graph-replace.js';
 import {
@@ -64,44 +67,6 @@ const statements = sparqlStatements('blazegraph');
 const NQUADS_CONTENT_TYPE = 'text/x-nquads';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
-
-/**
- * Blazegraph's per-request server-side query deadline. The deployed 2.1.x
- * engine honours this header (`BigdataRDFContext$AbstractQueryTask` reads it
- * via `getQueryTimeout`); `web.xml`'s `queryTimeout` context-param is the
- * global equivalent and ships as `0` — unbounded.
- */
-const MAX_QUERY_MILLIS_HEADER = 'X-BIGDATA-MAX-QUERY-MILLIS';
-
-/**
- * Multiplier applied to the client deadline to derive the server-side bound.
- *
- * This is deliberately > 1: the server deadline must be WIDER than the
- * client's, never tighter. Two reasons, and the second is a correctness trap:
- *
- * 1. The problem being solved is *abandoned* work. When the client aborts at
- *    its deadline the HTTP connection goes away but Blazegraph keeps executing
- *    the query — observed on mainnet running 10-32+ minutes past a 30s client
- *    abort, with `queryErrorCount = 0` across 20,953 queries confirming the
- *    server never cancelled anything. A handful of these saturate a core. Any
- *    finite server bound fixes that; it does not need to be tight.
- *
- * 2. A tight bound introduces silent data loss. Blazegraph commits `200 OK`
- *    and begins streaming before the deadline fires, then appends its error
- *    into the already-committed body. A CONSTRUCT killed mid-stream therefore
- *    returns a SHORT BUT STRUCTURALLY VALID n-quads document. Since the client
- *    is still reading at that point, it parses the truncated result as a
- *    complete one — a sync page that looks whole and is not. Keeping the
- *    server bound comfortably above the client deadline means the client
- *    always aborts first, so no caller is ever parsing a truncated body.
- *    ({@link parseBlazegraphConstructNQuads} is the belt-and-braces guard for the
- *    residual case.)
- *
- * With the 30s default this yields a 120s server bound: orphan lifetime drops
- * from unbounded to at most 2 minutes, while the truncation path stays
- * unreachable.
- */
-const SERVER_QUERY_DEADLINE_FACTOR = 4;
 
 interface StoreOperationDeadline extends AdmittedReadDeadline {
   markStarted(): void;
@@ -321,7 +286,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       return Promise.reject(new Error('Mutations are not allowed inside a query read admission'));
     }
     const deadline = createStoreOperationDeadline(
-      this.operationTimeoutMs,
+      blazegraphClientDeadlineMs(this.operationTimeoutMs, options?.workDeadline),
       options?.signal,
       operation,
     );
@@ -597,13 +562,19 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
 
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     refuseWithheldGraphQuery(options, 'BlazegraphStore');
-    return this.queryWithOperation(sparql, options);
+    if (options?.workDeadline === undefined) return this.queryWithOperation(sparql, options);
+    // A read with a work deadline is stopped on the server too (BlazegraphReadStop).
+    const stop = new BlazegraphReadStop(this.url, sparql, this.operationTimeoutMs, options.workDeadline);
+    try { return await this.queryWithOperation(stop.sparql, options, undefined, stop); }
+    catch (error) { throw stop.failed(error, options.signal); }
+    finally { stop.done(); }
   }
 
   private async queryWithOperation(
     sparql: string,
     options: TripleStoreQueryOptions | undefined,
     storeOperation?: StoreOperation,
+    stop?: BlazegraphReadStop,
   ): Promise<QueryResult> {
     const trimmed = sparql.trim();
     // PREFIX / BASE prologues precede the query form. Classify through the
@@ -620,7 +591,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       async (deadline) => {
 
       if (isConstruct) {
-        return this.queryConstruct(trimmed, deadline, options);
+        return this.queryConstruct(trimmed, deadline, options, stop);
       }
 
       // Direct POST (W3C SPARQL 1.1 Protocol): send the query as the raw
@@ -637,6 +608,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
         deadline,
         options?.maxResponseBytes,
         'query',
+        stop,
       );
 
       const text = options?.maxResponseBytes === undefined
@@ -669,8 +641,9 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     deadline: AdmittedReadDeadline,
     errorResponseByteCeiling: number | undefined,
     failureLabel: 'query' | 'construct',
+    stop?: BlazegraphReadStop,
   ): Promise<Response> {
-    const res = await this.postReadRequest(sparql, accept, deadline);
+    const res = await this.postReadRequest(sparql, accept, deadline, stop);
     if (!res.ok) {
       const text = await deadline.waitFor((errorResponseByteCeiling === undefined
         ? res.text()
@@ -685,13 +658,15 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     sparql: string,
     accept: string,
     deadline: AdmittedReadDeadline,
+    stop?: BlazegraphReadStop,
   ): Promise<Response> {
+    stop?.dispatched(deadline.signal);
     return deadline.waitFor(fetch(this.url, {
       method: 'POST',
       headers: {
         'Content-Type': SPARQL_QUERY_CONTENT_TYPE,
         Accept: accept,
-        [MAX_QUERY_MILLIS_HEADER]: String(this.serverQueryDeadlineMs()),
+        [MAX_QUERY_MILLIS_HEADER]: String(stop?.serverDeadlineMs ?? this.serverQueryDeadlineMs()),
       },
       body: sparql,
       signal: deadline.signal,
@@ -702,6 +677,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     sparql: string,
     deadline: AdmittedReadDeadline,
     options?: TripleStoreQueryOptions,
+    stop?: BlazegraphReadStop,
   ): Promise<ConstructResult> {
     const res = await this.postReadQuery(
       sparql,
@@ -709,6 +685,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       deadline,
       options?.maxResponseBytes,
       'construct',
+      stop,
     );
     const text = await deadline.waitFor(options?.maxResponseBytes === undefined
       ? res.text()
