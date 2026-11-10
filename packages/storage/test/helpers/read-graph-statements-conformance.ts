@@ -182,7 +182,8 @@ export function readGraphStatementsConformance(backend: 'oxigraph' | 'blazegraph
         fc.record({ kind: fc.constant('delete-prefix' as const), graph: graphIndex, prefix: fc.constantFrom('urn:s:', 'urn:t', 'urn:') }),
         fc.record({ kind: fc.constant('replace' as const), graph: graphIndex, triples: fc.array(triple, { maxLength: 4 }) }),
         fc.record({ kind: fc.constant('drop' as const), graph: graphIndex }),
-        fc.record({ kind: fc.constant('replace-subject' as const), graph: graphIndex, subject: terms.subject, triples: fc.array(fc.record({ predicate: terms.predicate, object: terms.object }), { maxLength: 3 }) }),
+        fc.record({ kind: fc.constant('replace-subject' as const), graph: graphIndex, subject: terms.subject, triples: fc.array(fc.record({ predicate: terms.predicate, object: terms.object }), { maxLength: 3 }),
+          companions: fc.array(triple, { maxLength: 2 }) }),
         fc.record({ kind: fc.constant('replace-group' as const), graph: graphIndex, other: graphIndex, triples: fc.array(triple, { maxLength: 3 }) }),
       );
       const runs = backend === 'blazegraph' ? 20 : propertyOptions().numRuns;
@@ -257,15 +258,19 @@ export function readGraphStatementsConformance(backend: 'oxigraph' | 'blazegraph
               await update(reference([graph], [`DROP SILENT GRAPH <${graph}>`]));
               break;
             case 'replace-subject': {
+              // replaceSubjectAndInsert: the companion rows of other subjects are added, never replaced.
+              const companions = op.companions.filter((t) => t.subject !== op.subject);
+              const companionSubjects = [...new Set(companions.map((t) => t.subject))];
               const before: string[] = [], after: string[] = [];
               for (const target of targets) {
                 if (!isMember(graph, target)) continue;
                 before.push(readGraphRetraction(target, graph, [graph], { subject: op.subject }));
-                after.push(readGraphCopy(target.readGraph, graph, { subject: op.subject }));
+                after.push(readGraphCopy(target.readGraph, graph, { subject: op.subject }),
+                  ...companionSubjects.map((subject) => readGraphCopy(target.readGraph, graph, { subject })));
               }
               await update(spliceReadGraphPlan({ readGraphs: [], before, after }, [
                 `DELETE { GRAPH <${graph}> { <${op.subject}> ?p ?o } } WHERE { GRAPH <${graph}> { <${op.subject}> ?p ?o } }`,
-                ...insertData(op.triples.map((t) => quad(graph, { subject: op.subject, ...t }))),
+                ...insertData([...op.triples.map((t) => quad(graph, { subject: op.subject, ...t })), ...companions.map((t) => quad(graph, t))]),
               ]));
               break;
             }
