@@ -148,6 +148,7 @@ import {
   type CASCondition,
 } from './errors.js';
 import { RpcPreconditionError, isQuorumUnmetError } from './ack-errors.js';
+import { assertAuthorIsContextGraphMember } from './author-membership-preflight.js';
 import { stripOptionalLiteral } from './sparql-binding-literal.js';
 import {
   runLegacyWorkingMemoryMigration,
@@ -3240,6 +3241,11 @@ export class DKGPublisher implements Publisher {
     const shouldCollectV10ACKs =
       v10ACKProvider !== undefined &&
       canAttemptOnChainPublish;
+    // ContextGraphs 10.1.0: a curated graph binds a KA only from a member author.
+    // Ask before any core is asked for an ACK; the chain decides if the gate can't answer.
+    if (shouldCollectV10ACKs) {
+      await assertAuthorIsContextGraphMember(this.chain, v10CgDomain, options.precomputedAttestation?.authorAddress);
+    }
     let v10ACKs: V10CoreNodeACK[] | undefined;
     if (shouldCollectV10ACKs) {
       onPhase?.('collect_v10_acks', 'start');

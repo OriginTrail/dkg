@@ -3,6 +3,8 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/author-membership-preflight.unit.test.ts',
+      'test/author-membership-publish-gate.unit.test.ts',
       'test/workspace-operation-timestamp.test.ts',
       'test/access-client-bounds.test.ts',
       'test/assertion-lifecycle-candidates.test.ts',

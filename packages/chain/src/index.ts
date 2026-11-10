@@ -22,6 +22,11 @@ export {
 export { assertContextGraphAuthorityIndexId } from
   './context-graph-authority-index-id.js';
 export {
+  AUTHOR_NOT_CONTEXT_GRAPH_MEMBER_ERROR,
+  hasContextGraphAuthorGate,
+  type ContextGraphAuthorGate,
+} from './context-graph-author-gate.js';
+export {
   resolveContextGraphAuthorityIndexTickMs,
   type ContextGraphAuthorityProjectionServedEvidence,
 } from './context-graph-authority-index-projection.js';

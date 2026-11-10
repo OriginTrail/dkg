@@ -11,6 +11,7 @@ import {
   Hub,
   Token,
 } from '../../typechain';
+import { packReservedKaId } from '../helpers/v10-ka-helpers';
 
 /**
  * Unit tests for the ContextGraphs facade — Phase 7 Task 3 rewrite.
@@ -23,6 +24,10 @@ import {
  *     not a recovered node signer
  *   - Governance mutators — ownership / curator gating, auto-rotation on
  *     NFT transfer, bounds enforcement
+ *   - 10.1.0 author gate (`isAuthorizedAuthor`, enforced by
+ *     `registerKnowledgeAsset`): a curated CG binds a KA only when its
+ *     attested author is a member; PCA agency and PCA ownership are not
+ *     membership. `isAuthorizedPublisher` remains the unchanged sender gate.
  *
  * Notes:
  *   - H5 is satisfied by deletion: there is no digest in the facade, no
@@ -1164,8 +1169,13 @@ describe('@unit ContextGraphs (facade)', () => {
   // facade itself is registered in Hub, so the forwarding call satisfies
   // storage's gate transparently.
   describe('registerKnowledgeAsset (facade wrapper)', () => {
+    // OT-RFC-43 (1a) ids carry their author in the high 160 bits; 10.1.0's
+    // author gate reads it there. CG 1 is open, so any non-zero author passes.
+    let kaId: bigint;
+
     beforeEach(async () => {
       await createOpenCG(accounts[0]);
+      kaId = packReservedKaId(accounts[2].address, 100);
     });
 
     it('forwards to storage and writes the reverse + forward mappings', async () => {
@@ -1175,11 +1185,11 @@ describe('@unit ContextGraphs (facade)', () => {
       // facade because ContextGraphs is itself registered in Hub via the
       // deploy script.
       await expect(
-        Facade.connect(storageOp).registerKnowledgeAsset(1, 100),
-      ).to.emit(Storage, 'KnowledgeAssetRegisteredToContextGraph').withArgs(1, 100);
+        Facade.connect(storageOp).registerKnowledgeAsset(1, kaId),
+      ).to.emit(Storage, 'KnowledgeAssetRegisteredToContextGraph').withArgs(1, kaId);
 
-      expect(await Storage.kaToContextGraph(100)).to.equal(1);
-      expect(await Storage.getContextGraphKaList(1)).to.deep.equal([100n]);
+      expect(await Storage.kaToContextGraph(kaId)).to.equal(1);
+      expect(await Storage.getContextGraphKaList(1)).to.deep.equal([kaId]);
       expect(await Storage.getContextGraphKaCount(1)).to.equal(1);
     });
 
@@ -1188,24 +1198,177 @@ describe('@unit ContextGraphs (facade)', () => {
       // reaches storage. UnauthorizedAccess is raised by the Hub lib used
       // across the facade / storage contracts.
       await expect(
-        Facade.connect(accounts[5]).registerKnowledgeAsset(1, 100),
+        Facade.connect(accounts[5]).registerKnowledgeAsset(1, kaId),
       ).to.be.revertedWithCustomError(HubContract, 'UnauthorizedAccess');
     });
 
     it('surfaces storage-level KnowledgeAssetAlreadyRegisteredToContextGraph on double register', async () => {
-      await Facade.connect(storageOp).registerKnowledgeAsset(1, 100);
+      await Facade.connect(storageOp).registerKnowledgeAsset(1, kaId);
       // Create a second CG and try to register the same kaId there.
       await createOpenCG(accounts[0]);
       await expect(
-        Facade.connect(storageOp).registerKnowledgeAsset(2, 100),
+        Facade.connect(storageOp).registerKnowledgeAsset(2, kaId),
       ).to.be.revertedWithCustomError(Storage, 'KnowledgeAssetAlreadyRegisteredToContextGraph');
     });
 
     it('surfaces storage-level ContextGraphNotActive on inactive target', async () => {
       await Storage.connect(storageOp).deactivateContextGraph(1);
       await expect(
-        Facade.connect(storageOp).registerKnowledgeAsset(1, 100),
+        Facade.connect(storageOp).registerKnowledgeAsset(1, kaId),
       ).to.be.revertedWithCustomError(Storage, 'ContextGraphNotActive');
+    });
+
+    it('refuses an id with no author namespace, even on an open CG', async () => {
+      // kaId 100 has zero high bits: no attested author. Unreachable through
+      // KnowledgeAssetsLifecycle (DKGKnowledgeAssets reverts
+      // KaIdNamespaceMismatch first); the facade refuses it on its own too.
+      await expect(Facade.connect(storageOp).registerKnowledgeAsset(1, 100))
+        .to.be.revertedWithCustomError(Facade, 'AuthorNotContextGraphMember')
+        .withArgs(1, ethers.ZeroAddress);
+    });
+  });
+
+  // =========================================================================
+  // 10.1.0 — publishing requires membership (the AUTHOR gate)
+  // =========================================================================
+  //
+  // `isAuthorizedAuthor(cgId, author)` and its enforcement in
+  // `registerKnowledgeAsset`: a KA joins a curated CG only if its attested
+  // author is a member — on the roster, the CG NFT holder, or the EOA/Safe
+  // curator. An agent or the owner of the CG's PCA is not a member by virtue
+  // of the PCA. The SENDER gate (`isAuthorizedPublisher`) is unchanged, so a
+  // PCA agent may still pay for a member's KA.
+  describe('author gate: publishing requires membership', () => {
+    let pcaOwner: SignerWithAddress;
+    let cgHolder: SignerWithAddress;
+    let member: SignerWithAddress;
+    let pcaAgent: SignerWithAddress;
+    let stranger: SignerWithAddress;
+    let pcaAccountId: bigint;
+    let cgId: bigint;
+
+    const kaOf = (author: SignerWithAddress | string, n: number = 1): bigint =>
+      packReservedKaId(typeof author === 'string' ? author : author.address, n);
+
+    beforeEach(async () => {
+      pcaOwner = accounts[0];   // deployer; holds TRAC for the PCA
+      cgHolder = accounts[6];   // registers the CG and holds its NFT
+      member = accounts[10];    // on the CG's roster (e.g. the node key that authors)
+      pcaAgent = accounts[3];   // registered on the PCA, NOT on the roster
+      stranger = accounts[4];
+
+      pcaAccountId = await createPCAAccount(pcaOwner, '60000');
+      await NFT.connect(pcaOwner).registerAgent(pcaAccountId, pcaAgent.address);
+
+      // PCA-curated, publicly readable CG with a one-member roster.
+      await Facade.connect(cgHolder).createContextGraph(
+        [member.address],
+        0,
+        0,                 // accessPolicy = public
+        0,                 // publishPolicy = curated
+        pcaOwner.address,  // authority = live PCA owner (create-time snapshot)
+        pcaAccountId,
+        ethers.ZeroHash,
+      );
+      cgId = await Storage.getLatestContextGraphId();
+    });
+
+    it('admits a roster member as author', async () => {
+      expect(await Facade.isAuthorizedAuthor(cgId, member.address)).to.equal(true);
+      await expect(Facade.connect(storageOp).registerKnowledgeAsset(cgId, kaOf(member)))
+        .to.emit(Storage, 'KnowledgeAssetRegisteredToContextGraph')
+        .withArgs(cgId, kaOf(member));
+    });
+
+    it('admits the CG NFT holder as author (it governs the roster)', async () => {
+      expect(await Facade.isAuthorizedAuthor(cgId, cgHolder.address)).to.equal(true);
+      await Facade.connect(storageOp).registerKnowledgeAsset(cgId, kaOf(cgHolder));
+      expect(await Storage.kaToContextGraph(kaOf(cgHolder))).to.equal(cgId);
+    });
+
+    it('refuses an agent of the CG\'s PCA that is not a member, though it remains a valid sender', async () => {
+      // Sender gate unchanged: the agent may still submit and pay.
+      expect(await Facade.isAuthorizedPublisher(cgId, pcaAgent.address)).to.equal(true);
+      // Author gate: agency on the PCA is not membership of the CG.
+      expect(await Facade.isAuthorizedAuthor(cgId, pcaAgent.address)).to.equal(false);
+      await expect(Facade.connect(storageOp).registerKnowledgeAsset(cgId, kaOf(pcaAgent)))
+        .to.be.revertedWithCustomError(Facade, 'AuthorNotContextGraphMember')
+        .withArgs(cgId, pcaAgent.address);
+    });
+
+    it('refuses the live PCA owner as author: PCA ownership is not membership', async () => {
+      // pcaOwner is also the stored create-time authority snapshot, which PCA
+      // mode ignores.
+      expect(await Facade.isAuthorizedPublisher(cgId, pcaOwner.address)).to.equal(true);
+      expect(await Facade.isAuthorizedAuthor(cgId, pcaOwner.address)).to.equal(false);
+      await expect(Facade.connect(storageOp).registerKnowledgeAsset(cgId, kaOf(pcaOwner)))
+        .to.be.revertedWithCustomError(Facade, 'AuthorNotContextGraphMember')
+        .withArgs(cgId, pcaOwner.address);
+    });
+
+    it('a PCA agent becomes an author by joining the roster, and stops when removed', async () => {
+      await Facade.connect(cgHolder).addParticipantAgent(cgId, pcaAgent.address);
+      expect(await Facade.isAuthorizedAuthor(cgId, pcaAgent.address)).to.equal(true);
+      await Facade.connect(storageOp).registerKnowledgeAsset(cgId, kaOf(pcaAgent, 1));
+
+      await Facade.connect(cgHolder).removeParticipantAgent(cgId, pcaAgent.address);
+      expect(await Facade.isAuthorizedAuthor(cgId, pcaAgent.address)).to.equal(false);
+      await expect(Facade.connect(storageOp).registerKnowledgeAsset(cgId, kaOf(pcaAgent, 2)))
+        .to.be.revertedWithCustomError(Facade, 'AuthorNotContextGraphMember');
+    });
+
+    it('a removed member can no longer author', async () => {
+      await Facade.connect(cgHolder).removeParticipantAgent(cgId, member.address);
+      expect(await Facade.isAuthorizedAuthor(cgId, member.address)).to.equal(false);
+      await expect(Facade.connect(storageOp).registerKnowledgeAsset(cgId, kaOf(member)))
+        .to.be.revertedWithCustomError(Facade, 'AuthorNotContextGraphMember')
+        .withArgs(cgId, member.address);
+    });
+
+    it('refuses strangers and the zero address', async () => {
+      expect(await Facade.isAuthorizedAuthor(cgId, stranger.address)).to.equal(false);
+      expect(await Facade.isAuthorizedAuthor(cgId, ethers.ZeroAddress)).to.equal(false);
+    });
+
+    it('a PCA transfer gives the new PCA owner no author right; the CG NFT moves membership', async () => {
+      const newPcaOwner = accounts[11];
+      await NFT.connect(pcaOwner).transferFrom(pcaOwner.address, newPcaOwner.address, pcaAccountId);
+      expect(await Facade.isAuthorizedAuthor(cgId, newPcaOwner.address)).to.equal(false);
+      // The inherited agent stays a valid sender but still cannot author.
+      expect(await Facade.isAuthorizedPublisher(cgId, pcaAgent.address)).to.equal(true);
+      expect(await Facade.isAuthorizedAuthor(cgId, pcaAgent.address)).to.equal(false);
+
+      // Membership through the CG NFT follows the NFT.
+      const newHolder = accounts[12];
+      await Storage.connect(cgHolder).transferFrom(cgHolder.address, newHolder.address, cgId);
+      expect(await Facade.isAuthorizedAuthor(cgId, newHolder.address)).to.equal(true);
+      expect(await Facade.isAuthorizedAuthor(cgId, cgHolder.address)).to.equal(false);
+      // The roster is untouched by either transfer.
+      expect(await Facade.isAuthorizedAuthor(cgId, member.address)).to.equal(true);
+    });
+
+    it('EOA / Safe curator mode: the stored authority is a member, others need the roster', async () => {
+      const curator = accounts[7];
+      const eoaCg = await createCuratedCG(accounts[1], curator.address);
+      expect(await Facade.isAuthorizedAuthor(eoaCg, curator.address)).to.equal(true);
+      expect(await Facade.isAuthorizedAuthor(eoaCg, accounts[1].address)).to.equal(true); // NFT holder
+      expect(await Facade.isAuthorizedAuthor(eoaCg, member.address)).to.equal(false);
+      await Facade.connect(curator).addParticipantAgent(eoaCg, member.address);
+      expect(await Facade.isAuthorizedAuthor(eoaCg, member.address)).to.equal(true);
+    });
+
+    it('open CGs admit any non-zero author', async () => {
+      const openCg = await createOpenCG(accounts[1]);
+      expect(await Facade.isAuthorizedAuthor(openCg, stranger.address)).to.equal(true);
+      expect(await Facade.isAuthorizedAuthor(openCg, pcaAgent.address)).to.equal(true);
+      expect(await Facade.isAuthorizedAuthor(openCg, ethers.ZeroAddress)).to.equal(false);
+    });
+
+    it('unknown, zero and deactivated CG ids admit nobody', async () => {
+      expect(await Facade.isAuthorizedAuthor(0, member.address)).to.equal(false);
+      expect(await Facade.isAuthorizedAuthor(cgId + 1n, member.address)).to.equal(false);
+      await Storage.connect(storageOp).deactivateContextGraph(cgId);
+      expect(await Facade.isAuthorizedAuthor(cgId, member.address)).to.equal(false);
     });
   });
 

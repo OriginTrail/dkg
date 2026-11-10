@@ -207,6 +207,11 @@ export {
   type UnwrapRpcOptions,
 } from './ack-errors.js';
 export {
+  AUTHOR_NOT_CONTEXT_GRAPH_MEMBER_CODE,
+  AuthorNotContextGraphMemberError,
+  assertAuthorIsContextGraphMember,
+} from './author-membership-preflight.js';
+export {
   StorageACKHandler,
   ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS,
   DEFAULT_ACK_HANDLER_DEADLINE_MS,

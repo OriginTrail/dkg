@@ -14,7 +14,12 @@ import {
   ASYNC_PUBLISH_FOREIGN_AUTHOR_CODE,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
 } from '@origintrail-official/dkg-core';
-import { PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE, SUB_GRAPH_NOT_FOUND_CODE } from '@origintrail-official/dkg-publisher';
+import {
+  AUTHOR_NOT_CONTEXT_GRAPH_MEMBER_CODE,
+  PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE,
+  SUB_GRAPH_NOT_FOUND_CODE,
+} from '@origintrail-official/dkg-publisher';
+import { AUTHOR_NOT_CONTEXT_GRAPH_MEMBER_ERROR } from '@origintrail-official/dkg-chain';
 import {
   isPayloadTooLargeError,
   jsonResponse,
@@ -99,6 +104,25 @@ export function respondAuthorSelectionError(res: RequestContext["res"], e: any):
     code: e.code,
     error: e.message ?? String(e),
     ...(e.candidates ? { candidates: e.candidates } : {}),
+  });
+  return true;
+}
+
+/**
+ * ContextGraphs 10.1.0 — the KA's author is not a member of the curated graph:
+ * refused by the publisher before any ACK was collected
+ * (`AUTHOR_NOT_CONTEXT_GRAPH_MEMBER`) or, when that check could not run, by the
+ * chain (`AuthorNotContextGraphMember`, decoded onto `revert.name`). It holds
+ * until the graph's owner or curator adds the author to the roster, so 403, not
+ * a retryable status.
+ */
+export function respondAuthorNotContextGraphMember(res: RequestContext["res"], e: any): boolean {
+  if (e?.code !== AUTHOR_NOT_CONTEXT_GRAPH_MEMBER_CODE && e?.revert?.name !== AUTHOR_NOT_CONTEXT_GRAPH_MEMBER_ERROR) {
+    return false;
+  }
+  jsonResponse(res, 403, {
+    code: AUTHOR_NOT_CONTEXT_GRAPH_MEMBER_CODE,
+    error: sanitizeRpcMessage(e.message ?? String(e)),
   });
   return true;
 }

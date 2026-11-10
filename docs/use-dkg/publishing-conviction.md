@@ -76,6 +76,15 @@ When the PCA is active, meets the governance commitment floor, and still has quo
 
 The same flow is available through `POST /api/context-graph/register` with `publishPolicy: 0` and `pcaAccountId`, and through MCP with `dkg_context_graph_register`.
 
+### Publishing into a PCA-curated graph requires membership (ContextGraphs 10.1.0)
+
+ContextGraphs 10.1.0, proposed and not deployed on any network yet, separates who pays from whose Knowledge Asset it is:
+
+- A wallet registered on the graph's PCA (or the PCA owner) may still send, and pay through the PCA for, a publish into the graph.
+- The publish's attested author must be a member of the graph: on its participant roster, or the holder of the graph's NFT. Being registered on the PCA, or owning it, does not make an author a member.
+
+A publish whose author is not a member is refused before ACK collection with HTTP 403 and code `AUTHOR_NOT_CONTEXT_GRAPH_MEMBER`, or on chain with `AuthorNotContextGraphMember`. The graph's owner or curator can add the author as a participant agent.
+
 ## API Routes
 
 | Route                                | Purpose              |
