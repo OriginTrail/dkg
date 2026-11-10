@@ -8,6 +8,7 @@ import {
   BlazegraphStore,
   GraphSetIndexStore,
   OxigraphStore,
+  OxigraphWorkerStore,
   SparqlHttpStore,
   createTripleStore,
   type Quad,
@@ -344,5 +345,16 @@ describe('unscoped reads on embedded Oxigraph', () => {
     expect(await planted.query(PER_GRAPH, withheld)).toEqual(await plain.query(PER_GRAPH, withheld));
     const unrestricted = await planted.query(PER_GRAPH);
     expect(unrestricted.type === 'bindings' && unrestricted.bindings.length).toBe(memberQuads.length + PARTITION_GRAPHS.length + 1);
+  });
+
+  it('leaves them out across the worker boundary too', async () => {
+    const worker = new OxigraphWorkerStore();
+    opened.push(worker);
+    await worker.insert([...memberQuads, ...plantedQuads]);
+    const graphs = (result: Awaited<ReturnType<TripleStore['query']>>) =>
+      result.type === 'bindings' ? result.bindings.map(row => row.g).sort() : [];
+    expect(graphs(await worker.query(PER_GRAPH, { withheldGraphRoots: [] })))
+      .toEqual(memberQuads.map(quad => quad.graph).sort());
+    expect(graphs(await worker.query(PER_GRAPH))).toEqual([...memberQuads.map(quad => quad.graph), ...PARTITION_GRAPHS].sort());
   });
 });
