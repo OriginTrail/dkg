@@ -2,7 +2,7 @@ import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react'
 import { Lock, Globe, Share2, TrendingUp, UsersRound, Wallet, Check, Diamond, RefreshCw } from 'lucide-react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
-import { useTabsStore } from '../stores/tabs.js';
+import { chooseTab as openTab } from '../lib/shellNavigation.js';
 import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
 import { useMyContextGraphs } from '../hooks/useMyContextGraphs.js';
 import { useMemoryEntities } from '../hooks/useMemoryEntities.js';
@@ -455,7 +455,6 @@ export function DashboardView() {
   const { data: status } = useFetch(api.fetchStatus, [], 10_000);
   const { data: econ } = useFetch(api.fetchEconomics, [], 60_000);
   const { data: wb, loading: wbLoading, error: wbError } = useFetch(api.fetchWalletsBalances, [], 30_000);
-  const { openTab } = useTabsStore();
   const { setActiveProject } = useProjectsStore();
   const { myCgs, identity, identityLoading, cgsError, identityError, inventoryLoading, inventoryError, retry } = useMyContextGraphs();
   const inventoryFailed = Boolean(inventoryError);

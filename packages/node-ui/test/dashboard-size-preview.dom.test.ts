@@ -31,7 +31,7 @@ vi.mock('../src/ui/hooks.js', () => ({
 vi.mock('../src/ui/api-wrapper.js', () => ({
   api: { listParticipants: async () => ({ allowedAgents: [] }) },
 }));
-vi.mock('../src/ui/stores/tabs.js', () => ({ useTabsStore: () => ({ openTab: () => {} }) }));
+vi.mock('../src/ui/stores/tabs.js', () => ({ useTabsStore: Object.assign(() => ({ openTab: () => {} }), { getState: () => ({ activeTabId: 'dashboard', openTab: () => {} }) }) }));
 vi.mock('../src/ui/stores/projects.js', () => ({
   useProjectsStore: () => ({ setActiveProject: () => {} }),
 }));

@@ -80,7 +80,9 @@ async function waitForAssertion(assertion: () => void): Promise<void> {
 
 describe('PanelRight component', () => {
   afterEach(() => vi.unstubAllGlobals());
-  beforeEach(() => {
+  beforeEach(async () => {
+    // Conversations live in a store that outlives the panel, so each test starts clean.
+    (await import('../src/ui/stores/agentConversations.js')).resetAgentConversations();
     vi.clearAllMocks();
     fetchContextGraphsMock.mockImplementation(async () => {
       const { useProjectsStore } = await import('../src/ui/stores/projects.js');
@@ -569,6 +571,95 @@ describe('PanelRight component', () => {
     });
     container.remove();
   });
+
+  it('a reply in flight survives closing the panel, and Stop in the reopened panel aborts it', async () => {
+    let signal: AbortSignal | undefined;
+    streamLocalAgentChatMock.mockImplementation((_id: string, _text: string, options: any) => {
+      signal = options.signal;
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      });
+    });
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    await act(async () => { await Promise.resolve(); });
+
+    const textarea = container.querySelector('textarea');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, 'Keep going while closed');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      (container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement).click();
+    });
+    await waitForAssertion(() => expect(container.querySelector('button[aria-label="Stop reply"]')).toBeTruthy());
+
+    // Close the panel (unmount) and open it again (a new instance).
+    await act(async () => { root.unmount(); });
+    root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    try {
+      await waitForAssertion(() => expect(container.textContent).toContain('Keep going while closed'));
+      const stop = container.querySelector('button[aria-label="Stop reply"]') as HTMLButtonElement | null;
+      expect(stop).toBeTruthy();
+      await act(async () => { stop!.click(); });
+      expect(signal?.aborted).toBe(true);
+      await waitForAssertion(() => expect(container.querySelector('button[aria-label="Send message"]')).toBeTruthy());
+    } finally {
+      await act(async () => { root.unmount(); });
+      container.remove();
+    }
+  }, 20_000);
+
+  it('a reply that streams and finishes while the panel is closed is there, once, when it reopens', async () => {
+    let options: any;
+    let finish: (value: unknown) => void = () => {};
+    streamLocalAgentChatMock.mockImplementation((_id: string, _text: string, opts: any) => {
+      options = opts;
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    await act(async () => { await Promise.resolve(); });
+
+    const textarea = container.querySelector('textarea');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, 'Answer while I look away');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      (container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement).click();
+    });
+    await waitForAssertion(() => expect(options).toBeTruthy());
+
+    // Close the panel, then the reply streams in and finishes.
+    await act(async () => { root.unmount(); });
+    const reply = 'Streamed and finished while the panel was closed';
+    await act(async () => {
+      options.onEvent?.({ type: 'text_delta', delta: 'Streamed and finished ' });
+      options.onEvent?.({ type: 'text_delta', delta: 'while the panel was closed' });
+      finish({ text: reply, correlationId: 'corr-closed' });
+      await Promise.resolve();
+    });
+
+    root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    try {
+      await waitForAssertion(() => expect(container.textContent).toContain(reply));
+      expect(container.textContent!.split(reply).length - 1).toBe(1);
+      expect(container.querySelector('button[aria-label="Send message"]')).toBeTruthy();
+      expect(container.querySelector('button[aria-label="Stop reply"]')).toBeNull();
+    } finally {
+      await act(async () => { root.unmount(); });
+      container.remove();
+    }
+  }, 20_000);
 
   it('persists failed Hermes turns so timeout sessions survive refresh', async () => {
     fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{

@@ -8,6 +8,7 @@ import { PanelRight } from './components/Shell/PanelRight.js';
 import { ContextGraphDialogs } from './components/Shell/ContextGraphDialogs.js';
 import { useLayoutStore, useShellPanels, maxBottomHeight } from './stores/layout.js';
 import { useTabsStore } from './stores/tabs.js';
+import { chooseTab as openTab } from './lib/shellNavigation.js';
 import { detectMockMode, isUsingMocks, subscribeMockMode } from './api-wrapper.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from './lib/contextGraphPrimer.js';
 import { applyTheme } from './lib/applyTheme.js';
@@ -85,7 +86,8 @@ function AppShell() {
   useEffect(() => {
     if (lastNarrow.current === narrow) return; // only a crossing, not the first render
     lastNarrow.current = narrow;
-    closeNarrowPanel();
+    // Shows the page: closes a floating panel, and an expanded one does not carry over.
+    useLayoutStore.getState().revealCentre();
   }, [narrow, closeNarrowPanel]);
   const [, setVpTick] = useState(0);
 
@@ -159,14 +161,17 @@ function AppShell() {
         {narrow && (leftOpen || rightOpen) && (
           <button type="button" className="v10-panel-scrim" aria-label="Close panel" onClick={closeNarrowPanel} />
         )}
-        {/* On a narrow screen a closed panel stays mounted but hidden, so a resize
-            or opening the other panel keeps what's in it (a chat draft, a form). */}
-        {(narrow || leftOpen) && (
-          <div className="v10-panel-left" role="complementary" aria-label="Context Graphs and node" style={{ width: leftWidth }} hidden={!leftOpen}>
-            <PanelLeft />
-          </div>
+        {/* A closed side panel unmounts, so its polling and listeners stop. What
+            must outlive it lives in the shell: the Context Graph dialogs
+            (ContextGraphDialogs) and agent conversations (stores/agentConversations). */}
+        {leftOpen && (
+          <>
+            <div className="v10-panel-left" role="complementary" aria-label="Context Graphs and node" style={{ width: leftWidth }}>
+              <PanelLeft />
+            </div>
+            <div className="v10-resize-handle-h" ref={leftHandle} />
+          </>
         )}
-        {leftOpen && <div className="v10-resize-handle-h" ref={leftHandle} />}
 
         <div className="v10-center-region" style={{ flex: 1, minWidth: 0, display: expanded ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
@@ -176,11 +181,13 @@ function AppShell() {
           <PanelBottom />
         </div>
 
-        {rightOpen && !expanded && <div className="v10-resize-handle-h" ref={rightHandle} />}
-        {(narrow || rightOpen) && (
-          <div id="agents-panel" tabIndex={-1} className="v10-panel-right" role="complementary" aria-label="Agents" style={expanded ? { flex: 1, minWidth: 0 } : { width: rightWidth }} hidden={!rightOpen}>
-            <PanelRight />
-          </div>
+        {rightOpen && (
+          <>
+            {!expanded && <div className="v10-resize-handle-h" ref={rightHandle} />}
+            <div id="agents-panel" tabIndex={-1} className="v10-panel-right" role="complementary" aria-label="Agents" style={expanded ? { flex: 1, minWidth: 0 } : { width: rightWidth }}>
+              <PanelRight />
+            </div>
+          </>
         )}
       </div>
     </div>
@@ -198,7 +205,6 @@ function AgentHubRoute() {
 }
 
 function ContextGraphPrimerRoute() {
-  const openTab = useTabsStore((s) => s.openTab);
 
   useLayoutEffect(() => {
     openTab(CONTEXT_GRAPH_PRIMER_TAB);

@@ -21,7 +21,7 @@ import { ActivityFeed } from '../components/ActivityFeed.js';
 import { MemoryReadStatus } from '../components/MemoryReadStatus.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from '../lib/contextGraphPrimer.js';
-import { useTabsStore } from '../stores/tabs.js';
+import { chooseTab as openTab } from '../lib/shellNavigation.js';
 import { shouldFetchSwmAttribution, useCanonicalTriples, type LayerView, type LayerContentTab, type SubGraphTab } from './project/helpers.js';
 import {
   ProjectHeaderStrip,
@@ -221,7 +221,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const participantsRequestRef = useRef(0);
   const profile = useProjectProfile(contextGraphId);
   const agentsData = useAgents(contextGraphId);
-  const openTab = useTabsStore((s) => s.openTab);
   const { data: currentAgent, loading: currentAgentLoading, error: currentAgentError } = useCurrentAgent();
 
   const currentScrollKey = useCallback(() => {

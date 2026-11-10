@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { createContextGraph, fetchCurrentAgent } from '../../api.js';
 import { refreshContextGraphInventoryAfterMutation } from '../../hooks/useContextGraphInventory.js';
 import { useProjectsStore } from '../../stores/projects.js';
-import { useTabsStore } from '../../stores/tabs.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { useJourneyStore } from '../../stores/journey.js';
 import { installOntology, listStarters } from '../../lib/ontologyInstall.js';
 import { publishProjectManifest } from '../../lib/projectManifest.js';
@@ -68,7 +68,6 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const [identityError, setIdentityError] = useState(false);
 
   const { contextGraphs, setActiveProject } = useProjectsStore();
-  const { openTab } = useTabsStore();
   const { setStage, stage } = useJourneyStore();
 
   const loadAgentIdentity = () => {

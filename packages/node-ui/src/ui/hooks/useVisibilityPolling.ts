@@ -12,10 +12,14 @@ import { useEffect, useRef } from 'react';
  * `document.hidden` becomes true and resume (with one immediate tick
  * to refresh stale data) the moment the tab regains focus.
  *
+ * The callback gets an AbortSignal for the polling run that called it. It's
+ * aborted on cleanup (unmount, an interval change, Strict Mode's replay), so
+ * a request can tell when its result no longer belongs to a live poll.
+ *
  * Returns nothing; cleanup is automatic on unmount.
  */
 export function useVisibilityPolling(
-  callback: () => void,
+  callback: (signal: AbortSignal) => void,
   intervalMs: number,
   options: { runImmediately?: boolean } = {},
 ): void {
@@ -28,10 +32,12 @@ export function useVisibilityPolling(
     if (intervalMs <= 0) return undefined;
     let timer: ReturnType<typeof setInterval> | null = null;
     let cancelled = false;
+    const lifetime = new AbortController();
+    const run = () => cbRef.current(lifetime.signal);
 
     const start = () => {
       if (timer || cancelled) return;
-      timer = setInterval(() => cbRef.current(), intervalMs);
+      timer = setInterval(run, intervalMs);
     };
     const stop = () => {
       if (!timer) return;
@@ -46,7 +52,7 @@ export function useVisibilityPolling(
       }
       // Becoming visible: refresh once so stale UI snaps to current,
       // then resume the cadence.
-      cbRef.current();
+      run();
       start();
     };
 
@@ -57,12 +63,13 @@ export function useVisibilityPolling(
     // mount, which is most of the daemon-fan-out we were trying to
     // suppress. The visibilitychange handler will run the deferred
     // initial refresh as soon as the user returns to the tab.
-    if (optionsRef.current.runImmediately !== false && !document.hidden) cbRef.current();
+    if (optionsRef.current.runImmediately !== false && !document.hidden) run();
     if (!document.hidden) start();
     document.addEventListener('visibilitychange', onVisibility);
 
     return () => {
       cancelled = true;
+      lifetime.abort();
       document.removeEventListener('visibilitychange', onVisibility);
       stop();
     };

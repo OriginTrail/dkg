@@ -1,6 +1,6 @@
 import React from 'react';
 import { ArrowRight } from 'lucide-react';
-import { useTabsStore } from '../../stores/tabs.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { usePcaOverview } from '../../hooks/usePcaOverview.js';
 import { usePcaScopeBootstrap } from '../../hooks/usePcaScopeBootstrap.js';
 import { formatBps } from '../../lib/format.js';
@@ -18,7 +18,6 @@ function pct(bps: number | null): string {
  */
 export function PcaSettingsCard() {
   usePcaScopeBootstrap();
-  const openTab = useTabsStore((s) => s.openTab);
   const { accounts, covered, bestCoveringDiscountBps, walletsInconclusive } = usePcaOverview();
   const tracked = accounts.length;
 
