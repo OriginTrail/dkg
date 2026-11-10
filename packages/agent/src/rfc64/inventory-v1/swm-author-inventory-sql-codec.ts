@@ -1,7 +1,7 @@
 import type { SQLInputValue } from 'node:sqlite';
 
 import {
-  assertEncodableSwmAuthorInventoryRowV1,
+  snapshotSwmAuthorInventoryRowV1,
   type Digest32V1,
   type SwmAuthorInventoryRowV1,
 } from '@origintrail-official/dkg-core';
@@ -80,8 +80,7 @@ export function decodeStoredSwmAuthorInventoryRowV1(
   } as SwmAuthorInventoryRowV1;
   // This fresh record contains only scalar values copied from typed SQL columns.
   // Core owns complete wire validation, including Unicode and exact byte limits.
-  assertEncodableSwmAuthorInventoryRowV1(decoded);
-  return Object.freeze(decoded);
+  return snapshotSwmAuthorInventoryRowV1(decoded);
 }
 
 export function assertBoundedSqlBlobV1(
