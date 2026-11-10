@@ -120,6 +120,22 @@ describe('a call with tools among sellers that take them and sellers that do not
     expect(asked).toEqual([BigInt(QUOTES_PER_PICK + 1), BigInt(count)]);
   });
 
+  it('reaches a demoted seller that takes tools past twelve that do not, once their quotes are kept: kept ones are not searched', async () => {
+    // The one that takes tools is the cheapest, but a refusal for good put it behind every other.
+    const { router, asked } = routerOf(QUOTES_PER_PICK + 1, new Set([1n]));
+    router.demote(1n);
+    // The first pick asks the twelve ahead of it and stops at the bound: no route for now, not "none takes tools".
+    expect(await router.pickFor(SERVICE, 1, 100n, { tools: true })).toEqual({ route: null, reason: 'no_seller' });
+    expect(asked).toHaveLength(QUOTES_PER_PICK);
+    expect(asked).not.toContain(1n);
+    // Their kept quotes say they take none, so the next pick does not search them, and asks the one that does.
+    asked.length = 0;
+    expect(await router.pickFor(SERVICE, 1, 100n, { tools: true })).toMatchObject({ route: { seller: 1n } });
+    expect(asked).toEqual([1n]);
+    // A text call still goes past the demoted seller, to the cheapest of the others.
+    expect(await router.pick(SERVICE, 1, 100n)).toMatchObject({ seller: 2n });
+  });
+
   it('says none takes tools only once every seller said so, and not while one that may is unreachable', async () => {
     expect(await routerOf(3, new Set()).router.pickFor(SERVICE, 1, 100n, { tools: true })).toEqual({ route: null, reason: 'tools_unsupported' });
     expect(await routerOf(3, new Set([2n]), new Set([2n])).router.pickFor(SERVICE, 1, 100n, { tools: true })).toEqual({ route: null, reason: 'no_seller' });

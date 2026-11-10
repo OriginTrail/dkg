@@ -12,8 +12,9 @@ import { UpstreamError, backendMessageOf, connectorOf, requestShapeOf, resolveSe
 
 const OK = { choices: [{ message: { role: 'assistant', content: 'synthetic answer' } }], usage: { prompt_tokens: 3, completion_tokens: 2 } };
 const CALL = { messages: [{ role: 'user' as const, content: 'q' }], maxTokens: 7 };
-// A test value only; it is no credential anywhere.
+// Test values only; neither is a credential anywhere.
 const TEST_KEY = ['test', 'backend', 'value', '1234'].join('-');
+const OTHER_BEARER = ['unrelated', 'token', '5678'].join('-');
 
 /** `fetch` answering `body` with `status`; each request's URL and body are kept. */
 function stubFetch(status: number, body: unknown): Array<{ url: string; body: Record<string, unknown> }> {
@@ -80,12 +81,12 @@ describe("a backend's refusal", () => {
 
   it('never says the key, nor anything shaped as one, and says only its status when the backend says nothing that reads', async () => {
     process.env.TEST_BACKEND_KEY = TEST_KEY;
-    stubFetch(401, { error: { message: `Incorrect API key provided: sk-proj-abcd1234****wxyz. Sent: ${TEST_KEY}. Authorization: Bearer ${TEST_KEY}` } });
+    stubFetch(401, { error: { message: `Incorrect API key provided: sk-proj-abcd1234****wxyz. Sent: ${TEST_KEY}. Forwarded: Authorization: Bearer ${OTHER_BEARER}` } });
     const err = await connectorOf({ kind: 'openai', baseUrl: 'https://api.openai.com/v1', model: 'm', apiKeyEnv: 'TEST_BACKEND_KEY' }).complete(CALL).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(UpstreamError);
-    expect((err as Error).message).toMatch(/^the backend answered 401: Incorrect API key provided: \[redacted\]/);
-    expect((err as Error).message).not.toContain(TEST_KEY);
-    expect((err as Error).message).not.toContain('sk-proj');
+    // Each by its own rule: the key itself, anything shaped as an API key, and any bearer token.
+    expect((err as Error).message).toBe('the backend answered 401: Incorrect API key provided: [redacted] Sent: [redacted]. Forwarded: Authorization: Bearer [redacted]');
+    for (const secret of [TEST_KEY, 'sk-proj', OTHER_BEARER]) expect((err as Error).message).not.toContain(secret);
     stubFetch(502, '<html>bad gateway</html>');
     await expect(connectorOf({ kind: 'openai', baseUrl: 'http://127.0.0.1:1/v1', model: 'm' }).complete(CALL)).rejects.toThrow(new UpstreamError('the backend answered 502'));
   });

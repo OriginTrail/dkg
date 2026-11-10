@@ -350,7 +350,8 @@ export function receiptFromWire(raw: unknown): QueryInferenceReceipt {
   };
 }
 
-const TEXT_ROLES = ['system', 'user', 'assistant'] as const;
+/** The roles whose messages are text alone; an assistant's is an answer (`answerFromWire`), a tool's a result. */
+const TEXT_ROLES = ['system', 'user'] as const;
 /** A function's name, as OpenAI takes it. */
 const FUNCTION_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 /** A tool call's id: printable ASCII, no spaces. */
@@ -425,11 +426,12 @@ function toolChoiceFromWire(raw: unknown, tools: readonly ToolSpec[]): ToolChoic
 function messageFromWire(m: unknown, i: number, called: Set<string>): ChatMessage {
   const at = `messages[${i}]`;
   if (!isRecord(m)) throw new WireError(`${at} must be a message`);
-  if (m.role === 'assistant' && !absent(m.tool_calls)) {
-    const toolCalls = toolCallsFromWire(m.tool_calls, `${at}.tool_calls`);
-    if (m.content !== undefined && m.content !== null && typeof m.content !== 'string') throw new WireError(`${at}.content must be text or null`);
+  if (m.role === 'assistant') {
+    // An answer the model gave before, decoded as any answer is (`answerFromWire`): text, or tool calls with text or none.
+    const { content, tool_calls: toolCalls } = answerFromWire(m, at);
+    if (!toolCalls) return { role: 'assistant', content: content! };
     for (const c of toolCalls) called.add(c.id);
-    return { role: 'assistant', content: typeof m.content === 'string' ? m.content : null, tool_calls: toolCalls };
+    return { role: 'assistant', content, tool_calls: toolCalls };
   }
   if (m.role === 'tool') {
     if (typeof m.content !== 'string') throw new WireError(`${at} must be a tool's result as text`);
