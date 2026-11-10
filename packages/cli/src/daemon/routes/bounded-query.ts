@@ -48,7 +48,8 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
       contextGraphId: parsed.contextGraphId, callerAgentAddress, view: query.view,
       includeContextGraphPartitions: query.includeContextGraphPartitions, chainEvidenceMode: query.chainEvidenceMode,
       excludeWorkingMemoryPartitions: true, requireCompleteGraphScope: true,
-      signal, priority: lifecycle.priority, source: lifecycle.source,
+      // The deadline stops the query's reads in the store, not only this wait.
+      signal, workDeadline: deadlineAt, priority: lifecycle.priority, source: lifecycle.source,
       accessDenied: 'error' as const, redactQuery: true, maxResponseBytes: BOUNDED_QUERY_MAX_BYTES,
     };
     const result = await resolveWithinAbort(() => agent.query(query.sparql, options), signal);

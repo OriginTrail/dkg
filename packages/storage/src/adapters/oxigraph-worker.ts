@@ -29,35 +29,12 @@ import {
 } from '../worker-error-protocol.js';
 import { raceStoreWorkAgainstAbort } from '../abortable-store-work-lifecycle.js';
 import type { OxigraphStoreOptions } from './oxigraph-read-only.js';
-
-/**
- * Default per-operation timeout for the embedded worker store. The worker is
- * a SINGLE thread that processes store ops FIFO, so one slow / wedged op (a
- * huge import, an expensive query, or a genuinely hung worker) blocks every
- * other store-backed request queued behind it. Without a bound, the caller —
- * an API route, the publisher, gossip ingest — waits FOREVER. That is the
- * exact signature behind issues #997 / #999 / #1002 / #1005 / #1008:
- * `/api/status` (no store) stays green while `/api/query`,
- * `/api/context-graph/list`, `/api/assertion/create` never return.
- *
- * A bounded wait turns an indefinite hang into a surfaced error the operator
- * can act on (the message points at the real fix: use an external SPARQL
- * server for heavy workloads). 120s is generous enough not to trip normal
- * operations yet finite. Set `operationTimeoutMs: 0` to restore the old
- * unbounded behaviour.
- *
- * IMPORTANT — the timeout is applied to READ-ONLY ops only (see
- * READ_ONLY_METHODS). A read is side-effect-free, so bounding the caller's wait
- * and rejecting is always a clean, determinate failure. A mutation is NOT
- * bounded: the timeout only drops the caller's promise while the single worker
- * thread keeps running the op, so a "timed-out" insert/delete could STILL
- * commit afterwards — and the rest of the codebase treats a rejected
- * insert/delete as a clean failure, which would leave partial state visible and
- * retries ambiguous. The user-visible hang in the issues above is on the read
- * paths (`/api/query`, `/api/context-graph/list`); bounding reads surfaces a
- * wedged worker there without inventing an indeterminate mutation outcome.
- */
-const DEFAULT_OPERATION_TIMEOUT_MS = 120_000;
+import {
+  DEFAULT_OPERATION_TIMEOUT_MS, READ_ONLY_METHODS, asAbortError,
+  createOxigraphWorkerTimeoutError, normalizeNonNegativeInt,
+} from './oxigraph-worker-timeout.js';
+export type { OxigraphWorkerTimeoutError } from './oxigraph-worker-timeout.js';
+import { WorkerAdmission, runStoppableRead, type StoppableReadHost } from './oxigraph-worker-admission.js';
 
 /**
  * Backoff (ms) before each consecutive respawn attempt after an UNEXPECTED
@@ -95,59 +72,6 @@ export interface OxigraphWorkerStoreOptions extends OxigraphStoreOptions {
    * clean failure while it is still in flight.
    */
   operationTimeoutMs?: number;
-}
-
-/**
- * Accept only a finite, non-negative override; otherwise fall back. The result
- * is floored to an INTEGER — the timeout is a millisecond count, so a fractional
- * value is meaningless noise.
- */
-function normalizeNonNegativeInt(value: number | undefined, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? Math.floor(value)
-    : fallback;
-}
-
-function asAbortError(reason: unknown): Error {
-  return reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
-}
-
-/**
- * Side-effect-free read methods. ONLY these are bounded by the per-op timeout:
- * rejecting a read after the bound is a clean, determinate failure (nothing was
- * written), so it safely surfaces a wedged worker on the exact paths that hang
- * in production. Every other method mutates persisted state and is left
- * unbounded — see DEFAULT_OPERATION_TIMEOUT_MS for why timing out a mutation
- * would be unsafe with the current call sites.
- */
-const READ_ONLY_METHODS = new Set<string>([
-  'query', 'hasGraph', 'listGraphs', 'countQuads', 'rfc64ExactBindingsReadV1',
-]);
-
-/** Rejection raised when a read op exceeds its per-op timeout. */
-export interface OxigraphWorkerTimeoutError extends Error {
-  code: 'OXIGRAPH_WORKER_OP_TIMEOUT';
-  /** Which store method timed out. */
-  method: string;
-  /** The bound that was exceeded. */
-  timeoutMs: number;
-}
-
-function createOxigraphWorkerTimeoutError(
-  method: string,
-  timeoutMs: number,
-): OxigraphWorkerTimeoutError {
-  const error = new Error(
-    `oxigraph-worker: "${method}" timed out after ${timeoutMs}ms. `
-      + 'The embedded store runs on a single worker thread, so a long-running or '
-      + 'stuck operation blocks all reads queued behind it. For heavy workloads '
-      + 'point the node at an external SPARQL server (store.backend "sparql-http" '
-      + '/ "blazegraph"), or raise / disable store.options.operationTimeoutMs.',
-  ) as OxigraphWorkerTimeoutError;
-  error.code = 'OXIGRAPH_WORKER_OP_TIMEOUT';
-  error.method = method;
-  error.timeoutMs = timeoutMs;
-  return error;
 }
 
 /**
@@ -291,6 +215,10 @@ export class OxigraphWorkerStore implements TripleStore {
    */
   private consecutiveRespawnFailures = 0;
   private recoveryGeneration = 0;
+  /** Holds later ops behind a read that may be stopped (see WorkerAdmission). */
+  private readonly admission = new WorkerAdmission();
+  /** A worker ended on purpose to stop a read past its limit, until its exit is handled. */
+  private stoppedWorker: Worker | null = null;
 
   constructor(persistPath?: string, opts?: OxigraphWorkerStoreOptions) {
     this.operationTimeoutMs = normalizeNonNegativeInt(opts?.operationTimeoutMs, DEFAULT_OPERATION_TIMEOUT_MS);
@@ -459,15 +387,21 @@ export class OxigraphWorkerStore implements TripleStore {
       if (this.worker !== worker) return;
       this.workerExited = true;
       const intentional = this.isClosing;
+      // A worker ended to stop a read held nothing else, and every write it
+      // acknowledged was on disk: its replacement loads the same data.
+      const readStop = this.stoppedWorker === worker && this.pending.size === 0;
+      this.stoppedWorker = null;
       // Distinguish the two unexpected exits up front so the log and the
       // lifecycle transition below agree on what just happened.
       const inMemoryLost = !intentional && this.persistPath === undefined;
-      if (!intentional && !inMemoryLost) this.recoveryGeneration++;
-      if (!intentional && !inMemoryLost && !this.replacementRevisionLifecycle) {
+      if (!intentional && !inMemoryLost && !readStop) this.recoveryGeneration++;
+      if (!intentional && !inMemoryLost && !readStop && !this.replacementRevisionLifecycle) {
         this.replacementRevisionLifecycle = this.writeGen.beginWrite({ kind: 'all' });
       }
       if (intentional) {
         console.info(`[oxigraph-worker] worker exited (code ${code}) — initiated by close()`);
+      } else if (readStop) {
+        console.info('[oxigraph-worker] replaced the worker thread to stop a read past its time limit');
       } else if (inMemoryLost) {
         console.error(
           `[oxigraph-worker] worker exited UNEXPECTEDLY (code ${code}) — nobody called close(). ` +
@@ -602,15 +536,31 @@ export class OxigraphWorkerStore implements TripleStore {
     method: string,
     ...args: unknown[]
   ): Promise<T> {
-    // A crashed worker may be mid-replacement right now. Park the op on the
-    // respawn instead of failing it: the store is disk-persisted and about to
-    // come back, so the caller sees a slightly slower success rather than a
-    // spurious "store is closed" for a condition the store is already fixing.
-    if (this.respawnPromise) {
-      const deadlineAt = timeoutMs > 0 ? performance.now() + timeoutMs : undefined;
-      return this.callAfterRespawn<T>(timeoutMs, deadlineAt, signal, method, args);
+    // A stoppable read that owns the worker, or waits for it, holds later ops
+    // here until it is done (see WorkerAdmission). Their bound includes the wait.
+    const deadlineAt = timeoutMs > 0 ? performance.now() + timeoutMs : undefined;
+    const post = (held: boolean): Promise<T> => {
+      // A crashed worker may be mid-replacement right now. Park the op on the
+      // respawn instead of failing it: the store is disk-persisted and about to
+      // come back, so the caller sees a slightly slower success rather than a
+      // spurious "store is closed" for a condition the store is already fixing.
+      if (this.respawnPromise || (held && deadlineAt !== undefined)) {
+        return this.callAfterRespawn<T>(timeoutMs, deadlineAt, signal, method, args);
+      }
+      return this.postToWorker<T>(timeoutMs, signal, method, args);
+    };
+    const ticket = this.admission.tryEnter();
+    if (ticket) {
+      const work = post(false);
+      work.then(ticket.done, ticket.done);
+      return work;
     }
-    return this.postToWorker<T>(timeoutMs, signal, method, args);
+    return this.admission.enter(signal, timeoutMs, () => createOxigraphWorkerTimeoutError(method, timeoutMs))
+      .then((entry) => {
+        const work = post(true);
+        work.then(entry.done, entry.done);
+        return work;
+      });
   }
 
   /**
@@ -833,7 +783,28 @@ export class OxigraphWorkerStore implements TripleStore {
     );
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
-    return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql, serializableQueryOptions(options));
+    const args = [sparql, serializableQueryOptions(options)];
+    // Replacing the worker is a safe stop only for a writable store on disk: an
+    // in-memory one would lose its data, a read-only one could load a newer file.
+    if (options?.workDeadline !== undefined && this.persistPath !== undefined && !this.readOnly) {
+      return runStoppableRead<QueryResult>(this.stoppableReadHost(), 'query', args, options);
+    }
+    return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', ...args);
+  }
+
+  private stoppableReadHost(): StoppableReadHost {
+    return {
+      admission: this.admission,
+      operationTimeoutMs: this.operationTimeoutMs,
+      post: <T>(method: string, args: unknown[], timeoutMs: number, signal: AbortSignal | undefined) =>
+        this.callAfterRespawn<T>(timeoutMs, timeoutMs > 0 ? performance.now() + timeoutMs : undefined, signal, method, args),
+      replaceWorker: async () => {
+        if (this.lifecycle !== 'live' || this.workerExited || this.respawnPromise) return false;
+        this.stoppedWorker = this.worker;
+        await this.worker.terminate();
+        return true;
+      },
+    };
   }
   async hasGraph(graphUri: string, options?: TripleStoreQueryOptions): Promise<boolean> {
     return this.callWithTimeout<boolean>(this.operationTimeoutMs, options?.signal, 'hasGraph', graphUri);

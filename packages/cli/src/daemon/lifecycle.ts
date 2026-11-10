@@ -472,6 +472,7 @@ import {
 
 import { handleRequest } from './handle-request.js';
 import { configureApiQueryPriority } from './api-query-priority.js';
+import { configureApiQueryTimeLimit } from './api-query-time-limit.js';
 import { configureWritePreflightCoalescing } from './write-preflight-coalescing.js';
 import { startRetention, type RetentionHandle } from './retention-sweeps.js';
 import { resolveRetentionConfig } from '../retention-config.js';
@@ -1262,6 +1263,7 @@ async function runDaemonInnerWithStartupOwnership(
     info: log,
     warn: log,
   });
+  configureApiQueryTimeLimit(process.env.DKG_API_QUERY_TIME_LIMIT_MS, { info: log, warn: log });
   // The store control path's default and config setting depend on the configured backend (OT-RFC-73 P14). This
   // runs before any store call can build the path; a later configuration would be refused with a warning.
   configureStoreControlPath({ backend: config.store?.backend ?? 'oxigraph-worker', configured: config.store?.controlReservedSlots }, { warn: log });

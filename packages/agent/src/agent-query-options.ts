@@ -37,6 +37,12 @@ export interface AgentQueryOptions {
   includePrivate?: boolean;
   /** Cancel the underlying store request when the outer caller disconnects. */
   signal?: AbortSignal;
+  /**
+   * The request's time limit, as a `performance.now()` deadline: a store that
+   * can stop a running read stops the query's own reads at it, or when `signal`
+   * aborts (see the storage package's QueryWorkStoppedError).
+   */
+  workDeadline?: number;
   /** Store admission lane used by the query engine. */
   priority?: import("@origintrail-official/dkg-storage").StoreWorkPriority;
   /** Store diagnostics / slow-query attribution label. */
