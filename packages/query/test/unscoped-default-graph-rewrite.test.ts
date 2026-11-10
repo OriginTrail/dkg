@@ -56,6 +56,13 @@ describe('patterns outside GRAPH', () => {
     expect(hidden('SELECT (COUNT(*) AS ?n) $s WHERE { ?s ?p ?o } GROUP BY ?s ORDER BY DESC(?n) LIMIT 3'))
       .toBe(`SELECT (COUNT(*) AS ?n) $s WHERE { ${graphForm('?s ?p ?o')} } GROUP BY ?s ORDER BY DESC(?n) LIMIT 3`);
     expect(hidden('SELECT ?n WHERE { { SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o } } }')).toContain(graphForm('?s ?p ?o'));
+    // Any spelling of one statement pattern keeps the form.
+    for (const triple of [
+      '?s <urn:val> "5"^^<http://www.w3.org/2001/XMLSchema#integer>', '?s <urn:lbl> "x"@en-GB', '?s ?p true',
+      '<urn:a> <urn:b> []', '<urn:a> <urn:b> _:x', '?o ^(^<urn:b>) <urn:a>', '<urn:a> (<urn:b>) ?o ;', '?x <urn:self> ?x',
+    ]) expect(hidden(`SELECT (COUNT(*) AS ?n) WHERE { ${triple} }`)).toBe(`SELECT (COUNT(*) AS ?n) WHERE { ${graphForm(triple)} }`);
+    expect(hidden('SELECT ?o (COUNT(*) AS ?n) WHERE { ?o ^<urn:b> ?s } GROUP BY (?o) VALUES ?x { 1 }')).toContain(graphForm('?o ^<urn:b> ?s'));
+    expect(hidden('SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o } ORDER BY ?n VALUES ?o { <urn:c> }')).toContain(graphForm('<urn:a> <urn:b> ?o'));
     // Not the fast form: these count solutions of the merged default graph.
     for (const query of [
       'SELECT (COUNT(?o) AS ?n) WHERE { ?s ?p ?o }',
@@ -65,6 +72,14 @@ describe('patterns outside GRAPH', () => {
       'SELECT ?x (COUNT(*) AS ?n) WHERE { ?s ?p ?o } GROUP BY ?x',
       'SELECT ?s (COUNT(*) AS ?n) WHERE { ?s ?p ?o } GROUP BY ?s HAVING (COUNT(*) > 1)',
       'SELECT ?s ?p (COUNT(*) AS ?n) WHERE { ?s ?p ?o } GROUP BY ?s',
+      'SELECT (COUNT(?o) AS ?n) WHERE { <urn:a> <urn:b> ?o }',
+      'SELECT (COUNT(*) AS ?n) WHERE { ?s <urn:p>/<urn:q> ?o }',
+      'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o FILTER(true) }',
+      'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o OPTIONAL { ?o <urn:c> ?z } }',
+      'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o BIND(STR(?o) AS ?x) }',
+      'SELECT ?s (COUNT(*) AS ?n) WHERE { ?s <urn:b> ?o } GROUP BY (STR(?s))',
+      // Two patterns: the elements beside them do not matter.
+      'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o . ?o <urn:c> ?z MINUS { ?z <urn:d> ?w } BIND(1 AS ?x) }',
     ]) expect(hidden(query)).toContain('FILTER EXISTS');
   });
 
@@ -92,6 +107,18 @@ describe('patterns outside GRAPH', () => {
     ['DESCRIBE with solution modifiers', 'DESCRIBE ?s WHERE { ?s ?p ?o } LIMIT 1'],
     ['COUNT(DISTINCT *) with a sequence path', 'SELECT (COUNT(DISTINCT *) AS ?n) WHERE { ?s <urn:p>/<urn:q> ?o }'],
     ['COUNT(DISTINCT *) with a blank node', 'SELECT ?s (COUNT(DISTINCT *) AS ?n) WHERE { ?s <urn:p> [] } GROUP BY ?s'],
+    ['a COUNT over one pattern beside MINUS', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o MINUS { <urn:x> <urn:y> <urn:z> } }'],
+    ['a COUNT over one pattern beside VALUES', 'SELECT (COUNT(*) AS ?n) WHERE { VALUES ?o { <urn:c> } <urn:a> <urn:b> ?o }'],
+    ['a COUNT over one pattern beside a BIND of a constant', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o BIND(1 AS ?x) }'],
+    ['a COUNT over one pattern beside an empty group', 'SELECT (COUNT(*) AS ?n) WHERE { {} <urn:a> <urn:b> ?o }'],
+    ['a COUNT over one pattern beside an empty constant GRAPH', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o GRAPH <urn:g> {} }'],
+    ['a COUNT over one pattern in a UNION', 'SELECT (COUNT(*) AS ?n) WHERE { { <urn:a> <urn:b> ?o } UNION {} }'],
+    ['a grouped COUNT over one pattern beside a sub-select', 'SELECT ?s (COUNT(*) AS ?n) WHERE { ?s <urn:b> ?o { SELECT ?x WHERE { ?x <urn:c> ?y } } } GROUP BY ?s'],
+    ['a COUNT in a sub-select inside EXISTS, beside a BIND of a constant',
+      'SELECT ?s WHERE { ?s <urn:p> ?o FILTER EXISTS { { SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?q BIND(1 AS ?x) } } } }'],
+    ['a COUNT over a pattern with an RDF collection', 'SELECT (COUNT(*) AS ?n) WHERE { ?s <urn:p> ( 1 2 ) }'],
+    ['a predicate variable that is also the object', 'SELECT ?p WHERE { <urn:a> ?p ?p }'],
+    ['a predicate variable that is also the subject, in the counting form', 'SELECT (COUNT(*) AS ?n) WHERE { ?x ?x ?o }'],
   ])('refuses %s', (_label, source) => {
     expect(() => hide(source)).toThrow(UnscopedReadGraphQueryError);
   });

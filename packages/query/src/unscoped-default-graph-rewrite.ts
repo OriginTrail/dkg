@@ -28,6 +28,19 @@ type Item =
 
 const BLOCK_END = new Set(['OPTIONAL', 'MINUS', 'GRAPH', 'SERVICE', 'FILTER', 'BIND', 'VALUES']);
 
+/** A predicate that is one IRI, inverted any number of times: one statement pattern. */
+const isLink = (path: SparqlPath): boolean => path.kind === 'link' || (path.kind === 'inverse' && isLink(path.path));
+const isStatementPattern = (triple: SparqlTriplePattern): boolean => triple.verb.kind === 'variable' || isLink(triple.verb);
+const variableName = (term: string): string | undefined => (/^[?$]/.test(term) ? term.slice(1) : undefined);
+
+/** What the walk of one query's WHERE group met outside GRAPH, MINUS, EXISTS and sub-selects. */
+interface CountSurvey {
+  triples: number;
+  simple: boolean;
+  /** MINUS, VALUES, a BIND of a constant, UNION, an empty group or a sub-select. */
+  besideDropped: boolean;
+}
+
 /**
  * Edits that make every pattern outside GRAPH read only graphs that `excluded`
  * lets through, and keep the answer of the store without the excluded graphs:
@@ -37,7 +50,10 @@ const BLOCK_END = new Set(['OPTIONAL', 'MINUS', 'GRAPH', 'SERVICE', 'FILTER', 'B
  *   inverse and negated sets); a path with `*`, `+` or `?` is refused;
  * - a query of the store's fast counting form (`COUNT(*)` over one triple
  *   pattern, alone or grouped by one of its variables) keeps counting stored
- *   quads: its pattern reads the allowed graphs directly.
+ *   quads: its pattern reads the allowed graphs directly. Such a count over one
+ *   pattern beside MINUS, VALUES, a BIND of a constant, UNION, an empty group or
+ *   a sub-select is refused;
+ * - a pattern whose predicate variable is also its subject or object is refused.
  * Patterns inside GRAPH are left alone.
  */
 export function defaultGraphEdits(scope: PreparedSparqlQuery, excluded: (variable: string) => string): SourceEdit[] {
@@ -50,6 +66,9 @@ class DefaultGraphRewriter {
   private readonly fresh: VariableAllocator;
   private readonly labels = new Map<string, string>();
   private introducedVariables = false;
+  private survey: CountSurvey = { triples: 0, simple: true, besideDropped: false };
+  /** Depth of MINUS and EXISTS groups, whose contents the survey leaves out. */
+  private contained = 0;
 
   constructor(private readonly scope: PreparedSparqlQuery, private readonly excluded: (variable: string) => string) {
     this.tokens = scope.prepared.tokens;
@@ -96,58 +115,90 @@ class DefaultGraphRewriter {
       if (index === skipFrom) { index = skipTo; continue; }
       if (this.keyword(index, 'EXISTS') && this.symbolAt(index + 1, '{')) {
         const closing = this.braceMatch(index + 1);
-        this.walkGroup(index + 1, closing);
+        this.walkContained(index + 1, closing);
         index = closing;
       }
     }
   }
 
+  private walkContained(opening: number, closing: number): void {
+    this.contained += 1;
+    this.walkGroup(opening, closing);
+    this.contained -= 1;
+  }
+
+  private noteBesideDropped(): void {
+    if (this.contained === 0) this.survey.besideDropped = true;
+  }
+
   /** The WHERE group of a query or sub-select: its fast counting form, or its patterns one by one. */
   private walkPattern(select: boolean, selectIndex: number, end: number, opening: number, closing: number): void {
-    const triple = select ? this.fastCountTriple(selectIndex, end, opening, closing) : undefined;
-    if (!triple) {
-      this.walkGroup(opening, closing);
+    const count = select ? this.countForm(selectIndex, end, opening, closing) : undefined;
+    const triple = count ? this.bareTriple(opening, closing, count) : undefined;
+    if (triple) {
+      const holder = this.fresh('_holder');
+      const text = this.scope.source.slice(this.tokens[triple.from]!.start, this.tokens[triple.to - 1]!.end);
+      this.edits.push({ start: this.tokens[triple.from]!.start, end: this.tokens[triple.to - 1]!.end,
+        text: `GRAPH ${holder} { ${text} } ${this.excluded(holder)}` });
       return;
     }
-    const holder = this.fresh('_holder');
-    const text = this.scope.source.slice(this.tokens[triple.from]!.start, this.tokens[triple.to - 1]!.end);
-    this.edits.push({ start: this.tokens[triple.from]!.start, end: this.tokens[triple.to - 1]!.end,
-      text: `GRAPH ${holder} { ${text} } ${this.excluded(holder)}` });
+    const [outer, contained] = [this.survey, this.contained];
+    const survey: CountSurvey = { triples: 0, simple: true, besideDropped: false };
+    [this.survey, this.contained] = [survey, 0];
+    this.walkGroup(opening, closing);
+    [this.survey, this.contained] = [outer, contained];
+    // Which count the store gives for one pattern beside such elements is not pinned here.
+    if (count && survey.triples === 1 && survey.simple && survey.besideDropped) {
+      throw new UnrewrittenPatternError('A COUNT over one pattern outside GRAPH beside MINUS, VALUES, BIND, UNION, an empty group or a sub-select');
+    }
   }
 
   private walkGroup(opening: number, closing: number): void {
     if (this.keyword(opening + 1, 'SELECT')) {
+      this.noteBesideDropped();
       this.walkSubSelect(opening, closing);
       return;
     }
+    if (closing === opening + 1) this.noteBesideDropped();
     const depth = this.scope.structure.braces.depthBefore[opening]! + 1;
     let index = opening + 1;
     while (index < closing) {
-      if (this.symbolAt(index, '.') || this.keyword(index, 'UNION')) { index += 1; continue; }
+      if (this.symbolAt(index, '.')) { index += 1; continue; }
+      if (this.keyword(index, 'UNION')) { this.noteBesideDropped(); index += 1; continue; }
       if (this.symbolAt(index, '{')) {
         const end = this.braceMatch(index);
         this.walkGroup(index, end);
         index = end + 1;
         continue;
       }
-      if (this.keyword(index, 'OPTIONAL') || this.keyword(index, 'MINUS')) {
+      if (this.keyword(index, 'OPTIONAL')) {
         const end = this.braceMatch(index + 1);
         this.walkGroup(index + 1, end);
         index = end + 1;
         continue;
       }
+      if (this.keyword(index, 'MINUS')) {
+        this.noteBesideDropped();
+        const end = this.braceMatch(index + 1);
+        this.walkContained(index + 1, end);
+        index = end + 1;
+        continue;
+      }
       if (this.keyword(index, 'GRAPH')) {
-        index = this.braceMatch(index + 2) + 1;
+        const end = this.braceMatch(index + 2);
+        if (end === index + 3) this.noteBesideDropped();
+        index = end + 1;
         continue;
       }
       if (this.keyword(index, 'FILTER')) { index = this.walkFilter(index); continue; }
       if (this.keyword(index, 'BIND')) {
         const end = this.parenthesisMatch(index + 1);
+        if (!this.tokens.slice(index + 2, end - 2).some(token => token.kind === 'variable')) this.noteBesideDropped();
         this.walkExistsOutside(index + 1, end, -1, -1);
         index = end + 1;
         continue;
       }
-      if (this.keyword(index, 'VALUES')) { index = this.skipValues(index); continue; }
+      if (this.keyword(index, 'VALUES')) { this.noteBesideDropped(); index = this.skipValues(index); continue; }
       if (this.keyword(index, 'SERVICE')) throw new UnrewrittenPatternError('SERVICE');
       let end = index;
       while (end < closing && !(this.symbolAt(end, '{') && this.scope.structure.braces.depthBefore[end] === depth)
@@ -170,7 +221,7 @@ class DefaultGraphRewriter {
     if (this.keyword(at, 'NOT')) at += 1;
     if (this.keyword(at, 'EXISTS')) {
       const end = this.braceMatch(at + 1);
-      this.walkGroup(at + 1, end);
+      this.walkContained(at + 1, end);
       return end + 1;
     }
     // FILTER(expression) or FILTER function(arguments).
@@ -194,8 +245,13 @@ class DefaultGraphRewriter {
       if (error instanceof UnreadTriplesBlockError) throw new UnrewrittenPatternError(`A pattern outside GRAPH with ${error.what}`);
       throw error;
     }
+    if (this.contained === 0) {
+      this.survey.triples += triples.length;
+      if (!triples.every(isStatementPattern)) this.survey.simple = false;
+    }
     const items: Item[] = [];
     for (const triple of triples) {
+      this.refuseRepeatedVerb(triple);
       if (triple.verb.kind === 'variable') items.push({ kind: 'triple', subject: triple.subject, verb: triple.verb.text, object: triple.object });
       else this.expand(triple.verb, triple.subject, triple.object, items);
     }
@@ -258,31 +314,62 @@ class DefaultGraphRewriter {
   }
 
   /**
-   * The one triple pattern of the store's fast counting form, by token range:
-   * `SELECT [DISTINCT] (COUNT(*) AS ?n)` over one triple pattern with no GROUP BY,
-   * or `?k` with `(COUNT(*) AS ?n)` or `(COUNT(?v) AS ?n)`, in either order, over
-   * one triple pattern `GROUP BY ?k`, where `?k` and `?v` are its variables. ORDER
-   * BY, LIMIT and OFFSET may follow; HAVING or anything else rules the form out.
+   * The projection of the store's fast counting form: `SELECT [DISTINCT] (COUNT(*) AS ?n)`
+   * with no GROUP BY, or `?k` with `(COUNT(*) AS ?n)` or `(COUNT(?v) AS ?n)`, in
+   * either order, `GROUP BY ?k` or `GROUP BY (?k)`. ORDER BY, LIMIT, OFFSET and a
+   * final VALUES may follow; HAVING or anything else rules the form out.
    */
-  private fastCountTriple(selectIndex: number, end: number, opening: number, closing: number): { from: number; to: number } | undefined {
-    let from = opening + 1;
-    let to = closing;
-    while (this.symbolAt(from, '{') && this.scope.structure.braces.matchingTokenIndexes[from] === to - 1) { from += 1; to -= 1; }
-    if (this.symbolAt(to - 1, '.')) to -= 1;
-    const terms = this.tokens.slice(from, to);
-    if (terms.length !== 3 || !terms.every(token => token.kind === 'variable' || token.kind === 'iri' || token.kind === 'prefixed-name'
-      || token.kind === 'number' || token.kind === 'string' || (token.kind === 'word' && token.logicalValue === 'a'))) return undefined;
-    const variables = new Set(terms.filter(token => token.kind === 'variable').map(token => token.logicalValue.slice(1)));
+  private countForm(
+    selectIndex: number, end: number, opening: number, closing: number,
+  ): { readonly key?: string; readonly counted: string } | undefined {
     const items = this.projectionItems(selectIndex, opening);
     const counts = items?.filter(item => item.kind === 'count') ?? [];
     const keys = items?.filter(item => item.kind === 'variable') ?? [];
     const groupKey = this.groupKey(closing + 1, end);
     if (!items || counts.length !== 1 || groupKey === null) return undefined;
     const counted = (counts[0] as { counted: string }).counted;
-    if (keys.length === 0 && groupKey === undefined && counted === '*') return { from, to };
+    if (keys.length === 0 && groupKey === undefined) return counted === '*' ? { counted } : undefined;
     const key = (keys[0] as { name: string } | undefined)?.name;
-    return keys.length === 1 && key !== undefined && key === groupKey && variables.has(key) && (counted === '*' || variables.has(counted))
-      ? { from, to } : undefined;
+    return keys.length === 1 && key !== undefined && key === groupKey ? { key, counted } : undefined;
+  }
+
+  /**
+   * The token range of a WHERE group that is one triple pattern of the counting
+   * form, nested braces aside: any term, and a predicate that is a variable or one
+   * IRI, inverted or in parentheses. A grouped count needs `?k` and `?v` in it.
+   */
+  private bareTriple(opening: number, closing: number, count: { readonly key?: string; readonly counted: string }): { from: number; to: number } | undefined {
+    let from = opening + 1;
+    let to = closing;
+    while (this.symbolAt(from, '{') && this.scope.structure.braces.matchingTokenIndexes[from] === to - 1) { from += 1; to -= 1; }
+    for (let index = from; index < to; index++) {
+      if (this.symbolAt(index, '{') || this.keyword(index, 'UNION') || this.keyword(index, 'SELECT')
+        || [...BLOCK_END].some(word => this.keyword(index, word))) return undefined;
+    }
+    let triples: SparqlTriplePattern[];
+    let blank = 0;
+    try {
+      // Throwaway names: '-' cannot occur in a query variable.
+      triples = from < to ? parseTriplesBlock(this.scope, from, to, { fresh: () => `?-${blank++}`, labels: new Map() }) : [];
+    } catch (error) {
+      if (error instanceof UnreadTriplesBlockError) return undefined;
+      throw error;
+    }
+    const triple = triples.length === 1 ? triples[0]! : undefined;
+    if (!triple || !isStatementPattern(triple)) return undefined;
+    this.refuseRepeatedVerb(triple);
+    const terms = [triple.subject, triple.object, ...(triple.verb.kind === 'variable' ? [triple.verb.text] : [])];
+    const variables = new Set(terms.map(variableName).filter(name => name !== undefined));
+    if (count.key !== undefined && !(variables.has(count.key) && (count.counted === '*' || variables.has(count.counted)))) return undefined;
+    return { from, to };
+  }
+
+  /** A pattern whose predicate variable is also its subject or object is refused. */
+  private refuseRepeatedVerb(triple: SparqlTriplePattern): void {
+    const verb = triple.verb.kind === 'variable' ? variableName(triple.verb.text) : undefined;
+    if (verb !== undefined && [triple.subject, triple.object].some(term => variableName(term) === verb)) {
+      throw new UnrewrittenPatternError('A pattern outside GRAPH whose predicate variable is also its subject or object');
+    }
   }
 
   /** Projected variables and `(COUNT(*|?v) AS ?n)` items; undefined for any other projection. */
@@ -308,27 +395,30 @@ class DefaultGraphRewriter {
   }
 
   /**
-   * After a WHERE group: the variable of a `GROUP BY ?k`, undefined without GROUP BY,
-   * or null when anything but ORDER BY, LIMIT and OFFSET follows.
+   * After a WHERE group: the variable of a `GROUP BY ?k` or `GROUP BY (?k)`, undefined
+   * without GROUP BY, or null when anything but ORDER BY, LIMIT, OFFSET and a final
+   * VALUES follows.
    */
   private groupKey(from: number, end: number): string | undefined | null {
     let key: string | undefined;
     let index = from;
-    const keyToken = this.tokens[index + 2];
-    if (this.keyword(index, 'GROUP') && this.keyword(index + 1, 'BY') && keyToken?.kind === 'variable') {
+    if (this.keyword(index, 'GROUP') && this.keyword(index + 1, 'BY')) {
+      const wrapped = this.symbolAt(index + 2, '(') && this.symbolAt(index + 4, ')');
+      const keyToken = this.tokens[index + (wrapped ? 3 : 2)];
+      if (keyToken?.kind !== 'variable') return null;
       key = keyToken.logicalValue.slice(1);
-      index += 3;
+      index += wrapped ? 5 : 3;
     }
     if (this.keyword(index, 'ORDER') && this.keyword(index + 1, 'BY')) {
       index += 2;
-      while (index < end && !this.keyword(index, 'LIMIT') && !this.keyword(index, 'OFFSET')) {
-        if (this.keyword(index, 'HAVING') || this.keyword(index, 'VALUES') || this.keyword(index, 'GROUP')) return null;
+      while (index < end && !this.keyword(index, 'LIMIT') && !this.keyword(index, 'OFFSET') && !this.keyword(index, 'VALUES')) {
+        if (this.keyword(index, 'HAVING') || this.keyword(index, 'GROUP')) return null;
         index += 1;
       }
     }
     while (index < end) {
       if ((this.keyword(index, 'LIMIT') || this.keyword(index, 'OFFSET')) && this.tokens[index + 1]?.kind === 'number') index += 2;
-      else return null;
+      else return this.keyword(index, 'VALUES') ? key : null;
     }
     return key;
   }

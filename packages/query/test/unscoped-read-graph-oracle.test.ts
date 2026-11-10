@@ -29,6 +29,7 @@ const R2 = readGraphIri({ scope: readScope(CG2), layer: MemoryLayer.VerifiableMe
 const ST = readGraphStateGraphIri(CG);
 const ST2 = readGraphStateGraphIri(CG2);
 const INT = (n: number) => `"${n}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
+const BOOLEAN_TRUE = '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>';
 const HINTS = 'PREFIX hint: <http://www.bigdata.com/queryHints#>';
 
 const q = (graph: string, subject: string, predicate: string, object: string): Quad => ({ graph, subject, predicate, object });
@@ -43,6 +44,9 @@ const BASE: Quad[] = [
   q(META, 'urn:ka1', 'urn:status', '"confirmed"'), q(META, 'urn:ka1', 'urn:points', RCG),
   q(H1, 'urn:s', 'urn:p', 'urn:x'), q(H1, 'urn:m', 'urn:n', 'urn:o'),
   q(G2, 'urn:s', 'urn:k1', 'urn:o2'), q(G2, 'urn:s', 'urn:k2', 'urn:o2'), q(G2, 'urn:s', 'urn:p', 'urn:x2'), q(G2, 'urn:x2', 'urn:r', 'urn:z'),
+  // Literal spellings and a pattern that repeats its variable, each held by two graphs.
+  ...[G1, G2].flatMap(graph => [q(graph, 'urn:s', 'urn:lbl', '"x"@en'), q(graph, 'urn:s', 'urn:flag', BOOLEAN_TRUE),
+    q(graph, 'urn:loop', 'urn:self', 'urn:loop')]),
   // The store's default graph.
   q('', 'urn:dg', 'urn:dp', 'urn:do'),
 ];
@@ -77,13 +81,16 @@ type Variant = keyof typeof VARIANTS;
  * - graph-path: inside GRAPH ?g with a *, + or ? path; graph-group: a GRAPH ?g group without a leading triple pattern;
  * - default: outside GRAPH; default-path: outside GRAPH with a *, + or ? path;
  * - default-star: SELECT * or COUNT(DISTINCT *) where blank nodes or paths outside GRAPH add variables;
+ * - default-dropped: a COUNT over one pattern outside GRAPH beside MINUS, VALUES, a BIND of a constant or an empty group;
+ * - default-repeated: a pattern outside GRAPH whose predicate variable is also its subject or object;
  * - hint: carries a query hint; dataset: names its own dataset; base: declares BASE;
  * - describe: DESCRIBE of IRIs, or of variables of a pattern outside GRAPH; describe-all: DESCRIBE *;
  * - describe-graph: DESCRIBE from a pattern with GRAPH, which the store itself does not answer;
  * - names: names a read graph, which every store refuses.
  * A COUNT grouped by a key it does not project is left out: the store itself rejects it.
  */
-type Kind = 'graph' | 'graph-path' | 'graph-group' | 'default' | 'default-path' | 'default-star' | 'hint' | 'dataset' | 'base'
+type Kind = 'graph' | 'graph-path' | 'graph-group' | 'default' | 'default-path' | 'default-star' | 'default-dropped' | 'default-repeated'
+  | 'hint' | 'dataset' | 'base'
   | 'describe' | 'describe-all' | 'describe-graph' | 'names';
 const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
   ['D1 all triples', 'default', 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }'],
@@ -169,6 +176,37 @@ const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
   ['D31 a blank-node property list', 'default', 'SELECT ?s ?z WHERE { ?s <urn:p> [ <urn:r> ?z ] }'],
   ['D32 SELECT * with a blank node', 'default-star', 'SELECT * WHERE { ?s <urn:p> [ <urn:r> ?z ] }'],
   ['D44 COUNT(DISTINCT *) with a sequence path', 'default-star', 'SELECT (COUNT(DISTINCT *) AS ?n) WHERE { ?s <urn:p>/<urn:r> ?z }'],
+  // Counting forms: which spellings of one pattern count stored copies, and which count distinct triples.
+  ['E1 COUNT of the one variable of a pattern', 'default', 'SELECT (COUNT(?o) AS ?n) WHERE { <urn:a> <urn:b> ?o }'],
+  ['E2 COUNT of the one variable, as subject', 'default', 'SELECT (COUNT(?s) AS ?n) WHERE { ?s <urn:b> <urn:c> }'],
+  ['E3 COUNT(*) of a pattern without variables', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> <urn:c> }'],
+  ['E4 COUNT(*) with a typed literal', 'default', `SELECT (COUNT(*) AS ?n) WHERE { ?s <urn:val> ${INT(5)} }`],
+  ['E5 COUNT(*) with a number', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { ?s <urn:val> 5 }'],
+  ['E6 COUNT(*) with a language-tagged literal', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { ?s <urn:lbl> "x"@en }'],
+  ['E7 COUNT(*) with a boolean', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { ?s <urn:flag> true }'],
+  ['E8 COUNT(*) grouped, with a language-tagged literal', 'default', 'SELECT ?s (COUNT(*) AS ?n) WHERE { ?s <urn:lbl> "x"@en } GROUP BY ?s'],
+  ['E9 COUNT(*) with a blank node', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> [] }'],
+  ['E10 COUNT(*) with a labelled blank node', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> _:x }'],
+  ['E11 COUNT(*) over an inverse link', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { ?o ^<urn:b> <urn:a> }'],
+  ['E12 COUNT(*) with a link in parentheses and a final semicolon', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> (<urn:b>) ?o ; }'],
+  ['E13 COUNT(*) grouped by (?o), over an inverse link', 'default', 'SELECT ?o (COUNT(*) AS ?n) WHERE { ?o ^<urn:b> ?s } GROUP BY (?o)'],
+  ['E14 COUNT(*) with a final VALUES on its variable', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o } VALUES ?o { <urn:c> }'],
+  ['E15 COUNT(*) grouped, with a final VALUES', 'default', 'SELECT ?s (COUNT(*) AS ?n) WHERE { ?s <urn:b> ?o } GROUP BY ?s VALUES ?x { 1 }'],
+  ['E16 COUNT(*) over a sequence path', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { ?s <urn:p>/<urn:r> ?z }'],
+  ['E17 COUNT(*) over an alternative', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b>|<urn:k1> ?o }'],
+  ['E18 COUNT(*) over one pattern with FILTER(true)', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o FILTER(true) }'],
+  ['E19 COUNT(*) over one pattern with OPTIONAL', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o OPTIONAL { ?o <urn:zz> ?w } }'],
+  ['E20 COUNT(*) over one pattern with a computed BIND', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o BIND(STR(?o) AS ?x) }'],
+  ['E21 COUNT(*) and COUNT(?o)', 'default', 'SELECT (COUNT(*) AS ?n) (COUNT(?o) AS ?m) WHERE { <urn:a> <urn:b> ?o }'],
+  ['E22 COUNT(*) of a pattern with its subject as object', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { ?x <urn:self> ?x }'],
+  ['E23 COUNT(?x) of the same pattern', 'default', 'SELECT (COUNT(?x) AS ?n) WHERE { ?x <urn:self> ?x }'],
+  ['E24 COUNT(*) grouped by a key the pattern does not bind', 'default', 'SELECT ?x (COUNT(*) AS ?n) WHERE { ?s <urn:b> ?o } GROUP BY ?x'],
+  ['F1 COUNT(*) over one pattern beside MINUS', 'default-dropped', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o MINUS { <urn:nx> <urn:ny> <urn:nz> } }'],
+  ['F2 COUNT(*) over one pattern beside VALUES', 'default-dropped', 'SELECT (COUNT(*) AS ?n) WHERE { VALUES ?o { <urn:c> } <urn:a> <urn:b> ?o }'],
+  ['F3 COUNT(*) over one pattern beside a BIND of a constant', 'default-dropped', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o BIND(1 AS ?x) }'],
+  ['F4 COUNT(*) over one pattern beside an empty group', 'default-dropped', 'SELECT (COUNT(*) AS ?n) WHERE { {} <urn:a> <urn:b> ?o }'],
+  ['F5 a predicate variable that is also the object', 'default-repeated', 'SELECT ?p WHERE { <urn:a> ?p ?p }'],
+  ['F6 COUNT(*) with a predicate variable that is also the subject', 'default-repeated', 'SELECT (COUNT(*) AS ?n) WHERE { ?x ?x ?o }'],
   ['D33 COUNT(*) with OFFSET', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o } OFFSET 0'],
   ['D34 COUNT(*) grouped by subject', 'default', 'SELECT ?s (COUNT(*) AS ?n) WHERE { ?s ?p ?o } GROUP BY ?s'],
   ['D36 COUNT(*) with a constant subject', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:s> ?p ?o }'],
