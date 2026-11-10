@@ -4,25 +4,26 @@
  * Names of read graphs: the node-local, derived graphs that hold the merged
  * default graph of one read scope, and the state graph that records them.
  *
- * Everything lives in the reserved `_read` partition under the context graph's
- * own prefix, so whatever protects or removes a context graph's graphs by name
- * covers its read graphs too:
+ * Everything lives in the reserved partition {@link READ_GRAPH_SEGMENT} under
+ * the context graph's own prefix, so whatever protects or removes a context
+ * graph's graphs by name covers its read graphs too:
  *
- *   did:dkg:context-graph:{cg}/_read                                  partition root
- *   did:dkg:context-graph:{cg}/_read/state                            state graph
- *   did:dkg:context-graph:{cg}/_read/cg/{layer}                       whole context graph
- *   did:dkg:context-graph:{cg}/_read/sub/{sub}/{layer}                one registered sub-graph
+ *   did:dkg:context-graph:{cg}/_~read                                 partition root
+ *   did:dkg:context-graph:{cg}/_~read/state                           state graph
+ *   did:dkg:context-graph:{cg}/_~read/cg/{layer}                      whole context graph
+ *   did:dkg:context-graph:{cg}/_~read/sub/{sub}/{layer}               one registered sub-graph
  *
  * `{layer}` is `_shared_memory` or `_verifiable_memory`, and for working
  * memory `_working_memory/{agent}` with the agent's canonical address. The
  * `cg` and `sub` segments keep two scopes from sharing a name: without them,
  * context graph `x/code` and sub-graph `code` of `x` would collide.
  *
- * Sub-graph names cannot start with `_` ({@link validateSubGraphName}) and new
- * context graph IDs cannot contain such a segment
- * ({@link validateNewContextGraphId}), so `_read` cannot collide with a
- * sub-graph or a new context graph. A context graph whose ID already contains a
- * `_`-prefixed segment (older stores) gets no read graphs.
+ * The segment cannot occur in any context graph ID, because no ID can contain
+ * `~` ({@link validateContextGraphId}), whichever rule it was created under. It
+ * cannot be a sub-graph name either, because those cannot start with `_`
+ * ({@link validateSubGraphName}). A context graph whose ID contains a
+ * `_`-prefixed segment, which only older stores hold
+ * ({@link validateNewContextGraphId}), gets no read graphs.
  */
 
 import {
@@ -34,8 +35,12 @@ import { MemoryLayer, memoryLayerSlug } from './memory-model.js';
 
 const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
 
-/** The reserved partition segment that holds a context graph's read graphs and their state. */
-export const READ_GRAPH_SEGMENT = '_read';
+/**
+ * The reserved partition segment that holds a context graph's read graphs and
+ * their state. Its `~` keeps it out of every context graph ID, and its leading
+ * `_` keeps it out of every sub-graph name.
+ */
+export const READ_GRAPH_SEGMENT = '_~read';
 
 const STATE_SEGMENT = 'state';
 const WHOLE_CONTEXT_GRAPH_SEGMENT = 'cg';
@@ -86,7 +91,7 @@ export function isReadGraphAgentAddress(agentAddress: string): boolean {
   return AGENT_SEGMENT.test(agent) && agent !== '.' && agent !== '..';
 }
 
-/** `did:dkg:context-graph:{cg}/_read`, the root of a context graph's read-graph partition. */
+/** `did:dkg:context-graph:{cg}/_~read`, the root of a context graph's read-graph partition. */
 export function readGraphPartitionRoot(contextGraphId: string): string {
   const validation = validateContextGraphId(contextGraphId);
   if (!validation.valid) throw new Error(`Invalid context graph ID for a read-graph name: ${validation.reason}`);
@@ -95,16 +100,17 @@ export function readGraphPartitionRoot(contextGraphId: string): string {
 
 /**
  * True for the root of any context graph's read-graph partition and for every
- * graph under it: a context-graph IRI with a `_read` path segment after the
- * first. It does not require a well-formed read-graph name, so a stray graph
- * under `_read` is still recognized. Takes a bare IRI, without angle brackets.
+ * graph under it: a context-graph IRI with a {@link READ_GRAPH_SEGMENT} path
+ * segment after the first. It does not require a well-formed read-graph name,
+ * so a stray graph in the partition is still recognized. Takes a bare IRI,
+ * without angle brackets.
  */
 export function isReadGraphPartitionIri(iri: string): boolean {
   if (!iri.startsWith(CONTEXT_GRAPH_PREFIX)) return false;
   return iri.slice(CONTEXT_GRAPH_PREFIX.length).split('/').indexOf(READ_GRAPH_SEGMENT, 1) !== -1;
 }
 
-/** `did:dkg:context-graph:{cg}/_read/state`, the graph that holds the state rows of a context graph's read graphs. */
+/** `did:dkg:context-graph:{cg}/_~read/state`, the graph that holds the state rows of a context graph's read graphs. */
 export function readGraphStateGraphIri(contextGraphId: string): string {
   return `${eligiblePartitionRoot(contextGraphId)}/${STATE_SEGMENT}`;
 }
