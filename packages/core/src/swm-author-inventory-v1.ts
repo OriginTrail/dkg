@@ -77,13 +77,20 @@ const ROW_KEYS = [
   'sharedAt',
   'expiresAt',
 ] as const;
-const ownedRows = new WeakSet<SwmAuthorInventoryRowV1>();
-const ownedRowSets = new WeakSet<readonly SwmAuthorInventoryRowV1[]>();
+const ownedRows = new WeakSet<object>();
+const ownedRowSets = new WeakSet<object>();
 // Cache only derived data for owned scalar records, never database results.
 let rowEncodingCache = new WeakMap<SwmAuthorInventoryRowV1, {
   text: string; bytes: number; identity: ReturnType<typeof assertCanonicalDeterministicUalV1>;
 }>();
 
+function isOwnedRow(value: unknown): value is SwmAuthorInventoryRowV1 {
+  return typeof value === 'object' && value !== null && ownedRows.has(value);
+}
+
+function isOwnedRowSet(value: unknown): value is readonly SwmAuthorInventoryRowV1[] {
+  return typeof value === 'object' && value !== null && ownedRowSets.has(value);
+}
 
 const UTF8 = new TextEncoder();
 const UTF8_FATAL = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
@@ -203,7 +210,7 @@ export function computeSwmAuthorInventoryScopeDigestV1(
 export function assertSwmAuthorInventoryRowV1(
   value: unknown,
 ): asserts value is SwmAuthorInventoryRowV1 {
-  if (ownedRows.has(value as SwmAuthorInventoryRowV1)) return;
+  if (isOwnedRow(value)) return;
   if (!isPlainRecord(value)) fail('swm-inventory-schema', 'row must be a plain object');
   assertExactKeysAdapted(value, ROW_KEYS, 'row');
   adaptScalars(() => {
@@ -304,12 +311,12 @@ export function assertEncodableSwmAuthorInventoryRowV1(
 
 /** Copy caller data once; only codec-owned scalar records can be reused. */
 export function snapshotSwmAuthorInventoryRowV1(
-  input: SwmAuthorInventoryRowV1,
+  input: unknown,
 ): SwmAuthorInventoryRowV1 {
-  if (ownedRows.has(input)) return input;
+  if (isOwnedRow(input)) return input;
   const row = snapshotExactDataRecord(
     input, ROW_KEYS, 'SWM inventory row',
-  ) as unknown as SwmAuthorInventoryRowV1;
+  );
   assertSwmAuthorInventoryRowV1(row);
   // Preserve the singleton wire codec's rejection contract as well as its bytes.
   try {
@@ -340,14 +347,14 @@ function ownedRowEncoding(row: SwmAuthorInventoryRowV1) {
 
 /** Validate an exact set without serializing it into the wire parser again. */
 export function snapshotSwmAuthorInventoryRowsV1(
-  input: readonly SwmAuthorInventoryRowV1[],
+  input: unknown,
 ): readonly SwmAuthorInventoryRowV1[] {
-  if (ownedRowSets.has(input)) return input;
+  if (isOwnedRowSet(input)) return input;
   if (!Array.isArray(input) || input.length > MAX_SWM_AUTHOR_INVENTORY_ROWS_V1) {
     fail('swm-inventory-too-large', 'row set exceeds the v1 row limit');
   }
   const rows = Object.freeze(snapshotDenseDataArray(input, 'SWM inventory rows')
-    .map((row) => snapshotSwmAuthorInventoryRowV1(row as SwmAuthorInventoryRowV1)));
+    .map((row) => snapshotSwmAuthorInventoryRowV1(row)));
   assertSwmAuthorInventoryRowsV1(rows);
   let bytes: Uint8Array;
   try {
@@ -594,7 +601,7 @@ export function assertSwmAuthorInventorySnapshotBindingV1(
 function assertSwmAuthorInventoryRowsV1(
   value: unknown,
 ): asserts value is SwmAuthorInventoryRowV1[] {
-  if (ownedRowSets.has(value as readonly SwmAuthorInventoryRowV1[])) return;
+  if (isOwnedRowSet(value)) return;
   if (!Array.isArray(value)) fail('swm-inventory-schema', 'rows must be an array');
   if (value.length > MAX_SWM_AUTHOR_INVENTORY_ROWS_V1) {
     fail('swm-inventory-too-large', 'row set exceeds the v1 row limit');

@@ -34,9 +34,7 @@ export function snapshotSwmAuthorInventoryMutationV1(
   const candidate = snapshotPlainDataRecordV1(mutation, 'SWM author inventory mutation');
   if (candidate.kind === 'upsert') {
     assertExactFieldSetV1(candidate, ['kind', 'row'], 'SWM author inventory upsert mutation');
-    const rows = snapshotSwmAuthorInventoryRowsV1([
-      candidate.row as SwmAuthorInventoryRowV1,
-    ]);
+    const rows = snapshotSwmAuthorInventoryRowsV1([candidate.row]);
     return Object.freeze({ kind: 'upsert' as const, row: rows[0]! });
   }
   if (candidate.kind === 'remove' && typeof candidate.kaUal === 'string') {
