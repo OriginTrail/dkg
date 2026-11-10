@@ -19,7 +19,7 @@ candidate; publication and production qualification are still pending.
   Verifiable Memory of the testnet Marketplace Context Graph.
   Subscriptions and receipts settle on the marketplace contracts on Base
   Sepolia. On mainnet the marketplace stays inactive until its contracts
-  are deployed there (#3645, #3720, #3721, #3738, #3742, #3747).
+  are deployed there (#3645, #3720, #3721, #3738, #3742, #3747, #3756).
 - **A new look for the node UI.** A fresh theme and type across the app
   (#3721).
 - **Correct catalog content after draft edits.** The catalog follows an
@@ -63,6 +63,9 @@ candidate; publication and production qualification are still pending.
   the marketplace stays inactive until its contracts are deployed there.
 - Tools that read `GET /api/diagnostics/rpc-usage` and pin its consumer
   labels should accept `consumerVocabularyVersion` 4.
+- A seller with an `openai` backend now takes tool calls for its services
+  by default. Set `marketplace.seller.services[].tools` to `false` for a
+  backend that does not support tools.
 - `dkg rollback` returns a node to 10.0.27. "Updating from 10.0.27" in
   `docs/use-dkg/updates-and-rollback.md` has the details.
 
@@ -128,13 +131,6 @@ The details follow.
   (#3702).
 - Find Claude Desktop's relocated Windows configuration in `dkg mcp setup`
   and `dkg mcp uninstall`, natively and through WSL (#3704).
-- Show only the graphs you are a member of in the MCP server's default
-  Context Graph listing, by the same rule as **My Context Graphs** in the
-  node UI (#3710).
-- Let a manually registered MCP server find the local node's home and token
-  when no home or workspace configuration is set, so its tools no longer
-  answer 401; an explicit home, workspace configuration or token keeps
-  precedence (#3703).
 
 ### Added
 
@@ -203,11 +199,16 @@ The details follow.
   fresh Edge, with a pinned Java runtime, complete journal verification and
   authenticated catch-up. Automatic/default activation remains disabled;
   existing data directories are not migrated (#3566).
+- **Tool calls through the marketplace gateway.** Calls carry `tools`,
+  `tool_choice` and the tool results, and answers carry the model's tool
+  calls. A seller says in its quote whether a service takes tool calls, the
+  router sends such calls only to sellers that do, and the gateway answers
+  400 `tools_unsupported` before anything is reserved or sent when none
+  does. Answers report prompt and completion tokens separately when the
+  seller provides the split. New access keys get 64-bit ids, and existing
+  keys keep working (#3756).
 - `dkg publisher clear-job <job-id>` and `dkg ka clear-share-job <job-id>`
   remove one finished job from a running node's queue (#3709).
-- The MCP guide explains how to configure a client by hand, which
-  connection settings take precedence, and how to recover from common
-  connection problems (#3711).
 
 ### Changed
 
@@ -229,12 +230,9 @@ The details follow.
   testnet chain, add a testnet smoke test, give the Solidity coverage job
   60 minutes, and extend three dated test exceptions (#3691, #3693, #3719,
   #3725).
-- Add end-to-end tests for the NeuroSymbolic Marketplace through the node
-  UI, on a devnet of their own in CI (#3732).
-- Make the marketplace one complete capability of the chain adapter, share
-  one registered-signer fallback between rotated sends, and move the
+- Share one registered-signer fallback between rotated sends, and move the
   RPC-usage consumer vocabulary into a module of its own, with no change in
-  behaviour (#3737, #3739, #3740).
+  behaviour (#3739, #3740).
 
 ### Before promotion
 
