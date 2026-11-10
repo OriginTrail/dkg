@@ -14,6 +14,7 @@ import {
   MAX_SEAL_TRIPLE_COUNT_V1,
 } from './canonical-graph-scoped-author-seal.js';
 import {
+  assertCanonicalJsonValue,
   canonicalizeJson,
   parseCanonicalJson,
   type CanonicalJsonValue,
@@ -63,6 +64,7 @@ export type SwmAuthorInventoryShareOperationIdV1 = string & {
 };
 
 const UTF8 = new TextEncoder();
+const UTF8_FATAL = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const SCOPE_DOMAIN_BYTES = UTF8.encode(SWM_AUTHOR_INVENTORY_SCOPE_DIGEST_DOMAIN_V1);
 const ROWS_DOMAIN_BYTES = UTF8.encode(SWM_AUTHOR_INVENTORY_ROWS_DIGEST_DOMAIN_V1);
 const SWM_AUTHOR_INVENTORY_SCOPE_KEYS = AUTHOR_LANE_SCOPE_KEYS_V1;
@@ -98,6 +100,12 @@ export interface SwmAuthorInventoryRowV1 {
   readonly sharedAt: TimestampMsV1;
   readonly expiresAt: TimestampMsV1 | null;
 }
+
+// A signed head may validate and digest the same parsed row set several times.
+// Keep the derived bytes private: callers still receive an independent buffer.
+const MAX_CACHED_ROWS_BYTES_V1 = 2 * MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1;
+let immutableRowsBytesV1 = new WeakMap<readonly SwmAuthorInventoryRowV1[], Uint8Array>();
+let allocatedRowsBytesV1 = 0;
 
 /** Constant-size signed exact-set commitment. The rows remain a separate blob. */
 export interface SwmAuthorInventoryHeadV1 extends SwmAuthorInventoryScopeV1 {
@@ -246,6 +254,9 @@ export function compareSwmAuthorInventoryRowsV1(
 export function canonicalizeSwmAuthorInventoryRowsBytesV1(
   rows: readonly SwmAuthorInventoryRowV1[],
 ): Uint8Array {
+  // Only fresh immutable row sets constructed by this module enter the cache.
+  const cached = immutableRowsBytesV1.get(rows);
+  if (cached !== undefined) return cached.slice();
   assertSwmAuthorInventoryRowsV1(rows);
   try {
     return UTF8.encode(canonicalizeJson(rows as unknown as CanonicalJsonValue, {
@@ -257,13 +268,37 @@ export function canonicalizeSwmAuthorInventoryRowsBytesV1(
   }
 }
 
+/** Complete singleton wire validation without allocating canonical output bytes. */
+export function assertEncodableSwmAuthorInventoryRowV1(
+  value: unknown,
+): asserts value is SwmAuthorInventoryRowV1 {
+  const rows = [value];
+  assertSwmAuthorInventoryRowsV1(rows);
+  try {
+    assertCanonicalJsonValue(rows as unknown as CanonicalJsonValue, {
+      maxBytes: MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1,
+      maxDepth: 2,
+    });
+  } catch (cause) {
+    fail('swm-inventory-too-large', 'row set exceeds the canonical v1 byte limit', cause);
+  }
+}
+
 export function parseCanonicalSwmAuthorInventoryRowsV1(
   input: string | Uint8Array,
   options: StrictJsonParseOptions = {},
 ): readonly SwmAuthorInventoryRowV1[] {
   let parsed: CanonicalJsonValue;
+  let text: string;
   try {
-    parsed = parseCanonicalJson(input, {
+    // Decode binary input once into immutable text. Never cache the caller's
+    // buffer or read it again after validation, including Buffer slice views.
+    if (typeof input !== 'string' && input.byteLength > Math.min(
+      options.maxBytes ?? MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1,
+      MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1,
+    )) throw new Error('row set exceeds the canonical v1 byte limit');
+    text = typeof input === 'string' ? input : UTF8_FATAL.decode(input);
+    parsed = parseCanonicalJson(text, {
       ...options,
       maxBytes: Math.min(
         options.maxBytes ?? MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1,
@@ -275,7 +310,17 @@ export function parseCanonicalSwmAuthorInventoryRowsV1(
     fail('swm-inventory-schema', 'rows are not strict canonical JSON', cause);
   }
   assertSwmAuthorInventoryRowsV1(parsed);
-  return Object.freeze(parsed.map((row) => Object.freeze({ ...row })));
+  const rows = Object.freeze(parsed.map((row) => Object.freeze({ ...row })));
+  const bytes = UTF8.encode(text);
+  // Weak keys avoid retaining dead snapshots. This conservative allocation
+  // budget also bounds stored bytes while many snapshots remain live.
+  if (allocatedRowsBytesV1 + bytes.byteLength > MAX_CACHED_ROWS_BYTES_V1) {
+    immutableRowsBytesV1 = new WeakMap();
+    allocatedRowsBytesV1 = 0;
+  }
+  immutableRowsBytesV1.set(rows, bytes);
+  allocatedRowsBytesV1 += bytes.byteLength;
+  return rows;
 }
 
 export function computeSwmAuthorInventoryRowsDigestV1(

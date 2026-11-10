@@ -1,3 +1,4 @@
+import { admitShareWhileConnected } from '../share-admission-lifetime.js';
 import { handleKnowledgeAssetPullFrom } from './knowledge-asset-pull-from.js';
 import { handleShareJobCollection } from './share-job-collection.js';
 import { handlePublishedDescriptorRepair } from './published-descriptor-repair.js';
@@ -53,6 +54,7 @@ import {
   noFundedPublisherWalletBody,
   respondIfPcaFundingUnknown,
   SMALL_BODY_BYTES,
+  type UnavailableResponseRenderer,
 } from "../http-utils.js";
 import { validateWritableQuads } from "../knowledge-asset-quad-validation.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
@@ -559,6 +561,11 @@ function rejectSelectedAuthorOnCreate(
   });
   return false;
 }
+
+/** Only used by the common preflight before this request can create a publisher job. */
+const renderPublishPreflightUnavailable: UnavailableResponseRenderer = (res, body, headers) => {
+  jsonResponse(res, 503, { ...body, jobCreated: false, retryable: true }, undefined, headers);
+};
 
 export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -1126,7 +1133,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     agent,
     parsed.contextGraphId,
     res,
-    writePreflightContextGraphOpts,
+    {
+      ...writePreflightContextGraphOpts,
+      // This common preflight precedes every mutation and the publish enqueue fence.
+      ...(layer === 'vm' && verb === 'publish-async' ? { renderUnavailable: renderPublishPreflightUnavailable } : {}),
+    },
   );
   if (!contextGraphId) return;
 
@@ -1309,11 +1320,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         }
       }
       try {
-        const result = await admissionStep(res, 'enqueue', () => agent.assertion.promoteAsync(contextGraphId, name, {
+        const result = await admitShareWhileConnected(res, signal => admissionStep(res, 'enqueue', () => agent.assertion.promoteAsync(contextGraphId, name, {
+          signal,
           entities: entities ?? "all",
           subGraphName,
           ...promoteStorageLane,
-        }));
+        })));
+        if (result === undefined) return;
         return jsonResponse(res, 200, { jobId: result.jobId, state: "queued" });
       } catch (err: any) {
         if (err instanceof PromoteJobConflictError) {

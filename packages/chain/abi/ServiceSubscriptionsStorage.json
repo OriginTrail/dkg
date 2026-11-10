@@ -1,0 +1,1500 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "hubAddress",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "constructor"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint256",
+        "name": "count",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "budgetCount",
+        "type": "uint256"
+      }
+    ],
+    "name": "BudgetTopUpOutOfRange",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "string",
+        "name": "name",
+        "type": "string"
+      }
+    ],
+    "name": "InvalidParameter",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint8",
+        "name": "bits",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint256",
+        "name": "value",
+        "type": "uint256"
+      }
+    ],
+    "name": "SafeCastOverflowedUintDowncast",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "SubscriptionExists",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "SubscriptionNotFound",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "string",
+        "name": "msg",
+        "type": "string"
+      }
+    ],
+    "name": "UnauthorizedAccess",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroAddressHub",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "ZeroSubscriptionStart",
+    "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint8",
+        "name": "oldValue",
+        "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint8",
+        "name": "newValue",
+        "type": "uint8"
+      }
+    ],
+    "name": "MaxBudgetsPerSubscriptionSet",
+    "type": "event"
+  },
+  {
+    "inputs": [],
+    "name": "CLASS_INFERENCE",
+    "outputs": [
+      {
+        "internalType": "uint8",
+        "name": "",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "CLASS_QUERY",
+    "outputs": [
+      {
+        "internalType": "uint8",
+        "name": "",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      }
+    ],
+    "name": "accountSubscriptionAt",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "accountSubscriptionCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "appendAccountSubscription",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "serviceId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "serviceClass",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "maxPricePerUnit",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.ServiceBudget",
+        "name": "b",
+        "type": "tuple"
+      }
+    ],
+    "name": "appendBudget",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "cost",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "spentFromWindow",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "spentFromTopUp",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.TopUpAmounts",
+        "name": "t",
+        "type": "tuple"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "planDigest",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint96[]",
+        "name": "added",
+        "type": "uint96[]"
+      },
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "serviceId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "serviceClass",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "maxPricePerUnit",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.ServiceBudget[]",
+        "name": "appended",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "applyTopUp",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      }
+    ],
+    "name": "buyerAt",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "buyerCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "consumeGrantNonce",
+    "outputs": [
+      {
+        "internalType": "uint64",
+        "name": "used",
+        "type": "uint64"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint256",
+            "name": "accountId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "address",
+            "name": "buyer",
+            "type": "address"
+          },
+          {
+            "internalType": "uint64",
+            "name": "grantNonce",
+            "type": "uint64"
+          },
+          {
+            "internalType": "address",
+            "name": "sessionKey",
+            "type": "address"
+          },
+          {
+            "internalType": "uint40",
+            "name": "epoch",
+            "type": "uint40"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "planDigest",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint40",
+            "name": "startsAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "endsAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "fundedEpoch",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "fundedWindow",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint16",
+            "name": "discountBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint8",
+            "name": "budgetCount",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "cost",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "spentFromWindow",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "spentFromTopUp",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.Subscription",
+        "name": "s",
+        "type": "tuple"
+      },
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "serviceId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "serviceClass",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "maxPricePerUnit",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.ServiceBudget[]",
+        "name": "budgets",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "createSubscription",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      }
+    ],
+    "name": "getBudget",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "serviceId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "serviceClass",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "maxPricePerUnit",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.ServiceBudget",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "getBudgets",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "serviceId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "serviceClass",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "maxPricePerUnit",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.ServiceBudget[]",
+        "name": "",
+        "type": "tuple[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      }
+    ],
+    "name": "getGrant",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "maxCostPerEpoch",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint40",
+            "name": "grantedAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "expiresAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "revokedAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint64",
+            "name": "nonce",
+            "type": "uint64"
+          },
+          {
+            "internalType": "address",
+            "name": "owner",
+            "type": "address"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.BuyerGrant",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getServiceSpending",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint40",
+            "name": "enabledAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "address",
+            "name": "owner",
+            "type": "address"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.ServiceSpending",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "getSubscription",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint256",
+            "name": "accountId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "address",
+            "name": "buyer",
+            "type": "address"
+          },
+          {
+            "internalType": "uint64",
+            "name": "grantNonce",
+            "type": "uint64"
+          },
+          {
+            "internalType": "address",
+            "name": "sessionKey",
+            "type": "address"
+          },
+          {
+            "internalType": "uint40",
+            "name": "epoch",
+            "type": "uint40"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "planDigest",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint40",
+            "name": "startsAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "endsAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "fundedEpoch",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "fundedWindow",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint16",
+            "name": "discountBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint8",
+            "name": "budgetCount",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "cost",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "spentFromWindow",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "spentFromTopUp",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.Subscription",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      }
+    ],
+    "name": "getUsage",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint32",
+            "name": "subscriptions",
+            "type": "uint32"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.Usage",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "nonce",
+        "type": "uint64"
+      }
+    ],
+    "name": "grantEnd",
+    "outputs": [
+      {
+        "internalType": "uint40",
+        "name": "",
+        "type": "uint40"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "name": "grantNonce",
+    "outputs": [
+      {
+        "internalType": "uint64",
+        "name": "",
+        "type": "uint64"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "hub",
+    "outputs": [
+      {
+        "internalType": "contract Hub",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "initialize",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      }
+    ],
+    "name": "isBuyerListed",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      }
+    ],
+    "name": "isGrantActive",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      }
+    ],
+    "name": "listBuyer",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "maxBudgetsPerSubscription",
+    "outputs": [
+      {
+        "internalType": "uint8",
+        "name": "",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "name",
+    "outputs": [
+      {
+        "internalType": "string",
+        "name": "",
+        "type": "string"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      }
+    ],
+    "name": "recordUsage",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "nonce",
+        "type": "uint64"
+      }
+    ],
+    "name": "replacedGrantEnd",
+    "outputs": [
+      {
+        "internalType": "uint40",
+        "name": "",
+        "type": "uint40"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      },
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "serviceId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "serviceClass",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "maxPricePerUnit",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.ServiceBudget",
+        "name": "b",
+        "type": "tuple"
+      }
+    ],
+    "name": "setBudget",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "maxCostPerEpoch",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint40",
+            "name": "expiresAt",
+            "type": "uint40"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.BuyerLimits",
+        "name": "limits",
+        "type": "tuple"
+      }
+    ],
+    "name": "setBuyerLimits",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "maxCostPerEpoch",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint40",
+            "name": "grantedAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "expiresAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "revokedAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint64",
+            "name": "nonce",
+            "type": "uint64"
+          },
+          {
+            "internalType": "address",
+            "name": "owner",
+            "type": "address"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.BuyerGrant",
+        "name": "grant",
+        "type": "tuple"
+      }
+    ],
+    "name": "setGrant",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "maxCostPerEpoch",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint40",
+            "name": "grantedAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "expiresAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "revokedAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint64",
+            "name": "nonce",
+            "type": "uint64"
+          },
+          {
+            "internalType": "address",
+            "name": "owner",
+            "type": "address"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.BuyerGrant",
+        "name": "grant",
+        "type": "tuple"
+      }
+    ],
+    "name": "setGrantRecord",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "internalType": "uint40",
+        "name": "at",
+        "type": "uint40"
+      }
+    ],
+    "name": "setGrantRevokedAt",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint8",
+        "name": "value",
+        "type": "uint8"
+      }
+    ],
+    "name": "setMaxBudgetsPerSubscription",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "nonce",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint40",
+        "name": "end",
+        "type": "uint40"
+      }
+    ],
+    "name": "setReplacedGrantEnd",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint40",
+            "name": "enabledAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "address",
+            "name": "owner",
+            "type": "address"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.ServiceSpending",
+        "name": "s",
+        "type": "tuple"
+      }
+    ],
+    "name": "setServiceSpending",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint256",
+            "name": "accountId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "address",
+            "name": "buyer",
+            "type": "address"
+          },
+          {
+            "internalType": "uint64",
+            "name": "grantNonce",
+            "type": "uint64"
+          },
+          {
+            "internalType": "address",
+            "name": "sessionKey",
+            "type": "address"
+          },
+          {
+            "internalType": "uint40",
+            "name": "epoch",
+            "type": "uint40"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "planDigest",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint40",
+            "name": "startsAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "endsAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "fundedEpoch",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "fundedWindow",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint16",
+            "name": "discountBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint8",
+            "name": "budgetCount",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "cost",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "spentFromWindow",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "spentFromTopUp",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.Subscription",
+        "name": "s",
+        "type": "tuple"
+      }
+    ],
+    "name": "setSubscription",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint32",
+            "name": "subscriptions",
+            "type": "uint32"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.Usage",
+        "name": "u",
+        "type": "tuple"
+      }
+    ],
+    "name": "setUsage",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "storedBudgetCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "subscriptionExists",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "version",
+    "outputs": [
+      {
+        "internalType": "string",
+        "name": "",
+        "type": "string"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  }
+]

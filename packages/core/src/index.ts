@@ -472,6 +472,7 @@ export {
   loadAuthToken,
   toEip55Checksum,
 } from './dkg-home.js';
+export * from './node-key-store.js';
 export {
   type Quad as ExtractionQuad,
   type ExtractionInput,

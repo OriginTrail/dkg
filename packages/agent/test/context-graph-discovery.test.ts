@@ -194,7 +194,7 @@ describe('ensureContextGraphLocal', () => {
     await expect(agent.contextGraphExists('workspace-only')).resolves.toBe(true);
   }, 15000);
 
-  it('probes write preflight policy and curator declarations from the AGENTS graph', async () => {
+  it('probes write preflight policy from the AGENTS graph, and no curator', async () => {
     const store = new OxigraphStore();
     const result = await createTestAgent({ store });
     agent = result.agent;
@@ -224,9 +224,7 @@ describe('ensureContextGraphLocal', () => {
       },
     ]);
 
-    const allowlistSpy = recorder(async () => {
-      throw new Error('allowlist lookup should be skipped for curator');
-    });
+    const allowlistSpy = recorder(async () => false);
     (agent as any).callerIsAllowlistedAgentParticipant = allowlistSpy;
 
     const probe = await agent.probeContextGraphWritePreflight(contextGraphId, {
@@ -237,9 +235,10 @@ describe('ensureContextGraphLocal', () => {
       exists: true,
       declarationFound: true,
       accessPolicy: 'private',
-      callerAuthorized: true,
+      callerAuthorized: false,
     });
-    expect(allowlistSpy.calls).toEqual([]);
+    expect(probe.curator).toBeUndefined();
+    expect(allowlistSpy.calls).toHaveLength(1);
   }, 15000);
 
   it('does not scan loadAll during exact write preflight when indexed subscription load is unavailable', async () => {

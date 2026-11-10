@@ -350,6 +350,7 @@ const KA_HIGH_WATER_DEFAULT_PAGE_SIZE = 2_000;
 
 export { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
 import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
+import { createBuyerAccountScan } from './buyer-account-scan.js';
 
 // Keep generic Hub binding invalidation responsive for read paths while still
 // replacing four hidden ethers subscription pollers with one owned log poller.
@@ -913,6 +914,8 @@ export class EVMChainAdapterBase {
   protected static readonly SIGNER_IDENTITY_ID_ZERO_TTL_MS = SIGNER_IDENTITY_ID_ZERO_TTL_MS;
 
   protected readonly pcaReadCache = new PcaReadCache();
+  /** The marketplace's `BuyerAdded` scan (see `createBuyerAccountScan`). */
+  protected readonly buyerAccountScan = createBuyerAccountScan();
 
   /**
    * #1583 — resolved-address memo for `resolveContract`. Caches the Hub-resolved
@@ -2110,7 +2113,7 @@ export class EVMChainAdapterBase {
    */
   protected async dispatchSerializedV10Write(
     signer: EvmSigner,
-    label: 'publish' | 'update',
+    label: 'publish' | 'update' | 'receipt batch',
     onBroadcast: ((signal: PreBroadcastSignal) => Promise<void> | void) | undefined,
     buildSignedTx: (ctx: SerializedSignerWriteContext) => Promise<SignedTransactionEnvelope>,
     onNullReceipt: (preBroadcastTxHash: string) => never,
