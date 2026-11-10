@@ -452,7 +452,7 @@ describe('dkg rollback drops read-graph partitions', () => {
     } finally { await store.close(); }
   });
 
-  it('closes the store and keeps the note when the drop fails part-way', async () => {
+  it('closes the store and keeps the note when the store cannot list its graphs', async () => {
     await writeFile(join(wiring.root, 'read-graph-partitions'), 'note\n');
     const closed: string[] = [];
     const store = new OxigraphStore();
@@ -462,6 +462,35 @@ describe('dkg rollback drops read-graph partitions', () => {
     }))).rejects.toThrow('store went away');
     expect(closed).toEqual(['closed']);
     expect(existsSync(join(wiring.root, 'read-graph-partitions'))).toBe(true);
+  });
+
+  it('keeps the note when the drop fails part-way, and a second run drops the rest', async () => {
+    const note = join(wiring.root, 'read-graph-partitions');
+    await writeFile(note, 'note\n');
+    const store = new OxigraphStore();
+    await store.insert([MEMBER, READ_GRAPH, READ_STATE].map((graph) => ({ graph, subject: 'urn:s', predicate: 'urn:p', object: '"v"' })));
+    const dropGraph = store.dropGraph.bind(store);
+    let drops = 0;
+    store.dropGraph = async (graph, options) => {
+      drops += 1;
+      if (drops === 2) throw new Error('store went away');
+      return dropGraph(graph, options);
+    };
+    const closed: string[] = [];
+    const open = async () => ({ store, close: async () => { closed.push('closed'); } });
+    try {
+      await expect(dropReadGraphsForRollback(wiring.root, () => undefined, open)).rejects.toThrow('store went away');
+      expect(closed).toEqual(['closed']);
+      expect(existsSync(note)).toBe(true);
+      // The state graph went first; the read graph is still there.
+      expect(await store.hasGraph(READ_STATE)).toBe(false);
+      expect(await store.hasGraph(READ_GRAPH)).toBe(true);
+      expect(await dropReadGraphsForRollback(wiring.root, () => undefined, open)).toBe(1);
+      expect(closed).toEqual(['closed', 'closed']);
+      expect(existsSync(note)).toBe(false);
+      expect(await store.hasGraph(READ_GRAPH)).toBe(false);
+      expect(await store.hasGraph(MEMBER)).toBe(true);
+    } finally { await store.close(); }
   });
 });
 
