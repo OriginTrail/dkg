@@ -25,6 +25,7 @@ export function programOrder(definition, registry = defaultComponentRegistry) {
   return ordered;
 }
 
+/** @returns {import('./studio-definition.mjs').ProgramStudioExecution} */
 export function compileProgramWorkflow(definition, registry = defaultComponentRegistry) {
   const { component, componentNeedsExport } = registry;
   const ordered = programOrder(definition, registry);
@@ -36,7 +37,7 @@ export function compileProgramWorkflow(definition, registry = defaultComponentRe
   }
   const revision = createHash('sha256').update(JSON.stringify({ compiler: 'program-v1', definition })).digest('hex');
   return { definition, ordered, kaRef: `urn:demo:nos:studio:${definition.id}:${revision.slice(0, 20)}`,
-    workflowName: 'nOS Program workflow ' + revision, mode: 'action', executor: 'dkg',
+    workflowName: 'nOS Program workflow ' + revision, mode: 'action', kind: 'dkg-program',
     requiresExportAuthorization: definition.nodes.some(n => componentNeedsExport(component(n.componentId))) };
 }
 

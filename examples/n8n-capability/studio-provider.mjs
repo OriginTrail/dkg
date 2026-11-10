@@ -31,7 +31,7 @@ export function createStudioProvider({ repository, config, graphId, owner, heade
   };
   async function provision(definition) {
     let compiled = compileStudio(definition, { graphId, owner, headerCredential, credentials });
-    if (!compiled.workflow || !compiled.grant?.toolIri) throw error('Native provisioning requires an n8n execution plan.');
+    if (compiled.kind !== 'native-n8n' || !compiled.workflow) throw error('Native provisioning requires an n8n execution plan.');
     repository.ensure(compiled);
     let saved = repository.nativeRevision(compiled.kaRef);
     if (!saved.providerId) {
@@ -76,7 +76,7 @@ export function createStudioProvider({ repository, config, graphId, owner, heade
   }
   // Fetch and verify remotely; the repository commits this snapshot with save completion.
   async function savedNativeSnapshot(compiled) {
-    if (compiled.executor === 'dkg' || ['schedule', 'webhook'].includes(compiled.mode)) return;
+    if (compiled.kind !== 'native-n8n' || ['schedule', 'webhook'].includes(compiled.mode)) return;
     const native = await api('/workflows/' + compiled.grant.workflowId);
     const published = native.activeVersion ? { ...native.activeVersion, settings: native.settings } : native;
     if (!native.active || n8nWorkflowSha256(published) !== compiled.grant.workflowSha256) throw error('Saved native revision is unavailable.');

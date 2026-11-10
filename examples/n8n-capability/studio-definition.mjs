@@ -2,7 +2,7 @@ import { normalizeStudioTopology } from './studio-topology.mjs';
 import { validateDkgTopology } from './dkg-components.mjs';
 import { createHash } from 'node:crypto';
 import { defaultComponentRegistry, componentExecutionDescriptor, normalizeComponentParameters, componentContract, componentValidationSource } from './component-registry.mjs';
-import { readStudio as readStudioV1 } from './studio-definition-v1.mjs';
+import { readStudio as readStudioV1, studioProgramSource as studioProgramSourceV1 } from './studio-definition-v1.mjs';
 import { componentPiece, nativeNode, editNode, wire, expression, nativeLiteral } from './component-workflows.mjs';
 import { n8nWorkflowSha256, n8nObservationScope } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { workflowUuid } from './workflow-definition.mjs';
@@ -15,6 +15,27 @@ const record = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 const fail = message => { throw Object.assign(new Error(message), { code: 'INVALID_WORKFLOW', status: 400 }); };
 const closed = (v, keys) => { if (!record(v) || Object.keys(v).some(k => !keys.includes(k))) fail('Unexpected workflow fields.'); };
 const identifier = v => { if (typeof v !== 'string' || !/^[a-z][a-z0-9_-]{0,39}$/i.test(v)) fail('Invalid block identity.'); return v; };
+
+/**
+ * @typedef {object} StudioExecutionBase
+ * @property {ReturnType<typeof normalizeStudio>} definition
+ * @property {string} kaRef
+ * @property {string} mode
+ * @property {boolean} requiresExportAuthorization
+ * @property {string} [workflowName]
+ * @typedef {StudioExecutionBase & { kind: 'native-n8n', grant: import('../../packages/cli/dist/semantic-runtime-n8n-contract.js').NativeN8nGrant, compiler?: number, legacy?: boolean, workflow?: object, workflowId?: string }} NativeStudioExecution
+ * @typedef {StudioExecutionBase & { kind: 'dkg-program', ordered: ReturnType<typeof normalizeStudio>['nodes'] }} ProgramStudioExecution
+ * @typedef {NativeStudioExecution | ProgramStudioExecution} StudioExecution
+ */
+
+/** Compiler preparation selects the execution variant before native ownership,
+ * credentials and provider identity are available to build the native graph.
+ * @returns {Pick<StudioExecution, 'kind' | 'definition'>}
+ */
+export function normalizeStudioExecution(value, registry = defaultComponentRegistry) {
+  const definition = normalizeStudio(value, registry);
+  return { kind: definition.nodes.some(n => n.componentId === 'run-program') ? 'dkg-program' : 'native-n8n', definition };
+}
 
 export function normalizeStudio(value, registry = defaultComponentRegistry) {
   const { component } = registry;
@@ -64,10 +85,11 @@ export function validateStudioCapabilities(definition, capabilities, registry = 
     || definition.nodes.some(n => needsExport(component(n.componentId))) };
 }
 
+/** @returns {StudioExecution} */
 export function compileStudio(value, { graphId, owner, headerCredential, credentials = {}, fixture = false, providerId, registry = defaultComponentRegistry } = {}) {
   const { component, componentNeedsExport: needsExport } = registry;
-  const definition = normalizeStudio(value, registry);
-  if (definition.nodes.some(n => n.componentId === 'run-program')) return compileProgramWorkflow(definition, registry);
+  const { kind, definition } = normalizeStudioExecution(value, registry);
+  if (kind === 'dkg-program') return compileProgramWorkflow(definition, registry);
   // Embedded helper definitions need a new immutable source identity.
   const compiler = definition.nodes.some(n => n.componentId === 'execute-workflow') ? 5 : 4;
   const revision = createHash('sha256').update(JSON.stringify({ compiler, definition })).digest('hex');
@@ -122,12 +144,14 @@ export function compileStudio(value, { graphId, owner, headerCredential, credent
     ...componentContract, outputSchema: { ...componentContract.outputSchema, properties: { ...componentContract.outputSchema.properties, traceJson: { type: 'string', maxLength: 8192 } },
       required: [...componentContract.outputSchema.required, 'traceJson'] },
     result: { nodes: [...new Set(sinks.map(s => s.node))], sinks, traceNodes: definition.nodes.map(n => pieces.get(n.id).traceNode ?? pieces.get(n.id).resultNode), allowObservation: false } };
-  return { compiler, definition, kaRef, workflowId, workflowName, workflow, grant, mode, requiresExportAuthorization: definition.nodes.some(n => needsExport(component(n.componentId))) };
+  return { kind: 'native-n8n', compiler, definition, kaRef, workflowId, workflowName, workflow, grant, mode, requiresExportAuthorization: definition.nodes.some(n => needsExport(component(n.componentId))) };
 }
 
 export function studioProgramSource(compiled, grant = compiled.grant, registry = defaultComponentRegistry) {
   const { component } = registry;
-  if (compiled.executor === 'dkg') return programWorkflowSource(compiled, registry);
+  if (compiled.kind === 'dkg-program') return programWorkflowSource(compiled, registry);
+  if (compiled.kind !== 'native-n8n' || !record(grant)) fail('A native Studio execution grant is required.');
+  if (compiled.legacy) return studioProgramSourceV1(compiled, grant);
   const metadata = { definition: compiled.definition, grant, mode: compiled.mode,
     ...([4, 5].includes(compiled.compiler) ? { compiler: compiled.compiler } : {}) };
   const root = compiled.definition.nodes.find(n => n.id === compiled.definition.entryId);
@@ -137,17 +161,18 @@ export function studioProgramSource(compiled, grant = compiled.grant, registry =
     + `export function run(input: unknown) { const value = normalize(${JSON.stringify(descriptor)}, input); if (value.paramsJson !== ${JSON.stringify(JSON.stringify(root.params))} || value.executionId) throw new Error('Use the saved workflow parameters.'); return invoke_tool('urn:dkg:tool:n8n', value); }\n`;
 }
 
+/** @returns {StudioExecution} */
 export function readStudio(source, registry = defaultComponentRegistry) {
   const { component, componentNeedsExport: needsExport } = registry;
   if (typeof source === 'string' && source.startsWith(PROGRAM_STUDIO_MARKER)) return readProgramWorkflow(source, value => normalizeStudio(value, registry), registry);
-  if (typeof source === 'string' && source.startsWith('// nos-n8n-studio-v1:')) return { ...readStudioV1(source), legacy: true };
+  if (typeof source === 'string' && source.startsWith('// nos-n8n-studio-v1:')) return { ...readStudioV1(source), kind: 'native-n8n', legacy: true };
   if (typeof source !== 'string' || !source.startsWith(marker) || source.length > 65536) fail('Saved Studio source is invalid.');
   const data = JSON.parse(Buffer.from(source.split('\n')[0].slice(marker.length), 'base64').toString('utf8'));
   const definition = normalizeStudio(data.definition, registry);
   if (data.compiler !== undefined && ![4, 5].includes(data.compiler)) fail('Unknown Studio compiler contract.');
   const compiler = data.compiler ?? (definition.nodes.some(n => n.componentId === 'invoke-dkg-program') ? 3 : 2);
   const revision = createHash('sha256').update(JSON.stringify({ compiler, definition })).digest('hex');
-  const compiled = { ...([4, 5].includes(data.compiler) ? { compiler: data.compiler } : {}), definition, grant: data.grant, mode: data.mode, kaRef: STUDIO_PREFIX + definition.id + ':' + revision.slice(0, 20),
+  const compiled = { kind: 'native-n8n', ...([4, 5].includes(data.compiler) ? { compiler: data.compiler } : {}), definition, grant: data.grant, mode: data.mode, kaRef: STUDIO_PREFIX + definition.id + ':' + revision.slice(0, 20),
     requiresExportAuthorization: definition.nodes.some(n => needsExport(component(n.componentId))) };
   if (studioProgramSource(compiled, compiled.grant, registry) !== source) fail('Saved Studio source differs from its reviewed definition.');
   return compiled;
@@ -157,6 +182,7 @@ export function readStudio(source, registry = defaultComponentRegistry) {
 export function createStudioCompiler(registry = defaultComponentRegistry) {
   return Object.freeze({ registry,
     normalizeStudio: value => normalizeStudio(value, registry),
+    normalizeStudioExecution: value => normalizeStudioExecution(value, registry),
     validateStudioCapabilities: (definition, capabilities) => validateStudioCapabilities(definition, capabilities, registry),
     compileStudio: (value, options) => compileStudio(value, { ...options, registry }),
     studioProgramSource: (compiled, grant) => studioProgramSource(compiled, grant, registry),

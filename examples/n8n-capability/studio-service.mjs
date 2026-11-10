@@ -35,9 +35,9 @@ export function createStudioService({ graphId, owner, client, repository, provid
     // revocation cannot leave this response with stale export/activation policy.
     const saved = repository.workflow(kaRef);
     if (!saved?.completed) throw reject('Unknown saved graph.');
-    if (saved.executor !== plan.kind) throw reject('The saved workflow executor changed.');
+    if (saved.executor !== compiled.kind) throw reject('The saved workflow executor changed.');
     return { compiled, plan, source, workflow: { definition: compiled.definition, kaRef, sourceHash: source.sourceHash, graphId,
-      ...(compiled.grant?.workflowSha256 ? { workflowSha256: compiled.grant.workflowSha256 } : {}),
+      ...(compiled.kind === 'native-n8n' ? { workflowSha256: compiled.grant.workflowSha256 } : {}),
       mode: compiled.mode, approved: isApproved,
       requiresExportAuthorization: compiled.requiresExportAuthorization || saved.requiresExportAuthorization,
       activation: (({ active, count, expiresAt }) => ({ active, count, expiresAt }))(saved.activation), readbackVerified: true } };
@@ -79,8 +79,8 @@ export function createStudioService({ graphId, owner, client, repository, provid
       if (requiresExportAuthorization) authorize();
       if (!await approved(compiled.kaRef, sourceHash)) await client.programs.approve({ graphId, operationIri: compiled.kaRef,
         program: reference(source, graphId), allowedCallers: [owner], ...plan.approval });
-      const published = plan.kind === 'native-n8n' ? await native().savedNativeSnapshot(compiled) : undefined;
-      repository.completeSave(compiled, plan.kind, requiresExportAuthorization, published, sourceHash);
+      const published = compiled.kind === 'native-n8n' ? await native().savedNativeSnapshot(compiled) : undefined;
+      repository.completeSave(compiled, compiled.kind, requiresExportAuthorization, published, sourceHash);
       return (await get(compiled.kaRef, sourceHash)).workflow;
     })();
     saving.set(key, pending); try { return await pending; } finally { saving.delete(key); }
@@ -90,7 +90,7 @@ export function createStudioService({ graphId, owner, client, repository, provid
   }
   async function execute(value, { authorizeExport, beforeDispatch, actor, prepareExecution }) {
     if (!value || Object.keys(value).some(k => !['kaRef', 'sourceHash', 'itemsJson', 'invocationId'].includes(k))) throw reject('Invalid graph invocation.');
-    const invocationId = workflowUuid(value.invocationId), { compiled, plan, workflow } = await get(value.kaRef, value.sourceHash);
+    const invocationId = workflowUuid(value.invocationId), { compiled, workflow } = await get(value.kaRef, value.sourceHash);
     if (!workflow.approved) throw reject('This graph is not approved.');
     const root = compiled.definition.nodes.find(n => n.id === compiled.definition.entryId);
     const descriptor = (compiled.legacy ? componentV1 : component)(root.componentId);
@@ -106,7 +106,7 @@ export function createStudioService({ graphId, owner, client, repository, provid
     };
     authorizeDispatch();
     assertDkgEnabled(compiled.definition, profile);
-    if (plan.kind === 'native-n8n') native().installGrant(compiled.grant);
+    if (compiled.kind === 'native-n8n') native().installGrant(compiled.grant);
     if (compiled.definition.nodes.some(n => isDkg(n.componentId))) {
       if (!programAuthority) throw componentFailure('Original Program invocation authority verifier required.');
       const authority = programAuthority.capture(workflow, invocationId, input);
@@ -119,13 +119,13 @@ export function createStudioService({ graphId, owner, client, repository, provid
     let result;
     try { result = await invoke(); }
     catch (error) {
-      if (error.code !== 'INVOCATION_REQUIRES_RECONCILIATION' || plan.kind === 'dkg-program') throw error;
+      if (error.code !== 'INVOCATION_REQUIRES_RECONCILIATION' || compiled.kind === 'dkg-program') throw error;
       // The native-only wrapper resumes its durable acknowledgement; it never
       // creates another n8n run or another remote Program invocation.
       result = await invoke();
     }
     if (!isDeepStrictEqual(await loadOutputs(result.executionIri), result.rawOutputs)) throw new Error('The DKG receipt readback differs.');
-    if (plan.kind === 'dkg-program') return { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, invocationId, executionIri: result.executionIri,
+    if (compiled.kind === 'dkg-program') return { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, invocationId, executionIri: result.executionIri,
       ...await programWorkflowReceipt(compiled, result, input, loadOutputs) };
     const output = result.outputs[0];
     if (output?.kind !== 'n8n-result' || output.workflowSha256 !== compiled.grant.workflowSha256 || !output.output || typeof output.output.traceJson !== 'string') throw new Error('Native graph evidence is incomplete.');

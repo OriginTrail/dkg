@@ -138,7 +138,7 @@ test('rejects unsupported mixed branches while preserving the native compiler fo
   assert.throws(() => compileStudio(graph([branch, program])), /linear/);
   const original = compileStudio(graph([native('before', { value: 1 }), native('after', { value: '{{ $json.value }}' })]), { fixture: true, graphId: 'test', owner: '0x1111111111111111111111111111111111111111' });
   assert.ok(original.workflow.nodes.some(n => n.type === 'n8n-nodes-base.webhook'));
-  assert.equal(original.executor, undefined);
+  assert.equal(original.kind, 'native-n8n');
 });
 
 test('rejects forged persisted child output and extra child calls', async () => {
