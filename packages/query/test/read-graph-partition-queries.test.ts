@@ -3,6 +3,7 @@ import { GraphSetIndexStore, noteStoreMayHoldReadGraphPartitions, OxigraphStore,
 import { MemoryLayer, READ_GRAPH_SEGMENT, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { classifyScopedContentGraph, describeScopedContentGraph, isExcludedContentGraph } from '../src/scoped-content-partition.js';
+import { createScopedContentGraphRoutePolicy, selectLegacyScopedRouteGraphs } from '../src/scoped-content-graph-policy.js';
 
 const CG = 'read-partition';
 const ROOT = `did:dkg:context-graph:${CG}`;
@@ -58,8 +59,32 @@ describe('read-graph partitions in content classification', () => {
     .map(rest => `${READ_GRAPH_SEGMENT}${rest}`)
     .concat([`code/${READ_GRAPH_SEGMENT}/cg/_verifiable_memory`, `child/${READ_GRAPH_SEGMENT}/state`]))('excludes %s wherever it excludes metadata', tail => {
     expect(isExcludedContentGraph(`${ROOT}/${tail}`, ROOT)).toBe(true);
-    expect(describeScopedContentGraph(`${ROOT}/${tail}`, CG)).toBeUndefined();
-    expect(classifyScopedContentGraph(`${ROOT}/${tail}`, CG, new Set(['code', 'child']), new Set(), new Set())).toBeUndefined();
+  });
+
+  // A child context graph whose older ID continues a content path puts its
+  // partition where the parent's content lives: only the exclusion keeps it out.
+  const UNDER_SHARED = `${ROOT}/_shared_memory/legacy/${READ_GRAPH_SEGMENT}/cg/_verifiable_memory`;
+  const UNDER_VERIFIED = `${ROOT}/_verifiable_memory/legacy/${READ_GRAPH_SEGMENT}/state`;
+  const SHARED = `${ROOT}/_shared_memory/legacy/x`;
+  const VERIFIED = `${ROOT}/_verifiable_memory/legacy/state`;
+
+  it('keeps partition graphs out of content where their path looks like content', () => {
+    for (const graph of [UNDER_SHARED, UNDER_VERIFIED]) {
+      expect(describeScopedContentGraph(graph, CG), graph).toBeUndefined();
+      expect(classifyScopedContentGraph(graph, CG, new Set(), new Set(), new Set()), graph).toBeUndefined();
+    }
+    expect(describeScopedContentGraph(SHARED, CG)?.kind).toBe('shared');
+    expect(describeScopedContentGraph(VERIFIED, CG)?.kind).toBe('verified');
+  });
+
+  it('keeps them out of a route that lists graphs by prefix', () => {
+    const policy = createScopedContentGraphRoutePolicy(CG, { includeSharedMemory: true });
+    const selected = selectLegacyScopedRouteGraphs(policy, new Map([
+      [`${ROOT}/_shared_memory`, [SHARED, UNDER_SHARED]],
+      [ROOT, [VERIFIED, UNDER_VERIFIED]],
+    ]));
+    expect(selected).toEqual(expect.arrayContaining([SHARED, VERIFIED]));
+    for (const graph of [UNDER_SHARED, UNDER_VERIFIED]) expect(selected, graph).not.toContain(graph);
   });
 
   it.each(['_reader', `${READ_GRAPH_SEGMENT}er`, 'reader/_verifiable_memory/0xab/1', '_verifiable_memory/0xab/read',
