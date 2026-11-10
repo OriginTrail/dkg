@@ -246,7 +246,9 @@ describe('PCA-backed curated context graph with an external signer', () => {
       'function isAuthorizedPublisher(uint256, address) view returns (bool)',
     ]);
     for (const payer of payers) expect(await contextGraphs.isAuthorizedPublisher(onChainId, payer.address)).toBe(true);
-    expect(await contextGraphs.isAuthorizedPublisher(onChainId, author.address)).toBe(false);
+    // ContextGraphs 10.2.0: the author key is on the graph's roster, so it may also send its own
+    // publish. It is no operational wallet of this node, so the node never picks it: the payers send.
+    expect(await contextGraphs.isAuthorizedPublisher(onChainId, author.address)).toBe(true);
 
     const epochs = await chain.getConvictionAccountLockDurationEpochs(accountId);
     const published = await Promise.all(['one', 'two'].map((label) => publish(chain, label, epochs)));
