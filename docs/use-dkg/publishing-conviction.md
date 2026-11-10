@@ -85,6 +85,14 @@ ContextGraphs 10.1.0, proposed and not deployed on any network yet, separates wh
 
 A publish whose author is not a member is refused before ACK collection with HTTP 403 and code `AUTHOR_NOT_CONTEXT_GRAPH_MEMBER`, or on chain with `AuthorNotContextGraphMember`. The graph's owner or curator can add the author as a participant agent.
 
+### Members send and pay for their own publishes (ContextGraphs 10.2.0)
+
+ContextGraphs 10.2.0, proposed on top of 10.1.0 and not deployed on any network yet, also lets every member of a curated graph send its own publish, without being the curator or a PCA agent.
+
+- **The member pays with its own TRAC, not with the PCA's allowance.** Payment follows the sending wallet: a wallet that is not registered as an agent of a PCA pays the full publish price from its own balance, so it needs TRAC and an allowance for `KnowledgeAssetsLifecycle`, as for a publish into an open graph. The graph's PCA pays only when one of its own agents sends.
+- **The curator, the PCA owner and the PCA's agents send as before.** Their sender check reads nothing new; it costs about 220 gas more than under 10.1.0.
+- **A node picks from more wallets.** The node offers a curated publish to every wallet of its signer pool that the graph accepts as a sender. A wallet on the graph's roster that holds TRAC can now be picked and pay the full price, where only the PCA's agents could before.
+
 ## API Routes
 
 | Route                                | Purpose              |
