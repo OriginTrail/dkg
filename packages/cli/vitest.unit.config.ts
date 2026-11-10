@@ -79,6 +79,8 @@ export default defineConfig({
           'test/reconcile-503-mapping.test.ts',
           'test/sealed-create-retry-route.test.ts',
           'test/config.test.ts',
+          'test/daemon-log-rotation.test.ts',
+          'test/daemon-log-rotation-io.test.ts',
           'test/status-route-rpc.test.ts',
           // Pure: in-process status route and a chain adapter over scripted endpoints.
           'test/status-chain-rpc.test.ts',
