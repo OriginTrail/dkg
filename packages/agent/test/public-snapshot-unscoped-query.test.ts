@@ -56,11 +56,11 @@ describe('agent.query after a core-cache snapshot job marked a graph', () => {
   });
 });
 
-it.each(['cold', 'warm'] as const)('charges the complete inventory through real agent composition (%s catalog)', async cache => {
+it.each(['cold', 'warm'] as const)('charges the owner inventory slice, never unrelated graphs, through real agent composition (%s catalog)', async cache => {
   const rawStore = new OxigraphStore();
   const agent = await startAgent(rawStore);
   const graph = 'did:dkg:context-graph:local-budget';
-  // Unrelated graphs must be charged even though the owner projection removes them.
+  // Graphs outside every context graph are node state: the owner read does not return them, so they cost nothing.
   await agent.store.insert(Array.from({ length: 1_000 }, (_, index) => ({
     subject: `urn:unrelated:${index}`, predicate: 'urn:unrelated', object: '"x"',
     graph: `urn:unrelated:${index}:${'g'.repeat(500)}`,
@@ -79,22 +79,21 @@ it.each(['cold', 'warm'] as const)('charges the complete inventory through real 
   }`);
   const content = await rawStore.query(query);
   const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
-  const inventoryBytes = bytes(inventory), policyBytes = bytes(policy), contentBytes = bytes(content);
-  const total = inventoryBytes + policyBytes + contentBytes;
-  const ceiling = 1024 * 1024;
-  expect(inventoryBytes).toBeGreaterThan(500_000);
+  const ownerSlice = inventory.filter(stored => stored.startsWith('did:dkg:context-graph:'));
+  const inventoryBytes = bytes(inventory), sliceBytes = bytes(ownerSlice);
+  const policyBytes = bytes(policy), contentBytes = bytes(content);
+  const total = sliceBytes + policyBytes + contentBytes;
+  expect(ownerSlice).toContain(graph);
+  expect(inventoryBytes - sliceBytes).toBeGreaterThan(500_000);
   expect(contentBytes).toBeGreaterThan(800_000);
-  expect(inventoryBytes + policyBytes).toBeLessThan(ceiling);
-  expect(contentBytes).toBeLessThan(ceiling);
-  expect(total).toBeGreaterThan(ceiling);
   if (cache === 'warm') await agent.query(query, { maxResponseBytes: total });
-  for (const limit of [ceiling, total - 1]) {
-    const outcome = await agent.query(query, { maxResponseBytes: limit }).then(
-      () => ({ code: 'unexpected-success' }),
-      error => ({ code: error.code, maxBytes: error.maxBytes, actualBytes: error.actualBytes }),
-    );
-    expect(outcome).toEqual({ code: 'QUERY_RESULT_TOO_LARGE', maxBytes: limit, actualBytes: total });
-  }
+  const outcome = await agent.query(query, { maxResponseBytes: total - 1 }).then(
+    () => ({ code: 'unexpected-success' }),
+    error => ({ code: error.code, maxBytes: error.maxBytes, actualBytes: error.actualBytes }),
+  );
+  expect(outcome).toEqual({ code: 'QUERY_RESULT_TOO_LARGE', maxBytes: total - 1, actualBytes: total });
+  // The whole budget is the slice, the policy read and the result, far below the inventory behind the slice.
+  expect(total + 500_000).toBeLessThan(inventoryBytes + policyBytes + contentBytes);
   await expect(agent.query(query, { maxResponseBytes: total })).resolves.toMatchObject({ bindings: content.type === 'bindings' ? content.bindings : [] });
 });
 

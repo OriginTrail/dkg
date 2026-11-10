@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { GraphManager, OxigraphStore, type TripleStore } from '../src/index.js';
+import { DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES, GraphManager, OxigraphStore, type TripleStore } from '../src/index.js';
 import {
   workspaceKnowledgeAssetOperationSnapshotGraph,
   workspaceOperationPublicSnapshotGraph,
@@ -79,7 +79,9 @@ describe('stored context graph candidates for query admission', () => {
     const result = await listStoredContextGraphQueryCandidates(store);
     expect(result).toEqual(expect.arrayContaining(['private', 'private/_shared_memory']));
     expect(result).not.toContain('urn:unrelated:graph');
-    expect(listGraphs).toHaveBeenCalledWith({ source: 'storage.contextGraphOwnerCandidates' });
+    // The complete list behind the fallback is node work under the internal catalog ceiling.
+    expect(listGraphs).toHaveBeenCalledWith({ source: 'storage.contextGraphOwnerCandidates',
+      maxResponseBytes: DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES, maxLiteralHydrationBytes: DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES });
     expect(query).not.toHaveBeenCalled();
   });
 

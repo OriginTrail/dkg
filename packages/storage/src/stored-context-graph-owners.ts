@@ -4,14 +4,14 @@ import { contextGraphStorageOwnerCandidates } from '@origintrail-official/dkg-co
 import type { QueryOptions, TripleStore } from './triple-store.js';
 const CG_PREFIX = 'did:dkg:context-graph:';
 
-/** Read and meter the complete inventory before projecting possible owners. */
+/** Read and meter the context-graph inventory before projecting possible owners. */
 export async function listStoredContextGraphOwnerCandidates(store: TripleStore, options: QueryOptions,
   materializationMeter?: { consumeBytes(bytes: number): void }): Promise<string[]> {
     options.signal?.throwIfAborted();
     const readOptions = { ...options, source: options.source ?? 'storage.contextGraphOwnerCandidates' };
     const graphUris = await readGraphInventoryByPrefix(store, CG_PREFIX, readOptions);
-    // Charge the decoded inventory before filtering or deduplicating owners.
-    // The fallback reads the whole inventory, so it charges that whole response.
+    // Charge the inventory this read returns, before deduplicating owners. A
+    // store without a prefix listing reads its complete list as node work.
     materializationMeter?.consumeBytes(graphUris.materializedBytes);
     const candidates = new Set<string>();
     let visited = 0;

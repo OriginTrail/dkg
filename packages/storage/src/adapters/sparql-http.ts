@@ -36,7 +36,7 @@ import type {
   StorePressureSnapshot,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
-import { assertGraphCatalogWithinResponseLimit } from '../graph-catalog-response-limit.js';
+import { internalCatalogReadOptions, readCompleteGraphCatalog } from '../graph-catalog-internal-limit.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import { decodeSparqlHttpQueryResponse, sparqlQueryResponseAccept } from './sparql-query-response.js';
 import { externalStorePriorityScheduler, type StorePriorityScheduler } from '../store-priority-scheduler.js';
@@ -1183,18 +1183,14 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       this.listGraphsCache &&
       this.now() - this.listGraphsCachedAt < MANAGED_LIST_GRAPHS_CACHE_MS
     ) {
-      assertGraphCatalogWithinResponseLimit(this.listGraphsCache, options?.maxResponseBytes);
       return [...this.listGraphsCache];
     }
 
-    // Cancellation is caller-local; transport ceilings and telemetry stay on the shared flight.
-    const refreshOptions = { source: options?.source, priority: options?.priority,
-      maxResponseBytes: options?.maxResponseBytes, maxLiteralHydrationBytes: options?.maxLiteralHydrationBytes };
+    // Cancellation is caller-local; the internal catalog ceiling and telemetry stay on the shared flight.
+    const refreshOptions = internalCatalogReadOptions({ source: options?.source, priority: options?.priority });
     const key = JSON.stringify([graphCatalogFlightKey(refreshOptions), refreshOptions.priority ?? 'normal', refreshOptions.source ?? null]);
     const inFlight = this.listGraphsInFlight.get(key) ?? this.refreshListGraphsCache(key, refreshOptions);
-    const graphs = await raceStoreWorkAgainstAbort(inFlight, options?.signal);
-    assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
-    return [...graphs];
+    return [...await raceStoreWorkAgainstAbort(inFlight, options?.signal)];
   }
 
   private async listGraphsDirect(options?: QueryOptions): Promise<string[]> {
@@ -1202,11 +1198,12 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     // Index-read enumeration shared with OxigraphStore — see the rationale on
     // NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY (O(#graphs) vs the legacy O(#quads)
     // scan; FILTER EXISTS preserves the non-empty-only contract).
-    const r = await this.queryWithOperation(
+    // The complete list is node state: the internal catalog ceiling bounds the read, not a caller's limit.
+    const r = await readCompleteGraphCatalog(options, internal => this.queryWithOperation(
       NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY,
-      { ...options, source: options?.source ?? 'sparql-http.listGraphs' },
+      { ...internal, source: internal.source ?? 'sparql-http.listGraphs' },
       'listGraphs',
-    );
+    ));
     return r.type === 'bindings'
       ? r.bindings
           .map((b) => b.g)
