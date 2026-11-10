@@ -120,6 +120,28 @@ describe('queries and read-graph partitions', () => {
     } finally { await fresh.close(); }
   });
 
+  it('answers no unscoped graph-variable query on a store that cannot leave read graphs out', async () => {
+    // As the HTTP adapters do: any dataset restriction is refused before dispatch.
+    const unrestricted = new Proxy(planted, { get(target, key) {
+      if (key === 'query') return (sparql: string, options?: { withheldGraphRoots?: readonly string[] }) => {
+        if (options?.withheldGraphRoots !== undefined) {
+          return Promise.reject(Object.assign(new Error('cannot withhold graphs from a query'), { code: 'QUERY_DATASET_UNRESTRICTED' }));
+        }
+        return target.query(sparql, options);
+      };
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } }) as TripleStore;
+    noteStoreMayHoldReadGraphPartitions(unrestricted);
+    const engine = new DKGQueryEngine(unrestricted);
+    await expect(engine.query(UNSCOPED[0]!)).rejects.toThrow(
+      'Scoped query violation: this store cannot answer a graph variable without a context graph');
+    // Without a graph variable, or with a dataset it names itself, the query needs no restriction.
+    expect((await engine.query('SELECT ?o WHERE { ?s <urn:p> ?o }')).bindings).toEqual([]);
+    expect((await engine.query(`SELECT ?o FROM NAMED <${VM}> WHERE { GRAPH ?g { ?s <urn:p> ?o } }`)).bindings)
+      .toHaveLength(1);
+  });
+
   it('refuses a query that names a read-graph partition, scoped or not', async () => {
     const engine = new DKGQueryEngine(planted);
     for (const sparql of NAMING) {

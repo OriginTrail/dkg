@@ -153,7 +153,7 @@ export class ReadGraphPartitionStore implements TripleStoreDecorator {
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
-    if (sparqlNamesReadGraphPartition(sparql) && isSparqlUpdateOperation(sparql)) {
+    if (isSparqlUpdateOperation(sparql) && sparqlNamesReadGraphPartition(sparql)) {
       throw new ReadGraphPartitionWriteError('query', undefined);
     }
     return this.innerStore.query(sparql, options);

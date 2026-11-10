@@ -11,8 +11,8 @@ import { resolveQueryReadPlan, type QueryReadPlan } from './query-read-plan.js';
 import { storeOptions } from './query-store-options.js';
 import {
   asGraphWriteRevisionSource, asQueryReadAdmissionCapability,
-  isSparqlHttpResponseError, preparedSparqlNamesReadGraphPartition, sparqlEngineOf, StoreResponseTooLargeError,
-  storeMayHoldReadGraphPartitions,
+  isQueryDatasetUnrestrictedError, isSparqlHttpResponseError, preparedSparqlNamesReadGraphPartition, sparqlEngineOf,
+  StoreResponseTooLargeError, storeMayHoldReadGraphPartitions,
 } from '@origintrail-official/dkg-storage';
 import type {
   SparqlEngineFamily,
@@ -400,11 +400,18 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         // the graphs it hides from enumeration out on request.
         const withheld = options?.withheldGraphRoots ?? [];
         if (withheld.length) assertWithheldGraphQuery(initialGraphScope);
-        const restricted = withheld.length > 0 || (initialGraphScope.graphVariables.length > 0
-          && !initialGraphScope.hasDatasetClause && storeMayHoldReadGraphPartitions(this.store));
-        return this.execWithExclusions(initialGraphScope, restricted
+        const hidesReadGraphs = withheld.length === 0 && initialGraphScope.graphVariables.length > 0
+          && !initialGraphScope.hasDatasetClause && storeMayHoldReadGraphPartitions(this.store);
+        return this.execWithExclusions(initialGraphScope, withheld.length > 0 || hidesReadGraphs
           ? reads.withWithheldGraphRoots(withheld) : reads,
-        options?.excludeGraphPrefixes);
+        options?.excludeGraphPrefixes).catch((error: unknown) => {
+          // A store that cannot leave them out answers no such query rather than a wrong one.
+          if (hidesReadGraphs && isQueryDatasetUnrestrictedError(error)) {
+            throw new ScopedQueryViolationError('this store cannot answer a graph variable without a context graph; '
+              + 'give the query a context graph');
+          }
+          throw error;
+        });
       }
     }
   }

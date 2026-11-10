@@ -36,6 +36,7 @@ import {
 } from '../src/read-graph-partition-marker.js';
 import { listStoredContextGraphOwnerCandidates } from '../src/stored-context-graph-owners.js';
 import { isStoreOperationNotStarted } from '../src/store-operation-outcome.js';
+import { isQueryDatasetUnrestrictedError } from '../src/withheld-graph-query.js';
 import { authorCommitInput, P_VALUE, SEAL } from './rfc64-author-commit-cas-harness.js';
 
 const CG = 'partition-test';
@@ -90,6 +91,18 @@ describe('read-graph partition names in storage', () => {
     expect(storeGraphEnumerationVisibility('')).toBe(false);
   });
 
+  it('has the HTTP adapters refuse any dataset restriction, an empty one too', async () => {
+    const blazegraph = new BlazegraphStore('http://127.0.0.1:1/blazegraph/namespace/kb/sparql');
+    const http = new SparqlHttpStore({ queryEndpoint: 'http://127.0.0.1:1/query' });
+    for (const store of [blazegraph, http]) {
+      for (const withheldGraphRoots of [[], ['urn:root']]) {
+        const error = await store.query('SELECT * WHERE { ?s ?p ?o }', { withheldGraphRoots }).then(() => undefined, (caught: unknown) => caught);
+        expect(isQueryDatasetUnrestrictedError(error)).toBe(true);
+      }
+    }
+    expect(isQueryDatasetUnrestrictedError(new Error('other'))).toBe(false);
+  });
+
   it('gives every adapter the shared enumeration predicate', () => {
     const blazegraph = new BlazegraphStore('http://127.0.0.1:1/blazegraph/namespace/kb/sparql');
     const http = new SparqlHttpStore({ queryEndpoint: 'http://127.0.0.1:1/query' });
@@ -112,6 +125,10 @@ describe('read-graph partition names in storage', () => {
     expect(sparqlNamesReadGraphPartition('DROP GRAPH <urn:x\\uZZZZ>')).toBe(true);
     expect(sparqlNamesReadGraphPartition(`INSERT DATA { GRAPH <${ASSET}> { <urn:s> <urn:p> "_read" } }`)).toBe(false);
     expect(sparqlNamesReadGraphPartition(`DROP GRAPH <${ROOT}/_reader/x>`)).toBe(false);
+    // A prefix can split the segment between its namespace and a local name.
+    expect(sparqlNamesReadGraphPartition(`PREFIX r: <${ROOT}/_> INSERT DATA { GRAPH r:read { <urn:s> <urn:p> "v" } }`)).toBe(true);
+    expect(sparqlNamesReadGraphPartition(`prefix r: <${ROOT}/_re> CLEAR GRAPH r:ad\\/state`)).toBe(true);
+    expect(sparqlNamesReadGraphPartition(`PREFIX r: <${ROOT}/_> CLEAR GRAPH r:reader`)).toBe(false);
     expect(sparqlNamesReadGraphPartition(`PREFIX r: <${ROOT}/> CLEAR GRAPH r:reader`)).toBe(false);
   });
 });
@@ -152,6 +169,7 @@ describe('the read-graph partition guard', () => {
       ['update', () => store.update!(`DROP SILENT GRAPH <${STATE}>`)],
       ['update', () => store.update!('CLEAR SILENT DEFAULT', { touchedGraphs: [VM_READ] })],
       ['query', () => store.query(`INSERT DATA { GRAPH <${STRAY}> { <urn:s> <urn:p> "v" } }`)],
+      ['update', () => store.update!(`PREFIX r: <${ROOT}/_> INSERT DATA { GRAPH r:read { <urn:s> <urn:p> "v" } }`)],
     ];
     for (const [operation, write] of refusals) {
       const error = await write().then(() => undefined, (caught: unknown) => caught);

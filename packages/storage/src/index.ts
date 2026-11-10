@@ -7,6 +7,7 @@ export { preparedSparqlNamesReadGraphPartition } from './read-graph-partition-re
 export { dropReadGraphPartitions, noteStoreMayHoldReadGraphPartitions, storeMayHoldReadGraphPartitions } from './read-graph-partition-store.js';
 export { clearReadGraphPartitionsNote, mayHoldReadGraphPartitions } from './read-graph-partition-marker.js';
 export { markReadGraphsDirtyAtStart } from './read-graph-partition-startup.js';
+export { isQueryDatasetUnrestrictedError } from './withheld-graph-query.js';
 export {
   BlazegraphNamespaceManager,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
