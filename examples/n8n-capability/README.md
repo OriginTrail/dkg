@@ -243,6 +243,17 @@ Inspection waits up to 55 seconds after acknowledgement, covering Studio's
 the 60-second parent budget. Each HTTP request remains limited to 15 seconds;
 authority is rechecked while polling and before callbacks commit their results.
 
+Both n8n adapters report v2 implementation fingerprints generated from their
+bundled import graphs, including workspace source dependencies and the host
+dependency lockfile. `pnpm --dir packages/cli build:compile` regenerates the pins;
+the native fingerprint regression rejects stale generated pins in CI. For a
+direct `tsc` build after editing those sources, first run
+`node packages/cli/scripts/n8n-implementation-fingerprints.mjs --write`.
+Historical v1 receipt versions and hashes remain immutable evidence and are
+never relabelled as v2. The `n8n-native-v1` acknowledgement format and effect
+identity stay compatible: recovery inspects the recorded provider execution
+under current authority without a second webhook POST.
+
 **Activate events** enables a Webhook or Schedule root for 30 minutes or five
 events. Native Schedule executions only emit scoped timer events. The local
 worker invokes the DKG Program with a deterministic event identity, checking

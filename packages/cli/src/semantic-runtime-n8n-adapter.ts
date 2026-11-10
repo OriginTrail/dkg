@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { legacyN8nImplementation } from './semantic-runtime-n8n-implementation.generated.js';
 import type { RuntimeAdapterOperation, SemanticN8nConfig, SemanticN8nGrant } from '@origintrail-official/dkg-semantic-runtime';
 import { assertN8nEmbeddedWorkflows, assertN8nValue, n8nExecutionMatches, n8nRecord, n8nWorkflowSha256, validateN8nConfig, validateN8nGrant } from './semantic-runtime-n8n-contract.js';
 
@@ -56,9 +57,10 @@ export function createN8nWorkflowAdapter(
   };
   return {
     id: 'n8n/workflow', version: '1', witInterface: 'origintrail:semantic-runtime/n8n-workflow@0.1.0',
-    implementationVersion: 'n8n-workflow-poc-v1',
-    implementationHash: createHash('sha256').update(readFileSync(new URL(import.meta.url)))
-      .update(assertN8nEmbeddedWorkflows.toString()).update(configuration).update(JSON.stringify(grant)).digest('hex'),
+    implementationVersion: legacyN8nImplementation.version,
+    implementationHash: createHash('sha256').update(JSON.stringify([
+      legacyN8nImplementation, configuration, grant,
+    ])).digest('hex'),
     enabled: matches, effectClass: 'external-workflow', verb: 'invoke',
     idempotencyClass: 'non_repeatable', reconciliationRule: 'inspect-n8n-execution-without-repeating-dispatch',
     validateInput(input) { assertN8nValue(grant.inputSchema, input, 'INPUT'); return structuredClone(input); },

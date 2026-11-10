@@ -4,8 +4,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { RuntimeAdapterOperation, SemanticN8nConfig, SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
 import { normalizeN8nResult, type NativeN8nGrant, assertN8nEmbeddedWorkflows, n8nResultSha256, assertN8nValue, n8nPinnedExecutionMatches, n8nObservationScope, n8nRecord, n8nWorkflowSha256, validateN8nConfig, validateN8nGrant } from './semantic-runtime-n8n-contract.js';
 import { collectN8nExecutionResult } from './semantic-runtime-n8n-results.js';
+import { nativeN8nImplementation } from './semantic-runtime-n8n-implementation.generated.js';
 
-import { decodeNativeN8nCheckpoint, encodeNativeN8nCheckpoint, readNativeN8nCheckpoint, type NativeN8nCheckpoint } from './semantic-runtime-n8n-checkpoint.js';
+import { encodeNativeN8nCheckpoint, readNativeN8nCheckpoint, type NativeN8nCheckpoint } from './semantic-runtime-n8n-checkpoint.js';
 type PreparedEffectToken = Parameters<RuntimeAdapterOperation['dispatch']>[0];
 // Studio allows 45s Program callbacks inside a 50s native workflow and a 60s
 // parent. Keep inspection alive through the native limit, with receipt margin.
@@ -107,12 +108,10 @@ export function createNativeN8nWorkflowAdapter(
   };
   return {
     id: 'n8n/workflow', version: '1', witInterface: 'origintrail:semantic-runtime/n8n-workflow@0.1.0',
-    implementationVersion: 'n8n-native-components-v1',
-    implementationHash: createHash('sha256').update(readFileSync(new URL(import.meta.url)))
-      .update(decodeNativeN8nCheckpoint.toString()).update(encodeNativeN8nCheckpoint.toString()).update(readNativeN8nCheckpoint.toString())
-      .update(n8nResultSha256.toString()).update(assertN8nEmbeddedWorkflows.toString())
-      .update(normalizeN8nResult.toString()).update(collectN8nExecutionResult.toString()).update(n8nPinnedExecutionMatches.toString())
-      .update(configuration).update(JSON.stringify(grant)).digest('hex'),
+    implementationVersion: nativeN8nImplementation.version,
+    implementationHash: createHash('sha256').update(JSON.stringify([
+      nativeN8nImplementation, configuration, grant,
+    ])).digest('hex'),
     enabled: matches, effectClass: 'external-workflow', verb: 'invoke', idempotencyClass: 'non_repeatable',
     reconciliationRule: 'inspect-pinned-n8n-execution-from-durable-acknowledgement',
     validateInput(input) { assertN8nValue(grant.inputSchema, input, 'INPUT'); return structuredClone(input); },

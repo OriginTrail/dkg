@@ -2,11 +2,12 @@ import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ExecutionReceiptJournal, ProgramTraceRecorder, readProgramTrace, readProgramCallHistory } from '@origintrail-official/dkg-semantic-runtime';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as nativeAdapter from '../src/semantic-runtime-n8n-native-adapter.js';
 import { n8nResultSha256, n8nWorkflowSha256 } from '../src/semantic-runtime-n8n-contract.js';
 import { cleanupRuntimeFixtures, toolFixture, toolApi, graph, sourceGraph, owner, caller, SR,
   restartNode, invalidateExecutionCapability } from './_helpers/semantic-runtime-api-fixture.js';
 
-afterEach(async () => { vi.unstubAllGlobals(); await cleanupRuntimeFixtures(); });
+afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllGlobals(); await cleanupRuntimeFixtures(); });
 
 const n8nTool = 'urn:dkg:tool:n8n';
 const nativeSource = `import { invoke_tool } from '${toolApi}';
@@ -266,4 +267,48 @@ describe('native dispatch and durable recovery', () => {
     await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ status: 403 });
     expect(f.state.dispatches).toBe(1);
   });
+});
+
+
+// These fixtures retain historical descriptor metadata while exercising the
+// real checkpoint, effect and receipt stores. They do not alias v1 pins to v2.
+function useHistoricalImplementationPin() {
+  const create = nativeAdapter.createNativeN8nWorkflowAdapter;
+  return vi.spyOn(nativeAdapter, 'createNativeN8nWorkflowAdapter').mockImplementation((...args) => ({
+    ...create(...args), implementationVersion: 'n8n-native-components-v1', implementationHash: 'b'.repeat(64),
+  }));
+}
+
+it('preserves a completed receipt with historical implementation pins across reopen', async () => {
+  const f = await nativeFixture(), prepared = await f.start();
+  f.state.interrupted = false;
+  const oldImplementation = useHistoricalImplementationPin();
+  const original = await f.client.programs.invoke(prepared);
+  oldImplementation.mockRestore();
+  const pins = async () => (await f.store.query(`SELECT ?version ?hash WHERE { GRAPH ?g {
+    <${original.executionIri}> <${SR}adapterVersion> ?version ; <${SR}adapterHash> ?hash . } }`)).bindings
+    .map(row => ({ version: JSON.parse(row.version!), hash: JSON.parse(row.hash!) }));
+  const historical = await pins();
+  expect(historical).toEqual([{ version: 'n8n-native-components-v1', hash: 'sha256:' + 'b'.repeat(64) }]);
+  await restartNode(f.target);
+  expect(await f.client.programs.invoke(prepared)).toEqual(original);
+  expect(await pins()).toEqual(historical);
+  expect(f.state.dispatches).toBe(1);
+});
+
+it('continues an acknowledged v1 effect under the v2 implementation without rewriting its identity', async () => {
+  const f = await nativeFixture(), prepared = await f.start();
+  const oldImplementation = useHistoricalImplementationPin();
+  await interruptInspection(f, prepared);
+  oldImplementation.mockRestore();
+  const effect = f.target.runtime!.store.effectsForExecution('urn:sr:execution:' + prepared.invocationId)[0]!;
+  const checkpoint = Buffer.from(f.target.runtime!.store.adapterCheckpoint(effect.effectId)!.payload);
+  await restartNode(f.target);
+  f.state.interrupted = false;
+  await expectCompleted(f, prepared);
+  const recovered = f.target.runtime!.store.effect(effect.effectId)!;
+  expect(recovered).toMatchObject({ adapterId: effect.adapterId, adapterVersion: effect.adapterVersion,
+    capabilityId: effect.capabilityId, requestDigest: effect.requestDigest, idempotencyKey: effect.idempotencyKey });
+  expect(Buffer.from(f.target.runtime!.store.adapterCheckpoint(effect.effectId)!.payload)).toEqual(checkpoint);
+  expect(f.state.dispatches).toBe(1);
 });

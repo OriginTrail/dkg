@@ -69,7 +69,7 @@ jobs:
           pnpm --filter @origintrail-official/dkg test:unit \
             test/semantic-runtime.test.ts test/semantic-runtime-configuration-api.test.ts \
             test/semantic-runtime-studio-authority.test.ts \
-            test/semantic-runtime-n8n-native.test.ts test/semantic-runtime-n8n-recovery.test.ts \
+            test/semantic-runtime-n8n-native.test.ts test/semantic-runtime-n8n-fingerprint.test.ts test/semantic-runtime-n8n-recovery.test.ts \
             test/semantic-runtime-program-bindings.test.ts \
             test/semantic-runtime-execution-output.test.ts test/semantic-runtime-graph-configuration-limits.test.ts \
             test/local-private-first-write.test.ts test/write-preflight-resilience.test.ts \

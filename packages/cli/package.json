@@ -47,7 +47,7 @@
     "test:benchmark:publish-async-get": "vitest run --config vitest.benchmark.config.ts",
     "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs cli",
     "clean": "node -e \"const fs=require('fs');for(const d of['dist','network']){fs.rmSync(d,{recursive:true,force:true})};fs.rmSync('tsconfig.tsbuildinfo',{force:true})\"",
-    "build:compile": "node ../../scripts/stamp-cli-build-info.mjs --compile"
+    "build:compile": "node scripts/n8n-implementation-fingerprints.mjs --write && node ../../scripts/stamp-cli-build-info.mjs --compile"
   },
   "dependencies": {
     "@chainsafe/as-chacha20poly1305": "0.1.0",
