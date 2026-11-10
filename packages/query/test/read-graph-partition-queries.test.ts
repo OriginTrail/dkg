@@ -122,6 +122,9 @@ describe('queries and read-graph partitions', () => {
       ['SELECT ?o WHERE { ?s <urn:p> ?o }', { contextGraphId: CG, view: 'verifiable-memory' }],
       ['SELECT ?o WHERE { ?s <urn:p> ?o }', { contextGraphId: CG, view: 'shared-working-memory' }],
       ['SELECT ?o WHERE { ?s <urn:p> ?o }', { contextGraphId: CG, subGraphName: 'code' }],
+      // The shape `dkg okf export` sends for a view.
+      ['SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?s), "urn:")) }', { contextGraphId: CG, view: 'verifiable-memory' }],
+      ['SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?s), "urn:")) }', { contextGraphId: CG, view: 'shared-working-memory' }],
     ];
     for (const [sparql, options] of cases) {
       expect(normalize(await engine.query(sparql, options)), JSON.stringify(options))
