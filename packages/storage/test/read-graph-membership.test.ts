@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import fc from 'fast-check';
 import {
   MemoryLayer,
+  READ_GRAPH_SEGMENT,
   knowledgeAssetAgentAddressesEqual,
   readGraphIri,
   readScope,
@@ -24,6 +25,8 @@ const AGENT = '0x' + 'ab'.repeat(20);
 const AGENT_MIXED = '0x' + 'aB'.repeat(20);
 const OTHER = '0x' + 'cd'.repeat(20);
 const PEER = '12D3KooWQYhTNQdmr3ArTeUHRYzFg94BKyTkoWBDWez9kSCVe2Xo';
+/** The partition segment without its `~`: an ordinary segment, which older context graph IDs may hold. */
+const LOOK_ALIKE = READ_GRAPH_SEGMENT.replace('~', '');
 const identity = workingMemoryIdentityRule({ defaultAgentAddress: AGENT_MIXED, peerId: PEER });
 const VM = MemoryLayer.VerifiableMemory;
 const SWM = MemoryLayer.SharedWorkingMemory;
@@ -58,7 +61,7 @@ describe('read-graph membership, shared layers', () => {
     `${root}/_meta`,
     `${root}/_private`,
     `${root}/_rules`,
-    `${root}/_read/cg/_verifiable_memory`,
+    `${root}/${READ_GRAPH_SEGMENT}/cg/_verifiable_memory`,
     `${root}/_shared_memory`,
     `${root}/_shared_memory/${AGENT}/6`,
     `${root}/_shared_memory/staging/ab12`,
@@ -197,9 +200,9 @@ describe('read graphs of a written graph', () => {
     const graph = `did:dkg:context-graph:a/b/_verifiable_memory/${AGENT}/1`;
     const keys = readGraphsOfMemberGraph(graph, (id) => registries.get(id), identity).map(readGraphIri);
     expect(keys.sort()).toEqual([
-      'did:dkg:context-graph:a/_read/cg/_verifiable_memory',
-      'did:dkg:context-graph:a/_read/sub/b/_verifiable_memory',
-      'did:dkg:context-graph:a/b/_read/cg/_verifiable_memory',
+      `did:dkg:context-graph:a/${READ_GRAPH_SEGMENT}/cg/_verifiable_memory`,
+      `did:dkg:context-graph:a/${READ_GRAPH_SEGMENT}/sub/b/_verifiable_memory`,
+      `did:dkg:context-graph:a/b/${READ_GRAPH_SEGMENT}/cg/_verifiable_memory`,
     ]);
     expect(readGraphsOfMemberGraph('urn:x:y', (id) => registries.get(id), identity)).toEqual([]);
     expect(readGraphsOfMemberGraph(graph, () => undefined, identity)).toEqual([]);
@@ -208,7 +211,7 @@ describe('read graphs of a written graph', () => {
   it('maps a peer-ID draft to the default agent', () => {
     const graph = `did:dkg:context-graph:x/_working_memory/${PEER}/1`;
     expect(readGraphsOfMemberGraph(graph, (id) => (id === 'x' ? registry('x') : undefined), identity).map(readGraphIri))
-      .toEqual([`did:dkg:context-graph:x/_read/cg/_working_memory/${AGENT}`]);
+      .toEqual([`did:dkg:context-graph:x/${READ_GRAPH_SEGMENT}/cg/_working_memory/${AGENT}`]);
   });
 });
 
@@ -245,7 +248,7 @@ function referenceViewMember(graph: string, layer: MemoryLayer.VerifiableMemory 
   }
   // Added by membership: reserved partitions anywhere, and a shared layer's bare staging graph.
   const segments = graph.split('/');
-  if (['_private', '_rules', '_read', '_shared_memory_meta'].some((segment) => segments.slice(1).includes(segment))) selected = false;
+  if (['_private', '_rules', READ_GRAPH_SEGMENT, '_shared_memory_meta'].some((segment) => segments.slice(1).includes(segment))) selected = false;
   if (/\/_(?:shared|verifiable)_memory\/staging$/.test(graph)) selected = false;
   return selected;
 }
@@ -253,8 +256,8 @@ function referenceViewMember(graph: string, layer: MemoryLayer.VerifiableMemory 
 const SUB_POOL = ['code', 'docs', 'staging', 'kid'];
 const CONTEXT_GRAPH_POOL = ['x', '0xabc/proj', 'x/code', 'acme/staging/v1', 'a/b/c'];
 const TAIL_SEGMENTS = ['_verifiable_memory', '_shared_memory', '_working_memory', 'assertion', 'context', 'staging',
-  '_meta', '_private', '_rules', '_read', '_shared_memory_meta', '_metadata', '_named_graph', AGENT, AGENT_MIXED, OTHER,
-  PEER, '7', 'cg', 'sub', ...SUB_POOL];
+  '_meta', '_private', '_rules', READ_GRAPH_SEGMENT, LOOK_ALIKE, '_shared_memory_meta', '_metadata', '_named_graph',
+  AGENT, AGENT_MIXED, OTHER, PEER, '7', 'cg', 'sub', ...SUB_POOL];
 
 const snapshotArbitrary = (contextGraphId: string) => fc.record({
   subGraphNames: fc.subarray([...SUB_POOL, '_hidden', 'a/b']),
@@ -308,7 +311,7 @@ describe('read-graph membership properties', () => {
         : { scope: readScope(contextGraphId, sub), layer }) as ReadGraphKey;
       if (!isReadGraphMember(graph, key, snapshot, identity)) return;
       const tail = graph.slice(`did:dkg:context-graph:${contextGraphId}`.length).split('/');
-      for (const reserved of ['_meta', '_private', '_rules', '_read', '_shared_memory_meta']) expect(tail).not.toContain(reserved);
+      for (const reserved of ['_meta', '_private', '_rules', READ_GRAPH_SEGMENT, '_shared_memory_meta']) expect(tail).not.toContain(reserved);
       expect(graph === `did:dkg:context-graph:${contextGraphId}` || graph.startsWith(`did:dkg:context-graph:${contextGraphId}/`)).toBe(true);
       for (const child of snapshot.childContextGraphRoots) expect(graph === child || graph.startsWith(`${child}/`)).toBe(false);
     }), propertyOptions());
