@@ -9,6 +9,7 @@ import { markReadGraphsDirtyAtStart } from '../src/read-graph-partition-startup.
 import { mayHoldReadGraphPartitions, noteReadGraphPartitions } from '../src/read-graph-partition-marker.js';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
+  MAX_READ_GRAPH_GENERATION,
   parseReadGraphStateRows,
   READ_GRAPH_STATE_PREDICATES,
   readGraphStateCompareAndSet,
@@ -32,6 +33,12 @@ function row(readGraph: string, state: ReadGraphState, generation: number): Read
 async function rows(store: TripleStore) {
   const result = await readGraphPartitionMaintenanceStore(store).query(readGraphStateRowsQuery());
   return parseReadGraphStateRows(result.type === 'bindings' ? result.bindings : []);
+}
+
+async function stateValues(store: TripleStore, graph: string): Promise<string[]> {
+  const result = await readGraphPartitionMaintenanceStore(store).query(
+    `SELECT ?state WHERE { GRAPH <${graph}> { ?readGraph <${READ_GRAPH_STATE_PREDICATES.state}> ?state } }`);
+  return result.type === 'bindings' ? result.bindings.map(binding => binding.state!).sort() : [];
 }
 
 async function anyReady(store: TripleStore): Promise<boolean> {
@@ -96,15 +103,57 @@ describe('marking read graphs dirty at start', () => {
     expect(storeMayHoldReadGraphPartitions(store)).toBe(true);
   });
 
-  it('leaves no ready state behind a damaged row', async () => {
+  it('leaves no ready state behind a damaged row, and creates it again, dirty', async () => {
     const store = await storeWithRows(row(VM, 'ready', 5));
-    // A row that holds a second state is damaged; its ready value must still go.
+    // A row that holds a second state, with a copy in another context graph's state graph, is damaged.
+    const elsewhere = readGraphStateGraphIri('elsewhere');
     await readGraphPartitionMaintenanceStore(store).insert([
       { graph: STATE, subject: VM, predicate: READ_GRAPH_STATE_PREDICATES.state, object: '"building"' },
+      { graph: elsewhere, subject: VM, predicate: READ_GRAPH_STATE_PREDICATES.state, object: '"ready"' },
     ]);
     expect((await rows(store)).damaged).toEqual([VM]);
     expect(await markReadGraphsDirtyAtStart(store)).toBe(1);
     expect(await anyReady(store)).toBe(false);
+    const after = await rows(store);
+    expect(after.damaged).toEqual([]);
+    expect(after.rows.map(({ readGraph, state }) => [readGraph, state])).toEqual([[VM, 'dirty']]);
+    expect(await stateValues(store, elsewhere)).toEqual([]);
+  });
+
+  it('starts a row whose generation cannot grow again', async () => {
+    const store = await storeWithRows(row(VM, 'ready', MAX_READ_GRAPH_GENERATION));
+    expect(await markReadGraphsDirtyAtStart(store)).toBe(1);
+    const [after] = (await rows(store)).rows;
+    expect(after?.state).toBe('dirty');
+    expect(after!.generation).toBeLessThan(MAX_READ_GRAPH_GENERATION);
+  });
+
+  it('changes only rows in a context graph\'s own state graph', async () => {
+    const store = await storeWithRows(row(VM, 'ready', 5));
+    // Ordinary graphs whose IRIs only end like a state graph, written through the guard.
+    const lookAlikes = ['did:dkg:context-graph:a/_x/_read/state', `did:dkg:context-graph:${CG}/_read/project/_read/state`];
+    await store.insert(lookAlikes.flatMap(graph => [VM, 'urn:s'].map(subject =>
+      ({ graph, subject, predicate: READ_GRAPH_STATE_PREDICATES.state, object: '"ready"' }))));
+    expect(await markReadGraphsDirtyAtStart(store)).toBe(1);
+    for (const graph of lookAlikes) expect(await stateValues(store, graph), graph).toEqual(['"ready"', '"ready"']);
+    expect(await stateValues(store, STATE)).toEqual(['"dirty"']);
+    // A store whose only rows are in such graphs holds no read graphs.
+    const ordinary = await storeWithRows();
+    await ordinary.insert([{ graph: lookAlikes[0]!, subject: 'urn:s', predicate: READ_GRAPH_STATE_PREDICATES.state, object: '"ready"' }]);
+    const dir = await dataDir();
+    expect(await markReadGraphsDirtyAtStart(ordinary, { dataDir: dir })).toBe(0);
+    expect(mayHoldReadGraphPartitions(dir)).toBe(false);
+    expect(storeMayHoldReadGraphPartitions(ordinary)).toBe(false);
+  });
+
+  it('marks many read graphs in bounded requests', async () => {
+    const graphs = Array.from({ length: 300 }, (_, index) =>
+      readGraphIri({ scope: readScope(`many-${index}`), layer: MemoryLayer.VerifiableMemory }));
+    const store = await storeWithRows(...graphs.map(graph => row(graph, 'ready', 1)));
+    const update = vi.spyOn(readGraphPartitionMaintenanceStore(store), 'update');
+    expect(await markReadGraphsDirtyAtStart(store)).toBe(300);
+    expect(update).toHaveBeenCalledTimes(2);
+    expect((await rows(store)).rows.every(({ state, generation }) => state === 'dirty' && generation === 2)).toBe(true);
   });
 
   it('runs below the partition guard', async () => {
