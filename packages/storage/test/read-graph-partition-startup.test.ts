@@ -150,6 +150,27 @@ describe('marking read graphs dirty at start', () => {
     expect(storeMayHoldReadGraphPartitions(plain)).toBe(false);
   });
 
+  it('keeps each damaged row\'s removal and new row in one request', async () => {
+    const graphs = Array.from({ length: 100 }, (_, index) =>
+      readGraphIri({ scope: readScope(`damaged-${index}`), layer: MemoryLayer.VerifiableMemory }));
+    const store = await storeWithRows(...graphs.map(graph => row(graph, 'ready', 1)));
+    const adapter = readGraphPartitionMaintenanceStore(store);
+    // A copy in another context graph's state graph damages each row: two removals and a new row apiece.
+    await adapter.insert(graphs.map(graph => ({
+      graph: readGraphStateGraphIri('elsewhere'), subject: graph, predicate: READ_GRAPH_STATE_PREDICATES.state, object: '"ready"',
+    })));
+    const update = vi.spyOn(adapter, 'update');
+    expect(await markReadGraphsDirtyAtStart(store)).toBe(100);
+    expect(update).toHaveBeenCalledTimes(2);
+    for (const [request] of update.mock.calls) {
+      expect((request.match(/^DELETE \{/gm) ?? []).length).toBe(2 * (request.match(/^INSERT \{/gm) ?? []).length);
+    }
+    const after = await rows(store);
+    expect(after.damaged).toEqual([]);
+    expect(after.rows.every(({ state }) => state === 'dirty')).toBe(true);
+    expect(await stateValues(store, readGraphStateGraphIri('elsewhere'))).toEqual([]);
+  });
+
   it('marks many read graphs in bounded requests', async () => {
     const graphs = Array.from({ length: 1_001 }, (_, index) =>
       readGraphIri({ scope: readScope(`many-${index}`), layer: MemoryLayer.VerifiableMemory }));

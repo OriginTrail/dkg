@@ -17,7 +17,7 @@ import type { UpdateOptions, TripleStore } from './triple-store.js';
 
 /** Rows per mark operation: on Blazegraph one operation costs about as much for one row as for a thousand. */
 const ROWS_PER_OPERATION = 1_000;
-/** Operations per request when damaged rows are created again. */
+/** Operations per request when damaged rows are created again; one row's operations are never split. */
 const OPERATIONS_PER_REQUEST = 256;
 
 type StateBinding = Readonly<Record<string, string | undefined>>;
@@ -61,10 +61,15 @@ export async function markReadGraphsDirtyAtStart(
   for (let at = 0; at < advancing.length; at += ROWS_PER_OPERATION) {
     requests.push(markDirty(advancing.slice(at, at + ROWS_PER_OPERATION)));
   }
-  const recreating = recreated.flatMap(readGraph => recreateDirty(readGraph, bindings));
-  for (let at = 0; at < recreating.length; at += OPERATIONS_PER_REQUEST) {
-    requests.push(recreating.slice(at, at + OPERATIONS_PER_REQUEST).join(';\n'));
+  let batch: string[] = [];
+  for (const operations of recreated.map(readGraph => recreateDirty(readGraph, bindings))) {
+    if (batch.length > 0 && batch.length + operations.length > OPERATIONS_PER_REQUEST) {
+      requests.push(batch.join(';\n'));
+      batch = [];
+    }
+    batch.push(...operations);
   }
+  if (batch.length > 0) requests.push(batch.join(';\n'));
   const marked = advancing.length + recreated.length;
   if (marked === 0) return 0;
   if (!target.update) throw new Error('This store cannot mark its read graphs dirty: it has no update()');
