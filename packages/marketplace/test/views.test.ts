@@ -243,7 +243,19 @@ describe('accounts and funding', () => {
     const third = await fundingView(buyer);
     expect(third.accountsPending).toBe(false);
     expect(third).not.toHaveProperty('accountsError');
-    expect(await fundingView(buyer, 10)).not.toHaveProperty('accountsError');
+
+    // Seen where it shows: a later read that cannot finish in time answers pending, without the old failure.
+    chain.listBuyerAccounts = () => new Promise<bigint[]>(() => undefined);
+    try {
+      const fourth = await fundingView(buyer, 10);
+      expect(fourth.accountsPending).toBe(true);
+      expect(fourth).not.toHaveProperty('accountsError');
+      const accounts = await accountsView(buyer, 10);
+      expect(accounts.accountsPending).toBe(true);
+      expect(accounts).not.toHaveProperty('accountsError');
+    } finally {
+      chain.listBuyerAccounts = listBuyerAccounts;
+    }
   });
 
   it('gives a browser wallet the contracts, the grant domain and its types', async () => {
