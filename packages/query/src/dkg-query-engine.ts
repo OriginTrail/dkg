@@ -12,7 +12,7 @@ import { storeOptions } from './query-store-options.js';
 import {
   asGraphWriteRevisionSource, asQueryReadAdmissionCapability,
   isQueryDatasetUnrestrictedError, isSparqlHttpResponseError, preparedSparqlNamesReadGraphPartition, sparqlEngineOf,
-  StoreResponseTooLargeError, storeMayHoldReadGraphPartitions,
+  StoreResponseTooLargeError, storeMayHoldReadGraphPartitions, storeRestrictsQueryDataset,
 } from '@origintrail-official/dkg-storage';
 import type {
   SparqlEngineFamily,
@@ -83,6 +83,7 @@ import {
 
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { assertWithheldGraphQuery } from './withheld-graph-scope.js';
+import { hideReadGraphPartitions } from './unscoped-read-graph-scope.js';
 export { ScopedQueryViolationError } from './scoped-query-error.js';
 
 /** Upstream statuses that mean the SUBMITTED query was malformed. */
@@ -397,11 +398,16 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         // The store answers over its dataset without the withheld graphs. While
         // the store may hold read-graph partitions, a graph variable must not
         // range over them either: a store that can restrict its dataset leaves
-        // the graphs it hides from enumeration out on request.
+        // the graphs it hides from enumeration out on request. Any other store
+        // gets a query that leaves them out by itself, or none.
         const withheld = options?.withheldGraphRoots ?? [];
         if (withheld.length) assertWithheldGraphQuery(initialGraphScope);
-        const hidesReadGraphs = withheld.length === 0 && initialGraphScope.graphVariables.length > 0
-          && !initialGraphScope.hasDatasetClause && storeMayHoldReadGraphPartitions(this.store);
+        const mayHoldReadGraphs = withheld.length === 0 && storeMayHoldReadGraphPartitions(this.store);
+        if (mayHoldReadGraphs && !storeRestrictsQueryDataset(this.store)) {
+          return this.execWithExclusions(hideReadGraphPartitions(initialGraphScope), reads, options?.excludeGraphPrefixes);
+        }
+        const hidesReadGraphs = mayHoldReadGraphs && initialGraphScope.graphVariables.length > 0
+          && !initialGraphScope.hasDatasetClause;
         return this.execWithExclusions(initialGraphScope, withheld.length > 0 || hidesReadGraphs
           ? reads.withWithheldGraphRoots(withheld) : reads,
         options?.excludeGraphPrefixes).catch((error: unknown) => {
