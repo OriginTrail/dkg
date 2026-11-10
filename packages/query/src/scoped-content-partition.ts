@@ -99,7 +99,7 @@ function isStagingGraphTail(tail: string): boolean {
 }
 
 
-export function isExcludedContentGraphTail(tail: string): boolean {
+function isExcludedContentGraphTail(tail: string): boolean {
   return isMetadataGraphTail(tail) || isPrivateGraphTail(tail) || isRulesGraphTail(tail) || isStagingGraphTail(tail);
 }
 

@@ -16,7 +16,7 @@ import { startManagedOxigraph } from '../daemon/oxigraph-managed.js';
 // graphs, so a rollback drops them before the version switch.
 
 /** A triple store opened while the daemon is stopped. */
-export interface StoppedNodeStore {
+interface StoppedNodeStore {
   readonly store: TripleStore;
   close(): Promise<void>;
 }
