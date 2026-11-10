@@ -142,14 +142,18 @@ export function dkgComponentStore(db, profile = null) {
       throw fail(
         "Run the approved workflow as its account owner before accessing DKG.",
       );
-    if (run.profile_id !== profile.id || run.profile_revision !== profile.revision)
-      throw fail('Invocation execution profile mismatch.');
     if (run.actor === null) throw fail('Unscoped legacy invocation has no recorded ownership.');
     const actor = JSON.parse(run.actor);
-    if (profile.requiresNosActor) {
-      if (!actor || actor.accountId !== profile.accountId || actor.role !== 'owner') throw fail('No authenticated execution owner.');
-      await profile.authorize(actor);
-    }
+    const assertCurrentProfile = () => {
+      assertDkgEnabled(definition, profile);
+      if (run.profile_id !== profile.id || run.profile_revision !== profile.revision)
+        throw fail('Invocation execution profile mismatch.');
+      if (profile.requiresNosActor && (!actor || actor.accountId !== profile.accountId || actor.role !== 'owner'))
+        throw fail('No authenticated execution owner.');
+    };
+    assertCurrentProfile();
+    if (profile.requiresNosActor) await profile.authorize(actor);
+    assertCurrentProfile();
     const node = definition.nodes.find(
       (n) => n.id === value.blockId && isDkg(n.componentId),
     );
@@ -182,8 +186,11 @@ export function dkgComponentStore(db, profile = null) {
       throw fail('This invocation belongs to a different native execution.');
     const authorize = async (readbackOnly = false) => {
       if (run.authority !== null && typeof journal.authorize !== 'function') throw fail('Original invocation authority verifier required.');
-      const assertCurrent = await journal.authorize?.(run.authority === null ? null : JSON.parse(run.authority), { readbackOnly });
-      assertCurrent?.();
+      const assertInvocationCurrent = await journal.authorize?.(run.authority === null ? null : JSON.parse(run.authority), { readbackOnly });
+      // Both policies must remain current across authorization awaits, including
+      // the caller's continuation immediately before effects or disclosure.
+      const assertCurrent = () => { assertInvocationCurrent?.(); assertCurrentProfile(); };
+      assertCurrent();
       return assertCurrent;
     };
     const assertCurrent = await authorize(!!previous);
@@ -208,8 +215,10 @@ export function dkgComponentStore(db, profile = null) {
     function completedResponse(call) {
       if (call?.result !== null && call?.result !== undefined && call.response === null) {
         call.response = operation.legacyResponse({ ...context, prior: call });
+        assertCurrentProfile();
         calls.adoptResponse(key, call.response);
       }
+      assertCurrentProfile();
       return call?.response ?? null;
     }
     const replay = completedResponse(prior);
@@ -229,7 +238,9 @@ export function dkgComponentStore(db, profile = null) {
     })();
     active.set(key, pending);
     try {
-      return await pending;
+      const response = await pending;
+      assertCurrentProfile();
+      return response;
     } finally {
       active.delete(key);
     }
