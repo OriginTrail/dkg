@@ -15,7 +15,7 @@ const reject = message => Object.assign(new Error(message), { code: 'INVALID_WOR
 const eventUuid = (ref, id) => { const b = createHash('sha256').update(ref + ':' + id).digest(); b[6] = (b[6] & 15) | 64; b[8] = (b[8] & 63) | 128;
   const h = b.toString('hex'); return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`; };
 
-export function createStudioService({ graphId, owner, client, repository, provider, dkg, listCapabilities, loadOutputs, exportTokenFile }) {
+export function createStudioService({ graphId, owner, client, repository, provider, dkg, programAuthority, listCapabilities, loadOutputs, exportTokenFile }) {
   const native = () => { if (!provider) throw reject('Native execution is not configured.'); return provider; };
   const fingerprint = path => createHash('sha256').update(readFileSync(path, 'utf8').trim()).digest('hex');
   const components = () => { if (!dkg) throw reject('DKG component execution is not configured.'); return dkg; };
@@ -97,8 +97,11 @@ export function createStudioService({ graphId, owner, client, repository, provid
     beforeDispatch?.(requiresExportAuthorization);
     assertDkgEnabled(compiled.definition);
     if (plan.kind === 'native-n8n') native().installGrant(compiled.grant);
-    if (compiled.definition.nodes.some(n => isDkg(n.componentId)))
-      components().grant(workflow, { invocationId, revisionDigest: workflow.sourceHash }, input, actor);
+    if (compiled.definition.nodes.some(n => isDkg(n.componentId))) {
+      if (!programAuthority) throw componentFailure('Original Program invocation authority verifier required.');
+      const authority = programAuthority.capture(workflow, invocationId, input);
+      components().grant(workflow, { invocationId, revisionDigest: workflow.sourceHash, authority }, input, actor);
+    }
     const invoke = () => {
       beforeDispatch?.(requiresExportAuthorization);
       if (compiled.mode === 'schedule') eventAuthorized(workflow.kaRef, requiresExportAuthorization);
@@ -280,7 +283,9 @@ export function createStudioService({ graphId, owner, client, repository, provid
     if(!workflow.approved) throw reject('Workflow approval is unavailable.');
     validateStudioCapabilities(compiled.definition,await listCapabilities());
     const input = await native().executionInput({ workflowId: value.workflowId, executionId: value.executionId, grant: compiled.grant });
-    return components().call(value, workflow, { invocationId, revisionDigest: workflow.sourceHash }, value.workflowId, input);
+    if (!programAuthority) throw componentFailure('Original Program invocation authority verifier required.');
+    return components().call(value, workflow, { invocationId, revisionDigest: workflow.sourceHash,
+      authorize: (authority, options) => programAuthority.assert(authority, value.effectId, options) }, value.workflowId, input);
   }
   const timer = setInterval(() => void poll(), 3000); timer.unref();
   return { dkgComponent, list, get, save, run, activate, event, history, poll, stop() { stopped = true; clearInterval(timer); } };

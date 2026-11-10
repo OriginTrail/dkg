@@ -5,12 +5,12 @@ export const componentFailure = message => Object.assign(new Error(message), { s
 const fail = componentFailure;
 
 /** Prepare synchronously inside the pending-call transaction; dispatch only after it commits. */
-export function dkgComponentOperations({ db, profile, transport, assertNoPendingWrite }) {
+export function dkgComponentOperations({ db, profile, assertNoPendingWrite }) {
   return {
     'dkg-read': {
       legacyResponse: ({ rows, node, prior }) => ({ items: profile.readItems(rows, JSON.parse(prior.result), node) }),
-      prepare: ({ rows, node, input, actor }) => async () => {
-        const result = await transport(profile.readRequest(node, rows, input), 'read', { actor });
+      prepare: ({ rows, node, input, actor, dispatch }) => async () => {
+        const result = await dispatch(profile.readRequest(node, rows, input), 'read', { actor });
         const items = profile.readItems(rows, result, node);
         if (JSON.stringify(items).length > 8192) throw fail('DKG Read result exceeds the workflow batch limit.');
         return { result, response: { items } };
@@ -18,10 +18,10 @@ export function dkgComponentOperations({ db, profile, transport, assertNoPending
     },
     'invoke-dkg-program': {
       legacyResponse: ({ prior }) => ({ items: JSON.parse(prior.result).items }),
-      prepare: ({ node, rows, id, actor }) => {
+      prepare: ({ node, rows, id, actor, dispatch }) => {
         const request = programRequest(node, rows, id, profile);
         return async () => {
-          const result = programResult(await transport(request, 'invoke', { actor }), request);
+          const result = programResult(await dispatch(request, 'invoke', { actor }), request);
           return { result, response: { items: result.items } };
         };
       },
@@ -32,7 +32,7 @@ export function dkgComponentOperations({ db, profile, transport, assertNoPending
         if (!saved?.receipt) throw fail('The completed legacy write has no saved receipt; operator reconciliation is required.');
         return JSON.parse(saved.receipt);
       },
-      prepare: ({ node, rows, id, key, input, value, workflow, actor, prior }) => {
+      prepare: ({ node, rows, id, key, input, value, workflow, actor, prior, dispatch }) => {
         const definition = workflow.definition;
         const readNode = definition.nodes.find(
           (n) => n.componentId === "dkg-read",
@@ -70,7 +70,7 @@ export function dkgComponentOperations({ db, profile, transport, assertNoPending
         db.prepare('INSERT OR IGNORE INTO dkg_component_writes VALUES (?,?,?,NULL)').run(key, JSON.stringify(value), JSON.stringify(evidence));
         return async () => {
           let result;
-          try { result = await transport({ ...payload, allowCreate: !prior }, 'write', { actor }); }
+          try { result = await dispatch({ ...payload, allowCreate: !prior }, 'write', { actor }); }
           catch (error) {
             throw Object.assign(error, { status: error.status ?? 409, code: 'DKG_WRITE_PENDING', invocationId: id, n8nExecutionId: value.executionId });
           }

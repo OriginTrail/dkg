@@ -10,6 +10,7 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { startConfiguredSemanticRuntime } from '../src/semantic-runtime.js';
+import { createNativeCallbackAuthority } from '../src/semantic-runtime-native-callback-authority.js';
 import { boundSemanticInvocationScope } from '../src/semantic-runtime-bound-invocation.js';
 import { GraphComputer } from '../../graph-computer/src/index.js';
 import { examples as sdkExamples } from '../../graph-computer/examples/programs.mjs';
@@ -388,6 +389,8 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     const f = await toolFixture('export function run() { return null; }', { graphId: graph }, []);
     const h = createStudioExecutionHarness({ state: join(f.target.dir, 'studio'), graphId: graph, owner,
       config: f.target.config.semanticRuntime, client: f.manager,
+      programAuthority: createNativeCallbackAuthority({ agent: f.target.agent, runtime: () => f.target.runtime,
+        config: f.target.config.semanticRuntime, graphId: graph, caller: owner }),
       loadOutputs: async (iri: string) => (await f.store.query(`SELECT ?output WHERE { GRAPH ?g { <${iri}> <${SR}output> ?output } }`)).bindings
         .map((row: any) => JSON.parse(row.output)) });
     vi.stubGlobal('fetch', h.runtimeFetch);
@@ -423,6 +426,8 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     const f = await toolFixture('export function run() { return null; }', { graphId: graph }, []);
     const h = createStudioExecutionHarness({ state: join(f.target.dir, 'studio'), graphId: graph, owner,
       config: f.target.config.semanticRuntime, client: f.manager,
+      programAuthority: createNativeCallbackAuthority({ agent: f.target.agent, runtime: () => f.target.runtime,
+        config: f.target.config.semanticRuntime, graphId: graph, caller: owner }),
       loadOutputs: async (iri: string) => (await f.store.query(`SELECT ?output WHERE { GRAPH ?g { <${iri}> <${SR}output> ?output } }`)).bindings
         .map((row: any) => JSON.parse(row.output)) });
     vi.stubGlobal('fetch', h.runtimeFetch);

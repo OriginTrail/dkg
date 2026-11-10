@@ -25,6 +25,34 @@ function readWorkflow() {
     { graphId: 'test', owner: '0x' + 'a'.repeat(40), fixture: true, headerCredential: { id: 'test', name: 'test' }, providerId: 'native-read' });
 }
 
+test('withdrawal while a DKG callback awaits account authorization prevents transport', async t => {
+  const state = mkdtempSync(join(tmpdir(), 'studio-mcp-withdraw-callback-'));
+  const repository = createStudioRepository(state);
+  t.after(() => { repository.close(); rmSync(state, { recursive: true, force: true }); });
+  const compiled = readWorkflow();
+  repository.mcp.recordSavedNative(compiled, { ...compiled.workflow, id: 'native-read', versionId: 'v1', active: true });
+  const entered = Promise.withResolvers(), release = Promise.withResolvers();
+  let transports = 0, received;
+  const checkedProfile = { ...profile,
+    async authorize(actor) { await profile.authorize(actor); entered.resolve(); await release.promise; },
+    transport() { transports++; throw new Error('withdrawn callback reached transport'); } };
+  const s = createStudioMcpService({ repository, accountId: profile.accountId, profile: checkedProfile,
+    dkg: dkgComponentStore(repository.db, undefined, undefined, checkedProfile),
+    runner: { async prepare() { return 'v1'; }, async dispatch(_workflow, invocationId, input) {
+      received = { invocationId, input }; return '42';
+    }, async inspect() { return { status: 'running' }; }, async verifyCallback() { return received; } } });
+  const actor = { id: 'owner', role: 'owner', accountId: profile.accountId };
+  const pin = { kaRef: compiled.kaRef, workflowSha256: compiled.grant.workflowSha256 };
+  const runKey = 'withdraw-during-authorization';
+  await s.run({ ...pin, runKey, arguments: { sample: 'a' } }, actor);
+  const pending = s.dkgComponent({ effectId: runKey, workflowId: 'native-read', executionId: '42', blockId: 'read', items: [{ sample: 'a' }] });
+  await entered.promise;
+  try { s.withdraw(pin, actor); } finally { release.resolve(); }
+  await assert.rejects(pending, { code: 'STUDIO_WORKFLOW_WITHDRAWN' });
+  assert.equal(transports, 0);
+  assert.equal(repository.db.prepare('SELECT COUNT(*) AS n FROM dkg_component_calls').get().n, 0);
+});
+
 test('shared callback preserves MCP routing and does not fall back after an MCP rejection', async t => {
   const state = mkdtempSync(join(tmpdir(), 'studio-mcp-callback-'));
   t.after(() => rmSync(state, { recursive: true, force: true }));

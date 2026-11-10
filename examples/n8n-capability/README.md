@@ -459,6 +459,14 @@ local workflow receipt records completion. Sharing and VM publishing are false. 
 every RDF term, payload SHA-256 and `wm-sealed` status before reporting success.
 
 The component journal binds invocation, native execution, block, input and workflow source hash.
+Program-backed runs also retain the original approval digest and signed invocation identity.
+Every callback checks that binding, the durable runtime effect and its capability (revocation,
+expiry and policy epoch), including a synchronous check immediately before transport after
+asynchronous authorization. Reapproving identical source cannot revive an older invocation.
+Completed parents permit only cached results or readback of an already journalled write.
+Legacy Program runs without the original authority snapshot remain closed to callbacks and
+grant renewal; preserve their journal for operator reconciliation instead of assigning a new approval.
+MCP runs retain their separate saved-workflow admission and withdrawal authority.
 A pending write is persisted before dispatch. The native HTTP step retries at most once; retry
 reconciles the same named asset, never recreates an ambiguous missing asset. Reads are reused
 within one invocation. Completed workflow replay returns the same persisted receipt. A new Run

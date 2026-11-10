@@ -44,7 +44,7 @@ export async function handleDkgComponentCallback(req, res, studio, config, mcp) 
   } catch(e) { json(res,e.status??409,{code:e.code??'DKG_COMPONENT_UNCONFIRMED',error:e.message}); }
 }
 
-export function createCapabilityBridge({ agent, client, graphId, owner, config, definitions = [], exportTokenFile, studioOptions }) {
+export function createCapabilityBridge({ agent, client, graphId, owner, config, definitions = [], exportTokenFile, studioOptions, programAuthority }) {
   if (!nosStudioSession && studioOptions && existsSync(join(studioOptions.state, 'nos-account.json')))
     throw new Error('This state requires its authenticated nOS account configuration.');
   const commitAccountBinding = nosStudioSession && studioOptions ? nosStudioSession.prepareStateBinding(studioOptions.state) : null;
@@ -114,7 +114,7 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     if (nosStudioSession && repository?.hasActiveWorkflows())
       throw new Error('Deactivate legacy schedules before adopting Studio state for an account.');
     const dkg = repository ? dkgComponentStore(repository.db) : undefined;
-    studio = repository ? createStudioService({ graphId, owner, client, repository, provider, dkg, exportTokenFile,
+    studio = repository ? createStudioService({ graphId, owner, client, repository, provider, dkg, programAuthority, exportTokenFile,
       listCapabilities: async () => [...await list(), ...await listPrograms()],
       loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner) }) : null;
     const mcpFlags = studioMcpFlags();

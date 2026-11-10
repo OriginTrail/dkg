@@ -41,7 +41,7 @@ test('migration preserves owner, scope, cached response and expiry renewal acros
   const scoped = { ...profile, requiresNosActor: true, accountId: actor.accountId,
     async authorize(value) { assert.deepEqual(value, actor); authorizations++; } };
   let store = dkgComponentStore(db, noTransport, [], scoped);
-  assert.deepEqual(row(db), { ...previous, profile_id: profile.id, profile_revision: profile.revision, actor: JSON.stringify(actor) });
+  assert.deepEqual(row(db), { ...previous, profile_id: profile.id, profile_revision: profile.revision, actor: JSON.stringify(actor), authority: null });
   assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE name IN ('dkg_component_profiles','dkg_component_actors')").all(), []);
   assert.deepEqual(await store.call(request, workflow, 'native'), cached);
   const beforeRenewal = row(db);

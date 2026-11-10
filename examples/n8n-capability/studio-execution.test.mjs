@@ -5,11 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createStudioExecutionHarness, memoryStudioClient } from './test-support/studio-execution-harness.mjs';
+import { fixtureProgramAuthority } from './test-support/studio-authority-fixture.mjs';
 
 test('generated Read/Write callbacks accept normalized pinned snapshots but reject changed authority or structure', async () => {
   const state = mkdtempSync(join(tmpdir(), 'studio-callback-'));
   const client = memoryStudioClient();
-  const h = createStudioExecutionHarness({ state, graphId: 'test-studio', owner: '0x' + '1'.repeat(40), config: {}, client, loadOutputs: async () => [] });
+  const h = createStudioExecutionHarness({ state, graphId: 'test-studio', owner: '0x' + '1'.repeat(40), config: {}, client, loadOutputs: async () => [], programAuthority: fixtureProgramAuthority });
   const originalRevision = h.profile.revision;
   try {
     const workflow = await h.service.save(h.definition, () => {});

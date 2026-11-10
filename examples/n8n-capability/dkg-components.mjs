@@ -53,7 +53,7 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
   // Older completed calls acquire a response lazily after the same authority checks.
   if (!db.prepare('PRAGMA table_info(dkg_component_calls)').all().some(column => column.name === 'response'))
     db.exec('ALTER TABLE dkg_component_calls ADD COLUMN response TEXT');
-  const operations = dkgComponentOperations({ db, profile, transport, assertNoPendingWrite });
+  const operations = dkgComponentOperations({ db, profile, assertNoPendingWrite });
   const active = new Map();
   function assertNoPendingWrite(workflow, invocationId) {
     const node = workflow.definition.nodes.find(n => n.componentId === 'dkg-write');
@@ -94,13 +94,16 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
     if (old && (old.profile_id !== profile.id || old.profile_revision !== profile.revision))
       throw fail('Invocation identity belongs to a different execution profile or an unscoped legacy run.');
     if (old && old.actor === null) throw fail('Unscoped legacy invocation has no recorded ownership.');
+    const authority = journal.authority == null ? null : JSON.stringify(journal.authority);
+    if (old && old.authority !== authority) throw fail('Invocation belongs to different original authority or an unscoped legacy run.');
     if (!old) assertNoPendingWrite(workflow, invocationId);
     const stored = db.prepare(`INSERT INTO dkg_component_runs
-      (id,ka_ref,source_hash,input,expires,profile_id,profile_revision,actor) VALUES (?,?,?,?,?,?,?,?)
+      (id,ka_ref,source_hash,input,expires,profile_id,profile_revision,actor,authority) VALUES (?,?,?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET expires=excluded.expires
       WHERE ka_ref=excluded.ka_ref AND source_hash=excluded.source_hash AND input=excluded.input
-        AND profile_id=excluded.profile_id AND profile_revision=excluded.profile_revision AND actor=excluded.actor`)
-      .run(invocationId, workflow.kaRef, revisionDigest, encoded, Date.now() + 600000, profile.id, profile.revision, actorText);
+        AND profile_id=excluded.profile_id AND profile_revision=excluded.profile_revision AND actor=excluded.actor
+        AND authority IS excluded.authority`)
+      .run(invocationId, workflow.kaRef, revisionDigest, encoded, Date.now() + 600000, profile.id, profile.revision, actorText, authority);
     if (stored.changes !== 1) throw fail('Invocation identity belongs to different workflow, inputs, profile or principal.');
   }
   async function call(value, workflow, journal, nativeId, receivedInput) {
@@ -161,15 +164,14 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
     )
       throw fail("Bounded DKG component input required.");
     profile.validateNode(node, rows, input);
-    const key = id + ":" + node.id,
-      requestHash = hash(value),
-      prior = db
-        .prepare("SELECT * FROM dkg_component_calls WHERE id=?")
-        .get(key);
-    if (prior && prior.request_hash !== requestHash)
-      throw fail(
-        "This DKG step already belongs to different inputs or native execution.",
-      );
+    const key = id + ":" + node.id, requestHash = hash(value);
+    const readPrior = () => {
+      const prior = db.prepare("SELECT * FROM dkg_component_calls WHERE id=?").get(key);
+      if (prior && prior.request_hash !== requestHash)
+        throw fail("This DKG step already belongs to different inputs or native execution.");
+      return prior;
+    };
+    const previous = readPrior();
     if (!isDeepStrictEqual(receivedInput, { invocationId: value.effectId, input }))
       throw fail('Native execution did not receive this invocation grant and its exact input.');
     const binding = db.prepare('SELECT * FROM dkg_component_native_executions WHERE id=?').get(id);
@@ -182,9 +184,30 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
     const bound = db.prepare('SELECT * FROM dkg_component_native_executions WHERE id=?').get(id);
     if (bound.effect_id !== value.effectId || bound.workflow_id !== nativeId || bound.execution_id !== value.executionId)
       throw fail('This invocation belongs to a different native execution.');
-    if (active.has(key)) return active.get(key);
+    const authorize = async (readbackOnly = false) => {
+      if (run.authority !== null && typeof journal.authorize !== 'function') throw fail('Original invocation authority verifier required.');
+      const assertCurrent = await journal.authorize?.(run.authority === null ? null : JSON.parse(run.authority), { readbackOnly });
+      assertCurrent?.();
+      return assertCurrent;
+    };
+    const assertCurrent = await authorize(!!previous);
+    assertCurrent?.();
+    if (active.has(key)) {
+      const response = await active.get(key);
+      const assertCurrent = await authorize(true);
+      assertCurrent?.();
+      return response;
+    }
+    // A matching callback may finish while authorization is awaiting graph
+    // access. Refresh its journal before selecting cache/reconciliation/create.
+    const prior = readPrior();
     const operation = operations[node.componentId];
-    const context = { node, rows, id, key, input, value, workflow, actor, prior };
+    const dispatch = async (request, kind, options) => {
+      const assertCurrent = await authorize(kind === 'write' && request.allowCreate === false);
+      assertCurrent?.();
+      return transport(request, kind, options);
+    };
+    const context = { node, rows, id, key, input, value, workflow, actor, prior, dispatch };
     if (prior?.result && !prior.response) {
       const response = operation.legacyResponse(context);
       db.prepare('UPDATE dkg_component_calls SET response=? WHERE id=?').run(JSON.stringify(response), key);
@@ -202,6 +225,8 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
         db.exec('ROLLBACK TO dkg_call_pending'); db.exec('RELEASE dkg_call_pending'); throw error;
       }
       const { result, response } = await execute();
+      const assertCurrent = await authorize(true);
+      assertCurrent?.();
       // Evidence and the exact outward response become complete atomically.
       db.prepare('UPDATE dkg_component_calls SET result=?,response=? WHERE id=?').run(JSON.stringify(result), JSON.stringify(response), key);
       return response;

@@ -3,7 +3,7 @@ export function migrateDkgInvocationMetadata(db) {
   db.exec('SAVEPOINT dkg_invocation_metadata');
   try {
     const columns = new Set(db.prepare('PRAGMA table_info(dkg_component_runs)').all().map(column => column.name));
-    for (const name of ['profile_id', 'profile_revision', 'actor'])
+    for (const name of ['profile_id', 'profile_revision', 'actor', 'authority'])
       if (!columns.has(name)) db.exec(`ALTER TABLE dkg_component_runs ADD COLUMN ${name} TEXT`);
     const exists = name => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
     if (exists('dkg_component_profiles')) {

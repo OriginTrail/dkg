@@ -8,6 +8,7 @@ import { readStudio } from '../studio-definition.mjs';
 import { createStudioRepository } from '../studio-repository.mjs';
 import { createStudioProvider } from '../studio-provider.mjs';
 import { createStudioService } from '../studio-service.mjs';
+import { fixtureProgramAuthority } from './studio-authority-fixture.mjs';
 export const graphId='n8n-capability-poc', owner='0x'+'1'.repeat(40);
 export const catalog=componentRegistry.map(d=>({kind:'component',kaRef:'urn:demo:n8n:component:'+d.id+':unit',sourceHash:'a'.repeat(64),available:true,descriptor:d}));
 export function definition(ids=['edit-fields','if','limit'], edges=[[0,0,1,0],[1,0,2,0]]) {
@@ -54,7 +55,7 @@ export function environment() {
       const value={kind:'n8n-result',n8nExecutionId:'42',workflowSha256:c.grant.workflowSha256,output:{ok:true,itemsJson:v.inputs[0].itemsJson,portsJson:'{}',error:'',traceJson:JSON.stringify(c.grant.result.traceNodes.map(node=>({node,status:'completed',items:[1],outputHash:'a'.repeat(64)})))}};
       const executionIri='urn:sr:execution:'+v.invocationId,rawOutputs=[JSON.stringify(value)];outputs.set(executionIri,rawOutputs);return {...v,executionIri,rawOutputs,outputs:[value],persisted:true};},
   }};
-  const openService=()=>createStudioService({graphId,owner,client,repository,provider,dkg:dkgComponentStore(repository.db),exportTokenFile,listCapabilities:async()=>{if(catalogHook){const hook=catalogHook;catalogHook=undefined;await hook();}if(catalogFailure){const error=catalogFailure;catalogFailure=undefined;throw error;}return inventory;},loadOutputs:async iri=>outputs.get(iri)});
+  const openService=()=>createStudioService({graphId,owner,client,repository,provider,dkg:dkgComponentStore(repository.db),programAuthority:fixtureProgramAuthority,exportTokenFile,listCapabilities:async()=>{if(catalogHook){const hook=catalogHook;catalogHook=undefined;await hook();}if(catalogFailure){const error=catalogFailure;catalogFailure=undefined;throw error;}return inventory;},loadOutputs:async iri=>outputs.get(iri)});
   let service=openService();
   return {state,get repository(){return repository;},get provider(){return provider;},get service(){return service;},restart(){service.stop();repository.close();repository=createStudioRepository(state);provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,fetchImpl,setExecutionPage:ids=>{executionPage=ids;},setCatalog:v=>{inventory=v;},failNextCatalog:error=>{catalogFailure=error;},loseNextCreate:()=>{loseCreate=true;},
     setUnpublishFailure:value=>{unpublishFailure=value;},

@@ -15,6 +15,7 @@ import { createRequestActor } from '../../packages/cli/dist/daemon/routes/contex
 import { handleKnowledgeAssetsRoutes } from '../../packages/cli/dist/daemon/routes/knowledge-assets.js';
 import { handleSemanticRuntimeRoutes } from '../../packages/cli/dist/daemon/routes/semantic-runtime.js';
 import { startConfiguredSemanticRuntime } from '../../packages/cli/dist/semantic-runtime.js';
+import { createNativeCallbackAuthority } from '../../packages/cli/dist/semantic-runtime-native-callback-authority.js';
 import { programSource } from './workflow.mjs';
 import { createCapabilityBridge } from './bridge.mjs';
 import { csvProgramSource } from './csv-workflows.mjs';
@@ -80,6 +81,7 @@ try {
   }
   credentialDb.close();
   bridge = createCapabilityBridge({ agent, client, graphId, owner, config: semanticRuntime,
+    programAuthority: createNativeCallbackAuthority({ agent, runtime: () => runtime, config: semanticRuntime, graphId, caller: owner }),
     definitions, exportTokenFile: csv.exportTokenFile, ...(componentManifest.installed ? { studioOptions: { state, headerCredential, credentials } } : {}) });
   server = createServer(async (req, res) => {
     try {

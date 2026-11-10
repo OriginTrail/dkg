@@ -126,7 +126,12 @@ export function createStudioMcpService({ repository, provider, installation, acc
       || r.checkpoint.executionId !== value.executionId) throw fail('STUDIO_NATIVE_UNCONFIRMED');
     const received = await runner.verifyCallback(workflow, r.checkpoint);
     if (saved(r.kaRef).withdrawn) throw fail('STUDIO_WORKFLOW_WITHDRAWN');
-    return dkg.call(value, workflow, { invocationId: r.runKey, revisionDigest: workflow.grant.workflowSha256 }, value.workflowId, received);
+    const assertCurrent = () => {
+      if (saved(r.kaRef).withdrawn) throw fail('STUDIO_WORKFLOW_WITHDRAWN');
+      if (!['running', 'unconfirmed'].includes(row(r.runKey).status)) throw fail('STUDIO_NATIVE_UNCONFIRMED');
+    };
+    return dkg.call(value, workflow, { invocationId: r.runKey, revisionDigest: workflow.grant.workflowSha256,
+      authorize: () => assertCurrent }, value.workflowId, received);
   }
   return { list, get, run, readRun, withdraw, dkgComponent };
 }

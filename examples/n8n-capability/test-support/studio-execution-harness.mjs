@@ -13,7 +13,7 @@ const { createStudioProvider } = await import('../studio-provider.mjs');
 const { createStudioService } = await import('../studio-service.mjs');
 const { handleDkgComponentCallback } = await import('../bridge.mjs');
 
-export function createStudioExecutionHarness({ state, graphId, owner, config, client, loadOutputs }) {
+export function createStudioExecutionHarness({ state, graphId, owner, config, client, loadOutputs, programAuthority }) {
   mkdirSync(state, { recursive: true });
   const tokenValue = 'fictional-provider-token-for-isolated-regression';
   const token = join(state, 'test-token'); writeFileSync(token, tokenValue);
@@ -27,10 +27,13 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
     edges: [{ from: 'read', to: 'write', output: 0, input: 0 }] };
   const effects = [], assets = new Map(), native = new Map(), executions = new Map();
   const controls = { interrupted: true, normalized: true, dispatches: 0, owner: true, snapshot: v => v,
-    loseWriteReply: false, nodeUnavailable: false, allowCreates: [], callbackStatuses: [] };
+    loseWriteReply: false, nodeUnavailable: false, allowCreates: [], callbackStatuses: [], callbackErrors: [] };
   const original = { transport: profile.transport, authorize: profile.authorize, requiresNosActor: profile.requiresNosActor, accountId: profile.accountId };
   profile.requiresNosActor = true; profile.accountId = 'account-fictional';
-  profile.authorize = async actor => { if (!controls.owner || actor.accountId !== profile.accountId) throw new Error('owner revoked'); };
+  profile.authorize = async actor => {
+    if (!controls.owner || actor.accountId !== profile.accountId) throw new Error('owner revoked');
+    await controls.authorizing?.();
+  };
   profile.transport = async (request, kind) => {
     effects.push(kind);
     if (kind === 'read') return { graph: 'urn:test:measurements', measurements };
@@ -50,13 +53,14 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
   };
   const actor = { accountId: profile.accountId, principalId: 'person-owner', role: 'owner' };
   let provider, service;
-  const requestFor = (effectId, blockId, items) => ({ effectId, workflowId: 'native1', executionId: '42', blockId, items });
+  const requestFor = (effectId, blockId, items, executionId = '42') => ({ effectId, workflowId: 'native1', executionId, blockId, items });
   const callback = async value => {
     const req = Readable.from([JSON.stringify(value)]);
     req.method = 'POST'; req.headers = { authorization: 'Bearer ' + tokenValue };
     let status, body;
     await handleDkgComponentCallback(req, { writeHead(s) { status = s; }, end(s) { body = JSON.parse(s); } }, service, config);
     controls.callbackStatuses.push(status);
+    if (status !== 200) controls.callbackErrors.push(body);
     if (status !== 200) throw Object.assign(new Error(body.error), { code: body.code, status });
     return body;
   };
@@ -76,17 +80,20 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
     const body = options.body ? JSON.parse(String(options.body)) : undefined;
     if (path.startsWith('/webhook/')) {
       controls.dispatches++;
+      const executionId = String(41 + controls.dispatches);
       const workflow = native.get('native1');
-      const execution = { id: '42', workflowId: 'native1', workflowVersionId: workflow.activeVersion.versionId,
+      const execution = { id: executionId, workflowId: 'native1', workflowVersionId: workflow.activeVersion.versionId,
         status: 'running', workflowData: snapshot(workflow), data: { executionData: { nodeExecutionStack: [
           { node: workflow.activeVersion.nodes.find(n => n.name === 'Receive input'), data: { main: [[{ json: { body } }]] } },
         ] }, resultData: { runData: {} } } };
-      executions.set('42', execution);
-      const read = await callback(requestFor(body.invocationId, 'read', JSON.parse(body.input.itemsJson)));
+      executions.set(executionId, execution);
+      const read = await callback(requestFor(body.invocationId, 'read', JSON.parse(body.input.itemsJson), executionId));
+      await controls.beforeWrite?.();
       const writeNode = workflow.activeVersion.nodes.find(n => n.name === 'Block write request');
       let written, error;
+      controls.writeRequest = requestFor(body.invocationId, 'write', read.items, executionId);
       for (let attempt = 0; attempt < (writeNode.retryOnFail ? writeNode.maxTries : 1); attempt++) {
-        try { written = await callback(requestFor(body.invocationId, 'write', read.items)); break; }
+        try { written = await callback(controls.writeRequest); break; }
         catch (failure) { error = { message: failure.message }; }
       }
       execution.status = written ? 'success' : 'error';
@@ -96,9 +103,9 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
       ].map(([node, items]) => [node, [{ data: { main: [items.map(json => ({ json }))] } }]]));
       if (!written) runData['Block write request'] = [{ error, data: { main: [[]] } }];
       execution.data = { resultData: { runData, ...(!written ? { error, lastNodeExecuted: writeNode.name } : {}) } };
-      return Response.json({ executionId: '42' });
+      return Response.json({ executionId });
     }
-    if (path.startsWith('/api/v1/executions/')) return Response.json(controls.snapshot(structuredClone(executions.get('42'))));
+    if (path.startsWith('/api/v1/executions/')) return Response.json(controls.snapshot(structuredClone(executions.get(path.split('/').at(-1)))));
     if (path === '/api/v1/workflows') {
       if (method === 'GET') return Response.json({ data: [...native.values()] });
       const workflow = { ...body, id: 'native1', active: false, versionId: 'published-1' };
@@ -122,7 +129,7 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
     repository = createStudioRepository(state);
     provider = createStudioProvider({ repository, config, graphId, owner,
       headerCredential: { id: 'test-header', name: 'Test header' }, credentials: {}, fetchImpl });
-    service = createStudioService({ graphId, owner, repository, provider, dkg: dkgComponentStore(repository.db), client, loadOutputs, listCapabilities: async () => catalog });
+    service = createStudioService({ graphId, owner, repository, provider, dkg: dkgComponentStore(repository.db), programAuthority, client, loadOutputs, listCapabilities: async () => catalog });
   }
   open();
   return { definition, actor, controls, effects, assets, native, executions, runtimeFetch, profile,

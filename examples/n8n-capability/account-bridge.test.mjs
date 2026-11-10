@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { execFileSync } from 'node:child_process';
+import { fixtureProgramAuthority } from './test-support/studio-authority-fixture.mjs';
 
 // Select account mode before importing the real bridge or any profile consumer.
 const setup = mkdtempSync(join(tmpdir(), 'account-bridge-'));
@@ -34,7 +35,7 @@ function options(f) {
     program: { contextGraphId: graphId, programIri: c.kaRef, programLayer: 'wm', authorAgentAddress: owner, sourceHash: c.sourceHash }, n8n: {} }));
   for (const binding of f.config.programBindings) f.approvals.set(binding.operationIri, { binding: structuredClone(binding) });
   for (const c of catalog) f.sources.set(c.kaRef, { programIri: c.kaRef, sourceHash: c.sourceHash, source: '', version: '1', authorAgentAddress: owner });
-  return { graphId, owner, config: f.config, client: f.client, definitions: catalog, exportTokenFile: f.exportTokenFile,
+  return { graphId, owner, config: f.config, client: f.client, definitions: catalog, exportTokenFile: f.exportTokenFile, programAuthority: fixtureProgramAuthority,
     studioOptions: { state: f.state, headerCredential: { id: 'fixture-header', name: 'Fixture' }, credentials: {}, fetchImpl: f.fetchImpl },
     agent: { query: async query => ({ bindings: query.includes('orderedOutputs')
       ? rawOutputs.map(value => ({ g: `did:dkg:context-graph:${graphId}/_working_memory/${owner}/1`, output: { value } }))

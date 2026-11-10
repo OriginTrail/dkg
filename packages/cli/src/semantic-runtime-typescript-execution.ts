@@ -5,6 +5,7 @@ import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { canonicalizeJson, type CanonicalJsonValue } from '@origintrail-official/dkg-core';
 import { ProgramTraceRecorder, readProgramTrace, readProgramCallHistory, hashCanonicalPlan, type SemanticRuntimeConfig, type SemanticProgramBinding, type SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
 import { canonicalProgramInputs } from './semantic-runtime-bound-invocation.js';
+import { typeScriptInvocationIdentity } from './semantic-runtime-typescript-identity.js';
 import { assertExecutionCapabilityAuthorized } from './semantic-runtime-invocation-policy.js';
 import { programBindingDigest } from './semantic-runtime-program-bindings.js';
 import { ConfiguredSemanticRuntimeService, SemanticInvocationResult, SemanticProgramError, StoredSemanticProgram, TypeScriptComposition } from './semantic-runtime-types.js';
@@ -171,7 +172,7 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
     checkChildren(binding, [operationKey]);
     checkCapability();
   };
-  const identity = hashParts(['typescript-v1', digest, caller.toLowerCase(), inputJson, ...(parent?.ancestors ?? [])]);
+  const identity = typeScriptInvocationIdentity(digest, caller, inputJson, parent?.ancestors);
   const key = `${graph}\0${invocationId}`;
   const existing = runtime.inFlight.get(key);
   if (existing) {
