@@ -1,6 +1,6 @@
 import { boundGraphInventory, filterGraphInventory, measureGraphInventory, readCompleteGraphInventory, readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
 import { graphCatalogFlightKey } from './graph-catalog-flight-key.js';
-import { assertGraphCatalogWithinInternalLimit, internalCatalogReadOptions, readCompleteGraphCatalog } from './graph-catalog-internal-limit.js';
+import { assertGraphCatalogWithinInternalLimit, internalCatalogReadOptions, isStoreInternalLimitError, readCompleteGraphCatalog } from './graph-catalog-internal-limit.js';
 import { graphCatalogRefreshKind, recordGraphCatalogSize, timeGraphCatalogRefresh } from './graph-catalog-metrics.js';
 import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
 import { namedGraphsFromQuads, endsWithHighSurrogate, normalizeGraphUris, queryOptionsFromUpdateOptions } from "./graph-set-index-utils.js";
@@ -580,8 +580,9 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       try {
         return await this.refreshIndexLoop(source, scanOptions, flight);
       } catch (error: unknown) {
-        // A failed warm revalidation, even over the internal ceiling, keeps the last catalog (below).
-        if (source !== 'revalidate') throw error;
+        // A warm revalidation over the internal ceiling fails closed, like a cold seed; any
+        // other failed warm revalidation keeps the last catalog (below).
+        if (source !== 'revalidate' || isStoreInternalLimitError(error)) throw error;
         // Cold seeds and mutation-dirty rebuilds are strict correctness paths
         // even if another refresh published in parallel.
         if (!this.catalog.initialized || this.pendingFullRefresh) {

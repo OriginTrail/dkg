@@ -67,7 +67,7 @@ describe('graph catalog metrics', () => {
     } finally { await store.close(); }
   });
 
-  it('counts a warm scan over the ceiling as a failure and as a node-side limit, and keeps serving', async () => {
+  it('counts a warm scan over the ceiling as a failure and as a node-side limit, and fails the read closed', async () => {
     let now = 1_000;
     const inner = new OxigraphStore();
     await inner.insert([q(`${CG}small/a`)]);
@@ -78,7 +78,7 @@ describe('graph catalog metrics', () => {
       await inner.insert([q(`${CG}${'large'.repeat(30)}`)]);
       now += 100;
       const recorded = await captureMetrics(async () => {
-        await expect(store.listGraphsByPrefix(`${CG}small/`)).resolves.toEqual([`${CG}small/a`]);
+        await expect(store.listGraphsByPrefix(`${CG}small/`)).rejects.toMatchObject({ code: 'STORE_INTERNAL_LIMIT' });
       });
       expect(named(recorded, 'dkg.store.graph_catalog_refresh_failures_total')).toEqual([{
         metric: 'dkg.store.graph_catalog_refresh_failures_total', value: 1,
