@@ -147,7 +147,9 @@ describe('queries and read-graph partitions', () => {
       expect(normalize(await engine.query(sparql, options)), JSON.stringify(options))
         .toBe(normalize(await reference.query(sparql, options)));
     }
-    const partitions = await engine.listContextGraphQueryPartitionReads(CG, { includeSharedMemory: true });
-    expect(partitions).toEqual(await reference.listContextGraphQueryPartitionReads(CG, { includeSharedMemory: true }));
+    // Partitions come in the store's enumeration order, which depends on what was inserted.
+    const byGraph = (reads: Array<{ graph: string }>) => [...reads].sort((a, b) => a.graph.localeCompare(b.graph));
+    expect(byGraph(await engine.listContextGraphQueryPartitionReads(CG, { includeSharedMemory: true })))
+      .toEqual(byGraph(await reference.listContextGraphQueryPartitionReads(CG, { includeSharedMemory: true })));
   });
 });
