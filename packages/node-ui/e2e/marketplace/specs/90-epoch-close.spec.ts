@@ -12,7 +12,7 @@
 import type { Plan, ReconciliationAnswer, SellerStatus, SubscriptionsAnswer } from '../../../src/ui/marketplace/api/types.js';
 import { test, expect } from '../fixtures.js';
 import { advanceChainTime, epochTimes, nodeOk, readSetup } from '../devnet.js';
-import { CHAT, NEXT_CHAT_PRICE, PLAN, REASONER, UI, microOf, tracOf, weiOfTrac } from '../topology.js';
+import { ACCOUNT, CHAT, NEXT_CHAT_PRICE, PLAN, REASONER, UI, microOf, tracOf, weiOfTrac } from '../topology.js';
 
 test.describe('The epoch closes', () => {
   test('the seller lands what it holds, the plan funds the next epoch, and the ended epoch is final', async ({ market, page }) => {
@@ -25,8 +25,14 @@ test.describe('The epoch closes', () => {
     const funded = weiOfTrac(PLAN.chatTrac) + weiOfTrac(PLAN.reasonerTrac) + weiOfTrac(PLAN.topUpTrac);
     const planValue = weiOfTrac(PLAN.chatTrac) + weiOfTrac(PLAN.reasonerTrac);
 
-    // What the earlier specs left: the chat's receipt landed, the reasoner's still held by the seller.
+    // What the earlier specs left: the chat's receipt landed, the reasoner's still held by the seller,
+    // and a standing plan that pays from the Conviction Account the account spec opened, at its discount.
     expect((await sellerStatus()).ledger).toMatchObject({ served: 1, landed: 1, missed: 0 });
+    const chosen = (await nodeOk<Plan>(buyer.node, 'GET', '/api/marketplace/plan')).source;
+    expect(chosen, 'the account spec left the plan paying from its Conviction Account').toMatchObject({ kind: 'account', discountBps: ACCOUNT.discountBps });
+    const accountId = chosen.kind === 'account' ? chosen.accountId : '';
+    // Worked out here, not read back from the node: the plan's value less the account's discount.
+    const cost = (planValue * BigInt(10_000 - ACCOUNT.discountBps)) / 10_000n;
 
     // Into the last stretch.
     await advanceChainTime(start.endsAt - 600 - start.now);
@@ -40,13 +46,12 @@ test.describe('The epoch closes', () => {
       timeout: 120_000,
       intervals: [3_000],
     }).toBe(String(planValue));
-    // The renewal pays from the plan's source, at its discount.
-    const plan = await nodeOk<Plan>(buyer.node, 'GET', '/api/marketplace/plan');
-    const discountBps = plan.source.kind === 'account' ? plan.source.discountBps : 0;
+    // The renewal pays from that account at its discount, and the plan still pays from it: a renewal
+    // from the buyer wallet, or at full price, fails here.
     const renewed = (await subscriptions()).subscriptions.find((s) => s.epoch === epoch + 1)!;
-    expect(renewed.source).toMatchObject(plan.source.kind === 'account' ? { kind: 'account', accountId: plan.source.accountId } : { kind: 'wallet' });
-    expect(renewed.cost).toBe(String((planValue * BigInt(10_000 - discountBps)) / 10_000n));
-    const sourceName = plan.source.kind === 'account' ? `account ${plan.source.accountId}` : 'the buyer wallet';
+    expect(renewed.source).toMatchObject({ kind: 'account', accountId });
+    expect(renewed.cost).toBe(String(cost));
+    expect((await nodeOk<Plan>(buyer.node, 'GET', '/api/marketplace/plan')).source).toMatchObject({ kind: 'account', accountId, discountBps: ACCOUNT.discountBps });
 
     const operate = await market.open('operate', UI.seller);
     await expect(operate).toHaveAttribute('data-state', 'active');
@@ -56,7 +61,7 @@ test.describe('The epoch closes', () => {
     await expect(plans).toHaveAttribute('data-state', 'active');
     await expect(page.getByTestId('mkt-next-epoch')).toHaveAttribute('data-funded', 'true');
     await expect(page.getByTestId('mkt-next-epoch')).toContainText(`Epoch ${epoch + 1} is funded`);
-    await expect(page.getByTestId('mkt-next-epoch')).toContainText(`for ${tracOf(BigInt(renewed.cost))} TRAC, from ${sourceName}`);
+    await expect(page.getByTestId('mkt-next-epoch')).toContainText(`for ${tracOf(cost)} TRAC, from account ${accountId}`);
 
     // Past the end.
     await advanceChainTime(start.endsAt + 30 - (await epochTimes()).now);

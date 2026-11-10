@@ -14,7 +14,13 @@ import { devnetApiFetch, readDevnetNode } from '../helpers/devnet.js';
 import { DOCKER_NAME_PREFIX, PORTS } from './topology.js';
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
-/** The devnet's directory: the default suite's, so its bootstrap, teardown and Vite config find it. */
+/**
+ * The devnet's directory: the default suite's, so its bootstrap, teardown and
+ * Vite config find it. So one checkout runs one devnet suite at a time. This
+ * lane's setup refuses to start while any node answers here; the default
+ * suite, started while this lane runs, would reuse this lane's nodes and its
+ * teardown would stop them.
+ */
 export const DEVNET_DIR = resolve(REPO_ROOT, '.devnet');
 const CONTRACTS_FILE = resolve(REPO_ROOT, 'packages/evm-module/deployments/localhost_contracts.json');
 export const RPC_URL = `http://127.0.0.1:${PORTS.hardhat}`;

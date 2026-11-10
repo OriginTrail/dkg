@@ -56,7 +56,7 @@ async function startDevnet(): Promise<void> {
   const up = await devnetAlreadyUp();
   if (up.length > 0 && process.env.MKT_E2E_REUSE_DEVNET !== '1') {
     throw new Error(
-      `a devnet is already up on the marketplace lane's ports (${up.join(', ')}). The specs fund this epoch's first ` +
+      `a devnet is already up on the marketplace lane's Hardhat port or in ${DEVNET_DIR} (${up.join(', ')}). The specs fund this epoch's first ` +
       'subscription, which a reused chain may hold already, so the lane starts its own. Stop it with ' +
       `\`DEVNET_DIR=${DEVNET_DIR} HARDHAT_PORT=${PORTS.hardhat} API_PORT_BASE=${PORTS.apiBase} ` +
       `DEVNET_DOCKER_NAME_PREFIX=${devnetEnv().DEVNET_DOCKER_NAME_PREFIX} bash scripts/devnet.sh stop\`, ` +

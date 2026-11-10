@@ -6,9 +6,11 @@
  * specs all read it, so they agree on one topology.
  *
  * The ports differ from the default suite's (Hardhat 8545, APIs from 19201,
- * libp2p from 20001, Oxigraph from 7900, Vite 5173), so this lane and the
- * default one can run on one machine without meeting. Each can be moved with
- * the environment variable beside it.
+ * libp2p from 20001, Oxigraph from 7900, Vite 5173), and each can be moved
+ * with the environment variable beside it. The devnet directory is the same:
+ * both lanes keep their devnet in the repository's `.devnet`, which the node
+ * UI's Vite config reads, so run one lane at a time in a checkout (see
+ * `DEVNET_DIR` in devnet.ts). CI runs each lane on its own runner.
  */
 import { keccak256, stringToBytes } from 'viem';
 
