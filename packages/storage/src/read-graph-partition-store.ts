@@ -53,11 +53,8 @@ function refuseSparql(sparql: string, operation: StoreOperation): void {
  * decorator sits directly above the adapter. It refuses every write that names
  * a graph in a partition, and answers that such a graph is absent; the
  * adapters already leave the partition out of enumeration. Storage-owned work
- * on the partition uses {@link readGraphPartitionMaintenanceStore}.
- *
- * A SPARQL UPDATE is refused when its text names a partition graph by IRI or
- * by a declared prefix. An IRI it builds at run time is not seen, and a
- * pattern delete without a graph still reaches the partition.
+ * on the partition uses {@link readGraphPartitionMaintenanceStore}. A SPARQL
+ * UPDATE is refused when its text names a partition graph.
  */
 export class ReadGraphPartitionStore implements TripleStoreDecorator {
   readonly innerStore: TripleStore;

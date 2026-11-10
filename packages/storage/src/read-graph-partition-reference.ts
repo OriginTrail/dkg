@@ -18,8 +18,7 @@ function isReadGraphPartitionReference(iri: string): boolean {
 
 /**
  * Whether lexed SPARQL names a read-graph partition graph, by IRI or by a
- * prefixed name whose PREFIX is declared in the same text. An IRI built at
- * run time (`IRI(CONCAT(...))`) is not visible here.
+ * prefixed name whose PREFIX is declared in the same text.
  */
 export function preparedSparqlNamesReadGraphPartition(prepared: ValidPreparedSparql): boolean {
   const prefixes = new Map<string, string>();

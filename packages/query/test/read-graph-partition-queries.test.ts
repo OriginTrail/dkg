@@ -113,8 +113,7 @@ describe('queries and read-graph partitions', () => {
       const query = vi.spyOn(fresh, 'query');
       await new DKGQueryEngine(fresh).query(UNSCOPED[0]!);
       expect(query.mock.calls.at(-1)?.[1]?.withheldGraphRoots).toBeUndefined();
-      // Planted without a record, read graphs reach an unscoped graph variable: whatever
-      // creates them has to record it, as the start-up rule and the rollback note do.
+      // The record is what turns the restriction on; whatever creates read graphs records it.
       await fresh.insert(READ_GRAPHS);
       const rows = await new DKGQueryEngine(fresh).query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
       expect(rows.bindings.map(row => row.g)).toContain(READ_VM);
