@@ -6,7 +6,7 @@
  */
 import type { GatewayModels } from '../../../src/ui/marketplace/api/types.js';
 import { test, expect } from '../fixtures.js';
-import { SERVICES, UI } from '../topology.js';
+import { SERVICES, UI, accessKeyIdOf } from '../topology.js';
 
 const LABEL = 'e2e-client';
 
@@ -27,7 +27,8 @@ test.describe('Access', () => {
     const secret = /api_key\s*=\s*"(dkgmk_[0-9a-f]{48})"/.exec(snippet)?.[1];
     expect(secret, `the snippet names the secret: ${snippet}`).toBeDefined();
     expect(snippet).toContain(`base_url = "${new URL(UI.buyer).origin}/api/marketplace/v1"`);
-    const keyId = secret!.slice(0, 'dkgmk_'.length + 8);
+    // The id the node gives the key, which names its row: see ACCESS_KEY_ID_HEX.
+    const keyId = accessKeyIdOf(secret!);
 
     // The key is listed by its label and prefix while the secret is still on show…
     const row = page.getByTestId(`mkt-key-${keyId}`);

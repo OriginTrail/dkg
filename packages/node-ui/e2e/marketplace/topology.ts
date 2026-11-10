@@ -116,6 +116,17 @@ export const ACCOUNT = { committedTrac: '100000', discountBps: 3_000 } as const;
  */
 export const LANDING_INTERVAL_MINUTES = 365 * 24 * 60;
 
+/**
+ * An access key's id: its secret's `dkgmk_` prefix and the first
+ * `ACCESS_KEY_ID_HEX` hex digits after it, 64 bits. This mirrors `KEY_ID_HEX`
+ * in packages/marketplace/src/keys.ts (keys made with the earlier 8-digit ids
+ * keep them; the lane makes new ones). The Access page names each key's row
+ * by this id and shows it as the key's prefix.
+ */
+export const ACCESS_KEY_PREFIX = 'dkgmk_';
+export const ACCESS_KEY_ID_HEX = 16;
+export const accessKeyIdOf = (secret: string): string => secret.slice(0, ACCESS_KEY_PREFIX.length + ACCESS_KEY_ID_HEX);
+
 /** The chat service's price for the next epoch, which the next-price spec sets on Operate: 150 µTRAC a token. */
 export const NEXT_CHAT_PRICE = 150_000_000_000_000n;
 
