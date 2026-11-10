@@ -92,6 +92,13 @@ export class GraphSetCatalogState {
     return this.ordered;
   }
 
+  /** The current catalog's size, measured once per membership; no ceiling check. */
+  measure(): { graphs: number; bytes: number } | null {
+    if (!this.members) return null;
+    this.ordered ??= createSortedUniqueStringCatalog(this.members);
+    return { graphs: this.members.size, bytes: this.projectionBytes(this.ordered) };
+  }
+
   private projectionBytes(graphs: SortedGraphCatalog): number {
     return this.measuredBytes ??= measureGraphCatalogBytes(graphs);
   }

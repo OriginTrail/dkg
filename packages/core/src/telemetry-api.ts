@@ -243,6 +243,19 @@ export interface DkgMetrics {
   backpressureQueueWaitMs: Histogram;
   /** admitted-work duration by bounded scheduler, lane, and outcome */
   backpressureActiveDurationMs: Histogram;
+  /** graphs in the node's graph catalog at its last refresh; no labels */
+  storeGraphCatalogGraphs: Gauge;
+  /** bytes; measured size of the node's graph catalog at its last refresh; no labels */
+  storeGraphCatalogBytes: Gauge;
+  /** ms; one full graph catalog scan. kind={seed|revalidate|rebuild}, outcome={ok|error} */
+  storeGraphCatalogRefreshMs: Histogram;
+  /** failed graph catalog scans. kind={seed|revalidate|rebuild},
+   *  reason={internal_limit|timeout|busy|aborted|error} */
+  storeGraphCatalogRefreshFailuresTotal: Counter;
+  /** named graphs in the store, as the graph catalog last counted them; no labels */
+  storeGraphsTotal: Gauge;
+  /** store reads refused by a node-side limit. limit=<limit name, a fixed set, else `other`> */
+  queryInternalLimitTotal: Counter;
   /** bounded materialized result rows by static source */
   storeQueryResultRows: Histogram;
   /** conservative bounded materialized bytes by static source */
@@ -513,6 +526,25 @@ function buildMetrics(): DkgMetrics {
       unit: 'ms',
       description: 'Scheduler admitted-work duration by bounded scheduler, lane, and outcome',
       advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    storeGraphCatalogGraphs: meter.createGauge('dkg.store.graph_catalog_graphs', {
+      description: 'Graphs in the node graph catalog at its last refresh',
+    }),
+    storeGraphCatalogBytes: meter.createGauge('dkg.store.graph_catalog_bytes', {
+      unit: 'By', description: 'Measured size of the node graph catalog at its last refresh',
+    }),
+    storeGraphCatalogRefreshMs: meter.createHistogram('dkg.store.graph_catalog_refresh_ms', {
+      unit: 'ms', description: 'Duration of one full graph catalog scan',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    storeGraphCatalogRefreshFailuresTotal: meter.createCounter('dkg.store.graph_catalog_refresh_failures_total', {
+      description: 'Failed graph catalog scans by kind and bounded reason',
+    }),
+    storeGraphsTotal: meter.createGauge('dkg.store.graphs_total', {
+      description: 'Named graphs in the store, as the graph catalog last counted them',
+    }),
+    queryInternalLimitTotal: meter.createCounter('dkg.query.internal_limit_total', {
+      description: 'Store reads refused by a node-side limit, by limit name',
     }),
     storeQueryResultRows: meter.createHistogram('dkg.store.query_result_rows', {
       description: 'Rows retained by bounded expensive store reads',
