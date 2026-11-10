@@ -20,13 +20,14 @@ export function environment() {
   const state=mkdtempSync(join(tmpdir(),'studio-unit-')), token=join(state,'fixture-api'), exportTokenFile=join(state,'fixture-export');
   writeFileSync(token,'unit-test-fixture-only');writeFileSync(exportTokenFile,'operator-unit-fixture-only');
   const config={n8nNative:{baseUrl:'http://127.0.0.1:45678',apiTokenFile:token,webhookTokenFile:token,workflows:[]}};
-  const native=new Map(),calls=[], executions=new Map();let loseCreate=false, executionPage=null, unpublishFailure=null;
+  const native=new Map(),calls=[], executions=new Map();let loseCreate=false, executionPage=null, unpublishFailure=null, nativeReadFailure=null;
   const fetchImpl=async(url,options)=>{
     const path=new URL(url).pathname.replace('/api/v1',''),method=options.method;calls.push([method,path]);
     const body=options.body?JSON.parse(options.body):undefined;
     if(path==='/executions') return Response.json({data:[...executions.values()].filter(e=>!executionPage||executionPage.includes(e.id))});
     if(path.startsWith('/executions/')) return Response.json(executions.get(path.split('/')[2]));
     if(path==='/workflows'&&method==='GET') return Response.json({data:[...native.values()]});
+    if(path.startsWith('/workflows/')&&method==='GET'&&nativeReadFailure){const error=nativeReadFailure;nativeReadFailure=null;throw error;}
     if(path==='/workflows'&&method==='POST'){const value={...body,id:'provider_'+(native.size+1),active:false,versionId:'version1'};native.set(value.id,value);if(loseCreate){loseCreate=false;throw Error('lost-ack');}return Response.json(value);}
     const [, , ,action]=path.split('/'); // /workflows/id[/publish]
     const key=path.split('/')[2],w=native.get(key);if(!w)return Response.json({},{status:404});
@@ -57,6 +58,7 @@ export function environment() {
   let service=openService();
   return {state,get repository(){return repository;},get provider(){return provider;},get service(){return service;},restart(){service.stop();repository.close();repository=createStudioRepository(state);provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,fetchImpl,setExecutionPage:ids=>{executionPage=ids;},setCatalog:v=>{inventory=v;},failNextCatalog:error=>{catalogFailure=error;},loseNextCreate:()=>{loseCreate=true;},
     setUnpublishFailure:value=>{unpublishFailure=value;},
+    failNextNativeRead:error=>{nativeReadFailure=error;},
     beforeNextCatalog:hook=>{catalogHook=hook;},
     close(){service.stop();repository.close();rmSync(state,{recursive:true,force:true});}};
 }

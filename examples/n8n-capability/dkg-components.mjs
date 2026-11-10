@@ -63,7 +63,16 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
     if (pending) throw Object.assign(fail('Reconcile the previous DKG write before starting another invocation.'),
       { code: 'DKG_WRITE_PENDING', invocationId: pending.id });
   }
-  function grant(workflow, invocationId, input, actor) {
+  // Adapters resolve their wire identities. The legacy source_hash column stores
+  // the explicit revision digest for either protocol; journal keys stay unchanged.
+  function journalScope(scope) {
+    if (!scope || typeof scope.invocationId !== 'string' || !scope.invocationId || scope.invocationId.length > 128
+      || typeof scope.revisionDigest !== 'string' || !/^[a-f0-9]{64}$/.test(scope.revisionDigest))
+      throw fail('Invocation identity and revision digest required.');
+    return scope;
+  }
+  function grant(workflow, journal, input, actor) {
+    const { invocationId, revisionDigest } = journalScope(journal);
     if (profile?.requiresNosActor && (!actor || actor.role !== 'owner' || actor.accountId !== profile.accountId))
       throw fail('Authenticated nOS owner required.');
     const actorText = JSON.stringify(actor ?? null);
@@ -76,7 +85,7 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
     if (
       old &&
       (old.ka_ref !== workflow.kaRef ||
-        old.source_hash !== workflow.sourceHash ||
+        old.source_hash !== revisionDigest ||
         old.input !== encoded)
     )
       throw fail(
@@ -91,10 +100,11 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
       ON CONFLICT(id) DO UPDATE SET expires=excluded.expires
       WHERE ka_ref=excluded.ka_ref AND source_hash=excluded.source_hash AND input=excluded.input
         AND profile_id=excluded.profile_id AND profile_revision=excluded.profile_revision AND actor=excluded.actor`)
-      .run(invocationId, workflow.kaRef, workflow.sourceHash, encoded, Date.now() + 600000, profile.id, profile.revision, actorText);
+      .run(invocationId, workflow.kaRef, revisionDigest, encoded, Date.now() + 600000, profile.id, profile.revision, actorText);
     if (stored.changes !== 1) throw fail('Invocation identity belongs to different workflow, inputs, profile or principal.');
   }
-  async function call(value, workflow, nativeId, receivedInput) {
+  async function call(value, workflow, journal, nativeId, receivedInput) {
+    const { invocationId: id, revisionDigest } = journalScope(journal);
     if (
       !value ||
       Object.keys(value).some(
@@ -109,18 +119,14 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
       )
     )
       throw fail("Invalid DKG component request.");
-    const match = /^urn:sr:effect:([a-f0-9-]{36}):[^\s]{1,100}$/.exec(
-      value.effectId ?? "",
-    );
     if (
-      !match ||
+      typeof value.effectId !== 'string' || !value.effectId ||
       value.workflowId !== nativeId ||
       !/^\d{1,20}$/.test(value.executionId ?? "") ||
       typeof value.blockId !== "string"
     )
       throw fail("Native execution identity required.");
-    const id = match[1],
-      run = db.prepare("SELECT * FROM dkg_component_runs WHERE id=?").get(id),
+    const run = db.prepare("SELECT * FROM dkg_component_runs WHERE id=?").get(id),
       definition = workflow.definition;
     assertDkgEnabled(definition, profile);
     validateDkgTopology(definition);
@@ -128,7 +134,7 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
       !run ||
       run.expires < Date.now() ||
       run.ka_ref !== workflow.kaRef ||
-      run.source_hash !== workflow.sourceHash
+      run.source_hash !== revisionDigest
     )
       throw fail(
         "Run the approved workflow as its account owner before accessing DKG.",
@@ -167,7 +173,10 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
     if (!isDeepStrictEqual(receivedInput, { invocationId: value.effectId, input }))
       throw fail('Native execution did not receive this invocation grant and its exact input.');
     const binding = db.prepare('SELECT * FROM dkg_component_native_executions WHERE id=?').get(id);
-    if (!binding && db.prepare('SELECT 1 FROM dkg_component_calls WHERE substr(id,1,?)=? LIMIT 1').get(id.length + 1, id + ':'))
+    // Block IDs cannot contain colons, but MCP run keys can. Only exact keys
+    // from this pinned workflow are evidence of calls belonging to this run.
+    if (!binding && definition.nodes.some(n => isDkg(n.componentId)
+      && db.prepare('SELECT 1 FROM dkg_component_calls WHERE id=?').get(id + ':' + n.id)))
       throw fail('Legacy DKG calls lack a verified native execution binding; operator reconciliation required.');
     db.prepare('INSERT OR IGNORE INTO dkg_component_native_executions VALUES (?,?,?,?)').run(id, value.effectId, nativeId, value.executionId);
     const bound = db.prepare('SELECT * FROM dkg_component_native_executions WHERE id=?').get(id);

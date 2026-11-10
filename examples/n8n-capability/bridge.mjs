@@ -10,6 +10,8 @@ import { timingSafeEqual } from 'node:crypto';
 import { persistProgramKnowledgeAsset } from '../../packages/cli/dist/semantic-runtime-execution-persistence.js';
 import { createWorkflowService } from './workflow-service.mjs';
 import { WORKFLOW_PREFIX } from './workflow-definition.mjs';
+import { createStudioMcpService } from './studio-mcp-service.mjs';
+import { createStudioMcpHttp, studioMcpFlags } from './studio-mcp-http.mjs';
 import { createStudioProvider } from './studio-provider.mjs';
 import { createStudioRepository } from './studio-repository.mjs';
 import { createStudioService } from './studio-service.mjs';
@@ -24,7 +26,7 @@ const nativeCallback = capabilityRoutes.find(route => route.id === 'dkgComponent
 const json = (res, status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); };
 
 /** Shared by the bridge and transport-level regression fixtures. */
-export async function handleDkgComponentCallback(req, res, studio, config) {
+export async function handleDkgComponentCallback(req, res, studio, config, mcp) {
   try {
     const token=readFileSync(config.n8nNative.webhookTokenFile,'utf8').trim();
     const expected=Buffer.from('Bearer '+token), supplied=Buffer.from(String(req.headers.authorization??''));
@@ -36,7 +38,9 @@ export async function handleDkgComponentCallback(req, res, studio, config) {
       if (size > nativeCallback.bodyLimit) throw Object.assign(new Error('Bounded DKG batch required'), { status: 413 });
       chunks.push(bytes);
     }
-    json(res,200,await studio.dkgComponent(JSON.parse(Buffer.concat(chunks, size).toString('utf8'))));
+    const value = JSON.parse(Buffer.concat(chunks, size).toString('utf8'));
+    const nativeResult = mcp ? await mcp.dkgComponent(value) : undefined;
+    json(res,200,nativeResult === undefined ? await studio.dkgComponent(value) : nativeResult);
   } catch(e) { json(res,e.status??409,{code:e.code??'DKG_COMPONENT_UNCONFIRMED',error:e.message}); }
 }
 
@@ -105,13 +109,18 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
   });
   const repository = studioOptions ? createStudioRepository(studioOptions.state) : null;
   const provider = repository && config.n8nNative ? createStudioProvider({ ...studioOptions, repository, config, graphId, owner }) : null;
-  let studio;
+  let studio, mcp, mcpHttp;
   try {
     if (nosStudioSession && repository?.hasActiveWorkflows())
       throw new Error('Deactivate legacy schedules before adopting Studio state for an account.');
-    studio = repository ? createStudioService({ graphId, owner, client, repository, provider, dkg: dkgComponentStore(repository.db), exportTokenFile,
+    const dkg = repository ? dkgComponentStore(repository.db) : undefined;
+    studio = repository ? createStudioService({ graphId, owner, client, repository, provider, dkg, exportTokenFile,
       listCapabilities: async () => [...await list(), ...await listPrograms()],
       loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner) }) : null;
+    const mcpFlags = studioMcpFlags();
+    if (mcpFlags.enabled && (!nosStudioSession || !provider)) throw new Error('Studio MCP requires an authenticated account companion.');
+    mcp = mcpFlags.enabled ? createStudioMcpService({ repository, provider, dkg, installation: config.n8nNative, accountId: nosStudioSession.accountId }) : null;
+    mcpHttp = mcp ? createStudioMcpHttp({ service: mcp, session: nosStudioSession, agentEnabled: mcpFlags.agentEnabled }) : null;
     commitAccountBinding?.();
   } catch (error) { studio?.stop(); repository?.close(); throw error; }
   async function invoke(capability, input, invocationId) {
@@ -166,12 +175,17 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
       if (selected.requiresExportAuthorization) authorize();
       json(res, 200, await invoke(selected, value.input, value.invocationId));
     },
-    dkgComponent: async ({ req, res }) => handleDkgComponentCallback(req, res, studio, config),
+    dkgComponent: async ({ req, res }) => handleDkgComponentCallback(req, res, studio, config, mcp),
     event: async ({ res, eventKey, value }) => json(res, 200, await studio.event(eventKey, value)),
     demo: async ({ res, value }) => json(res, 200, { source: 'nOS local demo API', items: [{ name: 'Ana', value: 12 }, { name: 'Luka', value: 7 }], ...(value === undefined ? {} : { received: value }) }),
   };
   async function handle(req, res, path) {
     if (!path.startsWith('/spike/ka/')) return false;
+    if (path === prefix + '/studio/mcp') {
+      if (mcpHttp) await mcpHttp(req, res);
+      else json(res, 404, { error: 'Not found' });
+      return true;
+    }
     const match = matchCapabilityRoute(path, prefix), route = match?.route;
     if (route?.role === 'native') { await handlers[route.id]({ req, res }); return true; }
     const delegated = route?.role === 'delegated', publicRoute = route?.role === 'public';

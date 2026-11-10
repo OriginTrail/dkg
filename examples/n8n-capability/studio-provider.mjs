@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { readResponseBodyBytesBounded, BoundedResponseBodyLimitError } from '../../packages/http-utils/dist/index.js';
 import { compileStudio } from './studio-definition.mjs';
 import { nativeTimerEvents } from './studio-native-events.mjs';
 import { readNativeExecutionInput } from './studio-native-execution.mjs';
@@ -14,8 +15,13 @@ export function createStudioProvider({ repository, config, graphId, owner, heade
       headers: { 'X-N8N-API-KEY': token, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     if (!res.ok) { await res.body?.cancel(); throw error('n8n did not confirm provisioning (' + res.status + '). Retry this save.'); }
-    const bytes = await res.text(); if (bytes.length > 1_048_576) throw error('n8n response exceeds the PoC limit.');
-    return JSON.parse(bytes);
+    let bytes;
+    try { bytes = await readResponseBodyBytesBounded(res, 1_048_576); }
+    catch (cause) {
+      if (cause instanceof BoundedResponseBodyLimitError) throw error('n8n response exceeds the PoC limit.');
+      throw cause;
+    }
+    return JSON.parse(Buffer.from(bytes).toString('utf8'));
   }
   const installGrant = grant => {
     const flows = config.n8nNative.workflows;
@@ -71,7 +77,15 @@ export function createStudioProvider({ repository, config, graphId, owner, heade
     if (n8nWorkflowSha256(native.activeVersion ? { ...native.activeVersion, settings: native.settings } : native) !== grant.workflowSha256) throw error('The native graph revision changed.');
     if (!!native.active !== active) await api('/workflows/' + saved.providerId + (active ? '/publish' : '/unpublish'), 'POST', {});
   }
+  // Fetch and verify remotely; the repository commits this snapshot with save completion.
+  async function savedNativeSnapshot(compiled) {
+    if (compiled.executor === 'dkg' || ['schedule', 'webhook'].includes(compiled.mode)) return;
+    const native = await api('/workflows/' + compiled.grant.workflowId);
+    const published = native.activeVersion ? { ...native.activeVersion, settings: native.settings } : native;
+    if (!native.active || n8nWorkflowSha256(published) !== compiled.grant.workflowSha256) throw error('Saved native revision is unavailable.');
+    return published;
+  }
   const timerEvents = options => nativeTimerEvents(api, { ...options, graphId, owner });
   const executionInput = options => readNativeExecutionInput(api, options);
-  return { provision, setPublished, installGrant, timerEvents, executionInput };
+  return { api, savedNativeSnapshot, provision, setPublished, installGrant, timerEvents, executionInput };
 }
