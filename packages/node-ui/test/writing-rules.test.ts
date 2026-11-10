@@ -56,10 +56,6 @@ const VISIBLE_CALL = /^(toast|notify|alert|confirm|set(Error|Notice|Message|Warn
 
 const clean = (text: string) => text.replace(/&apos;/g, "'").replace(/\s+/g, ' ').trim();
 
-const isComparison = (node: ts.Node) => ts.isBinaryExpression(node)
-  && [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken].includes(node.operatorToken.kind);
-/** Nested JSX is read by the main walk, and comparisons are code. */
-const isCode = (node: ts.Node) => ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node) || isComparison(node);
 const propertyName = (node: ts.PropertyAssignment) => node.name.getText().replace(/['"]/g, '');
 
 /** Whether a node, or the object or statement it sits in, is marked NOT_SHOWN on its own line or on a comment line just above. */
@@ -130,38 +126,78 @@ const declared = (name: ts.Identifier, checker: ts.TypeChecker) => {
   });
 };
 
+type Following = ReadonlySet<ts.Node>;
+
+/** Wrappers that don't change a value: `(x)`, `x as T`, `x satisfies T`, `x!`. */
+const unwrap = (node: ts.Expression): ts.Expression => (
+  ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node)
+  || ts.isNonNullExpression(node) || ts.isTypeAssertionExpression(node)
+    ? unwrap(node.expression) : node
+);
+
+/** The object literal an expression stands for: written in place, or the value of a `const` it names. */
+const objectOf = (node: ts.Expression, checker: ts.TypeChecker): ts.ObjectLiteralExpression | undefined => {
+  const value = unwrap(node);
+  if (ts.isObjectLiteralExpression(value)) return value;
+  if (!ts.isIdentifier(value)) return undefined;
+  const found = declared(value, checker).map((d) => d.value && unwrap(d.value)).find((v) => v && ts.isObjectLiteralExpression(v));
+  return found as ts.ObjectLiteralExpression | undefined;
+};
+
+/** The values a lookup can produce: `labels.name` or `labels['name']` gives that property, `labels[key]` gives every value. */
+const lookedUp = (node: ts.PropertyAccessExpression | ts.ElementAccessExpression, checker: ts.TypeChecker) => {
+  const object = objectOf(node.expression, checker);
+  if (!object) return [];
+  const key = ts.isPropertyAccessExpression(node) ? node.name.text
+    : ts.isStringLiteralLike(node.argumentExpression) ? node.argumentExpression.text : undefined;
+  return object.properties.filter(ts.isPropertyAssignment)
+    .filter((property) => key === undefined || propertyName(property) === key)
+    .map((property) => property.initializer);
+};
+
 /**
- * Every literal inside an expression: template text and the literals inside its
- * `${…}` parts, the value of a `const` it names, and what a local function it calls
- * returns. A condition (`a ? …`, `a && …`) and the arguments of a call are code.
+ * The text an expression can produce, read only from the forms listed here.
+ * Anything else, such as a comparison, a condition, a call argument or a lookup key,
+ * is opaque: it is code, not copy.
  */
-const literals = (node: ts.Node, add: Add, checker: ts.TypeChecker, following: ReadonlySet<ts.Node> = new Set()) => {
+const literals = (node: ts.Node, add: Add, checker: ts.TypeChecker, following: Following = new Set()): void => {
   const read = (next: ts.Node, via = following) => literals(next, add, checker, via);
+  const through = (at: ts.Node, values: ts.Node[]) => {
+    if (!following.has(at)) values.forEach((value) => read(value, new Set(following).add(at)));
+  };
+
+  // Text itself.
   if (ts.isStringLiteralLike(node)) add(node.text, node);
   else if (ts.isTemplateExpression(node)) {
     add([node.head.text, ...node.templateSpans.map((span) => span.literal.text)].join(' '), node);
     node.templateSpans.forEach((span) => read(span.expression));
-  } else if (ts.isIdentifier(node)) {
-    for (const { at, value } of declared(node, checker)) {
-      if (value && !following.has(at)) read(value, new Set(following).add(at));
+  }
+  // Wrappers around a value.
+  else if (ts.isJsxExpression(node)) { if (node.expression) read(node.expression); }
+  else if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node)
+    || ts.isNonNullExpression(node) || ts.isTypeAssertionExpression(node)) read(node.expression);
+  // A choice between values: the branches, never the condition.
+  else if (ts.isConditionalExpression(node)) { read(node.whenTrue); read(node.whenFalse); }
+  else if (ts.isBinaryExpression(node)) {
+    const op = node.operatorToken.kind;
+    if (op === ts.SyntaxKind.AmpersandAmpersandToken) read(node.right);
+    else if (op === ts.SyntaxKind.BarBarToken || op === ts.SyntaxKind.QuestionQuestionToken || op === ts.SyntaxKind.PlusToken) {
+      read(node.left);
+      read(node.right);
     }
-  } else if (ts.isCallExpression(node)) {
-    if (!ts.isIdentifier(node.expression)) return;
-    for (const { at, fn } of declared(node.expression, checker)) {
-      if (fn && !following.has(at)) returnsOf(fn).forEach((value) => read(value, new Set(following).add(at)));
-    }
-  } else if (ts.isConditionalExpression(node)) {
-    read(node.whenTrue);
-    read(node.whenFalse);
-  } else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
-    read(node.right);
-  } else if (ts.isObjectLiteralExpression(node)) {
-    // Read the properties people see, not ids, tones or kinds.
-    for (const property of node.properties) {
-      if (isProperty(property)) read(property.initializer);
-    }
-  } else if (!isCode(node)) {
-    ts.forEachChild(node, (child) => read(child));
+  }
+  // Values kept elsewhere in the file.
+  else if (ts.isIdentifier(node)) {
+    for (const { at, value } of declared(node, checker)) if (value) through(at, [value]);
+  } else if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+    for (const { at, fn } of declared(node.expression, checker)) if (fn) through(at, returnsOf(fn));
+  } else if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+    through(node, lookedUp(node, checker));
+  }
+  // Collections: every item of a list, and the properties people see on an object.
+  else if (ts.isArrayLiteralExpression(node)) node.elements.forEach((element) => read(element));
+  else if (ts.isObjectLiteralExpression(node)) {
+    for (const property of node.properties) if (isProperty(property)) read(property.initializer);
   }
 };
 
@@ -283,6 +319,29 @@ describe('writing rules', () => {
     `, 'example.tsx');
     expect(lines.map((line) => line.text).sort()).toEqual(['Shown message', 'Tab label', 'Toast object message']);
     expect(problemsIn(lines)).toEqual([]);
+  });
+
+  it('reads a lookup the same way as the matching condition', () => {
+    const lookup = visibleLines(`
+      const labels = { daemon: 'Node wallet', edge: 'Edge text' };
+      export const View = () => <p>{labels['daemon']}{labels[mode]}{labels.edge}</p>;
+    `, 'example.tsx');
+    const condition = visibleLines(`
+      export const View = () => <p>{mode === 'daemon' ? 'Node wallet' : 'Edge text'}</p>;
+    `, 'example.tsx');
+    expect(lookup.map((line) => line.text).sort()).toEqual(['Edge text', 'Node wallet']);
+    expect(condition.map((line) => line.text).sort()).toEqual(['Edge text', 'Node wallet']);
+  });
+
+  it('treats other expressions as code', () => {
+    const lines = visibleLines(`
+      export const View = () => (
+        <p title={format('daemon key')}>
+          {items.map((item) => item.daemon)}{!busy}{count > 0}{api.call('daemon')}{fallback ?? 'Shown fallback'}
+        </p>
+      );
+    `, 'example.tsx');
+    expect(lines.map((line) => line.text)).toEqual(['Shown fallback']);
   });
 
   it('follows each name to its own declaration', () => {
