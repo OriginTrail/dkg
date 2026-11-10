@@ -1,6 +1,6 @@
-import { boundGraphInventory, filterGraphInventory, measureGraphInventory, readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
+import { boundGraphInventory, filterGraphInventory, measureGraphInventory, readCompleteGraphInventory, readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
 import { graphCatalogFlightKey } from './graph-catalog-flight-key.js';
-import { internalCatalogReadOptions, readCompleteGraphCatalog } from './graph-catalog-internal-limit.js';
+import { assertGraphCatalogWithinInternalLimit, internalCatalogReadOptions, readCompleteGraphCatalog } from './graph-catalog-internal-limit.js';
 import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
 import { namedGraphsFromQuads, endsWithHighSurrogate, normalizeGraphUris, queryOptionsFromUpdateOptions } from "./graph-set-index-utils.js";
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
@@ -92,7 +92,9 @@ export async function loadSortedGraphCatalog(
   const graphs = await readCompleteGraphCatalog(options, async internal => sortedSource
     ? sortedSource.listGraphsSorted(internal)
     : createSortedUniqueStringCatalog(await store.listGraphs(internal)));
-  // The caller receives the complete list, so its own limit bounds that list.
+  // The ceiling bounds the list even if a store ignores byte options. The caller receives the complete
+  // list, so its own limit bounds that list too.
+  assertGraphCatalogWithinInternalLimit(graphs);
   assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
   return graphs;
 }
@@ -623,7 +625,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         ? { ...options, priority: 'background', source: 'graph-set-index.rebuild' }
         : options;
       const scan = this.refreshCoordinator.beginScan(flight);
-      const discovered = await readCompleteGraphCatalog(scanOptions, internal => readGraphInventory(this.inner, internal));
+      const discovered = await readCompleteGraphInventory(this.inner, scanOptions);
       const next = new Set(
         discovered.graphs.filter(
           (graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph),

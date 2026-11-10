@@ -12,9 +12,11 @@ import {
   StoreResponseTooLargeError,
   isStoreInternalLimitError,
   loadSortedGraphCatalog,
+  readGraphInventory,
   readGraphInventoryByPrefix,
   storeGraphCatalogMaxBytes,
   type QueryOptions,
+  type TripleStore,
 } from '../src/index.js';
 import {
   assertGraphCatalogWithinInternalLimit,
@@ -180,6 +182,30 @@ describe('a caller pays for, and is bounded by, what it receives', () => {
       setCeiling(callerLimit);
       await expect(loadSortedGraphCatalog(counting)).rejects.toMatchObject({ code: 'STORE_INTERNAL_LIMIT' });
     } finally { await inner.close(); }
+  });
+
+  it('bounds a complete list by the ceiling even when the store ignores byte options', async () => {
+    const match = `${CG}small/a`;
+    const graphs = [match, ...Array.from({ length: 20 }, (_, n) => `${CG}unrelated-${n}/b`)];
+    const ignoring = { listGraphs: async () => graphs } as unknown as TripleStore;
+    const measuring = {
+      listGraphs: async () => graphs,
+      readGraphInventory: async () => ({ graphs, materializedBytes: bytes(graphs) }),
+    } as unknown as TripleStore;
+    // The slice would fit; the complete list the store hands back does not.
+    setCeiling(bytes([match]) + 8);
+    for (const read of [
+      () => readGraphInventoryByPrefix(ignoring, `${CG}small/`),
+      () => readGraphInventory(ignoring),
+      () => loadSortedGraphCatalog(ignoring),
+      () => new GraphSetIndexStore(ignoring, { enabled: false }).readGraphInventory(`${CG}small/`),
+      () => new GraphSetIndexStore(measuring).readGraphInventory(`${CG}small/`),
+    ]) {
+      await expect(read()).rejects.toMatchObject({ code: 'STORE_INTERNAL_LIMIT', limitName: STORE_GRAPH_CATALOG_LIMIT_NAME });
+    }
+    vi.unstubAllEnvs();
+    await expect(readGraphInventoryByPrefix(ignoring, `${CG}small/`))
+      .resolves.toEqual({ graphs: [match], materializedBytes: bytes([match]) });
   });
 
   it('serves two prefix discoveries on a catalog larger than the discovery limit, each charged for its slice', async () => {
