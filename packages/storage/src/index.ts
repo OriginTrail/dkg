@@ -6,6 +6,7 @@ export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumerati
 export { preparedSparqlNamesReadGraphPartition } from './read-graph-partition-reference.js';
 export { dropReadGraphPartitions } from './read-graph-partition-store.js';
 export { clearReadGraphPartitionsNote, mayHoldReadGraphPartitions } from './read-graph-partition-marker.js';
+export { markReadGraphsDirtyAtStart } from './read-graph-partition-startup.js';
 export {
   BlazegraphNamespaceManager,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
