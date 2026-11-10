@@ -1,8 +1,13 @@
-import { describe, expect, it, vi } from 'vitest';
-import { ChangelogStore, OxigraphStore } from '@origintrail-official/dkg-storage';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import {
+  ChangelogStore, OxigraphStore, OxigraphWorkerStore, createManagedOxigraphRuntimeStoreConfigV1, createTripleStore,
+  sparqlEngineOf, type Quad, type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import { materializePreparedSparql, prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { resolveQueryReadPlan } from '../src/query-read-plan.js';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
+import type { QueryOptions, QueryResult } from '../src/query-engine.js';
+import { startOxigraphSparqlEndpoint } from '../../storage/test/helpers/oxigraph-sparql-endpoint.js';
 import {
   hasNestedSelect,
   hasRepeatedPath,
@@ -31,6 +36,8 @@ function scope(source: string) {
 }
 
 const ready = (result: ReturnType<typeof rewriteGraphSet>) => materializePreparedSparql(requireGraphScopeRewrite(result).prepared);
+/** The graph list a listed rewrite writes; on Oxigraph the dataset's named graphs replace it. */
+const LISTED = /VALUES \?__dkg\w+ \{ <urn:g:1> <urn:g:2> \} /g;
 
 describe('hasRepeatedPath', () => {
   it.each([
@@ -97,23 +104,27 @@ describe('hasNestedSelect', () => {
 
 describe('planGraphDataset', () => {
   const both = ['FROM', 'FROM NAMED'] as const;
-  const expected = (graphAccess: 'values' | 'dataset', datasetClauses: readonly string[],
+  const expected = (graphAccess: 'values' | 'dataset' | 'named', datasetClauses: readonly string[],
     transforms: Partial<{ preservePattern: boolean; bindCallerGraphs: boolean; wrapDescriptionPattern: boolean }> = {}) => ({
     graphAccess, datasetClauses, preservePattern: false, bindCallerGraphs: false, wrapDescriptionPattern: false, ...transforms,
   });
+  // On Oxigraph every read's named graphs come from its dataset alone, with a default graph where it reads one.
+  const named = ['FROM NAMED'] as const;
   it.each([
-    ['SELECT ?s WHERE { ?s ?p ?o }', expected('values', []), expected('values', both)],
-    ['SELECT ?s WHERE { ?s <urn:p>+ ?o }', expected('values', []), expected('dataset', both)],
-    ['SELECT ?s WHERE { { SELECT ?s WHERE { ?s ?p ?o } } }', expected('dataset', both), expected('dataset', both)],
-    ['ASK { ?s <urn:p>* ?o }', expected('values', []), expected('dataset', both)],
-    ['CONSTRUCT { ?s ?p ?o } WHERE { { SELECT ?s ?p ?o WHERE { ?s ?p ?o } } }', expected('dataset', both), expected('dataset', both)],
-    ['DESCRIBE ?s WHERE { ?s ?p ?o }', expected('values', []), expected('dataset', both, { wrapDescriptionPattern: true })],
-    ['DESCRIBE <urn:s>', expected('dataset', ['FROM'], { preservePattern: true }), expected('dataset', ['FROM'], { preservePattern: true })],
-    ['DESCRIBE ?s WHERE { { SELECT ?s WHERE { ?s ?p ?o } } }', expected('dataset', both), expected('dataset', both, { wrapDescriptionPattern: true })],
-    ['SELECT ?s WITH { SELECT ?s { ?s ?p ?o } } AS %x { INCLUDE %x }', expected('dataset', both, { preservePattern: true }), expected('dataset', both, { preservePattern: true })],
-    ['SELECT * WHERE { GRAPH ?g { ?s (<urn:a>|<urn:b>)+ ?o } }', expected('values', []), expected('dataset', both, { bindCallerGraphs: true })],
-    ['SELECT * WHERE { GRAPH ?g { ?s <urn:p>+ ?o } }', expected('values', []), expected('dataset', both)],
-    ['SELECT * WHERE { GRAPH ?g { BIND(<urn:g> AS ?g) ?s <urn:p>+ ?o } }', expected('values', []), expected('dataset', both, { bindCallerGraphs: true })],
+    ['SELECT ?s WHERE { ?s ?p ?o }', expected('named', named), expected('values', both)],
+    ['SELECT ?s WHERE { ?s <urn:p>+ ?o }', expected('named', named), expected('dataset', both)],
+    ['SELECT ?s WHERE { { SELECT ?s WHERE { ?s ?p ?o } } }', expected('named', named), expected('dataset', both)],
+    ['ASK { ?s <urn:p>* ?o }', expected('named', named), expected('dataset', both)],
+    ['CONSTRUCT { ?s ?p ?o } WHERE { { SELECT ?s ?p ?o WHERE { ?s ?p ?o } } }', expected('named', named), expected('dataset', both)],
+    ['DESCRIBE ?s WHERE { ?s ?p ?o }', expected('named', both), expected('dataset', both, { wrapDescriptionPattern: true })],
+    ['DESCRIBE <urn:s>', expected('named', ['FROM'], { preservePattern: true }), expected('dataset', ['FROM'], { preservePattern: true })],
+    ['DESCRIBE ?s WHERE { { SELECT ?s WHERE { ?s ?p ?o } } }', expected('named', both), expected('dataset', both, { wrapDescriptionPattern: true })],
+    ['SELECT ?s WITH { SELECT ?s { ?s ?p ?o } } AS %x { INCLUDE %x }', expected('named', both, { preservePattern: true }), expected('dataset', both, { preservePattern: true })],
+    ['SELECT * WHERE { GRAPH ?g { ?s (<urn:a>|<urn:b>)+ ?o } }', expected('named', named), expected('dataset', both, { bindCallerGraphs: true })],
+    ['SELECT * WHERE { GRAPH ?g { ?s <urn:p>+ ?o } }', expected('named', named), expected('dataset', both)],
+    ['SELECT * WHERE { GRAPH ?g { BIND(<urn:g> AS ?g) ?s <urn:p>+ ?o } }', expected('named', named), expected('dataset', both, { bindCallerGraphs: true })],
+    ['SELECT ?s (EXISTS { ?s <urn:f> ?f } AS ?x) WHERE { ?s ?p ?o }', expected('named', both), expected('values', both)],
+    ['SELECT ?s WHERE { GRAPH <urn:g:1> { ?s ?p ?o } ?s <urn:f> ?f }', expected('named', both), expected('values', both)],
   ] as const)('fully plans %s', (query, oxigraph, other) => {
     expect(planGraphDataset(scope(query), 'oxigraph')).toEqual(oxigraph);
     expect(planGraphDataset(scope(query), null)).toEqual(other);
@@ -196,17 +207,32 @@ describe('rewriteGraphSet with a known and an unknown engine', () => {
     }
   });
 
-  it('leaves a flat Oxigraph read exactly as it was', () => {
+  // The listed rewrite, with the dataset's named graphs in place of its list.
+  const fromNamed = (listed: string, head: string) => listed.replace(LISTED, '').replace(`${head} WHERE`, `${head} ${NAMED} WHERE`);
+
+  it('keeps the per-graph shape of a flat Oxigraph read and selects its graphs by the dataset', () => {
     expect(ready(rewriteGraphSet(scope(flat), graphs, 'deduplicated-values-union', 'oxigraph')))
-      .toBe(ready(wrapWithDeduplicatedGraphValues(scope(flat), graphs)));
+      .toBe(fromNamed(ready(wrapWithDeduplicatedGraphValues(scope(flat), graphs)), 'SELECT ?s ?o'));
     expect(ready(rewriteGraphSet(scope(flat), graphs, 'values-union', 'oxigraph')))
-      .toBe(ready(wrapWithGraphValues(scope(flat), graphs)));
+      .toBe(fromNamed(ready(wrapWithGraphValues(scope(flat), graphs)), 'SELECT ?s ?o'));
   });
 
-  it('leaves an Oxigraph path read exactly as it was', () => {
+  it('keeps the per-graph shape of an Oxigraph path read and selects its graphs by the dataset', () => {
     const path = 'SELECT ?s ?o WHERE { ?s <urn:p>+ ?o }';
     expect(ready(rewriteGraphSet(scope(path), graphs, 'values-union', 'oxigraph')))
-      .toBe(ready(wrapWithGraphValues(scope(path), graphs)));
+      .toBe(fromNamed(ready(wrapWithGraphValues(scope(path), graphs)), 'SELECT ?s ?o'));
+  });
+
+  it('gives every Oxigraph read its dataset and no graph list', () => {
+    for (const query of ['SELECT ?s WHERE { ?s <urn:p> ?o }', 'SELECT ?s WHERE { { SELECT ?s WHERE { ?s ?p ?o } } }',
+      'ASK { ?s <urn:p> ?o }', 'SELECT ?s ?x WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:q> ?x } }']) {
+      for (const policy of ['values-union', 'deduplicated-values-union'] as const) {
+        const text = ready(rewriteGraphSet(scope(query), graphs, policy, 'oxigraph'));
+        expect(text).toContain(NAMED);
+        expect(text).not.toContain('FROM <');
+        expect(text.replace(NAMED, '')).not.toContain('<urn:g:');
+      }
+    }
   });
 
   it('keeps the rewrite on a flat read and adds the dataset on an unknown engine', () => {
@@ -288,9 +314,10 @@ describe('rewriteGraphSet with a known and an unknown engine', () => {
       }
     });
 
-    it('leaves a caller GRAPH clause to the store on Oxigraph', () => {
+    it('leaves a caller GRAPH clause to the store on Oxigraph, inside its dataset', () => {
       const query = scope('DESCRIBE ?s WHERE { GRAPH <urn:g:1> { ?s <urn:p> ?o } }');
-      expect(rewriteGraphSet(query, graphs, 'values-union', 'oxigraph')).toEqual({ kind: 'ready', value: query });
+      expect(ready(rewriteGraphSet(query, graphs, 'values-union', 'oxigraph')))
+        .toBe(`DESCRIBE ?s ${DEFAULT} ${NAMED} WHERE { GRAPH <urn:g:1> { ?s <urn:p> ?o } }`);
     });
   });
 
@@ -304,10 +331,10 @@ describe('rewriteGraphSet with a known and an unknown engine', () => {
     }
   });
 
-  it('leaves Oxigraph DESCRIBE on the rewrite it had', () => {
+  it('describes from the default graph of the dataset on Oxigraph', () => {
     const query = 'DESCRIBE ?s WHERE { ?s <urn:p> ?o }';
     expect(ready(rewriteGraphSet(scope(query), graphs, 'values-union', 'oxigraph')))
-      .toBe(ready(wrapWithGraphValues(scope(query), graphs)));
+      .toBe(ready(wrapWithGraphValues(scope(query), graphs)).replace(LISTED, '').replace('DESCRIBE ?s WHERE', `DESCRIBE ?s ${DEFAULT} ${NAMED} WHERE`));
   });
 
   describe('a caller GRAPH clause', () => {
@@ -319,11 +346,19 @@ describe('rewriteGraphSet with a known and an unknown engine', () => {
       expect(text).toContain('VALUES ?g { <urn:g:1> <urn:g:2> }');
     });
 
-    it('adds the dataset on Oxigraph only around a nested SELECT', () => {
+    it('adds the dataset to every caller GRAPH read on Oxigraph', () => {
       const flatRead = constrained('SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:p>+ ?o } }');
-      expect(rewriteGraphSet(flatRead, graphs, 'values-union', 'oxigraph')).toEqual({ kind: 'ready', value: flatRead });
+      expect(ready(rewriteGraphSet(flatRead, graphs, 'values-union', 'oxigraph')))
+        .toBe(materializePreparedSparql(flatRead.prepared).replace('SELECT ?g ?s WHERE', `SELECT ?g ?s ${NAMED} WHERE`));
       const nested = constrained('SELECT ?s WHERE { GRAPH ?g { { SELECT ?s WHERE { ?s ?p ?o } } } }');
       expect(ready(rewriteGraphSet(nested, graphs, 'values-union', 'oxigraph'))).toContain(NAMED);
+    });
+
+    it('checks caller graph variables without writing their list when the dataset bounds them', () => {
+      const read = 'SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:p> ?o } }';
+      expect(ready(constrainGraphVariablesToAllowedSet(scope(read), graphs, { boundByDataset: true }))).toBe(read);
+      expect(() => constrainGraphVariablesToAllowedSet(scope('SELECT ?s WHERE { OPTIONAL { GRAPH ?g { ?s ?p ?o } } }'), graphs, { boundByDataset: true }))
+        .toThrow(/top level/);
     });
 
     it('adds the dataset to a constant GRAPH on an unknown engine', () => {
@@ -334,9 +369,9 @@ describe('rewriteGraphSet with a known and an unknown engine', () => {
 });
 
 describe('rewriteSingleGraph and rewriteGraphRoute', () => {
-  it('scopes one graph as before on Oxigraph', () => {
+  it('scopes one graph as before on Oxigraph, inside its dataset', () => {
     expect(ready(rewriteSingleGraph(scope('SELECT ?s WHERE { ?s ?p ?o }'), 'urn:g:1', 'oxigraph')))
-      .toBe('SELECT ?s WHERE { GRAPH <urn:g:1> {  ?s ?p ?o  } }');
+      .toBe('SELECT ?s FROM NAMED <urn:g:1> WHERE { GRAPH <urn:g:1> {  ?s ?p ?o  } }');
   });
 
   it('adds the dataset on an unknown engine', () => {
@@ -354,7 +389,7 @@ describe('rewriteSingleGraph and rewriteGraphRoute', () => {
     expect(ready(rewriteGraphRoute(scope(union), graphs, 'urn:g:1', 'values-union', 'compatibility', null)))
       .toContain('SELECT ?s FROM <urn:g:1> FROM NAMED <urn:g:1> WHERE { GRAPH <urn:g:1>');
     expect(ready(rewriteGraphRoute(scope(union), graphs, 'urn:g:1', 'values-union', 'compatibility', 'oxigraph')))
-      .not.toContain('FROM NAMED');
+      .toContain('SELECT ?s FROM NAMED <urn:g:1> WHERE { GRAPH <urn:g:1>');
   });
 
   it('keeps a graph list empty of graphs on the fallback', () => {
@@ -383,11 +418,11 @@ describe('what reaches an Oxigraph store through the engine', () => {
     }
   }
 
-  it('sends a flat read and a path read with no dataset', async () => {
+  it('sends a flat read and a path read with their dataset and no graph list', async () => {
     for (const read of ['SELECT ?s WHERE { ?s <urn:p> ?o }', 'SELECT ?s WHERE { ?s <urn:p>+ ?o }']) {
       const [text] = await sent(read);
-      expect(text).toContain('VALUES');
-      expect(text).not.toContain('FROM NAMED');
+      expect(text).toContain(`FROM NAMED <${ROOT}> FROM NAMED <${VM}>`);
+      expect(text).not.toContain('VALUES');
     }
   });
 
@@ -397,6 +432,111 @@ describe('what reaches an Oxigraph store through the engine', () => {
       const [text] = await sent(read, wrap);
       expect(text).toContain(`FROM NAMED <${ROOT}> FROM NAMED <${VM}>`);
       expect(text).not.toContain('VALUES');
+    }
+  });
+});
+
+// The node's three Oxigraph stores: in process, in a worker, and a managed oxigraph-server
+// (here the in-process SPARQL endpoint that runs the same engine).
+const OXIGRAPH_STORES: Array<[string, () => Promise<{ store: TripleStore; close: () => Promise<void> }>]> = [
+  ['embedded', async () => { const store = new OxigraphStore(); return { store, close: () => store.close() }; }],
+  ['worker', async () => { const store = new OxigraphWorkerStore(); return { store, close: () => store.close() }; }],
+  ['managed server', async () => {
+    const endpoint = await startOxigraphSparqlEndpoint();
+    const store = await createTripleStore(createManagedOxigraphRuntimeStoreConfigV1({ backend: 'sparql-http',
+      options: { queryEndpoint: endpoint.queryEndpoint, updateEndpoint: endpoint.updateEndpoint, managedByDkg: true } }));
+    return { store, close: async () => { await store.close(); await endpoint.close(); } };
+  }],
+];
+
+describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind, open) => {
+  const ID = 'dataset-stores';
+  const ROOT = `did:dkg:context-graph:${ID}`;
+  const OTHER = 'did:dkg:context-graph:dataset-stores-other';
+  const DATA = [ROOT, `${ROOT}/_verifiable_memory/0xa/1`, `${ROOT}/_verifiable_memory/0xb/2`];
+  const SHARED = [`${ROOT}/_shared_memory/0xa/1`, `${ROOT}/_shared_memory/0xb/2`];
+  const ELSEWHERE = [OTHER, `${OTHER}/_verifiable_memory/0xa/1`, `${OTHER}/_shared_memory/0xa/1`];
+  const ALL = [...DATA, ...SHARED, ...ELSEWHERE];
+  // Every graph holds its own resources and a label on one resource that every graph shares.
+  const quadsOf = (graphs: readonly string[]): Quad[] => graphs.flatMap((graph) => {
+    const n = ALL.indexOf(graph);
+    return [
+      { subject: `urn:s:${n}`, predicate: 'urn:p', object: `urn:o:${n}`, graph },
+      { subject: `urn:o:${n}`, predicate: 'urn:p', object: `"${graph}"`, graph },
+      { subject: `urn:s:${n}`, predicate: 'urn:label', object: `"label ${n}"`, graph },
+      { subject: 'urn:shared', predicate: 'urn:label', object: `"${graph}"`, graph },
+    ];
+  });
+  const ROUTES: Array<[string, Partial<QueryOptions>, string[][]]> = [
+    ['the verifiable-memory view', { view: 'verifiable-memory' }, [DATA]],
+    ['the shared-memory view', { view: 'shared-working-memory' }, [SHARED]],
+    ['the data route', {}, [DATA]],
+    ['the shared-memory route', { graphSuffix: '_shared_memory' }, [SHARED]],
+    ['data and shared memory', { includeSharedMemory: true }, [DATA, SHARED]],
+  ];
+  const READS = [
+    'SELECT ?s ?o WHERE { ?s <urn:p> ?o }',
+    'SELECT (COUNT(*) AS ?n) WHERE { ?s <urn:label> ?l }',
+    'SELECT DISTINCT ?o WHERE { ?s <urn:p>+ ?o }',
+    'SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:label> ?l } }',
+    'SELECT ?s ?l WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:label> ?l } }',
+    'SELECT ?s WHERE { { SELECT ?s WHERE { ?s <urn:label> ?l } } }',
+    'ASK { ?s <urn:label> ?l }',
+    'CONSTRUCT { ?s <urn:label> ?l } WHERE { ?s <urn:label> ?l }',
+    'DESCRIBE <urn:shared>',
+    'DESCRIBE ?s WHERE { ?s <urn:label> ?l }',
+  ];
+  const answerOf = (result: QueryResult) => JSON.stringify({
+    rows: result.bindings.map(row => JSON.stringify(Object.entries(row).sort())).sort(),
+    quads: (result.quads ?? []).map(quad => JSON.stringify([quad.subject, quad.predicate, quad.object, quad.graph])).sort(),
+  });
+  const datasetOf = (text: string) => [...text.matchAll(/FROM (?:NAMED )?<([^>]+)>/g)].map(match => match[1]);
+
+  let opened: Awaited<ReturnType<typeof open>>;
+  beforeAll(async () => {
+    opened = await open();
+    await opened.store.insert([...quadsOf(DATA), ...quadsOf(SHARED), ...quadsOf(ELSEWHERE)]);
+  }, 60_000);
+  afterAll(async () => { await opened?.close(); });
+
+  it('is a store the query engine reads as Oxigraph', () => {
+    expect(sparqlEngineOf(opened.store)).toBe('oxigraph');
+  });
+
+  it.each(ROUTES)('sends every read on %s with the dataset of its graphs', async (_route, route, families) => {
+    const query = vi.spyOn(opened.store, 'query');
+    try {
+      for (const read of READS) {
+        query.mockClear();
+        await new DKGQueryEngine(opened.store).query(read, { contextGraphId: ID, ...route });
+        const sent = query.mock.calls.map(([text]) => text).filter(text => text.includes('<urn:'));
+        expect(sent.length, read).toBeGreaterThan(0);
+        for (const text of sent) {
+          const dataset = datasetOf(text);
+          expect(dataset.length, read).toBeGreaterThan(0);
+          expect(dataset.filter(graph => !graph.startsWith(`${ROOT}/`) && graph !== ROOT), read).toEqual([]);
+          expect(families.some(family => family.every(graph => dataset.includes(graph))), read).toBe(true);
+        }
+      }
+    } finally {
+      query.mockRestore();
+    }
+  });
+
+  it.each(ROUTES)('answers on %s as a store that holds only its graphs', async (_route, route, families) => {
+    const only = new OxigraphStore();
+    try {
+      await only.insert(quadsOf([...new Set(families.flat())]));
+      for (const read of READS) {
+        const options = { contextGraphId: ID, ...route };
+        const [full, scoped] = await Promise.all([
+          new DKGQueryEngine(opened.store).query(read, options), new DKGQueryEngine(only).query(read, options)]);
+        expect(answerOf(full), read).toBe(answerOf(scoped));
+        // A description reads the graphs in scope as its default graph.
+        if (read.startsWith('DESCRIBE')) expect(full.quads?.length, read).toBeGreaterThan(0);
+      }
+    } finally {
+      await only.close();
     }
   });
 });
@@ -449,8 +589,8 @@ describe('content discovery for static GRAPH queries', () => {
     expect(plan.discovery.contentPrefixes.length > 0).toBe(needed);
   });
 
-  it('keeps ordinary FILTER variables outside dataset routing on Oxigraph', () => {
-    expect(planGraphDataset(scope(`SELECT ?s WHERE { ${graph} FILTER(BOUND(?s)) }`), 'oxigraph').datasetClauses).toEqual([]);
+  it('gives a static GRAPH read a default graph on Oxigraph only where it reads one', () => {
+    expect(planGraphDataset(scope(`SELECT ?s WHERE { ${graph} FILTER(BOUND(?s)) }`), 'oxigraph').datasetClauses).toEqual(['FROM NAMED']);
     expect(planGraphDataset(scope(`SELECT ?s WHERE { ${graph} FILTER(EXISTS { ?s <urn:flag> ?flag }) }`), 'oxigraph').datasetClauses).toEqual(['FROM', 'FROM NAMED']);
   });
 });
