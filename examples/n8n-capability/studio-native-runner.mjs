@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
-import { readResponseBodyBytesBounded, BoundedResponseBodyLimitError } from '../../packages/http-utils/dist/index.js';
-import { n8nWorkflowSha256, validateN8nGrant, normalizeN8nResult } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
+import { exchangeNativeN8nWebhook, pinnedN8nPublishedWorkflow } from '../../packages/cli/dist/semantic-runtime-n8n-wire.js';
+import { validateN8nGrant, normalizeN8nResult } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { collectN8nExecutionResult } from '../../packages/cli/dist/semantic-runtime-n8n-results.js';
 import { nativeExecutionError as fail, verifyNativeExecutionInput } from './studio-native-execution.mjs';
 
@@ -8,31 +8,17 @@ import { nativeExecutionError as fail, verifyNativeExecutionInput } from './stud
 export function createStudioNativeRunner(provider, installation, send = fetch) {
   async function prepare(workflow) {
     const grant = workflow.grant, native = await provider.api('/workflows/' + grant.workflowId);
-    const published = native.activeVersion ? { ...native.activeVersion, settings: native.settings } : native;
-    if (native.id !== grant.workflowId || !native.active || typeof published.versionId !== 'string'
-      || !published.versionId || n8nWorkflowSha256(published) !== grant.workflowSha256) throw fail('STUDIO_NATIVE_PIN_CHANGED');
+    const published = pinnedN8nPublishedWorkflow(native, grant, () => fail('STUDIO_NATIVE_PIN_CHANGED'));
     return published.versionId;
   }
   async function dispatch(workflow, runKey, input) {
     const token = readFileSync(installation.webhookTokenFile, 'utf8').trim();
     if (token.length < 32 || token.length > 512 || /[\r\n]/.test(token)) throw fail('STUDIO_NATIVE_UNCONFIRMED');
-    const response = await send(new URL('/webhook/dkg-capability-' + workflow.grant.workflowId, installation.baseUrl), {
-      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(12_000),
-      headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
-      body: JSON.stringify({ invocationId: runKey, input }),
-    });
-    let bytes;
-    try { bytes = await readResponseBodyBytesBounded(response, 512); }
-    catch (cause) {
-      if (cause instanceof BoundedResponseBodyLimitError) throw fail('STUDIO_NATIVE_UNCONFIRMED');
-      throw cause;
-    }
-    if (!response.ok) throw fail('STUDIO_NATIVE_UNCONFIRMED');
-    const ack = JSON.parse(Buffer.from(bytes).toString('utf8'));
-    if (!ack || Object.keys(ack).length !== 1 || typeof ack.executionId !== 'string' || !/^\d{1,20}$/.test(ack.executionId))
-      throw fail('STUDIO_NATIVE_UNCONFIRMED');
-    return ack.executionId;
+    return exchangeNativeN8nWebhook({ baseUrl: installation.baseUrl, workflowId: workflow.grant.workflowId,
+      token, invocationId: runKey, input, signal: AbortSignal.timeout(12_000), maxBytes: 512, send,
+      error: () => fail('STUDIO_NATIVE_UNCONFIRMED') });
   }
+
   async function loadExecution(workflow, checkpoint) {
     if (!/^\d{1,20}$/.test(checkpoint.executionId ?? '')) throw fail('STUDIO_NATIVE_UNCONFIRMED');
     const execution = await provider.api('/executions/' + checkpoint.executionId + '?includeData=true');

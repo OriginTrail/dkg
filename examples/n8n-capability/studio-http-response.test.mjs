@@ -12,6 +12,19 @@ function installation(t) {
   const token = join(state, 'fixture-token'); writeFileSync(token, 'fictional-studio-http-token'.repeat(3));
   return { baseUrl: 'http://127.0.0.1:1', apiTokenFile: token, webhookTokenFile: token, workflows: [] };
 }
+test('native exchange sends the admitted envelope and rejects acknowledgements containing anything but an execution ID', async t => {
+  const input = { itemsJson: '[{"name":"Équipement"}]', paramsJson: '{}', executionId: '' };
+  const replies = [{ executionId: '42', output: {} }, { executionId: 42 }, { executionId: '42/other' }, {}, null, []];
+  const runner = createStudioNativeRunner({}, installation(t), async (url, options) => {
+    assert.equal(url.pathname, '/webhook/dkg-capability-native-one');
+    assert.equal(options.method, 'POST'); assert.equal(options.redirect, 'error');
+    assert.equal(options.signal.aborted, false);
+    assert.deepEqual(JSON.parse(options.body), { invocationId: 'run:with:colons', input });
+    return Response.json(replies.shift());
+  });
+  while (replies.length) await assert.rejects(runner.dispatch({ grant: { workflowId: 'native-one' } }, 'run:with:colons', input),
+    { code: 'STUDIO_NATIVE_UNCONFIRMED', status: 409 });
+});
 const targets = [
   { name: 'provider API', limit: 1_048_576, body: { text: 'Équipement 🛠' }, expected: { text: 'Équipement 🛠' },
     limitError: { code: 'INVALID_WORKFLOW', status: 409, message: 'n8n response exceeds the PoC limit.' },

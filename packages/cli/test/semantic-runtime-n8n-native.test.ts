@@ -60,6 +60,46 @@ function fixture() {
 }
 
 describe('native n8n component execution receipts', () => {
+  it.each([
+    { name: 'extra output', body: { executionId: '42', output: {} } },
+    { name: 'numeric ID', body: { executionId: 42 } },
+    { name: 'non-decimal ID', body: { executionId: '42/other' } },
+    { name: 'missing ID', body: {} },
+  ])('does not checkpoint an acknowledgement with $name', async ({ body }) => {
+    const f = fixture(), adapter = f.adapter(), send = f.fetch.getMockImplementation()!;
+    f.fetch.mockImplementation((url, options) => String(url).includes('/webhook/') ? Promise.resolve(Response.json(body)) : send(url, options));
+    const error = await adapter.dispatch(authorization, input).catch(error => error);
+    expect(error.message).toBe('N8N_RESPONSE_INVALID');
+    expect(adapter.couldHaveReachedTarget(error)).toBe(true);
+    expect(f.store.adapterCheckpoint(authorization.effectId)).toBeUndefined();
+    expect(f.posts()).toBe(1);
+  });
+  it.each([1_048_576, 1_048_577])('preserves the runtime acknowledgement byte ceiling at %i bytes', async size => {
+    const f = fixture(), adapter = f.adapter(), send = f.fetch.getMockImplementation()!;
+    let body: ReadableStream<Uint8Array>, cancelled = false;
+    f.fetch.mockImplementation(async (url, options) => {
+      if (!String(url).includes('/webhook/')) return send(url, options);
+      expect(JSON.parse(options!.body as string)).toEqual({ invocationId: authorization.effectId, input });
+      expect(options!.redirect).toBe('error');
+      const bytes = Buffer.from(JSON.stringify({ executionId: '42' }).padEnd(size));
+      let sent = false;
+      body = new ReadableStream({ pull(controller) {
+        if (sent) controller.close(); else { sent = true; controller.enqueue(bytes); }
+      }, cancel() { cancelled = true; } }, { highWaterMark: 0 });
+      return new Response(body);
+    });
+    if (size === 1_048_576) {
+      expect((await adapter.dispatch(authorization, input)).status).toBe('succeeded');
+      expect(f.store.adapterCheckpoint(authorization.effectId)).toBeDefined();
+    } else {
+      const error = await adapter.dispatch(authorization, input).catch(error => error);
+      expect(error.message).toBe('N8N_RESPONSE_TOO_LARGE');
+      expect(adapter.couldHaveReachedTarget(error)).toBe(true);
+      expect(f.store.adapterCheckpoint(authorization.effectId)).toBeUndefined();
+    }
+    expect(cancelled).toBe(size > 1_048_576); expect(body!.locked).toBe(false);
+    expect(f.posts()).toBe(1);
+  });
   it.each(['missing', 'short', 'multiline', 'oversized'])('classifies a %s webhook credential as a local pre-dispatch failure', async mode => {
     const f = fixture(), adapter = f.adapter();
     if (mode === 'missing') rmSync(f.config.webhookTokenFile);

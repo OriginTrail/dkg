@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { RuntimeAdapterOperation, SemanticN8nConfig, SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
-import { normalizeN8nResult, type NativeN8nGrant, assertN8nEmbeddedWorkflows, n8nResultSha256, assertN8nValue, n8nPinnedExecutionMatches, n8nObservationScope, n8nRecord, n8nWorkflowSha256, validateN8nConfig, validateN8nGrant } from './semantic-runtime-n8n-contract.js';
+import { normalizeN8nResult, type NativeN8nGrant, assertN8nEmbeddedWorkflows, n8nResultSha256, assertN8nValue, n8nPinnedExecutionMatches, n8nObservationScope, n8nRecord, validateN8nConfig, validateN8nGrant } from './semantic-runtime-n8n-contract.js';
+import { exchangeNativeN8nWebhook, pinnedN8nPublishedWorkflow, requestN8nJson } from './semantic-runtime-n8n-wire.js';
 import { collectN8nExecutionResult } from './semantic-runtime-n8n-results.js';
 import { nativeN8nImplementation } from './semantic-runtime-n8n-implementation.generated.js';
 
@@ -20,26 +21,8 @@ const secret = (path: string): string => {
   if (bytes.length > 8192 || value.length < 16 || /[\r\n]/.test(value)) throw new Error('N8N_CREDENTIAL_UNAVAILABLE');
   return value;
 };
-async function request(url: URL, headers: Record<string, string>, signal: AbortSignal, body?: unknown): Promise<Record<string, unknown>> {
-  signal = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
-  const response = await fetch(url, { method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal,
-    headers: { ...headers, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error('N8N_REQUEST_FAILED'); }
-  const reader = response.body.getReader(), chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const part = await reader.read();
-      if (part.done) break;
-      size += part.value.length;
-      if (size > 1_048_576) throw new Error('N8N_RESPONSE_TOO_LARGE');
-      chunks.push(part.value);
-    }
-    const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    if (!n8nRecord(value)) throw new Error('N8N_RESPONSE_INVALID');
-    return value;
-  } finally { await reader.cancel().catch(() => {}); }
+function request(url: URL, headers: Record<string, string>, signal: AbortSignal): Promise<Record<string, unknown>> {
+  return requestN8nJson(url, { headers, signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) });
 }
 
 /** Early acknowledgement + durable provider execution ID; continuation never POSTs again. */
@@ -72,9 +55,7 @@ export function createNativeN8nWorkflowAdapter(
     await authorized();
     const origin = new URL(installation!.baseUrl), headers = { 'X-N8N-API-KEY': secret(installation!.apiTokenFile) };
     const workflow = await request(new URL(`/api/v1/workflows/${grant.workflowId}`, origin), headers, signal);
-    const published = n8nRecord(workflow.activeVersion) ? { ...workflow.activeVersion, settings: workflow.settings } : workflow;
-    if (workflow.id !== grant.workflowId || workflow.active !== true || typeof published.versionId !== 'string' || !published.versionId
-      || n8nWorkflowSha256(published) !== grant.workflowSha256) throw new Error('N8N_WORKFLOW_NOT_PINNED');
+    const published = pinnedN8nPublishedWorkflow(workflow, grant);
     assertN8nEmbeddedWorkflows(published);
     const names = new Set((published.nodes as Record<string, unknown>[]).map(node => node.name));
     if (projection.requiredNodes.some(name => !names.has(name))) throw new Error('N8N_WORKFLOW_NOT_PINNED');
@@ -126,18 +107,13 @@ export function createNativeN8nWorkflowAdapter(
           const observed = n8nRecord(input) && typeof input.executionId === 'string' ? input.executionId : '';
           if (observed && (!projection.allowObservation || !/^\d{1,20}$/.test(observed))) throw new Error('INVALID_N8N_INPUT');
           if (observed && !(prepared.published.nodes as Record<string, unknown>[]).some(node => node.name === n8nObservationScope(graph, executor, grant.workflowId))) throw new Error('N8N_OBSERVATION_SCOPE_MISMATCH');
-          const webhook = observed ? undefined : {
-            url: new URL(`/webhook/dkg-capability-${grant.workflowId}`, prepared.origin),
-            headers: { authorization: `Bearer ${secret(installation!.webhookTokenFile)}` },
-          };
+          const webhookToken = observed ? undefined : secret(installation!.webhookTokenFile);
           await authorized();
           mayHaveExecuted = true;
-          const response = observed ? { executionId: observed } : await request(webhook!.url,
-            webhook!.headers, signal, { invocationId: authorization.effectId, input });
-          if (typeof response.executionId !== 'string' || !/^\d{1,20}$/.test(response.executionId)
-            || Object.keys(response).some(key => key !== 'executionId')) throw new Error('N8N_RESPONSE_INVALID');
+          const executionId = observed || await exchangeNativeN8nWebhook({ baseUrl: prepared.origin, workflowId: grant.workflowId,
+            token: webhookToken!, invocationId: authorization.effectId, input, signal, maxBytes: 1_048_576 });
           saved = { kind: 'n8n-native-v1', workflowId: grant.workflowId, workflowSha256: grant.workflowSha256,
-            executionId: response.executionId, versionId: prepared.published.versionId as string, observed: !!observed };
+            executionId, versionId: prepared.published.versionId, observed: !!observed };
           persist(authorization, saved);
         }
         return await inspect(saved, AbortSignal.timeout(inspectionTimeoutMs), prepared);

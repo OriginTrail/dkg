@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { legacyN8nImplementation } from './semantic-runtime-n8n-implementation.generated.js';
 import type { RuntimeAdapterOperation, SemanticN8nConfig, SemanticN8nGrant } from '@origintrail-official/dkg-semantic-runtime';
-import { assertN8nEmbeddedWorkflows, assertN8nValue, n8nExecutionMatches, n8nRecord, n8nWorkflowSha256, validateN8nConfig, validateN8nGrant } from './semantic-runtime-n8n-contract.js';
+import { assertN8nEmbeddedWorkflows, assertN8nValue, n8nExecutionMatches, n8nRecord, validateN8nConfig, validateN8nGrant } from './semantic-runtime-n8n-contract.js';
+
+import { pinnedN8nPublishedWorkflow, requestN8nJson } from './semantic-runtime-n8n-wire.js';
 
 class N8nDispatchError extends Error {
   constructor(readonly mayHaveExecuted: boolean, code: string) { super(code); }
@@ -16,28 +18,8 @@ function token(path: string): string {
   return value;
 }
 
-async function json(url: URL, headers: Record<string, string>, body?: unknown, signal = AbortSignal.timeout(10_000)): Promise<Record<string, unknown>> {
-  const response = await fetch(url, {
-    method: body === undefined ? 'GET' : 'POST', redirect: 'error',
-    signal, headers: { ...headers, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
-  if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error('N8N_REQUEST_FAILED'); }
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  try {
-    for (;;) {
-      const next = await reader.read();
-      if (next.done) break;
-      length += next.value.byteLength;
-      if (length > 1_048_576) throw new Error('N8N_RESPONSE_TOO_LARGE');
-      chunks.push(next.value);
-    }
-    const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    if (!n8nRecord(value)) throw new Error('N8N_RESPONSE_INVALID');
-    return value;
-  } finally { await reader.cancel().catch(() => {}); }
+function json(url: URL, headers: Record<string, string>, body?: unknown, signal = AbortSignal.timeout(10_000)): Promise<Record<string, unknown>> {
+  return requestN8nJson(url, { headers, body, signal });
 }
 
 /** Installed only for bound TypeScript calls; uses the common durable effect broker. */
@@ -74,11 +56,7 @@ export function createN8nWorkflowAdapter(
         const origin = new URL(installation!.baseUrl);
         const apiHeaders = { 'X-N8N-API-KEY': token(installation!.apiTokenFile) };
         const workflow = await json(new URL(`/api/v1/workflows/${grant.workflowId}`, origin), apiHeaders, undefined, deadline);
-        const published = n8nRecord(workflow.activeVersion) ? { ...workflow.activeVersion, settings: workflow.settings } : workflow;
-        if (workflow.id !== grant.workflowId || workflow.active !== true || typeof published.versionId !== 'string'
-          || !published.versionId || n8nWorkflowSha256(published) !== grant.workflowSha256) {
-          throw new Error('N8N_WORKFLOW_NOT_PINNED');
-        }
+        const published = pinnedN8nPublishedWorkflow(workflow, grant);
         assertN8nEmbeddedWorkflows(published);
         const webhookHeaders = { authorization: `Bearer ${token(installation!.webhookTokenFile)}` };
         await assertAuthorized();
