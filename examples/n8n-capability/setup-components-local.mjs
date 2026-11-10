@@ -8,7 +8,7 @@ import { componentContract } from './component-registry.mjs';
 import { loadStudioContext } from './studio-context.mjs';
 import { loadStudioCredentials } from './studio-credentials.mjs';
 import { standaloneComponentWorkflow, echoSubworkflow } from './component-workflows.mjs';
-import { n8nWorkflowSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
+import { n8nObservationScope, n8nWorkflowSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 
 const { registry } = await loadStudioContext();
 const { componentRegistry, componentNeedsExport: needsExport, componentProgramSource } = registry;
@@ -31,7 +31,7 @@ if (existsSync(runtimeFile)) {
   if (row) executor = JSON.parse(row.payload).executorAgentAddress;
   db.close();
 } else if (!fixture) throw new Error('The existing PoC executor configuration is required.');
-const scopeName = id => 'nOS scope ' + createHash('sha256').update(JSON.stringify(['n8n-capability-poc', executor.toLowerCase(), id])).digest('hex').slice(0, 20);
+const scopeName = id => n8nObservationScope('n8n-capability-poc', executor, id);
 const { headerCredential: header, credentials } = loadStudioCredentials(state, { fixture });
 const components = [];
 const file = join(state, install ? 'components.json' : 'components.prepared.json');
