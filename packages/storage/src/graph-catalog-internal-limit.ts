@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { getMetrics } from '@origintrail-official/dkg-core';
 import { assertGraphCatalogWithinResponseLimit } from './graph-catalog-response-limit.js';
 import { isStoreResponseTooLargeError } from './http-response-limit.js';
 import type { QueryOptions } from './triple-store.js';
@@ -68,6 +69,17 @@ export function isStoreInternalLimitError(error: unknown): error is StoreInterna
     && typeof candidate.message === 'string';
 }
 
+const KNOWN_LIMIT_NAMES: ReadonlySet<string> = new Set([STORE_GRAPH_CATALOG_LIMIT_NAME]);
+
+/** Count one node-side limit hit. The label is a fixed set of limit names. */
+export function recordStoreInternalLimit(limitName: string): void {
+  try {
+    getMetrics().queryInternalLimitTotal.add(1, { limit: KNOWN_LIMIT_NAMES.has(limitName) ? limitName : 'other' });
+  } catch {
+    // Telemetry must never change a read's outcome.
+  }
+}
+
 function isByteCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
@@ -101,6 +113,7 @@ export async function readCompleteGraphCatalog<T>(
     return await read(internalCatalogReadOptions(options));
   } catch (error) {
     if (!isStoreResponseTooLargeError(error)) throw error;
+    recordStoreInternalLimit(STORE_GRAPH_CATALOG_LIMIT_NAME);
     throw new StoreInternalLimitError(STORE_GRAPH_CATALOG_LIMIT_NAME, error.maxBytes, error.actualBytes);
   }
 }
@@ -112,6 +125,7 @@ export function assertGraphCatalogWithinInternalLimit(graphs: readonly string[])
     assertGraphCatalogWithinResponseLimit(graphs, ceiling);
   } catch (error) {
     if (!isStoreResponseTooLargeError(error)) throw error;
+    recordStoreInternalLimit(STORE_GRAPH_CATALOG_LIMIT_NAME);
     throw new StoreInternalLimitError(STORE_GRAPH_CATALOG_LIMIT_NAME, ceiling, error.actualBytes);
   }
 }
@@ -119,5 +133,7 @@ export function assertGraphCatalogWithinInternalLimit(graphs: readonly string[])
 /** The same bound for a catalog whose size is already measured. */
 export function assertMeasuredGraphCatalogWithinInternalLimit(bytes: number): void {
   const ceiling = storeGraphCatalogMaxBytes();
-  if (bytes > ceiling) throw new StoreInternalLimitError(STORE_GRAPH_CATALOG_LIMIT_NAME, ceiling, bytes);
+  if (bytes <= ceiling) return;
+  recordStoreInternalLimit(STORE_GRAPH_CATALOG_LIMIT_NAME);
+  throw new StoreInternalLimitError(STORE_GRAPH_CATALOG_LIMIT_NAME, ceiling, bytes);
 }
