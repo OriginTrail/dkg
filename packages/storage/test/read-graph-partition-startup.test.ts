@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
 import { createTripleStore, OxigraphStore, type TripleStore } from '../src/index.js';
 import { readGraphPartitionMaintenanceStore, storeMayHoldReadGraphPartitions } from '../src/read-graph-partition-store.js';
@@ -66,19 +66,24 @@ describe('marking read graphs dirty at start', () => {
     const store = await storeWithRows(row(VM, 'ready', 5), row(SWM, 'dirty', 9), row(CODE, 'building', 3));
     const dir = await dataDir();
     expect(storeMayHoldReadGraphPartitions(store)).toBe(false);
-    expect(await markReadGraphsDirtyAtStart(store, { dataDir: dir })).toBe(2);
+    const log = vi.fn();
+    expect(await markReadGraphsDirtyAtStart(store, { dataDir: dir, log })).toBe(2);
+    expect(log.mock.calls).toEqual([['Marked 2 read graph(s) dirty: this release does not maintain read graphs']]);
     expect(mayHoldReadGraphPartitions(dir)).toBe(true);
     expect(storeMayHoldReadGraphPartitions(store)).toBe(true);
     const after = await rows(store);
     expect(after.damaged).toEqual([]);
     expect(after.rows.sort(byGraph)).toEqual([row(VM, 'dirty', 6), row(SWM, 'dirty', 9), row(CODE, 'dirty', 4)].sort(byGraph));
-    expect(await markReadGraphsDirtyAtStart(store, { dataDir: dir })).toBe(0);
+    expect(await markReadGraphsDirtyAtStart(store, { dataDir: dir, log })).toBe(0);
+    expect(log).toHaveBeenCalledTimes(1);
   });
 
   it('changes nothing and notes nothing on a store without read-graph state', async () => {
     const store = await storeWithRows();
     const dir = await dataDir();
-    expect(await markReadGraphsDirtyAtStart(store, { dataDir: dir })).toBe(0);
+    const log = vi.fn();
+    expect(await markReadGraphsDirtyAtStart(store, { dataDir: dir, log })).toBe(0);
+    expect(log).not.toHaveBeenCalled();
     expect(mayHoldReadGraphPartitions(dir)).toBe(false);
     expect(storeMayHoldReadGraphPartitions(store)).toBe(false);
   });

@@ -1,11 +1,29 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MemoryLayer, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
-import { GraphManager, GraphSetIndexStore, noteStoreMayHoldReadGraphPartitions, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  CURRENT_READ_GRAPH_VERSIONS,
+  GraphManager,
+  GraphSetIndexStore,
+  mayHoldReadGraphPartitions,
+  noteStoreMayHoldReadGraphPartitions,
+  OxigraphStore,
+  OxigraphWorkerStore,
+  parseReadGraphStateRows,
+  readGraphStateCompareAndSet,
+  readGraphStateRowsQuery,
+  storeMayHoldReadGraphPartitions,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/internal/context-graph-cache-invalidating-store.js';
 import { createResponderGraphListMemo } from '../src/sync/responder/graph-plan.js';
 import { isLegacySyncGraphCandidateV1 } from '../src/sync/legacy-sync-graph-candidate.js';
 import { canReadUnscopedQuery } from '../src/unscoped-query-admission.js';
+import { DKGAgent } from '../src/index.js';
 
 // Read graphs are node-local derived data. Every surface that enumerates a
 // store must answer the same with and without them.
@@ -109,6 +127,38 @@ describe('surfaces that enumerate the store, with read graphs planted', () => {
       for (const [sparql, options] of queries) {
         expect(await engine.query(sparql, options), sparql).toEqual(await reference.query(sparql, options));
       }
+    }
+  });
+});
+
+describe('an agent opened on a store that holds read graphs', () => {
+  it('marks them dirty and leaves them out of unscoped queries, whoever opens it', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-agent-read-graphs-'));
+    const readGraph = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory });
+    try {
+      // What a release that maintains read graphs leaves in the default store of a data directory.
+      const previous = new OxigraphWorkerStore(join(dataDir, 'store.nq'));
+      await previous.insert([...MEMBERS, row(readGraph, 'urn:a')]);
+      await previous.update!(readGraphStateCompareAndSet(undefined, { readGraph, state: 'ready', generation: 5, ...CURRENT_READ_GRAPH_VERSIONS }));
+      await previous.flush?.();
+      await previous.close();
+      const agent = await DKGAgent.create({ name: 'ReadGraphStartBot', dataDir, listenHost: '127.0.0.1' });
+      try {
+        const state = await agent.store.query(readGraphStateRowsQuery());
+        const { rows } = parseReadGraphStateRows(state.type === 'bindings' ? state.bindings : []);
+        expect(rows.map(({ state: rowState, generation }) => [rowState, generation])).toEqual([['dirty', 6]]);
+        expect(storeMayHoldReadGraphPartitions(agent.store)).toBe(true);
+        expect(mayHoldReadGraphPartitions(dataDir)).toBe(true);
+        const graphs = await new DKGQueryEngine(agent.store).query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
+        expect(graphs.bindings.map(binding => binding.g)).toEqual(expect.arrayContaining([LEGACY, `${ROOT}/_read/stray`]));
+        expect(graphs.bindings.map(binding => binding.g)).not.toContain(readGraph);
+        expect(graphs.bindings.map(binding => binding.g)).not.toContain(readGraphStateGraphIri(CG));
+      } finally {
+        await agent.stop().catch(() => {});
+        await agent.store.close().catch(() => {});
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
     }
   });
 });

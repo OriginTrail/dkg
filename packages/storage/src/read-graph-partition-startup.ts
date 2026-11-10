@@ -12,11 +12,12 @@ import type { UpdateOptions, TripleStore } from './triple-store.js';
  * partitions, for the rollback, and sends the state module's mark-all-dirty
  * update, one request, to the store below the partition guard. Rows found, or
  * a note left by an interrupted drop, also mark the store for this process as
- * one that may hold partitions. Returns how many rows were not dirty before.
+ * one that may hold partitions. Returns how many rows were not dirty before,
+ * and reports a non-zero count through `log`.
  */
 export async function markReadGraphsDirtyAtStart(
   store: TripleStore,
-  options: { readonly dataDir?: string; readonly signal?: AbortSignal } = {},
+  options: { readonly dataDir?: string; readonly signal?: AbortSignal; readonly log?: (message: string) => void } = {},
 ): Promise<number> {
   const target = readGraphPartitionMaintenanceStore(store);
   const storeOptions: UpdateOptions = { signal: options.signal, priority: 'background', source: 'storage.readGraphStartup' };
@@ -33,5 +34,6 @@ export async function markReadGraphsDirtyAtStart(
   if (notDirty === 0) return 0;
   if (!target.update) throw new Error('This store cannot mark its read graphs dirty: it has no update()');
   await target.update(readGraphStateMarkAllDirty(), storeOptions);
+  options.log?.(`Marked ${notDirty} read graph(s) dirty: this release does not maintain read graphs`);
   return notDirty;
 }
