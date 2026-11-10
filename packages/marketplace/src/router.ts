@@ -55,12 +55,14 @@ export const QUOTES_PER_PICK = 12;
 /** Whether something is so of a seller, as far as a pick knows. */
 type Known = 'yes' | 'no' | 'unknown';
 
-/** What a pick knows of one seller: whether it can serve the call now (at its quoted price), and whether it takes tools. */
-interface Outcome {
-  serves: Known;
-  tools: Known;
-  pricePerUnit?: bigint;
-}
+/**
+ * What a pick knows of one seller: whether it can serve the call now, and whether it takes tools. One that serves has
+ * a quote, which says its price and whether it takes tools; of one that does not, or one not read, only what is known
+ * of its tools matters, for why there is no route.
+ */
+type Outcome =
+  | { serves: 'yes'; tools: 'yes' | 'no'; pricePerUnit: bigint }
+  | { serves: 'no' | 'unknown'; tools: Known };
 
 /** A seller the pick did not read: nothing is known of it. */
 const UNREAD: Outcome = { serves: 'unknown', tools: 'unknown' };
@@ -163,7 +165,7 @@ export class Router {
       outcomes.push(outcome);
       if (outcome.serves === 'yes' && (!needs.tools || outcome.tools === 'yes')) {
         this.sticky.set(serviceId, offer.seller);
-        return { route: { seller: offer.seller, peerId: offer.peerId, pricePerUnit: outcome.pricePerUnit! } };
+        return { route: { seller: offer.seller, peerId: offer.peerId, pricePerUnit: outcome.pricePerUnit } };
       }
       // One that serves but takes no tools uses up no place: a call with tools reads on for one that does.
       if (outcome.serves !== 'yes') places += 1;

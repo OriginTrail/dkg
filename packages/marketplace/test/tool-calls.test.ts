@@ -160,6 +160,26 @@ describe('the wire, with tools', () => {
 describe('access keys', () => {
   const SCOPES = { label: 'agent', budget: 100n, services: null, rps: 5, expiresAt: null };
 
+  it('made at once, with secrets that begin alike, get ids of their own: each kept with its scopes, and each a key after a reload', async () => {
+    // The first two secrets share their first 8 bytes, so their ids would be one; the third draw is another.
+    const alike = (tail: number) => Buffer.concat([Buffer.alloc(8, 0xaa), Buffer.alloc(16, tail)]);
+    const draws = [alike(1), alike(2), Buffer.alloc(24, 0xbb)];
+    const keys = new AccessKeys(dir, undefined, () => draws.shift()!);
+    const [a, b] = await Promise.all([
+      keys.make({ ...SCOPES, label: 'agent-a', budget: 100n }, 0),
+      keys.make({ ...SCOPES, label: 'agent-b', budget: 200n }, 0),
+    ]);
+    expect(new Set([a.key.keyId, b.key.keyId])).toEqual(new Set([`dkgmk_${'aa'.repeat(8)}`, `dkgmk_${'bb'.repeat(8)}`]));
+    expect(a.key).toMatchObject({ label: 'agent-a', budget: '100' });
+    expect(b.key).toMatchObject({ label: 'agent-b', budget: '200' });
+    for (const made of [a, b]) expect(await keys.check(made.secret, 1)).toMatchObject({ ok: true, key: { keyId: made.key.keyId } });
+    const reloaded = new AccessKeys(dir);
+    expect(await reloaded.list()).toHaveLength(2);
+    for (const made of [a, b]) {
+      expect(await reloaded.check(made.secret, 1)).toMatchObject({ ok: true, key: { keyId: made.key.keyId, label: made.key.label, budget: made.key.budget } });
+    }
+  });
+
   it('have 64-bit ids, and a key whose id is taken is made again', async () => {
     const draws = [Buffer.alloc(24, 1), Buffer.alloc(24, 1), Buffer.alloc(24, 2)];
     const keys = new AccessKeys(dir, undefined, () => draws.shift()!);
@@ -213,14 +233,21 @@ describe('the OpenAI-compatible backend, with tools', () => {
   });
   afterEach(async () => { await new Promise((resolve) => server.close(resolve)); });
 
-  it('sends the tools, tool_choice and parallel_tool_calls, and reads the tool calls back', async () => {
+  it('sends the tools, tool_choice and parallel_tool_calls, a false one too, and reads the tool calls back', async () => {
     const backend = connectorOf({ kind: 'openai', baseUrl: base, model: 'test-model' });
-    const body = inferenceBodyFromWire({ messages: TURN, max_tokens: 7, tools: TOOLS, tool_choice: 'auto', parallel_tool_calls: false });
-    expect(await backend.complete({ messages: body.messages, maxTokens: 7, tools: body.tools, toolChoice: 'auto', parallelToolCalls: false }))
-      .toEqual({ content: null, tool_calls: CALLS, promptTokens: 40, completionTokens: 9 });
+    // The call's body as the wire decoded it, its output limit as `maxTokens`: what the seller asks a backend.
+    const { max_tokens: _limit, ...body } = inferenceBodyFromWire({ messages: TURN, max_tokens: 7, tools: TOOLS, tool_choice: 'auto', parallel_tool_calls: false });
+    expect(await backend.complete({ ...body, maxTokens: 7 })).toEqual({ content: null, tool_calls: CALLS, promptTokens: 40, completionTokens: 9 });
     expect(seen).toEqual({
       model: 'test-model', messages: TURN, max_tokens: 7, temperature: 0, stream: false, tools: TOOLS, tool_choice: 'auto', parallel_tool_calls: false,
     });
+  });
+
+  it('sends no tool options with no tools, whoever asks it', async () => {
+    reply = { choices: [{ message: { role: 'assistant', content: 'text' } }], usage: { prompt_tokens: 3, completion_tokens: 2 } };
+    const backend = connectorOf({ kind: 'openai', baseUrl: base, model: 'test-model' });
+    await backend.complete({ messages: [{ role: 'user', content: 'q' }], maxTokens: 7, tool_choice: 'auto', parallel_tool_calls: false });
+    expect(Object.keys(seen!)).toEqual(['model', 'messages', 'max_tokens', 'temperature', 'stream']);
   });
 
   it('sends a call without tools as before, and says when the backend stopped at the length', async () => {
@@ -318,7 +345,7 @@ describe('a call with tools through the gateway', () => {
     expect(answer.status).toBe(200);
     expect(body(answer).choices).toEqual([{ index: 0, message: { role: 'assistant', content: null, tool_calls: CALLS }, finish_reason: 'tool_calls' }]);
     expect(body(answer).usage).toEqual({ prompt_tokens: 40, completion_tokens: 9, total_tokens: 49 });
-    expect(seen[0]).toMatchObject({ tools: TOOLS, toolChoice: 'auto', parallelToolCalls: false });
+    expect(seen[0]).toEqual({ messages: [QUESTION], maxTokens: 20, tools: TOOLS, tool_choice: 'auto', parallel_tool_calls: false });
     // The seller's ledger keeps the calls and the split, which a repeat of the call is answered with.
     const ledger = await readFile(join(dir, 'seller', 'seller-ledger.jsonl'), 'utf8');
     expect(ledger).toContain('"tool_calls":[{"id":"call_1"');

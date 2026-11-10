@@ -434,15 +434,9 @@ export class Seller {
     const { requestDigest, unitCap } = at;
     let completion;
     try {
-      const { tools, tool_choice: toolChoice, parallel_tool_calls: parallelToolCalls } = call.body;
-      completion = await service.connector.complete({
-        messages: call.body.messages,
-        // No more output than the cap pays for once the input takes the most it could.
-        maxTokens: Number(minBig(BigInt(call.body.max_tokens), at.room)),
-        ...(tools ? { tools } : {}),
-        ...(tools && toolChoice !== undefined ? { toolChoice } : {}),
-        ...(tools && parallelToolCalls !== undefined ? { parallelToolCalls } : {}),
-      });
+      const { max_tokens: maxTokens, ...body } = call.body;
+      // No more output than the cap pays for once the input takes the most it could.
+      completion = await service.connector.complete({ ...body, maxTokens: Number(minBig(BigInt(maxTokens), at.room)) });
       this.backends.set(service.serviceId, 'up');
     } catch (err) {
       this.backends.set(service.serviceId, 'down');

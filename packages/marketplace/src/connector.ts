@@ -18,7 +18,7 @@
  * temperature of 0, as in 10.1.0. A backend that refuses a call has its own
  * words for why in the error and the seller's log, cut short, the key never.
  */
-import { WireError, answerFromWire, type Answer, type ChatMessage, type FinishReason, type ToolChoice, type ToolSpec } from './wire.js';
+import { WireError, answerFromWire, type Answer, type FinishReason, type InferenceBody } from './wire.js';
 
 /**
  * A backend's answer (`Answer`: text, or the tools the model called, with text or none), and what it counted. Its
@@ -30,13 +30,12 @@ export type Completion = Answer & {
   completionTokens: number;
 };
 
-export interface CompletionCall {
-  messages: ChatMessage[];
-  maxTokens: number;
-  tools?: ToolSpec[];
-  toolChoice?: ToolChoice;
-  parallelToolCalls?: boolean;
-}
+/**
+ * A call as its backend is asked it: the call's body (`InferenceBody`), its tool options named as there, and its
+ * output limit as `maxTokens`, which the seller cuts to what the request pays for and the backend gets in its own field
+ * (`maxTokensField`). Tool options without tools are not sent.
+ */
+export type CompletionCall = Omit<InferenceBody, 'max_tokens'> & { maxTokens: number };
 
 export interface Connector {
   readonly kind: 'openai' | 'llamacpp';
@@ -123,7 +122,7 @@ export function connectorOf(settings: ConnectorSettings): Connector {
   const shape = requestShapeOf(settings);
   return {
     kind: settings.kind,
-    async complete({ messages, maxTokens, tools, toolChoice, parallelToolCalls }) {
+    async complete({ messages, maxTokens, tools, tool_choice, parallel_tool_calls }) {
       const key = settings.apiKeyEnv ? process.env[settings.apiKeyEnv] : undefined;
       if (settings.apiKeyEnv && !key) throw new UpstreamError(`${settings.apiKeyEnv} is not set`);
       let res: Response;
@@ -137,8 +136,8 @@ export function connectorOf(settings: ConnectorSettings): Connector {
             stream: false,
             ...(tools ? {
               tools,
-              ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
-              ...(parallelToolCalls !== undefined ? { parallel_tool_calls: parallelToolCalls } : {}),
+              ...(tool_choice !== undefined ? { tool_choice } : {}),
+              ...(parallel_tool_calls !== undefined ? { parallel_tool_calls } : {}),
             } : {}),
           }),
           signal: AbortSignal.timeout(settings.timeoutMs ?? 60_000),
