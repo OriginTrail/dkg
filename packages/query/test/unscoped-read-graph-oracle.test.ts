@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { MemoryLayer, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
+import { MemoryLayer, READ_GRAPH_SEGMENT, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
 import {
   BlazegraphNamespaceManager, BlazegraphStore, blazegraphNamespaceApiUrlFromSparqlEndpoint,
   noteStoreMayHoldReadGraphPartitions, OxigraphStore, READ_GRAPH_STATE_PREDICATES,
@@ -36,6 +36,8 @@ const BASE: Quad[] = [
   q(G1, 'urn:s', 'urn:p', 'urn:x'), q(G1, 'urn:a', 'urn:b', 'urn:c'), q(G1, 'urn:x', 'urn:r', 'urn:z'), q(G1, 'urn:s', 'urn:val', INT(5)),
   // A subject whose only urn:q match is left in a read graph (STALE): it keeps the negative shapes honest.
   q(G1, 'urn:v', 'urn:p', 'urn:x'),
+  // Inverse links to urn:a: one through a predicate a negated set lets through, one through one it excludes.
+  q(G1, 'urn:b', 'urn:r', 'urn:a'), q(G1, 'urn:e', 'urn:q', 'urn:a'),
   q(G2, 'urn:s', 'urn:q', 'urn:y'), q(G2, 'urn:a', 'urn:b', 'urn:c'), q(G2, 'urn:s', 'urn:val', INT(5)),
   q(GS, 'urn:s', 'urn:t', 'urn:w'), q(GS, 'urn:a', 'urn:b', 'urn:c'),
   q(META, 'urn:ka1', 'urn:status', '"confirmed"'), q(META, 'urn:ka1', 'urn:points', RCG),
@@ -60,7 +62,8 @@ const stateRow = (stateGraph: string, readGraph: string, state: string, generati
 ];
 const STATE = [...stateRow(ST, RCG, 'ready', 3), ...stateRow(ST, RSUB, 'ready', 1), ...stateRow(ST2, R2, 'dirty', 7)];
 // Triples an unmaintained writer deleted from H1 while R2 was dirty: they are left only in R2.
-const STALE = [q(R2, 'urn:gone', 'urn:p', 'urn:x'), q(R2, 'urn:gone', 'urn:val', INT(5)), q(R2, 'urn:v', 'urn:q', 'urn:hidden')];
+const STALE = [q(R2, 'urn:gone', 'urn:p', 'urn:x'), q(R2, 'urn:gone', 'urn:val', INT(5)), q(R2, 'urn:v', 'urn:q', 'urn:hidden'),
+  q(R2, 'urn:h', 'urn:r', 'urn:a')];
 const VARIANTS = {
   copies: [...BASE, ...COPIES],
   'copies and state': [...BASE, ...COPIES, ...STATE],
@@ -140,12 +143,13 @@ const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
   ['M1 MINUS over GRAPH', 'graph', 'SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } MINUS { GRAPH ?h { ?s <urn:q> ?y } } }'],
   ['Y1 EXISTS in the projection, outside GRAPH', 'default', 'SELECT ?s (EXISTS { <urn:gone> <urn:p> <urn:x> } AS ?stale) WHERE { GRAPH ?g { ?s <urn:p> <urn:x> } }'],
   ['U1 UNION of GRAPH', 'graph', 'SELECT ?g ?s WHERE { { GRAPH ?g { ?s <urn:p> ?o } } UNION { GRAPH ?g { ?s <urn:t> ?o } } }'],
-  ['B1 a computed graph IRI', 'graph', `SELECT ?s WHERE { BIND(IRI(CONCAT("${ROOT}/_", "read/cg/_verifiable_memory")) AS ?g) GRAPH ?g { ?s ?p ?o } }`],
+  ['B1 a computed graph IRI', 'graph', `SELECT ?s WHERE { BIND(IRI(CONCAT("${ROOT}/${READ_GRAPH_SEGMENT.slice(0, 2)}", "${READ_GRAPH_SEGMENT.slice(2)}/cg/_verifiable_memory")) AS ?g) GRAPH ?g { ?s ?p ?o } }`],
   ['B2 a graph IRI read from data', 'graph', `SELECT ?o WHERE { GRAPH <${META}> { ?k <urn:points> ?g } GRAPH ?g { ?s ?p ?o } }`],
   ['Q1 ASK over GRAPH', 'graph', 'ASK { GRAPH ?g { <urn:gone> <urn:p> <urn:x> } }'],
   ['E1 graphs by an empty group', 'graph-group', 'SELECT ?g WHERE { GRAPH ?g { } }'],
   ['H1 a hint inside GRAPH', 'hint', `${HINTS} SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o . hint:Prior hint:runFirst "true" } }`],
-  ['K1 a read graph named through BASE and an empty prefix', 'base', `BASE <${ROOT}/_read#unused> PREFIX r: <> SELECT ?s ?p ?o WHERE { GRAPH r:\\/state { ?s ?p ?o } }`],
+  ['K1 a read graph named through BASE and an empty prefix', 'base', `BASE <${ROOT}/${READ_GRAPH_SEGMENT}#unused> PREFIX r: <> SELECT ?s ?p ?o WHERE { GRAPH r:\\/state { ?s ?p ?o } }`],
+  ['P5 a repeated path in FILTER(EXISTS) in GRAPH', 'graph-path', 'SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:p> <urn:x> FILTER(EXISTS { ?s <urn:p>+ ?y }) } }'],
   ['F1 FROM NAMED with GRAPH ?g', 'dataset', `SELECT ?g ?s FROM NAMED <${G1}> WHERE { GRAPH ?g { ?s ?p ?o } }`],
   ['C4 CONSTRUCT of every quad', 'graph', 'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }'],
   ['X6 DESCRIBE over GRAPH', 'describe-graph', 'DESCRIBE ?s WHERE { GRAPH ?g { ?s <urn:p> <urn:x> } }'],
@@ -156,6 +160,7 @@ const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
   ['X10 DESCRIBE an unbound variable', 'describe', 'DESCRIBE ?s WHERE { VALUES ?s { UNDEF } }'],
   ['X11 DESCRIBE a variable bound in some solutions', 'describe', 'DESCRIBE ?s WHERE { { BIND(<urn:a> AS ?s) } UNION { BIND(1 AS ?x) } }'],
   ['D42 COUNT(*) grouped, aggregate first', 'default', 'SELECT (COUNT(*) AS ?n) ?s WHERE { ?s ?p ?o } GROUP BY ?s'],
+  ['D43 a negated set with an inverse member', 'default', 'SELECT ?o WHERE { <urn:a> !(<urn:p>|^<urn:q>) ?o }'],
   ['D27 two intermediates of a sequence path', 'default', 'SELECT ?s ?z WHERE { ?s <urn:p>/<urn:r> ?z }'],
   ['D28 the same pair by two predicates of an alternative', 'default', 'SELECT ?s ?o WHERE { ?s <urn:k1>|<urn:k2> ?o }'],
   ['D29 the same pair by two predicates of a negated set', 'default', 'SELECT ?s ?o WHERE { ?s !<urn:none> ?o FILTER(?o = <urn:o2>) }'],

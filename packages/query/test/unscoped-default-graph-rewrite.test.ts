@@ -38,7 +38,9 @@ describe('patterns outside GRAPH', () => {
       + `?s <urn:p> ?_step . ${exists('?_holder', '?s <urn:p> ?_step')} ?z <urn:r> ?_step . ${exists('?_holder0', '?z <urn:r> ?_step')} }`);
     expect(hidden('SELECT ?s WHERE { ?s <urn:p>|<urn:q> ?o }')).toBe('SELECT ?s WHERE { '
       + `{ ?s <urn:p> ?o . ${exists('?_holder', '?s <urn:p> ?o')} } UNION { ?s <urn:q> ?o . ${exists('?_holder0', '?s <urn:q> ?o')} } }`);
-    expect(hidden('SELECT ?s WHERE { ?s !(<urn:p>|^<urn:q>) ?o }')).toContain('FILTER(?_verb NOT IN (<urn:p>))');
+    expect(hidden('SELECT ?s WHERE { ?s !(<urn:p>|^<urn:q>) ?o }')).toBe('SELECT ?s WHERE { '
+      + `{ ?s ?_verb ?o . FILTER(?_verb NOT IN (<urn:p>)) ${exists('?_holder', '?s ?_verb ?o')} } UNION `
+      + `{ ?o ?_verb0 ?s . FILTER(?_verb0 NOT IN (<urn:q>)) ${exists('?_holder0', '?o ?_verb0 ?s')} } }`);
   });
 
   it('keep counting stored quads in the fast counting form', () => {
@@ -100,6 +102,13 @@ describe('patterns outside GRAPH', () => {
   it('reads an escaped a as rdf:type and refuses its repetition', () => {
     expect(hidden('SELECT ?s WHERE { ?s \\u0061 <urn:T> }')).toContain('?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <urn:T>');
     expect(() => hideReadGraphPartitions(scope('SELECT ?s WHERE { ?s \\u0061* ?o }'))).toThrow(UnscopedReadGraphQueryError);
+  });
+
+  it('keeps the graph filter when a GRAPH clause touches the patterns after it', () => {
+    const padded = `SELECT ?secret WHERE { GRAPH ?g { <urn:s> <urn:secret> ?secret }<urn:s> <urn:p> ?o .${' '.repeat(300)}<urn:s> <urn:q> ?z }`;
+    const text = hidden(padded);
+    expect(text).toContain(`GRAPH ?g { <urn:s> <urn:secret> ?secret } ${readGraphPartitionExclusionFilter('?g')}<urn:s> <urn:p> ?o .`);
+    expect(text).toContain(exists('?_holder0', '<urn:s> <urn:q> ?z'));
   });
 
   it('lets SELECT * through when nothing new comes into scope', () => {
