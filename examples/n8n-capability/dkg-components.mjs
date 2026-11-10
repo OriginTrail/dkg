@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { requireDkgOperation, validateDkgProfile } from './dkg-profile.mjs';
 import { dkgComponentOperations, componentFailure as fail } from './dkg-component-operations.mjs';
 import { migrateDkgInvocationMetadata } from './dkg-component-schema.mjs';
+import { createDkgCallJournal } from './dkg-call-journal.mjs';
 
 export const isDkg = (id) => ["dkg-read", "dkg-write", "invoke-dkg-program"].includes(id);
 const hash = (v) =>
@@ -48,24 +49,18 @@ export function dkgComponentStore(db, profile = null) {
     if (!inputSnapshots.has(operation.loadInputs)) inputSnapshots.set(operation.loadInputs, operation.loadInputs?.() ?? []);
     operationInputs[id] = inputSnapshots.get(operation.loadInputs);
   }
-  db.exec(`CREATE TABLE IF NOT EXISTS dkg_component_runs(id TEXT PRIMARY KEY, ka_ref TEXT NOT NULL, source_hash TEXT NOT NULL, input TEXT NOT NULL, expires INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS dkg_component_calls(id TEXT PRIMARY KEY, request_hash TEXT NOT NULL, result TEXT, response TEXT);`);
+  db.exec(`CREATE TABLE IF NOT EXISTS dkg_component_runs(id TEXT PRIMARY KEY, ka_ref TEXT NOT NULL, source_hash TEXT NOT NULL, input TEXT NOT NULL, expires INTEGER NOT NULL);`);
   migrateDkgInvocationMetadata(db);
-  db.exec('CREATE TABLE IF NOT EXISTS dkg_component_writes (id TEXT PRIMARY KEY, request TEXT NOT NULL, evidence TEXT NOT NULL, receipt TEXT)');
+  const calls = createDkgCallJournal(db);
   db.exec('CREATE TABLE IF NOT EXISTS dkg_component_native_executions (id TEXT PRIMARY KEY, effect_id TEXT NOT NULL, workflow_id TEXT NOT NULL, execution_id TEXT NOT NULL)');
-  // Retain operation evidence in result; only response is returned to native callers.
-  // Older completed calls acquire a response lazily after the same authority checks.
-  if (!db.prepare('PRAGMA table_info(dkg_component_calls)').all().some(column => column.name === 'response'))
-    db.exec('ALTER TABLE dkg_component_calls ADD COLUMN response TEXT');
-  const operations = dkgComponentOperations({ db, profile, assertNoPendingWrite });
+  const operations = dkgComponentOperations({ profile });
   const active = new Map();
   function assertNoPendingWrite(workflow, invocationId) {
     const node = workflow.definition.nodes.find(n => n.componentId === 'dkg-write');
     if (!node) return;
-    const pending = db.prepare(`SELECT r.id FROM dkg_component_runs r JOIN dkg_component_calls c ON c.id=r.id||':'||?
-      WHERE r.ka_ref=? AND r.id<>? AND c.response IS NULL AND c.result IS NULL LIMIT 1`).get(node.id, workflow.kaRef, invocationId);
+    const pending = calls.pendingWrite(workflow.kaRef, invocationId, node.id);
     if (pending) throw Object.assign(fail('Reconcile the previous DKG write before starting another invocation.'),
-      { code: 'DKG_WRITE_PENDING', invocationId: pending.id });
+      { code: 'DKG_WRITE_PENDING', invocationId: pending });
   }
   // Adapters resolve their wire identities. The legacy source_hash column stores
   // the explicit revision digest for either protocol; journal keys stay unchanged.
@@ -171,12 +166,7 @@ export function dkgComponentStore(db, profile = null) {
     const capability = requireDkgOperation(profile, node.componentId);
     capability.validateNode(node, rows, input);
     const key = id + ":" + node.id, requestHash = hash(value);
-    const readPrior = () => {
-      const prior = db.prepare("SELECT * FROM dkg_component_calls WHERE id=?").get(key);
-      if (prior && prior.request_hash !== requestHash)
-        throw fail("This DKG step already belongs to different inputs or native execution.");
-      return prior;
-    };
+    const readPrior = () => calls.read(key, requestHash);
     const previous = readPrior();
     if (!isDeepStrictEqual(receivedInput, { invocationId: value.effectId, input }))
       throw fail('Native execution did not receive this invocation grant and its exact input.');
@@ -184,7 +174,7 @@ export function dkgComponentStore(db, profile = null) {
     // Block IDs cannot contain colons, but MCP run keys can. Only exact keys
     // from this pinned workflow are evidence of calls belonging to this run.
     if (!binding && definition.nodes.some(n => isDkg(n.componentId)
-      && db.prepare('SELECT 1 FROM dkg_component_calls WHERE id=?').get(id + ':' + n.id)))
+      && calls.read(id + ':' + n.id)))
       throw fail('Legacy DKG calls lack a verified native execution binding; operator reconciliation required.');
     db.prepare('INSERT OR IGNORE INTO dkg_component_native_executions VALUES (?,?,?,?)').run(id, value.effectId, nativeId, value.executionId);
     const bound = db.prepare('SELECT * FROM dkg_component_native_executions WHERE id=?').get(id);
@@ -213,28 +203,28 @@ export function dkgComponentStore(db, profile = null) {
       assertCurrent?.();
       return capability.transport(request, options);
     };
-    const context = { node, rows, id, key, input, value, workflow, actor, prior, dispatch };
-    if (prior?.result && !prior.response) {
-      const response = operation.legacyResponse(context);
-      db.prepare('UPDATE dkg_component_calls SET response=? WHERE id=?').run(JSON.stringify(response), key);
-      prior.response = JSON.stringify(response);
-    }
-    if (prior?.response) return JSON.parse(prior.response);
-    const pending = (async () => {
-      let execute;
-      db.exec('SAVEPOINT dkg_call_pending');
-      try {
-        db.prepare('INSERT OR IGNORE INTO dkg_component_calls (id,request_hash,result,response) VALUES (?,?,NULL,NULL)').run(key, requestHash);
-        execute = operation.prepare(context);
-        db.exec('RELEASE dkg_call_pending');
-      } catch (error) {
-        db.exec('ROLLBACK TO dkg_call_pending'); db.exec('RELEASE dkg_call_pending'); throw error;
+    const context = { node, rows, id, input, value, workflow, actor, dispatch,
+      completedResult: blockId => calls.completedResult(id + ':' + blockId) };
+    function completedResponse(call) {
+      if (call?.result !== null && call?.result !== undefined && call.response === null) {
+        call.response = operation.legacyResponse({ ...context, prior: call });
+        calls.adoptResponse(key, call.response);
       }
-      const { result, response } = await execute();
+      return call?.response ?? null;
+    }
+    const replay = completedResponse(prior);
+    if (replay !== null) return replay;
+    const pending = (async () => {
+      const { call, reconcile } = calls.prepare(key, requestHash, value, reconcile => {
+        if (!reconcile && node.componentId === 'dkg-write') assertNoPendingWrite(workflow, id);
+        return operation.prepare(context, reconcile);
+      });
+      const replay = completedResponse(call);
+      if (replay !== null) return replay;
+      const { result, response } = await operation.execute(context, call.prepared, { reconcile });
       const assertCurrent = await authorize(true);
       assertCurrent?.();
-      // Evidence and the exact outward response become complete atomically.
-      db.prepare('UPDATE dkg_component_calls SET result=?,response=? WHERE id=?').run(JSON.stringify(result), JSON.stringify(response), key);
+      calls.complete(key, result, response);
       return response;
     })();
     active.set(key, pending);
@@ -248,17 +238,16 @@ export function dkgComponentStore(db, profile = null) {
     const node = workflow.definition.nodes.find(n => n.componentId === 'dkg-write');
     if (!node) return null;
     const key = invocationId + ':' + node.id;
-    const prior = db.prepare('SELECT * FROM dkg_component_calls WHERE id=?').get(key);
+    const prior = calls.read(key);
     if (!prior) return null;
-    const saved = db.prepare('SELECT * FROM dkg_component_writes WHERE id=?').get(key);
-    if (!saved) {
+    if (!prior.request || !prior.prepared) {
       if (prior.result) return null;
       throw Object.assign(fail('The legacy write has no saved request; operator reconciliation is required.'), { code: 'DKG_WRITE_PENDING', invocationId });
     }
-    const request = JSON.parse(saved.request);
-    if (hash(request) !== prior.request_hash || request.workflowId !== workflowId || request.executionId !== executionId)
+    const request = prior.request;
+    if (hash(request) !== prior.requestHash || request.workflowId !== workflowId || request.executionId !== executionId)
       throw fail('The saved write belongs to a different native execution.');
-    return { request, requestHash: prior.request_hash, pending: !prior.response && !prior.result };
+    return { request, requestHash: prior.requestHash, pending: !prior.response && !prior.result };
   }
   return { grant, call, writeRecovery };
 }

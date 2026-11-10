@@ -217,7 +217,7 @@ for (const scenario of [
     assert.deepEqual(await store.call(request('invoke', source.items), workflow, 'native'), result);
     if (scenario.reject) {
       await assert.rejects(store.call(request('write', result.items), workflow, 'native'), /verified Program output/);
-      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM dkg_component_writes').get().n, 0);
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM dkg_component_calls WHERE result IS NULL').get().n, 0);
       assert.deepEqual(calls, ['read', 'invoke']);
       return;
     }

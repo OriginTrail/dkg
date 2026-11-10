@@ -130,7 +130,6 @@ it('a completed parent rejects its first Write callback without journalling or d
       expect(await f.manager.programs.getApproval({ graphId: graph, operationIri: workflow.kaRef })).toEqual(approval);
       await expect(h.service.dkgComponent(h.controls.writeRequest)).rejects.toMatchObject({ code: 'PROGRAM_AUTHORITY_REVOKED' });
       expect(h.repository.db.prepare('SELECT 1 FROM dkg_component_calls WHERE id=?').get(writeKey)).toBeUndefined();
-      expect(h.repository.db.prepare('SELECT 1 FROM dkg_component_writes WHERE id=?').get(writeKey)).toBeUndefined();
       expect(h.effects).toEqual(['read']);
       expect(h.assets.size).toBe(0);
       expect(h.controls.dispatches).toBe(1);
@@ -180,7 +179,7 @@ it.each(['canceled', 'crashed'])('recovers a journalled Write after native %s wi
     expect(h.controls.allowCreates.filter(Boolean)).toEqual([true]);
     expect(h.controls.dispatches).toBe(1);
     const writeKey = invocation.invocationId + ':write';
-    const pending = h.repository.db.prepare('SELECT * FROM dkg_component_writes WHERE id=?').get(writeKey);
+    const pending = h.repository.db.prepare('SELECT * FROM dkg_component_calls WHERE id=?').get(writeKey);
     expect(h.repository.db.prepare('SELECT response FROM dkg_component_calls WHERE id=?').get(writeKey).response).toBeNull();
     await restartNode(f.target); h.reopen();
     h.controls.interrupted = false; h.controls.nodeUnavailable = false;
@@ -190,7 +189,7 @@ it.each(['canceled', 'crashed'])('recovers a journalled Write after native %s wi
       dkgRecovery: { status: 'confirmed', invocationId: invocation.invocationId, n8nExecutionId: '42' } });
     expect(result.executionIri).toBe('urn:sr:execution:' + invocation.invocationId);
     expect(JSON.parse(h.repository.db.prepare('SELECT response FROM dkg_component_calls WHERE id=?').get(writeKey).response)).toEqual(result.dkgRecovery.receipt);
-    expect(h.repository.db.prepare('SELECT request FROM dkg_component_writes WHERE id=?').get(writeKey).request).toBe(pending.request);
+    expect(h.repository.db.prepare('SELECT request FROM dkg_component_calls WHERE id=?').get(writeKey).request).toBe(pending.request);
     expect(h.controls.allowCreates.at(-1)).toBe(false);
     const transportCalls = h.effects.length;
     await restartNode(f.target); h.reopen();

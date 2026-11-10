@@ -106,22 +106,25 @@ test('write recovery retains its exact payload and refuses unjournalled legacy r
     const calculated = await store.call(request('invoke', source.items), workflow, 'native');
     const value = request('write', calculated.items);
     await assert.rejects(store.call(value, workflow, 'native'), { code: 'DKG_WRITE_PENDING' });
-    const saved = db.prepare('SELECT * FROM dkg_component_writes WHERE id=?').get(id + ':write');
+    const saved = db.prepare('SELECT * FROM dkg_component_calls WHERE id=?').get(id + ':write');
     assert.deepEqual(JSON.parse(saved.request), value);
-    assert.deepEqual({ ...JSON.parse(saved.evidence).payload, allowCreate: true }, calls.at(-1).payload);
-    assert.equal(saved.receipt, null);
+    assert.deepEqual({ ...JSON.parse(saved.prepared).payload, allowCreate: true }, calls.at(-1).payload);
+    assert.equal(saved.response, null);
     assert.throws(() => store.writeRecovery(workflow, id, 'native', '43'), /different native execution/);
-    db.prepare('DELETE FROM dkg_component_writes WHERE id=?').run(id + ':write');
+    db.prepare('UPDATE dkg_component_calls SET prepared=NULL WHERE id=?').run(id + ':write');
     assert.throws(() => store.writeRecovery(workflow, id, 'native', '42'), /legacy write has no saved request/);
     assert.throws(() => store.grant(workflow, '11223344-1234-4234-8234-123456789abd', input), { code: 'DKG_WRITE_PENDING' });
-    db.prepare('INSERT INTO dkg_component_writes VALUES (?,?,?,?)').run(saved.id, saved.request, saved.evidence, saved.receipt);
+    await assert.rejects(store.call(value, workflow, 'native'), /legacy write has no saved request/);
+    db.exec('CREATE TABLE dkg_component_writes (id TEXT PRIMARY KEY, request TEXT NOT NULL, evidence TEXT NOT NULL, receipt TEXT)');
+    db.prepare('INSERT INTO dkg_component_writes VALUES (?,?,?,NULL)').run(saved.id, saved.request, saved.prepared);
+    db.exec('ALTER TABLE dkg_component_calls DROP COLUMN request; ALTER TABLE dkg_component_calls DROP COLUMN prepared');
     scoped.evidence = () => { throw new Error('Recovery must not rebuild the write payload'); };
     // Upgrade an uncertain write from the old schema without allowing another create.
     db.exec('ALTER TABLE dkg_component_calls DROP COLUMN response');
     store = dkgComponentStore(db, transport(calls, true), [], scoped);
     const recovery = store.writeRecovery(workflow, id, 'native', '42');
     const receipt = await store.call(recovery.request, workflow, 'native');
-    assert.deepEqual(calls.at(-1).payload, { ...JSON.parse(saved.evidence).payload, allowCreate: false });
+    assert.deepEqual(calls.at(-1).payload, { ...JSON.parse(saved.prepared).payload, allowCreate: false });
     assert.deepEqual(JSON.parse(db.prepare('SELECT response FROM dkg_component_calls WHERE id=?').get(saved.id).response), receipt);
     assert.equal(store.writeRecovery(workflow, id, 'native', '42').pending, false);
   } finally { db.close(); }
@@ -264,7 +267,7 @@ test('completed Read, Invoke and Write replay exact journalled responses after r
       ...scoped, readItems: () => assert.fail('completed Read cannot be remapped'),
       evidence: () => assert.fail('completed Write cannot rebuild evidence'),
     });
-    db.exec("CREATE TRIGGER no_write_recompletion BEFORE UPDATE ON dkg_component_writes BEGIN SELECT RAISE(ABORT, 'completed Write must use its stored response'); END");
+    db.exec("CREATE TRIGGER no_write_recompletion BEFORE UPDATE ON dkg_component_calls BEGIN SELECT RAISE(ABORT, 'completed Write must use its stored response'); END");
     for (let i = 0; i < requests.length; i++) {
       assert.deepEqual(await store.call(requests[i], workflow, 'native'), responses[i]);
       assert.deepEqual(JSON.parse(db.prepare('SELECT response FROM dkg_component_calls WHERE id=?').get(id + ':' + requests[i].blockId).response), responses[i]);
@@ -285,7 +288,9 @@ test('older completed journals adopt responses without dispatch and consume the 
     const calculated = await store.call(request('invoke', source.items), workflow, 'native');
     const receipt = await store.call(request('write', calculated.items), workflow, 'native');
     receipt.items[0].historicalReceiptField = 'preserve original response';
-    db.prepare('UPDATE dkg_component_writes SET receipt=? WHERE id=?').run(JSON.stringify(receipt), id + ':write');
+    db.exec('CREATE TABLE dkg_component_writes (id TEXT PRIMARY KEY, request TEXT NOT NULL, evidence TEXT NOT NULL, receipt TEXT)');
+    db.prepare('INSERT INTO dkg_component_writes SELECT id,request,prepared,? FROM dkg_component_calls WHERE id=?').run(JSON.stringify(receipt), id + ':write');
+    db.exec('ALTER TABLE dkg_component_calls DROP COLUMN request; ALTER TABLE dkg_component_calls DROP COLUMN prepared');
     // Model the pre-response schema, including its operation-specific result column.
     if (db.prepare('PRAGMA table_info(dkg_component_calls)').all().some(c => c.name === 'response'))
       db.exec('ALTER TABLE dkg_component_calls DROP COLUMN response');
@@ -295,7 +300,6 @@ test('older completed journals adopt responses without dispatch and consume the 
       assert.deepEqual(await store.call(value, workflow, 'native'), response);
     assert.equal(store.writeRecovery(workflow, id, 'native', '42').pending, false);
     db.prepare('UPDATE dkg_component_calls SET response=NULL WHERE id=?').run(id + ':write');
-    db.prepare('UPDATE dkg_component_writes SET receipt=NULL WHERE id=?').run(id + ':write');
     await assert.rejects(store.call(request('write', calculated.items), workflow, 'native'), /legacy write has no saved receipt/);
     assert.deepEqual(calls.map(c => c.operation), ['read', 'invoke', 'write']);
   } finally { db.close(); }

@@ -178,7 +178,7 @@ test('overlapping identical Write callbacks share one pending transport and reje
     assert.equal(payload.allowCreate, true);
     const pending = db.prepare('SELECT * FROM dkg_component_calls WHERE id=?').get(id + ':write');
     assert.equal(pending.result, null); assert.equal(pending.response, null);
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM dkg_component_writes').get().n, 1);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM dkg_component_calls WHERE result IS NULL').get().n, 1);
   } finally { release.resolve(); results = await replies; }
   const [a, b] = results;
   assert.deepEqual(a, b);
@@ -255,7 +255,7 @@ test('changed Write rows awaiting authorization cannot inherit an active valid c
   assert.equal(writes, 1);
   assert.deepEqual(await store.call(valid, workflow, current, 'native1', received), response);
   assert.deepEqual(JSON.parse(db.prepare('SELECT response FROM dkg_component_calls WHERE id=?').get(id + ':write').response), response);
-  assert.deepEqual(JSON.parse(db.prepare('SELECT request FROM dkg_component_writes WHERE id=?').get(id + ':write').request), valid);
+  assert.deepEqual(JSON.parse(db.prepare('SELECT request FROM dkg_component_calls WHERE id=?').get(id + ':write').request), valid);
   assert.equal(writes, 1);
 });
 test("rejects ungranted, foreign scope, changed replay, and invented ERP before effects", async () => {
