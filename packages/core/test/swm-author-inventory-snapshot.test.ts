@@ -67,7 +67,17 @@ describe('owned SWM inventory snapshots', () => {
     }
     expect(() => codec.snapshotSwmAuthorInventoryRowsV1([row(2), row(1)])).toThrow();
     expect(() => codec.snapshotSwmAuthorInventoryRowsV1([row(1), { ...row(2), shareOperationId: 'share-1' }])).toThrow();
-    expect(() => codec.snapshotSwmAuthorInventoryRowsV1(Array.from({ length: codec.MAX_SWM_AUTHOR_INVENTORY_ROWS_V1 + 1 }))).toThrow();
+    let inspections = 0;
+    const oversized = new Proxy(Array.from({ length: codec.MAX_SWM_AUTHOR_INVENTORY_ROWS_V1 + 1 }), {
+      ownKeys() { inspections++; throw new Error('oversized entries inspected'); },
+    });
+    expect(() => codec.snapshotSwmAuthorInventoryRowsV1(oversized)).toThrowError(
+      expect.objectContaining({
+        code: 'swm-inventory-too-large',
+        message: '[swm-inventory-too-large] row set exceeds the v1 row limit',
+      }),
+    );
+    expect(inspections).toBe(0);
   });
 
   it('enforces the full byte bound when composing owned row encodings', () => {
