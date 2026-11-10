@@ -92,16 +92,9 @@ describe('the read-graph partition filter', () => {
   });
 });
 
-describe('unscoped queries the filter cannot keep out of read-graph partitions', () => {
+describe('unscoped queries the rewrite cannot keep out of read-graph partitions', () => {
   it.each([
-    ['a pattern outside GRAPH', 'SELECT ?s WHERE { ?s ?p ?o }'],
-    ['a pattern outside GRAPH in OPTIONAL', 'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } OPTIONAL { ?s ?q ?y } }'],
-    ['a pattern outside GRAPH in EXISTS', 'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } FILTER(EXISTS { ?s ?q ?y }) }'],
-    // The pattern check reads an unparenthesized FILTER EXISTS as reading outside GRAPH.
-    ['FILTER NOT EXISTS without parentheses', 'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } FILTER NOT EXISTS { GRAPH ?h { ?s ?q ?y } } }'],
-    ['a pattern outside GRAPH in a sub-select', 'SELECT ?n WHERE { { SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o } } }'],
-    ['the short CONSTRUCT', 'CONSTRUCT WHERE { ?s ?p ?o }'],
-    ['DESCRIBE without WHERE', 'DESCRIBE <urn:a>'],
+    ['a short CONSTRUCT with a blank node', 'CONSTRUCT WHERE { ?s <urn:p> [] }'],
     ['DESCRIBE over GRAPH', 'DESCRIBE ?s WHERE { GRAPH ?g { ?s ?p ?o } }'],
     ['FROM', 'SELECT ?s FROM <urn:g> WHERE { GRAPH ?g { ?s ?p ?o } }'],
     ['FROM NAMED', 'SELECT ?s FROM NAMED <urn:g> WHERE { GRAPH ?g { ?s ?p ?o } }'],
@@ -185,12 +178,19 @@ describe('DKGQueryEngine on a store that cannot restrict its dataset', () => {
     expect(sorted(answer)).toEqual(sorted(await new DKGQueryEngine(oracle).query(query)));
   });
 
-  it('refuses what the filter cannot cover, before the store sees it', async () => {
+  it('refuses what the rewrite cannot cover, before the store sees it', async () => {
     noteStoreMayHoldReadGraphPartitions(store as unknown as TripleStore);
     const engine = new DKGQueryEngine(store as unknown as TripleStore);
-    await expect(engine.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toBeInstanceOf(UnscopedReadGraphQueryError);
-    await expect(engine.query('DESCRIBE <urn:a>')).rejects.toBeInstanceOf(UnscopedReadGraphQueryError);
+    await expect(engine.query('SELECT ?s WHERE { ?s <urn:p>* ?o }')).rejects.toBeInstanceOf(UnscopedReadGraphQueryError);
+    await expect(engine.query('DESCRIBE *')).rejects.toBeInstanceOf(UnscopedReadGraphQueryError);
     expect(store.sent).toEqual([]);
+  });
+
+  it('sends patterns outside GRAPH with an existence check per pattern', async () => {
+    noteStoreMayHoldReadGraphPartitions(store as unknown as TripleStore);
+    const engine = new DKGQueryEngine(store as unknown as TripleStore);
+    await engine.query('SELECT ?s WHERE { ?s <urn:p> ?o }');
+    expect(store.sent.at(-1)).toContain(`FILTER EXISTS { GRAPH ?_holder { ?s <urn:p> ?o } ${readGraphPartitionExclusionFilter('?_holder')} }`);
   });
 
   it('leaves scoped queries and withheld roots to their own rules', async () => {

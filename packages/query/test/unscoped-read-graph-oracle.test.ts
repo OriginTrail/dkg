@@ -38,6 +38,7 @@ const BASE: Quad[] = [
   q(GS, 'urn:s', 'urn:t', 'urn:w'), q(GS, 'urn:a', 'urn:b', 'urn:c'),
   q(META, 'urn:ka1', 'urn:status', '"confirmed"'), q(META, 'urn:ka1', 'urn:points', RCG),
   q(H1, 'urn:s', 'urn:p', 'urn:x'), q(H1, 'urn:m', 'urn:n', 'urn:o'),
+  q(G2, 'urn:s', 'urn:k1', 'urn:o2'), q(G2, 'urn:s', 'urn:k2', 'urn:o2'), q(G2, 'urn:s', 'urn:p', 'urn:x2'), q(G2, 'urn:x2', 'urn:r', 'urn:z'),
   // The store's default graph.
   q('', 'urn:dg', 'urn:dp', 'urn:do'),
 ];
@@ -69,10 +70,16 @@ type Variant = keyof typeof VARIANTS;
  * What each shape reads:
  * - graph: only inside GRAPH, by variable or by an IRI outside read-graph partitions;
  * - graph-path: inside GRAPH ?g with a *, + or ? path; graph-group: a GRAPH ?g group without a leading triple pattern;
- * - default: outside GRAPH; hint: carries a query hint; dataset: names its own dataset;
- * - describe: DESCRIBE; names: names a read graph, which every store refuses.
+ * - default: outside GRAPH; default-path: outside GRAPH with a *, + or ? path;
+ * - default-star: SELECT * where blank nodes or paths outside GRAPH add variables;
+ * - hint: carries a query hint; dataset: names its own dataset;
+ * - describe: DESCRIBE of IRIs, or of variables of a pattern outside GRAPH; describe-all: DESCRIBE *;
+ * - describe-graph: DESCRIBE from a pattern with GRAPH, which the store itself does not answer;
+ * - names: names a read graph, which every store refuses.
+ * A COUNT grouped by a key it does not project is left out: the store itself rejects it.
  */
-type Kind = 'graph' | 'graph-path' | 'graph-group' | 'default' | 'hint' | 'dataset' | 'describe' | 'names';
+type Kind = 'graph' | 'graph-path' | 'graph-group' | 'default' | 'default-path' | 'default-star' | 'hint' | 'dataset' | 'describe'
+  | 'describe-all' | 'describe-graph' | 'names';
 const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
   ['D1 all triples', 'default', 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }'],
   ['D1a all triples, analytic hint', 'hint', `${HINTS} SELECT ?s ?p ?o WHERE { hint:Query hint:analytic "true" . ?s ?p ?o }`],
@@ -93,7 +100,7 @@ const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
   ['D13 FILTER NOT EXISTS', 'default', 'SELECT ?s WHERE { ?s <urn:p> <urn:x> FILTER NOT EXISTS { ?s <urn:q> ?y } }'],
   ['D14 MINUS', 'default', 'SELECT ?s WHERE { ?s <urn:p> ?x MINUS { ?s <urn:q> ?y } }'],
   ['D15 sequence path', 'default', 'SELECT ?s ?z WHERE { ?s <urn:p>/<urn:r> ?z }'],
-  ['D16 one-or-more path', 'default', 'SELECT ?s ?o WHERE { ?s <urn:p>+ ?o }'],
+  ['D16 one-or-more path', 'default-path', 'SELECT ?s ?o WHERE { ?s <urn:p>+ ?o }'],
   ['D17 negated property set', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { ?s !<urn:none> ?o }'],
   ['D18 COUNT in a sub-select', 'default', 'SELECT ?n WHERE { { SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o } } }'],
   ['D19 ASK a stale triple', 'default', 'ASK { <urn:gone> <urn:p> <urn:x> }'],
@@ -137,7 +144,24 @@ const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
   ['H1 a hint inside GRAPH', 'hint', `${HINTS} SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o . hint:Prior hint:runFirst "true" } }`],
   ['F1 FROM NAMED with GRAPH ?g', 'dataset', `SELECT ?g ?s FROM NAMED <${G1}> WHERE { GRAPH ?g { ?s ?p ?o } }`],
   ['C4 CONSTRUCT of every quad', 'graph', 'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }'],
-  ['X6 DESCRIBE over GRAPH', 'describe', 'DESCRIBE ?s WHERE { GRAPH ?g { ?s <urn:p> <urn:x> } }'],
+  ['X6 DESCRIBE over GRAPH', 'describe-graph', 'DESCRIBE ?s WHERE { GRAPH ?g { ?s <urn:p> <urn:x> } }'],
+  ['X7 DESCRIBE a literal binding', 'describe', 'DESCRIBE ?o WHERE { <urn:ka1> <urn:status> ?o }'],
+  ['X8 DESCRIBE two IRIs', 'describe', 'DESCRIBE <urn:s> <urn:x>'],
+  ['X9 DESCRIBE *', 'describe-all', 'DESCRIBE * WHERE { ?s <urn:p> <urn:x> }'],
+  ['D27 two intermediates of a sequence path', 'default', 'SELECT ?s ?z WHERE { ?s <urn:p>/<urn:r> ?z }'],
+  ['D28 the same pair by two predicates of an alternative', 'default', 'SELECT ?s ?o WHERE { ?s <urn:k1>|<urn:k2> ?o }'],
+  ['D29 the same pair by two predicates of a negated set', 'default', 'SELECT ?s ?o WHERE { ?s !<urn:none> ?o FILTER(?o = <urn:o2>) }'],
+  ['D30 an inverse path', 'default', 'SELECT ?s ?o WHERE { ?o ^<urn:p> ?s }'],
+  ['D31 a blank-node property list', 'default', 'SELECT ?s ?z WHERE { ?s <urn:p> [ <urn:r> ?z ] }'],
+  ['D32 SELECT * with a blank node', 'default-star', 'SELECT * WHERE { ?s <urn:p> [ <urn:r> ?z ] }'],
+  ['D33 COUNT(*) with OFFSET', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o } OFFSET 0'],
+  ['D34 COUNT(*) grouped by subject', 'default', 'SELECT ?s (COUNT(*) AS ?n) WHERE { ?s ?p ?o } GROUP BY ?s'],
+  ['D36 COUNT(*) with a constant subject', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { <urn:s> ?p ?o }'],
+  ['D37 COUNT(*) in nested braces', 'default', 'SELECT (COUNT(*) AS ?n) WHERE { { ?s <urn:b> ?o } }'],
+  ['D38 COUNT(DISTINCT *)', 'default', 'SELECT (COUNT(DISTINCT *) AS ?n) WHERE { ?s ?p ?o }'],
+  ['D39 EXISTS in the projection', 'default', 'SELECT ?s (EXISTS { ?s <urn:q> ?y } AS ?e) WHERE { ?s <urn:p> <urn:x> }'],
+  ['D40 sub-select with a default pattern', 'default', 'SELECT ?s ?y WHERE { { SELECT ?s WHERE { ?s <urn:p> ?x } } OPTIONAL { ?s <urn:q> ?y } }'],
+  ['D41 BIND and VALUES beside patterns', 'default', 'SELECT ?s ?w WHERE { VALUES ?k { <urn:p> } ?s ?k ?x BIND(STR(?x) AS ?w) }'],
 ];
 
 /**
@@ -147,7 +171,7 @@ const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
 function expected(kind: Kind): 'exact' | 'refused' {
   if (kind === 'names' || kind === 'dataset') return 'refused';
   if (ENGINE === 'oxigraph') return 'exact';
-  return kind === 'graph' ? 'exact' : 'refused';
+  return ['graph', 'default', 'describe'].includes(kind) ? 'exact' : 'refused';
 }
 
 function normalize(result: { bindings: Array<Record<string, string>>; quads?: Quad[] }): string {
