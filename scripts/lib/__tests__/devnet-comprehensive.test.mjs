@@ -11,7 +11,7 @@ const scripts = fileURLToPath(new URL('../..', import.meta.url));
 const suiteFiles = ['v10-rc-validation.sh', '_devnet-full-sweep.sh', 'devnet-test-rfc49-catalog-sampling.sh',
   'devnet-test-rc11-promote-crash-recovery.sh', 'devnet-test-rc11-shutdown-mid-publish.sh', 'devnet-test-rfc38-all.sh',
   ...['hub-rotation', 'multi-rpc-failover', 'libp2p-tunables', 'cg-phonebook', 'ack-rejection-reasons'].map(p => `devnet-probe-${p}.sh`),
-  'devnet-test-node-ui-smoke.sh', 'libp2p-soak-test.sh', 'devnet-swm-soak-gate.sh', 'devnet-soak-rs.sh'];
+  'devnet-test-node-ui-smoke.sh', 'devnet-test-large-catalog.sh', 'libp2p-soak-test.sh', 'devnet-swm-soak-gate.sh', 'devnet-soak-rs.sh'];
 
 function setup(t, { missing = [], fail = {}, first = 'exit 0' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-comprehensive-'));
@@ -70,6 +70,26 @@ test('the issue-3251 suite has one entry, after the rfc38 extras and before the 
   const failing = setup(t, { fail: { 'devnet-test-issue-3251-member-sharing.mjs': 1 } });
   assert.equal((await launch(failing, { SKIP_SOAK: '1' }).done).status, 1);
   assert.equal(matchingReports(failing).suites.find(s => s.group === 'issue-3251').result, 'FAIL:1');
+});
+
+test('the large-catalog suite has one entry, after the node-ui smoke and before the soak', async t => {
+  const dir = setup(t, { first: 'exit 1' });
+  assert.equal((await launch(dir, { FAIL_FAST: '1' }).done).status, 1);
+  const suites = matchingReports(dir).suites;
+  const entries = suites.filter(s => s.group === 'large-catalog');
+  assert.deepEqual(entries.map(s => [s.id, s.command]),
+    [['large-catalog', join(dir, 'scripts', 'devnet-test-large-catalog.sh')]]);
+  const at = suites.indexOf(entries[0]);
+  assert.equal(suites[at - 1].group, 'node-ui');
+  assert.equal(suites[at + 1].group, 'soak');
+  // Not optional: no SKIP_* switch removes it from a run that reaches it.
+  const partial = setup(t, { first: 'exit 1' });
+  await launch(partial, { FAIL_FAST: '1', SKIP_UI: '1', SKIP_PROBES: '1', SKIP_RFC38_EXTRAS: '1', SKIP_RFC49: '1', SKIP_SOAK: '1' }).done;
+  assert.deepEqual(matchingReports(partial).suites.filter(s => s.group === 'large-catalog').map(s => s.id), ['large-catalog']);
+  // Its result is its exit status: a SKIP (exit 3) is not a pass.
+  const skipped = setup(t, { fail: { 'devnet-test-large-catalog.sh': 3 } });
+  assert.equal((await launch(skipped, { SKIP_SOAK: '1' }).done).status, 1);
+  assert.equal(matchingReports(skipped).suites.find(s => s.group === 'large-catalog').result, 'FAIL:3');
 });
 
 test('complete valid run succeeds and snapshots every registered suite before execution', async t => {

@@ -176,6 +176,18 @@
     "command": "pnpm --filter @origintrail-official/dkg-agent exec vitest run --config vitest.blazegraph.config.ts"
   },
   {
+    "pattern": "packages/query/test-live/large-catalog.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Scoped queries on a store of about 100,000 graphs across four context graphs, on Blazegraph and on embedded Oxigraph, in their own CI job that runs wherever the Blazegraph lane does",
+    "cadence": "required",
+    "command": "DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run --config vitest.large-catalog.config.ts && DKG_LARGE_CATALOG_ENGINE=oxigraph pnpm --filter @origintrail-official/dkg-query exec vitest run --config vitest.large-catalog.config.ts",
+    "layer": "system",
+    "prerequisites": [
+      "built storage, core and rdf-utils packages",
+      "BLAZEGRAPH_TEST_URL of a Blazegraph server that lets the test create a namespace"
+    ]
+  },
+  {
     "pattern": "tools/observability/w1/*.test.yaml",
     "lane": "prometheus-rules",
     "reason": "Promtool rule regression fixtures; requires Prometheus tools",
