@@ -1,7 +1,7 @@
 import { readGraphInventoryByPrefix } from './graph-inventory-materialization.js';
 // SPDX-License-Identifier: Apache-2.0
-import { contextGraphStorageOwnerCandidates, READ_GRAPH_SEGMENT } from '@origintrail-official/dkg-core';
-import { isReadGraphPartitionGraph } from './graph-enumeration-visibility.js';
+import { contextGraphStorageOwnerCandidates } from '@origintrail-official/dkg-core';
+import { readGraphPartitionOwner } from './graph-enumeration-visibility.js';
 import type { QueryOptions, TripleStore } from './triple-store.js';
 const CG_PREFIX = 'did:dkg:context-graph:';
 
@@ -32,9 +32,8 @@ export async function listStoredContextGraphOwnerCandidates(store: TripleStore, 
     return [...candidates];
 }
 
-/** A graph in a read-graph partition is owned by the context graph whose partition holds it. */
+/** A read graph or state graph is owned by the context graph whose partition holds it. */
 function ownerStorageUri(graph: string): string {
-  if (!isReadGraphPartitionGraph(graph)) return graph;
-  const segments = graph.slice(CG_PREFIX.length).split('/');
-  return CG_PREFIX + segments.slice(0, segments.indexOf(READ_GRAPH_SEGMENT, 1)).join('/');
+  const owner = readGraphPartitionOwner(graph);
+  return owner === undefined ? graph : CG_PREFIX + owner;
 }

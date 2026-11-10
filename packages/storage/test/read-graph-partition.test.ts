@@ -16,7 +16,9 @@ import {
 } from '../src/index.js';
 import {
   isReadGraphPartitionGraph,
+  isReadGraphStateGraph,
   isStorageHiddenGraph,
+  readGraphPartitionOwner,
   storeGraphEnumerationVisibility,
 } from '../src/graph-enumeration-visibility.js';
 import {
@@ -95,6 +97,12 @@ describe('read-graph partition names in storage', () => {
       expect(storeGraphEnumerationVisibility(graph), graph).toBe(true);
     }
     expect(storeGraphEnumerationVisibility('')).toBe(false);
+    // One parse names the owner, and tells state graphs from read graphs.
+    expect([VM_READ, SWM_READ, STATE].map(readGraphPartitionOwner)).toEqual([CG, CG, CG]);
+    expect(readGraphPartitionOwner('did:dkg:context-graph:a/b/_read/state')).toBe('a/b');
+    expect(readGraphPartitionOwner(LEGACY_ASSET)).toBeUndefined();
+    expect([STATE, VM_READ, STRAY, 'did:dkg:context-graph:a/_x/_read/state'].map(isReadGraphStateGraph))
+      .toEqual([true, false, false, false]);
   });
 
   it('has the HTTP adapters refuse any dataset restriction, an empty one too', async () => {

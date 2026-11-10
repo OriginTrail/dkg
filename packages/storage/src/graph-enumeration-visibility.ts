@@ -17,21 +17,33 @@ const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
 const READ_GRAPH_PARTITION_MARK = `/${READ_GRAPH_SEGMENT}/`;
 
 /**
- * A graph that storage keeps in a context graph's read-graph partition: one of
- * its read graphs, or the state graph that records them. Any other IRI with a
- * `_read` segment, such as a graph of an older context graph whose ID has one,
- * names an ordinary graph.
+ * The context graph whose read-graph partition holds a graph: one of its read
+ * graphs, or the state graph that records them. Undefined for any other IRI
+ * with a `_read` segment, such as a graph of an older context graph whose ID
+ * has one: that names an ordinary graph.
  */
-export function isReadGraphPartitionGraph(graph: string): boolean {
+export function readGraphPartitionOwner(graph: string): string | undefined {
   // The substring test keeps whole-catalog filtering cheap; the exact tests decide.
-  return graph.includes(READ_GRAPH_PARTITION_MARK)
-    && (parseReadGraphIri(graph) !== undefined || isReadGraphStateGraph(graph));
+  if (!graph.includes(READ_GRAPH_PARTITION_MARK)) return undefined;
+  return parseReadGraphIri(graph)?.scope.contextGraphId ?? readGraphStateGraphOwner(graph);
 }
 
-function isReadGraphStateGraph(graph: string): boolean {
-  if (!graph.startsWith(CONTEXT_GRAPH_PREFIX)) return false;
+/** Whether a graph is a read graph or a read-graph state graph. */
+export function isReadGraphPartitionGraph(graph: string): boolean {
+  return readGraphPartitionOwner(graph) !== undefined;
+}
+
+/** Whether a graph is the read-graph state graph of a context graph that can have read graphs. */
+export function isReadGraphStateGraph(graph: string): boolean {
+  return graph.includes(READ_GRAPH_PARTITION_MARK) && readGraphStateGraphOwner(graph) !== undefined;
+}
+
+function readGraphStateGraphOwner(graph: string): string | undefined {
+  if (!graph.startsWith(CONTEXT_GRAPH_PREFIX)) return undefined;
   const contextGraphId = graph.slice(CONTEXT_GRAPH_PREFIX.length).split('/').slice(0, -2).join('/');
-  return isReadGraphEligibleContextGraphId(contextGraphId) && readGraphStateGraphIri(contextGraphId) === graph;
+  return isReadGraphEligibleContextGraphId(contextGraphId) && readGraphStateGraphIri(contextGraphId) === graph
+    ? contextGraphId
+    : undefined;
 }
 
 /**
