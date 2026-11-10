@@ -28,7 +28,7 @@ candidate; publication and production qualification are still pending.
 - **Less repeated work.** Catalog backlog scans yield, parked placement
   passes reuse validated state, inventory validation encodes each value
   once, and a graph's presence check asks the store directly (#3599,
-  #3631, #3640, #3600, #3694, #3708, #3712, #3722).
+  #3631, #3640, #3600, #3694, #3708, #3712, #3722, #3754).
 - **Publishing that keeps going.** Settled ACK rounds retire unused
   requests, funded wallets get work fairly, retry budgets and job cleanup
   keep their safety bounds, seal checks at admission use the publisher's
