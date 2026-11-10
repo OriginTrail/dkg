@@ -2,7 +2,7 @@
 
 /**
  * Read-graph state: one row per read graph, kept in the state graph of its
- * context graph's `_read` partition (`readGraphStateGraphIri`), with its state,
+ * context graph's read-graph partition (`readGraphStateGraphIri`), with its state,
  * a generation, the membership-rule version and the builder version.
  *
  *   absent → building → ready → dirty → repairing | rebuilding → ready
@@ -25,6 +25,7 @@
 
 import { randomInt } from 'node:crypto';
 import {
+  READ_GRAPH_SEGMENT,
   assertSafeIri,
   parseReadGraphIri,
   readGraphStateGraphIri,
@@ -82,8 +83,9 @@ export const READ_GRAPH_STATE_PREDICATES = Object.freeze({
 type RowField = keyof typeof READ_GRAPH_STATE_PREDICATES;
 const ROW_FIELDS = Object.keys(READ_GRAPH_STATE_PREDICATES) as RowField[];
 
-/** Restricts `?stateGraph` to the state graph of some context graph's read-graph partition. */
-const IN_STATE_GRAPH = 'FILTER(STRSTARTS(STR(?stateGraph), "did:dkg:context-graph:") && STRENDS(STR(?stateGraph), "/_read/state"))';
+/** Restricts `?stateGraph` to the state graph of some context graph's read-graph partition (`readGraphStateGraphIri`). */
+const IN_STATE_GRAPH = 'FILTER(STRSTARTS(STR(?stateGraph), "did:dkg:context-graph:") && '
+  + `STRENDS(STR(?stateGraph), ${sparqlString(`/${READ_GRAPH_SEGMENT}/state`)}))`;
 
 /** The largest generation: transitions add one, and a generation must stay a safe integer. */
 export const MAX_READ_GRAPH_GENERATION = Number.MAX_SAFE_INTEGER;

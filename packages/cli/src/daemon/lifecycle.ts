@@ -87,7 +87,7 @@ import {
   type ContextGraphOnChainIdResolution,
   type DKGAgentConfig,
 } from '@origintrail-official/dkg-agent';
-import { configureStoreControlPath, isExternalBackend, logStoreControlPathGeometry, markReadGraphsDirtyAtStart } from '@origintrail-official/dkg-storage';
+import { configureStoreControlPath, isExternalBackend, logStoreControlPathGeometry } from '@origintrail-official/dkg-storage';
 import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_REQUIRED_ACKS,
@@ -2092,9 +2092,6 @@ async function runDaemonInnerWithStartupOwnership(
       config.apiPort, config.apiHost, writeApiPort);
   }
   const agent = checkpointAgent ?? await DKGAgent.create(agentConfig);
-  // This release does not maintain read graphs: none may stay ready across its writes.
-  const dirtyReadGraphs = await markReadGraphsDirtyAtStart(agent.store, { dataDir: dkgDir() });
-  if (dirtyReadGraphs > 0) log(`[store] Marked ${dirtyReadGraphs} read graph(s) dirty: this release does not maintain read graphs`);
   agent.configurePromoteQueue(promoteQueuePolicy);
   const publicSnapshotStore = agent.publicSnapshotStore;
 

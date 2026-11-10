@@ -48,7 +48,7 @@ function refuseSparql(sparql: string, operation: StoreOperation): void {
 }
 
 /**
- * Every context graph's read-graph partition (`{cg}/_read`) holds node-local
+ * Every context graph's read-graph partition (`{cg}/_~read`) holds node-local
  * derived graphs and their state, and only storage writes there. This
  * decorator sits directly above the adapter. It refuses every write that names
  * a graph in a partition, and answers that such a graph is absent; the
