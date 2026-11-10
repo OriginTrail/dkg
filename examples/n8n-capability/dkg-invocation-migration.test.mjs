@@ -92,3 +92,20 @@ test('failed metadata migration rolls back its schema and retains the original r
     assert.equal(row(db).actor, JSON.stringify(actor));
   } finally { db.close(); }
 });
+
+for (const blockId of ['read', 'retired']) test(`legacy ${blockId} calls cannot acquire a replacement native binding`, async () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    legacy(db);
+    db.prepare('UPDATE dkg_component_calls SET id=?,request_hash=?').run(id + ':' + blockId,
+      createHash('sha256').update(JSON.stringify({ ...request, blockId })).digest('hex'));
+    db.exec('DELETE FROM dkg_component_native_executions');
+    for (let reopen = 0; reopen < 2; reopen++) {
+      const store = dkgComponentStore(db, noTransport, [], profile);
+      const before = db.prepare('SELECT * FROM dkg_component_calls').all();
+      await assert.rejects(store.call(request, workflow, 'native'), /lack a verified native execution binding/);
+      assert.equal(db.prepare('SELECT 1 FROM dkg_component_native_executions WHERE id=?').get(id), undefined);
+      assert.deepEqual(db.prepare('SELECT * FROM dkg_component_calls').all(), before);
+    }
+  } finally { db.close(); }
+});

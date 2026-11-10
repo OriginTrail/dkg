@@ -169,16 +169,13 @@ export function dkgComponentStore(db, profile = null) {
       throw fail("Bounded DKG component input required.");
     const capability = requireDkgOperation(profile, node.componentId);
     capability.validateNode(node, rows, input);
-    const key = id + ":" + node.id, requestHash = hash(value);
-    const readPrior = () => calls.read(key, requestHash);
+    const invocationCalls = calls.invocation(id), requestHash = hash(value);
+    const readPrior = () => invocationCalls.read(node.id, requestHash);
     const previous = readPrior();
     if (!isDeepStrictEqual(receivedInput, { invocationId: value.effectId, input }))
       throw fail('Native execution did not receive this invocation grant and its exact input.');
     const binding = db.prepare('SELECT * FROM dkg_component_native_executions WHERE id=?').get(id);
-    // Block IDs cannot contain colons, but MCP run keys can. Only exact keys
-    // from this pinned workflow are evidence of calls belonging to this run.
-    if (!binding && definition.nodes.some(n => isDkg(n.componentId)
-      && calls.read(id + ':' + n.id)))
+    if (!binding && invocationCalls.hasCalls())
       throw fail('Legacy DKG calls lack a verified native execution binding; operator reconciliation required.');
     db.prepare('INSERT OR IGNORE INTO dkg_component_native_executions VALUES (?,?,?,?)').run(id, value.effectId, nativeId, value.executionId);
     const bound = db.prepare('SELECT * FROM dkg_component_native_executions WHERE id=?').get(id);
@@ -198,8 +195,9 @@ export function dkgComponentStore(db, profile = null) {
     // Another callback may journal this key while authorization awaits graph
     // access. Check its request identity before sharing any active response.
     const prior = readPrior();
-    if (active.has(key)) {
-      const response = await active.get(key);
+    const activeCall = active.get(id)?.get(node.id);
+    if (activeCall) {
+      const response = await activeCall;
       const assertCurrent = await authorize(true);
       assertCurrent?.();
       return response;
@@ -211,12 +209,12 @@ export function dkgComponentStore(db, profile = null) {
       return capability.transport(request, options);
     };
     const context = { node, rows, id, input, value, workflow, actor, dispatch,
-      completedResult: blockId => calls.completedResult(id + ':' + blockId) };
+      completedResult: invocationCalls.completedResult };
     function completedResponse(call) {
       if (call?.result !== null && call?.result !== undefined && call.response === null) {
         call.response = operation.legacyResponse({ ...context, prior: call });
         assertCurrentProfile();
-        calls.adoptResponse(key, call.response);
+        invocationCalls.adoptResponse(node.id, call.response);
       }
       assertCurrentProfile();
       return call?.response ?? null;
@@ -224,7 +222,7 @@ export function dkgComponentStore(db, profile = null) {
     const replay = completedResponse(prior);
     if (replay !== null) return replay;
     const pending = (async () => {
-      const { call, reconcile } = calls.prepare(key, requestHash, value, reconcile => {
+      const { call, reconcile } = invocationCalls.prepare(node.id, requestHash, value, reconcile => {
         if (!reconcile && node.componentId === 'dkg-write') assertNoPendingWrite(workflow, id);
         return operation.prepare(context, reconcile);
       });
@@ -233,23 +231,24 @@ export function dkgComponentStore(db, profile = null) {
       const { result, response } = await operation.execute(context, call.prepared, { reconcile });
       const assertCurrent = await authorize(true);
       assertCurrent?.();
-      calls.complete(key, result, response);
+      invocationCalls.complete(node.id, result, response);
       return response;
     })();
-    active.set(key, pending);
+    const activeBlocks = active.get(id) ?? new Map();
+    active.set(id, activeBlocks); activeBlocks.set(node.id, pending);
     try {
       const response = await pending;
       assertCurrentProfile();
       return response;
     } finally {
-      active.delete(key);
+      activeBlocks.delete(node.id);
+      if (!activeBlocks.size) active.delete(id);
     }
   }
   function writeRecovery(workflow, invocationId, workflowId, executionId) {
     const node = workflow.definition.nodes.find(n => n.componentId === 'dkg-write');
     if (!node) return null;
-    const key = invocationId + ':' + node.id;
-    const prior = calls.read(key);
+    const prior = calls.invocation(invocationId).read(node.id);
     if (!prior) return null;
     if (!prior.request || !prior.prepared) {
       if (prior.result) return null;

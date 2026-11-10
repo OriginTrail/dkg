@@ -309,9 +309,16 @@ for (const reopen of [false, true]) test(`colon-prefixed MCP run keys bind and r
   const child = await admit('run-one:child', 'a'), childResult = await service.dkgComponent(child);
   await complete(child, childResult);
   assert.equal(reads.length, 1);
-  if (reopen) { repository.close(); repository = createStudioRepository(state); service = open(); }
+  if (reopen) {
+    // Model a persisted journal from before explicit call ownership.
+    repository.db.exec(`DROP INDEX dkg_component_call_owner;
+      ALTER TABLE dkg_component_calls DROP COLUMN invocation_id;
+      ALTER TABLE dkg_component_calls DROP COLUMN block_id;`);
+    repository.close(); repository = createStudioRepository(state); service = open();
+  }
   const retained = repository.db.prepare('SELECT * FROM dkg_component_calls WHERE id=?').get('run-one:child:read');
   assert.ok(retained.response);
+  assert.equal(retained.invocation_id, 'run-one:child'); assert.equal(retained.block_id, 'read');
   const parent = await admit('run-one', 'b'), parentResult = await service.dkgComponent(parent);
   assert.deepEqual(parentResult, { items: measurements });
   assert.deepEqual(reads.map(read => [read.request.sample, read.actor.runKey]), [['a', 'run-one:child'], ['b', 'run-one']]);

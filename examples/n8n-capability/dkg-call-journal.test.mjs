@@ -16,8 +16,8 @@ function legacy(db) {
     CREATE TABLE dkg_component_writes (id TEXT PRIMARY KEY, request TEXT NOT NULL, evidence TEXT NOT NULL, receipt TEXT);`);
 }
 function seed(db, id, result, response) {
-  db.prepare('INSERT INTO dkg_component_calls VALUES (?,?,?)').run(id, requestHash, result);
-  db.prepare('INSERT INTO dkg_component_writes VALUES (?,?,?,?)').run(id, request, evidence, response);
+  db.prepare('INSERT INTO dkg_component_calls VALUES (?,?,?)').run(id + ':write', requestHash, result);
+  db.prepare('INSERT INTO dkg_component_writes VALUES (?,?,?,?)').run(id + ':write', request, evidence, response);
 }
 test('legacy pending and completed writes migrate exact bytes and replay after database reopen', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-call-migration-')), file = join(dir, 'journal.sqlite');
@@ -28,17 +28,17 @@ test('legacy pending and completed writes migrate exact bytes and replay after d
     seed(db, 'complete', '{ "verified": true }', receipt);
     let journal = createDkgCallJournal(db);
     for (const id of ['pending', 'complete']) {
-      const row = db.prepare('SELECT * FROM dkg_component_calls WHERE id=?').get(id);
+      const row = db.prepare('SELECT * FROM dkg_component_calls WHERE id=?').get(id + ':write');
       assert.equal(row.request, request); assert.equal(row.prepared, evidence);
     }
-    assert.equal(journal.read('pending').response, null);
+    assert.equal(journal.invocation('pending').read('write').response, null);
     assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name='dkg_component_writes'").get(), undefined);
     db.close(); db = new DatabaseSync(file); journal = createDkgCallJournal(db);
-    const pending = journal.prepare('pending', requestHash, JSON.parse(request), () => assert.fail('never rebuild saved evidence'));
+    const pending = journal.invocation('pending').prepare('write', requestHash, JSON.parse(request), () => assert.fail('never rebuild saved evidence'));
     assert.equal(pending.reconcile, true);
     assert.deepEqual(pending.call.prepared, JSON.parse(evidence));
-    assert.deepEqual(journal.read('complete').response, JSON.parse(receipt));
-    assert.equal(db.prepare('SELECT response FROM dkg_component_calls WHERE id=?').get('complete').response, receipt);
+    assert.deepEqual(journal.invocation('complete').read('write').response, JSON.parse(receipt));
+    assert.equal(db.prepare('SELECT response FROM dkg_component_calls WHERE id=?').get('complete:write').response, receipt);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 test('an orphan legacy write rolls back all migrated rows and schema changes', () => {
@@ -50,7 +50,7 @@ test('an orphan legacy write rolls back all migrated rows and schema changes', (
     assert.deepEqual(db.prepare('PRAGMA table_info(dkg_component_calls)').all().map(c => c.name), ['id', 'request_hash', 'result']);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM dkg_component_writes').get().n, 2);
     db.prepare('DELETE FROM dkg_component_writes WHERE id=?').run('orphan');
-    assert.deepEqual(createDkgCallJournal(db).read('valid').prepared, JSON.parse(evidence));
+    assert.deepEqual(createDkgCallJournal(db).invocation('valid').read('write').prepared, JSON.parse(evidence));
   } finally { db.close(); }
 });
 test('a conflicting partial migration preserves both journals for reconciliation', () => {
@@ -67,7 +67,7 @@ test('a conflicting partial migration preserves both journals for reconciliation
 test('failed completion leaves result and response pending together without losing prepared evidence', () => {
   const db = new DatabaseSync(':memory:');
   try {
-    const journal = createDkgCallJournal(db);
+    const journal = createDkgCallJournal(db).invocation('run');
     journal.prepare('write', requestHash, JSON.parse(request), () => JSON.parse(evidence));
     db.exec("CREATE TRIGGER reject_response BEFORE UPDATE OF response ON dkg_component_calls BEGIN SELECT RAISE(ABORT, 'storage failure'); END");
     assert.throws(() => journal.complete('write', { verified: true }, JSON.parse(receipt)), /storage failure/);
