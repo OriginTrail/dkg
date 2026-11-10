@@ -22,7 +22,7 @@
  */
 import { join } from 'node:path';
 import { Journal, KeyedLock, setAside } from './journal.js';
-import { receiptFromWire, requestFromWire, type ReceiptWire, type ServiceRequestWire } from './wire.js';
+import { receiptFromWire, requestFromWire, serveResultFromWire, serveUsageFromWire, type ReceiptWire, type ServeResult, type ServeUsage, type ServiceRequestWire } from './wire.js';
 
 /** One served call, as the ledger keeps it. */
 export interface ServedCall {
@@ -36,7 +36,10 @@ export interface ServedCall {
   signature: string;
   receipt: ReceiptWire;
   receiptSignature: string;
-  result: { content: string };
+  /** Text, or tool calls with text or none: what the receipt commits to. */
+  result: ServeResult;
+  /** How its units split; absent from calls served before it was kept. */
+  usage?: ServeUsage;
   /** The peer that sent the call, as its connection authenticated it: the only one its answer goes to again. */
   peerId?: string;
 }
@@ -384,11 +387,13 @@ function isServedCall(e: Record<string, unknown>): boolean {
   try {
     requestFromWire(e.request);
     receiptFromWire(e.receipt);
+    serveResultFromWire(e.result);
   } catch {
     return false;
   }
   return isString(e.requestDigest) && isString(e.subscriptionId) && isWhole(e.budgetIndex) && isWhole(e.epoch)
-    && isString(e.signature) && isString(e.receiptSignature) && isRecord(e.result) && isString(e.result.content)
+    && isString(e.signature) && isString(e.receiptSignature)
+    && (e.usage === undefined || serveUsageFromWire(e.usage) !== undefined)
     && (e.peerId === undefined || isString(e.peerId));
 }
 

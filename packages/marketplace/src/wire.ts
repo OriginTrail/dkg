@@ -5,9 +5,18 @@
  * and response messages over the node's messenger, as remote queries go.
  *   - `quote`: in, service ids; out, for each, the seller's price for the
  *     epoch, whether it is available, and its capacity.
+ *   - `quote`: a seller that takes tool calls for a service says so in its
+ *     offer there (`tools: true`); one that says nothing takes text alone.
  *   - `serve`: in, a `ServiceRequest` signed by the subscription's session key
  *     and the call's body; out, the result and the seller's signed receipt, or
  *     an error code that says whether to retry.
+ *
+ * A call may carry OpenAI tools: `tools`, `tool_choice` and
+ * `parallel_tool_calls`, an assistant's `tool_calls` and a tool's results
+ * (`role: "tool"`). A call without them is encoded as 10.1.0 encoded it, and
+ * a text result commits to its bytes as 10.1.0 committed: a seller or buyer
+ * of 10.1.0 serves and checks it as before. A served call also says, unsigned,
+ * how its units split between prompt and completion tokens.
  *
  * Messages are JSON. Integers past 2^53 (wei, nonces, units, identity ids) are
  * decimal strings; times are chain seconds. Everything that comes off the wire
@@ -35,17 +44,73 @@ export const PEER_LIMITS = Object.freeze({
   quoteServices: 32,
 });
 
-export type ChatRole = 'system' | 'user' | 'assistant';
+export type ChatRole = 'system' | 'user' | 'assistant' | 'tool';
 
-export interface ChatMessage {
-  role: ChatRole;
-  content: string;
+/** Bounds of a call's tools and tool calls; the serve message's byte cap bounds the rest. */
+export const TOOL_LIMITS = Object.freeze({
+  /** Tools in one call. */
+  tools: 128,
+  /** Tool calls in one message or result. */
+  toolCalls: 128,
+  /** A tool call's id, in characters. */
+  idChars: 128,
+  /** A tool's description, in characters. */
+  descriptionChars: 8_192,
+});
+
+/** A call the model made to one of the call's tools, as OpenAI shapes it: `arguments` is the JSON text it wrote. */
+export interface ToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
 }
 
-/** The body of an inference call: OpenAI-shaped messages and the most tokens to produce. */
+/** A tool the model may call: a function, with a JSON Schema of its arguments. */
+export interface ToolSpec {
+  type: 'function';
+  function: { name: string; description?: string; parameters?: Record<string, unknown>; strict?: boolean };
+}
+
+export type ToolChoice = 'none' | 'auto' | 'required' | { type: 'function'; function: { name: string } };
+
+/**
+ * One message of a call: text from system, user or assistant; an assistant's
+ * tool calls, with text or none; or a tool's result, answering one of them.
+ */
+export type ChatMessage =
+  | { role: 'system' | 'user'; content: string }
+  | { role: 'assistant'; content: string | null; tool_calls?: ToolCall[] }
+  | { role: 'tool'; content: string; tool_call_id: string };
+
+/**
+ * The body of an inference call: OpenAI-shaped messages, the most tokens to
+ * produce, and the tools the model may call, if any. Without tools it is
+ * `{ messages, max_tokens }`, as 10.1.0 sent it.
+ */
 export interface InferenceBody {
   messages: ChatMessage[];
   max_tokens: number;
+  tools?: ToolSpec[];
+  tool_choice?: ToolChoice;
+  parallel_tool_calls?: boolean;
+}
+
+/** Why a model stopped, as the wire carries it. */
+export type FinishReason = 'stop' | 'length' | 'tool_calls' | 'content_filter';
+
+export const FINISH_REASONS: readonly FinishReason[] = ['stop', 'length', 'tool_calls', 'content_filter'];
+
+/** What a served call answers: text, or tool calls with text or none; and why the model stopped, when not `stop`. */
+export interface ServeResult {
+  content: string | null;
+  tool_calls?: ToolCall[];
+  finish_reason?: FinishReason;
+}
+
+/** How a served call's units split, as the seller's backend counted them within the receipt's units. Not signed. */
+export interface ServeUsage {
+  promptTokens: number;
+  completionTokens: number;
 }
 
 export interface QuoteRequest {
@@ -59,6 +124,8 @@ export interface QuotedOffer {
   available: boolean;
   /** Calls the seller takes at once; `null` when it states none. */
   capacity: number | null;
+  /** Whether the seller takes tool calls for the service; absent, as from a 10.1.0 seller, it takes text alone. */
+  tools?: true;
 }
 
 export interface QuoteResponse {
@@ -95,15 +162,17 @@ export interface ServeRequest {
   body: InferenceBody;
 }
 
-/** A served call. The receipt commits to `resultBytesOf(result.content)`. */
+/** A served call. The receipt commits to `resultBytesOf(result)`. */
 export interface ServeAnswer {
   ok: true;
-  result: { content: string };
+  result: ServeResult;
   receipt: ReceiptWire;
   /** The seller's operational wallet's signature over the receipt (EIP-712, in the request's domain). */
   receiptSignature: string;
   /** The budget the call counted against, its index in the subscription. */
   budgetIndex: number;
+  /** How its units split; absent from a 10.1.0 seller. */
+  usage?: ServeUsage;
 }
 
 /** A refused or failed call: nothing was served and nothing is owed. */
@@ -155,13 +224,27 @@ export function refusal(code: ServeErrorCode, message?: string): ServeRefusal {
 
 // ------------------------------------------------------------------ results
 
-/** The bytes a receipt commits to: the completion's text, as UTF-8. Seller and buyer both use this. */
-export function resultBytesOf(content: string): Uint8Array {
-  return ethers.toUtf8Bytes(content);
+/** The first byte of a result with tool calls: never in UTF-8, so its bytes are never a text result's. */
+const TOOL_RESULT_TAG = 0xff;
+
+/**
+ * The bytes a receipt commits to. Seller and buyer both use this.
+ *   - A text result: its text, as UTF-8, as in 10.1.0.
+ *   - A result with tool calls: `0xff`, then the UTF-8 of the JSON array
+ *     `[content, [[id, type, name, arguments], …]]`, its calls in order.
+ */
+export function resultBytesOf(result: string | ServeResult): Uint8Array {
+  const r: ServeResult = typeof result === 'string' ? { content: result } : result;
+  if (!r.tool_calls?.length) return ethers.toUtf8Bytes(r.content ?? '');
+  const json = ethers.toUtf8Bytes(JSON.stringify([r.content, r.tool_calls.map((c) => [c.id, c.type, c.function.name, c.function.arguments])]));
+  const bytes = new Uint8Array(json.length + 1);
+  bytes[0] = TOOL_RESULT_TAG;
+  bytes.set(json, 1);
+  return bytes;
 }
 
-export function resultCommitmentOf(content: string): string {
-  return ethers.keccak256(resultBytesOf(content));
+export function resultCommitmentOf(result: string | ServeResult): string {
+  return ethers.keccak256(resultBytesOf(result));
 }
 
 // ---------------------------------------------------------------- encoding
@@ -267,24 +350,158 @@ export function receiptFromWire(raw: unknown): QueryInferenceReceipt {
   };
 }
 
-const ROLES: readonly ChatRole[] = ['system', 'user', 'assistant'];
+const TEXT_ROLES = ['system', 'user', 'assistant'] as const;
+/** A function's name, as OpenAI takes it. */
+const FUNCTION_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+/** A tool call's id: printable ASCII, no spaces. */
+const TOOL_CALL_ID = new RegExp(`^[\\x21-\\x7e]{1,${TOOL_LIMITS.idChars}}$`);
 
-/** The call body: 1 to 256 messages of a known role with text content, and a positive `max_tokens`. */
+/** Absent: undefined, null, or an empty list, as OpenAI clients send all three for "none". */
+const absent = (value: unknown) => value === undefined || value === null || (Array.isArray(value) && value.length === 0);
+
+function functionName(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !FUNCTION_NAME.test(value)) throw new WireError(`${field} must be a function name: 1 to 64 letters, digits, _ or -`);
+  return value;
+}
+
+function toolCallId(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !TOOL_CALL_ID.test(value)) throw new WireError(`${field} must be a tool call id`);
+  return value;
+}
+
+/** Tool calls: 1 to `TOOL_LIMITS.toolCalls` function calls, each with an id, a name and its arguments as text. */
+export function toolCallsFromWire(raw: unknown, field = 'tool_calls'): ToolCall[] {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > TOOL_LIMITS.toolCalls) {
+    throw new WireError(`${field} must be a list of 1 to ${TOOL_LIMITS.toolCalls} tool calls`);
+  }
+  return raw.map((c, i): ToolCall => {
+    const at = `${field}[${i}]`;
+    if (!isRecord(c) || (c.type !== undefined && c.type !== 'function') || !isRecord(c.function)) throw new WireError(`${at} must be a function call`);
+    if (typeof c.function.arguments !== 'string') throw new WireError(`${at}.function.arguments must be text`);
+    return { id: toolCallId(c.id, `${at}.id`), type: 'function', function: { name: functionName(c.function.name, `${at}.function.name`), arguments: c.function.arguments } };
+  });
+}
+
+/** Tools: up to `TOOL_LIMITS.tools` functions, each named once, with only the fields OpenAI defines for one. */
+function toolsFromWire(raw: unknown): ToolSpec[] {
+  if (!Array.isArray(raw) || raw.length > TOOL_LIMITS.tools) throw new WireError(`tools must be a list of at most ${TOOL_LIMITS.tools} functions`);
+  const names = new Set<string>();
+  return raw.map((t, i): ToolSpec => {
+    const at = `tools[${i}]`;
+    if (!isRecord(t) || t.type !== 'function' || !isRecord(t.function)) throw new WireError(`${at} must be a function`);
+    const f = t.function;
+    const name = functionName(f.name, `${at}.function.name`);
+    if (names.has(name)) throw new WireError(`${at}.function.name ${name} is listed twice`);
+    names.add(name);
+    const fn: ToolSpec['function'] = { name };
+    if (f.description !== undefined && f.description !== null) {
+      if (typeof f.description !== 'string' || f.description.length > TOOL_LIMITS.descriptionChars) {
+        throw new WireError(`${at}.function.description must be text of at most ${TOOL_LIMITS.descriptionChars} characters`);
+      }
+      fn.description = f.description;
+    }
+    if (f.parameters !== undefined && f.parameters !== null) {
+      if (!isRecord(f.parameters)) throw new WireError(`${at}.function.parameters must be a JSON Schema object`);
+      fn.parameters = f.parameters;
+    }
+    if (f.strict !== undefined && f.strict !== null) {
+      if (typeof f.strict !== 'boolean') throw new WireError(`${at}.function.strict must be true or false`);
+      fn.strict = f.strict;
+    }
+    return { type: 'function', function: fn };
+  });
+}
+
+function toolChoiceFromWire(raw: unknown, tools: readonly ToolSpec[]): ToolChoice {
+  if (raw === 'none' || raw === 'auto' || raw === 'required') return raw;
+  if (isRecord(raw) && raw.type === 'function' && isRecord(raw.function) && typeof raw.function.name === 'string') {
+    const name = raw.function.name;
+    if (tools.some((t) => t.function.name === name)) return { type: 'function', function: { name } };
+  }
+  throw new WireError('tool_choice must be none, auto, required, or a function of the call\'s tools');
+}
+
+/** One message; `called` holds the ids of the tool calls before it, which a tool's result must answer. */
+function messageFromWire(m: unknown, i: number, called: Set<string>): ChatMessage {
+  const at = `messages[${i}]`;
+  if (!isRecord(m)) throw new WireError(`${at} must be a message`);
+  if (m.role === 'assistant' && !absent(m.tool_calls)) {
+    const toolCalls = toolCallsFromWire(m.tool_calls, `${at}.tool_calls`);
+    if (m.content !== undefined && m.content !== null && typeof m.content !== 'string') throw new WireError(`${at}.content must be text or null`);
+    for (const c of toolCalls) called.add(c.id);
+    return { role: 'assistant', content: typeof m.content === 'string' ? m.content : null, tool_calls: toolCalls };
+  }
+  if (m.role === 'tool') {
+    if (typeof m.content !== 'string') throw new WireError(`${at} must be a tool's result as text`);
+    const id = toolCallId(m.tool_call_id, `${at}.tool_call_id`);
+    if (!called.has(id)) throw new WireError(`${at} answers no tool call before it`);
+    return { role: 'tool', content: m.content, tool_call_id: id };
+  }
+  if (!TEXT_ROLES.includes(m.role as (typeof TEXT_ROLES)[number]) || typeof m.content !== 'string') {
+    throw new WireError(`${at} must have a role of system, user, assistant or tool and text content`);
+  }
+  return { role: m.role as (typeof TEXT_ROLES)[number], content: m.content };
+}
+
+/**
+ * The call body: 1 to 256 messages, a positive `max_tokens`, and, when it has
+ * tools, `tool_choice` and `parallel_tool_calls` as it gives them. Without
+ * tools those two mean nothing and are dropped, so a text call's body is
+ * `{ messages, max_tokens }` with `{ role, content }` messages, as in 10.1.0.
+ * A tool's result must answer a tool call of an assistant message before it.
+ */
 export function inferenceBodyFromWire(raw: unknown): InferenceBody {
   if (!isRecord(raw) || !Array.isArray(raw.messages) || raw.messages.length === 0 || raw.messages.length > 256) {
     throw new WireError('messages must be a list of 1 to 256 messages');
   }
-  const messages = raw.messages.map((m, i): ChatMessage => {
-    if (!isRecord(m) || !ROLES.includes(m.role as ChatRole) || typeof m.content !== 'string') {
-      throw new WireError(`messages[${i}] must have a role of system, user or assistant and text content`);
-    }
-    return { role: m.role as ChatRole, content: m.content };
-  });
+  const called = new Set<string>();
+  const messages = raw.messages.map((m, i) => messageFromWire(m, i, called));
   const maxTokens = raw.max_tokens;
   if (typeof maxTokens !== 'number' || !Number.isSafeInteger(maxTokens) || maxTokens <= 0 || maxTokens > 1_000_000) {
     throw new WireError('max_tokens must be a positive integer');
   }
-  return { messages, max_tokens: maxTokens };
+  const body: InferenceBody = { messages, max_tokens: maxTokens };
+  if (absent(raw.tools)) return body;
+  const tools = toolsFromWire(raw.tools);
+  body.tools = tools;
+  if (raw.tool_choice !== undefined && raw.tool_choice !== null) body.tool_choice = toolChoiceFromWire(raw.tool_choice, tools);
+  if (raw.parallel_tool_calls !== undefined && raw.parallel_tool_calls !== null) {
+    if (typeof raw.parallel_tool_calls !== 'boolean') throw new WireError('parallel_tool_calls must be true or false');
+    body.parallel_tool_calls = raw.parallel_tool_calls;
+  }
+  return body;
+}
+
+/** Whether a call needs a seller that takes tool calls: it has tools, an assistant's tool calls, or a tool's result. */
+export function usesTools(body: InferenceBody): boolean {
+  return body.tools !== undefined || body.messages.some((m) => m.role === 'tool' || (m.role === 'assistant' && m.tool_calls !== undefined));
+}
+
+/**
+ * A served call's result: text, or tool calls with text or none. A finish
+ * reason the wire does not know is dropped: it is not signed, and says nothing
+ * the receipt relies on.
+ */
+export function serveResultFromWire(raw: unknown): ServeResult {
+  if (!isRecord(raw)) throw new WireError('result must have text content, or tool calls');
+  const toolCalls = absent(raw.tool_calls) ? undefined : toolCallsFromWire(raw.tool_calls, 'result.tool_calls');
+  if (typeof raw.content !== 'string' && !(toolCalls && (raw.content === null || raw.content === undefined))) {
+    throw new WireError('result must have text content, or tool calls');
+  }
+  const finish = FINISH_REASONS.find((r) => r === raw.finish_reason);
+  return {
+    content: typeof raw.content === 'string' ? raw.content : null,
+    ...(toolCalls ? { tool_calls: toolCalls } : {}),
+    ...(finish ? { finish_reason: finish } : {}),
+  };
+}
+
+/** A served call's usage, or `undefined` when it has none that reads as one: it is not signed. */
+export function serveUsageFromWire(raw: unknown): ServeUsage | undefined {
+  if (!isRecord(raw)) return undefined;
+  const { promptTokens, completionTokens } = raw;
+  const whole = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
+  return whole(promptTokens) && whole(completionTokens) ? { promptTokens, completionTokens } : undefined;
 }
 
 export function quoteRequestFromWire(raw: unknown): QuoteRequest {
@@ -317,6 +534,8 @@ export function quoteResponseFromWire(raw: unknown): QuoteResponse {
         pricePerUnit: uint(o.pricePerUnit, `offers[${i}].pricePerUnit`, 96).toString(),
         available: o.available,
         capacity: o.capacity === null ? null : count(o.capacity, `offers[${i}].capacity`),
+        // Only `true` says the seller takes tool calls; anything else, or nothing, is text alone.
+        ...(o.tools === true ? { tools: true as const } : {}),
       };
     }),
   };
@@ -324,8 +543,9 @@ export function quoteResponseFromWire(raw: unknown): QuoteResponse {
 
 /**
  * A seller's answer to `serve`: a refusal with a code of `SERVE_ERRORS`, or a
- * result with text, a receipt signature, and the budget's index. The receipt
- * is left as it came, for the buyer's checks of it.
+ * result (`serveResultFromWire`), a receipt signature, the budget's index,
+ * and the usage when it reads as one. The receipt is left as it came, for the
+ * buyer's checks of it.
  */
 export function serveResponseFromWire(raw: unknown): ServeResponseReceived {
   if (!isRecord(raw) || typeof raw.ok !== 'boolean') throw new WireError('an answer must be an object that says whether it is ok');
@@ -336,7 +556,11 @@ export function serveResponseFromWire(raw: unknown): ServeResponseReceived {
     if (raw.message !== undefined && typeof raw.message !== 'string') throw new WireError('a refusal message must be text');
     return { ok: false, code: raw.code as ServeErrorCode, retry: raw.retry, ...(raw.message === undefined ? {} : { message: raw.message }) };
   }
-  if (!isRecord(raw.result) || typeof raw.result.content !== 'string') throw new WireError('result must have text content');
+  const result = serveResultFromWire(raw.result);
   if (typeof raw.receiptSignature !== 'string') throw new WireError('receiptSignature must be text');
-  return { ok: true, result: { content: raw.result.content }, receipt: raw.receipt, receiptSignature: raw.receiptSignature, budgetIndex: count(raw.budgetIndex, 'budgetIndex') };
+  const usage = serveUsageFromWire(raw.usage);
+  return {
+    ok: true, result, receipt: raw.receipt, receiptSignature: raw.receiptSignature, budgetIndex: count(raw.budgetIndex, 'budgetIndex'),
+    ...(usage ? { usage } : {}),
+  };
 }

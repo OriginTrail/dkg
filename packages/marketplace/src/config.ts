@@ -104,14 +104,20 @@ export interface SellerServiceConfig {
   /** By default weights-pinned for a llama.cpp backend, upstream-claimed for another. */
   provenance?: 'weights-pinned' | 'upstream-claimed';
   tokenizerBundle?: string;
+  /**
+   * Whether the service takes OpenAI tool calls, said in its quotes. On by default for an `openai` backend, off for
+   * llama.cpp, whose server takes tools only when it runs with a tool-calling chat template.
+   */
+  tools?: boolean;
   backend: ConnectorSettings;
 }
 
-export interface ResolvedSellerService extends Omit<SellerServiceConfig, 'pricePerUnit' | 'capacity' | 'provenance'> {
+export interface ResolvedSellerService extends Omit<SellerServiceConfig, 'pricePerUnit' | 'capacity' | 'provenance' | 'tools'> {
   serviceId: string;
   pricePerUnit: bigint;
   capacity: number | null;
   provenance: 'weights-pinned' | 'upstream-claimed';
+  tools: boolean;
 }
 
 export interface ResolvedSellerConfig {
@@ -193,12 +199,14 @@ export function resolveSellerConfig(config: MarketplaceConfig | undefined): Reso
     if (b.apiKeyEnv !== undefined && !/^[A-Z_][A-Z0-9_]*$/.test(b.apiKeyEnv)) {
       throw new Error(`${at}.backend.apiKeyEnv must name an environment variable`);
     }
+    if (s.tools !== undefined && typeof s.tools !== 'boolean') throw new Error(`${at}.tools must be true or false`);
     return {
       model: s.model,
       serviceId,
       pricePerUnit: BigInt(s.pricePerUnit),
       capacity,
       provenance: s.provenance ?? (b.kind === 'llamacpp' ? 'weights-pinned' : 'upstream-claimed'),
+      tools: s.tools ?? b.kind === 'openai',
       ...(s.tokenizerBundle ? { tokenizerBundle: s.tokenizerBundle } : {}),
       backend: b,
     };

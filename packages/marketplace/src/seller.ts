@@ -19,9 +19,15 @@
  *   it. The job runs at every tick, beside the landing and never inside it.
  * - **Each call** is checked, cheapest check first, then
  *   served by the service's backend, cut to the units the request allows, and
- *   its receipt signed by an operational wallet. The call, its result and its
- *   receipt are in the ledger before the answer goes back; if that write fails,
- *   the answer is an error and no result. A repeat of a call already served
+ *   its receipt signed by an operational wallet. A call with tools is taken
+ *   only by a service that takes tool calls (`tools`, said in its quotes);
+ *   its tools go to the backend, and the tools the model called come back in
+ *   the result, which the receipt commits to with its text. An answer cut short
+ *   is its text alone: a tool call cut short is no call. The answer says,
+ *   unsigned, how its units split between prompt and completion tokens. The
+ *   call, its result and its receipt are in the ledger before the answer goes
+ *   back; if that write fails, the answer is an error and no result. A repeat
+ *   of a call already served
  *   gets the stored answer, but only from the peer it was served to: once its
  *   receipt lands, the request and its signature are public. Calls on one
  *   subscription run one at a time, so a nonce is claimed once and a budget's
@@ -56,7 +62,7 @@ import {
   type ServiceRequest,
 } from '@origintrail-official/dkg-chain';
 import { MarketplaceRefusal } from './buyer.js';
-import { UpstreamError, type Connector } from './connector.js';
+import { UpstreamError, type Completion, type Connector } from './connector.js';
 import { KeyedLock, setAside, writeDurably } from './journal.js';
 import { DEFAULT_LANDING, Lander, nextLandingAt, secondsToNextTick, secondsToRetry, type LandingReport, type LandingSettings } from './landing.js';
 import { SellerLedger, type ServedCall } from './ledger.js';
@@ -71,11 +77,13 @@ import {
   requestToWire,
   resultCommitmentOf,
   serveRequestFromWire,
+  usesTools,
   type InferenceBody,
   type QuoteResponse,
   type ServeAnswer,
   type ServeRefusal,
   type ServeResponse,
+  type ServeResult,
 } from './wire.js';
 
 /** New calls stop this long before an epoch ends. */
@@ -104,6 +112,8 @@ export interface SellerService {
   connector: Connector;
   /** The connector's time limit: a request that expires sooner, and the receipt after it, is refused. `DEFAULT_BACKEND_TIMEOUT_MS` by default. */
   backendTimeoutMs?: number;
+  /** Whether it takes tool calls: said in its quotes. Off unless set. */
+  tools?: boolean;
 }
 
 export interface SellerDeps {
@@ -327,7 +337,10 @@ export class Seller {
     for (const id of services) {
       const s = this.services.get(id);
       if (!s) continue;
-      offers.push({ serviceId: s.serviceId, pricePerUnit: (await this.priceFor(s, times.epoch, times.epoch)).toString(), available, capacity: s.capacity });
+      offers.push({
+        serviceId: s.serviceId, pricePerUnit: (await this.priceFor(s, times.epoch, times.epoch)).toString(), available, capacity: s.capacity,
+        ...(s.tools ? { tools: true as const } : {}),
+      });
     }
     return { seller: this.identityId.toString(), epoch: times.epoch, offers };
   }
@@ -368,6 +381,8 @@ export class Seller {
     if (times.endsAt - times.now <= this.deps.stopServingSeconds) return refusal('EpochEnding');
     const service = this.services.get(request.serviceId);
     if (!service) return refusal('UnknownService');
+    // A buyer sends a call with tools only to a seller whose quote says it takes them.
+    if (!service.tools && usesTools(call.body)) return refusal('BadRequest', 'this service takes no tool calls');
     if (request.pricePerUnit !== await this.priceFor(service, times.epoch, times.epoch)) return refusal('WrongPrice');
     // 2. A subscription of this epoch that funds the service, under its price cap.
     const subscription = await chain.getSubscription(request.subscriptionId);
@@ -419,10 +434,14 @@ export class Seller {
     const { requestDigest, unitCap } = at;
     let completion;
     try {
+      const { tools, tool_choice: toolChoice, parallel_tool_calls: parallelToolCalls } = call.body;
       completion = await service.connector.complete({
         messages: call.body.messages,
         // No more output than the cap pays for once the input takes the most it could.
         maxTokens: Number(minBig(BigInt(call.body.max_tokens), at.room)),
+        ...(tools ? { tools } : {}),
+        ...(tools && toolChoice !== undefined ? { toolChoice } : {}),
+        ...(tools && parallelToolCalls !== undefined ? { parallelToolCalls } : {}),
       });
       this.backends.set(service.serviceId, 'up');
     } catch (err) {
@@ -438,11 +457,11 @@ export class Seller {
       // The chain refuses a receipt completed after its request's expiry: no receipt, and no answer.
       if (completedAt > request.expiry) return this.failedOnce(requestDigest, refusal('Expired'));
       const output = minBig(BigInt(completion.completionTokens), unitCap - input);
-      const content = cutTo(completion.content, completion.completionTokens, Number(output));
+      const result = resultOf(completion, Number(output));
       const units = input + output;
       const receipt: QueryInferenceReceipt = {
         requestDigest,
-        resultCommitment: resultCommitmentOf(content),
+        resultCommitment: resultCommitmentOf(result),
         units,
         valueWei: units * request.pricePerUnit,
         completedAt,
@@ -457,7 +476,8 @@ export class Seller {
         signature: call.signature,
         receipt: receiptToWire(receipt),
         receiptSignature,
-        result: { content },
+        result,
+        usage: { promptTokens: Number(input), completionTokens: Number(output) },
         peerId: at.from,
       };
       await this.ledger.recordServed(served);
@@ -522,7 +542,22 @@ export class Seller {
 }
 
 function answerOf(call: ServedCall): ServeAnswer {
-  return { ok: true, result: call.result, receipt: call.receipt, receiptSignature: call.receiptSignature, budgetIndex: call.budgetIndex };
+  return {
+    ok: true, result: call.result, receipt: call.receipt, receiptSignature: call.receiptSignature, budgetIndex: call.budgetIndex,
+    ...(call.usage ? { usage: call.usage } : {}),
+  };
+}
+
+/**
+ * A completion as a served call's result, its output cut to `allowed` tokens: text, or the tools the model called.
+ * A completion cut short is its text alone, as a tool call cut short is no call.
+ */
+function resultOf(completion: Completion, allowed: number): ServeResult {
+  if (allowed < completion.completionTokens) {
+    return { content: cutTo(completion.content ?? '', completion.completionTokens, allowed), finish_reason: 'length' };
+  }
+  if (completion.toolCalls?.length) return { content: completion.content, tool_calls: completion.toolCalls, finish_reason: 'tool_calls' };
+  return { content: completion.content ?? '', ...(completion.finishReason ? { finish_reason: completion.finishReason } : {}) };
 }
 
 /** The frozen prices a prices file holds: service id => epoch => wei per unit. `null` when it holds anything else. */

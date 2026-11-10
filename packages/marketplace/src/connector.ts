@@ -6,19 +6,34 @@
  *   - `openai`, an upstream API. Its key is read, at each call, from the
  *     environment variable the settings name, and is never stored;
  *   - `llamacpp`, local weights behind llama.cpp's server, on loopback only.
- * It returns the text and what the backend counted: input and output tokens.
+ * It returns the text, or the tools the model called, and what the backend
+ * counted: input and output tokens. A call with tools sends them, with
+ * `tool_choice` and `parallel_tool_calls`; a call without sends what 10.1.0 sent.
  */
-import type { ChatMessage } from './wire.js';
+import { WireError, toolCallsFromWire, type ChatMessage, type FinishReason, type ToolCall, type ToolChoice, type ToolSpec } from './wire.js';
 
 export interface Completion {
-  content: string;
+  /** The text; `null` when the model only called tools. */
+  content: string | null;
+  /** The tools the model called, when it called any. */
+  toolCalls?: ToolCall[];
+  /** Why the backend stopped, when it says `length` or `content_filter`; `stop` and `tool_calls` go without saying. */
+  finishReason?: FinishReason;
   promptTokens: number;
   completionTokens: number;
 }
 
+export interface CompletionCall {
+  messages: ChatMessage[];
+  maxTokens: number;
+  tools?: ToolSpec[];
+  toolChoice?: ToolChoice;
+  parallelToolCalls?: boolean;
+}
+
 export interface Connector {
   readonly kind: 'openai' | 'llamacpp';
-  complete(call: { messages: ChatMessage[]; maxTokens: number }): Promise<Completion>;
+  complete(call: CompletionCall): Promise<Completion>;
 }
 
 export interface ConnectorSettings {
@@ -57,7 +72,7 @@ export function connectorOf(settings: ConnectorSettings): Connector {
   const endpoint = `${withoutTrailingSlashes(settings.baseUrl)}/chat/completions`;
   return {
     kind: settings.kind,
-    async complete({ messages, maxTokens }) {
+    async complete({ messages, maxTokens, tools, toolChoice, parallelToolCalls }) {
       const key = settings.apiKeyEnv ? process.env[settings.apiKeyEnv] : undefined;
       if (settings.apiKeyEnv && !key) throw new UpstreamError(`${settings.apiKeyEnv} is not set`);
       let res: Response;
@@ -65,7 +80,14 @@ export function connectorOf(settings: ConnectorSettings): Connector {
         res = await fetch(endpoint, {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...(key ? { authorization: `Bearer ${key}` } : {}) },
-          body: JSON.stringify({ model: settings.model, messages, max_tokens: maxTokens, temperature: 0, stream: false }),
+          body: JSON.stringify({
+            model: settings.model, messages, max_tokens: maxTokens, temperature: 0, stream: false,
+            ...(tools ? {
+              tools,
+              ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
+              ...(parallelToolCalls !== undefined ? { parallel_tool_calls: parallelToolCalls } : {}),
+            } : {}),
+          }),
           signal: AbortSignal.timeout(settings.timeoutMs ?? 60_000),
         });
       } catch (err) {
@@ -73,16 +95,34 @@ export function connectorOf(settings: ConnectorSettings): Connector {
       }
       if (!res.ok) throw new UpstreamError(`the backend answered ${res.status}`);
       const out = await res.json().catch(() => null) as {
-        choices?: Array<{ message?: { content?: unknown } }>;
+        choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
         usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
       } | null;
-      const content = out?.choices?.[0]?.message?.content;
+      const choice = out?.choices?.[0];
+      const content = choice?.message?.content;
+      const calls = choice?.message?.tool_calls;
+      let toolCalls: ToolCall[] | undefined;
+      if (calls !== undefined && calls !== null && !(Array.isArray(calls) && calls.length === 0)) {
+        try {
+          toolCalls = toolCallsFromWire(calls);
+        } catch (err) {
+          throw new UpstreamError(`the backend answered with tool calls that are not shaped as calls: ${err instanceof WireError ? err.message : String(err)}`);
+        }
+      }
       const promptTokens = out?.usage?.prompt_tokens;
       const completionTokens = out?.usage?.completion_tokens;
-      if (typeof content !== 'string' || !isCount(promptTokens) || !isCount(completionTokens)) {
-        throw new UpstreamError('the backend answered without text and token counts');
+      const answered = typeof content === 'string' || (toolCalls !== undefined && (content === null || content === undefined));
+      if (!answered || !isCount(promptTokens) || !isCount(completionTokens)) {
+        throw new UpstreamError('the backend answered without text or tool calls and token counts');
       }
-      return { content, promptTokens, completionTokens };
+      const finishReason = choice?.finish_reason === 'length' || choice?.finish_reason === 'content_filter' ? choice.finish_reason : undefined;
+      return {
+        content: typeof content === 'string' ? content : null,
+        ...(toolCalls ? { toolCalls } : {}),
+        ...(finishReason ? { finishReason } : {}),
+        promptTokens,
+        completionTokens,
+      };
     },
   };
 }

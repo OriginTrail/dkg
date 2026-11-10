@@ -9,6 +9,9 @@
  *      epoch, each from the peer its offer names, which must answer as the
  *      offer's seller. A quote that does not read as one
  *      (`quoteResponseFromWire`) counts as no answer.
+ *   A call with tools goes only to a seller whose quote says it takes tool
+ *   calls for the service; one whose kept quote says it does not goes behind
+ *   the others. With none, the pick says so (`tools_unsupported`).
  *   4. It stays with the seller that answered, so each seller gets one run of
  *      nonces, and moves on when a seller is unreachable, for ten minutes, or
  *      returns a receipt that fails the buyer's checks, for the rest of the epoch.
@@ -42,6 +45,14 @@ export interface Route {
   pricePerUnit: bigint;
 }
 
+/** What a call needs of its seller beyond the service: that it take tool calls. */
+export interface RouteNeeds {
+  tools?: boolean;
+}
+
+/** A pick: a route, or why there is none: no seller serves now, or none of those that do takes tool calls. */
+export type RoutePick = { route: Route } | { route: null; reason: 'no_seller' | 'tools_unsupported' };
+
 export interface RouterDeps {
   chain: Pick<MarketplaceChainAdapter, 'getMarketplaceContracts' | 'getIdentityIdForAddress' | 'isShardingTableMember'>;
   /** The offers in the Marketplace Context Graph's Verifiable Memory, their signatures not checked. */
@@ -71,7 +82,12 @@ export class Router {
   }
 
   /** The seller for a call to `serviceId` in `epoch`, under `maxPricePerUnit`; `null` when none can serve it. */
-  async pick(serviceId: string, epoch: number, maxPricePerUnit: bigint): Promise<Route | null> {
+  async pick(serviceId: string, epoch: number, maxPricePerUnit: bigint, needs: RouteNeeds = {}): Promise<Route | null> {
+    return (await this.pickFor(serviceId, epoch, maxPricePerUnit, needs)).route;
+  }
+
+  /** As `pick`, with why there is no route when there is none. */
+  async pickFor(serviceId: string, epoch: number, maxPricePerUnit: bigint, needs: RouteNeeds = {}): Promise<RoutePick> {
     const now = this.clock();
     const pinned = (await this.deps.pinned?.(serviceId)) ?? [];
     const offers = (await this.offersOf([epoch])).filter((o) =>
@@ -82,6 +98,7 @@ export class Router {
     for (const o of offers) if (await this.deps.chain.isShardingTableMember(o.seller)) candidates.push(o);
     const rank = (o: Offer) => [
       (this.demotedUntil.get(o.seller.toString()) ?? 0) > now ? 1 : 0,
+      needs.tools && this.quotedWithoutTools(o.seller, serviceId, epoch, now) ? 1 : 0,
       o.seller === this.sticky.get(serviceId) ? 0 : 1,
       pinned.includes(o.seller) ? 0 : 1,
     ];
@@ -91,14 +108,26 @@ export class Router {
       if (a.pricePerUnit !== b.pricePerUnit) return a.pricePerUnit < b.pricePerUnit ? -1 : 1;
       return (this.latency.get(a.seller.toString()) ?? Infinity) - (this.latency.get(b.seller.toString()) ?? Infinity);
     });
+    let withoutTools = false;
     for (const offer of candidates.slice(0, QUOTED_CANDIDATES)) {
       const quote = await this.quoteOf(offer.seller, offer.peerId, serviceId, epoch, now);
       const quoted = quote?.offers.find((q) => q.serviceId === serviceId);
       if (!quote || quote.epoch !== epoch || !quoted?.available || BigInt(quoted.pricePerUnit) > maxPricePerUnit) continue;
+      if (needs.tools && quoted.tools !== true) {
+        withoutTools = true;
+        continue;
+      }
       this.sticky.set(serviceId, offer.seller);
-      return { seller: offer.seller, peerId: offer.peerId, pricePerUnit: BigInt(quoted.pricePerUnit) };
+      return { route: { seller: offer.seller, peerId: offer.peerId, pricePerUnit: BigInt(quoted.pricePerUnit) } };
     }
-    return null;
+    return { route: null, reason: withoutTools ? 'tools_unsupported' : 'no_seller' };
+  }
+
+  /** Whether the quote kept from `seller` for `serviceId` in `epoch` says it takes no tool calls. */
+  private quotedWithoutTools(seller: bigint, serviceId: string, epoch: number, now: number): boolean {
+    const kept = this.quotes.get(`${seller}:${serviceId}`);
+    if (!kept || kept.quote.epoch !== epoch || now - kept.at >= QUOTE_TTL_MS) return false;
+    return kept.quote.offers.find((o) => o.serviceId === serviceId)?.tools !== true;
   }
 
   /** A seller that did not answer: left out for ten minutes. */
