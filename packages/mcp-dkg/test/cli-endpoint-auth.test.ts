@@ -3,13 +3,17 @@ import { createServer, type Server } from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import { runCli } from '../src/cli/index.js';
+import { fetchManifest } from '../src/manifest/fetch.js';
+import { CONFIG_YAML_TEMPLATE } from '../src/manifest/templates.js';
 
 const fixture = vi.hoisted(() => ({ home: '' }));
 vi.mock('node:os', async (original) => {
   const actual = await original<typeof import('node:os')>();
   return { ...actual, homedir: () => fixture.home, default: { ...actual, homedir: () => fixture.home } };
 });
+vi.mock('../src/manifest/fetch.js', () => ({ fetchManifest: vi.fn() }));
 let root: string;
 let workspace: string;
 let server: Server | undefined;
@@ -93,5 +97,53 @@ describe('CLI final endpoint credential scope', () => {
     expect(await runCli([...args, `--token-file=${explicit}`])).toBe(1);
     expect(remote.credentials).toEqual([undefined, 'Bearer selected-remote-secret']);
     expect(fs.readdirSync(workspace)).toEqual([]);
+  });
+});
+
+describe('join credential source', () => {
+  const wallets: Record<string, string> = { 'Bearer selected-secret': `0x${'5e'.repeat(20)}`, 'Bearer local-secret': `0x${'ad'.repeat(20)}` };
+  // Daemon double: records each request's credential; identity follows the credential.
+  function daemon() {
+    const requests: Array<[string, string | null]> = [];
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (input, init) => {
+      const route = new URL(String(input)).pathname; const authorization = new Headers(init?.headers).get('Authorization');
+      requests.push([route, authorization]);
+      return Response.json(route === '/api/agent/identity' ? { agentAddress: wallets[authorization ?? ''] } : { contextGraphs: [{ id: 'team' }] });
+    }));
+    vi.mocked(fetchManifest).mockResolvedValue({ uri: 'urn:manifest:team', contextGraphId: 'team', network: 'testnet', supportedTools: ['cursor'],
+      configTemplate: { uri: 'urn:template', encodingFormat: 'text/yaml', text: CONFIG_YAML_TEMPLATE } });
+    return requests;
+  }
+  const join = (...extra: string[]) => runCli(['join', 'team', `--workspace=${workspace}`, '--agent-slug=alice', '--yes', '--no-subscribe', '--skip-claude', ...extra]);
+  const installed = () => parseYaml(fs.readFileSync(path.join(workspace, '.dkg/config.yaml'), 'utf8'));
+
+  it.each([
+    { source: 'the active development home', file: '.dkg-dev/auth.token', api: 'http://localhost:9200', args: [], setup: () => {
+      write(path.join(root, '.dkg-dev/config.json'), '{"apiPort":9200}'); write(path.join(root, '.dkg-dev/api.port'), '9200');
+      write(path.join(root, '.dkg-dev/daemon.pid'), String(process.pid)); write(path.join(root, '.dkg-dev/auth.token'), 'node-secret');
+    } },
+    { source: 'an explicit DKG_HOME', file: 'chosen/auth.token', api: 'http://localhost:9400', args: ['--daemon=http://localhost:9400'], setup: () => {
+      write(path.join(root, 'chosen/config.json'), '{"apiPort":9400}'); write(path.join(root, 'chosen/auth.token'), 'node-secret');
+      vi.stubEnv('DKG_HOME', path.join(root, 'chosen'));
+    } },
+  ])('records the token file it authenticated with from $source', async ({ file, api, args, setup }) => {
+    setup(); const requests = daemon();
+    expect(await join(...args)).toBe(0);
+    expect(requests.map(([, authorization]) => authorization)).toEqual(['Bearer node-secret', 'Bearer node-secret']);
+    expect(installed().node).toEqual({ api, tokenFile: path.join(root, file) });
+    // After a restart without DKG_HOME, the workspace binding alone must authenticate.
+    vi.stubEnv('DKG_HOME', undefined); requests.length = 0;
+    expect(await runCli(['status'])).toBe(0);
+    expect(requests).toEqual([['/api/context-graph/list', 'Bearer node-secret']]);
+  });
+
+  it.each(['discovered home', 'workspace binding'])('uses an explicit token file over the %s for requests, identity and the install', async (source) => {
+    home(9200);
+    if (source === 'workspace binding') write(path.join(workspace, '.dkg/config.yaml'), `node:\n  api: http://localhost:9200\n  tokenFile: ${path.join(root, '.dkg/auth.token')}\n`);
+    const selected = path.join(root, 'selected.token'); write(selected, '# selected\nselected-secret\n');
+    const requests = daemon();
+    expect(await join(`--token-file=${selected}`)).toBe(0);
+    expect(requests).toEqual([['/api/context-graph/list', 'Bearer selected-secret'], ['/api/agent/identity', 'Bearer selected-secret']]);
+    expect(installed()).toMatchObject({ node: { tokenFile: selected }, agent: { uri: `urn:dkg:agent:${wallets['Bearer selected-secret']}` } });
   });
 });

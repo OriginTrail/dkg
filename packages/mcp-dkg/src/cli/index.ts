@@ -28,8 +28,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline/promises';
 
-import { loadConfig } from '../config.js';
-import { readDkgApiPortSync } from '@origintrail-official/dkg-core';
+import { loadConfig, resolveCredential } from '../config.js';
 import { DkgClient, DkgHttpError } from '../client.js';
 import { fetchManifest } from '../manifest/fetch.js';
 import { planInstall, writeInstall, buildReviewMarkdown } from '../manifest/install.js';
@@ -219,18 +218,6 @@ async function prompt(question: string, defaultValue?: string): Promise<string> 
   }
 }
 
-// Configured homes are resolved by loadConfig. The legacy token-only fallback
-// is local and uses its recorded runtime port, or the first-run default.
-function canUseImplicitTokenFile(api: string, tokenFile: string): boolean {
-  if (fs.existsSync(path.join(path.dirname(tokenFile), 'config.json'))) return false;
-  try {
-    const url = new URL(api);
-    const port = readDkgApiPortSync(path.dirname(tokenFile)) ?? 9200;
-    return url.protocol === 'http:' && url.port === String(port) && url.pathname === '/'
-      && !url.username && !url.password && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-  } catch { return false; }
-}
-
 async function cmdJoin(args: string[]): Promise<number> {
   let opts: JoinOptions;
   try {
@@ -253,39 +240,27 @@ async function cmdJoin(args: string[]): Promise<number> {
 
   // ── 1. Sanity-check the daemon ──
   console.log(`[join] checking local daemon at ${opts.daemonUrl}...`);
-  const config = loadConfig(opts.workspace, { api: opts.daemonUrl });
   // Resolve the bearer token BEFORE the first daemon call so fresh
-  // machines don't 401 on the very first `listProjects()`. Priority:
+  // machines don't 401 on the very first `listProjects()`. The config
+  // resolver owns the order:
   //
-  //   1. --token / DKG_TOKEN / DEVNET_TOKEN (explicit opts.token)
-  //   2. existing .dkg/config.yaml (config.token from loadConfig)
-  //   3. explicit --token-file, or a token-only home at its local runtime/default port
+  //   1. --token / DKG_TOKEN / DEVNET_TOKEN, then an explicit --token-file
+  //   2. an existing .dkg/config.yaml or DKG_HOME binding
+  //   3. automatic: the active node home for this endpoint, then a
+  //      token-only home at its local runtime/default port
   //
-  // Previously (3) was silently ignored here, so `dkg-mcp join` on a
-  // first-run machine with only a daemon-written auth.token file would
-  // send an empty Bearer, get 401 on /listProjects, and abort before
-  // the generated config.yaml could even be written. loadConfig already
-  // resolves `.dkg/config.yaml`'s tokenFile field, but that file doesn't
-  // exist yet the first time you run `join` — so we also read the CLI
-  // tokenFile ourselves.
-  let resolvedToken = opts.token ?? config.token ?? null;
-  if (!resolvedToken && opts.tokenFile && (opts.tokenFileExplicit || canUseImplicitTokenFile(opts.daemonUrl, opts.tokenFile))) {
-    try {
-      const raw = fs.readFileSync(opts.tokenFile, 'utf-8');
-      const lines = raw.split(/\r?\n/).filter((l) => l && !l.startsWith('#'));
-      const candidate = lines.join('').trim();
-      if (candidate) resolvedToken = candidate;
-    } catch {
-      // tokenFile doesn't exist / isn't readable yet — fall through and
-      // let the daemon call 401 with a helpful error below. Don't fail
-      // hard here because the user may legitimately have set a literal
-      // --token or DKG_TOKEN that we already picked up.
-    }
-  }
-  const effectiveConfig = {
-    ...config,
+  // The token file is read here because the generated config.yaml does
+  // not exist yet on the first `join`. The install records the file the
+  // token came from, so the workspace keeps the credential join used.
+  const credential = resolveCredential(opts.workspace, {
     api: opts.daemonUrl,
-    token: resolvedToken ?? '',
+    token: opts.token,
+    tokenFile: opts.tokenFileExplicit ? opts.tokenFile : undefined,
+    fallbackTokenFile: opts.tokenFile,
+  });
+  const effectiveConfig = {
+    ...credential.config,
+    api: opts.daemonUrl,
     defaultProject: invite.contextGraphId,
   };
   const client = new DkgClient({ config: effectiveConfig });
@@ -447,7 +422,7 @@ async function cmdJoin(args: string[]): Promise<number> {
     ...(agentUri ? { agentUri } : {}),
     ...(agentAddress ? { agentAddress } : {}),
     daemonApiUrl: opts.daemonUrl,
-    daemonTokenFile: opts.tokenFile,
+    daemonTokenFile: credential.tokenFile ?? opts.tokenFile,
     mcpDkgDistAbsPath: path.resolve(HERE, '..', 'index.js'),
     mcpDkgPackageDir: path.resolve(HERE, '..', '..'),
     mcpDkgSrcAbsPath: path.resolve(HERE, '..', '..', 'src', 'index.ts'),

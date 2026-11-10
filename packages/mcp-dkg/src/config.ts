@@ -155,9 +155,12 @@ function findConfigFile(start: string): string | null {
 
 type HomeFileDefaults = Pick<DkgConfig, 'api' | 'token' | 'defaultProject' | 'sourcePath'>;
 
+/** A configured daemon home has config.json; a token-only home has just auth.token. */
+const homeConfigPath = (dkgHome: string) => path.join(dkgHome, 'config.json');
+
 /** Decode daemon-home files only; endpoint selection and precedence belong to loadConfig. */
 function readHomeFileDefaults(dkgHome: string): HomeFileDefaults | null {
-  const jsonPath = path.join(dkgHome, 'config.json');
+  const jsonPath = homeConfigPath(dkgHome);
   if (!fs.existsSync(jsonPath)) return null;
   let daemonConfig: Record<string, unknown> = {};
   try {
@@ -206,7 +209,51 @@ function asPrivacy(v: unknown): 'private' | 'team' | 'public' {
  * + defaults, which is fine for tools that don't need auth.
  */
 export function loadConfig(cwd: string = process.cwd(), overrides: { api?: string } = {}): DkgConfig {
-  const overrideApi = asString(overrides.api);
+  return resolveCredential(cwd, overrides).config;
+}
+
+/** Credentials a command selected for itself, on top of normal configuration. */
+export interface CredentialChoice {
+  /** Endpoint the command contacts; automatic credentials stay bound to their own endpoint. */
+  api?: string;
+  /** Token selected for this command (`--token`, `DKG_TOKEN`, `DEVNET_TOKEN`). */
+  token?: string;
+  /** Token file selected for this command (`--token-file`). */
+  tokenFile?: string;
+  /** Legacy token-only home file. It is automatic, so only its own local endpoint may use it. */
+  fallbackTokenFile?: string;
+}
+
+export interface ResolvedCredential {
+  config: DkgConfig;
+  /** File the token was read from; null for a literal, environment or missing token. */
+  tokenFile: string | null;
+}
+
+/**
+ * The single credential resolver. Choices made for this command come first,
+ * then a workspace or DKG_HOME binding, then automatic sources: the active
+ * node home for this endpoint, then the legacy token-only home at its
+ * recorded local port (9200 when unrecorded). A home with config.json is
+ * never reached through the legacy file, so a rejected endpoint stays rejected.
+ */
+export function resolveCredential(cwd: string, choice: CredentialChoice = {}): ResolvedCredential {
+  const configured = loadConfiguredCredential(cwd, asString(choice.api));
+  const { config } = configured;
+  if (choice.token) return { config: { ...config, token: choice.token }, tokenFile: null };
+  if (choice.tokenFile) {
+    return { config: { ...config, token: resolveTokenFromFile(choice.tokenFile) ?? '' }, tokenFile: choice.tokenFile };
+  }
+  const fallback = choice.fallbackTokenFile;
+  if (config.token || !fallback) return configured;
+  const fallbackHome = path.dirname(fallback);
+  const eligible = !fs.existsSync(homeConfigPath(fallbackHome))
+    && matchesDiscoveredHomeEndpoint(config.api, `http://localhost:${readDkgApiPortSync(fallbackHome) ?? 9200}`);
+  const token = eligible ? resolveTokenFromFile(fallback) : null;
+  return token ? { config: { ...config, token }, tokenFile: fallback } : configured;
+}
+
+function loadConfiguredCredential(cwd: string, overrideApi: string | null): ResolvedCredential {
   const envApi = asString(process.env.DKG_API) ?? asString(process.env.DEVNET_API);
   const requestedApi = overrideApi ?? envApi;
   const envToken = asString(process.env.DKG_TOKEN) ?? asString(process.env.DEVNET_TOKEN) ?? asString(process.env.DKG_AUTH);
@@ -223,11 +270,12 @@ export function loadConfig(cwd: string = process.cwd(), overrides: { api?: strin
       const runtimePort = dkgHome ? null : readDkgApiPortSync(home);
       const homeApi = runtimePort === null ? defaults.api : `http://localhost:${runtimePort}`;
       if (dkgHome || matchesDiscoveredHomeEndpoint(requestedApi, homeApi)) {
-        return {
+        const config: DkgConfig = {
           ...defaults, api: requestedApi ?? homeApi, token: envToken ?? defaults.token,
           defaultProject: envProject ?? defaults.defaultProject, agentUri: envAgent,
           capture: { autoShare: true, defaultPrivacy: 'team', subGraph: 'chat', assertion: 'chat-log' },
         };
+        return { config, tokenFile: !envToken && defaults.token ? path.join(home, 'auth.token') : null };
       }
     }
   }
@@ -281,6 +329,7 @@ export function loadConfig(cwd: string = process.cwd(), overrides: { api?: strin
   // → every write 401s). The capture-chat hook had the same bug; fixed
   // there too.
   let token: string | null = asString(node.token);
+  let tokenFile: string | null = null;
   if (!token) {
     const tokenFileRaw = asString(node.tokenFile);
     if (tokenFileRaw && sourcePath) {
@@ -289,6 +338,7 @@ export function loadConfig(cwd: string = process.cwd(), overrides: { api?: strin
         ? expanded
         : path.resolve(path.dirname(sourcePath), expanded);
       token = resolveTokenFromFile(abs);
+      if (token) tokenFile = abs;
     }
   }
   if (!token) token = envToken;
@@ -302,7 +352,7 @@ export function loadConfig(cwd: string = process.cwd(), overrides: { api?: strin
     ?? envProject
     ?? null;
 
-  return {
+  const config: DkgConfig = {
     api: overrideApi ?? asString(node.api) ?? envApi ?? DEFAULT_API,
     token: token ?? '',
     defaultProject: project,
@@ -315,6 +365,7 @@ export function loadConfig(cwd: string = process.cwd(), overrides: { api?: strin
     },
     sourcePath,
   };
+  return { config, tokenFile };
 }
 
 /**
