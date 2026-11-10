@@ -14,6 +14,7 @@ import {
   loadSortedGraphCatalog,
   readGraphInventory,
   readGraphInventoryByPrefix,
+  resolveSharedMemoryReadGraphs,
   storeGraphCatalogMaxBytes,
   type QueryOptions,
   type TripleStore,
@@ -206,6 +207,17 @@ describe('a caller pays for, and is bounded by, what it receives', () => {
     vi.unstubAllEnvs();
     await expect(readGraphInventoryByPrefix(ignoring, `${CG}small/`))
       .resolves.toEqual({ graphs: [match], materializedBytes: bytes([match]) });
+  });
+
+  it("bounds a graph-manager prefix read's slice by the caller's limit on a store without a prefix listing", async () => {
+    const bucket = `${CG}swm/_shared_memory`;
+    const large = Array.from({ length: 20 }, (_, n) => `${bucket}/0xabc/${n}`);
+    const tooLarge = { listGraphs: async () => [...large, ...unrelated] } as unknown as TripleStore;
+    await expect(resolveSharedMemoryReadGraphs(tooLarge, bucket, { maxResponseBytes: callerLimit }))
+      .rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE', maxBytes: callerLimit });
+    const fits = { listGraphs: async () => [`${bucket}/0xabc/1`, ...unrelated] } as unknown as TripleStore;
+    await expect(resolveSharedMemoryReadGraphs(fits, bucket, { maxResponseBytes: callerLimit }))
+      .resolves.toEqual([bucket, `${bucket}/0xabc/1`]);
   });
 
   it('serves two prefix discoveries on a catalog larger than the discovery limit, each charged for its slice', async () => {
