@@ -62,6 +62,9 @@ describe('patterns outside GRAPH', () => {
       '<urn:a> <urn:b> []', '<urn:a> <urn:b> _:x', '?o ^(^<urn:b>) <urn:a>', '<urn:a> (<urn:b>) ?o ;', '?x <urn:self> ?x',
     ]) expect(hidden(`SELECT (COUNT(*) AS ?n) WHERE { ${triple} }`)).toBe(`SELECT (COUNT(*) AS ?n) WHERE { ${graphForm(triple)} }`);
     expect(hidden('SELECT ?o (COUNT(*) AS ?n) WHERE { ?o ^<urn:b> ?s } GROUP BY (?o) VALUES ?x { 1 }')).toContain(graphForm('?o ^<urn:b> ?s'));
+    // A variable is the same under any spelling (the materialized text decodes escapes).
+    expect(hidden('SELECT ?s (COUNT(*) AS ?n) WHERE { ?\\u0073 <urn:b> ?o } GROUP BY ?s')).toContain(graphForm('?s <urn:b> ?o'));
+    expect(hidden('SELECT $s (COUNT(?o) AS ?n) WHERE { ?s <urn:b> $\\u006F } GROUP BY ?\\u0073')).toMatch(/GRAPH \?_holder \{ \?s <urn:b> [?$]o \}/);
     expect(hidden('SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o } ORDER BY ?n VALUES ?o { <urn:c> }')).toContain(graphForm('<urn:a> <urn:b> ?o'));
     // Not the fast form: these count solutions of the merged default graph.
     for (const query of [
@@ -118,6 +121,7 @@ describe('patterns outside GRAPH', () => {
       'SELECT ?s WHERE { ?s <urn:p> ?o FILTER EXISTS { { SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?q BIND(1 AS ?x) } } } }'],
     ['a COUNT over a pattern with an RDF collection', 'SELECT (COUNT(*) AS ?n) WHERE { ?s <urn:p> ( 1 2 ) }'],
     ['a predicate variable that is also the object', 'SELECT ?p WHERE { <urn:a> ?p ?p }'],
+    ['a predicate variable that is also the object, spelled with an escape', 'SELECT ?p WHERE { <urn:a> ?p ?\\u0070 }'],
     ['a predicate variable that is also the subject, in the counting form', 'SELECT (COUNT(*) AS ?n) WHERE { ?x ?x ?o }'],
   ])('refuses %s', (_label, source) => {
     expect(() => hide(source)).toThrow(UnscopedReadGraphQueryError);

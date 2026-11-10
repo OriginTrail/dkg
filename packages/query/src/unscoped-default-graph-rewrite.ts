@@ -31,7 +31,6 @@ const BLOCK_END = new Set(['OPTIONAL', 'MINUS', 'GRAPH', 'SERVICE', 'FILTER', 'B
 /** A predicate that is one IRI, inverted any number of times: one statement pattern. */
 const isLink = (path: SparqlPath): boolean => path.kind === 'link' || (path.kind === 'inverse' && isLink(path.path));
 const isStatementPattern = (triple: SparqlTriplePattern): boolean => triple.verb.kind === 'variable' || isLink(triple.verb);
-const variableName = (term: string): string | undefined => (/^[?$]/.test(term) ? term.slice(1) : undefined);
 
 /** What the walk of one query's WHERE group met outside GRAPH, MINUS, EXISTS and sub-selects. */
 interface CountSurvey {
@@ -67,12 +66,20 @@ class DefaultGraphRewriter {
   private readonly labels = new Map<string, string>();
   private introducedVariables = false;
   private survey: CountSurvey = { triples: 0, simple: true, besideDropped: false };
+  /** The decoded name of each variable spelling in the query, such as `?\u0073` for `s`. */
+  private readonly variableNames: Map<string, string>;
   /** Depth of MINUS and EXISTS groups, whose contents the survey leaves out. */
   private contained = 0;
 
   constructor(private readonly scope: PreparedSparqlQuery, private readonly excluded: (variable: string) => string) {
     this.tokens = scope.prepared.tokens;
     this.fresh = createVariableAllocator(scope);
+    this.variableNames = new Map(this.tokens.flatMap(token => (token.kind === 'variable' ? [[token.raw, token.logicalValue.slice(1)] as const] : [])));
+  }
+
+  /** The decoded name of a term that is a variable, as the parser spells it. */
+  private variableName(term: string): string | undefined {
+    return this.variableNames.get(term) ?? (/^[?$]/.test(term) ? term.slice(1) : undefined);
   }
 
   run(): SourceEdit[] {
@@ -359,15 +366,15 @@ class DefaultGraphRewriter {
     if (!triple || !isStatementPattern(triple)) return undefined;
     this.refuseRepeatedVerb(triple);
     const terms = [triple.subject, triple.object, ...(triple.verb.kind === 'variable' ? [triple.verb.text] : [])];
-    const variables = new Set(terms.map(variableName).filter(name => name !== undefined));
+    const variables = new Set(terms.map(term => this.variableName(term)).filter(name => name !== undefined));
     if (count.key !== undefined && !(variables.has(count.key) && (count.counted === '*' || variables.has(count.counted)))) return undefined;
     return { from, to };
   }
 
   /** A pattern whose predicate variable is also its subject or object is refused. */
   private refuseRepeatedVerb(triple: SparqlTriplePattern): void {
-    const verb = triple.verb.kind === 'variable' ? variableName(triple.verb.text) : undefined;
-    if (verb !== undefined && [triple.subject, triple.object].some(term => variableName(term) === verb)) {
+    const verb = triple.verb.kind === 'variable' ? this.variableName(triple.verb.text) : undefined;
+    if (verb !== undefined && [triple.subject, triple.object].some(term => this.variableName(term) === verb)) {
       throw new UnrewrittenPatternError('A pattern outside GRAPH whose predicate variable is also its subject or object');
     }
   }
