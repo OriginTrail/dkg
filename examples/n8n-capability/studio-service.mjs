@@ -9,6 +9,7 @@ import { component as componentV1, normalizeComponentInput as normalizeComponent
 import { createStudioCompiler } from './studio-definition.mjs';
 import { workflowUuid } from './workflow-definition.mjs';
 import { programWorkflowReceipt } from './program-workflow-receipt.mjs';
+import { mapWithConcurrency } from '../../packages/agent/dist/map-with-concurrency.js';
 
 const reference = (source, graphId) => ({ graphId, programIri: source.programIri, programLayer: 'wm', authorAgentAddress: source.authorAgentAddress, sourceHash: source.sourceHash });
 const reject = message => Object.assign(new Error(message), { code: 'INVALID_WORKFLOW', status: 400 });
@@ -42,13 +43,15 @@ export function createStudioService({ graphId, owner, client, repository, provid
       activation: (({ active, count, expiresAt }) => ({ active, count, expiresAt }))(saved.activation), readbackVerified: true } };
   }
   async function list() {
-    const workflows = [];
-    for (const kaRef of repository.list()) {
+    const workflows = await mapWithConcurrency(repository.list(), 4, async kaRef => {
       // Unavailable revisions remain saved with their original pins; other workflows can still be listed.
-      try { workflows.push((await get(kaRef)).workflow); }
-      catch (e) { if (!['PROGRAM_NOT_FOUND', 'INVALID_WORKFLOW', 'WORKFLOW_CAPABILITY_CHANGED'].includes(e.code)) throw e; }
-    }
-    return workflows;
+      try { return (await get(kaRef)).workflow; }
+      catch (e) {
+        if (!['PROGRAM_NOT_FOUND', 'INVALID_WORKFLOW', 'WORKFLOW_CAPABILITY_CHANGED'].includes(e.code)) throw e;
+        return null;
+      }
+    });
+    return workflows.filter(workflow => workflow !== null);
   }
   async function save(value, authorize) {
     const definition = normalizeStudio(value);
