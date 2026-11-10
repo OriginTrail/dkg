@@ -2,6 +2,7 @@ import http from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { matchCapabilityRoute } from './capability-routes.mjs';
+import { readRequestBodyBytesBounded, RequestBodyLimitError } from './request-body.mjs';
 
 const identities = new Set(['Bearer l1-owner-a', 'Bearer l1-viewer-a']);
 const kitPolicy = { methods: ['GET'], role: 'member', bodyLimit: 0, exportHeader: false };
@@ -41,9 +42,11 @@ export function createPreviewHandler(directory, { send = fetch, clock = Date.now
           if (writes.length >= 20) return json(res, 429, { error: 'Preview invocation limit reached; retry in a minute' });
           if (Number(req.headers['content-length'] ?? 0) > policy.bodyLimit) return json(res, 413, { error: 'Input too large' });
           writes.push(now); // Reserve admission before another request can await its body.
-          const chunks = []; let bytes = 0;
-          for await (const chunk of req) { bytes += chunk.length; if (bytes > policy.bodyLimit) return json(res, 413, { error: 'Input too large' }); chunks.push(chunk); }
-          body = Buffer.concat(chunks);
+          try { body = await readRequestBodyBytesBounded(req, policy.bodyLimit); }
+          catch (error) {
+            if (error instanceof RequestBodyLimitError) return json(res, 413, { error: 'Input too large' });
+            throw error;
+          }
         }
         const upstream = await send(`${ka ? 'http://127.0.0.1:4631' : 'http://127.0.0.1:4610'}${path}${url.search}`, {
           method: req.method, redirect: 'error', signal: AbortSignal.timeout(60_000),

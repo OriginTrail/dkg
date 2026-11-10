@@ -80,8 +80,31 @@ test('preview denies invalid host, foreign origin, viewer writes and unexpected 
       [request(undefined, undefined, { authorization: 'Bearer l1-viewer-a' }), 403],
       [request(prefix + '/studio/run', 'GET'), 405],
       [request(prefix + '/studio/history', 'POST'), 405],
-    ]) { const res = response(); await f.handle(req, res); assert.equal(res.status, status); }
+    ]) { const res = response(); await f.handle(req, res); assert.equal(res.status, status); assert.equal(req.bodyReads, 0); }
     assert.equal(calls, 0);
+  } finally { f.close(); }
+});
+
+test('preview forwards unchanged bytes and keeps body failures separate from overflow', async () => {
+  const forwarded = [], f = fixture({ send: async (_url, options) => { forwarded.push(options.body); return Response.json({}); } });
+  try {
+    const text = 'Ébavurer — 鋼 🔧', bytes = Buffer.from(text);
+    for (const chunks of [[], [text], Array.from(bytes, byte => Buffer.from([byte])), [new Uint8Array(bytes)]]) {
+      const req = request(), res = response();
+      req[Symbol.asyncIterator] = async function* () { yield* chunks; };
+      await f.handle(req, res);
+      assert.equal(res.status, 200);
+      assert.deepEqual(forwarded.at(-1), chunks.length ? bytes : Buffer.alloc(0));
+    }
+    const before = forwarded.length, overflow = request(), tooLarge = response();
+    overflow[Symbol.asyncIterator] = async function* () { yield '€'.repeat(5462); };
+    await f.handle(overflow, tooLarge);
+    assert.equal(tooLarge.status, 413); assert.deepEqual(JSON.parse(tooLarge.body), { error: 'Input too large' });
+    const broken = request(), failed = response();
+    broken[Symbol.asyncIterator] = async function* () { yield Buffer.from('{'); throw new Error('Stream failed'); };
+    await f.handle(broken, failed);
+    assert.equal(failed.status, 502); assert.deepEqual(JSON.parse(failed.body), { error: 'Preview service unavailable' });
+    assert.equal(forwarded.length, before);
   } finally { f.close(); }
 });
 

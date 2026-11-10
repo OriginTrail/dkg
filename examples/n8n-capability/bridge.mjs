@@ -19,6 +19,7 @@ import { normalizeComponentInput } from './component-registry.mjs';
 import { STUDIO_PREFIX } from './studio-definition.mjs';
 import { createProgramCatalog } from './program-catalog.mjs';
 import { capabilityPrefix, capabilityRoutes, matchCapabilityRoute } from './capability-routes.mjs';
+import { readRequestBodyBytesBounded, RequestBodyLimitError } from './request-body.mjs';
 
 const SR = 'https://origintrail.io/semantic-runtime/v1#';
 const nativeCallback = capabilityRoutes.find(route => route.id === 'dkgComponent');
@@ -30,17 +31,14 @@ export async function handleDkgComponentCallback(req, res, studio, config, mcp) 
     const token=readFileSync(config.n8nNative.webhookTokenFile,'utf8').trim();
     const expected=Buffer.from('Bearer '+token), supplied=Buffer.from(String(req.headers.authorization??''));
     if(!studio || !nativeCallback.methods.includes(req.method) || Object.hasOwn(req.headers, 'origin') || token.length<32 || expected.length!==supplied.length || !timingSafeEqual(expected,supplied)) { json(res,403,{error:'Native DKG component access denied'});return true; }
-    const chunks = []; let size = 0;
-    for await (const chunk of req) {
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      size += bytes.length;
-      if (size > nativeCallback.bodyLimit) throw Object.assign(new Error('Bounded DKG batch required'), { status: 413 });
-      chunks.push(bytes);
-    }
-    const value = JSON.parse(Buffer.concat(chunks, size).toString('utf8'));
+    const bytes = await readRequestBodyBytesBounded(req, nativeCallback.bodyLimit);
+    const value = JSON.parse(bytes.toString('utf8'));
     const nativeResult = mcp ? await mcp.dkgComponent(value) : undefined;
     json(res,200,nativeResult === undefined ? await studio.dkgComponent(value) : nativeResult);
-  } catch(e) { json(res,e.status??409,{code:e.code??'DKG_COMPONENT_UNCONFIRMED',error:e.message}); }
+  } catch(e) {
+    const tooLarge = e instanceof RequestBodyLimitError;
+    json(res, tooLarge ? 413 : e.status ?? 409, { code: e.code ?? 'DKG_COMPONENT_UNCONFIRMED', error: tooLarge ? 'Bounded DKG batch required' : e.message });
+  }
 }
 
 export function createCapabilityBridge({ agent, client, graphId, owner, config, definitions = [], exportTokenFile, studioOptions, programAuthority, context = createStudioContext() }) {
@@ -213,18 +211,13 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     try {
       let value;
       if (route.bodyLimit) {
-        const chunks = []; let size = 0;
-        for await (const chunk of req) {
-          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); size += bytes.length;
-          if (size > route.bodyLimit) throw Object.assign(new Error('Request too large'), { status: 413 });
-          chunks.push(bytes);
-        }
-        if (size || !route.optionalBody) value = JSON.parse(Buffer.concat(chunks, size).toString('utf8'));
+        const bytes = await readRequestBodyBytesBounded(req, route.bodyLimit);
+        if (bytes.length || !route.optionalBody) value = JSON.parse(bytes.toString('utf8'));
       }
       await handlers[route.id]({ res, value, ownerAccess, actor, eventKey: match.params.eventKey,
         params: new URL(req.url ?? path, 'http://127.0.0.1:4631').searchParams, authorize: () => authorizeExport(req) });
     } catch (error) {
-      json(res, error.status ?? 400, { code: error.code ?? (delegated ? 'EVENT_UNCONFIRMED' : 'POC_REQUEST_REJECTED'),
+      json(res, error instanceof RequestBodyLimitError ? 413 : error.status ?? 400, { code: error.code ?? (delegated ? 'EVENT_UNCONFIRMED' : 'POC_REQUEST_REJECTED'),
         ...(error.code === 'DKG_WRITE_PENDING' ? { invocationId: error.invocationId, n8nExecutionId: error.n8nExecutionId } : {}),
         error: delegated ? 'The event did not confirm a result. Retain its invocationId.'
           : error.code === 'DKG_WRITE_PENDING' ? 'The DKG write is unconfirmed. Retry this invocation; do not start another run.'

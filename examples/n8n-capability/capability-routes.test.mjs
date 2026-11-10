@@ -85,3 +85,23 @@ test('bridge preserves delegated events and bounds common JSON parsing without s
     }
   } finally { f.close(); }
 });
+
+test('bridge keeps optional demo bodies and required route JSON distinct', async () => {
+  const f = fixture();
+  try {
+    for (const method of ['GET', 'POST']) {
+      const empty = await f.send('/spike/ka/demo-data', method, null, undefined, []);
+      assert.equal(empty.status, 200); assert.equal(Object.hasOwn(empty.body, 'received'), false);
+      const value = { text: '鋼 🔧' };
+      const supplied = await f.send('/spike/ka/demo-data', method, null, undefined, [JSON.stringify(value)]);
+      assert.equal(supplied.status, 200); assert.deepEqual(supplied.body.received, value);
+    }
+    for (const [path, code] of [[prefix + '/studio/save', 'POC_REQUEST_REJECTED'], [eventPath, 'EVENT_UNCONFIRMED']]) {
+      for (const chunks of [[], ['{']]) {
+        const rejected = await f.send(path, 'POST', 'owner', undefined, chunks);
+        assert.equal(rejected.status, 400); assert.equal(rejected.body.code, code);
+      }
+    }
+    assert.deepEqual(f.calls, []);
+  } finally { f.close(); }
+});

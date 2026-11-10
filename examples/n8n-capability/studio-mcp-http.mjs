@@ -1,4 +1,5 @@
 import { fail, mcpActor, record, closed } from './studio-mcp-contract.mjs';
+import { readRequestBodyBytesBounded, RequestBodyLimitError } from './request-body.mjs';
 
 const schema = properties => ({ type: 'object', properties, required: Object.keys(properties), additionalProperties: false });
 const text = { type: 'string' }, pin = { kaRef: text, workflowSha256: { type: 'string', pattern: '^[a-f0-9]{64}$' } };
@@ -29,14 +30,9 @@ export function createStudioMcpHttp({ service, session, agentEnabled = false }) 
     if (!/^application\/json(?:;|$)/i.test(req.headers['content-type'] ?? '')) { json(res, 415, { error: 'STUDIO_MCP_JSON_REQUIRED' }); return; }
     let value;
     try {
-      let size = 0; const parts = [];
-      for await (const part of req) {
-        size += part.length;
-        if (size > 16_384) throw fail('STUDIO_REQUEST_TOO_LARGE', 413);
-        parts.push(part);
-      }
-      value = JSON.parse(Buffer.concat(parts).toString('utf8'));
-    } catch (error) { json(res, error.status ?? 400, { error: 'STUDIO_INVALID_REQUEST' }); return; }
+      const bytes = await readRequestBodyBytesBounded(req, 16_384);
+      value = JSON.parse(bytes.toString('utf8'));
+    } catch (error) { json(res, error instanceof RequestBodyLimitError ? 413 : error.status ?? 400, { error: 'STUDIO_INVALID_REQUEST' }); return; }
     if (closed(value, ['jsonrpc', 'method']) && value.jsonrpc === '2.0' && value.method === 'notifications/initialized') {
       res.writeHead(202); res.end(); return;
     }

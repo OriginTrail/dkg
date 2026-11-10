@@ -114,7 +114,8 @@ test('callback handler enforces the 16 KiB byte limit before dispatching Unicode
   assert.deepEqual(h.calls, [{ text }]);
   const oversized = Buffer.from(JSON.stringify({ text: text + 'x' }));
   assert.equal(oversized.length, limit + 1);
-  assert.equal((await h.send([oversized.subarray(0, 4096), oversized.subarray(4096)])).status, 413);
+  assert.deepEqual(await h.send([oversized.subarray(0, 4096), oversized.subarray(4096)]),
+    { status: 413, body: { code: 'DKG_COMPONENT_UNCONFIRMED', error: 'Bounded DKG batch required' } });
   assert.deepEqual(h.calls, [{ text }]);
 });
 
