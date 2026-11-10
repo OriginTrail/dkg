@@ -1,7 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import fc from 'fast-check';
-import { MemoryLayer, readGraphIri, readScope, type ReadGraphKey } from '@origintrail-official/dkg-core';
+import {
+  MemoryLayer,
+  READ_GRAPH_SEGMENT,
+  readGraphIri,
+  readGraphStateGraphIri,
+  readScope,
+  type ReadGraphKey,
+} from '@origintrail-official/dkg-core';
 import { BlazegraphStore } from '../../src/adapters/blazegraph.js';
 import { OxigraphStore } from '../../src/adapters/oxigraph.js';
 import { ADAPTER_SPARQL_TERM_POLICY } from '../../src/adapters/sparql-term-policy.js';
@@ -47,6 +54,8 @@ import { propertyOptions } from '../../../../scripts/testing/property-options.js
 const AGENT = '0x' + 'ab'.repeat(20);
 const AGENT_MIXED = '0x' + 'aB'.repeat(20);
 const PEER = '12D3KooWQYhTNQdmr3ArTeUHRYzFg94BKyTkoWBDWez9kSCVe2Xo';
+/** The partition segment without its `~`: an ordinary segment, which older context graph IDs may hold. */
+const LOOK_ALIKE = READ_GRAPH_SEGMENT.replace('~', '');
 const identity = workingMemoryIdentityRule({ defaultAgentAddress: AGENT, peerId: PEER });
 const render = ADAPTER_SPARQL_TERM_POLICY.renderer({ adapter: 'oxigraph', operation: 'delete' }, () => {});
 
@@ -149,8 +158,8 @@ export function readGraphStatementsConformance(backend: 'oxigraph' | 'blazegraph
         contextGraphId: cg, subGraphNames: ['code', 'staging'], childContextGraphRoots: [`${root}/kid`],
       };
       const segments = ['_verifiable_memory', '_shared_memory', '_working_memory', 'assertion', 'context', 'staging',
-        '_meta', '_private', '_read', '_shared_memory_meta', '_metadata', AGENT, AGENT_MIXED, PEER, PEER.toLowerCase(),
-        '0X' + 'AB'.repeat(20), '7', 'code', 'kid', 'docs'];
+        '_meta', '_private', READ_GRAPH_SEGMENT, LOOK_ALIKE, '_shared_memory_meta', '_metadata', AGENT, AGENT_MIXED, PEER,
+        PEER.toLowerCase(), '0X' + 'AB'.repeat(20), '7', 'code', 'kid', 'docs'];
       const tails = fc.sample(fc.array(fc.constantFrom(...segments), { minLength: 1, maxLength: 4 }), { seed: propertyOptions().seed, numRuns: 400 });
       const graphs = [...new Set([root, `did:dkg:context-graph:${cg}x/_verifiable_memory/${AGENT}/1`, ...tails.map((tail) => [root, ...tail].join('/'))])];
       for (let start = 0; start < graphs.length; start += 200) {
@@ -407,7 +416,7 @@ export function readGraphStatementsConformance(backend: 'oxigraph' | 'blazegraph
       // A damaged row with a second state must not keep its ready mark either.
       const wm = readGraphIri({ scope: readScope(cg), layer: MemoryLayer.WorkingMemory, agentAddress: AGENT });
       await setState({ readGraph: wm, state: 'ready', generation: 40, ...versions() });
-      await update(`INSERT DATA { GRAPH <did:dkg:context-graph:${cg}/_read/state> { <${wm}> <http://dkg.io/ontology/readGraphState> "building" } }`);
+      await update(`INSERT DATA { GRAPH <${readGraphStateGraphIri(cg)}> { <${wm}> <http://dkg.io/ontology/readGraphState> "building" } }`);
       // A stale compare-and-set changes nothing.
       await update(readGraphStateCompareAndSet({ ...ready, state: 'building' }, { ...ready, state: 'dirty', generation: 4 }));
       const mine = (rows: ReadGraphStateRow[]) => rows.filter((row) => row.readGraph === vm || row.readGraph === swm)
