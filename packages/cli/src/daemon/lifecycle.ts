@@ -2247,7 +2247,7 @@ async function runDaemonInnerWithStartupOwnership(
   // The marketplace (OT-RFC-27), when enabled: the buyer, whose job keeps the standing plan funded, its gateway, and
   // the seller. A part that fails to start is logged and stays off; the node boots on.
   const { marketplace, marketplaceGateway, marketplaceSeller } = await startMarketplace({
-    config, agent, wallets: evmSigning.addresses.wallets.map((w) => w.address), dataDir: dkgDir(), dashDb, log,
+    config, network, agent, wallets: evmSigning.addresses.wallets.map((w) => w.address), dataDir: dkgDir(), dashDb, log,
   });
 
   // Classify configured graphs before migrating legacy readiness. Explicit
