@@ -13,6 +13,7 @@ import {
   computeSwmAuthorInventoryScopeDigestV1,
   deriveSwmAuthorInventoryScopeFromHeadV1,
   parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1,
+  snapshotSwmAuthorInventoryRowV1,
   snapshotSwmAuthorInventoryRowsV1,
   parseCanonicalDecimalU64,
   parseDeterministicKnowledgeAssetUal,
@@ -429,7 +430,7 @@ function prepareInput(input: MaintainRfc64SwmAuthorInventoryInputV1): Readonly<{
   try {
     assertSwmAuthorInventoryScopeV1(input.scope);
     const scope = Object.freeze({ ...input.scope });
-    const row = snapshotSwmAuthorInventoryRowsV1([input.row])[0]!;
+    const row = snapshotSwmAuthorInventoryRowV1(input.row);
     const signer = Object.freeze({
       issuer: input.signer.issuer,
       signDigest: input.signer.signDigest,
