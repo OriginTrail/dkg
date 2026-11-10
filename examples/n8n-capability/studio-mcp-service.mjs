@@ -2,15 +2,16 @@ import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { canonical, closed, fail, hash, id, readOnlyDefinition, runInput } from './studio-mcp-contract.mjs';
 import { nativeInputDigest } from './studio-native-execution.mjs';
-import { configuredDkgProfile } from './dkg-profile.mjs';
+import { createStudioCompiler } from './studio-definition.mjs';
 import { n8nWorkflowSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { createStudioNativeRunner } from './studio-native-runner.mjs';
 
 /** Small native admission journal, not a second receipt or workflow engine.
  * Arguments/results remain in n8n; only identity, pins and state live here.
  */
-export function createStudioMcpService({ repository, provider, installation, accountId, profile = configuredDkgProfile,
+export function createStudioMcpService({ repository, provider, installation, accountId, compiler = createStudioCompiler(),
   runner = createStudioNativeRunner(provider, installation), dkg }) {
+  const { profile } = compiler.registry;
   const journal = repository.mcp;
   const row = key => journal.run(accountId, key);
   const update = (key, status) => journal.updateRunStatus(accountId, key, status);
@@ -26,7 +27,7 @@ export function createStudioMcpService({ repository, provider, installation, acc
   }
   function describe(ref) {
     const workflow = saved(ref);
-    const definition = readOnlyDefinition(workflow.definition, profile);
+    const definition = readOnlyDefinition(workflow.definition, compiler);
     return { kaRef: ref, workflowSha256: workflow.grant.workflowSha256, definition,
       approved: !workflow.withdrawn, approvalKind: 'saved-workflow', effect: 'read', execution: 'native-n8n',
       ...(definition.nodes.some(n => n.componentId === 'dkg-read') ? {
@@ -73,8 +74,8 @@ export function createStudioMcpService({ repository, provider, installation, acc
     actorCheck(actor);
     const workflow = saved(value?.kaRef);
     if (workflow.withdrawn) throw fail('STUDIO_WORKFLOW_WITHDRAWN');
-    readOnlyDefinition(workflow.definition, profile);
-    const input = runInput(value, workflow, profile);
+    readOnlyDefinition(workflow.definition, compiler);
+    const input = runInput(value, workflow, compiler);
     const requestHash = createHash('sha256').update(canonical({ value, actor })).digest('hex');
     if (journal.matchingRun(accountId, value.runKey, requestHash)) return readRun({ runKey: value.runKey }, actor);
     const prior = journal.activeAgentRun(accountId);
@@ -120,7 +121,7 @@ export function createStudioMcpService({ repository, provider, installation, acc
       r = row(value.effectId);
     }
     const workflow = saved(r.kaRef);
-    readOnlyDefinition(workflow.definition, profile);
+    readOnlyDefinition(workflow.definition, compiler);
     if (!id(value.effectId) || !['running', 'unconfirmed'].includes(r.status) || workflow.withdrawn
       || value.workflowId !== workflow.grant.workflowId || !/^\d{1,20}$/.test(value.executionId ?? '')
       || r.checkpoint.executionId !== value.executionId) throw fail('STUDIO_NATIVE_UNCONFIRMED');

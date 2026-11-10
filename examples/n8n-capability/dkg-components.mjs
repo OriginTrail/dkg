@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { configuredDkgProfile, requireDkgProfile } from './dkg-profile.mjs';
+import { requireDkgProfile } from './dkg-profile.mjs';
 import { dkgComponentOperations, componentFailure as fail } from './dkg-component-operations.mjs';
 import { migrateDkgInvocationMetadata } from './dkg-component-schema.mjs';
 
 export const isDkg = (id) => ["dkg-read", "dkg-write", "invoke-dkg-program"].includes(id);
 const hash = (v) =>
   createHash("sha256").update(JSON.stringify(v)).digest("hex");
-export function assertDkgEnabled(definition, profile = configuredDkgProfile) {
+export function assertDkgEnabled(definition, profile = null) {
   for (const node of definition.nodes.filter(n => isDkg(n.componentId))) {
     requireDkgProfile(profile);
     if (!profile.enabled(node.componentId)) throw fail(node.componentId + ' is not enabled for this execution profile.');
@@ -41,7 +41,7 @@ export function validateDkgTopology(definition) {
     throw fail("DKG Write must be the terminal output.");
 }
 /** Transport journal only. Scheduling, transformations and joins remain in native n8n. */
-export function dkgComponentStore(db, transport, approvedInputs, profile = configuredDkgProfile) {
+export function dkgComponentStore(db, transport, approvedInputs, profile = null) {
   transport ??= profile?.transport;
   approvedInputs ??= profile?.loadInputs() ?? [];
   db.exec(`CREATE TABLE IF NOT EXISTS dkg_component_runs(id TEXT PRIMARY KEY, ka_ref TEXT NOT NULL, source_hash TEXT NOT NULL, input TEXT NOT NULL, expires INTEGER NOT NULL);

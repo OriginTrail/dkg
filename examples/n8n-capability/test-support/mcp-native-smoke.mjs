@@ -5,15 +5,14 @@
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 const state = resolve(process.argv[2] ?? '');
 if (!process.argv[2]) throw Error('Supply a fresh local setup-n8n state directory.');
-process.env.NOS_DKG_PROFILE_MODULE = fileURLToPath(new URL('./agent-read-profile.mjs', import.meta.url));
 const { default: profile, calls } = await import('./agent-read-profile.mjs');
-const { component } = await import('../component-registry.mjs');
+import { createStudioContext } from '../studio-context.mjs';
+const { compiler, registry: { component } } = createStudioContext({ profile });
 const { createStudioRepository } = await import('../studio-repository.mjs');
 const { createStudioProvider } = await import('../studio-provider.mjs');
 const { createStudioMcpService } = await import('../studio-mcp-service.mjs');
@@ -40,7 +39,7 @@ const server = createServer(async (req, res) => {
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const origin = 'http://127.0.0.1:' + server.address().port;
 const repository = createStudioRepository(join(state, 'mcp-smoke-' + randomUUID()));
-const provider = createStudioProvider({ repository, graphId: 'mcp-smoke', owner: '0x' + 'a'.repeat(40),
+const provider = createStudioProvider({ compiler, repository, graphId: 'mcp-smoke', owner: '0x' + 'a'.repeat(40),
   config: { n8nNative: { ...installation, workflows: [] } },
   // Resolve the credential already provisioned by setup, below.
   headerCredential: await (async () => {
@@ -69,7 +68,7 @@ try {
   repository.completeSave(compiled, 'native-n8n', false, await provider.savedNativeSnapshot(compiled));
   // n8n publication returns before local webhook registration settles.
   await delay(1500);
-  service = createStudioMcpService({ repository, provider, dkg: dkgComponentStore(repository.db, undefined, undefined, profile), accountId: profile.accountId, profile,
+  service = createStudioMcpService({ repository, provider, dkg: dkgComponentStore(repository.db, undefined, undefined, profile), accountId: profile.accountId, compiler,
     runner: createStudioNativeRunner(provider, installation, (url, options) => { posts++; return fetch(url, options); }) });
   const secret = randomBytes(32).toString('hex'), secretFile = join(state, 'smoke-service-key'), sessionFile = join(state, 'smoke-session.json');
   writeFileSync(secretFile, secret, { mode: 0o600 });

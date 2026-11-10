@@ -6,7 +6,9 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
-import { componentRegistry, normalizeComponentInput } from './component-registry.mjs';
+import { normalizeComponentInput } from './component-registry.mjs';
+import { loadStudioContext } from './studio-context.mjs';
+const { registry: { componentRegistry } } = await loadStudioContext();
 import { collectN8nExecutionResult } from '../../packages/cli/dist/semantic-runtime-n8n-results.js';
 
 const state = resolve(process.argv[2] ?? '');

@@ -1,12 +1,13 @@
-import './test-support/select-jpb-profile.mjs';
+import { compiler, registry, profile } from './test-support/jpb-context.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { programRequest, programResult } from './dkg-program.mjs';
+import { programRequest as requestProgram, programResult } from './dkg-program.mjs';
 import { dkgComponentStore } from './test-support/dkg-component-store-fixture.mjs';
-import { component } from './component-registry.mjs';
-import { compileStudio } from './studio-definition.mjs';
+const { component } = registry;
+const { compileStudio } = compiler;
 
+const programRequest = (node, rows, id) => requestProgram(node, rows, id, profile);
 const id = '11223344-1234-4234-8234-123456789abc';
 const block = (id, componentId, params = {}) => ({ id, componentId,
   kaRef: 'urn:demo:n8n:component:' + componentId + ':1234', sourceHash: 'a'.repeat(64), x: 0, y: 0,

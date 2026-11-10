@@ -1,9 +1,10 @@
 import { dkgComponentStore as createStore } from '../dkg-components.mjs';
+import profile from '../profiles/jpb.mjs';
 
 // Journal unit tests model a verified native Receive input. Bridge/service tests
 // independently supply provider execution snapshots through the actual route.
-export function dkgComponentStore(db, ...options) {
-  const store = createStore(db, ...options), { call, grant } = store;
+export function dkgComponentStore(db, transport, approvedInputs, selectedProfile = profile) {
+  const store = createStore(db, transport, approvedInputs, selectedProfile), { call, grant } = store;
   store.grant = (workflow, invocationId, input, actor) => grant(workflow,
     { invocationId, revisionDigest: workflow.sourceHash }, input, actor);
   store.call = (value, workflow, nativeId) => {

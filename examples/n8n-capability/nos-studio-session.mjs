@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
 import { createHash, timingSafeEqual } from 'node:crypto';
 
-export function loadNosStudioSession(file = process.env.NOS_STUDIO_SESSION_FILE) {
+export function loadNosStudioSession(file) {
   if (!file) return null;
   if (!isAbsolute(file)) throw new Error('Absolute operator Studio configuration required.');
   const config = JSON.parse(readFileSync(file, 'utf8'));
@@ -52,4 +52,3 @@ export function loadNosStudioSession(file = process.env.NOS_STUDIO_SESSION_FILE)
     },
   };
 }
-export const nosStudioSession = loadNosStudioSession();

@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
-import { configuredDkgProfile, requireDkgProfile } from './dkg-profile.mjs';
+import { requireDkgProfile } from './dkg-profile.mjs';
 import { resolveComponentValue } from './component-values.mjs';
 import { programRecords } from './program-block.mjs';
 
-export function programRequest(node, rows, parentInvocationId, profile = configuredDkgProfile) {
+export function programRequest(node, rows, parentInvocationId, profile = null) {
   requireDkgProfile(profile);
   if (node.params.catalogRevision !== profile.catalogRevision) throw new Error('The approved Program catalog changed. Select and save the current revision.');
   const selected = profile.programs.find(p => p.id === node.params.program && p.node === node.params.node);

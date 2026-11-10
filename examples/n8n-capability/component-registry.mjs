@@ -3,7 +3,7 @@ import { resolveComponentValueSource, validateComponentUrlSource, normalizeCompo
 import { resolveComponentValue, validateComponentUrl } from './component-values.mjs';
 import { componentProgramSource as componentProgramSourceV1 } from './component-registry-v1.mjs';
 import { programDescriptor } from './program-block.mjs';
-import { configuredDkgProfile, dkgOperationIds, profileParameters } from './dkg-profile.mjs';
+import { validateDkgProfile, dkgOperationIds, profileParameters } from './dkg-profile.mjs';
 const text = (label, value = '', extra = {}) => ({ type: 'string', label, default: value, maxLength: 256, ...extra });
 const field = (label, value) => text(label, value, { pattern: 'field', maxLength: 64 });
 const number = (label, value, min = 1, max = 20) => ({ type: 'integer', label, default: value, min, max });
@@ -15,7 +15,7 @@ const entry = (id, name, category, nodeType, parameters = {}, extra = {}) => ({
   input: 'items', outputs: ['main'], parameters, sampleItems: sample, mode: 'action', requiresExportAuthorization: false, ...extra,
 });
 
-export const componentRegistry = [
+function descriptors(profile) { return [
   entry('edit-fields', 'Edit Fields', 'Data', 'set', {
     fields: json('Field mappings', { team: 'DKG' }),
     keepInput: choice('Keep other input fields', 'yes', ['yes', 'no']),
@@ -42,15 +42,15 @@ export const componentRegistry = [
     query: json('Query parameters', {}), headers: json('Request headers', {}),
     body: { ...json('JSON request body', {}), shape: 'any' },
   }, { sampleItems: [{}], version: 2 }),
-  ...(configuredDkgProfile ? [
-    entry('dkg-read', 'DKG Read', 'DKG', 'httpRequest', profileParameters(configuredDkgProfile, 'dkg-read'),
-      { version: 2, connection: 'httpHeaderAuth', sampleItems: configuredDkgProfile.sampleItems?.['dkg-read'] ?? [{}] }),
+  ...(profile ? [
+    entry('dkg-read', 'DKG Read', 'DKG', 'httpRequest', profileParameters(profile, 'dkg-read'),
+      { version: 2, connection: 'httpHeaderAuth', sampleItems: profile.sampleItems?.['dkg-read'] ?? [{}] }),
     entry('invoke-dkg-program', 'Invoke DKG Program', 'DKG', 'httpRequest', {
-      ...profileParameters(configuredDkgProfile, 'invoke-dkg-program'),
+      ...profileParameters(profile, 'invoke-dkg-program'),
       inputs: { ...json('Program arguments · $json is all incoming rows', ['{{ $json }}']), shape: 'any' },
       outputMapping: { ...json('Returned result · $json is the Program output array', '{{ $json }}'), shape: 'any' },
     }, { version: 2, connection: 'httpHeaderAuth', sampleItems: [{}] }),
-    entry('dkg-write', 'DKG Write', 'DKG', 'httpRequest', profileParameters(configuredDkgProfile, 'dkg-write'),
+    entry('dkg-write', 'DKG Write', 'DKG', 'httpRequest', profileParameters(profile, 'dkg-write'),
       { version: 2, connection: 'httpHeaderAuth', writes: true, requiresExportAuthorization: false, sampleItems: [{}] }),
   ] : []),
   entry('google-sheets', 'Google Sheets', 'Integrations', 'googleSheets', { title: text('New spreadsheet title', 'nOS workflow export', { maxLength: 80 }) }, { connection: 'googleSheetsOAuth2Api', writes: true, requiresExportAuthorization: true }),
@@ -70,23 +70,39 @@ export const componentRegistry = [
   entry('webhook', 'Webhook', 'Events', 'webhook', {}, { input: 'event', mode: 'webhook' }),
   entry('schedule', 'Schedule Trigger', 'Events', 'scheduleTrigger', { minutes: number('Interval in minutes', 5, 1, 1440) }, { input: 'event', mode: 'schedule' }),
   entry('wait', 'Wait', 'Events', 'wait', { seconds: number('Seconds to wait', 1, 1, 3) }, { mode: 'wait' }),
-].map(value => Object.freeze(value));
+].map(value => Object.freeze(value)); }
 
-/** Registry policy is authoritative even for older installed descriptors. Unknown writers fail closed. */
-export const componentNeedsExport = descriptor => componentRegistry.find(c => c.id === descriptor?.id)?.requiresExportAuthorization
-  ?? descriptor?.requiresExportAuthorization ?? !!descriptor?.writes;
+const freeze = value => {
+  if (value && typeof value === 'object') {
+    for (const child of Object.values(value)) freeze(child);
+    Object.freeze(value);
+  }
+  return value;
+};
+
+/** One operator-selected profile owns descriptors and compilation policy. */
+export function createComponentRegistry(profile = null) {
+  if (profile) validateDkgProfile(profile);
+  const componentRegistry = freeze(structuredClone(descriptors(profile)));
+  const component = id => {
+    if (id === 'run-program') return programDescriptor;
+    const value = componentRegistry.find(item => item.id === id);
+    if (!value && !profile && dkgOperationIds.includes(id))
+      throw Object.assign(new Error('This workflow requires its configured DKG execution profile.'), { code: 'WORKFLOW_CAPABILITY_CHANGED', status: 409 });
+    if (!value) throw Object.assign(new Error('Unknown component.'), { code: 'INVALID_COMPONENT', status: 400 });
+    return value;
+  };
+  const componentNeedsExport = descriptor => componentRegistry.find(c => c.id === descriptor?.id)?.requiresExportAuthorization
+    ?? descriptor?.requiresExportAuthorization ?? !!descriptor?.writes;
+  const context = Object.freeze({ profile, componentRegistry, component, componentNeedsExport,
+    componentProgramSource: id => componentProgramSource(id, context) });
+  return context;
+}
+export const defaultComponentRegistry = createComponentRegistry();
+export const { componentRegistry, component, componentNeedsExport } = defaultComponentRegistry;
 
 /** Host authorization metadata is outside the immutable guest input contract. */
 export function componentExecutionDescriptor({ requiresExportAuthorization: _policy, ...descriptor }) { return descriptor; }
-
-export function component(id) {
-  if (id === 'run-program') return programDescriptor;
-  const value = componentRegistry.find(item => item.id === id);
-  if (!value && !configuredDkgProfile && dkgOperationIds.includes(id))
-    throw Object.assign(new Error('This workflow requires its configured DKG execution profile.'), { code: 'WORKFLOW_CAPABILITY_CHANGED', status: 409 });
-  if (!value) throw Object.assign(new Error('Unknown component.'), { code: 'INVALID_COMPONENT', status: 400 });
-  return value;
-}
 
 /** Embedded with componentValidationSource so the guest and native graph use the same contract. */
 export function normalizeComponentInput(descriptor, value) {
@@ -154,8 +170,8 @@ export const componentContract = {
   outputSchema: objectSchema({ ok: { type: 'boolean' }, itemsJson: stringSchema(8192), portsJson: stringSchema(8192), error: stringSchema(512) }),
 };
 
-export function componentProgramSource(id) {
-  const descriptor = component(id);
+export function componentProgramSource(id, registry = defaultComponentRegistry) {
+  const descriptor = registry.component(id);
   if (descriptor.version === 1) return componentProgramSourceV1(id);
   return `// nos-n8n-component-v2:${id}\nimport { invoke_tool } from '@origintrail-official/dkg-graph-computer/program';\n`
     + `const descriptor = ${JSON.stringify(componentExecutionDescriptor(descriptor))};\n${componentValidationSource()}`

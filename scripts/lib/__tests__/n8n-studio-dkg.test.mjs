@@ -1,15 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import profile, { measurements } from '../../../examples/n8n-capability/test-support/measurement-profile.mjs';
+import baseProfile, { measurements } from '../../../examples/n8n-capability/test-support/measurement-profile.mjs';
 
-// Select the fictional operator profile before loading the registry/service.
-process.env.NOS_DKG_PROFILE_MODULE = fileURLToPath(new URL('../../../examples/n8n-capability/test-support/measurement-profile.mjs', import.meta.url));
-const { environment, definition } = await import('../../../examples/n8n-capability/test-support/studio-service-fixture.mjs');
+import { createStudioFixtureContext } from '../../../examples/n8n-capability/test-support/studio-service-fixture.mjs';
 
 test('saved Studio DKG Read/Write callbacks accept normalized execution parameters and retain authority checks', async () => {
+  const profile = { ...baseProfile };
+  const { environment, definition } = createStudioFixtureContext(profile);
   const effects = [];
   profile.transport = async (payload, operation) => {
     effects.push(operation);
@@ -76,6 +75,7 @@ test('saved Studio DKG Read/Write callbacks accept normalized execution paramete
 
 
 test('removing a DKG profile preserves saved pins and leaves unrelated workflows listable', async () => {
+  const { environment, definition } = createStudioFixtureContext({ ...baseProfile });
   const f = environment();
   try {
     const ordinary = await f.service.save(definition(['edit-fields'], []), () => {});

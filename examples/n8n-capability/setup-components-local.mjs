@@ -4,10 +4,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rename
 import { resolve, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync, backup } from 'node:sqlite';
-import { componentRegistry, componentNeedsExport as needsExport, componentContract, componentProgramSource } from './component-registry.mjs';
+import { componentContract } from './component-registry.mjs';
+import { loadStudioContext } from './studio-context.mjs';
 import { standaloneComponentWorkflow, echoSubworkflow } from './component-workflows.mjs';
 import { n8nWorkflowSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 
+const { registry } = await loadStudioContext();
+const { componentRegistry, componentNeedsExport: needsExport, componentProgramSource } = registry;
 const state = resolve(process.argv[2] ?? '');
 if (!process.argv[2]) throw new Error('Supply the owned PoC state directory.');
 const arg = name => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1]; };
@@ -50,11 +53,11 @@ const componentRef = item => `urn:demo:n8n:component:${item.descriptor.id}:${ite
 const echo = echoSubworkflow();
 writeFileSync(join(output, echo.id + '.json'), JSON.stringify({ ...echo, versionId: randomUUID() }), { mode: 0o600 });
 for (const descriptor of componentRegistry.filter(c => !only || only.includes(c.id))) {
-  const blueprint = standaloneComponentWorkflow(descriptor.id, 'template', header, { credentials, scopeName: scopeName('template') });
+  const blueprint = standaloneComponentWorkflow(descriptor.id, 'template', header, { registry, credentials, scopeName: scopeName('template') });
   const { result: _result, ...template } = blueprint;
   const revision = createHash('sha256').update(JSON.stringify(template)).digest('hex').slice(0, 8);
   const id = `nos_${descriptor.id.replaceAll('-', '_')}_${revision}`;
-  const { result, ...workflow } = standaloneComponentWorkflow(descriptor.id, id, header, { credentials, scopeName: scopeName(id) });
+  const { result, ...workflow } = standaloneComponentWorkflow(descriptor.id, id, header, { registry, credentials, scopeName: scopeName(id) });
   if (fixture) {
     for (const n of workflow.nodes) if (n.type === 'n8n-nodes-base.webhook') {
       n.parameters.authentication = 'none'; delete n.credentials;

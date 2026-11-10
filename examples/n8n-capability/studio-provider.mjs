@@ -1,12 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { readResponseBodyBytesBounded, BoundedResponseBodyLimitError } from '../../packages/http-utils/dist/index.js';
-import { compileStudio } from './studio-definition.mjs';
+import { createStudioCompiler } from './studio-definition.mjs';
 import { nativeTimerEvents } from './studio-native-events.mjs';
 import { readNativeExecutionInput } from './studio-native-execution.mjs';
 import { n8nWorkflowSha256, n8nResultSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 
 /** The operator owns provisioning. Neither this API key nor credential data reaches a KA or browser. */
-export function createStudioProvider({ repository, config, graphId, owner, headerCredential, credentials, fetchImpl = fetch }) {
+export function createStudioProvider({ repository, config, graphId, owner, headerCredential, credentials, fetchImpl = fetch, compiler = createStudioCompiler() }) {
+  const { compileStudio } = compiler;
   const error = message => Object.assign(new Error(message), { status: 409, code: 'INVALID_WORKFLOW' });
   async function api(path, method = 'GET', body) {
     const installation = config.n8nNative;

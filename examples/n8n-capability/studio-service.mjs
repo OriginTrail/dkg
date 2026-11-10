@@ -4,9 +4,9 @@ import { studioExecutionPlan, prepareStudioExecution } from './studio-execution-
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
-import { component, normalizeComponentInput } from './component-registry.mjs';
+import { normalizeComponentInput } from './component-registry.mjs';
 import { component as componentV1, normalizeComponentInput as normalizeComponentInputV1 } from './component-registry-v1.mjs';
-import { normalizeStudio, readStudio, validateStudioCapabilities } from './studio-definition.mjs';
+import { createStudioCompiler } from './studio-definition.mjs';
 import { workflowUuid } from './workflow-definition.mjs';
 import { programWorkflowReceipt } from './program-workflow-receipt.mjs';
 
@@ -15,7 +15,9 @@ const reject = message => Object.assign(new Error(message), { code: 'INVALID_WOR
 const eventUuid = (ref, id) => { const b = createHash('sha256').update(ref + ':' + id).digest(); b[6] = (b[6] & 15) | 64; b[8] = (b[8] & 63) | 128;
   const h = b.toString('hex'); return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`; };
 
-export function createStudioService({ graphId, owner, client, repository, provider, dkg, programAuthority, listCapabilities, loadOutputs, exportTokenFile }) {
+export function createStudioService({ graphId, owner, client, repository, provider, dkg, programAuthority, listCapabilities, loadOutputs, exportTokenFile, compiler = createStudioCompiler() }) {
+  const { normalizeStudio, readStudio, validateStudioCapabilities } = compiler;
+  const { component, profile } = compiler.registry;
   const native = () => { if (!provider) throw reject('Native execution is not configured.'); return provider; };
   const fingerprint = path => createHash('sha256').update(readFileSync(path, 'utf8').trim()).digest('hex');
   const components = () => { if (!dkg) throw reject('DKG component execution is not configured.'); return dkg; };
@@ -30,7 +32,7 @@ export function createStudioService({ graphId, owner, client, repository, provid
     const source = await client.programs.getSource({ graphId, programIri: kaRef, programLayer: 'wm' });
     const compiled = readStudio(source.source);
     if (compiled.kaRef !== kaRef || sourceHash && sourceHash !== source.sourceHash) throw reject('The saved graph revision changed.');
-    const plan = studioExecutionPlan(compiled, graphId);
+    const plan = studioExecutionPlan(compiled, graphId, compiler);
     if (repository.row(kaRef).executor !== plan.kind) throw reject('The saved workflow executor changed.');
     return { compiled, plan, source, workflow: { definition: compiled.definition, kaRef, sourceHash: source.sourceHash, graphId,
       ...(compiled.grant?.workflowSha256 ? { workflowSha256: compiled.grant.workflowSha256 } : {}),
@@ -49,12 +51,12 @@ export function createStudioService({ graphId, owner, client, repository, provid
   }
   async function save(value, authorize) {
     const definition = normalizeStudio(value);
-    assertDkgEnabled(definition);
+    assertDkgEnabled(definition, profile);
     const policy = validateStudioCapabilities(definition, (await listCapabilities()).filter(c => !c.retired));
     if (policy.requiresExportAuthorization) authorize();
     const key = JSON.stringify(definition); if (saving.has(key)) return saving.get(key);
     const pending = (async () => {
-      const { compiled, plan } = await prepareStudioExecution(definition, graphId, definition => native().provision(definition));
+      const { compiled, plan } = await prepareStudioExecution(definition, graphId, definition => native().provision(definition), compiler);
       repository.ensure(compiled);
       const sourceText = plan.upload.source;
       const sourceHash = createHash('sha256').update(sourceText).digest('hex');
@@ -95,7 +97,7 @@ export function createStudioService({ graphId, owner, client, repository, provid
     let input; try { input = (compiled.legacy ? normalizeComponentInputV1 : normalizeComponentInput)(descriptor, { itemsJson: value.itemsJson, paramsJson: JSON.stringify(root.params), executionId: '' }); }
     catch (e) { throw reject(e.message); }
     beforeDispatch?.(requiresExportAuthorization);
-    assertDkgEnabled(compiled.definition);
+    assertDkgEnabled(compiled.definition, profile);
     if (plan.kind === 'native-n8n') native().installGrant(compiled.grant);
     if (compiled.definition.nodes.some(n => isDkg(n.componentId))) {
       if (!programAuthority) throw componentFailure('Original Program invocation authority verifier required.');

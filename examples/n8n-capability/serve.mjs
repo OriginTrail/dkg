@@ -19,10 +19,12 @@ import { createNativeCallbackAuthority } from '../../packages/cli/dist/semantic-
 import { programSource } from './workflow.mjs';
 import { createCapabilityBridge } from './bridge.mjs';
 import { csvProgramSource } from './csv-workflows.mjs';
-import { componentProgramSource } from './component-registry.mjs';
+import { loadStudioContext } from './studio-context.mjs';
 import { componentProgramSource as componentProgramSourceV1 } from './component-registry-v1.mjs';
 import { installProgramExamples } from './program-catalog.mjs';
 
+const context = await loadStudioContext();
+const { componentProgramSource } = context.registry;
 const require = createRequire(new URL('../../packages/cli/package.json', import.meta.url));
 const { Wallet } = require('ethers');
 const state = resolve(process.argv[2] ?? '');
@@ -80,7 +82,7 @@ try {
     for (const kind of ['googleSheetsOAuth2Api', 'googleDriveOAuth2Api']) if (node.credentials?.[kind]) credentials[kind] = node.credentials[kind];
   }
   credentialDb.close();
-  bridge = createCapabilityBridge({ agent, client, graphId, owner, config: semanticRuntime,
+  bridge = createCapabilityBridge({ context, agent, client, graphId, owner, config: semanticRuntime,
     programAuthority: createNativeCallbackAuthority({ agent, runtime: () => runtime, config: semanticRuntime, graphId, caller: owner }),
     definitions, exportTokenFile: csv.exportTokenFile, ...(componentManifest.installed ? { studioOptions: { state, headerCredential, credentials } } : {}) });
   server = createServer(async (req, res) => {

@@ -1,5 +1,5 @@
 import { JPB_SOURCE, JPB_TARGET, JPB_WORKBOOK } from './profiles/jpb-evidence.mjs';
-import './test-support/select-jpb-profile.mjs';
+import { compiler, registry, profile } from './test-support/jpb-context.mjs';
 import { dkgComponentStore } from './test-support/dkg-component-store-fixture.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -8,8 +8,8 @@ import {
   dkgComponentStore as createStore,
   validateDkgTopology,
 } from "./dkg-components.mjs";
-import { compileStudio } from "./studio-definition.mjs";
-import { component, componentNeedsExport } from "./component-registry.mjs";
+const { compileStudio } = compiler;
+const { component, componentNeedsExport } = registry;
 process.env.NOS_JPB_READ_ENABLED = "1";
 process.env.NOS_JPB_WRITE_ENABLED = "1";
 const id = "11223344-1234-4234-8234-123456789abc";
@@ -191,7 +191,7 @@ test('a callback waiting on authority reuses the Write completed by its overlapp
   const store = createStore(db, async (value, operation) => {
     if (operation === 'read') return readResult;
     writes++; assert.equal(value.allowCreate, true); return written(value);
-  }, [wb]);
+  }, [wb], profile);
   const scope = { invocationId: id, revisionDigest: workflow.sourceHash, authority: { invocation: id } };
   store.grant(workflow, scope, input);
   const received = { invocationId: request('read', []).effectId, input };
@@ -397,7 +397,7 @@ test("native lookup filters names and fails closed if pagination is incomplete",
   let requests = 0;
   const repository = createStudioRepository(dir);
   const provider = createStudioProvider({
-    repository,
+    compiler, repository,
     graphId: "g",
     owner: "a",
     headerCredential: { id: "ref", name: "ref" },

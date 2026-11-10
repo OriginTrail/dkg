@@ -14,7 +14,7 @@ test('MCP eligibility requires completed owner save and survives repository reop
     async dispatch() { dispatches++; return '42'; },
     async inspect() { return { status: 'running' }; },
   };
-  const mcp = () => createStudioMcpService({ repository: f.repository, accountId: owner.accountId, profile: null, runner });
+  const mcp = () => createStudioMcpService({ repository: f.repository, accountId: owner.accountId, runner });
   const approve = f.client.programs.approve;
   let attemptedApproval;
   f.client.programs.approve = async value => { attemptedApproval = value; throw new Error('owner approval unavailable'); };
@@ -61,7 +61,7 @@ for (const failure of ['native snapshot fetch', 'snapshot database write']) test
   const owner = { id: 'owner', accountId: 'account-test', role: 'owner' };
   const graph = definition(['edit-fields'], []);
   const mcp = () => createStudioMcpService({ repository: f.repository, provider: f.provider,
-    installation: f.config.n8nNative, accountId: owner.accountId, profile: null });
+    installation: f.config.n8nNative, accountId: owner.accountId });
   if (failure === 'native snapshot fetch') {
     const approve = f.client.programs.approve;
     f.client.programs.approve = async value => {
@@ -106,7 +106,7 @@ test('completed owner resave retains the original native snapshot and sticky wit
   const graph = definition(['edit-fields'], []), saved = await f.service.save(graph);
   const pin = { kaRef: saved.kaRef, workflowSha256: saved.workflowSha256 };
   const mcp = () => createStudioMcpService({ repository: f.repository, provider: f.provider,
-    installation: f.config.n8nNative, accountId: owner.accountId, profile: null });
+    installation: f.config.n8nNative, accountId: owner.accountId });
   mcp().withdraw(pin, owner);
   const snapshot = f.repository.mcp.savedNative(saved.kaRef);
   // Identical native graph published under another provider version must not

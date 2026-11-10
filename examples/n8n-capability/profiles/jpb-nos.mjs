@@ -4,7 +4,6 @@ import { createHash } from 'node:crypto';
 import { createJpbPolicy, loadJpbPrograms } from './jpb-policy.mjs';
 import { readJpbThroughNos } from './jpb-nos-read.mjs';
 import { verifyJpbEvidence } from './jpb-evidence.mjs';
-import { nosStudioSession } from '../nos-studio-session.mjs';
 import { createNosNodeClient, invokeNosProgram, writeNosEvidence } from '../nos-node-transport.mjs';
 
 export function createJpbNosProfile(session) {
@@ -35,4 +34,4 @@ export function createJpbNosProfile(session) {
     },
   };
 }
-export default createJpbNosProfile(nosStudioSession);
+export const createProfile = ({ session }) => createJpbNosProfile(session);

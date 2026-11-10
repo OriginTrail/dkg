@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
-import { component, componentNeedsExport, componentExecutionDescriptor, componentValidationSource } from './component-registry.mjs';
+import { defaultComponentRegistry, componentExecutionDescriptor, componentValidationSource } from './component-registry.mjs';
 import { programRecordsSource, runProgramStepsSource } from './guest-sources/program-v1.mjs';
 
 export const PROGRAM_STUDIO_MARKER = '// nos-program-studio-v1:';
 const fail = message => { throw Object.assign(new Error(message), { code: 'INVALID_WORKFLOW', status: 400 }); };
 
-export function programOrder(definition) {
+export function programOrder(definition, registry = defaultComponentRegistry) {
+  const { component } = registry;
   const ordered = [];
   let current = definition.entryId;
   while (current && !ordered.some(n => n.id === current)) {
@@ -24,8 +25,9 @@ export function programOrder(definition) {
   return ordered;
 }
 
-export function compileProgramWorkflow(definition) {
-  const ordered = programOrder(definition);
+export function compileProgramWorkflow(definition, registry = defaultComponentRegistry) {
+  const { component, componentNeedsExport } = registry;
+  const ordered = programOrder(definition, registry);
   const operations = new Map();
   for (const node of ordered) {
     const operation = node.componentId === 'run-program' ? node.params.operationIri : node.kaRef;
@@ -38,7 +40,8 @@ export function compileProgramWorkflow(definition) {
     requiresExportAuthorization: definition.nodes.some(n => componentNeedsExport(component(n.componentId))) };
 }
 
-export function programWorkflowSource(compiled) {
+export function programWorkflowSource(compiled, registry = defaultComponentRegistry) {
+  const { component } = registry;
   const nodes = compiled.ordered.map(node => ({ ...node, descriptor: componentExecutionDescriptor(component(node.componentId)) }));
   return PROGRAM_STUDIO_MARKER + Buffer.from(JSON.stringify(compiled.definition)).toString('base64') + '\n'
     + `import { invoke_program } from '@origintrail-official/dkg-graph-computer/program';\n${componentValidationSource()}`
@@ -46,10 +49,10 @@ export function programWorkflowSource(compiled) {
     + `export function run(input: any) { return execute(input, ${JSON.stringify(nodes)}, invoke_program, normalize, resolveComponentValue, records); }\n`;
 }
 
-export function readProgramWorkflow(source, normalizeStudio) {
+export function readProgramWorkflow(source, normalizeStudio, registry = defaultComponentRegistry) {
   if (source.length > 65536) fail('Saved Program workflow source is too large.');
   const definition = normalizeStudio(JSON.parse(Buffer.from(source.split('\n')[0].slice(PROGRAM_STUDIO_MARKER.length), 'base64').toString('utf8')));
-  const compiled = compileProgramWorkflow(definition);
-  if (programWorkflowSource(compiled) !== source) fail('Saved Program workflow differs from its pinned definition.');
+  const compiled = compileProgramWorkflow(definition, registry);
+  if (programWorkflowSource(compiled, registry) !== source) fail('Saved Program workflow differs from its pinned definition.');
   return compiled;
 }

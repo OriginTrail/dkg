@@ -12,7 +12,18 @@ authentication implementation.
 Set `NOS_DKG_PROFILE_MODULE` to an absolute module path **both when preparing the
 native component installation and when starting its companion**. No setting
 means no DKG components are advertised, and DKG effects fail closed. There is no
-implicit demo/customer transport fallback. The profile is loaded once at startup.
+implicit demo/customer transport fallback. `serve.mjs` and
+`setup-components-local.mjs` call `loadStudioContext()` once. That context owns
+the session, profile, registry and compiler; the bridge passes the same compiler
+to its provider and Studio/MCP services. Importing the registry never reads
+operator configuration. Programmatic callers use `createStudioContext({ profile,
+session })`; omitted profiles remain disabled, regardless of process environment.
+
+A profile module exports either its default profile object or `createProfile({
+session })`. The authenticated JPB module uses the factory so the explicit session
+owns its connection pins. Profile revision hashing still covers its policy,
+transport and session implementation. Changes to those implementations require
+new profile pins; existing approvals are never silently rebound.
 
 For the existing demo, opt in to `examples/n8n-capability/profiles/jpb.mjs`.
 That profile owns its existing `NOS_JPB_READ_ENABLED`, `NOS_JPB_PROGRAM_ENABLED`,

@@ -41,7 +41,7 @@ test('no selected profile means no DKG effects, no customer defaults and no fall
 });
 test('generic registry loads a different dataset and catalog through explicit operator configuration', () => {
   const output = execFileSync(process.execPath, ['--input-type=module', '-e',
-    `const { componentRegistry } = await import(${JSON.stringify(new URL('./component-registry.mjs', import.meta.url).href)}); console.log(JSON.stringify(componentRegistry.filter(c => c.category === 'DKG')));`],
+    `const { loadStudioContext } = await import(${JSON.stringify(new URL('./studio-context.mjs', import.meta.url).href)}); const { registry: { componentRegistry } } = await loadStudioContext(); console.log(JSON.stringify(componentRegistry.filter(c => c.category === 'DKG')));`],
     { env: { ...process.env, NOS_DKG_PROFILE_MODULE: fileURLToPath(new URL('./test-support/measurement-profile.mjs', import.meta.url)) }, encoding: 'utf8' });
   const descriptors = JSON.parse(output);
   assert.equal(descriptors.length, 3);

@@ -26,7 +26,9 @@ function fixture(t) {
   const run = source => execFileSync(process.execPath, ['--input-type=module', '-e', source], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, NOS_STUDIO_SESSION_FILE: sessionFile, NOS_JPB_WORKBOOK_INPUT_FILE: workbookFile,
       NOS_JPB_READ_ENABLED: '1', NOS_JPB_WRITE_ENABLED: '1' } }).trim();
-  const read = (name = 'jpb-nos') => JSON.parse(run(`const {default:p}=await import(${JSON.stringify(url('profiles/' + name + '.mjs'))});
+  const read = (name = 'jpb-nos') => JSON.parse(run(`const module=await import(${JSON.stringify(url('profiles/' + name + '.mjs'))});
+    const {loadNosStudioSession}=await import(${JSON.stringify(url('nos-studio-session.mjs'))});
+    const p=module.createProfile ? module.createProfile({session:loadNosStudioSession(process.env.NOS_STUDIO_SESSION_FILE)}) : module.default;
     console.log(JSON.stringify({revision:p.revision,programs:p.programs.map(p=>p.id),choices:p.parameters['invoke-dkg-program'].program.options}));`));
   return { dir, root, url, run, read, configure, secretFile, workbookFile };
 }
@@ -103,8 +105,10 @@ test('changed nOS connection fences cached reads and pending writes after journa
   const source = `
     import assert from 'node:assert/strict';
     import { DatabaseSync } from 'node:sqlite';
-    const { default: original, createJpbNosProfile } = await import(${JSON.stringify(f.url('profiles/jpb-nos.mjs'))});
-    const { nosStudioSession } = await import(${JSON.stringify(f.url('nos-studio-session.mjs'))});
+    const { createJpbNosProfile } = await import(${JSON.stringify(f.url('profiles/jpb-nos.mjs'))});
+    const { loadNosStudioSession } = await import(${JSON.stringify(f.url('nos-studio-session.mjs'))});
+    const nosStudioSession = loadNosStudioSession(process.env.NOS_STUDIO_SESSION_FILE);
+    const original = createJpbNosProfile(nosStudioSession);
     const { dkgComponentStore } = await import(${JSON.stringify(storeUrl)});
     const { profileParameters } = await import(${JSON.stringify(parametersUrl)});
     const actor = { id: 'owner', role: 'owner', accountId: original.accountId };

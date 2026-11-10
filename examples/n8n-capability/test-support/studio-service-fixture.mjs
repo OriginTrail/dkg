@@ -3,21 +3,24 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { componentRegistry, component } from '../component-registry.mjs';
-import { readStudio } from '../studio-definition.mjs';
+import { createStudioContext } from '../studio-context.mjs';
 import { createStudioRepository } from '../studio-repository.mjs';
 import { createStudioProvider } from '../studio-provider.mjs';
 import { createStudioService } from '../studio-service.mjs';
 import { fixtureProgramAuthority } from './studio-authority-fixture.mjs';
 export const graphId='n8n-capability-poc', owner='0x'+'1'.repeat(40);
-export const catalog=componentRegistry.map(d=>({kind:'component',kaRef:'urn:demo:n8n:component:'+d.id+':unit',sourceHash:'a'.repeat(64),available:true,descriptor:d}));
-export function definition(ids=['edit-fields','if','limit'], edges=[[0,0,1,0],[1,0,2,0]]) {
+export function createStudioFixtureContext(profile = null) {
+const context = createStudioContext({ profile });
+const { compiler, registry: { componentRegistry, component } } = context;
+const { readStudio } = compiler;
+const catalog=componentRegistry.map(d=>({kind:'component',kaRef:'urn:demo:n8n:component:'+d.id+':unit',sourceHash:'a'.repeat(64),available:true,descriptor:d}));
+function definition(ids=['edit-fields','if','limit'], edges=[[0,0,1,0],[1,0,2,0]]) {
   return {id:'00000000-0000-4000-8000-000000000001',name:'Unit native graph',entryId:'n0',
     nodes:ids.map((id,i)=>({id:'n'+i,componentId:id,kaRef:catalog.find(c=>c.descriptor.id===id).kaRef,sourceHash:'a'.repeat(64),params:Object.fromEntries(Object.entries(component(id).parameters).map(([k,s])=>[k,s.default])),x:i*240,y:100})),
     edges:edges.map(([a,output,b,input])=>({from:'n'+a,output,to:'n'+b,input}))};
 }
 
-export function environment() {
+function environment() {
   const state=mkdtempSync(join(tmpdir(),'studio-unit-')), token=join(state,'fixture-api'), exportTokenFile=join(state,'fixture-export');
   writeFileSync(token,'unit-test-fixture-only');writeFileSync(exportTokenFile,'operator-unit-fixture-only');
   const config={n8nNative:{baseUrl:'http://127.0.0.1:45678',apiTokenFile:token,webhookTokenFile:token,workflows:[]}};
@@ -43,7 +46,7 @@ export function environment() {
     return Response.json(w);
   };
   let repository=createStudioRepository(state);
-  const openProvider=()=>createStudioProvider({repository,config,graphId,owner,headerCredential:{id:'fixture-header',name:'Fixture'},credentials:{},fetchImpl});
+  const openProvider=()=>createStudioProvider({compiler,repository,config,graphId,owner,headerCredential:{id:'fixture-header',name:'Fixture'},credentials:{},fetchImpl});
   let provider=openProvider();
   const sources=new Map(), approvals=new Map(),outputs=new Map(),invocations=[]; let inventory=catalog, catalogFailure, catalogHook;
   const client={programs:{
@@ -55,11 +58,15 @@ export function environment() {
       const value={kind:'n8n-result',n8nExecutionId:'42',workflowSha256:c.grant.workflowSha256,output:{ok:true,itemsJson:v.inputs[0].itemsJson,portsJson:'{}',error:'',traceJson:JSON.stringify(c.grant.result.traceNodes.map(node=>({node,status:'completed',items:[1],outputHash:'a'.repeat(64)})))}};
       const executionIri='urn:sr:execution:'+v.invocationId,rawOutputs=[JSON.stringify(value)];outputs.set(executionIri,rawOutputs);return {...v,executionIri,rawOutputs,outputs:[value],persisted:true};},
   }};
-  const openService=()=>createStudioService({graphId,owner,client,repository,provider,dkg:dkgComponentStore(repository.db),programAuthority:fixtureProgramAuthority,exportTokenFile,listCapabilities:async()=>{if(catalogHook){const hook=catalogHook;catalogHook=undefined;await hook();}if(catalogFailure){const error=catalogFailure;catalogFailure=undefined;throw error;}return inventory;},loadOutputs:async iri=>outputs.get(iri)});
+  const openService=()=>createStudioService({compiler,graphId,owner,client,repository,provider,dkg:dkgComponentStore(repository.db,undefined,undefined,profile),programAuthority:fixtureProgramAuthority,exportTokenFile,listCapabilities:async()=>{if(catalogHook){const hook=catalogHook;catalogHook=undefined;await hook();}if(catalogFailure){const error=catalogFailure;catalogFailure=undefined;throw error;}return inventory;},loadOutputs:async iri=>outputs.get(iri)});
   let service=openService();
-  return {state,get repository(){return repository;},get provider(){return provider;},get service(){return service;},restart(){service.stop();repository.close();repository=createStudioRepository(state);provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,fetchImpl,setExecutionPage:ids=>{executionPage=ids;},setCatalog:v=>{inventory=v;},failNextCatalog:error=>{catalogFailure=error;},loseNextCreate:()=>{loseCreate=true;},
+  return {context,compiler,profile,state,get repository(){return repository;},get provider(){return provider;},get service(){return service;},restart(){service.stop();repository.close();repository=createStudioRepository(state);provider=openProvider();service=openService();},client,native,calls,sources,approvals,invocations,config,exportTokenFile,executions,fetchImpl,setExecutionPage:ids=>{executionPage=ids;},setCatalog:v=>{inventory=v;},failNextCatalog:error=>{catalogFailure=error;},loseNextCreate:()=>{loseCreate=true;},
     setUnpublishFailure:value=>{unpublishFailure=value;},
     failNextNativeRead:error=>{nativeReadFailure=error;},
     beforeNextCatalog:hook=>{catalogHook=hook;},
     close(){service.stop();repository.close();rmSync(state,{recursive:true,force:true});}};
 }
+
+return { context, catalog, definition, environment };
+}
+export const { catalog, definition, environment } = createStudioFixtureContext();

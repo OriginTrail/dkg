@@ -1,12 +1,10 @@
 // Fictional provider and node effects; the Studio compiler/service/SQLite journal are real.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
-process.env.NOS_DKG_PROFILE_MODULE = fileURLToPath(new URL('./measurement-profile.mjs', import.meta.url));
-const { default: profile, measurements } = await import('./measurement-profile.mjs');
-const { componentRegistry, component } = await import('../component-registry.mjs');
+const { default: baseProfile, measurements } = await import('./measurement-profile.mjs');
+import { createStudioContext } from '../studio-context.mjs';
 const { dkgComponentStore } = await import('../dkg-components.mjs');
 const { createStudioRepository } = await import('../studio-repository.mjs');
 const { createStudioProvider } = await import('../studio-provider.mjs');
@@ -14,6 +12,8 @@ const { createStudioService } = await import('../studio-service.mjs');
 const { handleDkgComponentCallback } = await import('../bridge.mjs');
 
 export function createStudioExecutionHarness({ state, graphId, owner, config, client, loadOutputs, programAuthority }) {
+  const profile = { ...baseProfile };
+  const { registry: { componentRegistry, component }, compiler } = createStudioContext({ profile });
   mkdirSync(state, { recursive: true });
   const tokenValue = 'fictional-provider-token-for-isolated-regression';
   const token = join(state, 'test-token'); writeFileSync(token, tokenValue);
@@ -28,7 +28,6 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
   const effects = [], assets = new Map(), native = new Map(), executions = new Map();
   const controls = { interrupted: true, normalized: true, dispatches: 0, owner: true, snapshot: v => v,
     loseWriteReply: false, nodeUnavailable: false, allowCreates: [], callbackStatuses: [], callbackErrors: [] };
-  const original = { transport: profile.transport, authorize: profile.authorize, requiresNosActor: profile.requiresNosActor, accountId: profile.accountId };
   profile.requiresNosActor = true; profile.accountId = 'account-fictional';
   profile.authorize = async actor => {
     if (!controls.owner || actor.accountId !== profile.accountId) throw new Error('owner revoked');
@@ -128,15 +127,15 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
   let repository;
   function open() {
     repository = createStudioRepository(state);
-    provider = createStudioProvider({ repository, config, graphId, owner,
+    provider = createStudioProvider({ compiler, repository, config, graphId, owner,
       headerCredential: { id: 'test-header', name: 'Test header' }, credentials: {}, fetchImpl });
-    service = createStudioService({ graphId, owner, repository, provider, dkg: dkgComponentStore(repository.db), programAuthority, client, loadOutputs, listCapabilities: async () => catalog });
+    service = createStudioService({ compiler, graphId, owner, repository, provider, dkg: dkgComponentStore(repository.db, undefined, undefined, profile), programAuthority, client, loadOutputs, listCapabilities: async () => catalog });
   }
   open();
   return { definition, actor, controls, effects, assets, native, executions, runtimeFetch, profile,
     requestFor, get service() { return service; }, get provider() { return provider; }, get repository() { return repository; },
     reopen() { service.stop(); repository.close(); open(); },
-    close() { service.stop(); repository.close(); Object.assign(profile, original); },
+    close() { service.stop(); repository.close(); },
   };
 }
 

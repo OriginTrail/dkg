@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
@@ -113,7 +114,7 @@ test('authenticated JPB revision also changes with approved workbook quantities'
   try {
     const session = sessionFile(f.dir);
     const read = () => execFileSync(process.execPath, ['--input-type=module', '-e',
-      `const {default:p}=await import(${JSON.stringify(new URL('./profiles/jpb-nos.mjs', import.meta.url).href)}); console.log(p.revision);`],
+      `const {loadStudioContext}=await import(${JSON.stringify(new URL('./studio-context.mjs', import.meta.url).href)}); const {profile:p}=await loadStudioContext({...process.env,NOS_DKG_PROFILE_MODULE:${JSON.stringify(fileURLToPath(new URL('./profiles/jpb-nos.mjs', import.meta.url)))}}); console.log(p.revision);`],
     { encoding: 'utf8', env: { ...process.env, NOS_STUDIO_SESSION_FILE: session, NOS_JPB_WORKBOOK_INPUT_FILE: f.file } }).trim();
     const original = rows(); f.write(original); const revision = read();
     original[0].quantity = 999; f.write(original); assert.notEqual(read(), revision);
@@ -127,7 +128,8 @@ test('authenticated JPB write checks its digest before dispatch and verifies exa
     const script = `
       import assert from 'node:assert/strict';
       import { createHash } from 'node:crypto';
-      const { default: profile } = await import(${JSON.stringify(new URL('./profiles/jpb-nos.mjs', import.meta.url).href)});
+      const { loadStudioContext } = await import(${JSON.stringify(new URL('./studio-context.mjs', import.meta.url).href)});
+      const { profile } = await loadStudioContext({...process.env,NOS_DKG_PROFILE_MODULE:${JSON.stringify(fileURLToPath(new URL('./profiles/jpb-nos.mjs', import.meta.url)))}});
       const text = JSON.stringify({ kind: 'fictional-jpb-test', value: 7 });
       const payload = { name: 'test-result', digest: createHash('sha256').update(text).digest('hex'), allowCreate: true,
         quads: [{ subject: 'urn:test:result', predicate: 'urn:nos:workflow:payload', object: JSON.stringify(text) }] };

@@ -38,7 +38,7 @@ async function fixture(t, runner) {
   repository.nativeGranted(compiled.kaRef, compiled.grant);
   repository.completeSave(compiled, 'native-n8n', false, await provider.savedNativeSnapshot(compiled));
   const input = (runKey = 'run-one') => ({ kaRef: compiled.kaRef, workflowSha256: compiled.grant.workflowSha256, runKey, arguments: { value: 'sensitive-input' } });
-  const service = () => createStudioMcpService({ repository, provider, installation: config.n8nNative, accountId: owner.accountId, profile: null, ...(runner ? { runner } : {}) });
+  const service = () => createStudioMcpService({ repository, provider, installation: config.n8nNative, accountId: owner.accountId, ...(runner ? { runner } : {}) });
   return { state, compiled, published, config, input, get repository() { return repository; }, get provider() { return provider; }, service,
     restart() { repository.close(); open(); return service(); } };
 }
@@ -69,7 +69,7 @@ async function nativeFixture(t) {
       return Response.json({ executionId: '42' });
     });
   return { f, state, service: () => createStudioMcpService({ repository: f.repository, provider: f.provider,
-    accountId: owner.accountId, profile: null, runner }) };
+    accountId: owner.accountId, runner }) };
 }
 test('saved pins and scalar arguments are mandatory; failed preflight cannot execute', async t => {
   const c = controllable(), f = await fixture(t, c.runner), s = f.service(), pin = { kaRef: f.input().kaRef, workflowSha256: f.input().workflowSha256 };
@@ -119,7 +119,7 @@ test('lost acknowledgement is never redispatched or released by a new service in
 test('cross-worker reservation wins once, and failed native completion releases capacity', async t => {
   const c = controllable(), f = await fixture(t, c.runner), a = f.service();
   const other = createStudioRepository(f.state); t.after(() => other.close());
-  const b = createStudioMcpService({ repository: other, provider: f.provider, accountId: owner.accountId, profile: null, runner: c.runner });
+  const b = createStudioMcpService({ repository: other, provider: f.provider, accountId: owner.accountId, runner: c.runner });
   const results = await Promise.allSettled([a.run(f.input('one'), actor), b.run(f.input('two'), actor)]);
   assert.equal(results.filter(r => r.status === 'fulfilled').length, 1); assert.equal(c.count, 1);
   c.status = 'failed';
@@ -129,7 +129,7 @@ test('cross-worker reservation wins once, and failed native completion releases 
 test('two repository connections reserve a matching run only once', async t => {
   const c = controllable(), f = await fixture(t, c.runner), a = f.service();
   const other = createStudioRepository(f.state); t.after(() => other.close());
-  const b = createStudioMcpService({ repository: other, provider: f.provider, accountId: owner.accountId, profile: null, runner: c.runner });
+  const b = createStudioMcpService({ repository: other, provider: f.provider, accountId: owner.accountId, runner: c.runner });
   await Promise.all([a.run(f.input(), actor), b.run(f.input(), actor)]);
   assert.equal(c.count, 1);
   await assert.rejects(b.run({ ...f.input(), arguments: { value: 'different' } }, actor), { code: 'STUDIO_RUN_KEY_CONFLICT' });
@@ -141,14 +141,14 @@ test('read-only admission uses an explicit list; no HTTP, file, wait, loop, subw
   for (const d of unsupported) {
     const params = Object.fromEntries(Object.entries(d.parameters).map(([key, p]) => [key, p.default]));
     const altered = { ...definition, nodes: [{ ...definition.nodes[0], componentId: d.id, kaRef: 'urn:demo:n8n:component:' + d.id + ':unit', params }] };
-    assert.throws(() => readOnlyDefinition(altered, null));
+    assert.throws(() => readOnlyDefinition(altered));
   }
   const loop = { ...definition, entryId: 'n0', nodes: ['loop-items', 'edit-fields', 'aggregate'].map((id, i) => ({
     id: 'n' + i, componentId: id, kaRef: 'urn:demo:n8n:component:' + id + ':unit', sourceHash: 'a'.repeat(64), x: i * 200, y: 0,
     params: Object.fromEntries(Object.entries(component(id).parameters).map(([k, p]) => [k, p.default])),
   })), edges: [[0,1,1,0],[1,0,0,0],[0,0,2,0]].map(([a,output,b,input]) => ({ from:'n'+a, output, to:'n'+b, input })) };
   assert.doesNotThrow(() => normalizeStudio(loop));
-  assert.throws(() => readOnlyDefinition(loop, null), { code: 'STUDIO_WORKFLOW_NOT_READ_ONLY' });
+  assert.throws(() => readOnlyDefinition(loop), { code: 'STUDIO_WORKFLOW_NOT_READ_ONLY' });
 });
 test('withdrawal suppresses retained output but still reconciles terminal capacity', async t => {
   const c = controllable(), f = await fixture(t, c.runner), s = f.service();
@@ -163,7 +163,7 @@ test('withdrawal during pending readback suppresses output and steps while durab
   assert.equal((await s.run(f.input(), actor)).status, 'running');
   const other = createStudioRepository(f.state); t.after(() => other.close());
   const withdrawing = createStudioMcpService({ repository: other, provider: f.provider,
-    accountId: owner.accountId, profile: null, runner: c.runner });
+    accountId: owner.accountId, runner: c.runner });
   const started = Promise.withResolvers(), inspection = Promise.withResolvers();
   c.runner.inspect = async () => { started.resolve(); return inspection.promise; };
   const pending = s.readRun({ runKey: 'run-one' }, actor);
@@ -218,11 +218,11 @@ test('native HTTP dispatch checks acknowledgement and verifies exact execution/v
   // must fail before the HTTP webhook is posted.
   published.nodes[0].parameters.unreviewed = true;
   const service = createStudioMcpService({ repository: f.repository, provider: f.provider, installation: f.config.n8nNative,
-    accountId: owner.accountId, profile: null, runner });
+    accountId: owner.accountId, runner });
   assert.equal((await service.run(f.input('changed-native'), actor)).status, 'failed');
   assert.equal(count, 0);
   delete published.nodes[0].parameters.unreviewed;
-  const input = runInput(f.input('native-run'), workflow, null);
+  const input = runInput(f.input('native-run'), workflow);
   assert.equal(await runner.dispatch(workflow, 'native-run', input), '42');
   const checkpoint = { executionId: '42', versionId: 'v1', runKey: 'native-run',
     inputDigest: createHash('sha256').update(canonical(input)).digest('hex') };

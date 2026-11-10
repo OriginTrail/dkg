@@ -1,5 +1,4 @@
-import { configuredDkgProfile } from './dkg-profile.mjs';
-import { nosStudioSession } from './nos-studio-session.mjs';
+import { createStudioContext } from './studio-context.mjs';
 import { isDkg, dkgComponentStore } from './dkg-components.mjs';
 import { canonicalizeJson } from '../../packages/core/dist/index.js';
 import { loadExecutionOutputs } from '../../packages/cli/dist/semantic-runtime-execution-persistence.js';
@@ -15,13 +14,12 @@ import { createStudioMcpHttp, studioMcpFlags } from './studio-mcp-http.mjs';
 import { createStudioProvider } from './studio-provider.mjs';
 import { createStudioRepository } from './studio-repository.mjs';
 import { createStudioService } from './studio-service.mjs';
-import { normalizeComponentInput, componentNeedsExport } from './component-registry.mjs';
+import { normalizeComponentInput } from './component-registry.mjs';
 import { STUDIO_PREFIX } from './studio-definition.mjs';
 import { createProgramCatalog } from './program-catalog.mjs';
 import { capabilityPrefix, capabilityRoutes, matchCapabilityRoute } from './capability-routes.mjs';
 
 const SR = 'https://origintrail.io/semantic-runtime/v1#';
-const prefix = capabilityPrefix(nosStudioSession?.accountId ?? 'account-a');
 const nativeCallback = capabilityRoutes.find(route => route.id === 'dkgComponent');
 const json = (res, status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); };
 
@@ -44,11 +42,14 @@ export async function handleDkgComponentCallback(req, res, studio, config, mcp) 
   } catch(e) { json(res,e.status??409,{code:e.code??'DKG_COMPONENT_UNCONFIRMED',error:e.message}); }
 }
 
-export function createCapabilityBridge({ agent, client, graphId, owner, config, definitions = [], exportTokenFile, studioOptions, programAuthority }) {
-  if (!nosStudioSession && studioOptions && existsSync(join(studioOptions.state, 'nos-account.json')))
+export function createCapabilityBridge({ agent, client, graphId, owner, config, definitions = [], exportTokenFile, studioOptions, programAuthority, context = createStudioContext() }) {
+  const { session, profile, compiler, registry } = context;
+  const { componentNeedsExport } = registry;
+  const prefix = capabilityPrefix(session?.accountId ?? 'account-a');
+  if (!session && studioOptions && existsSync(join(studioOptions.state, 'nos-account.json')))
     throw new Error('This state requires its authenticated nOS account configuration.');
-  const commitAccountBinding = nosStudioSession && studioOptions ? nosStudioSession.prepareStateBinding(studioOptions.state) : null;
-  if (nosStudioSession && configuredDkgProfile && (!configuredDkgProfile.requiresNosActor || configuredDkgProfile.accountId !== nosStudioSession.accountId))
+  const commitAccountBinding = session && studioOptions ? session.prepareStateBinding(studioOptions.state) : null;
+  if (session && profile && (!profile.requiresNosActor || profile.accountId !== session.accountId))
     throw new Error('Authenticated Studio requires an account-bound nOS transport profile.');
   const listPrograms = createProgramCatalog({ graphId, owner, client, definitions });
   function authorizeExport(req) {
@@ -108,19 +109,19 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner),
   });
   const repository = studioOptions ? createStudioRepository(studioOptions.state) : null;
-  const provider = repository && config.n8nNative ? createStudioProvider({ ...studioOptions, repository, config, graphId, owner }) : null;
+  const provider = repository && config.n8nNative ? createStudioProvider({ ...studioOptions, compiler, repository, config, graphId, owner }) : null;
   let studio, mcp, mcpHttp;
   try {
-    if (nosStudioSession && repository?.hasActiveWorkflows())
+    if (session && repository?.hasActiveWorkflows())
       throw new Error('Deactivate legacy schedules before adopting Studio state for an account.');
-    const dkg = repository ? dkgComponentStore(repository.db) : undefined;
-    studio = repository ? createStudioService({ graphId, owner, client, repository, provider, dkg, programAuthority, exportTokenFile,
+    const dkg = repository ? dkgComponentStore(repository.db, undefined, undefined, profile) : undefined;
+    studio = repository ? createStudioService({ compiler, graphId, owner, client, repository, provider, dkg, programAuthority, exportTokenFile,
       listCapabilities: async () => [...await list(), ...await listPrograms()],
       loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner) }) : null;
     const mcpFlags = studioMcpFlags();
-    if (mcpFlags.enabled && (!nosStudioSession || !provider)) throw new Error('Studio MCP requires an authenticated account companion.');
-    mcp = mcpFlags.enabled ? createStudioMcpService({ repository, provider, dkg, installation: config.n8nNative, accountId: nosStudioSession.accountId }) : null;
-    mcpHttp = mcp ? createStudioMcpHttp({ service: mcp, session: nosStudioSession, agentEnabled: mcpFlags.agentEnabled }) : null;
+    if (mcpFlags.enabled && (!session || !provider)) throw new Error('Studio MCP requires an authenticated account companion.');
+    mcp = mcpFlags.enabled ? createStudioMcpService({ compiler, repository, provider, dkg, installation: config.n8nNative, accountId: session.accountId }) : null;
+    mcpHttp = mcp ? createStudioMcpHttp({ service: mcp, session: session, agentEnabled: mcpFlags.agentEnabled }) : null;
     commitAccountBinding?.();
   } catch (error) { studio?.stop(); repository?.close(); throw error; }
   async function invoke(capability, input, invocationId) {
@@ -143,7 +144,7 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     studioRun: async ({ res, value, authorize, actor }) => json(res, 200, await studio.run(value, authorize, actor)),
     studioActivation: async ({ res, value, authorize }) => json(res, 200, await studio.activate(value, authorize)),
     studioHistory: async ({ res, params, ownerAccess, authorize }) => json(res, 200, await studio.history(params.get('kaRef'), needsExport => {
-      if (!ownerAccess || nosStudioSession) return false;
+      if (!ownerAccess || session) return false;
       try { if (needsExport) authorize(); return true; } catch { return false; }
     })),
     studioInvoke: async ({ res, value, authorize }) => {
@@ -189,19 +190,19 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     const match = matchCapabilityRoute(path, prefix), route = match?.route;
     if (route?.role === 'native') { await handlers[route.id]({ req, res }); return true; }
     const delegated = route?.role === 'delegated', publicRoute = route?.role === 'public';
-    if (delegated && nosStudioSession) { json(res, 403, { error: 'Account Studio supports manual execution only.' }); return true; }
+    if (delegated && session) { json(res, 403, { error: 'Account Studio supports manual execution only.' }); return true; }
     let actor, ownerAccess = false;
     if (!delegated && !publicRoute) {
       const origin = req.headers.origin;
       if (origin && !['http://127.0.0.1:4620', 'http://localhost:4620'].includes(origin)) { json(res, 403, { error: 'Local console origin required' }); return true; }
-      if (nosStudioSession) {
-        try { actor = nosStudioSession.actor(req.headers); }
+      if (session) {
+        try { actor = session.actor(req.headers); }
         catch { json(res, 403, { error: 'Authenticated nOS account context required.' }); return true; }
       }
-      ownerAccess = nosStudioSession ? actor.role === 'owner' : req.headers.authorization === 'Bearer l1-owner-a';
-      const memberAccess = nosStudioSession ? !!actor : ['Bearer l1-owner-a', 'Bearer l1-viewer-a'].includes(req.headers.authorization);
+      ownerAccess = session ? actor.role === 'owner' : req.headers.authorization === 'Bearer l1-owner-a';
+      const memberAccess = session ? !!actor : ['Bearer l1-owner-a', 'Bearer l1-viewer-a'].includes(req.headers.authorization);
       if (!memberAccess || !route) { json(res, 403, { error: 'Account access denied' }); return true; }
-      if (nosStudioSession && route.legacyOnly) { json(res, 403, { error: 'Account Studio supports manual execution only.' }); return true; }
+      if (session && route.legacyOnly) { json(res, 403, { error: 'Account Studio supports manual execution only.' }); return true; }
     }
     if (!route.methods.includes(req.method)) { json(res, 405, { error: 'Method unavailable' }); return true; }
     if (route.role === 'owner' && !ownerAccess) { json(res, 403, { error: 'Owner access required.' }); return true; }

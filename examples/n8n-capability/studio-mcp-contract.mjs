@@ -1,6 +1,6 @@
 import { canonicalizeJson } from '../../packages/core/dist/index.js';
-import { component, normalizeComponentInput } from './component-registry.mjs';
-import { normalizeStudio } from './studio-definition.mjs';
+import { normalizeComponentInput } from './component-registry.mjs';
+import { createStudioCompiler } from './studio-definition.mjs';
 
 export const fail = (code, status = 409) => Object.assign(new Error(code), { code, status });
 export const record = v => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -28,8 +28,9 @@ export function mcpActor(session, headers, agentEnabled = false) {
   return { ...actor, startedBy, agentVersion, toolDigest, approvalDecisionId };
 }
 
-export function readOnlyDefinition(definition, profile) {
-  const normalized = normalizeStudio(definition);
+export function readOnlyDefinition(definition, compiler = createStudioCompiler()) {
+  const { profile } = compiler.registry;
+  const normalized = compiler.normalizeStudio(definition);
   const reads = normalized.nodes.filter(n => n.componentId === 'dkg-read');
   if (reads.length && (reads.length !== 1 || reads[0].id !== normalized.entryId || !profile?.requiresNosActor
     || profile.workflowTools?.effect !== 'read' || !Array.isArray(profile.workflowTools.readGraphs)
@@ -42,7 +43,8 @@ export function readOnlyDefinition(definition, profile) {
   return normalized;
 }
 
-export function runInput(value, workflow, profile) {
+export function runInput(value, workflow, compiler = createStudioCompiler()) {
+  const { profile } = compiler.registry;
   if (!closed(value, ['kaRef', 'workflowSha256', 'runKey', 'arguments']) || !id(value.runKey)
     || value.kaRef !== workflow.kaRef || value.workflowSha256 !== workflow.grant.workflowSha256 || !record(value.arguments))
     throw fail('STUDIO_INVALID_RUN', 400);
@@ -54,6 +56,6 @@ export function runInput(value, workflow, profile) {
   canonical(value.arguments);
   const root = workflow.definition.nodes.find(n => n.id === workflow.definition.entryId);
   if (root.componentId === 'dkg-read') profile.workflowTools.validateArguments(value.arguments);
-  return normalizeComponentInput(component(root.componentId), { itemsJson: JSON.stringify([value.arguments]),
+  return normalizeComponentInput(compiler.registry.component(root.componentId), { itemsJson: JSON.stringify([value.arguments]),
     paramsJson: JSON.stringify(root.params), executionId: '' });
 }

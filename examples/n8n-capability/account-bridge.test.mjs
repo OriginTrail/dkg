@@ -8,7 +8,7 @@ import { Readable } from 'node:stream';
 import { execFileSync } from 'node:child_process';
 import { fixtureProgramAuthority } from './test-support/studio-authority-fixture.mjs';
 
-// Select account mode before importing the real bridge or any profile consumer.
+// Load account mode explicitly at startup.
 const setup = mkdtempSync(join(tmpdir(), 'account-bridge-'));
 const sessionFile = join(setup, 'session.json'), secretFile = join(setup, 'secret'), profileFile = join(setup, 'profile.mjs');
 const secret = 'fictional-bridge-test-service-secret', accountId = 'account-bridge-test';
@@ -16,10 +16,12 @@ writeFileSync(secretFile, secret, { mode: 0o600 });
 writeFileSync(sessionFile, JSON.stringify({ accountId, controlPlaneUrl: 'http://127.0.0.1:4610', secretFile, adoptExistingState: true }));
 writeFileSync(profileFile, `import profile from ${JSON.stringify(new URL('./test-support/measurement-profile.mjs', import.meta.url).href)};
   export default {...profile, requiresNosActor:true, accountId:${JSON.stringify(accountId)}, authorize:async()=>{}};`);
-process.env.NOS_STUDIO_SESSION_FILE = sessionFile;
-process.env.NOS_DKG_PROFILE_MODULE = profileFile;
+const { loadStudioContext, createStudioContext } = await import('./studio-context.mjs');
+const context = await loadStudioContext({ NOS_STUDIO_SESSION_FILE: sessionFile, NOS_DKG_PROFILE_MODULE: profileFile });
 const { createCapabilityBridge, handleDkgComponentCallback } = await import('./bridge.mjs');
-const { environment, definition, catalog, graphId, owner } = await import('./test-support/studio-service-fixture.mjs');
+const { createStudioFixtureContext, graphId, owner } = await import('./test-support/studio-service-fixture.mjs');
+const { definition, catalog } = createStudioFixtureContext(context.profile);
+const environment = () => createStudioFixtureContext({ ...context.profile }).environment();
 after(() => rmSync(setup, { recursive: true, force: true }));
 
 const headers = { 'x-nos-workflows-secret': secret, 'x-nos-workflows-account': accountId,
@@ -35,7 +37,7 @@ function options(f) {
     program: { contextGraphId: graphId, programIri: c.kaRef, programLayer: 'wm', authorAgentAddress: owner, sourceHash: c.sourceHash }, n8n: {} }));
   for (const binding of f.config.programBindings) f.approvals.set(binding.operationIri, { binding: structuredClone(binding) });
   for (const c of catalog) f.sources.set(c.kaRef, { programIri: c.kaRef, sourceHash: c.sourceHash, source: '', version: '1', authorAgentAddress: owner });
-  return { graphId, owner, config: f.config, client: f.client, definitions: catalog, exportTokenFile: f.exportTokenFile, programAuthority: fixtureProgramAuthority,
+  return { context: createStudioContext({ profile: f.profile, session: context.session }), graphId, owner, config: f.config, client: f.client, definitions: catalog, exportTokenFile: f.exportTokenFile, programAuthority: fixtureProgramAuthority,
     studioOptions: { state: f.state, headerCredential: { id: 'fixture-header', name: 'Fixture' }, credentials: {}, fetchImpl: f.fetchImpl },
     agent: { query: async query => ({ bindings: query.includes('orderedOutputs')
       ? rawOutputs.map(value => ({ g: `did:dkg:context-graph:${graphId}/_working_memory/${owner}/1`, output: { value } }))
@@ -116,9 +118,8 @@ test('callback handler enforces the 16 KiB byte limit before dispatching Unicode
 });
 
 async function callbackFixture() {
-  const { configuredDkgProfile: profile } = await import('./dkg-profile.mjs');
   const { measurements } = await import('./test-support/measurement-profile.mjs');
-  const f = environment(), effects = [], original = profile.transport;
+  const f = environment(), effects = [], profile = f.profile;
   let bridge;
   try {
     profile.transport = async (payload, operation) => {
@@ -147,8 +148,8 @@ async function callbackFixture() {
     return { f, effects, value, execution, received, measurements,
       send: (value, auth = nativeHeaders, method = 'POST') => request(bridge, callbackPath, method, auth, value),
       reopen() { bridge.close(); bridge = createCapabilityBridge(options(f)); },
-      close() { bridge.close(); profile.transport = original; f.close(); } };
-  } catch (error) { bridge?.close(); profile.transport = original; f.close(); throw error; }
+      close() { bridge.close(); f.close(); } };
+  } catch (error) { bridge?.close(); f.close(); throw error; }
 }
 
 test('internal DKG callback route rejects credentials, Origin, methods and oversized bodies before effects', async () => {
@@ -320,7 +321,8 @@ test('account bridge can bind fresh state without an adoption flag but refuses a
     writeFileSync(session, JSON.stringify({ accountId, controlPlaneUrl: 'http://127.0.0.1:4610', secretFile }));
     const script = `import assert from 'node:assert/strict'; import {readFileSync} from 'node:fs';
       const {createCapabilityBridge}=await import(${JSON.stringify(new URL('./bridge.mjs', import.meta.url).href)});
-      const {options,existing}=JSON.parse(readFileSync(0,'utf8')); options.agent={};options.client={};
+      const {loadStudioContext}=await import(${JSON.stringify(new URL('./studio-context.mjs', import.meta.url).href)});
+      const {options,existing}=JSON.parse(readFileSync(0,'utf8')); options.agent={};options.client={};options.context=await loadStudioContext();
       if(existing)assert.throws(()=>createCapabilityBridge(options),/explicit operator adoption/);
       else {const bridge=createCapabilityBridge(options);bridge.close();} console.log('verified');`;
     for (const [state, existing] of [[fresh, false], [f.state, true]]) {

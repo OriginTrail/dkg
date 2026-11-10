@@ -1,8 +1,8 @@
-import { compileStudio, studioProgramSource } from './studio-definition.mjs';
+import { createStudioCompiler } from './studio-definition.mjs';
 
 /** The same plan supplies upload declarations and approval permissions. */
-export function studioExecutionPlan(compiled, graphId) {
-  const source = studioProgramSource(compiled);
+export function studioExecutionPlan(compiled, graphId, compiler = createStudioCompiler()) {
+  const source = compiler.studioProgramSource(compiled);
   const limits = { maxConcurrency: 1, timeoutMs: 60000 };
   if (compiled.executor === 'dkg') {
     const children = [...new Map(compiled.definition.nodes.map(n => [n.kaRef, { graphId,
@@ -16,8 +16,8 @@ export function studioExecutionPlan(compiled, graphId) {
     approval: { n8n: compiled.grant, typescript: { children: [], maxCalls: 16, ...limits } } };
 }
 
-export async function prepareStudioExecution(definition, graphId, provisionNative) {
+export async function prepareStudioExecution(definition, graphId, provisionNative, compiler = createStudioCompiler()) {
   const compiled = definition.nodes.some(n => n.componentId === 'run-program')
-    ? compileStudio(definition) : await provisionNative(definition);
-  return { compiled, plan: studioExecutionPlan(compiled, graphId) };
+    ? compiler.compileStudio(definition) : await provisionNative(definition);
+  return { compiled, plan: studioExecutionPlan(compiled, graphId, compiler) };
 }

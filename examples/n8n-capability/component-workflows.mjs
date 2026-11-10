@@ -1,4 +1,4 @@
-import { component, componentExecutionDescriptor, componentValidationSource } from './component-registry.mjs';
+import { defaultComponentRegistry, componentExecutionDescriptor, componentValidationSource } from './component-registry.mjs';
 import { resolveComponentValueSource } from './guest-sources/component-v2.mjs';
 
 export const nativeVersions = { set: 3.4, filter: 2.3, sort: 1, limit: 1, removeDuplicates: 2, splitOut: 1.1,
@@ -87,7 +87,8 @@ function dkgPiece(id, name, credentials) {
 }
 
 /** One reviewed native component, with transport-only file conversion where needed. */
-export function componentPiece(id, name, param, { credentials = {} } = {}) {
+export function componentPiece(id, name, param, { credentials = {}, registry = defaultComponentRegistry } = {}) {
+  const { component } = registry;
   const descriptor = component(id), type = descriptor.nodeType.split('.').at(-1);
   const p = key => expression(param(key)), value = key => expression(`$json[${param(key)}]`);
   const resolved = key => `(${resolveComponentValueSource})(${param(key)}, $json)`;
@@ -158,6 +159,7 @@ export function echoSubworkflow() {
 }
 
 export function standaloneComponentWorkflow(id, workflowId, headerCredential, options = {}) {
+  const { component } = options.registry ?? defaultComponentRegistry;
   const descriptor = componentExecutionDescriptor(component(id)), params = key => `$('Prepare input').first().json.params[${JSON.stringify(key)}]`;
   const piece = componentPiece(id, 'Component', id === 'schedule' ? key => JSON.stringify(descriptor.parameters[key].default) : params, options);
   const receive = nativeNode('Receive input', 'webhook', { httpMethod: 'POST', path: 'dkg-capability-' + workflowId,

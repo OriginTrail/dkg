@@ -6,8 +6,8 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { createRequire } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
-import { component } from './component-registry.mjs';
-import { compileStudio } from './studio-definition.mjs';
+import { loadStudioContext } from './studio-context.mjs';
+const { registry: { component }, compiler: { compileStudio } } = await loadStudioContext();
 import { collectN8nExecutionResult } from '../../packages/cli/dist/semantic-runtime-n8n-results.js';
 
 const state = resolve(process.argv[2] ?? ''); if (!process.argv[2]) throw new Error('Supply a credential-free fixture state.');
