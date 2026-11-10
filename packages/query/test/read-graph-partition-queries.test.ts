@@ -73,13 +73,18 @@ const UNSCOPED = [
   'SELECT ?s WHERE { VALUES ?s { <urn:a> } FILTER NOT EXISTS { GRAPH ?g { ?s <urn:p> "missing" } } }',
   'SELECT ?o WHERE { GRAPH ?g { GRAPH ?h { ?s <urn:p> ?o } } }',
   'SELECT ?o WHERE { BIND(IRI(CONCAT(STR(<did:dkg:context-graph:read-partition>), "/_", "read/cg/_verifiable_memory")) AS ?g) GRAPH ?g { ?s ?p ?o } }',
-  `SELECT ?o FROM NAMED <${VM}> WHERE { GRAPH ?g { ?s <urn:p> ?o } }`,
-  `SELECT ?o FROM <${VM}> WHERE { ?s <urn:p> ?o }`,
   'SELECT ?o WHERE { ?s <urn:p> ?o }',
   'ASK { GRAPH ?g { <urn:a> <urn:p> "vm" } }',
   'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }',
   'DESCRIBE ?s WHERE { GRAPH ?g { ?s <urn:p> "code" } }',
 ];
+
+// Unscoped shapes that name their own dataset: while read graphs may exist, they need a context graph.
+const DATASET = [
+  `SELECT ?o FROM NAMED <${VM}> WHERE { GRAPH ?g { ?s <urn:p> ?o } }`,
+  `SELECT ?o FROM <${VM}> WHERE { ?s <urn:p> ?o }`,
+];
+const SCOPE_REQUIRED = 'Scoped query violation: this store cannot answer that query without a context graph now';
 
 // Shapes that name a read graph or its state, by IRI, prefix or escape.
 const NAMING = [
@@ -99,6 +104,10 @@ describe('queries and read-graph partitions', () => {
       const reference = new DKGQueryEngine(oracle);
       for (const sparql of UNSCOPED) {
         expect(normalize(await engine.query(sparql)), sparql).toBe(normalize(await reference.query(sparql)));
+      }
+      for (const sparql of DATASET) {
+        await expect(engine.query(sparql), sparql).rejects.toThrow(SCOPE_REQUIRED);
+        expect((await reference.query(sparql)).bindings, sparql).toHaveLength(1);
       }
     }
     // The read graphs are there: the adapter answers a raw graph query with them.
@@ -120,7 +129,7 @@ describe('queries and read-graph partitions', () => {
     } finally { await fresh.close(); }
   });
 
-  it('answers no unscoped graph-variable query on a store that cannot leave read graphs out', async () => {
+  it('answers no unscoped query on a store that cannot leave read graphs out', async () => {
     // As the HTTP adapters do: any dataset restriction is refused before dispatch.
     const unrestricted = new Proxy(planted, { get(target, key) {
       if (key === 'query') return (sparql: string, options?: { withheldGraphRoots?: readonly string[] }) => {
@@ -132,14 +141,16 @@ describe('queries and read-graph partitions', () => {
       const value = Reflect.get(target, key, target);
       return typeof value === 'function' ? value.bind(target) : value;
     } }) as TripleStore;
-    noteStoreMayHoldReadGraphPartitions(unrestricted);
     const engine = new DKGQueryEngine(unrestricted);
-    await expect(engine.query(UNSCOPED[0]!)).rejects.toThrow(
-      'Scoped query violation: this store cannot answer a graph variable without a context graph');
-    // Without a graph variable, or with a dataset it names itself, the query needs no restriction.
-    expect((await engine.query('SELECT ?o WHERE { ?s <urn:p> ?o }')).bindings).toEqual([]);
-    expect((await engine.query(`SELECT ?o FROM NAMED <${VM}> WHERE { GRAPH ?g { ?s <urn:p> ?o } }`)).bindings)
-      .toHaveLength(1);
+    // Until the store may hold read graphs, its unscoped queries run as before.
+    expect((await engine.query(UNSCOPED[0]!)).bindings.length).toBeGreaterThan(0);
+    noteStoreMayHoldReadGraphPartitions(unrestricted);
+    for (const sparql of [UNSCOPED[0]!, 'SELECT ?o WHERE { ?s <urn:p> ?o }', ...DATASET]) {
+      await expect(engine.query(sparql), sparql).rejects.toThrow(SCOPE_REQUIRED);
+    }
+    // A scoped query is unaffected.
+    expect((await engine.query('SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: CG, view: 'verifiable-memory' })).bindings)
+      .not.toHaveLength(0);
   });
 
   it('refuses a query that names a read-graph partition, scoped or not', async () => {

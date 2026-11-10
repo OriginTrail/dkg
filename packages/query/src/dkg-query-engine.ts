@@ -395,21 +395,18 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         plan.options.contextGraphId, plan.options, reads, reads.catalog);
       case 'unscoped': {
         // The store answers over its dataset without the withheld graphs. While
-        // the store may hold read-graph partitions, a graph variable must not
-        // range over them either: a store that can restrict its dataset leaves
-        // the graphs it hides from enumeration out on request.
+        // it may hold read-graph partitions, every unscoped query runs over its
+        // visible dataset, or is refused where the store cannot restrict it.
         const withheld = options?.withheldGraphRoots ?? [];
         if (withheld.length) assertWithheldGraphQuery(initialGraphScope);
-        const hidesReadGraphs = withheld.length === 0 && initialGraphScope.graphVariables.length > 0
-          && !initialGraphScope.hasDatasetClause && storeMayHoldReadGraphPartitions(this.store);
+        const hidesReadGraphs = withheld.length === 0 && storeMayHoldReadGraphPartitions(this.store);
+        const scopeRequired = () => new ScopedQueryViolationError(
+          'this store cannot answer that query without a context graph now; give the query a context graph');
+        if (hidesReadGraphs && initialGraphScope.hasDatasetClause) throw scopeRequired();
         return this.execWithExclusions(initialGraphScope, withheld.length > 0 || hidesReadGraphs
           ? reads.withWithheldGraphRoots(withheld) : reads,
         options?.excludeGraphPrefixes).catch((error: unknown) => {
-          // A store that cannot leave them out answers no such query rather than a wrong one.
-          if (hidesReadGraphs && isQueryDatasetUnrestrictedError(error)) {
-            throw new ScopedQueryViolationError('this store cannot answer a graph variable without a context graph; '
-              + 'give the query a context graph');
-          }
+          if (hidesReadGraphs && isQueryDatasetUnrestrictedError(error)) throw scopeRequired();
           throw error;
         });
       }
