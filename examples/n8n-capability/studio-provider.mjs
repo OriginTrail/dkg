@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { readResponseBodyBytesBounded, BoundedResponseBodyLimitError } from '../../packages/http-utils/dist/index.js';
+import { requestN8nJson } from '../../packages/cli/dist/semantic-runtime-n8n-wire.js';
 import { createStudioCompiler } from './studio-definition.mjs';
 import { nativeTimerEvents } from './studio-native-events.mjs';
 import { readNativeExecutionInput } from './studio-native-execution.mjs';
@@ -12,17 +12,13 @@ export function createStudioProvider({ repository, config, graphId, owner, heade
   async function api(path, method = 'GET', body) {
     const installation = config.n8nNative;
     const token = readFileSync(installation.apiTokenFile, 'utf8').trim();
-    const res = await fetchImpl(new URL('/api/v1' + path, installation.baseUrl), { method, redirect: 'error', signal: AbortSignal.timeout(12000),
-      headers: { 'X-N8N-API-KEY': token, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-    if (!res.ok) { await res.body?.cancel(); throw error('n8n did not confirm provisioning (' + res.status + '). Retry this save.'); }
-    let bytes;
-    try { bytes = await readResponseBodyBytesBounded(res, 1_048_576); }
-    catch (cause) {
-      if (cause instanceof BoundedResponseBodyLimitError) throw error('n8n response exceeds the PoC limit.');
-      throw cause;
-    }
-    return JSON.parse(Buffer.from(bytes).toString('utf8'));
+    return requestN8nJson(new URL('/api/v1' + path, installation.baseUrl), {
+      method, body, signal: AbortSignal.timeout(12000), maxBytes: 1_048_576, send: fetchImpl,
+      headers: { 'X-N8N-API-KEY': token },
+      error: (code, context) => error(code === 'N8N_RESPONSE_TOO_LARGE' ? 'n8n response exceeds the PoC limit.'
+        : code === 'N8N_RESPONSE_INVALID' ? 'n8n returned an invalid provisioning response. Retry this save.'
+          : 'n8n did not confirm provisioning (' + context.status + '). Retry this save.'),
+    });
   }
   const installGrant = grant => {
     const flows = config.n8nNative.workflows;

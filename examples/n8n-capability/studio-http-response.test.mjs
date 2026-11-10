@@ -86,3 +86,35 @@ for (const target of targets) {
     assert.equal(body.locked, false);
   });
 }
+
+for (const [method, body] of [['GET', undefined], ['POST', { name: 'new' }], ['PUT', { name: 'updated' }]])
+  test(`Studio provisioning preserves ${method}, credentials and its 12-second deadline`, async t => {
+    const config = { n8nNative: installation(t) }, deadlines = [], controller = new AbortController();
+    t.mock.method(AbortSignal, 'timeout', ms => { deadlines.push(ms); return controller.signal; });
+    const provider = createStudioProvider({ config, fetchImpl: async (url, options) => {
+      assert.equal(url.pathname, '/api/v1/workflows/native-one');
+      assert.equal(options.method, method); assert.equal(options.redirect, 'error');
+      assert.equal(options.signal, controller.signal);
+      assert.equal(options.headers['X-N8N-API-KEY'], 'fictional-studio-http-token'.repeat(3));
+      assert.equal(options.headers['content-type'], body === undefined ? undefined : 'application/json');
+      assert.equal(options.body, body === undefined ? undefined : JSON.stringify(body));
+      return Response.json({ id: 'native-one' });
+    } });
+    assert.deepEqual(await provider.api('/workflows/native-one', method, body), { id: 'native-one' });
+    assert.deepEqual(deadlines, [12000]);
+  });
+test('Studio provisioning propagates its deadline cancellation', async t => {
+  const controller = new AbortController(), expired = new DOMException('fixture deadline', 'TimeoutError');
+  t.mock.method(AbortSignal, 'timeout', ms => { assert.equal(ms, 12000); return controller.signal; });
+  const provider = createStudioProvider({ config: { n8nNative: installation(t) }, fetchImpl: async (_url, options) => {
+    controller.abort(expired); options.signal.throwIfAborted();
+  } });
+  await assert.rejects(provider.api('/workflows/native-one', 'PUT', {}), error => error === expired);
+});
+test('Studio provisioning rejects non-object JSON and preserves JSON syntax errors', async t => {
+  const replies = [Response.json([]), new Response('{invalid')];
+  const provider = createStudioProvider({ config: { n8nNative: installation(t) }, fetchImpl: async () => replies.shift() });
+  await assert.rejects(provider.api('/workflows/native-one'), { code: 'INVALID_WORKFLOW', status: 409,
+    message: 'n8n returned an invalid provisioning response. Retry this save.' });
+  await assert.rejects(provider.api('/workflows/native-one'), SyntaxError);
+});

@@ -1,27 +1,29 @@
 import { BoundedResponseBodyLimitError, readResponseBodyBytesBounded } from '@origintrail-official/dkg-http-utils';
 import { n8nRecord, n8nWorkflowSha256 } from './semantic-runtime-n8n-contract.js';
 
-type WireError = (code: string) => Error;
+type WireError = (code: string, context?: { status: number }) => Error;
 const wireError: WireError = code => new Error(code);
 
 /** Provider JSON only. Deadlines, credentials and execution authority belong to the caller. */
 export async function requestN8nJson(url: URL, options: {
   headers: Record<string, string>; signal: AbortSignal; body?: unknown;
+  method?: 'GET' | 'POST' | 'PUT';
   maxBytes?: number; send?: typeof fetch; error?: WireError;
 }): Promise<Record<string, unknown>> {
-  const { headers, signal, body, maxBytes = 1_048_576, send = fetch, error = wireError } = options;
-  const response = await send(url, { method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal,
+  const { headers, signal, body, method = body === undefined ? 'GET' : 'POST', maxBytes = 1_048_576, send = fetch, error = wireError } = options;
+  const response = await send(url, { method, redirect: 'error', signal,
     headers: { ...headers, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  if (!response.ok || !response.body) { await response.body?.cancel(); throw error('N8N_REQUEST_FAILED'); }
+  const context = { status: response.status };
+  if (!response.ok || !response.body) { await response.body?.cancel(); throw error('N8N_REQUEST_FAILED', context); }
   let bytes: Uint8Array;
   try { bytes = await readResponseBodyBytesBounded(response, maxBytes); }
   catch (cause) {
-    if (cause instanceof BoundedResponseBodyLimitError) throw error('N8N_RESPONSE_TOO_LARGE');
+    if (cause instanceof BoundedResponseBodyLimitError) throw error('N8N_RESPONSE_TOO_LARGE', context);
     throw cause;
   }
   const value: unknown = JSON.parse(Buffer.from(bytes).toString('utf8'));
-  if (!n8nRecord(value)) throw error('N8N_RESPONSE_INVALID');
+  if (!n8nRecord(value)) throw error('N8N_RESPONSE_INVALID', context);
   return value;
 }
 
