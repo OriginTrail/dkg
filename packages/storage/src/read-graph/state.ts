@@ -2,7 +2,7 @@
 
 /**
  * Read-graph state: one row per read graph, kept in the state graph of its
- * context graph's `_read` partition (`readGraphStateGraphIri`), with its state,
+ * context graph's read-graph partition (`readGraphStateGraphIri`), with its state,
  * a generation, the membership-rule version and the builder version.
  *
  *   absent → building → ready → dirty → repairing | rebuilding → ready
@@ -25,6 +25,7 @@
 
 import { randomInt } from 'node:crypto';
 import {
+  READ_GRAPH_SEGMENT,
   assertSafeIri,
   parseReadGraphIri,
   readGraphStateGraphIri,
@@ -82,8 +83,9 @@ export const READ_GRAPH_STATE_PREDICATES = Object.freeze({
 type RowField = keyof typeof READ_GRAPH_STATE_PREDICATES;
 const ROW_FIELDS = Object.keys(READ_GRAPH_STATE_PREDICATES) as RowField[];
 
-/** Restricts `?stateGraph` to the state graph of some context graph's read-graph partition. */
-const IN_STATE_GRAPH = 'FILTER(STRSTARTS(STR(?stateGraph), "did:dkg:context-graph:") && STRENDS(STR(?stateGraph), "/_read/state"))';
+/** Restricts `?stateGraph` to the state graph of some context graph's read-graph partition (`readGraphStateGraphIri`). */
+const IN_STATE_GRAPH = 'FILTER(STRSTARTS(STR(?stateGraph), "did:dkg:context-graph:") && '
+  + `STRENDS(STR(?stateGraph), ${sparqlString(`/${READ_GRAPH_SEGMENT}/state`)}))`;
 
 /** The largest generation: transitions add one, and a generation must stay a safe integer. */
 export const MAX_READ_GRAPH_GENERATION = Number.MAX_SAFE_INTEGER;
@@ -197,8 +199,10 @@ export interface ReadGraphStateMirror {
  * The compare-and-set for one transition: one UPDATE operation that changes
  * the stored row from `from` to `to` only when the stored row is exactly
  * `from`, and otherwise changes nothing. `from` undefined creates the row only
- * when none exists; `to` undefined removes it. Only the triples that differ are
- * deleted and inserted, so no triple is both removed and added by the operation.
+ * when the state graph holds none of its fields, so a field left by a damaged
+ * row never ends up beside new values; `to` undefined removes it. Only the
+ * triples that differ are deleted and inserted, so no triple is both removed
+ * and added by the operation.
  */
 export function readGraphStateCompareAndSet(
   from: ReadGraphStateRow | undefined,
@@ -212,8 +216,9 @@ export function readGraphStateCompareAndSet(
   const stateGraph = stateGraphOf(row.readGraph);
   if (from === undefined) {
     const created = checkedRow(to!);
-    return `INSERT { GRAPH <${stateGraph}> { ${rowTriples(created, ROW_FIELDS)} } } WHERE {\n`
-      + `  FILTER NOT EXISTS { GRAPH <${stateGraph}> { <${created.readGraph}> <${READ_GRAPH_STATE_PREDICATES.state}> ?existingState } }\n}`;
+    const absent = ROW_FIELDS.map((field) => `  FILTER NOT EXISTS { GRAPH <${stateGraph}> { <${created.readGraph}> `
+      + `<${READ_GRAPH_STATE_PREDICATES[field]}> ?existing${field[0]!.toUpperCase()}${field.slice(1)} } }`);
+    return `INSERT { GRAPH <${stateGraph}> { ${rowTriples(created, ROW_FIELDS)} } } WHERE {\n${absent.join('\n')}\n}`;
   }
   const before = checkedRow(from);
   const fence = exactRowPattern(before, ROW_FIELDS);
@@ -243,15 +248,18 @@ export function readGraphStateFencePattern(readGraph: string, state: ReadGraphSt
 }
 
 /**
- * Every state row in the store: one lookup on the state predicate, in any
- * context graph's state graph, with the other fields optional so a damaged row
- * is still found. Rows are read with {@link parseReadGraphStateRows}.
+ * Every state row in the store, in any context graph's state graph. A row is
+ * found by any of its fields, and every field is optional, so a damaged row is
+ * still found, one that has lost its state included. Rows are read with
+ * {@link parseReadGraphStateRows}.
  */
 export function readGraphStateRowsQuery(): string {
   const p = READ_GRAPH_STATE_PREDICATES;
-  return `SELECT ?stateGraph ?readGraph ?state ?generation ?ruleVersion ?builderVersion WHERE {
+  const anyField = ROW_FIELDS.map((field) => `{ ?readGraph <${p[field]}> ?readGraphRowField }`).join(' UNION ');
+  return `SELECT DISTINCT ?stateGraph ?readGraph ?state ?generation ?ruleVersion ?builderVersion WHERE {
   GRAPH ?stateGraph {
-    ?readGraph <${p.state}> ?state .
+    ${anyField}
+    OPTIONAL { ?readGraph <${p.state}> ?state }
     OPTIONAL { ?readGraph <${p.generation}> ?generation }
     OPTIONAL { ?readGraph <${p.ruleVersion}> ?ruleVersion }
     OPTIONAL { ?readGraph <${p.builderVersion}> ?builderVersion }

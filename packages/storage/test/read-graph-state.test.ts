@@ -231,6 +231,28 @@ describe('read-graph state statements on embedded Oxigraph', () => {
     expect(after.damaged).toEqual(['urn:not-a-read-graph']);
   });
 
+  it('finds a row that has lost its state, creates nothing beside it, and recovers it with a reset', async () => {
+    const store = new OxigraphStore();
+    const p = READ_GRAPH_STATE_PREDICATES;
+    const fieldCount = async () => {
+      const result = await store.query(`SELECT ?p ?o WHERE { GRAPH <${STATE_GRAPH}> { <${R}> ?p ?o } }`);
+      return result.type === 'bindings' ? result.bindings.length : -1;
+    };
+    // The generation and versions of an earlier row survive without its state.
+    await store.update(`INSERT DATA { GRAPH <${STATE_GRAPH}> { <${R}> <${p.generation}> 7 ; <${p.ruleVersion}> 1 ; <${p.builderVersion}> 1 } }`);
+    expect(await storedRows(store)).toEqual({ rows: [], damaged: [R] });
+
+    await store.update(readGraphStateCompareAndSet(undefined, row('building', 11)));
+    expect(await fieldCount()).toBe(3);
+    expect(await storedRows(store)).toEqual({ rows: [], damaged: [R] });
+
+    await store.update(readGraphStateReset(row('building', 12)));
+    const ready = nextReadGraphState(row('building', 12), { kind: 'publish-ready' })!;
+    await store.update(readGraphStateCompareAndSet(row('building', 12), ready));
+    expect(await storedRows(store)).toEqual({ rows: [ready], damaged: [] });
+    expect(await fieldCount()).toBe(4);
+  });
+
   it('marks every read graph dirty in one request, once, leaving dirty rows as they are', async () => {
     const store = new OxigraphStore();
     await store.update(readGraphStateMarkAllDirty());
