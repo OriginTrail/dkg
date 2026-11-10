@@ -495,7 +495,7 @@ describe('loadNetworkConfig', () => {
     expect((config as any).marketplace).toEqual({ contextGraphId: 'testnet-marketplace' });
   });
 
-  it('names a created testnet Marketplace Context Graph, not the placeholder', async () => {
+  it('names a testnet Marketplace Context Graph id, not the placeholder', async () => {
     const { _resetNetworkConfigCache } = await import('../src/config.js');
     _resetNetworkConfigCache();
     const config = await loadNetworkConfig('testnet');
@@ -503,7 +503,8 @@ describe('loadNetworkConfig', () => {
       expect(config).toBeNull();
       return;
     }
-    // The id is filled in once the graph exists on testnet; until then this fails, so the placeholder cannot ship.
+    // A format check only: the placeholder cannot ship. Whether the graph exists and admits nodes is a fact of the
+    // live testnet, checked when the id is filled in, not something a unit test can show.
     expect((config as any).marketplace?.contextGraphId).not.toMatch(/^FILL_IN_/);
   });
 
