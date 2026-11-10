@@ -279,6 +279,38 @@ export interface ChainEventLogStore {
   countEvents?(scope: string, query: ChainEventLogCountQuery): Promise<number>;
   /** Block hash for a block the log already holds, without an RPC round trip. */
   blockHashAt(scope: string, blockNumber: number): Promise<string | undefined>;
+  /**
+   * A hash kept by {@link rememberSettledBlockHash}, served only while the scope
+   * still has a live cursor on `lineage`, settled at or above `blockNumber`,
+   * with no fork suspicion held. Anything else answers `undefined`.
+   *
+   * Optional, with its writer: a store without them still gets each settled
+   * hash read once per process, from memory
+   * (`chain-event-log-settled-block-hashes.ts`), and a restart reads it once
+   * more.
+   */
+  readSettledBlockHash?(
+    scope: string,
+    lineage: string,
+    blockNumber: number,
+  ): Promise<string | undefined>;
+  /**
+   * Keep the chain's hash of one SETTLED block the log holds no row for.
+   *
+   * The store re-checks, in the write itself, that the scope has a live cursor
+   * on `lineage`, settled at or above `blockNumber`, with no fork suspicion
+   * held, and drops every kept hash of the scope whenever its lineage changes
+   * or it is tombstoned — including by a writer that does not know about them.
+   * Two different hashes for one block keep neither.
+   *
+   * Resolves `true` once the hash is kept, `false` when the store refused it.
+   */
+  rememberSettledBlockHash?(
+    scope: string,
+    lineage: string,
+    blockNumber: number,
+    blockHash: string,
+  ): Promise<boolean>;
 }
 
 /** The address+topic set one tick fetches. Its digest versions the coverage. */

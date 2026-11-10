@@ -651,4 +651,144 @@ describe('SqliteChainEventLogStore', () => {
     expect(await store.commit(SCOPE, undefined, value)).toBe(1);
   });
 
+  describe('settled block-hash memo', () => {
+    const LINEAGE = hash(0x01);
+    const OTHER_LINEAGE = hash(0x02);
+    const KEPT = hash(0x5a);
+
+    /** A live scope settled through 100, head 110. */
+    async function settledStore() {
+      const created = createStore();
+      await created.store.commit(SCOPE, undefined, commit(100, 110, []));
+      return created;
+    }
+
+    function memoRows(db: DashboardDB): number {
+      return (db.db.prepare('SELECT COUNT(*) AS c FROM chain_index_block_hashes')
+        .get() as { c: number }).c;
+    }
+
+    it('keeps a settled hash under the cursor lineage and serves it back', async () => {
+      const { store } = await settledStore();
+
+      expect(await store.rememberSettledBlockHash(SCOPE, LINEAGE, 40, KEPT)).toBe(true);
+      expect(await store.readSettledBlockHash(SCOPE, LINEAGE, 40)).toBe(KEPT);
+      // Idempotent for the same answer.
+      expect(await store.rememberSettledBlockHash(SCOPE, LINEAGE, 40, KEPT)).toBe(true);
+      // Never through `blockHashAt`, whose answers other readers rely on.
+      expect(await store.blockHashAt(SCOPE, 40)).toBeUndefined();
+      expect(await store.readSettledBlockHash(OTHER_SCOPE, LINEAGE, 40)).toBeUndefined();
+    });
+
+    it('survives closing and reopening the database', async () => {
+      const { db, store, dataDir } = await settledStore();
+      await store.rememberSettledBlockHash(SCOPE, LINEAGE, 40, KEPT);
+      db.close();
+
+      const reopened = new SqliteChainEventLogStore(openDatabase(dataDir));
+      expect(await reopened.readSettledBlockHash(SCOPE, LINEAGE, 40)).toBe(KEPT);
+    });
+
+    it('refuses a block in the reorg tail', async () => {
+      const { store } = await settledStore();
+
+      expect(await store.rememberSettledBlockHash(SCOPE, LINEAGE, 101, KEPT)).toBe(false);
+      expect(await store.readSettledBlockHash(SCOPE, LINEAGE, 101)).toBeUndefined();
+    });
+
+    it('refuses another lineage, a cold scope, and a malformed hash', async () => {
+      const { store } = await settledStore();
+
+      expect(await store.rememberSettledBlockHash(SCOPE, OTHER_LINEAGE, 40, KEPT)).toBe(false);
+      expect(await store.rememberSettledBlockHash(OTHER_SCOPE, LINEAGE, 40, KEPT)).toBe(false);
+      expect(await store.rememberSettledBlockHash(SCOPE, LINEAGE, 40, '0x1234')).toBe(false);
+      expect(await store.rememberSettledBlockHash(SCOPE, LINEAGE, 40, KEPT.toUpperCase()))
+        .toBe(false);
+      expect(await store.rememberSettledBlockHash(SCOPE, LINEAGE, -1, KEPT)).toBe(false);
+      expect(await store.rememberSettledBlockHash(SCOPE, '', 40, KEPT)).toBe(false);
+      await store.rememberSettledBlockHash(SCOPE, LINEAGE, 40, KEPT);
+      expect(await store.readSettledBlockHash(SCOPE, OTHER_LINEAGE, 40)).toBeUndefined();
+    });
+
+    it('serves and keeps nothing while a fork is suspected, and serves again once withdrawn',
+      async () => {
+        const { store } = await settledStore();
+        await store.rememberSettledBlockHash(SCOPE, LINEAGE, 40, KEPT);
+        await store.commit(SCOPE, 1, { ...commit(100, 110, []), suspectedForkBlockNumber: 100 });
+
+        expect(await store.readSettledBlockHash(SCOPE, LINEAGE, 40)).toBeUndefined();
+        expect(await store.rememberSettledBlockHash(SCOPE, LINEAGE, 41, KEPT)).toBe(false);
+
+        await store.commit(SCOPE, 2, { ...commit(100, 110, []), clearsForkSuspicion: true });
+        expect(await store.readSettledBlockHash(SCOPE, LINEAGE, 40)).toBe(KEPT);
+        expect(await store.readSettledBlockHash(SCOPE, LINEAGE, 41)).toBeUndefined();
+      });
+
+    it('keeps neither of two different answers for one block', async () => {
+      const { store } = await settledStore();
+      await store.rememberSettledBlockHash(SCOPE, LINEAGE, 40, KEPT);
+
+      expect(await store.rememberSettledBlockHash(SCOPE, LINEAGE, 40, hash(0x5b))).toBe(false);
+      expect(await store.readSettledBlockHash(SCOPE, LINEAGE, 40)).toBeUndefined();
+    });
+
+    it('drops the scope\'s memo with its tombstone, and only that scope\'s', async () => {
+      const { db, store } = await settledStore();
+      await store.commit(OTHER_SCOPE, undefined, commit(100, 110, []));
+      await store.rememberSettledBlockHash(SCOPE, LINEAGE, 40, KEPT);
+      await store.rememberSettledBlockHash(OTHER_SCOPE, LINEAGE, 40, KEPT);
+
+      expect(await store.tombstone(SCOPE, 1)).toBe(2);
+      expect(memoRows(db)).toBe(1);
+      // Re-initialized on the SAME lineage: nothing from before comes back.
+      expect(await store.commit(SCOPE, undefined, commit(100, 110, []))).toBe(3);
+      expect(await store.readSettledBlockHash(SCOPE, LINEAGE, 40)).toBeUndefined();
+      expect(await store.readSettledBlockHash(OTHER_SCOPE, LINEAGE, 40)).toBe(KEPT);
+    });
+
+    it('drops the memo when a writer that does not know it tombstones the scope', async () => {
+      // What an older release does after a downgrade: its own tombstone,
+      // which names only the tables it knows.
+      const { db, store } = await settledStore();
+      await store.rememberSettledBlockHash(SCOPE, LINEAGE, 40, KEPT);
+
+      db.db.prepare(`
+        UPDATE chain_index_cursor
+           SET revision = revision + 1, lineage = '', settled_block = -1, settled_hash = ''
+         WHERE scope = ?
+      `).run(SCOPE);
+      expect(memoRows(db)).toBe(0);
+    });
+
+    it('drops the memo when the lineage changes or the cursor row goes', async () => {
+      const { db, store } = await settledStore();
+      await store.rememberSettledBlockHash(SCOPE, LINEAGE, 40, KEPT);
+      db.db.prepare('UPDATE chain_index_cursor SET lineage = ? WHERE scope = ?')
+        .run(OTHER_LINEAGE, SCOPE);
+      expect(memoRows(db)).toBe(0);
+
+      await store.rememberSettledBlockHash(SCOPE, OTHER_LINEAGE, 40, KEPT);
+      // An ordinary commit rewrites the same lineage, which keeps the memo.
+      await store.commit(SCOPE, 1, {
+        ...commit(100, 111, []),
+        cursor: { ...commit(100, 111, []).cursor, lineage: OTHER_LINEAGE },
+      });
+      expect(memoRows(db)).toBe(1);
+      db.db.prepare('DELETE FROM chain_index_cursor WHERE scope = ?').run(SCOPE);
+      expect(memoRows(db)).toBe(0);
+    });
+
+    it('is not used when a trigger that keeps it honest is missing', async () => {
+      const { db, store } = await settledStore();
+      await store.rememberSettledBlockHash(SCOPE, LINEAGE, 40, KEPT);
+      db.db.exec('DROP TRIGGER chain_index_block_hashes_follow_lineage');
+
+      const withoutTrigger = new SqliteChainEventLogStore(db);
+      expect(await withoutTrigger.readSettledBlockHash(SCOPE, LINEAGE, 40)).toBeUndefined();
+      expect(await withoutTrigger.rememberSettledBlockHash(SCOPE, LINEAGE, 41, KEPT)).toBe(false);
+      // Its tombstone still clears the table it can see.
+      expect(await withoutTrigger.tombstone(SCOPE, 1)).toBe(2);
+      expect(memoRows(db)).toBe(0);
+    });
+  });
 });

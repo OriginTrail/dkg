@@ -1102,6 +1102,141 @@ describe('DashboardDB — chain log KA point-read index', () => {
   });
 });
 
+describe('DashboardDB — chain index block-hash memo', () => {
+  const MEMO = 'chain_index_block_hashes';
+  const LINEAGE_TRIGGER = 'chain_index_block_hashes_follow_lineage';
+  const DELETE_TRIGGER = 'chain_index_block_hashes_follow_cursor_delete';
+  const word = (seed: number): string => `0x${seed.toString(16).padStart(64, '0')}`;
+
+  function memoObjects(handle: Database.Database): string[] {
+    return (handle.prepare(`
+      SELECT name FROM sqlite_master WHERE name IN (?, ?, ?) ORDER BY name
+    `).all(MEMO, LINEAGE_TRIGGER, DELETE_TRIGGER) as Array<{ name: string }>)
+      .map((entry) => entry.name);
+  }
+
+  /** A live scope settled through 100, the way the chain log's tick leaves one. */
+  function liveCursor(handle: Database.Database): void {
+    handle.prepare(`
+      INSERT INTO chain_index_cursor (
+        scope, revision, lineage, deployment_block, settled_block, settled_hash,
+        head_block, head_hash, head_timestamp_seconds, head_fetched_at_ms,
+        topic_set_version, suspected_fork_block, updated_at
+      ) VALUES ('scope', 1, ?, 1, 100, ?, 110, ?, 1, 1, 'v1', NULL, 1)
+    `).run(word(1), word(100), word(110));
+  }
+
+  it('creates the memo and both of its triggers on a fresh database', () => {
+    expect(memoObjects(db.db)).toEqual([MEMO, DELETE_TRIGGER, LINEAGE_TRIGGER].sort());
+  });
+
+  it('adds them to a current-version database that predates them', async () => {
+    db.close();
+    const raw = new Database(join(dir, 'node-ui.db'));
+    raw.exec(`DROP TABLE ${MEMO}; DROP TRIGGER ${LINEAGE_TRIGGER}; DROP TRIGGER ${DELETE_TRIGGER};`);
+    liveCursor(raw);
+    expect(memoObjects(raw)).toEqual([]);
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(memoObjects(db.db)).toEqual([MEMO, DELETE_TRIGGER, LINEAGE_TRIGGER].sort());
+    const store = new SqliteChainEventLogStore(db);
+    expect(await store.rememberSettledBlockHash('scope', word(1), 40, word(40))).toBe(true);
+    expect(await store.readSettledBlockHash('scope', word(1), 40)).toBe(word(40));
+  });
+
+  it('empties a memo found without its triggers before recreating them', () => {
+    // Without the lineage trigger, a writer that does not know the memo can
+    // tombstone the scope and re-initialize it on the same lineage, and every
+    // kept hash would then outlive the log it was read for.
+    db.close();
+    const raw = new Database(join(dir, 'node-ui.db'));
+    liveCursor(raw);
+    raw.prepare(`INSERT INTO ${MEMO} VALUES ('scope', 40, ?, ?)`).run(word(1), word(40));
+    raw.exec(`DROP TRIGGER ${LINEAGE_TRIGGER}`);
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(memoObjects(db.db)).toEqual([MEMO, DELETE_TRIGGER, LINEAGE_TRIGGER].sort());
+    expect((db.db.prepare(`SELECT COUNT(*) AS c FROM ${MEMO}`).get() as { c: number }).c).toBe(0);
+  });
+
+  it('keeps the memo across an ordinary reopen', () => {
+    liveCursor(db.db);
+    db.db.prepare(`INSERT INTO ${MEMO} VALUES ('scope', 40, ?, ?)`).run(word(1), word(40));
+    db.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect((db.db.prepare(`SELECT COUNT(*) AS c FROM ${MEMO}`).get() as { c: number }).c).toBe(1);
+  });
+
+  it('creates them when a pre-chain-log database is upgraded', () => {
+    db.close();
+    const raw = new Database(join(dir, 'node-ui.db'));
+    raw.exec(`
+      DROP TABLE ${MEMO};
+      DROP TABLE chain_index_cursor;
+      DROP TABLE chain_events;
+      DROP TABLE chain_index_coverage;
+    `);
+    raw.pragma('user_version = 37');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(memoObjects(db.db)).toEqual([MEMO, DELETE_TRIGGER, LINEAGE_TRIGGER].sort());
+  });
+
+  it('recreates a memo table whose triggers outlived it, so a tombstone still works', async () => {
+    db.close();
+    const raw = new Database(join(dir, 'node-ui.db'));
+    liveCursor(raw);
+    raw.exec(`DROP TABLE ${MEMO}`);
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(memoObjects(db.db)).toEqual([MEMO, DELETE_TRIGGER, LINEAGE_TRIGGER].sort());
+    await expect(new SqliteChainEventLogStore(db).tombstone('scope', 1)).resolves.toBe(2);
+  });
+
+  it('starts without the memo when it cannot be built, and builds it on a later start', async () => {
+    db.close();
+    const raw = new Database(join(dir, 'node-ui.db'));
+    raw.exec(`DROP TABLE ${MEMO}; DROP TRIGGER ${LINEAGE_TRIGGER}; DROP TRIGGER ${DELETE_TRIGGER};`);
+    liveCursor(raw);
+    raw.close();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const exec = Database.prototype.exec;
+    const full = vi.spyOn(Database.prototype, 'exec').mockImplementation(function (this: Database.Database, sql: string) {
+      if (sql.includes(`CREATE TABLE IF NOT EXISTS ${MEMO}`)) {
+        throw new Database.SqliteError('database or disk is full', 'SQLITE_FULL');
+      }
+      return exec.call(this, sql);
+    });
+    let warnings: string[];
+    try {
+      db = new DashboardDB({ dataDir: dir });
+    } finally {
+      warnings = warn.mock.calls.map((call) => String(call[0]));
+      full.mockRestore();
+      warn.mockRestore();
+    }
+    expect(warnings.join('\n'))
+      .toMatch(/could not build the chain index block-hash memo.*database or disk is full/);
+    expect(memoObjects(db.db)).toEqual([]);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    // The node starts, and the memo is simply not used.
+    const store = new SqliteChainEventLogStore(db);
+    expect(await store.rememberSettledBlockHash('scope', word(1), 40, word(40))).toBe(false);
+    expect(await store.readSettledBlockHash('scope', word(1), 40)).toBeUndefined();
+    expect(await store.load('scope')).toBeDefined();
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    expect(memoObjects(db.db)).toEqual([MEMO, DELETE_TRIGGER, LINEAGE_TRIGGER].sort());
+  });
+});
+
 describe('DashboardDB — V27 join-approval ledger migration', () => {
   it('repairs a missing audit-cap trigger on a current-version database', () => {
     const dbPath = join(dir, 'node-ui.db');

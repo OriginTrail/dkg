@@ -159,6 +159,19 @@ const GRAPH_READ_INDEX = 'idx_chain_events_scope_address_topic';
 /** Tail rows only (`settled = 0`): the reorg tail is a handful of blocks. */
 const TAIL_READ_INDEX = 'idx_chain_events_scope_unsettled';
 
+/**
+ * The settled block-hash memo and the two triggers that keep it honest, all
+ * created by `DashboardDB` beside the chain-log schema. The memo is used only
+ * when all three exist: without the triggers, a writer that does not know the
+ * memo (an older release, after a downgrade) could tombstone the scope and
+ * leave kept hashes behind for a re-initialization on the same lineage.
+ */
+const BLOCK_HASH_MEMO_TABLE = 'chain_index_block_hashes';
+const BLOCK_HASH_MEMO_LINEAGE_TRIGGER = 'chain_index_block_hashes_follow_lineage';
+const BLOCK_HASH_MEMO_CURSOR_DELETE_TRIGGER = 'chain_index_block_hashes_follow_cursor_delete';
+
+const BLOCK_HASH = /^0x[0-9a-f]{64}$/;
+
 type EventFilter = Pick<SqliteChainEventLogCountQuery,
   'fromBlockNumber' | 'throughBlockNumber' | 'addresses' | 'topic0' | 'topic1' | 'topic2' | 'settled'>;
 
@@ -172,6 +185,10 @@ export class SqliteChainEventLogStore {
    * index is known to be there.
    */
   private readonly indexes: ReadonlySet<string>;
+  /** The memo table exists, so a tombstone must clear it. */
+  private readonly blockHashMemoTable: boolean;
+  /** The memo table AND both triggers exist, so the memo may be used. */
+  private readonly blockHashMemo: boolean;
 
   constructor(database: NodeStoreDatabaseHandle) {
     this.db = database.db;
@@ -179,6 +196,16 @@ export class SqliteChainEventLogStore {
       SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?, ?)
     `).all(KA_POINT_READ_INDEX, GRAPH_READ_INDEX, TAIL_READ_INDEX) as Array<{ name: string }>;
     this.indexes = new Set(present.map((index) => index.name));
+    const memo = new Set((this.db.prepare(`
+      SELECT name FROM sqlite_master
+       WHERE (type = 'table' AND name = ?) OR (type = 'trigger' AND name IN (?, ?))
+    `).all(
+      BLOCK_HASH_MEMO_TABLE,
+      BLOCK_HASH_MEMO_LINEAGE_TRIGGER,
+      BLOCK_HASH_MEMO_CURSOR_DELETE_TRIGGER,
+    ) as Array<{ name: string }>).map((entry) => entry.name));
+    this.blockHashMemoTable = memo.has(BLOCK_HASH_MEMO_TABLE);
+    this.blockHashMemo = memo.size === 3;
   }
 
   /**
@@ -397,6 +424,8 @@ export class SqliteChainEventLogStore {
       for (const table of [
         'chain_events',
         'chain_index_coverage',
+        // Also dropped by its trigger; named here so the tombstone says so.
+        ...(this.blockHashMemoTable ? [BLOCK_HASH_MEMO_TABLE] : []),
       ]) {
         this.db.prepare(`DELETE FROM ${table} WHERE scope = ?`).run(scope);
       }
@@ -469,6 +498,83 @@ export class SqliteChainEventLogStore {
        LIMIT 1
     `).get(scope, blockNumber) as { block_hash: string } | undefined;
     return row?.block_hash;
+  }
+
+  /**
+   * A settled block's kept hash, served only while the scope's live cursor is
+   * still on `lineage`, settled at or above the block, with no fork suspicion
+   * held. Anything else, including a database without the memo, is
+   * `undefined`: the caller then reads the chain, as it did before.
+   */
+  async readSettledBlockHash(
+    scope: string,
+    lineage: string,
+    blockNumber: number,
+  ): Promise<string | undefined> {
+    if (!this.blockHashMemo || lineage === TOMBSTONE_LINEAGE
+      || !Number.isSafeInteger(blockNumber) || blockNumber < 0) {
+      return undefined;
+    }
+    const row = this.db.prepare(`
+      SELECT h.block_hash
+        FROM ${BLOCK_HASH_MEMO_TABLE} h
+        JOIN chain_index_cursor c ON c.scope = h.scope
+       WHERE h.scope = ? AND h.block_number = ? AND h.lineage = ?
+         AND c.lineage = h.lineage
+         AND c.settled_block >= h.block_number
+         AND c.suspected_fork_block IS NULL
+    `).get(scope, blockNumber, lineage) as { block_hash: string } | undefined;
+    return row?.block_hash;
+  }
+
+  /**
+   * Keep the chain's hash of one settled block, if the scope's live cursor is
+   * on `lineage`, settled at or above it, with no fork suspicion held — checked
+   * in the INSERT itself, so a cursor that moved between the caller's read and
+   * this write refuses it.
+   *
+   * Two different hashes for one block keep NEITHER: one of the two reads was
+   * wrong, and the next read goes to the chain.
+   */
+  async rememberSettledBlockHash(
+    scope: string,
+    lineage: string,
+    blockNumber: number,
+    blockHash: string,
+  ): Promise<boolean> {
+    if (!this.blockHashMemo || lineage === TOMBSTONE_LINEAGE
+      || !Number.isSafeInteger(blockNumber) || blockNumber < 0
+      || !BLOCK_HASH.test(blockHash)) {
+      return false;
+    }
+    const apply = this.db.transaction((): boolean => {
+      const held = this.db.prepare(`
+        SELECT lineage, block_hash FROM ${BLOCK_HASH_MEMO_TABLE}
+         WHERE scope = ? AND block_number = ?
+      `).get(scope, blockNumber) as { lineage: string; block_hash: string } | undefined;
+      if (held !== undefined && held.lineage === lineage) {
+        if (held.block_hash === blockHash) return true;
+        this.db.prepare(`
+          DELETE FROM ${BLOCK_HASH_MEMO_TABLE} WHERE scope = ? AND block_number = ?
+        `).run(scope, blockNumber);
+        return false;
+      }
+      // The WHERE clause also settles SQLite's INSERT … SELECT … ON CONFLICT
+      // parsing ambiguity. The conflict branch replaces only a row left by
+      // another lineage, which the lineage trigger should already have dropped.
+      return this.db.prepare(`
+        INSERT INTO ${BLOCK_HASH_MEMO_TABLE} (scope, block_number, lineage, block_hash)
+        SELECT c.scope, ?, c.lineage, ?
+          FROM chain_index_cursor c
+         WHERE c.scope = ? AND c.lineage = ? AND c.lineage <> ''
+           AND c.settled_block >= ?
+           AND c.suspected_fork_block IS NULL
+        ON CONFLICT(scope, block_number) DO UPDATE SET
+          lineage = excluded.lineage,
+          block_hash = excluded.block_hash
+      `).run(blockNumber, blockHash, scope, lineage, blockNumber).changes === 1;
+    });
+    return apply();
   }
 
   private writeCursor(

@@ -838,3 +838,99 @@ describe('createEvmChainIndexRuntime', () => {
     expect(window!.throughBlockNumber).toBe(1_000);
   });
 });
+
+/**
+ * The authority page source's block reads, counted at `provider.getBlock`.
+ *
+ * The authority index asks for the hash of every page end of a walk and of the
+ * block its checkpoint stopped at; those are mostly EMPTY settled blocks the
+ * log holds no row for. Each is read from the chain once, the reorg tail on
+ * every read, and the tick's own settled check is never answered from memory.
+ */
+describe('createEvmChainIndexRuntime — settled block hashes', () => {
+  /** Head 1,000, tail of 5: the first pass settles through block 995. */
+  async function settledRuntime() {
+    const h = harness({ headNumber: 1_000, reorgHoldbackBlocks: 5 });
+    await h.runtime.tick.runOnce(new AbortController().signal);
+    expect((await h.store.load(RUNTIME_SCOPE))?.cursor.settledBlockNumber).toBe(995);
+    h.blocks.mockClear();
+    h.usageConsumers.length = 0;
+    return { h, pageSource: h.runtime.binding.contextGraphAuthority!.pageSource };
+  }
+
+  const reads = (h: Harness, blockNumber: number): number => (
+    h.blocks.mock.calls.filter(([read]) => read === blockNumber).length
+  );
+
+  it('reads a settled block once, under the chainIndex.authorityLineage consumer', async () => {
+    const { h, pageSource } = await settledRuntime();
+
+    for (let read = 0; read < 3; read += 1) {
+      expect(await pageSource.readBlockHash(500, new AbortController().signal))
+        .toBe(hexWord(500));
+    }
+
+    expect(reads(h, 500)).toBe(1);
+    expect(h.usageConsumers).toEqual(['chainIndex.authorityLineage']);
+  });
+
+  it('reads a block in the reorg tail on every read', async () => {
+    const { h, pageSource } = await settledRuntime();
+
+    await pageSource.readBlockHash(998, new AbortController().signal);
+    await pageSource.readBlockHash(998, new AbortController().signal);
+
+    expect(reads(h, 998)).toBe(2);
+  });
+
+  it('collapses concurrent reads of one settled block into one request', async () => {
+    const { h, pageSource } = await settledRuntime();
+
+    const answers = await Promise.all(Array.from({ length: 5 }, () => (
+      pageSource.readBlockHash(400, new AbortController().signal)
+    )));
+
+    expect(answers).toEqual(Array.from({ length: 5 }, () => hexWord(400)));
+    expect(reads(h, 400)).toBe(1);
+  });
+
+  it('forgets every kept hash when a reorg tombstones the scope on the same lineage', async () => {
+    const { h, pageSource } = await settledRuntime();
+    await pageSource.readBlockHash(500, new AbortController().signal);
+    expect(reads(h, 500)).toBe(1);
+
+    // A reorg below the tail rewrites everything from block 400 up. The
+    // deployment block is untouched, so the rebuilt scope keeps its lineage.
+    const reorged = (blockNumber: number): string => hexWord(blockNumber + 0xf0_0000);
+    h.blocks.mockImplementation(async (blockNumber: number) => ({
+      number: blockNumber,
+      hash: blockNumber >= 400 ? reorged(blockNumber) : hexWord(blockNumber),
+      timestamp: 1_700_000_000,
+    }));
+    const outcomes: string[] = [];
+    for (let pass = 0; pass < 3; pass += 1) {
+      outcomes.push((await h.runtime.tick.runOnce(new AbortController().signal)).outcome);
+    }
+    expect(outcomes.slice(0, 2)).toEqual(['fork-suspected', 'tombstoned']);
+    expect((await h.store.load(RUNTIME_SCOPE))?.cursor.lineage).toBe(hexWord(1));
+
+    expect(await pageSource.readBlockHash(500, new AbortController().signal))
+      .toBe(reorged(500));
+    expect(reads(h, 500)).toBe(2);
+  });
+
+  it('leaves the tick\'s own settled check on the chain, every pass', async () => {
+    const { h, pageSource } = await settledRuntime();
+    await pageSource.readBlockHash(995, new AbortController().signal);
+    await pageSource.readBlockHash(500, new AbortController().signal);
+
+    await h.runtime.tick.runOnce(new AbortController().signal);
+    await h.runtime.tick.runOnce(new AbortController().signal);
+
+    // Block 995 is the settled cursor: the page source answered it from the
+    // log, and each pass re-read it from the chain anyway.
+    expect(reads(h, 995)).toBe(2);
+    expect(h.usageConsumers.filter((consumer) => consumer === 'chainIndex.lineage'))
+      .toHaveLength(2);
+  });
+});

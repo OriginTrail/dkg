@@ -36,6 +36,15 @@ export {
 } from './chain-event-log-tombstones.js';
 
 export {
+  CHAIN_EVENT_LOG_SETTLED_BLOCK_HASH_DURABLE_DEPTH_BLOCKS,
+  DEFAULT_CHAIN_EVENT_LOG_SETTLED_BLOCK_HASH_ENTRIES,
+  createChainEventLogSettledBlockHashes,
+  type ChainEventLogSettledBlockHashes,
+  type ChainEventLogSettledBlockHashesOptions,
+  type ChainEventLogSettledBlockHashStats,
+} from './chain-event-log-settled-block-hashes.js';
+
+export {
   CHAIN_EVENT_LOG_FAMILIES,
   ChainEventDecoderRegistry,
   HUB_ROTATION_EVENT_NAMES,

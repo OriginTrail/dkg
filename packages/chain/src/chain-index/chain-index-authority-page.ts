@@ -5,6 +5,7 @@ import { ContextGraphAuthorityIndexRetryableError } from
 import type { RawContextGraphAuthorityIndexEvent } from
   '../context-graph-authority-index-reducer.js';
 import type { ChainEventDecoderRegistry } from './chain-event-decoders.js';
+import { createChainEventLogSettledBlockHashes } from './chain-event-log-settled-block-hashes.js';
 import {
   chainEventLogCoverageIncludes,
   findChainEventLogCoverage,
@@ -21,7 +22,8 @@ export interface ChainIndexAuthorityPageSourceOptions {
   /**
    * Fallback for a block hash the log does not hold. The log knows the hash of
    * every block that emitted an indexed event plus its own cursor; empty blocks
-   * in between still need the chain.
+   * in between still need the chain — once each, when they are settled
+   * (`chain-event-log-settled-block-hashes.ts`), and on every read in the tail.
    */
   readonly readBlockHash: (
     blockNumber: number,
@@ -69,6 +71,14 @@ export function createChainIndexAuthorityPageSource(
     throw new Error('Context Graph authority page source address is invalid');
   }
   const { scope, store, registry } = options;
+  // One memo per page source, so per runtime: a Hub rotation that rebuilds the
+  // runtime starts an empty one, and the durable rows it finds are still
+  // bound to the lineage they were read under.
+  const settledHashes = createChainEventLogSettledBlockHashes({
+    scope,
+    store,
+    readBlockHash: options.readBlockHash,
+  });
 
   return Object.freeze({
     async readPage(
@@ -142,9 +152,9 @@ export function createChainIndexAuthorityPageSource(
 
     async readBlockHash(blockNumber: number, signal: AbortSignal): Promise<string | null> {
       signal.throwIfAborted();
-      const known = await store.blockHashAt(scope, blockNumber);
-      if (known !== undefined) return known;
-      return options.readBlockHash(blockNumber, signal);
+      // `blockHashAt` first, as before; then a settled block's kept hash; then
+      // the chain.
+      return settledHashes.readBlockHash(blockNumber, signal);
     },
   });
 }

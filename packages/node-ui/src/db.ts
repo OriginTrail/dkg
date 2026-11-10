@@ -441,6 +441,67 @@ export class DashboardDB {
         );
       }
     };
+    /**
+     * The settled block-hash memo: the chain's hash of a block below the chain
+     * log's settled height that the log holds no row for, read once and kept
+     * (`chain-event-log-settled-block-hashes.ts` in the chain package).
+     *
+     * The triggers are what make it safe to keep across processes. Every way a
+     * scope's lineage changes — a tombstone (lineage ''), a re-initialization,
+     * a deleted cursor — empties the scope's memo in the same statement, even
+     * when the writer is a release that does not know this table exists. A memo
+     * found without them may hold hashes from a log tombstoned since, so it is
+     * emptied before they are recreated.
+     *
+     * BEST-EFFORT, like the KA index: the store uses the memo only when the
+     * table and both triggers exist, so a node that cannot build them (a full
+     * disk) starts and reads those hashes from the chain, and this is retried
+     * on the next open.
+     */
+    const ensureChainIndexBlockHashMemo = () => {
+      try {
+        this.db.transaction(() => {
+          const present = new Set((this.db.prepare(`
+            SELECT name FROM sqlite_master
+             WHERE (type = 'table' AND name = 'chain_index_block_hashes')
+                OR (type = 'trigger' AND name IN (
+                  'chain_index_block_hashes_follow_lineage',
+                  'chain_index_block_hashes_follow_cursor_delete'
+                ))
+          `).all() as Array<{ name: string }>).map((entry) => entry.name));
+          if (present.has('chain_index_block_hashes') && present.size < 3) {
+            this.db.exec('DELETE FROM chain_index_block_hashes;');
+          }
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS chain_index_block_hashes (
+              scope TEXT NOT NULL,
+              block_number INTEGER NOT NULL CHECK (block_number >= 0),
+              -- The cursor lineage the hash was read under.
+              lineage TEXT NOT NULL CHECK (length(lineage) > 0),
+              block_hash TEXT NOT NULL,
+              PRIMARY KEY (scope, block_number)
+            ) WITHOUT ROWID;
+            CREATE TRIGGER IF NOT EXISTS chain_index_block_hashes_follow_lineage
+            AFTER UPDATE OF lineage ON chain_index_cursor
+            WHEN NEW.lineage IS NOT OLD.lineage
+            BEGIN
+              DELETE FROM chain_index_block_hashes WHERE scope = NEW.scope;
+            END;
+            CREATE TRIGGER IF NOT EXISTS chain_index_block_hashes_follow_cursor_delete
+            AFTER DELETE ON chain_index_cursor
+            BEGIN
+              DELETE FROM chain_index_block_hashes WHERE scope = OLD.scope;
+            END;
+          `);
+        })();
+      } catch (err) {
+        console.warn(
+          '[DashboardDB] could not build the chain index block-hash memo; '
+            + 'settled block hashes are read from the chain until the next start: '
+            + `${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
     const ensureLocalContextGraphOriginSchema = () => this.db.exec(`
       CREATE TABLE IF NOT EXISTS local_context_graph_origins (
         context_graph_id TEXT PRIMARY KEY CHECK (length(trim(context_graph_id)) > 0),
@@ -473,6 +534,7 @@ export class DashboardDB {
       ensureLocalContextGraphOriginSchema();
       ensureChainEventLogSchema();
       ensureChainEventKaPointReadIndex();
+      ensureChainIndexBlockHashMemo();
       installRoutineLogRetentionSchema(this.db);
       return;
     }
@@ -1430,6 +1492,10 @@ export class DashboardDB {
       ensureChainEventLogSchema();
       ensureChainEventKaPointReadIndex();
     }
+    // Outside the version gate, like the join-policy trigger repair above:
+    // added after V38 shipped, so an upgrade from any earlier version builds it
+    // here too.
+    ensureChainIndexBlockHashMemo();
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
       this.retentionDays = LEGACY_IMPLICIT_RETENTION_DAYS;

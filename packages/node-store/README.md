@@ -10,7 +10,7 @@ The durable protocol state of a DKG V10 node, as SQLite-backed stores.
 | `SqliteChangelogCursorStore` | `changelog_cursors` | Last applied `(era, seq)` per `(peer, context graph)` |
 | `SqliteChangelogEraGuard` | `changelog_era` | The write-side changelog era and high-water mark |
 | `SqliteKaNumberStore` | `ka_numbers` | Per-author, never-reclaimed Knowledge Asset number allocator |
-| `SqliteChainEventLogStore` | `chain_index_cursor`, `chain_events`, `chain_index_coverage` | The node's one chain-event log, its cursor and its coverage record |
+| `SqliteChainEventLogStore` | `chain_index_cursor`, `chain_events`, `chain_index_coverage`, `chain_index_block_hashes` | The node's one chain-event log, its cursor, its coverage record, and the hashes of settled blocks it holds no row for |
 | `SqliteChainEventCursorStore`, `SqliteContextGraphRegistryScanCursorStore` | `runtime_cursors` (and legacy `settings` keys) | Chain poller and registry scan cursors |
 | `SqliteContextGraphAuthorityIndexStore` | `context_graph_authority_indexes` | Opaque compare-and-swap authority index checkpoints |
 | `SqliteContextGraphAuthorityHistoryStore`, `SqliteContextGraphStorageDiscoveryStore` | `settings` | Opaque authority-history and storage-discovery checkpoints |
