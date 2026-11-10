@@ -34,6 +34,7 @@ import {
 } from '../src/read-graph-partition-marker.js';
 import { listStoredContextGraphOwnerCandidates } from '../src/stored-context-graph-owners.js';
 import { isStoreOperationNotStarted } from '../src/store-operation-outcome.js';
+import { authorCommitInput, P_VALUE, SEAL } from './rfc64-author-commit-cas-harness.js';
 
 const CG = 'partition-test';
 const ROOT = `did:dkg:context-graph:${CG}`;
@@ -158,6 +159,25 @@ describe('the read-graph partition guard', () => {
     }
     expect(await store.countQuads()).toBe(memberQuads.length);
     expect(await readGraphPartitionMaintenanceStore(store).countQuads()).toBe(memberQuads.length);
+  });
+
+  it('checks every graph an RFC-64 author commit names', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    opened.push(store);
+    const intoPartition = authorCommitInput({ authorSealGraph: STATE,
+      authorSealQuads: [{ subject: SEAL, predicate: P_VALUE, object: '"x"', graph: STATE }] });
+    const error = await store.rfc64AuthorCommitCasV1!(intoPartition).then(() => undefined, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ReadGraphPartitionWriteError);
+    expect(isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1')).toBe(true);
+    // An ordinary commit reaches the adapter; with nothing stored yet its guard does not match.
+    expect(await store.rfc64AuthorCommitCasV1!(authorCommitInput())).toBe('conflict');
+    // An input the canonical plan refuses is left to the adapter to refuse.
+    const adapter = new OxigraphStore();
+    opened.push(adapter);
+    const refused = await new ReadGraphPartitionStore(adapter).rfc64AuthorCommitCasV1!({} as never)
+      .then(() => undefined, (caught: unknown) => caught);
+    expect(refused).toBeInstanceOf(Error);
+    expect(refused).not.toBeInstanceOf(ReadGraphPartitionWriteError);
   });
 
   it('passes ordinary writes and reads of the partition through', async () => {
