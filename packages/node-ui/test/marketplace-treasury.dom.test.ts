@@ -92,6 +92,19 @@ describe('marketplace Treasury', () => {
     expect(none.querySelector('[data-copy="treasury.accounts.pending"]')).toBeNull();
   });
 
+  it('says why the last look-up of the accounts failed while the node looks them up again', async () => {
+    recordNode();
+    const c = await render(React.createElement(Treasury, {
+      funding: { ...fundingWith([]), accountsPending: true, accountsError: 'upstream timeout' },
+      onChanged: () => undefined,
+    }));
+    const failed = c.querySelector('[data-copy="treasury.accounts.failed"]');
+    expect(failed?.textContent).toContain('upstream timeout');
+    expect(c.querySelector('[data-copy="treasury.accounts.pending"]')).toBeNull();
+    expect(c.querySelector('[data-copy="treasury.accounts.none"]')).toBeNull();
+    expect(c.textContent).not.toContain(MISSING_COPY);
+  });
+
   it('changes the limits on the account picked, for the buyer wallet the node names, with the exact limit and expiry', async () => {
     const sent = recordNode();
     const onChanged = vi.fn();

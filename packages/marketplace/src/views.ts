@@ -183,10 +183,20 @@ export async function accountView(buyer: Buyer, accountId: bigint) {
  */
 export const ACCOUNT_LIST_WAIT_MS = 5_000;
 
-/** A buyer's account list: the ids read last, and the read in flight, which every view waiting for the list shares. */
+/**
+ * A buyer's account list: the ids read last, why the last read that finished failed (until a read succeeds), and the
+ * read in flight, which every view waiting for the list shares.
+ */
 interface AccountListRefresh {
   last?: bigint[];
+  failure?: unknown;
   running?: Promise<bigint[]>;
+}
+
+/** How a failed account-list read reads in a view's `accountsError`. */
+function accountListFailureOf(failure: unknown): string {
+  const message = failure instanceof Error ? failure.message : String(failure);
+  return message.length > 300 ? `${message.slice(0, 297)}...` : message;
 }
 
 const accountListRefreshes = new WeakMap<Buyer, AccountListRefresh>();
@@ -215,12 +225,16 @@ function refreshAccountIds(buyer: Buyer): { refresh: AccountListRefresh; running
   const settle = (): void => {
     if (owner.running === running) owner.running = undefined;
   };
-  running.then(settle, settle);
+  // A read that fails after its views stopped waiting is kept, so the next view can say so; a read that succeeds clears it.
+  running.then(() => { owner.failure = undefined; settle(); }, (err: unknown) => { owner.failure = err; settle(); });
   return { refresh: owner, running };
 }
 
-/** The ids of the accounts the node owns and of those that granted the buyer wallet, or the last ones read if the read takes longer than `waitMs`. */
-async function accountIdsOf(buyer: Buyer, waitMs: number): Promise<{ ids: bigint[]; pending: boolean }> {
+/**
+ * The ids of the accounts the node owns and of those that granted the buyer wallet, or the last ones read if the read
+ * takes longer than `waitMs`, with why the last read that finished failed, if it did.
+ */
+async function accountIdsOf(buyer: Buyer, waitMs: number): Promise<{ ids: bigint[]; pending: boolean; failure?: unknown }> {
   const { refresh, running } = refreshAccountIds(buyer);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const waited = new Promise<null>((resolve) => {
@@ -231,7 +245,7 @@ async function accountIdsOf(buyer: Buyer, waitMs: number): Promise<{ ids: bigint
     const ids = await Promise.race([running, waited]);
     if (ids !== null) return { ids, pending: false };
     // The read goes on and keeps what it reads, so a later view answers from it.
-    return { ids: refresh.last ?? [], pending: true };
+    return { ids: refresh.last ?? [], pending: true, ...(refresh.failure !== undefined ? { failure: refresh.failure } : {}) };
   } finally {
     clearTimeout(timer);
   }
@@ -239,17 +253,22 @@ async function accountIdsOf(buyer: Buyer, waitMs: number): Promise<{ ids: bigint
 
 /**
  * The accounts the node's primary wallet owns, as `/api/pca` lists them, and those that granted the buyer wallet.
- * `accountsPending` is true when the list was still being read after `waitMs`: `accounts` is then the list read last.
+ * `accountsPending` is true when the list was still being read after `waitMs`: `accounts` is then the list read last,
+ * and `accountsError` says why the last read that finished failed, when it did and no read has succeeded since.
  */
 export async function accountsView(buyer: Buyer, waitMs = ACCOUNT_LIST_WAIT_MS) {
-  const { ids, pending } = await accountIdsOf(buyer, waitMs);
-  return { accounts: await Promise.all(ids.map((id) => accountView(buyer, id))), accountsPending: pending };
+  const { ids, pending, failure } = await accountIdsOf(buyer, waitMs);
+  return {
+    accounts: await Promise.all(ids.map((id) => accountView(buyer, id))),
+    accountsPending: pending,
+    ...(failure !== undefined ? { accountsError: accountListFailureOf(failure) } : {}),
+  };
 }
 
 /** The buyer wallet, its balances and its allowance to `ServiceSubscriptionsWallet`, and the accounts it can use (see `accountsView`). */
 export async function fundingView(buyer: Buyer, waitMs = ACCOUNT_LIST_WAIT_MS) {
   const chain = buyer.chain;
-  const [times, balances, allowance, { accounts, accountsPending }] = await Promise.all([
+  const [times, balances, allowance, { accounts, accountsPending, accountsError }] = await Promise.all([
     chain.getEpochTimes(),
     chain.getWalletBalances(buyer.buyerWallet),
     chain.getServiceSubscriptionsWalletAllowance(buyer.buyerWallet),
@@ -264,6 +283,7 @@ export async function fundingView(buyer: Buyer, waitMs = ACCOUNT_LIST_WAIT_MS) {
     },
     accounts,
     accountsPending,
+    ...(accountsError !== undefined ? { accountsError } : {}),
     epoch: times.epoch,
     epochEndsAt: times.endsAt,
   };

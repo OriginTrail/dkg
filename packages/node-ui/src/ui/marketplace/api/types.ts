@@ -198,8 +198,11 @@ export interface Account {
   publisherWallets: string[];
 }
 
-/** `accountsPending`: the node was still reading the account list, and `accounts` is the list it read last. */
-export interface AccountsAnswer { accounts: Account[]; accountsPending?: boolean }
+/**
+ * `accountsPending`: the node was still reading the account list, and `accounts` is the list it read last.
+ * `accountsError`: why the last read that finished failed, when it did and none has succeeded since.
+ */
+export interface AccountsAnswer { accounts: Account[]; accountsPending?: boolean; accountsError?: string }
 
 export interface Funding {
   buyerWallet: {
@@ -214,6 +217,8 @@ export interface Funding {
   accounts: Account[];
   /** The node was still reading the account list: `accounts` is the list it read last, and may be empty. */
   accountsPending?: boolean;
+  /** Why the node's last account-list read that finished failed, when it did and none has succeeded since. */
+  accountsError?: string;
   epoch: number;
   epochEndsAt: number;
 }

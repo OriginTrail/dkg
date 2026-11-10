@@ -217,6 +217,35 @@ describe('accounts and funding', () => {
     expect((await fundingView(buyer)).accountsPending).toBe(false);
   });
 
+  it('tells the next view that a list read failed after the views stopped waiting, until a read succeeds', async () => {
+    const listBuyerAccounts = chain.listBuyerAccounts.bind(chain);
+    const fails: Array<(err: Error) => void> = [];
+    chain.listBuyerAccounts = () => new Promise<bigint[]>((_resolve, reject) => { fails.push(reject); });
+    const settled = () => new Promise((resolve) => setTimeout(resolve, 0));
+    try {
+      const first = await fundingView(buyer, 10);
+      expect(first.accountsPending).toBe(true);
+      expect(first).not.toHaveProperty('accountsError');
+
+      // The read fails after the view answered; the next view, which cannot wait either, says so.
+      fails[0]!(new Error('upstream timeout'));
+      await settled();
+      const second = await fundingView(buyer, 10);
+      expect(second.accountsPending).toBe(true);
+      expect(second.accountsError).toBe('upstream timeout');
+      expect((await accountsView(buyer, 10)).accountsError).toBe('upstream timeout');
+      fails[1]!(new Error('upstream timeout'));
+      await settled();
+    } finally {
+      chain.listBuyerAccounts = listBuyerAccounts;
+    }
+    // A read that succeeds clears it.
+    const third = await fundingView(buyer);
+    expect(third.accountsPending).toBe(false);
+    expect(third).not.toHaveProperty('accountsError');
+    expect(await fundingView(buyer, 10)).not.toHaveProperty('accountsError');
+  });
+
   it('gives a browser wallet the contracts, the grant domain and its types', async () => {
     const contracts = await contractsView(buyer);
     const m = await chain.getMarketplaceContracts();
