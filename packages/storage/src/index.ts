@@ -390,4 +390,55 @@ export { StoreReadTransportFailure, isStoreReadTransportFailure } from './store-
 export { readStoreOperationExecutionGeneration, asStoreRecoveryGenerationReader, type StoreRecoveryGenerationReader, type StoreRecoveryState } from './store-recovery-generation.js';
 
 export { readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
+
+// Read graphs: membership, state rows and the contract with the adapters.
+export {
+  READ_GRAPH_MEMBERSHIP_RULE_VERSION,
+  isReadGraphMember,
+  matchesGraphNameTest,
+  readGraphMembership,
+  readGraphsOfMemberGraph,
+  registeredSubGraphNames,
+  workingMemoryIdentityRule,
+  type GraphNameTest,
+  type ReadGraphRegistrySnapshot,
+  type WorkingMemoryIdentityRule,
+} from './read-graph/membership.js';
+export {
+  CURRENT_READ_GRAPH_VERSIONS,
+  MAX_READ_GRAPH_GENERATION,
+  READ_GRAPH_BUILDER_VERSION,
+  READ_GRAPH_STATES,
+  READ_GRAPH_STATE_PREDICATES,
+  ReadGraphTransitionError,
+  isReadGraphRowAccepted,
+  newReadGraphGeneration,
+  nextReadGraphState,
+  parseReadGraphStateRows,
+  readGraphStateCompareAndSet,
+  readGraphStateFencePattern,
+  readGraphStateMarkAllDirty,
+  readGraphStateReset,
+  readGraphStateRowsQuery,
+  servingReadGraphGeneration,
+  type ReadGraphState,
+  type ReadGraphStateMirror,
+  type ReadGraphStateRow,
+  type ReadGraphTransition,
+  type ReadGraphVersions,
+} from './read-graph/state.js';
+export {
+  READ_GRAPH_METHOD_MAINTENANCE,
+  READ_GRAPH_PLANNED_METHODS,
+  missingReadGraphMethods,
+  readGraphCapabilitiesOf,
+  spliceReadGraphPlan,
+  type ReadGraphAdapterCapabilities,
+  type ReadGraphCapableAdapter,
+  type ReadGraphMaintenance,
+  type ReadGraphPlannedMethod,
+  type ReadGraphWriteOptions,
+  type ReadGraphWritePlan,
+  type TripleStoreMethodName,
+} from './read-graph/adapter-contract.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';
