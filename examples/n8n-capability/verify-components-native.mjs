@@ -1,3 +1,4 @@
+import { normalizeN8nResult } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 /** Exercise the actual native engine in a separate credential-free fixture instance. */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -46,7 +47,7 @@ try {
       await delay(100);
     }
     assert.ok(execution, descriptor.id + ' did not finish.');
-    const result = collectN8nExecutionResult(selected.grant, execution);
+    const result = collectN8nExecutionResult(normalizeN8nResult(selected.grant.result), execution);
     const output = JSON.parse(result.itemsJson), ports = JSON.parse(result.portsJson);
     const rejected = descriptor.mode === 'stop';
     if (result.ok !== !rejected) {

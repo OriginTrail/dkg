@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { readResponseBodyBytesBounded, BoundedResponseBodyLimitError } from '../../packages/http-utils/dist/index.js';
-import { n8nWorkflowSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
+import { n8nWorkflowSha256, validateN8nGrant, normalizeN8nResult } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { collectN8nExecutionResult } from '../../packages/cli/dist/semantic-runtime-n8n-results.js';
 import { nativeExecutionError as fail, verifyNativeExecutionInput } from './studio-native-execution.mjs';
 
@@ -61,7 +61,9 @@ export function createStudioNativeRunner(provider, installation, send = fetch) {
     verifyNativeExecutionInput(workflow, checkpoint, execution, true);
     if (execution.status !== 'success') return { status: 'failed' };
     try {
-      const result = collectN8nExecutionResult(workflow.grant, execution);
+      validateN8nGrant(workflow.grant);
+      const projection = normalizeN8nResult(workflow.grant.result);
+      const result = collectN8nExecutionResult(projection, execution);
       if (!result.ok) return { status: 'failed' };
       const output = { items: JSON.parse(result.itemsJson), ports: JSON.parse(result.portsJson) };
       if (Buffer.byteLength(JSON.stringify(output)) > 16_384) return { status: 'failed' };

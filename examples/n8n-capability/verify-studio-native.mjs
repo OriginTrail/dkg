@@ -1,3 +1,4 @@
+import { normalizeN8nResult } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 /** Credential-free native graph fixture. --prepare writes CLI imports; default verifies real executions. */
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -50,7 +51,7 @@ if (process.argv.includes('--prepare')) {
       }
       assert.ok(execution,f.name+' unfinished');
       if(execution.status==='error') console.log(JSON.stringify({name:f.name,error:execution.data.resultData.error?.message,node:execution.data.resultData.lastNodeExecuted}));
-      const output=collectN8nExecutionResult(f.grant,execution);assert.equal(output.ok,true,f.name);
+      const output=collectN8nExecutionResult(normalizeN8nResult(f.grant.result),execution);assert.equal(output.ok,true,f.name);
       const items=JSON.parse(output.itemsJson),ports=JSON.parse(output.portsJson),trace=JSON.parse(output.traceJson);
       assert.equal(trace.length,f.definition.nodes.length);assert.ok(trace.every(s=>s.status==='completed'),f.name);
       if(f.name==='branch'){assert.equal(ports['step2 main'][0].name,'Ana');assert.equal(ports['step3 main'][0].name,'Luka');}

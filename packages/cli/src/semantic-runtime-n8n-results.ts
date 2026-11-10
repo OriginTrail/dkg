@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import { canonicalizeJson, type CanonicalJsonValue } from '@origintrail-official/dkg-core';
-import { type NativeN8nGrant, N8N_VALUE_MAX_BYTES, n8nRecord } from './semantic-runtime-n8n-contract.js';
+import { type NativeN8nResultProjection, N8N_VALUE_MAX_BYTES, n8nRecord } from './semantic-runtime-n8n-contract.js';
 
 /** Only explicitly selected native nodes can contribute output or diagnostics. */
-export function collectN8nExecutionResult(grant: NativeN8nGrant, execution: Record<string, unknown>): Record<string, unknown> {
+export function collectN8nExecutionResult(projection: NativeN8nResultProjection, execution: Record<string, unknown>): Record<string, unknown> {
   if (!n8nRecord(execution.data) || !n8nRecord(execution.data.resultData)
     || !n8nRecord(execution.data.resultData.runData)) throw new Error('N8N_EXECUTION_DATA_MISSING');
   const runData = execution.data.resultData.runData;
@@ -41,13 +41,12 @@ export function collectN8nExecutionResult(grant: NativeN8nGrant, execution: Reco
     return result;
   };
   const failed = ['error', 'canceled', 'crashed'].includes(String(execution.status));
-  const sinks = grant.result.sinks;
-  const selected = sinks ? sinks.flatMap(s => outputs(s.node)[s.port] ?? []) : grant.result.nodes.flatMap(name => outputs(name)[0] ?? []);
-  const ports = sinks && sinks.length > 1 ? Object.fromEntries(sinks.map(s => [s.name, outputs(s.node)[s.port] ?? []])) : grant.result.ports && grant.result.ports.length > 1
-    ? Object.fromEntries(grant.result.ports.map((name, i) => [name, outputs(grant.result.nodes[0]!)[i] ?? []])) : {};
-  const recordCount = Object.keys(ports).length ? Object.values(ports).reduce((sum, port) => sum + port.length, 0) : selected.length;
-  const itemsJson = JSON.stringify(Object.keys(ports).length ? [] : selected), portsJson = JSON.stringify(ports);
-  const trace = grant.result.traceNodes?.map(name => {
+  const selected = projection.selectors.map(({ node, port, name }) => [name, outputs(node)[port] ?? []] as const);
+  const items = projection.presentation === 'items' ? selected.flatMap(([, records]) => records) : [];
+  const ports = projection.presentation === 'ports' ? Object.fromEntries(selected) : {};
+  const recordCount = selected.reduce((sum, [, records]) => sum + records.length, 0);
+  const itemsJson = JSON.stringify(items), portsJson = JSON.stringify(ports);
+  const trace = projection.traceNodes?.map(name => {
     const records = runs(name), main = outputs(name);
     return { node: name, status: !records.length ? 'skipped' : records.some(r => r.error) ? 'failed' : 'completed',
       items: counts.get(name) ?? [],

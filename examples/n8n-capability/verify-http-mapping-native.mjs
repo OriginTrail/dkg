@@ -1,3 +1,4 @@
+import { normalizeN8nResult } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 /** Real native HTTP + mapping, using only the credential-free fixture instance. */
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -51,7 +52,7 @@ if (process.argv.includes('--prepare')) {
       }
       assert.ok(execution, 'HTTP fixture did not finish');
       if (execution.status !== 'success') console.log(JSON.stringify({ error: execution.data.resultData.error?.message, node: execution.data.resultData.lastNodeExecuted }));
-      const output = collectN8nExecutionResult(f.grant, execution);
+      const output = collectN8nExecutionResult(normalizeN8nResult(f.grant.result), execution);
       assert.equal(output.ok, true, output.error);
       const rows = JSON.parse(output.itemsJson), trace = JSON.parse(output.traceJson);
       assert.equal(rows.length, 1); assert.equal(typeof rows[0].temperature, 'number'); assert.equal(rows[0].unit, '°C');

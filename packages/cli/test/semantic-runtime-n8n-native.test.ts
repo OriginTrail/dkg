@@ -6,7 +6,7 @@ import type { SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-ru
 import { createNativeN8nWorkflowAdapter } from '../src/semantic-runtime-n8n-native-adapter.js';
 import { collectN8nExecutionResult } from '../src/semantic-runtime-n8n-results.js';
 import { decodeNativeN8nCheckpoint, encodeNativeN8nCheckpoint } from '../src/semantic-runtime-n8n-checkpoint.js';
-import { type NativeN8nGrant, n8nObservationScope, n8nResultSha256, n8nPinnedExecutionMatches, n8nWorkflowSha256, validateN8nGrant } from '../src/semantic-runtime-n8n-contract.js';
+import { normalizeN8nResult, type NativeN8nGrant, n8nObservationScope, n8nResultSha256, n8nPinnedExecutionMatches, n8nWorkflowSha256, validateN8nGrant } from '../src/semantic-runtime-n8n-contract.js';
 
 const graph = 'native-n8n-poc', owner = '0x' + '1'.repeat(40), workflowId = 'native';
 const objectSchema = (properties: Record<string, any>) => ({ type: 'object' as const, properties, required: Object.keys(properties), additionalProperties: false as const });
@@ -147,7 +147,7 @@ describe('native n8n component execution receipts', () => {
   it('collects both native branch ports and excludes unselected transport data', () => {
     const f = fixture(); f.grant.result.ports = ['true', 'false'];
     f.execution.data.resultData.runData.Component[0].data.main = [[{ json: { name: 'Ana' } }], [{ json: { name: 'Luka' } }]];
-    const result = collectN8nExecutionResult(f.grant, f.execution);
+    const result = collectN8nExecutionResult(normalizeN8nResult(f.grant.result), f.execution);
     expect(result.itemsJson).toBe('[]');
     expect(JSON.parse(result.portsJson as string)).toEqual({ true: [{ name: 'Ana' }], false: [{ name: 'Luka' }] });
     expect(JSON.stringify(result)).not.toContain('never-leak');
@@ -156,12 +156,49 @@ describe('native n8n component execution receipts', () => {
     const f = fixture();
     f.grant.result = { nodes: ['Component'], sinks: [{ node: 'Component', port: 1, name: 'unconnected false' }], traceNodes: ['Component'] };
     f.execution.data.resultData.runData.Component[0].data.main = [[{ json: { connected: true } }], [{ json: { terminal: true } }]];
-    const output = collectN8nExecutionResult(f.grant, f.execution);
+    const output = collectN8nExecutionResult(normalizeN8nResult(f.grant.result), f.execution);
     expect(JSON.parse(output.itemsJson as string)).toEqual([{ terminal: true }]);
     expect(output.itemsJson).not.toContain('connected');
     expect(JSON.parse(output.traceJson as string)[0].items).toEqual([1, 1]);
     expect(() => validateN8nGrant({ ...f.grant, result: { ...f.grant.result, sinks: [{ node: 'Receive input', port: 0, name: 'headers' }] } })).toThrow();
     expect(() => validateN8nGrant({ ...f.grant, result: { ...f.grant.result, sinks: [{ node: 'Component', port: 4, name: 'bad' }] } })).toThrow();
+  });
+  it.each([
+    { name: 'one node', wire: { nodes: ['Component'] }, items: [{ value: 'a' }], ports: {} },
+    { name: 'multiple nodes', wire: { nodes: ['Component', 'Other'] }, items: [{ value: 'a' }, { value: 'c' }], ports: {} },
+    { name: 'one legacy named port', wire: { nodes: ['Component'], ports: ['first'] }, items: [{ value: 'a' }], ports: {} },
+    { name: 'multiple legacy ports', wire: { nodes: ['Component'], ports: ['first', 'second'] }, items: [],
+      ports: { first: [{ value: 'a' }], second: [{ value: 'b' }] } },
+    { name: 'one sink', wire: { nodes: ['Component'], sinks: [{ node: 'Component', port: 1, name: 'selected' }] }, items: [{ value: 'b' }], ports: {} },
+    { name: 'multiple sinks', wire: { nodes: ['Component', 'Other'], sinks: [{ node: 'Component', port: 0, name: 'first' }, { node: 'Other', port: 0, name: 'second' }] },
+      items: [], ports: { first: [{ value: 'a' }], second: [{ value: 'c' }] } },
+    { name: 'two names for one sink', wire: { nodes: ['Component'], sinks: [{ node: 'Component', port: 0, name: 'first' }, { node: 'Component', port: 0, name: 'copy' }] },
+      items: [], ports: { first: [{ value: 'a' }], copy: [{ value: 'a' }] } },
+  ])('preserves $name presentation and wire pins when normalizing selectors', ({ wire, items, ports }) => {
+    const f = fixture(); f.grant.result = wire;
+    validateN8nGrant(f.grant);
+    const original = JSON.stringify(f.grant), hash = n8nResultSha256(f.grant);
+    f.execution.data.resultData.runData = {
+      Component: [{ data: { main: [[{ json: { value: 'a' } }], [{ json: { value: 'b' } }]] } }],
+      Other: [{ data: { main: [[{ json: { value: 'c' } }]] } }],
+    };
+    const projection = normalizeN8nResult(f.grant.result);
+    const output = collectN8nExecutionResult(projection, f.execution);
+    expect(output.ok).toBe(true);
+    expect(JSON.parse(output.itemsJson as string)).toEqual(items);
+    expect(JSON.parse(output.portsJson as string)).toEqual(ports);
+    expect(JSON.stringify(f.grant)).toBe(original);
+    expect(n8nResultSha256(f.grant)).toBe(hash);
+    // The validated projection retains its own snapshot, independent of the wire object.
+    f.grant.result.nodes[0] = 'changed-after-normalization';
+    expect(collectN8nExecutionResult(projection, f.execution)).toEqual(output);
+  });
+  it('retains preflight checks for declared nodes not used by a sink selector', async () => {
+    const f = fixture();
+    f.grant.result = { nodes: ['Component', 'Missing'], sinks: [{ node: 'Component', port: 0, name: 'only' }] };
+    f.config.workflows[0]!.resultSha256 = n8nResultSha256(f.grant);
+    await expect(f.adapter().dispatch(authorization, input)).rejects.toThrow('N8N_WORKFLOW_NOT_PINNED');
+    expect(f.posts()).toBe(0);
   });
   it('continues the same acknowledged execution after restart without another POST', async () => {
     const f = fixture(); f.setFailRead(true);
@@ -195,7 +232,7 @@ describe('native n8n component execution receipts', () => {
     f.execution.data.resultData.runData.Component = [1, 2].map(iteration => ({ data: { main: [
       [{ json: { connected: iteration } }], [{ json: { terminal: iteration } }, { json: { repeated: true } }],
     ] } }));
-    const result = collectN8nExecutionResult(f.grant, f.execution);
+    const result = collectN8nExecutionResult(normalizeN8nResult(f.grant.result), f.execution);
     expect(result.ok).toBe(true);
     expect(JSON.parse(result.itemsJson as string)).toEqual([{ terminal: 1 }, { repeated: true }, { terminal: 2 }, { repeated: true }]);
     expect(JSON.parse(result.traceJson as string)[0].items).toEqual([2, 4]);
@@ -210,7 +247,7 @@ describe('native n8n component execution receipts', () => {
       { data: { main: [[], [{ json: { input: 'second' } }]] } },
       { data: { main: [done.map(json => ({ json })), []] } },
     ];
-    const result = collectN8nExecutionResult(f.grant, f.execution);
+    const result = collectN8nExecutionResult(normalizeN8nResult(f.grant.result), f.execution);
     expect(result.ok).toBe(true); expect(JSON.parse(result.itemsJson as string)).toEqual(done);
     expect(JSON.parse(result.traceJson as string)[0].items).toEqual([2, 2]);
   });
@@ -218,7 +255,7 @@ describe('native n8n component execution receipts', () => {
     const f = fixture(); f.grant.result.traceNodes = ['Component'];
     f.execution.data.resultData.runData.Component = [Math.floor(count / 2), Math.ceil(count / 2)]
       .map(length => ({ data: { main: [Array.from({ length }, () => ({ json: { value: 1 } }))] } }));
-    const result = collectN8nExecutionResult(f.grant, f.execution);
+    const result = collectN8nExecutionResult(normalizeN8nResult(f.grant.result), f.execution);
     expect(result.ok).toBe(count <= 20);
     expect(JSON.parse(result.itemsJson as string)).toHaveLength(count <= 20 ? count : 0);
     expect(JSON.parse(result.traceJson as string)[0].items).toEqual([count]);
@@ -227,17 +264,17 @@ describe('native n8n component execution receipts', () => {
   it('enforces byte and record limits across runs and named output ports', () => {
     const f = fixture();
     f.execution.data.resultData.runData.Component = [1, 2].map(() => ({ data: { main: [[{ json: { text: 'x'.repeat(4200) } }]] } }));
-    expect(collectN8nExecutionResult(f.grant, f.execution)).toMatchObject({ ok: false, itemsJson: '[]' });
+    expect(collectN8nExecutionResult(normalizeN8nResult(f.grant.result), f.execution)).toMatchObject({ ok: false, itemsJson: '[]' });
     f.execution.data.resultData.runData.Component = [{ data: { main: [[{ json: { text: '💫'.repeat(2200) } }]] } }];
-    expect(collectN8nExecutionResult(f.grant, f.execution)).toMatchObject({ ok: false, itemsJson: '[]' });
+    expect(collectN8nExecutionResult(normalizeN8nResult(f.grant.result), f.execution)).toMatchObject({ ok: false, itemsJson: '[]' });
     f.grant.result.ports = ['true', 'false'];
     f.execution.data.resultData.runData.Component = [{ data: { main: [10, 11].map(length => Array.from({ length }, () => ({ json: { value: 1 } }))) } }];
-    expect(collectN8nExecutionResult(f.grant, f.execution)).toMatchObject({ ok: false, portsJson: '{}' });
+    expect(collectN8nExecutionResult(normalizeN8nResult(f.grant.result), f.execution)).toMatchObject({ ok: false, portsJson: '{}' });
   });
   it('does not silently discard malformed records from an earlier iteration', () => {
     const f = fixture();
     f.execution.data.resultData.runData.Component.unshift({ data: { main: [[{ invalid: true }]] } });
-    expect(() => collectN8nExecutionResult(f.grant, f.execution)).toThrow('N8N_EXECUTION_DATA_INVALID');
+    expect(() => collectN8nExecutionResult(normalizeN8nResult(f.grant.result), f.execution)).toThrow('N8N_EXECUTION_DATA_INVALID');
   });
   it('keeps an unacknowledged outcome unresolved and never redispatches on resume', async () => {
     const f = fixture();
@@ -270,9 +307,9 @@ describe('native n8n component execution receipts', () => {
   });
   it('reports confirmed native errors and oversized results as controlled rejection', () => {
     const f = fixture(); f.execution.status = 'error';
-    expect(collectN8nExecutionResult(f.grant, f.execution)).toMatchObject({ ok: false, itemsJson: '[]' });
+    expect(collectN8nExecutionResult(normalizeN8nResult(f.grant.result), f.execution)).toMatchObject({ ok: false, itemsJson: '[]' });
     f.execution.status = 'success'; f.execution.data.resultData.runData.Component[0].data.main = [Array.from({ length: 21 }, () => ({ json: { name: 'Ana' } }))];
-    expect(collectN8nExecutionResult(f.grant, f.execution)).toMatchObject({ ok: false, itemsJson: '[]' });
+    expect(collectN8nExecutionResult(normalizeN8nResult(f.grant.result), f.execution)).toMatchObject({ ok: false, itemsJson: '[]' });
   });
   it('validates result selectors as part of the reviewed grant', () => {
     const f = fixture();
@@ -322,12 +359,12 @@ it.each([201, 10000])('confirms a completed %s-record rejection with bounded out
   expect(JSON.parse(result.output).output).toMatchObject({ok:false,itemsJson:'[]',portsJson:'{}',error:expect.stringContaining('twenty records')});
   expect(await f.adapter().resume!(authorization,input)).toEqual(result);expect(f.posts()).toBe(1);
   f.grant.result.traceNodes=['Component'];
-  const traced=collectN8nExecutionResult(f.grant,f.execution);
+  const traced=collectN8nExecutionResult(normalizeN8nResult(f.grant.result),f.execution);
   expect(JSON.parse(traced.traceJson as string)).toEqual([{node:'Component',status:'completed',items:[count],outputOmitted:'record-limit'}]);
 });
 it('rejects malformed native port shapes independently of overflow', () => {
   const f=fixture(); f.execution.data.resultData.runData.Component[0].data.main=[{invalid:true}];
-  expect(()=>collectN8nExecutionResult(f.grant,f.execution)).toThrow('N8N_EXECUTION_DATA_INVALID');
+  expect(()=>collectN8nExecutionResult(normalizeN8nResult(f.grant.result),f.execution)).toThrow('N8N_EXECUTION_DATA_INVALID');
 });
 
 it('verifies the captured n8n 2.43.8 Studio Read Write execution with the published definition pin', () => {

@@ -38,6 +38,35 @@ export function validateN8nGrant(value: unknown): asserts value is SemanticN8nGr
   }
 }
 
+export interface NativeN8nResultProjection {
+  readonly presentation: 'items' | 'ports';
+  readonly selectors: readonly Readonly<{ node: string; port: number; name: string }>[];
+  readonly requiredNodes: readonly string[];
+  readonly traceNodes?: readonly string[];
+  readonly allowObservation: boolean;
+}
+
+/** Decode a validated wire result once; never rewrite the serialized approval or its hash. */
+export function normalizeN8nResult(result: NativeN8nGrant['result']): NativeN8nResultProjection {
+  let presentation: NativeN8nResultProjection['presentation'] = 'items';
+  let selectors: { node: string; port: number; name: string }[];
+  if (result.sinks) {
+    selectors = result.sinks.map(sink => ({ ...sink }));
+    if (selectors.length > 1) presentation = 'ports';
+  } else if (result.ports && result.ports.length > 1) {
+    selectors = result.ports.map((name, port) => ({ node: result.nodes[0]!, port, name }));
+    presentation = 'ports';
+  } else {
+    // Historical single named ports still return ordinary items from port zero.
+    selectors = result.nodes.map(node => ({ node, port: 0, name: node }));
+  }
+  return Object.freeze({ presentation, selectors: Object.freeze(selectors.map(selector => Object.freeze(selector))),
+    // Keep the legacy preflight requirement for declared but unused sink scopes.
+    requiredNodes: Object.freeze([...new Set([...selectors.map(selector => selector.node), ...result.nodes, ...result.traceNodes ?? []])]),
+    ...(result.traceNodes ? { traceNodes: Object.freeze([...result.traceNodes]) } : {}),
+    allowObservation: result.allowObservation === true });
+}
+
 export function validateN8nConfig(value: unknown): asserts value is SemanticN8nConfig {
   if (!n8nRecord(value) || !closed(value, ['baseUrl', 'apiTokenFile', 'webhookTokenFile', 'workflows'])
     || typeof value.baseUrl !== 'string'
