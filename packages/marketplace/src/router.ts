@@ -15,8 +15,9 @@
  *   no place of the three: the pick reads on, up to `QUOTES_PER_PICK` quotes.
  *   It says none takes them (`tools_unsupported`) only once every seller's
  *   quote said it takes none; a seller it did not read, or one that cannot
- *   serve now but may take them (unreachable, or saying it takes them), makes
- *   it a pick with no route for now (`no_seller`).
+ *   serve now but may take them (unreachable, now or in the ten minutes after,
+ *   or saying it takes them), makes it a pick with no route for now
+ *   (`no_seller`).
  *   4. It stays with the seller that answered, so each seller gets one run of
  *      nonces, and moves on when a seller is unreachable, for ten minutes, or
  *      returns a receipt that fails the buyer's checks, for the rest of the epoch.
@@ -100,10 +101,11 @@ export class Router {
   async pickFor(serviceId: string, epoch: number, maxPricePerUnit: bigint, needs: RouteNeeds = {}): Promise<RoutePick> {
     const now = this.clock();
     const pinned = (await this.deps.pinned?.(serviceId)) ?? [];
-    const offers = (await this.offersOf([epoch])).filter((o) =>
+    const priced = (await this.offersOf([epoch])).filter((o) =>
       o.serviceId === serviceId && o.epoch === epoch && o.pricePerUnit <= maxPricePerUnit
-      && this.failedIn.get(o.seller.toString()) !== epoch
-      && (this.unreachableUntil.get(o.seller.toString()) ?? 0) <= now);
+      && this.failedIn.get(o.seller.toString()) !== epoch);
+    const cooling = (o: Offer) => (this.unreachableUntil.get(o.seller.toString()) ?? 0) > now;
+    const offers = priced.filter((o) => !cooling(o));
     const candidates: Offer[] = [];
     for (const o of offers) if (await this.deps.chain.isShardingTableMember(o.seller)) candidates.push(o);
     const rank = (o: Offer) => [
@@ -122,8 +124,9 @@ export class Router {
     let places = 0;
     let read = 0;
     let withoutTools = false;
-    // A seller not read, or one that cannot serve now and did not say it takes no tools: one that may take them later.
-    let mayLater = false;
+    // A seller not read, one that cannot serve now and did not say it takes no tools, or one held out only while it
+    // was unreachable a moment ago: one that may take them later.
+    let mayLater = priced.some(cooling);
     for (const offer of candidates) {
       if (places >= QUOTED_CANDIDATES || read >= QUOTES_PER_PICK) {
         mayLater = true;

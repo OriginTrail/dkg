@@ -68,7 +68,7 @@ describe('a call with tools among sellers that take them and sellers that do not
   };
 
   /** A router over sellers 1..`count`; those in `tools` take tool calls, those in `down` do not answer; `asked` counts quotes. */
-  function routerOf(count: number, tools: Set<bigint>, down = new Set<bigint>()) {
+  function routerOf(count: number, tools: Set<bigint>, down = new Set<bigint>(), clock?: () => number) {
     const offers = Array.from({ length: count }, (_, i) => offer(BigInt(i + 1)));
     const asked: bigint[] = [];
     const router = new Router({
@@ -87,6 +87,7 @@ describe('a call with tools among sellers that take them and sellers that do not
           offers: services.map((s) => ({ serviceId: s, pricePerUnit: seller.toString(), available: true, capacity: null, ...(tools.has(seller) ? { tools: true } : {}) })),
         };
       },
+      ...(clock ? { clock } : {}),
     });
     return { router, asked };
   }
@@ -124,5 +125,20 @@ describe('a call with tools among sellers that take them and sellers that do not
     expect(await routerOf(3, new Set([2n]), new Set([2n])).router.pickFor(SERVICE, 1, 100n, { tools: true })).toEqual({ route: null, reason: 'no_seller' });
     // A text call is served by any of them.
     expect(await routerOf(3, new Set()).router.pickFor(SERVICE, 1, 100n)).toMatchObject({ route: { seller: 1n } });
+  });
+
+  it('stays no route for now while a seller that may take tools is held out after its quote failed, and goes to it once it is back', async () => {
+    let clock = 0;
+    const down = new Set([2n]);
+    const { router, asked } = routerOf(2, new Set([2n]), down, () => clock);
+    expect(await router.pickFor(SERVICE, 1, 100n, { tools: true })).toEqual({ route: null, reason: 'no_seller' });
+    // At once again: seller 2 is held out for ten minutes, not asked, and may still take tools.
+    asked.length = 0;
+    expect(await router.pickFor(SERVICE, 1, 100n, { tools: true })).toEqual({ route: null, reason: 'no_seller' });
+    expect(asked).not.toContain(2n);
+    // Ten minutes on, it answers, and serves the call.
+    down.clear();
+    clock += 10 * 60_000;
+    expect(await router.pickFor(SERVICE, 1, 100n, { tools: true })).toMatchObject({ route: { seller: 2n } });
   });
 });

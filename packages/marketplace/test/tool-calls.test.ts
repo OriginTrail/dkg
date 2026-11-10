@@ -26,6 +26,7 @@ import {
   Gateway,
   Router,
   Seller,
+  SellerLedger,
   UpstreamError,
   WireError,
   connectorOf,
@@ -389,6 +390,20 @@ describe('a call with tools through the gateway', () => {
     expect(body(await call({ ...CHAT, tools: TOOLS })).choices[0].message.tool_calls).toEqual(CALLS);
   });
 
+  it('keeps the calls of a completion whose backend says it stopped for them, or stopped: signed and checked', async () => {
+    await setUp(true);
+    for (const finishReason of ['tool_calls', 'stop'] as const) {
+      completion = { content: null, toolCalls: CALLS as never, finishReason, promptTokens: 40, completionTokens: 9 };
+      const answer = await call({ ...CHAT, tools: TOOLS });
+      // A 200 is a receipt the buyer checked: its seller's signature, over a commitment to these calls.
+      expect(answer.status).toBe(200);
+      expect(body(answer).choices).toEqual([{ index: 0, message: { role: 'assistant', content: null, tool_calls: CALLS }, finish_reason: 'tool_calls' }]);
+      const served = answers.at(-1) as { ok: true; result: unknown; receipt: { resultCommitment: string } };
+      expect(served.result).toEqual({ content: null, tool_calls: CALLS, finish_reason: 'tool_calls' });
+      expect(served.receipt.resultCommitment).toBe(resultCommitmentOf({ content: null, tool_calls: CALLS as never }));
+    }
+  });
+
   it('keeps a call with tool calls across the seller\'s restart: a repeat gets the same answer, with no backend call, and its nonce and value stay counted', async () => {
     await setUp(true);
     expect((await call({ ...CHAT, tools: TOOLS })).status).toBe(200);
@@ -417,6 +432,31 @@ describe('a call with tools through the gateway', () => {
     const restarted = sellerOf(true);
     await restarted.load();
     expect(restarted.ledger.served(served.requestDigest)!.result).toStrictEqual({ content: 'text' });
+  });
+
+  it('keeps a result read back the same shape across a prune: decoded on the way in, at the load and at the prune alike', async () => {
+    const id = (n: number) => `0x${n.toString(16).padStart(64, '0')}`;
+    const line = (n: number, epoch: number, result: unknown) => ({
+      type: 'served', requestDigest: id(n), subscriptionId: id(100 + epoch), budgetIndex: 0, epoch,
+      request: { subscriptionId: id(100 + epoch), serviceId: SERVICE, seller: '1', nonce: String(n), pricePerUnit: '10', maxUnits: '100', maxValueWei: '1000', issuedAt: 1, expiry: 2 },
+      signature: `0x${'11'.repeat(64)}`,
+      receipt: { requestDigest: id(n), resultCommitment: id(200 + n), units: '12', valueWei: '120', completedAt: 1 },
+      receiptSignature: `0x${'22'.repeat(65)}`, result, peerId: 'buyer-peer',
+    });
+    const file = join(dir, 'seller-ledger.jsonl');
+    // Epoch 1 ends and is pruned; epoch 5's result has a `tool_calls: null`, which is none.
+    await writeFile(file, `${[line(1, 1, { content: 'old' }), line(2, 5, { content: 'text', tool_calls: null })].map((e) => JSON.stringify(e)).join('\n')}\n`);
+    const ledger = new SellerLedger(dir);
+    await ledger.load();
+    expect(ledger.served(id(2))!.result).toStrictEqual({ content: 'text' });
+    await ledger.prune(3);
+    expect(ledger.served(id(1))).toBeUndefined();
+    expect(ledger.served(id(2))!.result).toStrictEqual({ content: 'text' });
+    // Written again as it is held, and read back so.
+    expect(await readFile(file, 'utf8')).not.toContain('tool_calls');
+    const reread = new SellerLedger(dir);
+    await reread.load();
+    expect(reread.served(id(2))!.result).toStrictEqual({ content: 'text' });
   });
 
   it('answers a completion over its units with its text cut short, and no tool calls', async () => {

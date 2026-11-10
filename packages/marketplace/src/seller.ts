@@ -548,17 +548,21 @@ function answerOf(call: ServedCall): ServeAnswer {
   };
 }
 
+/** Why a backend stopped before it finished: an answer stopped so is its text alone. */
+const CUT_SHORT: ReadonlySet<string> = new Set(['length', 'content_filter']);
+
 /**
  * A completion as a served call's result, its output cut to `allowed` tokens: text, or the tools the model called.
  * A completion cut short is its text alone, as a tool call cut short is no call: cut here to the units the request
- * pays for, or stopped by its backend before the end (`length`, or `content_filter`), whose reason it keeps. Only a
- * completion its backend finished returns its tool calls.
+ * pays for, or stopped by its backend before the end (`length`, or `content_filter`), whose reason it keeps. A
+ * completion its backend finished (`stop`, `tool_calls`, or no reason) returns its tool calls.
  */
 function resultOf(completion: Completion, allowed: number): ServeResult {
   if (allowed < completion.completionTokens) {
     return { content: cutTo(completion.content ?? '', completion.completionTokens, allowed), finish_reason: 'length' };
   }
-  if (completion.finishReason) return { content: completion.content ?? '', finish_reason: completion.finishReason };
+  const reason = completion.finishReason;
+  if (reason && CUT_SHORT.has(reason)) return { content: completion.content ?? '', finish_reason: reason };
   if (completion.toolCalls?.length) return { content: completion.content, tool_calls: completion.toolCalls, finish_reason: 'tool_calls' };
   return { content: completion.content ?? '' };
 }
