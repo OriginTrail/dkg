@@ -7,9 +7,11 @@
 //   ENGINE=blazegraph BLAZEGRAPH_TEST_URL=http://127.0.0.1:<port>/bigdata/namespace/kb/sparql \
 //     node scripts/read-graph-statements-benchmark.mjs
 //
-// `oxigraph` runs in process. `oxigraph-server` and Blazegraph must be owned,
-// empty loopback test servers; for Blazegraph the script creates a scratch
-// namespace and removes it. SIZES, COPIES and RUNS override the defaults.
+// `oxigraph` runs in process. `oxigraph-server` and Blazegraph must be owned
+// loopback test servers. The script refuses an oxigraph-server that holds any
+// data before it writes, and empties it again at the end; for Blazegraph it
+// creates a scratch namespace and removes it. SIZES, COPIES and RUNS override
+// the defaults.
 // Prints one line per measurement, then JSON.
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
@@ -91,6 +93,12 @@ async function openOxigraphServer() {
     return text;
   };
   const query = async (sparql) => JSON.parse(await post('/query', sparql, 'application/sparql-query', 'application/sparql-results+json'));
+  // The cleanup empties the whole server, so refuse one that holds data before writing anything.
+  // sparql-scan-allow: R2 -- ASK stops at the first quad: it only checks that the scratch server is empty
+  const holdsData = (await query('ASK { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }')).boolean;
+  if (holdsData !== false) {
+    throw new Error('This benchmark needs an empty oxigraph-server: this one holds data, and the cleanup would remove it.');
+  }
   const version = (await (await fetch(new URL('/', base))).text()).match(/oxigraph[^<\s]*\s*v?([0-9.]+)/i)?.[1];
   return {
     name: `oxigraph-server${version ? ` ${version}` : ''} (local server)`,
