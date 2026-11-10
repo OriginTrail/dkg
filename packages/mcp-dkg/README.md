@@ -138,6 +138,12 @@ autoShare: true
 
 `.dkg/` is gitignored repo-wide so this file stays local to each operator. The `tokenFile` path is resolved relative to the YAML; default of `~/.dkg/auth.token` matches what `dkg start` writes on first boot.
 
+### Manual client authentication
+
+When neither `DKG_HOME` nor a workspace `.dkg/config.yaml` is present, the MCP server resolves the default local node home and its token. Explicit workspace/home configuration keeps precedence. Prefer the entry from `dkg mcp setup --print-only` for GUI clients. A `missing-token` status or 401 hint means the client needs `DKG_HOME` or `DKG_TOKEN`; `token-configured` does not prove the daemon accepted the credential. An explicit API endpoint different from the discovered local node uses only explicit credentials and graph selection (`DKG_TOKEN`, `DKG_PROJECT`, or tool arguments), without importing the local token or graph defaults.
+
+CLI `status --daemon` and `join --daemon` resolve the selected endpoint before loading automatic credentials. For a remote daemon, supply `--token`, `DKG_TOKEN`, or an explicit `--token-file` for join. The legacy implicit token-file fallback is restricted to a token-only home at its recorded local port (9200 when unrecorded); configured homes use normal configuration resolution. `join` takes `--token`, `DKG_TOKEN` or an explicit `--token-file` first, then a workspace or `DKG_HOME` binding, then automatically discovered credentials, and the generated `.dkg/config.yaml` records the token file it authenticated with.
+
 ## Tool surface (33 tools)
 
 All tools are available the moment `dkg mcp setup` registers the MCP with your client. They group into seven categories tracking how a session typically uses memory: check health, discover the graph, set it up, drive the knowledge-asset lifecycle (create → write → finalize → share → publish), recall from it, query it, and message other agents.
@@ -325,9 +331,3 @@ Ten V9-era and coding-project tools were dropped from the V10 surface during con
 ### Large tool responses
 
 The stdio server limits each serialized JSON-RPC response to 8 MiB, below the MCP SDK client's default 10 MiB receive buffer. JSON escaping can make an artifact response larger than its original file. An oversized result returns an error without closing the session: narrow/paginate a query, or retrieve large artifacts through the daemon HTTP API. Markdown reads return the whole file; `maxBytes` is an acceptance cap, so lowering it returns HTTP 413 rather than a smaller result. For partial artifact retrieval outside MCP, use the daemon `/api/knowledge-assets/import-artifact/read` endpoint with `offset` and `maxBytes`. The daemon's 5 MiB artifact-read maximum is a source-byte limit, not a guarantee that the fully formatted result fits over MCP.
-
-### Manual client authentication
-
-When neither `DKG_HOME` nor a workspace `.dkg/config.yaml` is present, the MCP server resolves the default local node home and its token. Explicit workspace/home configuration keeps precedence. Prefer the entry from `dkg mcp setup --print-only` for GUI clients. A `missing-token` status or 401 hint means the client needs `DKG_HOME` or `DKG_TOKEN`; `token-configured` does not prove the daemon accepted the credential. An explicit API endpoint different from the discovered local node uses only explicit credentials and graph selection (`DKG_TOKEN`, `DKG_PROJECT`, or tool arguments), without importing the local token or graph defaults.
-
-CLI `status --daemon` and `join --daemon` resolve the selected endpoint before loading automatic credentials. For a remote daemon, supply `--token`, `DKG_TOKEN`, or an explicit `--token-file` for join. The legacy implicit token-file fallback is restricted to a token-only home at its recorded local port (9200 when unrecorded); configured homes use normal configuration resolution. `join` takes `--token`, `DKG_TOKEN` or an explicit `--token-file` first, then a workspace or `DKG_HOME` binding, then automatically discovered credentials, and the generated `.dkg/config.yaml` records the token file it authenticated with.
