@@ -52,6 +52,11 @@ export type ReadGraphMaintenance =
   /** The reference procedure, restricted to the triples of the replaced subject. */
   | 'reference-subject'
   /**
+   * The reference procedure for the replaced subject, plus a copy of each
+   * companion subject's rows that the call adds to the same graph.
+   */
+  | 'reference-subject-and-insert'
+  /**
    * The reference procedure, over the member graphs the caller declares. An
    * update without a declaration is refused unless it declares that it
    * touches no member graph.
@@ -89,7 +94,7 @@ export const READ_GRAPH_METHOD_MAINTENANCE = Object.freeze({
   replaceAssetGroup: 'reference',
   replaceGraphAndSubject: 'reference',
   replaceSubject: 'reference-subject',
-  replaceSubjectAndInsert: 'reference-subject',
+  replaceSubjectAndInsert: 'reference-subject-and-insert',
   rfc64AuthorCommitCasV1: 'reference',
   graphEnumerationVisibility: 'read',
   listGraphs: 'read',
