@@ -22,21 +22,31 @@ import {
 
 export const READ_GRAPH_PARTITION_WRITE_CODE = 'READ_GRAPH_PARTITION_WRITE';
 
-/** A write named a graph in a read-graph partition; it was refused before it reached the store. */
+/** A write could reach a read-graph partition; it was refused before it reached the store. */
 export class ReadGraphPartitionWriteError extends Error implements StoreOperationOutcomeErrorLike {
   readonly code = READ_GRAPH_PARTITION_WRITE_CODE;
   readonly storeOperationOutcomeTag = STORE_OPERATION_OUTCOME_TAG;
   readonly outcome = 'not_started' as const;
 
   constructor(readonly storeOperation: StoreOperation, readonly graph: string | undefined) {
-    super(`${storeOperation}() names ${graph === undefined ? 'a graph' : `<${graph}>`} in a read-graph partition, `
-      + 'which only storage writes');
+    super(`${storeOperation}() ${graph === undefined ? 'may write into' : `names <${graph}> in`} a read-graph `
+      + 'partition, which only storage writes');
     this.name = 'ReadGraphPartitionWriteError';
   }
 }
 
 function refuseGraph(graph: string | undefined, operation: StoreOperation): void {
   if (graph !== undefined && isReadGraphPartitionGraph(graph)) throw new ReadGraphPartitionWriteError(operation, graph);
+}
+
+/**
+ * A pattern delete that names a partition graph is refused. One that names no
+ * graph reaches every graph, so it is refused while the store may hold
+ * partitions.
+ */
+function refusePattern(store: TripleStore, graph: string | undefined, operation: StoreOperation): void {
+  if (graph) refuseGraph(graph, operation);
+  else if (storeMayHoldReadGraphPartitions(store)) throw new ReadGraphPartitionWriteError(operation, undefined);
 }
 
 function refuseQuads(quads: readonly Quad[], operation: StoreOperation): void {
@@ -55,7 +65,8 @@ function refuseSparql(sparql: string, operation: StoreOperation): void {
  * adapters already leave the partition out of enumeration. Storage-owned work
  * on the partition uses {@link readGraphPartitionMaintenanceStore}. A SPARQL
  * UPDATE is refused when its text names a partition graph, or when it writes
- * through a graph variable, whose target only the store would know.
+ * through a graph variable, whose target only the store would know. A pattern
+ * delete without a graph is refused while the store may hold partitions.
  */
 export class ReadGraphPartitionStore implements TripleStoreDecorator {
   readonly innerStore: TripleStore;
@@ -77,7 +88,7 @@ export class ReadGraphPartitionStore implements TripleStoreDecorator {
     this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !isReadGraphPartitionGraph(graph));
     // Each optional capability exists exactly when the store below has it.
     if (inner.deleteByPatternWithoutCount) this.deleteByPatternWithoutCount = async (pattern, options) => {
-      refuseGraph(pattern.graph, 'deleteByPattern');
+      refusePattern(inner, pattern.graph, 'deleteByPattern');
       return deleteByPatternWithoutCount(inner, pattern, options);
     };
     if (inner.replaceGraph) this.replaceGraph = async (graphUri, quads, options) => {
@@ -149,7 +160,7 @@ export class ReadGraphPartitionStore implements TripleStoreDecorator {
   }
 
   async deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number> {
-    refuseGraph(pattern.graph, 'deleteByPattern');
+    refusePattern(this.innerStore, pattern.graph, 'deleteByPattern');
     return this.innerStore.deleteByPattern(pattern, options);
   }
 

@@ -237,6 +237,29 @@ describe('the read-graph partition guard', () => {
     expect(await stored()).toEqual(before);
   });
 
+  it('refuses a pattern delete without a graph while the store may hold partitions', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    opened.push(store);
+    await store.insert(memberQuads);
+    const adapter = readGraphPartitionMaintenanceStore(store);
+    await adapter.insert(plantedQuads);
+    // Before the store may hold partitions, such a delete runs as it always has.
+    expect(await store.deleteByPattern({ subject: 'urn:m' })).toBe(1);
+    noteStoreMayHoldReadGraphPartitions(adapter);
+    for (const remove of [
+      () => store.deleteByPattern({ predicate: 'urn:p' }),
+      () => store.deleteByPattern({ graph: '', predicate: 'urn:p' }),
+      () => store.deleteByPatternWithoutCount!({ predicate: 'urn:p' }),
+    ]) {
+      const error = await remove().then(() => undefined, (caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ReadGraphPartitionWriteError);
+      expect(isStoreOperationNotStarted(error, 'deleteByPattern')).toBe(true);
+    }
+    expect(await adapter.countQuads(VM_READ)).toBe(1);
+    expect(await adapter.countQuads(STATE)).toBe(1);
+    expect(await store.deleteByPattern({ graph: ASSET, predicate: 'urn:p' })).toBe(1);
+  });
+
   it('checks every graph an RFC-64 author commit names', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     opened.push(store);
