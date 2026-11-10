@@ -28,7 +28,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline/promises';
 
-import { loadConfig, resolveCredential } from '../config.js';
+import { resolveCredential } from '../config.js';
 import { DkgClient, DkgHttpError } from '../client.js';
 import { fetchManifest } from '../manifest/fetch.js';
 import { planInstall, writeInstall, buildReviewMarkdown } from '../manifest/install.js';
@@ -519,12 +519,12 @@ async function cmdStatus(args: string[]): Promise<number> {
       token:   { type: 'string' },
     },
   });
-  const config = loadConfig(undefined, { api: values.daemon });
-  const daemonUrl = config.api;
-  const token = values.token ?? process.env.DKG_TOKEN ?? process.env.DEVNET_TOKEN ?? '';
-  const client = new DkgClient({
-    config: { ...config, token: token || config.token },
+  const { config } = resolveCredential(process.cwd(), {
+    api: values.daemon,
+    token: values.token ?? process.env.DKG_TOKEN ?? process.env.DEVNET_TOKEN,
   });
+  const daemonUrl = config.api;
+  const client = new DkgClient({ config });
 
   console.log(`Daemon:    ${daemonUrl}`);
   let projects;

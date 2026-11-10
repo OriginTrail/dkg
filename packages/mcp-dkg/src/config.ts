@@ -275,7 +275,7 @@ function loadConfiguredCredential(cwd: string, overrideApi: string | null): Reso
           defaultProject: envProject ?? defaults.defaultProject, agentUri: envAgent,
           capture: { autoShare: true, defaultPrivacy: 'team', subGraph: 'chat', assertion: 'chat-log' },
         };
-        return { config, tokenFile: !envToken && defaults.token ? path.join(home, 'auth.token') : null };
+        return { config, tokenFile: !envToken && defaults.token ? path.resolve(home, 'auth.token') : null };
       }
     }
   }
