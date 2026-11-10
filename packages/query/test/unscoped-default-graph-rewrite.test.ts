@@ -48,6 +48,12 @@ describe('patterns outside GRAPH', () => {
 
   it('keep counting stored quads in the fast counting form', () => {
     const graphForm = (triple: string) => `GRAPH ?_holder { ${triple} } ${readGraphPartitionExclusionFilter('?_holder')}`;
+    // The merged-graph rewrite holds the same GRAPH text inside its existence check.
+    const counting = (query: string) => {
+      const text = hidden(query);
+      expect(text).not.toContain('FILTER EXISTS');
+      return text;
+    };
     expect(hidden('SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }')).toBe(`SELECT (COUNT(*) AS ?n) WHERE { ${graphForm('?s ?p ?o')} }`);
     expect(hidden('SELECT DISTINCT (COUNT(*) AS ?n) WHERE { { ?s <urn:p> ?o } } LIMIT 5'))
       .toBe(`SELECT DISTINCT (COUNT(*) AS ?n) WHERE { { ${graphForm('?s <urn:p> ?o')} } } LIMIT 5`);
@@ -55,17 +61,17 @@ describe('patterns outside GRAPH', () => {
       .toBe(`SELECT ?s (COUNT(?o) AS ?n) WHERE { ${graphForm('?s ?p ?o')} } GROUP BY ?s`);
     expect(hidden('SELECT (COUNT(*) AS ?n) $s WHERE { ?s ?p ?o } GROUP BY ?s ORDER BY DESC(?n) LIMIT 3'))
       .toBe(`SELECT (COUNT(*) AS ?n) $s WHERE { ${graphForm('?s ?p ?o')} } GROUP BY ?s ORDER BY DESC(?n) LIMIT 3`);
-    expect(hidden('SELECT ?n WHERE { { SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o } } }')).toContain(graphForm('?s ?p ?o'));
+    expect(counting('SELECT ?n WHERE { { SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o } } }')).toContain(graphForm('?s ?p ?o'));
     // Any spelling of one statement pattern keeps the form.
     for (const triple of [
       '?s <urn:val> "5"^^<http://www.w3.org/2001/XMLSchema#integer>', '?s <urn:lbl> "x"@en-GB', '?s ?p true',
       '<urn:a> <urn:b> []', '<urn:a> <urn:b> _:x', '?o ^(^<urn:b>) <urn:a>', '<urn:a> (<urn:b>) ?o ;', '?x <urn:self> ?x',
     ]) expect(hidden(`SELECT (COUNT(*) AS ?n) WHERE { ${triple} }`)).toBe(`SELECT (COUNT(*) AS ?n) WHERE { ${graphForm(triple)} }`);
-    expect(hidden('SELECT ?o (COUNT(*) AS ?n) WHERE { ?o ^<urn:b> ?s } GROUP BY (?o) VALUES ?x { 1 }')).toContain(graphForm('?o ^<urn:b> ?s'));
+    expect(counting('SELECT ?o (COUNT(*) AS ?n) WHERE { ?o ^<urn:b> ?s } GROUP BY (?o) VALUES ?x { 1 }')).toContain(graphForm('?o ^<urn:b> ?s'));
     // A variable is the same under any spelling (the materialized text decodes escapes).
-    expect(hidden('SELECT ?s (COUNT(*) AS ?n) WHERE { ?\\u0073 <urn:b> ?o } GROUP BY ?s')).toContain(graphForm('?s <urn:b> ?o'));
-    expect(hidden('SELECT $s (COUNT(?o) AS ?n) WHERE { ?s <urn:b> $\\u006F } GROUP BY ?\\u0073')).toMatch(/GRAPH \?_holder \{ \?s <urn:b> [?$]o \}/);
-    expect(hidden('SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o } ORDER BY ?n VALUES ?o { <urn:c> }')).toContain(graphForm('<urn:a> <urn:b> ?o'));
+    expect(counting('SELECT ?s (COUNT(*) AS ?n) WHERE { ?\\u0073 <urn:b> ?o } GROUP BY ?s')).toContain(graphForm('?s <urn:b> ?o'));
+    expect(counting('SELECT $s (COUNT(?o) AS ?n) WHERE { ?s <urn:b> $\\u006F } GROUP BY ?\\u0073')).toMatch(/GRAPH \?_holder \{ \?s <urn:b> [?$]o \}/);
+    expect(counting('SELECT (COUNT(*) AS ?n) WHERE { <urn:a> <urn:b> ?o } ORDER BY ?n VALUES ?o { <urn:c> }')).toContain(graphForm('<urn:a> <urn:b> ?o'));
     // Not the fast form: these count solutions of the merged default graph.
     for (const query of [
       'SELECT (COUNT(?o) AS ?n) WHERE { ?s ?p ?o }',
