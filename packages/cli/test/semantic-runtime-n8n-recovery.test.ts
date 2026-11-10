@@ -1,5 +1,6 @@
 import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { ExecutionReceiptJournal, ProgramTraceRecorder, readProgramTrace, readProgramCallHistory } from '@origintrail-official/dkg-semantic-runtime';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as nativeAdapter from '../src/semantic-runtime-n8n-native-adapter.js';
@@ -129,7 +130,7 @@ describe('native dispatch and durable recovery', () => {
     finally { execute.mockRestore(); }
     const executionIri = `urn:sr:execution:${prepared.invocationId}`;
     expect(readProgramTrace(runtime.store, executionIri)?.calls).toEqual([]);
-    expect(readProgramCallHistory(runtime.store, executionIri)).toHaveLength(1);
+    expect(readProgramCallHistory(runtime.store, executionIri).calls).toHaveLength(1);
     await restartNode(f.target);
     await rejectChangedInput(f, prepared);
     await resumeInspection(f, prepared);
@@ -181,6 +182,20 @@ describe('native dispatch and durable recovery', () => {
     const executionIri = `urn:sr:execution:${prepared.invocationId}`;
     f.target.runtime!.store.setExecutionStatus(executionIri, 'active');
     new ProgramTraceRecorder(f.target.runtime!.store, executionIri);
+    await restartNode(f.target);
+    await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_NOT_RETRYABLE' });
+    expect(f.state.dispatches).toBe(1);
+  });
+
+  it('rejects a corrupt call journal entry after restart without dispatching again', async () => {
+    const f = await nativeFixture(), prepared = await f.start();
+    await interruptInspection(f, prepared);
+    const store = f.target.runtime!.store, executionIri = `urn:sr:execution:${prepared.invocationId}`;
+    store.setExecutionStatus(executionIri, 'active'); // Model a journal write interrupted by a hard stop.
+    const bytes = new Uint8Array([0xa1]); // Truncated CBOR map, not a valid v1 event.
+    const seq = store.execution(executionIri)!.nextEventSeq;
+    store.commitRuntimeTransition({ executionId: executionIri, expectedNextSeq: seq, eventId: `trace:${seq}`,
+      eventType: 'typescript-call-trace-v1', eventCbor: bytes, stateDigest: createHash('sha256').update(bytes).digest() });
     await restartNode(f.target);
     await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_NOT_RETRYABLE' });
     expect(f.state.dispatches).toBe(1);

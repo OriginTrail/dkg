@@ -204,7 +204,8 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
     const trace = new ProgramTraceRecorder(runtime.store, executionIri);
     try {
       const output = await runtime.typescript!.execute(artifact, inputJson,
-        { ...grant, timeoutMs: Math.max(1, Math.min(grant.timeoutMs, budget.deadline - Date.now())) }, async effect => trace.call(String(effect.id), effect.kind, effect.kind === 'tool' ? effect.tool : effect.program, async call => {
+        { ...grant, timeoutMs: Math.max(1, Math.min(grant.timeoutMs, budget.deadline - Date.now())) }, async effect => trace.call(
+          { id: String(effect.id), kind: effect.kind, target: effect.kind === 'tool' ? effect.tool : effect.program }, async call => {
           await check();
           if (++budget.calls > budget.maximum) throw new SemanticProgramError('PROGRAM_CALL_BUDGET_EXCEEDED', 'Program tree exceeds its call budget', 403);
           if (continuation && (effect.kind !== 'tool'

@@ -36,7 +36,9 @@ export function readNativeN8nCheckpoint(store: SemanticRuntimeStore, effectId: s
 export function nativeN8nContinuationEffects(store: SemanticRuntimeStore, executionIri: string, grant: NativeN8nGrant): Set<string> | null {
   // Declared child pins are not evidence of child calls. Only actual call
   // history decides whether this was an exclusively native execution.
-  const calls = readProgramCallHistory(store, executionIri);
+  let calls;
+  try { calls = readProgramCallHistory(store, executionIri).calls; }
+  catch { return null; }
   if (!calls.length || calls.some(call => call.kind !== 'tool' || call.target !== grant.toolIri)) return null;
   const effects = store.effectsForExecution(executionIri);
   if (!effects.length) return null;

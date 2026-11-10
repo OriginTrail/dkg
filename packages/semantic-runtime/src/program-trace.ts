@@ -1,19 +1,13 @@
-import { createHash } from 'node:crypto';
-import { decode, encode } from 'cborg';
 import type { SemanticRuntimeStore } from './persistence.js';
+import { appendProgramExecutionEvent, readProgramExecutionJournal, ProgramExecutionJournalError, type ProgramCallIdentity, type ProgramCallDiagnostics } from './program-execution-journal.js';
 
-export interface ProgramCallTrace {
-  id: string; kind: 'tool' | 'program'; target: string;
-  startedAt: string; durationMs?: number; status: 'running' | 'succeeded' | 'failed' | 'interrupted';
-  result?: unknown; resultTruncated?: boolean; error?: string; executionIri?: string;
-}
+export interface ProgramCallTrace extends ProgramCallIdentity, ProgramCallDiagnostics {}
 export interface ProgramExecutionTrace {
   version: 1; executionIri: string; startedAt: string; durationMs?: number;
   status: 'running' | 'succeeded' | 'failed' | 'interrupted'; calls: ProgramCallTrace[];
   failure?: { location: string; message: string };
 }
-const EVENT = 'typescript-call-trace-v1';
-/** Bounded diagnostic events in the existing durable journal. No schema migration. */
+/** Diagnostic projection of the durable execution journal. No schema migration. */
 export class ProgramTraceRecorder {
   readonly trace: ProgramExecutionTrace;
   private closed = false;
@@ -23,9 +17,9 @@ export class ProgramTraceRecorder {
     this.trace = { version: 1, executionIri, startedAt: new Date().toISOString(), status: 'running', calls: [] };
     this.persist({ type: 'start', startedAt: this.trace.startedAt });
   }
-  async call<T>(id: string, kind: ProgramCallTrace['kind'], target: string, run: (call: ProgramCallTrace) => Promise<T>): Promise<T> {
+  async call<T>(identity: ProgramCallIdentity, run: (call: ProgramCallTrace) => Promise<T>): Promise<T> {
     if (this.closed || this.trace.calls.length >= 256) throw new Error('PROGRAM_TRACE_CALL_LIMIT');
-    const call: ProgramCallTrace = { id, kind, target, startedAt: new Date().toISOString(), status: 'running' };
+    const call: ProgramCallTrace = { ...identity, startedAt: new Date().toISOString(), status: 'running' };
     const started = performance.now(); this.trace.calls.push(call); this.persist({ type: 'call', call });
     try {
       const result = await run(call);
@@ -60,40 +54,24 @@ export class ProgramTraceRecorder {
     if (error !== undefined) this.trace.failure = { location: 'Program execution', message: message(error) };
     this.persist({ type: 'finish', status: this.trace.status, durationMs: this.trace.durationMs, ...(this.trace.failure ? { failure: this.trace.failure } : {}) });
   }
-  private persist(event: unknown) {
-    const execution = this.store.execution(this.trace.executionIri)!;
-    const bytes = encode(event);
-    this.store.commitRuntimeTransition({ executionId: this.trace.executionIri, expectedNextSeq: execution.nextEventSeq,
-      eventId: `trace:${execution.nextEventSeq}`, eventType: EVENT, eventCbor: bytes,
-      stateDigest: createHash('sha256').update(bytes).digest() });
+  private persist(event: Parameters<typeof appendProgramExecutionEvent>[2]) {
+    appendProgramExecutionEvent(this.store, this.trace.executionIri, event);
   }
 }
 function message(error: unknown) { return (error instanceof Error ? error.message : String(error)).slice(0, 2048); }
-/** Recovery uses every recorded call identity, including earlier attempts. A
- * new diagnostic start must never erase evidence used to prohibit mixed replay.
- * Preserve conflicting identities as well as deduplicating repeated events.
- */
-export function readProgramCallHistory(store: SemanticRuntimeStore, executionIri: string): Pick<ProgramCallTrace, 'id' | 'kind' | 'target'>[] {
-  const calls = new Map<string, Pick<ProgramCallTrace, 'id' | 'kind' | 'target'>>();
-  for (const record of store.runtimeEventsAfter(executionIri, 0n)) {
-    if (record.eventType !== EVENT) continue;
-    const event = decode(record.cbor) as any;
-    if (event.type !== 'call') continue;
-    const { id, kind, target } = event.call;
-    calls.set(JSON.stringify([id, kind, target]), { id, kind, target });
-  }
-  return [...calls.values()];
-}
 export function readProgramTrace(store: SemanticRuntimeStore, executionIri: string): ProgramExecutionTrace | undefined {
+  let journal;
+  try { journal = readProgramExecutionJournal(store, executionIri); }
+  catch (error) { if (error instanceof ProgramExecutionJournalError) return undefined; throw error; }
   let trace: ProgramExecutionTrace | undefined;
-  for (const record of store.runtimeEventsAfter(executionIri, 0n)) {
-    if (record.eventType !== EVENT) continue;
-    const event = decode(record.cbor) as any;
-    if (event.type === 'start') trace = { version: 1, executionIri, startedAt: event.startedAt, status: 'interrupted', calls: [] };
+  for (const event of journal.events) {
+    if (event.type === 'start' && event.startedAt) trace = { version: 1, executionIri, startedAt: event.startedAt, status: 'interrupted', calls: [] };
     else if (trace && event.type === 'call') {
-      const index = trace.calls.findIndex(c => c.id === event.call.id);
-      if (index < 0) trace.calls.push(event.call); else trace.calls[index] = event.call;
-    } else if (trace && event.type === 'finish') Object.assign(trace, { status: event.status, durationMs: event.durationMs, ...(event.failure ? { failure: event.failure } : {}) });
+      const call: ProgramCallTrace = { ...event.identity, ...(event.diagnostics ?? { startedAt: trace.startedAt, status: 'interrupted' }) };
+      const index = trace.calls.findIndex(c => c.id === call.id);
+      if (index < 0) trace.calls.push(call); else trace.calls[index] = call;
+    } else if (trace && event.type === 'finish') Object.assign(trace, { status: event.status ?? 'interrupted',
+      ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}), ...(event.failure ? { failure: event.failure } : {}) });
   }
   if (trace) for (const call of trace.calls) if (call.status === 'running') call.status = 'interrupted';
   return trace;
