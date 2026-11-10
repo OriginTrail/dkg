@@ -18,6 +18,14 @@ dkg mcp setup --network testnet
 
 Setup initializes a fresh node, starts it, and offers to register DKG in detected clients. Restart the chosen client. Existing nodes keep their network. Use `dkg mcp setup --dry-run` to inspect changes first.
 
+## Verify
+
+1. Run `dkg status` in the terminal.
+2. Inspect the client's DKG tool list. Ask it to call the discovered status and Context Graph listing tools.
+3. Complete the [quickstart](../getting-started/quickstart.md), including retrieval in a new conversation.
+
+If the client cannot find tools, confirm that setup detected the intended installation, restart it, and inspect its MCP logs. A source checkout and a globally installed CLI use different setup modes and homes; see the [package reference](https://github.com/OriginTrail/dkg/blob/main/packages/mcp-dkg/README.md).
+
 ## Configure a client manually
 
 If setup does not find your client, print the entry for the Node installation, CLI, and DKG home you intend to use:
@@ -121,14 +129,6 @@ Legacy aliases are also accepted: `DKG_API` precedes `DEVNET_API`; token environ
 | Tools do not appear after an edit | The client retained its old server process, the JSON/TOML is invalid, or a saved executable path is stale. | Fully quit from the system tray or menu bar, then reopen. Check MCP logs and the absolute paths; regenerate the entry after changing the Node or DKG installation. |
 | Tools time out or cannot reach the node | The node is stopped, the API URL is wrong, or a request exceeded its deadline. | Run `dkg status` using the same home. Check the API setting and node logs before adjusting the timeout variables. |
 | Instructions say “project,” but there is no Projects screen | Older configuration and tool names use “project” for a Context Graph. | Open **Context Graphs** / **My Context Graphs** in the node UI. `DKG_PROJECT` and legacy `projectId` arguments contain a Context Graph ID. |
-
-## Verify
-
-1. Run `dkg status` in the terminal.
-2. Inspect the client's DKG tool list. Ask it to call the discovered status and Context Graph listing tools.
-3. Complete the [quickstart](../getting-started/quickstart.md), including retrieval in a new conversation.
-
-If the client cannot find tools, confirm that setup detected the intended installation, restart it, and inspect its MCP logs. A source checkout and a globally installed CLI use different setup modes and homes; see the [package reference](https://github.com/OriginTrail/dkg/blob/main/packages/mcp-dkg/README.md).
 
 ## Remove the connection
 
