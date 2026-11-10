@@ -1,3 +1,4 @@
+import { stripSparqlLiteralsAndComments } from '@origintrail-official/dkg-core';
 import {
   spliceReadGraphPlan,
   type ReadGraphWriteOptions,
@@ -24,11 +25,26 @@ export function refuseReadGraphOperations(options: QueryOptions | undefined, wri
 /**
  * One update request: the plan's `before` operations, the write's own update,
  * then the plan's `after` operations. Without operations the update is
- * returned as it is.
+ * returned as it is. The adapter's own update text ends with an operation,
+ * not a separator.
  */
 export function withReadGraphOperations(update: string, options: QueryOptions | undefined): string {
   const plan = operationsOf(options);
-  if (!plan) return update;
-  // The splice adds the separators, so a caller's own trailing one would make two.
-  return spliceReadGraphPlan(plan, [update.replace(/\s*;\s*$/, '')]);
+  return plan ? spliceReadGraphPlan(plan, [update]) : update;
+}
+
+/**
+ * {@link withReadGraphOperations} for a caller's own update text, which may end
+ * with a `;` separator, also before a trailing comment. That separator is
+ * removed first, because the splice adds its own.
+ */
+export function withReadGraphOperationsAroundCallerUpdate(sparql: string, options: QueryOptions | undefined): string {
+  return operationsOf(options) ? withReadGraphOperations(withoutFinalSeparator(sparql), options) : sparql;
+}
+
+function withoutFinalSeparator(sparql: string): string {
+  // Same length as the text, with strings, IRIs and comments blanked.
+  const masked = stripSparqlLiteralsAndComments(sparql);
+  const end = masked.trimEnd().length;
+  return masked[end - 1] === ';' ? sparql.slice(0, end - 1) + sparql.slice(end) : sparql;
 }

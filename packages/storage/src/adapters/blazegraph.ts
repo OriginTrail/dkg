@@ -50,7 +50,7 @@ import {
 } from './sparql-statements.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { parseBlazegraphConstructNQuads } from './blazegraph-construct-nquads.js';
-import { refuseReadGraphOperations, withReadGraphOperations } from './read-graph-request.js';
+import { refuseReadGraphOperations, withReadGraphOperations, withReadGraphOperationsAroundCallerUpdate } from './read-graph-request.js';
 import type { ReadGraphAdapterCapabilities, ReadGraphCapableAdapter } from '../read-graph/adapter-contract.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
 import { isReadOnlyStoreOperation, type StoreOperation, type StoreOperationOutcome } from '../store-operation-outcome.js';
@@ -452,7 +452,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
    */
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
     await this.sparqlUpdate(
-      withReadGraphOperations(sparql, options),
+      withReadGraphOperationsAroundCallerUpdate(sparql, options),
       { ...options, source: options?.source ?? 'blazegraph.update' },
       'update',
     );

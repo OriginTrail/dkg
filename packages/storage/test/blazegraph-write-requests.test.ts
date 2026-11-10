@@ -97,10 +97,18 @@ describe('BlazegraphStore write requests with read-graph operations', () => {
     ]);
   });
 
-  it('keeps a caller update that ends with a separator one valid request', async () => {
-    const { requests } = await recordBlazegraphWrite((store) =>
-      store.update('DROP SILENT GRAPH <urn:test:g> ;  \n', planned(PLAN)));
-    expect(requests).toEqual([carrying('application/sparql-update\nDROP SILENT GRAPH <urn:test:g>')]);
+  it.each([
+    ['a final separator', 'DROP SILENT GRAPH <urn:test:g> ;  \n', 'DROP SILENT GRAPH <urn:test:g>   \n'],
+    ['a final separator before a comment', 'DROP SILENT GRAPH <urn:test:g>; # done', 'DROP SILENT GRAPH <urn:test:g> # done'],
+    ['a separator only inside a string', 'INSERT DATA { <urn:test:s> <urn:test:p> "a ;" }', 'INSERT DATA { <urn:test:s> <urn:test:p> "a ;" }'],
+    ['a separator only inside an IRI', 'DROP SILENT GRAPH <urn:test:g;>', 'DROP SILENT GRAPH <urn:test:g;>'],
+    ['a separator only inside a comment', 'DROP SILENT GRAPH <urn:test:g> # done;', 'DROP SILENT GRAPH <urn:test:g> # done;'],
+  ])('a caller update with %s stays one valid request', async (_case, sparql, own) => {
+    const { requests } = await recordBlazegraphWrite((store) => store.update(sparql, planned(PLAN)));
+    expect(requests).toEqual([carrying(`application/sparql-update\n${own}`)]);
+    // Without operations the caller's text goes out exactly as it is.
+    expect((await recordBlazegraphWrite((store) => store.update(sparql))).requests)
+      .toEqual([`application/sparql-update\n${sparql}`]);
   });
 
   it('declares every write it sends with operations, and that the engine runs one update at a time', () => {
