@@ -30,18 +30,22 @@ export function hasNestedSelect(scope: PreparedSparqlQuery): boolean {
   return tokens.some((_token, index) => index > prologue.endTokenIndex && isSparqlKeyword(tokens, index, 'SELECT'));
 }
 
+/** A `+`, `*` or `?` token right after something a property path can repeat. */
+export function isRepeatedPathOperator(tokens: readonly SparqlLexicalToken[], index: number): boolean {
+  const token = tokens[index];
+  if (!isSymbol(token, '+') && !isSymbol(token, '*') && !isSymbol(token, '?')) return false;
+  const before = tokens[index - 1];
+  return before?.kind === 'iri' || before?.kind === 'prefixed-name' || isSymbol(before, ')')
+    || (before?.kind === 'word' && before.logicalValue === 'a' && isSparqlKeyword(tokens, index - 1, 'A'));
+}
+
 /**
  * True when a `+`, `*` or `?` follows something a path can repeat. Arithmetic after
  * a function call also matches, which only costs that query the dataset route.
  */
 export function hasRepeatedPath(scope: PreparedSparqlQuery): boolean {
   const { tokens } = scope.prepared;
-  return tokens.some((token, index) => {
-    if (!isSymbol(token, '+') && !isSymbol(token, '*') && !isSymbol(token, '?')) return false;
-    const before = tokens[index - 1];
-    return before?.kind === 'iri' || before?.kind === 'prefixed-name' || isSymbol(before, ')')
-      || (before?.kind === 'word' && before.logicalValue === 'a' && isSparqlKeyword(tokens, index - 1, 'A'));
-  });
+  return tokens.some((_token, index) => isRepeatedPathOperator(tokens, index));
 }
 
 /** Atomic paths retain their GRAPH binding; compound paths need constant targets. */

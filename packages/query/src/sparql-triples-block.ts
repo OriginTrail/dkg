@@ -219,7 +219,7 @@ class TriplesBlockParser {
       this.index += 1;
       return { kind: 'link', iri: token.raw };
     }
-    if (token?.kind === 'word' && token.raw === 'a') {
+    if (token?.kind === 'word' && token.logicalValue === 'a') {
       this.index += 1;
       return { kind: 'link', iri: RDF_TYPE };
     }
@@ -246,7 +246,7 @@ class TriplesBlockParser {
       const token = this.peek();
       let iri: string;
       if (token?.kind === 'iri' || token?.kind === 'prefixed-name') iri = token.raw;
-      else if (token?.kind === 'word' && token.raw === 'a') iri = RDF_TYPE;
+      else if (token?.kind === 'word' && token.logicalValue === 'a') iri = RDF_TYPE;
       else throw new UnreadTriplesBlockError('an unexpected member of a negated property set');
       this.index += 1;
       (inverted ? inverse : forward).push(iri);

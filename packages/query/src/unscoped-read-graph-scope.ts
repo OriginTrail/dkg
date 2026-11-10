@@ -2,6 +2,7 @@
 import { READ_GRAPH_SEGMENT } from '@origintrail-official/dkg-core';
 import { isSparqlKeyword, type PreparedSparqlQuery, type SparqlLexicalToken } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
+import { isRepeatedPathOperator } from './sparql-graph-dataset.js';
 import { transitionGraphScope } from './sparql-query-transition.js';
 import { createVariableAllocator } from './sparql-rewrite-names.js';
 import { defaultGraphEdits, UnrewrittenPatternError, type SourceEdit } from './unscoped-default-graph-rewrite.js';
@@ -10,6 +11,7 @@ const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
 const QUERY_HINT_NAMESPACE = 'http://www.bigdata.com/queryHints#';
 // The store resolves this prefix without a declaration in the query.
 const BUILT_IN_QUERY_HINT_PREFIX = 'hint';
+const LOCAL_NAME_ESCAPE = /\\([_~.\-!$&'()*+,;=/?#@%])/g;
 
 export const UNSCOPED_READ_GRAPH_QUERY_CODE = 'UNSCOPED_QUERY_NEEDS_CONTEXT_GRAPH';
 
@@ -97,11 +99,7 @@ function graphFilterEdits(scope: PreparedSparqlQuery): SourceEdit[] {
   return insertions;
 }
 
-/**
- * A `*`, `+` or `?` path modifier inside a group, outside FILTER and BIND
- * expressions: a lone `?`, or `*` or `+` right after an IRI, a prefixed name,
- * `a` or a closing parenthesis.
- */
+/** A `*`, `+` or `?` path modifier inside a group, outside FILTER and BIND expressions. */
 function holdsRepeatedPath(scope: PreparedSparqlQuery, opening: number, closing: number): boolean {
   const { tokens } = scope.prepared;
   const parentheses = scope.structure.parentheses.matchingTokenIndexes;
@@ -111,13 +109,7 @@ function holdsRepeatedPath(scope: PreparedSparqlQuery, opening: number, closing:
       if (expression?.kind === 'symbol' && expression.logicalValue === '(') index = Math.max(index, parentheses[index + 1] ?? index);
       continue;
     }
-    const token = tokens[index]!;
-    if (token.kind !== 'symbol') continue;
-    if (token.logicalValue === '?') return true;
-    if (token.logicalValue !== '*' && token.logicalValue !== '+') continue;
-    const previous = tokens[index - 1];
-    if (previous?.kind === 'iri' || previous?.kind === 'prefixed-name' || (previous?.kind === 'word' && previous.raw === 'a')
-      || (previous?.kind === 'symbol' && previous.logicalValue === ')')) return true;
+    if (isRepeatedPathOperator(tokens, index)) return true;
   }
   return false;
 }
@@ -130,10 +122,11 @@ function carriesQueryHint(scope: PreparedSparqlQuery): boolean {
   for (const token of tokens) {
     if (token.kind === 'iri' && isHint(token.logicalValue)) return true;
     if (token.kind !== 'prefixed-name') continue;
-    const prefix = token.logicalValue.slice(0, token.logicalValue.indexOf(':'));
+    const colon = token.logicalValue.indexOf(':');
+    const prefix = token.logicalValue.slice(0, colon);
     const namespace = scope.prefixes.get(prefix)
       ?? (prefix === BUILT_IN_QUERY_HINT_PREFIX ? QUERY_HINT_NAMESPACE : undefined);
-    if (namespace !== undefined && isHint(namespace)) return true;
+    if (namespace !== undefined && isHint(namespace + token.logicalValue.slice(colon + 1).replace(LOCAL_NAME_ESCAPE, '$1'))) return true;
   }
   return false;
 }

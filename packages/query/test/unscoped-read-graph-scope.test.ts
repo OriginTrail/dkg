@@ -115,6 +115,8 @@ describe('unscoped queries the rewrite cannot keep out of read-graph partitions'
     ['a zero-or-one path in GRAPH', 'SELECT ?g WHERE { GRAPH ?g { ?s <urn:p>? ?o } }'],
     ['a repeated group path in GRAPH', 'SELECT ?g WHERE { GRAPH ?g { ?s (<urn:p>/<urn:q>)* ?o } }'],
     ['a repeated path inside EXISTS in GRAPH', 'SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o FILTER EXISTS { ?s pre:p+ ?x } } }'],
+    ['an escaped a with a repetition in GRAPH', 'SELECT ?g WHERE { GRAPH ?g { ?s \\u0061* ?o } }'],
+    ['a hint IRI completed by a local name', 'PREFIX h: <http://www.bigdata.com/> SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o . h:queryHints\\#Prior h:queryHints\\#runFirst "true" } }'],
   ])('refuses %s', (_label, source) => {
     const error = refusal(source);
     expect(error).toBeInstanceOf(UnscopedReadGraphQueryError);
@@ -127,6 +129,7 @@ describe('unscoped queries the rewrite cannot keep out of read-graph partitions'
     expect(refusal('PREFIX hint: <urn:not-hints#> SELECT ?s WHERE { GRAPH ?g { ?s hint:p ?o } }')).toBeUndefined();
     expect(refusal('SELECT ?s WHERE { GRAPH ?g { ?s ?p "http://www.bigdata.com/queryHints#Prior" } }')).toBeUndefined();
     expect(refusal('BASE <urn:base/> SELECT ?s WHERE { GRAPH ?g { ?s <relative> ?o } }')).toBeUndefined();
+    expect(refusal('PREFIX h: <http://www.bigdata.com/> SELECT ?s WHERE { GRAPH ?g { ?s h:other ?o } }')).toBeUndefined();
   });
 
   it('refuses a GRAPH clause whose group it cannot find', () => {

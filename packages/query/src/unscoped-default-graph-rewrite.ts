@@ -284,7 +284,7 @@ class DefaultGraphRewriter {
     while (this.symbolAt(from, '{') && this.scope.structure.braces.matchingTokenIndexes[from] === to - 1) { from += 1; to -= 1; }
     const body = this.tokens.slice(from, to).filter((token, index, all) => !(index === all.length - 1 && token.kind === 'symbol' && token.logicalValue === '.'));
     return body.length === 3 && body.every(token => token.kind === 'variable' || token.kind === 'iri' || token.kind === 'prefixed-name'
-      || token.kind === 'number' || token.kind === 'string' || (token.kind === 'word' && token.raw === 'a'))
+      || token.kind === 'number' || token.kind === 'string' || (token.kind === 'word' && token.logicalValue === 'a'))
       && variables.every(variable => body.some(token => token.kind === 'variable' && token.raw === variable));
   }
 

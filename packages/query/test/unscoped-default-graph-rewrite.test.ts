@@ -83,6 +83,19 @@ describe('patterns outside GRAPH', () => {
     expect(() => hideReadGraphPartitions(scope(source))).toThrow(UnscopedReadGraphQueryError);
   });
 
+  it('reach patterns outside GRAPH in the projection, ORDER BY and HAVING', () => {
+    for (const query of [
+      'SELECT ?s (EXISTS { ?s <urn:q> ?y } AS ?e) WHERE { GRAPH ?g { ?s ?p ?o } }',
+      'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY (EXISTS { ?s <urn:q> ?y })',
+      'SELECT ?s (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?s HAVING (EXISTS { ?s <urn:q> ?y })',
+    ]) expect(hidden(query)).toMatch(/GRAPH \?_holder\d* \{ \?s <urn:q> \?y \}/);
+  });
+
+  it('reads an escaped a as rdf:type and refuses its repetition', () => {
+    expect(hidden('SELECT ?s WHERE { ?s \\u0061 <urn:T> }')).toContain('?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <urn:T>');
+    expect(() => hideReadGraphPartitions(scope('SELECT ?s WHERE { ?s \\u0061* ?o }'))).toThrow(UnscopedReadGraphQueryError);
+  });
+
   it('lets SELECT * through when nothing new comes into scope', () => {
     expect(hidden('SELECT * WHERE { ?s ?p ?o }')).toContain('FILTER EXISTS');
   });
