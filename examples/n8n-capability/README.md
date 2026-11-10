@@ -206,9 +206,29 @@ the unmatched input (and overwrites any existing `_source` property).
 This exposes n8n's native Merge v3.2 settings; no new join engine or domain-specific mapping is added.
 
 Provision the installed local n8n runtime with its official CLI while that owned
-instance is stopped. The installer first takes a SQLite backup, reads credential
-references (never tokens), imports native templates and publishes action flows.
+instance is stopped. The installer resolves credential references (never tokens),
+takes a SQLite backup, imports native templates and publishes action flows.
 Schedule components remain inactive until a saved workflow is activated.
+
+Installation and companion startup use the authenticated webhook credential from
+the bootstrap workflow pinned by `n8n.json`. A missing, edited or ambiguous bootstrap
+workflow stops setup before import. Other workflows cannot select this credential.
+For Studio Google connections, put the operator-selected references in
+`/tmp/n8n-ka-state/studio-connections.json` before installation and restart:
+
+```json
+{
+  "googleSheetsOAuth2Api": { "id": "EXISTING_SHEETS_ID", "name": "My Sheets connection" },
+  "googleDriveOAuth2Api": { "id": "EXISTING_DRIVE_ID", "name": "My Drive connection" }
+}
+```
+
+Omit connections you do not want to enable; `{}` disables both for new Studio
+templates. IDs must exist in this n8n instance with the matching credential type.
+When this file is absent, the Sheets ID explicitly selected through `setup-csv.mjs`
+is reused; conflicting CSV selections are rejected. Drive always requires an
+explicit reference. Credential references in unrelated workflows are never used,
+and existing saved workflow pins are retained.
 
 ```sh
 node examples/n8n-capability/setup-components-local.mjs /tmp/n8n-ka-state --install \

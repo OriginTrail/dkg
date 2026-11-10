@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { componentContract } from './component-registry.mjs';
 import { loadStudioContext } from './studio-context.mjs';
+import { loadStudioCredentials } from './studio-credentials.mjs';
 import { standaloneComponentWorkflow, echoSubworkflow } from './component-workflows.mjs';
 import { n8nWorkflowSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 
@@ -22,8 +23,6 @@ if (process.argv.includes('--only') && (!only?.length || only.some(id => !compon
 const userFolder = join(state, 'n8n'), database = join(userFolder, '.n8n/database.sqlite');
 mkdirSync(state, { recursive: true, mode: 0o700 });
 const output = mkdtempSync(join(state, 'component-workflows-v1-')); chmodSync(output, 0o700);
-let header = { id: 'component-fixture-header', name: 'Component fixture' };
-const credentials = {};
 let executor = '0x' + '1'.repeat(40);
 const runtimeFile = join(state, 'runtime/semantic-runtime.sqlite');
 if (existsSync(runtimeFile)) {
@@ -33,20 +32,7 @@ if (existsSync(runtimeFile)) {
   db.close();
 } else if (!fixture) throw new Error('The existing PoC executor configuration is required.');
 const scopeName = id => 'nOS scope ' + createHash('sha256').update(JSON.stringify(['n8n-capability-poc', executor.toLowerCase(), id])).digest('hex').slice(0, 20);
-if (existsSync(database)) {
-  const db = new DatabaseSync(database, { readOnly: true });
-  for (const row of db.prepare('SELECT nodes FROM workflow_entity').all()) {
-    for (const item of JSON.parse(row.nodes)) {
-      header = item.credentials?.httpHeaderAuth ?? header;
-      for (const kind of ['googleSheetsOAuth2Api', 'googleDriveOAuth2Api']) {
-        if (item.credentials?.[kind]) credentials[kind] = item.credentials[kind];
-      }
-    }
-  }
-  db.close();
-}
-if (!fixture && header.id === 'component-fixture-header') throw new Error('The existing PoC webhook credential reference was not found.');
-credentials.httpHeaderAuth = header;
+const { headerCredential: header, credentials } = loadStudioCredentials(state, { fixture });
 const components = [];
 const componentRef = item => `urn:demo:n8n:component:${item.descriptor.id}:${item.grant.workflowSha256.slice(0, 12)}`
   + (item.descriptor.version >= 2 ? ':' + createHash('sha256').update(item.source).digest('hex').slice(0, 12) : '');

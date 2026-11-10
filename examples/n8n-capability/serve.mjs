@@ -22,6 +22,7 @@ import { csvProgramSource } from './csv-workflows.mjs';
 import { loadStudioContext } from './studio-context.mjs';
 import { componentProgramSource as componentProgramSourceV1 } from './component-registry-v1.mjs';
 import { installProgramExamples } from './program-catalog.mjs';
+import { loadStudioCredentials } from './studio-credentials.mjs';
 
 const context = await loadStudioContext();
 const { componentProgramSource } = context.registry;
@@ -35,6 +36,7 @@ const csvFile = join(state, 'csv-components.json');
 const csv = existsSync(csvFile) ? JSON.parse(readFileSync(csvFile, 'utf8')) : { components: [] };
 const componentsFile = join(state, 'components.json');
 const componentManifest = existsSync(componentsFile) ? JSON.parse(readFileSync(componentsFile, 'utf8')) : { components: [] };
+const studioCredentials = componentManifest.installed ? loadStudioCredentials(state) : null;
 const legacyDefinitions = [{ kind: 'text', kaRef, name: 'Normalize text', enabled: true, grant }, ...csv.components];
 const definitions = [...legacyDefinitions, ...componentManifest.components];
 // Source revisions may reuse an identical native template. Retain their KA pins
@@ -75,16 +77,9 @@ try {
   nonceDb = new Database(join(state, 'http-nonces.db'));
   const nonces = new SqliteAgentHttpNonceStore(nonceDb);
   const client = new GraphComputer({ nodeUrl, peerId: agent.peerId, signer, retries: 0 });
-  const credentialDb = new Database(join(state, 'n8n/.n8n/database.sqlite'), { readonly: true });
-  let headerCredential; const credentials = {};
-  for (const row of credentialDb.prepare('SELECT nodes FROM workflow_entity').all()) for (const node of JSON.parse(row.nodes)) {
-    headerCredential = node.credentials?.httpHeaderAuth ?? headerCredential;
-    for (const kind of ['googleSheetsOAuth2Api', 'googleDriveOAuth2Api']) if (node.credentials?.[kind]) credentials[kind] = node.credentials[kind];
-  }
-  credentialDb.close();
   bridge = createCapabilityBridge({ context, agent, client, graphId, owner, config: semanticRuntime,
     programAuthority: createNativeCallbackAuthority({ agent, runtime: () => runtime, config: semanticRuntime, graphId, caller: owner }),
-    definitions, exportTokenFile: csv.exportTokenFile, ...(componentManifest.installed ? { studioOptions: { state, headerCredential, credentials } } : {}) });
+    definitions, exportTokenFile: csv.exportTokenFile, ...(studioCredentials ? { studioOptions: { state, ...studioCredentials } } : {}) });
   server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', nodeUrl), path = url.pathname;
