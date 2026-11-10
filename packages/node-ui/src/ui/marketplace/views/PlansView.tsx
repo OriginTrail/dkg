@@ -175,9 +175,11 @@ export function PlansView(): React.ReactElement {
   }, [toppedUp, reloadSubs, reloadFunding]);
   // The node answers the funding before it has read the account list when that takes long (the first read on a public
   // RPC can). While the last funding read says so, the funding is read again on the UI's polling policy: paused while
-  // the tab is hidden, and kept up after a read that failed, until a read brings the list.
+  // the tab is hidden, and kept up after a read that failed, until a read brings the list. A poll that finds a funding
+  // read still running skips its turn, so a newer read never supersedes a slow one before it answers.
   const accountsPending = funding.data?.accountsPending === true;
-  useVisibilityPolling(reloadFunding, accountsPending ? ACCOUNTS_PENDING_RELOAD_MS : 0, { runImmediately: false });
+  const fundingLoading = funding.loading;
+  useVisibilityPolling(() => { if (!fundingLoading) reloadFunding(); }, accountsPending ? ACCOUNTS_PENDING_RELOAD_MS : 0, { runImmediately: false });
   // The flow on show made a confirmation; the onboarding one is on show with no flow asked for, and is one from here.
   const confirmed = (id: number) => setFlow((f) => ({ ...(f ?? { kind: 'fund', epoch: 'current' }), confirmed: id }));
 

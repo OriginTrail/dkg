@@ -43,33 +43,66 @@ describe('decodeReceiptBatch', () => {
 
 describe('listBuyerAccounts', () => {
   const BUYER = ethers.getAddress('0x00000000000000000000000000000000000000b1');
+  const OTHER_BUYER = ethers.getAddress('0x00000000000000000000000000000000000000b2');
   const SUBSCRIPTIONS = ethers.getAddress('0x00000000000000000000000000000000000000a1');
+  const REPLACEMENT = ethers.getAddress('0x00000000000000000000000000000000000000a2');
   const DEPLOYED = 10_000;
   const topic = (value: bigint | string) => ethers.zeroPadValue(typeof value === 'bigint' ? ethers.toBeHex(value) : value, 32);
-  const buyerAdded = (accountId: bigint, blockNumber: number) => ({ blockNumber, topics: [ethers.id('BuyerAdded'), topic(accountId), topic(BUYER)] });
+  const buyerAdded = (accountId: bigint, blockNumber: number, buyer = BUYER, address = SUBSCRIPTIONS) => (
+    { address, blockNumber, topics: [ethers.id('BuyerAdded'), topic(accountId), topic(buyer)] }
+  );
 
-  /** An adapter whose chain is `logs` up to `chain.head`, recording each page it reads and each lookup it makes. */
-  function adapterOver(chain: { head: number; logs: Array<ReturnType<typeof buyerAdded>>; anchor?: number }) {
+  interface FakeChain {
+    head: number;
+    logs: Array<ReturnType<typeof buyerAdded>>;
+    /** The Hub's ServiceSubscriptions address, and each address's deploy block (a deploy-block search that fell back to genesis gives 0). */
+    subscriptions?: string;
+    deployedAt?: Record<string, number>;
+  }
+
+  /**
+   * An adapter built as the node builds one, whose chain is `logs` up to `chain.head`. It records each page
+   * it reads, by contract, and each lookup it makes. Only the chain reads are stubbed: the scan it keeps is
+   * the adapter's own.
+   */
+  function adapterOver(chain: FakeChain) {
     const pages: Array<[number, number]> = [];
+    const pagesByContract = new Map<string, Array<[number, number]>>();
     const lookups = { deployBlock: 0, head: 0 };
-    const serviceSubscriptions = { getAddress: async () => SUBSCRIPTIONS, filters: { BuyerAdded: () => ({}) } };
-    const adapter = Object.assign(Object.create(EVMChainAdapter.prototype), {
+    const contractAt = (address: string) => ({
+      getAddress: async () => address,
+      filters: { BuyerAdded: (_accountId: unknown, buyer: string) => ({ buyer }) },
+    });
+    const real = new EVMChainAdapter({
+      rpcUrl: 'http://127.0.0.1:1',
+      privateKey: `0x${'11'.repeat(32)}`,
+      hubAddress: '0x0000000000000000000000000000000000000001',
+      chainId: 'evm:31337',
+      allowNoAdminSigner: true,
+      staticNetwork: false,
+    });
+    const adapter = Object.assign(real, {
       init: async () => undefined,
-      resolveContract: async () => serviceSubscriptions,
-      resolveContractDeployBlock: async () => {
+      resolveContract: async () => contractAt(chain.subscriptions ?? SUBSCRIPTIONS),
+      resolveContractDeployBlock: async (address: string) => {
         lookups.deployBlock += 1;
-        return { fromBlock: chain.anchor ?? DEPLOYED, head: chain.head, scanProviders: [], ...(chain.anchor === 0 ? { degradedFromGenesis: true } : {}) };
+        const fromBlock = chain.deployedAt?.[address] ?? DEPLOYED;
+        return { fromBlock, head: chain.head, scanProviders: [], ...(fromBlock === 0 ? { degradedFromGenesis: true } : {}) };
       },
       resolveLogScanHead: async () => {
         lookups.head += 1;
         return { head: chain.head, scanProviders: [] };
       },
-      queryEventLogsPage: async (_contract: unknown, _filter: unknown, lo: number, hi: number) => {
+      queryEventLogsPage: async (contract: { getAddress(): Promise<string> }, filter: { buyer: string }, lo: number, hi: number) => {
+        const address = await contract.getAddress();
         pages.push([lo, hi]);
-        return { logs: chain.logs.filter((l) => l.blockNumber >= lo && l.blockNumber <= hi), provider: {} };
+        pagesByContract.set(address, [...(pagesByContract.get(address) ?? []), [lo, hi]]);
+        const logs = chain.logs.filter((l) => l.address === address && l.topics[2] === topic(filter.buyer)
+          && l.blockNumber >= lo && l.blockNumber <= hi);
+        return { logs, provider: {} };
       },
-    }) as { listBuyerAccounts(buyer: string): Promise<bigint[]> };
-    return { adapter, pages, lookups };
+    }) as unknown as { listBuyerAccounts(buyer: string): Promise<bigint[]> };
+    return { adapter, pages, pagesByContract, lookups };
   }
 
   it('keeps the scan between reads: a repeat read covers only the new blocks and the reorg tail', async () => {
@@ -89,7 +122,7 @@ describe('listBuyerAccounts', () => {
   });
 
   it('does not search for the deploy block again after a read that fell back to genesis', async () => {
-    const chain = { head: 25_000, logs: [buyerAdded(7n, 12_345)], anchor: 0 };
+    const chain = { head: 25_000, logs: [buyerAdded(7n, 12_345)], deployedAt: { [SUBSCRIPTIONS]: 0 } };
     const { adapter, pages, lookups } = adapterOver(chain);
     expect(await adapter.listBuyerAccounts(BUYER)).toEqual([7n]);
     expect(pages[0]).toEqual([0, 9_999]);
@@ -115,5 +148,33 @@ describe('listBuyerAccounts', () => {
     const second = adapterOver(chain);
     await second.adapter.listBuyerAccounts(BUYER);
     expect(second.pages[0]).toEqual([DEPLOYED, 19_999]);
+  });
+
+  it('keeps a scan per buyer: another buyer reads from the deployment and gets only its own accounts', async () => {
+    const chain = { head: 20_000, logs: [buyerAdded(7n, 12_345), buyerAdded(9n, 11_000, OTHER_BUYER)] };
+    const { adapter, pages } = adapterOver(chain);
+    expect(await adapter.listBuyerAccounts(BUYER)).toEqual([7n]);
+    pages.length = 0;
+    // Buyer B's account is older than the reorg tail of A's scan, so a scan shared with A would miss it.
+    expect(await adapter.listBuyerAccounts(OTHER_BUYER)).toEqual([9n]);
+    expect(pages).toEqual([[DEPLOYED, 19_999], [20_000, 20_000]]);
+    // And A's next read still covers only its tail.
+    pages.length = 0;
+    expect(await adapter.listBuyerAccounts(BUYER)).toEqual([7n]);
+    expect(pages).toEqual([[20_001 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 20_000]]);
+  });
+
+  it('keeps a scan per contract: a replacement ServiceSubscriptions is read from its own deployment', async () => {
+    const chain: FakeChain = {
+      head: 20_000,
+      logs: [buyerAdded(7n, 12_345), buyerAdded(11n, 16_000, BUYER, REPLACEMENT)],
+      deployedAt: { [SUBSCRIPTIONS]: DEPLOYED, [REPLACEMENT]: 15_000 },
+    };
+    const { adapter, pagesByContract } = adapterOver(chain);
+    expect(await adapter.listBuyerAccounts(BUYER)).toEqual([7n]);
+    // The Hub now names a replacement contract.
+    chain.subscriptions = REPLACEMENT;
+    expect(await adapter.listBuyerAccounts(BUYER)).toEqual([11n]);
+    expect(pagesByContract.get(REPLACEMENT)).toEqual([[15_000, 20_000]]);
   });
 });

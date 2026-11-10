@@ -26,9 +26,9 @@ import type { TxResult } from './chain-adapter.js';
 import { loadAbi } from './evm-adapter-abi.js';
 import { enrichEvmError } from './evm-adapter-errors.js';
 import { EVMChainAdapterBase, type ScanProvider } from './evm-adapter-base.js';
-import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
+import { BUYER_SCAN_PAGE_BLOCKS } from './evm-adapter-constants.js';
 import type { EvmSigner } from './evm-signer.js';
-import { IncrementalEventScan, type ScannedEvent } from './incremental-event-scan.js';
+import type { ScannedEvent } from './incremental-event-scan.js';
 import {
   BUYER_GRANT_TYPES,
   compactSignature,
@@ -63,16 +63,6 @@ import {
 } from './marketplace.js';
 
 type Log = { address: string; topics: ReadonlyArray<string>; data: string };
-
-/** Blocks per `eth_getLogs` page of the `BuyerAdded` scan; the reader fits a page to each RPC's span cap. */
-const BUYER_SCAN_PAGE_BLOCKS = 10_000;
-
-/**
- * Each adapter's `BuyerAdded` scan, kept per contract and buyer so that a repeat read covers only the
- * blocks since the last one. A WeakMap because a mixin's own fields are never set on the class it is
- * mixed into.
- */
-const buyerAccountScans = new WeakMap<object, IncrementalEventScan<bigint>>();
 
 const interfaces = new Map<string, ethers.Interface>();
 
@@ -428,13 +418,8 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     const ss = await this.resolveContract('ServiceSubscriptions');
     const address = await ss.getAddress();
     const label = 'listBuyerAccounts';
-    let scan = buyerAccountScans.get(this);
-    if (!scan) {
-      scan = new IncrementalEventScan<bigint>({ pageBlocks: BUYER_SCAN_PAGE_BLOCKS, tailBlocks: CG_REGISTRY_REORG_BUFFER_BLOCKS });
-      buyerAccountScans.set(this, scan);
-    }
     const filter = ss.filters.BuyerAdded(null, buyer);
-    const accounts = await scan.read(
+    const accounts = await this.buyerAccountScan.read(
       `${address.toLowerCase()}:${buyer.toLowerCase()}`,
       async (progress) => {
         // Once the scan has read from its anchor, a later read only needs the head. That also keeps a deploy-block

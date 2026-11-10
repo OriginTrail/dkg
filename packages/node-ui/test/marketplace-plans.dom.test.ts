@@ -156,4 +156,41 @@ describe('marketplace Plans', () => {
       vi.useRealTimers();
     }
   });
+
+  it('starts no funding read while one is running, so a read slower than the interval still brings the list', async () => {
+    let reads = 0;
+    let answerSlowRead!: () => void;
+    const slowRead = new Promise<void>((resolve) => { answerSlowRead = resolve; });
+    const node = fixtureFetch('active');
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') !== 'GET' || String(input) !== '/api/marketplace/funding') return node(input, init);
+      reads += 1;
+      const funding = await (await node(input, init)).json() as Funding;
+      if (reads === 1) return json({ ...funding, accounts: [], accountsPending: true });
+      // The second read brings the list, but only once it is answered, three intervals later.
+      await slowRead;
+      return json({ ...funding, accountsPending: false });
+    });
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const c = await render(plans());
+      await waitUntil(() => !!byTestId(c, 'mkt-treasury')?.querySelector('[data-copy="treasury.accounts.pending"]'), 'the pending note');
+
+      await act(async () => { vi.advanceTimersByTime(10_000); });
+      await waitUntil(() => reads === 2, 'the slow read');
+      // Two more intervals pass while it runs: neither starts a read of its own.
+      await act(async () => { vi.advanceTimersByTime(10_000); });
+      await act(async () => { vi.advanceTimersByTime(10_000); });
+      await flush();
+      expect(reads).toBe(2);
+
+      answerSlowRead();
+      await waitUntil(() => !!byTestId(c, 'mkt-account-7'), 'the account the node owns');
+      await act(async () => { vi.advanceTimersByTime(60_000); });
+      await flush();
+      expect(reads).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
