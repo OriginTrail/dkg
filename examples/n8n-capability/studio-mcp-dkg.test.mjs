@@ -36,7 +36,7 @@ test('withdrawal while a DKG callback awaits account authorization prevents tran
     operations: { 'dkg-read': { ...profile.operations['dkg-read'],
       transport() { transports++; throw new Error('withdrawn callback reached transport'); } } } };
   const s = createStudioMcpService({ repository, accountId: profile.accountId, compiler: createStudioContext({ profile: checkedProfile }).compiler,
-    dkg: dkgComponentStore(repository.db, undefined, undefined, checkedProfile),
+    dkg: dkgComponentStore(repository.db, checkedProfile),
     runner: { async prepare() { return 'v1'; }, async dispatch(_workflow, invocationId, input) {
       received = { invocationId, input }; return '42';
     }, async inspect() { return { status: 'running' }; }, async verifyCallback() { return received; } } });
@@ -88,7 +88,7 @@ test('native DKG callback uses the admitted pins, typed profile and full agent a
   // Test fixture installs the same durable saved record that a completed owner save writes.
   repository.mcp.recordSavedNative(compiled, published);
   const actor = { id: 'owner', role: 'owner', accountId: 'account-test', startedBy: 'agent:a', agentVersion: 'v1', toolDigest: 'd'.repeat(64), approvalDecisionId: 'decision-1' };
-  const dkg = dkgComponentStore(repository.db, undefined, undefined, profile);
+  const dkg = dkgComponentStore(repository.db, profile);
   let earlyCallback;
   const s = createStudioMcpService({ repository, dkg, accountId: actor.accountId, compiler,
     runner: { ...nativeRunner, async prepare() { return 'v1'; }, async dispatch(_workflow, invocationId, input) {
@@ -167,7 +167,7 @@ test('native DKG callback uses the admitted pins, typed profile and full agent a
   const reopened = createStudioProvider({ compiler, repository: reopenedRepository, config: { n8nNative: { workflows: [] } }, graphId: 'test', owner: '0x' + 'a'.repeat(40) });
   t.after(() => reopenedRepository.close());
   const restored = createStudioMcpService({ repository: reopenedRepository, provider: reopened,
-    dkg: dkgComponentStore(reopenedRepository.db, undefined, undefined, profile), accountId: actor.accountId, compiler,
+    dkg: dkgComponentStore(reopenedRepository.db, profile), accountId: actor.accountId, compiler,
     runner: { async inspect() { return { status: 'succeeded', output: { secret: 'retained' } }; } } });
   assert.equal(restored.list(owner).length, 0);
   await assert.rejects(restored.run({ ...input, runKey: 'new-run' }, actor), { code: 'STUDIO_WORKFLOW_WITHDRAWN' });
@@ -197,7 +197,7 @@ for (const reopen of [false, true]) test(`colon-prefixed MCP run keys bind and r
     return id;
   } };
   const open = () => createStudioMcpService({ repository, runner, accountId: profile.accountId, compiler: createStudioContext({ profile: scoped }).compiler,
-    dkg: dkgComponentStore(repository.db, undefined, undefined, scoped) });
+    dkg: dkgComponentStore(repository.db, scoped) });
   let service = open();
   async function admit(runKey, sample) {
     const run = await service.run({ kaRef: compiled.kaRef, workflowSha256: compiled.grant.workflowSha256,

@@ -25,13 +25,20 @@ test('read-only profile loads without Program, write or shared transport placeho
 });
 
 test('declared read capability dispatches and replays with current authorization and its enable switch', async () => {
-  let enabled = true, authorized = true, calls = 0;
+  let enabled = true, authorized = true, calls = 0, loads = 0;
+  const selectedInputs = [{ sample: 'a' }];
   const profile = { ...readProfile, authorize() { if (!authorized) throw new Error('owner revoked'); },
     operations: { 'dkg-read': { ...readProfile.operations['dkg-read'], enabled: () => enabled,
+      loadInputs() { loads++; return structuredClone(selectedInputs); },
+      validateInput(definition, input, approvedInputs) {
+        readProfile.operations['dkg-read'].validateInput(definition, input);
+        if (input.itemsJson !== JSON.stringify(approvedInputs)) throw new Error('Input differs from the approved profile snapshot');
+      },
       transport(request) { calls++; assert.equal(request.sample, 'a'); return { graph: 'urn:test:measurements', measurements }; } } } };
   const db = new DatabaseSync(':memory:');
   try {
-    const store = dkgComponentStore(db, undefined, undefined, profile);
+    const store = dkgComponentStore(db, profile);
+    selectedInputs[0].sample = 'b'; // Configuration changes cannot mutate this journal's loaded snapshot.
     const node = { id: 'read', componentId: 'dkg-read', params: Object.fromEntries(Object.entries(profileParameters(profile, 'dkg-read')).map(([k, v]) => [k, v.default])) };
     const workflow = { kaRef: 'urn:test:readonly', sourceHash: 'a'.repeat(64), definition: { entryId: node.id, nodes: [node], edges: [] } };
     const id = '11223344-1234-4234-8234-123456789abc', input = { itemsJson: '[{"sample":"a"}]', paramsJson: '{}', executionId: '' };
@@ -40,6 +47,8 @@ test('declared read capability dispatches and replays with current authorization
     const request = { blockId: node.id, items: [{ sample: 'a' }], effectId: 'urn:sr:effect:' + id + ':0', workflowId: 'native', executionId: '42' };
     const call = () => store.call(request, workflow, journal, 'native', { invocationId: request.effectId, input });
     store.grant(workflow, journal, input, actor);
+    assert.throws(() => store.grant(workflow, { ...journal, invocationId: 'different-run' },
+      { ...input, itemsJson: '[{"sample":"b"}]' }, actor), /approved profile snapshot/);
     assert.deepEqual(await call(), { items: measurements });
     assert.deepEqual(await call(), { items: measurements });
     enabled = false;
@@ -51,6 +60,7 @@ test('declared read capability dispatches and replays with current authorization
       assert.throws(() => store.grant(unsupported, journal, input, actor), /not supported/);
     }
     assert.equal(calls, 1);
+    assert.equal(loads, 1);
   } finally { db.close(); }
 });
 

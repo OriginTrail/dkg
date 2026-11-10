@@ -68,7 +68,7 @@ try {
   repository.completeSave(compiled, 'native-n8n', false, await provider.savedNativeSnapshot(compiled));
   // n8n publication returns before local webhook registration settles.
   await delay(1500);
-  service = createStudioMcpService({ repository, provider, dkg: dkgComponentStore(repository.db, undefined, undefined, profile), accountId: profile.accountId, compiler,
+  service = createStudioMcpService({ repository, provider, dkg: dkgComponentStore(repository.db, profile), accountId: profile.accountId, compiler,
     runner: createStudioNativeRunner(provider, installation, (url, options) => { posts++; return fetch(url, options); }) });
   const secret = randomBytes(32).toString('hex'), secretFile = join(state, 'smoke-service-key'), sessionFile = join(state, 'smoke-session.json');
   writeFileSync(secretFile, secret, { mode: 0o600 });

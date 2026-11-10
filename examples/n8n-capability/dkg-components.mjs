@@ -41,10 +41,10 @@ export function validateDkgTopology(definition) {
     throw fail("DKG Write must be the terminal output.");
 }
 /** Transport journal only. Scheduling, transformations and joins remain in native n8n. */
-export function dkgComponentStore(db, transport, approvedInputs, profile = null) {
+export function dkgComponentStore(db, profile = null) {
   const inputSnapshots = new Map(), operationInputs = {};
   for (const [id, operation] of Object.entries(profile ? profileOperations(profile) : {})) {
-    if (!inputSnapshots.has(operation.loadInputs)) inputSnapshots.set(operation.loadInputs, approvedInputs ?? operation.loadInputs?.() ?? []);
+    if (!inputSnapshots.has(operation.loadInputs)) inputSnapshots.set(operation.loadInputs, operation.loadInputs?.() ?? []);
     operationInputs[id] = inputSnapshots.get(operation.loadInputs);
   }
   db.exec(`CREATE TABLE IF NOT EXISTS dkg_component_runs(id TEXT PRIMARY KEY, ka_ref TEXT NOT NULL, source_hash TEXT NOT NULL, input TEXT NOT NULL, expires INTEGER NOT NULL);
@@ -197,20 +197,20 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = null)
     };
     const assertCurrent = await authorize(!!previous);
     assertCurrent?.();
+    // Another callback may journal this key while authorization awaits graph
+    // access. Check its request identity before sharing any active response.
+    const prior = readPrior();
     if (active.has(key)) {
       const response = await active.get(key);
       const assertCurrent = await authorize(true);
       assertCurrent?.();
       return response;
     }
-    // A matching callback may finish while authorization is awaiting graph
-    // access. Refresh its journal before selecting cache/reconciliation/create.
-    const prior = readPrior();
     const operation = operations[node.componentId];
     const dispatch = async (request, kind, options) => {
       const assertCurrent = await authorize(kind === 'write' && request.allowCreate === false);
       assertCurrent?.();
-      return transport ? transport(request, kind, options) : capability.transport(request, options);
+      return capability.transport(request, options);
     };
     const context = { node, rows, id, key, input, value, workflow, actor, prior, dispatch };
     if (prior?.result && !prior.response) {

@@ -59,6 +59,9 @@ Every declared operation owns public `parameters`, optional `sampleItems`,
 fixture. Admission validates each selected operation once, and callbacks recheck
 its enable switch and node/input policy before cached responses or effects.
 Transport is selected by the declared operation, never by workflow input.
+`dkgComponentStore(db, profile)` accepts no separate transport or input overrides.
+Tests also supply those dependencies through `operation.transport` and
+`operation.loadInputs`; each distinct loader is snapshotted once per journal.
 
 Additional fields belong only to the operation that uses them:
 
@@ -126,6 +129,9 @@ Completed Read, Invoke and Write calls journal their exact native response
 separately from operation evidence. All three replay through the same path after
 current authority, profile, request and native-execution checks. Operation handlers
 prepare durable requests before dispatch; evidence and response commit atomically.
+Callbacks recheck the journalled request hash after asynchronous authorization,
+before sharing another callback's active response. Only identical requests may
+join that pending result.
 Older completed rows acquire responses without transport calls, using the original
 Write receipt where present. A completed legacy Write without its receipt requires
 operator reconciliation. Uncertain writes retain their exact payload and reconcile

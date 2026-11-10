@@ -1,9 +1,10 @@
 import { JPB_SOURCE, JPB_TARGET, JPB_WORKBOOK } from './profiles/jpb-evidence.mjs';
 import { compiler, registry, profile } from './test-support/jpb-context.mjs';
-import { dkgComponentStore } from './test-support/dkg-component-store-fixture.mjs';
+import { dkgComponentStore, withDkgTestDependencies } from './test-support/dkg-component-store-fixture.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
+import { setImmediate } from 'node:timers/promises';
 import {
   dkgComponentStore as createStore,
   validateDkgTopology,
@@ -188,10 +189,10 @@ test('overlapping identical Write callbacks share one pending transport and reje
 test('a callback waiting on authority reuses the Write completed by its overlapping retry', async t => {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close());
   let writes = 0;
-  const store = createStore(db, async (value, operation) => {
+  const store = createStore(db, withDkgTestDependencies(profile, { transport: async (value, operation) => {
     if (operation === 'read') return readResult;
     writes++; assert.equal(value.allowCreate, true); return written(value);
-  }, [wb], profile);
+  }, approvedInputs: [wb] }));
   const scope = { invocationId: id, revisionDigest: workflow.sourceHash, authority: { invocation: id } };
   store.grant(workflow, scope, input);
   const received = { invocationId: request('read', []).effectId, input };
@@ -215,6 +216,47 @@ test('a callback waiting on authority reuses the Write completed by its overlapp
   await assert.rejects(store.call(value, workflow, scope, 'native1', received), /authority verifier required/);
   db.prepare('UPDATE dkg_component_runs SET authority=NULL').run();
   assert.throws(() => store.grant(workflow, scope, input), /unscoped legacy run/);
+});
+
+test('changed Write rows awaiting authorization cannot inherit an active valid callback receipt', { timeout: 5000 }, async t => {
+  const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+  const authorizing = Promise.withResolvers(), authorized = Promise.withResolvers();
+  const writing = Promise.withResolvers(), writtenReply = Promise.withResolvers();
+  let writes = 0;
+  const store = createStore(db, withDkgTestDependencies(profile, { transport: async (value, operation) => {
+    if (operation === 'read') return readResult;
+    writes++; writing.resolve(); await writtenReply.promise; return written(value);
+  }, approvedInputs: [wb] }));
+  const scope = { invocationId: id, revisionDigest: workflow.sourceHash, authority: { invocation: id } };
+  store.grant(workflow, scope, input);
+  const received = { invocationId: request('read', []).effectId, input };
+  const current = { ...scope, authorize: async () => () => {} };
+  await store.call(request('read', JSON.parse(input.itemsJson)), workflow, current, 'native1', received);
+  let pause = true;
+  const waiting = { ...scope, authorize: async () => {
+    if (pause) { pause = false; authorizing.resolve(); await authorized.promise; }
+    return () => {};
+  } };
+  const valid = request('write', [{ erp: records[0], workbook: wb }]);
+  const changed = { ...valid, items: [{ erp: { ...records[0], orderNo: 'forged' }, workbook: wb }] };
+  const outcome = store.call(changed, workflow, waiting, 'native1', received)
+    .then(response => ({ response }), error => ({ error }));
+  await authorizing.promise;
+  assert.equal(db.prepare('SELECT id FROM dkg_component_calls WHERE id=?').get(id + ':write'), undefined);
+  const pending = store.call(valid, workflow, current, 'native1', received);
+  try {
+    await writing.promise;
+    authorized.resolve();
+    await setImmediate(); // The changed callback resumes while the valid Write is still in flight.
+  } finally { authorized.resolve(); writtenReply.resolve(); }
+  const [denied, response] = await Promise.all([outcome, pending]);
+  assert.match(denied.error?.message ?? '', /different inputs or native execution/);
+  assert.equal(denied.response, undefined);
+  assert.equal(writes, 1);
+  assert.deepEqual(await store.call(valid, workflow, current, 'native1', received), response);
+  assert.deepEqual(JSON.parse(db.prepare('SELECT response FROM dkg_component_calls WHERE id=?').get(id + ':write').response), response);
+  assert.deepEqual(JSON.parse(db.prepare('SELECT request FROM dkg_component_writes WHERE id=?').get(id + ':write').request), valid);
+  assert.equal(writes, 1);
 });
 test("rejects ungranted, foreign scope, changed replay, and invented ERP before effects", async () => {
   const calls = [];
