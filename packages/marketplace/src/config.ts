@@ -5,7 +5,7 @@
  * `enabled` is true.
  */
 import { ethers } from 'ethers';
-import { MAX_TOKENS_FIELDS, type ConnectorSettings } from './connector.js';
+import { MAX_TOKENS_FIELDS, REASONING_EFFORTS, type ConnectorSettings } from './connector.js';
 import { DEFAULT_LANDING, type LandingSettings } from './landing.js';
 import { serviceIdOf } from './offers.js';
 import { DEFAULT_STOP_SERVING_SECONDS } from './seller.js';
@@ -205,6 +205,9 @@ export function resolveSellerConfig(config: MarketplaceConfig | undefined): Reso
     }
     if (b.temperature !== undefined && b.temperature !== null && (typeof b.temperature !== 'number' || !Number.isFinite(b.temperature) || b.temperature < 0 || b.temperature > 2)) {
       throw new Error(`${at}.backend.temperature must be a number from 0 to 2, or null to send none`);
+    }
+    if (b.reasoningEffort !== undefined && b.reasoningEffort !== null && !REASONING_EFFORTS.includes(b.reasoningEffort)) {
+      throw new Error(`${at}.backend.reasoningEffort must be one of ${REASONING_EFFORTS.join(', ')}, or null to send none`);
     }
     return {
       model: s.model,

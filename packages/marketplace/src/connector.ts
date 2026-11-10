@@ -15,7 +15,10 @@
  * (api.openai.com) gets `max_completion_tokens` and no temperature, which its
  * reasoning models (GPT-5 and on) need, as they refuse `max_tokens` and any
  * temperature but the default; every other backend `max_tokens` and a
- * temperature of 0, as in 10.1.0. A backend that refuses a call has its own
+ * temperature of 0, as in 10.1.0. A call with tools to one of OpenAI's
+ * reasoning models there also gets `reasoning_effort: "none"`, the only effort
+ * with which its chat completions take function tools; a service may set its
+ * own (`reasoningEffort`), or none. A backend that refuses a call has its own
  * words for why in the error and the seller's log, cut short, the key never.
  */
 import { WireError, answerFromWire, type Answer, type ChatMessage, type FinishReason, type ToolChoice, type ToolSpec } from './wire.js';
@@ -56,6 +59,33 @@ export interface ConnectorSettings {
   maxTokensField?: MaxTokensField;
   /** The temperature sent; `null` sends none, for the backend's default. By default none for api.openai.com, 0 elsewhere. */
   temperature?: number | null;
+  /**
+   * The `reasoning_effort` sent with every call; `null` sends none. By default none, but `none` for a call with tools
+   * to a reasoning model (GPT-5 and on, the o-series) of api.openai.com, whose chat completions take function tools
+   * only so.
+   */
+  reasoningEffort?: ReasoningEffort | null;
+}
+
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high';
+
+export const REASONING_EFFORTS: readonly ReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high'];
+
+/** OpenAI's reasoning models: GPT-5 and on, and the o-series. */
+const REASONING_MODEL = /^(gpt-5|o\d)/i;
+
+/**
+ * The `reasoning_effort` a backend is sent for a call, or `null` for none: its setting when it has one, else `none` for
+ * a call with tools to a reasoning model of api.openai.com (its chat completions refuse function tools with any other
+ * effort), and else none, as before.
+ */
+export function reasoningEffortOf(
+  settings: Pick<ConnectorSettings, 'baseUrl' | 'model' | 'reasoningEffort'>,
+  withTools: boolean,
+): ReasoningEffort | null {
+  if (settings.reasoningEffort !== undefined) return settings.reasoningEffort;
+  const openai = new URL(settings.baseUrl).hostname.toLowerCase() === OPENAI_API_HOST;
+  return openai && withTools && REASONING_MODEL.test(settings.model) ? 'none' : null;
 }
 
 export type MaxTokensField = 'max_tokens' | 'max_completion_tokens';
@@ -124,6 +154,7 @@ export function connectorOf(settings: ConnectorSettings): Connector {
   return {
     kind: settings.kind,
     async complete({ messages, maxTokens, tools, toolChoice, parallelToolCalls }) {
+      const effort = reasoningEffortOf(settings, Boolean(tools?.length));
       const key = settings.apiKeyEnv ? process.env[settings.apiKeyEnv] : undefined;
       if (settings.apiKeyEnv && !key) throw new UpstreamError(`${settings.apiKeyEnv} is not set`);
       let res: Response;
@@ -134,6 +165,7 @@ export function connectorOf(settings: ConnectorSettings): Connector {
           body: JSON.stringify({
             model: settings.model, messages, [shape.maxTokensField]: maxTokens,
             ...(shape.temperature !== null ? { temperature: shape.temperature } : {}),
+            ...(effort !== null ? { reasoning_effort: effort } : {}),
             stream: false,
             ...(tools ? {
               tools,

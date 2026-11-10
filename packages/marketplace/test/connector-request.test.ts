@@ -8,7 +8,7 @@
  * `fetch` is stubbed, so no request leaves the process.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { UpstreamError, backendMessageOf, connectorOf, requestShapeOf, resolveSellerConfig } from '../src/index.js';
+import { UpstreamError, backendMessageOf, connectorOf, reasoningEffortOf, requestShapeOf, resolveSellerConfig, type ToolSpec } from '../src/index.js';
 
 const OK = { choices: [{ message: { role: 'assistant', content: 'synthetic answer' } }], usage: { prompt_tokens: 3, completion_tokens: 2 } };
 const CALL = { messages: [{ role: 'user' as const, content: 'q' }], maxTokens: 7 };
@@ -68,6 +68,56 @@ describe("a backend's output limit and temperature", () => {
       [{ temperature: '0' }, /temperature must be a number from 0 to 2, or null/],
     ] as const) {
       expect(() => resolveSellerConfig({ seller: { enabled: true, services: [{ ...service, backend: { ...service.backend, ...backend } as never }] } })).toThrow(message);
+    }
+  });
+});
+
+describe("a backend's reasoning effort", () => {
+  const TOOLS = [{ type: 'function', function: { name: 'list_deployments', parameters: { type: 'object', properties: {} } } }] satisfies ToolSpec[];
+  const OPENAI = 'https://api.openai.com/v1';
+
+  it("is none for a call with tools to one of OpenAI's reasoning models, the only effort with which it takes function tools", async () => {
+    const seen = stubFetch(200, OK);
+    await connectorOf({ kind: 'openai', baseUrl: OPENAI, model: 'gpt-5.6-sol' }).complete({ ...CALL, tools: TOOLS, toolChoice: 'required' });
+    expect(seen[0]!.body).toEqual({
+      model: 'gpt-5.6-sol', messages: CALL.messages, max_completion_tokens: 7, reasoning_effort: 'none', stream: false, tools: TOOLS, tool_choice: 'required',
+    });
+    // The o-series alike, in any case.
+    await connectorOf({ kind: 'openai', baseUrl: OPENAI, model: 'O3-mini' }).complete({ ...CALL, tools: TOOLS });
+    expect(seen[1]!.body).toMatchObject({ reasoning_effort: 'none' });
+  });
+
+  it('is not sent otherwise, as before: a text call, another model, or another host', async () => {
+    const seen = stubFetch(200, OK);
+    await connectorOf({ kind: 'openai', baseUrl: OPENAI, model: 'gpt-5.6-sol' }).complete(CALL);
+    await connectorOf({ kind: 'openai', baseUrl: OPENAI, model: 'gpt-4.1-mini' }).complete({ ...CALL, tools: TOOLS });
+    await connectorOf({ kind: 'openai', baseUrl: 'http://100.87.65.128:11434/v1', model: 'gpt-5-oss' }).complete({ ...CALL, tools: TOOLS });
+    for (const { body } of seen) expect(body).not.toHaveProperty('reasoning_effort');
+    expect(Object.keys(seen[0]!.body)).toEqual(['model', 'messages', 'max_completion_tokens', 'stream']);
+  });
+
+  it("is the service's own when it sets one, on every call, and never sent when it sets null", async () => {
+    const seen = stubFetch(200, OK);
+    const low = connectorOf({ kind: 'openai', baseUrl: 'http://127.0.0.1:8080/v1', model: 'm', reasoningEffort: 'low' });
+    await low.complete(CALL);
+    await low.complete({ ...CALL, tools: TOOLS });
+    expect(seen.map(({ body }) => body.reasoning_effort)).toEqual(['low', 'low']);
+    await connectorOf({ kind: 'openai', baseUrl: OPENAI, model: 'gpt-5.6-sol', reasoningEffort: null }).complete({ ...CALL, tools: TOOLS });
+    expect(seen[2]!.body).not.toHaveProperty('reasoning_effort');
+    expect(reasoningEffortOf({ baseUrl: OPENAI, model: 'gpt-5.6-sol' }, true)).toBe('none');
+    expect(reasoningEffortOf({ baseUrl: OPENAI, model: 'gpt-5.6-sol' }, false)).toBeNull();
+    expect(reasoningEffortOf({ baseUrl: OPENAI, model: 'gpt-5.6-sol', reasoningEffort: 'medium' }, false)).toBe('medium');
+  });
+
+  it('is checked in the seller settings', () => {
+    const service = { model: 'urn:test:model:a', pricePerUnit: '1000', backend: { kind: 'openai' as const, baseUrl: OPENAI, model: 'gpt-5.6-sol' } };
+    for (const reasoningEffort of [null, 'none', 'minimal', 'high'] as const) {
+      expect(resolveSellerConfig({ seller: { enabled: true, services: [{ ...service, backend: { ...service.backend, reasoningEffort } }] } })!.services[0]!.backend)
+        .toMatchObject({ reasoningEffort });
+    }
+    for (const reasoningEffort of ['max', 7, '']) {
+      expect(() => resolveSellerConfig({ seller: { enabled: true, services: [{ ...service, backend: { ...service.backend, reasoningEffort } as never }] } }))
+        .toThrow(/reasoningEffort must be one of none, minimal, low, medium, high, or null/);
     }
   });
 });
