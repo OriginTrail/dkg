@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Readable } from 'node:stream';
 import { createPreviewHandler } from './cloudflare-preview.mjs';
+import { streamedBodyOverflow } from './test-support/http-body-overflow.mjs';
 
 const prefix = '/spike/ka/accounts/account-a/capabilities';
 function fixture(options) {
@@ -13,13 +13,24 @@ function fixture(options) {
   return { handle: createPreviewHandler(state, options), close: () => rmSync(state, { recursive: true, force: true }) };
 }
 function request(path = prefix + '/studio/run', method = 'POST', headers = {}) {
-  const req = Object.assign(Readable.from([Buffer.from('{}')]), { method, url: path,
-    headers: { host: '127.0.0.1:4621', authorization: 'Bearer l1-owner-a', ...headers } });
-  let reads = 0; const iterator = req[Symbol.asyncIterator].bind(req);
-  req[Symbol.asyncIterator] = () => { reads++; return iterator(); };
+  let reads = 0;
+  const req = { method, url: path, headers: { host: '127.0.0.1:4621', authorization: 'Bearer l1-owner-a', ...headers },
+    async *[Symbol.asyncIterator]() { reads++; yield Buffer.from('{}'); } };
   Object.defineProperty(req, 'bodyReads', { get: () => reads });
   return req;
 }
+
+test('preview returns HTTP 413 for an unfinished chunked upload without forwarding it', async () => {
+  let forwards = 0;
+  const f = fixture({ send: async () => { forwards++; return Response.json({}); } });
+  try {
+    const res = await streamedBodyOverflow(f.handle, { path: prefix + '/studio/run',
+      headers: { host: '127.0.0.1:4621', authorization: 'Bearer l1-owner-a' } });
+    assert.equal(res.status, 413); assert.deepEqual(res.body, { error: 'Input too large' });
+    assert.equal(res.destroyedBeforeResponse, false); assert.equal(res.headers.connection, 'close');
+    assert.equal(forwards, 0);
+  } finally { f.close(); }
+});
 function response(onEnd = () => {}) {
   return { status: 0, headersSent: false, writeHead(status) { this.status = status; this.headersSent = true; },
     end(body) { this.body = body; onEnd(); } };

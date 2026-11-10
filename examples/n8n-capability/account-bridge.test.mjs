@@ -8,6 +8,7 @@ import { Readable } from 'node:stream';
 import { execFileSync } from 'node:child_process';
 import { fixtureProgramAuthority } from './test-support/studio-authority-fixture.mjs';
 import { withDkgTestDependencies } from './test-support/dkg-component-store-fixture.mjs';
+import { streamedBodyOverflow } from './test-support/http-body-overflow.mjs';
 
 // Load account mode explicitly at startup.
 const setup = mkdtempSync(join(tmpdir(), 'account-bridge-'));
@@ -102,6 +103,17 @@ test('callback handler preserves UTF-8 characters split across Buffer chunks', a
   const bytewise = Array.from(bytes, byte => Buffer.from([byte]));
   assert.equal((await h.send(bytewise)).status, 200);
   assert.deepEqual(h.calls, [value, value]);
+});
+
+test('native callback returns HTTP 413 for an unfinished upload without dispatching', async () => {
+  const h = handlerFixture();
+  const res = await streamedBodyOverflow((req, res) => handleDkgComponentCallback(req, res,
+    { dkgComponent: async value => { h.calls.push(value); } }, { n8nNative: { webhookTokenFile: h.tokenFile } }),
+  { headers: nativeHeaders });
+  assert.equal(res.status, 413);
+  assert.deepEqual(res.body, { code: 'DKG_COMPONENT_UNCONFIRMED', error: 'Bounded DKG batch required' });
+  assert.equal(res.destroyedBeforeResponse, false); assert.equal(res.headers.connection, 'close');
+  assert.deepEqual(h.calls, []);
 });
 
 test('callback handler enforces the 16 KiB byte limit before dispatching Unicode bodies', async () => {

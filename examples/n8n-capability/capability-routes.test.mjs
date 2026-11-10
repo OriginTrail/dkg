@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { createCapabilityBridge } from './bridge.mjs';
 import { component } from './component-registry.mjs';
+import { streamedBodyOverflow } from './test-support/http-body-overflow.mjs';
 
 const prefix = '/spike/ka/accounts/account-a/capabilities', eventPath = '/spike/ka/events/11223344-1234-4234-8234-123456789abc';
 function fixture() {
@@ -31,14 +32,26 @@ function fixture() {
     input: { itemsJson: '[{}]', paramsJson: JSON.stringify(Object.fromEntries(Object.entries(descriptor.parameters).map(([key, p]) => [key, p.default]))), executionId: '' } };
   async function send(path, method, role = 'owner', value = {}, chunks) {
     const req = Readable.from(chunks ?? [Buffer.from(JSON.stringify(value))]); let reads = 0;
-    const iterator = req[Symbol.asyncIterator].bind(req); req[Symbol.asyncIterator] = () => { reads++; return iterator(); };
+    const iterator = req.iterator.bind(req); req.iterator = options => { reads++; return iterator(options); };
     req.url = path; req.method = method; req.headers = role ? { authorization: 'Bearer l1-' + role + '-a' } : {};
     let status, body;
     await bridge.handle(req, { writeHead: s => { status = s; }, end: text => { body = JSON.parse(text); } }, path.split('?')[0]);
     return { status, body, reads };
   }
-  return { send, calls, invocation, close() { bridge.close(); rmSync(state, { recursive: true, force: true }); } };
+  return { send, calls, invocation, handle: (req, res) => bridge.handle(req, res, req.url), close() { bridge.close(); rmSync(state, { recursive: true, force: true }); } };
 }
+
+test('bridge returns HTTP 413 for unfinished uploads at both route byte limits', async () => {
+  const f = fixture();
+  try {
+    for (const [path, limit] of [[prefix + '/studio/save', 16384], ['/spike/ka/demo-data', 4096]]) {
+      const res = await streamedBodyOverflow(f.handle, { path, limit, headers: { authorization: 'Bearer l1-owner-a' } });
+      assert.equal(res.status, 413); assert.equal(res.body.code, 'POC_REQUEST_REJECTED');
+      assert.equal(res.destroyedBeforeResponse, false); assert.equal(res.headers.connection, 'close');
+    }
+    assert.deepEqual(f.calls, []);
+  } finally { f.close(); }
+});
 
 test('bridge dispatches every capability route and rejects methods and viewer writes before body reads', async () => {
   const f = fixture();

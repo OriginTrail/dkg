@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createStudioMcpHttp } from './studio-mcp-http.mjs';
+import { streamedBodyOverflow } from './test-support/http-body-overflow.mjs';
 
 const rpc = text => ({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'studio_run', arguments: { text } } });
 function fixture() {
@@ -9,7 +10,7 @@ function fixture() {
     session: { actor(headers) { if (!headers['x-test-authorized']) throw new Error('Denied'); return { role: 'owner' }; } },
     service: { async run(value) { calls.push(value); return value; } },
   });
-  return { calls, async send(chunks, headers = {}, method = 'POST') {
+  return { calls, handle, async send(chunks, headers = {}, method = 'POST') {
     let reads = 0, status, body;
     const req = { method, headers: { 'x-test-authorized': 'yes', 'content-type': 'application/json', ...headers },
       async *[Symbol.asyncIterator]() { reads++; yield* chunks; } };
@@ -27,6 +28,16 @@ test('MCP decodes split UTF-8 and normalizes string and Uint8Array body chunks',
     assert.deepEqual(result.body.result.structuredContent, value.params.arguments);
   }
   assert.deepEqual(f.calls, Array(3).fill(value.params.arguments));
+});
+
+test('MCP returns HTTP 413 for an unfinished chunked upload without dispatching a tool', async () => {
+  const f = fixture();
+  const response = await streamedBodyOverflow(f.handle, { headers: { 'x-test-authorized': 'yes' } });
+  assert.equal(response.status, 413);
+  assert.deepEqual(response.body, { error: 'STUDIO_INVALID_REQUEST' });
+  assert.equal(response.destroyedBeforeResponse, false);
+  assert.equal(response.headers.connection, 'close');
+  assert.deepEqual(f.calls, []);
 });
 
 test('MCP accepts exactly 16 KiB and rejects Unicode byte overflow before service dispatch', async () => {

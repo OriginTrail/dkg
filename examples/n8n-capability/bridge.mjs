@@ -37,6 +37,7 @@ export async function handleDkgComponentCallback(req, res, studio, config, mcp) 
     json(res,200,nativeResult === undefined ? await studio.dkgComponent(value) : nativeResult);
   } catch(e) {
     const tooLarge = e instanceof RequestBodyLimitError;
+    if (tooLarge) res.shouldKeepAlive = false;
     json(res, tooLarge ? 413 : e.status ?? 409, { code: e.code ?? 'DKG_COMPONENT_UNCONFIRMED', error: tooLarge ? 'Bounded DKG batch required' : e.message });
   }
 }
@@ -217,7 +218,9 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
       await handlers[route.id]({ res, value, ownerAccess, actor, eventKey: match.params.eventKey,
         params: new URL(req.url ?? path, 'http://127.0.0.1:4631').searchParams, authorize: () => authorizeExport(req) });
     } catch (error) {
-      json(res, error instanceof RequestBodyLimitError ? 413 : error.status ?? 400, { code: error.code ?? (delegated ? 'EVENT_UNCONFIRMED' : 'POC_REQUEST_REJECTED'),
+      const tooLarge = error instanceof RequestBodyLimitError;
+      if (tooLarge) res.shouldKeepAlive = false;
+      json(res, tooLarge ? 413 : error.status ?? 400, { code: error.code ?? (delegated ? 'EVENT_UNCONFIRMED' : 'POC_REQUEST_REJECTED'),
         ...(error.code === 'DKG_WRITE_PENDING' ? { invocationId: error.invocationId, n8nExecutionId: error.n8nExecutionId } : {}),
         error: delegated ? 'The event did not confirm a result. Retain its invocationId.'
           : error.code === 'DKG_WRITE_PENDING' ? 'The DKG write is unconfirmed. Retry this invocation; do not start another run.'

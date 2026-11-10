@@ -40,11 +40,15 @@ export function createPreviewHandler(directory, { send = fetch, clock = Date.now
           const now = clock();
           while (writes[0] < now - 60_000) writes.shift();
           if (writes.length >= 20) return json(res, 429, { error: 'Preview invocation limit reached; retry in a minute' });
-          if (Number(req.headers['content-length'] ?? 0) > policy.bodyLimit) return json(res, 413, { error: 'Input too large' });
+          if (Number(req.headers['content-length'] ?? 0) > policy.bodyLimit) {
+            res.shouldKeepAlive = false; return json(res, 413, { error: 'Input too large' });
+          }
           writes.push(now); // Reserve admission before another request can await its body.
           try { body = await readRequestBodyBytesBounded(req, policy.bodyLimit); }
           catch (error) {
-            if (error instanceof RequestBodyLimitError) return json(res, 413, { error: 'Input too large' });
+            if (error instanceof RequestBodyLimitError) {
+              res.shouldKeepAlive = false; return json(res, 413, { error: 'Input too large' });
+            }
             throw error;
           }
         }

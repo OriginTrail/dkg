@@ -32,7 +32,11 @@ export function createStudioMcpHttp({ service, session, agentEnabled = false }) 
     try {
       const bytes = await readRequestBodyBytesBounded(req, 16_384);
       value = JSON.parse(bytes.toString('utf8'));
-    } catch (error) { json(res, error instanceof RequestBodyLimitError ? 413 : error.status ?? 400, { error: 'STUDIO_INVALID_REQUEST' }); return; }
+    } catch (error) {
+      const tooLarge = error instanceof RequestBodyLimitError;
+      if (tooLarge) res.shouldKeepAlive = false;
+      json(res, tooLarge ? 413 : error.status ?? 400, { error: 'STUDIO_INVALID_REQUEST' }); return;
+    }
     if (closed(value, ['jsonrpc', 'method']) && value.jsonrpc === '2.0' && value.method === 'notifications/initialized') {
       res.writeHead(202); res.end(); return;
     }
