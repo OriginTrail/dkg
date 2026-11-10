@@ -74,6 +74,7 @@ export class OxigraphStore implements TripleStore {
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly graphEnumerationVisibility = storeGraphEnumerationVisibility;
   readonly sparqlEngine = 'oxigraph' as const;
+  readonly restrictsQueryDataset = true as const;
   readonly queryCancellation = 'pre-dispatch' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   readonly rfc64SemanticReadCertifiedV1 = true as const;
