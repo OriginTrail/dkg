@@ -48,6 +48,8 @@ describe('patterns outside GRAPH', () => {
       .toBe(`SELECT DISTINCT (COUNT(*) AS ?n) WHERE { { ${graphForm('?s <urn:p> ?o')} } } LIMIT 5`);
     expect(hidden('SELECT ?s (COUNT(?o) AS ?n) WHERE { ?s ?p ?o } GROUP BY ?s'))
       .toBe(`SELECT ?s (COUNT(?o) AS ?n) WHERE { ${graphForm('?s ?p ?o')} } GROUP BY ?s`);
+    expect(hidden('SELECT (COUNT(*) AS ?n) $s WHERE { ?s ?p ?o } GROUP BY ?s ORDER BY DESC(?n) LIMIT 3'))
+      .toBe(`SELECT (COUNT(*) AS ?n) $s WHERE { ${graphForm('?s ?p ?o')} } GROUP BY ?s ORDER BY DESC(?n) LIMIT 3`);
     expect(hidden('SELECT ?n WHERE { { SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o } } }')).toContain(graphForm('?s ?p ?o'));
     // Not the fast form: these count solutions of the merged default graph.
     for (const query of [
@@ -56,6 +58,8 @@ describe('patterns outside GRAPH', () => {
       'SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o . ?o ?q ?r }',
       'SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o FILTER(isIRI(?o)) }',
       'SELECT ?x (COUNT(*) AS ?n) WHERE { ?s ?p ?o } GROUP BY ?x',
+      'SELECT ?s (COUNT(*) AS ?n) WHERE { ?s ?p ?o } GROUP BY ?s HAVING (COUNT(*) > 1)',
+      'SELECT ?s ?p (COUNT(*) AS ?n) WHERE { ?s ?p ?o } GROUP BY ?s',
     ]) expect(hidden(query)).toContain('FILTER EXISTS');
   });
 
@@ -69,6 +73,8 @@ describe('patterns outside GRAPH', () => {
     expect(text).toMatch(/^CONSTRUCT \{ <urn:a> \?_describedVerb \?_describedObject \. \?_describingSubject \?_describingVerb <urn:a> \. \} WHERE/);
     expect(text).toContain('UNION');
     expect(hidden('PREFIX ex: <urn:ex:> DESCRIBE ?s WHERE { ?s ex:p ?o }')).toMatch(/^PREFIX ex: <urn:ex:> CONSTRUCT/);
+    // The description joins the WHERE solutions, as the store's DESCRIBE does.
+    expect(hidden('DESCRIBE ?s WHERE { VALUES ?s { UNDEF } }')).toMatch(/WHERE \{\s+VALUES \?s \{ UNDEF \}\s+\{ \{ \?s /);
   });
 
   it.each([

@@ -60,8 +60,7 @@ class DefaultGraphRewriter {
     const where = this.scope.where;
     if (where) {
       const operation = this.scope.prepared.prologue.endTokenIndex;
-      this.walkGroup(where.openingTokenIndex, where.closingTokenIndex,
-        this.scope.operation === 'SELECT' && this.isFastCount(operation, this.tokens.length, where.openingTokenIndex, where.closingTokenIndex));
+      this.walkPattern(this.scope.operation === 'SELECT', operation, this.tokens.length, where.openingTokenIndex, where.closingTokenIndex);
     }
     this.walkExistsOutside(0, this.tokens.length, where?.openingTokenIndex ?? -1, where?.closingTokenIndex ?? -1);
     if (this.introducedVariables && this.projectsEverything()) {
@@ -97,13 +96,26 @@ class DefaultGraphRewriter {
       if (index === skipFrom) { index = skipTo; continue; }
       if (this.keyword(index, 'EXISTS') && this.symbolAt(index + 1, '{')) {
         const closing = this.braceMatch(index + 1);
-        this.walkGroup(index + 1, closing, false);
+        this.walkGroup(index + 1, closing);
         index = closing;
       }
     }
   }
 
-  private walkGroup(opening: number, closing: number, fastCount: boolean): void {
+  /** The WHERE group of a query or sub-select: its fast counting form, or its patterns one by one. */
+  private walkPattern(select: boolean, selectIndex: number, end: number, opening: number, closing: number): void {
+    const triple = select ? this.fastCountTriple(selectIndex, end, opening, closing) : undefined;
+    if (!triple) {
+      this.walkGroup(opening, closing);
+      return;
+    }
+    const holder = this.fresh('_holder');
+    const text = this.scope.source.slice(this.tokens[triple.from]!.start, this.tokens[triple.to - 1]!.end);
+    this.edits.push({ start: this.tokens[triple.from]!.start, end: this.tokens[triple.to - 1]!.end,
+      text: `GRAPH ${holder} { ${text} } ${this.excluded(holder)}` });
+  }
+
+  private walkGroup(opening: number, closing: number): void {
     if (this.keyword(opening + 1, 'SELECT')) {
       this.walkSubSelect(opening, closing);
       return;
@@ -114,13 +126,13 @@ class DefaultGraphRewriter {
       if (this.symbolAt(index, '.') || this.keyword(index, 'UNION')) { index += 1; continue; }
       if (this.symbolAt(index, '{')) {
         const end = this.braceMatch(index);
-        this.walkGroup(index, end, fastCount);
+        this.walkGroup(index, end);
         index = end + 1;
         continue;
       }
       if (this.keyword(index, 'OPTIONAL') || this.keyword(index, 'MINUS')) {
         const end = this.braceMatch(index + 1);
-        this.walkGroup(index + 1, end, false);
+        this.walkGroup(index + 1, end);
         index = end + 1;
         continue;
       }
@@ -140,7 +152,7 @@ class DefaultGraphRewriter {
       let end = index;
       while (end < closing && !(this.symbolAt(end, '{') && this.scope.structure.braces.depthBefore[end] === depth)
         && ![...BLOCK_END].some(word => this.keyword(end, word))) end += 1;
-      this.rewriteBlock(index, end, fastCount);
+      this.rewriteBlock(index, end);
       index = end;
     }
   }
@@ -149,8 +161,7 @@ class DefaultGraphRewriter {
     const { where } = readSparqlQueryBoundaries(this.scope.prepared, this.scope.structure,
       { operationTokenIndex: opening + 1, endTokenIndex: closing });
     if (!where) throw new UnrewrittenPatternError('a sub-select without a WHERE group');
-    this.walkGroup(where.openingTokenIndex, where.closingTokenIndex,
-      this.isFastCount(opening + 1, closing, where.openingTokenIndex, where.closingTokenIndex));
+    this.walkPattern(true, opening + 1, closing, where.openingTokenIndex, where.closingTokenIndex);
     this.walkExistsOutside(opening + 1, closing, where.openingTokenIndex, where.closingTokenIndex);
   }
 
@@ -159,7 +170,7 @@ class DefaultGraphRewriter {
     if (this.keyword(at, 'NOT')) at += 1;
     if (this.keyword(at, 'EXISTS')) {
       const end = this.braceMatch(at + 1);
-      this.walkGroup(at + 1, end, false);
+      this.walkGroup(at + 1, end);
       return end + 1;
     }
     // FILTER(expression) or FILTER function(arguments).
@@ -175,7 +186,7 @@ class DefaultGraphRewriter {
     return this.braceMatch(at) + 1;
   }
 
-  private rewriteBlock(from: number, to: number, fastCount: boolean): void {
+  private rewriteBlock(from: number, to: number): void {
     let triples: SparqlTriplePattern[];
     try {
       triples = parseTriplesBlock(this.scope, from, to, { fresh: name => { this.introducedVariables = true; return this.fresh(name); }, labels: this.labels });
@@ -188,9 +199,7 @@ class DefaultGraphRewriter {
       if (triple.verb.kind === 'variable') items.push({ kind: 'triple', subject: triple.subject, verb: triple.verb.text, object: triple.object });
       else this.expand(triple.verb, triple.subject, triple.object, items);
     }
-    const simple = items.length === 1 && items[0]!.kind === 'triple' && !items[0]!.filter;
-    const text = fastCount && simple ? this.renderFastCount(items[0] as Extract<Item, { kind: 'triple' }>) : this.render(items);
-    this.edits.push({ start: this.tokens[from]!.start, end: this.tokens[to - 1]!.end, text });
+    this.edits.push({ start: this.tokens[from]!.start, end: this.tokens[to - 1]!.end, text: this.render(items) });
   }
 
   private expand(path: SparqlPath, subject: string, object: string, out: Item[]): void {
@@ -248,44 +257,80 @@ class DefaultGraphRewriter {
     }).join(' ');
   }
 
-  private renderFastCount(item: Extract<Item, { kind: 'triple' }>): string {
-    const holder = this.fresh('_holder');
-    return `GRAPH ${holder} { ${item.subject} ${item.verb} ${item.object} } ${this.excluded(holder)}`;
-  }
-
   /**
-   * The store's fast counting form: SELECT [DISTINCT] (COUNT(*) AS ?n) over one
-   * triple pattern with no GROUP BY or HAVING, or SELECT ?k (COUNT(*|?v) AS ?n)
-   * over one triple pattern GROUP BY ?k. The pattern check happens when the
-   * block is rewritten: one plain triple, alone in its group.
+   * The one triple pattern of the store's fast counting form, by token range:
+   * `SELECT [DISTINCT] (COUNT(*) AS ?n)` over one triple pattern with no GROUP BY,
+   * or `?k` with `(COUNT(*) AS ?n)` or `(COUNT(?v) AS ?n)`, in either order, over
+   * one triple pattern `GROUP BY ?k`, where `?k` and `?v` are its variables. ORDER
+   * BY, LIMIT and OFFSET may follow; HAVING or anything else rules the form out.
    */
-  private isFastCount(selectIndex: number, end: number, whereOpening: number, whereClosing: number): boolean {
-    const projection = this.tokens.slice(selectIndex + 1, whereOpening).filter(token => !(token.kind === 'word' && token.upper === 'WHERE'));
-    const words = projection.map(token => token.kind === 'symbol' ? token.logicalValue : token.kind === 'word' ? token.upper : token.kind);
-    const tail = this.tokens.slice(whereClosing + 1, end).map(token => (token.kind === 'word' ? token.upper : token.kind === 'symbol' ? token.logicalValue : token.kind));
-    if (tail.includes('HAVING')) return false;
-    const groupBy = tail.indexOf('GROUP');
-    const plain = words.join(' ').replace(/^(DISTINCT|REDUCED) /, '');
-    if (plain === '( COUNT ( * ) AS variable )') return groupBy < 0 && this.singleTriple(whereOpening, whereClosing);
-    const grouped = /^variable \( COUNT \( (\*|variable) \) AS variable \)$/.test(plain);
-    if (!grouped || groupBy < 0 || tail[groupBy + 1] !== 'BY' || tail[groupBy + 2] !== 'variable') return false;
-    if (tail.slice(groupBy + 3).some(word => !['ORDER', 'BY', 'LIMIT', 'OFFSET', 'number', 'variable', 'ASC', 'DESC', '(', ')'].includes(word))) return false;
-    const key = this.tokens[whereClosing + 1 + groupBy + 2]!;
-    const first = words[0] === 'DISTINCT' || words[0] === 'REDUCED' ? 1 : 0;
-    const counted = projection[first + 4]!;
-    return projection[first]!.raw === key.raw && this.singleTriple(whereOpening, whereClosing, [key.raw,
-      ...(counted.kind === 'variable' ? [counted.raw] : [])]);
-  }
-
-  /** One plain triple pattern, possibly inside nested braces, and nothing else; it binds every variable named. */
-  private singleTriple(opening: number, closing: number, variables: readonly string[] = []): boolean {
+  private fastCountTriple(selectIndex: number, end: number, opening: number, closing: number): { from: number; to: number } | undefined {
     let from = opening + 1;
     let to = closing;
     while (this.symbolAt(from, '{') && this.scope.structure.braces.matchingTokenIndexes[from] === to - 1) { from += 1; to -= 1; }
-    const body = this.tokens.slice(from, to).filter((token, index, all) => !(index === all.length - 1 && token.kind === 'symbol' && token.logicalValue === '.'));
-    return body.length === 3 && body.every(token => token.kind === 'variable' || token.kind === 'iri' || token.kind === 'prefixed-name'
-      || token.kind === 'number' || token.kind === 'string' || (token.kind === 'word' && token.logicalValue === 'a'))
-      && variables.every(variable => body.some(token => token.kind === 'variable' && token.raw === variable));
+    if (this.symbolAt(to - 1, '.')) to -= 1;
+    const terms = this.tokens.slice(from, to);
+    if (terms.length !== 3 || !terms.every(token => token.kind === 'variable' || token.kind === 'iri' || token.kind === 'prefixed-name'
+      || token.kind === 'number' || token.kind === 'string' || (token.kind === 'word' && token.logicalValue === 'a'))) return undefined;
+    const variables = new Set(terms.filter(token => token.kind === 'variable').map(token => token.logicalValue.slice(1)));
+    const items = this.projectionItems(selectIndex, opening);
+    const counts = items?.filter(item => item.kind === 'count') ?? [];
+    const keys = items?.filter(item => item.kind === 'variable') ?? [];
+    const groupKey = this.groupKey(closing + 1, end);
+    if (!items || counts.length !== 1 || groupKey === null) return undefined;
+    const counted = (counts[0] as { counted: string }).counted;
+    if (keys.length === 0 && groupKey === undefined && counted === '*') return { from, to };
+    const key = (keys[0] as { name: string } | undefined)?.name;
+    return keys.length === 1 && key !== undefined && key === groupKey && variables.has(key) && (counted === '*' || variables.has(counted))
+      ? { from, to } : undefined;
+  }
+
+  /** Projected variables and `(COUNT(*|?v) AS ?n)` items; undefined for any other projection. */
+  private projectionItems(selectIndex: number, whereOpening: number): Array<{ kind: 'variable'; name: string } | { kind: 'count'; counted: string }> | undefined {
+    const items: Array<{ kind: 'variable'; name: string } | { kind: 'count'; counted: string }> = [];
+    let index = selectIndex + 1;
+    if (this.keyword(index, 'DISTINCT') || this.keyword(index, 'REDUCED')) index += 1;
+    while (index < whereOpening && !this.keyword(index, 'WHERE')) {
+      const token = this.tokens[index]!;
+      if (token.kind === 'variable') {
+        items.push({ kind: 'variable', name: token.logicalValue.slice(1) });
+        index += 1;
+        continue;
+      }
+      const argument = this.tokens[index + 3];
+      if (!this.symbolAt(index, '(') || !this.keyword(index + 1, 'COUNT') || !this.symbolAt(index + 2, '(')
+        || !(this.symbolAt(index + 3, '*') || argument?.kind === 'variable') || !this.symbolAt(index + 4, ')')
+        || !this.keyword(index + 5, 'AS') || this.tokens[index + 6]?.kind !== 'variable' || !this.symbolAt(index + 7, ')')) return undefined;
+      items.push({ kind: 'count', counted: argument?.kind === 'variable' ? argument.logicalValue.slice(1) : '*' });
+      index += 8;
+    }
+    return items;
+  }
+
+  /**
+   * After a WHERE group: the variable of a `GROUP BY ?k`, undefined without GROUP BY,
+   * or null when anything but ORDER BY, LIMIT and OFFSET follows.
+   */
+  private groupKey(from: number, end: number): string | undefined | null {
+    let key: string | undefined;
+    let index = from;
+    const keyToken = this.tokens[index + 2];
+    if (this.keyword(index, 'GROUP') && this.keyword(index + 1, 'BY') && keyToken?.kind === 'variable') {
+      key = keyToken.logicalValue.slice(1);
+      index += 3;
+    }
+    if (this.keyword(index, 'ORDER') && this.keyword(index + 1, 'BY')) {
+      index += 2;
+      while (index < end && !this.keyword(index, 'LIMIT') && !this.keyword(index, 'OFFSET')) {
+        if (this.keyword(index, 'HAVING') || this.keyword(index, 'VALUES') || this.keyword(index, 'GROUP')) return null;
+        index += 1;
+      }
+    }
+    while (index < end) {
+      if ((this.keyword(index, 'LIMIT') || this.keyword(index, 'OFFSET')) && this.tokens[index + 1]?.kind === 'number') index += 2;
+      else return null;
+    }
+    return key;
   }
 
   private projectsEverything(): boolean {

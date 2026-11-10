@@ -151,6 +151,10 @@ const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
   ['X7 DESCRIBE a literal binding', 'describe', 'DESCRIBE ?o WHERE { <urn:ka1> <urn:status> ?o }'],
   ['X8 DESCRIBE two IRIs', 'describe', 'DESCRIBE <urn:s> <urn:x>'],
   ['X9 DESCRIBE *', 'describe-all', 'DESCRIBE * WHERE { ?s <urn:p> <urn:x> }'],
+  // The store describes every resource for a solution that leaves the variable unbound; the answer must stay the same.
+  ['X10 DESCRIBE an unbound variable', 'describe', 'DESCRIBE ?s WHERE { VALUES ?s { UNDEF } }'],
+  ['X11 DESCRIBE a variable bound in some solutions', 'describe', 'DESCRIBE ?s WHERE { { BIND(<urn:a> AS ?s) } UNION { BIND(1 AS ?x) } }'],
+  ['D42 COUNT(*) grouped, aggregate first', 'default', 'SELECT (COUNT(*) AS ?n) ?s WHERE { ?s ?p ?o } GROUP BY ?s'],
   ['D27 two intermediates of a sequence path', 'default', 'SELECT ?s ?z WHERE { ?s <urn:p>/<urn:r> ?z }'],
   ['D28 the same pair by two predicates of an alternative', 'default', 'SELECT ?s ?o WHERE { ?s <urn:k1>|<urn:k2> ?o }'],
   ['D29 the same pair by two predicates of a negated set', 'default', 'SELECT ?s ?o WHERE { ?s !<urn:none> ?o FILTER(?o = <urn:o2>) }'],

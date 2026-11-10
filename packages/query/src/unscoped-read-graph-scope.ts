@@ -165,6 +165,7 @@ function describeAsConstruct(scope: PreparedSparqlQuery): string {
   // The store does not describe from a pattern that uses GRAPH.
   if (where && scope.graphTargets.length > 0) throw new UnscopedReadGraphQueryError('DESCRIBE over GRAPH');
   const fresh = createVariableAllocator(scope);
+  const body = where ? scope.source.slice(tokens[where.openingTokenIndex]!.end, tokens[where.closingTokenIndex]!.start) : '';
   const template: string[] = [];
   const branches: string[] = [];
   for (const resource of resources) {
@@ -173,7 +174,8 @@ function describeAsConstruct(scope: PreparedSparqlQuery): string {
     branches.push(`{ ${resource.raw} ${verb} ${object} }`, `{ ${subject} ${inverseVerb} ${resource.raw} }`);
   }
   const prologue = scope.source.slice(0, tokens[operation]!.start);
-  const body = where ? scope.source.slice(tokens[where.openingTokenIndex]!.end, tokens[where.closingTokenIndex]!.start) : '';
+  // The description joins the WHERE solutions as the store's own DESCRIBE does: a variable that a
+  // solution leaves unbound is bound by the description, and the store describes every resource then.
   return `${prologue}CONSTRUCT { ${template.join(' ')} } WHERE { ${body} { ${branches.join(' UNION ')} } }`;
 }
 
