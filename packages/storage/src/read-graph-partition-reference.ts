@@ -72,7 +72,8 @@ export function preparedSparqlWritesThroughGraphVariable(prepared: ValidPrepared
       if (next.upper === 'DATA') continue;
       open += 1;
     }
-    if (tokens[open]?.kind !== 'symbol' || tokens[open]!.logicalValue !== '{') continue;
+    const brace = tokens[open];
+    if (brace?.kind !== 'symbol' || brace.logicalValue !== '{') continue;
     let depth = 0;
     for (let at = open; at < tokens.length; at += 1) {
       const token = tokens[at]!;
