@@ -1,4 +1,4 @@
-import { component, componentValidationSource } from './component-registry.mjs';
+import { component, componentExecutionDescriptor, componentValidationSource } from './component-registry.mjs';
 import { resolveComponentValueSource } from './guest-sources/component-v2.mjs';
 
 export const nativeVersions = { set: 3.4, filter: 2.3, sort: 1, limit: 1, removeDuplicates: 2, splitOut: 1.1,
@@ -71,6 +71,21 @@ function googleSheetsPiece(name, param, credentials) {
   return { nodes, connections, entry: aggregate.name, exits: [done.name], resultNode: done.name };
 }
 
+function dkgPiece(id, name, credentials) {
+  const connections = {};
+  const request = nativeNode(name + ' request', 'httpRequest', {
+    method: 'POST', url: 'http://127.0.0.1:4631/spike/ka/internal/dkg-component',
+    authentication: 'genericCredentialType', genericAuthType: 'httpHeaderAuth',
+    sendBody: true, specifyBody: 'json',
+    jsonBody: expression(`({ effectId: $('Receive input').first().json.body.invocationId, workflowId: String($workflow.id), executionId: String($execution.id), blockId: ${JSON.stringify(name.replace(/^Block /,''))}, items: $input.all().map(i => i.json) })`),
+    options: { timeout: id === 'invoke-dkg-program' ? 45000 : 14000, redirect: { redirect: { followRedirects: false } }, response: { response: { responseFormat: 'json' } } },
+  }, { executeOnce: true, retryOnFail: true, maxTries: 2, waitBetweenTries: 1000, credentials: { httpHeaderAuth: credentials.httpHeaderAuth } });
+  const split = nativeNode(name + ' records', 'splitOut', { fieldToSplitOut: 'items', include: 'noOtherFields', options: { destinationFieldName: 'value' } });
+  const result = editNode(name, '$json.value');
+  wire(connections,request.name,split.name);wire(connections,split.name,result.name);
+  return { nodes:[request,split,result],connections,entry:request.name,exits:[result.name],resultNode:result.name,traceNode:request.name };
+}
+
 /** One reviewed native component, with transport-only file conversion where needed. */
 export function componentPiece(id, name, param, { credentials = {} } = {}) {
   const descriptor = component(id), type = descriptor.nodeType.split('.').at(-1);
@@ -82,6 +97,7 @@ export function componentPiece(id, name, param, { credentials = {} } = {}) {
   const condition = () => ({ options: { caseSensitive: true, leftValue: '', typeValidation: 'loose', version: 2 },
     conditions: [{ id: 'equals', leftValue: value('field'), rightValue: p('equals'), operator: { type: 'string', operation: 'equals' } }], combinator: 'and' });
   switch (id) {
+    case 'dkg-read': case 'dkg-write': case 'invoke-dkg-program': return dkgPiece(id, name, credentials);
     case 'edit-fields': parameters = { mode: 'raw', jsonOutput: expression(`({ ...(${param('keepInput')} === 'yes' ? $json : {}), ...${resolved('fields')} })`), options: {} }; break;
     case 'filter': case 'if': parameters = { conditions: condition(), options: {} }; break;
     case 'sort': parameters = { type: 'simple', sortFieldsUi: { sortField: [{ fieldName: p('field'), order: p('direction') }] }, options: {} }; break;
@@ -113,6 +129,10 @@ export function componentPiece(id, name, param, { credentials = {} } = {}) {
       name: p('name'), driveId: { __rl: true, mode: 'list', value: 'My Drive' }, folderId: { __rl: true, mode: 'id', value: 'root' }, options: {} }, nodeCredentials)), name);
     case 'switch': parameters = { mode: 'expression', numberOutputs: 2, output: expression(`String($json[${param('field')}]) === String(${param('equals')}) ? 0 : 1`) }; break;
     case 'merge': parameters = { mode: 'append', numberInputs: 2, options: {} }; break;
+    case 'merge-fields': parameters = { mode: 'combine', combineBy: 'combineByFields',
+      advanced: true, mergeByFields: { values: [{ field1: p('fieldA'), field2: p('fieldB') }] },
+      joinMode: p('joinMode'), outputDataFrom: 'both',
+      options: { fuzzyCompare: false, multipleMatches: 'all', clashHandling: { values: { resolveClash: 'preferInput1', mergeMode: 'shallowMerge', overrideEmpty: false } } } }; break;
     case 'compare-datasets': parameters = { mergeByFields: { values: [{ field1: p('field'), field2: p('field') }] }, resolve: 'includeBoth', options: {} }; break;
     case 'loop-items': parameters = { batchSize: p('batchSize'), options: {} }; break;
     case 'execute-workflow': {
@@ -138,7 +158,7 @@ export function echoSubworkflow() {
 }
 
 export function standaloneComponentWorkflow(id, workflowId, headerCredential, options = {}) {
-  const descriptor = component(id), params = key => `$('Prepare input').first().json.params[${JSON.stringify(key)}]`;
+  const descriptor = componentExecutionDescriptor(component(id)), params = key => `$('Prepare input').first().json.params[${JSON.stringify(key)}]`;
   const piece = componentPiece(id, 'Component', id === 'schedule' ? key => JSON.stringify(descriptor.parameters[key].default) : params, options);
   const receive = nativeNode('Receive input', 'webhook', { httpMethod: 'POST', path: 'dkg-capability-' + workflowId,
     authentication: 'headerAuth', responseMode: 'responseNode', options: {} }, { webhookId: workflowId,

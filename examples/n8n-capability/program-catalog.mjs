@@ -1,4 +1,5 @@
 import { programDescriptor } from './program-block.mjs';
+import { componentNeedsExport } from './component-registry.mjs';
 
 /** Only current, caller-approved source pins in this PoC's private graph are offered. */
 export function createProgramCatalog({ graphId, owner, client, definitions }) {
@@ -25,7 +26,7 @@ export function createProgramCatalog({ graphId, owner, client, definitions }) {
       seen.add(id);
       if (binding.n8n) {
         const known = definitions.find(d => d.grant?.workflowId === binding.n8n.workflowId && d.grant.workflowSha256 === binding.n8n.workflowSha256);
-        if (!known || known.requiresExportAuthorization || known.descriptor?.writes || known.kind === 'google-sheets-export') return true;
+        if (!known || known.requiresExportAuthorization || componentNeedsExport(known.descriptor) || known.kind === 'google-sheets-export') return true;
       }
       for (const pin of binding.typescript?.children ?? [])
         if (await requiresExport(await resolve(pin.contextGraphId, pin.operationIri), new Set(seen))) return true;

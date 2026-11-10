@@ -1,5 +1,6 @@
+import { validateDkgTopology } from './dkg-components.mjs';
 import { createHash } from 'node:crypto';
-import { component, normalizeComponentInput, componentContract, componentValidationSource } from './component-registry.mjs';
+import { component, componentNeedsExport as needsExport, componentExecutionDescriptor, normalizeComponentInput, componentContract, componentValidationSource } from './component-registry.mjs';
 import { readStudio as readStudioV1 } from './studio-definition-v1.mjs';
 import { componentPiece, nativeNode, editNode, wire, expression, nativeLiteral } from './component-workflows.mjs';
 import { n8nWorkflowSha256, n8nObservationScope } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
@@ -14,12 +15,14 @@ const closed = (v, keys) => { if (!record(v) || Object.keys(v).some(k => !keys.i
 const identifier = v => { if (typeof v !== 'string' || !/^[a-z][a-z0-9_-]{0,39}$/i.test(v)) fail('Invalid block identity.'); return v; };
 
 export function normalizeStudio(value) {
-  closed(value, ['id', 'name', 'entryId', 'nodes', 'edges']);
+  closed(value, ['id', 'name', 'entryId', 'nodes', 'edges', 'groups']);
   if (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 80) fail('Name this workflow (up to 80 characters).');
-  if (!Array.isArray(value.nodes) || !value.nodes.length || value.nodes.length > 8) fail('Add between one and eight component KAs.');
+  if (!Array.isArray(value.nodes) || !value.nodes.length || value.nodes.length > 12) fail('Add between one and twelve component KAs.');
   if (!Array.isArray(value.edges) || value.edges.length > 20) fail('Too many connections.');
   const nodes = value.nodes.map(n => {
-    closed(n, ['id', 'componentId', 'kaRef', 'sourceHash', 'params', 'x', 'y']);
+    closed(n, ['id', 'componentId', 'kaRef', 'sourceHash', 'params', 'x', 'y', 'label', 'groupId']);
+    if (n.label !== undefined && (typeof n.label !== 'string' || !n.label.trim() || n.label.length > 80)) fail('Name each step using up to 80 characters.');
+    if (n.groupId !== undefined) identifier(n.groupId);
     const descriptor = component(n.componentId);
     if (typeof n.kaRef !== 'string' || (n.componentId === 'run-program' ? !/^[a-z][a-z0-9+.-]*:[^\s<>"{}\\]{1,220}$/i.test(n.kaRef) : !/^urn:demo:n8n:component:[a-z0-9:-]{1,100}$/.test(n.kaRef))
       || typeof n.sourceHash !== 'string' || !/^[a-f0-9]{64}$/.test(n.sourceHash)) fail('Choose a pinned component KA.');
@@ -27,7 +30,8 @@ export function normalizeStudio(value) {
     let params;
     try { params = JSON.parse(normalizeComponentInput(descriptor, { itemsJson: JSON.stringify(descriptor.sampleItems), paramsJson: JSON.stringify(n.params), executionId: '1' }).paramsJson); }
     catch (e) { fail(e.message); }
-    return { id: identifier(n.id), componentId: descriptor.id, kaRef: n.kaRef, sourceHash: n.sourceHash, params, x: n.x, y: n.y };
+    return { id: identifier(n.id), componentId: descriptor.id, kaRef: n.kaRef, sourceHash: n.sourceHash, params, x: n.x, y: n.y,
+      ...(n.label !== undefined ? { label: n.label } : {}), ...(n.groupId !== undefined ? { groupId: n.groupId } : {}) };
   }).sort((a, b) => a.id.localeCompare(b.id));
   if (new Set(nodes.map(n => n.id)).size !== nodes.length) fail('Block identities must be unique.');
   if (nodes.filter(n => n.componentId === 'loop-items').length > 1) fail('This PoC supports one Loop Over Items block per workflow.');
@@ -72,7 +76,19 @@ export function normalizeStudio(value) {
     if (n.id !== entryId && ['schedule', 'webhook'].includes(n.componentId)) fail('Place event triggers first.');
   }
   if (component(byId.get(entryId).componentId).inputs === 2) fail('A join needs two upstream blocks.');
-  return { id: workflowUuid(value.id), name: value.name.trim(), entryId, nodes, edges };
+  validateDkgTopology({ entryId, nodes, edges });
+  let groups;
+  if (value.groups !== undefined) {
+    if (!Array.isArray(value.groups) || value.groups.length > 12) fail('Use up to twelve visual groups.');
+    groups = value.groups.map(g => {
+      closed(g, ['id', 'name', 'tone']);
+      if (typeof g.name !== 'string' || !g.name.trim() || g.name.length > 80 || !['purple', 'teal', 'amber', 'neutral'].includes(g.tone)) fail('Name each visual group and choose its color.');
+      return { id: identifier(g.id), name: g.name, tone: g.tone };
+    });
+    if (new Set(groups.map(g => g.id)).size !== groups.length) fail('Visual group identities must be unique.');
+  }
+  if (nodes.some(n => n.groupId !== undefined && !groups?.some(g => g.id === n.groupId))) fail('Choose an existing visual group.');
+  return { id: workflowUuid(value.id), name: value.name.trim(), entryId, nodes, edges, ...(groups !== undefined ? { groups } : {}) };
 }
 
 export function validateStudioCapabilities(definition, capabilities) {
@@ -83,7 +99,7 @@ export function validateStudioCapabilities(definition, capabilities) {
     return c;
   });
   return { selected, requiresExportAuthorization: selected.some(c => c.requiresExportAuthorization)
-    || definition.nodes.some(n => component(n.componentId).writes) };
+    || definition.nodes.some(n => needsExport(component(n.componentId))) };
 }
 
 export function compileStudio(value, { graphId, owner, headerCredential, credentials = {}, fixture = false, providerId } = {}) {
@@ -98,8 +114,8 @@ export function compileStudio(value, { graphId, owner, headerCredential, credent
   const root = definition.nodes.find(n => n.id === definition.entryId), mode = component(root.componentId).mode;
   const nodes = [], connections = {}, pieces = new Map();
   for (const n of definition.nodes) {
-    const descriptor = component(n.componentId), name = 'Block ' + n.id;
-    const piece = componentPiece(n.componentId, name, key => n.componentId === 'schedule' ? JSON.stringify(n.params[key]) : nativeLiteral(n.params[key]), { credentials });
+    const descriptor = componentExecutionDescriptor(component(n.componentId)), name = 'Block ' + n.id;
+    const piece = componentPiece(n.componentId, name, key => n.componentId === 'schedule' ? JSON.stringify(n.params[key]) : nativeLiteral(n.params[key]), { credentials: { ...credentials, httpHeaderAuth: headerCredential } });
     Object.assign(connections, piece.connections); nodes.push(...piece.nodes);
     if (n.componentId === 'schedule') {
       const event = editNode(name + ' event', '$json'); nodes.push(event);
@@ -142,8 +158,8 @@ export function compileStudio(value, { graphId, owner, headerCredential, credent
   const grant = { toolIri: 'urn:dkg:tool:n8n', workflowId, workflowSha256: n8nWorkflowSha256(workflow),
     ...componentContract, outputSchema: { ...componentContract.outputSchema, properties: { ...componentContract.outputSchema.properties, traceJson: { type: 'string', maxLength: 8192 } },
       required: [...componentContract.outputSchema.required, 'traceJson'] },
-    result: { nodes: [...new Set(sinks.map(s => s.node))], sinks, traceNodes: definition.nodes.map(n => pieces.get(n.id).resultNode), allowObservation: false } };
-  return { compiler, definition, kaRef, workflowId, workflowName, workflow, grant, mode, requiresExportAuthorization: definition.nodes.some(n => component(n.componentId).writes) };
+    result: { nodes: [...new Set(sinks.map(s => s.node))], sinks, traceNodes: definition.nodes.map(n => pieces.get(n.id).traceNode ?? pieces.get(n.id).resultNode), allowObservation: false } };
+  return { compiler, definition, kaRef, workflowId, workflowName, workflow, grant, mode, requiresExportAuthorization: definition.nodes.some(n => needsExport(component(n.componentId))) };
 }
 
 export function studioProgramSource(compiled, grant = compiled.grant) {
@@ -151,7 +167,7 @@ export function studioProgramSource(compiled, grant = compiled.grant) {
   const metadata = { definition: compiled.definition, grant, mode: compiled.mode,
     ...([4, 5].includes(compiled.compiler) ? { compiler: compiled.compiler } : {}) };
   const root = compiled.definition.nodes.find(n => n.id === compiled.definition.entryId);
-  const descriptor = { ...component(root.componentId), ...(compiled.mode === 'schedule' ? { mode: 'action' } : {}) };
+  const descriptor = { ...componentExecutionDescriptor(component(root.componentId)), ...(compiled.mode === 'schedule' ? { mode: 'action' } : {}) };
   return marker + Buffer.from(JSON.stringify(metadata)).toString('base64') + '\n'
     + `import { invoke_tool } from '@origintrail-official/dkg-graph-computer/program';\n${componentValidationSource()}`
     + `export function run(input: unknown) { const value = normalize(${JSON.stringify(descriptor)}, input); if (value.paramsJson !== ${JSON.stringify(JSON.stringify(root.params))} || value.executionId) throw new Error('Use the saved workflow parameters.'); return invoke_tool('urn:dkg:tool:n8n', value); }\n`;
@@ -164,10 +180,10 @@ export function readStudio(source) {
   const data = JSON.parse(Buffer.from(source.split('\n')[0].slice(marker.length), 'base64').toString('utf8'));
   const definition = normalizeStudio(data.definition);
   if (data.compiler !== undefined && ![4, 5].includes(data.compiler)) fail('Unknown Studio compiler contract.');
-  const compiler = data.compiler ?? 2;
+  const compiler = data.compiler ?? (definition.nodes.some(n => n.componentId === 'invoke-dkg-program') ? 3 : 2);
   const revision = createHash('sha256').update(JSON.stringify({ compiler, definition })).digest('hex');
   const compiled = { ...([4, 5].includes(data.compiler) ? { compiler: data.compiler } : {}), definition, grant: data.grant, mode: data.mode, kaRef: STUDIO_PREFIX + definition.id + ':' + revision.slice(0, 20),
-    requiresExportAuthorization: definition.nodes.some(n => component(n.componentId).writes) };
+    requiresExportAuthorization: definition.nodes.some(n => needsExport(component(n.componentId))) };
   if (studioProgramSource(compiled) !== source) fail('Saved Studio source differs from its reviewed definition.');
   return compiled;
 }

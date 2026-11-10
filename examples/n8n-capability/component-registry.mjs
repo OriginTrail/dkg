@@ -3,6 +3,7 @@ import { resolveComponentValueSource, validateComponentUrlSource, normalizeCompo
 import { resolveComponentValue, validateComponentUrl } from './component-values.mjs';
 import { componentProgramSource as componentProgramSourceV1 } from './component-registry-v1.mjs';
 import { programDescriptor } from './program-block.mjs';
+import { configuredDkgProfile, dkgOperationIds, profileParameters } from './dkg-profile.mjs';
 const text = (label, value = '', extra = {}) => ({ type: 'string', label, default: value, maxLength: 256, ...extra });
 const field = (label, value) => text(label, value, { pattern: 'field', maxLength: 64 });
 const number = (label, value, min = 1, max = 20) => ({ type: 'integer', label, default: value, min, max });
@@ -11,7 +12,7 @@ const json = (label, value) => ({ type: 'json', label, default: value, maxLength
 const sample = [{ name: 'Ana', value: 12, active: true }, { name: 'Luka', value: 7, active: false }];
 const entry = (id, name, category, nodeType, parameters = {}, extra = {}) => ({
   id, name, category, nodeType: `n8n-nodes-base.${nodeType}`, version: 1,
-  input: 'items', outputs: ['main'], parameters, sampleItems: sample, mode: 'action', ...extra,
+  input: 'items', outputs: ['main'], parameters, sampleItems: sample, mode: 'action', requiresExportAuthorization: false, ...extra,
 });
 
 export const componentRegistry = [
@@ -41,11 +42,27 @@ export const componentRegistry = [
     query: json('Query parameters', {}), headers: json('Request headers', {}),
     body: { ...json('JSON request body', {}), shape: 'any' },
   }, { sampleItems: [{}], version: 2 }),
-  entry('google-sheets', 'Google Sheets', 'Integrations', 'googleSheets', { title: text('New spreadsheet title', 'nOS workflow export', { maxLength: 80 }) }, { connection: 'googleSheetsOAuth2Api', writes: true }),
-  entry('google-drive', 'Google Drive', 'Integrations', 'googleDrive', { name: text('Drive file name', 'nOS-export.txt', { maxLength: 80 }) }, { input: 'file', connection: 'googleDriveOAuth2Api', writes: true, sampleItems: [{ file: { name: 'hello.txt', mimeType: 'text/plain', base64: 'SGVsbG8gREtHCg==' } }] }),
+  ...(configuredDkgProfile ? [
+    entry('dkg-read', 'DKG Read', 'DKG', 'httpRequest', profileParameters(configuredDkgProfile, 'dkg-read'),
+      { version: 2, connection: 'httpHeaderAuth', sampleItems: configuredDkgProfile.sampleItems?.['dkg-read'] ?? [{}] }),
+    entry('invoke-dkg-program', 'Invoke DKG Program', 'DKG', 'httpRequest', {
+      ...profileParameters(configuredDkgProfile, 'invoke-dkg-program'),
+      inputs: { ...json('Program arguments · $json is all incoming rows', ['{{ $json }}']), shape: 'any' },
+      outputMapping: { ...json('Returned result · $json is the Program output array', '{{ $json }}'), shape: 'any' },
+    }, { version: 2, connection: 'httpHeaderAuth', sampleItems: [{}] }),
+    entry('dkg-write', 'DKG Write', 'DKG', 'httpRequest', profileParameters(configuredDkgProfile, 'dkg-write'),
+      { version: 2, connection: 'httpHeaderAuth', writes: true, requiresExportAuthorization: false, sampleItems: [{}] }),
+  ] : []),
+  entry('google-sheets', 'Google Sheets', 'Integrations', 'googleSheets', { title: text('New spreadsheet title', 'nOS workflow export', { maxLength: 80 }) }, { connection: 'googleSheetsOAuth2Api', writes: true, requiresExportAuthorization: true }),
+  entry('google-drive', 'Google Drive', 'Integrations', 'googleDrive', { name: text('Drive file name', 'nOS-export.txt', { maxLength: 80 }) }, { input: 'file', connection: 'googleDriveOAuth2Api', writes: true, requiresExportAuthorization: true, sampleItems: [{ file: { name: 'hello.txt', mimeType: 'text/plain', base64: 'SGVsbG8gREtHCg==' } }] }),
   entry('if', 'IF', 'Flow', 'if', { field: field('Field', 'name'), equals: text('Equals', 'Ana') }, { outputs: ['true', 'false'], mode: 'branch' }),
   entry('switch', 'Switch', 'Flow', 'switch', { field: field('Field', 'name'), equals: text('First route equals', 'Ana') }, { outputs: ['match', 'other'], mode: 'branch' }),
   entry('merge', 'Merge', 'Flow', 'merge', {}, { inputs: 2, mode: 'join' }),
+  entry('merge-fields', 'Merge by fields', 'Flow', 'merge', {
+    fieldA: field('Match field in input A', 'joinKey'),
+    fieldB: field('Match field in input B', 'joinKey'),
+    joinMode: choice('Rows to keep', 'keepEverything', ['keepEverything', 'keepMatches', 'keepNonMatches']),
+  }, { inputs: 2, mode: 'join', version: 2 }),
   entry('compare-datasets', 'Compare Datasets', 'Flow', 'compareDatasets', { field: field('Match field', 'name') }, { inputs: 2, outputs: ['only-a', 'same', 'different', 'only-b'], mode: 'join' }),
   entry('loop-items', 'Loop Over Items', 'Flow', 'splitInBatches', { batchSize: number('Batch size', 1) }, { outputs: ['done', 'loop'], mode: 'loop' }),
   entry('execute-workflow', 'Execute Sub-workflow', 'Flow', 'executeWorkflow', {}, { mode: 'subworkflow' }),
@@ -55,9 +72,18 @@ export const componentRegistry = [
   entry('wait', 'Wait', 'Events', 'wait', { seconds: number('Seconds to wait', 1, 1, 3) }, { mode: 'wait' }),
 ].map(value => Object.freeze(value));
 
+/** Registry policy is authoritative even for older installed descriptors. Unknown writers fail closed. */
+export const componentNeedsExport = descriptor => componentRegistry.find(c => c.id === descriptor?.id)?.requiresExportAuthorization
+  ?? descriptor?.requiresExportAuthorization ?? !!descriptor?.writes;
+
+/** Host authorization metadata is outside the immutable guest input contract. */
+export function componentExecutionDescriptor({ requiresExportAuthorization: _policy, ...descriptor }) { return descriptor; }
+
 export function component(id) {
   if (id === 'run-program') return programDescriptor;
   const value = componentRegistry.find(item => item.id === id);
+  if (!value && !configuredDkgProfile && dkgOperationIds.includes(id))
+    throw Object.assign(new Error('This workflow requires its configured DKG execution profile.'), { code: 'WORKFLOW_CAPABILITY_CHANGED', status: 409 });
   if (!value) throw Object.assign(new Error('Unknown component.'), { code: 'INVALID_COMPONENT', status: 400 });
   return value;
 }
@@ -132,6 +158,6 @@ export function componentProgramSource(id) {
   const descriptor = component(id);
   if (descriptor.version === 1) return componentProgramSourceV1(id);
   return `// nos-n8n-component-v2:${id}\nimport { invoke_tool } from '@origintrail-official/dkg-graph-computer/program';\n`
-    + `const descriptor = ${JSON.stringify(descriptor)};\n${componentValidationSource()}`
+    + `const descriptor = ${JSON.stringify(componentExecutionDescriptor(descriptor))};\n${componentValidationSource()}`
     + `export function run(input: unknown) { return invoke_tool('urn:dkg:tool:n8n', normalize(descriptor, input)); }\n`;
 }

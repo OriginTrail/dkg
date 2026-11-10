@@ -1,3 +1,4 @@
+import { assertDkgEnabled, isDkg } from './dkg-components.mjs';
 import { studioExecutionPlan, prepareStudioExecution } from './studio-execution-plan.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -13,9 +14,10 @@ const reject = message => Object.assign(new Error(message), { code: 'INVALID_WOR
 const eventUuid = (ref, id) => { const b = createHash('sha256').update(ref + ':' + id).digest(); b[6] = (b[6] & 15) | 64; b[8] = (b[8] & 63) | 128;
   const h = b.toString('hex'); return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`; };
 
-export function createStudioService({ graphId, owner, client, repository, provider, listCapabilities, loadOutputs, exportTokenFile }) {
+export function createStudioService({ graphId, owner, client, repository, provider, dkg, listCapabilities, loadOutputs, exportTokenFile }) {
   const native = () => { if (!provider) throw reject('Native execution is not configured.'); return provider; };
   const fingerprint = path => createHash('sha256').update(readFileSync(path, 'utf8').trim()).digest('hex');
+  const components = () => { if (!dkg) throw reject('DKG component execution is not configured.'); return dkg; };
   const saving = new Map(); let polling = false, stopped = false;
   async function approved(kaRef, sourceHash) {
     try { const a = await client.programs.getApproval({ graphId, operationIri: kaRef }); return a.binding.enabled && a.binding.program.sourceHash === sourceHash; }
@@ -37,12 +39,15 @@ export function createStudioService({ graphId, owner, client, repository, provid
   async function list() {
     const workflows = [];
     for (const row of repository.list()) {
-      try { workflows.push((await get(row.ka_ref)).workflow); } catch (e) { if (!['PROGRAM_NOT_FOUND', 'INVALID_WORKFLOW'].includes(e.code)) throw e; }
+      // Unavailable revisions remain saved with their original pins; other workflows can still be listed.
+      try { workflows.push((await get(row.ka_ref)).workflow); }
+      catch (e) { if (!['PROGRAM_NOT_FOUND', 'INVALID_WORKFLOW', 'WORKFLOW_CAPABILITY_CHANGED'].includes(e.code)) throw e; }
     }
     return workflows;
   }
   async function save(value, authorize) {
     const definition = normalizeStudio(value);
+    assertDkgEnabled(definition);
     const policy = validateStudioCapabilities(definition, (await listCapabilities()).filter(c => !c.retired));
     if (policy.requiresExportAuthorization) authorize();
     const key = JSON.stringify(definition); if (saving.has(key)) return saving.get(key);
@@ -71,10 +76,10 @@ export function createStudioService({ graphId, owner, client, repository, provid
     })();
     saving.set(key, pending); try { return await pending; } finally { saving.delete(key); }
   }
-  function run(value, authorize) {
-    return execute(value, { authorizeExport: authorize });
+  function run(value, authorize, actor) {
+    return execute(value, { authorizeExport: authorize, actor });
   }
-  async function execute(value, { authorizeExport, beforeDispatch }) {
+  async function execute(value, { authorizeExport, beforeDispatch, actor }) {
     if (!value || Object.keys(value).some(k => !['kaRef', 'sourceHash', 'itemsJson', 'invocationId'].includes(k))) throw reject('Invalid graph invocation.');
     const invocationId = workflowUuid(value.invocationId), { compiled, plan, workflow } = await get(value.kaRef, value.sourceHash);
     if (!workflow.approved) throw reject('This graph is not approved.');
@@ -86,7 +91,10 @@ export function createStudioService({ graphId, owner, client, repository, provid
     const descriptor = { ...(compiled.legacy ? componentV1 : component)(root.componentId), ...(compiled.mode === 'schedule' ? { mode: 'action' } : {}) };
     let input; try { input = (compiled.legacy ? normalizeComponentInputV1 : normalizeComponentInput)(descriptor, { itemsJson: value.itemsJson, paramsJson: JSON.stringify(root.params), executionId: '' }); }
     catch (e) { throw reject(e.message); }
+    beforeDispatch?.(requiresExportAuthorization);
+    assertDkgEnabled(compiled.definition);
     if (plan.kind === 'native-n8n') native().installGrant(compiled.grant);
+    if (compiled.definition.nodes.some(n => isDkg(n.componentId))) components().grant(workflow, invocationId, input, actor);
     const invoke = () => {
       beforeDispatch?.(requiresExportAuthorization);
       if (compiled.mode === 'schedule') eventAuthorized(workflow.kaRef, requiresExportAuthorization);
@@ -96,7 +104,8 @@ export function createStudioService({ graphId, owner, client, repository, provid
     try { result = await invoke(); }
     catch (error) {
       if (error.code !== 'INVOCATION_REQUIRES_RECONCILIATION' || plan.kind === 'dkg-program') throw error;
-      // Reconcile the durable acknowledgement under the same invocation, once.
+      // The native-only wrapper resumes its durable acknowledgement; it never
+      // creates another n8n run or another remote Program invocation.
       result = await invoke();
     }
     if (!isDeepStrictEqual(await loadOutputs(result.executionIri), result.rawOutputs)) throw new Error('The DKG receipt readback differs.');
@@ -104,11 +113,24 @@ export function createStudioService({ graphId, owner, client, repository, provid
       ...await programWorkflowReceipt(compiled, result, input, loadOutputs) };
     const output = result.outputs[0];
     if (output?.kind !== 'n8n-result' || output.workflowSha256 !== compiled.grant.workflowSha256 || !output.output || typeof output.output.traceJson !== 'string') throw new Error('Native graph evidence is incomplete.');
+    const write = dkg?.writeRecovery(workflow, invocationId, compiled.grant.workflowId, output.n8nExecutionId);
+    let dkgRecovery;
+    if (write && (write.pending || output.output.ok === false)) {
+      // The native receipt may already be terminal. Reconcile only the journalled
+      // write through the same current authority/pin checks as its callback.
+      // call() sees the original journal entry and can only use allowCreate:false.
+      const receipt = await dkgComponent(write.request);
+      const current = await get(workflow.kaRef, workflow.sourceHash);
+      if (!current.workflow.approved) throw reject('Workflow approval is unavailable.');
+      validateStudioCapabilities(current.compiled.definition, await listCapabilities());
+      dkgRecovery = { status: 'confirmed', invocationId, n8nExecutionId: output.n8nExecutionId,
+        blockId: write.request.blockId, requestHash: write.requestHash, receipt };
+    }
     const trace = JSON.parse(output.output.traceJson);
     return { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, invocationId, executionIri: result.executionIri,
       n8nExecutionId: output.n8nExecutionId, workflowSha256: output.workflowSha256, output: output.output,
       steps: compiled.definition.nodes.map((n, i) => ({ nodeId: n.id, componentId: n.componentId, kaRef: n.kaRef, ...trace[i] })),
-      persisted: true, readbackVerified: true };
+      ...(dkgRecovery ? { dkgRecovery } : {}), persisted: true, readbackVerified: true };
   }
   function eventAuthorized(ref, requiresExportAuthorization, expectedRevision) {
     const row = repository.row(ref), active = row?.activation_json ? JSON.parse(row.activation_json) : { active: false };
@@ -245,6 +267,15 @@ export function createStudioService({ graphId, owner, client, repository, provid
     } catch { /* A bounded retry resumes the same journalled event identities. */ }
     finally { polling = false; }
   }
+  async function dkgComponent(value) {
+    const row=repository.nativeWorkflow(value?.workflowId ?? '');
+    if(!row) throw reject('Unknown native workflow.');
+    const {compiled,workflow}=await get(row.ka_ref);
+    if(!workflow.approved) throw reject('Workflow approval is unavailable.');
+    validateStudioCapabilities(compiled.definition,await listCapabilities());
+    const input = await native().executionInput({ workflowId: value.workflowId, executionId: value.executionId, grant: compiled.grant });
+    return components().call(value, workflow, value.workflowId, input);
+  }
   const timer = setInterval(() => void poll(), 3000); timer.unref();
-  return { list, get, save, run, activate, event, history, poll, stop() { stopped = true; clearInterval(timer); } };
+  return { dkgComponent, list, get, save, run, activate, event, history, poll, stop() { stopped = true; clearInterval(timer); } };
 }

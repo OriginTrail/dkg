@@ -1,7 +1,11 @@
+import { configuredDkgProfile } from './dkg-profile.mjs';
+import { nosStudioSession } from './nos-studio-session.mjs';
+import { isDkg, dkgComponentStore } from './dkg-components.mjs';
 import { canonicalizeJson } from '../../packages/core/dist/index.js';
 import { loadExecutionOutputs } from '../../packages/cli/dist/semantic-runtime-execution-persistence.js';
 import { iriValue, resultRows } from '../../packages/cli/dist/semantic-runtime-values.js';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { persistProgramKnowledgeAsset } from '../../packages/cli/dist/semantic-runtime-execution-persistence.js';
 import { createWorkflowService } from './workflow-service.mjs';
@@ -9,16 +13,39 @@ import { WORKFLOW_PREFIX } from './workflow-definition.mjs';
 import { createStudioProvider } from './studio-provider.mjs';
 import { createStudioRepository } from './studio-repository.mjs';
 import { createStudioService } from './studio-service.mjs';
-import { normalizeComponentInput } from './component-registry.mjs';
+import { normalizeComponentInput, componentNeedsExport } from './component-registry.mjs';
 import { STUDIO_PREFIX } from './studio-definition.mjs';
 import { createProgramCatalog } from './program-catalog.mjs';
-import { capabilityPrefix, matchCapabilityRoute } from './capability-routes.mjs';
+import { capabilityPrefix, capabilityRoutes, matchCapabilityRoute } from './capability-routes.mjs';
 
 const SR = 'https://origintrail.io/semantic-runtime/v1#';
-const prefix = capabilityPrefix();
+const prefix = capabilityPrefix(nosStudioSession?.accountId ?? 'account-a');
+const nativeCallback = capabilityRoutes.find(route => route.id === 'dkgComponent');
 const json = (res, status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); };
 
+/** Shared by the bridge and transport-level regression fixtures. */
+export async function handleDkgComponentCallback(req, res, studio, config) {
+  try {
+    const token=readFileSync(config.n8nNative.webhookTokenFile,'utf8').trim();
+    const expected=Buffer.from('Bearer '+token), supplied=Buffer.from(String(req.headers.authorization??''));
+    if(!studio || !nativeCallback.methods.includes(req.method) || Object.hasOwn(req.headers, 'origin') || token.length<32 || expected.length!==supplied.length || !timingSafeEqual(expected,supplied)) { json(res,403,{error:'Native DKG component access denied'});return true; }
+    const chunks = []; let size = 0;
+    for await (const chunk of req) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += bytes.length;
+      if (size > nativeCallback.bodyLimit) throw Object.assign(new Error('Bounded DKG batch required'), { status: 413 });
+      chunks.push(bytes);
+    }
+    json(res,200,await studio.dkgComponent(JSON.parse(Buffer.concat(chunks, size).toString('utf8'))));
+  } catch(e) { json(res,e.status??409,{code:e.code??'DKG_COMPONENT_UNCONFIRMED',error:e.message}); }
+}
+
 export function createCapabilityBridge({ agent, client, graphId, owner, config, definitions = [], exportTokenFile, studioOptions }) {
+  if (!nosStudioSession && studioOptions && existsSync(join(studioOptions.state, 'nos-account.json')))
+    throw new Error('This state requires its authenticated nOS account configuration.');
+  const commitAccountBinding = nosStudioSession && studioOptions ? nosStudioSession.prepareStateBinding(studioOptions.state) : null;
+  if (nosStudioSession && configuredDkgProfile && (!configuredDkgProfile.requiresNosActor || configuredDkgProfile.accountId !== nosStudioSession.accountId))
+    throw new Error('Authenticated Studio requires an account-bound nOS transport profile.');
   const listPrograms = createProgramCatalog({ graphId, owner, client, definitions });
   function authorizeExport(req) {
     const supplied = req.headers['x-dkg-export-token'];
@@ -55,7 +82,7 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
         kind: definition?.kind ?? 'text', available,
         ...(definition.retired ? { retired: true } : {}),
         ...(definition?.kind === 'component' ? { descriptor: definition.descriptor } : {}),
-        ...((definition?.requiresExportAuthorization || definition?.kind === 'google-sheets-export') ? { requiresExportAuthorization: true } : {}),
+        ...((definition?.requiresExportAuthorization || componentNeedsExport(definition?.descriptor) || definition?.kind === 'google-sheets-export') ? { requiresExportAuthorization: true } : {}),
         ...(!available && definition?.descriptor?.connection ? { unavailableReason: 'Connect ' + definition.descriptor.name + ' OAuth in local n8n, then refresh the operator installation.' } : {}),
         ...(definition?.kind === 'google-sheets-export' && !available ? { unavailableReason: 'Connect a Google Sheets OAuth credential in n8n to enable this KA.' } : {}) });
     }
@@ -78,9 +105,15 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
   });
   const repository = studioOptions ? createStudioRepository(studioOptions.state) : null;
   const provider = repository && config.n8nNative ? createStudioProvider({ ...studioOptions, repository, config, graphId, owner }) : null;
-  const studio = repository ? createStudioService({ graphId, owner, client, repository, provider, exportTokenFile,
-    listCapabilities: async () => [...await list(), ...await listPrograms()],
-    loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner) }) : null;
+  let studio;
+  try {
+    if (nosStudioSession && repository?.hasActiveWorkflows())
+      throw new Error('Deactivate legacy schedules before adopting Studio state for an account.');
+    studio = repository ? createStudioService({ graphId, owner, client, repository, provider, dkg: dkgComponentStore(repository.db), exportTokenFile,
+      listCapabilities: async () => [...await list(), ...await listPrograms()],
+      loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner) }) : null;
+    commitAccountBinding?.();
+  } catch (error) { studio?.stop(); repository?.close(); throw error; }
   async function invoke(capability, input, invocationId) {
     const result = await client.programs.invoke({ graphId, operationIri: capability.kaRef, inputs: [input], invocationId });
     const stored = await loadExecutionOutputs(agent, graphId, result.executionIri, 'wm', owner);
@@ -98,15 +131,16 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     workflowRun: async ({ res, value, authorize }) => json(res, 200, await workflows.run(value, authorize)),
     studio: async ({ res, ownerAccess }) => json(res, 200, { capabilities: [...(await list()).filter(c => c.kind === 'component'), ...await listPrograms()], workflows: await studio.list(), canInvoke: ownerAccess }),
     studioSave: async ({ res, value, authorize }) => json(res, 200, await studio.save(value, authorize)),
-    studioRun: async ({ res, value, authorize }) => json(res, 200, await studio.run(value, authorize)),
+    studioRun: async ({ res, value, authorize, actor }) => json(res, 200, await studio.run(value, authorize, actor)),
     studioActivation: async ({ res, value, authorize }) => json(res, 200, await studio.activate(value, authorize)),
     studioHistory: async ({ res, params, ownerAccess, authorize }) => json(res, 200, await studio.history(params.get('kaRef'), needsExport => {
-      if (!ownerAccess) return false;
+      if (!ownerAccess || nosStudioSession) return false;
       try { if (needsExport) authorize(); return true; } catch { return false; }
     })),
     studioInvoke: async ({ res, value, authorize }) => {
       const selected = (await list()).find(c => c.kind === 'component' && c.kaRef === value.kaRef && c.sourceHash === value.sourceHash && c.available);
       if (!selected) throw Object.assign(new Error('Component revision unavailable.'), { code: 'WORKFLOW_CAPABILITY_CHANGED', status: 409 });
+      if (isDkg(selected.descriptor.id)) throw Object.assign(new Error('Compose DKG Read / Write inside a saved native workflow.'), { status: 400 });
       if (selected.requiresExportAuthorization) authorize();
       let input; try { input = normalizeComponentInput(selected.descriptor, value.input); }
       catch (e) { throw Object.assign(selected.retired ? new Error('This older component version does not accept these inputs. Choose Use current component version, then invoke it again. Your URL and field settings are kept.') : e, { code: 'INVALID_WORKFLOW', status: 400 }); }
@@ -132,19 +166,28 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
       if (selected.requiresExportAuthorization) authorize();
       json(res, 200, await invoke(selected, value.input, value.invocationId));
     },
+    dkgComponent: async ({ req, res }) => handleDkgComponentCallback(req, res, studio, config),
     event: async ({ res, eventKey, value }) => json(res, 200, await studio.event(eventKey, value)),
     demo: async ({ res, value }) => json(res, 200, { source: 'nOS local demo API', items: [{ name: 'Ana', value: 12 }, { name: 'Luka', value: 7 }], ...(value === undefined ? {} : { received: value }) }),
   };
   async function handle(req, res, path) {
     if (!path.startsWith('/spike/ka/')) return false;
     const match = matchCapabilityRoute(path, prefix), route = match?.route;
+    if (route?.role === 'native') { await handlers[route.id]({ req, res }); return true; }
     const delegated = route?.role === 'delegated', publicRoute = route?.role === 'public';
-    const ownerAccess = req.headers.authorization === 'Bearer l1-owner-a';
-    const memberAccess = ['Bearer l1-owner-a', 'Bearer l1-viewer-a'].includes(req.headers.authorization);
+    if (delegated && nosStudioSession) { json(res, 403, { error: 'Account Studio supports manual execution only.' }); return true; }
+    let actor, ownerAccess = false;
     if (!delegated && !publicRoute) {
       const origin = req.headers.origin;
       if (origin && !['http://127.0.0.1:4620', 'http://localhost:4620'].includes(origin)) { json(res, 403, { error: 'Local console origin required' }); return true; }
+      if (nosStudioSession) {
+        try { actor = nosStudioSession.actor(req.headers); }
+        catch { json(res, 403, { error: 'Authenticated nOS account context required.' }); return true; }
+      }
+      ownerAccess = nosStudioSession ? actor.role === 'owner' : req.headers.authorization === 'Bearer l1-owner-a';
+      const memberAccess = nosStudioSession ? !!actor : ['Bearer l1-owner-a', 'Bearer l1-viewer-a'].includes(req.headers.authorization);
       if (!memberAccess || !route) { json(res, 403, { error: 'Account access denied' }); return true; }
+      if (nosStudioSession && route.legacyOnly) { json(res, 403, { error: 'Account Studio supports manual execution only.' }); return true; }
     }
     if (!route.methods.includes(req.method)) { json(res, 405, { error: 'Method unavailable' }); return true; }
     if (route.role === 'owner' && !ownerAccess) { json(res, 403, { error: 'Owner access required.' }); return true; }
@@ -160,11 +203,13 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
         }
         if (size || !route.optionalBody) value = JSON.parse(Buffer.concat(chunks, size).toString('utf8'));
       }
-      await handlers[route.id]({ res, value, ownerAccess, eventKey: match.params.eventKey,
+      await handlers[route.id]({ res, value, ownerAccess, actor, eventKey: match.params.eventKey,
         params: new URL(req.url ?? path, 'http://127.0.0.1:4631').searchParams, authorize: () => authorizeExport(req) });
     } catch (error) {
       json(res, error.status ?? 400, { code: error.code ?? (delegated ? 'EVENT_UNCONFIRMED' : 'POC_REQUEST_REJECTED'),
+        ...(error.code === 'DKG_WRITE_PENDING' ? { invocationId: error.invocationId, n8nExecutionId: error.n8nExecutionId } : {}),
         error: delegated ? 'The event did not confirm a result. Retain its invocationId.'
+          : error.code === 'DKG_WRITE_PENDING' ? 'The DKG write is unconfirmed. Retry this invocation; do not start another run.'
           : ['INVALID_WORKFLOW', 'WORKFLOW_CAPABILITY_CHANGED'].includes(error.code) ? error.message : 'The DKG request did not confirm a result' });
     }
     return true;

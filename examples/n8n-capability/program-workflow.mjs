@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { component, componentValidationSource } from './component-registry.mjs';
+import { component, componentNeedsExport, componentExecutionDescriptor, componentValidationSource } from './component-registry.mjs';
 import { programRecordsSource, runProgramStepsSource } from './guest-sources/program-v1.mjs';
 
 export const PROGRAM_STUDIO_MARKER = '// nos-program-studio-v1:';
@@ -35,11 +35,11 @@ export function compileProgramWorkflow(definition) {
   const revision = createHash('sha256').update(JSON.stringify({ compiler: 'program-v1', definition })).digest('hex');
   return { definition, ordered, kaRef: `urn:demo:nos:studio:${definition.id}:${revision.slice(0, 20)}`,
     workflowName: 'nOS Program workflow ' + revision, mode: 'action', executor: 'dkg',
-    requiresExportAuthorization: definition.nodes.some(n => component(n.componentId).writes) };
+    requiresExportAuthorization: definition.nodes.some(n => componentNeedsExport(component(n.componentId))) };
 }
 
 export function programWorkflowSource(compiled) {
-  const nodes = compiled.ordered.map(node => ({ ...node, descriptor: component(node.componentId) }));
+  const nodes = compiled.ordered.map(node => ({ ...node, descriptor: componentExecutionDescriptor(component(node.componentId)) }));
   return PROGRAM_STUDIO_MARKER + Buffer.from(JSON.stringify(compiled.definition)).toString('base64') + '\n'
     + `import { invoke_program } from '@origintrail-official/dkg-graph-computer/program';\n${componentValidationSource()}`
     + `const records = ${programRecordsSource};\nconst execute = ${runProgramStepsSource};\n`

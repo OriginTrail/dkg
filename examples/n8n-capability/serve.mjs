@@ -1,5 +1,6 @@
 import { n8nResultSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
@@ -33,6 +34,13 @@ const componentsFile = join(state, 'components.json');
 const componentManifest = existsSync(componentsFile) ? JSON.parse(readFileSync(componentsFile, 'utf8')) : { components: [] };
 const legacyDefinitions = [{ kind: 'text', kaRef, name: 'Normalize text', enabled: true, grant }, ...csv.components];
 const definitions = [...legacyDefinitions, ...componentManifest.components];
+// Source revisions may reuse an identical native template. Retain their KA pins
+// while installing that exact native workflow only once in the runtime allowlist.
+const nativeDefinitions = [...new Map(componentManifest.components.filter(item => item.enabled).map(item => {
+  const versions = componentManifest.components.filter(other => other.enabled && other.grant.workflowId === item.grant.workflowId);
+  if (versions.some(other => other.grant.workflowSha256 !== item.grant.workflowSha256)) throw new Error('Conflicting native component revisions.');
+  return [item.grant.workflowId, item];
+})).values()];
 const nodeUrl = 'http://127.0.0.1:4631';
 mkdirSync(join(state, 'dkg'), { recursive: true, mode: 0o700 });
 const dashDb = new DashboardDB({ dataDir: join(state, 'dkg') });
@@ -56,7 +64,7 @@ try {
   const semanticRuntime = { enabled: true, startupTimeoutMs: 30000, watchdogMs: 1000,
     n8n: { ...connection, workflows: legacyDefinitions.filter(item => item.enabled).map(item => ({ contextGraphId: graphId, executorAgentAddress: owner,
       workflowId: item.grant.workflowId, workflowSha256: item.grant.workflowSha256 })) },
-    n8nNative: { ...connection, workflows: componentManifest.components.filter(item => item.enabled).map(item => ({ contextGraphId: graphId, executorAgentAddress: owner,
+    n8nNative: { ...connection, workflows: nativeDefinitions.map(item => ({ contextGraphId: graphId, executorAgentAddress: owner,
       workflowId: item.grant.workflowId, workflowSha256: item.grant.workflowSha256, resultSha256: n8nResultSha256(item.grant) })) } };
   runtime = await startConfiguredSemanticRuntime(semanticRuntime, { dataDirectory: join(state, 'runtime'), log: () => {} });
   const config = { name: 'n8n-ka-poc', apiPort: 4631, listenPort: 0, nodeRole: 'edge', semanticRuntime };
@@ -96,7 +104,7 @@ try {
     try { program = await client.programs.getSource({ graphId, programIri, programLayer: 'wm' }); }
     catch (error) { if (error.code !== 'PROGRAM_NOT_FOUND') throw error; }
     if (program) program = { graphId, programIri, programLayer: 'wm', authorAgentAddress: program.authorAgentAddress, sourceHash: program.sourceHash };
-    else program = await client.programs.upload({ graphId, programIri, name: definition.kind + '-' + definition.grant.workflowSha256.slice(0, 12), label: definition.name, language: 'typescript-v1',
+    else program = await client.programs.upload({ graphId, programIri, name: definition.kind + '-' + createHash('sha256').update(programIri).digest('hex').slice(0, 24), label: definition.name, language: 'typescript-v1',
       source: definition.kind === 'text' ? programSource : definition.kind === 'component' ? definition.source ?? (definition.retired ? componentProgramSourceV1 : componentProgramSource)(definition.descriptor.id) : csvProgramSource(definition.kind), version: '1.0.0', requiredTools: [definition.grant.toolIri], requestedPermissions: { graphId, n8n: definition.grant } });
     if (!definition.enabled) continue;
     let approval;

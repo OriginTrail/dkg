@@ -1,3 +1,7 @@
+> DKG components now require an explicit operator-selected execution profile.
+> See [DKG execution profiles](./DKG-PROFILES.md) before installing or running them.
+> The JPB sections below describe the opt-in demo policy, not generic component defaults.
+
 # Invoke an n8n capability as a Program KA
 
 An agent invokes `urn:demo:n8n:normalize-text:1` through the ordinary signed Graph
@@ -176,9 +180,9 @@ save and run. Invalid CSV, missing mapped columns or incompatible Google headers
 stop before downstream calls with a confirmed result the user can correct.
 Uncertain outcomes retain the original invocation for reconciliation.
 
-## Thirty native components and nOS Studio
+## Native components and nOS Studio
 
-The **Workflow builder** tab now opens **n8n KA Studio**, with thirty separately
+The **Workflow builder** tab now opens **n8n KA Studio**, with thirty-one separately
 registered component Programs. Every leaf KA declares its exact native workflow
 ID, definition hash, bounded input/output schemas and selected result nodes in
 its owner-approved n8n grant. Credentials stay in the local n8n installation.
@@ -188,8 +192,18 @@ its owner-approved n8n grant. Credentials stay in the local n8n installation.
 | Data | Edit Fields, Filter, Sort, Limit, Remove Duplicates, Split Out, Aggregate, Summarize, Rename Keys, Date & Time |
 | Files | Extract From File, Convert to File, XML, HTML, Markdown, Crypto, Compression |
 | Integrations | HTTP Request, Google Sheets, Google Drive |
-| Flow | IF, Switch, Merge, Compare Datasets, Loop Over Items, Execute Sub-workflow, Stop And Error |
+| Flow | IF, Switch, Merge, Merge by fields, Compare Datasets, Loop Over Items, Execute Sub-workflow, Stop And Error |
 | Events | Webhook, Schedule Trigger, Wait |
+
+**Merge by fields** is a separate component revision; existing append-only Merge workflows
+keep their original pins and behavior. Select the exact field in input A and input B and choose
+`keepEverything` (full outer join), `keepMatches`, or `keepNonMatches`. Matching is case-sensitive
+with fuzzy comparison disabled. All matches are retained, including one-to-many/many-to-many
+results, within the existing twenty-record/8 KiB result bound. Overlapping properties prefer
+input A; map independent provenance into separate named fields before joining to preserve both.
+With `keepNonMatches`, native n8n adds `_source: input1` or `_source: input2` to identify
+the unmatched input (and overwrites any existing `_source` property).
+This exposes n8n's native Merge v3.2 settings; no new join engine or domain-specific mapping is added.
 
 Provision the installed local n8n runtime with its official CLI while that owned
 instance is stopped. The installer first takes a SQLite backup, reads credential
@@ -308,6 +322,17 @@ node examples/n8n-capability/verify-studio-native.mjs /tmp/n8n-component-fixture
 node examples/n8n-capability/verify-studio-native.mjs /tmp/n8n-component-fixture http://127.0.0.1:45780
 ```
 
+The field-join regression runs eight generated Merge cases on n8n 2.43.8 with
+distinct left/right field names, all three join modes, duplicate matches and
+append-only compatibility. It imports and executes through the native CLI in a
+fresh temporary SQLite state, then removes that state; it needs no running
+server, account credentials or partner data. Use a Node version supported by
+that n8n installation:
+
+```sh
+node examples/n8n-capability/verify-field-join-native.mjs /path/to/node_modules/n8n /tmp/field-join-report.json
+```
+
 ```sh
 node examples/n8n-capability/verify-workflows.mjs /tmp/n8n-ka-state
 ```
@@ -390,6 +415,122 @@ redispatched. A successful completed retry returns the persisted result after
 current authorization checks. Private KA receipts establish provenance and
 matching content, not independently verified execution of an external service.
 
+### JPB DKG Read and DKG Write components
+
+Select the same `NOS_DKG_PROFILE_MODULE` and approved `NOS_JPB_WORKBOOK_INPUT_FILE`
+for installation and the companion. Install with
+`setup-components-local.mjs <state> --install --only dkg-read,dkg-write --n8n-cli <cli>`
+in the isolated local n8n instance, using the same `httpHeaderAuth` connection as the native bridge.
+Partial installation verifies the selected components and preserves all unselected
+manifest entries and pins. It does not advertise or require the unselected
+`invoke-dkg-program` component. Install that component explicitly when needed.
+Restart the local n8n instance after offline installation. The fixed callback is
+`http://127.0.0.1:4631/spike/ka/internal/dkg-component`; allow loopback for this isolated n8n
+instance with `N8N_SSRF_ALLOWED_IP_RANGES=127.0.0.1/32`, keeping SSRF protection enabled.
+The general HTTP component still rejects arbitrary private destinations.
+
+Configure the companion:
+
+- `NOS_JPB_READ_ENABLED=1`
+- `NOS_JPB_WRITE_ENABLED=1`
+- `NOS_JPB_WORKBOOK_INPUT_FILE=/absolute/path/to/JPB-recorded-inputs.json`
+
+The last file contains the reviewed original four workbook rows at `[0].workbook`. Input must
+match them exactly before a workflow containing DKG Write can execute. The JPB connection uses
+existing SSH access to `adminuser@100.113.215.1`; node credentials remain on that host.
+No remote services are installed or restarted. These flags authorize only this fixed demo scope.
+
+Use **DKG Read** as the first block. It accepts one `{workbook:[...]}` item and reads saved order
+62633 (CUT, USILU, EBAVM) through the JPB DKG query API in `jpb-data`. The selected evidence
+snapshot was captured on 2026-10-18. Four fixed assertion graphs bound the query; missing,
+duplicate, oversized or unavailable source results fail the step. No fresh SQL extraction runs.
+
+Connect ordinary native n8n mapping/split/join components, followed by terminal **DKG Write**.
+Both DKG blocks compile to native HTTP Request nodes with explicit credential references and
+native result unpacking. The transport validates the approved workflow digest and native execution,
+then uses fixed JPB adapters. Mapping, joins, scheduling and step errors stay in n8n. DKG blocks
+currently support bounded manual native workflows only, with at most one read and one write.
+The standalone `/studio/jpb-output` action has been removed: Run executes the write component.
+
+The write target is the existing private `jpb-plca-study` Context Graph. Output is non-calculated
+PLCA input evidence with unconfirmed allocation. It retains both input provenances, source
+snapshot and execution identity. The payload marks its execution `running-at-write`; the final
+local workflow receipt records completion. Sharing and VM publishing are false. Readback checks
+every RDF term, payload SHA-256 and `wm-sealed` status before reporting success.
+
+The component journal binds invocation, native execution, block, input and workflow source hash.
+A pending write is persisted before dispatch. The native HTTP step retries at most once; retry
+reconciles the same named asset, never recreates an ambiguous missing asset. Reads are reused
+within one invocation. Completed workflow replay returns the same persisted receipt. A new Run
+has a new identity and may create a new evidence asset. No EPCIS or calculated footprint is implied.
+
+Validation: `node --test examples/n8n-capability/dkg-components.test.mjs
+examples/n8n-capability/jpb-output.test.mjs examples/n8n-capability/program-workflow.test.mjs`.
+
+### Studio presentation metadata
+
+Studio blocks optionally carry `label` (up to 80 characters) and `groupId`. The definition may
+include up to twelve `groups`, each with a unique `id`, a `name` and a `tone` selected from
+`purple`, `teal`, `amber`, `neutral`. Membership must reference an existing group. These fields
+persist in the immutable workflow source but never enter native node parameters or control flow.
+Definitions without these fields retain their original normalization and source identity.
+Renaming or regrouping creates a saved revision; it does not execute the workflow.
+
+Run `node --test examples/n8n-capability/studio-presentation.test.mjs` to check old-source
+compatibility, presentation readback, validation and unchanged native execution definitions.
+# Invoke DKG Program (JPB local demo)
+
+The DKG palette includes **Invoke DKG Program**. It remains a native n8n HTTP
+step and can follow branches and a Merge by fields step. It does not switch to
+the separate linear Program-workflow executor.
+
+Select the execution node and a reviewed remote Program. **Program arguments**
+is a JSON array of positional arguments; `$json` is the complete incoming batch.
+For one argument containing all rows, use `["{{ $json }}"]`. For the first row,
+use `["{{ $json[0] }}"]`. **Returned result** maps the remote output array using
+the same references. The next step receives `result` and `programExecution`,
+including the remote execution IRI, source hash, binding digest and output hash.
+
+Programs are pinned in `jpb-programs.json`. The adapter checks the selected
+node, current approval and stored source before invoking and checks approval
+again afterward. Remote credentials remain on JPB. Calls require an owner-run,
+approved saved workflow and a matching native execution. Retry uses the same
+deterministic remote invocation ID; a changed request cannot reuse that ID.
+The operator enables this adapter with `NOS_JPB_PROGRAM_ENABLED=1`.
+
+The current reviewed Programs are **JPB PLCA - Run study pipeline v1.0.0** and
+**JPB PLCA - Prepare inventory v1.0.0**. The former accepts a study request and
+reads its stored snapshot; the latter accepts `[reader, request]`. They do not
+yet accept arbitrary joined ERP/Excel rows as a calculated impact assessment.
+That requires the mapped-input revision of the existing PLCA Program, followed
+by a result-aware DKG Write. This component does not alter or deploy those
+remote Programs. The existing evidence workflow remains available separately.
+
+### Account access integration status
+
+The JPB SSH adapter remains an explicit local-demo transport. It is not an account
+or runner authorization contract. nOS already implements account/job node access,
+runner-held node credentials and workflow publishing via its node-action journal
+(`tl-nos` PR #1076 and the current `workflow-publish.ts` / `workflows-access.ts`).
+Production integration must consume that path. It must not forward a customer's
+session bearer to this companion, n8n or DKG, or replace account checks with an
+SSH administrator credential.
+
+Read and Write can reuse the existing query/publish foundations once trusted
+account/principal context and a checked managed-node selector reach the component.
+Program bindings/source/execute still need an agreed runner operation contract;
+those routes are not currently on the nOS runner allowlist. JPB fleet visibility
+alone does not establish a corresponding account-owned launched node. See
+`tl-nos/docs/l1/STUDIO-DKG-ACCESS.md` for the specific reuse points and acceptance
+criteria. This change does not expand runner permissions or deploy an adapter.
+
+The demo transport now pins Python script bytes at profile load and hashes those
+same bytes into the profile revision. Both Program invocation and Write require
+the approved workbook input. Confirmed Write retries reuse their durable receipt;
+only an unconfirmed write calls the transport again with `allowCreate: false`.
+The transport owns actual DKG content readback; the generic component additionally
+checks graph, asset name, content digest and sealed status before retaining it.
+
 
 ### Operator output authority and embedded helpers
 
@@ -418,6 +559,7 @@ owner can receive `eventPath`; protected workflows additionally require the curr
 `x-dkg-export-token` header on the history request. A deliberately shared event URL
 still delegates bounded webhook invocation. Direct service history omits the URL
 unless its caller explicitly supplies a disclosure authorization callback.
+Account-bound nOS Studio remains manual-only and never discloses an event URL.
 
 Program export analysis resolves each child by both `contextGraphId` and
 `operationIri`, including descendants in other graphs. Unreadable, missing,

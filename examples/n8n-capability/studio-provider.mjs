@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { compileStudio } from './studio-definition.mjs';
 import { nativeTimerEvents } from './studio-native-events.mjs';
+import { readNativeExecutionInput } from './studio-native-execution.mjs';
 import { n8nWorkflowSha256, n8nResultSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 
 /** The operator owns provisioning. Neither this API key nor credential data reaches a KA or browser. */
@@ -33,10 +34,11 @@ export function createStudioProvider({ repository, config, graphId, owner, heade
     if (!saved.providerId) {
       let cursor, found = [];
       for (let page = 0; page < 8; page++) {
-        const list = await api('/workflows?limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+        const list = await api('/workflows?limit=10&excludePinnedData=true&name=' + encodeURIComponent(compiled.workflowName) + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
         found.push(...list.data.filter(w => w.name === compiled.workflowName)); cursor = list.nextCursor;
         if (!cursor) break;
       }
+      if (cursor) throw error('Native graph lookup is incomplete; reconcile before creating another workflow.');
       if (found.length > 1) throw error('Duplicate native graph definitions require operator inspection.');
       let created = found[0];
       if (!created) {
@@ -70,5 +72,6 @@ export function createStudioProvider({ repository, config, graphId, owner, heade
     if (!!native.active !== active) await api('/workflows/' + saved.providerId + (active ? '/publish' : '/unpublish'), 'POST', {});
   }
   const timerEvents = options => nativeTimerEvents(api, { ...options, graphId, owner });
-  return { provision, setPublished, installGrant, timerEvents };
+  const executionInput = options => readNativeExecutionInput(api, options);
+  return { provision, setPublished, installGrant, timerEvents, executionInput };
 }

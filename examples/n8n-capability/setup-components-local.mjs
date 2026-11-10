@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rename
 import { resolve, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync, backup } from 'node:sqlite';
-import { componentRegistry, componentContract, componentProgramSource } from './component-registry.mjs';
+import { componentRegistry, componentNeedsExport as needsExport, componentContract, componentProgramSource } from './component-registry.mjs';
 import { standaloneComponentWorkflow, echoSubworkflow } from './component-workflows.mjs';
 import { n8nWorkflowSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 
@@ -14,6 +14,8 @@ const arg = name => { const i = process.argv.indexOf(name); return i < 0 ? undef
 const install = process.argv.includes('--install'), fixture = process.argv.includes('--fixture');
 const cli = arg('--n8n-cli'), node = arg('--node') ?? process.execPath;
 const only = arg('--only')?.split(',');
+if (process.argv.includes('--only') && (!only?.length || only.some(id => !componentRegistry.some(c => c.id === id))))
+  throw new Error('--only requires known component ids from the selected profile.');
 const userFolder = join(state, 'n8n'), database = join(userFolder, '.n8n/database.sqlite');
 mkdirSync(state, { recursive: true, mode: 0o700 });
 const output = mkdtempSync(join(state, 'component-workflows-v1-')); chmodSync(output, 0o700);
@@ -41,12 +43,13 @@ if (existsSync(database)) {
   db.close();
 }
 if (!fixture && header.id === 'component-fixture-header') throw new Error('The existing PoC webhook credential reference was not found.');
+credentials.httpHeaderAuth = header;
 const components = [];
 const componentRef = item => `urn:demo:n8n:component:${item.descriptor.id}:${item.grant.workflowSha256.slice(0, 12)}`
   + (item.descriptor.version >= 2 ? ':' + createHash('sha256').update(item.source).digest('hex').slice(0, 12) : '');
 const echo = echoSubworkflow();
 writeFileSync(join(output, echo.id + '.json'), JSON.stringify({ ...echo, versionId: randomUUID() }), { mode: 0o600 });
-for (const descriptor of componentRegistry) {
+for (const descriptor of componentRegistry.filter(c => !only || only.includes(c.id))) {
   const blueprint = standaloneComponentWorkflow(descriptor.id, 'template', header, { credentials, scopeName: scopeName('template') });
   const { result: _result, ...template } = blueprint;
   const revision = createHash('sha256').update(JSON.stringify(template)).digest('hex').slice(0, 8);
@@ -57,10 +60,10 @@ for (const descriptor of componentRegistry) {
       n.parameters.authentication = 'none'; delete n.credentials;
     }
   }
-  if (!only || only.includes(descriptor.id)) writeFileSync(join(output, id + '.json'), JSON.stringify({ ...workflow, versionId: randomUUID() }), { mode: 0o600 });
+  writeFileSync(join(output, id + '.json'), JSON.stringify({ ...workflow, versionId: randomUUID() }), { mode: 0o600 });
   const item = { kind: 'component', descriptor, name: descriptor.name, source: componentProgramSource(descriptor.id),
     enabled: !descriptor.connection || !!credentials[descriptor.connection],
-    requiresExportAuthorization: !!descriptor.writes,
+    requiresExportAuthorization: needsExport(descriptor),
     kaRef: `urn:demo:n8n:component:${descriptor.id}:${n8nWorkflowSha256(workflow).slice(0, 12)}`,
     grant: { toolIri: 'urn:dkg:tool:n8n', workflowId: id, workflowSha256: n8nWorkflowSha256(workflow), ...componentContract, result } };
   item.kaRef = componentRef(item); components.push(item);
@@ -78,7 +81,7 @@ if (install) {
   const imported = run(['import:workflow', '--separate', '--input=' + output]);
   if (!imported.includes('Successfully imported')) throw new Error('n8n did not confirm the component import.');
   run(['publish:workflow', '--id=' + echo.id]);
-  for (const item of components.filter(c => c.enabled && c.descriptor.mode !== 'schedule' && (!only || only.includes(c.descriptor.id)))) {
+  for (const item of components.filter(c => c.enabled && c.descriptor.mode !== 'schedule')) {
     const published = run(['publish:workflow', '--id=' + item.grant.workflowId]);
     if (!published.includes('Publishing workflow')) throw new Error('n8n did not confirm publication.');
   }
@@ -95,9 +98,10 @@ if (install) {
 }
 const file = join(state, install ? 'components.json' : 'components.prepared.json');
 // Existing saved graphs keep their original child pins and native definitions.
-const retired = install && existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')).components
-  .filter(old => !components.some(current => current.kaRef === old.kaRef)).map(old => ({ ...old, retired: true })) : [];
-writeFileSync(file + '.next', JSON.stringify({ version: 2, installed: install, components: [...components, ...retired] }, null, 2), { mode: 0o600 });
+const retained = install && existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')).components
+  .filter(old => !components.some(current => current.kaRef === old.kaRef))
+  .map(old => only && !only.includes(old.descriptor.id) ? old : { ...old, retired: true }) : [];
+writeFileSync(file + '.next', JSON.stringify({ version: 2, installed: install, components: [...components, ...retained] }, null, 2), { mode: 0o600 });
 renameSync(file + '.next', file);
 console.log(JSON.stringify({ installed: install, prepared: components.length, availableConnections: Object.keys(credentials),
   enabled: components.filter(c => c.enabled).length, scheduleActivationRequired: true, restartN8nRequired: install, manifest: file }));

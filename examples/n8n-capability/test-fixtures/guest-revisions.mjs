@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 const hash = value => createHash('sha256').update(value).digest('hex');
-/** Stable deployed compiler examples; the baseline was captured from ca32f84. */
+/** Stable deployed compiler examples; baselines were captured from ca32f84 and the child extension at 962387a. */
 export async function guestRevisionHashes(root = new URL('../', import.meta.url)) {
   const load = name => import(new URL(name, root));
   const hashes = {};

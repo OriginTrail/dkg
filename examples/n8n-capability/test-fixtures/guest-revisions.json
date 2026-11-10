@@ -105,6 +105,8 @@
   "native/switch": "57e47c809ba1aacd1d42b0190df4cf5cb427673ad671fed624bd893bdbc26349",
   "component/merge": "24341102aa1b4450719e41e8dd0ed5a63dc36a85ed33e45e05629538bbc63578",
   "native/merge": "e9ad166296d721cebfe2ad80f52eade73f6c7c71143c8cf928621b521892ed7c",
+  "component/merge-fields": "de6018ba50533b5f1563f4d7c939509e8dbffb207797e2c0565638cd855f4691",
+  "native/merge-fields": "ac11e47f5fe3334262de6dbf5679e68c5f8c083266c7a696362159c96f0bf421",
   "component/compare-datasets": "4d6994615b530ca63c7afad72170e4331df8f856414f62f47f7ebae7afab208f",
   "native/compare-datasets": "56e484036c7c9ae5763e51f4b9f3a285cdf7bf7fb41999f4d9e22016f39d7fef",
   "component/loop-items": "7ad7a5492c8d15e28034ab4a0b860ee361ba3ce359ea4d7c6960497c3f4afc47",

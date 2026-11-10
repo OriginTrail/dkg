@@ -1,3 +1,4 @@
+import { runInThisContext, constants as vmConstants } from 'node:vm';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -378,6 +379,105 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     await f.manager.programs.revoke({ ...f.operation, expectedRevision: child.revision });
     await expect(f.manager.programs.invoke({ ...operation, inputs: [input] })).rejects.toMatchObject({ status: 403 });
     expect(f.agent.assertion.create.mock.calls.length).toBe(writes);
+  });
+
+  it('recovers a Studio-produced Read Write approval after the sealed effect and runtime reopen', async () => {
+    // Native import keeps compiler-generated source in its real ESM environment.
+    const { createStudioExecutionHarness } = await runInThisContext('(url) => import(url)', { importModuleDynamically: vmConstants.USE_MAIN_CONTEXT_DEFAULT_LOADER })(
+      new URL('../../../examples/n8n-capability/test-support/studio-execution-harness.mjs', import.meta.url).href);
+    const f = await toolFixture('export function run() { return null; }', { graphId: graph }, []);
+    const h = createStudioExecutionHarness({ state: join(f.target.dir, 'studio'), graphId: graph, owner,
+      config: f.target.config.semanticRuntime, client: f.manager,
+      loadOutputs: async (iri: string) => (await f.store.query(`SELECT ?output WHERE { GRAPH ?g { <${iri}> <${SR}output> ?output } }`)).bindings
+        .map((row: any) => JSON.parse(row.output)) });
+    vi.stubGlobal('fetch', h.runtimeFetch);
+    try {
+      const workflow = await h.service.save(h.definition, () => {});
+      const approval = await f.manager.programs.getApproval({ graphId: graph, operationIri: workflow.kaRef });
+      expect(approval.binding.typescript!.children).toEqual([]);
+      const invocationId = randomUUID();
+      const input = { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, itemsJson: '[{}]', invocationId };
+      await expect(h.service.run(input, () => {}, h.actor)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
+      expect(h.controls.dispatches).toBe(1);
+      expect(h.effects).toEqual(['read', 'write']);
+      expect(h.assets.size).toBe(1);
+      const reopened = await restartNode(f.target);
+      h.reopen();
+      h.controls.interrupted = false;
+      const result = await h.service.run(input, () => {}, h.actor);
+      expect(result).toMatchObject({ invocationId, n8nExecutionId: '42', persisted: true, readbackVerified: true });
+      expect(reopened.store.execution(result.executionIri)?.status).toBe('completed');
+      expect(await h.service.run(input, () => {}, h.actor)).toEqual(result);
+      expect(h.controls.dispatches).toBe(1);
+      expect(h.effects).toEqual(['read', 'write']);
+      expect(h.assets.size).toBe(1);
+      await f.manager.programs.revoke({ graphId: graph, operationIri: workflow.kaRef, expectedRevision: approval.revision });
+      await expect(h.service.run(input, () => {}, h.actor)).rejects.toThrow('not approved');
+      expect(h.controls.dispatches).toBe(1);
+    } finally { h.close(); vi.unstubAllGlobals(); }
+  });
+
+  it('reconciles a journalled DKG write after both native callbacks fail and the failed receipt is cached', async () => {
+    const { createStudioExecutionHarness } = await runInThisContext('(url) => import(url)', { importModuleDynamically: vmConstants.USE_MAIN_CONTEXT_DEFAULT_LOADER })(
+      new URL('../../../examples/n8n-capability/test-support/studio-execution-harness.mjs', import.meta.url).href);
+    const f = await toolFixture('export function run() { return null; }', { graphId: graph }, []);
+    const h = createStudioExecutionHarness({ state: join(f.target.dir, 'studio'), graphId: graph, owner,
+      config: f.target.config.semanticRuntime, client: f.manager,
+      loadOutputs: async (iri: string) => (await f.store.query(`SELECT ?output WHERE { GRAPH ?g { <${iri}> <${SR}output> ?output } }`)).bindings
+        .map((row: any) => JSON.parse(row.output)) });
+    vi.stubGlobal('fetch', h.runtimeFetch);
+    const revision = h.profile.revision;
+    try {
+      h.controls.interrupted = false;
+      h.controls.loseWriteReply = true;
+      const workflow = await h.service.save(h.definition, () => {});
+      const input = { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, itemsJson: '[{}]', invocationId: randomUUID() };
+      await expect(h.service.run(input, () => {}, h.actor)).rejects.toMatchObject({ code: 'DKG_WRITE_PENDING', invocationId: input.invocationId });
+      expect(h.controls.callbackStatuses).toEqual([200, 409, 409]);
+      expect(h.controls.allowCreates).toEqual([true, false, false]);
+      expect(h.executions.get('42').status).toBe('error');
+      expect(h.controls.dispatches).toBe(1);
+      expect(h.assets.size).toBe(1);
+      const executionIri = 'urn:sr:execution:' + input.invocationId;
+      expect(f.target.runtime!.store.execution(executionIri)?.status).toBe('completed');
+      const reopened = await restartNode(f.target); h.reopen();
+      const attempt = () => h.service.run(input, () => {}, h.actor);
+      // A fresh invocation cannot be used to bypass the outstanding write.
+      await expect(h.service.run({ ...input, invocationId: randomUUID() }, () => {}, h.actor)).rejects.toMatchObject({ code: 'DKG_WRITE_PENDING', invocationId: input.invocationId });
+      await expect(h.service.run({ ...input, itemsJson: '[{"changed":true}]' }, () => {}, h.actor)).rejects.toThrow('different workflow or inputs');
+      await expect(h.service.run(input, () => {}, { ...h.actor, principalId: 'another-owner' })).rejects.toThrow('different account or principal');
+      h.controls.owner = false;
+      await expect(attempt()).rejects.toThrow('owner revoked');
+      h.controls.owner = true;
+      h.profile.revision = 'f'.repeat(64);
+      await expect(attempt()).rejects.toThrow('profile changed');
+      h.profile.revision = revision;
+      h.controls.snapshot = (value: any) => ({ ...value, workflowVersionId: 'other-version' });
+      await expect(attempt()).rejects.toThrow('does not match');
+      h.controls.snapshot = (value: any) => value;
+      expect(h.controls.allowCreates).toEqual([true, false, false]);
+      h.controls.nodeUnavailable = false;
+      const [name, payload] = [...h.assets.entries()][0];
+      h.assets.delete(name);
+      await expect(attempt()).rejects.toMatchObject({ code: 'DKG_WRITE_PENDING' });
+      expect(h.assets.size).toBe(0); // Missing readback must not recreate the asset.
+      h.assets.set(name, payload);
+      const result = await attempt();
+      expect(result).toMatchObject({ invocationId: input.invocationId, n8nExecutionId: '42', output: { ok: false },
+        dkgRecovery: { status: 'confirmed', invocationId: input.invocationId, n8nExecutionId: '42', blockId: 'write',
+          receipt: { items: [{ assetId: 'urn:test:asset:1', readbackVerified: true, status: 'wm-sealed' }] } } });
+      expect(reopened.store.execution(executionIri)?.status).toBe('completed');
+      expect(h.executions.get('42').status).toBe('error'); // Preserve the original native outcome.
+      expect(h.controls.allowCreates).toEqual([true, false, false, false, false]);
+      h.reopen();
+      expect(await attempt()).toEqual(result);
+      expect(h.controls.allowCreates).toEqual([true, false, false, false, false]);
+      expect(h.controls.dispatches).toBe(1);
+      expect(h.assets.size).toBe(1);
+      const approval = await f.manager.programs.getApproval({ graphId: graph, operationIri: workflow.kaRef });
+      await f.manager.programs.revoke({ graphId: graph, operationIri: workflow.kaRef, expectedRevision: approval.revision });
+      await expect(attempt()).rejects.toThrow('not approved');
+    } finally { h.profile.revision = revision; h.close(); vi.unstubAllGlobals(); }
   });
 
   it('stores requests, approves and executes signed remote reads without data graph membership', async () => {

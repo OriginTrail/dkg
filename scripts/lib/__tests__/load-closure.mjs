@@ -12,6 +12,7 @@ import { traceLaneLoads } from './load-graph.mjs';
 // load-closure guard cannot follow, each with the reason it needs no route of
 // its own.
 export const UNFOLLOWED_LOADS = new Map([
+  ["examples/n8n-capability/dkg-profile.mjs: pathToFileURL(file).href", "an absolute operator-configured external profile, absent by default; repository profile fixtures and the loader share the n8n-capability support route"],
   ["packages/semantic-runtime/src/component-supervisor.ts: this.options.workerUrl ?? new URL('./component-worker.js', import.meta.url)", "the default component-worker is semantic-runtime source with the same package route; an injected worker URL is supplied by tests"],
   ["packages/semantic-runtime/src/component-worker.ts: pathToFileURL(artifacts.componentJsPath).href", "integrity-checked generated component glue built from semantic-runtime and Rust sources; package changes select supporting and CLI lanes, and Rust changes plan full CI"],
   ["packages/semantic-runtime/src/typescript-programs.ts: new URL(`../typescript-runtime/${filename}`, import.meta.url)", "compiler and worker helpers under the same semantic-runtime package rule"],
