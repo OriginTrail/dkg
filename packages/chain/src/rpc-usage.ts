@@ -463,6 +463,22 @@ const RPC_USAGE_SNAPSHOT_RAW_CONSUMERS = [
   'rss.getNodeChallenge',
   'rss.getNodeEpochProofPeriodScore',
 
+  // The marketplace's views (evm-adapter-marketplace.ts), by contract.
+  'marketplace epoch times', 'chronos.epochAtTimestamp', 'chronos.timestampForEpoch',
+  'serviceSubscriptions.previewCost', 'serviceSubscriptions.currentWindowAllowance',
+  'serviceSubscriptionsStorage.getSubscription', 'serviceSubscriptionsStorage.getBudgets',
+  'serviceSubscriptionsStorage.subscriptionExists', 'serviceSubscriptionsStorage.getGrant',
+  'serviceSubscriptionsStorage.grantEnd', 'serviceSubscriptionsStorage.grantNonce',
+  'serviceSubscriptionsStorage.getServiceSpending', 'serviceSubscriptionsStorage.maxBudgetsPerSubscription',
+  'serviceSubscriptionsStorage.buyerCount', 'serviceSubscriptionsStorage.buyerAt',
+  'queryInferenceSettlement.budgetLeft', 'queryInferenceSettlement.stakeFactor',
+  'queryInferenceSettlement.epochPool', 'queryInferenceSettlement.queryInferenceGross',
+  'queryInferenceStorage.batchState', 'queryInferenceStorage.nonceWord', 'queryInferenceStorage.budgetUsed',
+  'queryInferenceStorage.fundingIn', 'queryInferenceStorage.getEpochTotals', 'queryInferenceStorage.getNodeEpoch',
+  'shardingTableStorage.getNode', 'randomSamplingStorage.getNodeEpochScore',
+  'profileStorage.profileExists', 'convictionStakingStorage.getNodeStakeV10', 'parametersStorage.minimumStake',
+  'parametersStorage.protocolTreasury', 'marketplace wallet balance', 'marketplace wallet nonce', 'marketplace base fee',
+
   // Background views coalesced into one request, and the bytecode check before it.
   'multicall3.aggregate3',
   'multicall3.getCode',
@@ -492,6 +508,11 @@ const RPC_USAGE_SNAPSHOT_HUB_CONTRACT_NAMES = [
   'Chronos',
   'Token',
   'StakingV10',
+  'ServiceSubscriptions',
+  'ServiceSubscriptionsWallet',
+  'ServiceSubscriptionsStorage',
+  'QueryInferenceSettlement',
+  'QueryInferenceStorage',
 ] as const;
 
 const RPC_USAGE_SNAPSHOT_HUB_ASSET_NAMES = [
@@ -512,10 +533,12 @@ const RPC_USAGE_SNAPSHOT_HUB_ASSET_NAMES = [
  * request now carries background views that v2 counted one request each under
  * their own labels.
  *
- * v4 adds `contextGraphs.isAuthorizedAuthor`, the ContextGraphs 10.1.0 author
+ * v4 adds the marketplace's Hub lookups and views (evm-adapter-marketplace.ts).
+ *
+ * v5 adds `contextGraphs.isAuthorizedAuthor`, the ContextGraphs 10.1.0 author
  * gate the publisher asks before it collects ACKs.
  */
-export const RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION = 4 as const;
+export const RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION = 5 as const;
 
 /** Complete closed vocabulary that the cumulative diagnostic may serialize. */
 export const RPC_USAGE_SNAPSHOT_CONSUMERS: readonly string[] = Object.freeze(

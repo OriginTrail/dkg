@@ -1449,6 +1449,11 @@ export class ApiClient {
     return this.post(`/api/pca/${encodeURIComponent(accountId)}/primary-node`, { node });
   }
 
+  async marketplace<T = unknown>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body: unknown = {}): Promise<T> {
+    const route = `/api/marketplace${path}`;
+    return { GET: () => this.get<T>(route), DELETE: () => this.del<T>(route), PUT: () => this.put<T>(route, body), POST: () => this.post<T>(route, body) }[method]();
+  }
+
   // ─── Node operational wallets (Identity operational keys) ────────────
 
   /** List the node's local operational wallets (addresses only) + on-chain status. */

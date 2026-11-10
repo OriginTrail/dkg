@@ -278,6 +278,7 @@ export {
   type RpcRetryDisposition,
 } from './evm-adapter.js';
 export { NoChainAdapter } from './no-chain-adapter.js';
+export * from './marketplace.js';
 export {
   OperationalKeyUnavailableError,
   isExternalEvmSigner,

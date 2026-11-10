@@ -1240,36 +1240,12 @@ export class DKGPublisher implements Publisher {
             <${cgData}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy
           }
         } UNION {
-          GRAPH <${ontologyGraph}> {
-            <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?gate
-          }
-        } UNION {
-          GRAPH <${agentsGraph}> {
-            <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?gate
-          }
-        } UNION {
           GRAPH <${cgMeta}> {
             <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?gate
           }
         } UNION {
-          GRAPH <${ontologyGraph}> {
-            <${cgData}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?gate
-          }
-        } UNION {
-          GRAPH <${agentsGraph}> {
-            <${cgData}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?gate
-          }
-        } UNION {
           GRAPH <${cgMeta}> {
             <${cgData}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?gate
-          }
-        } UNION {
-          GRAPH <${ontologyGraph}> {
-            <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> ?gate
-          }
-        } UNION {
-          GRAPH <${agentsGraph}> {
-            <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> ?gate
           }
         } UNION {
           GRAPH <${cgMeta}> {

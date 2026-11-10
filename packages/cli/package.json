@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg",
-  "version": "10.0.27",
+  "version": "10.1.0",
   "type": "module",
   "dkgBuildIdentity": "compiler",
   "engines": {
@@ -77,6 +77,7 @@
     "@origintrail-official/dkg-epcis": "workspace:*",
     "@origintrail-official/dkg-http-utils": "workspace:*",
     "@origintrail-official/dkg-local-llm": "workspace:*",
+    "@origintrail-official/dkg-marketplace": "workspace:*",
     "@origintrail-official/dkg-mcp": "workspace:*",
     "@origintrail-official/dkg-node-store": "workspace:*",
     "@origintrail-official/dkg-node-ui": "workspace:*",

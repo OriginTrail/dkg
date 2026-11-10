@@ -54,6 +54,7 @@ import {
   noFundedPublisherWalletBody,
   respondIfPcaFundingUnknown,
   SMALL_BODY_BYTES,
+  type UnavailableResponseRenderer,
 } from "../http-utils.js";
 import { validateWritableQuads } from "../knowledge-asset-quad-validation.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
@@ -561,6 +562,11 @@ function rejectSelectedAuthorOnCreate(
   });
   return false;
 }
+
+/** Only used by the common preflight before this request can create a publisher job. */
+const renderPublishPreflightUnavailable: UnavailableResponseRenderer = (res, body, headers) => {
+  jsonResponse(res, 503, { ...body, jobCreated: false, retryable: true }, undefined, headers);
+};
 
 export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -1128,7 +1134,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     agent,
     parsed.contextGraphId,
     res,
-    writePreflightContextGraphOpts,
+    {
+      ...writePreflightContextGraphOpts,
+      // This common preflight precedes every mutation and the publish enqueue fence.
+      ...(layer === 'vm' && verb === 'publish-async' ? { renderUnavailable: renderPublishPreflightUnavailable } : {}),
+    },
   );
   if (!contextGraphId) return;
 
