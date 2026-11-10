@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphSetIndexStore, noteStoreMayHoldReadGraphPartitions, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { MemoryLayer, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
-import { classifyScopedContentGraph, describeScopedContentGraph, isExcludedContentGraphTail } from '../src/scoped-content-partition.js';
+import { classifyScopedContentGraph, describeScopedContentGraph, isExcludedContentGraph } from '../src/scoped-content-partition.js';
 
 const CG = 'read-partition';
 const ROOT = `did:dkg:context-graph:${CG}`;
@@ -15,11 +15,15 @@ const READ_VM = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.Verifiab
 const READ_SWM = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.SharedWorkingMemory });
 const READ_CODE = readGraphIri({ scope: readScope(CG, 'code'), layer: MemoryLayer.VerifiableMemory });
 const STATE = readGraphStateGraphIri(CG);
+// A context graph from before the `_read` reservation, whose ID has the segment.
+const LEGACY_CG = `${CG}/_read/project`;
+const LEGACY = `did:dkg:context-graph:${LEGACY_CG}/_verifiable_memory/0xaa/1`;
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
 const row = (graph: string, subject: string, object: string): Quad => ({ graph, subject, predicate: 'urn:p', object });
 const MEMBERS: Quad[] = [
   row(VM, 'urn:a', '"vm"'), row(VM_CODE, 'urn:b', '"code"'), row(SWM, 'urn:c', '"swm"'), row(OTHER, 'urn:d', '"other"'),
+  row(LEGACY, 'urn:e', '"legacy"'),
   { graph: META, subject: `${ROOT}/code`, predicate: RDF_TYPE, object: 'http://dkg.io/ontology/SubGraph' },
   { graph: META, subject: `${ROOT}/code`, predicate: 'http://schema.org/name', object: '"code"' },
 ];
@@ -50,15 +54,21 @@ function normalize(result: { bindings: Array<Record<string, string>>; quads?: Qu
 }
 
 describe('read-graph partitions in content classification', () => {
-  it.each(['_read', '_read/state', '_read/cg/_verifiable_memory', '_read/sub/code/_shared_memory',
+  it.each(['_read/state', '_read/cg/_verifiable_memory', '_read/sub/code/_shared_memory',
     'code/_read/cg/_verifiable_memory', 'child/_read/state'])('excludes %s wherever it excludes metadata', tail => {
-    expect(isExcludedContentGraphTail(tail)).toBe(true);
+    expect(isExcludedContentGraph(`${ROOT}/${tail}`, ROOT)).toBe(true);
     expect(describeScopedContentGraph(`${ROOT}/${tail}`, CG)).toBeUndefined();
     expect(classifyScopedContentGraph(`${ROOT}/${tail}`, CG, new Set(['code', 'child']), new Set(), new Set())).toBeUndefined();
   });
 
-  it.each(['_reader', 'reader/_verifiable_memory/0xab/1', '_verifiable_memory/0xab/read'])('keeps look-alike %s', tail => {
-    expect(isExcludedContentGraphTail(tail)).toBe(false);
+  it.each(['_reader', 'reader/_verifiable_memory/0xab/1', '_verifiable_memory/0xab/read', '_verifiable_memory/0xab/_read',
+    '_read', '_read/project/_verifiable_memory/0xaa/1'])('keeps look-alike %s', tail => {
+    expect(isExcludedContentGraph(`${ROOT}/${tail}`, ROOT)).toBe(false);
+  });
+
+  it('classifies a context graph whose ID has the segment as any other', () => {
+    expect(describeScopedContentGraph(LEGACY, LEGACY_CG)).toEqual({ kind: 'verified', subGraphName: undefined });
+    expect(describeScopedContentGraph(`${ROOT}/_verifiable_memory/0xab/_read`, CG)).toEqual({ kind: 'verified', subGraphName: undefined });
   });
 });
 
@@ -159,6 +169,20 @@ describe('queries and read-graph partitions', () => {
       for (const options of [undefined, { contextGraphId: CG }, { contextGraphId: CG, view: 'verifiable-memory' as const }]) {
         await expect(engine.query(sparql, options), sparql).rejects.toThrow('Scoped query violation: the query names a graph in a read-graph partition');
       }
+    }
+  });
+
+  it('answers for a context graph whose ID has the segment as for any other', async () => {
+    const engine = new DKGQueryEngine(planted);
+    const reference = new DKGQueryEngine(oracle);
+    const cases: Array<[string, Record<string, unknown> | undefined]> = [
+      [`SELECT ?o WHERE { GRAPH <${LEGACY}> { ?s ?p ?o } }`, undefined],
+      ['SELECT ?o WHERE { ?s <urn:p> ?o }', { contextGraphId: LEGACY_CG, view: 'verifiable-memory' }],
+    ];
+    for (const [sparql, options] of cases) {
+      const answer = await engine.query(sparql, options);
+      expect(answer.bindings.map(binding => binding.o), sparql).toEqual(['"legacy"']);
+      expect(normalize(answer), sparql).toBe(normalize(await reference.query(sparql, options)));
     }
   });
 

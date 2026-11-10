@@ -6,19 +6,23 @@ import { isReadGraphPartitionGraph } from './graph-enumeration-visibility.js';
 const ABSOLUTE_IRI = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const LOCAL_NAME_ESCAPE = /\\([_~.\-!$&'()*+,;=/?#@%])/g;
 
-/**
- * Whether one IRI (absolute, or relative to a BASE the text may declare)
- * names a graph in a read-graph partition. A relative IRI with a `_read`
- * segment counts, because the base it resolves against is not checked here.
- */
-function isReadGraphPartitionReference(iri: string): boolean {
-  if (ABSOLUTE_IRI.test(iri)) return isReadGraphPartitionGraph(iri);
+function hasReadGraphSegment(iri: string): boolean {
   return iri.split(/[/?#]/).includes(READ_GRAPH_SEGMENT);
 }
 
 /**
- * Whether lexed SPARQL names a read-graph partition graph, by IRI or by a
- * prefixed name whose PREFIX is declared in the same text.
+ * Whether one IRI names a read graph or a read-graph state graph. A relative
+ * IRI with a `_read` segment counts, because the base it resolves against is
+ * not checked here.
+ */
+function isReadGraphPartitionReference(iri: string): boolean {
+  return ABSOLUTE_IRI.test(iri) ? isReadGraphPartitionGraph(iri) : hasReadGraphSegment(iri);
+}
+
+/**
+ * Whether lexed SPARQL names a read graph or a read-graph state graph, by IRI
+ * or by a prefixed name whose PREFIX is declared in the same text. A BASE with
+ * a `_read` segment counts as well, since relative IRIs resolve against it.
  */
 export function preparedSparqlNamesReadGraphPartition(prepared: ValidPreparedSparql): boolean {
   const prefixes = new Map<string, string>();
@@ -37,19 +41,25 @@ export function preparedSparqlNamesReadGraphPartition(prepared: ValidPreparedSpa
       if (name?.kind === 'prefixed-name' && iri?.kind === 'iri') {
         prefixes.set(name.logicalValue.slice(0, -1), iri.logicalValue);
       }
+    } else if (isSparqlKeyword(tokens, index, 'BASE')) {
+      const iri = tokens[index + 1];
+      if (iri?.kind === 'iri' && hasReadGraphSegment(iri.logicalValue)) return true;
     }
   }
   return false;
 }
 
+/** Only text with the segment, an escape that could spell it, or a PREFIX can name a partition graph. */
+function mayNameReadGraphPartition(sparql: string): boolean {
+  return sparql.includes(READ_GRAPH_SEGMENT) || /\\[uU]/.test(sparql) || /prefix/i.test(sparql);
+}
+
 /**
- * The same test on SPARQL text. Text that mentions the segment, carries
- * escapes that could spell it, or declares a prefix whose names could complete
- * it is lexed; text that cannot be lexed, or that leaves a string, IRI or
- * comment open, counts as naming the partition.
+ * The same test on SPARQL text. Text that cannot be lexed, or that leaves a
+ * string open, counts as naming the partition.
  */
 export function sparqlNamesReadGraphPartition(sparql: string): boolean {
-  if (!sparql.includes(READ_GRAPH_SEGMENT) && !/\\[uU]/.test(sparql) && !/prefix/i.test(sparql)) return false;
+  if (!mayNameReadGraphPartition(sparql)) return false;
   const prepared = prepareSparql(sparql);
   return prepared.status !== 'valid' || prepared.unterminated || preparedSparqlNamesReadGraphPartition(prepared);
 }
@@ -91,11 +101,13 @@ export function preparedSparqlWritesThroughGraphVariable(prepared: ValidPrepared
 
 /**
  * Whether a SPARQL UPDATE may write into a read-graph partition: it names a
- * partition graph, or writes through a graph variable.
+ * read graph or state graph, or writes through a graph variable. Text that
+ * cannot be lexed, or that leaves a string open, counts as writing there.
  */
 export function sparqlUpdateMayWriteReadGraphPartition(sparql: string): boolean {
-  if (sparqlNamesReadGraphPartition(sparql)) return true;
-  if (!/graph\s*[?$]/i.test(sparql)) return false;
+  // A graph variable needs a `?` or `$`, written out or as an escape.
+  if (!mayNameReadGraphPartition(sparql) && !/[?$]/.test(sparql)) return false;
   const prepared = prepareSparql(sparql);
-  return prepared.status !== 'valid' || preparedSparqlWritesThroughGraphVariable(prepared);
+  if (prepared.status !== 'valid' || prepared.unterminated) return true;
+  return preparedSparqlNamesReadGraphPartition(prepared) || preparedSparqlWritesThroughGraphVariable(prepared);
 }

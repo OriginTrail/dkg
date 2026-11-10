@@ -373,12 +373,14 @@ describe('dkg rollback readies the local stores for the target version', () => {
 const MEMBER = 'did:dkg:context-graph:rollback/_verifiable_memory/0xab/1';
 const READ_GRAPH = 'did:dkg:context-graph:rollback/_read/cg/_verifiable_memory';
 const READ_STATE = 'did:dkg:context-graph:rollback/_read/state';
+// A graph of a context graph from before the `_read` reservation, whose ID has the segment.
+const LEGACY = 'did:dkg:context-graph:rollback/_read/project/_verifiable_memory/0xaa/1';
 
-/** An embedded store file holding one member graph and a read-graph partition. */
+/** An embedded store file holding member graphs and a read-graph partition. */
 async function writeStoreWithReadGraphs(): Promise<string> {
   const path = join(wiring.root, 'store.nq');
   const store = new OxigraphStore(path);
-  await store.insert([MEMBER, READ_GRAPH, READ_STATE].map((graph) => ({ graph, subject: 'urn:s', predicate: 'urn:p', object: '"v"' })));
+  await store.insert([MEMBER, LEGACY, READ_GRAPH, READ_STATE].map((graph) => ({ graph, subject: 'urn:s', predicate: 'urn:p', object: '"v"' })));
   await store.close();
   wiring.store = { backend: 'oxigraph-persistent', options: { path } };
   return path;
@@ -404,7 +406,7 @@ describe('dkg rollback drops read-graph partitions', () => {
     expect(await rollback()).toBeUndefined();
 
     expect(wiring.calls).toEqual(['stop', 'swap:b', 'lease held']);
-    expect(await storedGraphs(path)).toEqual([MEMBER]);
+    expect(await storedGraphs(path)).toEqual([LEGACY, MEMBER].sort());
     expect(existsSync(join(wiring.root, 'read-graph-partitions'))).toBe(false);
     expect(output.log).toContain(
       'Dropped 2 read-graph partition graph(s) for 10.0.26; read graphs are rebuilt from the stored data.',
@@ -418,7 +420,7 @@ describe('dkg rollback drops read-graph partitions', () => {
 
     expect(await rollback()).toBeUndefined();
 
-    expect(await storedGraphs(path)).toEqual([MEMBER, READ_STATE, READ_GRAPH].sort());
+    expect(await storedGraphs(path)).toEqual([MEMBER, LEGACY, READ_STATE, READ_GRAPH].sort());
     expect(output.log.join('\n')).not.toContain('read-graph');
   });
 

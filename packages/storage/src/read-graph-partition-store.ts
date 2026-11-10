@@ -230,11 +230,11 @@ export function storeMayHoldReadGraphPartitions(store: TripleStore): boolean {
 }
 
 /**
- * Drop every graph of every read-graph partition, with their state. The
- * partition is hidden from enumeration, so this reads the store's own graph
- * list once. State graphs and other graphs that are not read graphs go first,
- * so a drop that stops part way never leaves a state row without its data.
- * Returns the number of graphs dropped.
+ * Drop every read graph and read-graph state graph. They are hidden from
+ * enumeration, so this reads the store's own graph list once. Other graphs
+ * stay, whatever their IRIs. State graphs go first, so a drop that stops part
+ * way never leaves a state row without its data. Returns the number of graphs
+ * dropped.
  */
 export async function dropReadGraphPartitions(store: TripleStore, options: QueryOptions = {}): Promise<number> {
   const target = readGraphPartitionMaintenanceStore(store);

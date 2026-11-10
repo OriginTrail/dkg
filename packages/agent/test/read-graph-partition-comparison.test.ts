@@ -12,6 +12,9 @@ import { canReadUnscopedQuery } from '../src/unscoped-query-admission.js';
 const CG = 'comparison';
 const ROOT = `did:dkg:context-graph:${CG}`;
 const CHILD = `${CG}/child`;
+// A context graph from before the `_read` reservation, whose ID has the segment.
+const LEGACY_CG = `${CG}/_read/project`;
+const LEGACY = `did:dkg:context-graph:${LEGACY_CG}/_verifiable_memory/0xaa/1`;
 const row = (graph: string, subject: string, object = '"v"'): Quad => ({ graph, subject, predicate: 'urn:p', object });
 const MEMBERS: Quad[] = [
   row(`${ROOT}/_verifiable_memory/0xab/1`, 'urn:a'),
@@ -19,6 +22,9 @@ const MEMBERS: Quad[] = [
   row(`${ROOT}/code/_verifiable_memory/0xab/2`, 'urn:c'),
   row(`${ROOT}/_meta`, 'urn:m'),
   row(`did:dkg:context-graph:${CHILD}/_verifiable_memory/0xab/3`, 'urn:d'),
+  // Ordinary graphs that only have a `_read` segment.
+  row(`${ROOT}/_read/stray`, 'urn:x'),
+  row(LEGACY, 'urn:e'),
 ];
 const READ_GRAPHS: Quad[] = [
   row(readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory }), 'urn:a'),
@@ -27,7 +33,6 @@ const READ_GRAPHS: Quad[] = [
   row(readGraphIri({ scope: readScope(CG), layer: MemoryLayer.WorkingMemory, agentAddress: '0x' + 'a'.repeat(40) }), 'urn:w'),
   row(readGraphIri({ scope: readScope(CHILD), layer: MemoryLayer.VerifiableMemory }), 'urn:d'),
   row(readGraphStateGraphIri(CG), 'urn:state', '"ready"'),
-  row(`${ROOT}/_read/stray`, 'urn:x'),
 ];
 
 let adapters: OxigraphStore[] = [];
@@ -55,6 +60,9 @@ describe('surfaces that enumerate the store, with read graphs planted', () => {
       expect(candidates(snapshot.graphs)).toEqual(candidates(reference.graphs));
     }
     for (const quad of READ_GRAPHS) expect(snapshot.has(quad.graph)).toBe(false);
+    for (const quad of READ_GRAPHS) expect(isLegacySyncGraphCandidateV1(quad.graph, CG, 'durable-data'), quad.graph).toBe(false);
+    expect(snapshot.has(LEGACY)).toBe(true);
+    expect(isLegacySyncGraphCandidateV1(LEGACY, LEGACY_CG, 'durable-data')).toBe(true);
   });
 
   it('lists the same graph inventories through the agent store wrapper', async () => {
