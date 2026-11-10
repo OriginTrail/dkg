@@ -2,7 +2,7 @@
 
 /**
  * Read-graph state: one row per read graph, kept in the state graph of its
- * context graph's `_read` partition (`readGraphStateGraphIri`), with its state,
+ * context graph's read-graph partition (`readGraphStateGraphIri`), with its state,
  * a generation, the membership-rule version and the builder version.
  *
  *   absent → building → ready → dirty → repairing | rebuilding → ready
@@ -25,12 +25,16 @@
 
 import { randomInt } from 'node:crypto';
 import {
+  READ_GRAPH_SEGMENT,
   assertSafeIri,
   parseReadGraphIri,
   readGraphStateGraphIri,
   sparqlString,
 } from '@origintrail-official/dkg-core';
+import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { READ_GRAPH_MEMBERSHIP_RULE_VERSION } from './membership.js';
+
+const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
 /** The states a stored row can have. A read graph without a row is absent. */
 export const READ_GRAPH_STATES = Object.freeze(['building', 'ready', 'dirty', 'repairing', 'rebuilding'] as const);
@@ -79,8 +83,9 @@ export const READ_GRAPH_STATE_PREDICATES = Object.freeze({
 type RowField = keyof typeof READ_GRAPH_STATE_PREDICATES;
 const ROW_FIELDS = Object.keys(READ_GRAPH_STATE_PREDICATES) as RowField[];
 
-/** Restricts `?stateGraph` to the state graph of some context graph's read-graph partition. */
-const IN_STATE_GRAPH = 'FILTER(STRSTARTS(STR(?stateGraph), "did:dkg:context-graph:") && STRENDS(STR(?stateGraph), "/_read/state"))';
+/** Restricts `?stateGraph` to the state graph of some context graph's read-graph partition (`readGraphStateGraphIri`). */
+const IN_STATE_GRAPH = 'FILTER(STRSTARTS(STR(?stateGraph), "did:dkg:context-graph:") && '
+  + `STRENDS(STR(?stateGraph), ${sparqlString(`/${READ_GRAPH_SEGMENT}/state`)}))`;
 
 /** The largest generation: transitions add one, and a generation must stay a safe integer. */
 export const MAX_READ_GRAPH_GENERATION = Number.MAX_SAFE_INTEGER;
@@ -194,8 +199,10 @@ export interface ReadGraphStateMirror {
  * The compare-and-set for one transition: one UPDATE operation that changes
  * the stored row from `from` to `to` only when the stored row is exactly
  * `from`, and otherwise changes nothing. `from` undefined creates the row only
- * when none exists; `to` undefined removes it. Only the triples that differ are
- * deleted and inserted, so no triple is both removed and added by the operation.
+ * when the state graph holds none of its fields, so a field left by a damaged
+ * row never ends up beside new values; `to` undefined removes it. Only the
+ * triples that differ are deleted and inserted, so no triple is both removed
+ * and added by the operation.
  */
 export function readGraphStateCompareAndSet(
   from: ReadGraphStateRow | undefined,
@@ -209,8 +216,9 @@ export function readGraphStateCompareAndSet(
   const stateGraph = stateGraphOf(row.readGraph);
   if (from === undefined) {
     const created = checkedRow(to!);
-    return `INSERT { GRAPH <${stateGraph}> { ${rowTriples(created, ROW_FIELDS)} } } WHERE {\n`
-      + `  FILTER NOT EXISTS { GRAPH <${stateGraph}> { <${created.readGraph}> <${READ_GRAPH_STATE_PREDICATES.state}> ?existingState } }\n}`;
+    const absent = ROW_FIELDS.map((field) => `  FILTER NOT EXISTS { GRAPH <${stateGraph}> { <${created.readGraph}> `
+      + `<${READ_GRAPH_STATE_PREDICATES[field]}> ?existing${field[0]!.toUpperCase()}${field.slice(1)} } }`);
+    return `INSERT { GRAPH <${stateGraph}> { ${rowTriples(created, ROW_FIELDS)} } } WHERE {\n${absent.join('\n')}\n}`;
   }
   const before = checkedRow(from);
   const fence = exactRowPattern(before, ROW_FIELDS);
@@ -240,15 +248,18 @@ export function readGraphStateFencePattern(readGraph: string, state: ReadGraphSt
 }
 
 /**
- * Every state row in the store: one lookup on the state predicate, in any
- * context graph's state graph, with the other fields optional so a damaged row
- * is still found. Rows are read with {@link parseReadGraphStateRows}.
+ * Every state row in the store, in any context graph's state graph. A row is
+ * found by any of its fields, and every field is optional, so a damaged row is
+ * still found, one that has lost its state included. Rows are read with
+ * {@link parseReadGraphStateRows}.
  */
 export function readGraphStateRowsQuery(): string {
   const p = READ_GRAPH_STATE_PREDICATES;
-  return `SELECT ?stateGraph ?readGraph ?state ?generation ?ruleVersion ?builderVersion WHERE {
+  const anyField = ROW_FIELDS.map((field) => `{ ?readGraph <${p[field]}> ?readGraphRowField }`).join(' UNION ');
+  return `SELECT DISTINCT ?stateGraph ?readGraph ?state ?generation ?ruleVersion ?builderVersion WHERE {
   GRAPH ?stateGraph {
-    ?readGraph <${p.state}> ?state .
+    ${anyField}
+    OPTIONAL { ?readGraph <${p.state}> ?state }
     OPTIONAL { ?readGraph <${p.generation}> ?generation }
     OPTIONAL { ?readGraph <${p.ruleVersion}> ?ruleVersion }
     OPTIONAL { ?readGraph <${p.builderVersion}> ?builderVersion }
@@ -304,17 +315,20 @@ export function readGraphStateMarkAllDirty(): string {
 }
 
 /**
- * Replace a read graph's row, whatever it holds, with `row`: two operations,
- * the removal and then the insertion. Unfenced, so it is for start-up, before
- * any work on the read graph, under its lock.
+ * Replace a read graph's row, whatever it holds, with `row`: two operations.
+ * The first removes the read graph's row fields from every state graph, a
+ * misplaced copy in another context graph's included; the second inserts
+ * `row` in its own state graph. Unfenced, so it is for start-up, before any
+ * work on the read graph, under its lock.
  */
 export function readGraphStateReset(row: ReadGraphStateRow): string {
   const checked = checkedRow(row);
   const stateGraph = stateGraphOf(checked.readGraph);
   const fields = ROW_FIELDS.map((field) => `<${READ_GRAPH_STATE_PREDICATES[field]}>`).join(' ');
-  return `DELETE { GRAPH <${stateGraph}> { <${checked.readGraph}> ?readGraphResetPredicate ?readGraphResetValue } } WHERE {\n`
+  return `DELETE { GRAPH ?stateGraph { <${checked.readGraph}> ?readGraphResetPredicate ?readGraphResetValue } } WHERE {\n`
     + `  VALUES ?readGraphResetPredicate { ${fields} }\n`
-    + `  GRAPH <${stateGraph}> { <${checked.readGraph}> ?readGraphResetPredicate ?readGraphResetValue }\n};\n`
+    + `  GRAPH ?stateGraph { <${checked.readGraph}> ?readGraphResetPredicate ?readGraphResetValue }\n`
+    + `  ${IN_STATE_GRAPH}\n};\n`
     + `INSERT DATA { GRAPH <${stateGraph}> { ${rowTriples(checked, ROW_FIELDS)} } }`;
 }
 
@@ -327,10 +341,9 @@ function parseRow(readGraph: string, found: readonly Readonly<Record<string, str
     const list = values(name);
     return list.length === 1 && list[0] !== undefined ? list[0] : undefined;
   };
-  const state = one('state');
   const row = {
     readGraph,
-    state: state !== undefined ? literalValue(state) : undefined,
+    state: stateValue(one('state')),
     generation: integerValue(one('generation')),
     ruleVersion: integerValue(one('ruleVersion')),
     builderVersion: integerValue(one('builderVersion')),
@@ -340,15 +353,27 @@ function parseRow(readGraph: string, found: readonly Readonly<Record<string, str
   return row as ReadGraphStateRow;
 }
 
-/** The lexical value of a literal binding, in either of the forms the result decoders produce. */
-function literalValue(value: string): string {
-  const quoted = /^"((?:[^"\\]|\\.)*)"(?:\^\^<[^<>]*>|@[A-Za-z0-9-]+)?$/.exec(value);
-  return quoted ? quoted[1]!.replace(/\\(.)/g, '$1') : value;
+/**
+ * A binding's value, only in the term forms the row's statements write and
+ * match: a plain literal for the state, an `xsd:integer` for the numbers, or
+ * the bare lexical form some decoders give. Any other term (a language tag, a
+ * string where a number belongs) leaves the row damaged.
+ */
+function stateValue(binding: string | undefined): string | undefined {
+  if (binding === undefined) return undefined;
+  if (!binding.startsWith('"')) return binding;
+  const literal = parseRdfLiteralTerm(binding);
+  return literal?.kind === 'plain' ? literal.value : undefined;
 }
 
-function integerValue(value: string | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  const lexical = literalValue(value);
+function integerValue(binding: string | undefined): number | undefined {
+  if (binding === undefined) return undefined;
+  let lexical = binding;
+  if (binding.startsWith('"')) {
+    const literal = parseRdfLiteralTerm(binding);
+    if (literal?.kind !== 'typed' || literal.datatype !== XSD_INTEGER) return undefined;
+    lexical = literal.value;
+  }
   if (!/^[1-9][0-9]*$/.test(lexical)) return undefined;
   const parsed = Number(lexical);
   return Number.isSafeInteger(parsed) ? parsed : undefined;

@@ -170,6 +170,16 @@ describe('read-graph state statements on embedded Oxigraph', () => {
     expect(await storedRows(store)).toEqual({ rows: [], damaged: [] });
   });
 
+  it('refuses a compare-and-set whose state matches but whose generation is stale', async () => {
+    const store = new OxigraphStore();
+    const current = row('rebuilding', 9);
+    await store.update(readGraphStateCompareAndSet(undefined, current));
+    await store.update(readGraphStateCompareAndSet(row('rebuilding', 7), row('ready', 7)));
+    expect((await storedRows(store)).rows).toEqual([current]);
+    await store.update(readGraphStateCompareAndSet(current, nextReadGraphState(current, { kind: 'publish-ready' })));
+    expect((await storedRows(store)).rows).toEqual([row('ready', 9)]);
+  });
+
   it('lets a fenced operation write only for its own state and generation', async () => {
     const store = new OxigraphStore();
     await store.insert([{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: MEMBER }]);
@@ -213,6 +223,34 @@ describe('read-graph state statements on embedded Oxigraph', () => {
 
     await store.update(readGraphStateReset(row('dirty', 11)));
     expect((await storedRows(store)).rows).toEqual([row('dirty', 11)]);
+    // A reset also clears a copy of the row left in another context graph's state graph.
+    await store.update(readGraphStateReset(row('dirty', 12, R2)));
+    const after = await storedRows(store);
+    expect(after.rows.sort((a, b) => a.readGraph.localeCompare(b.readGraph)))
+      .toEqual([row('dirty', 11), row('dirty', 12, R2)].sort((a, b) => a.readGraph.localeCompare(b.readGraph)));
+    expect(after.damaged).toEqual(['urn:not-a-read-graph']);
+  });
+
+  it('finds a row that has lost its state, creates nothing beside it, and recovers it with a reset', async () => {
+    const store = new OxigraphStore();
+    const p = READ_GRAPH_STATE_PREDICATES;
+    const fieldCount = async () => {
+      const result = await store.query(`SELECT ?p ?o WHERE { GRAPH <${STATE_GRAPH}> { <${R}> ?p ?o } }`);
+      return result.type === 'bindings' ? result.bindings.length : -1;
+    };
+    // The generation and versions of an earlier row survive without its state.
+    await store.update(`INSERT DATA { GRAPH <${STATE_GRAPH}> { <${R}> <${p.generation}> 7 ; <${p.ruleVersion}> 1 ; <${p.builderVersion}> 1 } }`);
+    expect(await storedRows(store)).toEqual({ rows: [], damaged: [R] });
+
+    await store.update(readGraphStateCompareAndSet(undefined, row('building', 11)));
+    expect(await fieldCount()).toBe(3);
+    expect(await storedRows(store)).toEqual({ rows: [], damaged: [R] });
+
+    await store.update(readGraphStateReset(row('building', 12)));
+    const ready = nextReadGraphState(row('building', 12), { kind: 'publish-ready' })!;
+    await store.update(readGraphStateCompareAndSet(row('building', 12), ready));
+    expect(await storedRows(store)).toEqual({ rows: [ready], damaged: [] });
+    expect(await fieldCount()).toBe(4);
   });
 
   it('marks every read graph dirty in one request, once, leaving dirty rows as they are', async () => {
@@ -259,6 +297,10 @@ describe('read-graph state statements on embedded Oxigraph', () => {
     expect(parseReadGraphStateRows([binding('"ready"', '"7"^^<http://www.w3.org/2001/XMLSchema#integer>')]).rows).toEqual([row('ready')]);
     expect(parseReadGraphStateRows([binding('ready', '7')]).rows).toEqual([row('ready')]);
     expect(parseReadGraphStateRows([binding('"ready"', '"07"')]).damaged).toEqual([R]);
+    // Only the term forms the statements write and match: no language tag, no string where a number belongs.
+    expect(parseReadGraphStateRows([binding('"ready"@en', '7')]).damaged).toEqual([R]);
+    expect(parseReadGraphStateRows([binding('"ready"', '"7"')]).damaged).toEqual([R]);
+    expect(parseReadGraphStateRows([binding('"ready"', '"7"^^<http://www.w3.org/2001/XMLSchema#long>')]).damaged).toEqual([R]);
     expect(parseReadGraphStateRows([binding('"ready"', String(2 ** 60))]).damaged).toEqual([R]);
     expect(parseReadGraphStateRows([{ stateGraph: STATE_GRAPH }])).toEqual({ rows: [], damaged: [] });
   });
