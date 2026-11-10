@@ -212,6 +212,27 @@ export function readGraphPartitionMaintenanceStore(store: TripleStore): TripleSt
   return guard?.innerStore ?? store;
 }
 
+const MAY_HOLD_PARTITIONS = new WeakSet<TripleStore>();
+
+/** The innermost store of a decorator chain: the backend every decorator above shares. */
+function backendOf(store: TripleStore): TripleStore {
+  return findTripleStoreCapability(store, (candidate): candidate is TripleStore =>
+    typeof candidate === 'object' && candidate !== null && !('innerStore' in candidate)) ?? store;
+}
+
+/**
+ * Record, for this process, that a store may hold read-graph partitions. Its
+ * unscoped queries leave hidden graphs out only then, so a store that cannot
+ * hold any pays nothing. Whatever creates or finds read graphs records it.
+ */
+export function noteStoreMayHoldReadGraphPartitions(store: TripleStore): void {
+  MAY_HOLD_PARTITIONS.add(backendOf(store));
+}
+
+export function storeMayHoldReadGraphPartitions(store: TripleStore): boolean {
+  return MAY_HOLD_PARTITIONS.has(backendOf(store));
+}
+
 /**
  * Drop every graph of every read-graph partition, with their state. The
  * partition is hidden from enumeration, so this reads the store's own graph

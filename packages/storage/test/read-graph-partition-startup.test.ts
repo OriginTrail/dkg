@@ -4,9 +4,9 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryLayer, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
 import { createTripleStore, OxigraphStore, type TripleStore } from '../src/index.js';
-import { readGraphPartitionMaintenanceStore } from '../src/read-graph-partition-store.js';
+import { readGraphPartitionMaintenanceStore, storeMayHoldReadGraphPartitions } from '../src/read-graph-partition-store.js';
 import { markReadGraphsDirtyAtStart } from '../src/read-graph-partition-startup.js';
-import { mayHoldReadGraphPartitions } from '../src/read-graph-partition-marker.js';
+import { mayHoldReadGraphPartitions, noteReadGraphPartitions } from '../src/read-graph-partition-marker.js';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
   parseReadGraphStateRows,
@@ -65,8 +65,10 @@ describe('marking read graphs dirty at start', () => {
   it('marks every row that is not dirty with a new generation, and notes the partition', async () => {
     const store = await storeWithRows(row(VM, 'ready', 5), row(SWM, 'dirty', 9), row(CODE, 'building', 3));
     const dir = await dataDir();
+    expect(storeMayHoldReadGraphPartitions(store)).toBe(false);
     expect(await markReadGraphsDirtyAtStart(store, { dataDir: dir })).toBe(2);
     expect(mayHoldReadGraphPartitions(dir)).toBe(true);
+    expect(storeMayHoldReadGraphPartitions(store)).toBe(true);
     const after = await rows(store);
     expect(after.damaged).toEqual([]);
     expect(after.rows.sort(byGraph)).toEqual([row(VM, 'dirty', 6), row(SWM, 'dirty', 9), row(CODE, 'dirty', 4)].sort(byGraph));
@@ -78,6 +80,15 @@ describe('marking read graphs dirty at start', () => {
     const dir = await dataDir();
     expect(await markReadGraphsDirtyAtStart(store, { dataDir: dir })).toBe(0);
     expect(mayHoldReadGraphPartitions(dir)).toBe(false);
+    expect(storeMayHoldReadGraphPartitions(store)).toBe(false);
+  });
+
+  it('treats a note left by an interrupted drop as partitions that may remain', async () => {
+    const store = await storeWithRows();
+    const dir = await dataDir();
+    noteReadGraphPartitions(dir);
+    expect(await markReadGraphsDirtyAtStart(store, { dataDir: dir })).toBe(0);
+    expect(storeMayHoldReadGraphPartitions(store)).toBe(true);
   });
 
   it('leaves no ready state behind a damaged row', async () => {

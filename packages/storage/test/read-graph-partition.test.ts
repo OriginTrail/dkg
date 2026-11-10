@@ -23,7 +23,9 @@ import {
   ReadGraphPartitionStore,
   ReadGraphPartitionWriteError,
   dropReadGraphPartitions,
+  noteStoreMayHoldReadGraphPartitions,
   readGraphPartitionMaintenanceStore,
+  storeMayHoldReadGraphPartitions,
 } from '../src/read-graph-partition-store.js';
 import { sparqlNamesReadGraphPartition } from '../src/read-graph-partition-reference.js';
 import {
@@ -238,6 +240,23 @@ describe('the read-graph partition guard', () => {
     expect(indexed.graphEnumerationVisibility?.(ASSET)).toBe(true);
     const passthrough = new GraphSetIndexStore(base, { enabled: false });
     expect(await passthrough.listGraphsByPrefix(ROOT)).toEqual(expect.not.arrayContaining(PARTITION_GRAPHS));
+  });
+});
+
+describe('stores that may hold read-graph partitions', () => {
+  it('records it once per backend, for every decorator over it', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const other = await createTripleStore({ backend: 'oxigraph' });
+    opened.push(store, other);
+    expect(storeMayHoldReadGraphPartitions(store)).toBe(false);
+    noteStoreMayHoldReadGraphPartitions(readGraphPartitionMaintenanceStore(store));
+    expect(storeMayHoldReadGraphPartitions(store)).toBe(true);
+    expect(storeMayHoldReadGraphPartitions(new GraphSetIndexStore(store))).toBe(true);
+    expect(storeMayHoldReadGraphPartitions(other)).toBe(false);
+    const adapter = new OxigraphStore();
+    opened.push(adapter);
+    noteStoreMayHoldReadGraphPartitions(new GraphSetIndexStore(adapter));
+    expect(storeMayHoldReadGraphPartitions(adapter)).toBe(true);
   });
 });
 

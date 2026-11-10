@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { GraphSetIndexStore, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { GraphSetIndexStore, noteStoreMayHoldReadGraphPartitions, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { MemoryLayer, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { classifyScopedContentGraph, describeScopedContentGraph, isExcludedContentGraphTail } from '../src/scoped-content-partition.js';
@@ -35,6 +35,8 @@ beforeEach(async () => {
   planted = new OxigraphStore();
   oracle = new OxigraphStore();
   await planted.insert([...MEMBERS, ...READ_GRAPHS]);
+  // As whatever creates read graphs does, so unscoped queries leave them out.
+  noteStoreMayHoldReadGraphPartitions(planted);
   // The behavioural oracle: the same store without read graphs.
   await oracle.insert(MEMBERS);
 });
@@ -102,6 +104,21 @@ describe('queries and read-graph partitions', () => {
     // The read graphs are there: the adapter answers a raw graph query with them.
     const raw = await planted.query(`SELECT ?o WHERE { GRAPH <${READ_VM}> { ?s ?p ?o } }`);
     expect(raw.type === 'bindings' && raw.bindings.length).toBe(2);
+  });
+
+  it('leaves unscoped queries unchanged on a store that cannot hold read graphs', async () => {
+    const fresh = new OxigraphStore();
+    try {
+      await fresh.insert(MEMBERS);
+      const query = vi.spyOn(fresh, 'query');
+      await new DKGQueryEngine(fresh).query(UNSCOPED[0]!);
+      expect(query.mock.calls.at(-1)?.[1]?.withheldGraphRoots).toBeUndefined();
+      // Planted without a record, read graphs reach an unscoped graph variable: whatever
+      // creates them has to record it, as the start-up rule and the rollback note do.
+      await fresh.insert(READ_GRAPHS);
+      const rows = await new DKGQueryEngine(fresh).query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
+      expect(rows.bindings.map(row => row.g)).toContain(READ_VM);
+    } finally { await fresh.close(); }
   });
 
   it('refuses a query that names a read-graph partition, scoped or not', async () => {

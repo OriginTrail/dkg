@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MemoryLayer, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
-import { GraphManager, GraphSetIndexStore, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, GraphSetIndexStore, noteStoreMayHoldReadGraphPartitions, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/internal/context-graph-cache-invalidating-store.js';
 import { createResponderGraphListMemo } from '../src/sync/responder/graph-plan.js';
@@ -39,6 +39,7 @@ beforeEach(async () => {
   await bare.insert(MEMBERS);
   // Planted below every decorator, as only storage itself writes them.
   await withReadGraphs.insert([...MEMBERS, ...READ_GRAPHS]);
+  noteStoreMayHoldReadGraphPartitions(withReadGraphs);
   plain = new GraphSetIndexStore(bare);
   planted = new GraphSetIndexStore(withReadGraphs);
 });
