@@ -99,6 +99,7 @@ export default defineConfig({
           'test/semantic-runtime-local-llm-adapter.test.ts',
           'test/semantic-runtime-n8n-adapter.test.ts',
           'test/semantic-runtime-n8n-native.test.ts',
+          'test/semantic-runtime-n8n-wire.test.ts',
           'test/semantic-runtime-n8n-fingerprint.test.ts',
           'test/semantic-runtime-remote-execute-adapter.test.ts',
           'test/status-route-rpc.test.ts',

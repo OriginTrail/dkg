@@ -57,7 +57,7 @@ export function createNativeN8nWorkflowAdapter(
     const workflow = await request(new URL(`/api/v1/workflows/${grant.workflowId}`, origin), headers, signal);
     const published = pinnedN8nPublishedWorkflow(workflow, grant);
     assertN8nEmbeddedWorkflows(published);
-    const names = new Set((published.nodes as Record<string, unknown>[]).map(node => node.name));
+    const names = new Set(published.nodes.map(node => node.name));
     if (projection.requiredNodes.some(name => !names.has(name))) throw new Error('N8N_WORKFLOW_NOT_PINNED');
     return { origin, headers, published };
   };
@@ -106,7 +106,7 @@ export function createNativeN8nWorkflowAdapter(
         if (!saved) {
           const observed = n8nRecord(input) && typeof input.executionId === 'string' ? input.executionId : '';
           if (observed && (!projection.allowObservation || !/^\d{1,20}$/.test(observed))) throw new Error('INVALID_N8N_INPUT');
-          if (observed && !(prepared.published.nodes as Record<string, unknown>[]).some(node => node.name === n8nObservationScope(graph, executor, grant.workflowId))) throw new Error('N8N_OBSERVATION_SCOPE_MISMATCH');
+          if (observed && !prepared.published.nodes.some(node => node.name === n8nObservationScope(graph, executor, grant.workflowId))) throw new Error('N8N_OBSERVATION_SCOPE_MISMATCH');
           const webhookToken = observed ? undefined : secret(installation!.webhookTokenFile);
           await authorized();
           mayHaveExecuted = true;

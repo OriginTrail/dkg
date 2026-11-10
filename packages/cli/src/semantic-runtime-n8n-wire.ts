@@ -1,5 +1,5 @@
 import { BoundedResponseBodyLimitError, readResponseBodyBytesBounded } from '@origintrail-official/dkg-http-utils';
-import { n8nRecord, n8nWorkflowSha256 } from './semantic-runtime-n8n-contract.js';
+import { decodeN8nWorkflowSnapshot, n8nRecord, n8nWorkflowSha256, type N8nPublishedWorkflow } from './semantic-runtime-n8n-contract.js';
 
 type WireError = (code: string, context?: { status: number }) => Error;
 const wireError: WireError = code => new Error(code);
@@ -29,11 +29,13 @@ export async function requestN8nJson(url: URL, options: {
 
 export function pinnedN8nPublishedWorkflow(workflow: Record<string, unknown>,
   grant: { workflowId: string; workflowSha256: string }, error = wireError,
-): Record<string, unknown> & { versionId: string } {
-  const published = n8nRecord(workflow.activeVersion) ? { ...workflow.activeVersion, settings: workflow.settings } : workflow;
-  if (workflow.id !== grant.workflowId || workflow.active !== true || typeof published.versionId !== 'string'
-    || !published.versionId || n8nWorkflowSha256(published) !== grant.workflowSha256) throw error('N8N_WORKFLOW_NOT_PINNED');
-  return published as Record<string, unknown> & { versionId: string };
+): N8nPublishedWorkflow {
+  const value = n8nRecord(workflow.activeVersion) ? { ...workflow.activeVersion, settings: workflow.settings } : workflow;
+  if (workflow.id !== grant.workflowId || workflow.active !== true || typeof value.versionId !== 'string'
+    || !value.versionId) throw error('N8N_WORKFLOW_NOT_PINNED');
+  const published = decodeN8nWorkflowSnapshot(value);
+  if (n8nWorkflowSha256(published) !== grant.workflowSha256) throw error('N8N_WORKFLOW_NOT_PINNED');
+  return { ...published, versionId: value.versionId };
 }
 
 /** Native acknowledgement contains only a durable execution ID, never workflow output. */

@@ -15,6 +15,41 @@ const hash = (value: unknown): value is string => typeof value === 'string' && /
 export const n8nRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const closed = (value: Record<string, unknown>, keys: string[]) => Object.keys(value).every(key => keys.includes(key));
 
+export interface N8nWorkflowNode extends Record<string, unknown> {
+  name: string; type: string; id?: string; typeVersion?: number; parameters?: Record<string, unknown>;
+}
+export interface N8nWorkflowConnection extends Record<string, unknown> { node: string; type: string; index: number }
+export type N8nWorkflowConnections = Record<string, Record<string, (N8nWorkflowConnection[] | null)[]>>;
+export interface N8nWorkflowSnapshot extends Record<string, unknown> {
+  nodes: N8nWorkflowNode[]; connections: N8nWorkflowConnections;
+  settings?: Record<string, unknown>;
+}
+export type N8nPublishedWorkflow = N8nWorkflowSnapshot & { versionId: string };
+
+const workflowNode = (value: unknown): value is N8nWorkflowNode => n8nRecord(value)
+  && typeof value.name === 'string' && typeof value.type === 'string'
+  && (value.id === undefined || typeof value.id === 'string')
+  && (value.typeVersion === undefined || typeof value.typeVersion === 'number' && Number.isFinite(value.typeVersion))
+  && (value.parameters === undefined || n8nRecord(value.parameters));
+const workflowConnection = (value: unknown): value is N8nWorkflowConnection => n8nRecord(value)
+  && typeof value.node === 'string' && typeof value.type === 'string'
+  && typeof value.index === 'number' && Number.isSafeInteger(value.index) && value.index >= 0;
+const workflowConnections = (value: unknown): value is N8nWorkflowConnections => n8nRecord(value)
+  && Object.values(value).every(channels => n8nRecord(channels) && Object.values(channels)
+    .every(ports => Array.isArray(ports) && ports.every(port => port === null || Array.isArray(port) && port.every(workflowConnection))));
+function workflowSnapshot(value: unknown): value is N8nWorkflowSnapshot {
+  return n8nRecord(value) && Array.isArray(value.nodes) && value.nodes.every(workflowNode)
+    && workflowConnections(value.connections) && (value.settings === undefined || n8nRecord(value.settings));
+}
+
+/** Validate without rebuilding provider objects or filling omitted fields. The
+ * complete node/edge/settings bytes, including extra fields, remain hash inputs. */
+export function decodeN8nWorkflowSnapshot(value: unknown): N8nWorkflowSnapshot {
+  n8nWorkflowSha256(value); // Bound the complete snapshot before traversing it.
+  if (!workflowSnapshot(value)) throw new Error('INVALID_N8N_WORKFLOW');
+  return value;
+}
+
 export function validateN8nGrant(value: unknown): asserts value is SemanticN8nGrant {
   if (!n8nRecord(value) || !closed(value, ['toolIri', 'workflowId', 'workflowSha256', 'inputSchema', 'outputSchema', 'result'])
     || value.toolIri !== N8N_TOOL_IRI || !id(value.workflowId) || !hash(value.workflowSha256)) throw new Error('INVALID_N8N_GRANT');
@@ -101,10 +136,10 @@ export function n8nWorkflowSha256(value: unknown): string {
 
 /** n8n fills omitted parameter defaults in execution snapshots. Every reviewed
  * value must survive unchanged; graph, node settings and credentials stay exact. */
-export function n8nExecutionMatches(source: Record<string, unknown>, executed: unknown): boolean {
+export function n8nExecutionMatches(source: N8nWorkflowSnapshot, executed: unknown): boolean {
   if (!n8nRecord(executed)) return false;
-  n8nWorkflowSha256(executed); // Apply the same size/depth bounds to the snapshot.
-  const strip = (value: Record<string, unknown>) => ({ ...value, nodes: (value.nodes as Record<string, unknown>[])
+  const actual = decodeN8nWorkflowSnapshot(executed);
+  const strip = (value: N8nWorkflowSnapshot) => ({ ...value, nodes: value.nodes
     .map(({ parameters: _parameters, ...node }) => node) });
   const subset = (expected: unknown, actual: unknown, depth = 0): boolean => {
     if (depth > 30) return false;
@@ -114,9 +149,8 @@ export function n8nExecutionMatches(source: Record<string, unknown>, executed: u
       .every(([key, value]) => Object.hasOwn(actual, key) && subset(value, actual[key], depth + 1));
     return Object.is(expected, actual);
   };
-  return n8nWorkflowSha256(strip(source)) === n8nWorkflowSha256(strip(executed))
-    && (source.nodes as Record<string, unknown>[]).every((node, index) =>
-      subset(node.parameters, (executed.nodes as Record<string, unknown>[])[index]?.parameters));
+  return n8nWorkflowSha256(strip(source)) === n8nWorkflowSha256(strip(actual))
+    && source.nodes.every((node, index) => subset(node.parameters, actual.nodes[index]?.parameters));
 }
 
 /** Native snapshots contain normalized parameters, not the immutable definition.
@@ -125,7 +159,7 @@ export function n8nExecutionMatches(source: Record<string, unknown>, executed: u
  * node types/settings and credential references. No node-specific exceptions.
  */
 export function n8nPinnedExecutionMatches(
-  source: Record<string, unknown>, execution: Record<string, unknown>,
+  source: N8nPublishedWorkflow, execution: Record<string, unknown>,
   approved: Pick<SemanticN8nGrant, 'workflowId' | 'workflowSha256'>,
   acknowledgedVersion: string,
 ): boolean {
@@ -133,12 +167,12 @@ export function n8nPinnedExecutionMatches(
     || source.versionId !== acknowledgedVersion || execution.workflowVersionId !== acknowledgedVersion
     || execution.workflowId !== approved.workflowId || n8nWorkflowSha256(source) !== approved.workflowSha256
     || !n8nRecord(execution.workflowData)) return false;
-  const structural = (value: Record<string, unknown>) => {
+  const structural = (value: N8nWorkflowSnapshot) => {
     n8nWorkflowSha256(value); // Bound the complete provider snapshot before projecting it.
-    return { ...value, nodes: (value.nodes as Record<string, unknown>[])
+    return { ...value, nodes: value.nodes
       .map(({ parameters: _parameters, ...node }) => node) };
   };
-  return n8nWorkflowSha256(structural(source)) === n8nWorkflowSha256(structural(execution.workflowData));
+  return n8nWorkflowSha256(structural(source)) === n8nWorkflowSha256(structural(decodeN8nWorkflowSnapshot(execution.workflowData)));
 }
 
 export const N8N_VALUE_MAX_BYTES = 16_384;
@@ -155,10 +189,10 @@ export function n8nResultSha256(grant: Pick<NativeN8nGrant, 'result' | 'outputSc
 }
 
 /** A parent pin must cover every executed helper before any effect is admitted. */
-export function assertN8nEmbeddedWorkflows(workflow: Record<string, unknown>, depth = 0): void {
+export function assertN8nEmbeddedWorkflows(workflow: N8nWorkflowSnapshot, depth = 0): void {
   if (depth > 8) throw new Error('N8N_SUBWORKFLOW_NOT_PINNED');
   n8nWorkflowSha256(workflow);
-  for (const node of workflow.nodes as Record<string, unknown>[]) {
+  for (const node of workflow.nodes) {
     if (node.type !== 'n8n-nodes-base.executeWorkflow') continue;
     const p = node.parameters;
     if (!n8nRecord(p) || p.source !== 'parameter' || typeof p.workflowJson !== 'string'
@@ -166,6 +200,6 @@ export function assertN8nEmbeddedWorkflows(workflow: Record<string, unknown>, de
     let child: unknown;
     try { child = JSON.parse(p.workflowJson); } catch { throw new Error('N8N_SUBWORKFLOW_NOT_PINNED'); }
     if (!n8nRecord(child) || child.id !== undefined) throw new Error('N8N_SUBWORKFLOW_NOT_PINNED');
-    assertN8nEmbeddedWorkflows(child, depth + 1);
+    assertN8nEmbeddedWorkflows(decodeN8nWorkflowSnapshot(child), depth + 1);
   }
 }
