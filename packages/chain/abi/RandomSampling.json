@@ -18,6 +18,17 @@
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      }
+    ],
+    "name": "ContractCallerNotAllowed",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "bytes32",
         "name": "computedMerkleRoot",
         "type": "bytes32"
