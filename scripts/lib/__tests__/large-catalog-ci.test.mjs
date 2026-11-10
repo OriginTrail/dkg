@@ -1,6 +1,7 @@
 // The large graph catalog fixture: its own CI job, on both engines, required
 // by the CI gate and started by every change the Blazegraph lane covers.
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import test from 'node:test';
 import { parse } from 'yaml';
@@ -9,6 +10,24 @@ import { change, pullRequestPlan } from './ci-plan-fixtures.mjs';
 const read = (file) => fs.readFileSync(new URL(`../../../${file}`, import.meta.url), 'utf8');
 const FIXTURE = 'packages/query/test-live/large-catalog.test.ts';
 const CONFIG = '--config vitest.large-catalog.config.ts';
+const GATE_STEP = 'Require the large graph catalog fixture where the Blazegraph lane runs';
+
+test('the CI gate fails a selected Blazegraph lane unless the large catalog fixture succeeded', () => {
+  const step = parse(read('.github/workflows/ci.yml')).jobs['ci-gate'].steps.find(({ name }) => name === GATE_STEP);
+  assert.ok(step, 'the CI gate has its own step for the fixture');
+  assert.equal(step.if, 'always()');
+  assert.deepEqual(step.env, {
+    BLAZEGRAPH_LANE: '${{ needs.changes.outputs.tornado_blazegraph }}',
+    LARGE_CATALOG_RESULT: '${{ needs.tornado-large-catalog.result }}',
+  });
+  const verdict = (lane, result) => spawnSync('bash', ['-e', '-c', step.run], {
+    env: { ...process.env, BLAZEGRAPH_LANE: lane, LARGE_CATALOG_RESULT: result },
+  }).status;
+  assert.equal(verdict('true', 'success'), 0);
+  for (const result of ['failure', 'cancelled', 'skipped', '']) assert.notEqual(verdict('true', result), 0, result);
+  // A plan without the lane does not run the job.
+  assert.equal(verdict('false', 'skipped'), 0);
+});
 
 test('the large catalog fixture runs once per engine in its own job, which the CI gate requires', () => {
   const { jobs } = parse(read('.github/workflows/ci.yml'));

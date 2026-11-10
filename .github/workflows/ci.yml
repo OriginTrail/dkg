@@ -1912,6 +1912,14 @@ jobs:
         env:
           COVERAGE_RESULT: ${{ needs.coverage-results.result }}
         run: test "$COVERAGE_RESULT" = success
+      # The trusted controller requires the lane jobs it knows; the large catalog fixture runs for the
+      # Blazegraph lane, so a selected lane must also see this job succeed, not be skipped.
+      - name: Require the large graph catalog fixture where the Blazegraph lane runs
+        if: always()
+        env:
+          BLAZEGRAPH_LANE: ${{ needs.changes.outputs.tornado_blazegraph }}
+          LARGE_CATALOG_RESULT: ${{ needs.tornado-large-catalog.result }}
+        run: test "$BLAZEGRAPH_LANE" != true || test "$LARGE_CATALOG_RESULT" = success
       - name: Verify selected lanes completed
         if: always()
         env:

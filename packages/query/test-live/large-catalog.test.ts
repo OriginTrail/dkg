@@ -216,17 +216,26 @@ describe(`a graph catalog larger than any caller limit, on ${engine}`, () => {
 
     // Last: it adds graphs to the store.
     it('fails a read as a node-side limit when a warm catalog revalidates past the ceiling', async () => {
-      const reader = new DKGQueryEngine(new GraphSetIndexStore(inner, { revalidateMs: 1 }));
+      // The index's clock decides when the catalog is due; the store counts each full catalog read.
+      let now = 0;
+      const { store: counted, counter } = countingCatalogReads(inner);
+      const reader = new DKGQueryEngine(new GraphSetIndexStore(counted, { revalidateMs: 30_000, now: () => now }));
       const read = () => reader.query(FIXTURE_QUERIES.SELECT, requestOptions(vm));
       expect(answer('SELECT', await read())).toEqual(expected('SELECT', vm));
-      // The warm catalog is within the ceiling; its next revalidation is not, as on a node whose store grew past it.
+      expect(counter.reads).toBe(1);
+      // The warm catalog is within the ceiling; the store then grows past it, as on a node whose store grew.
       await inner.insert(Array.from({ length: 40 }, (_, n) => ({
         graph: `${UNRELATED_GRAPH_PREFIXES[0]}_shared_memory/0x00000000000000000000000000000000000000ff/${n}`,
         subject: `urn:fixture:growth:${n}`, predicate: 'http://schema.org/name', object: `"growth ${n}"`,
       })));
-      await new Promise(resolve => setTimeout(resolve, 5));
       const ceiling = fixture.catalogBytes + 1024;
+      // Before the catalog is due, the read is answered from it without a store read.
+      expect(answer('SELECT', await withCeiling(ceiling, read))).toEqual(expected('SELECT', vm));
+      expect(counter.reads).toBe(1);
+      // Once it is due, the read revalidates: exactly one full read, which fails closed at the ceiling.
+      now = 30_001;
       expectNodeSideLimit(await failure(withCeiling(ceiling, read)), ceiling);
+      expect(counter.reads).toBe(2);
     });
   });
 });

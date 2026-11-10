@@ -52,6 +52,7 @@ fail() { echo "[large-catalog] FAIL: $*" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || skip "curl not available"
 cd "$REPO_ROOT"
 node --import tsx -e '' >/dev/null 2>&1 || skip "tsx is not installed (run pnpm install)"
+[ -f "$REPO_ROOT/packages/storage/dist/index.js" ] || skip "the storage package is not built"
 # shellcheck source=devnet-lib.sh
 . "$REPO_ROOT/scripts/devnet-lib.sh" || skip "cannot source scripts/devnet-lib.sh"
 
@@ -98,14 +99,23 @@ loaded=0
 cleanup() {
   local status=$?
   trap - EXIT
+  # A second signal must not interrupt the recovery.
+  trap '' INT TERM
   if [ "$loaded" = 1 ]; then
     say "removing the loaded graphs and restarting node${target} with its normal settings"
-    helper remove "$kind" "$store_url" || { echo "[large-catalog] FAIL: could not remove the loaded graphs" >&2; status=1; }
+    # A daemon-managed store is down while its node is: bring the node back, then remove again.
+    if ! helper remove "$kind" "$store_url"; then
+      { restart_node && helper remove "$kind" "$store_url"; } \
+        || { echo "[large-catalog] FAIL: could not remove the loaded graphs" >&2; status=1; }
+    fi
     restart_node || { echo "[large-catalog] FAIL: node${target} did not come back" >&2; status=1; }
   fi
   exit "$status"
 }
 trap cleanup EXIT
+# Cancellation (the comprehensive runner sends TERM to the suite's group) leaves through cleanup.
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 created="$(api "$target" POST /api/context-graph/create \
   "{\"id\":\"$SMALL_CONTEXT_GRAPH\",\"name\":\"Large catalog fixture\"}")"

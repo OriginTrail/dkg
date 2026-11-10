@@ -2,7 +2,7 @@
 // The large graph catalog fixture of packages/query/test-live on a devnet node:
 // load it into the node's own store, read its small context graph through the
 // node's /api/query, and remove the graphs that only make the catalog large.
-// Run with tsx, from the repository root:
+// Run with tsx, from the repository root, after the packages are built:
 //
 //   node --import tsx scripts/devnet-large-catalog-store.mjs <command> ...
 //
@@ -13,14 +13,13 @@
 //
 // Exit status: 0 when the command did what it says, 1 otherwise.
 import { readFileSync } from 'node:fs';
+import { quadsToNQuads } from '../packages/storage/dist/index.js';
 import {
   AGENT, FIXTURE_QUERIES, FIXTURE_READS, SMALL_CONTEXT_GRAPH,
   expectedSubjects, fixtureAssets, loadLargeCatalog, unrelatedGraphNames,
 } from '../packages/query/test-live/large-catalog-fixture.ts';
 
 const SPARQL_UPDATE = 'application/sparql-update; charset=utf-8';
-const term = value => value.startsWith('"') ? value : `<${value}>`;
-const toNQuads = quads => `${quads.map(q => `${term(q.subject)} <${q.predicate}> ${term(q.object)} <${q.graph}> .`).join('\n')}\n`;
 
 /** Where to send a bulk load and an update, for each store the devnet configures. */
 function storeEndpoints(kind, url) {
@@ -72,7 +71,7 @@ const readName = read => [read.view ?? 'legacy route', read.subGraphName && `sub
 const commands = {
   async load(kind, url) {
     const { load, loadType } = storeEndpoints(kind, url);
-    const fixture = await loadLargeCatalog({ insert: quads => post(load, loadType, toNQuads(quads)) });
+    const fixture = await loadLargeCatalog({ insert: quads => post(load, loadType, `${quadsToNQuads(quads)}\n`) });
     console.log(JSON.stringify({ loaded: fixture.graphCount, catalogBytes: fixture.catalogBytes,
       seconds: Math.round(fixture.loadMs / 100) / 10 }));
     return true;
