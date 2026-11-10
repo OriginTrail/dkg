@@ -50,8 +50,15 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  *      author split), but cannot bind a KA it authors itself unless it is a
  *      member. Open CGs (publishPolicy == 1) admit any author.
  *
- *      The sender gate supports the three curator types encoded in
- *      ContextGraphStorage (see decision #22):
+ *      Since 10.2.0 every MEMBER is also a valid sender, so a member can
+ *      send and pay for its own publish without being the curator or a PCA
+ *      agent. KnowledgeAssetsLifecycle picks the payment from `msg.sender`
+ *      alone: a member that is not registered as an agent of a PCA pays with
+ *      its own TRAC (direct spend; the CG NFT holder spends its OT-RFC-53
+ *      escrow first). The CG's PCA pays only for its own agents' sends.
+ *
+ *      Besides its members, the sender gate admits the three curator types
+ *      encoded in ContextGraphStorage (see decision #22):
  *
  *        1. EOA    — publishAuthority = wallet, accountId = 0
  *                    Read path: direct address match against stored authority.
@@ -90,7 +97,15 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
     //          gate) keeps its ABI and answers. Stateless facade: no storage
     //          change; the upgrade is a Hub swap plus a re-initialize of
     //          KnowledgeAssetsLifecycle, which caches this facade's address.
-    string private constant _VERSION = "10.1.0";
+    // 10.2.0 — Members send their own publishes. `isAuthorizedPublisher` also
+    //          admits every member of a curated CG (roster or CG NFT holder;
+    //          the EOA/Safe curator already passed), so a member can send and
+    //          pay for its own publish. Its ABI is unchanged and its answers
+    //          only widen: every sender 10.1.0 admits is still admitted, before
+    //          any new read. Payment is unchanged: KnowledgeAssetsLifecycle
+    //          keys it on `msg.sender`, so a member that is not a PCA agent
+    //          pays with its own TRAC. Same upgrade shape as 10.1.0.
+    string private constant _VERSION = "10.2.0";
 
     /// @notice A curated context graph refused a Knowledge Asset because the KA's
     ///         attested author is not a member of the graph.
@@ -523,11 +538,13 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
      *      must also carry an author that is a MEMBER of the CG
      *      (`isAuthorizedAuthor`, enforced in `registerKnowledgeAsset`). So a
      *      `true` here for a registered agent of the CG's PCA means "may pay
-     *      for a member's KA", not "may publish its own KA". The answers and
-     *      the ABI of this function are unchanged from 10.0.4, so deployed
-     *      nodes that filter their payer wallets with it keep working.
+     *      for a member's KA", not "may publish its own KA". The ABI of this
+     *      function is unchanged from 10.0.4. Its answers are unchanged in
+     *      10.1.0 and only widen in 10.2.0, which admits every member as a
+     *      sender (last bullet below), so deployed nodes that filter their
+     *      payer wallets with it keep working.
      *
-     *      Implements the 3-curator-type model per decision #22:
+     *      Implements the 3-curator-type model per decision #22, plus members:
      *
      *      - Open CGs (publishPolicy == 1) allow any non-zero principal.
      *      - Curated + EOA curator (accountId == 0): direct address equality
@@ -552,6 +569,16 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
      *        SENDERS until the new owner calls `PublishingConviction.clearAgents`.
      *        Since 10.1.0 that no longer lets them bind KAs they author
      *        themselves: the author gate requires a member author.
+     *      - Curated, any curator type (10.2.0): a MEMBER of the CG, i.e. on
+     *        its participant roster or holding the CG NFT (the EOA/Safe
+     *        curator has already passed). The same membership the author gate
+     *        checks (`_isAuthorizedAuthor`), so a member may send, and pay
+     *        for, its own KA. Checked LAST: every sender above returns before
+     *        any read this adds. It also runs when the PCA branch cannot
+     *        resolve the PCA, so membership never depends on the PCA's state.
+     *        Who pays is not decided here: KnowledgeAssetsLifecycle keys the
+     *        payment on `msg.sender`, so a member that is not a PCA agent
+     *        pays with its own TRAC, and the CG's PCA is never charged for it.
      *
      *      Branch order is IMPORTANT. Because the EOA/Safe branch matches on
      *      the stored authority snapshot, it MUST NOT run in PCA mode — an
@@ -571,8 +598,9 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
      *      Phase 6 has not been deployed yet. Using a fresh lookup each call
      *      (rather than caching on `initialize()`) lets the PCA branch start
      *      working without a facade redeployment once Phase 6 lands. Any
-     *      resolution failure in PCA mode yields `false` (fail-closed read
-     *      path — unlike the write path, which reverts).
+     *      resolution failure in PCA mode refuses the PCA route (fail-closed
+     *      read path — unlike the write path, which reverts); since 10.2.0
+     *      the membership check still runs after it.
      *
      *      View-only — no state mutations.
      *
@@ -600,22 +628,42 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
         // 2. Curated: never authorize the zero address.
         if (publisher == address(0)) return false;
 
-        // 3. Determine curator type from accountId FIRST — we must not run
-        //    the direct-equality branch in PCA mode because the stored
-        //    authority is a stale-on-transfer snapshot in that case.
+        // 3. The curator, or the live owner or a registered agent of the CG's
+        //    PCA (10.1.0's answer). Every sender it admits returns here,
+        //    before any read that 10.2.0 adds.
+        if (_isCuratorOrPcaSender(contextGraphId, publisher, storedAuthority)) return true;
+
+        // 4. 10.2.0: a member of the CG may send its own publish (roster or CG
+        //    NFT holder). Also reached when the PCA branch cannot resolve.
+        return _isAuthorizedAuthor(contextGraphId, publisher);
+    }
+
+    /// @dev The curator part of the sender gate, unchanged from 10.1.0 except
+    ///      that a `false` now falls through to the membership check in
+    ///      `isAuthorizedPublisher` instead of refusing outright. The caller
+    ///      has established that the CG exists, is active and curated, and
+    ///      that `publisher` is non-zero.
+    function _isCuratorOrPcaSender(
+        uint256 contextGraphId,
+        address publisher,
+        address storedAuthority
+    ) internal view returns (bool) {
+        // Determine curator type from accountId FIRST — we must not run the
+        // direct-equality branch in PCA mode because the stored authority is
+        // a stale-on-transfer snapshot in that case.
         uint256 authorityAccountId = contextGraphStorage.getPublishAuthorityAccountId(contextGraphId);
 
         if (authorityAccountId == 0) {
-            // 3a. EOA / Safe curator: direct address match against the
-            //     stored authority. Storage auto-rotates this field on CG
-            //     NFT transfer, so it is always live for this mode.
+            // a. EOA / Safe curator: direct address match against the
+            //    stored authority. Storage auto-rotates this field on CG
+            //    NFT transfer, so it is always live for this mode.
             return publisher == storedAuthority;
         }
 
-        // 3b. PCA curator: IGNORE the stored authority snapshot entirely.
-        //     Live-resolve the NFT's current owner and accept it or any
-        //     registered agent of the same account. A missing / burned NFT
-        //     yields `false` (fail-closed read path).
+        // b. PCA curator: IGNORE the stored authority snapshot entirely.
+        //    Live-resolve the NFT's current owner and accept it or any
+        //    registered agent of the same account. A missing / burned NFT
+        //    refuses this route (fail-closed read path).
         address nftAddr;
         try hub.getContractAddress("DKGPublishingConvictionNFT") returns (address addr) {
             nftAddr = addr;
@@ -668,7 +716,9 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
      *
      *      Independent of who SENDS the publish: the sender gate is
      *      `isAuthorizedPublisher`. A payer that is not a member can therefore
-     *      submit, and pay for, a member's KA.
+     *      submit, and pay for, a member's KA. Since 10.2.0 the sender gate
+     *      also admits every member this function admits, so a member can
+     *      send its own KA as well.
      * @param contextGraphId The context graph the KA would be published into.
      * @param author         The KA's EIP-712-attested author.
      * @return               True when the CG would bind a KA by `author`.
@@ -683,12 +733,15 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
         return _isAuthorizedAuthor(contextGraphId, author);
     }
 
-    /// @dev Shared by `isAuthorizedAuthor` and `registerKnowledgeAsset`. The
-    ///      caller has established that the CG exists. Reads are ordered
-    ///      cheapest first: the policy slot and accountId are already warm in
-    ///      a publish (the sender gate read them), the NFT holder is one cold
-    ///      slot, and the roster scan (at most MAX_PARTICIPANT_AGENTS slots)
-    ///      runs last and stops at the first match.
+    /// @dev Shared by `isAuthorizedAuthor` and `registerKnowledgeAsset`, and
+    ///      since 10.2.0 by `isAuthorizedPublisher`, whose members are the same
+    ///      set. The caller has established that the CG exists. Reads are
+    ///      ordered cheapest first: the policy slot and accountId are already
+    ///      warm in a publish (the sender gate read them), the NFT holder is
+    ///      one cold slot, and the roster scan (at most MAX_PARTICIPANT_AGENTS
+    ///      slots) runs last and stops at the first match. When a member sends
+    ///      its own KA, the sender gate has already read all of them, so the
+    ///      author gate re-reads them warm.
     function _isAuthorizedAuthor(
         uint256 contextGraphId,
         address author

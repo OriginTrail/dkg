@@ -6,10 +6,11 @@
  * policy.
  *
  * Two real agents on the shared Hardhat chain, linked over libp2p:
- *   - the curator owns the graph; only its wallet may publish into it;
+ *   - the curator owns the graph and publishes into it;
  *   - the member is on the graph's on-chain roster, so the graph accepts
  *     knowledge assets it authors (ContextGraphs 10.1.0: a curated graph takes
- *     a KA only from a member author), but its wallet may not publish;
+ *     a KA only from a member author). Since 10.2.0 a member may also send its
+ *     own publish; here the curator publishes the member's asset;
  *   - the member creates a knowledge asset in the graph's `reports` sub-graph
  *     through the knowledge-asset API (`POST /api/knowledge-assets`), and
  *     shares it with `POST /api/knowledge-assets/:name/swm/share-async`, which
@@ -155,11 +156,10 @@ describe('a curator publishes a member\'s sub-graph share from shared memory (GH
     const curatorDial = curator.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
     await member.connectTo(curatorDial);
 
-    // The curator owns the graph and its curated publish policy (0): the
-    // member's wallet is not an authorized publisher. A curated graph binds a
-    // KA only when its author is a member (ContextGraphs 10.1.0), so the
-    // curator puts the member on the graph's on-chain roster. Inviting it
-    // would not: for a public graph that writes only local metadata.
+    // The curator owns the graph and its curated publish policy (0). A curated
+    // graph binds a KA only when its author is a member (ContextGraphs 10.1.0),
+    // so the curator puts the member on the graph's on-chain roster. Inviting
+    // it would not: for a public graph that writes only local metadata.
     await curator.createContextGraph({ id: CG, name: 'Curated reports' });
     const { onChainId } = await curator.registerContextGraph(CG, { publishPolicy: 0 });
     expect(await curatorChain.isAuthorizedAuthor(BigInt(onChainId), memberAddress)).toBe(false);

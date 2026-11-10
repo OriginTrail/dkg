@@ -27,7 +27,9 @@ import { packReservedKaId } from '../helpers/v10-ka-helpers';
  *   - 10.1.0 author gate (`isAuthorizedAuthor`, enforced by
  *     `registerKnowledgeAsset`): a curated CG binds a KA only when its
  *     attested author is a member; PCA agency and PCA ownership are not
- *     membership. `isAuthorizedPublisher` remains the unchanged sender gate.
+ *     membership. `isAuthorizedPublisher` remains the sender gate.
+ *   - 10.2.0 sender gate: every member of a curated CG is also a valid
+ *     sender, after the curator and PCA routes of 10.1.0.
  *
  * Notes:
  *   - H5 is satisfied by deletion: there is no digest in the facade, no
@@ -759,8 +761,14 @@ describe('@unit ContextGraphs (facade)', () => {
     // -------------------------------------------------------------------------
 
     it('old PCA owner (Alice) loses publish authority after transferring the PCA', async () => {
+      // Since 10.2.0 a member of the CG may send, and the CG NFT holder is a
+      // member. So this CG's NFT goes to a wallet of its own (accounts[8]):
+      // Alice's only route is the PCA, and the stored authority snapshot
+      // still names her.
+      const drifted = await createCuratedCG(accounts[8], alice.address, pcaAccountId);
+
       // Pre-transfer: Alice is the PCA owner, so live-resolve returns her.
-      expect(await Facade.isAuthorizedPublisher(cgId, alice.address)).to.be.true;
+      expect(await Facade.isAuthorizedPublisher(drifted, alice.address)).to.equal(true);
 
       // Transfer. Post-transfer: Alice no longer owns the PCA NFT, so
       // live-resolve returns Bob instead. Alice is not authorized.
@@ -768,7 +776,16 @@ describe('@unit ContextGraphs (facade)', () => {
       // passed the unconditional direct-equality check and returned true.
       await transferPCA(alice, bob);
 
-      expect(await Facade.isAuthorizedPublisher(cgId, alice.address)).to.be.false;
+      expect(await Facade.isAuthorizedPublisher(drifted, alice.address)).to.equal(false);
+    });
+
+    it('10.2.0: a former PCA owner that holds the CG NFT keeps sending, as a member', async () => {
+      // In this fixture Alice also holds the CG NFT. After the PCA transfer
+      // the PCA no longer admits her, but holding the CG NFT makes her a
+      // member, and a member may send its own publish.
+      await transferPCA(alice, bob);
+      expect(await Facade.isAuthorizedAuthor(cgId, alice.address)).to.equal(true);
+      expect(await Facade.isAuthorizedPublisher(cgId, alice.address)).to.equal(true);
     });
 
     it('new PCA owner (Bob) gains publish authority after transfer', async () => {
@@ -1369,6 +1386,105 @@ describe('@unit ContextGraphs (facade)', () => {
       expect(await Facade.isAuthorizedAuthor(cgId + 1n, member.address)).to.equal(false);
       await Storage.connect(storageOp).deactivateContextGraph(cgId);
       expect(await Facade.isAuthorizedAuthor(cgId, member.address)).to.equal(false);
+    });
+  });
+
+  // =========================================================================
+  // 10.2.0 — members send their own publishes (the SENDER gate)
+  // =========================================================================
+  //
+  // `isAuthorizedPublisher(cgId, sender)` also admits every member of a
+  // curated CG, the roster and the CG NFT holder, after the curator and PCA
+  // routes of 10.1.0, which are unchanged. Who pays is decided by
+  // KnowledgeAssetsLifecycle from msg.sender (v10-cg-member-sends-own-publish).
+  describe('sender gate: members may send their own publishes (10.2.0)', () => {
+    let pcaOwner: SignerWithAddress;
+    let cgHolder: SignerWithAddress;
+    let member: SignerWithAddress;
+    let pcaAgent: SignerWithAddress;
+    let stranger: SignerWithAddress;
+    let pcaAccountId: bigint;
+    let cgId: bigint;
+
+    beforeEach(async () => {
+      pcaOwner = accounts[0];   // deployer; holds TRAC for the PCA
+      cgHolder = accounts[6];   // registers the CG and holds its NFT
+      member = accounts[10];    // on the CG's roster
+      pcaAgent = accounts[3];   // registered on the PCA, NOT on the roster
+      stranger = accounts[4];
+
+      pcaAccountId = await createPCAAccount(pcaOwner, '60000');
+      await NFT.connect(pcaOwner).registerAgent(pcaAccountId, pcaAgent.address);
+      await Facade.connect(cgHolder).createContextGraph(
+        [member.address], 0, 0, 0, pcaOwner.address, pcaAccountId, ethers.ZeroHash,
+      );
+      cgId = await Storage.getLatestContextGraphId();
+    });
+
+    it('admits a roster member and the CG NFT holder, neither of them tied to the PCA', async () => {
+      expect(await NFT.agentToAccountId(member.address)).to.equal(0n);
+      expect(await NFT.agentToAccountId(cgHolder.address)).to.equal(0n);
+      expect(await Facade.isAuthorizedPublisher(cgId, member.address)).to.equal(true);
+      expect(await Facade.isAuthorizedPublisher(cgId, cgHolder.address)).to.equal(true);
+    });
+
+    it('keeps the routes of 10.1.0: the live PCA owner and the PCA\'s agents still send', async () => {
+      expect(await Facade.isAuthorizedPublisher(cgId, pcaOwner.address)).to.equal(true);
+      expect(await Facade.isAuthorizedPublisher(cgId, pcaAgent.address)).to.equal(true);
+    });
+
+    it('still refuses strangers and the zero address', async () => {
+      expect(await Facade.isAuthorizedPublisher(cgId, stranger.address)).to.equal(false);
+      expect(await Facade.isAuthorizedPublisher(cgId, ethers.ZeroAddress)).to.equal(false);
+    });
+
+    it('follows the roster: a removed member stops sending, a re-added one resumes', async () => {
+      await Facade.connect(cgHolder).removeParticipantAgent(cgId, member.address);
+      expect(await Facade.isAuthorizedPublisher(cgId, member.address)).to.equal(false);
+      await Facade.connect(cgHolder).addParticipantAgent(cgId, member.address);
+      expect(await Facade.isAuthorizedPublisher(cgId, member.address)).to.equal(true);
+    });
+
+    it('follows the CG NFT; a PCA transfer neither adds nor removes members', async () => {
+      // The stored authority snapshot still names the old PCA owner, which
+      // is no member: it stops sending once the PCA moves.
+      await NFT.connect(pcaOwner).transferFrom(pcaOwner.address, accounts[11].address, pcaAccountId);
+      expect(await Facade.isAuthorizedPublisher(cgId, pcaOwner.address)).to.equal(false);
+      expect(await Facade.isAuthorizedPublisher(cgId, member.address)).to.equal(true);
+
+      const newHolder = accounts[12];
+      await Storage.connect(cgHolder).transferFrom(cgHolder.address, newHolder.address, cgId);
+      expect(await Facade.isAuthorizedPublisher(cgId, newHolder.address)).to.equal(true);
+      expect(await Facade.isAuthorizedPublisher(cgId, cgHolder.address)).to.equal(false);
+    });
+
+    it('does not depend on the PCA: members still send when the PCA cannot be resolved', async () => {
+      // With the PCA NFT gone from the Hub, the PCA route fails closed.
+      await HubContract.removeContractByName('DKGPublishingConvictionNFT');
+      expect(await Facade.isAuthorizedPublisher(cgId, pcaAgent.address)).to.equal(false);
+      expect(await Facade.isAuthorizedPublisher(cgId, pcaOwner.address)).to.equal(false);
+      expect(await Facade.isAuthorizedPublisher(cgId, member.address)).to.equal(true);
+      expect(await Facade.isAuthorizedPublisher(cgId, cgHolder.address)).to.equal(true);
+    });
+
+    it('EOA / Safe curator mode: the curator, the CG NFT holder and the roster send', async () => {
+      const curator = accounts[7];
+      const eoaCg = await createCuratedCG(accounts[1], curator.address); // NFT to accounts[1]
+      expect(await Facade.isAuthorizedPublisher(eoaCg, curator.address)).to.equal(true);
+      expect(await Facade.isAuthorizedPublisher(eoaCg, accounts[1].address)).to.equal(true);
+      expect(await Facade.isAuthorizedPublisher(eoaCg, member.address)).to.equal(false);
+      await Facade.connect(curator).addParticipantAgent(eoaCg, member.address);
+      expect(await Facade.isAuthorizedPublisher(eoaCg, member.address)).to.equal(true);
+      // Membership is per CG: holding eoaCg's NFT is no route into cgId.
+      expect(await Facade.isAuthorizedPublisher(cgId, accounts[1].address)).to.equal(false);
+    });
+
+    it('unknown, zero and deactivated CG ids admit no member', async () => {
+      expect(await Facade.isAuthorizedPublisher(0, member.address)).to.equal(false);
+      expect(await Facade.isAuthorizedPublisher(cgId + 1n, member.address)).to.equal(false);
+      await Storage.connect(storageOp).deactivateContextGraph(cgId);
+      expect(await Facade.isAuthorizedPublisher(cgId, member.address)).to.equal(false);
+      expect(await Facade.isAuthorizedPublisher(cgId, cgHolder.address)).to.equal(false);
     });
   });
 
