@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { runInThisContext, constants as vmConstants } from 'node:vm';
 import { afterEach, expect, it, vi } from 'vitest';
 import { cleanupRuntimeFixtures, graph, owner, SR, toolFixture, restartNode, invalidateExecutionCapability } from './_helpers/semantic-runtime-api-fixture.js';
@@ -8,7 +9,7 @@ import { assertExecutionCapabilityAuthorized } from '../src/semantic-runtime-inv
 
 afterEach(async () => { vi.unstubAllGlobals(); await cleanupRuntimeFixtures(); });
 
-async function studio({ childDepth = 0 } = {}) {
+async function studio({ childDepth = 0, withProgram = false } = {}) {
   // Real compiler, signed SDK route, TypeScript/Wasm runtime and SQLite journals.
   // Only the n8n HTTP provider and remote DKG transport are fictional.
   const { createStudioExecutionHarness } = await runInThisContext('(url) => import(url)',
@@ -38,7 +39,7 @@ async function studio({ childDepth = 0 } = {}) {
   const authority = createNativeCallbackAuthority({ agent: f.target.agent, runtime: () => f.target.runtime,
     config: f.target.config.semanticRuntime, graphId: graph, caller: owner });
   const h = createStudioExecutionHarness({ state: join(f.target.dir, 'studio'), graphId: graph, owner,
-    config: f.target.config.semanticRuntime, client: { programs }, programAuthority: authority,
+    config: f.target.config.semanticRuntime, client: { programs }, programAuthority: authority, withProgram,
     loadOutputs: async (iri: string) => (await f.store.query(`SELECT ?output WHERE { GRAPH ?g { <${iri}> <${SR}output> ?output } }`)).bindings
       .map((row: any) => JSON.parse(row.output)) });
   vi.stubGlobal('fetch', h.runtimeFetch);
@@ -200,3 +201,38 @@ it.each(['canceled', 'crashed'])('recovers a journalled Write after native %s wi
     expect(h.controls.dispatches).toBe(1);
   } finally { h.close(); }
 });
+
+
+it('retains a 35-second Program callback beyond both former polling windows under its original invocation', async () => {
+  const { f, h, invocation } = await studio({ withProgram: true });
+  let parentAtCompletion: string | undefined;
+  try {
+    h.controls.earlyAcknowledgement = true;
+    h.controls.invokeProgram = async (request: any) => {
+      await delay(35_000);
+      const executionId = 'urn:sr:execution:' + invocation.invocationId;
+      parentAtCompletion = f.target.runtime!.store.execution(executionId)?.status;
+      return { invocationId: request.invocationId, operationIri: request.selected.operationIri,
+        sourceHash: request.selected.program.sourceHash, bindingDigest: request.selected.bindingDigest,
+        executionIri: 'urn:sr:execution:' + request.invocationId, outputs: [{ sum: 7 }] };
+    };
+    const result = await h.service.run(invocation, () => {}, h.actor);
+    await h.controls.finished;
+    expect(result).toMatchObject({ invocationId: invocation.invocationId, n8nExecutionId: '42',
+      executionIri: 'urn:sr:execution:' + invocation.invocationId, persisted: true, readbackVerified: true,
+      output: { ok: true } });
+    const response = JSON.parse(h.repository.db.prepare('SELECT response FROM dkg_component_calls WHERE id=?')
+      .get(invocation.invocationId + ':program').response);
+    expect(parentAtCompletion).toBe('active');
+    expect(response.items[0].result).toEqual([{ sum: 7 }]);
+    expect(JSON.parse(result.output.itemsJson)).toEqual(response.items);
+    expect(h.controls.callbackStatuses).toEqual([200, 200]);
+    expect(h.controls.callbackErrors).toEqual([]);
+    expect(h.effects).toEqual(['read', 'invoke']);
+    expect(h.controls.dispatches).toBe(1);
+    await restartNode(f.target); h.reopen();
+    expect(await h.service.run(invocation, () => {}, h.actor)).toEqual(result);
+    expect(h.effects).toEqual(['read', 'invoke']);
+    expect(h.controls.dispatches).toBe(1);
+  } finally { await h.controls.finished; h.close(); }
+}, 90_000);

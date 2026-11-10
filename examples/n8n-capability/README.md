@@ -238,6 +238,10 @@ An interrupted invocation resumes inspection of that same provider execution;
 it never re-posts a webhook after a recorded acknowledgement. Missing
 acknowledgements remain uncertain and retain their request identity. Native
 errors, empty branches and oversized outputs are explicit results.
+Inspection waits up to 55 seconds after acknowledgement, covering Studio's
+50-second native execution limit and 45-second Program callback timeout within
+the 60-second parent budget. Each HTTP request remains limited to 15 seconds;
+authority is rechecked while polling and before callbacks commit their results.
 
 **Activate events** enables a Webhook or Schedule root for 30 minutes or five
 events. Native Schedule executions only emit scoped timer events. The local
@@ -343,6 +347,9 @@ saved-version reopening and refusal of unauthorized parent workflows. **View in
 DKG** reads live Program source and its exact revision from the local node's
 private Working Memory. The example HTTP server exposes the fixture API rather
 than a standalone node dashboard.
+Google parent authorization evidence is `passed` only after the save-denial
+and inventory assertions run. Without an available Google export capability it
+is `skipped` with a reason, and `unprivilegedGoogleParentDenied` remains false.
 
 ## Execution boundaries
 

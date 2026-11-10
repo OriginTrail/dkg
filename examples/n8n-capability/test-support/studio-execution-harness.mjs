@@ -11,7 +11,7 @@ const { createStudioProvider } = await import('../studio-provider.mjs');
 const { createStudioService } = await import('../studio-service.mjs');
 const { handleDkgComponentCallback } = await import('../bridge.mjs');
 
-export function createStudioExecutionHarness({ state, graphId, owner, config, client, loadOutputs, programAuthority }) {
+export function createStudioExecutionHarness({ state, graphId, owner, config, client, loadOutputs, programAuthority, withProgram = false }) {
   const profile = { ...baseProfile };
   const { registry: { componentRegistry, component }, compiler } = createStudioContext({ profile });
   mkdirSync(state, { recursive: true });
@@ -20,11 +20,12 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
   config.n8nNative = { baseUrl: 'http://127.0.0.1:5679', apiTokenFile: token, webhookTokenFile: token, workflows: [] };
   const catalog = componentRegistry.map(descriptor => ({ kind: 'component',
     kaRef: 'urn:demo:n8n:component:' + descriptor.id + ':unit', sourceHash: 'a'.repeat(64), available: true, descriptor }));
-  const definition = { id: randomUUID(), name: 'Fictional Read Write', entryId: 'read',
-    nodes: ['dkg-read', 'dkg-write'].map((id, index) => ({ id: index ? 'write' : 'read', componentId: id,
+  const lastBlock = withProgram ? 'program' : 'write';
+  const definition = { id: randomUUID(), name: 'Fictional Read ' + lastBlock, entryId: 'read',
+    nodes: ['dkg-read', withProgram ? 'invoke-dkg-program' : 'dkg-write'].map((id, index) => ({ id: index ? lastBlock : 'read', componentId: id,
       kaRef: catalog.find(c => c.descriptor.id === id).kaRef, sourceHash: 'a'.repeat(64),
       params: Object.fromEntries(Object.entries(component(id).parameters).map(([k, v]) => [k, v.default])), x: index * 240, y: 0 })),
-    edges: [{ from: 'read', to: 'write', output: 0, input: 0 }] };
+    edges: [{ from: 'read', to: lastBlock, output: 0, input: 0 }] };
   const effects = [], assets = new Map(), native = new Map(), executions = new Map();
   const controls = { interrupted: true, normalized: true, dispatches: 0, owner: true, snapshot: v => v,
     loseWriteReply: false, nodeUnavailable: false, allowCreates: [], callbackStatuses: [], callbackErrors: [] };
@@ -36,6 +37,7 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
   profile.transport = async (request, kind) => {
     effects.push(kind);
     if (kind === 'read') return { graph: 'urn:test:measurements', measurements };
+    if (kind === 'invoke') return controls.invokeProgram(request);
     if (kind !== 'write') throw new Error('unexpected effect');
     controls.allowCreates.push(request.allowCreate);
     if (controls.nodeUnavailable) throw new Error('node unavailable');
@@ -86,23 +88,33 @@ export function createStudioExecutionHarness({ state, graphId, owner, config, cl
           { node: workflow.activeVersion.nodes.find(n => n.name === 'Receive input'), data: { main: [[{ json: { body } }]] } },
         ] }, resultData: { runData: {} } } };
       executions.set(executionId, execution);
-      const read = await callback(requestFor(body.invocationId, 'read', JSON.parse(body.input.itemsJson), executionId));
-      await controls.beforeWrite?.();
-      const writeNode = workflow.activeVersion.nodes.find(n => n.name === 'Block write request');
-      let written, error;
-      controls.writeRequest = requestFor(body.invocationId, 'write', read.items, executionId);
-      if (controls.skipWrite) error = { message: 'Provider stopped before Write' };
-      for (let attempt = 0; !controls.skipWrite && attempt < (writeNode.retryOnFail ? writeNode.maxTries : 1); attempt++) {
-        try { written = await callback(controls.writeRequest); break; }
-        catch (failure) { error = { message: failure.message }; }
-      }
-      execution.status = controls.terminalStatus ?? (written ? 'success' : 'error');
-      const runData = Object.fromEntries([
-        ['Receive input', [{ body }]],
-        ['Block read request', read.items], ...(written ? [['Block write request', written.items], ['Block write', written.items]] : []),
-      ].map(([node, items]) => [node, [{ data: { main: [items.map(json => ({ json }))] } }]]));
-      if (!written) runData['Block write request'] = [{ error, data: { main: [[]] } }];
-      execution.data = { resultData: { runData, ...(!written ? { error, lastNodeExecuted: writeNode.name } : {}) } };
+      const complete = async () => {
+        const read = await callback(requestFor(body.invocationId, 'read', JSON.parse(body.input.itemsJson), executionId));
+        await controls.beforeWrite?.();
+        const lastName = 'Block ' + lastBlock, requestName = lastName + ' request';
+        const lastNode = workflow.activeVersion.nodes.find(n => n.name === requestName);
+        let result, error;
+        const request = requestFor(body.invocationId, lastBlock, read.items, executionId);
+        controls[withProgram ? 'programRequest' : 'writeRequest'] = request;
+        if (controls.skipWrite) error = { message: 'Provider stopped before Write' };
+        for (let attempt = 0; !controls.skipWrite && attempt < (lastNode.retryOnFail ? lastNode.maxTries : 1); attempt++) {
+          try { result = await callback(request); break; }
+          catch (failure) { error = { message: failure.message }; }
+        }
+        execution.status = controls.terminalStatus ?? (result ? 'success' : 'error');
+        const runData = Object.fromEntries([
+          ['Receive input', [{ body }]],
+          ['Block read request', read.items], ...(result ? [[requestName, result.items], [lastName, result.items]] : []),
+        ].map(([node, items]) => [node, [{ data: { main: [items.map(json => ({ json }))] } }]]));
+        if (!result) runData[requestName] = [{ error, data: { main: [[]] } }];
+        execution.data = { resultData: { runData, ...(!result ? { error, lastNodeExecuted: lastNode.name } : {}) } };
+      };
+      if (controls.earlyAcknowledgement) {
+        controls.finished = complete().catch(error => {
+          execution.status = 'error';
+          execution.data.resultData.error = { message: error.message };
+        });
+      } else await complete();
       return Response.json({ executionId });
     }
     if (path.startsWith('/api/v1/executions/')) return Response.json(controls.snapshot(structuredClone(executions.get(path.split('/').at(-1)))));

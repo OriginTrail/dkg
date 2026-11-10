@@ -4,6 +4,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { compileWorkflow } from './workflow-definition.mjs';
+import { verifyGoogleParentAuthorization } from './workflow-verification.mjs';
 
 const state = resolve(process.argv[2]);
 const { nodeUrl } = JSON.parse(readFileSync(join(state, 'client.json'), 'utf8'));
@@ -58,16 +59,10 @@ assert.equal((await request(prefix + '/workflows/save', pending.definition, { or
 assert.equal((await request(prefix.replace('account-a', 'account-b') + '/workflows/save', pending.definition)).status, 403);
 assert.equal((await request(prefix + '/workflows/run', { ...invoke, sourceHash: 'f'.repeat(64) })).status, 409);
 assert.equal((await request(prefix + '/workflows/save', { ...pending.definition, nodes: pending.definition.nodes.map(n => ({ ...n, sourceHash: 'f'.repeat(64) })) })).status, 409);
-const google = catalog.value.capabilities.find(c => c.kind === 'google-sheets-export');
-if (google?.available) {
-  const withGoogle = structuredClone(pending.definition); withGoogle.id = randomUUID();
-  withGoogle.nodes.push({ id: 'google', kind: google.kind, kaRef: google.kaRef, sourceHash: google.sourceHash, x: 750, y: 150, config: { title: 'Not dispatched without an export key' } });
-  withGoogle.edges.push({ from: 'map', to: 'google' });
-  assert.equal((await request(prefix + '/workflows/save', withGoogle)).status, 403);
-  assert.equal((await request(prefix + '/workflows')).value.workflows.some(w => w.definition.id === withGoogle.id), false);
-}
+const googleAuthorization = await verifyGoogleParentAuthorization({
+  capabilities: catalog.value.capabilities, definition: pending.definition, prefix, request });
 assert.deepEqual(ids(), afterMalformed); db.close();
 const report = { workflow: save.value, receipt: run.value, invalidInputReceipt: malformed.value, sourceReadbackVerified: true, completedReplayVerified: true,
-  saveReplayVerified: true, invalidCsvStoppedBeforeMapping: true, invalidCsvReplayVerified: true, viewerDenied: true, foreignAccountDenied: true, foreignOriginDenied: true, stalePinsDenied: true, unprivilegedGoogleParentDenied: true };
+  saveReplayVerified: true, invalidCsvStoppedBeforeMapping: true, invalidCsvReplayVerified: true, viewerDenied: true, foreignAccountDenied: true, foreignOriginDenied: true, stalePinsDenied: true, ...googleAuthorization };
 writeFileSync(join(state, 'workflow-builder-evidence-v2.json'), JSON.stringify(report, null, 2), { mode: 0o600 });
 console.log(JSON.stringify(report));

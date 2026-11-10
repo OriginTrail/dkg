@@ -99,6 +99,26 @@ describe('native n8n component execution receipts', () => {
     expect(result.output.ok).toBe(true); expect(f.posts()).toBe(1);
     expect(value.output).not.toContain('fixture');
   });
+  it('aborts pending inspection at its deadline and resumes the recorded execution without another POST', async () => {
+    const f = fixture(), adapter = f.adapter(), deadline = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
+    const send = f.fetch.getMockImplementation()!;
+    f.execution.status = 'running';
+    f.fetch.mockImplementation(async (url, options) => {
+      const response = await send(url, options);
+      if (String(url).includes('/executions/')) deadline.abort(new DOMException('Inspection expired', 'TimeoutError'));
+      return response;
+    });
+    try {
+      const error = await adapter.dispatch(authorization, input).catch(error => error);
+      expect(error).toBeInstanceOf(Error);
+      expect(adapter.couldHaveReachedTarget(error)).toBe(true);
+      expect(f.store.adapterCheckpoint(authorization.effectId)).toBeDefined();
+    } finally { timeout.mockRestore(); }
+    f.fetch.mockImplementation(send); f.execution.status = 'success';
+    expect((await adapter.resume!(authorization, input)).status).toBe('succeeded');
+    expect(f.posts()).toBe(1);
+  });
   it.each(['canceled', 'crashed'])('reconciles pinned %s execution as a failed workflow without redispatch', async status => {
     const f = fixture(), adapter = f.adapter();
     f.setFailRead(true);

@@ -1,11 +1,15 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { RuntimeAdapterOperation, SemanticN8nConfig, SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
 import { normalizeN8nResult, type NativeN8nGrant, assertN8nEmbeddedWorkflows, n8nResultSha256, assertN8nValue, n8nPinnedExecutionMatches, n8nObservationScope, n8nRecord, n8nWorkflowSha256, validateN8nConfig, validateN8nGrant } from './semantic-runtime-n8n-contract.js';
 import { collectN8nExecutionResult } from './semantic-runtime-n8n-results.js';
 
 import { decodeNativeN8nCheckpoint, encodeNativeN8nCheckpoint, readNativeN8nCheckpoint, type NativeN8nCheckpoint } from './semantic-runtime-n8n-checkpoint.js';
 type PreparedEffectToken = Parameters<RuntimeAdapterOperation['dispatch']>[0];
+// Studio allows 45s Program callbacks inside a 50s native workflow and a 60s
+// parent. Keep inspection alive through the native limit, with receipt margin.
+const inspectionTimeoutMs = 55_000;
 class NativeError extends Error {
   constructor(readonly mayHaveExecuted: boolean, code: string) { super(code); }
 }
@@ -16,6 +20,7 @@ const secret = (path: string): string => {
   return value;
 };
 async function request(url: URL, headers: Record<string, string>, signal: AbortSignal, body?: unknown): Promise<Record<string, unknown>> {
+  signal = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
   const response = await fetch(url, { method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal,
     headers: { ...headers, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -77,13 +82,13 @@ export function createNativeN8nWorkflowAdapter(
   const inspect = async (saved: NativeN8nCheckpoint, signal: AbortSignal, prepared?: Awaited<ReturnType<typeof preflight>>) => {
     const { origin, headers, published } = prepared ?? await preflight(signal);
     let execution: Record<string, unknown> = {};
-    for (let attempt = 0; attempt < 60; attempt++) {
+    for (;;) {
+      signal.throwIfAborted();
       await authorized();
       execution = await request(new URL(`/api/v1/executions/${saved.executionId}?includeData=true`, origin), headers, signal);
       if (!['new', 'running', 'waiting'].includes(String(execution.status))) break;
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await delay(200, undefined, { signal });
     }
-    if (['new', 'running', 'waiting'].includes(String(execution.status))) throw new Error('N8N_EXECUTION_PENDING');
     if (String(execution.id) !== saved.executionId || execution.workflowId !== grant.workflowId
       || !['success', 'error', 'canceled', 'crashed'].includes(String(execution.status))
       || !n8nPinnedExecutionMatches(published, execution, grant, saved.versionId)) throw new Error('N8N_EXECUTION_NOT_VERIFIED');
@@ -136,7 +141,7 @@ export function createNativeN8nWorkflowAdapter(
             executionId: response.executionId, versionId: prepared.published.versionId as string, observed: !!observed };
           persist(authorization, saved);
         }
-        return await inspect(saved, signal, prepared);
+        return await inspect(saved, AbortSignal.timeout(inspectionTimeoutMs), prepared);
       } catch (error) {
         const code = error instanceof Error && /^(N8N|INVALID)_[A-Z0-9_]+$/.test(error.message) ? error.message : 'N8N_INVOCATION_FAILED';
         throw new NativeError(mayHaveExecuted, code);
@@ -146,12 +151,12 @@ export function createNativeN8nWorkflowAdapter(
       assertN8nValue(grant.inputSchema, input, 'INPUT');
       const saved = checkpoint(authorization.effectId);
       if (!saved) throw new Error('N8N_EXECUTION_INSPECTION_REQUIRED');
-      return inspect(saved, AbortSignal.timeout(15_000));
+      return inspect(saved, AbortSignal.timeout(inspectionTimeoutMs));
     },
     async reconcile(effect) {
       const saved = checkpoint(effect.effectId);
       if (!saved) return { status: 'unknown', evidenceRef: 'urn:sr:n8n:execution-inspection-required' };
-      try { const result = await inspect(saved, AbortSignal.timeout(15_000)); return { status: 'applied', output: result.output, evidenceRef: result.evidenceRef }; }
+      try { const result = await inspect(saved, AbortSignal.timeout(inspectionTimeoutMs)); return { status: 'applied', output: result.output, evidenceRef: result.evidenceRef }; }
       catch { return { status: 'unknown', evidenceRef: 'urn:sr:n8n:execution-inspection-required' }; }
     },
     couldHaveReachedTarget(error) { return !(error instanceof NativeError) || error.mayHaveExecuted; },
