@@ -24,6 +24,7 @@ import {
 } from '../../src/read-graph/membership.js';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
+  READ_GRAPH_STATE_PREDICATES,
   nextReadGraphState,
   parseReadGraphStateRows,
   readGraphStateCompareAndSet,
@@ -423,6 +424,12 @@ export function readGraphStatementsConformance(backend: 'oxigraph' | 'blazegraph
         .sort((a, b) => a.readGraph.localeCompare(b.readGraph));
       const lookup = async () => parseReadGraphStateRows(await select(readGraphStateRowsQuery()));
       expect(mine((await lookup()).rows)).toEqual(mine([ready, { readGraph: swm, state: 'dirty', generation: 12, ...versions() }]));
+      // A row that has lost its state is found as damaged, and a create adds nothing beside it.
+      const orphan = readGraphIri({ scope: readScope(cg, 'code'), layer: MemoryLayer.VerifiableMemory });
+      await update(`INSERT DATA { GRAPH <${readGraphStateGraphIri(cg)}> { <${orphan}> <${READ_GRAPH_STATE_PREDICATES.generation}> 7 } }`);
+      await update(readGraphStateCompareAndSet(undefined, { readGraph: orphan, state: 'building', generation: 9, ...versions() }));
+      expect((await lookup()).damaged).toContain(orphan);
+      expect(await count(`SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${readGraphStateGraphIri(cg)}> { <${orphan}> ?p ?o } }`)).toBe(1);
 
       await update(readGraphStateMarkAllDirty());
       expect(mine((await lookup()).rows)).toEqual(mine([
