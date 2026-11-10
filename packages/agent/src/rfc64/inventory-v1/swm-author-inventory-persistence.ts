@@ -5,6 +5,7 @@ import {
   assertSwmAuthorInventorySnapshotBindingV1,
   canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1,
   compareSwmAuthorInventoryRowsV1,
+  snapshotSwmAuthorInventoryRowsV1,
   computeSwmAuthorInventoryScopeDigestV1,
   deriveSwmAuthorInventoryScopeFromHeadV1,
   parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1,
@@ -233,7 +234,7 @@ export class SwmAuthorInventoryPersistenceV1 {
     }) as SqlRowV1[]);
     try {
       const { head } = decodeStoredHead(headRow, key.scope, key.author);
-      const rows = Object.freeze(
+      const rows = snapshotSwmAuthorInventoryRowsV1(
         storedRows
           .map(decodeStoredSwmAuthorInventoryRowV1)
           .sort(compareSwmAuthorInventoryRowsV1),

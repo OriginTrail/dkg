@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import TOML from '@iarna/toml';
 import { inspectRegistration, removeRegistration, readRegistration, classifyRegistration, writeRegistration } from '../src/mcp-client-config.js';
-import { snapshotMcpConfigSource as snapshotSourceTransaction, writeMcpConfigAtomic, type McpConfigSourceSnapshot } from '../src/mcp-config-file.js';
+import { snapshotMcpConfigSource as snapshotSourceTransaction, writeMcpConfigAtomic, type McpConfigSourceSnapshot, type McpConfigWriteOptions } from '../src/mcp-config-file.js';
 import { mcpConfigPersistenceStrategy, type McpConfigPersistenceStrategy } from '../src/mcp-config-metadata.js';
 import { selectMcpClientTargets, type ClientTarget } from '../src/mcp-client-registry.js';
 import { dkgDir, configPath } from '../src/config.js';
@@ -31,7 +31,8 @@ vi.mock('../src/mcp-config-file.js', async importOriginal => {
       content: string,
       _persistence: McpConfigPersistenceStrategy,
       expectedSource: McpConfigSourceSnapshot,
-    ) => actual.writeMcpConfigAtomic(path, content, mcpConfigPersistenceStrategy(path, process.platform === 'win32' ? 'windows' : process.platform === 'linux' ? 'linux' : 'posix'), expectedSource)),
+      options?: McpConfigWriteOptions,
+    ) => actual.writeMcpConfigAtomic(path, content, mcpConfigPersistenceStrategy(path, process.platform === 'win32' ? 'windows' : process.platform === 'linux' ? 'linux' : 'posix'), expectedSource, options)),
   };
 });
 
@@ -512,6 +513,7 @@ describe('stable client selectors', () => {
     expect(writes[0]).toEqual([
       fs.realpathSync(native.configPath), expect.any(String),
       expect.objectContaining({ kind: mcpConfigPersistenceStrategy(fs.realpathSync(native.configPath)).kind }), expect.any(Object),
+      { preserveTimestamps: false },
     ]);
     expect(read(windows).mcpServers.dkg.command).toBe(process.execPath);
     expect(read(windows).mcpServers.other).toEqual({ command: 'other-server', custom: 'keep' });
@@ -538,6 +540,7 @@ describe('stable client selectors', () => {
       expect.any(String),
       expect.objectContaining({ kind: mcpConfigPersistenceStrategy(client.configPath).kind }),
       expect.any(Object),
+      { preserveTimestamps: true },
     );
   });
 
@@ -568,6 +571,7 @@ describe('stable client selectors', () => {
       expect.any(String),
       expect.objectContaining({ kind: mcpConfigPersistenceStrategy(native.configPath).kind }),
       expect.any(Object),
+      { preserveTimestamps: true },
     );
   });
 
