@@ -1,3 +1,4 @@
+import { mapWithConcurrency } from '../../packages/agent/dist/map-with-concurrency.js';
 import { isDeepStrictEqual } from 'node:util';
 import { compileWorkflow, readWorkflow, validateWorkflowCapabilities, workflowRunInput, workflowUuid, workflowTableProblem, WORKFLOW_PREFIX } from './workflow-definition.mjs';
 
@@ -22,8 +23,7 @@ export function createWorkflowService({ graphId, owner, client, listCapabilities
   async function list() {
     const programs = await listPrograms();
     if (programs.length > 128) throw Object.assign(new Error('The PoC workflow inventory is full.'), { status: 409 });
-    const workflows = [];
-    for (const iri of programs) { const stored = await get(iri); workflows.push(stored.workflow); }
+    const workflows = await mapWithConcurrency(programs, 4, async iri => (await get(iri)).workflow);
     return workflows.sort((a, b) => b.definition.savedAt.localeCompare(a.definition.savedAt) || a.kaRef.localeCompare(b.kaRef));
   }
   async function save(value, authorizeExport) {
@@ -80,17 +80,21 @@ export function createWorkflowService({ graphId, owner, client, listCapabilities
         && isDeepStrictEqual(output.output, { ok: false, columns: [], rows: [], error: problem });
       if (!childRejected && !inputRejected) throw new Error('Workflow input rejection is invalid.');
     } else if (!isDeepStrictEqual(output.output, last?.result?.output)) throw new Error('Workflow final output differs from its last child receipt.');
-    const steps = [];
-    for (const [i, node] of compiled.ordered.slice(0, output.steps.length).entries()) {
+    const readbacks = compiled.ordered.slice(0, output.steps.length).map((node, i) => {
       const step = output.steps[i], call = calls[i];
       if (step.nodeId !== node.id || step.kaRef !== node.kaRef || step.result?.kind !== 'n8n-result'
         || call.target !== node.kaRef || call.status !== 'succeeded' || !call.executionIri) throw new Error('Workflow child identity differs.');
+      return { node, step, call };
+    });
+    // Validate every identity before reading independent immutable receipts.
+    // Assemble ordered steps only after all persisted comparisons succeed.
+    await mapWithConcurrency(readbacks, 4, async ({ step, call }) => {
       const stored = await loadOutputs(call.executionIri);
       if (stored.length !== 1 || !isDeepStrictEqual(JSON.parse(stored[0]), step.result)) throw new Error('Child DKG receipt readback differs.');
-      steps.push({ nodeId: node.id, kaRef: node.kaRef, sourceHash: node.sourceHash, executionIri: call.executionIri,
-        n8nExecutionId: step.result.n8nExecutionId, workflowSha256: step.result.workflowSha256,
-        output: step.result.output, persisted: true, readbackVerified: true });
-    }
+    });
+    const steps = readbacks.map(({ node, step, call }) => ({ nodeId: node.id, kaRef: node.kaRef, sourceHash: node.sourceHash, executionIri: call.executionIri,
+      n8nExecutionId: step.result.n8nExecutionId, workflowSha256: step.result.workflowSha256,
+      output: step.result.output, persisted: true, readbackVerified: true }));
     return { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, invocationId, executionIri: result.executionIri,
       status, output: output.output, steps, persisted: true, readbackVerified: true };
   }

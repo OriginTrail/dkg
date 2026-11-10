@@ -102,7 +102,9 @@ function serviceFixture() {
     approve: async value => { counts.approve++; const record = { binding: { enabled: true, program: value.program, typescript: value.typescript } }; approvals.set(value.operationIri, record); return record; },
     invoke: async value => {
       counts.invoke++; const compiled = readWorkflow(programs.get(value.operationIri).source);
-      const result = { kind: 'nos-ka-workflow-result', status: 'completed', output: mapped.output, steps: compiled.ordered.map((node, i) => ({ nodeId: node.id, kaRef: node.kaRef, result: i ? mapped : parsed })) };
+      const steps = compiled.ordered.map((node, i) => ({ nodeId: node.id, kaRef: node.kaRef, result: node.kind === 'text'
+        ? { ...parsed, n8nExecutionId: String(i + 1), output: { text: 'step-' + i } } : i ? mapped : parsed }));
+      const result = { kind: 'nos-ka-workflow-result', status: 'completed', output: steps.at(-1).result.output, steps };
       const executionIri = `urn:sr:execution:${value.invocationId}`, rawOutputs = [JSON.stringify(result)]; outputs.set(executionIri, rawOutputs);
       for (const [i, step] of result.steps.entries()) if (!outputs.has(`urn:child:${i}`)) outputs.set(`urn:child:${i}`, [JSON.stringify(step.result)]);
       return { invocationId: value.invocationId, executionIri, rawOutputs, outputs: [result], persisted: true,
@@ -142,4 +144,85 @@ test('revoked parents and stale child pins are rejected before any invocation', 
   f.inventory([]); await assert.rejects(f.service.run(request, () => {}), /unavailable/);
   f.inventory(capabilities); f.approvals.get(saved.kaRef).binding.enabled = false;
   await assert.rejects(f.service.run(request, () => {}), /approval/); assert.equal(f.counts.invoke, 0);
+});
+
+test('workflow inventory reads at most four revisions concurrently and sorts after out-of-order completion', { timeout: 10000 }, async () => {
+  const f = serviceFixture();
+  for (let i = 0; i < 8; i++) await f.service.save({ ...sample(), name: 'Workflow ' + i,
+    savedAt: new Date(1700000000000 + i % 3 * 1000).toISOString() }, () => {});
+  const order = [...f.programs.keys()], gates = order.map(() => Promise.withResolvers()), first = Promise.withResolvers(), second = Promise.withResolvers();
+  const getSource = f.dependencies.client.programs.getSource, calls = []; let active = 0, peak = 0;
+  f.dependencies.client.programs.getSource = async pin => {
+    const index = order.indexOf(pin.programIri); calls.push(index); active++; peak = Math.max(peak, active);
+    if (calls.length === 4) first.resolve(); if (calls.length === 8) second.resolve();
+    await gates[index].promise; active--; return getSource(pin);
+  };
+  const listing = f.service.list();
+  try {
+    await first.promise; assert.deepEqual(calls, [0, 1, 2, 3]); assert.equal(active, 4);
+    for (const i of [3, 2, 1, 0]) gates[i].resolve();
+    await second.promise; assert.equal(active, 4);
+    for (const i of [7, 6, 5, 4]) gates[i].resolve();
+    const listed = await listing, expected = [...f.programs.values()].map(p => readWorkflow(p.source))
+      .sort((a, b) => b.definition.savedAt.localeCompare(a.definition.savedAt) || a.kaRef.localeCompare(b.kaRef));
+    assert.equal(peak, 4); assert.equal(active, 0);
+    assert.deepEqual(listed.map(w => w.kaRef), expected.map(w => w.kaRef));
+  } finally { gates.forEach(g => g.resolve()); }
+});
+for (const method of ['getSource', 'getApproval']) test(`workflow inventory propagates ${method} failures without returning partial results`, async () => {
+  const f = serviceFixture(); await f.service.save(sample(), () => {});
+  const failure = new Error('metadata unavailable'); f.dependencies.client.programs[method] = async () => { throw failure; };
+  await assert.rejects(f.service.list(), error => error === failure);
+});
+test('workflow inventory limit rejects before metadata fetching', async () => {
+  const f = serviceFixture();
+  const service = createWorkflowService({ ...f.dependencies, listPrograms: async () => Array(129).fill('unused'),
+    client: { programs: { getSource: () => assert.fail('oversized inventory must not read metadata') } } });
+  await assert.rejects(service.list(), /inventory is full/);
+});
+async function receiptFixture() {
+  const f = serviceFixture(), value = { ...sample(), nodes: Array.from({ length: 8 }, (_, i) => ({
+    id: 'n' + i, kaRef: capabilities[0].kaRef, sourceHash: capabilities[0].sourceHash, kind: 'text', x: i * 100, y: 0, config: {},
+  })), edges: Array.from({ length: 7 }, (_, i) => ({ from: 'n' + i, to: 'n' + (i + 1) })) };
+  const saved = await f.service.save(value, () => {});
+  return { ...f, request: { kaRef: saved.kaRef, sourceHash: saved.sourceHash, input: { text: 'start' }, invocationId: '123e4567-e89b-42d3-a456-426614174099' } };
+}
+test('child receipts use four concurrent reads and retain step order after reverse completion', { timeout: 10000 }, async () => {
+  const f = await receiptFixture(), gates = Array.from({ length: 8 }, () => Promise.withResolvers());
+  const first = Promise.withResolvers(), second = Promise.withResolvers(), reads = []; let active = 0, peak = 0;
+  const service = createWorkflowService({ ...f.dependencies, loadOutputs: async iri => {
+    if (!iri.startsWith('urn:child:')) return f.dependencies.loadOutputs(iri);
+    const index = Number(iri.split(':').at(-1)); reads.push(index); active++; peak = Math.max(peak, active);
+    if (reads.length === 4) first.resolve(); if (reads.length === 8) second.resolve();
+    await gates[index].promise; active--; return f.dependencies.loadOutputs(iri);
+  } });
+  const run = service.run(f.request, () => {});
+  try {
+    await first.promise; assert.deepEqual(reads, [0, 1, 2, 3]); assert.equal(active, 4);
+    for (const i of [3, 2, 1, 0]) gates[i].resolve();
+    await second.promise; assert.equal(active, 4);
+    for (const i of [7, 6, 5, 4]) gates[i].resolve();
+    const result = await run;
+    assert.equal(peak, 4); assert.equal(active, 0);
+    assert.deepEqual(result.steps.map(s => [s.nodeId, s.n8nExecutionId, s.output.text]),
+      Array.from({ length: 8 }, (_, i) => ['n' + i, String(i + 1), 'step-' + i]));
+  } finally { gates.forEach(g => g.resolve()); }
+});
+test('a bad final child identity rejects before any child receipt read', async () => {
+  const f = await receiptFixture(), invoke = f.dependencies.client.programs.invoke, reads = [];
+  f.dependencies.client.programs.invoke = async value => { const result = await invoke(value); result.trace.calls.at(-1).target = 'urn:wrong'; return result; };
+  const service = createWorkflowService({ ...f.dependencies, loadOutputs: async iri => { reads.push(iri); return f.dependencies.loadOutputs(iri); } });
+  await assert.rejects(service.run(f.request, () => {}), /child identity/);
+  assert.deepEqual(reads, ['urn:sr:execution:' + f.request.invocationId]);
+});
+for (const failure of ['mismatch', 'unavailable']) test(`a ${failure} child receipt rejects the complete workflow response`, async () => {
+  const f = await receiptFixture();
+  const service = createWorkflowService({ ...f.dependencies, loadOutputs: async iri => {
+    if (iri === 'urn:child:7') {
+      if (failure === 'unavailable') throw new Error('receipt unavailable');
+      return ['{"different":true}'];
+    }
+    return f.dependencies.loadOutputs(iri);
+  } });
+  await assert.rejects(service.run(f.request, () => {}), failure === 'unavailable' ? /receipt unavailable/ : /Child DKG receipt/);
 });
