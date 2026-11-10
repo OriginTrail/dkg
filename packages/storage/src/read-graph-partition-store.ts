@@ -2,7 +2,7 @@
 import { isSparqlUpdateOperation, parseReadGraphIri } from '@origintrail-official/dkg-core';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './adapters/graph-enumeration-query.js';
 import { composeGraphEnumerationVisibility, isReadGraphPartitionGraph } from './graph-enumeration-visibility.js';
-import { sparqlNamesReadGraphPartition } from './read-graph-partition-reference.js';
+import { sparqlUpdateMayWriteReadGraphPartition } from './read-graph-partition-reference.js';
 import { describeRfc64AuthorCommitCasV1 } from './rfc64-author-commit-mutation.js';
 import {
   STORE_OPERATION_OUTCOME_TAG,
@@ -44,7 +44,7 @@ function refuseQuads(quads: readonly Quad[], operation: StoreOperation): void {
 }
 
 function refuseSparql(sparql: string, operation: StoreOperation): void {
-  if (sparqlNamesReadGraphPartition(sparql)) throw new ReadGraphPartitionWriteError(operation, undefined);
+  if (sparqlUpdateMayWriteReadGraphPartition(sparql)) throw new ReadGraphPartitionWriteError(operation, undefined);
 }
 
 /**
@@ -54,7 +54,8 @@ function refuseSparql(sparql: string, operation: StoreOperation): void {
  * a graph in a partition, and answers that such a graph is absent; the
  * adapters already leave the partition out of enumeration. Storage-owned work
  * on the partition uses {@link readGraphPartitionMaintenanceStore}. A SPARQL
- * UPDATE is refused when its text names a partition graph.
+ * UPDATE is refused when its text names a partition graph, or when it writes
+ * through a graph variable, whose target only the store would know.
  */
 export class ReadGraphPartitionStore implements TripleStoreDecorator {
   readonly innerStore: TripleStore;
@@ -153,9 +154,7 @@ export class ReadGraphPartitionStore implements TripleStoreDecorator {
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
-    if (isSparqlUpdateOperation(sparql) && sparqlNamesReadGraphPartition(sparql)) {
-      throw new ReadGraphPartitionWriteError('query', undefined);
-    }
+    if (isSparqlUpdateOperation(sparql)) refuseSparql(sparql, 'query');
     return this.innerStore.query(sparql, options);
   }
 

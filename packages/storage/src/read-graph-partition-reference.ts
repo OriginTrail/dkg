@@ -53,3 +53,48 @@ export function sparqlNamesReadGraphPartition(sparql: string): boolean {
   const prepared = prepareSparql(sparql);
   return prepared.status !== 'valid' || prepared.unterminated || preparedSparqlNamesReadGraphPartition(prepared);
 }
+
+const DATA_OR_WHERE = new Set(['DATA', 'WHERE']);
+
+/**
+ * Whether a lexed SPARQL UPDATE writes through a graph variable: an INSERT or
+ * DELETE template, or a DELETE WHERE pattern, with `GRAPH ?var` in it. Its
+ * target is only known when it runs, so it cannot be shown to stay outside
+ * read-graph partitions. A graph variable only in a WHERE clause reads.
+ */
+export function preparedSparqlWritesThroughGraphVariable(prepared: ValidPreparedSparql): boolean {
+  const { tokens } = prepared;
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (!isSparqlKeyword(tokens, index, 'INSERT') && !isSparqlKeyword(tokens, index, 'DELETE')) continue;
+    let open = index + 1;
+    const next = tokens[open];
+    if (next?.kind === 'word' && DATA_OR_WHERE.has(next.upper)) {
+      if (next.upper === 'DATA') continue;
+      open += 1;
+    }
+    if (tokens[open]?.kind !== 'symbol' || tokens[open]!.logicalValue !== '{') continue;
+    let depth = 0;
+    for (let at = open; at < tokens.length; at += 1) {
+      const token = tokens[at]!;
+      if (token.kind === 'symbol' && token.logicalValue === '{') depth += 1;
+      else if (token.kind === 'symbol' && token.logicalValue === '}') {
+        depth -= 1;
+        if (depth === 0) break;
+      } else if (isSparqlKeyword(tokens, at, 'GRAPH') && tokens[at + 1]?.kind === 'variable') {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether a SPARQL UPDATE may write into a read-graph partition: it names a
+ * partition graph, or writes through a graph variable.
+ */
+export function sparqlUpdateMayWriteReadGraphPartition(sparql: string): boolean {
+  if (sparqlNamesReadGraphPartition(sparql)) return true;
+  if (!/graph\s*[?$]/i.test(sparql)) return false;
+  const prepared = prepareSparql(sparql);
+  return prepared.status !== 'valid' || preparedSparqlWritesThroughGraphVariable(prepared);
+}
