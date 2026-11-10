@@ -88,6 +88,7 @@ export class QueryHandler {
   private readonly defaultRatePerMinute: number;
   private readonly deps: QueryHandlerDeps;
   private readonly publicCgCache = new Map<string, { value: boolean; expiresAt: number }>();
+  private readonly internalLimitWarnings = createStoreInternalLimitWarnings();
 
   constructor(queryEngine: DKGQueryEngine, config: QueryAccessConfig, deps: QueryHandlerDeps = {}) {
     this.queryEngine = queryEngine;
@@ -187,6 +188,11 @@ export class QueryHandler {
     } catch (err) {
       const busyError = storeSchedulerBusyCause(err);
       if (busyError) return storeBusyResponse(opId, busyError);
+      const internalLimit = storeInternalLimitCause(err);
+      if (internalLimit) {
+        this.internalLimitWarnings.record(internalLimit);
+        return storeInternalLimitResponse(opId);
+      }
       if (err instanceof UalResolutionError) {
         return errorResponse(opId, 'ERROR', err.message);
       }
@@ -558,6 +564,65 @@ function storeBusyResponse(
     retryable: true,
     retryAfterMs: STORE_BUSY_RETRY_AFTER_MS,
     reason: error.reason,
+  };
+}
+
+/**
+ * A node-side store limit: the node's own state passed one of its internal
+ * bounds. Recognized by its code, as the store error crosses package and
+ * worker boundaries.
+ */
+function isStoreInternalLimit(error: unknown): error is { code: 'STORE_INTERNAL_LIMIT'; limitName?: unknown } {
+  return typeof error === 'object' && error !== null
+    && (error as { code?: unknown }).code === 'STORE_INTERNAL_LIMIT';
+}
+
+function storeInternalLimitCause(error: unknown): { limitName?: unknown } | null {
+  if (isStoreInternalLimit(error)) return error;
+  if (error instanceof UalResolutionError && isStoreInternalLimit(error.cause)) return error.cause;
+  return null;
+}
+
+/** The retryable BUSY answer. A remote peer learns only that it is a node-side condition. */
+function storeInternalLimitResponse(opId: string): QueryBusyResponse {
+  return {
+    operationId: opId,
+    status: 'BUSY',
+    truncated: false,
+    resultCount: 0,
+    error: 'Node storage reached an internal limit. Retry later.',
+    code: 'STORE_INTERNAL_LIMIT',
+    retryable: true,
+    retryAfterMs: STORE_BUSY_RETRY_AFTER_MS,
+  };
+}
+
+const LIMIT_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+
+/**
+ * One warning per interval naming the limit; the next warning reports how many
+ * answers it held back.
+ */
+function createStoreInternalLimitWarnings(
+  now: () => number = () => performance.now(),
+  intervalMs = 60_000,
+): { record(error: { limitName?: unknown }): void } {
+  let warnedAt: number | undefined;
+  let heldBack = 0;
+  return {
+    record(error) {
+      const at = now();
+      if (warnedAt !== undefined && at - warnedAt >= 0 && at - warnedAt < intervalMs) {
+        heldBack += 1;
+        return;
+      }
+      const limit = typeof error.limitName === 'string' && LIMIT_NAME.test(error.limitName)
+        ? error.limitName : 'unknown';
+      console.warn(`[query-handler] Node-side store limit reached, answered BUSY STORE_INTERNAL_LIMIT: limit=${limit}`
+        + (heldBack > 0 ? ` (${heldBack} more since the last warning)` : ''));
+      warnedAt = at;
+      heldBack = 0;
+    },
   };
 }
 
