@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { MemoryLayer, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
+import { MemoryLayer, READ_GRAPH_SEGMENT, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
 import {
   BlazegraphNamespaceManager, BlazegraphStore, blazegraphNamespaceApiUrlFromSparqlEndpoint,
   noteStoreMayHoldReadGraphPartitions, OxigraphStore, READ_GRAPH_STATE_PREDICATES,
@@ -133,12 +133,13 @@ const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
   ['M1 MINUS over GRAPH', 'graph', 'SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } MINUS { GRAPH ?h { ?s <urn:q> ?y } } }'],
   ['Y1 EXISTS in the projection, outside GRAPH', 'default', 'SELECT ?s (EXISTS { <urn:gone> <urn:p> <urn:x> } AS ?stale) WHERE { GRAPH ?g { ?s <urn:p> <urn:x> } }'],
   ['U1 UNION of GRAPH', 'graph', 'SELECT ?g ?s WHERE { { GRAPH ?g { ?s <urn:p> ?o } } UNION { GRAPH ?g { ?s <urn:t> ?o } } }'],
-  ['B1 a computed graph IRI', 'graph', `SELECT ?s WHERE { BIND(IRI(CONCAT("${ROOT}/_", "read/cg/_verifiable_memory")) AS ?g) GRAPH ?g { ?s ?p ?o } }`],
+  ['B1 a computed graph IRI', 'graph', `SELECT ?s WHERE { BIND(IRI(CONCAT("${ROOT}/${READ_GRAPH_SEGMENT.slice(0, 2)}", "${READ_GRAPH_SEGMENT.slice(2)}/cg/_verifiable_memory")) AS ?g) GRAPH ?g { ?s ?p ?o } }`],
   ['B2 a graph IRI read from data', 'graph', `SELECT ?o WHERE { GRAPH <${META}> { ?k <urn:points> ?g } GRAPH ?g { ?s ?p ?o } }`],
   ['Q1 ASK over GRAPH', 'graph', 'ASK { GRAPH ?g { <urn:gone> <urn:p> <urn:x> } }'],
   ['E1 graphs by an empty group', 'graph-group', 'SELECT ?g WHERE { GRAPH ?g { } }'],
   ['H1 a hint inside GRAPH', 'hint', `${HINTS} SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o . hint:Prior hint:runFirst "true" } }`],
-  ['K1 a read graph named through BASE and an empty prefix', 'base', `BASE <${ROOT}/_read#unused> PREFIX r: <> SELECT ?s ?p ?o WHERE { GRAPH r:\\/state { ?s ?p ?o } }`],
+  ['K1 a read graph named through BASE and an empty prefix', 'base', `BASE <${ROOT}/${READ_GRAPH_SEGMENT}#unused> PREFIX r: <> SELECT ?s ?p ?o WHERE { GRAPH r:\\/state { ?s ?p ?o } }`],
+  ['P5 a repeated path in FILTER(EXISTS) in GRAPH', 'graph-path', 'SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:p> <urn:x> FILTER(EXISTS { ?s <urn:p>+ ?y }) } }'],
   ['F1 FROM NAMED with GRAPH ?g', 'dataset', `SELECT ?g ?s FROM NAMED <${G1}> WHERE { GRAPH ?g { ?s ?p ?o } }`],
   ['C4 CONSTRUCT of every quad', 'graph', 'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }'],
   ['X6 DESCRIBE over GRAPH', 'describe', 'DESCRIBE ?s WHERE { GRAPH ?g { ?s <urn:p> <urn:x> } }'],

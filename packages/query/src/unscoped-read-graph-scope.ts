@@ -26,9 +26,9 @@ export class UnscopedReadGraphQueryError extends ScopedQueryViolationError {
 
 /**
  * A FILTER that keeps a graph term outside every context graph's read-graph
- * partition: the SPARQL form of `isReadGraphPartitionIri`, a `_read` path
- * segment after the first one of a context-graph IRI. A graph term that is not
- * an IRI passes.
+ * partition: the SPARQL form of `isReadGraphPartitionIri`, the partition
+ * segment (`READ_GRAPH_SEGMENT`) after the first segment of a context-graph IRI.
+ * A graph term that is not an IRI passes.
  */
 export function readGraphPartitionExclusionFilter(variable: string): string {
   const text = `STR(${variable})`;
@@ -56,6 +56,12 @@ export function hideReadGraphPartitions(scope: PreparedSparqlQuery): PreparedSpa
     throw new UnscopedReadGraphQueryError('A query with BASE');
   }
   if (carriesQueryHint(scope)) throw new UnscopedReadGraphQueryError('A query with a query hint');
+  // A named subquery reads outside every check here, wherever its INCLUDE stands.
+  if (scope.prepared.tokens.some((_token, index) => isSparqlKeyword(scope.prepared.tokens, index, 'INCLUDE')
+    || (isSparqlKeyword(scope.prepared.tokens, index, 'WITH') && scope.prepared.tokens[index + 1]?.kind === 'symbol'
+      && (scope.prepared.tokens[index + 1] as { logicalValue: string }).logicalValue === '{'))) {
+    throw new UnscopedReadGraphQueryError('A query with a named subquery');
+  }
   if (hasDefaultGraphRead(scope)) throw new UnscopedReadGraphQueryError('A pattern outside GRAPH');
   return transitionGraphScope(scope, withGraphFilters(scope));
 }
@@ -91,14 +97,26 @@ function withGraphFilters(scope: PreparedSparqlQuery): string {
   return source;
 }
 
-/** A `*`, `+` or `?` path modifier inside a group, outside FILTER and BIND expressions. */
+/**
+ * A `*`, `+` or `?` path modifier inside a group. FILTER and BIND expressions
+ * are skipped, except the groups of their EXISTS, which read like the group.
+ */
 function holdsRepeatedPath(scope: PreparedSparqlQuery, opening: number, closing: number): boolean {
   const { tokens } = scope.prepared;
   const parentheses = scope.structure.parentheses.matchingTokenIndexes;
+  const braces = scope.structure.braces.matchingTokenIndexes;
   for (let index = opening + 1; index < closing; index++) {
     if (isSparqlKeyword(tokens, index, 'FILTER') || isSparqlKeyword(tokens, index, 'BIND')) {
       const expression = tokens[index + 1];
-      if (expression?.kind === 'symbol' && expression.logicalValue === '(') index = Math.max(index, parentheses[index + 1] ?? index);
+      if (expression?.kind !== 'symbol' || expression.logicalValue !== '(') continue;
+      const end = Math.max(index, parentheses[index + 1] ?? index);
+      for (let inner = index + 2; inner < end; inner++) {
+        if (!isSparqlKeyword(tokens, inner, 'EXISTS')) continue;
+        const groupEnd = braces[inner + 1] ?? -1;
+        if (groupEnd > inner && holdsRepeatedPath(scope, inner + 1, groupEnd)) return true;
+        if (groupEnd > inner) inner = groupEnd;
+      }
+      index = end;
       continue;
     }
     if (isRepeatedPathOperator(tokens, index)) return true;

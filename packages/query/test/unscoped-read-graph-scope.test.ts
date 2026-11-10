@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { materializePreparedSparql, prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
-import { MemoryLayer, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
+import { MemoryLayer, READ_GRAPH_SEGMENT, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
 import {
   noteStoreMayHoldReadGraphPartitions, OxigraphStore,
   type Quad, type QueryOptions, type QueryResult, type TripleStore,
@@ -18,9 +18,9 @@ const VM = `${ROOT}/_verifiable_memory/0xab/1`;
 const SWM = `${ROOT}/_shared_memory/0xab/1`;
 const READ_VM = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory });
 const STATE = readGraphStateGraphIri(CG);
-// A context graph from before the naming rule whose own ID has a `_read` segment.
-const LEGACY = 'did:dkg:context-graph:old/_read/x/_verifiable_memory/0xab/1';
-const LOOK_ALIKE = `${ROOT}/_reader/1`;
+// An IRI with the partition segment after its first segment is in a partition, whatever precedes it.
+const IN_PARTITION = `did:dkg:context-graph:old/${READ_GRAPH_SEGMENT}/x/_verifiable_memory/0xab/1`;
+const LOOK_ALIKE = `${ROOT}/${READ_GRAPH_SEGMENT}er/1`;
 
 const quad = (graph: string, subject: string, predicate: string, object: string): Quad => ({ graph, subject, predicate, object });
 const MEMBERS: Quad[] = [
@@ -81,10 +81,10 @@ describe('the read-graph partition filter', () => {
   it('keeps exactly the graphs outside every read-graph partition', async () => {
     const store = new OxigraphStore();
     try {
-      await store.insert([...MEMBERS, ...READ_GRAPHS, quad(LEGACY, 'urn:c', 'urn:p', '"legacy"')]);
+      await store.insert([...MEMBERS, ...READ_GRAPHS, quad(IN_PARTITION, 'urn:c', 'urn:p', '"partition"')]);
       const result = await store.query(hidden('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }'));
       const graphs = result.type === 'bindings' ? result.bindings.map(row => row.g).sort() : [];
-      // The look-alike `_reader` stays; the legacy ID with a `_read` segment counts as a partition, as it does everywhere.
+      // The look-alike segment stays; a graph under the partition segment does not, as everywhere.
       expect(graphs).toEqual([LOOK_ALIKE, SWM, VM].sort());
     } finally {
       await store.close();
@@ -109,7 +109,10 @@ describe('unscoped queries the filter cannot keep out of read-graph partitions',
     ['the built-in hint prefix', 'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o . hint:Prior hint:runFirst "true" } }'],
     ['a prefix bound to hints', 'PREFIX h: <http://www.bigdata.com/queryHints#> SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o . h:Prior h:runFirst "true" } }'],
     ['BASE', 'BASE <http://www.bigdata.com/> SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o . <queryHints#Prior> <queryHints#runFirst> "true" } }'],
-    ['a graph named through BASE and an empty prefix', 'BASE <did:dkg:context-graph:cg/_read#unused> PREFIX r: <> SELECT ?s ?p ?o WHERE { GRAPH r:\\/state { ?s ?p ?o } }'],
+    ['a graph named through BASE and an empty prefix', `BASE <did:dkg:context-graph:cg/${READ_GRAPH_SEGMENT}#unused> PREFIX r: <> SELECT ?s ?p ?o WHERE { GRAPH r:\\/state { ?s ?p ?o } }`],
+    ['a repeated path in FILTER(EXISTS) in GRAPH', 'SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o FILTER(EXISTS { ?s <urn:p>+ ?x }) } }'],
+    ['a repeated path in BIND(EXISTS) in GRAPH', 'SELECT ?g ?e WHERE { GRAPH ?g { ?s ?p ?o BIND(EXISTS { ?s <urn:p>* ?x } AS ?e) } }'],
+    ['a named subquery', 'SELECT ?s WITH { SELECT ?s WHERE { ?s <urn:p> <urn:x> } } AS %rows WHERE { GRAPH <urn:visible> { ?a ?b ?c . INCLUDE %rows } }'],
     ['a GRAPH clause that names neither an IRI nor a variable', 'SELECT ?s WHERE { GRAPH undeclared:g { ?s ?p ?o } }'],
     ['an empty GRAPH group', 'SELECT ?g WHERE { GRAPH ?g { } }'],
     ['a GRAPH group with only a FILTER', 'SELECT ?g WHERE { GRAPH ?g { FILTER(true) } }'],
@@ -196,6 +199,8 @@ describe('DKGQueryEngine on a store that cannot restrict its dataset', () => {
     const engine = new DKGQueryEngine(store as unknown as TripleStore);
     await expect(engine.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toBeInstanceOf(UnscopedReadGraphQueryError);
     await expect(engine.query('DESCRIBE <urn:a>')).rejects.toBeInstanceOf(UnscopedReadGraphQueryError);
+    await expect(engine.query('SELECT ?s WITH { SELECT ?s WHERE { ?s <urn:p> <urn:x> } } AS %rows '
+      + 'WHERE { GRAPH <urn:visible> { ?a ?b ?c . INCLUDE %rows } }')).rejects.toBeInstanceOf(UnscopedReadGraphQueryError);
     expect(store.sent).toEqual([]);
   });
 
