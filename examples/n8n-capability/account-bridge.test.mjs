@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { execFileSync } from 'node:child_process';
 import { fixtureProgramAuthority } from './test-support/studio-authority-fixture.mjs';
+import { withDkgTestDependencies } from './test-support/dkg-component-store-fixture.mjs';
 
 // Load account mode explicitly at startup.
 const setup = mkdtempSync(join(tmpdir(), 'account-bridge-'));
@@ -122,13 +123,14 @@ async function callbackFixture() {
   const f = environment(), effects = [], profile = f.profile;
   let bridge;
   try {
-    profile.transport = async (payload, operation) => {
+    const transport = async (payload, operation) => {
       effects.push(operation);
       if (operation === 'read') return { graph: 'urn:test:measurements', measurements };
       assert.equal(operation, 'write');
-      return { contextGraphId: profile.targetGraph, name: payload.name, digest: payload.digest,
+      return { contextGraphId: profile.operations['dkg-write'].targetGraph, name: payload.name, digest: payload.digest,
         readbackVerified: true, metadata: { status: 'wm-sealed', reservedUal: 'urn:test:callback-asset' } };
     };
+    profile.operations = withDkgTestDependencies(profile, { transport }).operations;
     writeFileSync(f.config.n8nNative.webhookTokenFile, nativeToken);
     const workflow = await f.service.save(definition(['dkg-read', 'dkg-write'], [[0, 0, 1, 0]]), () => assert.fail('DKG Write uses account authority, not Google export authorization'));
     bridge = createCapabilityBridge(options(f));
@@ -333,6 +335,33 @@ test('account bridge can bind fresh state without an adoption flag but refuses a
       assert.equal(existsSync(join(state, 'nos-account.json')), !existing);
     }
   } finally { f.close(); rmSync(fresh, { recursive: true, force: true }); }
+});
+
+test('pending schedule unpublication blocks account adoption until legacy cleanup succeeds', async () => {
+  const f = environment(); let bridge;
+  try {
+    const workflow = await f.service.save(definition(['schedule', 'edit-fields'], [[0,0,1,0]]), () => {});
+    await f.service.activate({ kaRef: workflow.kaRef, active: true, activationId: randomUUID() }, () => {});
+    f.setUnpublishFailure('reject');
+    await assert.rejects(f.service.activate({ kaRef: workflow.kaRef, active: false, activationId: randomUUID() }, () => {}), /provisioning/);
+    f.restart();
+    const before = f.repository.lifecycle(workflow.kaRef), marker = join(f.state, 'nos-account.json');
+    assert.equal(before.activation.active, false);
+    assert.ok(before.pendingUnpublication);
+    assert.equal(f.native.get(before.providerId).active, true);
+    assert.throws(() => { bridge = createCapabilityBridge(options(f)); }, /schedule cleanup/);
+    assert.equal(existsSync(marker), false);
+    assert.deepEqual(f.repository.lifecycle(workflow.kaRef), before);
+    legacyReopen(f, false);
+    f.setUnpublishFailure(null);
+    await f.service.poll();
+    assert.equal(f.repository.lifecycle(workflow.kaRef).pendingUnpublication, null);
+    assert.equal(f.native.get(before.providerId).active, false);
+    bridge = createCapabilityBridge(options(f));
+    assert.deepEqual(JSON.parse(readFileSync(marker, 'utf8')), { accountId });
+    bridge.close(); bridge = undefined;
+    legacyReopen(f, true);
+  } finally { bridge?.close(); f.close(); }
 });
 
 
