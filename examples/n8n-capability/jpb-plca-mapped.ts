@@ -1,5 +1,4 @@
-// Readable PLCA study Program. Only reachable pure functions are bundled.
-// jpb-plca-study.ts
+// Mapped four-row demo estimate. Pure functions also run inside the Program guest.
 
 function preparedJpbJson(value) {
   if (Array.isArray(value)) return "[" + value.map(preparedJpbJson).join(",") + "]";
@@ -146,151 +145,67 @@ function jpbSha256(text) {
   return h.map((n) => (n >>> 0).toString(16).padStart(8, "0")).join("");
 }
 
-function validateJpbPlcaFactorCatalogue(catalogue) {
-  if (catalogue.schemaVersion !== "jpb.plca-factors.v1" || !catalogue.studyId || !catalogue.workbookSha256 || !catalogue.source?.name || !catalogue.source.reference || !catalogue.source.exportedAt || !catalogue.method?.name || !catalogue.method.version || !catalogue.indicators?.length)
+function calculateMappedImpact(inventory, factors, assumptions, workbookSha256) {
+  const outputUnits = assumptions.outputUnits;
+  if (!Number.isFinite(outputUnits) || outputUnits <= 0 || !assumptions.notice)
+    throw new Error("PLCA_ESTIMATE_BASIS_REQUIRED");
+  if (!workbookSha256 || !assumptions.reference || !assumptions.date)
     throw new Error("PLCA_FACTOR_SOURCE_REQUIRED");
-  const indicators = new Set(catalogue.indicators.map((indicator) => indicator.id));
-  if (indicators.size !== catalogue.indicators.length || catalogue.indicators.some((indicator) => !indicator.id || !indicator.unit))
-    throw new Error("PLCA_FACTOR_INDICATOR_INVALID");
-  const keys = /* @__PURE__ */ new Set();
-  for (const factor of catalogue.factors) {
-    const key = JSON.stringify([factor.studyItemId, factor.indicatorId]);
-    if (!factor.studyItemId || !factor.datasetId || !factor.quantityUnit || !indicators.has(factor.indicatorId) || !Number.isFinite(factor.value) || keys.has(key)) throw new Error("PLCA_FACTOR_MAPPING_INVALID");
+  const keys = new Set();
+  for (const factor of factors) {
+    const key = JSON.stringify([factor.studyItemId]);
+    if (!factor.studyItemId || !factor.quantityUnit || !Number.isFinite(factor.value) || keys.has(key))
+      throw new Error("PLCA_FACTOR_MAPPING_INVALID");
     keys.add(key);
   }
-  return catalogue;
-}
-function calculateJpbStudyEstimate(snapshot, studyId, basis, catalogue) {
-  if (!Number.isFinite(basis.referenceOutputUnits) || basis.referenceOutputUnits <= 0 || !basis.assumption)
-    throw new Error("PLCA_ESTIMATE_BASIS_REQUIRED");
-  const study = snapshot.records.find((record) => record.kind === "study" && record.id === studyId);
-  if (!study) throw new Error("PLCA_STUDY_NOT_FOUND");
-  if (catalogue) {
-    validateJpbPlcaFactorCatalogue(catalogue);
-    if (catalogue.studyId !== studyId || catalogue.workbookSha256 !== study.workbookSha256)
-      throw new Error("PLCA_FACTOR_STUDY_CHANGED");
-  }
-  const inventory = snapshot.records.filter((record) => record.kind === "study-item" && record.studyId === studyId).map((item) => ({
-    ...item,
-    internalTransfer: item.proxy.trim().toLowerCase() === "input from previous step",
-    perProduct: item.value === null ? null : item.value / basis.referenceOutputUnits
-  }));
-  const resources = inventory.filter((item) => item.category !== "output" && !item.internalTransfer);
+  const resources = inventory.filter(item => !item.internalTransfer);
   if (!resources.length) throw new Error("PLCA_STUDY_INVENTORY_REQUIRED");
-  if (catalogue?.factors.some((factor) => !resources.some((item) => item.id === factor.studyItemId)))
+  if (factors.some(factor => !resources.some(item => item.rowId === factor.studyItemId)))
     throw new Error("PLCA_FACTOR_ROW_NOT_RESOURCE");
-  const issues = [];
-  const warning = (code, recordId, message) => issues.push({ code, recordId, message, severity: "warning" });
-  warning("ASSUMED_STUDY_REFERENCE_RUN", study.id, basis.assumption);
-  if (!snapshot.coverage.complete)
-    warning("INCOMPLETE_STUDY_COVERAGE", study.id, snapshot.coverage.description);
-  for (const item of resources) if (item.value === null)
-    warning("MISSING_STUDY_QUANTITY", item.id, "No quantity supplied at " + item.sourceCell);
-  if (!catalogue) warning("IMPACT_FACTORS_MISSING", study.id, "No partner impact-factor export has been imported");
-  const resourceTotals = /* @__PURE__ */ new Map();
+
+  // Preserve the inventory overflow check even when impact factors are missing.
+  const quantities = new Map();
   for (const item of resources) {
     const key = JSON.stringify([item.material, item.unit]);
-    const total = resourceTotals.get(key) ?? {
-      material: item.material,
-      unit: item.unit,
-      knownQuantity: 0,
-      knownRows: 0,
-      missingRows: 0,
-      sourceCells: []
-    };
-    if (item.value === null) total.missingRows++;
-    else {
-      total.knownQuantity += item.value;
-      total.knownRows++;
-    }
-    if (!Number.isFinite(total.knownQuantity / basis.referenceOutputUnits)) throw new Error("PLCA_INVENTORY_OVERFLOW");
-    total.sourceCells.push(item.sourceCell);
-    resourceTotals.set(key, total);
+    const total = (quantities.get(key) ?? 0) + item.quantity;
+    if (!Number.isFinite(total / outputUnits)) throw new Error("PLCA_INVENTORY_OVERFLOW");
+    quantities.set(key, total);
   }
-  const impacts = (catalogue?.indicators ?? []).map((indicator) => {
-    let subtotal = 0, coveredRows = 0;
-    const contributions = [];
-    for (const item of resources) {
-      const factor = catalogue.factors.find((factor2) => factor2.studyItemId === item.id && factor2.indicatorId === indicator.id);
-      if (!factor) {
-        warning("IMPACT_FACTOR_MISSING", item.id, "No " + indicator.id + " factor for " + item.sourceCell);
-        continue;
-      }
-      if (factor.quantityUnit !== item.unit) {
-        warning("IMPACT_FACTOR_UNIT_MISMATCH", item.id, "Factor unit " + factor.quantityUnit + " differs from " + item.unit + "; an explicit conversion is required");
-        continue;
-      }
-      if (item.value === null) continue;
-      const impact = item.value * factor.value;
-      if (!Number.isFinite(impact)) throw new Error("PLCA_IMPACT_OVERFLOW");
-      subtotal += impact;
-      if (!Number.isFinite(subtotal / basis.referenceOutputUnits)) throw new Error("PLCA_IMPACT_OVERFLOW");
-      coveredRows++;
-      contributions.push({
-        studyItemId: item.id,
-        sourceCell: item.sourceCell,
-        datasetId: factor.datasetId,
-        factor: factor.value,
-        impact,
-        perProduct: impact / basis.referenceOutputUnits
-      });
-    }
-    const complete = coveredRows === resources.length;
-    return {
-      indicatorId: indicator.id,
-      unit: indicator.unit,
-      status: complete ? "estimated" : "partial-estimate",
-      coveredRows,
-      requiredRows: resources.length,
-      subtotal: coveredRows ? subtotal : null,
-      subtotalPerProduct: coveredRows ? subtotal / basis.referenceOutputUnits : null,
-      total: complete ? subtotal : null,
-      totalPerProduct: complete ? subtotal / basis.referenceOutputUnits : null,
-      contributions
-    };
-  });
-  const impactStatus = !catalogue ? "not-calculated" : impacts.every((impact) => impact.status === "estimated") ? "estimated" : "partial-estimate";
-  return {
-    schemaVersion: "jpb.plca-study-estimate.v1",
-    calculationKind: "representative-product-estimate",
-    studyId,
-    snapshotIri: snapshot.snapshotIri,
-    datasetRevision: snapshot.revision,
-    workbookSha256: study.workbookSha256,
-    boundary: study.boundary,
-    functionalUnit: study.functionalUnit,
-    coverage: snapshot.coverage,
-    basis: { ...basis, status: "assumed", orderAllocationConfirmed: false },
-    inventoryStatus: resources.some((item) => item.value === null) ? "partial-estimate" : "estimated",
-    impactStatus,
-    inventory,
-    resourceTotals: [...resourceTotals.values()].map((total) => ({
-      ...total,
-      knownQuantity: total.knownRows ? total.knownQuantity : null,
-      perProduct: total.knownRows ? total.knownQuantity / basis.referenceOutputUnits : null,
-      total: total.missingRows ? null : total.knownQuantity,
-      totalPerProduct: total.missingRows ? null : total.knownQuantity / basis.referenceOutputUnits
-    })),
-    impacts,
-    ...catalogue ? { factorSource: catalogue.source, method: catalogue.method } : {},
-    issues
-  };
+  let subtotal = 0;
+  const contributions = [];
+  for (const item of resources) {
+    const factor = factors.find(factor => factor.studyItemId === item.rowId);
+    if (!factor || factor.quantityUnit !== item.unit) continue;
+    const impact = item.quantity * factor.value;
+    if (!Number.isFinite(impact)) throw new Error("PLCA_IMPACT_OVERFLOW");
+    subtotal += impact;
+    if (!Number.isFinite(subtotal / outputUnits)) throw new Error("PLCA_IMPACT_OVERFLOW");
+    contributions.push({ studyItemId: item.rowId, sourceCell: item.rowId, datasetId: assumptions.reference,
+      factor: factor.value, impact, perProduct: impact / outputUnits });
+  }
+  const calculated = contributions.length === resources.length;
+  return { calculated, total: calculated ? subtotal : null, perProduct: calculated ? subtotal / outputUnits : null,
+    unit: "kg CO2e", contributions };
 }
 
-// Mapped-input adapter; calculation above is reused verbatim from JPB's installed Program.
 export function run(input) {
-  const {records, assumptions}=input;
-  if (!Array.isArray(records)||records.length>20||!assumptions||assumptions.kind!=="demo-assumptions") throw new Error("MAPPED_INPUT_REQUIRED");
-  const workbook=records.filter(r=>r.workbook).map(r=>r.workbook);
-  if(workbook.length!==4||new Set(workbook.map(w=>w.rowId)).size!==4) throw new Error("EXACT_WORKBOOK_ROWS_REQUIRED");
-  const studyId="urn:nos:jpb:mapped-demo-study";
-  const workbookSha256=workbook[0].evidence.contentDigest;
-  if(workbook.some(w=>w.evidence.contentDigest!==workbookSha256)) throw new Error("WORKBOOK_REVISION_MISMATCH");
-  const inventory=workbook.map(w=>({id:w.rowId,kind:"study-item",studyId,material:w.material,unit:w.unit,category:"input",proxy:assumptions.internalTransferRows.includes(w.rowId)?"input from previous step":"external",value:w.quantity===null?assumptions.missingQuantities[w.rowId]:w.quantity,sourceCell:w.rowId,evidenceIds:["urn:sha256:"+workbookSha256]}));
-  if(inventory.some(w=>!Number.isFinite(w.value)||w.value<0)) throw new Error("EXPLICIT_QUANTITY_REQUIRED");
-  const catalogue={schemaVersion:"jpb.plca-factors.v1",studyId,workbookSha256,source:{name:"Explicit demo assumptions",reference:assumptions.reference,exportedAt:assumptions.date},method:{name:"Demo arithmetic - selected workbook rows",version:"1"},indicators:[{id:"climate",unit:"kg CO2e"}],factors:assumptions.factors.map(f=>({...f,indicatorId:"climate",datasetId:assumptions.reference}))};
-  const snapshot={snapshotIri:"urn:nos:mapped:"+jpbSha256(preparedJpbJson(records)),revision:"mapped-v1",coverage:{complete:true,description:"Only the four selected demo rows; not the complete product life cycle"},records:[{id:studyId,kind:"study",workbookSha256,boundary:"Selected demo rows",functionalUnit:"Assumed reference batch"},...inventory]};
-  const estimate=calculateJpbStudyEstimate(snapshot,studyId,{referenceOutputUnits:assumptions.outputUnits,assumption:assumptions.notice},catalogue);
-  const impact=estimate.impacts[0];
-  return {records,assessment:{kind:"Demo estimate",calculated:impact.status==="estimated",total:impact.total,perProduct:impact.totalPerProduct,unit:impact.unit,outputUnits:assumptions.outputUnits,contributions:impact.contributions,assumptions,scope:"Selected demo rows only; not a validated JPB product footprint",sourceSnapshot:snapshot.snapshotIri}};
+  const { records, assumptions } = input;
+  if (!Array.isArray(records) || records.length > 20 || !assumptions || assumptions.kind !== "demo-assumptions")
+    throw new Error("MAPPED_INPUT_REQUIRED");
+  const workbook = records.filter(r => r.workbook).map(r => r.workbook);
+  if (workbook.length !== 4 || new Set(workbook.map(w => w.rowId)).size !== 4)
+    throw new Error("EXACT_WORKBOOK_ROWS_REQUIRED");
+  const workbookSha256 = workbook[0].evidence.contentDigest;
+  if (workbook.some(w => w.evidence.contentDigest !== workbookSha256)) throw new Error("WORKBOOK_REVISION_MISMATCH");
+  const inventory = workbook.map(w => ({ rowId: w.rowId, material: w.material, unit: w.unit,
+    internalTransfer: assumptions.internalTransferRows.includes(w.rowId),
+    quantity: w.quantity === null ? assumptions.missingQuantities[w.rowId] : w.quantity }));
+  if (inventory.some(w => !Number.isFinite(w.quantity) || w.quantity < 0)) throw new Error("EXPLICIT_QUANTITY_REQUIRED");
+  const factors = assumptions.factors.map(factor => ({ ...factor }));
+  const sourceSnapshot = "urn:nos:mapped:" + jpbSha256(preparedJpbJson(records));
+  const impact = calculateMappedImpact(inventory, factors, assumptions, workbookSha256);
+  return { records, assessment: { kind: "Demo estimate", calculated: impact.calculated, total: impact.total,
+    perProduct: impact.perProduct, unit: impact.unit, outputUnits: assumptions.outputUnits,
+    contributions: impact.contributions, assumptions,
+    scope: "Selected demo rows only; not a validated JPB product footprint", sourceSnapshot } };
 }

@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { TypeScriptProgramHost } from '../../packages/semantic-runtime/dist/index.js';
 import { run } from './jpb-plca-mapped.ts';
 
 // Fictional workbook, factors and output basis; no partner data or transport fixture.
@@ -29,9 +31,53 @@ test('mapped PLCA calculates explicit quantities and excludes internal transfers
   assert.deepEqual(result.assessment.contributions.map(c => [c.studyItemId, c.impact, c.perProduct]),
     [['row-0', 4, 2], ['row-1', 6, 3], ['row-2', 8, 4]]);
   assert.deepEqual(result.assessment.assumptions, before.assumptions);
+  assert.equal(result.assessment.sourceSnapshot, 'urn:nos:mapped:16cc0d148eff1d6cc60eefeb89c538d7f1be4e7386b2fbba7d7c066258f72e65');
+  assert.deepEqual(result.assessment.contributions[0], { studyItemId: 'row-0', sourceCell: 'row-0',
+    datasetId: 'urn:test:factors', factor: 2, impact: 4, perProduct: 2 });
   const changed = input(); changed.assumptions.outputUnits = 3;
   assert.equal(run(changed).assessment.total, 18);
   assert.equal(run(changed).assessment.perProduct, 6);
+  assert.equal(run(changed).assessment.sourceSnapshot, result.assessment.sourceSnapshot);
+});
+
+test('mapped PLCA preserves validation precedence before resource and impact arithmetic', () => {
+  for (const [change, message] of [
+    [v => { v.assumptions.outputUnits = 0; v.assumptions.reference = ''; }, 'PLCA_ESTIMATE_BASIS_REQUIRED'],
+    [v => { v.assumptions.date = ''; v.assumptions.factors.push({ ...v.assumptions.factors[0] }); }, 'PLCA_FACTOR_SOURCE_REQUIRED'],
+    [v => { v.assumptions.factors.push({ ...v.assumptions.factors[0] }); v.assumptions.internalTransferRows = v.records.map(r => r.workbook.rowId); }, 'PLCA_FACTOR_MAPPING_INVALID'],
+    [v => { v.assumptions.internalTransferRows = v.records.map(r => r.workbook.rowId); }, 'PLCA_STUDY_INVENTORY_REQUIRED'],
+    [v => { v.assumptions.factors[0].studyItemId = 'row-3'; v.assumptions.outputUnits = Number.MIN_VALUE; }, 'PLCA_FACTOR_ROW_NOT_RESOURCE'],
+  ]) {
+    const value = input(); change(value);
+    assert.throws(() => run(value), { message });
+  }
+});
+
+test('mapped PLCA retains quantity, impact, subtotal and per-product overflow rejection', () => {
+  for (const [change, message] of [
+    [v => { v.records[0].workbook.quantity = Number.MAX_VALUE; v.records[1].workbook.quantity = Number.MAX_VALUE; v.assumptions.factors = []; }, 'PLCA_INVENTORY_OVERFLOW'],
+    [v => { v.assumptions.outputUnits = Number.MIN_VALUE; v.assumptions.factors = []; }, 'PLCA_INVENTORY_OVERFLOW'],
+    [v => { v.records[0].workbook.quantity = Number.MAX_VALUE; }, 'PLCA_IMPACT_OVERFLOW'],
+    [v => { v.assumptions.outputUnits = 1; v.assumptions.factors.forEach(f => { f.value = 4e307; }); }, 'PLCA_IMPACT_OVERFLOW'],
+    [v => { v.assumptions.outputUnits = .1; v.records[0].workbook.quantity = 1; v.assumptions.factors[0].value = 1e308; }, 'PLCA_IMPACT_OVERFLOW'],
+  ]) {
+    const value = input(); change(value);
+    assert.throws(() => run(value), { message });
+  }
+});
+
+test('mapped Program executes the same assessment and snapshot inside the TypeScript guest', async () => {
+  const host = new TypeScriptProgramHost();
+  try {
+    const artifact = await host.compile(readFileSync(new URL('./jpb-plca-mapped.ts', import.meta.url), 'utf8'));
+    const execute = value => host.execute(artifact, JSON.stringify([value]),
+      { children: [], maxCalls: 1, maxConcurrency: 1, timeoutMs: 30000 }, () => assert.fail('pure estimate cannot issue effects'));
+    const complete = input(), partial = input(), unicode = input();
+    partial.assumptions.factors.pop(); unicode.records[0].workbook.material = 'Čelik 🌍';
+    for (const value of [complete, partial, unicode]) assert.deepEqual(JSON.parse(await execute(value)), run(value));
+    const overflow = input(); overflow.records[0].workbook.quantity = Number.MAX_VALUE;
+    await assert.rejects(execute(overflow), /PLCA_IMPACT_OVERFLOW/);
+  } finally { await host.stop(); }
 });
 
 for (const mode of ['missing', 'incompatible', 'none']) test(`mapped PLCA keeps ${mode} factors uncalculated`, () => {
