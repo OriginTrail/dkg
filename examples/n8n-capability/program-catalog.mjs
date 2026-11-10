@@ -1,3 +1,4 @@
+import { mapWithConcurrency } from '../../packages/agent/dist/map-with-concurrency.js';
 import { isProgramReference, programDescriptor } from './program-block.mjs';
 import { componentNeedsExport } from './component-registry.mjs';
 
@@ -32,15 +33,20 @@ export function createProgramCatalog({ graphId, owner, client, definitions }) {
         if (await requiresExport(await resolve(pin.contextGraphId, pin.operationIri), new Set(seen))) return true;
       return false;
     };
+    const eligible = approvals.map(a => a.binding).filter(b => {
+      const ref = b.program;
+      return b.enabled && b.contextGraphId === graphId && ref.contextGraphId === graphId && ref.programLayer === 'wm'
+        && b.executorAgentAddress.toLowerCase() === owner.toLowerCase()
+        && b.allowedCallerAgentAddresses.some(a => a.toLowerCase() === owner.toLowerCase())
+        && !definitions.some(d => d.kaRef === ref.programIri)
+        && !/^urn:demo:nos:(?:studio|workflow):/.test(ref.programIri);
+    });
+    const sources = await mapWithConcurrency(eligible, 4, b =>
+      client.programs.getSource({ graphId, programIri: b.program.programIri, programLayer: 'wm' }));
     const programs = [];
-    for (const approval of approvals) {
-      const b = approval.binding, ref = b.program;
-      if (!b.enabled || b.contextGraphId !== graphId || ref.contextGraphId !== graphId || ref.programLayer !== 'wm'
-        || b.executorAgentAddress.toLowerCase() !== owner.toLowerCase()
-        || !b.allowedCallerAgentAddresses.some(a => a.toLowerCase() === owner.toLowerCase())
-        || definitions.some(d => d.kaRef === ref.programIri)
-        || /^urn:demo:nos:(?:studio|workflow):/.test(ref.programIri)) continue;
-      const source = await client.programs.getSource({ graphId, programIri: ref.programIri, programLayer: 'wm' });
+    // Metadata reads are independent; policy traversal consumes shared budgets in approval order.
+    for (const [index, b] of eligible.entries()) {
+      const ref = b.program, source = sources[index];
       if (source.sourceHash !== ref.sourceHash || source.authorAgentAddress.toLowerCase() !== ref.authorAgentAddress.toLowerCase()) continue;
       // Run Program KA always passes one mapped argument; sexpr-v1 accepts none.
       if (source.language !== 'typescript-v1') continue;

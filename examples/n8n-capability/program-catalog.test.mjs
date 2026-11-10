@@ -99,3 +99,75 @@ test('cross-graph export protection gates actual Studio save and run before SDK 
     assert.equal(repository.workflow(saved.kaRef).requiresExportAuthorization,true);
   }finally{service.stop();repository.close();rmSync(state,{recursive:true,force:true});}
 });
+
+function batchFixture(count) {
+  const f = fixture('safe'), approvals = Array.from({ length: count }, (_, index) => ({
+    ...f.root, operationIri: 'urn:operation:' + index,
+    program: { ...f.root.program, programIri: 'urn:program:' + index }, typescript: { children: [] },
+  }));
+  f.client.programs.listApprovals = async () => approvals.map(binding => ({ operationIri: binding.operationIri, binding }));
+  return { ...f, approvals };
+}
+test('catalog bounds metadata reads at four, filters pins and sorts independently of completion order', { timeout: 10000 }, async () => {
+  const f = batchFixture(8), gates = Array.from({ length: 8 }, () => Promise.withResolvers());
+  const first = Promise.withResolvers(), second = Promise.withResolvers(), calls = [];
+  let active = 0, peak = 0;
+  f.approvals.push({ ...f.approvals[0], enabled: false });
+  f.approvals.push({ ...f.approvals[0], program: { ...f.approvals[0].program, programIri: 'urn:demo:nos:studio:excluded' } });
+  f.client.programs.getSource = async ({ programIri }) => {
+    const index = Number(programIri.split(':').at(-1));
+    calls.push(index); active++; peak = Math.max(peak, active);
+    if (calls.length === 4) first.resolve();
+    if (calls.length === 8) second.resolve();
+    await gates[index].promise; active--;
+    return { ...f.source, programIri, label: 'Program ' + (8 - index),
+      ...(index === 0 ? { sourceHash: 'stale' } : {}),
+      ...(index === 1 ? { authorAgentAddress: 'different' } : {}),
+      ...(index === 2 ? { language: 'sexpr-v1' } : {}),
+      ...(index === 3 ? { version: '' } : {}),
+    };
+  };
+  const listing = f.list();
+  try {
+    await first.promise;
+    assert.deepEqual(calls, [0, 1, 2, 3]); assert.equal(active, 4);
+    for (const index of [3, 2, 1, 0]) gates[index].resolve();
+    await second.promise; assert.equal(active, 4);
+    for (const index of [7, 6, 5, 4]) gates[index].resolve();
+    const entries = await listing;
+    assert.equal(peak, 4); assert.equal(active, 0);
+    assert.deepEqual(calls, [0, 1, 2, 3, 4, 5, 6, 7]);
+    assert.deepEqual(entries.map(e => e.kaRef), [7, 6, 5, 4].map(i => 'urn:program:' + i));
+    assert.ok(entries.every(e => !e.requiresExportAuthorization));
+  } finally { for (const gate of gates) gate.resolve(); }
+});
+test('out-of-order metadata preserves approval-order export traversal and its shared budget', async () => {
+  const f = batchFixture(2), gates = [Promise.withResolvers(), Promise.withResolvers()], started = Promise.withResolvers();
+  let sources = 0; const inspected = [];
+  for (const [index, binding] of f.approvals.entries()) binding.typescript.children = Array.from({ length: 80 }, (_, child) =>
+    ({ contextGraphId: 'other-graph', operationIri: `urn:child:${index}:${child}` }));
+  f.client.programs.getSource = async ({ programIri }) => {
+    if (++sources === 2) started.resolve();
+    await gates[Number(programIri.split(':').at(-1))].promise;
+    return { ...f.source, programIri };
+  };
+  f.client.programs.getApproval = async pin => {
+    inspected.push(pin.operationIri);
+    return { binding: { enabled: true, contextGraphId: pin.graphId, operationIri: pin.operationIri } };
+  };
+  const listing = f.list();
+  await started.promise;
+  gates[1].resolve(); await Promise.resolve(); gates[0].resolve();
+  const entries = await listing;
+  assert.deepEqual(entries.map(e => e.requiresExportAuthorization), [false, true]);
+  assert.deepEqual(inspected, [...Array.from({ length: 80 }, (_, i) => `urn:child:0:${i}`),
+    ...Array.from({ length: 48 }, (_, i) => `urn:child:1:${i}`)]);
+});
+test('parallel Program metadata failures reject the catalog without returning a partial selector', async () => {
+  const f = batchFixture(8), failure = new Error('metadata unavailable');
+  f.client.programs.getSource = async ({ programIri }) => {
+    if (programIri === 'urn:program:2') throw failure;
+    return { ...f.source, programIri };
+  };
+  await assert.rejects(f.list(), error => error === failure);
+});
