@@ -85,17 +85,21 @@ describe('surfaces that enumerate the store, with read graphs planted', () => {
     expect(await checked(planted)).toEqual(await checked(plain));
   });
 
-  it('answers unscoped and scoped queries the same', async () => {
-    const engine = new DKGQueryEngine(planted);
-    const reference = new DKGQueryEngine(plain);
+  it('answers unscoped and scoped queries the same, through the agent store wrapper as in the daemon', async () => {
     const queries: Array<[string, Record<string, unknown> | undefined]> = [
       ['SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g ORDER BY ?g', undefined],
       ['SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } }', undefined],
       ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s', { contextGraphId: CG, includeContextGraphPartitions: true }],
       ['SELECT ?s WHERE { ?s ?p ?o } ORDER BY ?s', { contextGraphId: CG, view: 'verifiable-memory' }],
     ];
-    for (const [sparql, options] of queries) {
-      expect(await engine.query(sparql, options), sparql).toEqual(await reference.query(sparql, options));
+    const wrap = (store: TripleStore) => createListContextGraphsCacheInvalidatingStore(store, () => undefined);
+    for (const [engine, reference] of [
+      [new DKGQueryEngine(planted), new DKGQueryEngine(plain)],
+      [new DKGQueryEngine(wrap(planted)), new DKGQueryEngine(wrap(plain))],
+    ]) {
+      for (const [sparql, options] of queries) {
+        expect(await engine.query(sparql, options), sparql).toEqual(await reference.query(sparql, options));
+      }
     }
   });
 });
