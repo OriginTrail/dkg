@@ -21,6 +21,8 @@ describe('read-graph adapter contract', () => {
     expect(READ_GRAPH_PLANNED_METHODS).not.toContain('insert');
     expect(READ_GRAPH_METHOD_MAINTENANCE.createGraph).toBe('none');
     expect(READ_GRAPH_METHOD_MAINTENANCE.query).toBe('read');
+    expect(READ_GRAPH_METHOD_MAINTENANCE.replaceSubject).toBe('reference-subject');
+    expect(READ_GRAPH_METHOD_MAINTENANCE.replaceSubjectAndInsert).toBe('reference-subject-and-insert');
   });
 
   it('lists the planned methods an adapter implements but has not declared', () => {
