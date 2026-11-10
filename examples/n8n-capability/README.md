@@ -581,3 +581,11 @@ reading the request body, so concurrent or incomplete bodies cannot bypass the
 limit. An admitted attempt keeps its reservation for that window. Owner history
 requests forward the export key to the companion; viewer history and unrelated
 read routes do not receive that header.
+
+### Development Studio MCP adapter
+
+See [STUDIO-MCP.md](./STUDIO-MCP.md) for the default-off native execution adapter,
+exact pins, trusted agent attribution, durable run lookup and the proposed
+#1227/#1247 gateway contract. This is separate from manual Studio's Program path;
+standing authority is confirmed in principle; enforcement and live customer
+qualification remain pending.

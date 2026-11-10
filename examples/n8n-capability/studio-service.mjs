@@ -1,4 +1,5 @@
 import { assertDkgEnabled, isDkg } from './dkg-components.mjs';
+import { componentFailure } from './dkg-component-operations.mjs';
 import { studioExecutionPlan, prepareStudioExecution } from './studio-execution-plan.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -32,6 +33,7 @@ export function createStudioService({ graphId, owner, client, repository, provid
     const plan = studioExecutionPlan(compiled, graphId);
     if (repository.row(kaRef).executor !== plan.kind) throw reject('The saved workflow executor changed.');
     return { compiled, plan, source, workflow: { definition: compiled.definition, kaRef, sourceHash: source.sourceHash, graphId,
+      ...(compiled.grant?.workflowSha256 ? { workflowSha256: compiled.grant.workflowSha256 } : {}),
       mode: compiled.mode, approved: await approved(kaRef, source.sourceHash),
       requiresExportAuthorization: compiled.requiresExportAuthorization || !!repository.row(kaRef).requires_export,
       activation: (({ active, count, expiresAt }) => ({ active, count, expiresAt }))(activation(kaRef)), readbackVerified: true } };
@@ -71,7 +73,8 @@ export function createStudioService({ graphId, owner, client, repository, provid
       if (requiresExportAuthorization) authorize();
       if (!await approved(compiled.kaRef, sourceHash)) await client.programs.approve({ graphId, operationIri: compiled.kaRef,
         program: reference(source, graphId), allowedCallers: [owner], ...plan.approval });
-      repository.saved(compiled.kaRef, plan.kind, requiresExportAuthorization);
+      const published = plan.kind === 'native-n8n' ? await native().savedNativeSnapshot(compiled) : undefined;
+      repository.completeSave(compiled, plan.kind, requiresExportAuthorization, published);
       return (await get(compiled.kaRef, sourceHash)).workflow;
     })();
     saving.set(key, pending); try { return await pending; } finally { saving.delete(key); }
@@ -94,7 +97,8 @@ export function createStudioService({ graphId, owner, client, repository, provid
     beforeDispatch?.(requiresExportAuthorization);
     assertDkgEnabled(compiled.definition);
     if (plan.kind === 'native-n8n') native().installGrant(compiled.grant);
-    if (compiled.definition.nodes.some(n => isDkg(n.componentId))) components().grant(workflow, invocationId, input, actor);
+    if (compiled.definition.nodes.some(n => isDkg(n.componentId)))
+      components().grant(workflow, { invocationId, revisionDigest: workflow.sourceHash }, input, actor);
     const invoke = () => {
       beforeDispatch?.(requiresExportAuthorization);
       if (compiled.mode === 'schedule') eventAuthorized(workflow.kaRef, requiresExportAuthorization);
@@ -268,13 +272,15 @@ export function createStudioService({ graphId, owner, client, repository, provid
     finally { polling = false; }
   }
   async function dkgComponent(value) {
+    const invocationId = /^urn:sr:effect:([a-f0-9-]{36}):[^\s]{1,100}$/.exec(value?.effectId ?? '')?.[1];
+    if (!invocationId) throw componentFailure('Native execution identity required.');
     const row=repository.nativeWorkflow(value?.workflowId ?? '');
     if(!row) throw reject('Unknown native workflow.');
     const {compiled,workflow}=await get(row.ka_ref);
     if(!workflow.approved) throw reject('Workflow approval is unavailable.');
     validateStudioCapabilities(compiled.definition,await listCapabilities());
     const input = await native().executionInput({ workflowId: value.workflowId, executionId: value.executionId, grant: compiled.grant });
-    return components().call(value, workflow, value.workflowId, input);
+    return components().call(value, workflow, { invocationId, revisionDigest: workflow.sourceHash }, value.workflowId, input);
   }
   const timer = setInterval(() => void poll(), 3000); timer.unref();
   return { dkgComponent, list, get, save, run, activate, event, history, poll, stop() { stopped = true; clearInterval(timer); } };

@@ -1,6 +1,7 @@
 import { mkdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { createStudioMcpRepository } from './studio-mcp-repository.mjs';
 
 const invalid = message => { throw Object.assign(new Error(message), { status: 409, code: 'INVALID_WORKFLOW' }); };
 /** Saved revisions and event identities belong to Studio, independently of the executor. */
@@ -12,6 +13,7 @@ export function createStudioRepository(state) {
     grant_json TEXT, activation_json TEXT, event_key TEXT, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS events (provider_id TEXT NOT NULL, execution_id TEXT NOT NULL,
     ka_ref TEXT NOT NULL, invocation_id TEXT NOT NULL, input_json TEXT, receipt_json TEXT, PRIMARY KEY(provider_id,execution_id));`);
+  let mcp;
   db.exec('BEGIN IMMEDIATE');
   try {
     const columns = db.prepare('PRAGMA table_info(workflows)').all();
@@ -20,11 +22,14 @@ export function createStudioRepository(state) {
     if (!columns.some(c => c.name === 'unpublish_pending')) db.exec('ALTER TABLE workflows ADD COLUMN unpublish_pending TEXT');
     if (!columns.some(c => c.name === 'activation_revision')) db.exec('ALTER TABLE workflows ADD COLUMN activation_revision INTEGER NOT NULL DEFAULT 0');
     if (!db.prepare('PRAGMA table_info(events)').all().some(c => c.name === 'input_json')) db.exec('ALTER TABLE events ADD COLUMN input_json TEXT');
-    for (const saved of db.prepare('SELECT ka_ref,grant_json FROM workflows WHERE executor IS NULL AND grant_json IS NOT NULL').all()) {
+    // Only legacy schemas lack completion metadata. In current schemas a null
+    // executor is an unfinished save, even when native provisioning has a grant.
+    if (!columns.some(c => c.name === 'executor')) for (const saved of db.prepare('SELECT ka_ref,grant_json FROM workflows WHERE executor IS NULL AND grant_json IS NOT NULL').all()) {
       const grant = JSON.parse(saved.grant_json), program = grant.kind === 'program-workflow-v1';
       db.prepare('UPDATE workflows SET executor=?,requires_export=?,grant_json=? WHERE ka_ref=?').run(
         program ? 'dkg-program' : 'native-n8n', grant.requiresExportAuthorization ? 1 : 0, program ? null : saved.grant_json, saved.ka_ref);
     }
+    mcp = createStudioMcpRepository(db);
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); db.close(); throw error; }
   const row = ref => db.prepare('SELECT * FROM workflows WHERE ka_ref=?').get(ref);
@@ -42,6 +47,16 @@ export function createStudioRepository(state) {
       || kind === 'native-n8n' && !existing.grant_json
       || kind === 'dkg-program' && (existing.grant_json || existing.provider_id)) invalid('The saved workflow executor changed.');
     db.prepare('UPDATE workflows SET executor=?,requires_export=? WHERE ka_ref=?').run(kind, requiresExportAuthorization ? 1 : 0, ref);
+  }
+  function completeSave(compiled, kind, requiresExportAuthorization, published) {
+    const needsSnapshot = kind === 'native-n8n' && !['schedule', 'webhook'].includes(compiled.mode);
+    if (needsSnapshot !== (published !== undefined)) invalid('Save completion requires the verified native snapshot.');
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      saved(compiled.kaRef, kind, requiresExportAuthorization);
+      if (needsSnapshot) mcp.recordSavedNative(compiled, published);
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
   }
   function nativeRevision(ref) {
     const saved = row(ref);
@@ -114,7 +129,7 @@ export function createStudioRepository(state) {
     if (result.changes !== 1) invalid('The reserved event identity or completed receipt changed.');
     return receipt;
   }
-  return { db, row, ensure, saved, nativeRevision, beginNativeCreate, nativeCreated, nativeGranted, activation, setActivation, deactivate, reserveEvent, completeEvent,
+  return { db, mcp, row, ensure, saved, completeSave, nativeRevision, beginNativeCreate, nativeCreated, nativeGranted, activation, setActivation, deactivate, reserveEvent, completeEvent,
     pendingUnpublications: () => db.prepare('SELECT ka_ref FROM workflows WHERE unpublish_pending IS NOT NULL').all(),
     completeUnpublication: (ref, activationId) => db.prepare('UPDATE workflows SET unpublish_pending=NULL WHERE ka_ref=? AND unpublish_pending=?')
       .run(ref, activationId),
