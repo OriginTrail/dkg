@@ -1,11 +1,13 @@
 // @vitest-environment happy-dom
 // The Plans page's states: this epoch's budgets, an ended plan, a plan that
-// cannot be read, and the marketplace off.
-import { afterEach, describe, expect, it } from 'vitest';
+// cannot be read, the marketplace off, and an account list the node is still reading.
+import { act } from 'react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useMarketplaceDraftStore } from '../src/ui/marketplace/draftStore.js';
-import { FIXTURE_IDS } from '../src/ui/marketplace/api/fixtures.js';
-import { MISSING_COPY, buttonWithText, byTestId, click, render, unmountAll, useFixtureNode, waitForText } from './helpers/marketplace-render.js';
-import { failingPlanNode, plans, topUpLlama, waitUntil } from './helpers/marketplace-nodes.js';
+import { FIXTURE_IDS, fixtureFetch } from '../src/ui/marketplace/api/fixtures.js';
+import type { Funding } from '../src/ui/marketplace/api/types.js';
+import { MISSING_COPY, buttonWithText, byTestId, click, flush, render, unmountAll, useFixtureNode, waitForText } from './helpers/marketplace-render.js';
+import { failingPlanNode, json, plans, topUpLlama, waitUntil } from './helpers/marketplace-nodes.js';
 
 describe('marketplace Plans', () => {
   afterEach(async () => {
@@ -111,5 +113,84 @@ describe('marketplace Plans', () => {
     const c = await render(plans());
     await waitForText(c, 'The marketplace is off on this node');
     expect(byTestId(c, 'mkt-plans')?.getAttribute('data-state')).toBe('off');
+  });
+
+  it('reads the funding again while the node is still reading the account list, past a failed read, until the list is in', async () => {
+    // The funding reads answer: still pending, then a failure, then the full list.
+    const answers: Array<'pending' | 'fail' | 'list'> = ['pending', 'fail', 'list'];
+    let reads = 0;
+    const node = fixtureFetch('active');
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') !== 'GET' || String(input) !== '/api/marketplace/funding') return node(input, init);
+      const answer = answers[Math.min(reads, answers.length - 1)];
+      reads += 1;
+      if (answer === 'fail') return json({ error: 'upstream timeout', code: 'Error', retryable: true }, 503);
+      const funding = await (await node(input, init)).json() as Funding;
+      return json(answer === 'pending' ? { ...funding, accounts: [], accountsPending: true } : { ...funding, accountsPending: false });
+    });
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const c = await render(plans());
+      const treasury = () => byTestId(c, 'mkt-treasury');
+      await waitUntil(() => !!treasury()?.querySelector('[data-copy="treasury.accounts.pending"]'), 'the pending note');
+      expect(treasury()?.querySelector('[data-copy="treasury.accounts.none"]')).toBeNull();
+      expect(reads).toBe(1);
+
+      // The read after the first interval fails; the page keeps the pending answer and reads again.
+      await act(async () => { vi.advanceTimersByTime(10_000); });
+      await waitUntil(() => reads === 2, 'the failed read');
+      await flush();
+      expect(treasury()?.querySelector('[data-copy="treasury.accounts.pending"]')).not.toBeNull();
+
+      await act(async () => { vi.advanceTimersByTime(10_000); });
+      await waitUntil(() => reads === 3, 'the read that brings the list');
+      await waitUntil(() => !!byTestId(c, 'mkt-account-7'), 'the account the node owns');
+      expect(treasury()?.querySelector('[data-copy="treasury.accounts.pending"]')).toBeNull();
+
+      // With the list in, the page stops reading the funding on its own.
+      await act(async () => { vi.advanceTimersByTime(60_000); });
+      await flush();
+      expect(reads).toBe(3);
+      expect(c.textContent).not.toContain(MISSING_COPY);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('starts no funding read while one is running, so a read slower than the interval still brings the list', async () => {
+    let reads = 0;
+    let answerSlowRead!: () => void;
+    const slowRead = new Promise<void>((resolve) => { answerSlowRead = resolve; });
+    const node = fixtureFetch('active');
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') !== 'GET' || String(input) !== '/api/marketplace/funding') return node(input, init);
+      reads += 1;
+      const funding = await (await node(input, init)).json() as Funding;
+      if (reads === 1) return json({ ...funding, accounts: [], accountsPending: true });
+      // The second read brings the list, but only once it is answered, three intervals later.
+      await slowRead;
+      return json({ ...funding, accountsPending: false });
+    });
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const c = await render(plans());
+      await waitUntil(() => !!byTestId(c, 'mkt-treasury')?.querySelector('[data-copy="treasury.accounts.pending"]'), 'the pending note');
+
+      await act(async () => { vi.advanceTimersByTime(10_000); });
+      await waitUntil(() => reads === 2, 'the slow read');
+      // Two more intervals pass while it runs: neither starts a read of its own.
+      await act(async () => { vi.advanceTimersByTime(10_000); });
+      await act(async () => { vi.advanceTimersByTime(10_000); });
+      await flush();
+      expect(reads).toBe(2);
+
+      answerSlowRead();
+      await waitUntil(() => !!byTestId(c, 'mkt-account-7'), 'the account the node owns');
+      await act(async () => { vi.advanceTimersByTime(60_000); });
+      await flush();
+      expect(reads).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
