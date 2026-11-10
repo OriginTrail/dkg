@@ -205,8 +205,9 @@ describe('the read-graph partition guard', () => {
     expect(await planted.listGraphs()).toEqual(await plain.listGraphs());
     expect(await planted.listGraphsByPrefix!(`${ROOT}/`)).toEqual(await plain.listGraphsByPrefix!(`${ROOT}/`));
     expect(await planted.readGraphInventory!(ROOT, {})).toEqual(await plain.readGraphInventory!(ROOT, {}));
-    expect(await readGraphPartitionMaintenanceStore(planted).listGraphs())
-      .toEqual(await readGraphPartitionMaintenanceStore(plain).listGraphs());
+    // The adapter lists in its own order, which depends on what was inserted.
+    expect((await readGraphPartitionMaintenanceStore(planted).listGraphs()).sort())
+      .toEqual((await readGraphPartitionMaintenanceStore(plain).listGraphs()).sort());
   });
 
   it('exposes each optional capability exactly when the store below has it', () => {
@@ -252,7 +253,7 @@ describe('dropping read-graph partitions', () => {
     expect(dropped.slice(0, 2).sort()).toEqual([STATE, STRAY].sort());
     expect(dropped.slice(2).sort()).toEqual([VM_READ, SWM_READ].sort());
     expect(await adapter.countQuads()).toBe(memberQuads.length);
-    expect(await adapter.listGraphs()).toEqual(await readGraphPartitionMaintenanceStore(plain).listGraphs());
+    expect((await adapter.listGraphs()).sort()).toEqual((await readGraphPartitionMaintenanceStore(plain).listGraphs()).sort());
     expect(await dropReadGraphPartitions(plain)).toBe(0);
   });
 
