@@ -310,7 +310,7 @@ describe('a refresh is node work', () => {
     } finally { await store.close(); }
   });
 
-  it('keeps the last catalog and backs off when a warm refresh passes the ceiling', async () => {
+  it('fails a warm refresh that passes the ceiling closed, like a cold seed, and keeps tolerating other warm failures', async () => {
     let now = 1_000;
     const inner = new OxigraphStore();
     await inner.insert([q(small)]);
@@ -318,17 +318,21 @@ describe('a refresh is node work', () => {
     const store = new GraphSetIndexStore(counting, { revalidateMs: 100, revalidateFailureBackoffMs: 10, now: () => now });
     try {
       expect(await store.listGraphsByPrefix(`${CG}small/`)).toEqual([small]);
+      // Another failure of a warm refresh keeps the last catalog.
+      counting.failListGraphs = true;
+      now += 100;
+      await expect(store.listGraphsByPrefix(`${CG}small/`)).resolves.toEqual([small]);
+      counting.failListGraphs = false;
       setCeiling(bytes([small]));
       // A writer outside this index grows the store past the ceiling.
       await inner.insert([q(`${CG}${'large'.repeat(30)}`)]);
-      now += 100;
-      await expect(store.listGraphsByPrefix(`${CG}small/`)).resolves.toEqual([small]);
-      expect(counting.listGraphsCalls).toBe(2);
-      await expect(store.listGraphsByPrefix(`${CG}small/`)).resolves.toEqual([small]);
-      expect(counting.listGraphsCalls).toBe(2);
       now += 10;
+      await expect(store.listGraphsByPrefix(`${CG}small/`)).rejects.toMatchObject({
+        code: 'STORE_INTERNAL_LIMIT', limitName: STORE_GRAPH_CATALOG_LIMIT_NAME,
+      });
+      vi.unstubAllEnvs();
       await expect(store.listGraphsByPrefix(`${CG}small/`)).resolves.toEqual([small]);
-      expect(counting.listGraphsCalls).toBe(3);
+      expect(await store.listGraphs()).toHaveLength(2);
     } finally { await store.close(); }
   });
 
