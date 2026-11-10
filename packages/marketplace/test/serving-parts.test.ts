@@ -316,7 +316,8 @@ describe("the seller's settings", () => {
     expect(resolveSellerConfig({ seller: { services: [service] } })).toBeNull();
     expect(resolveSellerConfig({ contextGraphId: 'cg', seller: { enabled: true, services: [service] } })).toEqual({
       contextGraphId: 'cg', stopServingSeconds: 180, tickSeconds: 300, landing: DEFAULT_LANDING,
-      services: [{ model: 'urn:test:model:a', serviceId: serviceIdOf('urn:test:model:a'), pricePerUnit: 1000n, capacity: null, provenance: 'weights-pinned', backend: service.backend }],
+      // A llama.cpp backend takes no tool calls unless the settings say it does.
+      services: [{ model: 'urn:test:model:a', serviceId: serviceIdOf('urn:test:model:a'), pricePerUnit: 1000n, capacity: null, provenance: 'weights-pinned', tools: false, backend: service.backend }],
     });
     const landing = { landingIntervalMinutes: 60, finalLandingSeconds: 0, nearLimitShare: 0, baseFeeCeilingGwei: 0.5, lastStretchBaseFeeCeilingGwei: 2 };
     expect(resolveSellerConfig({ seller: { enabled: true, services: [service], landing } })!.landing).toEqual({

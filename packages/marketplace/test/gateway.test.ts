@@ -281,7 +281,8 @@ describe('access keys', () => {
     const now = Math.floor(Date.now() / 1000);
     const { secret, key } = await keys.make({ label: 'test-agent', budget: 700n, services: [SERVICE], rps: 1, expiresAt: now + 3_600 }, now);
     expect(secret).toMatch(/^dkgmk_[0-9a-f]{48}$/);
-    expect(key).toMatchObject({ keyId: secret.slice(0, 14), label: 'test-agent', budget: '700', spent: '0', revoked: false });
+    // The id is the secret's first 16 hex digits after the prefix: 64 bits.
+    expect(key).toMatchObject({ keyId: secret.slice(0, 22), label: 'test-agent', budget: '700', spent: '0', revoked: false });
     expect(JSON.stringify(await keys.list())).not.toContain(secret.slice(14));
 
     // Refused before the body is looked at: no key, a key of another node, a node or agent token.
