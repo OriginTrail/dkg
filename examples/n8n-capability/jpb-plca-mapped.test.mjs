@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { TypeScriptProgramHost } from '../../packages/semantic-runtime/dist/index.js';
 import { run } from './jpb-plca-mapped.ts';
+import { createJpbMappedProgramBundle } from './jpb-plca-mapped-bundle.mjs';
 
 // Fictional workbook, factors and output basis; no partner data or transport fixture.
 function input() {
@@ -18,6 +19,26 @@ function input() {
     },
   };
 }
+
+// Fixed fixture keys in the existing snapshot's canonical order. Node crypto is
+// the independent digest oracle for both the host library and the guest bundle.
+const snapshotText = value => JSON.stringify(value.records.map(({ workbook: w }) => ({ workbook: {
+  evidence: { contentDigest: w.evidence.contentDigest }, material: w.material, quantity: w.quantity, rowId: w.rowId, unit: w.unit,
+} })));
+const expectedSnapshot = value => 'urn:nos:mapped:' + createHash('sha256').update(snapshotText(value)).digest('hex');
+function boundaryInputs() {
+  return [0, 1, 55, 56, 63, 64, 65, 119, 120, 127, 128].map(offset => {
+    const value = input(); value.records[0].workbook.material = 'Čelik 🌍 中 e\u0301 \ud800';
+    const base = Buffer.byteLength(snapshotText(value)), target = (Math.floor(base / 64) + 1) * 64 + offset;
+    value.records[0].workbook.material += 'x'.repeat(target - base);
+    assert.equal(Buffer.byteLength(snapshotText(value)), target);
+    return value;
+  });
+}
+
+test('mapped snapshot matches Node SHA-256 for Unicode and padding/block boundaries', () => {
+  for (const value of boundaryInputs()) assert.equal(run(value).assessment.sourceSnapshot, expectedSnapshot(value));
+});
 
 test('mapped PLCA calculates explicit quantities and excludes internal transfers', () => {
   const value = input(), before = structuredClone(value), result = run(value);
@@ -69,12 +90,18 @@ test('mapped PLCA retains quantity, impact, subtotal and per-product overflow re
 test('mapped Program executes the same assessment and snapshot inside the TypeScript guest', async () => {
   const host = new TypeScriptProgramHost();
   try {
-    const artifact = await host.compile(readFileSync(new URL('./jpb-plca-mapped.ts', import.meta.url), 'utf8'));
+    const source = createJpbMappedProgramBundle();
+    assert.equal(source, createJpbMappedProgramBundle(), 'packaging is deterministic');
+    const artifact = await host.compile(source);
     const execute = value => host.execute(artifact, JSON.stringify([value]),
       { children: [], maxCalls: 1, maxConcurrency: 1, timeoutMs: 30000 }, () => assert.fail('pure estimate cannot issue effects'));
     const complete = input(), partial = input(), unicode = input();
     partial.assumptions.factors.pop(); unicode.records[0].workbook.material = 'Čelik 🌍';
-    for (const value of [complete, partial, unicode]) assert.deepEqual(JSON.parse(await execute(value)), run(value));
+    for (const value of [complete, partial, unicode, ...boundaryInputs()]) {
+      const result = JSON.parse(await execute(value));
+      assert.deepEqual(result, run(value));
+      assert.equal(result.assessment.sourceSnapshot, expectedSnapshot(value));
+    }
     const overflow = input(); overflow.records[0].workbook.quantity = Number.MAX_VALUE;
     await assert.rejects(execute(overflow), /PLCA_IMPACT_OVERFLOW/);
   } finally { await host.stop(); }

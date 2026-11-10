@@ -285,7 +285,12 @@ event access before asking n8n to unpublish a timer. Failed or unconfirmed
 unpublication remains pending in the Studio repository and is retried by polling
 or an explicit deactivation retry, including after restart. Changed native pins
 keep cleanup pending until the pinned revision is restored; they never restore
-local event authority. A new activation must finish pending cleanup first.
+local event authority. Revocation uses the locally saved mode and source pin, so
+unavailable Program source or approval reads cannot block it. Its response is a
+local acknowledgement (`kaRef`, known `sourceHash`/`mode`, `activation.active=false`),
+without claiming a fresh approval readback. Legacy saved native workflows without
+mode metadata conservatively retain unpublication work as well. A new activation
+must finish pending cleanup first.
 Activation commits compare the durable lifecycle revision, so a request awaiting
 inspection cannot overwrite a later revocation. Delegated webhook and timer events
 recheck that same revision immediately before invocation and reconciliation.
@@ -552,6 +557,16 @@ yet accept arbitrary joined ERP/Excel rows as a calculated impact assessment.
 That requires the mapped-input revision of the existing PLCA Program, followed
 by a result-aware DKG Write. This component does not alter or deploy those
 remote Programs. The existing evidence workflow remains available separately.
+
+The candidate mapped calculator in `jpb-plca-mapped.ts` uses the pinned
+`@noble/hashes` 2.2.0 SHA-256 implementation. Build its uploadable source with
+`node examples/n8n-capability/jpb-plca-mapped-bundle.mjs > /tmp/jpb-plca-mapped.bundle.json`.
+This creates a `dkg.typescript-source-bundle.v1` containing the calculator,
+dependency sources and license, with per-file hashes and explicit import mappings.
+The guest needs no package loader or host crypto access. Upload the bundle text as
+a new Program revision and approve its new source hash separately; existing
+deployed Program sources and `jpb-programs.json` pins remain immutable. The
+canonical record serialization and `urn:nos:mapped:` snapshot digests are unchanged.
 
 ### Account access integration status
 

@@ -69,29 +69,40 @@ export function createStudioEventController({ repository, provider, lookup, exec
   async function activate(value, authorize) {
     if (!value || Object.keys(value).some(k => !['kaRef', 'sourceHash', 'active', 'activationId'].includes(k)) || typeof value.active !== 'boolean') throw reject('Choose an activation state.');
     const activationId = workflowUuid(value.activationId);
-    const revision = typeof value.kaRef === 'string' ? repository.lifecycle(value.kaRef)?.revision : undefined;
+    const saved = typeof value.kaRef === 'string' ? repository.lifecycle(value.kaRef) : undefined;
+    if (!value.active) {
+      if (!saved?.executor) throw reject('Unknown saved graph.');
+      if (saved.executor !== 'native-n8n' || saved.mode && !['schedule', 'webhook'].includes(saved.mode))
+        throw reject('Start with a Webhook or Schedule Trigger to activate events.');
+      if (value.sourceHash && saved.sourceHash && value.sourceHash !== saved.sourceHash) throw reject('The saved graph revision changed.');
+      // Owner revocation uses only durable identity. Legacy native rows have no
+      // mode: conservatively retain unpublication rather than inspect remote source.
+      if (saved.activation.active || saved.activation.activationId !== activationId)
+        repository.deactivate(saved.kaRef, activationId, saved.mode !== 'webhook');
+      await reconcileUnpublication(saved.kaRef);
+      return { kaRef: saved.kaRef, ...(saved.mode ? { mode: saved.mode } : {}),
+        ...(saved.sourceHash ? { sourceHash: saved.sourceHash } : {}),
+        activation: { active: !!repository.lifecycle(saved.kaRef).activation.active } };
+    }
+    const revision = saved?.revision;
     const { compiled, workflow } = await lookup(value.kaRef, value.sourceHash);
     if (!['schedule', 'webhook'].includes(compiled.mode)) throw reject('Start with a Webhook or Schedule Trigger to activate events.');
     const state = repository.lifecycle(workflow.kaRef), current = state.activation;
     if (current.activationId === activationId) {
-      if (value.active && current.active && current.expiresAt > Date.now() && compiled.mode === 'schedule')
+      if (current.active && current.expiresAt > Date.now() && compiled.mode === 'schedule')
         await setPublished(workflow.kaRef, true, state.revision);
       if (!current.active) await reconcileUnpublication(workflow.kaRef);
       return (await lookup(value.kaRef)).workflow;
     }
-    if (value.active) {
-      await reconcileUnpublication(workflow.kaRef);
-      if (!workflow.approved) throw reject('This graph is not approved.');
-      const policy = validateStudioCapabilities(compiled.definition, await listCapabilities());
-      const requiresExportAuthorization = workflow.requiresExportAuthorization || policy.requiresExportAuthorization;
-      if (requiresExportAuthorization) authorize();
-      const a = { active: true, activationId, startedAt: Date.now(), expiresAt: Date.now() + 30 * 60 * 1000, count: 0,
-        ...(requiresExportAuthorization ? { exportFingerprint: fingerprint(exportTokenFile) } : {}) };
-      repository.setActivation(workflow.kaRef, a, randomUUID(), revision);
-      if (compiled.mode === 'schedule') await setPublished(workflow.kaRef, true, revision + 1);
-    } else {
-      await deactivate(workflow.kaRef, activationId, compiled.mode);
-    }
+    await reconcileUnpublication(workflow.kaRef);
+    if (!workflow.approved) throw reject('This graph is not approved.');
+    const policy = validateStudioCapabilities(compiled.definition, await listCapabilities());
+    const requiresExportAuthorization = workflow.requiresExportAuthorization || policy.requiresExportAuthorization;
+    if (requiresExportAuthorization) authorize();
+    const a = { active: true, activationId, startedAt: Date.now(), expiresAt: Date.now() + 30 * 60 * 1000, count: 0,
+      ...(requiresExportAuthorization ? { exportFingerprint: fingerprint(exportTokenFile) } : {}) };
+    repository.setActivation(workflow.kaRef, a, randomUUID(), revision);
+    if (compiled.mode === 'schedule') await setPublished(workflow.kaRef, true, revision + 1);
     return (await lookup(workflow.kaRef)).workflow;
   }
   async function event(key, value) {

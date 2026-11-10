@@ -46,6 +46,9 @@ importers:
 
   .:
     devDependencies:
+      '@noble/hashes':
+        specifier: 2.2.0
+        version: 2.2.0
       '@origintrail-official/dkg':
         specifier: workspace:*
         version: link:packages/cli

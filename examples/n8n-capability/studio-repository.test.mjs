@@ -79,6 +79,7 @@ test('activation revisions fence stale commits across connections and survive re
     first.db.prepare('UPDATE workflows SET provider_id=? WHERE ka_ref=?').run('native', 'flow');
     assert.equal(first.lifecycle('unknown'), undefined);
     assert.deepEqual(first.lifecycle('flow'), { kaRef: 'flow', providerId: 'native', activation: { active: false },
+      executor: null, mode: null, sourceHash: null,
       revision: 0, eventKey: null, pendingUnpublication: null });
     const initial = first.lifecycle('flow').revision;
     first.setActivation('flow', { active: true, activationId: 'first', count: 0, expiresAt: Date.now() + 60000 }, 'first-key', initial);

@@ -21,6 +21,8 @@ export function createStudioRepository(state) {
     if (!columns.some(c => c.name === 'requires_export')) db.exec('ALTER TABLE workflows ADD COLUMN requires_export INTEGER NOT NULL DEFAULT 0');
     if (!columns.some(c => c.name === 'unpublish_pending')) db.exec('ALTER TABLE workflows ADD COLUMN unpublish_pending TEXT');
     if (!columns.some(c => c.name === 'activation_revision')) db.exec('ALTER TABLE workflows ADD COLUMN activation_revision INTEGER NOT NULL DEFAULT 0');
+    if (!columns.some(c => c.name === 'mode')) db.exec('ALTER TABLE workflows ADD COLUMN mode TEXT');
+    if (!columns.some(c => c.name === 'source_hash')) db.exec('ALTER TABLE workflows ADD COLUMN source_hash TEXT');
     if (!db.prepare('PRAGMA table_info(events)').all().some(c => c.name === 'input_json')) db.exec('ALTER TABLE events ADD COLUMN input_json TEXT');
     // Only legacy schemas lack completion metadata. In current schemas a null
     // executor is an unfinished save, even when native provisioning has a grant.
@@ -48,12 +50,16 @@ export function createStudioRepository(state) {
       || kind === 'dkg-program' && (existing.grant_json || existing.provider_id)) invalid('The saved workflow executor changed.');
     db.prepare('UPDATE workflows SET executor=?,requires_export=? WHERE ka_ref=?').run(kind, requiresExportAuthorization ? 1 : 0, ref);
   }
-  function completeSave(compiled, kind, requiresExportAuthorization, published) {
+  function completeSave(compiled, kind, requiresExportAuthorization, published, sourceHash = null) {
     const needsSnapshot = kind === 'native-n8n' && !['schedule', 'webhook'].includes(compiled.mode);
     if (needsSnapshot !== (published !== undefined)) invalid('Save completion requires the verified native snapshot.');
     db.exec('BEGIN IMMEDIATE');
     try {
       saved(compiled.kaRef, kind, requiresExportAuthorization);
+      const existing = row(compiled.kaRef);
+      if (existing.mode && existing.mode !== compiled.mode || existing.source_hash && existing.source_hash !== sourceHash)
+        invalid('The saved graph revision changed.');
+      db.prepare('UPDATE workflows SET mode=?,source_hash=? WHERE ka_ref=?').run(compiled.mode, sourceHash, compiled.kaRef);
       if (needsSnapshot) mcp.recordSavedNative(compiled, published);
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
@@ -82,6 +88,7 @@ export function createStudioRepository(state) {
     return nativeRevision(ref);
   }
   const lifecycleValue = value => value && ({ kaRef: value.ka_ref, providerId: value.provider_id,
+    executor: value.executor, mode: value.mode, sourceHash: value.source_hash,
     activation: value.activation_json ? JSON.parse(value.activation_json) : { active: false },
     revision: value.activation_revision, eventKey: value.event_key, pendingUnpublication: value.unpublish_pending });
   // Decode one row so authority and its revision always describe the same state.

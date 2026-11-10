@@ -1,4 +1,6 @@
-// Mapped four-row demo estimate. Pure functions also run inside the Program guest.
+// Mapped four-row demo estimate. Package with jpb-plca-mapped-bundle.mjs for the Program guest.
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 
 function preparedJpbJson(value) {
   if (Array.isArray(value)) return "[" + value.map(preparedJpbJson).join(",") + "]";
@@ -8,143 +10,6 @@ function preparedJpbJson(value) {
   }
   return JSON.stringify(value);
 }
-function jpbSha256(text) {
-  const block = new Uint8Array(64), w = new Int32Array(64);
-  let position = 0, length = 0;
-  const k = [
-    1116352408,
-    1899447441,
-    3049323471,
-    3921009573,
-    961987163,
-    1508970993,
-    2453635748,
-    2870763221,
-    3624381080,
-    310598401,
-    607225278,
-    1426881987,
-    1925078388,
-    2162078206,
-    2614888103,
-    3248222580,
-    3835390401,
-    4022224774,
-    264347078,
-    604807628,
-    770255983,
-    1249150122,
-    1555081692,
-    1996064986,
-    2554220882,
-    2821834349,
-    2952996808,
-    3210313671,
-    3336571891,
-    3584528711,
-    113926993,
-    338241895,
-    666307205,
-    773529912,
-    1294757372,
-    1396182291,
-    1695183700,
-    1986661051,
-    2177026350,
-    2456956037,
-    2730485921,
-    2820302411,
-    3259730800,
-    3345764771,
-    3516065817,
-    3600352804,
-    4094571909,
-    275423344,
-    430227734,
-    506948616,
-    659060556,
-    883997877,
-    958139571,
-    1322822218,
-    1537002063,
-    1747873779,
-    1955562222,
-    2024104815,
-    2227730452,
-    2361852424,
-    2428436474,
-    2756734187,
-    3204031479,
-    3329325298
-  ];
-  const h = [1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225];
-  const rot = (x, n) => x >>> n | x << 32 - n;
-  const compress = () => {
-    for (let i = 0; i < 16; i++)
-      w[i] = block[i * 4] << 24 | block[i * 4 + 1] << 16 | block[i * 4 + 2] << 8 | block[i * 4 + 3];
-    for (let i = 16; i < 64; i++) {
-      const x = w[i - 15], y = w[i - 2];
-      w[i] = w[i - 16] + (rot(x, 7) ^ rot(x, 18) ^ x >>> 3) + w[i - 7] + (rot(y, 17) ^ rot(y, 19) ^ y >>> 10) | 0;
-    }
-    let [a, b, c, d, e, f, g, z] = h;
-    for (let i = 0; i < 64; i++) {
-      const t1 = z + (rot(e, 6) ^ rot(e, 11) ^ rot(e, 25)) + (e & f ^ ~e & g) + k[i] + w[i] | 0;
-      const t2 = (rot(a, 2) ^ rot(a, 13) ^ rot(a, 22)) + (a & b ^ a & c ^ b & c) | 0;
-      z = g;
-      g = f;
-      f = e;
-      e = d + t1 | 0;
-      d = c;
-      c = b;
-      b = a;
-      a = t1 + t2 | 0;
-    }
-    h[0] = h[0] + a | 0;
-    h[1] = h[1] + b | 0;
-    h[2] = h[2] + c | 0;
-    h[3] = h[3] + d | 0;
-    h[4] = h[4] + e | 0;
-    h[5] = h[5] + f | 0;
-    h[6] = h[6] + g | 0;
-    h[7] = h[7] + z | 0;
-  };
-  const byte = (value) => {
-    block[position++] = value;
-    length++;
-    if (position === 64) {
-      compress();
-      position = 0;
-    }
-  };
-  for (let i = 0; i < text.length; i++) {
-    let code = text.charCodeAt(i);
-    if (code >= 55296 && code <= 56319) {
-      const low = text.charCodeAt(++i);
-      if (!(low >= 56320 && low <= 57343)) throw new URIError("URI malformed");
-      code = 65536 + (code - 55296 << 10) + low - 56320;
-    } else if (code >= 56320 && code <= 57343) throw new URIError("URI malformed");
-    if (code < 128) byte(code);
-    else if (code < 2048) {
-      byte(192 | code >>> 6);
-      byte(128 | code & 63);
-    } else if (code < 65536) {
-      byte(224 | code >>> 12);
-      byte(128 | code >>> 6 & 63);
-      byte(128 | code & 63);
-    } else {
-      byte(240 | code >>> 18);
-      byte(128 | code >>> 12 & 63);
-      byte(128 | code >>> 6 & 63);
-      byte(128 | code & 63);
-    }
-  }
-  const bits = length * 8;
-  byte(128);
-  while (position !== 56) byte(0);
-  for (let i = 7; i >= 0; i--) byte(Math.floor(bits / 2 ** (i * 8)) & 255);
-  return h.map((n) => (n >>> 0).toString(16).padStart(8, "0")).join("");
-}
-
 function calculateMappedImpact(inventory, factors, assumptions, workbookSha256) {
   const outputUnits = assumptions.outputUnits;
   if (!Number.isFinite(outputUnits) || outputUnits <= 0 || !assumptions.notice)
@@ -202,7 +67,7 @@ export function run(input) {
     quantity: w.quantity === null ? assumptions.missingQuantities[w.rowId] : w.quantity }));
   if (inventory.some(w => !Number.isFinite(w.quantity) || w.quantity < 0)) throw new Error("EXPLICIT_QUANTITY_REQUIRED");
   const factors = assumptions.factors.map(factor => ({ ...factor }));
-  const sourceSnapshot = "urn:nos:mapped:" + jpbSha256(preparedJpbJson(records));
+  const sourceSnapshot = "urn:nos:mapped:" + bytesToHex(sha256(utf8ToBytes(preparedJpbJson(records))));
   const impact = calculateMappedImpact(inventory, factors, assumptions, workbookSha256);
   return { records, assessment: { kind: "Demo estimate", calculated: impact.calculated, total: impact.total,
     perProduct: impact.perProduct, unit: impact.unit, outputUnits: assumptions.outputUnits,

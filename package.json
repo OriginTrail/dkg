@@ -154,6 +154,7 @@
     "release:publish-prepared": "node scripts/release-packages.mjs publish-prepared"
   },
   "devDependencies": {
+    "@noble/hashes": "2.2.0",
     "@origintrail-official/dkg": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
     "@stryker-mutator/core": "10.0.0",
