@@ -176,24 +176,59 @@ export async function accountView(buyer: Buyer, accountId: bigint) {
   };
 }
 
-/** The accounts the node's primary wallet owns, as `/api/pca` lists them, and those that granted the buyer wallet. */
-export async function accountsView(buyer: Buyer) {
-  const [owned, granted] = await Promise.all([
+/**
+ * How long the accounts and funding views wait for the account list. Listing the accounts that granted
+ * the buyer wallet reads the chain's event logs, and on a public RPC the first read after a start can
+ * take minutes; past this wait a view answers with the list it last read and `accountsPending: true`.
+ */
+export const ACCOUNT_LIST_WAIT_MS = 5_000;
+
+/** The account ids each buyer listed last, for a view that cannot wait for a fresh list. */
+const lastAccountIds = new WeakMap<Buyer, bigint[]>();
+
+/** The ids of the accounts the node owns and of those that granted the buyer wallet, or the last ones read if a fresh read takes longer than `waitMs`. */
+async function accountIdsOf(buyer: Buyer, waitMs: number): Promise<{ ids: bigint[]; pending: boolean }> {
+  const listing = Promise.all([
     buyer.chain.listNodePublishingConvictionAccounts(),
     buyer.chain.listBuyerAccounts(buyer.buyerWallet),
-  ]);
-  const ids = [...new Set([...owned.map((a) => a.accountId), ...granted])].sort((a, b) => (a < b ? -1 : 1));
-  return { accounts: await Promise.all(ids.map((id) => accountView(buyer, id))) };
+  ]).then(([owned, granted]) => {
+    const ids = [...new Set([...owned.map((a) => a.accountId), ...granted])].sort((a, b) => (a < b ? -1 : 1));
+    lastAccountIds.set(buyer, ids);
+    return ids;
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const waited = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), waitMs);
+    (timer as { unref?: () => void }).unref?.();
+  });
+  try {
+    const ids = await Promise.race([listing, waited]);
+    if (ids !== null) return { ids, pending: false };
+    // The read goes on and keeps what it reads, so a later view answers from it.
+    listing.catch(() => undefined);
+    return { ids: lastAccountIds.get(buyer) ?? [], pending: true };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-/** The buyer wallet, its balances and its allowance to `ServiceSubscriptionsWallet`, and the accounts it can use. */
-export async function fundingView(buyer: Buyer) {
+/**
+ * The accounts the node's primary wallet owns, as `/api/pca` lists them, and those that granted the buyer wallet.
+ * `accountsPending` is true when the list was still being read after `waitMs`: `accounts` is then the list read last.
+ */
+export async function accountsView(buyer: Buyer, waitMs = ACCOUNT_LIST_WAIT_MS) {
+  const { ids, pending } = await accountIdsOf(buyer, waitMs);
+  return { accounts: await Promise.all(ids.map((id) => accountView(buyer, id))), accountsPending: pending };
+}
+
+/** The buyer wallet, its balances and its allowance to `ServiceSubscriptionsWallet`, and the accounts it can use (see `accountsView`). */
+export async function fundingView(buyer: Buyer, waitMs = ACCOUNT_LIST_WAIT_MS) {
   const chain = buyer.chain;
-  const [times, balances, allowance, { accounts }] = await Promise.all([
+  const [times, balances, allowance, { accounts, accountsPending }] = await Promise.all([
     chain.getEpochTimes(),
     chain.getWalletBalances(buyer.buyerWallet),
     chain.getServiceSubscriptionsWalletAllowance(buyer.buyerWallet),
-    accountsView(buyer),
+    accountsView(buyer, waitMs),
   ]);
   return {
     buyerWallet: {
@@ -203,6 +238,7 @@ export async function fundingView(buyer: Buyer) {
       ...amount('walletContractAllowance', allowance),
     },
     accounts,
+    accountsPending,
     epoch: times.epoch,
     epochEndsAt: times.endsAt,
   };

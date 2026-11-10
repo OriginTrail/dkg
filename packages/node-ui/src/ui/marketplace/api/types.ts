@@ -198,7 +198,8 @@ export interface Account {
   publisherWallets: string[];
 }
 
-export interface AccountsAnswer { accounts: Account[] }
+/** `accountsPending`: the node was still reading the account list, and `accounts` is the list it read last. */
+export interface AccountsAnswer { accounts: Account[]; accountsPending?: boolean }
 
 export interface Funding {
   buyerWallet: {
@@ -211,6 +212,8 @@ export interface Funding {
     walletContractAllowanceTrac: string;
   };
   accounts: Account[];
+  /** The node was still reading the account list: `accounts` is the list it read last, and may be empty. */
+  accountsPending?: boolean;
   epoch: number;
   epochEndsAt: number;
 }

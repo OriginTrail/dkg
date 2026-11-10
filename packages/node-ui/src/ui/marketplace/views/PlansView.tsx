@@ -22,6 +22,9 @@ import { TopUp, WaitingTopUp } from '../purchase/TopUp.js';
 import { topUpAttempts } from '../purchase/topUpAttempts.js';
 import { Treasury } from '../purchase/Treasury.js';
 
+/** How often the funding is read again while the node is still reading the account list. */
+const ACCOUNTS_PENDING_RELOAD_MS = 10_000;
+
 /** The flow on show; `confirmed` is the confirmation it made, once the coordinator holds it. */
 type Flow = ({ kind: 'fund'; epoch: 'current' | 'next'; serviceId?: string } | { kind: 'plan' } | { kind: 'top-up'; serviceId: string }) & { confirmed?: number };
 
@@ -169,6 +172,14 @@ export function PlansView(): React.ReactElement {
     reloadSubs();
     reloadFunding();
   }, [toppedUp, reloadSubs, reloadFunding]);
+  // The node answers the funding before it has read the account list when that takes long (the first read on a public
+  // RPC can); the funding is read again until the list is in.
+  const accountsPending = funding.data?.accountsPending === true;
+  useEffect(() => {
+    if (!accountsPending) return;
+    const timer = setTimeout(reloadFunding, ACCOUNTS_PENDING_RELOAD_MS);
+    return () => clearTimeout(timer);
+  }, [accountsPending, funding.data, reloadFunding]);
   // The flow on show made a confirmation; the onboarding one is on show with no flow asked for, and is one from here.
   const confirmed = (id: number) => setFlow((f) => ({ ...(f ?? { kind: 'fund', epoch: 'current' }), confirmed: id }));
 

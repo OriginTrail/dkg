@@ -164,7 +164,48 @@ describe('accounts and funding', () => {
       walletContractAllowance: String(42n * TRAC), walletContractAllowanceTrac: '42.0',
     });
     expect(funding.accounts).toHaveLength(2);
+    expect(funding.accountsPending).toBe(false);
     expect(funding.epochEndsAt).toBe((await chain.getEpochTimes()).endsAt);
+  });
+
+  it('answers without waiting for an account list that takes long to read, and from the last list read', async () => {
+    const owned = await mock.createPublishingConvictionAccount(120_000n * TRAC);
+    const listBuyerAccounts = chain.listBuyerAccounts.bind(chain);
+    let release!: (ids: bigint[]) => void;
+    const slow = new Promise<bigint[]>((resolve) => { release = resolve; });
+    chain.listBuyerAccounts = () => slow;
+    try {
+      // No list read yet: the balances come back with no accounts, and the list is pending.
+      const first = await fundingView(buyer, 10);
+      expect(first.accountsPending).toBe(true);
+      expect(first.accounts).toEqual([]);
+      expect(first.buyerWallet.address).toBe(SIGNER.address);
+      expect((await accountsView(buyer, 10)).accountsPending).toBe(true);
+
+      // The read finishes after the view answered; a later view that cannot wait answers from it.
+      release([]);
+      await slow;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      chain.listBuyerAccounts = () => new Promise<bigint[]>(() => undefined);
+      const second = await fundingView(buyer, 10);
+      expect(second.accountsPending).toBe(true);
+      expect(second.accounts.map((a) => a.accountId)).toEqual([String(owned.accountId)]);
+    } finally {
+      chain.listBuyerAccounts = listBuyerAccounts;
+    }
+    const third = await fundingView(buyer);
+    expect(third.accountsPending).toBe(false);
+    expect(third.accounts.map((a) => a.accountId)).toEqual([String(owned.accountId)]);
+  });
+
+  it('still fails when the account list fails before the wait is over', async () => {
+    const listBuyerAccounts = chain.listBuyerAccounts.bind(chain);
+    chain.listBuyerAccounts = () => Promise.reject(new Error('no backend'));
+    try {
+      await expect(fundingView(buyer, 1_000)).rejects.toThrow('no backend');
+    } finally {
+      chain.listBuyerAccounts = listBuyerAccounts;
+    }
   });
 
   it('gives a browser wallet the contracts, the grant domain and its types', async () => {

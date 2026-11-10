@@ -342,6 +342,7 @@ export const COPY = {
   "treasury.wallet.note": "This node's buyer wallet funds subscriptions. Send it TRAC and a little ETH, or add it to an account below.",
   "treasury.accounts": "Accounts",
   "treasury.accounts.none": "No account this node owns or may use",
+  "treasury.accounts.pending": "Still looking up the accounts this node owns or may use",
   "treasury.account": "Account {id}",
   "treasury.owned": "owned by this node",
   "treasury.owned.other": "owned elsewhere",

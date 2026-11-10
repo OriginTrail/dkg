@@ -25,8 +25,10 @@ import { ethers, type Contract, type JsonRpcProvider } from 'ethers';
 import type { TxResult } from './chain-adapter.js';
 import { loadAbi } from './evm-adapter-abi.js';
 import { enrichEvmError } from './evm-adapter-errors.js';
-import { EVMChainAdapterBase } from './evm-adapter-base.js';
+import { EVMChainAdapterBase, type ScanProvider } from './evm-adapter-base.js';
+import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
 import type { EvmSigner } from './evm-signer.js';
+import { IncrementalEventScan } from './incremental-event-scan.js';
 import {
   BUYER_GRANT_TYPES,
   compactSignature,
@@ -64,6 +66,13 @@ type Log = { address: string; topics: ReadonlyArray<string>; data: string };
 
 /** Blocks per `eth_getLogs` page of the `BuyerAdded` scan; the reader fits a page to each RPC's span cap. */
 const BUYER_SCAN_PAGE_BLOCKS = 10_000;
+
+/**
+ * Each adapter's `BuyerAdded` scan, kept per contract and buyer so that a repeat read covers only the
+ * blocks since the last one. A WeakMap because a mixin's own fields are never set on the class it is
+ * mixed into.
+ */
+const buyerAccountScans = new WeakMap<object, IncrementalEventScan<bigint>>();
 
 const interfaces = new Map<string, ethers.Interface>();
 
@@ -409,24 +418,40 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     return buyers;
   }
 
-  /** Read in pages from the deployment of the Hub's `ServiceSubscriptions` to the head; nothing is cached. */
+  /**
+   * Read in pages from the deployment of the Hub's `ServiceSubscriptions` to the head. The first read
+   * for a buyer covers the whole range; later reads cover only the blocks since the last one (and a
+   * reorg tail), and overlapping reads share one scan.
+   */
   async listBuyerAccounts(buyer: string): Promise<bigint[]> {
     await this.init();
     const ss = await this.resolveContract('ServiceSubscriptions');
+    const address = await ss.getAddress();
     const label = 'listBuyerAccounts';
-    const { fromBlock, head, scanProviders } = await this.resolveContractDeployBlock(await ss.getAddress(), label, 'ServiceSubscriptions');
+    let scan = buyerAccountScans.get(this);
+    if (!scan) {
+      scan = new IncrementalEventScan<bigint>({ pageBlocks: BUYER_SCAN_PAGE_BLOCKS, tailBlocks: CG_REGISTRY_REORG_BUFFER_BLOCKS });
+      buyerAccountScans.set(this, scan);
+    }
     const filter = ss.filters.BuyerAdded(null, buyer);
     const connected = new Map<JsonRpcProvider, Contract>();
-    const accounts = new Set<bigint>();
+    let scanProviders: ReadonlyArray<ScanProvider> = [];
     let preferred: JsonRpcProvider | undefined;
-    for (let lo = fromBlock; lo <= head; lo += BUYER_SCAN_PAGE_BLOCKS) {
-      const page = await this.queryEventLogsPage(
-        ss, filter, lo, Math.min(lo + BUYER_SCAN_PAGE_BLOCKS - 1, head), scanProviders, connected, `${label} BuyerAdded`, preferred,
-      );
-      preferred = page.provider;
-      // topics: the event, the indexed accountId, the indexed buyer.
-      for (const log of page.logs) accounts.add(BigInt(log.topics[1]!));
-    }
+    const accounts = await scan.read(
+      `${address.toLowerCase()}:${buyer.toLowerCase()}`,
+      async () => {
+        const resolved = await this.resolveContractDeployBlock(address, label, 'ServiceSubscriptions');
+        scanProviders = resolved.scanProviders;
+        return { anchor: resolved.fromBlock, head: resolved.head };
+      },
+      async (lo, hi) => {
+        const page = await this.queryEventLogsPage(ss, filter, lo, hi, scanProviders, connected, `${label} BuyerAdded`, preferred);
+        preferred = page.provider;
+        // topics: the event, the indexed accountId, the indexed buyer.
+        return page.logs.map((log) => BigInt(log.topics[1]!));
+      },
+      (accountId) => accountId.toString(),
+    );
     return [...accounts].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   }
 
