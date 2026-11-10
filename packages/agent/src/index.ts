@@ -683,3 +683,5 @@ export { CatalogPublicationAdmissionError, CATALOG_PUBLICATION_ADMISSION_CODE } 
 export type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryReport, SwmConnectedHostCatchupOptions, SwmConnectedHostCatchupResult } from './swm/host-catchup-types.js';
 
 export type { PreparedSnapshotCheckpoint, SnapshotCheckpointManifest, VerifiedNativeSnapshotCheckpoint, NativeSnapshotCheckpointReport, PublicCheckpointPreparationResult } from './snapshot-checkpoint-contract.js';
+
+export { ListContextGraphsBudgetExceeded, isListContextGraphsBudgetExceeded, type ListContextGraphsBudgetExceededLike } from './context-graph-list-budget-error.js';
