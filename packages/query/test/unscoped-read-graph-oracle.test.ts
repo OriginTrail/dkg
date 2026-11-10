@@ -71,10 +71,10 @@ type Variant = keyof typeof VARIANTS;
  * What each shape reads:
  * - graph: only inside GRAPH, by variable or by an IRI outside read-graph partitions;
  * - graph-path: inside GRAPH ?g with a *, + or ? path; graph-group: a GRAPH ?g group without a leading triple pattern;
- * - default: outside GRAPH; hint: carries a query hint; dataset: names its own dataset;
+ * - default: outside GRAPH; hint: carries a query hint; dataset: names its own dataset; base: declares BASE;
  * - describe: DESCRIBE; names: names a read graph, which every store refuses.
  */
-type Kind = 'graph' | 'graph-path' | 'graph-group' | 'default' | 'hint' | 'dataset' | 'describe' | 'names';
+type Kind = 'graph' | 'graph-path' | 'graph-group' | 'default' | 'hint' | 'dataset' | 'base' | 'describe' | 'names';
 const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
   ['D1 all triples', 'default', 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }'],
   ['D1a all triples, analytic hint', 'hint', `${HINTS} SELECT ?s ?p ?o WHERE { hint:Query hint:analytic "true" . ?s ?p ?o }`],
@@ -138,6 +138,7 @@ const SHAPES: ReadonlyArray<readonly [string, Kind, string]> = [
   ['Q1 ASK over GRAPH', 'graph', 'ASK { GRAPH ?g { <urn:gone> <urn:p> <urn:x> } }'],
   ['E1 graphs by an empty group', 'graph-group', 'SELECT ?g WHERE { GRAPH ?g { } }'],
   ['H1 a hint inside GRAPH', 'hint', `${HINTS} SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o . hint:Prior hint:runFirst "true" } }`],
+  ['K1 a read graph named through BASE and an empty prefix', 'base', `BASE <${ROOT}/_read#unused> PREFIX r: <> SELECT ?s ?p ?o WHERE { GRAPH r:\\/state { ?s ?p ?o } }`],
   ['F1 FROM NAMED with GRAPH ?g', 'dataset', `SELECT ?g ?s FROM NAMED <${G1}> WHERE { GRAPH ?g { ?s ?p ?o } }`],
   ['C4 CONSTRUCT of every quad', 'graph', 'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }'],
   ['X6 DESCRIBE over GRAPH', 'describe', 'DESCRIBE ?s WHERE { GRAPH ?g { ?s <urn:p> <urn:x> } }'],
