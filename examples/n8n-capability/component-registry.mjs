@@ -110,24 +110,24 @@ export const { componentRegistry, component, componentNeedsExport } = defaultCom
 /** Host authorization metadata is outside the immutable guest input contract. */
 export function componentExecutionDescriptor({ requiresExportAuthorization: _policy, ...descriptor }) { return descriptor; }
 
-/** Embedded with componentValidationSource so the guest and native graph use the same contract. */
-export function normalizeComponentInput(descriptor, value) {
-  const bad = message => { throw new Error(message); };
-  const record = v => v !== null && typeof v === 'object' && !Array.isArray(v);
-  const inspect = (v, depth = 0) => {
-    if (depth > 8) bad('Input is nested too deeply.');
-    if (typeof v === 'number' && !Number.isFinite(v)) bad('Use finite JSON numbers.');
-    if (v && typeof v === 'object') for (const [key, child] of Object.entries(v)) {
-      if (['__proto__', 'constructor', 'prototype'].includes(key) || key.startsWith('__nos')) bad('Reserved input field.');
-      inspect(child, depth + 1);
-    }
-  };
-  if (!record(value) || Object.keys(value).some(key => !['itemsJson', 'paramsJson', 'executionId'].includes(key))
-    || typeof value.itemsJson !== 'string' || value.itemsJson.length > 8192
-    || typeof value.paramsJson !== 'string' || value.paramsJson.length > 2048) bad('Use bounded component input.');
-  const items = JSON.parse(value.itemsJson), supplied = JSON.parse(value.paramsJson);
-  if (!Array.isArray(items) || items.length > 20 || !items.every(record) || !record(supplied)) bad('Supply up to twenty JSON records and component parameters.');
-  inspect(items); inspect(supplied);
+const invalidComponentValue = message => { throw new Error(message); };
+const componentRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+function inspectComponentValue(value, depth = 0) {
+  if (depth > 8) invalidComponentValue('Input is nested too deeply.');
+  if (typeof value === 'number' && !Number.isFinite(value)) invalidComponentValue('Use finite JSON numbers.');
+  if (value && typeof value === 'object') for (const [key, child] of Object.entries(value)) {
+    if (['__proto__', 'constructor', 'prototype'].includes(key) || key.startsWith('__nos')) invalidComponentValue('Reserved input field.');
+    inspectComponentValue(child, depth + 1);
+  }
+}
+
+/** Normalize persisted paramsJson without records, presentation samples or an execution identity. */
+export function normalizeComponentParameters(descriptor, paramsJson) {
+  const bad = invalidComponentValue, record = componentRecord;
+  if (typeof paramsJson !== 'string' || paramsJson.length > 2048) bad('Use bounded component parameters.');
+  const supplied = JSON.parse(paramsJson);
+  if (!record(supplied)) bad('Supply component parameters as a JSON object.');
+  inspectComponentValue(supplied);
   if (Object.keys(supplied).some(key => !Object.hasOwn(descriptor.parameters, key))) bad('Unexpected component parameter.');
   const params = {};
   for (const [key, spec] of Object.entries(descriptor.parameters)) {
@@ -148,6 +148,20 @@ export function normalizeComponentInput(descriptor, value) {
     }
     params[key] = selected;
   }
+  // Saved definitions own their JSON values, including descriptor defaults.
+  return JSON.parse(JSON.stringify(params));
+}
+
+/** Host invocation validation. Historical embedded guest bytes remain in guest-sources. */
+export function normalizeComponentInput(descriptor, value) {
+  const bad = invalidComponentValue, record = componentRecord;
+  if (!record(value) || Object.keys(value).some(key => !['itemsJson', 'paramsJson', 'executionId'].includes(key))
+    || typeof value.itemsJson !== 'string' || value.itemsJson.length > 8192
+    || typeof value.paramsJson !== 'string' || value.paramsJson.length > 2048) bad('Use bounded component input.');
+  const items = JSON.parse(value.itemsJson);
+  if (!Array.isArray(items) || items.length > 20 || !items.every(record)) bad('Supply up to twenty JSON records and component parameters.');
+  inspectComponentValue(items);
+  const params = normalizeComponentParameters(descriptor, value.paramsJson);
   if (descriptor.input === 'file') {
     if (!items.length || !items.every(item => record(item.file) && typeof item.file.base64 === 'string'
       && item.file.base64.length <= 6000 && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(item.file.base64)

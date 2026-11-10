@@ -1,7 +1,7 @@
 import { normalizeStudioTopology } from './studio-topology.mjs';
 import { validateDkgTopology } from './dkg-components.mjs';
 import { createHash } from 'node:crypto';
-import { defaultComponentRegistry, componentExecutionDescriptor, normalizeComponentInput, componentContract, componentValidationSource } from './component-registry.mjs';
+import { defaultComponentRegistry, componentExecutionDescriptor, normalizeComponentParameters, componentContract, componentValidationSource } from './component-registry.mjs';
 import { readStudio as readStudioV1 } from './studio-definition-v1.mjs';
 import { componentPiece, nativeNode, editNode, wire, expression, nativeLiteral } from './component-workflows.mjs';
 import { n8nWorkflowSha256, n8nObservationScope } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
@@ -31,7 +31,7 @@ export function normalizeStudio(value, registry = defaultComponentRegistry) {
       || typeof n.sourceHash !== 'string' || !/^[a-f0-9]{64}$/.test(n.sourceHash)) fail('Choose a pinned component KA.');
     if (![n.x, n.y].every(p => Number.isInteger(p) && p >= 0 && p <= 10000)) fail('Invalid block position.');
     let params;
-    try { params = JSON.parse(normalizeComponentInput(descriptor, { itemsJson: JSON.stringify(descriptor.sampleItems), paramsJson: JSON.stringify(n.params), executionId: '1' }).paramsJson); }
+    try { params = normalizeComponentParameters(descriptor, JSON.stringify(n.params)); }
     catch (e) { fail(e.message); }
     return { id: identifier(n.id), componentId: descriptor.id, kaRef: n.kaRef, sourceHash: n.sourceHash, params, x: n.x, y: n.y,
       ...(n.label !== undefined ? { label: n.label } : {}), ...(n.groupId !== undefined ? { groupId: n.groupId } : {}) };
