@@ -221,9 +221,9 @@ for (const mixed of [false, true]) test(`Studio service saves and runs a ${mixed
     assert.equal(saved.approved, true);
     assert.deepEqual(uploads[0].requiredTools, []);
     assert.deepEqual(approvals.get(saved.kaRef).request.typescript.children, [...new Map(definition.nodes.map(n => [n.kaRef, { graphId, operationIri: n.componentId === 'run-program' ? n.params.operationIri : n.kaRef }])).values()]);
-    assert.equal(repository.row(saved.kaRef).grant_json, null);
-    assert.equal(repository.row(saved.kaRef).provider_id, null);
-    assert.equal(repository.row(saved.kaRef).executor, 'dkg-program');
+    assert.equal(repository.nativeRevision(saved.kaRef).grant, null);
+    assert.equal(repository.nativeRevision(saved.kaRef).providerId, null);
+    assert.equal(repository.workflow(saved.kaRef).executor, 'dkg-program');
     assert.deepEqual(await service.save(definition, () => {}), saved);
     assert.equal(uploads.length, 1);
     assert.equal(approvals.get(saved.kaRef).request.n8n, undefined);

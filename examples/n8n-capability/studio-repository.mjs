@@ -40,7 +40,7 @@ export function createStudioRepository(state) {
       if (Number(db.prepare('SELECT COUNT(*) AS n FROM workflows').get().n) >= 24) invalid('The PoC supports 24 saved graph revisions.');
       db.prepare('INSERT INTO workflows (ka_ref,name,created_at) VALUES (?,?,?)').run(compiled.kaRef, compiled.workflowName, Date.now());
     }
-    return row(compiled.kaRef);
+    return workflow(compiled.kaRef);
   }
   function saved(ref, kind, requiresExportAuthorization) {
     const existing = row(ref);
@@ -48,7 +48,7 @@ export function createStudioRepository(state) {
       || existing.executor && existing.executor !== kind
       || kind === 'native-n8n' && !existing.grant_json
       || kind === 'dkg-program' && (existing.grant_json || existing.provider_id)) invalid('The saved workflow executor changed.');
-    db.prepare('UPDATE workflows SET executor=?,requires_export=? WHERE ka_ref=?').run(kind, requiresExportAuthorization ? 1 : 0, ref);
+    db.prepare('UPDATE workflows SET executor=?,requires_export=MAX(requires_export,?) WHERE ka_ref=?').run(kind, requiresExportAuthorization ? 1 : 0, ref);
   }
   function completeSave(compiled, kind, requiresExportAuthorization, published, sourceHash = null) {
     const needsSnapshot = kind === 'native-n8n' && !['schedule', 'webhook'].includes(compiled.mode);
@@ -93,6 +93,10 @@ export function createStudioRepository(state) {
     revision: value.activation_revision, eventKey: value.event_key, pendingUnpublication: value.unpublish_pending });
   // Decode one row so authority and its revision always describe the same state.
   const lifecycle = ref => lifecycleValue(row(ref));
+  const workflow = ref => {
+    const value = row(ref);
+    return value && { ...lifecycleValue(value), completed: value.executor !== null, requiresExportAuthorization: !!value.requires_export };
+  };
   const activation = ref => lifecycle(ref)?.activation ?? { active: false };
   const eventValue = value => value && ({ kaRef: value.ka_ref, providerId: value.provider_id, executionId: value.execution_id,
     invocationId: value.invocation_id, receipt: value.receipt_json ? JSON.parse(value.receipt_json) : null });
@@ -141,17 +145,17 @@ export function createStudioRepository(state) {
     if (result.changes !== 1) invalid('The reserved event identity or completed receipt changed.');
     return receipt;
   }
-  return { db, mcp, row, ensure, saved, completeSave, nativeRevision, beginNativeCreate, nativeCreated, nativeGranted, lifecycle, activation, setActivation, deactivate, reserveEvent, completeEvent,
+  return { db, mcp, workflow, ensure, saved, completeSave, nativeRevision, beginNativeCreate, nativeCreated, nativeGranted, lifecycle, activation, setActivation, deactivate, reserveEvent, completeEvent,
     pendingUnpublications: () => db.prepare('SELECT * FROM workflows WHERE unpublish_pending IS NOT NULL').all().map(lifecycleValue),
     completeUnpublication: (ref, activationId) => db.prepare('UPDATE workflows SET unpublish_pending=NULL WHERE ka_ref=? AND unpublish_pending=?')
       .run(ref, activationId),
-    nativeWorkflow: providerId => db.prepare('SELECT ka_ref FROM workflows WHERE provider_id=?').get(providerId),
+    nativeWorkflow: providerId => db.prepare('SELECT ka_ref FROM workflows WHERE provider_id=?').get(providerId)?.ka_ref,
     hasActiveWorkflows: () => db.prepare('SELECT * FROM workflows WHERE activation_json IS NOT NULL').all().some(r => lifecycleValue(r).activation.active),
     eventWorkflow: key => lifecycleValue(db.prepare('SELECT * FROM workflows WHERE event_key=?').get(key)),
     activatedWorkflows: () => db.prepare('SELECT * FROM workflows WHERE activation_json IS NOT NULL').all().map(lifecycleValue),
     pendingEvents: ref => db.prepare('SELECT * FROM events WHERE ka_ref=? AND receipt_json IS NULL').all(ref).map(eventValue),
     eventHistory: ref => db.prepare('SELECT * FROM events WHERE ka_ref=? ORDER BY rowid DESC LIMIT 20').all(ref)
       .map(value => { const event = eventValue(value); return { invocationId: event.invocationId, triggerExecutionId: event.executionId, receipt: event.receipt }; }),
-    list: () => db.prepare('SELECT ka_ref FROM workflows WHERE executor IS NOT NULL ORDER BY created_at DESC LIMIT 24').all(),
+    list: () => db.prepare('SELECT ka_ref FROM workflows WHERE executor IS NOT NULL ORDER BY created_at DESC LIMIT 24').all().map(value => value.ka_ref),
     close: () => db.close() };
 }

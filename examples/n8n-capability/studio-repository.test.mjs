@@ -24,20 +24,56 @@ test('migrates legacy executor metadata without changing native grants, revision
     for (let i = 0; i < 2; i++) {
       const repository = createStudioRepository(state);
       try {
-        assert.equal(repository.row('program').executor, 'dkg-program');
-        assert.equal(repository.row('program').requires_export, 1);
-        assert.equal(repository.row('program').grant_json, null);
-        assert.equal(repository.row('native').executor, 'native-n8n');
-        assert.equal(repository.row('native').grant_json, native);
-        assert.equal(repository.row('native').activation_json, '{"active":true,"count":5}');
-        assert.equal(repository.row('native').event_key, 'retained-key');
-        assert.equal(repository.row('native').activation_revision, 0);
+        assert.equal(repository.workflow('program').completed, true);
+        assert.equal(repository.workflow('program').executor, 'dkg-program');
+        assert.equal(repository.workflow('program').requiresExportAuthorization, true);
+        assert.equal(repository.nativeRevision('program').grant, null);
+        assert.equal(repository.workflow('native').executor, 'native-n8n');
+        // Migration preserves the exact stored grant bytes as well as decoded state.
+        assert.equal(repository.db.prepare('SELECT grant_json FROM workflows WHERE ka_ref=?').get('native').grant_json, native);
+        assert.deepEqual(repository.lifecycle('native').activation, { active: true, count: 5 });
+        assert.equal(repository.lifecycle('native').eventKey, 'retained-key');
+        assert.equal(repository.lifecycle('native').revision, 0);
         assert.equal(repository.db.prepare('SELECT invocation_id FROM events').get().invocation_id, 'same-invocation');
         assert.equal(repository.list().length, 2);
         assert.throws(() => repository.saved('native', 'dkg-program', false), /executor changed/);
       } finally { repository.close(); }
     }
   } finally { rmSync(state, { recursive: true, force: true }); }
+});
+
+test('decoded saved state owns completion and sticky export policy while lookups retain historical references', () => {
+  const state = mkdtempSync(join(tmpdir(), 'studio-saved-state-'));
+  let repository = createStudioRepository(state);
+  try {
+    assert.equal(repository.workflow('missing'), undefined);
+    const compiled = { kaRef: 'native', workflowName: 'Native schedule', mode: 'schedule' };
+    const incomplete = repository.ensure(compiled);
+    assert.equal(incomplete.completed, false);
+    assert.equal(incomplete.requiresExportAuthorization, false);
+    repository.nativeCreated(compiled.kaRef, 'provider');
+    repository.nativeGranted(compiled.kaRef, { workflowId: 'provider', workflowSha256: 'a'.repeat(64) });
+    assert.deepEqual(repository.list(), []);
+    repository.completeSave(compiled, 'native-n8n', true, undefined, 'b'.repeat(64));
+    const completed = repository.workflow(compiled.kaRef);
+    repository.completeSave(compiled, 'native-n8n', false, undefined, 'b'.repeat(64));
+    assert.deepEqual(repository.workflow(compiled.kaRef), completed, 'a later save cannot lower persisted export policy');
+    assert.equal(incomplete.completed, false, 'previous decoded snapshots must not change');
+    assert.equal(completed.completed, true);
+    assert.equal(completed.requiresExportAuthorization, true);
+    assert.equal(completed.executor, 'native-n8n');
+    assert.equal(completed.sourceHash, 'b'.repeat(64));
+    assert.throws(() => repository.completeSave({ ...compiled, mode: 'webhook' }, 'native-n8n', false, undefined, 'b'.repeat(64)), /revision changed/);
+    assert.throws(() => repository.completeSave(compiled, 'native-n8n', false, undefined, 'c'.repeat(64)), /revision changed/);
+    repository.ensure({ kaRef: 'historical', workflowName: 'Earlier Program' });
+    repository.saved('historical', 'dkg-program', false);
+    repository.close(); repository = createStudioRepository(state);
+    assert.deepEqual(repository.workflow(compiled.kaRef), completed);
+    assert.equal(repository.nativeWorkflow('provider'), compiled.kaRef);
+    assert.equal(repository.nativeWorkflow('unknown'), undefined);
+    assert.deepEqual(repository.list().sort(), ['historical', 'native']);
+    assert.throws(() => repository.saved(compiled.kaRef, 'dkg-program', false), /executor changed/);
+  } finally { repository.close(); rmSync(state, { recursive: true, force: true }); }
 });
 
 test('event reservations share one quota across connections and retain identity, inputs and completed receipts', () => {

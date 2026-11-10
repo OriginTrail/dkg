@@ -24,23 +24,28 @@ export function createStudioService({ graphId, owner, client, repository, provid
     catch (e) { if (e.status === 404) return false; throw e; }
   }
   async function get(kaRef, sourceHash) {
-    if (typeof kaRef !== 'string' || !repository.row(kaRef)?.executor) throw reject('Unknown saved graph.');
+    if (typeof kaRef !== 'string' || !repository.workflow(kaRef)?.completed) throw reject('Unknown saved graph.');
     const source = await client.programs.getSource({ graphId, programIri: kaRef, programLayer: 'wm' });
     const compiled = readStudio(source.source);
     if (compiled.kaRef !== kaRef || sourceHash && sourceHash !== source.sourceHash) throw reject('The saved graph revision changed.');
     const plan = studioExecutionPlan(compiled, graphId, compiler);
-    if (repository.row(kaRef).executor !== plan.kind) throw reject('The saved workflow executor changed.');
+    const isApproved = await approved(kaRef, source.sourceHash);
+    // Read the normalized state after remote inspection, so concurrent saves or
+    // revocation cannot leave this response with stale export/activation policy.
+    const saved = repository.workflow(kaRef);
+    if (!saved?.completed) throw reject('Unknown saved graph.');
+    if (saved.executor !== plan.kind) throw reject('The saved workflow executor changed.');
     return { compiled, plan, source, workflow: { definition: compiled.definition, kaRef, sourceHash: source.sourceHash, graphId,
       ...(compiled.grant?.workflowSha256 ? { workflowSha256: compiled.grant.workflowSha256 } : {}),
-      mode: compiled.mode, approved: await approved(kaRef, source.sourceHash),
-      requiresExportAuthorization: compiled.requiresExportAuthorization || !!repository.row(kaRef).requires_export,
-      activation: (({ active, count, expiresAt }) => ({ active, count, expiresAt }))(repository.lifecycle(kaRef).activation), readbackVerified: true } };
+      mode: compiled.mode, approved: isApproved,
+      requiresExportAuthorization: compiled.requiresExportAuthorization || saved.requiresExportAuthorization,
+      activation: (({ active, count, expiresAt }) => ({ active, count, expiresAt }))(saved.activation), readbackVerified: true } };
   }
   async function list() {
     const workflows = [];
-    for (const row of repository.list()) {
+    for (const kaRef of repository.list()) {
       // Unavailable revisions remain saved with their original pins; other workflows can still be listed.
-      try { workflows.push((await get(row.ka_ref)).workflow); }
+      try { workflows.push((await get(kaRef)).workflow); }
       catch (e) { if (!['PROGRAM_NOT_FOUND', 'INVALID_WORKFLOW', 'WORKFLOW_CAPABILITY_CHANGED'].includes(e.code)) throw e; }
     }
     return workflows;
@@ -66,7 +71,7 @@ export function createStudioService({ graphId, owner, client, repository, provid
       }
       if (source.sourceHash !== sourceHash || source.source !== sourceText) throw reject('The graph source differs from its saved revision.');
       const currentPolicy = validateStudioCapabilities(definition, (await listCapabilities()).filter(c => !c.retired));
-      const requiresExportAuthorization = compiled.requiresExportAuthorization || !!repository.row(compiled.kaRef).requires_export
+      const requiresExportAuthorization = compiled.requiresExportAuthorization || repository.workflow(compiled.kaRef).requiresExportAuthorization
         || currentPolicy.requiresExportAuthorization;
       if (requiresExportAuthorization) authorize();
       if (!await approved(compiled.kaRef, sourceHash)) await client.programs.approve({ graphId, operationIri: compiled.kaRef,
@@ -143,9 +148,9 @@ export function createStudioService({ graphId, owner, client, repository, provid
   async function dkgComponent(value) {
     const invocationId = /^urn:sr:effect:([a-f0-9-]{36}):[^\s]{1,100}$/.exec(value?.effectId ?? '')?.[1];
     if (!invocationId) throw componentFailure('Native execution identity required.');
-    const row=repository.nativeWorkflow(value?.workflowId ?? '');
-    if(!row) throw reject('Unknown native workflow.');
-    const {compiled,workflow}=await get(row.ka_ref);
+    const kaRef=repository.nativeWorkflow(value?.workflowId ?? '');
+    if(!kaRef) throw reject('Unknown native workflow.');
+    const {compiled,workflow}=await get(kaRef);
     if(!workflow.approved) throw reject('Workflow approval is unavailable.');
     validateStudioCapabilities(compiled.definition,await listCapabilities());
     const input = await native().executionInput({ workflowId: value.workflowId, executionId: value.executionId, grant: compiled.grant });

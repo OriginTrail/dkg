@@ -296,10 +296,10 @@ test('rejected account adoption leaves legacy state reopenable; successful adopt
   try {
     const workflow = await f.service.save(definition(['schedule', 'edit-fields'], [[0,0,1,0]]), () => {});
     await f.service.activate({ kaRef: workflow.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const before = f.repository.row(workflow.kaRef), marker = join(f.state, 'nos-account.json');
+    const before = f.repository.lifecycle(workflow.kaRef), marker = join(f.state, 'nos-account.json');
     assert.throws(() => createCapabilityBridge(options(f)), /Deactivate legacy schedules/);
     assert.equal(existsSync(marker), false);
-    assert.deepEqual(f.repository.row(workflow.kaRef), before);
+    assert.deepEqual(f.repository.lifecycle(workflow.kaRef), before);
     legacyReopen(f, false);
     await f.service.activate({ kaRef: workflow.kaRef, active: false, activationId: randomUUID() }, () => {});
     bridge = createCapabilityBridge(options(f));

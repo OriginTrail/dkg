@@ -96,6 +96,6 @@ test('cross-graph export protection gates actual Studio save and run before SDK 
     await assert.rejects(service.save(definition,deny),/export key required/);
     await assert.rejects(service.run({...request,invocationId:randomUUID()},deny),/export key required/);
     assert.equal(uploads,1);assert.equal(invokes,1);
-    assert.equal(repository.row(saved.kaRef).requires_export,1);
+    assert.equal(repository.workflow(saved.kaRef).requiresExportAuthorization,true);
   }finally{service.stop();repository.close();rmSync(state,{recursive:true,force:true});}
 });

@@ -138,7 +138,7 @@ test('fresh catalog policy fences save approval and persists export restrictions
     assert.equal((await f.service.history(saved.kaRef, needsExport => !needsExport)).eventPath, undefined);
     assert.ok((await f.service.history(saved.kaRef, needsExport => needsExport)).eventPath);
     writeFileSync(f.exportTokenFile, 'revoked-export');
-    await assert.rejects(f.service.event(f.repository.row(saved.kaRef).event_key, { invocationId: randomUUID(), items: [{}] }), /export authorization changed/);
+    await assert.rejects(f.service.event(f.repository.lifecycle(saved.kaRef).eventKey, { invocationId: randomUUID(), items: [{}] }), /export authorization changed/);
     assert.equal(f.invocations.length, 0);
   } finally { f.close(); }
 });
@@ -153,7 +153,7 @@ test('current capability policy gates run, activation and event disclosure witho
     await assert.rejects(f.service.run({ kaRef: saved.kaRef, sourceHash: saved.sourceHash, itemsJson: '[{}]', invocationId: randomUUID() }, deny), /export key required/);
     await assert.rejects(f.service.activate({ kaRef: saved.kaRef, active: true, activationId: randomUUID() }, deny), /export key required/);
     assert.equal((await f.service.history(saved.kaRef, needsExport => !needsExport)).eventPath, undefined);
-    await assert.rejects(f.service.event(f.repository.row(saved.kaRef).event_key, { invocationId: randomUUID(), items: [{}] }), /export authorization changed/);
+    await assert.rejects(f.service.event(f.repository.lifecycle(saved.kaRef).eventKey, { invocationId: randomUUID(), items: [{}] }), /export authorization changed/);
     f.setCatalog(catalog.map(c => ({ ...c, available: false })));
     assert.equal((await f.service.history(saved.kaRef, () => assert.fail('unavailable selection cannot be disclosed'))).eventPath, undefined);
     assert.equal(f.invocations.length, 0);
@@ -181,7 +181,7 @@ test('a timer cannot invoke downstream actions after a component is revoked',asy
 });
 
 function timerExecution(f, row, id, normalized = true) {
-  const native = f.native.get(row.provider_id), a = JSON.parse(row.activation_json);
+  const native = f.native.get(row.providerId), a = row.activation;
   const workflowData = structuredClone({ ...native.activeVersion, settings: native.settings });
   const trigger = workflowData.nodes.find(n => n.name.endsWith(' trigger')).name;
   if (normalized) for (const node of workflowData.nodes) {
@@ -191,7 +191,7 @@ function timerExecution(f, row, id, normalized = true) {
       delete node.parameters.specifyBody; delete node.parameters.jsonBody;
     }
   }
-  return { id, workflowId: row.provider_id, workflowVersionId: native.activeVersion.versionId,
+  return { id, workflowId: row.providerId, workflowVersionId: native.activeVersion.versionId,
     status: 'success', startedAt: new Date(a.startedAt + 1).toISOString(), workflowData,
     data: { resultData: { runData: { [trigger]: [{ data: { main: [[{ json: { tick: id } }]] } }] } } } };
 }
@@ -202,8 +202,8 @@ for (const mode of ['webhook', 'schedule']) for (const stage of ['source', 'appr
     try {
       const w = await f.service.save(definition([mode, 'edit-fields'], [[0,0,1,0]]), () => {});
       await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-      const row = f.repository.row(w.kaRef), invocationId = randomUUID(), items = [{ name: 'retry' }];
-      f.repository.reserveEvent({ kaRef: w.kaRef, providerId: row.provider_id,
+      const row = f.repository.lifecycle(w.kaRef), invocationId = randomUUID(), items = [{ name: 'retry' }];
+      f.repository.reserveEvent({ kaRef: w.kaRef, providerId: row.providerId,
         executionId: mode === 'schedule' ? '7' : invocationId, invocationId,
         ...(mode === 'webhook' ? { inputJson: JSON.stringify(items) } : {}) }, () => {});
       if (mode === 'schedule') f.executions.set('7', timerExecution(f, row, '7'));
@@ -217,12 +217,12 @@ for (const mode of ['webhook', 'schedule']) for (const stage of ['source', 'appr
       const calls = f.calls.length;
       await f.service.poll();
       assert.deepEqual(f.repository.activation(w.kaRef), before);
-      assert.equal(f.repository.row(w.kaRef).event_key, row.event_key);
+      assert.equal(f.repository.lifecycle(w.kaRef).eventKey, row.eventKey);
       assert.deepEqual(f.repository.pendingEvents(w.kaRef), pending);
-      assert.equal(f.native.get(row.provider_id).active, true);
+      assert.equal(f.native.get(row.providerId).active, true);
       assert.equal(f.calls.length, calls); assert.equal(f.invocations.length, 0);
       f.restart(); await f.service.poll();
-      if (mode === 'webhook') await f.service.event(row.event_key, { invocationId, items });
+      if (mode === 'webhook') await f.service.event(row.eventKey, { invocationId, items });
       assert.equal(f.invocations.length, 1); assert.equal(f.invocations[0].invocationId, invocationId);
       assert.equal(f.repository.pendingEvents(w.kaRef).length, 0);
       assert.equal(f.repository.activation(w.kaRef).count, 1);
@@ -236,15 +236,15 @@ for (const mode of ['webhook', 'schedule']) for (const loss of ['expired', 'appr
     try {
       const w = await f.service.save(definition([mode, loss === 'export' ? 'google-sheets' : 'edit-fields'], [[0,0,1,0]]), () => {});
       await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-      const row = f.repository.row(w.kaRef);
+      const row = f.repository.lifecycle(w.kaRef);
       if (loss === 'expired') f.repository.setActivation(w.kaRef,
-        { ...f.repository.activation(w.kaRef), expiresAt: Date.now() - 1 }, row.event_key);
+        { ...f.repository.activation(w.kaRef), expiresAt: Date.now() - 1 }, row.eventKey);
       if (loss === 'approval') f.approvals.get(w.kaRef).binding.enabled = false;
       if (loss === 'export') writeFileSync(f.exportTokenFile, 'rotated-fictional-export-authorization');
       await f.service.poll();
       assert.equal(f.repository.activation(w.kaRef).active, false);
-      assert.equal(f.repository.row(w.kaRef).event_key, null);
-      if (mode === 'schedule') assert.equal(f.native.get(row.provider_id).active, false);
+      assert.equal(f.repository.lifecycle(w.kaRef).eventKey, null);
+      if (mode === 'schedule') assert.equal(f.native.get(row.providerId).active, false);
       assert.equal(f.invocations.length, 0);
     } finally { f.close(); }
   });
@@ -255,23 +255,23 @@ for (const failure of ['reject', 'lost-ack', 'changed-pin']) test(`schedule deac
   try {
     const w = await f.service.save(definition(['schedule', 'google-sheets'], [[0,0,1,0]]), () => {});
     await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const row = f.repository.row(w.kaRef), native = f.native.get(row.provider_id), original = structuredClone(native.activeVersion);
+    const row = f.repository.lifecycle(w.kaRef), native = f.native.get(row.providerId), original = structuredClone(native.activeVersion);
     f.executions.set('7', timerExecution(f, row, '7'));
-    f.repository.reserveEvent({ kaRef: w.kaRef, providerId: row.provider_id, executionId: '7', invocationId: randomUUID() }, () => {});
+    f.repository.reserveEvent({ kaRef: w.kaRef, providerId: row.providerId, executionId: '7', invocationId: randomUUID() }, () => {});
     const pending = f.repository.pendingEvents(w.kaRef);
     if (failure === 'changed-pin') native.activeVersion.nodes[0].parameters.changed = true;
     else f.setUnpublishFailure(failure);
     const request = { kaRef: w.kaRef, active: false, activationId: randomUUID() };
     await assert.rejects(f.service.activate(request, () => {}));
     assert.equal(f.repository.activation(w.kaRef).active, false);
-    assert.equal(f.repository.row(w.kaRef).event_key, null);
-    assert.equal(f.repository.row(w.kaRef).unpublish_pending, request.activationId);
+    assert.equal(f.repository.lifecycle(w.kaRef).eventKey, null);
+    assert.equal(f.repository.lifecycle(w.kaRef).pendingUnpublication, request.activationId);
     assert.equal((await f.service.history(w.kaRef, () => true)).eventPath, undefined);
-    await assert.rejects(f.service.event(row.event_key, { invocationId: randomUUID(), items: [{}] }), /Inactive/);
+    await assert.rejects(f.service.event(row.eventKey, { invocationId: randomUUID(), items: [{}] }), /Inactive/);
     f.restart();
     if (failure !== 'lost-ack') {
       await f.service.poll();
-      assert.equal(f.repository.row(w.kaRef).unpublish_pending, request.activationId);
+      assert.equal(f.repository.lifecycle(w.kaRef).pendingUnpublication, request.activationId);
       await assert.rejects(f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {}));
       assert.equal(f.repository.activation(w.kaRef).active, false);
     }
@@ -282,7 +282,7 @@ for (const failure of ['reject', 'lost-ack', 'changed-pin']) test(`schedule deac
     // Explicit retry and background reconciliation must both work after reopen.
     if (failure === 'lost-ack') await f.service.activate(request, () => {});
     else await f.service.poll();
-    assert.equal(f.repository.row(w.kaRef).unpublish_pending, null);
+    assert.equal(f.repository.lifecycle(w.kaRef).pendingUnpublication, null);
     assert.equal(native.active, false);
     assert.equal(f.repository.activation(w.kaRef).active, false);
     assert.deepEqual(f.repository.pendingEvents(w.kaRef), pending);
@@ -296,12 +296,12 @@ for (const mode of ['webhook', 'schedule']) for (const loss of ['deactivation', 
     const w = await f.service.save(definition([mode, 'http-request'], [[0,0,1,0]]), () => assert.fail('unexpected export authorization'));
     assert.equal(w.requiresExportAuthorization, false);
     await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const row = f.repository.row(w.kaRef);
+    const row = f.repository.lifecycle(w.kaRef);
     if (mode === 'schedule') f.executions.set('7', timerExecution(f, row, '7'));
     // Intake inspects once, then execution inspects again after reservation.
     f.beforeNextCatalog(() => f.beforeNextCatalog(async () => { entered.resolve(); await resume.promise; }));
     const denied = mode === 'webhook'
-      ? assert.rejects(f.service.event(row.event_key, { invocationId: randomUUID(), items: [{}] }), /inactive|activation changed/)
+      ? assert.rejects(f.service.event(row.eventKey, { invocationId: randomUUID(), items: [{}] }), /inactive|activation changed/)
       : f.service.poll();
     await entered.promise;
     if (loss === 'expiry') {
@@ -327,14 +327,14 @@ for (const mode of ['webhook', 'schedule']) test(mode + ' reconciliation recheck
   try {
     const w = await f.service.save(definition([mode, 'edit-fields'], [[0,0,1,0]]), () => {});
     await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const row = f.repository.row(w.kaRef);
+    const row = f.repository.lifecycle(w.kaRef);
     if (mode === 'schedule') f.executions.set('7', timerExecution(f, row, '7'));
     f.client.programs.invoke = async () => {
       attempts++;
       await f.service.activate({ kaRef: w.kaRef, active: false, activationId: randomUUID() }, () => {});
       throw Object.assign(new Error('inspect the durable acknowledgement'), { code: 'INVOCATION_REQUIRES_RECONCILIATION' });
     };
-    if (mode === 'webhook') await assert.rejects(f.service.event(row.event_key, { invocationId: randomUUID(), items: [{}] }), /inactive|activation changed/);
+    if (mode === 'webhook') await assert.rejects(f.service.event(row.eventKey, { invocationId: randomUUID(), items: [{}] }), /inactive|activation changed/);
     else await f.service.poll();
     assert.equal(attempts, 1);
     assert.equal(f.repository.pendingEvents(w.kaRef).length, 1);
@@ -349,7 +349,7 @@ for (const mode of ['webhook', 'schedule']) test(mode + ' reconciliation retains
     assert.equal(saved.requiresExportAuthorization, false);
     f.setCatalog(protectedCatalog);
     await f.service.activate({ kaRef: saved.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const row = f.repository.row(saved.kaRef);
+    const row = f.repository.lifecycle(saved.kaRef);
     if (mode === 'schedule') f.executions.set('7', timerExecution(f, row, '7'));
     f.setCatalog(catalog);
     f.beforeNextCatalog(() => f.beforeNextCatalog(() => f.setCatalog(protectedCatalog)));
@@ -358,7 +358,7 @@ for (const mode of ['webhook', 'schedule']) test(mode + ' reconciliation retains
       writeFileSync(f.exportTokenFile, 'revoked-during-dispatch');
       throw Object.assign(new Error('inspect the durable acknowledgement'), { code: 'INVOCATION_REQUIRES_RECONCILIATION' });
     };
-    if (mode === 'webhook') await assert.rejects(f.service.event(row.event_key, { invocationId: randomUUID(), items: [{}] }), /export authorization changed/);
+    if (mode === 'webhook') await assert.rejects(f.service.event(row.eventKey, { invocationId: randomUUID(), items: [{}] }), /export authorization changed/);
     else await f.service.poll();
     assert.equal(attempts, 1);
     assert.equal(f.repository.pendingEvents(saved.kaRef).length, 1);
@@ -377,15 +377,15 @@ for (const mode of ['webhook', 'schedule']) for (const renewal of [false, true])
     await entered.promise;
     const revocationId = randomUUID();
     await f.service.activate({ kaRef: w.kaRef, active: false, activationId: revocationId }, () => {});
-    const revoked = f.repository.row(w.kaRef);
+    const revoked = f.repository.lifecycle(w.kaRef);
     const nativeActive = [...f.native.values()][0].active;
     resume.resolve(); await denied;
-    assert.deepEqual(f.repository.row(w.kaRef), revoked);
+    assert.deepEqual(f.repository.lifecycle(w.kaRef), revoked);
     assert.deepEqual(f.repository.activation(w.kaRef), { active: false, activationId: revocationId });
-    assert.equal(f.repository.row(w.kaRef).event_key, null);
+    assert.equal(f.repository.lifecycle(w.kaRef).eventKey, null);
     assert.equal([...f.native.values()][0].active, nativeActive);
     f.restart();
-    assert.deepEqual(f.repository.row(w.kaRef), revoked);
+    assert.deepEqual(f.repository.lifecycle(w.kaRef), revoked);
   } finally { resume.resolve(); f.close(); }
 });
 
@@ -410,12 +410,12 @@ test('activation waiting on provider cleanup cannot overwrite a later revocation
     const revoking = f.service.activate({ kaRef: w.kaRef, active: false, activationId: revocationId }, () => {});
     await locallyRevoked.promise;
     assert.deepEqual(f.repository.activation(w.kaRef), { active: false, activationId: revocationId });
-    assert.equal(f.repository.row(w.kaRef).event_key, null);
+    assert.equal(f.repository.lifecycle(w.kaRef).eventKey, null);
     // Local revocation is immediate; provider cleanup waits for the earlier operation.
     resume.resolve(); await Promise.all([denied, revoking]);
     assert.deepEqual(f.repository.activation(w.kaRef), { active: false, activationId: revocationId });
-    assert.equal(f.repository.row(w.kaRef).event_key, null);
-    assert.equal(f.repository.row(w.kaRef).unpublish_pending, null);
+    assert.equal(f.repository.lifecycle(w.kaRef).eventKey, null);
+    assert.equal(f.repository.lifecycle(w.kaRef).pendingUnpublication, null);
     assert.equal([...f.native.values()][0].active, false);
   } finally { resume.resolve(); f.close(); }
 });
@@ -438,9 +438,9 @@ test('schedule deactivation orders cleanup after an earlier pending publication'
     await localRevoked;
     assert.equal(f.repository.activation(w.kaRef).active, false);
     release(); await Promise.all([activating, deactivating]);
-    assert.equal(f.native.get(f.repository.row(w.kaRef).provider_id).active, false);
-    assert.equal(f.repository.row(w.kaRef).unpublish_pending, null);
-    assert.equal(f.repository.row(w.kaRef).event_key, null);
+    assert.equal(f.native.get(f.repository.lifecycle(w.kaRef).providerId).active, false);
+    assert.equal(f.repository.lifecycle(w.kaRef).pendingUnpublication, null);
+    assert.equal(f.repository.lifecycle(w.kaRef).eventKey, null);
     assert.equal(f.invocations.length, 0);
   } finally { release?.(); f.close(); }
 });
@@ -468,23 +468,23 @@ for (const loss of ['expired', 'approval', 'export', 'component']) test(`confirm
   try {
     const w = await f.service.save(definition(['schedule', 'google-sheets'], [[0,0,1,0]]), () => {});
     await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const row = f.repository.row(w.kaRef), native = f.native.get(row.provider_id);
+    const row = f.repository.lifecycle(w.kaRef), native = f.native.get(row.providerId);
     f.executions.set('7', timerExecution(f, row, '7')); f.setUnpublishFailure('reject');
-    if (loss === 'expired') f.repository.setActivation(w.kaRef, { ...f.repository.activation(w.kaRef), expiresAt: Date.now() - 1 }, row.event_key);
+    if (loss === 'expired') f.repository.setActivation(w.kaRef, { ...f.repository.activation(w.kaRef), expiresAt: Date.now() - 1 }, row.eventKey);
     if (loss === 'approval') f.approvals.get(w.kaRef).binding.enabled = false;
     if (loss === 'export') writeFileSync(f.exportTokenFile, 'revoked-export');
     if (loss === 'component') f.setCatalog(catalog.map(c => ({ ...c, available: false })));
     await f.service.poll();
     assert.equal(f.repository.activation(w.kaRef).active, false);
-    assert.equal(f.repository.row(w.kaRef).event_key, null);
-    assert.ok(f.repository.row(w.kaRef).unpublish_pending);
+    assert.equal(f.repository.lifecycle(w.kaRef).eventKey, null);
+    assert.ok(f.repository.lifecycle(w.kaRef).pendingUnpublication);
     f.restart(); f.setUnpublishFailure(null);
     f.approvals.get(w.kaRef).binding.enabled = true; f.setCatalog(catalog);
     writeFileSync(f.exportTokenFile, 'operator-unit-fixture-only');
     // Cleanup is independent of DKG/catalog inspection once authority is revoked.
     f.client.programs.getSource = async () => { throw new Error('source inspection unavailable'); };
     await f.service.poll();
-    assert.equal(f.repository.row(w.kaRef).unpublish_pending, null);
+    assert.equal(f.repository.lifecycle(w.kaRef).pendingUnpublication, null);
     assert.equal(native.active, false);
     assert.equal(f.repository.activation(w.kaRef).active, false);
     assert.equal(f.invocations.length, 0);
@@ -496,7 +496,7 @@ for (const interrupted of [false, true]) test(`normalized timer ${interrupted ? 
   try {
     const w = await f.service.save(definition(['schedule', 'http-request'], [[0,0,1,0]]), () => {});
     await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const row = f.repository.row(w.kaRef), execution = timerExecution(f, row, '7');
+    const row = f.repository.lifecycle(w.kaRef), execution = timerExecution(f, row, '7');
     f.executions.set('7', execution);
     const invoke = f.client.programs.invoke, attempts = [], cached = new Map();
     let loseReply = interrupted;
@@ -517,7 +517,7 @@ for (const interrupted of [false, true]) test(`normalized timer ${interrupted ? 
     assert.deepEqual(attempts, Array(interrupted ? 2 : 1).fill(first.invocation_id));
     const completed = f.repository.db.prepare('SELECT * FROM events WHERE execution_id=?').get('7');
     assert.equal(completed.invocation_id, first.invocation_id); assert.ok(completed.receipt_json);
-    assert.equal(JSON.parse(f.repository.row(w.kaRef).activation_json).count, 1);
+    assert.equal(f.repository.lifecycle(w.kaRef).activation.count, 1);
   } finally { f.close(); }
 });
 
@@ -526,7 +526,7 @@ test('timer admission rejects changed versions, published digests, identities, s
   try {
     const w = await f.service.save(definition(['schedule', 'http-request'], [[0,0,1,0]]), () => {});
     await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const row = f.repository.row(w.kaRef), native = f.native.get(row.provider_id);
+    const row = f.repository.lifecycle(w.kaRef), native = f.native.get(row.providerId);
     const original = structuredClone(native.activeVersion);
     for (const change of [
       e => { e.workflowVersionId = 'foreign-version'; },
@@ -559,8 +559,8 @@ test('timer intake fetches off-page pending details once and preserves candidate
   try {
     const w = await f.service.save(definition(['schedule', 'edit-fields'], [[0,0,1,0]]), () => {});
     await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const row = f.repository.row(w.kaRef), invocationId = randomUUID();
-    f.repository.reserveEvent({ kaRef: w.kaRef, providerId: row.provider_id, executionId: '7', invocationId }, () => {});
+    const row = f.repository.lifecycle(w.kaRef), invocationId = randomUUID();
+    f.repository.reserveEvent({ kaRef: w.kaRef, providerId: row.providerId, executionId: '7', invocationId }, () => {});
     for (const id of ['9', '8', '7']) f.executions.set(id, timerExecution(f, row, id));
     f.setExecutionPage(['9', '8']);
     f.restart(); await f.service.poll();
@@ -578,21 +578,21 @@ for (const mode of ['webhook', 'schedule']) test('failed quota persistence rolls
   try {
     const w = await f.service.save(definition([mode, 'edit-fields'], [[0,0,1,0]]), () => {});
     await f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
-    const row = f.repository.row(w.kaRef), value = { invocationId: randomUUID(), items: [{ value: 1 }] };
+    const row = f.repository.lifecycle(w.kaRef), value = { invocationId: randomUUID(), items: [{ value: 1 }] };
     if (mode === 'schedule') f.executions.set('7', timerExecution(f, row, '7'));
     f.repository.db.exec("CREATE TRIGGER fail_event_count BEFORE UPDATE OF activation_json ON workflows BEGIN SELECT RAISE(ABORT, 'count unavailable'); END");
-    if (mode === 'webhook') await assert.rejects(f.service.event(row.event_key, value), /count unavailable/);
+    if (mode === 'webhook') await assert.rejects(f.service.event(row.eventKey, value), /count unavailable/);
     else await f.service.poll();
     assert.equal(f.invocations.length, 0);
     assert.equal(f.repository.db.prepare('SELECT count(*) AS n FROM events').get().n, 0);
-    assert.equal(JSON.parse(f.repository.row(w.kaRef).activation_json).count, 0);
+    assert.equal(f.repository.lifecycle(w.kaRef).activation.count, 0);
     f.repository.db.exec('DROP TRIGGER fail_event_count');
     if (mode === 'webhook') {
-      const receipt = await f.service.event(row.event_key, value);
-      assert.deepEqual(await f.service.event(row.event_key, value), receipt);
+      const receipt = await f.service.event(row.eventKey, value);
+      assert.deepEqual(await f.service.event(row.eventKey, value), receipt);
     } else { await f.service.poll(); await f.service.poll(); }
     assert.equal(f.invocations.length, 1);
-    assert.equal(JSON.parse(f.repository.row(w.kaRef).activation_json).count, 1);
+    assert.equal(f.repository.lifecycle(w.kaRef).activation.count, 1);
   } finally { f.close(); }
 });
 
@@ -601,27 +601,27 @@ for (const mode of ['webhook', 'schedule']) test(`pending fifth ${mode} retains 
   try {
     const w = await f.service.save(definition([mode, 'edit-fields'], [[0,0,1,0]]), () => {});
     await f.service.activate({kaRef:w.kaRef,sourceHash:w.sourceHash,active:true,activationId:randomUUID()},()=>{});
-    const row = f.repository.row(w.kaRef), a = JSON.parse(row.activation_json);
+    const row = f.repository.lifecycle(w.kaRef), a = row.activation;
     a.count = 5; f.repository.db.prepare('UPDATE workflows SET activation_json=? WHERE ka_ref=?').run(JSON.stringify(a), w.kaRef);
     const invocationId = randomUUID(), executionId = mode === 'webhook' ? invocationId : '5';
     f.repository.db.prepare('INSERT INTO events(provider_id,execution_id,ka_ref,invocation_id,input_json) VALUES(?,?,?,?,?)')
-      .run(row.provider_id, executionId, w.kaRef, invocationId, '[{}]');
+      .run(row.providerId, executionId, w.kaRef, invocationId, '[{}]');
     if (mode === 'schedule') {
       for (const id of ['5','6']) f.executions.set(id, timerExecution(f, row, id));
     }
     f.restart();
     await f.service.poll();
-    assert.equal(f.repository.row(w.kaRef).event_key, row.event_key);
-    assert.equal(JSON.parse(f.repository.row(w.kaRef).activation_json).active, true);
+    assert.equal(f.repository.lifecycle(w.kaRef).eventKey, row.eventKey);
+    assert.equal(f.repository.lifecycle(w.kaRef).activation.active, true);
     if (mode === 'webhook') {
-      await assert.rejects(f.service.event(row.event_key,{invocationId:randomUUID(),items:[{}]}),/limit/);
-      await f.service.event(row.event_key,{invocationId,items:[{}]});
+      await assert.rejects(f.service.event(row.eventKey,{invocationId:randomUUID(),items:[{}]}),/limit/);
+      await f.service.event(row.eventKey,{invocationId,items:[{}]});
     }
     assert.equal(f.invocations.length,1); assert.equal(f.invocations[0].invocationId,invocationId);
     assert.ok(f.repository.db.prepare('SELECT receipt_json FROM events WHERE execution_id=?').get(executionId).receipt_json);
     assert.equal(f.repository.db.prepare('SELECT count(*) AS n FROM events').get().n,1);
     f.setCatalog(catalog.map(c=>({...c,available:false}))); await f.service.poll();
-    assert.equal(f.repository.row(w.kaRef).event_key,null);
+    assert.equal(f.repository.lifecycle(w.kaRef).eventKey,null);
   } finally { f.close(); }
 });
 
@@ -674,7 +674,7 @@ for (const protectedComponent of ['google-sheets', 'google-drive', 'edit-fields'
       const allowed=role==='owner'&&(protectedComponent==='edit-fields'||token===secret);
       assert.equal(typeof body.eventPath==='string',allowed);
       if(allowed)delegatedPath=body.eventPath;
-      else assert.ok(!JSON.stringify(body).includes(f.repository.row(w.kaRef).event_key));
+      else assert.ok(!JSON.stringify(body).includes(f.repository.lifecycle(w.kaRef).eventKey));
     }
     // Possession of an explicitly disclosed URL remains a delegated invocation capability.
     const receipt=await f.service.event(delegatedPath.split('/').at(-1),{invocationId:randomUUID(),items:[{value:1}]});

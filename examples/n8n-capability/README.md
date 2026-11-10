@@ -236,6 +236,15 @@ node examples/n8n-capability/setup-components-local.mjs /tmp/n8n-ka-state --inst
 node examples/n8n-capability/serve.mjs /tmp/n8n-ka-state
 ```
 
+Reinstalling unchanged components preserves their native workflow and published
+version IDs, including the shared echo workflow. Only missing definitions are
+imported; a retry after interrupted publication publishes the existing imported
+version. The installer verifies current and published definitions against the
+pins before changing n8n or replacing the manifest. A changed definition under an
+existing identity is rejected; changed templates must use a new revision identity.
+Pending acknowledgements can therefore recover their original executions without
+relaxing the runtime's exact version check or sending another webhook request.
+
 In nOS choose **HTTP → temperature**, **Data + branching**, **CSV → Google Sheet**, **Loop example** or
 **Schedule example**, or drag your own blocks. Click a block to edit its fields.
 Connect named outputs to inputs A/B; the Connections panel offers the same

@@ -69,9 +69,9 @@ export function createStudioEventController({ repository, provider, lookup, exec
   async function activate(value, authorize) {
     if (!value || Object.keys(value).some(k => !['kaRef', 'sourceHash', 'active', 'activationId'].includes(k)) || typeof value.active !== 'boolean') throw reject('Choose an activation state.');
     const activationId = workflowUuid(value.activationId);
-    const saved = typeof value.kaRef === 'string' ? repository.lifecycle(value.kaRef) : undefined;
+    const saved = typeof value.kaRef === 'string' ? repository.workflow(value.kaRef) : undefined;
     if (!value.active) {
-      if (!saved?.executor) throw reject('Unknown saved graph.');
+      if (!saved?.completed) throw reject('Unknown saved graph.');
       if (saved.executor !== 'native-n8n' || saved.mode && !['schedule', 'webhook'].includes(saved.mode))
         throw reject('Start with a Webhook or Schedule Trigger to activate events.');
       if (value.sourceHash && saved.sourceHash && value.sourceHash !== saved.sourceHash) throw reject('The saved graph revision changed.');

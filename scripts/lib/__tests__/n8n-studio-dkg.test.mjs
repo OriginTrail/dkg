@@ -22,7 +22,7 @@ test('saved Studio DKG Read/Write callbacks accept normalized execution paramete
     const approval = f.approvals.get(w.kaRef);
     assert.equal(approval.typescript.children.length, 0);
     assert.deepEqual(f.sources.get(w.kaRef).permittedPrograms, []);
-    const native = f.native.get(f.repository.row(w.kaRef).provider_id);
+    const native = f.native.get(f.repository.lifecycle(w.kaRef).providerId);
     const snapshot = structuredClone({ ...native.activeVersion, settings: native.settings });
     // n8n normalizes HTTP Request body/header parameters in execution snapshots.
     for (const node of snapshot.nodes.filter(n => n.type === 'n8n-nodes-base.httpRequest'))
@@ -83,7 +83,7 @@ test('removing a DKG profile preserves saved pins and leaves unrelated workflows
     for (const ids of [['dkg-read'], ['dkg-read', 'invoke-dkg-program'], ['dkg-read', 'dkg-write']]) {
       dependent.push(await f.service.save(definition(ids, ids.length === 1 ? [] : [[0,0,1,0]]), () => {}));
     }
-    const before = dependent.map(w => ({ row: { ...f.repository.row(w.kaRef) }, source: structuredClone(f.sources.get(w.kaRef)) }));
+    const before = dependent.map(w => ({ row: { ...f.repository.lifecycle(w.kaRef) }, source: structuredClone(f.sources.get(w.kaRef)) }));
     const env = { ...process.env }; delete env.NOS_DKG_PROFILE_MODULE; delete env.NOS_STUDIO_SESSION_FILE;
     const bridgeUrl = new URL('../../../examples/n8n-capability/bridge.mjs', import.meta.url).href;
     const registryUrl = new URL('../../../examples/n8n-capability/component-registry.mjs', import.meta.url).href;
@@ -126,7 +126,7 @@ test('removing a DKG profile preserves saved pins and leaves unrelated workflows
     `;
     assert.equal(execFileSync(process.execPath, ['--input-type=module', '-e', script], { env, encoding: 'utf8',
       input: JSON.stringify({ state: f.state, sources: [...f.sources], approvals: [...f.approvals], ordinary, dependent }) }).trim(), 'verified');
-    assert.deepEqual(dependent.map(w => ({ row: { ...f.repository.row(w.kaRef) }, source: f.sources.get(w.kaRef) })), before);
+    assert.deepEqual(dependent.map(w => ({ row: { ...f.repository.lifecycle(w.kaRef) }, source: f.sources.get(w.kaRef) })), before);
     f.restart();
     assert.equal((await f.service.list()).length, 4);
     for (const saved of dependent) assert.equal((await f.service.get(saved.kaRef)).workflow.sourceHash, saved.sourceHash);

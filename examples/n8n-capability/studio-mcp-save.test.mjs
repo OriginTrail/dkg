@@ -25,7 +25,7 @@ test('MCP eligibility requires completed owner save and survives repository reop
   const pin = { kaRef: compiled.kaRef, workflowSha256: compiled.grant.workflowSha256 };
   const input = { ...pin, runKey: 'save-retry', arguments: { value: 'sample' } };
   async function assertIneligible() {
-    assert.equal(f.repository.row(pin.kaRef).executor, null);
+    assert.equal(f.repository.workflow(pin.kaRef).executor, null);
     assert.deepEqual(await f.service.list(), []);
     const service = mcp();
     assert.deepEqual(service.list(owner), []);
@@ -76,8 +76,8 @@ for (const failure of ['native snapshot fetch', 'snapshot database write']) test
   assert.equal([...f.native.values()][0].active, true);
   const nativeRevision = f.repository.nativeRevision(compiled.kaRef);
   const verifyIncomplete = async () => {
-    assert.equal(f.repository.row(compiled.kaRef).executor, null);
-    assert.equal(f.repository.row(compiled.kaRef).requires_export, 0);
+    assert.equal(f.repository.workflow(compiled.kaRef).executor, null);
+    assert.equal(f.repository.workflow(compiled.kaRef).requiresExportAuthorization, false);
     assert.equal(f.repository.mcp.savedNative(compiled.kaRef), undefined);
     assert.deepEqual(f.repository.nativeRevision(compiled.kaRef), nativeRevision);
     assert.deepEqual(await f.service.list(), []);
