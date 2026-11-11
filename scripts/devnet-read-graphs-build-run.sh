@@ -30,9 +30,11 @@
 # puts back every node's config.json, restarts the nodes in ascending order
 # and drops their read graphs, unless READ_GRAPHS_RUN_KEEP=1.
 #
-# It reads read-graph state only through `dkg store read-graphs` (status --json,
-# check --full, rebuild, drop); the read_graph_* functions below are the one
-# place that parses their output.
+# It reads read-graph state only through `dkg store read-graphs` (status, check,
+# rebuild and drop, each with --json), which ask the running daemon; the
+# read_graph_* functions and check_verdict below are the one place that parses
+# their output. A full check counts as clean only when every read graph it
+# checked is consistent: a skipped or interrupted one is checked again.
 #
 # Exit codes (a run that exercised nothing never looks like a pass):
 #   0 = PASS, 3 = INCONCLUSIVE (a precondition was unmet, or a step or a drill
@@ -192,14 +194,29 @@ read_graph_rows() {
       for (const row of JSON.parse(d).readGraphs ?? []) console.log(`${row.state} ${row.generation} ${row.readGraph}`);
     });'
 }
-# read_graph_check <n> <out>: the full check, both directions; exit 0 only when every read graph is consistent.
-read_graph_check() { dkg_cli "$1" store read-graphs check --full --json > "$2" 2>&1; }
-# read_graph_rebuild <n> [context graph]: rebuild the node's read graphs, or those of one context graph.
-read_graph_rebuild() {
-  if [ -n "${2:-}" ]; then dkg_cli "$1" store read-graphs rebuild --context-graph "$2" >> "$RESULTS/cli.log" 2>&1
-  else dkg_cli "$1" store read-graphs rebuild >> "$RESULTS/cli.log" 2>&1; fi
+# read_graph_check <n> <out>: the full check (the default), both directions, as JSON in <out>. Its exit code
+# says only whether a read graph mismatched or failed; check_verdict reads the rest.
+read_graph_check() { dkg_cli "$1" store read-graphs check --json > "$2" 2>> "$RESULTS/cli-errors.log"; }
+# check_verdict <out>: "clean" when every read graph checked is consistent; "bad" when one mismatched,
+# failed, or the answer cannot be read; "incomplete" when one was skipped (not ready) or interrupted.
+check_verdict() {
+  node -e '
+    let results;
+    try { results = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).results; } catch { results = undefined; }
+    if (!Array.isArray(results)) { console.log("bad"); process.exit(0); }
+    const outcomes = results.map((r) => r.outcome);
+    if (outcomes.some((o) => o !== "consistent" && o !== "skipped" && o !== "interrupted")) console.log("bad");
+    else if (outcomes.some((o) => o !== "consistent")) console.log("incomplete");
+    else console.log("clean");
+  ' "$1"
 }
-read_graph_drop() { dkg_cli "$1" store read-graphs drop >> "$RESULTS/cli.log" 2>&1; }
+# read_graph_rebuild <n> [context graph]: mark the node's read graphs dirty, or those of one context graph;
+# the builder rebuilds them at its next pass (rebuilding, then ready).
+read_graph_rebuild() {
+  if [ -n "${2:-}" ]; then dkg_cli "$1" store read-graphs rebuild --context-graph "$2" --json >> "$RESULTS/cli.log" 2>&1
+  else dkg_cli "$1" store read-graphs rebuild --json >> "$RESULTS/cli.log" 2>&1; fi
+}
+read_graph_drop() { dkg_cli "$1" store read-graphs drop --yes --json >> "$RESULTS/cli.log" 2>&1; }
 
 dkg_cli "${NODES%% *}" store read-graphs --help > /dev/null 2>&1 \
   || early_exit "this build has no \`dkg store read-graphs\` commands"
@@ -240,15 +257,29 @@ wait_all_ready() {
   done
   return 0
 }
-# full_checks <label> [nodes]: the full check on every node; 0 when every one is clean.
+# full_checks <label> [nodes]: the full check on every node. A node whose check skipped or was
+# interrupted is checked again, up to three times, once its read graphs are ready.
+# Returns 0 when every node is clean, 1 when one is bad, 2 when one stays incomplete;
+# checks/<label>.failed names the nodes.
 full_checks() {
-  local label="$1" nodes="${2:-$NODES}" n bad=""
+  local label="$1" nodes="${2:-$NODES}" n attempt verdict bad="" incomplete=""
   for n in $nodes; do
-    read_graph_check "$n" "$RESULTS/checks/$label.node$n.json" || bad="$bad node$n"
+    for attempt in 1 2 3; do
+      read_graph_check "$n" "$RESULTS/checks/$label.node$n.json"
+      verdict="$(check_verdict "$RESULTS/checks/$label.node$n.json")"
+      [ "$verdict" = incomplete ] || break
+      sleep 15
+      wait_all_ready "$label-recheck" "$READY_TIMEOUT" "$n" || break
+    done
+    case "$verdict" in
+      clean) ;;
+      incomplete) incomplete="$incomplete node$n" ;;
+      *) bad="$bad node$n" ;;
+    esac
   done
-  [ -z "$bad" ] && return 0
-  echo "$bad" > "$RESULTS/checks/$label.failed"
-  return 1
+  if [ -n "$bad" ]; then echo "$bad (bad)$incomplete" > "$RESULTS/checks/$label.failed"; return 1; fi
+  if [ -n "$incomplete" ]; then echo "$incomplete (skipped or interrupted)" > "$RESULTS/checks/$label.failed"; return 2; fi
+  return 0
 }
 # generation_of <rows file> <read graph>
 generation_of() { awk -v g="$2" '$3 == g { print $2 }' "$1"; }
@@ -344,12 +375,13 @@ phase_backfill() {
   awk 'NR == FNR { restarted[$1] = $2; next } ($1 in restarted) { print $1, $3 - restarted[$1] }' \
     "$RESULTS/rows/restarted" "$RESULTS/rows/backfill.seconds" > "$RESULTS/rows/backfill-time" 2>/dev/null || true
   [ -z "$empty" ] || note "backfill: no read graph on nodes that subscribe to no context graph:$empty"
-  if full_checks backfill; then
-    if [ "$built" = 0 ]; then record backfill INCONCLUSIVE "$(( $(now) - started ))" "no node built a read graph"
-    else record backfill PASS "$(( $(now) - started ))" "read graphs ready on $built nodes, full check clean"; fi
-  else
-    record backfill FAIL "$(( $(now) - started ))" "full check not clean on:$(cat "$RESULTS/checks/backfill.failed")"
-  fi
+  full_checks backfill
+  case "$?" in
+    0) if [ "$built" = 0 ]; then record backfill INCONCLUSIVE "$(( $(now) - started ))" "no node built a read graph"
+       else record backfill PASS "$(( $(now) - started ))" "read graphs ready on $built nodes, full check clean"; fi ;;
+    2) record backfill INCONCLUSIVE "$(( $(now) - started ))" "full check incomplete on:$(cat "$RESULTS/checks/backfill.failed")" ;;
+    *) record backfill FAIL "$(( $(now) - started ))" "full check not clean on:$(cat "$RESULTS/checks/backfill.failed")" ;;
+  esac
 }
 
 phase_measure() {
@@ -380,7 +412,7 @@ phase_measure() {
 }
 
 phase_gate() {
-  local started rc n cg lost="" rebuilt=""
+  local started rc checked n cg lost="" rebuilt=""
   started="$(now)"
   "$GATE_CMD" > "$RESULTS/gate.log" 2>&1; rc=$?
   for n in $NODES; do same_json "$(read_graphs_setting "$n")" "$SETTING" || lost="$lost node$n"; done
@@ -403,8 +435,13 @@ phase_gate() {
     note "gate: rebuilt the read graphs of context graphs a suite writes into the store directly:$rebuilt"
     wait_all_ready after-gate-rebuild "$READY_TIMEOUT" || { record gate FAIL "$(( $(now) - started ))" "rebuilt read graphs not ready"; return; }
   fi
-  if ! full_checks after-gate; then
+  full_checks after-gate; checked=$?
+  if [ "$checked" = 1 ]; then
     record gate FAIL "$(( $(now) - started ))" "full check not clean after the gate on:$(cat "$RESULTS/checks/after-gate.failed")"
+  elif [ "$rc" != 0 ] && [ "$rc" != "$SKIP_EXIT" ]; then
+    record gate FAIL "$(( $(now) - started ))" "the gate failed with exit $rc (gate.log)"
+  elif [ "$checked" = 2 ]; then
+    record gate INCONCLUSIVE "$(( $(now) - started ))" "full check incomplete after the gate on:$(cat "$RESULTS/checks/after-gate.failed")"
   elif [ "$rc" = 0 ]; then
     record gate PASS "$(( $(now) - started ))" "the gate passed with read graphs on; full check clean"
   elif [ "$rc" = "$SKIP_EXIT" ]; then
@@ -416,9 +453,13 @@ phase_gate() {
 
 # drill_end <drill> <node> <started> <detail>: ready again, and a clean full check.
 drill_end() {
-  if ! wait_all_ready "$1" "$READY_TIMEOUT" "$2"; then record "$1" FAIL "$(( $(now) - $3 ))" "node$2's read graphs not ready afterwards"
-  elif ! full_checks "$1" "$2"; then record "$1" FAIL "$(( $(now) - $3 ))" "node$2's full check not clean afterwards"
-  else record "$1" PASS "$(( $(now) - $3 ))" "$4"; fi
+  if ! wait_all_ready "$1" "$READY_TIMEOUT" "$2"; then record "$1" FAIL "$(( $(now) - $3 ))" "node$2's read graphs not ready afterwards"; return; fi
+  full_checks "$1" "$2"
+  case "$?" in
+    0) record "$1" PASS "$(( $(now) - $3 ))" "$4" ;;
+    2) record "$1" INCONCLUSIVE "$(( $(now) - $3 ))" "node$2's full check stayed incomplete afterwards" ;;
+    *) record "$1" FAIL "$(( $(now) - $3 ))" "node$2's full check not clean afterwards" ;;
+  esac
 }
 
 drill_restart_during_rebuild() {
@@ -426,12 +467,13 @@ drill_restart_during_rebuild() {
   started="$(now)"; before="$RESULTS/rows/restart.before.node$n"
   read_graph_rows "$n" > "$before" && all_ready "$before" || { record drill-restart INCONCLUSIVE 0 "node$n had no ready read graph to rebuild"; return; }
   read_graph_rebuild "$n" || { record drill-restart FAIL "$(( $(now) - started ))" "rebuild refused on node$n (cli.log)"; return; }
+  # `rebuild` marks the read graphs dirty; the builder's next pass rebuilds them. Restart while one is being rebuilt.
   for i in $(seq 1 150); do
     read_graph_rows "$n" > "$RESULTS/rows/restart.caught.node$n" 2>/dev/null || true
-    if grep -qv '^ready ' "$RESULTS/rows/restart.caught.node$n"; then caught=1; break; fi
+    if grep -qE '^(rebuilding|building) ' "$RESULTS/rows/restart.caught.node$n"; then caught=1; break; fi
     sleep 0.2
   done
-  [ -n "$caught" ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "every rebuild on node$n ended before a restart could start"; return; }
+  [ -n "$caught" ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "no read graph on node$n was seen being rebuilt, so no restart could land during one"; return; }
   restart_node "$n" || { record drill-restart FAIL "$(( $(now) - started ))" "node$n did not come back"; return; }
   if ! wait_all_ready drill-restart "$READY_TIMEOUT" "$n"; then record drill-restart FAIL "$(( $(now) - started ))" "node$n's read graphs not ready after the restart"; return; fi
   # Each read graph the restart caught unfinished must have a new generation.
@@ -529,9 +571,8 @@ drill_flag_off_and_back() {
   read_graph_rows "$n" > "$RESULTS/rows/flag.off.node$n" || true
   while read -r state gen graph; do [ "$state" = dirty ] || undirty="$undirty <$graph>:$state"; done < "$RESULTS/rows/flag.off.node$n"
   set_read_graphs "$n" "$SETTING"
-  if [ ! -s "$RESULTS/rows/flag.off.node$n" ]; then
-    restart_node "$n"; record drill-flag INCONCLUSIVE "$(( $(now) - started ))" "status listed no read graph with off"; return
-  fi
+  # With off, the node keeps no read graph: status lists none, or lists them dirty.
+  [ -s "$RESULTS/rows/flag.off.node$n" ] || note "drill-flag: with off, status listed no read graph on node$n"
   [ -z "$undirty" ] || { restart_node "$n"; record drill-flag FAIL "$(( $(now) - started ))" "with off, not dirty:$undirty"; return; }
   restart_node "$n" || { record drill-flag FAIL "$(( $(now) - started ))" "node$n did not come back with the setting"; return; }
   if ! wait_all_ready drill-flag "$READY_TIMEOUT" "$n"; then record drill-flag FAIL "$(( $(now) - started ))" "node$n's read graphs not ready after the setting came back"; return; fi
@@ -540,7 +581,7 @@ drill_flag_off_and_back() {
     [ -n "$gen_after" ] && [ "$gen_after" != "$gen" ] || older="$older <$graph>"
   done < "$RESULTS/rows/flag.before.node$n"
   [ -z "$older" ] || { record drill-flag FAIL "$(( $(now) - started ))" "no new generation for:$older"; return; }
-  drill_end drill-flag "$n" "$started" "off marked every read graph dirty; back on, each got a new generation and was rebuilt"
+  drill_end drill-flag "$n" "$started" "with off no read graph was kept or ready; back on, each got a new generation and was rebuilt"
 }
 
 phase_drills() {
