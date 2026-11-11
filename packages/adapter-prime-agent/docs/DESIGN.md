@@ -42,7 +42,6 @@ Recorded before anything is built on them.
 
 | Brief said | Source says |
 | --- | --- |
-| Deliverables go in `agent-docs/` and `agent-docs/adr/` | Neither path exists upstream. The ADR convention is `.ai/adr/NNNN-kebab-title.md` (0002–0006, kafka-plugin series) plus `docs/adr/0001-*`. Next free number is **0007**. The ADR for Q1 is written there; the other four documents are placed under `agent-docs/adapters/prime-agent/` as instructed, creating the directory. |
 | Prime Agent daemon "protocol v4" | Code is **protocol 7, schema revision 13** — `DAEMON_PROTOCOL_VERSION = 7` (`daemon-protocol.ts:52`), `DAEMON_SCHEMA_REVISION = 13` (`:59`), `DAEMON_SCHEMA_ID = "protocol-7-schema-13-816309b1cd50"` (`:60`). The docs still say v4 (`docs/daemon.md:76`, `docs/agent-connection.md:105`). The wire moved 4→7 while the prose did not — a stability signal in itself. |
 | `~30 dkg_*` tools is the parity target | Prime Agent ships **exactly one** built-in tool: `allToolNames = new Set(["ipython"])` (`src/core/tools/index.ts:46-47`); `read/write/grep/find/ls` were removed and are explicitly rejected (`src/cli/args.ts:63,161-167`). Tool-count parity is not a meaningful goal here. |
 | Adapters upstream include `adapter-neo4j` | Upstream has `adapter-hermes`, `adapter-openclaw`, `adapter-elizaos`. `adapter-neo4j` exists only in the local fork. |

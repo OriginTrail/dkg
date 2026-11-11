@@ -28,8 +28,8 @@ export function decodeConvictionCostCovered(
           epoch: Number(parsed.args.epoch),
           baseCost: BigInt(parsed.args.baseCost),
           discountedCost: BigInt(parsed.args.discountedCost),
-          drawnFromEpoch: BigInt(parsed.args.drawnFromEpoch),
-          drawnFromTopUp: BigInt(parsed.args.drawnFromTopUp),
+          drawnFromEpoch: BigInt(parsed.args.spentFromEpoch),
+          drawnFromTopUp: BigInt(parsed.args.spentFromTopUp),
         };
       }
     } catch { /* not a PublishingConviction event */ }

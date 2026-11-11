@@ -19,7 +19,7 @@ export function classifyPromoteAdmissionError(error: unknown): AssertionFailureR
         statusPath: `/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(evidence.jobId)}`,
       } : {}),
       recovery: evidence.admissionOutcome === 'indeterminate'
-        ? 'Observe this job ID or replay the same selector; do not create a different operation. A missing status response does not prove non-admission.'
+        ? 'Poll this job ID; do not resend. A missing status response does not prove non-admission; if every reply was lost, reconcile the share.'
         : 'This attempt did not admit a job. Retry the same selector after pressure subsides.',
     },
   };

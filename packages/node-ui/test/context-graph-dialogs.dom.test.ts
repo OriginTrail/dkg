@@ -40,15 +40,19 @@ describe('Context Graph dialogs', () => {
   const render = (panelOpen: boolean) => act(async () => {
     root.render(React.createElement(MemoryRouter, null, React.createElement(Shell, { panelOpen })));
   });
-  const find = (id: string) => container.querySelector<HTMLElement>(`[data-testid="${id}"]`);
+  // The dialogs portal to document.body, outside the shell's container.
+  const find = (id: string) => document.body.querySelector<HTMLElement>(`[data-testid="${id}"]`);
 
   beforeEach(() => {
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     useContextGraphDialogs.setState({ createOpen: false, joinOpen: false, joinContextGraphId: undefined });
-    container = document.createElement('div');
+    container = document.body.appendChild(document.createElement('div'));
     root = createRoot(container);
   });
-  afterEach(async () => { await act(async () => { root.unmount(); }); });
+  afterEach(async () => {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  });
 
   it('keeps the create dialog and its step when the panel closes and the route changes', async () => {
     await render(true);

@@ -174,9 +174,9 @@ const QUEUE_FILES: Readonly<Record<string, QueueFile>> = {
   },
   'packages/publisher/src/async-lift-guarded-clear.ts': {
     role: 'sites',
-    labels: [L('clear.siblings')],
-    storeCalls: [],
-    note: 'P11: bulk clear\'s sibling read; the label is issued through the selectors by the publisher (no store call of its own)',
+    labels: [L('clear.keys'), L('clear.siblings')].sort(),
+    storeCalls: ['query'],
+    note: 'P11: bulk clear\'s sibling read, whose label is issued through the selectors by the publisher; #3562: the read of the job\'s stored lifecycle-key triples, its one store call',
   },
   'packages/publisher/src/async-lift-retention-access.ts': {
     role: 'sites',

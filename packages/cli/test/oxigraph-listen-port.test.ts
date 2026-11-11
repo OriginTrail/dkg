@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { findListenOwnerPid, procNetLocalPortHex } from '../src/daemon/oxigraph-listen-port.js';
+import { findListenOwnerPid, procNetLocalPortHex, windowsTcpOwnerPid } from '../src/daemon/oxigraph-listen-port.js';
 import {
   linuxProcessTree,
   procHasFdTarget,
@@ -95,5 +95,34 @@ describe('procHasFdTarget', () => {
     expect(seen).toBe(1);
     await expect(procHasFdTarget(process.pid, () => false)).resolves.toBe(false);
     await expect(procHasFdTarget(2 ** 22 + 7, () => true)).resolves.toBe(false);
+  });
+});
+
+
+describe('Windows TCP service ownership', () => {
+  it.each(['LISTENING', 'ESTABLISHED'])('accepts the child local endpoint in %s state', state => {
+    expect(windowsTcpOwnerPid(`  TCP    127.0.0.1:7878    127.0.0.1:59001    ${state}    24336\r\n`, 24336, 7878)).toBe(24336);
+  });
+  it('accepts an IPv6 local endpoint with the exact target port', () => {
+    expect(windowsTcpOwnerPid(' TCP [::1]:7878 [::1]:59001 ESTABLISHED 24336', 24336, 7878)).toBe(24336);
+  });
+  it.each([
+    'TCP 127.0.0.1:59001 127.0.0.1:7878 ESTABLISHED 24336',
+    'TCP 127.0.0.1:59001 127.0.0.1:7878 LISTENING 24336',
+    'TCP 127.0.0.1:78780 0.0.0.0:0 LISTENING 24336',
+    'TCP 127.0.0.1:7878 0.0.0.0:0 LISTENING 99',
+    'TCP 127.0.0.1:7878 127.0.0.1:59001 TIME_WAIT 24336',
+    'TCP 127.0.0.1:7878 127.0.0.1:59001 CLOSE_WAIT 24336',
+    'UDP 127.0.0.1:7878 *:* ESTABLISHED 24336',
+    'TCP 127.0.0.1:7878 LISTENING 24336',
+  ])('rejects non-serving or unrelated rows: %s', row => {
+    expect(windowsTcpOwnerPid(row, 24336, 7878)).toBeNull();
+  });
+  it('ignores headers and unrelated rows before the matching server row', () => {
+    expect(windowsTcpOwnerPid([
+      'Active Connections', 'Proto Local Address Foreign Address State PID',
+      'TCP 127.0.0.1:7878 0.0.0.0:0 LISTENING 99',
+      'TCP 127.0.0.1:7878 127.0.0.1:59001 ESTABLISHED 24336',
+    ].join('\n'), 24336, 7878)).toBe(24336);
   });
 });

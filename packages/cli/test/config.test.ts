@@ -491,6 +491,21 @@ describe('loadNetworkConfig', () => {
     expect((config as any).genesisId).toBe('base-testnet');
     expect(config.networkId).toBe('7449c543ff04a550b2dafa999fe8ee577a00b212023bb4d4244e8d58a4792c7b');
     expect(config.defaultContextGraphs).toEqual([]);
+    // OT-RFC-27: the testnet Marketplace Context Graph, the default for a node whose config names none.
+    expect((config as any).marketplace).toEqual({ contextGraphId: 'testnet-marketplace' });
+  });
+
+  it('names a testnet Marketplace Context Graph id, not the placeholder', async () => {
+    const { _resetNetworkConfigCache } = await import('../src/config.js');
+    _resetNetworkConfigCache();
+    const config = await loadNetworkConfig('testnet');
+    if (!config) {
+      expect(config).toBeNull();
+      return;
+    }
+    // A format check only: the placeholder cannot ship. Whether the graph exists and admits nodes is a fact of the
+    // live testnet, checked when the id is filled in, not something a unit test can show.
+    expect((config as any).marketplace?.contextGraphId).not.toMatch(/^FILL_IN_/);
   });
 
   it('loads mainnet prep configs without activating testnet genesis or relays', async () => {
@@ -576,6 +591,8 @@ describe('loadNetworkConfig', () => {
       // must match the committed values.
       expect(cfg.networkId).not.toBe(testnetNetworkId);
       expect(cfg.relays).not.toEqual(testnetRelays);
+      // OT-RFC-27: no mainnet chain has the marketplace contracts, so no mainnet names a Marketplace Context Graph.
+      expect(cfg.marketplace).toBeUndefined();
       expect(cfg.networkName).toBe(expected.networkName);
       expect(cfg.genesisId).toBe(expected.genesisId);
       expect(cfg.networkId).toBe(expected.networkId);

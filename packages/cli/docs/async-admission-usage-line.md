@@ -112,7 +112,7 @@ The classes and reasons:
 | Queue | Classes | `_kept` reasons |
 | --- | --- | --- |
 | Share (`share_retention`) | `succeeded`, `cancelled`, `retired_no_effect` | `unreadable`, `index_mismatch`, `unknown_state`, `newer_format`, `not_terminal`, `unfinished_bound_obligation`, `failed_retained`, `post_commit_recoverable`, `pending_admission`, `too_recent`, `future_dated`, `vanished` |
-| Publisher (`lift_retention`) | `finalized` | `unreadable`, `unknown_state`, `index_mismatch`, `not_terminal`, `bound_obligation`, `too_recent`, `future_dated`, `older_sibling_kept`, `older_sibling_pending`, `siblings_unreadable`, `binding_would_change`, `vanished` |
+| Publisher (`lift_retention`) | `finalized` | `unreadable`, `unknown_state`, `index_mismatch`, `not_terminal`, `bound_obligation`, `too_recent`, `future_dated`, `older_sibling_kept`, `older_sibling_pending`, `siblings_unreadable`, `siblings_too_many`, `binding_would_change`, `vanished` |
 
 A growing `older_sibling_kept` count means older failed publish jobs of the same
 Knowledge Asset hold newer finalized ones back; clear them with

@@ -293,7 +293,11 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       return this.inner.hasGraph(graphUri, options);
     }
     if (this.pendingFullRefresh) {
-      return (await this.ensureGraphSet(options)).has(graphUri);
+      // A dirty catalog cannot answer presence, but the backend can. Do not
+      // make an exact probe wait for a full inventory scan under write load.
+      // Leave the dirty catalog and its mutation source for the next listing.
+      throwIfAborted(options?.signal);
+      return raceStoreWorkAgainstAbort(this.inner.hasGraph(graphUri, options), options?.signal);
     }
     const hasGraph = await this.inner.hasGraph(graphUri, options);
     const indexed = this.catalog.has(graphUri);

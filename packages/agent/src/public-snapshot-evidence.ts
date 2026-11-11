@@ -9,7 +9,7 @@ import {
   sparqlString,
 } from "@origintrail-official/dkg-core";
 import { isWithheldGraphQueryError, type QueryEngine, type QueryOptions, type QueryResult } from "@origintrail-official/dkg-query";
-import type { TripleStore } from "@origintrail-official/dkg-storage";
+import type { Quad, TripleStore } from "@origintrail-official/dkg-storage";
 import type {
   VerifiedGraphScopedAsset,
   AuthenticatedGraphScopedAsset,
@@ -29,14 +29,18 @@ export async function markCoreTrustedGraph(
   store: TripleStore,
   contextGraphId: string,
 ): Promise<void> {
-  await store.insert([
+  await store.insert(coreTrustedGraphQuads(contextGraphId));
+}
+/** The same durable query restriction for live materialization and an empty checkpoint. */
+export function coreTrustedGraphQuads(contextGraphId: string): Quad[] {
+  return [
     {
       subject: contextGraphDataUri(contextGraphId),
       predicate: `${DKG}chainEvidenceMode`,
       object: '"core-cache"',
       graph: SNAPSHOT_TRUST_GRAPH,
     },
-  ]);
+  ];
 }
 /** True when the caller accepted core-cache evidence, which needs an explicit context graph. */
 function acceptsCoreCache(contextGraphId: string | undefined, accepted: PublicSnapshotMode | undefined): boolean {

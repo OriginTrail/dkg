@@ -26,10 +26,35 @@ interface PeerEventState {
   log: { warn(ctx: OperationContext, message: string): void };
 }
 
+/**
+ * The `connection:open` listeners the agent adds once its libp2p node first
+ * runs. The `node.start` spy removes itself on that start, so a test can still
+ * spy on `node.start` for a restart of its own.
+ */
+function captureAgentConnectionOpenListeners(agent: DKGAgent) {
+  const captured = { transport: undefined as unknown, listeners: [] as Array<(event: CustomEvent) => void> };
+  const startNode = agent.node.start.bind(agent.node);
+  const start = vi.spyOn(agent.node, 'start').mockImplementation(async () => {
+    start.mockRestore();
+    await startNode();
+    const transport = agent.node.libp2p;
+    const addEventListener = transport.addEventListener.bind(transport);
+    vi.spyOn(transport, 'addEventListener').mockImplementation((type, listener, options) => {
+      if (type === 'connection:open' && typeof listener === 'function') {
+        captured.listeners.push(listener as (event: CustomEvent) => void);
+      }
+      addEventListener(type, listener, options);
+    });
+    captured.transport = transport;
+  });
+  return captured;
+}
+
 export async function createPeerEventFixture() {
   const agent = await DKGAgent.create({
     name: 'PeerEventLifecycle', listenHost: '127.0.0.1', chainAdapter: new MockChainAdapter(),
   });
+  const connectionOpen = captureAgentConnectionOpenListeners(agent);
   await agent.start();
   const state = agent as unknown as PeerEventState;
   const transport = agent.node.libp2p;
@@ -55,6 +80,18 @@ export async function createPeerEventFixture() {
       transport.dispatchEvent(new CustomEvent('connection:open', {
         detail: { remotePeer: peer, direction: 'inbound' },
       }));
+    },
+    /**
+     * Hand an open connection to the agent's own `connection:open` listeners
+     * only. Dispatched on the running node, it would also reach libp2p's
+     * connection manager, which keeps an open connection and closes it at stop.
+     */
+    openConnection(connection: object) {
+      if (transport !== connectionOpen.transport || agent.node.libp2p !== transport) {
+        throw new Error('openConnection serves the first node lifetime of the fixture only');
+      }
+      const event = new CustomEvent('connection:open', { detail: connection });
+      for (const listener of connectionOpen.listeners) listener(event);
     },
     dispatchClose() {
       transport.dispatchEvent(new CustomEvent('connection:close', {

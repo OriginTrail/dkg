@@ -1,8 +1,7 @@
-import type { SharedMemoryPublicSnapshotStorageConfig } from '@origintrail-official/dkg-publisher';
 import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError } from './oxigraph-memory-limits.js';
 import { resolveBooleanEnvOverride } from './boolean-env-override.js';
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
-import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origintrail-official/dkg-publisher';
+import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning, type SharedMemoryPublicSnapshotStorageConfig } from '@origintrail-official/dkg-publisher';
 import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -632,10 +631,10 @@ export interface LoggingConfig {
   /** Emit detailed KA publish lifecycle logs. Default: false. */
   kaPublishLifecycleDebug?: boolean;
 }
-
 export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'> {
   /** Lower RPC usage by using the DKG Core chain cache. Core service defaults on. Edge use is opt-in. */
   DKG_Core_chain_cache?: boolean;
+  publicSnapshotBootstrap?: import('./daemon/public-checkpoint-config.js').DaemonPublicCheckpointConfig;
   name: string;
   /**
    * Selects which bundled network/<name>.json overlay this node should use.
@@ -763,6 +762,7 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
   logging?: LoggingConfig;
   /** Cross-agent query access policy for inbound query-remote requests. */
   queryAccess?: QueryAccessConfig;
+  marketplace?: { enabled?: boolean; seller?: { enabled?: boolean }; [setting: string]: unknown }; // OT-RFC-27; packages/marketplace reads it.
   autoUpdate?: AutoUpdateConfig;
   /**
    * Field-merged over network/<env>.json#chain by resolveChainConfig().

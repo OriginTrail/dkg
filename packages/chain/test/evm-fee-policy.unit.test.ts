@@ -20,8 +20,8 @@ const GNOSIS = chainFeeFloor(100n)!;
 const PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
 describe('EVM fee pricing', () => {
-  it('floors Gnosis and Chiado only', () => {
-    expect(chainFeeFloor(100n)).toEqual({ maxFeePerGasWei: 2n * GWEI, maxPriorityFeePerGasWei: GWEI });
+  it('floors the Gnosis and Chiado fee ceiling without flooring the RPC tip', () => {
+    expect(chainFeeFloor(100n)).toEqual({ maxFeePerGasWei: 2n * GWEI, maxPriorityFeePerGasWei: 0n });
     expect(chainFeeFloor(10200n)).toEqual(chainFeeFloor(100n));
     for (const chainId of [1n, 8453n, 84532n, 2043n, 31337n]) {
       expect(chainFeeFloor(chainId)).toBeUndefined();
@@ -74,7 +74,7 @@ describe('EVM fee pricing', () => {
         suggestedPriorityFeePerGas: 100n,
         floor: GNOSIS,
       });
-      expect(fees).toEqual({ maxFeePerGas: 2n * GWEI, maxPriorityFeePerGas: GWEI });
+      expect(fees).toEqual({ maxFeePerGas: 2n * GWEI, maxPriorityFeePerGas: 100n });
       for (const spike of spikeBaseFees) {
         // Includable through the whole spike, and still paying the full tip at its peak.
         expect(fees.maxFeePerGas).toBeGreaterThan(spike);
@@ -82,6 +82,35 @@ describe('EVM fee pricing', () => {
       }
       expect(fees.maxFeePerGas / 36_000_000n).toBeGreaterThanOrEqual(55n);
     }
+  });
+});
+
+describe('Gnosis market tips with independent base-fee headroom', () => {
+  it.each([100n, 10200n])('uses the RPC tip on chain %s without charging the fee ceiling', (chainId) => {
+    for (const tip of [0n, 1n, 100n, 1_000_000n, 350_000_000n, 2n * GWEI]) {
+      const fees = priceEip1559Fees({ baseFeePerGas: 14n, suggestedPriorityFeePerGas: tip, floor: chainFeeFloor(chainId) });
+      expect(fees.maxPriorityFeePerGas).toBe(tip);
+      expect(fees.maxFeePerGas).toBeGreaterThanOrEqual(2n * GWEI);
+      expect(fees.maxFeePerGas).toBeGreaterThanOrEqual(3n * 14n + tip);
+    }
+  });
+
+  it('keeps a low-tip publication includable through the historical base-fee spikes', () => {
+    const fees = priceEip1559Fees({ baseFeePerGas: 14n, suggestedPriorityFeePerGas: 100n, floor: GNOSIS });
+    // EIP-1559 charges min(maxFee, block base fee + tip), not the ceiling itself.
+    for (const blockBaseFee of [14n, 4_900_000n, 36_000_000n]) {
+      expect(fees.maxFeePerGas - blockBaseFee).toBeGreaterThanOrEqual(fees.maxPriorityFeePerGas);
+    }
+    const gasUsed = 807_024n;
+    expect(gasUsed * (14n + fees.maxPriorityFeePerGas)).toBe(92_000_736n);
+    expect(gasUsed * (14n + GWEI)).toBe(807_024_011_298_336n);
+  });
+
+  it('retains the availability fallback when no RPC tip is available', () => {
+    expect(priceEip1559Fees({ baseFeePerGas: 14n, suggestedPriorityFeePerGas: null, floor: GNOSIS })).toEqual({
+      maxFeePerGas: 2n * GWEI,
+      maxPriorityFeePerGas: GWEI,
+    });
   });
 });
 
@@ -103,7 +132,7 @@ describe('same-nonce replacement fees', () => {
     const stuck = { maxFeePerGas: 614n, maxPriorityFeePerGas: 100n };
     const market = priceEip1559Fees({ baseFeePerGas: 4_900_000n, suggestedPriorityFeePerGas: 100n, floor: GNOSIS });
     const fees = replacementFees(stuck, market);
-    expect(fees).toEqual({ maxFeePerGas: 2n * GWEI, maxPriorityFeePerGas: GWEI });
+    expect(fees).toEqual({ maxFeePerGas: 2n * GWEI, maxPriorityFeePerGas: 113n });
     expect(isAcceptedReplacement(stuck, fees)).toBe(true);
   });
 

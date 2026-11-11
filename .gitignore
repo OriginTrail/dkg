@@ -41,6 +41,8 @@ devnet/**/turns/
 # checked-in ADRs live in docs/adr/.
 .ai/
 .scratch/
+# Internal agent working plans stay local.
+/agent-docs/
 
 # WM persistence regression repro (Phase 1 of fix/graphify-import-issues).
 # Daemon state (.dkg-repro/) contains agent keystore, tokens, the Oxigraph

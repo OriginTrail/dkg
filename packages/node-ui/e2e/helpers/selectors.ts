@@ -5,8 +5,7 @@ export const sel = {
   header: {
     root: '.v10-header',
     logo: '.v10-header-logo',
-    logoText: '.v10-header-logo-text',
-    version: '.v10-header-logo-version',
+    logoText: '.v10-header-ot-wordmark',
     sidebarToggle: 'button[title="Toggle sidebar"]',
     agentName: '.v10-header-agent-name',
     status: '.v10-header-meta .ds-badge',
@@ -40,10 +39,10 @@ export const sel = {
     // PRs); this PR only triages the cases its removals directly broke.
     treeContent: '.v10-tree-content',
     dashboard: '.v10-tree-dashboard',
-    newProjectBtn: '.v10-new-project-btn',
-    emptyCard: '.v10-journey-empty-card',
-    emptyTitle: '.v10-jec-title',
-    emptyHint: '.v10-jec-hint',
+    newProjectBtn: '.v10-sidebar-inline-actions button',
+    emptyCard: '.v10-sidebar-empty',
+    emptyTitle: '.v10-sidebar-empty strong',
+    emptyHint: '.v10-sidebar-empty span',
     section: '.v10-tree-section',
     sectionHeader: '.v10-tree-section-header',
     sectionLabel: '.v10-tree-section-label',
@@ -56,6 +55,7 @@ export const sel = {
     peerGroup: '.v10-peer-group',
     peerGroupHeader: '.v10-peer-group-header',
     peerGroupLabel: '.v10-peer-group-label',
+    peerGroupCount: '.v10-peer-group-count',
     peerGroupBody: '.v10-peer-group-body',
   },
 

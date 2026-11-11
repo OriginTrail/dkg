@@ -1417,11 +1417,9 @@ describe('approved private bare-name replica authorization', () => {
     await expect(fixture.receiver.resolveSwmAllowedPeersForCurrentAuthority(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual([fixture.receiver.peerId]);
-    // The compatibility projection is intentionally broad and demonstrates
-    // the exact widening input. SWM authority must ignore the secondary row
-    // while this graph is governed by the approved-private replica proof.
+    // The projection takes no peer from the secondary row either.
     await expect(fixture.receiver.getContextGraphAllowedPeers(CONTEXT_GRAPH_ID))
-      .resolves.toEqual(expect.arrayContaining([fixture.receiver.peerId, CURATOR_PEER]));
+      .resolves.toEqual([fixture.receiver.peerId]);
 
     const recipientKeyId = fixture.member.workspaceEncryptionKeys[0]?.encryptionKeyId;
     if (recipientKeyId === undefined) {
@@ -1455,7 +1453,7 @@ describe('approved private bare-name replica authorization', () => {
     });
   });
 
-  it('preserves the merged legacy peer gate when no local approval marker exists', async () => {
+  it('keeps the peer gate of the graph\'s own metadata when no local approval marker exists', async () => {
     const fixture = await approvedBareNameReplicaFixture({
       localApproval: false,
       peerAllowlist: 'receiver-only',
@@ -1476,7 +1474,7 @@ describe('approved private bare-name replica authorization', () => {
     await expect(fixture.receiver.resolveSwmAllowedPeersForCurrentAuthority(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual(legacyPeers);
-    expect(legacyPeers).toEqual(expect.arrayContaining([fixture.receiver.peerId, CURATOR_PEER]));
+    expect(legacyPeers).toEqual([fixture.receiver.peerId]);
     expect(transport).not.toHaveBeenCalled();
   });
 
@@ -2288,9 +2286,9 @@ describe('approved private bare-name replica authorization', () => {
         object: JSON.stringify(OUTSIDER),
       }]);
       Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty(CONTEXT_GRAPH_ID);
-      // The merged projection carries the assertion: this is the widening input.
+      // The merged projection takes no such assertion either.
       expect((await fixture.receiver.getLocalMetadataMemberRecoveryGate(CONTEXT_GRAPH_ID))
-        ?.map((address) => address.toLowerCase())).toContain(OUTSIDER);
+        ?.map((address) => address.toLowerCase())).not.toContain(OUTSIDER);
 
       const authority = await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
         CONTEXT_GRAPH_ID,
@@ -2341,7 +2339,7 @@ describe('approved private bare-name replica authorization', () => {
     },
   );
 
-  it('applies a revocation from shared metadata to a member named in the graph\'s own metadata', async () => {
+  it('takes no revocation from shared metadata for a member named in the graph\'s own metadata', async () => {
     const secondMember = OUTSIDER;
     const fixture = await approvedBareNameReplicaFixture({
       additionalAllowedAgents: [secondMember],
@@ -2360,9 +2358,9 @@ describe('approved private bare-name replica authorization', () => {
       { kind: 'finalized-absence' },
     );
 
-    // Shared metadata may only narrow the roster, never widen it.
+    // Shared metadata neither widens the roster nor narrows it.
     expect(authority?.roster?.members.map(({ agentAddress }) => agentAddress).sort())
-      .toEqual([OWNER, fixture.memberAddress].sort());
+      .toEqual([OWNER, fixture.memberAddress, secondMember].sort());
   });
 
   it('keeps reads and shared memory on the live join proof after catalog authority is accepted', async () => {

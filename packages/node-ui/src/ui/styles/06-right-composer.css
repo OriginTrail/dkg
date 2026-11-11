@@ -299,7 +299,7 @@
   color: var(--text-tertiary);
 }
 .v10-drop-overlay-title {
-  font-size: var(--fs-title);
+  font-size: var(--fs-body);
   font-weight: 600;
   color: var(--text-primary);
 }

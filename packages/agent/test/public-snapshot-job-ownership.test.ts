@@ -1,3 +1,4 @@
+import { PublicSnapshotSessionMethods } from '../src/public-snapshot-session.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import * as exactRecovery from '../src/exact-recovery-execution.js';
@@ -29,6 +30,7 @@ function snapshot(extra = false) {
 function fixture() {
   let generation = 0;
   const a: any = {
+    withPublicSnapshotSession: PublicSnapshotSessionMethods.prototype.withPublicSnapshotSession,
     started: true, vmReconcileRotationClosed: false, workLifetime: new AgentWorkLifetime(),
     contextGraphSubscriptionDormancyById: new Map(),
     waitForContextGraphSubscriptionActivation: LifecycleSyncMethods.prototype.waitForContextGraphSubscriptionActivation,
@@ -252,6 +254,7 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
     a.contextGraphSubscriptionDormancyById = new Map();
     a.waitForContextGraphSubscriptionActivation = LifecycleSyncMethods.prototype.waitForContextGraphSubscriptionActivation;
     a.router.send = vi.fn(async () => { throw new Error('RPC-only jobs must not request a core snapshot'); });
+    a.withPublicSnapshotSession = PublicSnapshotSessionMethods.prototype.withPublicSnapshotSession;
     a.started = true;
     a.subscribedContextGraphs.set(CG, { subscribed: true, onChainId: '14', onChainHash: ethers.id(CG) });
     a.getSubscribedContextGraphs = () => a.subscribedContextGraphs;

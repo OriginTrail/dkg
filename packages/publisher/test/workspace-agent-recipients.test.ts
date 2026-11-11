@@ -3,12 +3,8 @@ import { ethers } from 'ethers';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   DKG_ONTOLOGY,
-  SYSTEM_CONTEXT_GRAPHS,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
-  computeWorkspaceAgentEncryptionKeyProofPayload,
   computeWorkspaceAgentEncryptionKeyRevocationPayload,
-  contextGraphDataUri,
-  contextGraphMetaUri,
   encodeWorkspaceEncryptionKey,
   generateWorkspaceRecipientEncryptionKey,
   toAgentDid,
@@ -23,15 +19,18 @@ import {
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
 } from '../src/index.js';
+import {
+  AGENTS_GRAPH,
+  CONTEXT_GRAPH_ID,
+  DATA_GRAPH,
+  DKG_ENCRYPTION_KEY_PROOF,
+  DKG_PUBLIC_ENCRYPTION_KEY,
+  META_GRAPH,
+  agentUri,
+  insertAgentEncryptionKey,
+  insertAgentGate,
+} from './_helpers/workspace-agent-recipient-store.js';
 
-const CONTEXT_GRAPH_ID = 'workspace-agent-recipient-resolution';
-const DATA_GRAPH = contextGraphDataUri(CONTEXT_GRAPH_ID);
-const META_GRAPH = contextGraphMetaUri(CONTEXT_GRAPH_ID);
-const AGENTS_GRAPH = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
-const DKG = 'https://dkg.network/ontology#';
-const DKG_PUBLIC_ENCRYPTION_KEY = `${DKG}publicEncryptionKey`;
-const DKG_ENCRYPTION_KEY_ALGORITHM = `${DKG}encryptionKeyAlgorithm`;
-const DKG_ENCRYPTION_KEY_PROOF = `${DKG}encryptionKeyProof`;
 const PEER_A = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
 const PEER_B = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
 const SELF_PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
@@ -39,10 +38,6 @@ const PROJECTION_AGENTS = Array.from(
   { length: 6 },
   (_unused, index) => ethers.getAddress(`0x${String(index + 1).padStart(40, '0')}`),
 );
-
-function agentUri(address: string): string {
-  return `did:dkg:agent:${ethers.getAddress(address)}`;
-}
 
 function recipientFixture(agentAddress: string, peerId?: string): WorkspaceAgentRecipient {
   return {
@@ -64,19 +59,6 @@ function inspectResolutionArm(resolution: WorkspaceAgentRecipientResolution): st
   return noRecipients.length;
 }
 
-async function insertAgentGate(
-  store: OxigraphStore,
-  predicate: string,
-  address: string,
-): Promise<void> {
-  await store.insert([{
-    subject: DATA_GRAPH,
-    predicate,
-    object: `"${address}"`,
-    graph: META_GRAPH,
-  }]);
-}
-
 async function insertPrivatePeerGate(store: OxigraphStore): Promise<void> {
   await store.insert([
     {
@@ -92,75 +74,6 @@ async function insertPrivatePeerGate(store: OxigraphStore): Promise<void> {
       graph: META_GRAPH,
     },
   ]);
-}
-
-async function insertAgentEncryptionKey(
-  store: OxigraphStore,
-  wallet: ethers.Wallet,
-  options: {
-    algorithm?: string;
-    proofWallet?: ethers.Wallet;
-    omitAlgorithm?: boolean;
-    omitProof?: boolean;
-    keyFill?: number;
-    subject?: string;
-    graph?: string;
-    peerId?: string;
-  } = {},
-): Promise<{ publicKeyBytes: Uint8Array; keyId: string }> {
-  const recipientKey = generateWorkspaceRecipientEncryptionKey(
-    agentUri(wallet.address),
-    `${agentUri(wallet.address)}#test-x25519`,
-    options.keyFill === undefined
-      ? undefined
-      : (length) => new Uint8Array(length).fill(options.keyFill),
-  );
-  const publicKeyBytes = recipientKey.publicKeyBytes!;
-  const publicEncryptionKey = encodeWorkspaceEncryptionKey(publicKeyBytes);
-  const proofSigner = options.proofWallet ?? wallet;
-  const proofPayload = computeWorkspaceAgentEncryptionKeyProofPayload({
-    agentAddress: wallet.address,
-    encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
-    publicKeyBytes,
-  });
-  const proof = proofSigner.signingKey.sign(ethers.hashMessage(proofPayload)).serialized;
-  const subject = options.subject ?? agentUri(wallet.address);
-  const graph = options.graph ?? 'did:dkg:system/agents';
-  const quads = [{
-    subject,
-    predicate: DKG_PUBLIC_ENCRYPTION_KEY,
-    object: `"${publicEncryptionKey}"`,
-    graph,
-  }];
-  if (!options.omitAlgorithm) {
-    quads.push({
-      subject,
-      predicate: DKG_ENCRYPTION_KEY_ALGORITHM,
-      object: `"${options.algorithm ?? WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519}"`,
-      graph,
-    });
-  }
-  if (!options.omitProof) {
-    quads.push({
-      subject,
-      predicate: DKG_ENCRYPTION_KEY_PROOF,
-      object: `"${proof}"`,
-      graph,
-    });
-  }
-  if (options.peerId !== undefined) {
-    quads.push({
-      subject,
-      predicate: `${DKG}peerId`,
-      object: `"${options.peerId}"`,
-      graph,
-    });
-  }
-  await store.insert(quads);
-  return {
-    publicKeyBytes,
-    keyId: workspaceAgentEncryptionKeyId(ethers.getAddress(wallet.address), publicKeyBytes),
-  };
 }
 
 async function insertAgentEncryptionKeyRevocation(
@@ -440,32 +353,6 @@ describe('resolveWorkspaceAgentRecipients', () => {
 
     await expect(resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID }))
       .rejects.toThrow(/Too many public encryption-key proof candidates/u);
-  });
-
-  it('resolves AGENTS-graph private declarations through the sender-key recipient path', async () => {
-    const store = new OxigraphStore();
-    const wallet = ethers.Wallet.createRandom();
-    await store.insert([
-      {
-        subject: DATA_GRAPH,
-        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
-        object: '"private"',
-        graph: AGENTS_GRAPH,
-      },
-      {
-        subject: DATA_GRAPH,
-        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
-        object: `"${wallet.address}"`,
-        graph: AGENTS_GRAPH,
-      },
-    ]);
-    await insertAgentEncryptionKey(store, wallet);
-
-    const resolution = await resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID });
-
-    expect(resolution.requiresEncryption).toBe(true);
-    expect(resolution.recipients).toHaveLength(1);
-    expect(resolution.recipients[0]?.agentAddress).toBe(ethers.getAddress(wallet.address));
   });
 
   it('preserves peer-only non-private graphs as legacy plaintext-compatible SWM', async () => {

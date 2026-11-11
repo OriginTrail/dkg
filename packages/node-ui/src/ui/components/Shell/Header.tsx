@@ -14,7 +14,7 @@ const ORIGINTRAIL_SYMBOL = (
 /** OriginTrail wordmark — same paths as `v9-stable` packages/node-ui App.tsx sidebar. */
 const ORIGINTRAIL_WORDMARK = (
   <span className="v10-header-ot-wordmark">
-    <svg width="60" height="13" viewBox="0 0 180 40" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+    <svg width="90" height="20" viewBox="0 0 180 40" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden>
       <path d="M55.0428 28.0111C59.7903 28.0111 62.6388 24.531 62.6388 20.3908C62.6388 16.2806 59.7903 12.8005 55.0428 12.8005C50.325 12.8005 47.4766 16.2806 47.4766 20.3908C47.4766 24.531 50.325 28.0111 55.0428 28.0111ZM55.0428 24.621C52.6988 24.621 51.3932 22.6709 51.3932 20.3908C51.3932 18.1407 52.6988 16.1906 55.0428 16.1906C57.3869 16.1906 58.7221 18.1407 58.7221 20.3908C58.7221 22.6709 57.3869 24.621 55.0428 24.621Z" fill="currentColor" />
       <path d="M65.4344 27.6511H69.2027V18.0807C69.8258 17.1507 71.4874 16.4606 72.7336 16.4606C73.149 16.4606 73.5051 16.4906 73.7721 16.5507V12.8305C71.9918 12.8305 70.2115 13.8505 69.2027 15.1406V13.1605H65.4344V27.6511Z" fill="currentColor" />
       <path d="M77.9959 11.0304C79.2421 11.0304 80.251 10.0104 80.251 8.75031C80.251 7.49026 79.2421 6.47021 77.9959 6.47021C76.7794 6.47021 75.7409 7.49026 75.7409 8.75031C75.7409 10.0104 76.7794 11.0304 77.9959 11.0304ZM76.1266 27.6511H79.8949V13.1605H76.1266V27.6511Z" fill="currentColor" />
@@ -33,7 +33,7 @@ const ORIGINTRAIL_WORDMARK = (
 
 /** The wordmark's symbol alone: keeps OriginTrail in the header where the wordmark doesn't fit. */
 const ORIGINTRAIL_MARK = (
-  <span className="v10-header-ot-mark" role="img" aria-label="Powered by OriginTrail">
+  <span className="v10-header-ot-mark" aria-hidden="true">
     <svg width="17" height="17" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden>
       {ORIGINTRAIL_SYMBOL}
     </svg>
@@ -88,13 +88,10 @@ export function Header() {
 
   return (
     <header className="v10-header">
-      <div className="v10-header-logo">
+      {/* The OriginTrail wordmark is the logo; under 860px its mark stands in, so the brand stays in view. */}
+      <div className="v10-header-logo" aria-label="OriginTrail">
         {ORIGINTRAIL_MARK}
-        <span className="v10-header-logo-text">DKG <span className="v10-header-logo-version">v10</span></span>
-        <div className="v10-header-logo-ot" aria-label="Powered by OriginTrail">
-          <span className="v10-header-logo-ot-by">powered by</span>
-          {ORIGINTRAIL_WORDMARK}
-        </div>
+        {ORIGINTRAIL_WORDMARK}
       </div>
 
       <button

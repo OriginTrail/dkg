@@ -31,7 +31,7 @@
 }
 .v10-pca-section-title {
   margin: 0;
-  font-size: var(--fs-title);
+  font-size: var(--fs-body);
   font-weight: 700;
   color: var(--text-primary);
 }
@@ -79,7 +79,7 @@
   .v10-pca-card-grid { grid-template-columns: 1fr; }
 }
 .v10-pca-card-title { display: flex; align-items: center; gap: var(--space-8); margin-bottom: var(--space-12); }
-.v10-pca-card-id { font-size: var(--fs-title); font-weight: 700; color: var(--text-primary); }
+.v10-pca-card-id { font-size: var(--fs-body); font-weight: 700; color: var(--text-primary); }
 .v10-pca-card-sponsor { font-size: var(--fs-label); color: var(--text-tertiary); }
 .v10-pca-card-spacer { flex: 1; }
 .v10-pca-card-owner { display: flex; align-items: center; gap: var(--space-8); margin-top: var(--space-12); }
