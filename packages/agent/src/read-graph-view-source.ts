@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { ViewReadGraphs } from '@origintrail-official/dkg-query';
+import { MemoryLayer, parseReadGraphIri } from '@origintrail-official/dkg-core';
 import {
-  readGraphLayerOf, readGraphModeOf, viewSemanticsOf, workingMemoryIdentityRule, type WorkingMemoryIdentityRule,
+  nextReadGraphState, readGraphLayerOf, readGraphModeOf, readGraphStateCompareAndSet, viewSemanticsOf, workingMemoryIdentityRule,
+  type ReadGraphBackendRuntime, type ReadGraphStore, type WorkingMemoryIdentityRule,
 } from '@origintrail-official/dkg-storage';
 
 /**
@@ -36,37 +38,56 @@ export interface ReadGraphNodeIdentity {
   readonly peerId?: string;
 }
 
+const INSTALLED = new WeakMap<ReadGraphBackendRuntime, { readonly node: ReadGraphNodeIdentity; readonly rule: WorkingMemoryIdentityRule }>();
+
 /**
  * Give the backend's read-graph runtime the node's working-memory identity
  * rule: every agent owns the drafts written under its own address, and the
  * default agent also those written under the node's peer ID. Merged view
  * queries and the layer's maintenance both map drafts to agents with it.
  *
- * `node` is read at each use, so a later change of the default agent applies
- * at once; when it cannot be read (a node that has stopped), the rule knows
- * neither. A store without a read-graph layer is left as it is.
+ * The agent installs it at start, and again when its default agent changes.
+ * A new rule that gives the drafts under the peer ID to another agent first
+ * marks the working-memory read graphs of both agents dirty, under their
+ * locks, so neither is served with contents built under the previous rule;
+ * the builder rebuilds them. A store without a read-graph layer is left as it
+ * is.
  */
-export function installReadGraphWorkingMemoryIdentity(store: unknown, node: () => ReadGraphNodeIdentity): void {
-  const runtime = readGraphLayerOf(store)?.runtime;
-  if (runtime === undefined) return;
-  let last: { readonly defaultAgentAddress?: string; readonly peerId?: string; readonly rule: WorkingMemoryIdentityRule } | undefined;
-  const current = (): WorkingMemoryIdentityRule => {
-    let identity: ReadGraphNodeIdentity;
-    try {
-      identity = node();
-    } catch {
-      identity = {};
+export async function installReadGraphWorkingMemoryIdentity(store: unknown, node: ReadGraphNodeIdentity): Promise<void> {
+  const layer = readGraphLayerOf(store);
+  if (layer === null) return;
+  const rule = workingMemoryIdentityRule(node);
+  const previous = INSTALLED.get(layer.runtime);
+  if (previous !== undefined) {
+    const affected = new Set<string>();
+    for (const peerId of [previous.node.peerId, node.peerId]) {
+      if (peerId === undefined) continue;
+      const before = previous.rule.ownerOf(peerId);
+      const after = rule.ownerOf(peerId);
+      if (before === after) continue;
+      for (const owner of [before, after]) if (owner !== undefined) affected.add(owner);
     }
-    const { defaultAgentAddress, peerId } = identity;
-    let entry = last;
-    if (entry === undefined || entry.defaultAgentAddress !== defaultAgentAddress || entry.peerId !== peerId) {
-      entry = { defaultAgentAddress, peerId, rule: workingMemoryIdentityRule({ defaultAgentAddress, peerId }) };
-      last = entry;
-    }
-    return entry.rule;
-  };
-  runtime.workingMemoryIdentity = {
-    ownerOf: (address) => current().ownerOf(address),
-    addressesOf: (agentAddress) => current().addressesOf(agentAddress),
-  };
+    if (affected.size > 0) await markWorkingMemoryReadGraphsDirty(layer, affected);
+  }
+  layer.runtime.workingMemoryIdentity = rule;
+  INSTALLED.set(layer.runtime, { node, rule });
+}
+
+/** Mark dirty the working-memory read graphs of `agents` that have a row: in the mirror first, then in the store. */
+async function markWorkingMemoryReadGraphsDirty(layer: ReadGraphStore, agents: ReadonlySet<string>): Promise<void> {
+  const { runtime } = layer;
+  for (const { readGraph } of runtime.mirror.rows()) {
+    const key = parseReadGraphIri(readGraph);
+    if (key?.layer !== MemoryLayer.WorkingMemory || !agents.has(key.agentAddress)) continue;
+    await runtime.locks.withLocks([readGraph], async () => {
+      const row = runtime.mirror.get(readGraph);
+      if (row === undefined || row.state === 'dirty') return;
+      const dirty = nextReadGraphState(row, { kind: 'mark-dirty' });
+      if (dirty === undefined) return;
+      runtime.mirror.set(dirty);
+      // If the store keeps the older row, a rebuild starts from it, as for the layer's own dirty marks.
+      await layer.innerStore.update?.(readGraphStateCompareAndSet(row, dirty), { source: 'agent.readGraphIdentityChange' })
+        .catch(() => undefined);
+    });
+  }
 }

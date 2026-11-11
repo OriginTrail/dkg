@@ -1672,8 +1672,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // reliance on SPARQL result ordering. Then settle the default agent once.
     await this.loadAgentsFromStore();
     await this.reconcileDefaultAgent();
-    // Read graphs map working-memory drafts to agents with the node's own rule, read at each use.
-    installReadGraphWorkingMemoryIdentity(this.store, () => ({ defaultAgentAddress: this.defaultAgentAddress, peerId: this.peerId }));
+    // Read graphs map working-memory drafts to agents with the node's own rule.
+    await installReadGraphWorkingMemoryIdentity(this.store, { defaultAgentAddress: this.defaultAgentAddress, peerId: this.peerId });
 
     const network = new LibP2PNetwork(this.node);
     // Local helper: race a lookup against an optional AbortSignal so

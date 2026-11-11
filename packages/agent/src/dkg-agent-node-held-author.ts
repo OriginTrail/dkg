@@ -10,6 +10,7 @@ import type { AgentKeyRecord } from './agent-keystore.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import { isNodeHeldAgent, localAgentRecord, nodeHeldAuthorEnabled, nodeHeldDefaultAgent } from './node-held-author.js';
+import { installReadGraphWorkingMemoryIdentity } from './read-graph-view-source.js';
 // dkg-agent.ts takes the config check from here too, on one import line: it is at its file-size budget.
 export { assertNodeHeldAuthorConfig } from './node-held-author.js';
 
@@ -35,6 +36,8 @@ export class NodeHeldAuthorMethods extends DKGAgentBase {
     const previous = this.defaultAgentAddress;
     // Taken before anything is awaited, so a concurrent registration finds the default agent taken.
     this.defaultAgentAddress = record.agentAddress;
+    // A started node's read graphs follow the new owner of its peer ID's drafts; start installs the rule otherwise.
+    if (this.started) await installReadGraphWorkingMemoryIdentity(this.store, { defaultAgentAddress: record.agentAddress, peerId: this.peerId });
     const ctx = createOperationContext('system');
     this.log.info(
       ctx,
