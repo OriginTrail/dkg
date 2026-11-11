@@ -6,8 +6,8 @@ import {
 import {
   CURRENT_READ_GRAPH_VERSIONS, OxigraphStore, workingMemoryIdentityRule, type ReadGraphState,
 } from '@origintrail-official/dkg-storage';
-import { DKGQueryEngine, ViewNotReadyError, type ViewReadGraphs } from '@origintrail-official/dkg-query';
-import { DKGAgent } from '../src/index.js';
+import { DKGQueryEngine, ViewNotReadyError, ViewSemanticsDeltaSampler, type ViewReadGraphs } from '@origintrail-official/dkg-query';
+import { DKGAgent, readableViewSemanticsDeltaReport } from '../src/index.js';
 
 const OWNER = '0x0000000000000000000000000000000000000001';
 const OUTSIDER = '0x00000000000000000000000000000000000000ff';
@@ -34,7 +34,7 @@ describe('view semantics for a caller who may not read the context graph', () =>
     agent = undefined;
   });
 
-  async function fixture(state: ReadGraphState, defaultSemantics: ViewQuerySemantics) {
+  async function fixture(state: ReadGraphState, defaultSemantics: ViewQuerySemantics, viewSemanticsDelta?: ViewSemanticsDeltaSampler) {
     const chain = new MockChainAdapter();
     const created = await DKGAgent.create({ name: 'ViewSemanticsAuthorityOrder', chainAdapter: chain, store: new OxigraphStore() });
     agent = created;
@@ -73,7 +73,7 @@ describe('view semantics for a caller who may not read the context graph', () =>
       identity: workingMemoryIdentityRule({ defaultAgentAddress: OWNER, peerId: PEER_ID }),
       defaultSemantics: vi.fn((): ViewQuerySemantics => defaultSemantics),
     } satisfies ViewReadGraphs;
-    const engine = new DKGQueryEngine(created.store, { readGraphs });
+    const engine = new DKGQueryEngine(created.store, { readGraphs, viewSemanticsDelta });
     Object.defineProperty(created, 'queryEngine', { value: engine, configurable: true });
     return { agent: created, execution: vi.spyOn(engine, 'query'), readGraphs };
   }
@@ -115,6 +115,19 @@ describe('view semantics for a caller who may not read the context graph', () =>
       expect(await outcome(target.query(sparql, { ...options, contextGraphId: MISSING_CG, callerAgentAddress: OUTSIDER }))).toEqual(denied);
     }
     expect(execution).not.toHaveBeenCalled();
+  });
+
+  it('reports sampled merged answers through the agent, only to a caller who may read the context graph', async () => {
+    const sampler = new ViewSemanticsDeltaSampler({ sampleRate: 1 });
+    const { agent: target } = await fixture('ready', 'per-asset', sampler);
+    // Per asset the marker is in no asset; merged, the read graph holds it.
+    await expect(ask(target, PRIVATE_CG, undefined, OWNER)).resolves.toEqual({ bindings: [] });
+    await sampler.idle();
+    await expect(readableViewSemanticsDeltaReport(target, { callerAgentAddress: OWNER })).resolves.toMatchObject([{
+      contextGraphId: PRIVATE_CG, samples: 1, skipped: 0, kinds: { 'rows-added': 1 },
+    }]);
+    await expect(readableViewSemanticsDeltaReport(target, { callerAgentAddress: OUTSIDER })).resolves.toEqual([]);
+    await expect(readableViewSemanticsDeltaReport(target, { contextGraphId: MISSING_CG, callerAgentAddress: OWNER })).resolves.toEqual([]);
   });
 
   it('consults the read graph for a caller who may read the context graph (control)', async () => {
