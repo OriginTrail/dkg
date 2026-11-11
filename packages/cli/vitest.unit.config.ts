@@ -112,6 +112,8 @@ export default defineConfig({
           'test/status-route-rpc.test.ts',
           // Pure: in-process status route and a chain adapter over scripted endpoints.
           'test/status-chain-rpc.test.ts',
+          // Pure: in-process balances route over a scripted endpoint and a refused port.
+          'test/wallet-balances-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
           'test/notifications-route-bounded.test.ts',
       'test/status-route-store-quads.test.ts',
