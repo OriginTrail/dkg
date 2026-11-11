@@ -349,6 +349,23 @@ describe('the membership check never changes an answer', () => {
     expect(result.bindings).toEqual([{ s: 'urn:held:1' }]);
   });
 
+  it('reads the registry once per request, and the child fence after each listing', async () => {
+    const sent: string[] = [];
+    const engine = new DKGQueryEngine(over({
+      query: (sparql: string, queryOptions?: unknown) => { sent.push(sparql); return inner.query(sparql, queryOptions as never); },
+    }));
+    const count = (marker: string) => sent.filter(sparql => sparql.includes(marker)).length;
+    await engine.query(`SELECT ?s WHERE { GRAPH <${GRAPH}> { ?s <urn:p> ?o } }`, options);
+    expect([count('ontology/SubGraph'), count('ontology#ContextGraph')]).toEqual([1, 2]);
+    sent.length = 0;
+    // No KA number is stamped here, so the named graph is outside the read; the check runs before the refusal.
+    await expect(engine.query(`SELECT ?s WHERE { GRAPH <${wm(AGENT, 7)}> { ?s <urn:p> ?o } }`,
+      { contextGraphId: id, view: 'working-memory', agentAddress: AGENT, assertionName: 'numbered' }))
+      .rejects.toThrow('outside the allowed graph set');
+    expect([count('ontology/kaId'), count('ontology#ContextGraph')]).toEqual([1, 2]);
+    expect(engine.explicitGraphMembershipCounts()).toMatchObject({ checked: 2, disagreed: 0, failed: 0 });
+  });
+
   it('when it disagrees with the enumeration', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const engine = new DKGQueryEngine(over({ graphEnumerationVisibility: (graph: string) => graph !== GRAPH }));

@@ -322,6 +322,11 @@ export function resolveViewGraphs(
 type ScopedQueryReadPlan = Extract<QueryReadPlan, { kind: 'scoped' }>;
 /** Store reads measured on their own, never charged to the caller's materialization budget. */
 type UnchargedReads = QueryStoreReadContext['shared']['measure'];
+interface ViewRoutingFacts {
+  readonly fanOut: boolean;
+  readonly subGraphs: Iterable<string>;
+  readonly kaNumber?: bigint;
+}
 
 /**
  * Local-only query engine that executes SPARQL against this node's own
@@ -515,16 +520,16 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   }
 
   /**
-   * A view's graphs: its fixed graphs, and the graphs `reads` lists under its
-   * prefixes. Graphs of a registered child context graph are left out.
+   * The registry facts a view's graphs depend on, read once per request: whether
+   * the view fans out over registered sub-graphs, those sub-graphs, and the KA
+   * number of a by-name working-memory read.
    */
-  private async collectViewGraphs(
+  private async readViewRoutingFacts(
     view: GetView,
     contextGraphId: string,
     options: QueryOptions,
-    reads: StoreReadLane,
     catalogReads: StoreReadLane,
-  ): Promise<string[]> {
+  ): Promise<ViewRoutingFacts> {
     const fanOut = !options.subGraphName && !options.verifiedGraph
       && !(view === 'working-memory' && options.assertionName);
     const subGraphs = fanOut ? await readRegisteredViewSubGraphs(contextGraphId, catalogReads.query) : [];
@@ -543,7 +548,22 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         options.subGraphName,
       );
     }
+    return { fanOut, subGraphs, kaNumber };
+  }
 
+  /**
+   * A view's graphs: its fixed graphs, and the graphs `reads` lists under its
+   * prefixes. Graphs of a registered child context graph are left out. That fence
+   * is read after the listing, so a child registered meanwhile is left out too.
+   */
+  private async collectViewGraphs(
+    view: GetView,
+    contextGraphId: string,
+    options: QueryOptions,
+    { fanOut, subGraphs, kaNumber }: ViewRoutingFacts,
+    reads: StoreReadLane,
+    catalogReads: StoreReadLane,
+  ): Promise<string[]> {
     const resolution = resolveViewGraphs(view, contextGraphId, {
       agentAddress: options.agentAddress,
       agentAddressAliases: options.agentAddressAliases,
@@ -634,11 +654,13 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     catalogReads: StoreReadLane,
   ): Promise<QueryResult> {
     const sparql = initialScope.source;
-    const allGraphs = await this.collectViewGraphs(view, contextGraphId, options, reads, catalogReads);
+    const facts = await this.readViewRoutingFacts(view, contextGraphId, options, catalogReads);
+    const allGraphs = await this.collectViewGraphs(view, contextGraphId, options, facts, reads, catalogReads);
     const named = explicitGraphTargets(initialScope);
     if (named) {
+      // Both sides share the registry facts; each reads the child fence after its own listing.
       await this.compareExplicitGraphMembership(`${view} view`, named, allGraphs, reads.shared.measure,
-        (listing, catalog) => this.collectViewGraphs(view, contextGraphId, options, listing, catalog));
+        (listing, catalog) => this.collectViewGraphs(view, contextGraphId, options, facts, listing, catalog));
     }
 
     if (allGraphs.length === 0) {
