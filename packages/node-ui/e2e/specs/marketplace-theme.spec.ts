@@ -48,11 +48,11 @@ for (const theme of THEMES) {
     const card = page.locator('.mktx .mkt-card').first();
     await expect(card).toHaveCSS('background-color', await resolved(page, '--bg-surface'));
 
-    const primary = page.locator('.mktx .mkt-btn--primary').first();
+    const primary = page.locator('.mktx .ds-btn.ds-primary').first();
     await expect(primary).toHaveCSS('background-color', await resolved(page, '--accent-primary'));
     await expect(primary).toHaveCSS('color', await resolved(page, '--text-on-primary'));
 
-    const landed = page.locator('[data-testid="mkt-gallery-calls"] .mkt-chipleft').first();
+    const landed = page.locator('[data-testid="mkt-gallery-calls"] .ds-badge.ds-tone-success').first();
     await expect(landed).toHaveCSS('color', await resolved(page, '--text-success'));
   });
 }

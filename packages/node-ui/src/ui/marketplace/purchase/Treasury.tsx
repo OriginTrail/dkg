@@ -37,16 +37,16 @@ function LimitsForm({ action, onSent, onCancel }: { action: NonNullable<Action>;
     <div className="mkt-form" data-testid="mkt-limits-form">
       <div className="mkt-fork">
         <label className="mkt-xs"><span data-copy="treasury.limit">{copy('treasury.limit')}</span>{' '}
-          <input className="mkt-input mkt-input--short mkt-mono" inputMode="decimal" value={limit} onChange={(e) => setLimit(e.target.value)} data-testid="mkt-limit" />{' '}
+          <input className="ds-input mkt-input mkt-input--short mkt-mono" inputMode="decimal" value={limit} onChange={(e) => setLimit(e.target.value)} data-testid="mkt-limit" />{' '}
           <span data-copy="treasury.limit.unit">{copy('treasury.limit.unit')}</span></label>
         <label className="mkt-xs"><span data-copy="treasury.expiry">{copy('treasury.expiry')}</span>{' '}
-          <input className="mkt-input mkt-input--short mkt-mono" inputMode="numeric" value={days} onChange={(e) => setDays(e.target.value)} data-testid="mkt-limit-days" />{' '}
+          <input className="ds-input mkt-input mkt-input--short mkt-mono" inputMode="numeric" value={days} onChange={(e) => setDays(e.target.value)} data-testid="mkt-limit-days" />{' '}
           <span data-copy="treasury.expiry.unit">{copy('treasury.expiry.unit')}</span></label>
       </div>
       {err ? <ErrorCard err={err} onRetry={send} /> : null}
       <div className="mkt-fork">
-        <button type="button" className="mkt-btn" data-copy="gate.cancel" onClick={onCancel} disabled={busy}>{copy('gate.cancel')}</button>
-        <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-limits-send" data-copy={`treasury.${action.kind}.cta`} onClick={send} disabled={!ok || busy}>
+        <button type="button" className="ds-btn" data-copy="gate.cancel" onClick={onCancel} disabled={busy}>{copy('gate.cancel')}</button>
+        <button type="button" className="ds-btn ds-primary" data-testid="mkt-limits-send" data-copy={`treasury.${action.kind}.cta`} onClick={send} disabled={!ok || busy}>
           {busy ? copy('state.working') : copy(`treasury.${action.kind}.cta`)}
         </button>
       </div>
@@ -80,8 +80,8 @@ function AccountRow({ a, buyerWallet, onChanged }: { a: Account; buyerWallet: st
           <span className="mkt-muted mkt-xs" data-copy={a.ownedByNode ? 'treasury.owned' : 'treasury.owned.other'}>{copy(a.ownedByNode ? 'treasury.owned' : 'treasury.owned.other')}</span>
         </span>
         {a.serviceCapable
-          ? <span className="mkt-chipleft" data-copy="treasury.capable">{copy('treasury.capable', { pct: a.discountBps / 100 })}</span>
-          : <span className="mkt-chipblock" data-copy={refusalKey(a.refusal)}>{copy(refusalKey(a.refusal))}</span>}
+          ? <span className="ds-badge ds-tone-success" data-copy="treasury.capable">{copy('treasury.capable', { pct: a.discountBps / 100 })}</span>
+          : <span className="ds-badge ds-tone-danger" data-copy={refusalKey(a.refusal)}>{copy(refusalKey(a.refusal))}</span>}
       </div>
       <div className="mkt-muted mkt-xs" data-copy={w.expired ? 'treasury.window.expired' : 'treasury.window'}>
         {copy(w.expired ? 'treasury.window.expired' : 'treasury.window', { n: w.index, base: fmtTrac(w.baseRemaining), buffer: fmtTrac(w.topUpBuffer) })}
@@ -98,14 +98,14 @@ function AccountRow({ a, buyerWallet, onChanged }: { a: Account; buyerWallet: st
       <div className="mkt-fork">
         {a.ownedByNode ? (
           <>
-            {!a.grant?.live && <button type="button" className="mkt-btn" data-testid={`mkt-add-buyer-${a.accountId}`} data-copy="treasury.add" onClick={() => setAction({ kind: 'add', accountId: a.accountId })} disabled={busy}>{copy('treasury.add')}</button>}
-            {a.grant?.live && <button type="button" className="mkt-btn" data-copy="treasury.limits" onClick={() => setAction({ kind: 'limits', accountId: a.accountId })} disabled={busy}>{copy('treasury.limits')}</button>}
-            {a.grant?.live && <button type="button" className="mkt-btn" data-testid={`mkt-remove-buyer-${a.accountId}`} data-copy="treasury.remove" onClick={() => run(marketplaceApi.removeBuyer(a.accountId, a.grant!.buyer))} disabled={busy}>{copy('treasury.remove')}</button>}
-            <button type="button" className="mkt-btn" data-testid={`mkt-spending-${a.accountId}`} data-copy={spendingOff ? 'treasury.spending.on' : 'treasury.spending.off'}
+            {!a.grant?.live && <button type="button" className="ds-btn" data-testid={`mkt-add-buyer-${a.accountId}`} data-copy="treasury.add" onClick={() => setAction({ kind: 'add', accountId: a.accountId })} disabled={busy}>{copy('treasury.add')}</button>}
+            {a.grant?.live && <button type="button" className="ds-btn" data-copy="treasury.limits" onClick={() => setAction({ kind: 'limits', accountId: a.accountId })} disabled={busy}>{copy('treasury.limits')}</button>}
+            {a.grant?.live && <button type="button" className="ds-btn ds-danger" data-testid={`mkt-remove-buyer-${a.accountId}`} data-copy="treasury.remove" onClick={() => run(marketplaceApi.removeBuyer(a.accountId, a.grant!.buyer))} disabled={busy}>{copy('treasury.remove')}</button>}
+            <button type="button" className="ds-btn" data-testid={`mkt-spending-${a.accountId}`} data-copy={spendingOff ? 'treasury.spending.on' : 'treasury.spending.off'}
               onClick={() => run(marketplaceApi.serviceSpending(a.accountId, spendingOff))} disabled={busy}>{copy(spendingOff ? 'treasury.spending.on' : 'treasury.spending.off')}</button>
           </>
         ) : (
-          !a.grant?.live && <button type="button" className="mkt-btn" data-testid={`mkt-consent-${a.accountId}`} data-copy="treasury.consent" onClick={() => setAction({ kind: 'consent', accountId: a.accountId })}>{copy('treasury.consent')}</button>
+          !a.grant?.live && <button type="button" className="ds-btn" data-testid={`mkt-consent-${a.accountId}`} data-copy="treasury.consent" onClick={() => setAction({ kind: 'consent', accountId: a.accountId })}>{copy('treasury.consent')}</button>
         )}
         {busy && <span className="mkt-muted mkt-xs" data-copy="state.working">{copy('state.working')}</span>}
         {done && <span className="mkt-muted mkt-xs" data-copy="treasury.sent">{copy('treasury.sent', { tx: fmtHex(done) })}</span>}
@@ -125,7 +125,7 @@ function AccountRow({ a, buyerWallet, onChanged }: { a: Account; buyerWallet: st
 export function Treasury({ funding, onChanged }: { funding: Funding; onChanged: () => void }): React.ReactElement {
   const w = funding.buyerWallet;
   return (
-    <div className="mkt-card" data-testid="mkt-treasury">
+    <div className="ds-card mkt-card" data-testid="mkt-treasury">
       <h2 data-copy="treasury.title">{copy('treasury.title')}</h2>
       <div className="mkt-wallet" data-testid="mkt-buyer-wallet">
         <strong data-copy="treasury.wallet">{copy('treasury.wallet')}</strong><br />

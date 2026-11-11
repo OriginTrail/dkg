@@ -92,11 +92,11 @@ export function OperateView(): React.ReactElement {
   if (st.err && !st.data) {
     return (
       <div className="mkt-frame" data-testid="mkt-operate" data-state="error">
-        <div className="mkt-card"><div data-copy="operate.error">{copy('operate.error')}</div><ErrorCard err={st.err} onRetry={st.reload} /></div>
+        <div className="ds-card mkt-card"><div data-copy="operate.error">{copy('operate.error')}</div><ErrorCard err={st.err} onRetry={st.reload} /></div>
       </div>
     );
   }
-  if (!st.data) return <div className="mkt-frame" data-testid="mkt-operate" data-state="loading"><div className="mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></div>;
+  if (!st.data) return <div className="mkt-frame" data-testid="mkt-operate" data-state="loading"><div className="ds-card mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></div>;
   const s = st.data;
   const epoch = s.epoch;
   const g = s.gate;
@@ -107,7 +107,7 @@ export function OperateView(): React.ReactElement {
   return (
     <div className="mkt-frame" data-testid="mkt-operate" data-state="active">
       {st.err ? <ErrorCard err={st.err} onRetry={st.reload} /> : null}
-      <div className="mkt-card">
+      <div className="ds-card mkt-card">
         <h2 data-copy="operate.price.title">{copy('operate.price.title')}</h2>
         <div className="mkt-muted mkt-xs" data-copy="operate.price.epoch" data-testid="mkt-ask-cycle">
           {copy('operate.price.epoch', { n: epoch, next: epoch + 1, t: relAt(s.endsAt) })}
@@ -123,7 +123,7 @@ export function OperateView(): React.ReactElement {
                 <strong title={o.serviceId} data-copy="_data">{label(o.serviceId)}</strong>{' '}
                 {o.connector === 'up'
                   ? <span className="mkt-yours" data-copy="operate.connector.up">{copy('operate.connector.up')}</span>
-                  : <span className="mkt-chipblock" data-copy="operate.connector.down">{copy('operate.connector.down')}</span>}
+                  : <span className="ds-badge ds-tone-danger" data-copy="operate.connector.down">{copy('operate.connector.down')}</span>}
                 <div className="mkt-muted mkt-xs" data-copy={changed ? 'operate.price.queued' : 'operate.price.none'}>
                   {changed ? copy('operate.price.queued', { price: fmtMicro(o.nextPrice) }) : copy('operate.price.none')}
                 </div>
@@ -133,9 +133,9 @@ export function OperateView(): React.ReactElement {
               <span className="mkt-mono mkt-sec mkt-askedit">
                 <span data-copy="catalog.price.micro">{copy('catalog.price.micro', { micro: fmtMicro(o.price), unit: 'tok' })}</span>
                 {' → '}
-                <input className="mkt-input mkt-input--short" inputMode="decimal" data-testid={`mkt-ask-input-${o.serviceId}`} value={edits[o.serviceId] ?? ''} placeholder={fmtMicro(o.nextPrice)}
+                <input className="ds-input mkt-input mkt-input--short" inputMode="decimal" data-testid={`mkt-ask-input-${o.serviceId}`} value={edits[o.serviceId] ?? ''} placeholder={fmtMicro(o.nextPrice)}
                   aria-label={copy('operate.price.cta')} onChange={(e) => setEdits((x) => ({ ...x, [o.serviceId]: e.target.value }))} />
-                <button type="button" className="mkt-btn" data-testid={`mkt-ask-queue-${o.serviceId}`} data-copy="operate.price.cta" onClick={() => setPrice(o.serviceId)}
+                <button type="button" className="ds-btn" data-testid={`mkt-ask-queue-${o.serviceId}`} data-copy="operate.price.cta" onClick={() => setPrice(o.serviceId)}
                   disabled={!wei || busy === o.serviceId} title={!wei ? copy('operate.price.invalid') : undefined}>{busy === o.serviceId ? copy('state.working') : copy('operate.price.cta')}</button>
               </span>
             </div>
@@ -144,7 +144,7 @@ export function OperateView(): React.ReactElement {
         <p className="mkt-muted mkt-xs" data-copy="operate.price.note">{copy('operate.price.note')}</p>
       </div>
 
-      <div className="mkt-card" data-testid="mkt-ledger">
+      <div className="ds-card mkt-card" data-testid="mkt-ledger">
         <h2 data-copy="operate.epoch.title">{copy('operate.epoch.title')}</h2>
         <div className="mkt-muted mkt-xs" data-copy="operate.gate">
           {copy('operate.gate', {
@@ -157,13 +157,13 @@ export function OperateView(): React.ReactElement {
         <div className="mkt-muted mkt-xs" data-copy="operate.thisepoch">{copy('operate.thisepoch', { served: fmtTrac(s.thisEpoch.servedValue), weighted: fmtTrac(s.thisEpoch.weightedValue), pool: fmtTrac(s.thisEpoch.poolSoFar) })}</div>
         <div className="mkt-mhead">
           <span className="mkt-sec mkt-sm" data-copy="operate.nextlanding">{copy('operate.nextlanding', { t: relAt(s.nextLandingAt) })}</span>
-          <button type="button" className="mkt-btn" data-testid="mkt-land-now" data-copy="operate.land.cta" onClick={landNow} disabled={busy === 'land'}>{busy === 'land' ? copy('state.working') : copy('operate.land.cta')}</button>
+          <button type="button" className="ds-btn" data-testid="mkt-land-now" data-copy="operate.land.cta" onClick={landNow} disabled={busy === 'land'}>{busy === 'land' ? copy('state.working') : copy('operate.land.cta')}</button>
         </div>
         {line && <div className="mkt-muted mkt-xs" data-testid="mkt-land-result" data-copy={line.key}>{copy(line.key, line.vars)}</div>}
         {landErr ? <ErrorCard err={landErr} onRetry={landNow} /> : null}
       </div>
 
-      <div className="mkt-card" data-testid="mkt-batches">
+      <div className="ds-card mkt-card" data-testid="mkt-batches">
         <h2 data-copy="operate.batches">{copy('operate.batches')}</h2>
         {s.batches.length === 0 && <div className="mkt-muted mkt-xs" data-copy="operate.batches.none">{copy('operate.batches.none')}</div>}
         <table className="mkt-act">
@@ -194,7 +194,7 @@ export function OperateView(): React.ReactElement {
         </table>
       </div>
 
-      <div className="mkt-card">
+      <div className="ds-card mkt-card">
         <h2 data-copy="op.wallets">{copy('op.wallets')}</h2>
         {s.wallets.map((w) => (
           <div key={w.address} className="mkt-wallet" data-testid="mkt-ops-wallet">
