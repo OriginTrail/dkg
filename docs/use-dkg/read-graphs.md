@@ -123,6 +123,8 @@ Go on only when the context graph's owner and its callers expect those answers.
 
 ### 5. Set `serve`
 
+**Where another process writes the same store,** for example a standalone `dkg publisher run` against a shared Blazegraph or `oxigraph-server`, keep `serve` off until [#3839](https://github.com/OriginTrail/dkg/issues/3839) is fixed. Until the node's catalog revalidates, merged queries with `GRAPH` parts can miss rows that the other process wrote.
+
 Change the mode to `serve`, and restart:
 
 ```json
@@ -173,7 +175,7 @@ Measured on a local Blazegraph, importing 1,000 asset graphs of 20 triples each 
 Rebuilding the same read graph in one pass took 0.17 s. In every run the read graph equalled the union of its asset graphs.
 
 - **What it means:** keeping the shared-memory read graph roughly doubles a snapshot import. A catch-up of 100,000 asset graphs takes about an hour longer.
-- **Until imports skip per-graph maintenance and rebuild once (#3831):** keep `shared-working-memory` at `off` on nodes that catch up many asset graphs. A rule per layer does that, for example `"layers": { "verifiable-memory": "serve", "shared-working-memory": "off" }`.
+- **Until imports skip per-graph maintenance and rebuild once ([#3831](https://github.com/OriginTrail/dkg/issues/3831)):** keep `shared-working-memory` at `off` on nodes that catch up many asset graphs. A rule per layer does that, for example `"layers": { "verifiable-memory": "serve", "shared-working-memory": "off" }`.
 
 ## Back out
 
