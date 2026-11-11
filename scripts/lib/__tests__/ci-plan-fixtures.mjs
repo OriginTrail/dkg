@@ -28,7 +28,7 @@ export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url
 // test 'the pinned controller is already on protected branch history' checks
 // that against the branches the repository checks job fetches, and the
 // scheduled inspect-ci-policy report flags it after merge.
-export const TRUSTED_CI_CONTROLLER_SHA = '38684f46b352019d6ba1e2ec899cf7e2a5fc8848';
+export const TRUSTED_CI_CONTROLLER_SHA = 'd6ddef7b337331efafdc21dc121470ffae3739af';
 export const NON_SOLIDITY_LANES = CI_LANES.filter((lane) => lane !== 'contracts');
 // The jobs selected lanes run: each lane's own job, and the Windows lifecycle
 // job, which runs with the agent lane.

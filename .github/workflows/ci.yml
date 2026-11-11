@@ -110,7 +110,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: 38684f46b352019d6ba1e2ec899cf7e2a5fc8848
+          ref: d6ddef7b337331efafdc21dc121470ffae3739af
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
@@ -1491,19 +1491,20 @@ jobs:
   #                                parallel; previously ~20 min single).
   #   - merge queue candidate    : same sharded suite against the exact
   #                                combined commit that is about to land.
-  #   - push (trigger branches)  : full coverage + ratchet safety net,
-  #                                single job (coverage reports don't
-  #                                compose across shards, so we keep
-  #                                the safety-net job unsharded).
+  #   - push (trigger branches)  : same sharded suite on the merged commit.
+  #   - manual runs (the nightly): full coverage + ratchet, single job
+  #                                (coverage reports don't compose across
+  #                                shards, so that job stays unsharded).
   # ------------------------------------------------------------------
   solidity:
     name: "Tornado: Solidity [${{ matrix.shard }}/4]"
     needs: changes
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # Candidate lane — sharded 4 ways. Protected pushes and manual runs use the
-    # separate coverage+ratchet job below.
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.contracts == 'true'
+    # Sharded 4 ways for candidates and protected pushes. Manual runs, the
+    # nightly included, use the separate coverage+ratchet job below; the
+    # trusted controller accepts either on a push (scripts/lib/ci-results.mjs).
+    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && needs.changes.outputs.contracts == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -1629,18 +1630,19 @@ jobs:
           if-no-files-found: warn
 
   # ------------------------------------------------------------------
-  # Tornado Solidity coverage lane — safety net on protected push or manual
-  # dispatch. Full Solidity suite + solidity-coverage + coverage ratchet.
+  # Tornado Solidity coverage lane — manual dispatches, the nightly included.
+  # Full Solidity suite + solidity-coverage + coverage ratchet.
   # Not sharded because solidity-coverage's instrumentation state
-  # doesn't compose across parallel runners. Wall-clock on push is
-  # not on the critical path so ~20-25 min here is acceptable.
+  # doesn't compose across parallel runners. At about 40 minutes it was
+  # the longest job of every push run, so pushes run the sharded suite
+  # above instead, as the trusted controller allows.
   # ------------------------------------------------------------------
   solidity-coverage:
-    name: "Tornado: Solidity coverage (push safety net)"
+    name: "Tornado: Solidity coverage (nightly and manual runs)"
     needs: changes
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
+    if: github.event_name != 'pull_request' && github.event_name != 'merge_group' && github.event_name != 'push'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -1690,8 +1692,8 @@ jobs:
   #                    baseline refreshes after every merge. Without
   #                    this, post-merge findings would never bubble
   #                    up to Code Scanning even though they apply to
-  #                    the new tip — same dual-trigger reasoning as
-  #                    the solidity-coverage lane above.
+  #                    the new tip — the same reason the Solidity
+  #                    shards run on every push.
   #
   # Why pnpm pre-compile + ignore-compile=true: the upstream
   # crytic/slither-action defaults to running `npm install` inside
@@ -1993,7 +1995,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: 38684f46b352019d6ba1e2ec899cf7e2a5fc8848
+          ref: d6ddef7b337331efafdc21dc121470ffae3739af
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
