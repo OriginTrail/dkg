@@ -1497,6 +1497,34 @@ describe('read-graph start-up', () => {
     expect(layer.runtime.mirror.size).toBe(0);
   });
 
+  it('tries a failed load again in one start-up, however many waited for it', async () => {
+    const { adapter, layer, store, other, first, second } = await sharedBackend();
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const rowsQuery = readGraphStateRowsQuery();
+    // Without rows, each load reads the state rows once.
+    let loads = 0;
+    const query = adapter.query.bind(adapter);
+    adapter.query = async (sparql, options) => {
+      if (sparql === rowsQuery && (loads += 1) === 1) {
+        await held;
+        throw new Error('connection reset');
+      }
+      return query(sparql, options);
+    };
+    // Two start-ups wait for a load that fails: one of them loads again, and the other waits for that load.
+    const failing = startReadGraphs(store, { dataDir: first, maintains: () => true });
+    const retries = [
+      startReadGraphs(store, { dataDir: first, maintains: () => true }),
+      startReadGraphs(other, { dataDir: second, maintains: () => true }),
+    ];
+    release!();
+    await expect(failing).rejects.toThrow('connection reset');
+    expect(await Promise.all(retries)).toEqual([{ marked: 0, maintained: 0 }, { marked: 0, maintained: 0 }]);
+    expect(loads).toBe(2);
+    expect(layer.runtime.mirror.size).toBe(0);
+  });
+
   it('applies a journaled mark to a running mirror that already says dirty, and keeps the journal while the store refuses it', async () => {
     const { adapter, fixture, layer, store, other, context, first, second } = await sharedBackend();
     const [vm] = fixture.keys as [ReadGraphKey];

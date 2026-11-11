@@ -1,7 +1,16 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { MemoryLayer, readGraphIri, readScope } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
+import { guardReadGraphPartition } from '../src/read-graph-partition-store.js';
+import { missingReadGraphMethods } from '../src/read-graph/adapter-contract.js';
+import { readUnstoredReadGraphMarks, useReadGraphMarkJournal } from '../src/read-graph/mark-journal.js';
+import { readStoredReadGraphRow } from '../src/read-graph/rebuild.js';
 import { READ_GRAPH_REGISTRY_PREDICATES as R, readReadGraphRegistry } from '../src/read-graph/registry.js';
+import { readGraphRegistryRecordUpdate } from '../src/read-graph/registry-record.js';
+import { startReadGraphs } from '../src/read-graph/startup.js';
 import {
   isExactRegistryWrite,
   readReadGraphRegistryFacts,
@@ -16,7 +25,7 @@ import {
   readGraphStateRowsQuery,
 } from '../src/read-graph/state.js';
 import type { Quad } from '../src/triple-store.js';
-import { ReadGraphMaintenanceError } from '../src/read-graph/read-graph-store.js';
+import { ReadGraphMaintenanceError, wrapReadGraphLayer } from '../src/read-graph/read-graph-store.js';
 import { isStoreOperationNotStarted } from '../src/store-operation-outcome.js';
 import { isStoreSchedulerBusyError, StoreSchedulerBusyError } from '../src/store-priority-scheduler.js';
 import { layerFixture, layeredStore, readyRow } from './helpers/read-graph-layer-conformance.js';
@@ -100,6 +109,17 @@ describe('registry facts', () => {
       .toEqual([]);
     expect(registryFactsAfter('w', code, { kind: 'opaque', graphs: [meta] })).toBeUndefined();
     expect(registryFactsAfter('w', code, { kind: 'opaque', graphs: [`${root}/_shared_memory`] })).toEqual(code);
+  });
+
+  it('keep one fact per quad however often a write inserts it, and literals that differ in datatype or language apart', () => {
+    const meta = 'did:dkg:context-graph:w/_meta';
+    const named = (object: string) => ({ kind: 'quads' as const, added: [fact(meta, 'urn:asset:1', R.authenticatedSubGraphName, object)], removed: [] as Quad[] });
+    let facts: ReadGraphRegistryFact[] = [];
+    for (let round = 0; round < 3; round += 1) facts = registryFactsAfter('w', facts, named('"docs"'))!;
+    expect(facts).toHaveLength(1);
+    for (const object of ['"docs"@en', '"docs"@de', '"docs"^^<urn:test:type>', '"docs"@en']) facts = registryFactsAfter('w', facts, named(object))!;
+    expect(facts).toHaveLength(4);
+    expect(new Set(facts.map((each) => each.object)).size).toBe(4);
   });
 });
 
@@ -236,6 +256,45 @@ describe('registry recognition in the read-graph layer', () => {
     expect(layer.runtime.registries.get(kid)?.subGraphNames).toEqual(['docs']);
     expect(layer.runtime.registries.facts(fixture.contextGraphId)).toBeUndefined();
     expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code']);
+  });
+
+  it('puts back what it fenced for one context graph when another\'s registry cannot be read before the write, and sends nothing', async () => {
+    const { adapter, store, fixture, layer, states } = await layered();
+    const kid = `${fixture.contextGraphId}/kid`;
+    const kidVm = readGraphIri({ scope: readScope(kid), layer: MemoryLayer.VerifiableMemory });
+    layer.runtime.mirror.set(readyRow(kidVm));
+    const kidMeta = `${fixture.root}/kid/_meta`;
+    // The child's registry is known without its facts, as after a write that could not be settled.
+    layer.runtime.registries.set({ contextGraphId: kid, subGraphNames: [], childContextGraphRoots: [] });
+    // In the write, the parent's facts are read and its read graphs fenced; then reading the child's facts fails once.
+    const query = adapter.query.bind(adapter);
+    let failures = 1;
+    let during: Record<string, string> | undefined;
+    adapter.query = async (sparql, options) => {
+      if (failures > 0 && options?.source === 'storage.readGraphRegistry' && sparql.includes(`<${kidMeta}>`)) {
+        failures -= 1;
+        during = states();
+        throw new Error('connection reset');
+      }
+      return query(sparql, options);
+    };
+    const update = adapter.update.bind(adapter);
+    let sent = 0;
+    adapter.update = async (sparql, options) => {
+      if (sparql.includes('urn:test:p')) sent += 1;
+      return update(sparql, options);
+    };
+    const write = `INSERT DATA { GRAPH <${kidMeta}> { <urn:asset:1> <urn:test:p> "m" } }`;
+    await expect(store.update!(write, { writtenGraphs: [kidMeta] })).rejects.toThrow('connection reset');
+    expect(sent).toBe(0);
+    expect(during).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'dirty@2', agentWm: 'dirty@2' });
+    const ready = { wholeVm: 'ready@1', wholeSwm: 'ready@1', codeVm: 'ready@1', agentWm: 'ready@1' };
+    expect(states()).toEqual(ready);
+    expect(layer.runtime.mirror.get(kidVm)).toMatchObject({ state: 'ready', generation: 1 });
+    // The next attempt is sent, and leaves them in service as well.
+    await store.update!(write, { writtenGraphs: [kidMeta] });
+    expect(sent).toBe(1);
+    expect(states()).toEqual(ready);
   });
 
   it('follows a registration in an asset group\'s metadata, in and out', async () => {
@@ -467,6 +526,54 @@ describe('registry recognition in the read-graph layer', () => {
     expect(states).toEqual({ wholeVm: 'dirty', wholeSwm: 'dirty', codeVm: 'dirty', agentWm: 'dirty' });
     expect(layer.runtime.registries.facts(fixture.contextGraphId)).toBeUndefined();
     await late;
+  });
+
+  it('journals the dirty marks the store refuses after a registry write with an unknown outcome, though the mirror already says dirty', async () => {
+    class Late extends PlanningOxigraphStore {
+      override readonly readGraphCapabilities = { ...new PlanningOxigraphStore().readGraphCapabilities, serialUpdates: false };
+      constructor() {
+        super();
+        // It offers no method it does not declare, so a start-up maintains read graphs over it.
+        for (const method of missingReadGraphMethods(this, this.readGraphCapabilities)) {
+          Object.defineProperty(this, method, { value: undefined, configurable: true, writable: true });
+        }
+      }
+    }
+    const adapter = new Late();
+    const fixture = layerFixture(`recognition-journal-${sequence += 1}`);
+    const { layer, store } = await layeredStore(adapter, { backend: 'oxigraph' }, fixture);
+    const meta = `${fixture.root}/_meta`;
+    const { wholeVm } = fixture.readGraphs;
+    // A stored row and the registry record a start-up keeps it ready by, and a data directory for refused marks.
+    await adapter.update(readGraphStateCompareAndSet(undefined, readyRow(wholeVm)));
+    await adapter.update(readGraphRegistryRecordUpdate(fixture.registry));
+    const dataDir = mkdtempSync(join(tmpdir(), 'read-graph-recognition-'));
+    try {
+      useReadGraphMarkJournal(layer.runtime, dataDir);
+      const update = adapter.update.bind(adapter);
+      const docs = `${fixture.root}/docs`;
+      const registration = `GRAPH <${meta}> { <${docs}> <${R.type}> <${R.subGraphClass}> ; <${R.name}> "docs" }`;
+      adapter.update = async (sparql, options) => {
+        if (options?.source === 'storage.readGraphDirtyMark') throw new Error('connection reset');
+        await update(sparql, options);
+        // The registration lands, and its response is lost.
+        if (sparql.includes(`<${docs}>`)) throw new Error('socket hang up');
+      };
+      // The fence takes the read graphs out of service, the registry read after the write moves their membership,
+      // and no dirty mark reaches the store.
+      await expect(store.update!(`INSERT DATA { ${registration} }`, { writtenGraphs: [meta] })).rejects.toThrow('socket hang up');
+      expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
+      expect((await readStoredReadGraphRow(adapter, wholeVm)).row).toEqual(readyRow(wholeVm));
+      expect(readUnstoredReadGraphMarks(dataDir).get(wholeVm)).toEqual(new Set([1]));
+      // A later write past this layer takes the registration out again: the registry matches its record once more,
+      // and only the journal keeps the mark for the next start-up.
+      await update(`DELETE DATA { ${registration} }`);
+      const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+      expect(await startReadGraphs(restarted, { dataDir, maintains: () => true })).toEqual({ marked: 1, maintained: 1 });
+      expect((await readStoredReadGraphRow(adapter, wholeVm)).row).toMatchObject({ state: 'dirty', generation: 2 });
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 
   it('marks a registry deletion in the store before the delete reaches the adapter', async () => {
