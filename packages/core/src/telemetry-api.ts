@@ -263,7 +263,7 @@ export interface DkgMetrics {
   queryScopeRequestsTotal: Counter;
   /** graphs one query routes per asset (its slice). route={view|legacy}, graph */
   queryScopeSliceGraphs: Histogram;
-  /** ms; store time of a query's routed reads. route, slice={le_100|le_1000|…|le_20000|gt_20000} */
+  /** ms; store time of a query's routed reads. route, graph, slice={le_100|le_1000|…|le_20000|gt_20000} */
   queryScopeStoreMs: Histogram;
   /** queries whose slice is over a candidate scope limit. route, graph, limit=<candidate> */
   queryScopeOverLimitTotal: Counter;

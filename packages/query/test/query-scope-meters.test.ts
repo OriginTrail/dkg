@@ -133,7 +133,7 @@ describe('the meter of one query', () => {
     expect(meters()).toEqual([
       { metric: REQUESTS, value: 1, attributes: cls({ view: 'vm' }) },
       { metric: SLICE, value: 4, attributes: { route: 'view', graph: 'none' } },
-      { metric: STORE_MS, value: 30, attributes: { route: 'view', slice: 'le_100' } },
+      { metric: STORE_MS, value: 30, attributes: { route: 'view', graph: 'none', slice: 'le_100' } },
     ]);
   });
 
@@ -174,10 +174,19 @@ describe('the query engine', () => {
       expect(named(SLICE)).toEqual([{ metric: SLICE, value: sliceGraphs, attributes: { route: 'view', graph: 'none' } }]);
       const [storeTime, ...more] = named(STORE_MS);
       expect(more).toEqual([]);
-      expect(storeTime).toMatchObject({ attributes: { route: 'view', slice: 'le_100' } });
+      expect(storeTime!.attributes).toEqual({ route: 'view', graph: 'none', slice: 'le_100' });
       expect(storeTime!.value).toBeGreaterThanOrEqual(0);
       expect(named(OVER_LIMIT)).toEqual([]);
     }
+  });
+
+  it('labels a read of explicit graphs apart, and counts the set its route authorizes', async () => {
+    const answer = await engine.query(`SELECT ?name WHERE { GRAPH <${vmGraphs[0]}> { ?s <${NAME}> ?name } }`,
+      { contextGraphId: CG, view: 'verifiable-memory' });
+    expect(answer.bindings).toEqual([{ name: '"item 10"' }]);
+    expect(named(REQUESTS)).toEqual([{ metric: REQUESTS, value: 1, attributes: cls({ view: 'vm', graph: 'explicit' }) }]);
+    expect(named(SLICE)).toEqual([{ metric: SLICE, value: 1 + vmGraphs.length, attributes: { route: 'view', graph: 'explicit' } }]);
+    expect(named(STORE_MS).map(({ attributes }) => attributes)).toEqual([{ route: 'view', graph: 'explicit', slice: 'le_100' }]);
   });
 
   it('meters the legacy route by the graphs it routes, across data and shared memory', async () => {
@@ -222,7 +231,7 @@ describe('the query engine', () => {
     const answer = await engine.query(QUERY, { contextGraphId: LARGE_CG, view: 'shared-working-memory' });
     expect(answer.bindings).toHaveLength(LARGE_SWM_GRAPHS);
     expect(named(SLICE)).toEqual([{ metric: SLICE, value: 1 + LARGE_SWM_GRAPHS, attributes: { route: 'view', graph: 'none' } }]);
-    expect(named(STORE_MS)).toMatchObject([{ attributes: { route: 'view', slice: 'le_5000' } }]);
+    expect(named(STORE_MS).map(({ attributes }) => attributes)).toEqual([{ route: 'view', graph: 'none', slice: 'le_5000' }]);
     expect(named(OVER_LIMIT)).toEqual(['1000', '2000'].map(limit => ({
       metric: OVER_LIMIT, value: 1, attributes: { route: 'view', graph: 'none', limit },
     })));

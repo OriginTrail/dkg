@@ -61,6 +61,11 @@ export function sliceClass(graphs: number): string {
  * over (the slice), and the caller's reads are timed. When the answer settles,
  * the query is counted by route and class, and a routed query records its
  * slice size, its store time by slice size, and each candidate limit it exceeds.
+ *
+ * The slice is the set the route authorizes the query for and binds it to, as
+ * VALUES, UNION branches or a dataset. A read that names only explicit GRAPH
+ * IRIs may get no dataset (embedded Oxigraph): its store then reads just the
+ * named graphs. The `graph` label keeps those reads apart in every series.
  */
 export class QueryScopeMeter {
   private readonly slices: (readonly string[])[] = [];
@@ -105,7 +110,7 @@ export class QueryScopeMeter {
       const graphs = lists.size === 1 ? this.slices[0]!.length : new Set(this.slices.flat()).size;
       metrics.queryScopeSliceGraphs.record(graphs, { route, graph });
       if (this.storeReads > 0) {
-        metrics.queryScopeStoreMs.record(this.storeMs, { route, slice: sliceClass(graphs) });
+        metrics.queryScopeStoreMs.record(this.storeMs, { route, graph, slice: sliceClass(graphs) });
       }
       for (const limit of QUERY_SCOPE_LIMIT_CANDIDATES) {
         if (graphs > limit) metrics.queryScopeOverLimitTotal.add(1, { route, graph, limit: String(limit) });
