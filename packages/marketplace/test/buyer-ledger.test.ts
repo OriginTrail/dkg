@@ -2,19 +2,22 @@
 /**
  * The buyer's ledger (buyer-ledger.ts) on its own: the journals it replaces,
  * read once and left as they are; its one compaction; the keys it hands out,
- * each a copy; and what it does with a key it does not hold. The gateway's and
- * the keys' behaviour over it is in gateway-durability, gateway-legacy-journals
- * and gateway-keys.
+ * each a copy, and looked up by their secrets' hashes; and what it does with a
+ * key it does not hold. The gateway's and the keys' behaviour over it is in
+ * gateway-durability, gateway-legacy-journals and gateway-keys.
  */
+import { createHash } from 'node:crypto';
 import { cp, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AccessKeys, BUYER_LEDGER_FILE, BuyerLedger, Journal, type HeldReceipt, type KeptKey, type KeptReceipt, type KeyRecord } from '../src/index.js';
+import { AccessKeys, BUYER_LEDGER_FILE, BuyerLedger, Journal, type HeldReceipt, type KeptReceipt, type KeyRecord } from '../src/index.js';
 
 const FIXTURE = join(__dirname, 'fixtures', 'legacy-buyer-journals');
 const SUB = (n: number) => `0x${n.toString(16).padStart(64, '0')}`;
 const KEY: KeyRecord = { keyId: 'dkgmk_00000001', hash: '00'.repeat(32), label: 'k', budget: '1000', services: null, rps: 1, expiresAt: null, at: 0 };
+/** A secret's sha256, as a key keeps it. */
+const hashOf = (secret: string) => createHash('sha256').update(secret).digest();
 
 let dir: string;
 const jsonl = (entries: unknown[]) => entries.map((e) => `${JSON.stringify(e)}\n`).join('');
@@ -336,28 +339,48 @@ describe('the keys the ledger hands out', () => {
     // The keys as listed.
     const listed = await ledger.keyList();
     listed[0].spent = '0';
+    listed[0].revoked = true;
     listed[0].services!.push(SUB(3));
-    // The keys with their secrets' hashes, as a secret is checked against them.
-    for (const held of await ledger.heldKeys()) {
-      const copy = held.key as KeptKey;
-      copy.spent = '0';
-      copy.revoked = true;
-      copy.services!.push(SUB(4));
-      held.hash.fill(0);
-    }
+    // The key a secret is checked against, looked up by the secret's hash.
+    const found = (await ledger.keyByHash(hashOf(secret)))!;
+    found.spent = '0';
+    found.revoked = true;
+    found.services!.push(SUB(4));
     expect(await ledger.keyList()).toEqual([expect.objectContaining(kept)]);
     expect(await keys.check(secret, 3)).toMatchObject({ ok: true, key: kept });
   });
 
   it('are copies when a key is made or revoked too', async () => {
     const ledger = new BuyerLedger(dir);
-    const made = (await ledger.makeKey({ ...KEY, services: [SUB(1)] }))!;
+    const keys = new AccessKeys(ledger);
+    const secret = `dkgmk_${'0a'.repeat(24)}`;
+    const services = [SUB(1)];
+    const made = (await ledger.makeKey({ ...KEY, hash: hashOf(secret).toString('hex'), services, rps: 1_000 }))!;
+    services.push(SUB(2));
     made.spent = '9';
-    made.services!.push(SUB(2));
+    made.revoked = true;
+    made.services!.push(SUB(3));
+    const kept = { keyId: KEY.keyId, spent: '0', services: [SUB(1)] };
+    expect(await ledger.keyList()).toEqual([expect.objectContaining({ ...kept, revoked: false })]);
+    expect(await keys.check(secret, 1)).toMatchObject({ ok: true, key: { ...kept, revoked: false } });
     const revoked = (await ledger.revokeKey(KEY.keyId, 2))!;
+    revoked.spent = '9';
     revoked.revoked = false;
-    revoked.services!.push(SUB(3));
-    expect(await ledger.keyList()).toEqual([expect.objectContaining({ keyId: KEY.keyId, spent: '0', services: [SUB(1)], revoked: true })]);
+    revoked.services!.push(SUB(4));
+    expect(await ledger.keyList()).toEqual([expect.objectContaining({ ...kept, revoked: true })]);
+    expect(await keys.check(secret, 3)).toEqual({ ok: false, status: 401, code: 'revoked_key' });
+  });
+
+  it("are looked up by their secret's hash: the key made, or none for a hash no key has", async () => {
+    const ledger = new BuyerLedger(dir);
+    const keys = new AccessKeys(ledger);
+    const scopes = (label: string) => ({ label, budget: 1_000n, services: null, rps: 1, expiresAt: null });
+    const made = [await keys.make(scopes('one'), 1), await keys.make(scopes('two'), 1)];
+    const listed = await ledger.keyList();
+    expect(listed.map((k) => k.keyId)).toEqual(made.map((m) => m.key.keyId));
+    // Each key as listed, found by its own secret's hash among both.
+    for (const [i, { secret }] of made.entries()) expect(await ledger.keyByHash(hashOf(secret))).toEqual(listed[i]);
+    expect(await ledger.keyByHash(hashOf('dkgmk_none'))).toBeUndefined();
   });
 });
 

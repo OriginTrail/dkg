@@ -35,6 +35,7 @@
  * nothing is written to it before that first read: every change waits for
  * `load`, and fails with it, until the journals it replaces are in.
  */
+import { timingSafeEqual } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CallBook, exposureOf, type HeldReceipt, type KeptReceipt } from './gateway-book.js';
@@ -84,15 +85,6 @@ const counterOf = (n: { subscriptionId: string; seller: string }): string => `${
 interface HeldKey {
   key: KeptKey;
   hash: Buffer;
-}
-
-/** A key as the ledger hands it out: a copy, its fields read-only, its list of services too. */
-export type KeyCopy = Readonly<Omit<KeptKey, 'services'>> & { readonly services: readonly string[] | null };
-
-/** A key and its secret's hash as `heldKeys` hands them out: copies of both, read-only. */
-export interface HeldKeyCopy {
-  readonly key: KeyCopy;
-  readonly hash: Buffer;
 }
 
 /** A key from its record: its list of services a copy, so the record's stays its caller's. */
@@ -148,10 +140,17 @@ export class BuyerLedger {
     return [...this.keys.values()].map((k) => copyOf(k.key));
   }
 
-  /** Every key, with its secret's hash: a copy of each, so what is done to one changes nothing the ledger holds. */
-  async heldKeys(): Promise<readonly HeldKeyCopy[]> {
+  /**
+   * The key whose secret's sha256 is `hash`, a copy, or `undefined` when no key has it. Every key's hash is compared,
+   * each in constant time.
+   */
+  async keyByHash(hash: Buffer): Promise<KeptKey | undefined> {
     await this.load();
-    return [...this.keys.values()].map((k) => ({ key: copyOf(k.key), hash: Buffer.from(k.hash) }));
+    let found: HeldKey | undefined;
+    for (const held of this.keys.values()) {
+      if (timingSafeEqual(hash, held.hash)) found = held;
+    }
+    return found && copyOf(found.key);
   }
 
   /** A key made, on disk then held: `null`, making nothing, when another key has its id, checked under the journal's lock. */

@@ -22,8 +22,8 @@
  * keys as made and revoked, and what each call charged, in the call's own
  * record. The ledger is read once, and keeps the keys in memory.
  */
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { BuyerLedger, type KeyCopy } from './buyer-ledger.js';
+import { createHash, randomBytes } from 'node:crypto';
+import { BuyerLedger } from './buyer-ledger.js';
 
 const PREFIX = 'dkgmk_';
 /** Hex digits of a key's id after its prefix: 64 bits. 10.1.0 made ids of 8. */
@@ -113,16 +113,12 @@ export class AccessKeys {
 
   /**
    * Whether `secret` is a live key of this node, within its rate: the check a
-   * call meets before its body is read. Every key's hash is compared, each in
-   * constant time.
+   * call meets before its body is read. The key is looked up in the ledger by
+   * the secret's hash (`BuyerLedger.keyByHash`).
    */
   async check(secret: string | undefined, now: number): Promise<KeyCheck> {
     if (!secret) return { ok: false, status: 401, code: 'missing_key' };
-    const presented = hashOf(secret);
-    let found: KeyCopy | undefined;
-    for (const { key, hash } of await this.ledger.heldKeys()) {
-      if (timingSafeEqual(presented, hash)) found = key;
-    }
+    const found = await this.ledger.keyByHash(hashOf(secret));
     if (!found) return { ok: false, status: 401, code: 'unknown_key' };
     if (found.revoked) return { ok: false, status: 401, code: 'revoked_key' };
     if (found.expiresAt !== null && now >= found.expiresAt) return { ok: false, status: 401, code: 'expired_key' };
@@ -156,8 +152,8 @@ export class AccessKeys {
     return this.ledger.reservedOf(keyId);
   }
 
-  /** A key as the node API shows it: a copy, its list of services too, with what its calls not yet settled hold now. */
-  private shown(key: KeyCopy): AccessKey {
-    return { ...key, services: key.services && [...key.services], reserved: this.reservedOf(key.keyId).toString() };
+  /** A key as the node API shows it, from the ledger's copy, with what its calls not yet settled hold now. */
+  private shown(key: KeptKey): AccessKey {
+    return { ...key, reserved: this.reservedOf(key.keyId).toString() };
   }
 }
