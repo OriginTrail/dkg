@@ -4,13 +4,13 @@
 // and what this epoch's subscription has left for each service it funds.
 // "Add to plan" hands the service to Plans.
 import React, { useMemo, useState } from 'react';
-import { Check, Cloud, Link } from 'lucide-react';
+import { Check, Cloud, ShieldCheck } from 'lucide-react';
 import { PageHeader } from '../../components/ds/PageHeader.js';
 import { copy } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi } from '../api/client.js';
 import type { CatalogAnswer, Fx, Offer, Service, Storefront } from '../api/types.js';
 import { fmtMicro, fmtTrac, modelName, usdPerMillion } from '../amounts.js';
-import { CheckMark, ErrorCard, MarketplacePage, OffCard, richCopy, sellerName, useLoad, useMarketplaceNav } from '../shared.js';
+import { CoreNodeChecks, ErrorCard, MarketplacePage, OffCard, coreNodeBasics, sellerName, useLoad, useMarketplaceNav } from '../shared.js';
 import { useMarketplaceDraftStore } from '../draftStore.js';
 import { Playground } from './Playground.js';
 
@@ -39,7 +39,7 @@ export function ProvBadge({ offers }: { offers: Offer[] }): React.ReactElement {
   const pinned = offers.length > 0 && offers.every((o) => o.provenance === 'weights-pinned');
   return (
     <span className="mkt-sm mkt-prov" data-copy={pinned ? 'prov.pinned' : 'prov.claimed'} title={copy(pinned ? 'prov.pinned.tip' : 'prov.claimed.tip')}>
-      {pinned ? <><Link size={12} aria-hidden /> {copy('prov.pinned')}</> : <><Cloud size={12} aria-hidden /> {copy('prov.claimed')}</>}
+      {pinned ? <><ShieldCheck size={12} aria-hidden /> {copy('prov.pinned')}</> : <><Cloud size={12} aria-hidden /> {copy('prov.claimed')}</>}
     </span>
   );
 }
@@ -82,11 +82,8 @@ function StorefrontBody({ store, fx, label }: { store: Storefront; fx: Fx; label
   const factor = (Number(BigInt(store.stakeFactor18) / 10n ** 14n) / 10_000).toString();
   return (
     <>
-      <p className="mkt-muted mkt-xs" data-copy="store.gate">
-        {richCopy('store.gate', {
-          profile: <CheckMark ok={g.profile} />, table: <CheckMark ok={g.shardingTable} />,
-          stake: fmtTrac(g.stake), min: fmtTrac(g.minimumStake), factor,
-        })}
+      <p className="mkt-muted mkt-xs" data-copy="gate.core" data-testid="mkt-store-gate">
+        <CoreNodeChecks items={[...coreNodeBasics(g), { label: copy('gate.factor', { factor }) }]} />
       </p>
       <h3 data-copy="store.offers">{copy('store.offers')}</h3>
       {store.offers.length === 0 && <div className="mkt-muted mkt-xs" data-copy="store.offers.none">{copy('store.offers.none')}</div>}

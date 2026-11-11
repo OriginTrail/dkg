@@ -31,6 +31,14 @@ export function fmtTrac(wei: string | bigint): string {
   return s === '0' && v > 0n ? '<0.0001' : s;
 }
 
+/** fmtTrac with the whole part grouped in thousands, for stakes and other large amounts: 50000 → "50,000". */
+export function fmtTracGrouped(wei: string | bigint): string {
+  const s = fmtTrac(wei);
+  const [whole, frac] = s.split('.');
+  if (!/^\d+$/.test(whole!)) return s;
+  return whole!.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (frac ? `.${frac}` : '');
+}
+
 /**
  * `0.6` µTRAC per unit from wei per unit (1 µTRAC per token is 1 TRAC per
  * million tokens), cut to four places: for display only, never to read back.
