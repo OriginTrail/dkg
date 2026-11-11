@@ -1356,6 +1356,27 @@ describe('a store restored to an earlier state', () => {
     expect(readUnstoredReadGraphMarks(dataDir)).toEqual(new Map([[wholeVm, new Set([stored.generation])]]));
   });
 
+  it('ends a build whose publication a reported restore overlaps, and keeps the published row for a start-up mark', async () => {
+    const { adapter, fixture, layer, store, context, dataDir } = await open();
+    useReadGraphMarkJournal(layer.runtime, dataDir);
+    const [vm] = fixture.keys as [ReadGraphKey];
+    const { wholeVm } = fixture.readGraphs;
+    const publishing = `<${wholeVm}> <${READ_GRAPH_STATE_PREDICATES.state}> "ready"`;
+    adapter.onUpdate = (sparql) => {
+      // The restore is reported while the publication's request is on its way: no recovery generation tells it.
+      if (sparql.split('\n').some((line) => line.startsWith('INSERT {') && line.includes(publishing))) noteReadGraphStoreRestored(store);
+    };
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'lost' });
+    adapter.onUpdate = undefined;
+    const stored = (await readStoredReadGraphRow(adapter, wholeVm)).row!;
+    expect(stored.state).toBe('ready');
+    expect(servingReadGraphGeneration(layer.runtime.mirror.get(wholeVm))).toBeUndefined();
+    expect(readUnstoredReadGraphMarks(dataDir)).toEqual(new Map([[wholeVm, new Set([stored.generation])]]));
+    // The next process marks that row dirty rather than trust what the restore may have cut short.
+    const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    expect(await startReadGraphs(restarted, { dataDir, maintains: () => true })).toMatchObject({ marked: 1 });
+  });
+
   it('takes every read graph out of service once a supervised backend tells of a restart, before the next query is served', async () => {
     const { adapter, fixture, layer, store, context } = await open();
     let recovery = { generation: 1, ready: true };

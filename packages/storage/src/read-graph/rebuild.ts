@@ -442,7 +442,7 @@ class ReadGraphJob {
   private batches = 0;
   /** Whether this job replaced a damaged row. */
   replacedRow = false;
-  /** The backend's recovery generation when the job began. */
+  /** The runtime's recovery generation when the job began (`./recovery.ts`). */
   private readonly recovery: number | undefined;
 
   constructor(private readonly context: ReadGraphJobContext, readonly readGraph: string, private readonly kind: ReadGraphJobKind) {
@@ -679,7 +679,7 @@ class ReadGraphJob {
   }
 
   /** One batch: one lock hold, sent only while the row is still the job's. `false` when it is not. */
-  /** Whether the backend restarted since the job began: its progress may be gone, and the mirror is invalidated. */
+  /** Whether the store went back to an earlier state since the job began: its progress may be gone, and the mirror is invalidated. */
   restarted(): boolean {
     syncReadGraphRuntimeWithRecovery(this.context.store, this.runtime);
     return this.recovery !== readGraphRecoveryGeneration(this.context.store, this.runtime);
