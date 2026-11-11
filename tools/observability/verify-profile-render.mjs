@@ -178,6 +178,7 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
     'Publish failures',
     'Chain RPC failover exhausted',
     'Errored spans rate',
+    'Graph catalog at 80%',
   ];
   for (const stem of EXPECTED_RULE_STEMS) {
     const n = (payload.rules ?? []).filter((r) => (r.title ?? '').startsWith(stem)).length;
