@@ -757,9 +757,9 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
 
     assertExplicitGraphIrisAllowed(initialScope, allGraphs);
-    const constrainedScope = this.guardHeldGraphs(requireGraphScopeRewrite(
+    const constrainedScope = requireGraphScopeRewrite(
       constrainGraphVariablesToAllowedSet(initialScope, allGraphs, { boundByDataset: this.boundByDataset(initialScope, allGraphs) }),
-    ));
+    );
 
     // Spec §14 trust-gradient filter — only enforced on verifiable-memory
     // where on-chain-anchored trust metadata is expected to live.
@@ -799,6 +799,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       }
       effectiveScope = transitionGraphScope(constrainedScope, rewritten.value);
     }
+    // The trust rewrite reads the caller's own pattern, so the held-graph guards follow it.
+    effectiveScope = this.guardHeldGraphs(effectiveScope);
 
     if (allGraphs.length === 1) {
       return this.execAndNormalize(

@@ -1,5 +1,6 @@
 import type { PreparedSparqlQuery, SparqlLexicalToken } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { literalSuffixLength } from './sparql-literal-suffix.js';
+import { heldGraphGuardEnd } from './sparql-held-graph-guard.js';
 
 interface SourceRange {
   readonly start: number;
@@ -64,6 +65,12 @@ export function analyzeDedupPattern(scope: PreparedSparqlQuery): {
   let hasTriple = false;
   for (let index = scope.where.openingTokenIndex + 1; index < end; index++) {
     const token = tokens[index];
+    // The held-graph guard stays in the pattern, so each graph read keeps it.
+    const guardEnd = heldGraphGuardEnd(tokens, index);
+    if (guardEnd > index && guardEnd < end) {
+      index = guardEnd;
+      continue;
+    }
     if (token.kind === 'word' && token.upper === 'FILTER') {
       // FILTER ( ... ) or FILTER fn( ... )
       const isOpening = (at: number) => {
