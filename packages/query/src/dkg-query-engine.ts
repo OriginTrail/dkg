@@ -72,8 +72,8 @@ import {
   type PreparedGraphScope,
 } from './sparql-graph-scope.js';
 import { injectMinTrustFilter } from './sparql-min-trust.js';
-import { needsCallerGraphBinding } from './sparql-graph-dataset.js';
-import { bindCallerGraphsBeforeRead } from './sparql-caller-graph-read.js';
+import { guardGraphBlocksWithoutTriples, needsCallerGraphBinding, readsNeedGraphList } from './sparql-graph-dataset.js';
+import { bindCallerGraphsBeforeRead, callerGraphBranchesFit, hasCallerGraphAssignmentsInside } from './sparql-caller-graph-read.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 import {
@@ -398,6 +398,21 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
   }
 
+  /** On Oxigraph a graph in the dataset counts as present without triples, so blocks that need none get a guard. */
+  private guardHeldGraphs(scope: PreparedGraphScope): PreparedGraphScope {
+    return this.sparqlEngine === 'oxigraph' ? guardGraphBlocksWithoutTriples(scope) : scope;
+  }
+
+  /**
+   * On Oxigraph the dataset alone bounds a caller's graph variables, unless the read keeps a
+   * graph list: one that needs it, and a constant graph assignment over too many graphs for a
+   * branch per graph.
+   */
+  private boundByDataset(scope: PreparedGraphScope, graphs: readonly string[]): boolean {
+    return this.sparqlEngine === 'oxigraph' && !readsNeedGraphList(scope)
+      && (!hasCallerGraphAssignmentsInside(scope) || callerGraphBranchesFit(scope, graphs));
+  }
+
   /** On Oxigraph a scoped read selects its graphs through its dataset, so a read without one is refused. */
   private requireReadDatasets(reads: QueryStoreReadContext): QueryStoreReadContext {
     return this.sparqlEngine === 'oxigraph' ? requireQueryDataset(reads) : reads;
@@ -437,8 +452,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // Explicit IRIs retain static route authority; only opted-in variables gain
     // classified same-CG content selected for this caller and sub-graph.
     assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
-    const routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(initialGraphScope, variableAllowedGraphs,
-      { boundByDataset: this.sparqlEngine === 'oxigraph' }));
+    const routedScope = this.guardHeldGraphs(requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(initialGraphScope,
+      variableAllowedGraphs, { boundByDataset: this.boundByDataset(initialGraphScope, variableAllowedGraphs) })));
     const resolve = (target: { root: string; family: 'data' | 'shared-memory' }) => resolveLegacyRouteScope(
       routedScope, { ...target, discover: prefix => this.discoverGraphsByPrefix(prefix, reads),
         fallbackPolicy: plan.fallbackPolicy, engine: this.sparqlEngine, authorizedDatasetGraphs: variableAllowedGraphs });
@@ -518,10 +533,12 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
     const graphs = await this.resolveViewGraphSet(options.view, options.contextGraphId, options, reads, catalogReads);
     assertExplicitGraphIrisAllowed(scope, graphs);
-    const constrained = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(scope, graphs,
-      { boundByDataset: this.sparqlEngine === 'oxigraph', allowDefaultGraphPatterns: true }));
-    // As on the per-asset route, some GRAPH portions keep their graph only with constant targets.
+    // As on the per-asset route: the graph list where Oxigraph needs one, a guard on GRAPH blocks
+    // without a triple of their own, and constant targets for the portions that need them.
+    const constrained = this.guardHeldGraphs(requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(scope, graphs,
+      { boundByDataset: this.boundByDataset(scope, graphs), allowDefaultGraphPatterns: true })));
     const bound = needsCallerGraphBinding(constrained, this.sparqlEngine)
+      && (this.sparqlEngine !== 'oxigraph' || callerGraphBranchesFit(constrained, graphs))
       ? transitionGraphScope(constrained, bindCallerGraphsBeforeRead(constrained, graphs).source) : constrained;
     const result = await this.execAndNormalize(withMergedViewDataset(bound, plan.readGraph, graphs), reads);
     // A new member graph reaches the read graph as it is written, and the named graphs only when
@@ -661,9 +678,9 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
 
     assertExplicitGraphIrisAllowed(initialScope, allGraphs);
-    const constrainedScope = requireGraphScopeRewrite(
-      constrainGraphVariablesToAllowedSet(initialScope, allGraphs, { boundByDataset: this.sparqlEngine === 'oxigraph' }),
-    );
+    const constrainedScope = this.guardHeldGraphs(requireGraphScopeRewrite(
+      constrainGraphVariablesToAllowedSet(initialScope, allGraphs, { boundByDataset: this.boundByDataset(initialScope, allGraphs) }),
+    ));
 
     // Spec §14 trust-gradient filter — only enforced on verifiable-memory
     // where on-chain-anchored trust metadata is expected to live.
