@@ -159,8 +159,10 @@ export interface WorkingMemoryIdentityInstall {
  * the layer, the recorded one that start-up installed, the runtime's own
  * (every address owns its drafts), or the one installed before. In one
  * synchronous step, every working-memory read graph with a row whose agent
- * owns other addresses under the new rule is marked dirty in the mirror, the
- * record is removed when the identity changes, and the rule is installed. So
+ * owns other addresses under the new rule is marked dirty in the mirror, and
+ * its stored mark is owed, also when the mirror already held it dirty (its
+ * stored row may still say ready); the record is removed when the identity
+ * changes, and the rule is installed. So
  * no reader sees the new owner with a read graph built for the old one, nor
  * the old rule beside the new default, and no later start keeps a read graph
  * under the old record.
@@ -182,8 +184,8 @@ export async function installWorkingMemoryIdentity(
   const dataDir = context.dataDir ?? DATA_DIRS.get(runtime);
   const rule = workingMemoryIdentityRule(node);
   // Nothing is awaited from here until the rule, the marks and the record agree.
-  const marked = markWorkingMemoryReadGraphsDirty(runtime, runtime.workingMemoryIdentity, rule);
-  if (marked.length > 0 || recording.node === undefined || !sameIdentity(recording.node, node)) {
+  const { marked, moved } = markWorkingMemoryReadGraphsDirty(runtime, runtime.workingMemoryIdentity, rule);
+  if (moved.length > 0 || recording.node === undefined || !sameIdentity(recording.node, node)) {
     recording.recorded = false;
     // A record that cannot be removed here is removed before the identity is recorded, or the installation reports it unrecorded.
     try {
@@ -194,7 +196,7 @@ export async function installWorkingMemoryIdentity(
   }
   runtime.workingMemoryIdentity = rule;
   recording.node = node;
-  for (const readGraph of marked) recording.owed.add(readGraph);
+  for (const readGraph of moved) recording.owed.add(readGraph);
   const turn = recording.queue.then(() => storeMarksAndRecord(context, runtime, recording, dataDir));
   recording.queue = turn.then(() => undefined, () => undefined);
   return { marked, recorded: await turn };
@@ -247,22 +249,26 @@ function ownsOtherAddresses(before: WorkingMemoryIdentityRule, after: WorkingMem
 }
 
 /**
- * Mark dirty, in the mirror, the working-memory read graphs that have a row and
- * whose agent owns other addresses under `after` than under `before`.
+ * The working-memory read graphs that have a row and whose agent owns other
+ * addresses under `after` than under `before` (`moved`), and those of them
+ * this marks dirty in the mirror, which did not hold them dirty yet (`marked`).
  */
 function markWorkingMemoryReadGraphsDirty(
   runtime: ReadGraphBackendRuntime,
   before: WorkingMemoryIdentityRule,
   after: WorkingMemoryIdentityRule,
-): string[] {
+): { readonly marked: string[]; readonly moved: string[] } {
   const marked: string[] = [];
+  const moved: string[] = [];
   for (const row of runtime.mirror.rows()) {
     const key = parseReadGraphIri(row.readGraph);
-    if (key?.layer !== MemoryLayer.WorkingMemory || row.state === 'dirty' || !ownsOtherAddresses(before, after, key.agentAddress)) continue;
+    if (key?.layer !== MemoryLayer.WorkingMemory || !ownsOtherAddresses(before, after, key.agentAddress)) continue;
+    moved.push(row.readGraph);
+    if (row.state === 'dirty') continue;
     const dirty = nextReadGraphState(row, { kind: 'mark-dirty' });
     if (dirty === undefined) continue;
     runtime.mirror.set(dirty);
     marked.push(row.readGraph);
   }
-  return marked;
+  return { marked, moved };
 }
