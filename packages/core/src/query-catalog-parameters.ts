@@ -10,7 +10,7 @@
  */
 
 import { isSafeIri, sparqlString } from './sparql-safe.js';
-import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
+import { prepareSparql } from './sparql-lexer.js';
 
 export const QUERY_CATALOG_PARAMETER_TYPES = [
   'string',
