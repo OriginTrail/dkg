@@ -6,12 +6,15 @@ import {
   asChangelogReader,
   createManagedOxigraphRuntimeStoreConfigV1,
   createTripleStore,
+  keepsAnyReadGraph,
   readGraphLayerOf,
+  viewSemanticsOf,
   type ChangelogEraGuard,
   type ReadGraphStoreConfig,
 } from '@origintrail-official/dkg-storage';
 
 import { buildAgentRuntimeStoreConfig } from '../src/daemon/agent-runtime-store-config.js';
+import { readGraphStoreSettings, resolveQueryConfig } from '../src/read-graphs-config.js';
 
 describe('daemon managed Oxigraph store construction', () => {
   it('retains managed RFC-64 authority through the final changelog-wrapped agent config', async () => {
@@ -126,5 +129,15 @@ describe('daemon managed Oxigraph store construction', () => {
       readGraphs,
     });
     expect(buildAgentRuntimeStoreConfig({ ...base, dataDir: '/tmp/dkg-home' })).toBeUndefined();
+    // Settings that keep no read graph reach it too: the view semantics of the node and of each context graph.
+    const semantics = readGraphStoreSettings(resolveQueryConfig({
+      readGraphs: 'off',
+      viewSemantics: { default: 'merged', contextGraphs: { notes: 'per-asset' } },
+    }));
+    const config = buildAgentRuntimeStoreConfig({ ...base, readGraphs: semantics, dataDir: '/tmp/dkg-home' });
+    expect(config).toEqual({ backend: 'oxigraph-worker', options: { path: '/tmp/dkg-home/store.nq' }, readGraphs: semantics });
+    expect(viewSemanticsOf(config?.readGraphs?.viewSemantics, 'notes')).toBe('per-asset');
+    expect(viewSemanticsOf(config?.readGraphs?.viewSemantics, 'my-project')).toBe('merged');
+    expect(keepsAnyReadGraph(config?.readGraphs?.modes)).toBe(false);
   });
 });
