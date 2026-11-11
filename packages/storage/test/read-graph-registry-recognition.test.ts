@@ -16,6 +16,9 @@ import {
   readGraphStateRowsQuery,
 } from '../src/read-graph/state.js';
 import type { Quad } from '../src/triple-store.js';
+import { ReadGraphMaintenanceError } from '../src/read-graph/read-graph-store.js';
+import { isStoreOperationNotStarted } from '../src/store-operation-outcome.js';
+import { isStoreSchedulerBusyError, StoreSchedulerBusyError } from '../src/store-priority-scheduler.js';
 import { layerFixture, layeredStore, readyRow } from './helpers/read-graph-layer-conformance.js';
 import { PlanningOxigraphStore } from './helpers/read-graph-planning-store.js';
 
@@ -273,6 +276,35 @@ describe('registry recognition in the read-graph layer', () => {
     await expect(store.update!(notes, { writtenGraphs: [meta] })).rejects.toThrow('connection reset');
     expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs', 'notes']);
     expect(states()).toEqual({ wholeVm: 'dirty@3', wholeSwm: 'dirty@3', codeVm: 'ready@1', agentWm: 'dirty@3' });
+  });
+
+  it('reports a write that ran but whose registry cannot be read again as indeterminate, never as not started', async () => {
+    const { adapter, store, meta, fixture, layer } = await layered();
+    // The registry's read after the write is refused by a full queue, as a not-started update would be.
+    const busy = new StoreSchedulerBusyError('queue_full', 'background', 'storage.readGraphRegistry', { storeOperation: 'update' });
+    expect(isStoreSchedulerBusyError(busy)).toBe(true);
+    let written = false;
+    const query = adapter.query.bind(adapter);
+    adapter.query = async (sparql, options) => {
+      if (written && options?.source === 'storage.readGraphRegistry') throw busy;
+      return query(sparql, options);
+    };
+    const update = adapter.update.bind(adapter);
+    adapter.update = async (sparql, options) => {
+      await update(sparql, options);
+      if (sparql.includes('/notes')) written = true;
+    };
+    const notes = `INSERT DATA { GRAPH <${meta}> { <${fixture.root}/notes> <${R.type}> <${R.subGraphClass}> ; <${R.name}> "notes" } }`;
+    const error = await store.update!(notes, { writtenGraphs: [meta] }).then(() => undefined, (failure: unknown) => failure);
+    expect(error).toBeInstanceOf(ReadGraphMaintenanceError);
+    expect(error).toMatchObject({ code: 'READ_GRAPH_MAINTENANCE_FAILED', storeOperation: 'update', outcome: 'indeterminate', cause: busy });
+    expect(isStoreOperationNotStarted(error, 'update')).toBe(false);
+    expect(isStoreSchedulerBusyError(error)).toBe(false);
+    // The write ran, and the read graphs of the context graph are out of service until the registry is read again.
+    written = false;
+    expect((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames).toEqual(['code', 'notes']);
+    expect(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)?.state).toBe('dirty');
+    expect(layer.runtime.registries.facts(fixture.contextGraphId)).toBeUndefined();
   });
 
   it('takes a literal in the form the store reports, with its escapes decoded', async () => {

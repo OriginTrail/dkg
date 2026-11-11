@@ -110,8 +110,8 @@ export function readGraphCheckConformance(backend: 'oxigraph' | 'blazegraph') {
       const opened = await open();
       try {
         const { wholeVm } = opened.fixture.readGraphs;
-        // Another context graph whose graph names alone are over the ceiling set below.
-        const other = `did:dkg:context-graph:${run}-bulk-${sequence}`;
+        // A context graph whose ID extends this one's, with graph names that alone are over the ceiling set below.
+        const other = `${opened.fixture.root}-bulk`;
         await opened.adapter.insert(Array.from({ length: 200 }, (_, n) => q(`urn:s:bulk${n}`, '"bulk"', `${other}/_verifiable_memory/${AGENT}/${n}`)));
         vi.stubEnv(STORE_GRAPH_CATALOG_MAX_BYTES_ENV, String(8 * 1024));
         try {

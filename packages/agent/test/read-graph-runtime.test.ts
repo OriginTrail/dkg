@@ -7,6 +7,7 @@ import {
   readGraphRuntimeOf,
   readGraphLayerOf,
   readGraphStateCompareAndSet,
+  withReadGraphBackgroundSlot,
   wrapReadGraphLayer,
 } from '@origintrail-official/dkg-storage';
 import { READ_GRAPHS_OFF, ReadGraphWorkloadOwnerV1, readGraphWorkloadOf, type ReadGraphModesV1 } from '../src/read-graph-runtime.js';
@@ -152,5 +153,26 @@ describe('the agent read-graph workload', () => {
     expect(owner.readGraphStatus().lastCheck).toBe(report);
     await owner.close();
     expect(owner.readGraphStatus()).toMatchObject({ checking: false, builder: undefined });
+  });
+
+  it('ends a check run on request when it stops, and refuses one asked for while it stops', async () => {
+    const { view } = await agentView({ subscribed: [CG] });
+    const owner = new ReadGraphWorkloadOwnerV1(view, {
+      logger: logger(), intervalMs: 60_000, modes: modes((key) => key.layer === MemoryLayer.VerifiableMemory && key.scope.kind === 'context-graph'),
+    });
+    owner.start(ctx);
+    await owner.whenIdle();
+    let release: (() => void) | undefined;
+    // A build holds the backend's background slot, so the requested check waits for it.
+    const build = withReadGraphBackgroundSlot(readGraphLayerOf(view.store)!.runtime, () => new Promise<void>((resolve) => { release = resolve; }));
+    await vi.waitFor(() => expect(release).toBeDefined());
+    const requested = owner.checkNow();
+    const closed = owner.close();
+    await expect(owner.checkNow()).rejects.toThrow('The read-graph checks are stopping');
+    release!();
+    await build;
+    await expect(requested).rejects.toThrow('The read-graph checks are stopping');
+    await closed;
+    expect(owner.readGraphStatus().lastCheck).toBeUndefined();
   });
 });

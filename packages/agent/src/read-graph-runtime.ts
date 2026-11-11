@@ -108,6 +108,9 @@ export class ReadGraphWorkloadOwnerV1 {
   #builder: ReadGraphBuilder | undefined;
   #checks: ReadGraphCheckSchedule | undefined;
   #lastCheck: ReadGraphCheckReportV1 | undefined;
+  /** The checks run on request, each with the controller that ends it when the workload stops. */
+  readonly #requested = new Map<AbortController, Promise<unknown>>();
+  #closing = 0;
 
   constructor(agent: ReadGraphAgentViewV1, options: ReadGraphWorkloadOptionsV1) {
     this.#agent = agent;
@@ -139,13 +142,28 @@ export class ReadGraphWorkloadOwnerV1 {
     return this.#builder?.whenIdle() ?? Promise.resolve();
   }
 
-  /** Stop the builder and the checks: no new pass, and what runs is aborted and waited for. */
+  /**
+   * Stop the builder and the checks: no new pass, and what runs, a check run
+   * on request included, is aborted and waited for. A check asked for while
+   * this runs is refused.
+   */
   async close(): Promise<void> {
     const builder = this.#builder;
     const checks = this.#checks;
     this.#builder = undefined;
     this.#checks = undefined;
-    await Promise.all([checks?.close(), builder?.close()]);
+    this.#closing += 1;
+    try {
+      const requested = [...this.#requested];
+      for (const [stop] of requested) stop.abort(new Error('The read-graph checks are stopping'));
+      await Promise.all([
+        checks?.close(),
+        builder?.close(),
+        ...requested.map(([, run]) => run.then(() => undefined, () => undefined)),
+      ]);
+    } finally {
+      this.#closing -= 1;
+    }
   }
 
   /**
@@ -153,19 +171,37 @@ export class ReadGraphWorkloadOwnerV1 {
    * results for {@link readGraphStatus}: for `dkg store read-graphs check`. A
    * full check compares every triple; a mismatch marks the read graph dirty.
    * Each check runs in the backend's background slot, so it never overlaps a
-   * build.
+   * build or a scheduled check. Stopping the workload ends it.
    */
   async checkNow(options: { readonly mode?: ReadGraphCheckMode; readonly signal?: AbortSignal } = {}): Promise<ReadGraphCheckReportV1> {
-    const mode = options.mode ?? 'full';
+    if (this.#closing > 0) throw new Error('The read-graph checks are stopping');
+    const stop = new AbortController();
+    const caller = options.signal;
+    const forward = () => stop.abort(caller?.reason);
+    if (caller?.aborted) forward();
+    else caller?.addEventListener('abort', forward, { once: true });
+    const run = this.#check(options.mode ?? 'full', stop.signal);
+    this.#requested.set(stop, run);
+    try {
+      return await run;
+    } finally {
+      this.#requested.delete(stop);
+      caller?.removeEventListener('abort', forward);
+    }
+  }
+
+  async #check(mode: ReadGraphCheckMode, signal: AbortSignal): Promise<ReadGraphCheckReportV1> {
     const store = this.#agent.store;
     const layer = readGraphLayerOf(store);
     const results: ReadGraphCheckResult[] = [];
     if (layer) {
       const ready = layer.runtime.mirror.rows().filter((row) => row.state === 'ready').map((row) => row.readGraph).sort();
       for (const readGraph of ready) {
-        options.signal?.throwIfAborted();
-        results.push(await withReadGraphBackgroundSlot(layer.runtime,
-          () => checkReadGraph(store, readGraph, mode, options.signal ? { signal: options.signal } : {})));
+        signal.throwIfAborted();
+        results.push(await withReadGraphBackgroundSlot(layer.runtime, async () => {
+          signal.throwIfAborted();
+          return checkReadGraph(store, readGraph, mode, { signal });
+        }));
       }
     }
     const report: ReadGraphCheckReportV1 = { mode, at: Date.now(), results };
