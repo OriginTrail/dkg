@@ -16,6 +16,7 @@ import {
 } from './sparql-caller-graph-read.js';
 import { transitionGraphScope } from './sparql-query-transition.js';
 import { createVariableAllocator } from './sparql-rewrite-names.js';
+import { heldGraphGuard } from './sparql-held-graph-guard.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { sparqlRewriteReady, sparqlRewriteUnsupported, type SparqlRewriteResult } from './sparql-rewrite-result.js';
 
@@ -188,8 +189,7 @@ export function guardGraphBlocksWithoutTriples(scope: PreparedSparqlQuery): Prep
     closings.add(scope.where.closingTokenIndex);
   }
   if (closings.size === 0) return scope;
-  const allocate = createVariableAllocator(scope);
-  const guard = `FILTER EXISTS { ${allocate('__dkgHeldS')} ${allocate('__dkgHeldP')} ${allocate('__dkgHeldO')} }`;
+  const guard = heldGraphGuard(createVariableAllocator(scope));
   // Insertions go from the end of the text, so earlier offsets stay valid.
   const insertions: Array<readonly [number, string]> = [];
   for (const closing of closings) {
