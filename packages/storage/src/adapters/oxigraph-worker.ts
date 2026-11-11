@@ -30,6 +30,8 @@ import {
 import { raceStoreWorkAgainstAbort } from '../abortable-store-work-lifecycle.js';
 import type { OxigraphStoreOptions } from './oxigraph-read-only.js';
 import { createOxigraphWorkerTimeoutError } from './oxigraph-worker-timeout-error.js';
+import { OXIGRAPH_WORKER_READ_GRAPH_CAPABILITIES, readGraphPlanArgs, type ReadGraphCapableAdapter } from './oxigraph-read-graph-writes.js';
+import { refuseReadGraphOperations, withReadGraphs } from './read-graph-request.js';
 export type { OxigraphWorkerTimeoutError } from './oxigraph-worker-timeout-error.js';
 
 /**
@@ -161,7 +163,8 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
   'closed', 'gave_up', 'in_memory_lost',
 ]);
 
-export class OxigraphWorkerStore implements TripleStore {
+export class OxigraphWorkerStore implements TripleStore, ReadGraphCapableAdapter {
+  readonly readGraphCapabilities = OXIGRAPH_WORKER_READ_GRAPH_CAPABILITIES;
   readonly graphEnumerationVisibility = oxigraphGraphEnumerationVisibility;
   readonly sparqlEngine = 'oxigraph' as const;
   readonly writeRevisionCoverage = 'all-writers' as const;
@@ -722,41 +725,41 @@ export class OxigraphWorkerStore implements TripleStore {
   // can't land without the other). Large idempotent bulk imports that want
   // head-of-line fairness should run on an external SPARQL server, not by
   // silently fragmenting this insert into non-atomic chunks.
-  async insert(quads: Quad[]): Promise<void> {
+  async insert(quads: Quad[], options?: TripleStoreQueryOptions): Promise<void> {
+    refuseReadGraphOperations(options, 'OxigraphWorkerStore.insert');
     await runTrackedStoreWrite(this.writeGen,
       { kind: 'graphs', graphs: [...new Set(quads.map((q) => q.graph || ''))] },
       () => this.call('insert', quads),
     );
   }
-  async delete(quads: Quad[]): Promise<void> {
+  async delete(quads: Quad[], options?: TripleStoreQueryOptions): Promise<void> {
     await runTrackedStoreWrite(this.writeGen,
-      { kind: 'graphs', graphs: [...new Set(quads.map((q) => q.graph || ''))] },
-      () => this.call('delete', quads),
+      withReadGraphs({ kind: 'graphs', graphs: [...new Set(quads.map((q) => q.graph || ''))] }, options),
+      () => this.call('delete', quads, ...readGraphPlanArgs(options)),
     );
   }
-  async deleteByPattern(pattern: Partial<Quad>): Promise<number> {
+  async deleteByPattern(pattern: Partial<Quad>, options?: TripleStoreQueryOptions): Promise<number> {
     return runTrackedStoreWrite(this.writeGen,
-      pattern.graph
+      withReadGraphs(pattern.graph
         ? { kind: 'graphs', graphs: [pattern.graph] }
-        : { kind: 'all' },
-      () => this.call<number>('deleteByPattern', pattern),
+        : { kind: 'all' }, options),
+      () => this.call<number>('deleteByPattern', pattern, ...readGraphPlanArgs(options)),
     );
   }
-  async deleteByPatternWithoutCount(pattern: Partial<Quad>): Promise<void> {
-    await this.deleteByPattern(pattern);
+  async deleteByPatternWithoutCount(pattern: Partial<Quad>, options?: TripleStoreQueryOptions): Promise<void> {
+    await this.deleteByPattern(pattern, options);
   }
   // Server-side SPARQL UPDATE forwarded to the worker's OxigraphStore (which
   // implements `update`); same atomic single-message contract as `insert`.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async update(sparql: string, _options?: UpdateOptions): Promise<void> {
+  async update(sparql: string, options?: UpdateOptions): Promise<void> {
     // A raw UPDATE's write scope is not derivable at the call site
     // (`touchedGraphs` hints only membership changes) — unscoped lifecycle.
-    await runTrackedStoreWrite(this.writeGen, { kind: 'all' }, () => this.call('update', sparql));
+    await runTrackedStoreWrite(this.writeGen, { kind: 'all' }, () => this.call('update', sparql, ...readGraphPlanArgs(options)));
   }
-  async replaceGraph(graphUri: string, quads: Quad[]): Promise<void> {
+  async replaceGraph(graphUri: string, quads: Quad[], options?: TripleStoreQueryOptions): Promise<void> {
     await runTrackedStoreWrite(this.writeGen,
-      { kind: 'graphs', graphs: [graphUri] },
-      () => this.call('replaceGraph', graphUri, quads),
+      withReadGraphs({ kind: 'graphs', graphs: [graphUri] }, options),
+      () => this.call('replaceGraph', graphUri, quads, ...readGraphPlanArgs(options)),
     );
   }
   async replaceGraphAndSubject(
@@ -765,9 +768,10 @@ export class OxigraphWorkerStore implements TripleStore {
     metaGraphUri: string,
     metadataSubject: string,
     metadataQuads: Quad[],
+    options?: TripleStoreQueryOptions,
   ): Promise<void> {
     await runTrackedStoreWrite(this.writeGen,
-      { kind: 'graphs', graphs: [graphUri, metaGraphUri] },
+      withReadGraphs({ kind: 'graphs', graphs: [graphUri, metaGraphUri] }, options),
       () => this.call(
         'replaceGraphAndSubject',
         graphUri,
@@ -775,15 +779,16 @@ export class OxigraphWorkerStore implements TripleStore {
         metaGraphUri,
         metadataSubject,
         metadataQuads,
+        ...readGraphPlanArgs(options),
       ),
     );
   }
-  async replaceSubject(graphUri: string, subject: string, quads: Quad[]): Promise<void> {
+  async replaceSubject(graphUri: string, subject: string, quads: Quad[], options?: TripleStoreQueryOptions): Promise<void> {
     // The worker dispatch is generic (`store[method](...args)`), so this routes
     // to the worker's embedded OxigraphStore.replaceSubject — one atomic
     // single-message commit, same contract as insert/replaceGraph.
-    await runTrackedStoreWrite(this.writeGen, { kind: 'graphs', graphs: [graphUri] }, () =>
-      this.call('replaceSubject', graphUri, subject, quads));
+    await runTrackedStoreWrite(this.writeGen, withReadGraphs({ kind: 'graphs', graphs: [graphUri] }, options), () =>
+      this.call('replaceSubject', graphUri, subject, quads, ...readGraphPlanArgs(options)));
   }
   async replaceSubjectAndInsert(
     graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
@@ -791,8 +796,8 @@ export class OxigraphWorkerStore implements TripleStore {
   ): Promise<void> {
     if (options?.signal?.aborted) throw asAbortError(options.signal.reason);
     assertSubjectAndInsertPayload(graphUri, subject, replacementQuads, insertQuads);
-    await runTrackedStoreWrite(this.writeGen, { kind: 'graphs', graphs: [graphUri] }, () =>
-      this.call('replaceSubjectAndInsert', graphUri, subject, replacementQuads, insertQuads));
+    await runTrackedStoreWrite(this.writeGen, withReadGraphs({ kind: 'graphs', graphs: [graphUri] }, options), () =>
+      this.call('replaceSubjectAndInsert', graphUri, subject, replacementQuads, insertQuads, ...readGraphPlanArgs(options)));
   }
   async rfc64AuthorCommitCasV1(
     input: Rfc64AuthorCommitCasInputV1,
@@ -801,10 +806,11 @@ export class OxigraphWorkerStore implements TripleStore {
     if (options?.signal?.aborted) throw asAbortError(options.signal.reason);
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
     return runTrackedStoreWrite(this.writeGen,
-      { kind: 'graphs', graphs: [...manifest.touchedGraphs] },
+      withReadGraphs({ kind: 'graphs', graphs: [...manifest.touchedGraphs] }, options),
       () => this.call<Rfc64AuthorCommitCasResultV1>(
         'rfc64AuthorCommitCasNormalizedV1',
         manifest,
+        ...readGraphPlanArgs(options),
       ),
     );
   }
@@ -815,18 +821,18 @@ export class OxigraphWorkerStore implements TripleStore {
     return this.callWithTimeout<boolean>(this.operationTimeoutMs, options?.signal, 'hasGraph', graphUri);
   }
   async createGraph(graphUri: string): Promise<void> { return this.call('createGraph', graphUri); }
-  async dropGraph(graphUri: string): Promise<void> {
+  async dropGraph(graphUri: string, options?: TripleStoreQueryOptions): Promise<void> {
     await runTrackedStoreWrite(this.writeGen,
-      { kind: 'graphs', graphs: [graphUri] },
-      () => this.call('dropGraph', graphUri),
+      withReadGraphs({ kind: 'graphs', graphs: [graphUri] }, options),
+      () => this.call('dropGraph', graphUri, ...readGraphPlanArgs(options)),
     );
   }
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
     return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs', serializableQueryOptions(options));
   }
-  async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {
-    return runTrackedStoreWrite(this.writeGen, { kind: 'graphs', graphs: [graphUri] }, () =>
-      this.call<number>('deleteBySubjectPrefix', graphUri, prefix));
+  async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: TripleStoreQueryOptions): Promise<number> {
+    return runTrackedStoreWrite(this.writeGen, withReadGraphs({ kind: 'graphs', graphs: [graphUri] }, options), () =>
+      this.call<number>('deleteBySubjectPrefix', graphUri, prefix, ...readGraphPlanArgs(options)));
   }
 
   /** {@link GraphWriteGenSource} capability (#1609) — see graph-write-gen.ts. */
