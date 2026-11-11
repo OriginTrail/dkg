@@ -4,6 +4,11 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+## [10.1.1] - Unreleased
+
+10.1.1 fixes problems found while 10.1.0 ran on testnet, in the
+Marketplace, the MCP server and the public catalog.
+
 ### Fixed
 
 - A seller can serve tool calls on an OpenAI reasoning model that takes
@@ -11,7 +16,19 @@ All notable changes to the DKG V10 node are documented here. The format is based
   `marketplace.seller.services[].backend.reasoningEffortWithTools` to
   `none` for that service. Calls with tools then carry
   `reasoning_effort: "none"`, and calls without tools keep the model's own
-  reasoning.
+  reasoning. A model that refuses `none` as well takes function tools only on
+  the Responses API, so it can't serve tool calls: set `tools: false` for its
+  service, and buyers then get `tools_unsupported` instead of refused calls.
+- An MCP server registered by hand, with no `DKG_HOME` or workspace config
+  selected, now loads the default node home's credentials, so its
+  authenticated tools no longer answer `401`. An explicit home or workspace
+  config still comes first.
+- The MCP server's default `mine` listing shows only graphs the user takes
+  part in, by the node UI's membership rule, instead of every graph the node
+  has discovered.
+- A node refuses a public catalog head it cannot apply before it writes
+  anything to shared memory, so shared memory and Verifiable Memory stay
+  untouched.
 
 ## [10.1.0] - Unreleased
 
