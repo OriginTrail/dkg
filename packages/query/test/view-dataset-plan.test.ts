@@ -147,8 +147,14 @@ describe('planning a view query', () => {
       .toMatchObject({ code: SEMANTICS_UNSUPPORTED_CODE, message: 'semantics "merged" does not apply to this scope on this node' });
   });
 
+  it('answers 503 for an explicit merged without a state row, and a default per asset', () => {
+    const source = readGraphs([], { defaultSemantics: () => 'merged' });
+    expect(refusal(() => planViewDataset('verifiable-memory', CG, { semantics: 'merged' }, source)))
+      .toMatchObject({ code: VIEW_NOT_READY_CODE, retryAfterSeconds: VIEW_NOT_READY_RETRY_AFTER_SECONDS });
+    expect(planViewDataset('verifiable-memory', CG, {}, source)).toEqual({ kind: 'per-asset' });
+  });
+
   it.each([
-    ['without a state row', []],
     ['while building', [row(VM, 'building')]],
     ['while dirty', [row(VM, 'dirty')]],
     ['while repairing', [row(VM, 'repairing')]],
