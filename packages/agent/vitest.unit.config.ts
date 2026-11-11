@@ -166,6 +166,8 @@ export default defineConfig({
       "test/view-semantics-delta-report.test.ts",
       "test/context-graph-held-graphs.test.ts",
       "test/read-graph-declared-updates.test.ts",
+      "test/query-unheld-context-graph.test.ts",
+      "test/unheld-context-graph-read.test.ts",
       "test/unscoped-query-admission.test.ts",
       "test/prepare-unscoped-context-graph-read-checks.test.ts",
       "test/unscoped-query-consistency.test.ts",
