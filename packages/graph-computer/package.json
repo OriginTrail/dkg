@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-graph-computer",
-  "version": "10.1.0",
+  "version": "10.1.1",
   "description": "Agent-signed TypeScript client for DKG Graph Computer Programs",
   "type": "module",
   "main": "dist/index.js",
