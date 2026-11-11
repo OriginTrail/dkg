@@ -2,14 +2,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { MemoryLayer, readGraphIri, readScope, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import {
+  CURRENT_READ_GRAPH_VERSIONS,
   OxigraphStore,
   READ_GRAPH_PLANNED_METHODS,
   workingMemoryIdentityRule,
   wrapReadGraphLayer,
   type ReadGraphStoreConfig,
 } from '@origintrail-official/dkg-storage';
-import { DKGAgent } from '../src/index.js';
-import { installReadGraphWorkingMemoryIdentity, viewReadGraphsOf } from '../src/read-graph-view-source.js';
+import { ViewSemanticsDeltaSampler } from '@origintrail-official/dkg-query';
+import { DKGAgent, readableViewSemanticsDeltaReport } from '../src/index.js';
+import { installReadGraphWorkingMemoryIdentity, viewQueryEngineOptionsOf, viewReadGraphsOf } from '../src/read-graph-view-source.js';
 
 const AGENT = `0x${'ab'.repeat(20)}`;
 const OTHER = `0x${'cd'.repeat(20)}`;
@@ -27,15 +29,25 @@ function layered(readGraphs: ReadGraphStoreConfig) {
 }
 
 describe('the read-graph source of merged view queries', () => {
-  it('keeps only the read graphs the node serves, and reads state, identity and defaults from the runtime', () => {
+  it('keeps what the node builds or serves, serves only what it serves, and reads the rest from the runtime', async () => {
     const store = layered({
-      modes: { default: 'build', contextGraphs: { served: { layers: { [MemoryLayer.VerifiableMemory]: 'serve' } } } },
+      modes: {
+        default: 'off',
+        contextGraphs: { served: { default: 'build', layers: { [MemoryLayer.VerifiableMemory]: 'serve' } } },
+      },
       viewSemantics: { contextGraphs: { served: 'merged' } },
     });
     const source = viewReadGraphsOf(store)!;
-    expect(source.keeps(vm('served'))).toBe(true);
-    expect(source.keeps(swm('served'))).toBe(false);
-    expect(source.keeps(vm('other'))).toBe(false);
+    expect([source.keeps(vm('served')), source.serves?.(vm('served'))]).toEqual([true, true]);
+    // Built but not served: kept for the semantic-delta sampler, never for a request.
+    expect([source.keeps(swm('served')), source.serves?.(swm('served'))]).toEqual([true, false]);
+    expect([source.keeps(vm('other')), source.serves?.(vm('other'))]).toEqual([false, false]);
+    const readGraphOfVm = readGraphIri(vm('served'));
+    await source.withWriteLock?.(readGraphOfVm, async () => {
+      // The layer's own lock, which every maintained write of that read graph takes.
+      expect(store.runtime.locks.isLocked(readGraphOfVm)).toBe(true);
+    });
+    expect(store.runtime.locks.isLocked(readGraphOfVm)).toBe(false);
     expect(source.defaultSemantics?.('served')).toBe('merged');
     expect(source.defaultSemantics?.('other')).toBe('per-asset');
 
@@ -87,9 +99,13 @@ describe('the read-graph source of merged view queries', () => {
     await expect(installReadGraphWorkingMemoryIdentity(new OxigraphStore(), { peerId: PEER })).resolves.toBeUndefined();
   });
 
-  it('is absent for a store without a read-graph layer', () => {
+  it('is absent for a store without a read-graph layer, and so is the sampler', () => {
     expect(viewReadGraphsOf(new OxigraphStore())).toBeUndefined();
     expect(viewReadGraphsOf(undefined)).toBeUndefined();
+    expect(viewQueryEngineOptionsOf(new OxigraphStore())).toEqual({});
+    const options = viewQueryEngineOptionsOf(layered({}));
+    expect(options.readGraphs).toBeDefined();
+    expect(options.viewSemanticsDelta).toBeInstanceOf(ViewSemanticsDeltaSampler);
   });
 });
 
@@ -120,5 +136,34 @@ describe('the agent', () => {
     await expect(merged('served')).rejects.toMatchObject({ code: 'VIEW_NOT_READY' });
     // Built but not served, as with no read graphs at all: merged does not apply.
     await expect(merged('built')).rejects.toMatchObject({ code: 'SEMANTICS_UNSUPPORTED' });
+  });
+
+  it('samples a view query on a served read graph through its own engine, and reports it', async () => {
+    const store = layered({ modes: { contextGraphs: { sampled: { default: 'serve' } } } });
+    // The node's sampler draws from Math.random; the spy is the function it keeps, so it can be made to always sample.
+    const random = vi.spyOn(Math, 'random');
+    try {
+      agent = await DKGAgent.create({
+        name: 'ReadGraphSampling', listenHost: '127.0.0.1', listenPort: 0, chainAdapter: new MockChainAdapter(), nodeRole: 'edge', store,
+      });
+      await agent.start();
+      await agent.createContextGraph({ id: 'sampled', name: 'sampled', description: 'read-graph sampling test' });
+      // A ready read graph holding one triple, after the context graph's own writes.
+      const readGraph = readGraphIri(vm('sampled'));
+      await store.innerStore.insert([{ subject: 'urn:sampled:s', predicate: 'urn:sampled:p', object: '"o"', graph: readGraph }]);
+      store.runtime.mirror.set({
+        readGraph, state: 'ready', generation: 1,
+        ruleVersion: CURRENT_READ_GRAPH_VERSIONS.ruleVersion, builderVersion: CURRENT_READ_GRAPH_VERSIONS.builderVersion,
+      });
+      random.mockReturnValue(0);
+      await agent.query('SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: 'sampled', view: 'verifiable-memory' });
+      await vi.waitFor(async () => {
+        const report = await readableViewSemanticsDeltaReport(agent!);
+        expect(report).toMatchObject([{ contextGraphId: 'sampled' }]);
+        expect(report[0]!.samples + report[0]!.skipped).toBeGreaterThan(0);
+      });
+    } finally {
+      random.mockRestore();
+    }
   });
 });

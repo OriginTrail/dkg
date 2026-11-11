@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { ViewReadGraphs } from '@origintrail-official/dkg-query';
-import { MemoryLayer, parseReadGraphIri } from '@origintrail-official/dkg-core';
+import { ViewSemanticsDeltaSampler, type ViewReadGraphs } from '@origintrail-official/dkg-query';
+import { MemoryLayer, parseReadGraphIri, recordViewSemanticsDelta } from '@origintrail-official/dkg-core';
 import {
   nextReadGraphState, readGraphLayerOf, readGraphModeOf, readGraphStateCompareAndSet, viewSemanticsOf, workingMemoryIdentityRule,
   type ReadGraphBackendRuntime, type ReadGraphStateRow, type ReadGraphStore, type WorkingMemoryIdentityRule,
@@ -9,9 +9,11 @@ import {
 /**
  * The read graphs that merged view queries may read on this node, taken from
  * its store's read-graph layer:
- * - a read graph is kept for merged queries only where the node serves it:
- *   `query.readGraphs` is `serve` for its context graph and layer;
- * - its state is the row in the backend's process-wide mirror;
+ * - a read graph is kept where `query.readGraphs` is `build` or `serve` for
+ *   its context graph and layer, and serves requests only under `serve`; one
+ *   kept but not served still answers the semantic-delta sampler;
+ * - its state is the row in the backend's process-wide mirror, and its write
+ *   lock is the layer's own, which every maintained write takes;
  * - the working-memory identity rule and the default semantics
  *   (`query.viewSemantics`) are the runtime's.
  *
@@ -23,13 +25,31 @@ export function viewReadGraphsOf(store: unknown): ViewReadGraphs | undefined {
   const runtime = readGraphLayerOf(store)?.runtime;
   if (runtime === undefined) return undefined;
   return {
-    keeps: (key) => readGraphModeOf(runtime.modes, key) === 'serve',
+    keeps: (key) => readGraphModeOf(runtime.modes, key) !== 'off',
+    serves: (key) => readGraphModeOf(runtime.modes, key) === 'serve',
+    withWriteLock: (readGraph, work) => runtime.locks.withLocks([readGraph], work),
     state: (readGraph) => runtime.mirror.get(readGraph),
     get identity() {
       return runtime.workingMemoryIdentity;
     },
     defaultSemantics: (contextGraphId) => viewSemanticsOf(runtime.viewSemantics, contextGraphId),
   };
+}
+
+/**
+ * The query engine's options for merged view queries: the read-graph source
+ * and, with it, the semantic-delta sampler, which counts each classified
+ * sample in the node's metrics. A store without a read-graph layer gets
+ * neither.
+ */
+export function viewQueryEngineOptionsOf(store: unknown): {
+  readonly readGraphs?: ViewReadGraphs;
+  readonly viewSemanticsDelta?: ViewSemanticsDeltaSampler;
+} {
+  const readGraphs = viewReadGraphsOf(store);
+  return readGraphs === undefined
+    ? {}
+    : { readGraphs, viewSemanticsDelta: new ViewSemanticsDeltaSampler({ onDelta: recordViewSemanticsDelta }) };
 }
 
 /** The node as its working-memory identity rule sees it. Either value may be absent. */
