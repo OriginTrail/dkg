@@ -210,6 +210,28 @@ describe('planGraphDataset', () => {
     ]) expect(guardGraphBlocksWithoutTriples(scope(query)).source, query).toContain('FILTER EXISTS');
     const oneOrMore = scope('SELECT ?o WHERE { GRAPH <urn:g:1> { <urn:x> <urn:p>+ ?o } }');
     expect(guardGraphBlocksWithoutTriples(oneOrMore)).toBe(oneOrMore);
+    // A nested group, or every branch of a UNION, that reads a triple of the graph needs no guard.
+    for (const query of [
+      'SELECT * WHERE { GRAPH ?g { { ?s ?p ?o } } }',
+      'SELECT * WHERE { GRAPH ?g { { ?b ?p ?o } UNION { ?s ?p ?b } FILTER(isBlank(?b)) } }',
+      'SELECT * WHERE { GRAPH ?g { { { ?b ?p ?o } UNION { ?s ?p ?b } UNION { ?b ?p ?b } } FILTER(isBlank(?b)) } }',
+      'SELECT * WHERE { GRAPH ?g { BIND(1 AS ?x) { ?s ?p ?o } } }',
+      'SELECT ?s WHERE { { ?s ?p ?o } UNION { ?o ?p ?s } }',
+    ]) {
+      const read = scope(query);
+      expect(guardGraphBlocksWithoutTriples(read), query).toBe(read);
+    }
+    // A UNION branch that may read none, OPTIONAL, MINUS, EXISTS, a nested GRAPH or a subquery proves nothing.
+    for (const query of [
+      'SELECT * WHERE { GRAPH ?g { { ?s ?p ?o } UNION { BIND(1 AS ?x) } } }',
+      'SELECT * WHERE { GRAPH ?g { { ?s <urn:p>* ?o } UNION { ?s ?p ?o } } }',
+      'SELECT * WHERE { GRAPH ?g { OPTIONAL { ?s ?p ?o } } }',
+      'SELECT * WHERE { GRAPH ?g { MINUS { ?s ?p ?o } } }',
+      'SELECT * WHERE { GRAPH ?g { FILTER EXISTS { ?s ?p ?o } } }',
+      'SELECT * WHERE { GRAPH ?g { GRAPH ?h { ?s ?p ?o } } }',
+      'SELECT * WHERE { GRAPH ?g { VALUES ?x { 1 } { SELECT ?s WHERE { ?s ?p ?o } } } }',
+      'SELECT * WHERE { GRAPH ?g { VALUES (?x) { (1) } } }',
+    ]) expect(guardGraphBlocksWithoutTriples(scope(query)).source, query).toContain('FILTER EXISTS { ?__dkgHeld');
     // A subquery that fills its group moves into a group of its own, which the guard follows.
     const subquery = guardGraphBlocksWithoutTriples(scope('SELECT ?g ?s WHERE { GRAPH ?g { SELECT ?s WHERE { ?s ?p ?o } } }'));
     expect(subquery.source).toMatch(/GRAPH \?g \{ \{ SELECT \?s WHERE \{ \?s \?p \?o \}\s+\} FILTER EXISTS \{ [^}]+ \} \}/);
