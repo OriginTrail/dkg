@@ -50,6 +50,7 @@ import {
 } from './sparql-statements.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { readCompleteGraphCatalog } from '../graph-catalog-internal-limit.js';
+import { BLAZEGRAPH_GRAPH_LIST_QUERY, decodeBlazegraphGraphList, GRAPH_LIST_ACCEPT } from './blazegraph-graph-list.js';
 import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
 import { isReadOnlyStoreOperation, type StoreOperation, type StoreOperationOutcome } from '../store-operation-outcome.js';
@@ -738,13 +739,10 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
     // The complete list is node state: the internal catalog ceiling bounds the read, not a caller's limit.
-    const r = await readCompleteGraphCatalog(options, internal => this.queryWithOperation(
-      'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
-      internal,
-      'listGraphs',
-    ));
-    if (r.type !== 'bindings') return [];
-    return r.bindings.map((b) => b.g).filter(this.graphEnumerationVisibility);
+    // It is read one graph per line and decoded as a stream (blazegraph-graph-list.ts).
+    return readCompleteGraphCatalog(options, internal => classifyStoreReadTransport(this.runStoreWork('listGraphs', internal,
+      async (deadline) => decodeBlazegraphGraphList(await this.postReadQuery(BLAZEGRAPH_GRAPH_LIST_QUERY, GRAPH_LIST_ACCEPT,
+        deadline, internal.maxResponseBytes, 'query'), deadline, internal.maxResponseBytes, this.graphEnumerationVisibility))));
   }
 
   // -------------------------------------------------------------------
