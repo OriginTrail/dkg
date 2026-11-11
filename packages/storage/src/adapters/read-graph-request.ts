@@ -4,6 +4,7 @@ import {
   type ReadGraphWriteOptions,
   type ReadGraphWritePlan,
 } from '../read-graph/adapter-contract.js';
+import type { GraphWriteScope } from '../graph-write-gen.js';
 import type { QueryOptions } from '../triple-store.js';
 
 /**
@@ -36,16 +37,34 @@ export function withReadGraphOperations(update: string, options: QueryOptions | 
 /**
  * {@link withReadGraphOperations} for a caller's own update text, which may end
  * with a `;` separator, also before a trailing comment. That separator is
- * removed first, because the splice adds its own. It is found as the last
- * token of the SPARQL lexical scanner, so a `;` inside a string, an IRI, a
- * comment or an escaped prefixed name (`ex:a\;`) is never taken for it.
+ * removed first, because the splice adds its own. A prologue (`PREFIX` and
+ * `BASE` declarations) that opens the caller's text stays at the start of the
+ * request, before the plan's operations: Oxigraph accepts a prologue only
+ * there, and the plan's operations use absolute IRIs, which it does not change.
+ *
+ * Both come from one linear pass of the SPARQL lexical scanner. A comment counts
+ * as whitespace, and the separator is the last token only when it is a `;` of
+ * its own, so a `;` inside a string, an IRI, a comment or an escaped prefixed
+ * name (`ex:a\;`) is never taken for it.
  */
 export function withReadGraphOperationsAroundCallerUpdate(sparql: string, options: QueryOptions | undefined): string {
-  return operationsOf(options) ? withReadGraphOperations(withoutFinalSeparator(sparql), options) : sparql;
+  if (!operationsOf(options)) return sparql;
+  const { tokens, prologue } = prepareSparql(sparql);
+  const start = prologue.endTokenIndex > 0 ? tokens[prologue.endTokenIndex - 1]!.end : 0;
+  const last = tokens.length > prologue.endTokenIndex ? tokens[tokens.length - 1] : undefined;
+  const operations = last?.kind === 'symbol' && last.logicalValue === ';'
+    ? sparql.slice(start, last.start) + sparql.slice(last.end)
+    : sparql.slice(start);
+  const spliced = withReadGraphOperations(operations, options);
+  return start > 0 ? `${sparql.slice(0, start)}\n${spliced}` : spliced;
 }
 
-function withoutFinalSeparator(sparql: string): string {
-  const { tokens } = prepareSparql(sparql);
-  const last = tokens[tokens.length - 1];
-  return last?.kind === 'symbol' && last.logicalValue === ';' ? sparql.slice(0, last.start) + sparql.slice(last.end) : sparql;
+/**
+ * The graphs a write may change: the scope of its own update, and the read
+ * graphs its plan maintains, which change in the same request. An unscoped
+ * write stays unscoped.
+ */
+export function withReadGraphs(scope: GraphWriteScope, options: QueryOptions | undefined): GraphWriteScope {
+  const plan = operationsOf(options);
+  return plan && scope.kind === 'graphs' ? { kind: 'graphs', graphs: [...scope.graphs, ...plan.readGraphs] } : scope;
 }
