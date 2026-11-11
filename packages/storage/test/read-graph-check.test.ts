@@ -65,6 +65,33 @@ describe('read-graph checks under concurrent writes', () => {
     await adapter.close();
   });
 
+  it('leaves a read graph alone when a newer generation is published while a full check runs', async () => {
+    const { adapter, fixture, layer, store } = await hooked();
+    const { wholeVm } = fixture.readGraphs;
+    let probes = 0;
+    adapter.hook = {
+      matches: isMissingProbe,
+      // During the first probe a rebuild publishes generation 3 under the lock, holding a triple no member holds.
+      before: async () => {
+        if (++probes !== 1) return;
+        await layer.runtime.locks.withLocks([wholeVm], async () => {
+          layer.runtime.mirror.set(readyRow(wholeVm, 3));
+          await adapter.insert([q('urn:s:stray', '"stray"', wholeVm)]);
+        });
+      },
+    };
+    const alerts: string[] = [];
+    expect(await checkReadGraph(store, wholeVm, 'full', { alert: (message) => alerts.push(message) }))
+      .toEqual({ readGraph: wholeVm, mode: 'full', outcome: 'skipped' });
+    expect(probes).toBeGreaterThan(0);
+    expect(layer.runtime.mirror.get(wholeVm)).toMatchObject({ state: 'ready', generation: 3 });
+    expect(alerts).toEqual([]);
+    // The check that starts at generation 3 finds the triple.
+    expect(await checkReadGraph(store, wholeVm, 'full', { alert: (message) => alerts.push(message) }))
+      .toEqual({ readGraph: wholeVm, mode: 'full', outcome: 'mismatch', direction: 'unheld' });
+    await adapter.close();
+  });
+
   it('probes a member graph that appears between the probes and the count', async () => {
     const { adapter, fixture, layer, store } = await hooked();
     const { wholeVm } = fixture.readGraphs;
