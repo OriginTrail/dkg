@@ -14,9 +14,8 @@ export type FinalizationRecoveryState =
   | 'REJECTED'
   | 'UNSUPPORTED';
 
-export interface FinalizationRecoveryEntry {
+interface FinalizationRecoveryEntryFields {
   key: string;
-  state: FinalizationRecoveryState;
   chainId: string;
   contextGraphId: string;
   sourcePeerId?: string;
@@ -31,7 +30,6 @@ export interface FinalizationRecoveryEntry {
   targetContextGraphId?: string;
   envelopeSha256: string;
   rawMessage: Uint8Array;
-  verifiedEvidence?: VerifiedGraphScopedFinalizationEvidence;
   generation: number;
   attemptCount: number;
   failureSignature?: string;
@@ -41,6 +39,38 @@ export interface FinalizationRecoveryEntry {
   createdAt: number;
   updatedAt: number;
 }
+
+/** Entries that have not acquired chain-verified finalization evidence. */
+export type UnverifiedFinalizationRecoveryEntry = FinalizationRecoveryEntryFields & {
+  state: 'RECEIVED' | 'REORGED';
+  verifiedEvidence?: never;
+};
+
+/** Entries whose state is evidence-bearing by construction. */
+export type VerifiedFinalizationRecoveryEntry = FinalizationRecoveryEntryFields & {
+  state: 'VERIFIED' | 'SETTLED';
+  verifiedEvidence: VerifiedGraphScopedFinalizationEvidence;
+};
+
+/**
+ * Terminal rows retain optional evidence for bounded diagnostics and audit.
+ *
+ * UNSUPPORTED belongs here, not with the evidence-free states: `transition()`
+ * admits it from RECEIVED, VERIFIED and REORGED and clears only
+ * `publisher_upgrade_pending`, so a VERIFIED row downgraded by
+ * `markUnsupported()` keeps the evidence it had acquired. Classifying it as
+ * evidence-free made every later read of such a row throw — including the
+ * open-time sweep, which made the whole inbox unopenable.
+ */
+export type HistoricalFinalizationRecoveryEntry = FinalizationRecoveryEntryFields & {
+  state: 'SUPERSEDED' | 'REJECTED' | 'UNSUPPORTED';
+  verifiedEvidence?: VerifiedGraphScopedFinalizationEvidence;
+};
+
+export type FinalizationRecoveryEntry =
+  | UnverifiedFinalizationRecoveryEntry
+  | VerifiedFinalizationRecoveryEntry
+  | HistoricalFinalizationRecoveryEntry;
 
 export interface FinalizationRecoveryReceiveInput {
   key: string;
@@ -66,8 +96,8 @@ export type FinalizationRecoveryReceiveResult =
   | { status: 'closed' };
 
 export type FinalizationRecoveryVerifyResult =
-  | { status: 'verified'; entry: FinalizationRecoveryEntry }
-  | { status: 'existing'; entry: FinalizationRecoveryEntry }
+  | { status: 'verified'; entry: VerifiedFinalizationRecoveryEntry }
+  | { status: 'existing'; entry: VerifiedFinalizationRecoveryEntry }
   | { status: 'conflict' }
   | { status: 'missing' }
   | { status: 'closed' };
@@ -96,7 +126,7 @@ export interface FinalizationRecoveryVerifiedEvidenceUpdate {
 
 export type FinalizationRecoveryVerifiedEvidenceTransitionPlan =
   | { status: 'update'; fields: FinalizationRecoveryVerifiedEvidenceUpdate }
-  | { status: 'existing'; entry: FinalizationRecoveryEntry }
+  | { status: 'existing'; entry: VerifiedFinalizationRecoveryEntry }
   | { status: 'conflict' };
 
 /**
@@ -111,7 +141,7 @@ export function planFinalizationRecoveryVerifiedEvidenceTransition(
 ): FinalizationRecoveryVerifiedEvidenceTransitionPlan {
   const { evidence } = commit;
   if (current.generation !== generation) return { status: 'conflict' };
-  if (current.verifiedEvidence) {
+  if (current.state === 'VERIFIED' || current.state === 'SETTLED') {
     return VerifiedGraphScopedFinalizationEvidenceCodec.same(
       current.verifiedEvidence,
       evidence,
@@ -119,6 +149,7 @@ export function planFinalizationRecoveryVerifiedEvidenceTransition(
       ? { status: 'existing', entry: current }
       : { status: 'conflict' };
   }
+  if (current.verifiedEvidence) return { status: 'conflict' };
   if (
     (current.state !== 'RECEIVED' && current.state !== 'REORGED')
     || (
@@ -157,7 +188,7 @@ export function planFinalizationRecoveryVerifiedEvidenceTransition(
 }
 
 export type FinalizationRecoverySettledPublisherUpgradeResult =
-  | { status: 'recorded' | 'existing'; entry: FinalizationRecoveryEntry }
+  | { status: 'recorded' | 'existing'; entry: VerifiedFinalizationRecoveryEntry }
   | { status: 'conflict' | 'missing' | 'closed' };
 
 export type FinalizationRecoveryFailureCode =

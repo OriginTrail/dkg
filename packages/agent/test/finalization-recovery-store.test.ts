@@ -148,7 +148,7 @@ describe('finalization recovery verified-evidence transition planner', () => {
     ],
     [
       'terminal source state',
-      entry({ state: 'SETTLED' }),
+      entry({ state: 'SUPERSEDED' }),
       0,
       { evidence: evidence(), placement: 'original' },
     ],
