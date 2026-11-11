@@ -15,7 +15,11 @@
  *     its own: refused too, the service stops saying it takes tools until the
  *     node restarts, so the buyer answers its calls with tools itself, and
  *     they hold nothing; served, the refusal was that call's own. A service
- *     whose backend has served a call with tools keeps them, unchecked.
+ *     whose backend has served a call with tools keeps them, unchecked. The
+ *     refused call waits for the check within its backend's time limit only.
+ * The service backend itself (seller-backend.ts) is driven by hand at the end:
+ * a buyer's call with tools served while a check is out, one check at a time,
+ * and a check asked again after one that said nothing.
  */
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -31,6 +35,7 @@ import {
   MAX_UNSETTLED_PER_SELLER,
   Router,
   Seller,
+  UpstreamError,
   connectorOf,
   decodeMessage,
   encodeMessage,
@@ -38,12 +43,16 @@ import {
   signServiceOffer,
   type AccessKey,
   type ChatMessage,
+  type Completion,
+  type CompletionCall,
+  type Connector,
   type GatewayAnswer,
   type QuoteResponse,
   type ServeResponse,
   type ToolCalls,
   type ToolSpec,
 } from '../src/index.js';
+import { ServiceBackend, TOOLS_CHECK } from '../src/seller-backend.js';
 
 const NODE = new ethers.Wallet(`0x${'22'.repeat(32)}`);
 /** The seller's two services: each a model URN, and the backend's own model name. */
@@ -59,8 +68,11 @@ const OK = { choices: [{ message: { role: 'assistant', content: 'synthetic answe
 /** What a backend whose model takes no function tools on chat completions answers a call with tools. */
 const NO_TOOLS = { error: { message: 'Function tools are not supported for this model on chat completions.', type: 'invalid_request_error' } };
 
-/** What the stubbed backend answers: a status and its body, `hang` until the connector's time limit, or `down`, no answer. */
-type Reply = { status: number; body?: unknown } | 'hang' | 'down';
+/**
+ * What the stubbed backend answers: a status and its body, `after` so many milliseconds; `hang` until the connector's
+ * time limit; `stall`, never, past any time limit; or `down`, no answer at all.
+ */
+type Reply = { status: number; body?: unknown; after?: number } | 'hang' | 'stall' | 'down';
 /** A reply, or what picks one for the request sent. */
 type Answer = Reply | ((sent: Record<string, unknown>) => Reply);
 
@@ -86,9 +98,9 @@ const chat = (model: string, extra: Record<string, unknown> = {}) => ({ model, m
 const withTools = (model: string) => chat(model, { tools: TOOLS });
 const call = (c: unknown) => gateway.chatCompletion(caller, c);
 const quoted = async (s: Seller, model: string) => (await s.quote({ services: [serviceIdOf(model)] })).offers[0]!;
-/** Whether a backend request is the seller's own check of its tools: one with tools that are not the buyer's. */
+/** Whether a backend request is the seller's own check of its tools. */
 const isCheck = (sent: Record<string, unknown>) =>
-  Array.isArray(sent.tools) && !(sent.tools as ToolSpec[]).some((t) => t.function.name === TOOLS[0].function.name);
+  Array.isArray(sent.tools) && (sent.tools as ToolSpec[])[0]?.function.name === TOOLS_CHECK.tools![0]!.function.name;
 const checks = () => requests.filter(isCheck).length;
 
 /** `fetch` as the backends answer it: by the request's model, and whether it carries tools. */
@@ -100,31 +112,36 @@ function stubBackends(): void {
     const reply = typeof answer === 'function' ? answer(sent) : answer;
     if (reply === 'down') throw new TypeError('fetch failed');
     if (reply === 'hang') return new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason)));
+    if (reply === 'stall') return new Promise<Response>(() => {});
+    if (reply.after) await new Promise((resolve) => setTimeout(resolve, reply.after));
     const said = reply.body ?? (reply.status < 300 ? OK : { error: { message: 'synthetic refusal' } });
     return new Response(JSON.stringify(said), { status: reply.status, headers: { 'content-type': 'application/json' } });
   }));
 }
 
-/** The seller of A and B, each taking tools, on its directory: a second one there is the first restarted. */
-function sellerOf(): Seller {
+/**
+ * The seller of A and B, each taking tools, on its directory: a second one there is the first restarted. `timeoutMs`
+ * is each backend's time limit.
+ */
+function sellerOf(timeoutMs = 2_000): Seller {
   return new Seller({
     chain, dir: join(dir, 'seller'), signer: NODE.address, peerId: 'seller-peer', stopServingSeconds: 180, tickSeconds: 300,
     services: [A, B].map((s) => ({
       model: s.model, serviceId: serviceIdOf(s.model), pricePerUnit: PRICE, capacity: null, provenance: 'upstream-claimed' as const, tools: true,
       // The base is never reached: `fetch` is stubbed.
-      connector: connectorOf({ kind: 'openai', baseUrl: 'http://127.0.0.1:9/v1', model: s.backend, timeoutMs: 50 }), backendTimeoutMs: 50,
+      connector: connectorOf({ kind: 'openai', baseUrl: 'http://127.0.0.1:9/v1', model: s.backend, timeoutMs }), backendTimeoutMs: timeoutMs,
     })),
     log: (message) => logs.push(message),
   });
 }
 
-/** A buyer funding both services, and its gateway, routed to the seller in this process. */
-async function setUp(): Promise<void> {
+/** A buyer funding both services, and its gateway, routed to the seller in this process, whose backends have `timeoutMs`. */
+async function setUp(timeoutMs?: number): Promise<void> {
   await mock.ensureProfile();
   const buyer = new Buyer({ chain, store: new BuyerStore(join(dir, 'buyer')), config: { enabled: true, buyerWallet: NODE.address, prefundLeadSeconds: 7_200, tickSeconds: 300 } });
   const { epoch } = await chain.getEpochTimes();
   await buyer.fund({ epoch, source: { kind: 'wallet' }, services: [A, B].map((s) => ({ serviceId: serviceIdOf(s.model), serviceClass: 1, value: 10n ** 6n, maxPricePerUnit: 100n })) });
-  seller = sellerOf();
+  seller = sellerOf(timeoutMs);
   await seller.load();
   await seller.tick();
   const domain = (await chain.getMarketplaceContracts()).requestDomain;
@@ -228,6 +245,20 @@ describe('a call its backend refuses about the call itself', () => {
     expect(unreachable).not.toHaveBeenCalled();
   });
 
+  it("is answered within its backend's time limit when the check never answers, and the seller's other service stays routed", async () => {
+    // The buyer's call is refused late in its backend's 400 ms, and the check then answers nothing at all.
+    await setUp(400);
+    replies[A.backend]!.tools = (sent) => (isCheck(sent) ? 'stall' : { status: 400, body: NO_TOOLS, after: 250 });
+    const startedAt = Date.now();
+    expect(await call(withTools(A.model))).toMatchObject({ status: 502, body: { error: { code: 'seller_refused' }, sellerCode: 'BadRequest', retry: false } });
+    // Within the backend's time limit and some slack for a busy host, well before the check's wait of seconds ends.
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+    expect(checks()).toBe(1);
+    // The buyer only demoted the seller, nothing is known of the tools, and the other service is routed.
+    expect((await call(chat(B.model))).status).toBe(200);
+    expect(await quoted(seller, A.model)).toMatchObject({ tools: true });
+  });
+
   it('refuses a call with tools from a buyer whose quote is from before, without running the backend', async () => {
     await setUp();
     replies[A.backend]!.tools = { status: 400, body: NO_TOOLS };
@@ -308,7 +339,8 @@ describe("a call whose backend fails for the seller's key, quota or load, or doe
     ['times out', 'hang'],
     ['cannot be reached', 'down'],
   ] satisfies Array<[string, Reply]>)('is refused as UpstreamError, to retry, when the backend %s: the buyer leaves the seller out for ten minutes, as before', async (_what, reply) => {
-    await setUp();
+    // A backend that times out takes its whole time limit: a short one here.
+    await setUp(reply === 'hang' ? 100 : undefined);
     const demote = vi.spyOn(router, 'demote');
     const unreachable = vi.spyOn(router, 'unreachable');
     replies[A.backend] = { tools: reply, text: reply };
@@ -320,5 +352,83 @@ describe("a call whose backend fails for the seller's key, quota or load, or doe
     expect(body(await call(chat(B.model))).error?.code).toBe('no_seller');
     expect(await quoted(seller, A.model)).toMatchObject({ tools: true });
     expect(checks()).toBe(0);
+  });
+});
+
+describe('a service backend, driven by hand', () => {
+  const SERVED: Completion = { content: 'OK', promptTokens: 3, completionTokens: 1 };
+  const WITH_TOOLS: CompletionCall = { messages: [QUESTION], maxTokens: 20, tools: TOOLS };
+  const refusedWith = (status: number) => new UpstreamError(`the backend answered ${status}: synthetic refusal`, status);
+
+  /** A connector whose calls wait, in the order they came, until the test settles them. */
+  function heldConnector() {
+    const held: Array<{ call: CompletionCall; resolve: (c: Completion) => void; reject: (err: unknown) => void }> = [];
+    const connector: Connector = {
+      kind: 'openai',
+      complete: (c) => new Promise<Completion>((resolve, reject) => { held.push({ call: c, resolve, reject }); }),
+    };
+    return { connector, held };
+  }
+
+  it("keeps the tools of a backend that serves a buyer's call with tools while a check is out, whatever the check comes to", async () => {
+    const { connector, held } = heldConnector();
+    const backend = new ServiceBackend(connector, { model: A.model, takesTools: true }, (message) => logs.push(message));
+    const check = backend.checkToolsAfter(400);
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    expect(held[0]!.call).toBe(TOOLS_CHECK);
+    // Another buyer's call with tools is served while the check is out.
+    const served = backend.complete(WITH_TOOLS);
+    await vi.waitFor(() => expect(held).toHaveLength(2));
+    held[1]!.resolve(SERVED);
+    expect(await served).toEqual(SERVED);
+    // The check comes back refused, after that: the tools stay, and nothing more is checked.
+    held[0]!.reject(refusedWith(400));
+    await check;
+    expect(backend.takesTools).toBe(true);
+    expect(logs).toEqual([]);
+    await backend.checkToolsAfter(400);
+    expect(held).toHaveLength(2);
+  });
+
+  it('checks once at a time, only for 400 and 422, and again after a check that said nothing', async () => {
+    const { connector, held } = heldConnector();
+    const backend = new ServiceBackend(connector, { model: A.model, takesTools: true }, (message) => logs.push(message));
+    const first = backend.checkToolsAfter(400);
+    expect(backend.checkToolsAfter(422)).toBe(first);
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    held[0]!.reject(new UpstreamError('the backend did not answer: synthetic'));
+    await first;
+    expect(backend.takesTools).toBe(true);
+    // Refusals about the model, the size or the form check nothing.
+    for (const status of [404, 413, 415]) await backend.checkToolsAfter(status);
+    expect(held).toHaveLength(1);
+    const again = backend.checkToolsAfter(400);
+    await vi.waitFor(() => expect(held).toHaveLength(2));
+    held[1]!.reject(refusedWith(422));
+    await again;
+    expect(backend.takesTools).toBe(false);
+    expect(logs).toEqual([`[marketplace] ${A.model} takes no tool calls until the node restarts: its backend refused a minimal call with tools too: the backend answered 422: synthetic refusal`]);
+    // A buyer's call with tools that answers after all, one that was out then, shows the backend takes them.
+    const late = backend.complete(WITH_TOOLS);
+    await vi.waitFor(() => expect(held).toHaveLength(3));
+    held[2]!.resolve(SERVED);
+    await late;
+    expect(backend.takesTools).toBe(true);
+  });
+
+  it('is up or down by its last call, and takes no tools when its settings say none', async () => {
+    const { connector, held } = heldConnector();
+    const backend = new ServiceBackend(connector, { model: A.model, takesTools: false });
+    expect([backend.state, backend.takesTools]).toEqual(['up', false]);
+    const failed = backend.complete(WITH_TOOLS);
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    held[0]!.reject(refusedWith(500));
+    await expect(failed).rejects.toThrow(UpstreamError);
+    expect(backend.state).toBe('down');
+    const served = backend.complete(WITH_TOOLS);
+    await vi.waitFor(() => expect(held).toHaveLength(2));
+    held[1]!.resolve(SERVED);
+    await served;
+    expect([backend.state, backend.takesTools]).toEqual(['up', false]);
   });
 });

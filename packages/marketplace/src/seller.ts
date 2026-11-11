@@ -47,9 +47,11 @@
  *   `UpstreamError`, to retry. When the backend refuses a call with tools as
  *   made (400 or 422) and has shown nothing of tools since the node started,
  *   the seller asks it a minimal call with tools of its own, which no buyer's
- *   content is in. Refused as made too, the service takes no tool calls until
- *   the node restarts, and its quotes stop saying it takes them; served, the
- *   refusal was that call's own, and the service keeps its tools.
+ *   content is in (seller-backend.ts). Refused as made too, the service takes
+ *   no tool calls until the node restarts, and its quotes stop saying it takes
+ *   them; served, the refusal was that call's own, and the service keeps its
+ *   tools. The refused call waits for that a few seconds at most, and never
+ *   past its backend's time limit, which the buyer's wait for it outlasts.
  * - **The end of the epoch.** Within `stopServingSeconds` of it, new calls are
  *   refused: their receipts could not land in time.
  * - **The job.** Ticks every `tickSeconds` from the epoch's start, and once
@@ -73,11 +75,12 @@ import {
   type ServiceRequest,
 } from '@origintrail-official/dkg-chain';
 import { MarketplaceRefusal } from './buyer.js';
-import { UpstreamError, type Completion, type CompletionCall, type Connector } from './connector.js';
+import { UpstreamError, type Completion, type Connector } from './connector.js';
 import { KeyedLock, setAside, writeDurably } from './journal.js';
 import { DEFAULT_LANDING, Lander, nextLandingAt, secondsToNextTick, secondsToRetry, type LandingReport, type LandingSettings } from './landing.js';
 import { SellerLedger, type ServedCall } from './ledger.js';
 import { OfferJob, type OfferAssets } from './offer-job.js';
+import { ServiceBackend } from './seller-backend.js';
 import { inputUnitsBound } from './seller-bounds.js';
 import {
   PEER_LIMITS,
@@ -115,17 +118,12 @@ const FAILED_CALLS_KEPT = 10_000;
  * again, so it is refused as `BadRequest`, not to retry. Any other failure is `UpstreamError`, to retry.
  */
 const CALL_REFUSED: ReadonlySet<number> = new Set([400, 404, 413, 415, 422]);
-/** Of those, the ones that say the backend cannot take what the call carries: for a call with tools, maybe its tools. */
-const CALL_INVALID: ReadonlySet<number> = new Set([400, 422]);
 /**
- * The seller's own call with tools, a few tokens long and with no buyer's content in it, that tells whether a
- * backend takes tools once it has refused a buyer's call with them (`Seller.checkTools`).
+ * The longest a refused call with tools waits for the check of its backend's tools (`ServiceBackend.checkToolsAfter`)
+ * before it is answered, so a buyer that asks for a new quote at once mostly sees what the check found. Never past its
+ * backend's time limit, counted from when the call went to the backend: the buyer's wait for an answer ends soon after.
  */
-const TOOLS_CHECK: CompletionCall = {
-  messages: [{ role: 'user', content: 'Reply with OK.' }],
-  maxTokens: 16,
-  tools: [{ type: 'function', function: { name: 'noop', description: 'Does nothing.', parameters: { type: 'object', properties: {} } } }],
-};
+const TOOLS_CHECK_WAIT_MS = 5_000;
 
 export interface SellerService {
   /** The model's URN; `serviceId` is its keccak256. */
@@ -141,7 +139,7 @@ export interface SellerService {
   backendTimeoutMs?: number;
   /**
    * Whether it takes tool calls: said in its quotes. Off unless set; off too, until the node restarts, once its
-   * backend refuses the seller's own minimal call with tools as made (`Seller.checkTools`).
+   * backend refuses the seller's own minimal call with tools as made (`ServiceBackend.checkToolsAfter`).
    */
   tools?: boolean;
 }
@@ -182,15 +180,8 @@ export class Seller {
   private identityId = 0n;
   private open = false;
   private domain: MarketplaceDomain | undefined;
-  /** service id => whether its backend answered the last call. */
-  private readonly backends = new Map<string, 'up' | 'down'>();
-  /**
-   * service id => what its backend has shown of tools since the node started: it served a call with tools, or it
-   * refused the seller's own minimal one as made (`checkTools`). Nothing is known while it is absent.
-   */
-  private readonly toolSupport = new Map<string, 'served' | 'refused'>();
-  /** service id => the seller's own call with tools to its backend, while one is out. */
-  private readonly toolChecks = new Map<string, Promise<void>>();
+  /** service id => its backend: whether the last call answered, and what it has shown of tools. */
+  private readonly backends: ReadonlyMap<string, ServiceBackend>;
   /** The chain's time as the last tick read it, and when, by this host's clock. */
   private lastTimes: { times: EpochTimes; at: number } | undefined;
   /** request digest => the refusal of a call whose backend ran but gave nothing to sign, oldest first. */
@@ -201,6 +192,9 @@ export class Seller {
 
   constructor(private readonly deps: SellerDeps) {
     this.services = new Map(deps.services.map((s) => [s.serviceId.toLowerCase(), s]));
+    this.backends = new Map(deps.services.map((s) => [
+      s.serviceId.toLowerCase(), new ServiceBackend(s.connector, { model: s.model, takesTools: s.tools === true }, deps.log),
+    ]));
     this.landing = deps.landing ?? DEFAULT_LANDING;
     this.ledger = new SellerLedger(deps.dir, deps.log);
     this.lander = new Lander({ chain: deps.chain, ledger: this.ledger, settings: this.landing, ...(deps.log ? { log: deps.log } : {}) });
@@ -234,7 +228,7 @@ export class Seller {
 
   /** Whether a service's backend answered its last call: `up` until one fails. */
   backendOf(serviceId: string): 'up' | 'down' {
-    return this.backends.get(serviceId.toLowerCase()) ?? 'up';
+    return this.backends.get(serviceId.toLowerCase())?.state ?? 'up';
   }
 
   /** When the next landing is due, in chain seconds. */
@@ -376,7 +370,7 @@ export class Seller {
       if (!s) continue;
       offers.push({
         serviceId: s.serviceId, pricePerUnit: (await this.priceFor(s, times.epoch, times.epoch)).toString(), available, capacity: s.capacity,
-        ...(this.takesTools(s) ? { tools: true as const } : {}),
+        ...(this.backendFor(s).takesTools ? { tools: true as const } : {}),
       });
     }
     return { seller: this.identityId.toString(), epoch: times.epoch, offers };
@@ -419,7 +413,7 @@ export class Seller {
     const service = this.services.get(request.serviceId);
     if (!service) return refusal('UnknownService');
     // A buyer sends a call with tools only to a seller whose quote says it takes them.
-    if (!this.takesTools(service) && usesTools(call.body)) return refusal('BadRequest', 'this service takes no tool calls');
+    if (!this.backendFor(service).takesTools && usesTools(call.body)) return refusal('BadRequest', 'this service takes no tool calls');
     if (request.pricePerUnit !== await this.priceFor(service, times.epoch, times.epoch)) return refusal('WrongPrice');
     // 2. A subscription of this epoch that funds the service, under its price cap.
     const subscription = await chain.getSubscription(request.subscriptionId);
@@ -469,10 +463,12 @@ export class Seller {
     at: { requestDigest: string; budgetIndex: number; epoch: number; unitCap: bigint; room: bigint; from: string },
   ): Promise<ServeResponse> {
     const { requestDigest, unitCap } = at;
+    const backend = this.backendFor(service);
+    const sentAt = Date.now();
     let completion;
     try {
       const { tools, tool_choice: toolChoice, parallel_tool_calls: parallelToolCalls } = call.body;
-      completion = await service.connector.complete({
+      completion = await backend.complete({
         messages: call.body.messages,
         // No more output than the cap pays for once the input takes the most it could.
         maxTokens: Number(minBig(BigInt(call.body.max_tokens), at.room)),
@@ -480,17 +476,18 @@ export class Seller {
         ...(tools && toolChoice !== undefined ? { toolChoice } : {}),
         ...(tools && parallelToolCalls !== undefined ? { parallelToolCalls } : {}),
       });
-      this.backends.set(service.serviceId, 'up');
-      if (call.body.tools) this.toolSupport.set(service.serviceId, 'served');
     } catch (err) {
-      this.backends.set(service.serviceId, 'down');
       // The backend's detail (a missing key's variable, an address, its own words) stays in the log.
       this.deps.log?.(`[marketplace] the backend of ${service.model} failed: ${err instanceof UpstreamError ? err.message : String(err)}`);
       const status = err instanceof UpstreamError ? err.status : undefined;
       // No answer, or one about the seller's key, quota or load: the call may be served later.
       if (status === undefined || !CALL_REFUSED.has(status)) return this.failedOnce(requestDigest, refusal('UpstreamError'));
-      // Maybe its tools, maybe what the call put in them: the seller's own call with tools tells which, before the answer.
-      if (call.body.tools && CALL_INVALID.has(status)) await this.checkTools(service);
+      if (call.body.tools) {
+        // Maybe its tools, maybe what the call put in them: the seller's own call with tools tells which, mostly before
+        // this answer, and never past the backend's time limit from when the call went to it.
+        const left = (service.backendTimeoutMs ?? DEFAULT_BACKEND_TIMEOUT_MS) - (Date.now() - sentAt);
+        await within(backend.checkToolsAfter(status), Math.min(TOOLS_CHECK_WAIT_MS, left));
+      }
       return this.failedOnce(requestDigest, refusal('BadRequest', `the service's backend refused the call (${status})`));
     }
     try {
@@ -553,40 +550,9 @@ export class Seller {
     return refused;
   }
 
-  /** Whether a service takes tool calls now: its settings say so, and its backend has not refused them (`checkTools`). */
-  private takesTools(service: SellerService): boolean {
-    return service.tools === true && this.toolSupport.get(service.serviceId) !== 'refused';
-  }
-
-  /**
-   * After its backend refused a buyer's call with tools as made (400 or 422): while the backend has shown nothing of
-   * tools since the node started, ask it the seller's own minimal call with tools (`TOOLS_CHECK`), one at a time.
-   *   - Served: the backend takes tools, and the refusal was that call's own.
-   *   - Refused as made too: the backend takes no tools as this service sends them. The service takes no tool calls
-   *     until the node restarts, so buyers stop sending it calls it would only refuse.
-   *   - Anything else, such as no answer: nothing is known, and the next such refusal asks again.
-   * It costs the seller a few tokens, and only until the backend has shown whether it takes tools.
-   */
-  private checkTools(service: SellerService): Promise<void> {
-    const id = service.serviceId;
-    if (this.toolSupport.has(id)) return Promise.resolve();
-    const out = this.toolChecks.get(id);
-    if (out) return out;
-    const check = Promise.resolve()
-      .then(() => service.connector.complete(TOOLS_CHECK))
-      .then(
-        () => { this.toolSupport.set(id, 'served'); },
-        (err: unknown) => {
-          const status = err instanceof UpstreamError ? err.status : undefined;
-          // Nothing known, or a buyer's call with tools was served meanwhile: the tools stay.
-          if (status === undefined || !CALL_INVALID.has(status) || this.toolSupport.has(id)) return;
-          this.toolSupport.set(id, 'refused');
-          this.deps.log?.(`[marketplace] ${service.model} takes no tool calls until the node restarts: its backend refused a minimal call with tools too: ${messageOf(err)}`);
-        },
-      )
-      .finally(() => { this.toolChecks.delete(id); });
-    this.toolChecks.set(id, check);
-    return check;
+  /** The service's backend: one per service, made with the seller. */
+  private backendFor(service: SellerService): ServiceBackend {
+    return this.backends.get(service.serviceId.toLowerCase())!;
   }
 
   /** Whether `request` expires before the service's backend could answer and its receipt be signed, at chain time `now`. */
@@ -666,6 +632,17 @@ function pricesFrom(text: string): Record<string, Record<string, string>> | null
 }
 
 const minBig = (a: bigint, b: bigint) => (a < b ? a : b);
+
+/** Wait for `work`, for `ms` at most; it goes on after that, and what it comes to is not this wait's. */
+async function within(work: Promise<void>, ms: number): Promise<void> {
+  if (ms <= 0) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([work, new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * The completion cut to `allowed` of its `counted` output tokens: the same
