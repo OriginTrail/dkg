@@ -475,6 +475,8 @@ import { configureApiQueryPriority } from './api-query-priority.js';
 import { configureWritePreflightCoalescing } from './write-preflight-coalescing.js';
 import { startRetention, type RetentionHandle } from './retention-sweeps.js';
 import { resolveRetentionConfig } from '../retention-config.js';
+import { readGraphStoreSettings, resolveQueryConfig } from '../read-graphs-config.js';
+import { assertRollbackTargetRecognizesReadGraphs } from '../update/read-graph-rollback-target.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
 import { buildChatMemoryStack } from './memory-tool-context.js';
@@ -1393,6 +1395,9 @@ async function runDaemonInnerWithStartupOwnership(
   }
   // OT-RFC-73 P10b: a bad queue-retention value fails the boot here and the error names the key (the default is off for both queues).
   const retentionSettings = resolveRetentionConfig(config.queueRetention);
+  // OT-RFC-74: a bad `query` value fails the boot here, and so do read graphs that the rollback target would not recognize.
+  const queryConfig = resolveQueryConfig(config.query);
+  await assertRollbackTargetRecognizesReadGraphs(queryConfig, role);
   const { name: selectedNetworkConfig, network } = await loadResolvedNetworkConfig(
     config,
     loadNetworkConfig,
@@ -1789,6 +1794,7 @@ async function runDaemonInnerWithStartupOwnership(
     managedStore: managed?.storeConfig,
     changelogEnabled: Boolean(config.store?.changelog),
     changelogEraGuard: protocolStores.changelogEraGuard,
+    readGraphs: readGraphStoreSettings(queryConfig),
   });
 
   const agentConfig: DKGAgentConfig = {

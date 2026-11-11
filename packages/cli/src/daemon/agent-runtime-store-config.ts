@@ -2,6 +2,7 @@ import {
   withManagedOxigraphRuntimeStoreConfigV1,
   type ChangelogEraGuard,
   type ManagedOxigraphRuntimeStoreConfigV1,
+  type ReadGraphStoreConfig,
   type TripleStoreConfig,
 } from '@origintrail-official/dkg-storage';
 
@@ -10,6 +11,8 @@ export interface AgentRuntimeStoreConfigInput {
   readonly managedStore: ManagedOxigraphRuntimeStoreConfigV1 | undefined;
   readonly changelogEnabled: boolean;
   readonly changelogEraGuard: ChangelogEraGuard | undefined;
+  /** The read-graph settings of `query` in config.json, for every store object over the backend. */
+  readonly readGraphs?: ReadGraphStoreConfig;
 }
 
 /** Assemble the exact store config passed from the daemon into DKGAgent.create. */
@@ -28,11 +31,13 @@ export function buildAgentRuntimeStoreConfig(
     options: input.runtimeStore.options,
     graphSetIndex: input.runtimeStore.graphSetIndex,
     changelog,
+    readGraphs: input.readGraphs,
   };
   return input.managedStore
     ? withManagedOxigraphRuntimeStoreConfigV1(input.managedStore, {
       graphSetIndex: complete.graphSetIndex,
       changelog: complete.changelog,
+      readGraphs: complete.readGraphs,
     })
     : complete;
 }
