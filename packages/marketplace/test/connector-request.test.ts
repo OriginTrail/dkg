@@ -5,7 +5,8 @@
  * no temperature, which its reasoning models need; any other backend
  * `max_tokens` and 0, as in 10.1.0) or by the service's settings; the
  * reasoning effort a call with tools carries, when the settings name one; and
- * what a refusal says: the backend's own words, on one line, cut short, never a key.
+ * what a refusal says: the backend's own words, on one line, cut short, never a key,
+ * and the status it answered, which a backend that did not answer has none of.
  * `fetch` is stubbed, so no request leaves the process.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -26,6 +27,9 @@ function stubFetch(status: number, body: unknown): Array<{ url: string; body: Re
   }));
   return seen;
 }
+
+/** What a backend's refusal with an HTTP status fails with: an `UpstreamError`, its message and its status each checked. */
+const upstream = (message: string, status: number) => ({ name: 'UpstreamError', message, status });
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -109,7 +113,30 @@ describe("a backend's refusal", () => {
   it("says its status and the backend's own words", async () => {
     stubFetch(400, { error: { message: "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", type: 'invalid_request_error' } });
     await expect(connectorOf({ kind: 'openai', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.6-sol', maxTokensField: 'max_tokens' }).complete(CALL))
-      .rejects.toThrow(new UpstreamError("the backend answered 400: Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."));
+      .rejects.toMatchObject(upstream("the backend answered 400: Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", 400));
+  });
+
+  it('carries the status the backend answered, and none when it did not answer, timed out, or answered with nothing to serve', async () => {
+    const backend = connectorOf({ kind: 'openai', baseUrl: 'http://127.0.0.1:1/v1', model: 'm', timeoutMs: 20 });
+    for (const status of [404, 408, 413, 422, 429, 503]) {
+      stubFetch(status, { error: { message: 'synthetic refusal' } });
+      await expect(backend.complete(CALL)).rejects.toMatchObject(upstream(`the backend answered ${status}: synthetic refusal`, status));
+    }
+    const statusOf = (err: unknown) => (err instanceof UpstreamError ? err.status : 'not an UpstreamError');
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('fetch failed'); }));
+    const down = await backend.complete(CALL).catch((e: unknown) => e);
+    expect(down).toMatchObject({ message: 'the backend did not answer: fetch failed' });
+    expect(statusOf(down)).toBeUndefined();
+    // A backend that never answers is stopped at the time limit.
+    vi.stubGlobal('fetch', vi.fn((_url: string | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason)))));
+    const late = await backend.complete(CALL).catch((e: unknown) => e);
+    expect(late).toMatchObject({ message: expect.stringMatching(/^the backend did not answer: .*timeout/i) });
+    expect(statusOf(late)).toBeUndefined();
+    stubFetch(200, { choices: OK.choices });
+    const empty = await backend.complete(CALL).catch((e: unknown) => e);
+    expect(empty).toMatchObject({ message: 'the backend answered without token counts' });
+    expect(statusOf(empty)).toBeUndefined();
   });
 
   it('never says the key, nor anything shaped as one, and says only its status when the backend says nothing that reads', async () => {
@@ -117,11 +144,12 @@ describe("a backend's refusal", () => {
     stubFetch(401, { error: { message: `Incorrect API key provided: sk-proj-abcd1234****wxyz. Sent: ${TEST_KEY}. Forwarded: Authorization: Bearer ${OTHER_BEARER}` } });
     const err = await connectorOf({ kind: 'openai', baseUrl: 'https://api.openai.com/v1', model: 'm', apiKeyEnv: 'TEST_BACKEND_KEY' }).complete(CALL).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(UpstreamError);
+    expect((err as UpstreamError).status).toBe(401);
     // Each by its own rule: the key itself, anything shaped as an API key, and any bearer token.
     expect((err as Error).message).toBe('the backend answered 401: Incorrect API key provided: [redacted] Sent: [redacted]. Forwarded: Authorization: Bearer [redacted]');
     for (const secret of [TEST_KEY, 'sk-proj', OTHER_BEARER]) expect((err as Error).message).not.toContain(secret);
     stubFetch(502, '<html>bad gateway</html>');
-    await expect(connectorOf({ kind: 'openai', baseUrl: 'http://127.0.0.1:1/v1', model: 'm' }).complete(CALL)).rejects.toThrow(new UpstreamError('the backend answered 502'));
+    await expect(connectorOf({ kind: 'openai', baseUrl: 'http://127.0.0.1:1/v1', model: 'm' }).complete(CALL)).rejects.toMatchObject(upstream('the backend answered 502', 502));
   });
 
   it('is on one line and cut short, from an OpenAI error or a bare one', () => {

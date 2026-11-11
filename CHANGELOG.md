@@ -4,6 +4,21 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Fixed
+
+- An error from one service's backend no longer takes a seller's other
+  services away from buyers. When the backend refuses a call as made (400,
+  404, 413, 415 or 422), the seller refuses it with a code buyers don't
+  retry. Buyers then try other sellers first for ten minutes and still route
+  the seller's other services, where before they left the seller out of
+  every service for ten minutes. No answer, timeouts, and 401, 403, 408,
+  409, 429 and 5xx answers are handled as before. When a service's backend
+  refuses a call with tools, the seller checks with minimal calls with tools
+  of its own: one where the model chooses, and one that names the function.
+  If the backend refuses both, the service stops offering tools until the
+  node restarts, so buyers answer such calls with `tools_unsupported`
+  instead of sending them.
+
 ## [10.1.1] - Unreleased
 
 10.1.1 fixes problems found while 10.1.0 ran on testnet, in the
