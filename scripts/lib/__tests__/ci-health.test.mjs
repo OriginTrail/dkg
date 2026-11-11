@@ -298,6 +298,11 @@ test('a job that failed and then passed on a retry or on the same commit is flak
     // The nightly runs more: its failure on a green commit is not a flake.
     run({ id: 5, event: 'push', branch: 'testnet-canary', sha: 'e'.repeat(40) }),
     run({ id: 6, event: 'workflow_dispatch', branch: 'testnet-canary', actor: 'github-actions[bot]', conclusion: 'failure', sha: 'e'.repeat(40) }),
+    // So does a developer's nightly-equivalent dispatch; a standard dispatch is compared.
+    run({ id: 7, event: 'push', branch: 'testnet-canary', sha: 'f'.repeat(40) }),
+    { ...run({ id: 8, event: 'workflow_dispatch', branch: 'testnet-canary', conclusion: 'failure', sha: 'f'.repeat(40) }), display_title: 'CI (nightly-equivalent)' },
+    run({ id: 9, event: 'push', branch: 'testnet-canary', sha: 'g'.repeat(40) }),
+    { ...run({ id: 10, event: 'workflow_dispatch', branch: 'testnet-canary', conclusion: 'failure', sha: 'g'.repeat(40) }), display_title: 'CI (standard)' },
   ]).map((entry) => ({ ...entry, jobs: {
     1: [failedLane(lane, 'Run core tests'), gate({ conclusion: 'failure' }), job(lane, { attempt: 2 }), gate({ attempt: 2 })],
     2: [job(lane), failedLane('Bura: cli [1/4]', 'Run'), job(lane, { attempt: 2 }), job('Bura: cli [1/4]', { attempt: 2 })],
@@ -305,29 +310,41 @@ test('a job that failed and then passed on a retry or on the same commit is flak
     4: [job('Tornado: agent [2/11]'), gate()],
     5: [job('Tornado: publisher [1/4]')],
     6: [failedLane('Tornado: publisher [1/4]', 'Run')],
+    7: [job('Tornado: query [1/2]')],
+    8: [failedLane('Tornado: query [1/2]', 'Run')],
+    9: [job('Tornado: sync [1/2]')],
+    10: [failedLane('Tornado: sync [1/2]', 'Run')],
   }[entry.run.id] }));
   const flaky = Object.fromEntries(flakyJobs(entries).map(({ name, retried, sameCommit }) => [name, [retried.map(({ id }) => id), sameCommit.map(({ sha }) => sha.slice(0, 1))]]));
   assert.deepEqual(flaky, {
     [lane]: [[1], []],
     'Bura: cli [1/4]': [[2], []],
     'Tornado: agent [2/11]': [[], ['d']],
+    'Tornado: sync [1/2]': [[], ['g']],
   });
 });
 
 test('lane timings use the latest attempt, the slowest shard, passing lanes only, and flag an uneven split', () => {
   const sharded = (minutes) => minutes.map((length, index) => job(`Tornado: agent [${index + 1}/4]`, { minutes: length }));
-  const entries = classifyRuns([run({ id: 1 }), run({ id: 2, attempt: 2 }), run({ id: 3 }), run({ id: 4, event: 'workflow_dispatch', branch: 'testnet-canary', actor: 'github-actions[bot]' })])
+  const dispatch = (id, profile) => ({ ...run({ id, event: 'workflow_dispatch', branch: 'testnet-canary' }), display_title: `CI (${profile})` });
+  const entries = classifyRuns([
+    run({ id: 1 }), run({ id: 2, attempt: 2 }), run({ id: 3 }), run({ id: 4, event: 'workflow_dispatch', branch: 'testnet-canary', actor: 'github-actions[bot]' }),
+    dispatch(5, 'nightly-equivalent'), dispatch(6, 'standard'),
+  ])
     .map((entry) => ({ ...entry, jobs: {
       1: [...sharded([4, 5, 6, 12]), job('Build packages', { minutes: 6 }), gate({ minutes: 1 })],
       // Attempt 1's failed shard is not timed; attempt 2 holds the copies and the re-run.
       2: [...sharded([4, 5, 6, 10]), failedLane('Tornado: agent [4/4]', 'Run', { minutes: 2 }), ...sharded([4, 5, 6, 10]).map((entry) => ({ ...entry, run_attempt: 2 }))].filter((entry) => !(entry.run_attempt === 1 && entry.name.endsWith('[4/4]') && entry.conclusion === 'success')),
       3: [...sharded([5, 5, 5, 5]).slice(0, 3), failedLane('Tornado: agent [4/4]', 'Run'), job('Build packages', { minutes: 8 })],
       4: [...sharded([50, 50, 50, 50])],
+      // A developer's nightly-equivalent dispatch is not timed; a standard dispatch is.
+      5: [...sharded([40, 40, 40, 40])],
+      6: [...sharded([4, 5, 6, 11])],
     }[entry.run.id] }));
   const timings = Object.fromEntries(laneTimings(entries).map((entry) => [entry.lane, entry]));
   assert.deepEqual(Object.keys(timings), ['Tornado: agent', 'Build packages']);
   const agent = timings['Tornado: agent'];
-  assert.equal(agent.runs, 2, 'a lane with a failed shard is not timed, nor the nightly');
+  assert.equal(agent.runs, 3, 'a lane with a failed shard is not timed, nor a nightly-equivalent run');
   assert.equal(agent.p50, 11 * MINUTE);
   assert.equal(agent.shardCount, 4);
   assert.deepEqual(agent.shards.map(({ shard, p50 }) => [shard, p50 / MINUTE]), [[1, 4], [2, 5], [3, 6], [4, 11]]);
@@ -403,26 +420,53 @@ test('test exceptions are read from comments in the audit\'s files, and their de
   assert.equal(scanned, 7);
 });
 
+// The files whose exceptions the report reads differently from the audit:
+// per file, the lines the audit finds (in 2100 every exception is invalid)
+// against the lines the report read. Every file given is compared, including
+// those where the report read nothing.
+function exceptionDisagreements(files, read, reported) {
+  const byFile = Object.groupBy(reported, ({ file }) => file);
+  const farFuture = new Date(Date.parse('2100-01-01T00:00:00Z'));
+  return files.flatMap((file) => {
+    const audit = inspectTestExceptions(read(file), file, farFuture).invalidExceptions;
+    const report = (byFile[file] ?? []).map(({ line }) => line);
+    return JSON.stringify(audit) === JSON.stringify(report) ? [] : [{ file, audit, report }];
+  });
+}
+
 test('the exception reader agrees with the disabled-test audit on every tracked file', () => {
   // The audit's own scanner loads TypeScript, so the report mirrors its file
-  // set and comment reading. Every exception the mirror reads is one the
-  // audit sees, valid the day before its deadline and invalid the day after.
+  // set and comment reading. Every file the audit scans is compared, so a file
+  // whose exceptions the report misses entirely fails here, and every
+  // exception the report reads is valid the day before its deadline and
+  // invalid the day after.
   const files = execFileSync('git', ['ls-files', '-z'], { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).split('\0').filter(Boolean);
   const disagreements = files.filter((file) => isScannableFile(file) !== isTestExceptionFile(file));
   assert.deepEqual(disagreements, []);
   const exceptions = trackedTestExceptions(REPO_ROOT);
   assert.ok(exceptions.length > 0, 'the repository has exceptions to compare');
+  const read = (file) => fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
+  assert.deepEqual(exceptionDisagreements(files.filter(isScannableFile), read, exceptions), [],
+    'the CI health report reads test-disable-allow comments that open a line: put the waiver on its own line, or teach parseTestExceptions its form');
   const day = 86_400_000;
-  for (const [file, own] of Object.entries(Object.groupBy(exceptions, ({ file }) => file))) {
-    const source = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
-    const farFuture = new Date(Date.parse('2100-01-01T00:00:00Z'));
-    assert.deepEqual(inspectTestExceptions(source, file, farFuture).invalidExceptions, own.map(({ line }) => line), file);
-    for (const exception of own.filter(({ owner, lane, expires }) => owner && lane && expires)) {
-      const deadline = Date.parse(`${exception.expires}T23:59:59Z`);
-      assert.equal(inspectTestExceptions(source, file, new Date(deadline - day)).invalidExceptions.includes(exception.line), false, `${file}:${exception.line}`);
-      assert.equal(inspectTestExceptions(source, file, new Date(deadline + day)).invalidExceptions.includes(exception.line), true, `${file}:${exception.line}`);
-    }
+  for (const { file, line, expires } of exceptions.filter(({ owner, lane, expires }) => owner && lane && expires)) {
+    const deadline = Date.parse(`${expires}T23:59:59Z`);
+    assert.equal(inspectTestExceptions(read(file), file, new Date(deadline - day)).invalidExceptions.includes(line), false, `${file}:${line}`);
+    assert.equal(inspectTestExceptions(read(file), file, new Date(deadline + day)).invalidExceptions.includes(line), true, `${file}:${line}`);
   }
+});
+
+test('the reader comparison fails for a file whose exceptions the report misses entirely, beside one it reads', () => {
+  const waiver = 'test-disable-allow: D1 #1 -- owner=ci lane=network expires=2026-11-12';
+  const sources = {
+    'packages/x/test/leading.test.ts': ['// ' + waiver, "it.skip('a', () => {});", ''].join('\n'),
+    'packages/x/test/trailing.test.ts': ['const setup = true; // ' + waiver, "it.skip('b', () => {});", ''].join('\n'),
+  };
+  const reported = Object.entries(sources).flatMap(([file, source]) => parseTestExceptions(source).map((exception) => ({ file, ...exception })));
+  assert.deepEqual(reported.map(({ file, line }) => `${file}:${line}`), ['packages/x/test/leading.test.ts:1'], 'the report reads only waivers that open a line');
+  assert.deepEqual(exceptionDisagreements(Object.keys(sources), (file) => sources[file], reported), [
+    { file: 'packages/x/test/trailing.test.ts', audit: [1], report: [] },
+  ]);
 });
 
 test('table text cannot break a table, inject HTML or notify anyone', () => {

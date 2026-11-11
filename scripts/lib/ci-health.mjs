@@ -278,11 +278,16 @@ export function topRootFailures(entries) {
     .sort((a, b) => b.failed - a.failed || a.lane.localeCompare(b.lane));
 }
 
+// A nightly-equivalent run (the nightly, or a dispatch of that profile) runs
+// more property trials and suites than a standard one, so it is left out of
+// comparisons with standard runs.
+const extended = (run) => runProfile(run) === 'nightly-equivalent';
+
 // Jobs that failed and then passed without a code change: in a later attempt
 // of the same run (passed on retry), or in another run of the same head commit.
 // The second is a candidate, not proof: a pull request run tests a merge with
-// its moving base, and labels can change its plan. Nightly runs, which run
-// more, are left out of it.
+// its moving base, and labels can change its plan. Nightly-equivalent runs are
+// left out of it.
 export function flakyJobs(entries) {
   const jobs = new Map();
   const job = (name) => jobs.get(name) ?? jobs.set(name, { name, ...laneOf(name), retried: [], sameCommit: [] }).get(name);
@@ -298,7 +303,7 @@ export function flakyJobs(entries) {
       }
     }
   }
-  const byCommit = groupBy(entries.filter(({ kind }) => kind !== 'nightly'), ({ run }) => run.head_sha);
+  const byCommit = groupBy(entries.filter(({ run }) => !extended(run)), ({ run }) => run.head_sha);
   for (const [sha, commitEntries] of byCommit) {
     if (commitEntries.length < 2) continue;
     const failed = new Map();
@@ -322,15 +327,15 @@ export function flakyJobs(entries) {
 
 // Lane wall times from the latest attempt of each run (its carried-over jobs
 // are real executions, counted once): a lane's time in a run is its slowest
-// job, kept when every job of the lane passed. Nightly runs are left out
-// (more property trials, more suites). Per sharded lane, each shard's p50 in
+// job, kept when every job of the lane passed. Nightly-equivalent runs are
+// left out. Per sharded lane, each shard's p50 in
 // the lane's latest layout (its shard count can change within a week) shows
 // how even the split is: the slowest shard's p50 over the median shard's.
 export function laneTimings(entries) {
   const lanes = new Map();
   const ordered = [...entries].sort((a, b) => time(a.run.created_at) - time(b.run.created_at));
-  for (const { kind, jobs } of ordered) {
-    if (kind === 'nightly') continue;
+  for (const { run, jobs } of ordered) {
+    if (extended(run)) continue;
     const ran = latestAttempt(jobs).filter((job) => job.status === 'completed' && job.conclusion !== 'skipped' && !NOT_LANES.has(job.name));
     for (const [name, laneJobs] of groupBy(ran, (job) => laneOf(job.name).lane)) {
       if (!laneJobs.every((job) => job.conclusion === 'success' && duration(job) > 0)) continue;
@@ -398,10 +403,11 @@ export function isTestExceptionFile(file) {
   return d1 || d2;
 }
 
-// Each `test-disable-allow:` exception in a comment of `source`, a `//` line
-// or a block comment as the audit reads them, with its metadata. Text in a
-// string (the audit's own test fixtures) does not start a line as a comment
-// and is skipped.
+// Each `test-disable-allow:` exception in a comment of `source` that opens a
+// line, a `//` line or a block comment, with its metadata. Text in a string
+// (the audit's own test fixtures) does not open a line as a comment and is
+// skipped. The audit also accepts a comment after code on its line; that form
+// is not read here, and ci-health.test.mjs fails if a tracked file uses it.
 export function parseTestExceptions(source) {
   const lines = source.split(/\r?\n/);
   const exceptions = [];
