@@ -17,6 +17,25 @@ test('temporary test exceptions require an owner, execution obligation and a val
   assert.deepEqual(inspect('const fixture = "// test-disable-allow: D1 #123 -- example";').invalidExceptions, []);
 });
 
+test('a lapsed review deadline is told apart from a malformed exception, and a near one is reported', async () => {
+  const { analyzeTestSource, EXCEPTION_RENEWAL_WARNING_DAYS } = await import('../disabled-test-scanner.mjs');
+  const marker = (rest) => '// test-disable-allow: D1 #123 -- reviewed ' + rest;
+  const source = [
+    marker('owner=cli lane=bura-cli expires=2026-09-04'),
+    marker('owner=cli lane=bura-cli expires=2026-09-07'),
+    marker('owner=cli lane=bura-cli expires=2026-09-20'),
+    marker('lane=bura-cli expires=2026-09-04'),
+    marker('owner=cli lane=bura-cli expires=2026-12-01'),
+  ].join('\n');
+  const result = analyzeTestSource(source, 'example.test.ts', { now: new Date('2026-09-05T00:00:00Z') });
+  assert.equal(EXCEPTION_RENEWAL_WARNING_DAYS, 7);
+  assert.deepEqual(result.exceptions.map(({ line, state }) => [line, state]), [[1, 'expired'], [2, 'expiring'], [3, 'valid'], [4, 'malformed'], [5, 'malformed']]);
+  assert.deepEqual(result.exceptions[0], { line: 1, state: 'expired', expires: '2026-09-04', owner: 'cli', lane: 'bura-cli', daysLeft: -1 });
+  assert.deepEqual(result.exceptions[1], { line: 2, state: 'expiring', expires: '2026-09-07', owner: 'cli', lane: 'bura-cli', daysLeft: 2 });
+  // The older invalid-line list is the malformed and expired records.
+  assert.deepEqual(result.invalidExceptions, [1, 4, 5]);
+});
+
 test('focused and disabled tests share namespace, computed member, alias and chaining resolution', async () => {
   const { analyzeTestSource } = await import('../disabled-test-scanner.mjs');
   const source = [

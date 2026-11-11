@@ -176,3 +176,30 @@ test('profile setup reaches only execution and coverage consumers; checkout iden
   assert.notEqual(group('push'), group('schedule'));
   assert.equal(group('push'), group('workflow_dispatch', 'standard'));
 });
+
+test('a lapsed test-exception review warns in CI lint and fails only the nightly gate', () => {
+  // Producer: the build job's lint step runs the audit in warn mode, and the
+  // count the audit writes reaches the job's outputs.
+  const scripts = JSON.parse(fs.readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')).scripts;
+  assert.match(scripts.lint, /pnpm run lint:tests/);
+  assert.match(scripts['lint:tests'], /node scripts\/ci\/check-disabled-tests\.mjs/);
+  assert.match(fs.readFileSync(new URL('../../ci/check-disabled-tests.mjs', import.meta.url), 'utf8'), /expired_test_exceptions=\$\{expired\}/);
+  const lint = workflow.jobs.build.steps.find((step) => step.name === 'Lint source and repository tooling');
+  assert.equal(lint.id, 'lint');
+  assert.equal(lint.run, 'pnpm lint');
+  assert.equal(lint.env.DKG_TEST_EXCEPTION_EXPIRY, 'warn');
+  assert.equal(workflow.jobs.build.outputs.expired_test_exceptions, '${{ steps.lint.outputs.expired_test_exceptions }}');
+
+  // Consumer: the gate reads that output, only under the nightly profile.
+  const gate = workflow.jobs['ci-gate'];
+  assert.ok(gate.needs.includes('build') && gate.needs.includes('changes'));
+  const step = gate.steps.find((candidate) => candidate.name === 'Require renewed test exceptions on the nightly profile');
+  assert.equal(step.if, "always() && needs.changes.outputs.profile == 'nightly-equivalent'");
+  assert.equal(step.env.EXPIRED_TEST_EXCEPTIONS, '${{ needs.build.outputs.expired_test_exceptions }}');
+  assert.equal(resolveCiProfile({ eventName: 'schedule', runNumber: '1' }).profile, 'nightly-equivalent');
+  for (const [count, status] of [['0', 0], ['', 0], ['1', 1], ['5', 1]]) {
+    const result = spawnSync('bash', ['-e', '-c', step.run], { env: { ...process.env, EXPIRED_TEST_EXCEPTIONS: count }, encoding: 'utf8' });
+    assert.equal(result.status, status, `${JSON.stringify(count)}: ${result.stdout}${result.stderr}`);
+    if (status) assert.match(result.stdout, new RegExp(`::error::${count} test exception\\(s\\) are past their review deadline`));
+  }
+});
