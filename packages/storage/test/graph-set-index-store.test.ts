@@ -1680,6 +1680,22 @@ describe('GraphSetIndexStore', () => {
     await optedInStore.close();
   });
 
+  it('indexes a Blazegraph configured by hand by default, and not when graphSetIndex is false', async () => {
+    const url = 'http://example.invalid/blazegraph/namespace/kb/sparql';
+    const byHand = await createTripleStore({ backend: 'blazegraph', options: { url, managedByDkg: false } });
+    expect(byHand).toBeInstanceOf(GraphSetIndexStore);
+    await byHand.close();
+
+    const shared = await createTripleStore({ backend: 'blazegraph', options: { url }, graphSetIndex: false });
+    expect(shared).not.toBeInstanceOf(GraphSetIndexStore);
+    expect(shared.listGraphsByPrefix).toBeUndefined();
+    await shared.close();
+
+    const disabled = await createTripleStore({ backend: 'blazegraph', options: { url }, graphSetIndex: { enabled: false } });
+    expect(disabled).not.toBeInstanceOf(GraphSetIndexStore);
+    await disabled.close();
+  });
+
   it('preserves atomic graph replacement when a managed SPARQL store is index-wrapped', async () => {
     let updateRequests = 0;
     const server = createServer((request, response) => {
