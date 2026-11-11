@@ -178,19 +178,19 @@ A reused legacy container is never recreated automatically, because doing so cou
 
 ### Blazegraph configured by hand: the graph catalog
 
-The node keeps a catalog of the store's named graphs in memory, so that it can find a context graph's graphs without reading the store's full graph list. It is on by default for the embedded and daemon-managed Oxigraph stores, for a Blazegraph that `dkg init` provisioned, and for a Blazegraph URL you configure yourself (`"backend": "blazegraph"`).
+The node keeps a catalog of the store's named graphs in memory, so that it can find a context graph's graphs without reading the store's full graph list. It is on by default for the embedded and daemon-managed Oxigraph stores and for a Blazegraph that `dkg init` provisioned.
 
-The catalog assumes this node is the only writer of the store. If another node or process writes to the same Blazegraph namespace, switch the catalog off in the `store` block and restart the node:
+The catalog assumes this node is the only writer of the store. For a Blazegraph URL you configure yourself (`"backend": "blazegraph"`), only you know that, so the catalog stays off until you switch it on. If this node is the only writer of the namespace, set `graphSetIndex` in the `store` block and restart the node:
 
 ```json
 "store": {
   "backend": "blazegraph",
   "options": { "url": "http://127.0.0.1:9999/blazegraph/namespace/kb/sparql" },
-  "graphSetIndex": false
+  "graphSetIndex": true
 }
 ```
 
-Without the catalog, every graph discovery reads the store's full graph list, which gets slower as the store grows. Give each node its own namespace where you can.
+Leave it off when another node or process writes to the same namespace. Without the catalog, every graph discovery reads the store's full graph list, which gets slower as the store grows. Give each node its own namespace where you can.
 
 ## Programmatic (DKGAgent)
 
