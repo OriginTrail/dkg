@@ -13,6 +13,6 @@ it('refuses missing, duplicate, unfinished, or system-only fixtures instead of s
   for (const graphs of [[], [{ id: 'agents', name: 'Agent Registry', isSystem: true }],
     [{ id: 'devnet-test', name: '' }], [{ id: 'devnet-test', name: 'System', isSystem: true }],
     [{ id: 'devnet-test', name: 'First' }, { id: 'devnet-test', name: 'Second' }]]) {
-    expect(() => requireSeededUserGraph(graphs, 'devnet-test')).toThrow('Required user Context Graph devnet-test is not ready');
+    expect(() => requireSeededUserGraph(graphs, 'devnet-test')).toThrow('Required user context graph devnet-test is not ready');
   }
 });

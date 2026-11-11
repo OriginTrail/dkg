@@ -14,9 +14,9 @@ for (const endpoint of ['/api/context-graph/list', '/api/agent/identity']) {
     const sidebar = page.locator('.v10-panel-left').last();
     await expect(dashboardRoot.getByRole('alert')).toContainText('could not be loaded');
     await expect(sidebar.getByRole('alert')).toContainText('unavailable');
-    await expect(sidebar).not.toContainText('No Context Graphs yet');
-    await expect(dashboardRoot).not.toContainText('No Context Graphs yet');
-    const count = dashboardRoot.locator('.stat-card').filter({ hasText: 'My Context Graphs' }).locator('.stat-value');
+    await expect(sidebar).not.toContainText('No context graphs yet');
+    await expect(dashboardRoot).not.toContainText('No context graphs yet');
+    const count = dashboardRoot.locator('.stat-card').filter({ hasText: 'My context graphs' }).locator('.stat-value');
     await expect(count).not.toHaveText('0');
 
     await page.unroute(route);

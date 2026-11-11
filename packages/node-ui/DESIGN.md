@@ -32,7 +32,7 @@ All colours are CSS variables. Never write a hex value in a component: use the t
 | Notifications | `--notify`, `--text-on-notify` | The unread count on the bell, and nothing else. A brand purple kept apart from `--layer-verified` and `--accent-vm`, so it doesn't read as Verifiable Memory. |
 | Links | `--text-link`, `--link-underline` | Links are text colour with an underline. Blue is not a link colour. |
 | Focus | `--focus-ring` | Keyboard focus only, always as a 2px ring. Not a link colour, not a layer. |
-| Data | `--data-1`, `--data-2`, `--data-3`, `--data-4`, `--data-5`, `--data-6`, `--data-7`, `--data-8` | Charts and Context Graph identity colours. Use in this fixed order; never cycle within one chart. Separation between neighbours is validated in both themes. |
+| Data | `--data-1`, `--data-2`, `--data-3`, `--data-4`, `--data-5`, `--data-6`, `--data-7`, `--data-8` | Charts and context graph identity colours. Use in this fixed order; never cycle within one chart. Separation between neighbours is validated in both themes. |
 | Signal tints | `--success-bg`, `--warning-bg`, `--danger-bg` (+ `-bg-strong`, `-border`) | Washes of the signal accents for notices, result cards and highlighted rows. Text on them uses the matching `--text-*` signal. Mixed from the accents, so they follow the theme. |
 | Neutral tints | `--tint-faint`, `--tint-subtle`, `--tint-strong` | Hover rows, wells, tracks and inline code. A wash of the text colour, so they read in both themes (white-alpha disappears in light mode). |
 | Elevation | `--shadow-xs`, `--shadow-sm`, `--shadow-menu`, `--shadow-popover`, `--shadow-lift`, `--shadow-modal`, `--shadow-drawer`; `--scrim`, `--scrim-strong`, `--shade` | One shadow per kind of surface: sm for hovered cards, menu for dropdowns and floating panels, popover for popovers, lift for raised graph cards, modal for dialogs, drawer for side sheets. Scrim dims the page behind a modal or drawer; shade darkens an expanded row or inset well. |
@@ -59,7 +59,7 @@ Instrument Sans for the interface, JetBrains Mono for identifiers (DIDs, UALs, h
 
 Every font size is one of these tokens, in CSS and inline styles alike. Agent dots size their initials from the dot, and never below the 11px floor. Canvas renderers that take a number say so in a comment.
 
-Type sizes are whole pixels. Every size is one of these tokens; weights are 400, 500, 600 and 700. Uppercase text uses `--ls-caps`, and other text has no tracking. Large numbers use `--fs-display`. Sentence case everywhere, including buttons, tabs and badges. Names keep their capitals: Edge, Core (only the role: Core node, Edge node), Context Graph, Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction. Uppercase is for small section kickers and for card and chart titles.
+Type sizes are whole pixels. Every size is one of these tokens; weights are 400, 500, 600 and 700. Uppercase text uses `--ls-caps`, and other text has no tracking. Large numbers use `--fs-display`. Sentence case everywhere, including buttons, tabs and badges. Names keep their capitals: Edge, Core (only the role: Core node, Edge node), Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction. Uppercase is for small section kickers and for card and chart titles.
 
 ## Shape and size
 
@@ -168,7 +168,7 @@ A badge states a fact (status, role, type, layer). It is never the click target.
 
 A leading mark says "this opens":
 
-- **Context Graph:** `<ContextGraphChip>`, a monogram tile in the graph's data colour plus the name, in a pill.
+- **Context graph:** `<ContextGraphChip>`, a monogram tile in the graph's data colour plus the name, in a pill.
 - **Agent:** `<AgentChip size>` (24 / 28 / 40) with a circle of initials, and `<AgentDot>` / `<AgentDotStack>` for avatars alone. On an agent's own page, `<AgentTitle>` shows the avatar beside the page title, with no pill and no link. Agents are drawn the same way in the graph canvas.
 
 ### Small screens
@@ -186,8 +186,8 @@ A leading mark says "this opens":
 
 The centre of the app works like browser tabs:
 
-- **Places** are the node's fixed screens (Dashboard, Memory stack, Observability, Publisher Conviction, Settings). They live in the sidebar: Dashboard and Memory stack at the top, the rest in the Node group. Between them, New and Join sit above two collapsible lists, My Context Graphs and Public Context Graphs. The header holds status, notifications, theme and panel toggles only, no navigation.
-- **Things you open** (a Context Graph, an agent, a PCA) open as tabs next to the current one.
+- **Places** are the node's fixed screens (Dashboard, Memory stack, Observability, Publisher Conviction, Settings). They live in the sidebar: Dashboard and Memory stack at the top, the rest in the Node group. Between them sit collapsible groups: Marketplace (when it is on), My context graphs, which ends with New and Join (they form its empty state on first run), Public graphs and Integrations. The header holds status, notifications, theme and panel toggles only, no navigation.
+- **Things you open** (a context graph, an agent, a PCA) open as tabs next to the current one.
 - Every tab has a web address (`src/ui/lib/tab-routes.ts`): `/`, `/observability`, `/settings`, `/conviction`, `/graph/<id>`, `/agent/<graph>/<slug>`, `/pca/<n>`. Back, forward, refresh and bookmarks land on the same tab.
 - Open tabs, their order, the active tab and recently closed tabs are saved in the browser (`stores/tabs.ts`) and restored on refresh.
 - Tabs can be dragged or moved with Ctrl+Shift+←/→, closed with ×, middle-click or Delete, and reopened from the ⌄ menu. Dashboard is pinned first.
@@ -280,7 +280,7 @@ Every table header looks the same: `--fs-label`, weight 500, uppercase with `--l
 
 **Tooltips.** Use the native `title` for extra detail, such as a full address behind a shortened one. Nothing that needs reading lives only in a tooltip, because touch and keyboard users can't reach it, and a tooltip is never a control's name.
 
-**Breakpoints.** Use 600, 720, 860 and 920. The Context Graph tab bar has its own fitting steps at 1180, 1320 and 1500.
+**Breakpoints.** Use 600, 720, 860 and 920. The context graph tab bar has its own fitting steps at 1180, 1320 and 1500.
 
 **Motion.** `--motion-fast` (.12s) for hover and press, `--motion-base` (.15s) for things that appear or move, `--motion-slow` (.3s) for larger changes.
 

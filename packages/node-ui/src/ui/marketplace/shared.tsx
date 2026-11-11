@@ -2,11 +2,70 @@
 // reveal deeper), the section's off and admin-needed states, one loader hook,
 // relative times, seller names, and the hop to another marketplace tab.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Check, X } from 'lucide-react';
 import { copy, type CopyKey } from './copy.generated.js';
 import { isMarketplaceError } from './api/client.js';
-import { spanOf } from './amounts.js';
+import { fmtTracGrouped, spanOf } from './amounts.js';
 import { MARKETPLACE_TABS } from './tabs.js';
 import { chooseTab } from '../lib/shellNavigation.js';
+import { PageHeader } from '../components/ds/PageHeader.js';
+
+/** Whether a check passed, as an icon named for screen readers. */
+export function CheckMark({ ok }: { ok: boolean }): React.ReactElement {
+  return ok ? <Check size={12} aria-label="yes" /> : <X size={12} aria-label="no" />;
+}
+
+/** One of a Core node's requirements: its words, and whether it is met (no mark when it isn't a check). */
+export interface CoreNodeCheck { label: React.ReactNode; ok?: boolean }
+
+/** The requirements every Core node line shows: a profile, a place in the sharding table, and the minimum stake. */
+export function coreNodeBasics(g: { profile: boolean; shardingTable: boolean; stake: string; minimumStake: string }): CoreNodeCheck[] {
+  return [
+    { ok: g.profile, label: copy('gate.profile') },
+    { ok: g.shardingTable, label: copy('gate.table') },
+    { ok: BigInt(g.stake) >= BigInt(g.minimumStake), label: copy('gate.stake', { stake: fmtTracGrouped(g.stake), min: fmtTracGrouped(g.minimumStake) }) },
+  ];
+}
+
+/**
+ * A Core node's requirements as separate items, each with its own check before it. The gaps
+ * between items separate them, so the line needs no dots, and it wraps on a narrow screen.
+ */
+export function CoreNodeChecks({ items }: { items: CoreNodeCheck[] }): React.ReactElement {
+  return (
+    <span className="mkt-corenode">
+      <span className="mkt-sec">{copy('gate.core')}</span>
+      {items.map((item, i) => (
+        <span key={i} className="mkt-corenode-item">
+          {item.ok !== undefined && <CheckMark ok={item.ok} />}
+          {item.label}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** Each Marketplace page: its tab (for the title) and its one-line purpose. */
+const PAGES = {
+  browse: { testId: 'mkt-marketplace', tab: MARKETPLACE_TABS.browse, desc: 'page.browse.desc' },
+  plans: { testId: 'mkt-plans', tab: MARKETPLACE_TABS.plans, desc: 'page.plans.desc' },
+  access: { testId: 'mkt-access', tab: MARKETPLACE_TABS.access, desc: 'page.access.desc' },
+  operate: { testId: 'mkt-operate', tab: MARKETPLACE_TABS.operate, desc: 'page.operate.desc' },
+} as const satisfies Record<string, { testId: string; tab: { label: string }; desc: CopyKey }>;
+
+/**
+ * A Marketplace page: its frame and its page title, whatever state it is in. The state
+ * (loading, off, an error, the page itself) only supplies the body and `data-state`.
+ */
+export function MarketplacePage({ page, state, children }: { page: keyof typeof PAGES; state: string; children: React.ReactNode }): React.ReactElement {
+  const p = PAGES[page];
+  return (
+    <div className="mkt-frame" data-testid={p.testId} data-state={state}>
+      <PageHeader title={p.tab.label} description={copy(p.desc)} />
+      {children}
+    </div>
+  );
+}
 
 /** A refusal's code → its plain words. The codes are the node's, so any string; the words are the table's. */
 const CODE_COPY: Record<string, CopyKey> = {

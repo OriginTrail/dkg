@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { relative } from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
-import { UI, attrsOf, hasSpread, opening, uiFiles as files, type Jsx } from './helpers/jsx.js';
+import { UI, attrsOf, hasSpread, jsxElements, opening, parseTsx, uiFiles as files, uiJsxElements, type Jsx } from './helpers/jsx.js';
 
 /** True when the node puts words on screen, as text or a value worked out at runtime. */
 function hasText(n: ts.Node): boolean {
@@ -45,6 +45,37 @@ function scan(visit: (n: Jsx, where: string, context: { inLabel: boolean; labell
   }
 }
 
+/**
+ * Why a clickable element that isn't a control can't be used from the keyboard, or null when it can.
+ * It has to join the tab order (a tabIndex other than -1) and answer Enter or Space (an onKeyDown or
+ * onKeyUp handler), or spread `pressable()`, which gives it both. A role or a tabIndex alone does
+ * neither. Backdrops (a mouse shortcut for Escape), stopPropagation-only handlers and rows whose
+ * name is a real button (`ds-row-open`) are exempt, and so is an option, menu item or tree item
+ * whose listbox, menu or tree takes the keys itself.
+ */
+function keyboardGap(n: Jsx, ancestors: Jsx[] = []): string | null {
+  if (!/^(div|span|li|tr|td|p|section|article)$/.test(opening(n).tagName.getText())) return null;
+  const spreads = opening(n).attributes.properties.filter(ts.isJsxSpreadAttribute).map((x) => x.expression.getText());
+  if (spreads.some((x) => x.startsWith('pressable('))) return null;
+  const a = attrsOf(n);
+  const click = a.get('onClick')?.getText();
+  if (!click || a.has('aria-hidden')) return null;
+  const role = a.get('role')?.initializer?.getText() ?? '';
+  const OWNER: Record<string, RegExp> = { '"option"': /"listbox"/, '"menuitem"': /"menu"/, '"treeitem"': /"tree"/ };
+  if (OWNER[role]) {
+    const owner = ancestors.find((x) => OWNER[role]!.test(attrsOf(x).get('role')?.initializer?.getText() ?? ''));
+    if (owner && attrsOf(owner).has('onKeyDown')) return null;
+  }
+  if (/onBackdropClick|target === \w+\.currentTarget|^onClick=\{\(?\w*\)? => \w+\.stopPropagation\(\)\}$/.test(click)) return null;
+  if (n.getText().includes('ds-row-open')) return null;
+  const tab = a.get('tabIndex')?.initializer?.getText().replace(/[{}"'\s]/g, '');
+  const reachable = tab !== undefined && tab !== '-1';
+  const activates = a.has('onKeyDown') || a.has('onKeyUp');
+  if (reachable && activates) return null;
+  if (!reachable && !activates) return 'not focusable, no key handler';
+  return reachable ? 'no Enter/Space handler' : 'not focusable';
+}
+
 const named = (a: Map<string, ts.JsxAttribute>) => a.has('aria-label') || a.has('aria-labelledby') || a.has('ariaLabel');
 
 describe('accessibility rules', { timeout: 30_000 }, () => {
@@ -76,16 +107,30 @@ describe('accessibility rules', { timeout: 30_000 }, () => {
 
   it('gives clickable elements a way in from the keyboard', () => {
     const found: string[] = [];
-    scan((n, where) => {
-      if (!/^(div|span|li|tr|td|p|section|article)$/.test(opening(n).tagName.getText())) return;
-      const a = attrsOf(n);
-      const click = a.get('onClick')?.getText();
-      if (!click || a.has('role') || a.has('tabIndex') || a.has('aria-hidden')) return;
-      // Backdrops are a mouse shortcut for Escape; a stopPropagation-only handler isn't an action.
-      if (/onBackdropClick|target === \w+\.currentTarget|^onClick=\{\(?\w*\)? => \w+\.stopPropagation\(\)\}$/.test(click)) return;
-      if (!n.getText().includes('ds-row-open')) found.push(where);
-    });
+    for (const { node, ancestors, where } of uiJsxElements()) {
+      const gap = keyboardGap(node, ancestors);
+      if (gap) found.push(`${where} (${gap})`);
+    }
     expect(found).toEqual([]);
+  });
+
+  it('asks for focus and Enter/Space, not a role or a tabIndex alone', () => {
+    // The verdict on the innermost clickable element of the snippet.
+    const verdict = (jsx: string) => {
+      const all = [...jsxElements(parseTsx(`const x = ${jsx};`))];
+      const target = all.reverse().find(({ node }) => attrsOf(node).has('onClick') || hasSpread(node))!;
+      return keyboardGap(target.node, target.ancestors);
+    };
+    expect(verdict('<div role="button" onClick={open}>Open</div>')).toBe('not focusable, no key handler');
+    expect(verdict('<div tabIndex={0} onClick={open}>Open</div>')).toBe('no Enter/Space handler');
+    expect(verdict('<div role="button" tabIndex={-1} onKeyDown={key} onClick={open}>Open</div>')).toBe('not focusable');
+    expect(verdict('<div role="button" tabIndex={0} onKeyDown={key} onClick={open}>Open</div>')).toBeNull();
+    expect(verdict('<li {...pressable(open)}>Open</li>')).toBeNull();
+    expect(verdict('<div className="v10-modal-overlay" onClick={onBackdropClick} role="presentation" />')).toBeNull();
+    expect(verdict('<tr onClick={open}><td><button className="ds-row-open">Open</button></td></tr>')).toBeNull();
+    // An option is reached through its listbox, which has to take the keys.
+    expect(verdict('<ul role="listbox" tabIndex={-1} onKeyDown={key}><li role="option" onClick={pick}>A</li></ul>')).toBeNull();
+    expect(verdict('<ul role="listbox"><li role="option" onClick={pick}>A</li></ul>')).toBe('not focusable, no key handler');
   });
 
   it('names every dialog', () => {

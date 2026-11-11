@@ -360,7 +360,7 @@ function VmHeroFacts({ entities, vmTriples, contextGraphId }: { entities: Memory
   const vmSubjects = useMemo(() => vmSubjectsOf(vmTriples), [vmTriples]);
   const facts = useMemo(() => buildVmFacts(entities, summary, { loading, error }, vmSubjects), [entities, summary, loading, error, vmSubjects]);
   return (
-    <dl className="v10-vm-hero-facts" aria-label="Verifiable Memory facts for this Context Graph">
+    <dl className="v10-vm-hero-facts" aria-label="Verifiable Memory facts for this context graph">
       {facts.map(f => (
         <div key={f.id} className={`v10-vm-hero-fact tone-${f.tone}`} title={f.tooltip} data-fact={f.id}>
           <dt>{f.label}</dt>
@@ -391,7 +391,7 @@ export function VerifiableMemoryHeroBanner({ entities, vmTriples, contextGraphId
           <div className="v10-vm-hero-heading">
             <span className="v10-vm-hero-headline">Nothing published yet</span>
             <span className="v10-vm-hero-context" title={contextGraphId}>
-              Context Graph: {contextGraphId}
+              Context graph: {contextGraphId}
             </span>
           </div>
         </div>
@@ -414,7 +414,7 @@ export function VerifiableMemoryHeroBanner({ entities, vmTriples, contextGraphId
         <div className="v10-vm-hero-heading">
           <span className="v10-vm-hero-headline">On-chain anchored · cryptographically signed</span>
           <span className="v10-vm-hero-context" title={contextGraphId}>
-            Context Graph: {contextGraphId}
+            Context graph: {contextGraphId}
           </span>
         </div>
       </div>

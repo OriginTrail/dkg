@@ -69,7 +69,7 @@ const rawMemory = {
 
 const profile: ProjectProfile = {
   contextGraphId: 'cg-test',
-  displayName: 'Context Graph Test',
+  displayName: 'Context graph Test',
   primaryColor: '#64748b',
   accentColor: '#38bdf8',
   subGraphs: [],
@@ -88,7 +88,7 @@ const profile: ProjectProfile = {
       return {
         slug: ROOT_SLUG_SENTINEL,
         displayName: 'Root',
-        description: 'Entities not in any subgraph (Context Graph root)',
+        description: 'Entities not in any subgraph (context graph root)',
         icon: '⊘',
         rank: 99,
       };

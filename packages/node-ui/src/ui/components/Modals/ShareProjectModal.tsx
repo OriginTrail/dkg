@@ -240,7 +240,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
           className="v10-modal-header v10-modal-header-row"
         >
           <div className="v10-modal-heading">
-            <div id="dkg-share-modal-title" className="v10-modal-title">Share Context Graph</div>
+            <div id="dkg-share-modal-title" className="v10-modal-title">Share context graph</div>
             <div className="v10-modal-subtitle">
               Invite agents to collaborate on <strong>{contextGraphName}</strong>.
             </div>
@@ -289,7 +289,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
               <div className="v10-form-group">
                 <label className="v10-form-label">Allowed agents</label>
                 <div className="v10-share-hint">
-                  Only agents on this list can read and write to the Context Graph. To add someone, share the Invite code below — they'll send a signed join request you can approve in the <strong>Join requests</strong> tab.
+                  Only agents on this list can read and write to the context graph. To add someone, share the invite code below — they'll send a signed join request you can approve in the <strong>Join requests</strong> tab.
                 </div>
 
                 {allowedAgents.length > 0 && (
@@ -319,7 +319,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
 
                 {allowedAgents.length === 0 && (
                   <div className="v10-share-empty-row">
-                    No agents on allowlist — Context Graph is open to anyone who subscribes.
+                    No agents on allowlist — context graph is open to anyone who subscribes.
                   </div>
                 )}
               </div>
@@ -354,7 +354,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
             <div className="v10-form-group">
               <label className="v10-form-label">Pending join requests</label>
               <div className="v10-share-hint">
-                Agents who submitted a signed request to join this Context Graph. Approve to add them to the allowlist.
+                Agents who submitted a signed request to join this context graph. Approve to add them to the allowlist.
               </div>
 
               {pendingRequests.length === 0 && (

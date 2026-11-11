@@ -11,7 +11,7 @@ test.describe('Create Context Graph Modal (rc.12)', () => {
   });
 
   test('modal title is "Create new Context Graph"', async ({ createProjectModal }) => {
-    await expect(createProjectModal.title).toHaveText('Create new Context Graph');
+    await expect(createProjectModal.title).toHaveText('Create new context graph');
   });
 
   test('name input is visible and accepts text', async ({ createProjectModal }) => {
@@ -73,7 +73,7 @@ test.describe('Create Context Graph Modal (rc.12)', () => {
   test('submit button text is "Create Context Graph"', async ({ createProjectModal }) => {
     await createProjectModal.fill('My Graph');
     const text = await createProjectModal.getSubmitText();
-    expect(text?.trim()).toBe('Create Context Graph');
+    expect(text?.trim()).toBe('Create context graph');
   });
 
   test('modal subtitle describes Context Graph purpose', async ({ page }) => {

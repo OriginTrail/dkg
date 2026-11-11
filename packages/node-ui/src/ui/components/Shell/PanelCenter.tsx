@@ -168,7 +168,7 @@ export function DocumentViewer({ docRef, contentType: expectedContentType, conte
   return (
     <div className="v10-doc-view">
       <div className="v10-doc-bar">
-        <Breadcrumbs items={[contextGraphId ? graph : { label: 'Context Graph' }, { label: docLabel }]} />
+        <Breadcrumbs items={[contextGraphId ? graph : { label: 'Context graph' }, { label: docLabel }]} />
         {showToggle && (
           <div
             role="group"

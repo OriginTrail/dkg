@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { NavigationType, useLocation, useNavigate, useNavigationType } from 'react-router-dom';
 import { useTabsStore } from '../stores/tabs.js';
 import { useLayoutStore, useShellPanels } from '../stores/layout.js';
 import { useProjectsStore } from '../stores/projects.js';
@@ -38,6 +38,7 @@ import { tabContextGraphId } from '../lib/tab-target.js';
  */
 export function useShellRouting(): void {
   const { pathname, search, key, state } = useLocation();
+  const navigationType = useNavigationType();
   const { narrow } = useShellPanels();
   const navigate = useNavigate();
   const activeTabId = useTabsStore((s) => s.activeTabId);
@@ -68,7 +69,9 @@ export function useShellRouting(): void {
       navigate(pathname + search, { replace: true, state: { agentsOpened: true } });
       return;
     }
-    if (routeState?.agentsOpened) return;
+    // Only the redirect's own replace keeps the panel open. Coming back to the marked entry
+    // later with Back or Forward (a POP) is going somewhere like any other.
+    if (routeState?.agentsOpened && navigationType === NavigationType.Replace) return;
     layout.revealCentre();
     // Only a new address counts: a new history entry, or a path or query string that
     // changed without one (an entry pushed outside the router has no key).
