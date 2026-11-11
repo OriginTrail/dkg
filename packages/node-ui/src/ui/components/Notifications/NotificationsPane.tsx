@@ -15,7 +15,6 @@ import React from 'react';
 import type { UseNotificationsFeed } from '../../hooks/useNotificationsFeed.js';
 import type { PcaAlert } from '../../hooks/usePcaAlerts.js';
 import { JoinRequestRow, ActivityDigestRow, ConfirmationRow, PcaCostCoveredRow } from './rows.js';
-import { Count } from '../ds/Badge.js';
 
 export interface NotificationsPaneProps {
   feed: UseNotificationsFeed;
@@ -61,13 +60,13 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
   const isEmpty = !hasJoin && !hasActivity && !hasPca;
 
   return (
-    <div className="v10-notif-pane ds-card-nested" role="region" aria-label="Notifications" id={id} ref={paneRef} tabIndex={-1}>
+    <div className="v10-notif-pane" role="region" aria-label="Notifications" id={id} ref={paneRef} tabIndex={-1}>
       <div className="v10-notif-pane-titlebar">
         <div className="v10-notif-pane-title">Notifications</div>
         {hasInformationalUnread && (
           <button
             type="button"
-            className="v10-notif-pane-markread ds-btn ds-ghost ds-sm"
+            className="v10-notif-pane-markread"
             onClick={markAllInformationalSeen}
             title="Mark informational notifications as read"
           >
@@ -83,7 +82,7 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
           <section className="v10-notif-section v10-notif-section-pca" aria-label="Publisher Conviction">
             <div className="v10-notif-section-head">
               <span className="v10-notif-section-label">Publisher Conviction</span>
-              <Count value={pcaAlerts.length} tone="attention" className="v10-notif-section-count" />
+              <span className="v10-notif-section-count">{pcaAlerts.length}</span>
             </div>
             <div className="v10-notif-section-rows">
               {pcaAlerts.map((al) => (
@@ -139,7 +138,7 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
               <section className="v10-notif-section v10-notif-section-action" aria-label="Needs your action">
                 <div className="v10-notif-section-head">
                   <span className="v10-notif-section-label">Needs your action</span>
-                  <Count value={joinRequests.length} tone="attention" className="v10-notif-section-count" />
+                  <span className="v10-notif-section-count">{joinRequests.length}</span>
                 </div>
                 <div className="v10-notif-section-rows">
                   {joinRequests.map((req) => (

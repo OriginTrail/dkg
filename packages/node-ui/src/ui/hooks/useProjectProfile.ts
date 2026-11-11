@@ -66,8 +66,6 @@ export interface EntityTypeBinding {
   label?: string;
   icon?: string;
   color?: string;
-  /** True for the synthesised binding of a type the profile doesn't define. */
-  isFallback?: true;
   detailHint?: string;
   /**
    * Domain-aware copy for the Verify-on-DKG CTA. When all four are unset
@@ -162,19 +160,15 @@ export interface ProjectProfile {
 
 const DEFAULT_PROFILE_SEED = {
   displayName: 'Project',
-  // Neutral unless the context graph's profile sets a colour: violet and
-  // green now mean VM and success, so they can't be a default identity.
-  primaryColor: 'var(--text-tertiary)',
-  accentColor: 'var(--text-tertiary)',
+  primaryColor: '#a855f7',
+  accentColor: '#22c55e',
 };
 
-// Fallbacks carry no colour: profile data stays theme-free, and each
-// consumer applies its own neutral (a CSS token in the DOM, the GraphPalette
-// on canvas), as for ROOT_SUBGRAPH_BINDING below.
 const DEFAULT_SUBGRAPH_FALLBACK = (slug: string): SubGraphBinding => ({
   slug,
   displayName: slug,
   icon: '•',
+  color: '#64748b',
   rank: 99,
 });
 
@@ -200,7 +194,7 @@ const ROOT_SUBGRAPH_BINDING: SubGraphBinding = {
 const DEFAULT_TYPE_FALLBACK = (typeIri: string): EntityTypeBinding => ({
   typeIri,
   label: typeIri.split(/[/#]/).pop() || typeIri,
-  isFallback: true,
+  color: '#64748b',
 });
 
 // ── SPARQL helpers ────────────────────────────────────────────

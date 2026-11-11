@@ -7,7 +7,6 @@ import type {
   GraphEventHandler,
   LabelMode,
   ChangeSet,
-  StyleConfig,
 } from './types.js';
 import type { GraphDataSource } from '../data-sources/types.js';
 import type { ViewConfig } from './view-config.js';
@@ -601,16 +600,6 @@ export class RdfGraphViz {
   /** Force a visual re-render (call after modifying node properties externally) */
   refresh(): void {
     this._renderCurrent();
-  }
-
-  /**
-   * Restyle in place: new class/namespace/predicate colours, appearances and
-   * defaults (a theme switch), keeping the loaded graph, its layout and the
-   * camera. No remount, reload or refit.
-   */
-  setStyle(style: StyleConfig | undefined): void {
-    this._styleEngine.setStyle(style);
-    this.refresh();
   }
 
   /** Destroy the visualization and clean up resources */

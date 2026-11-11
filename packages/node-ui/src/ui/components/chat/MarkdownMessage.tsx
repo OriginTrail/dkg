@@ -179,7 +179,7 @@ export function MarkdownMessage({ content, streaming }: MarkdownMessageProps) {
           blockquote: ({ children }) => <blockquote className="v10-md-blockquote">{children}</blockquote>,
           hr: () => <hr className="v10-md-hr" />,
           table: ({ children }) => (
-            <div className="v10-md-table-scroll ds-card-nested">
+            <div className="v10-md-table-scroll">
               <table className="v10-md-table">{children}</table>
             </div>
           ),

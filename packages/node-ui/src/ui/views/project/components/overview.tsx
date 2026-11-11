@@ -8,10 +8,7 @@ import { canonicalAgentDid, normalizeAccessPolicy } from '../../../lib/contextGr
 import { layerNoun, useLayerTriples, useCanonicalTriples, type LayerView } from '../helpers.js';
 import { StatStrip } from '../../../components/ContextGraphPrimitives.js';
 import { useNodeEvents } from '../../../hooks/useNodeEvents.js';
-import { AgentDot } from '../../../components/AgentDot.js';
 import { overviewRoleState, type OverviewAgentIdentity, type OverviewAgentStatus, type OverviewParticipantsStatus } from './overview-role.js';
-import { useContextGraphColor, ContextGraphMark } from '../../../context-graph-colors.js';
-import { Count } from '../../../components/ds/Badge.js';
 
 export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onRefresh }: {
   active: LayerView;
@@ -42,7 +39,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
   return (
     <div className="v10-layer-switcher">
       <button
-        className={`v10-layer-switch-btn ds-tab ${active === 'overview' ? 'active' : ''}`}
+        className={`v10-layer-switch-btn ${active === 'overview' ? 'active' : ''}`}
         data-layer="overview"
         aria-label="Overview"
         title="Overview"
@@ -53,44 +50,44 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
       </button>
       <span className="v10-layer-switch-separator" aria-hidden="true" />
       <button
-        className={`v10-layer-switch-btn ds-tab ${active === 'wm' ? 'active' : ''}`}
+        className={`v10-layer-switch-btn ${active === 'wm' ? 'active' : ''}`}
         data-layer="wm"
         aria-label="Working Memory"
         title="Working Memory"
         onClick={() => switchTo('wm')}
       >
-        <span className="v10-layer-switch-icon" style={{ color: 'var(--layer-working)' }}>◇</span>
+        <span className="v10-layer-switch-icon" style={{ color: '#64748b' }}>◇</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-full">Working Memory</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-compact">WM</span>
-        {counts.wm > 0 && <Count value={counts.wm} className="v10-layer-switch-count" />}
+        {counts.wm > 0 && <span className="v10-layer-switch-count">{counts.wm}</span>}
       </button>
       <button
-        className={`v10-layer-switch-btn ds-tab ${active === 'swm' ? 'active' : ''}`}
+        className={`v10-layer-switch-btn ${active === 'swm' ? 'active' : ''}`}
         data-layer="swm"
         aria-label="Shared Working Memory"
         title="Shared Working Memory"
         onClick={() => switchTo('swm')}
       >
-        <span className="v10-layer-switch-icon" style={{ color: 'var(--layer-shared)' }}>◈</span>
+        <span className="v10-layer-switch-icon" style={{ color: '#f59e0b' }}>◈</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-full">Shared Working Memory</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-compact">SWM</span>
-        {counts.swm > 0 && <Count value={counts.swm} className="v10-layer-switch-count" />}
+        {counts.swm > 0 && <span className="v10-layer-switch-count">{counts.swm}</span>}
       </button>
       <button
-        className={`v10-layer-switch-btn ds-tab ${active === 'vm' ? 'active' : ''}`}
+        className={`v10-layer-switch-btn ${active === 'vm' ? 'active' : ''}`}
         data-layer="vm"
         aria-label="Verifiable Memory"
         title="Verifiable Memory"
         onClick={() => switchTo('vm')}
       >
-        <span className="v10-layer-switch-icon" style={{ color: 'var(--layer-verified)' }}>◉</span>
+        <span className="v10-layer-switch-icon" style={{ color: '#22c55e' }}>◉</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-full">Verifiable Memory</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-compact">VM</span>
-        {counts.vm > 0 && <Count value={counts.vm} className="v10-layer-switch-count" />}
+        {counts.vm > 0 && <span className="v10-layer-switch-count">{counts.vm}</span>}
       </button>
       <span className="v10-layer-switch-separator" aria-hidden="true" />
       <button
-        className={`v10-layer-switch-btn ds-tab ${active === 'graph-overview' ? 'active' : ''}`}
+        className={`v10-layer-switch-btn ${active === 'graph-overview' ? 'active' : ''}`}
         data-layer="graph-overview"
         aria-label="Subgraphs"
         title="Subgraphs"
@@ -110,7 +107,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
       >
         <button
           type="button"
-          className={`v10-layer-switch-btn ds-tab v10-layer-more-btn ${active === 'query' ? 'active' : ''}`}
+          className={`v10-layer-switch-btn v10-layer-more-btn ${active === 'query' ? 'active' : ''}`}
           data-layer="query"
           aria-haspopup="menu"
           aria-expanded={moreOpen}
@@ -122,7 +119,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
           <span className="v10-layer-switch-label">More</span>
         </button>
         {moreOpen && (
-          <div className="v10-layer-more-menu ds-card-nested" role="menu">
+          <div className="v10-layer-more-menu" role="menu">
             <button
               type="button"
               role="menuitem"
@@ -137,15 +134,15 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
       </div>
       <div className="v10-layer-switcher-spacer" />
       <div className="v10-layer-switcher-actions">
-        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onShare} aria-label="Share Context Graph">
+        <button className="v10-layer-action-btn" onClick={onShare} aria-label="Share Context Graph">
           <span className="v10-layer-action-icon">⤴</span>
           <span className="v10-layer-action-label">Share</span>
         </button>
-        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onImport} aria-label="Import into Context Graph">
+        <button className="v10-layer-action-btn" onClick={onImport} aria-label="Import into Context Graph">
           <span className="v10-layer-action-icon">↑</span>
           <span className="v10-layer-action-label">Import</span>
         </button>
-        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onRefresh} aria-label="Refresh Context Graph data">
+        <button className="v10-layer-action-btn" onClick={onRefresh} aria-label="Refresh Context Graph data">
           <span className="v10-layer-action-icon">↻</span>
         </button>
       </div>
@@ -172,10 +169,17 @@ export function ProjectHeaderStrip({
   onClearSubGraph: () => void;
 }) {
   const name = cg.name || profile.displayName || cg.id;
-  const cgColor = useContextGraphColor(cg.id);
   return (
-    <div className="v10-project-strip" style={{ '--sg-color': activeSubGraph ? activeSubGraph.color ?? 'var(--text-tertiary)' : cgColor } as React.CSSProperties}>
-      <ContextGraphMark id={cg.id} name={name} size="md" />
+    <div
+      className="v10-project-strip"
+      style={{
+        '--sg-color': activeSubGraph?.color ?? profile.primaryColor,
+      } as React.CSSProperties}
+    >
+      <span
+        className="v10-project-strip-dot"
+        style={{ background: profile.primaryColor }}
+      />
       <button
         type="button"
         className="v10-project-strip-name"
@@ -451,7 +455,7 @@ export function ProjectOverviewCard({
       desc: 'Private staging area',
       count: working,
       status: memory.layerStatus?.wm ?? 'ok',
-      color: 'var(--layer-working)',
+      color: '#64748b',
     },
     {
       key: 'swm' as const,
@@ -459,7 +463,7 @@ export function ProjectOverviewCard({
       desc: 'Collaborative review',
       count: shared,
       status: memory.layerStatus?.swm ?? 'ok',
-      color: 'var(--layer-shared)',
+      color: '#f59e0b',
     },
     {
       key: 'vm' as const,
@@ -467,7 +471,7 @@ export function ProjectOverviewCard({
       desc: 'Published on-chain',
       count: verified,
       status: memory.layerStatus?.vm ?? 'ok',
-      color: 'var(--layer-verified)',
+      color: '#22c55e',
     },
   ];
   const pipelineHasUnavailableLayer = pipeline.some(item => item.status === 'error');
@@ -486,7 +490,6 @@ export function ProjectOverviewCard({
             <span
               className="v10-po-badge"
               data-role={role.tone}
-              data-rank={role.rank}
               title={role.title}
             >
               {role.label}
@@ -506,7 +509,7 @@ export function ProjectOverviewCard({
         {onOpenPrimer && (
           <button
             type="button"
-            className="v10-po-identity-primer ds-btn ds-sm"
+            className="v10-po-identity-primer"
             onClick={onOpenPrimer}
             title="Open the Context Graph primer"
           >
@@ -555,7 +558,7 @@ export function ProjectOverviewCard({
             <button
               key={item.key}
               type="button"
-              className={`v10-po-pipeline-step ds-card-nested ${item.key}`}
+              className={`v10-po-pipeline-step ${item.key}`}
               onClick={() => onSwitchLayer?.(item.key)}
               style={{ '--po-layer-color': item.color } as React.CSSProperties}
             >
@@ -667,7 +670,6 @@ export function ProjectOverviewCard({
                     title={full}
                     aria-label={ariaLabelParts.join(' ')}
                   >
-                    <AgentDot uri={canonical} label={display} size={16} title={full} />
                     <span className="v10-po-participant-name">{shortAddress}</span>
                     {isSelf && <span className="v10-po-participant-tag">you</span>}
                     {isCurator && <span className="v10-po-participant-tag">curator</span>}
@@ -803,7 +805,9 @@ export function PendingJoinRequestsSection({
     <section className="v10-po-join" data-section="join-requests">
       <header className="v10-po-join-head">
         <span className="v10-po-section-title">Pending join requests</span>
-        <Count value={requests.length} tone={requests.length > 0 ? 'attention' : 'neutral'} />
+        <span className="v10-po-join-count" data-empty={requests.length === 0 ? 'true' : 'false'}>
+          {requests.length}
+        </span>
       </header>
       {status === 'loading'
         ? <div className="v10-po-join-empty">Loading join requests...</div>
@@ -813,21 +817,21 @@ export function PendingJoinRequestsSection({
             ? <div className="v10-po-join-empty">No pending join requests.</div>
             : <div className="v10-po-join-list">
                 {requests.map(req => (
-                  <div key={req.agentAddress} className="v10-po-join-item ds-card-nested">
+                  <div key={req.agentAddress} className="v10-po-join-item">
                     <div className="v10-po-join-info">
                       <span className="v10-po-join-name">{req.name || `${req.agentAddress.slice(0, 6)}…${req.agentAddress.slice(-4)}`}</span>
                       <span className="v10-po-join-addr" title={req.agentAddress}>{req.agentAddress.slice(0, 10)}…</span>
                     </div>
                     <div className="v10-po-join-actions">
                       <button
-                        className="v10-po-join-btn ds-btn ds-primary ds-sm"
+                        className="v10-po-join-btn approve"
                         onClick={() => handleApprove(req.agentAddress)}
                         disabled={processing === req.agentAddress}
                       >
                         {processing === req.agentAddress ? '…' : '✓ Approve'}
                       </button>
                       <button
-                        className="v10-po-join-btn ds-btn ds-danger ds-sm"
+                        className="v10-po-join-btn reject"
                         onClick={() => handleReject(req.agentAddress)}
                         disabled={processing === req.agentAddress}
                         aria-label="Reject join request"

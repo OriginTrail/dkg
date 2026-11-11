@@ -13,17 +13,52 @@
 .v10-identity-wallet-description,
 .v10-identity-wallet-status {
   margin: 10px 0 0;
-  font-size: var(--fs-label);
+  font-size: var(--font-size-caption);
   line-height: 1.5;
   color: var(--text-tertiary);
 }
 
 .v10-identity-wallet-status {
-  font-size: var(--fs-control);
+  font-size: var(--font-size-label);
   color: var(--text-secondary);
 }
 
-.v10-identity-wallet-btn:disabled { opacity: 0.5; }
+.v10-identity-wallet-btn {
+  padding: 6px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: 7px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: var(--font-size-label);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.v10-identity-wallet-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.v10-identity-wallet-btn.compact {
+  min-height: 32px;
+  padding: 4px 10px;
+}
+
+.v10-identity-wallet-btn.primary {
+  border-color: var(--accent-blue);
+  background: var(--accent-blue);
+  color: var(--text-on-accent);
+}
+
+.v10-identity-wallet-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.v10-identity-wallet-btn:focus-visible {
+  outline: 2px solid var(--text-link);
+  outline-offset: 1px;
+}
 
 .v10-identity-wallet-counts,
 .v10-identity-wallet-signer,
@@ -41,6 +76,7 @@
   padding: 10px;
   margin-bottom: 14px;
   border: 1px solid var(--border-subtle);
+  border-radius: 8px;
   background: var(--bg-surface);
 }
 
@@ -56,7 +92,7 @@
 
 .v10-identity-wallet-subtitle {
   margin: 0 0 8px;
-  font-size: var(--fs-label);
+  font-size: var(--font-size-caption);
   font-weight: 700;
   color: var(--text-secondary);
   text-transform: uppercase;
@@ -89,19 +125,20 @@
   min-width: 0;
   padding: 14px;
   border: 1px solid var(--border-subtle);
+  border-radius: 8px;
   background: var(--bg-surface);
 }
 
 .v10-identity-wallet-card h4 {
   margin: 0;
-  font-size: var(--fs-body);
+  font-size: var(--font-size-ui);
   color: var(--text-primary);
 }
 
 .v10-identity-wallet-card p,
 .v10-identity-wallet-card label {
   margin: 0;
-  font-size: var(--fs-label);
+  font-size: var(--font-size-caption);
   line-height: 1.45;
   color: var(--text-tertiary);
 }

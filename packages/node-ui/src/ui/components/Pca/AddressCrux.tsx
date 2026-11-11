@@ -65,7 +65,7 @@ export function AddressCrux({
         <textarea
           id={inputId}
           data-testid={testId}
-          className="v10-form-textarea ds-input"
+          className="v10-form-textarea"
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder ?? fallbackPlaceholder}
@@ -80,7 +80,7 @@ export function AddressCrux({
           id={inputId}
           data-testid={testId}
           type="text"
-          className="v10-form-input ds-input"
+          className="v10-form-input"
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder ?? fallbackPlaceholder}

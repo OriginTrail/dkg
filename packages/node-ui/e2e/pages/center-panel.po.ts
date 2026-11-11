@@ -19,14 +19,15 @@ export class CenterPanelPage {
     const count = await tabs.count();
     const names: string[] = [];
     for (let i = 0; i < count; i++) {
-      const label = await tabs.nth(i).getAttribute('title');
+      const label = await tabs.nth(i).locator(sel.center.tabLabel).textContent();
       if (label) names.push(label.trim());
     }
     return names;
   }
 
   async getActiveTabName() {
-    return this.tabBar.locator(sel.center.activeTab).getAttribute('title');
+    const active = this.tabBar.locator(`${sel.center.tab}.active`);
+    return active.locator(sel.center.tabLabel).textContent();
   }
 
   async switchTab(name: string) {

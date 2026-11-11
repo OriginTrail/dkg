@@ -1,9 +1,9 @@
 import { test, expect } from '../fixtures/base.js';
 
 test.describe('Operations View (rc.12 Observability)', () => {
-  test.beforeEach(async ({ shell, leftPanel }) => {
+  test.beforeEach(async ({ shell, header }) => {
     await shell.goto();
-    await leftPanel.openObservability();
+    await header.openObservability();
   });
 
   test('Observability tab opens in center panel', async ({ centerPanel }) => {
