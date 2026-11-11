@@ -51,3 +51,5 @@ export const ADMISSION_LATENCY_BUCKETS = [5, 25, 100, 250, 500, 1000, 2500, 5000
 export const QUEUE_WAIT_BUCKETS = [1, 5, 25, 100, 500, 1000, 2500, 5000, 15000, 60000, 120000];
 /** ms; publisher pick-up and claim-to-finish: 100 ms to 1 h. */
 export const PICKUP_BUCKETS = [100, 500, 1000, 5000, 15000, 60000, 300000, 900000, 1800000, 3600000];
+/** ms; one read-graph check: a sampled probe in milliseconds, a full check up to half an hour. */
+export const READ_GRAPH_CHECK_DURATION_BUCKETS = [10, 50, 100, 500, 1_000, 5_000, 30_000, 120_000, 600_000, 1_800_000];

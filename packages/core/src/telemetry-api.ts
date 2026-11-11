@@ -31,7 +31,7 @@ import {
 import {
   ADMISSION_LATENCY_BUCKETS, BYTE_BUCKETS, CATCHUP_DURATION_BUCKETS, GRAPH_COUNT_BUCKETS,
   OP_DURATION_BUCKETS, PAGE_COUNT_BUCKETS, PICKUP_BUCKETS, QUAD_COUNT_BUCKETS, QUEUE_WAIT_BUCKETS,
-  RPC_DURATION_BUCKETS, SYNC_OPERATION_DURATION_BUCKETS,
+  READ_GRAPH_CHECK_DURATION_BUCKETS, RPC_DURATION_BUCKETS, SYNC_OPERATION_DURATION_BUCKETS,
 } from './telemetry-buckets.js';
 
 const TRACER_NAME = '@origintrail-official/dkg';
@@ -222,6 +222,15 @@ export interface DkgMetrics {
   queryScopeStoreMs: Histogram;
   /** queries whose slice is over a candidate scope limit. route, graph, limit=<candidate> */
   queryScopeOverLimitTotal: Counter;
+  /** read-graph checks. mode={sampled|full}, outcome={consistent|mismatch|skipped|interrupted|error}, layer={wm|swm|vm|other} */
+  storeReadGraphChecksTotal: Counter;
+  /** ms; one read-graph check. mode, outcome */
+  storeReadGraphCheckMs: Histogram;
+  /** read graphs a check found unequal to their member graphs' union, each marked dirty.
+   *  mode, direction={missing|unheld}, layer */
+  storeReadGraphMismatchesTotal: Counter;
+  /** read graphs in the state mirror by state={building|ready|dirty|repairing|rebuilding}, at each check pass */
+  storeReadGraphs: Gauge;
   /** bounded materialized result rows by static source */
   storeQueryResultRows: Histogram;
   /** conservative bounded materialized bytes by static source */
@@ -524,6 +533,19 @@ function buildMetrics(): DkgMetrics {
     }),
     queryScopeOverLimitTotal: meter.createCounter('dkg.query.scope_over_limit_total', {
       description: 'Queries whose slice is over a candidate scope limit; none is refused',
+    }),
+    storeReadGraphChecksTotal: meter.createCounter('dkg.store.read_graph_checks_total', {
+      description: 'Read-graph checks by mode, outcome and layer',
+    }),
+    storeReadGraphCheckMs: meter.createHistogram('dkg.store.read_graph_check_ms', {
+      unit: 'ms', description: 'Duration of one read-graph check',
+      advice: { explicitBucketBoundaries: READ_GRAPH_CHECK_DURATION_BUCKETS },
+    }),
+    storeReadGraphMismatchesTotal: meter.createCounter('dkg.store.read_graph_mismatches_total', {
+      description: 'Read graphs found unequal to the union of their member graphs, each marked dirty',
+    }),
+    storeReadGraphs: meter.createGauge('dkg.store.read_graphs', {
+      description: 'Read graphs in the state mirror by state, at each check pass',
     }),
     storeQueryResultRows: meter.createHistogram('dkg.store.query_result_rows', {
       description: 'Rows retained by bounded expensive store reads',
