@@ -632,6 +632,14 @@ describe('building a read graph', () => {
     adapter.listGraphs = async () => { throw new Error('the whole graph list was read'); };
     expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
     await expectUnion(adapter, layer, fixture, vm);
+    // The context graph's own list stays under the catalog's internal ceiling.
+    vi.stubEnv('DKG_STORE_GRAPH_CATALOG_MAX_BYTES', '64');
+    try {
+      layer.runtime.mirror.set({ ...layer.runtime.mirror.get(fixture.readGraphs.wholeVm)!, state: 'dirty' });
+      await expect(buildReadGraph(context, vm)).rejects.toMatchObject({ code: 'STORE_INTERNAL_LIMIT' });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('lists members by prefix where the backend can, pauses between batches, and lets queued foreground work go first', async () => {
