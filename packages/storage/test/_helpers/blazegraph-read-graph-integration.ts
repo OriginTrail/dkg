@@ -4,7 +4,7 @@ import { expect, it } from 'vitest';
 import { BlazegraphStore } from '../../src/adapters/blazegraph.js';
 import type { AtomicAssetReplacement } from '../../src/atomic-asset-group.js';
 import { readGraphDeltaDelete, readGraphInsertQuads } from '../../src/read-graph/statements.js';
-import { P, planned, q, readGraphWriteSuite, sentOverFetch } from './read-graph-write-suite.js';
+import { has, P, planned, q, readGraphWriteSuite, sentOverFetch } from './read-graph-write-suite.js';
 
 /**
  * Live checks that BlazegraphStore sends a write's read-graph operations in
@@ -29,15 +29,20 @@ export function blazegraphReadGraphWriteTests(url: string): void {
     open: async () => new BlazegraphStore(url, { timeout: 30_000 }),
     requests: sentOverFetch(),
   }, ({ store, inScenario, graph, render, statements }) => {
-    it('replaceAssetGroup in one direct update', () => inScenario(async (s) => {
-      // Two literals Blazegraph may store as one term select the direct update instead of the bulk plan.
-      const asset: AtomicAssetReplacement = {
-        graphUri: s.G4, graphQuads: [{ ...q('g', 'x', s.G4), object: '"eight"@en' }, { ...q('g', 'x', s.G4), object: '"eight"@EN' }],
+    it('replaceAssetGroup in one direct update replaces what the graph held', () => inScenario(async (s) => {
+      const asset = (objects: string[]): AtomicAssetReplacement => ({
+        graphUri: s.G4, graphQuads: objects.map((object) => ({ ...q('g', 'x', s.G4), object })),
         metaGraphUri: s.META, metadataSubject: `${s.base}/asset/4`,
         metadataQuads: [{ subject: `${s.base}/asset/4`, predicate: P, object: '"meta"', graph: s.META }],
-      };
-      await s.maintained(s.reference(s.G4, s.META), (o) => store().replaceAssetGroup([asset], o));
-      expect((await graph(s.G4)).length).toBeGreaterThan(0);
+      });
+      await s.maintained(s.reference(s.G4, s.META), (o) => store().replaceAssetGroup([asset(['"seven"'])], o));
+      expect(has(await s.readGraph(), 'seven')).toBe(true);
+      // Two literals Blazegraph may store as one term select the direct update instead of the bulk plan.
+      await s.maintained(s.reference(s.G4, s.META), (o) => store().replaceAssetGroup([asset(['"eight"@en', '"eight"@EN'])], o));
+      expect(has(await graph(s.G4), 'seven')).toBe(false);
+      expect(has(await s.readGraph(), 'seven')).toBe(false);
+      expect((await graph(s.G4)).some((t) => t.includes('"eight"'))).toBe(true);
+      expect((await s.readGraph()).some((t) => t.includes('"eight"'))).toBe(true);
     }));
 
     it('runs one update request at a time: concurrent removals of the last two copies leave R right', () =>

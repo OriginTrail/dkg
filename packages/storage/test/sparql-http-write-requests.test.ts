@@ -115,15 +115,22 @@ describe('SparqlHttpStore write requests with read-graph operations', () => {
     ['one declaration', 'PREFIX ex: <urn:test:ex:>', ' INSERT DATA { ex:s ex:p "o" }'],
     ['declarations, comments and a base',
       '# replace\nprefix ex:<urn:test:ex:#> # two\nBASE <urn:test:base/>\nPREFIX : <urn:test:default:>', '\nINSERT DATA { :s ex:p <o> }'],
+    ['a comment inside a declaration', 'PREFIX ex: # namespace\n<urn:test:ex:>', ' INSERT DATA { ex:s ex:p "o" }'],
+    ['long whitespace after it', 'PREFIX ex: <urn:test:ex:>', `${' '.repeat(100_000)}INSERT DATA { ex:s ex:p "o" }`],
   ])('a caller update that opens with a prologue keeps it at the start: %s', async (_case, prologue, operations) => {
     const { requests } = await recordSparqlHttpWrite((store) => store.update(`${prologue}${operations}`, planned(PLAN)));
     expect(requests).toEqual([`application/sparql-update\n${prologue}\n${carrying(`x\n${operations}`).slice(2)}`]);
   });
 
-  it('a prologue later in the caller text stays where it is', async () => {
-    const sparql = 'DROP SILENT GRAPH <urn:test:g> ; PREFIX ex: <urn:test:ex:> INSERT DATA { ex:s ex:p "o" }';
+  it.each([
+    ['a prologue later in the caller text', 'DROP SILENT GRAPH <urn:test:g> ; PREFIX ex: <urn:test:ex:> INSERT DATA { ex:s ex:p "o" }'],
+    ['long whitespace before an update with no prologue', `${' '.repeat(100_000)}DROP SILENT GRAPH <urn:test:g>`],
+  ])('%s stays where it is', async (_case, sparql) => {
+    const startedAt = performance.now();
     const { requests } = await recordSparqlHttpWrite((store) => store.update(sparql, planned(PLAN)));
     expect(requests).toEqual([carrying(`application/sparql-update\n${sparql}`)]);
+    // One linear scan of the text: no backtracking over whitespace.
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
   });
 
   it('declares every write it sends with operations on an atomic endpoint, and that updates may run side by side', () => {

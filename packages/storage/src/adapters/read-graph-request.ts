@@ -1,4 +1,4 @@
-import { stripSparqlLiteralsAndComments } from '@origintrail-official/dkg-core';
+import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import {
   spliceReadGraphPlan,
   type ReadGraphWriteOptions,
@@ -40,21 +40,20 @@ export function withReadGraphOperations(update: string, options: QueryOptions | 
  * `BASE` declarations) that opens the caller's text stays at the start of the
  * request, before the plan's operations: Oxigraph accepts a prologue only
  * there, and the plan's operations use absolute IRIs, which it does not change.
+ *
+ * Both come from one pass of the SPARQL lexical scanner, which treats comments
+ * as whitespace and masks strings, IRIs and comments.
  */
 export function withReadGraphOperationsAroundCallerUpdate(sparql: string, options: QueryOptions | undefined): string {
   if (!operationsOf(options)) return sparql;
-  const prologue = LEADING_PROLOGUE.exec(sparql)?.[0] ?? '';
-  const spliced = withReadGraphOperations(withoutFinalSeparator(sparql.slice(prologue.length)), options);
-  return prologue ? `${prologue}\n${spliced}` : spliced;
+  const { tokens, prologue, masked } = prepareSparql(sparql);
+  const start = prologue.endTokenIndex > 0 ? tokens[prologue.endTokenIndex - 1]!.end : 0;
+  const spliced = withReadGraphOperations(withoutFinalSeparator(sparql.slice(start), masked.slice(start)), options);
+  return start > 0 ? `${sparql.slice(0, start)}\n${spliced}` : spliced;
 }
 
-const IRI_REF = '<[^<>"{}|^`\\\\\\u0000-\\u0020]*>';
-/** Whitespace and comments, each followed by a `PREFIX` or `BASE` declaration, from the start of the text. */
-const LEADING_PROLOGUE = new RegExp(`^(?:(?:\\s+|#[^\\n]*(?:\\n|$))*(?:PREFIX\\s+[^\\s:]*:\\s*${IRI_REF}|BASE\\s*${IRI_REF}))*`, 'i');
-
-function withoutFinalSeparator(sparql: string): string {
-  // Same length as the text, with strings, IRIs and comments blanked.
-  const masked = stripSparqlLiteralsAndComments(sparql);
+/** `text` without a final `;`, found in `masked`: the same text with strings, IRIs and comments blanked. */
+function withoutFinalSeparator(text: string, masked: string): string {
   const end = masked.trimEnd().length;
-  return masked[end - 1] === ';' ? sparql.slice(0, end - 1) + sparql.slice(end) : sparql;
+  return masked[end - 1] === ';' ? text.slice(0, end - 1) + text.slice(end) : text;
 }

@@ -234,17 +234,28 @@ export function readGraphWriteSuite<T extends ReadGraphTestStore>(
       await s.maintained(s.reference(s.G3), (o) => store().update(
         `PREFIX rg: <urn:rg-int:> INSERT DATA { GRAPH <${s.G3}> { rg:n <${P}> "fourteen" } } ; # done`,
         { ...o, touchedGraphs: [s.G3] }));
-      expect(await s.graph(s.G3)).toHaveLength(3);
+      // A comment inside a declaration is whitespace.
+      await s.maintained(s.reference(s.G3), (o) => store().update(
+        `PREFIX rg: # the test namespace\n<urn:rg-int:> INSERT DATA { GRAPH <${s.G3}> { rg:o <${P}> "fifteen" } }`,
+        { ...o, touchedGraphs: [s.G3] }));
+      expect(await s.graph(s.G3)).toHaveLength(4);
     }));
 
-    if (engine.replaceAssetGroup !== false) it('replaceAssetGroup', () => inScenario(async (s) => {
-      await s.maintained(s.reference(s.G4, s.META), (o) => store().replaceAssetGroup!([{
-        graphUri: s.G4, graphQuads: [q('g', 'seven', s.G4), q('b', 'two', s.G4)],
-        metaGraphUri: s.META, metadataSubject: `${s.base}/asset/4`,
-        metadataQuads: [{ subject: `${s.base}/asset/4`, predicate: P, object: '"meta"', graph: s.META }],
-      } satisfies AtomicAssetReplacement], o));
-      expect(await s.graph(s.G4)).toHaveLength(2);
-    }));
+    if (engine.replaceAssetGroup !== false) it('replaceAssetGroup: the replaced triples leave R, the new ones join it', () =>
+      inScenario(async (s) => {
+        const asset = (objects: string[]): AtomicAssetReplacement => ({
+          graphUri: s.G4, graphQuads: objects.map((object) => q('g', object, s.G4)),
+          metaGraphUri: s.META, metadataSubject: `${s.base}/asset/4`,
+          metadataQuads: [{ subject: `${s.base}/asset/4`, predicate: P, object: '"meta"', graph: s.META }],
+        });
+        await s.maintained(s.reference(s.G4, s.META), (o) => store().replaceAssetGroup!([asset(['seven', 'two'])], o));
+        expect(await s.graph(s.G4)).toHaveLength(2);
+        await s.maintained(s.reference(s.G4, s.META), (o) => store().replaceAssetGroup!([asset(['eight'])], o));
+        expect(await s.graph(s.G4)).toHaveLength(1);
+        expect(has(await s.graph(s.G4), 'eight')).toBe(true);
+        expect(has(await s.readGraph(), 'seven')).toBe(false);
+        expect(has(await s.readGraph(), 'eight')).toBe(true);
+      }));
 
     it('replaceGraphAndSubject, and replaceSubject and replaceSubjectAndInsert with the subject procedure', () =>
       inScenario(async (s) => {
