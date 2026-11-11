@@ -19,7 +19,7 @@ dkg stop                                 # graceful shutdown
 dkg status                               # node health, peer count, store status
 dkg logs                                 # tail the daemon log
 dkg debug cpu-profile [--seconds <n>]    # record a CPU profile of the node (node-admin token; 10 s default, 60 s max)
-dkg store read-graphs status|check|rebuild|drop [--context-graph <id>] [--layer wm|swm|vm]   # list, check, rebuild or drop the node's read graphs (node-admin token; drop needs --yes)
+dkg store read-graphs status|check|rebuild|drop [-c <id>] [--layer wm|swm|vm] [--json]   # list, check, rebuild or drop the node's read graphs (node-admin token; drop needs --yes)
 dkg peers                                # list discovered agents on the network
 dkg peer info <peer-id>                  # inspect a peer's identity and addresses
 

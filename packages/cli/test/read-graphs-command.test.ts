@@ -157,6 +157,29 @@ describe('dkg store read-graphs drop', () => {
   });
 });
 
+describe('dkg store read-graphs --json', () => {
+  it('prints each node answer as JSON, with the same exit codes', async () => {
+    const check = { results: [{ readGraph: VM, outcome: 'mismatch', direction: 'unheld' }] };
+    const rebuild = { marked: [{ readGraph: VM, state: 'dirty' }] };
+    const drop = { removed: [{ readGraph: VM, outcome: 'done' }] };
+    const f = fixture({ status: STATUS, check, rebuild, drop });
+    await f.run('check', '--json', '-c', 'research');
+    expect(f.readGraphs).toHaveBeenLastCalledWith('check', { contextGraphId: 'research', mode: 'full' });
+    expect(process.exitCode).toBe(1);
+    process.exitCode = undefined;
+    await f.run('rebuild', '--json');
+    expect(process.exitCode).toBeUndefined();
+    // Without --yes: what it would drop, and exit 1.
+    await f.run('drop', '--json');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = undefined;
+    await f.run('drop', '--json', '--yes');
+    expect(process.exitCode).toBeUndefined();
+    expect(f.printed().map((line) => JSON.parse(line) as unknown)).toEqual([check, rebuild, STATUS, drop]);
+    expect(f.readGraphs.mock.calls.map(([action]) => action)).toEqual(['check', 'rebuild', 'status', 'drop']);
+  });
+});
+
 describe('dkg store read-graphs, failing', () => {
   it.each<[string[], RegExp]>([
     [['status', '--layer', 'xx'], /^layer must be one of wm, swm, vm\.$/],
