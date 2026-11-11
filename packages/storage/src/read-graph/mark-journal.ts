@@ -15,33 +15,34 @@
  * nothing.
  *
  * The file is a line per mark, `{generation} {read graph}`. Start-up removes it
- * once its own marks are stored.
+ * once its own marks are stored. A journal that exists but cannot be read
+ * fails the start-up: it is never taken for an empty one.
  *
  * Agents of one process over the same backend share its runtime, and any of
  * them may be the one a later process starts alone. So a mark goes to the
- * journal of every data directory a start-up over that backend named. Once
- * one start-up stores a mark, the row moves on to a newer generation, and the
- * same mark in another journal finds nothing to do.
+ * journal of each of the runtime's data directories (`./data-directories.ts`).
+ * Once one start-up stores a mark, the row moves on to a newer generation, and
+ * the same mark in another journal finds nothing to do.
  */
 
 import { appendFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseReadGraphIri } from '@origintrail-official/dkg-core';
+import { addReadGraphDataDirectory, readGraphDataDirectories } from './data-directories.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
 
 export const READ_GRAPH_MARK_JOURNAL = 'read-graph-unstored-marks';
-
-/** Each runtime's journals: one per data directory that a start-up over its backend named. */
-const JOURNALS = new WeakMap<ReadGraphBackendRuntime, Set<string>>();
 
 export function readGraphMarkJournalPath(dataDir: string): string {
   return join(dataDir, READ_GRAPH_MARK_JOURNAL);
 }
 
-/** Keep the marks a runtime's stores could not store in this data directory's journal too. */
+/**
+ * Keep the marks a runtime's stores could not store in this data directory's
+ * journal too: the directory becomes one of the runtime's.
+ */
 export function useReadGraphMarkJournal(runtime: ReadGraphBackendRuntime, dataDir: string): void {
-  const files = JOURNALS.get(runtime) ?? new Set<string>();
-  JOURNALS.set(runtime, files.add(readGraphMarkJournalPath(dataDir)));
+  addReadGraphDataDirectory(runtime, dataDir);
 }
 
 /**
@@ -50,11 +51,10 @@ export function useReadGraphMarkJournal(runtime: ReadGraphBackendRuntime, dataDi
  * Without a journal it notes nothing.
  */
 export function noteUnstoredReadGraphMark(runtime: ReadGraphBackendRuntime, readGraph: string, generation: number): void {
-  const files = JOURNALS.get(runtime);
-  if (files === undefined || !Number.isSafeInteger(generation) || /\s/.test(readGraph)) return;
-  for (const file of files) {
+  if (!Number.isSafeInteger(generation) || /\s/.test(readGraph)) return;
+  for (const dataDir of readGraphDataDirectories(runtime)) {
     try {
-      appendFileSync(file, `${generation} ${readGraph}\n`);
+      appendFileSync(readGraphMarkJournalPath(dataDir), `${generation} ${readGraph}\n`);
     } catch {
       // This data directory cannot be written either; the others still keep the mark.
     }
@@ -63,12 +63,7 @@ export function noteUnstoredReadGraphMark(runtime: ReadGraphBackendRuntime, read
 
 /** The journal's marks: for each read graph, the generations at which it must not be kept ready. */
 export function readUnstoredReadGraphMarks(dataDir: string): Map<string, Set<number>> {
-  let text: string;
-  try {
-    text = readFileSync(readGraphMarkJournalPath(dataDir), 'utf8');
-  } catch {
-    return new Map();
-  }
+  const text = unstoredReadGraphMarksText(dataDir) ?? '';
   const marks = new Map<string, Set<number>>();
   for (const line of text.split('\n')) {
     const [generation, readGraph, ...rest] = line.trim().split(' ');
@@ -79,12 +74,13 @@ export function readUnstoredReadGraphMarks(dataDir: string): Map<string, Set<num
   return marks;
 }
 
-/** The journal as it stands, or `undefined` without one. */
+/** The journal as it stands, or `undefined` without one. A journal that exists but cannot be read throws. */
 export function unstoredReadGraphMarksText(dataDir: string): string | undefined {
   try {
     return readFileSync(readGraphMarkJournalPath(dataDir), 'utf8');
-  } catch {
-    return undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return undefined;
+    throw error;
   }
 }
 

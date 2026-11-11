@@ -13,7 +13,10 @@
  *
  * A supervised backend tells of such a restart by its recovery generation
  * (`../store-recovery-generation.ts`), which the layer reads before each query
- * and write and the builder before each job.
+ * and write and the builder before each job. A restore that no generation
+ * tells is reported instead (`./store-restored.ts`). Either one invalidates
+ * the runtime, and a job in progress, which compares the count of
+ * invalidations before each batch and its publication, then ends.
  */
 
 import { asStoreRecoveryGenerationReader, type StoreRecoveryGenerationReader } from '../store-recovery-generation.js';
@@ -24,9 +27,12 @@ import { nextReadGraphState } from './state.js';
 
 const READERS = new WeakMap<ReadGraphBackendRuntime, StoreRecoveryGenerationReader>();
 const SEEN = new WeakMap<ReadGraphBackendRuntime, number>();
+/** How often each runtime was invalidated. */
+const INVALIDATIONS = new WeakMap<ReadGraphBackendRuntime, number>();
 
 /** Take every read graph of a runtime out of service, and forget its cached registries and records. */
 export function invalidateReadGraphRuntime(runtime: ReadGraphBackendRuntime): void {
+  INVALIDATIONS.set(runtime, (INVALIDATIONS.get(runtime) ?? 0) + 1);
   for (const row of runtime.mirror.rows()) {
     if (row.state !== 'dirty') runtime.mirror.set(nextReadGraphState(row, { kind: 'mark-dirty' })!);
   }
@@ -40,15 +46,24 @@ export function invalidateReadGraphRuntime(runtime: ReadGraphBackendRuntime): vo
  * supervised backend never restarts this way.
  */
 export function syncReadGraphRuntimeWithRecovery(store: TripleStore, runtime: ReadGraphBackendRuntime): void {
-  const generation = readGraphRecoveryGeneration(store, runtime);
+  const generation = backendRecoveryGeneration(store, runtime);
   if (generation === undefined) return;
   const seen = SEEN.get(runtime);
   SEEN.set(runtime, generation);
   if (seen !== undefined && seen !== generation) invalidateReadGraphRuntime(runtime);
 }
 
+/**
+ * The runtime's recovery generation: how often it was invalidated, by a
+ * backend restart a sync saw or by a restore it was told of. Read it after
+ * `syncReadGraphRuntimeWithRecovery`, so a restart is counted first.
+ */
+export function readGraphRecoveryGeneration(_store: TripleStore, runtime: ReadGraphBackendRuntime): number {
+  return INVALIDATIONS.get(runtime) ?? 0;
+}
+
 /** The backend's recovery generation now, or `undefined` for a backend without one. */
-export function readGraphRecoveryGeneration(store: TripleStore, runtime: ReadGraphBackendRuntime): number | undefined {
+function backendRecoveryGeneration(store: TripleStore, runtime: ReadGraphBackendRuntime): number | undefined {
   // Only a reader that was found is kept: a backend may register its reader after the layer first looks.
   let read = READERS.get(runtime);
   if (read === undefined) {

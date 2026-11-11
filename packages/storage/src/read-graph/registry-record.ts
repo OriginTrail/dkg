@@ -26,7 +26,7 @@
 
 import { assertSafeIri, readGraphStateGraphIri, validateSubGraphName, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
-import { noteReadGraphPartitions } from '../read-graph-partition-marker.js';
+import { noteReadGraphPartitionsOfRuntime } from './data-directories.js';
 import { noteStoreMayHoldReadGraphPartitions } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { readGraphMembership, type ReadGraphRegistrySnapshot, type WorkingMemoryIdentityRule } from './membership.js';
@@ -110,8 +110,10 @@ export function noteReadGraphRegistryRecord(runtime: ReadGraphBackendRuntime, sn
  * Record a context graph's registry, unless the stored record already holds
  * it. The caller holds a registry every ready row of the context graph follows.
  * The record lives in the read-graph partition, so before it is written the
- * store, and the data directory where there is one, note that the partition
- * may exist: unscoped reads leave it out from then on, across a restart too.
+ * store, `dataDir` where there is one, and each of the runtime's data
+ * directories (`./data-directories.ts`) note that the partition may exist:
+ * unscoped reads leave it out from then on, across a restart too, and a
+ * rollback from any of those directories drops it.
  */
 export async function recordReadGraphRegistry(
   store: TripleStore,
@@ -123,7 +125,7 @@ export async function recordReadGraphRegistry(
   const recorded = RECORDED.get(runtime)?.get(snapshot.contextGraphId);
   if (recorded !== undefined && sameRegistry(recorded, snapshot)) return;
   if (!store.update) throw new Error('This store cannot record a read-graph registry: it has no update()');
-  if (dataDir !== undefined) noteReadGraphPartitions(dataDir);
+  noteReadGraphPartitionsOfRuntime(runtime, dataDir);
   noteStoreMayHoldReadGraphPartitions(store);
   await store.update(readGraphRegistryRecordUpdate(snapshot), { ...options, source: 'storage.readGraphRegistryRecord' });
   if (encodeRecord(snapshot) !== undefined) noteReadGraphRegistryRecord(runtime, snapshot);
