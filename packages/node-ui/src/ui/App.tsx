@@ -134,15 +134,8 @@ function AppShell() {
   useLiveStatus();
   useKeyboardShortcuts();
   useShellRouting();
-  const { leftCollapsed, rightCollapsed, bottomCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
+  const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
   const [, setVpTick] = useState(0);
-
-  useEffect(() => {
-    // BUG-004: see applyTheme for why both <html> AND <body> need the
-    // class. The helper lives in src/ui/lib/applyTheme so a unit test
-    // can pin the contract without mounting AppShell.
-    applyTheme(theme);
-  }, [theme]);
 
   // Re-render on viewport resize so the render-time clamp in PanelBottom
   // and the drag base both recompute against the new maxBottomHeight().
@@ -233,16 +226,9 @@ const NetworkDebugPage = React.lazy(() =>
   import('./pages/Network.js').then((m) => ({ default: m.NetworkPage }))
 );
 
-const MarketplaceGalleryView = React.lazy(() =>
+const MarketplaceGalleryRoute = React.lazy(() =>
   import('./marketplace/GalleryView.js').then((m) => ({ default: m.MarketplaceGalleryView }))
 );
-
-/** The gallery renders outside AppShell, so it applies the saved theme itself. */
-function MarketplaceGalleryRoute() {
-  const theme = useLayoutStore((s) => s.theme);
-  useEffect(() => { applyTheme(theme); }, [theme]);
-  return <MarketplaceGalleryView />;
-}
 
 function ContextGraphPrimerRoute() {
   const openTab = useTabsStore((s) => s.openTab);
@@ -258,6 +244,11 @@ function ContextGraphPrimerRoute() {
 export function App() {
   const usingMocks = useSyncExternalStore(subscribeMockMode, isUsingMocks, isUsingMocks);
   useEffect(() => { void detectMockMode(); }, []);
+  // The one owner of the document's theme, for every route: the shell, the
+  // standalone pages and the unavailable view. BUG-004: see applyTheme for
+  // why both <html> AND <body> carry the class.
+  const theme = useLayoutStore((s) => s.theme);
+  useEffect(() => { applyTheme(theme); }, [theme]);
   if (usingMocks) return <NodeUnavailableView />;
 
   return (
