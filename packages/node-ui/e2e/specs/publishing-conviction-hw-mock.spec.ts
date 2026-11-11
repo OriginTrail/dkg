@@ -428,7 +428,8 @@ test.describe('Publisher Conviction hardware-wallet mock lane', () => {
     await expect(page.getByText(/Approve exact TRAC allowance/i)).toBeVisible();
     await expect(page.getByText(/Sign Create PCA/i)).toBeVisible();
     await expect(page.getByTestId('pca-create-success')).toContainText(`Account #${ACCOUNT_ID}`, { timeout: 20_000 });
-    await expect(page.getByTestId('pca-create-success')).toContainText(/0\/100 wallets approved/i);
+    await expect(page.getByTestId('pca-create-success')).toContainText(/No wallets are approved yet/i);
+    await expect(page.getByTestId('pca-create-success')).toContainText(/no publishes get the discount/i);
   });
 
   test('keeps the modal open and reports post-approve create rejection without claiming nothing changed', async ({ page }) => {

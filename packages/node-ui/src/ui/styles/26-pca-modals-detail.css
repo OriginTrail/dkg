@@ -121,3 +121,12 @@
   font-size: var(--fs-label);
   color: var(--text-warning);
 }
+
+/* ----- "What is a PCA?" primer dialog (PcaPrimer.tsx) ----- */
+.v10-pca-primer-section { display: flex; flex-direction: column; gap: var(--space-8); }
+.v10-pca-primer-title { font-size: var(--fs-control); font-weight: 700; color: var(--text-primary); margin: 0; }
+.v10-pca-primer-copy,
+.v10-pca-primer-list { margin: 0; font-size: var(--fs-body); color: var(--text-secondary); line-height: var(--lh-body); }
+.v10-pca-primer-list { display: flex; flex-direction: column; gap: var(--space-4); padding-left: var(--space-16); }
+.v10-pca-primer-list strong { color: var(--text-primary); }
+.v10-pca-primer-foot { margin: 0; font-size: var(--fs-label); color: var(--text-tertiary); line-height: var(--lh-body); }

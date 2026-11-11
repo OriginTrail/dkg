@@ -182,6 +182,19 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     await unmount();
   });
 
+  it('explains each tile in its tooltip and links the primer from the title band (R1, R4)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Funding');
+    const tip = (id: string) => container.querySelector(`[data-stat-id="${id}"]`)?.getAttribute('title');
+    expect(tip('buffer')).toBe('TRAC the owner added on top of the commitment. Publishes use it once the current billing period’s share of the committed TRAC runs out.');
+    // Billing periods are creation-anchored, epoch-long windows, not the network's numbered epochs.
+    expect(tip('per-epoch')).toBe('The committed TRAC is split into equal shares, one for each billing period. A billing period is an epoch long, counted from when the PCA was created. This is one period’s share.');
+    expect(tip('wallets')).toBe('Wallets approved to publish with this PCA, out of 100.');
+    expect(container.querySelector('.v10-pca-detail-band [data-testid="pca-primer-link"]')?.textContent).toBe('What is a PCA?');
+    await unmount();
+  });
+
   // M8 — a probe that returns 200-without-probedKey is "couldn't determine", never
   // a false "NOT approved" (manual probe tool + the per-wallet row).
   it('the manual Probe and the wallet row both say "couldn’t determine" on a probe with no probedKey (M8)', async () => {
@@ -307,7 +320,7 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     const warn = container.querySelector('[data-testid="pca-action-warning"]')!;
     expect(warn.getAttribute('role')).toBe('alert');
     expect(warn.textContent).toContain('0xabc');
-    expect(warn.textContent).toContain('a second top-up would lock additional TRAC');
+    expect(warn.textContent).toContain('or you could top up twice');
     expect(container.textContent).not.toContain('temporarily unavailable');
     await unmount();
   });

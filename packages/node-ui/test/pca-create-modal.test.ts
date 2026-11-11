@@ -174,9 +174,23 @@ describe('CreatePcaModal', () => {
     await waitForText(container, 'Commit amount (TRAC)'); // the form opens — no gate
     expect(container.querySelector('[data-testid="pca-create-tokens"]')).toBeTruthy();
     // Non-blocking explainer, without an inline get-added CTA inside the create flow.
+    expect(container.querySelector('[data-testid="pca-create-no-identity-note"]')?.textContent).toContain('This node is an Edge node, so pick a Core node below');
     expect(container.querySelector('[data-testid="pca-create-no-identity-note"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="pca-create-get-sponsored-link"]')).toBeNull();
     expect(onGetSponsored).not.toHaveBeenCalled();
+    await unmount();
+  });
+
+  it('a Core node with no on-chain identity: the note says it isn’t registered yet, not that it’s Edge', async () => {
+    useAgentsStore.getState().setNodeStatus({ nodeRole: 'core', hasIdentity: false });
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    const note = container.querySelector('[data-testid="pca-create-no-identity-note"]')!;
+    expect(note.textContent).toContain('an active Core node on the network, with TRAC staked on it');
+    expect(note.textContent).toContain('This node isn’t registered on the network yet, so pick a Core node below');
+    expect(note.textContent).not.toContain('Edge');
     await unmount();
   });
 
@@ -207,8 +221,8 @@ describe('CreatePcaModal', () => {
     await waitForText(container, 'PCA #7 created');
 
     const success = container.querySelector('[data-testid="pca-create-success"]')!;
-    expect(success.textContent).toContain('0/100 wallets approved'); // #11 literal (QA anchor)
-    expect(success.textContent).toContain('discounts nothing yet');
+    expect(success.textContent).toContain('No wallets are approved yet'); // #11 (QA anchor)
+    expect(success.textContent).toContain('no publishes get the discount');
     expect(success.textContent).toContain('30%'); // verified discountBps readback
     // Id persisted to the tracked set.
     expect(usePcaStore.getState().trackedIds).toContain('7');
@@ -298,7 +312,7 @@ describe('CreatePcaModal', () => {
     const { container, unmount } = await render(
       React.createElement(CreatePcaModal, createModalProps()),
     );
-    await waitForText(container, 'approve publishing wallets for other nodes'); // the zero-coverage warning copy
+    await waitForText(container, 'approve other nodes’ wallets on it'); // the zero-coverage warning copy
     expect(container.querySelector('[data-testid="pca-b1-zero-coverage"]')).toBeTruthy();
     // Enter a valid amount (node #42 is pre-selected) — informed consent, NOT a gate.
     setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
@@ -346,8 +360,13 @@ describe('CreatePcaModal', () => {
     const { container, unmount } = await render(
       React.createElement(CreatePcaModal, createModalProps()),
     );
-    await waitForText(container, 'already approved on a PCA you own');
-    expect(container.querySelector('[data-testid="pca-b1-own-bound"]')).toBeTruthy();
+    await waitForText(container, 'is on another PCA you own');
+    const ownBound = container.querySelector('[data-testid="pca-b1-own-bound"]')!;
+    expect(ownBound).toBeTruthy();
+    // Creating doesn't move wallets: only approving them on the new PCA afterwards does.
+    expect(ownBound.textContent).toContain('approving it on the new PCA in the next step moves it off the other one');
+    expect(ownBound.textContent).toContain('Creating the PCA on its own doesn’t move anything');
+    expect(ownBound.textContent).not.toMatch(/creating this one moves/i);
     // Not the zero-coverage alarm (the wallet IS self-coverable via migration).
     expect(container.querySelector('[data-testid="pca-b1-zero-coverage"]')).toBeNull();
     await unmount();
@@ -387,7 +406,7 @@ describe('CreatePcaModal', () => {
     const { container, unmount } = await render(
       React.createElement(CreatePcaModal, createModalProps()),
     );
-    await waitForText(container, 'Couldn’t load the staked-node list');
+    await waitForText(container, 'Couldn’t load the list of Core nodes');
     expect(container.querySelector('[data-testid="pca-primary-node-error"]')).toBeTruthy();
     // The create-time PrimaryNodeNotInShardingTable revert is the backstop; core still defaults
     // to its own id (#42) so the Review reflects it (Q1).
@@ -604,7 +623,7 @@ describe('CreatePcaModal', () => {
         seed: { tokens: '100000.0', primaryNodeUnknown: true }, replacingAccountId: '4',
       }),
     );
-    await waitForText(container, 'Couldn’t read PCA #4’s primary node');
+    await waitForText(container, 'couldn’t find out which primary node PCA #4 uses');
     expect(container.querySelector('[data-testid="pca-renew-primary-unknown"]')).toBeTruthy();
     await unmount();
   });

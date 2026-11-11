@@ -74,7 +74,7 @@ describe('PcaSettingsCard', () => {
     const { container, unmount } = await render(React.createElement(PcaSettingsCard));
     expect(container.textContent).toContain('Couldn’t check this node’s wallets');
     expect(container.textContent).not.toContain('covers this node');
-    expect(Array.from(container.querySelectorAll('button')).map((b) => b.textContent)).toEqual(['Retry', 'Manage PCA']);
+    expect(Array.from(container.querySelectorAll('button')).map((b) => b.textContent)).toEqual(['Retry', 'Manage PCA', 'What is a PCA?']);
     await unmount();
   });
 

@@ -6,6 +6,7 @@ import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { usePcaOverview } from '../../hooks/usePcaOverview.js';
 import { usePcaScopeBootstrap } from '../../hooks/usePcaScopeBootstrap.js';
 import { formatBps } from '../../lib/format.js';
+import { PcaPrimerLink } from './PcaPrimer.js';
 
 function pct(bps: number | null): string {
   if (bps == null) return '—';
@@ -33,8 +34,9 @@ export function PcaDashboardRow() {
           ? 'Couldn’t check your wallets'
           : covered
             ? pct(bestCoveringDiscountBps)
-            : 'None. Publishing pays the full fee'}
+            : 'None. A PCA can cut the publishing fee by up to 75%.'}
       </span>
+      <PcaPrimerLink />
       {/* Coverage is unknown, so offer the re-read rather than a way to get a PCA. */}
       {walletsUnreadable ? (
         <RetryButton className="v10-ws-pca-cta" onClick={() => refresh()} />

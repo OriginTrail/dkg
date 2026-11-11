@@ -33,6 +33,7 @@ import { Loading } from '../../components/ds/Loading.js';
 import { bpsToPercent } from '../../lib/format.js';
 import { ExternalMark } from '../../components/ds/ExternalMark.js';
 import { Breadcrumbs } from '../../components/ds/Breadcrumbs.js';
+import { PcaPrimerLink } from './PcaPrimer.js';
 import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
@@ -167,6 +168,7 @@ function DetailBody({
         <span className="v10-pca-detail-committed">{formatPcaTrac(snapshot.committedTRACTrac)} TRAC committed</span>
         <span className="v10-pca-card-spacer" />
         <HealthChip state={health} />
+        <PcaPrimerLink />
       </div>
 
       {snapshot.fullySwept && (
@@ -202,8 +204,8 @@ function DetailBody({
 
       <StatStrip
         items={[
-          { id: 'buffer', label: 'Top-up buffer', value: `${formatPcaTrac(snapshot.topUpBufferTrac)} TRAC` },
-          { id: 'per-epoch', label: 'Per-epoch allowance', value: `${formatWeiToTrac(snapshot.baseEpochAllowance)} TRAC` },
+          { id: 'buffer', label: 'Top-up buffer', value: `${formatPcaTrac(snapshot.topUpBufferTrac)} TRAC`, tooltip: 'TRAC the owner added on top of the commitment. Publishes use it once the current billing period’s share of the committed TRAC runs out.' },
+          { id: 'per-epoch', label: 'Per-epoch allowance', value: `${formatWeiToTrac(snapshot.baseEpochAllowance)} TRAC`, tooltip: 'The committed TRAC is split into equal shares, one for each billing period. A billing period is an epoch long, counted from when the PCA was created. This is one period’s share.' },
           // GAP-4/5 — the precise current-epoch remaining allowance (extended snapshot,
           // best-effort). Display only — the coverage spine stays the coarse proxy (#1349
           // is a separate decision). Omitted when the extended read didn't return it.
@@ -212,10 +214,12 @@ function DetailBody({
                 id: 'remaining',
                 label: 'Remaining this epoch',
                 value: `${formatPcaTrac(snapshot.remainingAllowanceTrac)} TRAC`,
-                tooltip: snapshot.currentEpoch != null ? `Current epoch ${snapshot.currentEpoch}` : undefined,
+                tooltip: snapshot.currentEpoch != null
+                  ? `What publishes can still use now: what’s left of this billing period’s share, plus the top-up buffer. Current epoch ${snapshot.currentEpoch}.`
+                  : 'What publishes can still use now: what’s left of this billing period’s share, plus the top-up buffer.',
               }]
             : []),
-          { id: 'wallets', label: 'Publishing wallets', value: `${snapshot.agentCount} / 100` },
+          { id: 'wallets', label: 'Publishing wallets', value: `${snapshot.agentCount} / 100`, tooltip: 'Wallets approved to publish with this PCA, out of 100.' },
           { id: 'expires', label: 'Expires in', value: formatExpiryTileValue(snapshot.expiresAtTimestamp), tooltip: `Expiry epoch ${snapshot.expiresAtEpoch}` },
           // GAP-4/5 — the node this PCA directs publishing-reward weight to. '0' = none set;
           // ABSENT (read-failed) → omit, never a false value.

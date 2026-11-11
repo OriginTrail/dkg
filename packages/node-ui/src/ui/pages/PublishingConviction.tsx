@@ -1,19 +1,19 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { usePcaAvailability } from '../hooks/usePcaAvailability.js';
 import { EmptyState } from '../components/ContextGraphPrimitives.js';
 import { ConvictionOverview } from './conviction/ConvictionOverview.js';
 import { Loading } from '../components/ds/Loading.js';
-
-const PCA_DOCS_URL = 'https://docs.origintrail.io/';
+import { PcaPrimerDialog } from './conviction/PcaPrimer.js';
 
 /**
  * Root of the `conviction` tab. Runs the §6.6 deployment gate first: a 503
  * FEATURE_UNAVAILABLE from the capability probe replaces the WHOLE tab with the
- * Deployment-Unavailable state (not a per-card error), with a Recheck + docs
- * link. Otherwise it renders the S1 overview.
+ * Deployment-Unavailable state (not a per-card error), with a Recheck and
+ * the "What is a PCA?" primer. Otherwise it renders the S1 overview.
  */
 export function PublishingConvictionPage() {
   const { status, recheck } = usePcaAvailability();
+  const [primerOpen, setPrimerOpen] = useState(false);
 
   return (
     <div data-testid="pca-view">
@@ -27,9 +27,10 @@ export function PublishingConvictionPage() {
             description="This network doesn't support Publisher Conviction Accounts yet. You can still publish and pay the full fee."
             actions={[
               { label: 'Recheck', onClick: recheck, variant: 'primary', testId: 'pca-recheck-btn' },
-              { label: 'Learn more', onClick: () => window.open(PCA_DOCS_URL, '_blank', 'noopener') },
+              { label: 'What is a PCA?', onClick: () => setPrimerOpen(true), testId: 'pca-primer-link' },
             ]}
           />
+          {primerOpen && <PcaPrimerDialog onClose={() => setPrimerOpen(false)} />}
         </div>
       ) : (
         <ConvictionOverview />

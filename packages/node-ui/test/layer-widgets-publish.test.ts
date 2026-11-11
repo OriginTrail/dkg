@@ -382,6 +382,54 @@ describe('PublishVmWidget — S5 publish CTA gate (#1382)', () => {
     expect(publishBtn(container).getAttribute('aria-describedby')).toBeNull();
     await unmount();
   });
+
+  // R2 — the full-fee line is presentation only: it renders from useVmPublishGate's
+  // `fullFeeConfirmed`, which comes from the SAME eligibility read as the chip and the gate
+  // (`noPcaConfirmed`, pinned over the real hook in pca-publish-eligibility.test.ts).
+  const setNoPca = (noPcaConfirmed: boolean) =>
+    eligMock.usePublishEligibility.mockReturnValue({ verdict: 'unknown', ownerPublish: false, anyGasFunded: false, noPcaConfirmed } as any);
+
+  it('nothing tracked and no wallet on any PCA → a quiet full-fee line with the primer button', async () => {
+    usePcaStore.setState({ trackedIds: [] });
+    setNoPca(true);
+    const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+    const note = container.querySelector('[data-testid="pca-fee-note"]')!;
+    expect(note.className).toBe('v10-pca-fee-note');
+    expect(note.textContent).toContain('This publish pays the full TRAC fee. A PCA can cut it by up to 75%.');
+    expect(note.querySelector('[data-testid="pca-primer-link"]')?.textContent).toBe('What is a PCA?');
+    // Not a warning: no status glyph, and the button is not described by it.
+    expect(note.querySelector('.ds-status-glyph')).toBeNull();
+    expect(publishBtn(container).getAttribute('aria-describedby')).toBeNull();
+    // One read for the whole CTA: the widget runs no lookups of its own.
+    expect(eligMock.usePublishEligibility).toHaveBeenCalledWith('cg', 30_000);
+    await unmount();
+  });
+
+  it('nothing tracked but not confirmed (checking, a wallet on a PCA, or a failed read) → no line', async () => {
+    usePcaStore.setState({ trackedIds: [] });
+    for (const value of [false, undefined]) {
+      eligMock.usePublishEligibility.mockReturnValue({ verdict: 'unknown', ownerPublish: false, anyGasFunded: false, noPcaConfirmed: value } as any);
+      const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+      expect(container.querySelector('[data-testid="pca-fee-note"]')).toBeNull();
+      await unmount();
+    }
+  });
+
+  it('a tracked PCA shows the chip instead, even if a stale read still says confirmed', async () => {
+    setNoPca(true); // trackedIds is ['7'] from beforeEach
+    const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+    expect(container.querySelector('[data-testid="pca-fee-note"]')).toBeNull();
+    expect(container.querySelector('[data-testid="pca-publish-eligibility"]')).toBeTruthy();
+    await unmount();
+  });
+
+  it('the full-fee line never gates the publish button', async () => {
+    usePcaStore.setState({ trackedIds: [] });
+    setNoPca(true);
+    const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+    expect(publishBtn(container).getAttribute('aria-disabled')).toBeNull();
+    await unmount();
+  });
 });
 
 describe('PromoteWidget — promote flow (#1382)', () => {

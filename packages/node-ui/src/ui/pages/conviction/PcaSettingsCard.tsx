@@ -6,6 +6,7 @@ import { usePcaOverview } from '../../hooks/usePcaOverview.js';
 import { usePcaScopeBootstrap } from '../../hooks/usePcaScopeBootstrap.js';
 import { RetryButton } from '../../components/ds/RetryButton.js';
 import { formatBps } from '../../lib/format.js';
+import { PcaPrimerLink } from './PcaPrimer.js';
 
 function pct(bps: number | null): string {
   if (bps == null) return '—';
@@ -64,6 +65,7 @@ export function PcaSettingsCard() {
           >
             {action}<ArrowRight size={14} aria-hidden="true" />
           </button>
+          <PcaPrimerLink size="md" />
         </div>
       </div>
     </section>

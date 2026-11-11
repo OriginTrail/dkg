@@ -16,13 +16,11 @@ import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 import { GetSponsoredPanel } from './GetSponsoredPanel.js';
 import { resolvePcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { Badge } from '../../components/ds/Badge.js';
-import { ExternalMark } from '../../components/ds/ExternalMark.js';
+import { PcaPrimerLink } from './PcaPrimer.js';
 import { Loading } from '../../components/ds/Loading.js';
 import { Plus } from 'lucide-react';
 import { formatNodeRole } from '../../lib/format.js';
 import { PageHeader } from '../../components/ds/PageHeader.js';
-
-export const PCA_DOCS_URL = 'https://docs.origintrail.io/';
 
 type WalletBootstrapStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -175,7 +173,7 @@ export function ConvictionOverview() {
         description={(
           <>
             Commit TRAC up front to publish at a discount of up to 75%.{' '}
-            <a className="v10-pca-text-link" href={PCA_DOCS_URL} target="_blank" rel="noreferrer">What is a PCA? <ExternalMark /></a>
+            <PcaPrimerLink />
           </>
         )}
       />

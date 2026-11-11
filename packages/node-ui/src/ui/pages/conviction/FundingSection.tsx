@@ -84,7 +84,7 @@ export function FundingSection({
             warning: {
               txHash,
               message:
-                'Your top-up was submitted but we lost confirmation — it may already be on-chain. Verify on the explorer before adding again; a second top-up would lock additional TRAC.',
+                'Your top-up was submitted but we lost confirmation — it may already be on-chain. Check the explorer before adding again, or you could top up twice.',
             },
           });
           return;
@@ -132,8 +132,8 @@ export function FundingSection({
     <section className="v10-pca-detail-section">
       <h3 className="v10-pca-detail-section-title">Funding</h3>
       <p className="v10-pca-detail-hint">
-        Top-up raises the spendable buffer. It does <strong>not</strong> extend the lock period —
-        when the account expires you create a new one.
+        A top-up adds TRAC that publishes use after each billing period’s share runs out. It does <strong>not</strong>
+        make the PCA last longer: when the PCA expires, you create a new one.
       </p>
       {ownerTrac != null && <p className="v10-pca-detail-hint">Owner balance: {formatPcaTrac(ownerTrac)} TRAC</p>}
       <div className="v10-pca-detail-form">
@@ -162,7 +162,7 @@ export function FundingSection({
       {topUpPending && (
         <p className="v10-pca-create-warn ds-card-nested" data-testid="pca-topup-pending" role="alert">
           Top-up transaction <code>{topUpPending.txHash}</code> is pending confirmation. The top-up
-          button is disabled while this exact receipt is checked; adding again could lock more TRAC.
+          button is disabled while this exact receipt is checked; adding again could top up twice.
           {' '}
           <button type="button" className="v10-pca-card-btn ds-btn" onClick={refresh}>Recheck account</button>
         </p>
