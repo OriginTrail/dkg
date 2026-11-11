@@ -75,7 +75,9 @@ import {
 } from './sparql-graph-scope.js';
 import { injectMinTrustFilter } from './sparql-min-trust.js';
 import { guardGraphBlocksWithoutTriples, needsCallerGraphBinding, readsNeedGraphList } from './sparql-graph-dataset.js';
-import { bindCallerGraphsBeforeRead, callerGraphBranchesFit, hasCallerGraphAssignmentsInside, isolateCallerGraphAssignments } from './sparql-caller-graph-read.js';
+import {
+  bindCallerGraphsBeforeRead, callerGraphBranchesFit, hasCallerGraphAssignmentsInside, isolateCallerGraphAssignments,
+} from './sparql-caller-graph-read.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 import {
