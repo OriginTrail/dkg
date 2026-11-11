@@ -208,6 +208,7 @@ export {
   type SortedGraphCatalog,
   type SortedGraphSetSource,
 } from './graph-set-index-store.js';
+export type { GraphSetRevalidation } from './graph-set-refresh.js';
 export {
   CHANGELOG_GRAPH,
   CHANGELOG_SCHEMA_VERSION,

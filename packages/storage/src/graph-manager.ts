@@ -970,9 +970,8 @@ export class ContextGraphManager {
    * persisted storage graphs. This is an inventory boundary only: callers
    * still resolve read authority for every returned candidate.
    */
-  async listStoredContextGraphOwnerCandidates(options: QueryOptions = {},
-    materializationMeter?: { consumeBytes(bytes: number): void }): Promise<string[]> {
-    return listStoredContextGraphOwnerCandidates(this.store, options, materializationMeter);
+  async listStoredContextGraphOwnerCandidates(options: QueryOptions = {}): Promise<string[]> {
+    return listStoredContextGraphOwnerCandidates(this.store, options);
   }
 
   /**

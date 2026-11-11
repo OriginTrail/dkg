@@ -1,4 +1,10 @@
-import { OxigraphStore, StoreResponseTooLargeError } from '@origintrail-official/dkg-storage';
+import {
+  DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
+  OxigraphStore,
+  STORE_GRAPH_CATALOG_LIMIT_NAME,
+  StoreResponseTooLargeError,
+} from '@origintrail-official/dkg-storage';
+import { QUERY_CATALOG_LIMIT_NAME, QUERY_CATALOG_MAX_RESPONSE_BYTES } from '@origintrail-official/dkg-query';
 import { contextGraphDataGraphUri, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -56,7 +62,7 @@ describe('agent.query after a core-cache snapshot job marked a graph', () => {
   });
 });
 
-it.each(['cold', 'warm'] as const)('charges the owner inventory slice, never unrelated graphs, through real agent composition (%s catalog)', async cache => {
+it.each(['cold', 'warm'] as const)('charges an unscoped query for its result only, through real agent composition (%s catalog)', async cache => {
   const rawStore = new OxigraphStore();
   const agent = await startAgent(rawStore);
   const graph = 'did:dkg:context-graph:local-budget';
@@ -80,41 +86,47 @@ it.each(['cold', 'warm'] as const)('charges the owner inventory slice, never unr
   const content = await rawStore.query(query);
   const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
   const ownerSlice = inventory.filter(stored => stored.startsWith('did:dkg:context-graph:'));
-  const inventoryBytes = bytes(inventory), sliceBytes = bytes(ownerSlice);
-  const policyBytes = bytes(policy), contentBytes = bytes(content);
-  const total = sliceBytes + policyBytes + contentBytes;
+  const contentBytes = bytes(content);
   expect(ownerSlice).toContain(graph);
-  expect(inventoryBytes - sliceBytes).toBeGreaterThan(500_000);
+  expect(bytes(inventory) - bytes(ownerSlice)).toBeGreaterThan(500_000);
+  expect(bytes(policy)).toBeGreaterThan(0);
   expect(contentBytes).toBeGreaterThan(800_000);
-  if (cache === 'warm') await agent.query(query, { maxResponseBytes: total });
-  const outcome = await agent.query(query, { maxResponseBytes: total - 1 }).then(
-    () => ({ code: 'unexpected-success' }),
-    error => ({ code: error.code, maxBytes: error.maxBytes, actualBytes: error.actualBytes }),
-  );
-  expect(outcome).toEqual({ code: 'QUERY_RESULT_TOO_LARGE', maxBytes: total - 1, actualBytes: total });
-  // The whole budget is the slice, the policy read and the result, far below the inventory behind the slice.
-  expect(total + 500_000).toBeLessThan(inventoryBytes + policyBytes + contentBytes);
-  await expect(agent.query(query, { maxResponseBytes: total })).resolves.toMatchObject({ bindings: content.type === 'bindings' ? content.bindings : [] });
+  // Admission reads the owner inventory and the access policy as node work: the budget is the result alone.
+  if (cache === 'warm') await agent.query(query, { maxResponseBytes: contentBytes });
+  await expect(agent.query(query, { maxResponseBytes: contentBytes - 1 }))
+    .rejects.toMatchObject({ code: 'QUERY_RESULT_TOO_LARGE', maxBytes: contentBytes - 1 });
+  await expect(agent.query(query, { maxResponseBytes: contentBytes }))
+    .resolves.toMatchObject({ bindings: content.type === 'bindings' ? content.bindings : [] });
 });
 
-it.each(['policy', 'inventory'] as const)('normalizes caller-capped %s admission errors at the agent boundary', async kind => {
+it.each(['policy', 'inventory'] as const)('answers an admission %s read over its node limit with STORE_INTERNAL_LIMIT', async kind => {
   const agent = await startAgent();
-  const error = new StoreResponseTooLargeError(64, 65);
+  const limit = kind === 'policy' ? QUERY_CATALOG_MAX_RESPONSE_BYTES : DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES;
+  const error = new StoreResponseTooLargeError(limit, limit + 1);
+  const seen: Array<number | undefined> = [];
   const query = agent.store.query.bind(agent.store);
   const querySpy = vi.spyOn(agent.store, 'query').mockImplementation((sparql, options) => {
-    if (kind === 'policy' && options?.source === 'agent.query.privateGraphAccessPolicy') {
-      expect(options.maxResponseBytes).toBe(64); throw error;
+    if (options?.source === 'agent.query.privateGraphAccessPolicy') {
+      seen.push(options.maxResponseBytes);
+      if (kind === 'policy') throw error;
     }
     return query(sparql, options);
   });
   const inventory = agent.store.readGraphInventory!.bind(agent.store);
   const inventorySpy = vi.spyOn(agent.store, 'readGraphInventory').mockImplementation((prefix, options) => {
-    if (kind === 'inventory' && options?.maxResponseBytes === 64) throw error;
+    if (prefix === 'did:dkg:context-graph:') {
+      seen.push(options?.maxResponseBytes);
+      if (kind === 'inventory') throw error;
+    }
     return inventory(prefix, options);
   });
   try {
-    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', { maxResponseBytes: 64 }))
-      .rejects.toMatchObject({ code: 'QUERY_RESULT_TOO_LARGE', maxBytes: 64, actualBytes: 65, cause: error });
-    if (kind === 'inventory') expect(inventorySpy).toHaveBeenCalledWith('did:dkg:context-graph:', expect.objectContaining({ maxResponseBytes: 64 }));
+    // The caller's 64 bytes bound neither read; each read's own limit is the node's.
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', { maxResponseBytes: 64 })).rejects.toMatchObject({
+      code: 'STORE_INTERNAL_LIMIT', limitBytes: limit,
+      limitName: kind === 'policy' ? QUERY_CATALOG_LIMIT_NAME : STORE_GRAPH_CATALOG_LIMIT_NAME,
+    });
+    expect(seen).not.toContain(64);
+    expect(seen).toContain(limit);
   } finally { querySpy.mockRestore(); inventorySpy.mockRestore(); }
 });
