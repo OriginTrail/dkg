@@ -426,6 +426,8 @@ export default defineConfig({
       // #2858 — refresh of confirmed VM copies after an on-chain KA update.
       "test/vm-refresh-after-update.test.ts",
       "test/vm-promotion-gate.test.ts",
+      // A KA's latest root and publisher in one batched request; stub and real adapter, no hardhat.
+      "test/ka-latest-root-and-publisher.test.ts",
       "test/vm-recovery-microbatch-planner.test.ts",
       "test/vm-recovery-phase-timing.test.ts",
       // #3081 — where a confirmed publication waits for its catalog placement (observation only).

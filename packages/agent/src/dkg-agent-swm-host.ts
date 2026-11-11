@@ -11,6 +11,7 @@ import type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryRe
 
 import type { KnowledgeAssetUpdateIdentity } from '@origintrail-official/dkg-chain';
 import { orderVmRecoveryCandidates } from './vm-recovery-candidate-order.js';
+import { readLatestMerkleRootAndPublisher } from './ka-latest-root-and-publisher.js';
 import {
   isCanonicalAuthoritativeContextGraphId, localContextGraphIdMatchesCommittedNameHash,
 } from './context-graph-binding-state.js';
@@ -7730,12 +7731,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
       }
 
-      merkleRoot = await this.chain.getLatestMerkleRoot!(kaId);
+      // One batched request for both views, not one each (an ordinal that
+      // stays pending reads them again on every sweep).
+      const latest = await readLatestMerkleRootAndPublisher(this.chain, kaId);
+      merkleRoot = latest.merkleRoot;
+      publisherAddress = latest.publisherAddress;
       cacheKey = this.vmReconcileCacheKey(localCgId, ual, merkleRoot);
-
-      publisherAddress = (this.chain.getLatestMerkleRootPublisher
-        ? await this.chain.getLatestMerkleRootPublisher(kaId)
-        : '') ?? '';
     } catch (err) {
       return unresolvable(err);
     }

@@ -35,6 +35,7 @@ import {
 } from './core-hosted-public-cg-record-decision.js';
 import { DEFAULT_SWM_TTL_MS } from './dkg-agent-constants.js';
 import { noteCoreHostedStorageAck } from './core-hosted-definition.js';
+import { readLatestMerkleRootAndPublisher } from './ka-latest-root-and-publisher.js';
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 import { resolveVmReconcilerEnabled } from './sync/backpressure.js';
 import { storageAckGrandfatherUpdate } from './storage-ack-retention.js';
@@ -1351,10 +1352,7 @@ export class VmPromotionMethods extends DKGAgentBase {
     if (kaId === null || typeof this.chain.getLatestMerkleRoot !== 'function') return false;
     const ctx = createOperationContext('system');
     try {
-      const merkleRoot = await this.chain.getLatestMerkleRoot(kaId);
-      const publisherAddress = (this.chain.getLatestMerkleRootPublisher
-        ? await this.chain.getLatestMerkleRootPublisher(kaId)
-        : '') ?? '';
+      const { merkleRoot, publisherAddress } = await readLatestMerkleRootAndPublisher(this.chain, kaId);
       const versionBlock = typeof this.chain.getBlockNumber === 'function'
         ? await this.chain.getBlockNumber()
         : 0;
