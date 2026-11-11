@@ -147,7 +147,7 @@ function sameIdentity(left: WorkingMemoryNodeIdentity, right: WorkingMemoryNodeI
 export interface WorkingMemoryIdentityInstall {
   /** The working-memory read graphs marked dirty because their agent owns other addresses under the new rule. */
   readonly marked: readonly string[];
-  /** Whether the record now names this identity. When not, the next start keeps no working-memory read graph. */
+  /** Whether the record now names the runtime's identity, every mark it needs stored. When not, the next start keeps no working-memory read graph. */
   readonly recorded: boolean;
 }
 
