@@ -176,6 +176,28 @@ test('aggregate gate accepts the full-push and docs-only job shapes', () => {
     /evm-devnet-test-artifacts was selected but ended with skipped/,
   );
 
+  // A push may prove its contracts with the sharded tests instead of coverage,
+  // but not with neither; scheduled and manual runs keep requiring coverage.
+  const shardedPush = structuredClone(fullNeeds);
+  shardedPush['solidity-coverage'].result = 'skipped';
+  shardedPush.solidity.result = 'success';
+  assert.deepEqual(validatePrimaryResults({ eventName: 'push', plan: full, needs: shardedPush }), []);
+  shardedPush.solidity.result = 'skipped';
+  assert.match(
+    validatePrimaryResults({ eventName: 'push', plan: full, needs: shardedPush }).join('\n'),
+    /push ran neither solidity nor solidity-coverage to success/,
+  );
+  for (const eventName of ['schedule', 'workflow_dispatch']) {
+    const campaign = structuredClone(fullNeeds);
+    campaign['solidity-coverage'].result = 'skipped';
+    campaign.solidity.result = 'success';
+    assert.match(
+      validatePrimaryResults({ eventName, plan: planCi({ eventName }), needs: campaign }).join('\n'),
+      /solidity-coverage was selected but ended with skipped/,
+      eventName,
+    );
+  }
+
   const mergeNeeds = structuredClone(fullNeeds);
   mergeNeeds['solidity-coverage'].result = 'skipped';
   assert.match(validatePrimaryResults({

@@ -37,7 +37,10 @@ concurrency:
   # Keep campaigns independent of ordinary pushes/PRs; supersede duplicate
   # campaigns on the same ref, without disabling ordinary cancellation.
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'nightly-equivalent')) && 'nightly-equivalent' || 'standard' }}
-  cancel-in-progress: true
+  # A newer commit supersedes a pull request or manual run, but a protected
+  # branch push is the only full run some merges get: let it finish. GitHub
+  # still keeps just one pending push run per branch, the newest.
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 # Minimum-needed token scope. All jobs only check out and run tests; nothing
 # pushes back to the repo, comments on PRs, publishes packages, or creates
@@ -50,6 +53,9 @@ concurrency:
 permissions:
   contents: read
 
+# Runner images are pinned rather than `*-latest`: on 2026-11-02
+# `ubuntu-latest` moved to Ubuntu 26.04 under every job at once, and
+# Playwright could not install there. Move images in a reviewed change.
 jobs:
   # ------------------------------------------------------------------
   # Produce one fail-closed test plan for every workflow in this repository.
@@ -61,7 +67,7 @@ jobs:
   # ------------------------------------------------------------------
   changes:
     name: Plan CI delta
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       profile: ${{ steps.profile.outputs.profile }}
@@ -214,10 +220,11 @@ jobs:
   build:
     outputs:
       test_matrices: ${{ steps.test-matrices.outputs.matrices }}
+      expired_test_exceptions: ${{ steps.lint.outputs.expired_test_exceptions }}
     name: Build packages
     needs: changes
     if: needs.changes.outputs.run_node == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -277,7 +284,13 @@ jobs:
       - name: Set up semantic runtime build tools
         uses: ./.github/actions/setup-semantic-runtime
 
+      # A test exception whose monthly review lapsed is a warning here: its
+      # deadline passes on every branch at once, so failing would fail every
+      # unrelated change. The CI gate fails on it under the nightly profile.
       - name: Lint source and repository tooling
+        id: lint
+        env:
+          DKG_TEST_EXCEPTION_EXPIRY: warn
         run: pnpm lint
 
       - name: Validate npm metadata points to v10
@@ -342,6 +355,78 @@ jobs:
           pnpm release:build-info --dist-tag ci --commit "${GITHUB_SHA}" --ci-run "${GITHUB_RUN_ID}"
           pnpm release:verify-pack
 
+      - name: Package build outputs
+        run: |
+          set -euo pipefail
+          # Collect every emitted output: tsc dist/, optional Vite dist-ui/,
+          # the nested Prime extension/dist, locally built semantic-runtime
+          # Wasm, the native Linux safe-LLM runner, and the generated network/
+          # dir the CLI copies during build. Keep the native executable outside
+          # the portable Wasm artifact lock; CLI consumers use this runner OS.
+          test -d packages/semantic-runtime/generated
+          test -x rust/target/release/dkg-safe-llm-runner
+          mapfile -t PATHS < <(
+            find packages -maxdepth 3 -type d \
+              \( -name dist -o -name dist-ui -o -name network \) \
+              2>/dev/null | sort -u
+          )
+          test -d packages/adapter-prime-agent/extension/dist
+          PATHS+=(packages/semantic-runtime/generated)
+          PATHS+=(rust/target/release/dkg-safe-llm-runner)
+          echo "Packing ${#PATHS[@]} build outputs…"
+          tar -czf /tmp/build-outputs.tgz "${PATHS[@]}"
+          ls -lh /tmp/build-outputs.tgz
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-outputs
+          path: /tmp/build-outputs.tgz
+          retention-days: 1
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Repository checks, beside the test lanes: the repository-script tests,
+  # the devnet and share recovery evidence tests, the test inventory, the
+  # W1 §8.3 packet gate and the A18 benchmark smoke. No lane consumes
+  # anything they produce, yet in the build job they ran ahead of the
+  # build-outputs upload every lane waits for, and took more than half of
+  # its time. They still check a built checkout: this job restores the same
+  # build outputs the lanes do.
+  #
+  # It runs on the build job's own run_node condition, so every plan that
+  # runs the shared build, including one that declares only the build
+  # checks, runs these too. The trusted controller does not know this job:
+  # it fails the gate on it only when it fails or is cancelled, so the CI
+  # gate requires its success itself wherever the build succeeded.
+  # ------------------------------------------------------------------
+  repository-checks:
+    name: Repository checks
+    needs: [changes, build]
+    if: needs.changes.outputs.run_node == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: build-outputs
+          path: /tmp
+      # --touch: this run's build of this commit, but archived before this
+      # checkout, so kept mtimes would make every output look older than its
+      # source, and the A18 smoke refuses a dist older than its source.
+      - name: Restore build outputs
+        run: tar --touch -xzf /tmp/build-outputs.tgz
+
       # The controller wiring test checks this workflow's planner flags against
       # the pinned controller's parser, which a depth-1 checkout does not hold.
       # The provenance test requires the pin to be on protected testnet-canary
@@ -395,35 +480,6 @@ jobs:
       - name: Smoke the W1 A18 benchmark (real seam, non-gating budget)
         run: pnpm run bench:w1-sync-telemetry:smoke
 
-      - name: Package build outputs
-        run: |
-          set -euo pipefail
-          # Collect every emitted output: tsc dist/, optional Vite dist-ui/,
-          # the nested Prime extension/dist, locally built semantic-runtime
-          # Wasm, the native Linux safe-LLM runner, and the generated network/
-          # dir the CLI copies during build. Keep the native executable outside
-          # the portable Wasm artifact lock; CLI consumers use this runner OS.
-          test -d packages/semantic-runtime/generated
-          test -x rust/target/release/dkg-safe-llm-runner
-          mapfile -t PATHS < <(
-            find packages -maxdepth 3 -type d \
-              \( -name dist -o -name dist-ui -o -name network \) \
-              2>/dev/null | sort -u
-          )
-          test -d packages/adapter-prime-agent/extension/dist
-          PATHS+=(packages/semantic-runtime/generated)
-          PATHS+=(rust/target/release/dkg-safe-llm-runner)
-          echo "Packing ${#PATHS[@]} build outputs…"
-          tar -czf /tmp/build-outputs.tgz "${PATHS[@]}"
-          ls -lh /tmp/build-outputs.tgz
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: build-outputs
-          path: /tmp/build-outputs.tgz
-          retention-days: 1
-          if-no-files-found: error
-
   # Rust/Wasm falsification gate. Generated bindings are local build outputs,
   # not repository inputs. This lane builds them with the pinned toolchain,
   # checks native/Wasm byte equivalence, and proves the Worker
@@ -432,7 +488,7 @@ jobs:
     name: Rust/Wasm semantic runtime
     needs: changes
     if: needs.changes.outputs.run_node == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -484,7 +540,7 @@ jobs:
     name: Compile EVM test artifacts (0.8.20/london)
     needs: changes
     if: needs.changes.outputs.node_test_artifacts == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -513,7 +569,7 @@ jobs:
     name: Compile devnet EVM artifacts (0.8.24/cancun)
     needs: changes
     if: needs.changes.outputs.kosava_node_ui_e2e == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -550,7 +606,7 @@ jobs:
     name: "Tornado: ${{ matrix.label }}"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_core == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -623,11 +679,19 @@ jobs:
   # tests `describe.skipIf`-skip, so local `pnpm test` needs no Docker.
   # ------------------------------------------------------------------
   tornado-blazegraph:
-    name: "Tornado: storage Blazegraph integration (live server)"
+    name: "Tornado: storage Blazegraph integration (live server, ${{ matrix.group }})"
     needs: [changes, build]
     if: needs.changes.outputs.tornado_blazegraph == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # Two runners, each with its own Blazegraph service. `services` runs the
+    # publisher and agent live suites (~100 s each in 2026-11) with the native
+    # bootstrap and rollout fixtures; `stores` runs everything else, so neither
+    # runner waits for the other's ~3.5 min of suites.
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [stores, services]
     services:
       blazegraph:
         image: lyrasis/blazegraph:2.1.5@sha256:56be5edb612e981607edcd4fe1e6d4e66ba3303efc4bb3a7c5c8e6662e598125
@@ -687,6 +751,7 @@ jobs:
           exit 1
 
       - name: "Storage and RFC-64 rollout Blazegraph integration tests (no mocks)"
+        if: matrix.group == 'stores'
         env:
           # Stock image ships the default `kb` namespace. Storage tests isolate
           # through unique GRAPH IRIs; the rollout certificate derives the
@@ -714,6 +779,12 @@ jobs:
           DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/view-merged-query.test.ts
           DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/qualification-merged-meaning.test.ts
           DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/qualification-merged-working-memory.test.ts
+
+      - name: "Publisher, agent and rollout Blazegraph integration tests (no mocks)"
+        if: matrix.group == 'services'
+        env:
+          BLAZEGRAPH_TEST_URL: http://127.0.0.1:9999/bigdata/namespace/kb/sparql
+        run: |
           pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts
           pnpm --filter @origintrail-official/dkg-agent exec vitest run --config vitest.blazegraph.config.ts
           pnpm --filter @origintrail-official/dkg exec vitest run --config vitest.native-bootstrap.config.ts
@@ -724,6 +795,7 @@ jobs:
       # the image pinned in blazegraph-image.json (the one the node setup provisions) does, so the same live differential runs against THAT image with
       # the reproduction required (BLAZEGRAPH_REQUIRE_U001F_COLLAPSE=1): the real-engine check cannot turn vacuous when the image changes.
       - name: "Share promote lookup live differential on the provisioned Blazegraph image (U+001F positive control required)"
+        if: matrix.group == 'stores'
         timeout-minutes: 5
         run: |
           set -euo pipefail
@@ -753,7 +825,7 @@ jobs:
           pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts test-live/async-promote-bounded-lookup.blazegraph.test.ts
 
       - name: Upload store conformance packet
-        if: always()
+        if: always() && matrix.group == 'stores'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: storage-conformance-evidence
@@ -845,7 +917,7 @@ jobs:
     name: "Tornado: publisher [${{ matrix.shard }}/${{ matrix.shards }}]"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_publisher == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -907,7 +979,7 @@ jobs:
     name: "Tornado: agent [${{ matrix.shard }}/${{ matrix.shards }}]"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_agent == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Inventory policy grants native runs headroom for coverage/report cleanup.
     timeout-minutes: ${{ matrix.timeoutMinutes }}
     strategy:
@@ -979,7 +1051,7 @@ jobs:
     name: "Bura: cli [${{ matrix.shard }}/${{ matrix.shards }}]"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.bura_cli == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -1044,7 +1116,7 @@ jobs:
     name: "Bura: query"
     needs: [changes, build]
     if: needs.changes.outputs.bura_query == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -1095,7 +1167,7 @@ jobs:
     name: "Kosava: node-ui"
     needs: [changes, build]
     if: needs.changes.outputs.kosava_node_ui == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -1189,6 +1261,21 @@ jobs:
           path: /tmp
       - name: Restore devnet EVM artifacts
         run: tar -xzf /tmp/evm-devnet-test-artifacts.tgz
+      - name: Resolve the Playwright version
+        id: playwright
+        run: echo "version=$(node -p "require('./packages/node-ui/node_modules/@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      # The browser build is fixed by the Playwright version, so every shard
+      # can reuse one download instead of fetching it from Playwright's CDN.
+      - name: Restore the Playwright browser
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      # `--with-deps` also apt-installs fonts the runner image lacks. When
+      # GitHub's apt mirror is unreachable (it was on 2026-11-11, failing every
+      # shard), install the browser alone: the image already ships the system
+      # libraries Chromium needs. An unreachable mirror can stall apt for ten
+      # minutes before it fails, so the attempt gets three (it takes ~20 s).
       - name: Install Playwright Chromium
         run: |
           sudo env GITHUB_ACTIONS=true "$(command -v node)" scripts/ci/prepare-ubuntu-apt.mjs
@@ -1200,7 +1287,8 @@ jobs:
               sudo mv -- "$source" "${source}.disabled-for-playwright"
             fi
           done
-          pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps
+          timeout --kill-after=10 180 pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps \
+            || { echo "::warning::Installing Chromium's OS packages failed or timed out; installing the browser alone."; pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium; }
       - name: Apply resolved execution profile
         env:
           PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
@@ -1252,7 +1340,7 @@ jobs:
     name: "Kosava: ${{ matrix.label }}"
     needs: [changes, build]
     if: needs.changes.outputs.kosava_supporting == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -1344,7 +1432,7 @@ jobs:
     name: "Kosava: random-sampling + kafka-plugin (real Hardhat)"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.kosava_hardhat_plugins == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -1398,7 +1486,7 @@ jobs:
     name: "Tornado: ABI freshness (committed abi/ vs hardhat compile)"
     needs: changes
     if: needs.changes.outputs.abi_freshness == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1478,7 +1566,7 @@ jobs:
   solidity:
     name: "Tornado: Solidity [${{ matrix.shard }}/4]"
     needs: changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     # Candidate lane — sharded 4 ways. Protected pushes and manual runs use the
     # separate coverage+ratchet job below.
@@ -1617,7 +1705,7 @@ jobs:
   solidity-coverage:
     name: "Tornado: Solidity coverage (push safety net)"
     needs: changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
     steps:
@@ -1690,7 +1778,7 @@ jobs:
   tornado-static-analysis:
     name: "Tornado: static analysis (informational)"
     needs: changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Always run on push (refreshes Code Scanning baseline). On PR,
     # only run when contracts changed (paths-filter, see `changes`).
@@ -1838,7 +1926,7 @@ jobs:
     name: Verify merged package coverage
     if: always()
     needs: [changes, tornado-core, tornado-publisher, tornado-agent, bura-cli, bura-supporting, kosava-node-ui, kosava-supporting, kosava-hardhat-plugins]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1890,7 +1978,7 @@ jobs:
     name: Verify execution profile
     if: always()
     needs: [changes, tornado-publisher, kosava-node-ui-e2e]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1932,6 +2020,7 @@ jobs:
       - changes
       - chain-rpc-node26
       - build
+      - repository-checks
       - semantic-runtime
       - evm-node-test-artifacts
       - evm-devnet-test-artifacts
@@ -1954,7 +2043,7 @@ jobs:
       - coverage-results
       - profile-results
       - inventory-windows
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:
       - name: Verify semantic runtime lane completed
@@ -1989,6 +2078,17 @@ jobs:
         env:
           PROFILE_RESULT: ${{ needs.profile-results.result }}
         run: test "$PROFILE_RESULT" = success
+      # The nightly is where a lapsed test-exception review fails, after every
+      # lane has run; pull requests, the merge queue and pushes only warn.
+      - name: Require renewed test exceptions on the nightly profile
+        if: always() && needs.changes.outputs.profile == 'nightly-equivalent'
+        env:
+          EXPIRED_TEST_EXCEPTIONS: ${{ needs.build.outputs.expired_test_exceptions }}
+        run: |
+          if [ "${EXPIRED_TEST_EXCEPTIONS:-0}" != 0 ]; then
+            echo "::error::${EXPIRED_TEST_EXCEPTIONS} test exception(s) are past their review deadline; the build job's lint warnings name them."
+            exit 1
+          fi
       - name: Require the coverage verdict
         if: always()
         env:
@@ -2002,6 +2102,17 @@ jobs:
           BLAZEGRAPH_LANE: ${{ needs.changes.outputs.tornado_blazegraph }}
           LARGE_CATALOG_RESULT: ${{ needs.tornado-large-catalog.result }}
         run: test "$BLAZEGRAPH_LANE" != true || test "$LARGE_CATALOG_RESULT" = success
+      # The trusted controller does not know the repository checks job, and a
+      # job it does not know fails the gate only by failing or being
+      # cancelled, so a skipped one would pass. The job runs whenever the
+      # build succeeds (both take the planner's run_node), so require its
+      # success then; a plan without the shared build skips both.
+      - name: Require the repository checks verdict
+        if: always()
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          REPOSITORY_CHECKS_RESULT: ${{ needs.repository-checks.result }}
+        run: test "$BUILD_RESULT" != success || test "$REPOSITORY_CHECKS_RESULT" = success
       - name: Verify selected lanes completed
         if: always()
         env:

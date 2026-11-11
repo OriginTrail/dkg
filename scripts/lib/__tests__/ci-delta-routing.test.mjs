@@ -380,7 +380,7 @@ test('the mutation pilot configuration selects the core job that runs it', () =>
   for (const file of ['test-policy/stryker.config.mjs', 'test-policy/vitest.mutation.config.ts']) {
     assert.deepEqual(selectedLanes(pullRequestPlan([change(file)])), ['tornado_core'], file);
   }
-  // The rest of test-policy/ is still checked by the shared build job alone.
+  // The rest of test-policy/ is still checked by the shared build checks alone.
   assert.deepEqual(selectedLanes(pullRequestPlan([change('test-policy/vitest.properties.config.ts')])), []);
 });
 
@@ -688,9 +688,9 @@ test('Blazegraph provisioning changes include the native arm64 contract lane', (
 // workspace's src for the queue's graph IRIs, graph constants and source
 // labels. A path pattern cannot see what a file says, and widening the
 // publisher lane to all of agent and cli src would send it to every agent-only
-// or cli-only PR, so this scan stands in for the content check: the build job
-// runs it on every PR that changes code, and it fails until a file that names
-// the queue selects the lane that runs the coverage test.
+// or cli-only PR, so this scan stands in for the content check: the repository
+// checks job runs it on every PR that changes code, and it fails until a file
+// that names the queue selects the lane that runs the coverage test.
 const QUEUE_GRAPH_LANE = 'tornado_publisher';
 const QUEUE_GRAPH_COVERAGE_TEST = 'packages/publisher/test/async-lift-queue-graph-coverage.test.ts';
 const QUEUE_GRAPH_STRING = /urn:dkg:publisher|publisher\.(?:asyncLift\.|queueUsage\.lift)/;
@@ -784,13 +784,15 @@ test('the queue scan sees the references a new agent or cli file would add, and 
   assert.deepEqual(queueGraphRoutingGaps(['packages/publisher/src/x.ts'], () => "const p = 'publisher.asyncLift.x';"), []);
 });
 
-test('the queue scan runs in the build job of every PR that changes code, and reads what the coverage test reads', () => {
+test('the queue scan runs in the repository checks of every PR that changes code, and reads what the coverage test reads', () => {
   const ci = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
-  assert.equal(ci.jobs.build.if, "needs.changes.outputs.run_node == 'true'");
-  assert.ok(ci.jobs.build.steps.some(({ run = '' }) => run.trim() === 'pnpm run test:scripts'));
+  const checks = ci.jobs['repository-checks'];
+  assert.equal(checks.if, "needs.changes.outputs.run_node == 'true'");
+  assert.ok(checks.steps.some(({ run = '' }) => run.trim() === 'pnpm run test:scripts'));
   const scripts = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')).scripts;
   assert.match(scripts['test:scripts'], /scripts\/lib\/__tests__\/\*\.test\.mjs/);
-  // Every code change that does not select the publisher lane still plans the build job, so the scan runs.
+  // Every code change that does not select the publisher lane still plans the build job, and the
+  // repository checks with it, so the scan runs.
   for (const file of ['packages/agent/src/planted-iri.ts', 'packages/cli/src/daemon/planted-label.ts', 'packages/node-ui/src/planted.ts']) {
     const plan = pullRequestPlan([change(file, 'A')]);
     assert.equal(plan.mode, 'delta', file);

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
@@ -27,12 +27,16 @@ test('the Windows gate runs directly for integration pushes and through CI for p
   assert.equal(ciWorkflow.jobs['inventory-windows'].if, "needs.changes.outputs.tornado_agent == 'true'");
 });
 
-test('Windows groups retain every original test selector exactly once', () => {
-  const originalSelectors = [
+test('Windows groups run every lifecycle suite exactly once', () => {
+  // Every rfc64-inventory-v1 suite, including ones added later, plus these.
+  const inventorySuites = readdirSync(new URL('../../../packages/agent/test/', import.meta.url))
+    .filter((file) => /^rfc64-inventory-v1-.*\.test\.ts$/.test(file)).map((file) => `test/${file}`);
+  assert.ok(inventorySuites.includes('test/rfc64-inventory-v1-rollback.test.ts'));
+  const expectedSelectors = [
     'test/finalization-recovery-sqlite-deferred.test.ts',
     'test/finalization-recovery-sqlite-migration.test.ts',
     'test/finalization-recovery-sqlite-store.test.ts',
-    'test/rfc64-inventory-v1',
+    ...inventorySuites,
     'test/rfc64-agent-inventory-lifecycle.test.ts',
     'test/rfc64-author-catalog-producer.test.ts',
     'test/rfc64-control-object-store-v1.test.ts',
@@ -40,11 +44,14 @@ test('Windows groups retain every original test selector exactly once', () => {
     'test/rfc64-durable-file-store-v1.test.ts',
     'test/rfc64-secure-filesystem-policy-v1.test.ts',
   ];
-  assert.equal(job['runs-on'], 'windows-latest');
+  assert.equal(job['runs-on'], 'windows-2025-vs2026');
   assert.equal(job.strategy['fail-fast'], false);
   const selectors = job.strategy.matrix.include.flatMap((group) => group.tests.trim().split(/\s+/));
-  assert.deepEqual(selectors.sort(), originalSelectors.sort());
+  assert.deepEqual(selectors.sort(), expectedSelectors.sort());
   assert.equal(new Set(selectors).size, selectors.length);
+  // One group produces the RFC-64 Gate 0 evidence; the original two names stay.
+  assert.deepEqual(job.strategy.matrix.include.filter((group) => group.evidence).map((group) => group.group), ['inventory']);
+  for (const name of ['inventory', 'object-stores']) assert.ok(job.strategy.matrix.include.some((group) => group.group === name), name);
   assert.match(job.steps.find((step) => step.name === 'Run SQLite persistence tests').run,
     /--config vitest\.unit\.config\.ts\s+\$\{\{ matrix.tests \}\}/);
 });

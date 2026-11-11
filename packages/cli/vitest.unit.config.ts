@@ -113,6 +113,8 @@ export default defineConfig({
           'test/status-route-rpc.test.ts',
           // Pure: in-process status route and a chain adapter over scripted endpoints.
           'test/status-chain-rpc.test.ts',
+          // Pure: in-process balances route over a scripted endpoint and a refused port.
+          'test/wallet-balances-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
           'test/notifications-route-bounded.test.ts',
       'test/status-route-store-quads.test.ts',
@@ -452,7 +454,9 @@ export default defineConfig({
           'test/context-graph-join-policy-route.test.ts',
           'test/context-graph-join-request-route.test.ts',
           'test/assertion-cli-smoke.test.ts',
-          'test/knowledge-asset-cli-smoke.test.ts',
+          'test/knowledge-asset-cli-smoke-validation.test.ts',
+          'test/knowledge-asset-cli-smoke-mapping.test.ts',
+          'test/knowledge-asset-cli-smoke-lifecycle.test.ts',
           'test/knowledge-asset-share-catalog-handoff.test.ts',
           'test/async-job-failure-cli.test.ts',
           'test/okf-subcommands.test.ts',

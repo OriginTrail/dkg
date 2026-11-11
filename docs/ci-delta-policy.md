@@ -29,7 +29,7 @@ CI whenever it cannot prove that a smaller plan is safe.
 | `evm-module` | Full Node/EVM CI; Solidity only for the established contract-relevant paths |
 | Root dependency/build config, lockfile, CI control-plane workflows (`ci.yml`, `evm-integration.yml`, `rfc64-inventory-windows.yml`), any nested path under `.github/workflows/`, composite actions, the planner and other CI tooling (`scripts/ci/`, `scripts/lib/` outside its tests), shared test fixtures (`scripts/testing/`), the EVM integration runner, the CLI runtime-asset copier, the coverage baselines, the files the CLI's install hooks run in every job's install (its node:sqlite runtime guard and MarkItDown bundler, with what they load and read, including the CLI's `tsconfig.json`, whose presence tells the bundler it runs in a workspace checkout), and every repository script outside the families below: the root build, release promotion and lint scripts, and any new script | Full Node/EVM CI; Solidity only when its independent path filter matches |
 | `scripts/devnet.sh`, `scripts/devnet-publish-helpers.sh`, `scripts/sync-chain-abis.mjs` | The lanes that run them (the devnet bootstrap: browser E2E, the agent lane's devnet harnesses and the CLI Blazegraph smoke fixture; the publish helpers: the CLI smoke test; the ABI sync: a chain test that runs it against temporary directories) plus the shared build checks |
-| Repository scripts in the build-only families: devnet suites and operations run by hand (`devnet-*`, the soak and smoke suites), the repository checks the build job runs (`audit-*`, `check-npm-metadata`, `release-packages`, `verify-w1-packet`), operator and data tools run by hand (`import-*`, snapshot and analysis tools, `scripts/load/`, `scripts/repro/`, `scripts/testnet-publish-stress/`); the repository-script tests (`scripts/lib/__tests__/`); the rest of `test-policy/` | Shared build checks (its lint, script tests and repository checks run them). A routing test fails if a lane runs or reads one of these scripts without a route to that lane: named in a test, even inside embedded shell, run by a workflow job, or reached through a workspace script CI runs. It also fails on a script path a lane assembles or picks at run time until the test lists it, and on a family that no longer matches an existing script |
+| Repository scripts in the build-only families: devnet suites and operations run by hand (`devnet-*`, the soak and smoke suites), the repository checks the build job runs (`audit-*`, `check-npm-metadata`, `release-packages`) and the repository checks job runs (`verify-w1-packet`), operator and data tools run by hand (`import-*`, snapshot and analysis tools, `scripts/load/`, `scripts/repro/`, `scripts/testnet-publish-stress/`); the repository-script tests (`scripts/lib/__tests__/`); the rest of `test-policy/` | Shared build checks (the build job's lint and checks and the repository checks job's script tests and checks run them). A routing test fails if a lane runs or reads one of these scripts without a route to that lane: named in a test, even inside embedded shell, run by a workflow job, or reached through a workspace script CI runs. It also fails on a script path a lane assembles or picks at run time until the test lists it, and on a family that no longer matches an existing script |
 | Workspace `package.json` changing only package-scoped fields (`exports`, `scripts` other than install hooks, `version`, `files`, metadata) | Same lanes as a source change in that workspace |
 | Workspace `package.json` changing dependencies, `pnpm`/overrides, `engines`, `bin`, `directories`, `name`, `type`, install-time scripts (npm install/prepare lifecycle, `prepublish`, `dependencies`, any `pnpm:` hook) or unknown fields; added, removed or moved manifests; root and `devnet/*` manifests | Full CI because the install or dependency graph may differ |
 | Deletion, rename or copy | Routed by every old and new path, like edits |
@@ -118,10 +118,13 @@ on planted workflows, runs and install hooks, sharing `load-closure.mjs`),
   selected job was accidentally skipped, failed, or was cancelled. The shared
   build is required when a Node lane needs it or the plan declares
   `buildChecks` (repository paths whose only CI consumer is the build job's own
-  checks). One function, `needsSharedBuild`, decides this for both the build
-  job's `run_node` condition and the primary gate, so the two cannot disagree;
-  a delta plan that selects no lane and no build checks fails closed to full
-  CI.
+  checks or the repository checks job's). One function, `needsSharedBuild`,
+  decides this for both the build job's `run_node` condition and the primary
+  gate, so the two cannot disagree; a delta plan that selects no lane and no
+  build checks fails closed to full CI. The repository checks job (script
+  tests, test inventory and the other checks no lane consumes) runs beside the
+  lanes on the same condition. The pinned controller does not know that job,
+  so `CI gate` has its own step that requires it whenever the build succeeded.
 - CI controller changes use a two-phase rollout. The controller implementation
   lands first while every workflow remains pinned to an immutable SHA already
   present on protected `main` or `testnet-canary` history. Only a follow-up PR
@@ -137,7 +140,7 @@ on planted workflows, runs and install hooks, sharing `load-closure.mjs`),
   git merge-base --is-ancestor <controller-sha> origin/testnet-canary
   ```
 
-  PR CI now checks this as well. The build job's
+  PR CI now checks this as well. The repository checks job's
   `fetch-trusted-controller.mjs` step fetches `testnet-canary` and `main`
   from `origin` back to a day before the pin's commit date, and a failed
   fetch fails the step. A merge of a pull request branch last pushed before
@@ -150,10 +153,10 @@ on planted workflows, runs and install hooks, sharing `load-closure.mjs`),
   the pinned SHA is an ancestor of one of those branches, and logs which
   one, so a rotation to a commit that only a pull request branch contains
   fails that PR's CI. The check runs under the controller it checks, which
-  decides whether the build job runs and whether a failure fails the gate:
-  it catches a mistaken rotation, but not a malicious pin or a PR that edits
-  the check. Review of rotations still matters, and the scheduled report
-  below remains the independent provenance check.
+  decides whether the repository checks job runs and whether a failure fails
+  the gate: it catches a mistaken rotation, but not a malicious pin or a PR
+  that edits the check. Review of rotations still matters, and the scheduled
+  report below remains the independent provenance check.
 - `CONTROLLER_POLICY_FILES` in `scripts/ci/trusted-controller-pins.mjs` is the
   single manifest for the narrow controller boundary. The semantic workflow
   validator parses every trusted checkout and rejects missing, extra, or
