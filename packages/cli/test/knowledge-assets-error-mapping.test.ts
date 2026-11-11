@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
+import { USER_AUTHORED_TRUST_LEVEL_CODE, UserAuthoredTrustLevelError } from '@origintrail-official/dkg-core';
 import { tagPromoteError } from '../../publisher/src/promote-step-tag.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { respondAssertionCodeError, respondAssertionError } from '../src/daemon/routes/knowledge-assets-error-mapping.js';
@@ -68,6 +69,14 @@ describe('knowledge-assets mutation error mapping', () => {
     expect(respondAssertionCodeError(direct.res, { code, message: 'caller precondition' })).toBe(true);
     expect(direct.record.status).toBe(409);
     expect(JSON.parse(direct.record.body)).toEqual(JSON.parse(record.body));
+  });
+
+  it('answers user-authored trust metadata with 400, not 500', () => {
+    const error = new UserAuthoredTrustLevelError('urn:a');
+    const { record, res } = fakeResponse();
+    respondAssertionError(res, error);
+    expect(record.status).toBe(400);
+    expect(JSON.parse(record.body)).toEqual({ code: USER_AUTHORED_TRUST_LEVEL_CODE, error: error.message });
   });
 
   it('leaves unknown codes to the route-specific fallback without writing a response', () => {

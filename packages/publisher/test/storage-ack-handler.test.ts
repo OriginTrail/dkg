@@ -728,6 +728,46 @@ describe('StorageACKHandler', () => {
     }
   });
 
+  it.each([
+    ['a trust-level row', '<urn:entity:1> <http://dkg.io/ontology/trustLevel> "3"^^<http://www.w3.org/2001/XMLSchema#integer> <did:dkg:context-graph:42> .', 'urn:entity:1'],
+    ['a subject in a reserved namespace', '<urn:dkg:file:staged> <urn:p> "v" <did:dkg:context-graph:42> .', 'urn:dkg:file:staged'],
+  ])('refuses inline staging quads carrying %s before persisting or signing', async (_label, nquadsStr, rootEntity) => {
+    const stagingBytes = new TextEncoder().encode(nquadsStr);
+    const parsed = parseSimpleNQuads(nquadsStr);
+    const store = new OxigraphStore();
+    const signMessage = vi.spyOn(coreWallet, 'signMessage');
+    try {
+      const handler = new StorageACKHandler(store as any, {
+        nodeRole: 'core',
+        nodeIdentityId: coreIdentityId,
+        signerWallet: coreWallet,
+        contextGraphSharedMemoryUri: (cgId: string) => `did:dkg:context-graph:${cgId}/_shared_memory`,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
+        isCgCurated: async () => true,
+      }, new TypedEventBus() as any);
+      const intent = encodePublishIntent({
+        merkleRoot: computeFlatKCRoot(parsed, []),
+        contextGraphId,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: stagingBytes.length,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: [rootEntity],
+        epochs: 1,
+        tokenAmountStr: '1000',
+        merkleLeafCount: computeFlatKCMerkleLeafCountV10(parsed, []),
+        stagingQuads: stagingBytes,
+      });
+
+      await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(/trustLevel|reserved namespace/);
+      expect(signMessage).not.toHaveBeenCalled();
+      expect(await store.countQuads()).toBe(0);
+    } finally {
+      signMessage.mockRestore();
+    }
+  });
+
   it('declines (SIGNER_NOT_REGISTERED) when the signer is no longer confirmed registered', async () => {
     // PR #557: this used to throw, which the publisher saw as a libp2p
     // stream reset; now the handler returns a typed decline so the

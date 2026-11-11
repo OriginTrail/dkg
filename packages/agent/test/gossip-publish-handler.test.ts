@@ -515,6 +515,15 @@ describe('GossipPublishHandler', () => {
     expect(await store.countQuads()).toBe(0);
   });
 
+  it.each([
+    ['a trust-level row', '<http://example.org/s> <http://dkg.io/ontology/trustLevel> "3" .'],
+    ['a subject in a reserved namespace', '<urn:dkg:file:gossip> <http://example.org/p> "v" .'],
+  ])('refuses a broadcast carrying %s before anything is written', async (_label, nquads) => {
+    const { store, handler } = createHandler();
+    await handler.handlePublishMessage(makePublishMessage({ contextGraphId: CONTEXT_GRAPH, nquads }), CONTEXT_GRAPH);
+    expect(await store.countQuads()).toBe(0);
+  });
+
   it('refuses a broadcast whose manifest root entity is not an absolute IRI', async () => {
     const { store, handler } = createHandler();
     await handler.handlePublishMessage(makePublishMessage({

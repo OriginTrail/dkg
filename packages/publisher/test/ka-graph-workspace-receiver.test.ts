@@ -593,6 +593,25 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
     })).toBeUndefined();
   });
 
+  it.each([
+    ['a subject in a reserved namespace', `<urn:dkg:file:shared> <urn:predicate:value> "v" <${DATA_GRAPH}> .`],
+    ['a trust-level row', `<urn:entity:1> <http://dkg.io/ontology/trustLevel> "3" <${DATA_GRAPH}> .`],
+  ])('permanently rejects %s and writes nothing to SWM', async (_label, line) => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    const outcome = await handler.handle(v2Request({
+      nquads: new TextEncoder().encode(line),
+      shareOperationId: 'rootless-op-protocol-metadata',
+    }), PEER_ID);
+    expect(outcome).toMatchObject({ applied: false, retryable: false });
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    expect(await graphCount(store, swmGraph)).toBe(0);
+  });
+
   it('permanently rejects a write the store refuses for a malformed term, unlike a store failure', async () => {
     const store = new OxigraphStore();
     const refusedTerm = async (): Promise<never> => {

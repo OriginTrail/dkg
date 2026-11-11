@@ -4,7 +4,12 @@
  * a 400, and the agent is never called.
  */
 import { describe, expect, it } from 'vitest';
-import { SPARQL_TERM_VALIDATION_ERROR_CODE, SparqlTermValidationError } from '@origintrail-official/dkg-core';
+import {
+  SPARQL_TERM_VALIDATION_ERROR_CODE,
+  SparqlTermValidationError,
+  USER_AUTHORED_TRUST_LEVEL_CODE,
+  UserAuthoredTrustLevelError,
+} from '@origintrail-official/dkg-core';
 import { respondWithDaemonError } from '../src/daemon/http-utils.js';
 import { handleAgentChatRoutes } from '../src/daemon/routes/agent-chat.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -142,5 +147,18 @@ describe('POST /api/update term validation', () => {
       error: expect.stringContaining('invalid literal'),
       code: SPARQL_TERM_VALIDATION_ERROR_CODE,
     });
+  });
+
+  it('maps user-authored trust metadata the agent refuses to a 400, not a 500', async () => {
+    const result = await postUpdate({
+      kaId: '1',
+      contextGraphId: 'term-validation-cg',
+      quads: [{ ...WELL_FORMED, predicate: '<http://dkg.io/ontology/trustLevel>' }],
+    }, () => new UserAuthoredTrustLevelError('urn:update:root'));
+    expect(result.agentCalls).toBe(1);
+    const res = fakeRes();
+    respondWithDaemonError(res, result.thrown);
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toMatchObject({ code: USER_AUTHORED_TRUST_LEVEL_CODE });
   });
 });
