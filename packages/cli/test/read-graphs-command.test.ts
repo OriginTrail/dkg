@@ -1,5 +1,8 @@
 // `dkg store read-graphs status | check | rebuild | drop`, the API client call
 // behind them, and the request rules the CLI and the node share.
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { Agent, fetch as undiciFetch, getGlobalDispatcher, setGlobalDispatcher } from 'undici';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import { ApiClient } from '../src/api-client.js';
@@ -262,6 +265,39 @@ describe('ApiClient.readGraphs', () => {
     ]);
     expect((calls[2]!.init.headers as Record<string, string>).Authorization).toBe('Bearer operator-token');
     expect(deadlines.filter((ms) => ms === READ_GRAPHS_REQUEST_TIMEOUT_MS)).toHaveLength(2);
+  });
+});
+
+describe('ApiClient.readGraphs on a real transport', () => {
+  it('waits for a long answer past the default dispatcher\'s timers, up to its own deadline', async () => {
+    // A node that answers a check only when it ends, a second from now.
+    const node = createServer((_req, res) => {
+      const answer = setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(check([])));
+      }, 1_000);
+      res.on('close', () => clearTimeout(answer));
+    });
+    await new Promise<void>((resolve) => node.listen(0, '127.0.0.1', resolve));
+    const port = (node.address() as AddressInfo).port;
+    // Stand-in for undici's 300 s defaults: a default dispatcher that gives up after 250 ms.
+    // undici's own fetch stands in for Node's, and resolves the dispatcher the same way.
+    const defaultDispatcher = getGlobalDispatcher();
+    const impatient = new Agent({ headersTimeout: 250, bodyTimeout: 250 });
+    setGlobalDispatcher(impatient);
+    vi.stubGlobal('fetch', undiciFetch);
+    try {
+      await expect(undiciFetch(`http://127.0.0.1:${port}/api/store/read-graphs/check`, { method: 'POST', body: '{}' }))
+        .rejects.toMatchObject({ cause: { code: 'UND_ERR_HEADERS_TIMEOUT' } });
+      const client = new ApiClient(port, 'operator-token');
+      await expect(client.readGraphs('check', { mode: 'full' })).resolves.toEqual(check([]));
+    } finally {
+      vi.unstubAllGlobals();
+      setGlobalDispatcher(defaultDispatcher);
+      await impatient.destroy();
+      node.closeAllConnections();
+      await new Promise((resolve) => node.close(resolve));
+    }
   });
 });
 

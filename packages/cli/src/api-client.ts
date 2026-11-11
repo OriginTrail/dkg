@@ -39,7 +39,9 @@ import {
 } from './finalized-publish-options.js';
 import { parseRegisterPcaAgentResult, type RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { CPU_PROFILE_PATH, cpuProfileRequestTimeoutMs, type CpuProfileResult } from './cpu-profile-wire.js';
+import type { Dispatcher } from 'undici';
 import { DaemonOutcomeUnknownError } from './daemon-outcome-unknown-error.js';
+import { longRequestDispatcher } from './daemon/local-agent-channel-fetch.js';
 import { READ_GRAPHS_PATH, READ_GRAPHS_REQUEST_TIMEOUT_MS, readGraphsStatusPath, type ReadGraphsAction, type ReadGraphsRequest } from './read-graphs-wire.js';
 import {
   serializeStatusQuery,
@@ -82,6 +84,8 @@ interface RequestDeadline {
    * {@link DaemonOutcomeUnknownError} carrying this hint.
    */
   outcomeUnknownHint?: string;
+  /** For a request that may run past undici's 300 s header and body timers: a dispatcher whose timers outlast the deadline. */
+  dispatcher?: Dispatcher;
 }
 
 /**
@@ -2415,7 +2419,8 @@ export class ApiClient {
    */
   async readGraphs<T>(action: ReadGraphsAction, request: ReadGraphsRequest = {}): Promise<T> {
     if (action === 'status') return this.get<T>(readGraphsStatusPath(request));
-    return this.post<T>(`${READ_GRAPHS_PATH}/${action}`, request, { timeoutMs: READ_GRAPHS_REQUEST_TIMEOUT_MS });
+    const timeoutMs = READ_GRAPHS_REQUEST_TIMEOUT_MS;
+    return this.post<T>(`${READ_GRAPHS_PATH}/${action}`, request, { timeoutMs, dispatcher: longRequestDispatcher(timeoutMs) });
   }
 
   async shutdown(): Promise<void> {
@@ -2466,7 +2471,7 @@ export class ApiClient {
 
   private async send<T>(path: string, init: RequestInit, deadline: RequestDeadline = {}): Promise<T> {
     return this.withDeadline(init.method ?? 'GET', path, deadline, async (signal) => {
-      const res = await fetch(`${this.baseUrl}${path}`, { ...init, signal });
+      const res = await fetch(`${this.baseUrl}${path}`, { ...init, signal, ...(deadline.dispatcher ? { dispatcher: deadline.dispatcher } : {}) } as RequestInit);
       if (!res.ok) {
         const data = await res.json().catch(() => ({ error: res.statusText }));
         throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);

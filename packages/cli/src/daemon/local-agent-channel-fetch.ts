@@ -43,6 +43,14 @@ function localAgentChannelDispatcher(deadlineMs: number): Dispatcher {
 }
 
 /**
+ * The same dispatcher for any other request to the daemon that may run longer
+ * than undici's 300 s timers, such as `dkg store read-graphs check`.
+ */
+export function longRequestDispatcher(deadlineMs: number): Dispatcher {
+  return localAgentChannelDispatcher(deadlineMs);
+}
+
+/**
  * `fetch` options for a local-agent channel forward that may run for
  * `deadlineMs`: an AbortSignal at the deadline, and a dispatcher that does not
  * give up before it.
