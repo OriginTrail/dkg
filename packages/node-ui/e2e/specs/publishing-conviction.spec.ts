@@ -213,8 +213,11 @@ test.describe('Publisher Conviction tab (PCA) — P0', () => {
     const cgName = list[0]!.name;
 
     // Track a PCA so the chip is expected to render (gate: trackedIds.length > 0).
+    // Seeded browser-locally, so this test needs no PCA on chain and doesn't depend on
+    // another test having minted one. (Get added still rejects an ID that doesn't exist.)
     await conviction.open();
-    await conviction.trackAccount('1');
+    test.skip(await conviction.isUnavailable(), 'PCA not deployed on this network');
+    await conviction.seedTrackedIds(['1']);
 
     // Navigate to the CG project → SWM layer (the SWM→VM publish CTA; chip is !isWm).
     await expect(async () => {

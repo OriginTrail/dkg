@@ -500,3 +500,23 @@ describe('GetSponsoredPanel — adding a partially checked PCA', () => {
     await unmount();
   });
 });
+
+describe('GetSponsoredPanel — a failed chain lookup of the PCA', () => {
+  it('treats 503 PCA_LOOKUP_READ_FAILED as temporary with Retry, not as PCAs being unavailable', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    let lookupFails = true;
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      if (!key && lookupFails) throw new HttpError(503, 'Service Unavailable', { code: 'PCA_LOOKUP_READ_FAILED' });
+      return { ...makePcaSnapshot({ accountId: id }), probedKey: key ? { key, registered: true, adapterSupported: true } : undefined };
+    });
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn(), initialAccountId: '7' }));
+    await waitForText(container, 'Couldn’t check PCA #7 right now.');
+    expect(container.textContent).not.toContain('aren\'t available on this network');
+    const retry = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Retry');
+    expect(retry).toBeTruthy();
+    lookupFails = false;
+    await act(async () => { retry!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'Approved on PCA #7: 1 of 1 wallets');
+    await unmount();
+  });
+});

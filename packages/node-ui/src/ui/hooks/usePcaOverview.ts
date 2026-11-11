@@ -1,13 +1,8 @@
 import { useEffect, useMemo, useReducer } from 'react';
-import {
-  fetchPca,
-  fetchWalletsBalances,
-  HttpError,
-  type PcaSnapshot,
-} from '../api.js';
+import { fetchWalletsBalances } from '../api.js';
 import { usePcaStore } from '../stores/pca.js';
 import { healthForSnapshot, type PcaHealthState } from '../pca/health.js';
-import { classifyCoverage } from '../pca/coverage.js';
+import { readPcaAccount } from '../pca/readAccount.js';
 import { nodeCoverage, type CoverageAccount, type CoverageProbe, type NodeCoverage } from '../pca/walletCoverage.js';
 import { eqAddress as eq } from '../web3/address.js';
 
@@ -81,25 +76,11 @@ async function resolveAccount(accountId: string, wallets: string[]): Promise<Res
     walletCount: wallets.length,
     probesInconclusive: false,
   };
-  let snapshot: PcaSnapshot;
-  try {
-    snapshot = await fetchPca(accountId, undefined, { extended: true });
-  } catch (err) {
-    return { ...blank, error: err, notFound: err instanceof HttpError && err.status === 404 };
-  }
-
-  const walletProbes: PcaWalletProbe[] = await Promise.all(
-    wallets.map((wallet) =>
-      fetchPca(accountId, wallet, { extended: true })
-        // S2/#9 (via shared classifyCoverage, #1344 — reads s.probedKey) —
-        // adapterSupported===false (the adapter couldn't answer) → registered null
-        // (couldn't determine), NOT not-registered → probesInconclusive (H2 path),
-        // excluded from approvedCount (which counts registered === true, not 'covers').
-        .then((s): PcaWalletProbe => ({ wallet, coverage: classifyCoverage(s) }))
-        // A failed probe couldn't determine coverage: inconclusive, not a capability gap.
-        .catch((): PcaWalletProbe => ({ wallet, coverage: { outcome: 'inconclusive', registered: null, adapterUnsupported: false } })),
-    ),
-  );
+  const read = await readPcaAccount(accountId, wallets, { extended: true });
+  if (!read.ok) return { ...blank, error: read.error, notFound: read.notFound };
+  const { snapshot, probes: walletProbes } = read;
+  // An inconclusive probe (S2/#9) sets probesInconclusive (H2) and isn't counted as
+  // approved: approvedCount counts registered === true, not 'covers'.
   const approvedCount = walletProbes.filter((p) => p.coverage.registered === true).length;
   const probesInconclusive = walletProbes.some((p) => p.coverage.outcome === 'inconclusive');
   const owned = wallets.some((w) => eq(w, snapshot.owner));
