@@ -46,21 +46,39 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The control-object files account for most of the filesystem time.
           # Each group has its own runner, temporary stores, and process tree.
+          # The two slowest files run alone (Windows, 2026-11: the inventory
+          # rollback suite ~190 s, the control-object store ~212 s), so no
+          # group's tests take much longer than ~3.5 min after the shared
+          # ~5 min of checkout, install and agent build. The inventory files
+          # are named one by one; windows-persistence-ci.test.mjs fails if a
+          # new rfc64-inventory-v1 file is not in exactly one group.
           - group: inventory
             evidence: true
             tests: >-
               test/finalization-recovery-sqlite-deferred.test.ts
               test/finalization-recovery-sqlite-migration.test.ts
               test/finalization-recovery-sqlite-store.test.ts
-              test/rfc64-inventory-v1
+              test/rfc64-inventory-v1-applied-head.test.ts
+              test/rfc64-inventory-v1-candidate-faults.test.ts
+              test/rfc64-inventory-v1-candidate-latency.test.ts
+              test/rfc64-inventory-v1-candidate-plans.test.ts
+              test/rfc64-inventory-v1-candidates.test.ts
+              test/rfc64-inventory-v1-lifecycle.test.ts
+              test/rfc64-inventory-v1-scalars.test.ts
               test/rfc64-agent-inventory-lifecycle.test.ts
               test/rfc64-author-catalog-producer.test.ts
-          - group: object-stores
+          - group: inventory-rollback
+            evidence: false
+            tests: >-
+              test/rfc64-inventory-v1-rollback.test.ts
+          - group: control-objects
             evidence: false
             tests: >-
               test/rfc64-control-object-store-v1.test.ts
+          - group: object-stores
+            evidence: false
+            tests: >-
               test/rfc64-control-object-store-lifecycle-v1.test.ts
               test/rfc64-durable-file-store-v1.test.ts
               test/rfc64-secure-filesystem-policy-v1.test.ts

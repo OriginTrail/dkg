@@ -679,11 +679,19 @@ jobs:
   # tests `describe.skipIf`-skip, so local `pnpm test` needs no Docker.
   # ------------------------------------------------------------------
   tornado-blazegraph:
-    name: "Tornado: storage Blazegraph integration (live server)"
+    name: "Tornado: storage Blazegraph integration (live server, ${{ matrix.group }})"
     needs: [changes, build]
     if: needs.changes.outputs.tornado_blazegraph == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # Two runners, each with its own Blazegraph service. `services` runs the
+    # publisher and agent live suites (~100 s each in 2026-11) with the native
+    # bootstrap and rollout fixtures; `stores` runs everything else, so neither
+    # runner waits for the other's ~3.5 min of suites.
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [stores, services]
     services:
       blazegraph:
         image: lyrasis/blazegraph:2.1.5@sha256:56be5edb612e981607edcd4fe1e6d4e66ba3303efc4bb3a7c5c8e6662e598125
@@ -743,6 +751,7 @@ jobs:
           exit 1
 
       - name: "Storage and RFC-64 rollout Blazegraph integration tests (no mocks)"
+        if: matrix.group == 'stores'
         env:
           # Stock image ships the default `kb` namespace. Storage tests isolate
           # through unique GRAPH IRIs; the rollout certificate derives the
@@ -770,6 +779,12 @@ jobs:
           DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/view-merged-query.test.ts
           DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/qualification-merged-meaning.test.ts
           DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/qualification-merged-working-memory.test.ts
+
+      - name: "Publisher, agent and rollout Blazegraph integration tests (no mocks)"
+        if: matrix.group == 'services'
+        env:
+          BLAZEGRAPH_TEST_URL: http://127.0.0.1:9999/bigdata/namespace/kb/sparql
+        run: |
           pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts
           pnpm --filter @origintrail-official/dkg-agent exec vitest run --config vitest.blazegraph.config.ts
           pnpm --filter @origintrail-official/dkg exec vitest run --config vitest.native-bootstrap.config.ts
@@ -780,6 +795,7 @@ jobs:
       # the image pinned in blazegraph-image.json (the one the node setup provisions) does, so the same live differential runs against THAT image with
       # the reproduction required (BLAZEGRAPH_REQUIRE_U001F_COLLAPSE=1): the real-engine check cannot turn vacuous when the image changes.
       - name: "Share promote lookup live differential on the provisioned Blazegraph image (U+001F positive control required)"
+        if: matrix.group == 'stores'
         timeout-minutes: 5
         run: |
           set -euo pipefail
@@ -809,7 +825,7 @@ jobs:
           pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts test-live/async-promote-bounded-lookup.blazegraph.test.ts
 
       - name: Upload store conformance packet
-        if: always()
+        if: always() && matrix.group == 'stores'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: storage-conformance-evidence
