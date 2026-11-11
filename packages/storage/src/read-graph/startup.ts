@@ -28,7 +28,8 @@
  * the layer maintains every write from the first, and records that registry.
  * Without anything to
  * maintain it is the start-up of a release that does not maintain read graphs
- * (`markReadGraphsDirtyAtStart`), unchanged.
+ * (`markReadGraphsDirtyAtStart`), after a look for registry records that
+ * outlived their state rows.
  */
 
 import { MemoryLayer, parseReadGraphIri, type ReadGraphKey } from '@origintrail-official/dkg-core';
@@ -96,6 +97,7 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
   const maintains = options.maintains
     ?? (modes && keepsAnyReadGraph(modes) ? (key: ReadGraphKey) => readGraphModeOf(modes, key) !== 'off' : undefined);
   if (!maintains || !layer || missingReadGraphMethods(layer.innerStore, layer.adapterCapabilities).length > 0) {
+    await noteRecordOnlyPartitions(store, options);
     return { marked: await markReadGraphsDirtyAtStart(store, options), maintained: 0 };
   }
   const recorded = options.dataDir === undefined ? undefined : installRecordedWorkingMemoryIdentity(layer.runtime, options.dataDir);
@@ -190,6 +192,26 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
 function keepsReady(row: ReadGraphStateRow, versions: ReadGraphVersions, identityRecorded: boolean): boolean {
   return row.state === 'ready' && isReadGraphRowAccepted(row, versions)
     && (identityRecorded || parseReadGraphIri(row.readGraph)?.layer !== MemoryLayer.WorkingMemory);
+}
+
+/**
+ * With read graphs off, start-up looks for state rows only. A registry record
+ * can outlive every state row of its context graph, so the records are looked
+ * for too, and a store that holds one is noted as holding read-graph
+ * partitions. A store that cannot be asked is noted all the same: unscoped
+ * reads leaving out a partition that does not exist cost little.
+ */
+async function noteRecordOnlyPartitions(store: TripleStore, options: ReadGraphStartOptions): Promise<void> {
+  const target = readGraphPartitionMaintenanceStore(store);
+  const queryOptions: QueryOptions = { priority: 'background', source: 'storage.readGraphStartup', ...(options.signal ? { signal: options.signal } : {}) };
+  try {
+    if ((await registryRecords(target, queryOptions)).size === 0) return;
+  } catch (error) {
+    options.signal?.throwIfAborted();
+    options.log?.(`Read-graph registry records could not be listed at start (${error instanceof Error ? error.message : String(error)}); unscoped reads leave the read-graph partition out`);
+  }
+  if (options.dataDir !== undefined) noteReadGraphPartitions(options.dataDir);
+  noteStoreMayHoldReadGraphPartitions(target);
 }
 
 async function registryRecords(store: TripleStore, options: QueryOptions) {
