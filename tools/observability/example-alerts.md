@@ -139,9 +139,12 @@ sum by (service_instance_id, deployment_environment) (count_over_time({service_n
   down, zero nodes) lives in its own rule with **noData = Alerting**.
 - **Graph catalog at 80%** matches the node's WARN log line for that level
   (`graphCatalogLimitWarning` in lib/queries.mjs). The node repeats it hourly
-  while the catalog stays there, so the 70-minute window keeps the rule firing
-  until about an hour after the last warning. Operator steps:
-  docs/use-dkg/graph-catalog-limit.md.
+  while the catalog stays there, so the 70-minute count keeps the rule firing
+  between warnings. The query range is 10 minutes, like the other rules', so
+  the `last` reducer reads only current counts: the rule clears about 80
+  minutes after the last warning. The storage test
+  `graph-catalog-alert-contract.test.ts` runs the node's real warnings
+  through this rule's filter. Operator steps: docs/use-dkg/graph-catalog-limit.md.
 - **RPC credit burn** reads the `rpc_usage` log lines (delta counts, so
   `sum_over_time` is exact) — needs nodes on a post-#1409 build.
 - **Failover exhausted** filters `reason="exhausted"`: the metric contract also

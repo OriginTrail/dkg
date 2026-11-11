@@ -32,7 +32,7 @@ catalog stays there.
 
 The alert set in `tools/observability` has a rule on the 80 % warning:
 "Graph catalog at 80% of its limit on a node". It fires while the warning keeps
-coming, and resolves about an hour after the last one.
+coming, and resolves about 80 minutes after the last one.
 
 When the node exports metrics, the same numbers are there:
 

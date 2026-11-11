@@ -87,10 +87,10 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
       condition: { op: '>', value: 0.05 }, forDur: '5m', noData: 'OK',
       summary: 'DKG operations are producing errored trace spans at {{ $values.B }}/s. (Silent until traces + Tempo metrics-generator are enabled.)' },
     { title: 'Graph catalog at 80% of its limit on a node', signal: 'logs', added: '2026-11-11',
-      ds: 'loki', windowSec: 4200, maxDataPoints: 50,
+      ds: 'loki', windowSec: 600, maxDataPoints: 50,
       expr: sumByLokiNode(`count_over_time(${dkgLogStream()}${severityIs('WARN')}${graphCatalogLimitWarning(80)} [70m])`),
       condition: { op: '>', value: 0 }, forDur: '5m', noData: 'OK',
-      summary: 'Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) reports its graph catalog at 80% or more of DKG_STORE_GRAPH_CATALOG_MAX_BYTES. At the limit its catalog reads fail with STORE_INTERNAL_LIMIT. Raise the limit and restart the node: docs/use-dkg/graph-catalog-limit.md. The node repeats the warning hourly, so the rule clears about an hour after the last one.' },
+      summary: 'Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) reports its graph catalog at 80% or more of DKG_STORE_GRAPH_CATALOG_MAX_BYTES. At the limit its catalog reads fail with STORE_INTERNAL_LIMIT. Raise the limit and restart the node: docs/use-dkg/graph-catalog-limit.md. The node repeats the warning hourly, so the rule clears about 80 minutes after the last one.' },
   ];
 
   const EXPR = '__expr__';
