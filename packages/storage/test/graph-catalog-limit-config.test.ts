@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Worker } from 'node:worker_threads';
 
 /** Storage loaded afresh: the configured ceiling belongs to the process, which keeps one. */
 async function freshStorage() {
@@ -51,6 +55,30 @@ describe('the graph catalog ceiling from the store config', () => {
         code: 'STORE_INTERNAL_LIMIT', limitName: 'STORE_GRAPH_CATALOG_MAX_BYTES', limitBytes: 200,
       });
     } finally { await store.close(); }
+  });
+
+  it('bounds the catalog reads inside an Oxigraph worker thread, also after the thread respawns', async () => {
+    const storage = await freshStorage();
+    vi.stubEnv(storage.STORE_GRAPH_CATALOG_MAX_BYTES_ENV, '');
+    const dir = mkdtempSync(join(tmpdir(), 'graph-catalog-worker-'));
+    // No outer graph index, so the worker's own check is the one that refuses.
+    const store = await storage.createTripleStore({
+      backend: 'oxigraph-worker', options: { path: join(dir, 'store.nq') }, graphSetIndex: false, graphCatalog: { maxBytes: 200 },
+    });
+    try {
+      await store.insert(Array.from({ length: 10 }, (_, i) => ({
+        subject: 'urn:s', predicate: 'urn:p', object: `"${i}"`, graph: `did:dkg:context-graph:limit-config/${i}`,
+      })));
+      await store.flush?.();
+      const refused = { code: 'STORE_INTERNAL_LIMIT', limitName: 'STORE_GRAPH_CATALOG_MAX_BYTES', limitBytes: 200 };
+      await expect(store.listGraphs()).rejects.toMatchObject(refused);
+      // An unexpected exit respawns the thread, which takes the configured value again.
+      await (store as unknown as { worker: Worker }).worker.terminate();
+      await expect(store.listGraphs()).rejects.toMatchObject(refused);
+    } finally {
+      await store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('leaves the ceiling alone for a store config without the setting', async () => {

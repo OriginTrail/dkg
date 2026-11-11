@@ -28,6 +28,7 @@ import {
   type WorkerResponseV1,
 } from '../worker-error-protocol.js';
 import { raceStoreWorkAgainstAbort } from '../abortable-store-work-lifecycle.js';
+import { configuredStoreGraphCatalogMaxBytes } from '../graph-catalog-internal-limit.js';
 import type { OxigraphStoreOptions } from './oxigraph-read-only.js';
 
 /**
@@ -393,9 +394,8 @@ export class OxigraphWorkerStore implements TripleStore {
    * already-replaced thread can never clobber the live one's state.
    */
   private spawnWorker(): void {
-    const worker = new Worker(this.workerPath, {
-      workerData: { persistPath: this.persistPath, readOnly: this.readOnly },
-    });
+    // The thread has its own storage modules: it takes this process's configured catalog ceiling at each spawn and respawn.
+    const worker = new Worker(this.workerPath, { workerData: { persistPath: this.persistPath, readOnly: this.readOnly, graphCatalogMaxBytes: configuredStoreGraphCatalogMaxBytes() } });
     this.worker = worker;
     this.workerExited = false;
     // Arming a fresh thread IS the transition into 'live'. Route it through the

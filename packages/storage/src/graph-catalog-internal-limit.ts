@@ -46,6 +46,11 @@ export function configureStoreGraphCatalogMaxBytes(maxBytes: unknown): void {
   configuredMaxBytes = maxBytes as number;
 }
 
+/** The value set from a store config, if any. A worker thread has its own copy of this module, so its store is given this value. */
+export function configuredStoreGraphCatalogMaxBytes(): number | undefined {
+  return configuredMaxBytes;
+}
+
 /**
  * The ceiling: the environment variable when it holds a positive safe integer, else the
  * configured value, else the default. Read at each use, so a process sees one value everywhere.
