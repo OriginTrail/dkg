@@ -4,12 +4,11 @@
 // Minting shows the secret once; revoking stops the key at its next call.
 // Keys are the node admin's alone.
 import React, { useMemo, useState } from 'react';
-import { PageHeader } from '../../components/ds/PageHeader.js';
 import { copy } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi, needsNodeAdmin } from '../api/client.js';
 import type { Key, MadeKey } from '../api/types.js';
 import { fmtTrac, modelName, pctOf, usdOf, weiOfTrac } from '../amounts.js';
-import { AdminCard, ErrorCard, OffCard, relAt, useLoad } from '../shared.js';
+import { AdminCard, ErrorCard, MarketplacePage, OffCard, relAt, useLoad } from '../shared.js';
 import { KeyOnce } from '../purchase/KeyStep.js';
 
 type Expiry = 'never' | '7' | '30' | '90';
@@ -65,17 +64,17 @@ export function AccessView(): React.ReactElement {
     marketplaceApi.revokeKey(keyId).then(() => keys.reload()).catch((err: unknown) => setRevokeErr({ keyId, err })).finally(() => setBusy(null));
   };
 
-  if (isMarketplaceOff(keys.err)) return <div className="mkt-frame" data-testid="mkt-access" data-state="off"><PageHeader title={copy('access.title')} description="Access keys that let your agents call the models in your plan" /><OffCard /></div>;
-  if (isMarketplaceAbsent(keys.err)) return <div className="mkt-frame" data-testid="mkt-access" data-state="absent"><PageHeader title={copy('access.title')} description="Access keys that let your agents call the models in your plan" /><OffCard absent /></div>;
-  if (needsNodeAdmin(keys.err)) return <div className="mkt-frame" data-testid="mkt-access" data-state="admin"><PageHeader title={copy('access.title')} description="Access keys that let your agents call the models in your plan" /><AdminCard what="admin.access" /></div>;
+  if (isMarketplaceOff(keys.err)) return <MarketplacePage page="access" state="off"><OffCard /></MarketplacePage>;
+  if (isMarketplaceAbsent(keys.err)) return <MarketplacePage page="access" state="absent"><OffCard absent /></MarketplacePage>;
+  if (needsNodeAdmin(keys.err)) return <MarketplacePage page="access" state="admin"><AdminCard what="admin.access" /></MarketplacePage>;
   if (keys.err && !keys.data) {
     return (
-      <div className="mkt-frame" data-testid="mkt-access" data-state="error"><PageHeader title={copy('access.title')} description="Access keys that let your agents call the models in your plan" />
+      <MarketplacePage page="access" state="error">
         <div className="mkt-card"><div data-copy="empty.error">{copy('empty.error')}</div><ErrorCard err={keys.err} onRetry={keys.reload} /></div>
-      </div>
+      </MarketplacePage>
     );
   }
-  if (!keys.data) return <div className="mkt-frame" data-testid="mkt-access" data-state="loading"><PageHeader title={copy('access.title')} description="Access keys that let your agents call the models in your plan" /><div className="mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></div>;
+  if (!keys.data) return <MarketplacePage page="access" state="loading"><div className="mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></MarketplacePage>;
 
   const scopeOf = (k: Key) => [
     k.services ? copy('access.scope.models', { n: k.services.length }) : copy('access.models.all'),
@@ -85,7 +84,7 @@ export function AccessView(): React.ReactElement {
   ].join(' · ');
 
   return (
-    <div className="mkt-frame" data-testid="mkt-access" data-state="ok"><PageHeader title={copy('access.title')} description="Access keys that let your agents call the models in your plan" />
+    <MarketplacePage page="access" state="ok">
       <div className="mkt-card">
         <div className="mkt-planhead">
           <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-mint-open" data-copy="access.mint" aria-expanded={formOpen} onClick={() => setFormOpen((o) => !o)}>{copy('access.mint')}</button>
@@ -163,6 +162,6 @@ export function AccessView(): React.ReactElement {
         {keys.data.keys.some((k) => reservedOf(k) > 0n) && <p className="mkt-muted mkt-xs" data-testid="mkt-reserved-note" data-copy="access.reserved.note">{copy('access.reserved.note')}</p>}
         <p className="mkt-muted mkt-xs" data-copy="access.revoke">{copy('access.revoke')}</p>
       </div>
-    </div>
+    </MarketplacePage>
   );
 }
