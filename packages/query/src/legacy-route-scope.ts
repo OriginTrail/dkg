@@ -20,14 +20,13 @@ export async function resolveLegacyRouteScope(scope: PreparedGraphScope, {
   root, family, discover, authorizedDatasetGraphs, fallbackPolicy = 'compatibility', engine = null,
 }: LegacyRouteScopeOptions): Promise<PreparedGraphScope> {
   if (scope.hasGraphClause) {
-    reportRoutedGraphs(authorizedDatasetGraphs);
-    return requireGraphScopeRewrite(rewriteGraphSet(scope, authorizedDatasetGraphs, 'union-only', engine));
+    const rewritten = rewriteGraphSet(scope, authorizedDatasetGraphs, 'union-only', engine);
+    if (rewritten.kind === 'ready') reportRoutedGraphs(authorizedDatasetGraphs);
+    return requireGraphScopeRewrite(rewritten);
   }
   const data = family === 'data';
   const graphs = await discover(data ? `${root}/_verifiable_memory/` : `${root}/`);
-  const routed = data && graphs.length ? [root, ...graphs] : graphs;
-  // With no graph found, the route reads its root graph alone.
-  reportRoutedGraphs(routed.length ? routed : [root]);
-  return requireGraphScopeRewrite(rewriteGraphRoute(scope, routed, root,
-    data ? 'deduplicated-values-union' : 'union-only', fallbackPolicy, engine));
+  return requireGraphScopeRewrite(rewriteGraphRoute(scope,
+    data && graphs.length ? [root, ...graphs] : graphs, root,
+    data ? 'deduplicated-values-union' : 'union-only', fallbackPolicy, engine, reportRoutedGraphs));
 }
