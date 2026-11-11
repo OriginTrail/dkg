@@ -168,6 +168,11 @@ import {
   formatMetricsCollectorStartupLog,
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
+import { startConfiguredSemanticRuntime } from '../semantic-runtime.js';
+import {
+  registerSemanticRuntimeInboxSkill,
+  SEMANTIC_RUNTIME_INBOX_SKILL_IRI,
+} from '../semantic-runtime-inbox.js';
 import { assertNodeRuntimeSupported } from '../node-runtime-preflight.js';
 import { refuseBrotliOnDaemonFetch } from './outbound-brotli-refusal.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
@@ -226,6 +231,8 @@ import { daemonCpuProfiles } from './cpu-profile.js';
 import { startContextGraphCatchupProgress } from './context-graph-catchup-progress-sources.js';
 import { beginAsyncAdmissionTrace } from './async-admission-trace.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
+import { AGENT_HTTP_HEADERS, normalizeOperatorAgentAddresses } from '../agent-http-auth.js';
+import { SqliteAgentHttpNonceStore } from '../agent-http-nonce-store.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -2163,7 +2170,14 @@ async function runDaemonInnerWithStartupOwnership(
   {
     const openSkills = config.messaging?.openSkills === true;
     const allowedSkillPeers = new Set(config.messaging?.skillAllowedPeers ?? []);
-    agent.setSkillAcl((senderPeerId: string) => {
+    agent.setSkillAcl((senderPeerId: string, skillUri: string) => {
+      // The semantic handler verifies wallet signatures, then live graph membership
+      // for Programs or tenant approval for bound operations. Let only it reach its
+      // stronger application-level gate without opening unrelated skills.
+      if (
+        config.semanticRuntime?.enabled === true
+        && skillUri === SEMANTIC_RUNTIME_INBOX_SKILL_IRI
+      ) return { accept: true };
       if (openSkills) return { accept: true };
       if (allowedSkillPeers.has(senderPeerId)) return { accept: true };
       return {
@@ -2244,6 +2258,64 @@ async function runDaemonInnerWithStartupOwnership(
     const coverage = await checkpointStartup.complete();
     log(`[bootstrap] Current public coverage: ${coverage.committed}/${coverage.assets}`);
   }
+
+
+  const localLlm = createDaemonLocalLlmService({
+    dkgHome: dkgDir(), cwd: process.cwd(),
+    stderr: (line) => log(`[dkg-mcp] ${line}`),
+  });
+
+  // Persisted API permissions restore the service on boot. With no records,
+  // only an authenticated management request may lazily activate it; an
+  // explicit enabled:false remains the operator's service kill switch.
+  config.semanticRuntime ??= {};
+  type SemanticRuntimeService = Awaited<ReturnType<typeof startConfiguredSemanticRuntime>>;
+  let semanticRuntimeHost: SemanticRuntimeService = null;
+  let semanticRuntimeStarting: Promise<SemanticRuntimeService> | undefined;
+  const ensureSemanticRuntime = async (activate = true): Promise<SemanticRuntimeService> => {
+    if (semanticRuntimeHost) return semanticRuntimeHost;
+    if (semanticRuntimeStarting) return semanticRuntimeStarting;
+    semanticRuntimeStarting = (async () => {
+      const started = await startConfiguredSemanticRuntime(config.semanticRuntime, {
+        log, dataDirectory: dkgDir(), activate, localLlmProvider: localLlm.programProvider,
+      });
+      if (started) {
+        try { registerSemanticRuntimeInboxSkill(agent, started, config.semanticRuntime, config.llm); }
+        catch (error) { await started.stop(); throw error; }
+      }
+      semanticRuntimeHost = started;
+      return started;
+    })();
+    try { return await semanticRuntimeStarting; }
+    finally { semanticRuntimeStarting = undefined; }
+  };
+  try {
+    semanticRuntimeHost = await ensureSemanticRuntime(false);
+  } catch (err) {
+    await localLlm.close();
+    await semanticRuntimeHost?.stop().catch((stopErr: any) =>
+      log(`Semantic runtime startup rollback could not stop runtime: ${stopErr?.message ?? String(stopErr)}`),
+    );
+    semanticRuntimeHost = null;
+    await agent.stop().catch((stopErr: any) =>
+      log(`Semantic runtime startup rollback could not stop agent: ${stopErr?.message ?? String(stopErr)}`),
+    );
+    await managedOxigraph
+      ?.stop()
+      .catch((stopErr: any) =>
+        log(`Semantic runtime startup rollback could not stop managed Oxigraph: ${stopErr?.message ?? String(stopErr)}`),
+      );
+    try {
+      dashDb.close();
+    } catch (closeErr: any) {
+      log(`Semantic runtime startup rollback could not close dashboard DB: ${closeErr?.message ?? String(closeErr)}`);
+    }
+    throw new Error(
+      `Semantic runtime startup failed: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    );
+  }
+
   // The marketplace (OT-RFC-27), when enabled: the buyer, whose job keeps the standing plan funded, its gateway, and
   // the seller. A part that fails to start is logged and stays off; the node boots on.
   const { marketplace, marketplaceGateway, marketplaceSeller } = await startMarketplace({
@@ -3224,6 +3296,8 @@ async function runDaemonInnerWithStartupOwnership(
   // --- Authentication ---
 
   const authEnabled = config.auth?.enabled !== false;
+  const operatorAgentAddresses = normalizeOperatorAgentAddresses(config.auth?.operatorAgentAddresses);
+  const agentHttpNonces = new SqliteAgentHttpNonceStore(dashDb.db);
   const validTokens = await loadTokens(config.auth);
   const bridgeAuthToken =
     (await loadBridgeAuthToken()) ??
@@ -3311,12 +3385,6 @@ async function runDaemonInnerWithStartupOwnership(
   // (version counters or ETag-like compare-and-swap) to close the race
   // across processes — out of scope for Round 6.
   const assertionImportLocks = new Map<string, Promise<void>>();
-  const localLlm = createDaemonLocalLlmService({
-    dkgHome: dkgDir(),
-    cwd: process.cwd(),
-    stderr: (line) => log(`[dkg-mcp] ${line}`),
-  });
-
   // --- HTTP API ---
 
   const rateLimiter = new HttpRateLimiter(
@@ -3424,7 +3492,7 @@ async function runDaemonInnerWithStartupOwnership(
             ? { "Access-Control-Allow-Origin": reqCorsOrigin }
             : {}),
           "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Access-Control-Allow-Headers": AGENT_HTTP_HEADERS,
         });
         res.end();
         return;
@@ -3437,6 +3505,7 @@ async function runDaemonInnerWithStartupOwnership(
         authEnabled,
         validTokens,
         resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
+        agentKey: { targetPeerId: agent.peerId, operatorAgentAddresses, nonces: agentHttpNonces },
         corsOrigin: resolveCorsOrigin(req, corsAllowed),
       });
       if (!authentication.allowed) return;
@@ -3574,6 +3643,8 @@ async function runDaemonInnerWithStartupOwnership(
         eventLoopDelay: eventLoopDelayView,
         localLlm,
         routeRpcTransport: daemonRpcRuntime?.routeTransport,
+        semanticRuntimeHost,
+        ensureSemanticRuntime,
         marketplace,
         marketplaceGateway,
         marketplaceSeller: marketplaceSeller?.seller,
@@ -3726,6 +3797,11 @@ async function runDaemonInnerWithStartupOwnership(
         const teardown = await runProducerQuiescentTeardown(
           buildProducerQuiescentTeardownSteps({
             closeHttpServer: () => closeDaemonHttpServer(server, detachedHttpResponses),
+            stopSemanticRuntime: async () => {
+              const runtimeToStop = semanticRuntimeHost;
+              semanticRuntimeHost = null;
+              await runtimeToStop?.stop();
+            },
             closeEntitySearch: async () => { entitySearch?.close(); },
             closeLocalLlm: () => localLlm.close(),
             drainCatchupJobs,
