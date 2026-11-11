@@ -143,6 +143,9 @@ describe('planGraphDataset', () => {
     ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o OPTIONAL { BIND(<urn:g:1> AS ?g) } } }', expected('named', named, { bindCallerGraphs: true }), expected('values', both)],
     ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o { SELECT (<urn:g:1> AS ?g) WHERE {} } } }', expected('named', named, { bindCallerGraphs: true }), expected('dataset', both)],
     ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o VALUES ?g { <urn:g:1> } } }', expected('named', named), expected('values', both)],
+    // An assignment of an expression, which may fail and leave ?g unbound, keeps the graph list instead.
+    ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o BIND(IF(?x, <urn:g:1>, <urn:g:2>) AS ?g) } }', expected('values', named), expected('values', both)],
+    ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o BIND(<urn:g:1> AS ?k) BIND(COALESCE(?k, <urn:g:2>) AS ?g) } }', expected('values', named), expected('values', both)],
     ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o FILTER(?g != <urn:g:2>) } }', expected('named', named), expected('values', both)],
   ] as const)('fully plans %s', (query, oxigraph, other) => {
     expect(planGraphDataset(scope(query), 'oxigraph')).toEqual(oxigraph);
@@ -642,6 +645,22 @@ describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind,
       expect(rows(scoped.bindings), body).toEqual(rows(labelled));
     }
     const plain = await engine.query('SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:label> ?l } }', shared);
+    // An assignment of an expression reads as with the view's graph list: one whose expression
+    // fails leaves ?g to the graph, so every graph keeps its own rows.
+    const viewGraphs = [`${ROOT}/_shared_memory`, ...SHARED];
+    const asListed = async (body: string) => {
+      const listed = await opened.store.query(`SELECT ?g ?s ${viewGraphs.map(graph => `FROM NAMED <${graph}>`).join(' ')} `
+        + `WHERE { VALUES ?g { ${viewGraphs.map(graph => `<${graph}>`).join(' ')} } GRAPH ?g { ${body} } }`);
+      return rows(listed.type === 'bindings' ? listed.bindings : []);
+    };
+    const failingBody = `?s <urn:label> ?l BIND(IF(?missing, <${SHARED[0]}>, <${SHARED[1]}>) AS ?g)`;
+    const failing = await engine.query(`SELECT ?g ?s WHERE { GRAPH ?g { ${failingBody} } }`, shared);
+    expect(rows(failing.bindings)).toEqual(rows(plain.bindings));
+    expect(rows(failing.bindings)).toEqual(await asListed(failingBody));
+    const perRowBody = `?s <urn:label> ?l BIND(IF(?s = <urn:shared>, <${SHARED[0]}>, <${DATA[1]}>) AS ?g)`;
+    const perRow = await engine.query(`SELECT ?g ?s WHERE { GRAPH ?g { ${perRowBody} } }`, shared);
+    expect(perRow.bindings.length).toBeGreaterThan(0);
+    expect(rows(perRow.bindings)).toEqual(await asListed(perRowBody));
     const optional = await engine.query(`SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:label> ?l OPTIONAL { BIND(<${SHARED[0]}> AS ?g) } } }`, shared);
     expect(rows(optional.bindings)).toEqual(rows(plain.bindings));
     expect(plain.bindings.length).toBeGreaterThan(labelled.length);

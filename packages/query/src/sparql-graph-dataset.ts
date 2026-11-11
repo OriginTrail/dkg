@@ -7,7 +7,12 @@ import {
 import type { SparqlEngineFamily } from '@origintrail-official/dkg-storage';
 import type { GraphAccessMode } from './sparql-graph-access.js';
 import { hasOuterDefaultGraphPattern, hasTopLevelDefaultGraphPattern } from './sparql-default-graph-pattern.js';
-import { bindCallerGraphsBeforeRead, hasCallerGraphAssignments, hasCallerGraphAssignmentsInside } from './sparql-caller-graph-read.js';
+import {
+  bindCallerGraphsBeforeRead,
+  hasCallerGraphAssignments,
+  hasCallerGraphAssignmentsInside,
+  hasCallerGraphExpressionAssignments,
+} from './sparql-caller-graph-read.js';
 import { transitionGraphScope } from './sparql-query-transition.js';
 import { createVariableAllocator } from './sparql-rewrite-names.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
@@ -108,11 +113,14 @@ function hasOwnTriplePattern(scope: PreparedSparqlQuery, opening: number, closin
 /**
  * Oxigraph does not evaluate `GRAPH ?var { P }` once per graph of the dataset
  * when P has no triple pattern of its own and holds a VALUES, a subquery or a
- * nested GRAPH: such a read binds ?var differently or repeats rows differently
- * than with a graph list. Those reads keep the list next to their dataset. P is
- * a caller's GRAPH ?var block, or the whole pattern when the rewrite wraps it.
+ * nested GRAPH, or when P assigns ?var an expression: such a read binds ?var
+ * differently or repeats rows differently than with a graph list. Those reads
+ * keep the list next to their dataset. (A constant graph branch would drop the
+ * rows whose assignment fails.) P is a caller's GRAPH ?var block, or the whole
+ * pattern when the rewrite wraps it.
  */
 export function readsNeedGraphList(scope: PreparedSparqlQuery): boolean {
+  if (scope.hasGraphClause && hasCallerGraphExpressionAssignments(scope)) return true;
   const { tokens } = scope.prepared;
   const groups: Array<readonly [number, number]> = scope.hasGraphClause
     ? scope.graphTargets.flatMap(target => target.kind === 'variable'
@@ -195,8 +203,8 @@ export function planGraphDataset(
     datasetClauses: graphlessDescription ? ['FROM']
       : !oxigraph || readsDefaultGraph ? ['FROM', 'FROM NAMED'] : ['FROM NAMED'],
     preservePattern: graphlessDescription || scope.readsOnlyDeclaredNamedSet,
-    // Oxigraph repeats the rows of a GRAPH ?var block that assigns ?var, at any depth,
-    // once per graph it iterates; a constant branch per graph keeps one row per match.
+    // Oxigraph repeats the rows of a GRAPH ?var block that assigns ?var a constant, at any
+    // depth, once per graph it iterates; a constant branch per graph keeps one row per match.
     bindCallerGraphs: !scopedDescription && scope.graphVariables.length > 0 && (oxigraph
       ? hasCallerGraphAssignmentsInside(scope)
       : graphAccess === 'dataset' && repeatedPath && needsConstantCallerGraphs(scope)),
