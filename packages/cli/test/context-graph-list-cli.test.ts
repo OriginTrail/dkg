@@ -90,6 +90,27 @@ const ROWS: ContextGraphListRowView[] = [
 ];
 
 describe('context graph list formatting', () => {
+  const hash = `0x${'a'.repeat(64)}`;
+  const chain = (nameHash: string) => chainRow('1', nameHash, {}).onChain;
+  const names: Array<{ label: string; row: Partial<ContextGraphListRowView>; expected: string | null }> = [
+    { label: 'ordinary same-name graph', row: { id: 'team', name: 'team' }, expected: 'team' },
+    { label: 'explicit known name', row: { name: 'team', nameKnown: true }, expected: 'team' },
+    { label: 'explicit unknown name', row: { name: 'stale', nameKnown: false }, expected: null },
+    { label: 'missing name', row: { name: undefined }, expected: null },
+    { label: 'blank name', row: { name: ' ' }, expected: ' ' },
+    { label: 'empty name', row: { name: '' }, expected: '' },
+    { label: 'known blank name', row: { name: ' ', nameKnown: true }, expected: ' ' },
+    { label: 'legacy hash ID without chain provenance', row: { id: hash, name: hash }, expected: hash },
+    { label: 'legacy chain hash', row: { name: hash, onChain: chain(hash) }, expected: null },
+    { label: 'known flag does not override chain provenance', row: { id: hash, name: hash, nameKnown: true, onChain: chain(hash) }, expected: null },
+    { label: 'uppercase name against canonical chain hash', row: { name: hash.toUpperCase(), onChain: chain(hash) }, expected: null },
+    { label: 'noncanonical chain hash stays distinct', row: { name: hash, onChain: chain(hash.toUpperCase()) }, expected: hash },
+    { label: 'different chain provenance', row: { name: hash, onChain: chain(`0x${'b'.repeat(64)}`) }, expected: hash },
+  ];
+  it.each(names)('preserves CLI name compatibility: $label', ({ row, expected }) => {
+    expect(contextGraphDisplayName({ id: 'team', name: 'team', isSystem: false, ...row })).toBe(expected);
+  });
+
   it('leads with what a user needs to choose a graph and keeps the full id last', () => {
     const lines = formatContextGraphListTable(ROWS);
     const [header, rule, ...body] = lines;

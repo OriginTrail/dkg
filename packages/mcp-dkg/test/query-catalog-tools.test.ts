@@ -432,7 +432,7 @@ describe('query-catalog boundary responses', () => {
     async (failure) => {
       const inspected: string[] = [];
       const client = new FakeClient({
-        listProjects: async () => [{ id: 'first', role: ' Member ' }, { id: 'second' }],
+        listProjects: async () => [{ id: 'first', callerInvolved: true }, { id: 'second', callerInvolved: true }],
         readQueryCatalog: async (id) => {
           inspected.push(id);
           if (failure) throw 'catalog inaccessible';
