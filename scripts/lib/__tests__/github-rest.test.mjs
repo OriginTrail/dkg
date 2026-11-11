@@ -145,6 +145,30 @@ test('a deadline stops a wait that would pass it and any request after it, and a
   assert.equal(signals[2], undefined);
 });
 
+test('a request still in flight at the deadline is aborted then, in real time', { timeout: 10_000 }, async () => {
+  // A server that never answers: the request settles only if its signal
+  // aborts. A real request's socket keeps the process alive until then; this
+  // fake has none, and the abort's timer does not hold the process, so a
+  // timer outlasting the test does. Without the abort the test times out.
+  const keepAlive = setTimeout(() => {}, 20_000);
+  try {
+    let signal;
+    const stalled = (url, init) => new Promise((resolve, reject) => {
+      signal = init.signal;
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+    const github = createGitHubClient({ token: 't', fetch: stalled, deadlineMs: 300 });
+    const started = Date.now();
+    await assert.rejects(github.request('GET', 'x'), /deadline/);
+    const elapsed = Date.now() - started;
+    assert.equal(signal?.aborted, true);
+    assert.equal(signal.reason?.name, 'TimeoutError');
+    assert.ok(elapsed >= 250 && elapsed < 5_000, `aborted after ${elapsed} ms`);
+  } finally {
+    clearTimeout(keepAlive);
+  }
+});
+
 test('pagination reads every page of arrays and of object pages, stopping at the total', async () => {
   const page = (count, offset = 0) => Array.from({ length: count }, (_, index) => offset + index);
   const arrays = client([{ body: page(2) }, { body: page(2, 2) }, { body: page(1, 4) }]);
