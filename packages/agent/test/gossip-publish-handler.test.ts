@@ -572,6 +572,19 @@ describe('GossipPublishHandler', () => {
     });
   });
 
+  describe('received protocol metadata', () => {
+    it.each([
+      ['a trust-level row', '<http://example.org/s> <http://dkg.io/ontology/trustLevel> "3" .'],
+      ['a subject in a reserved namespace', '<urn:dkg:file:gossip> <http://example.org/p> "v" .'],
+    ])('refuses a broadcast carrying %s before it calls the store', async (_label, nquads) => {
+      const { store, calls } = recordingStore();
+      const { handler } = createHandler(store);
+      await handler.handlePublishMessage(makePublishMessage({ contextGraphId: CONTEXT_GRAPH, nquads }), CONTEXT_GRAPH);
+      expect(calls).toEqual([]);
+      expect(await store.countQuads()).toBe(0);
+    });
+  });
+
   it('registers the sub-graph of a publish once and hands the inserted rows to the metadata projection', async () => {
     const store = new OxigraphStore();
     const subscriptions = new Map<string, ContextGraphSub>();

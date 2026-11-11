@@ -115,12 +115,29 @@ function nquad(subject: string, predicate: string, object: string, graph: string
   return `<${subject}> <${predicate}> ${renderedObject} <${graph}> .`;
 }
 
+function nquadOf(quad: { subject: string; predicate: string; object: string }, graph: string): string {
+  return nquad(quad.subject, quad.predicate, quad.object, graph);
+}
+
 function utf8(text: string): Uint8Array {
   return new TextEncoder().encode(text);
 }
 
 function uniqueContextGraph(): string {
   return `term-validation-${randomUUID()}`;
+}
+
+/**
+ * The written quad a scenario varies: an object term, or its subject,
+ * predicate and object. A legacy scenario uses the subject as its manifest
+ * root too.
+ */
+export type PeerWritePayload = string | { readonly subject?: string; readonly predicate?: string; readonly object: string };
+
+function payload(variant: PeerWritePayload, subject: string, predicate: string): { subject: string; predicate: string; object: string } {
+  return typeof variant === 'string'
+    ? { subject, predicate, object: variant }
+    : { subject: variant.subject ?? subject, predicate: variant.predicate ?? predicate, object: variant.object };
 }
 
 /** What a scenario observed: whether the node accepted the write, and what reached the store. */
@@ -139,11 +156,12 @@ export interface PeerWriteOutcome {
 export async function legacyPublish(
   api: PeerWritePublisherApi,
   store: TripleStore,
-  objectTerm: string,
+  variant: PeerWritePayload,
 ): Promise<PeerWriteOutcome> {
   const contextGraphId = uniqueContextGraph();
   const dataGraph = contextGraphDataUri(contextGraphId);
-  const root = `urn:term-validation:${randomUUID()}`;
+  const written = payload(variant, `urn:term-validation:${randomUUID()}`, SCHEMA_DESCRIPTION);
+  const root = written.subject;
   await new GraphManager(store).ensureContextGraph(contextGraphId);
   const before = await store.countQuads();
   const recorder = recordStoreWrites(store);
@@ -152,7 +170,7 @@ export async function legacyPublish(
     ual: `did:dkg:mock:31337/${PUBLISHER}/1`,
     nquads: utf8([
       nquad(root, SCHEMA_NAME, '"kept"', dataGraph),
-      nquad(root, SCHEMA_DESCRIPTION, objectTerm, dataGraph),
+      nquad(root, written.predicate, written.object, dataGraph),
     ].join('\n')),
     contextGraphId,
     kas: [{ tokenId: 1, rootEntity: root, privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
@@ -177,7 +195,7 @@ export async function legacyPublish(
 export async function graphScopedPublish(
   api: PeerWritePublisherApi,
   store: TripleStore,
-  objectTerm: string,
+  variant: PeerWritePayload,
 ): Promise<PeerWriteOutcome> {
   const contextGraphId = uniqueContextGraph();
   const chainId = 'otp:20430';
@@ -195,7 +213,7 @@ export async function graphScopedPublish(
   const handler = new api.PublishHandler(recorder.store, new TypedEventBus());
   const ack = decodePublishAck(await handler.handler(encodePublishRequest({
     ual,
-    nquads: utf8(nquad('urn:asset:subject', 'urn:asset:predicate', objectTerm, vmGraph)),
+    nquads: utf8(nquadOf(payload(variant, 'urn:asset:subject', 'urn:asset:predicate'), vmGraph)),
     contextGraphId,
     kas: [],
     publisherIdentity: new Uint8Array(32),
@@ -225,11 +243,12 @@ export async function graphScopedPublish(
 export async function legacyUpdate(
   api: PeerWritePublisherApi,
   store: TripleStore,
-  objectTerm: string,
+  variant: PeerWritePayload,
 ): Promise<PeerWriteOutcome> {
   const contextGraphId = uniqueContextGraph();
   const batchId = 77n;
-  const root = `urn:term-validation:${randomUUID()}`;
+  const written = payload(variant, `urn:term-validation:${randomUUID()}`, SCHEMA_DESCRIPTION);
+  const root = written.subject;
   const labelGraph = contextGraphDataUri(contextGraphId);
   const vmGraph = contextGraphLayerUri(
     contextGraphId,
@@ -239,7 +258,7 @@ export async function legacyUpdate(
   );
   const text = [
     nquad(root, SCHEMA_NAME, '"kept"', labelGraph),
-    nquad(root, SCHEMA_DESCRIPTION, objectTerm, labelGraph),
+    nquad(root, written.predicate, written.object, labelGraph),
   ].join('\n');
   const merkleRoot = api.computeFlatKCRootV10(api.parseSimpleNQuads(text), []);
   const chain = {
@@ -271,7 +290,7 @@ export async function legacyUpdate(
 export async function graphScopedUpdate(
   api: PeerWritePublisherApi,
   store: TripleStore,
-  objectTerm: string,
+  variant: PeerWritePayload,
 ): Promise<PeerWriteOutcome> {
   const contextGraphId = uniqueContextGraph();
   const chainId = 'otp:20430';
@@ -293,7 +312,7 @@ export async function graphScopedUpdate(
     { subject: ual, predicate: `${dkg}accessPolicy`, object: '"public"', graph: metaGraph },
     { subject: ual, predicate: `${dkg}publisherPeerId`, object: '"original-peer"', graph: metaGraph },
   ]);
-  const text = nquad('urn:asset:subject', 'urn:asset:predicate', objectTerm, vmGraph);
+  const text = nquadOf(payload(variant, 'urn:asset:subject', 'urn:asset:predicate'), vmGraph);
   const merkleRoot = api.computeFlatKCRootV10(
     api.parseSimpleNQuads(text).map((quad) => ({ ...quad, graph: '' })),
     [],
@@ -378,3 +397,47 @@ export function describePeerWriteTermValidation(
     }
   });
 }
+
+/**
+ * Protocol metadata a peer's write may not carry: a trust-level row, which a
+ * node stamps itself, and a subject in a reserved namespace. Each comes with
+ * a substring that identifies it in a store call.
+ */
+export const RECEIVED_PROTOCOL_METADATA = [
+  {
+    label: 'a trust-level row',
+    payload: { predicate: 'http://dkg.io/ontology/trustLevel', object: '"3"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+    marker: 'ontology/trustLevel',
+  },
+  {
+    label: 'a subject in a reserved namespace',
+    payload: { subject: 'urn:dkg:file:peer-write', object: '"refused value"' },
+    marker: 'urn:dkg:file:peer-write',
+  },
+] as const;
+
+/** Declares one suite per scenario: each refuses protocol metadata and writes nothing. */
+export function describePeerWriteProtocolMetadata(
+  factory: PeerWriteStoreFactory,
+  api: PeerWritePublisherApi,
+): void {
+  describe(`peer write protocol metadata on ${factory.name}`, () => {
+    for (const scenario of SCENARIOS) {
+      describe(scenario.name, () => {
+        it.each(RECEIVED_PROTOCOL_METADATA)('refuses $label and writes nothing', async ({ payload, marker }) => {
+          const { store, dispose } = await factory.open();
+          try {
+            const outcome = await scenario.run(api, store, payload);
+            expect(outcome.accepted).toBe(false);
+            expect(outcome.targetQuads).toBe(0);
+            expect(outcome.writes.filter((write) => write.includes(marker))).toEqual([]);
+            expect(outcome.after).toBe(outcome.before);
+          } finally {
+            await dispose();
+          }
+        });
+      });
+    }
+  });
+}
+

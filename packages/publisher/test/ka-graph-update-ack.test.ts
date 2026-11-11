@@ -356,6 +356,32 @@ describe('StorageACKHandler graph-scoped updates', () => {
     );
   });
 
+  it.each([
+    ['a trust-level row', {
+      subject: 'urn:entity:b',
+      predicate: 'http://dkg.io/ontology/trustLevel',
+      object: '"3"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    }],
+    ['a subject in a reserved namespace', { subject: 'urn:dkg:file:update', predicate: 'urn:p:value', object: '"b"' }],
+  ])('refuses an inline graph update carrying %s before signing or writing', async (_label, metadata) => {
+    const quads: Quad[] = [
+      { subject: 'urn:entity:a', predicate: 'urn:p:value', object: '"a"', graph: EXACT_VM_GRAPH },
+      { ...metadata, graph: EXACT_VM_GRAPH },
+    ];
+    const stagingQuads = encodePublicNQuads(quads);
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    const signMessage = vi.spyOn(wallet, 'signMessage');
+    const handler = createHandler({ store, wallet });
+
+    await expect(handler.updateHandler(intent(quads, 3, {
+      stagingQuads,
+      newByteSize: stagingQuads.length,
+    }), PEER)).rejects.toThrow(/trustLevel|reserved namespace/);
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(await store.countQuads()).toBe(0);
+  });
+
   it('declines the same public-plus-private graph update when staging is absent and SWM is empty', async () => {
     const quads: Quad[] = [
       { subject: 'urn:entity:a', predicate: 'urn:p:value', object: '"a"', graph: EXACT_VM_GRAPH },

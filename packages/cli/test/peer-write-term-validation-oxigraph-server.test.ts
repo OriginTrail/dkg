@@ -15,7 +15,11 @@ import * as publisher from '@origintrail-official/dkg-publisher';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { resolveOxigraphBinary } from '../src/daemon/oxigraph-binary.js';
 import { freePort } from './fixtures/oxigraph-server-real-fixture.js';
-import { describePeerWriteTermValidation } from '../../publisher/test/_helpers/peer-write-terms.js';
+import {
+  describePeerWriteProtocolMetadata,
+  describePeerWriteTermValidation,
+  type PeerWriteStoreFactory,
+} from '../../publisher/test/_helpers/peer-write-terms.js';
 
 let server: Awaited<ReturnType<typeof startOxigraphServer>> | undefined;
 let location: string | undefined;
@@ -47,7 +51,7 @@ afterAll(async () => {
   if (location) await rm(location, { recursive: true, force: true });
 }, 30_000);
 
-describePeerWriteTermValidation({
+const STORE: PeerWriteStoreFactory = {
   name: 'the pinned oxigraph-server',
   async open() {
     const store = createManagedOxigraphSparqlStoreV1({
@@ -57,4 +61,7 @@ describePeerWriteTermValidation({
     });
     return { store, dispose: () => store.close() };
   },
-}, publisher);
+};
+
+describePeerWriteTermValidation(STORE, publisher);
+describePeerWriteProtocolMetadata(STORE, publisher);

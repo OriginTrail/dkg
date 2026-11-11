@@ -19,6 +19,7 @@ export { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
 export type { LiftJobTailStep, LiftJobTailStepObserver } from './lift-job-tail-steps.js';
 export { skolemize, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } from './skolemize.js';
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
+export { assertNoReceivedProtocolMetadata, rejectReservedSubjectPrefixes, rejectUserAuthoredProtocolMetadata } from './protocol-metadata.js';
 export {
   KNOWLEDGE_ASSET_SKOLEM_PREFIX,
   KNOWLEDGE_ASSET_PRIVATE_SKOLEM_PREFIX,

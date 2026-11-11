@@ -16,7 +16,11 @@ import {
   blazegraphNamespaceApiUrlFromSparqlEndpoint,
 } from '@origintrail-official/dkg-storage';
 import * as publisher from '../src/index.js';
-import { describePeerWriteTermValidation } from '../test/_helpers/peer-write-terms.js';
+import {
+  describePeerWriteProtocolMetadata,
+  describePeerWriteTermValidation,
+  type PeerWriteStoreFactory,
+} from '../test/_helpers/peer-write-terms.js';
 
 let manager: BlazegraphNamespaceManager;
 let handles: Awaited<ReturnType<BlazegraphNamespaceManager['acquireMany']>> = [];
@@ -35,10 +39,13 @@ afterAll(async () => {
   if (handles.length > 0) await manager.disposeAll(handles);
 }, 60_000);
 
-describePeerWriteTermValidation({
+const STORE: PeerWriteStoreFactory = {
   name: 'a live Blazegraph',
   async open() {
     const store = new BlazegraphStore(handles[0]!.sparqlUrl, { timeout: 30_000 });
     return { store, dispose: () => store.close() };
   },
-}, publisher);
+};
+
+describePeerWriteTermValidation(STORE, publisher);
+describePeerWriteProtocolMetadata(STORE, publisher);

@@ -28,11 +28,11 @@ import {
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
   GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
   SWM_SENDER_KEY_MESSAGE_TYPE,
-  assertNoUserAuthoredTrustLevelQuads,
 } from '@origintrail-official/dkg-core';
 import type { EncryptedWorkspacePayloadMsg, GossipEnvelopeMsg, OperationContext, SwmSenderKeyMessageMsg, WorkspaceCASConditionMsg, WorkspacePublishRequestMsg, WorkspaceRecipientEncryptionKey } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
+import { assertNoReceivedProtocolMetadata } from './protocol-metadata.js';
 import { acceptIncomingPublicQuads } from './incoming-public-copy.js';
 import { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 import {
@@ -1488,7 +1488,7 @@ export class SharedMemoryHandler {
       let quads: Quad[];
       try {
         quads = parseSimpleNQuads(nquadsStr);
-        assertNoUserAuthoredTrustLevelQuads(quads);
+        assertNoReceivedProtocolMetadata(quads);
       } catch (error) {
         const reason = `INVALID_KA_RDF: ${error instanceof Error ? error.message : String(error)}`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
