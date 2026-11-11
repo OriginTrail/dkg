@@ -33,7 +33,7 @@ import { workingMemoryIdentityRule, type WorkingMemoryIdentityRule } from './mem
 import { readGraphRuntimeOf } from './read-graph-store.js';
 import { markReadGraphDirty, type ReadGraphJobContext } from './rebuild.js';
 import { readGraphRecoveryGeneration } from './recovery.js';
-import { holdWorkingMemoryReadGraphs, workingMemoryReadGraphsHeld } from './working-memory-hold.js';
+import { holdWorkingMemoryReadGraphs } from './working-memory-hold.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
 import { nextReadGraphState } from './state.js';
 
@@ -46,8 +46,17 @@ export interface WorkingMemoryNodeIdentity {
 /** The record, in the node's data directory, of the identity its working-memory read graphs are kept under. */
 export const READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE = 'read-graph-working-memory-identity.json';
 
-/** The data directory each backend's identity is recorded in. */
-const DATA_DIRS = new WeakMap<ReadGraphBackendRuntime, string>();
+/**
+ * The data directories each backend's identity is recorded in: every one a
+ * start-up over the backend named, since any of their agents may be the one a
+ * later process starts alone.
+ */
+const DATA_DIRS = new WeakMap<ReadGraphBackendRuntime, Set<string>>();
+
+function noteDirectory(runtime: ReadGraphBackendRuntime, dataDir: string): void {
+  const dirs = DATA_DIRS.get(runtime) ?? new Set<string>();
+  DATA_DIRS.set(runtime, dirs.add(dataDir));
+}
 
 /** What a backend's runtime knows of its identity and its record. */
 interface IdentityRecording {
@@ -62,6 +71,8 @@ interface IdentityRecording {
    * it was stored. A restart of the backend since may have undone them.
    */
   readonly unflushed: Map<string, number | undefined>;
+  /** Data directories whose record a change of identity could not remove: the working-memory read graphs are held. */
+  readonly stale: Set<string>;
   /** The stored part of the installations, one at a time. */
   queue: Promise<void>;
 }
@@ -71,7 +82,7 @@ const RECORDINGS = new WeakMap<ReadGraphBackendRuntime, IdentityRecording>();
 function recordingOf(runtime: ReadGraphBackendRuntime): IdentityRecording {
   let recording = RECORDINGS.get(runtime);
   if (!recording) {
-    recording = { node: undefined, recorded: false, owed: new Set(), unflushed: new Map(), queue: Promise.resolve() };
+    recording = { node: undefined, recorded: false, owed: new Set(), unflushed: new Map(), stale: new Set(), queue: Promise.resolve() };
     RECORDINGS.set(runtime, recording);
   }
   return recording;
@@ -108,13 +119,33 @@ export function installRecordedWorkingMemoryIdentity(
   runtime: ReadGraphBackendRuntime,
   dataDir: string,
 ): WorkingMemoryNodeIdentity | undefined {
-  DATA_DIRS.set(runtime, dataDir);
+  noteDirectory(runtime, dataDir);
   const recording = recordingOf(runtime);
   const recorded = recording.owed.size > 0 || recording.unflushed.size > 0 ? undefined : recordedWorkingMemoryIdentity(dataDir);
   recording.node = recorded;
   recording.recorded = recorded !== undefined;
   if (recorded !== undefined) runtime.workingMemoryIdentity = workingMemoryIdentityRule(recorded);
   return recorded;
+}
+
+/**
+ * A later start-up's part, over a backend another start-up of this process
+ * loaded: its agent may be the one a later process starts alone, so its data
+ * directory records the running identity from now on. A record it holds is
+ * replaced by the running identity's, or removed while none is recorded.
+ */
+export function noteWorkingMemoryIdentityDirectory(runtime: ReadGraphBackendRuntime, dataDir: string): void {
+  noteDirectory(runtime, dataDir);
+  const recording = recordingOf(runtime);
+  if (recording.recorded && recording.node !== undefined) {
+    try {
+      recordWorkingMemoryIdentity(dataDir, recording.node);
+      return;
+    } catch {
+      // No record rather than one of another identity.
+    }
+  }
+  removeRecordsOrHold(runtime, [dataDir]);
 }
 
 /** Write the record: a new file, synced, renamed over the old one, and the directory synced. */
@@ -133,18 +164,22 @@ function recordWorkingMemoryIdentity(dataDir: string, node: WorkingMemoryNodeIde
 }
 
 /**
- * Remove the record, holding the backend's working-memory read graphs while it
- * cannot be removed and releasing them once it is. Returns whether it is gone.
+ * Remove the record in each of `dirs`, holding the backend's working-memory
+ * read graphs while any record that should be gone is left and releasing them
+ * once none is. Returns whether none is left.
  */
-function removeRecordOrHold(runtime: ReadGraphBackendRuntime, dataDir: string): boolean {
-  try {
-    removeWorkingMemoryIdentityRecord(dataDir);
-  } catch {
-    holdWorkingMemoryReadGraphs(runtime, true);
-    return false;
+function removeRecordsOrHold(runtime: ReadGraphBackendRuntime, dirs: Iterable<string>): boolean {
+  const { stale } = recordingOf(runtime);
+  for (const dir of dirs) {
+    try {
+      removeWorkingMemoryIdentityRecord(dir);
+      stale.delete(dir);
+    } catch {
+      stale.add(dir);
+    }
   }
-  holdWorkingMemoryReadGraphs(runtime, false);
-  return true;
+  holdWorkingMemoryReadGraphs(runtime, stale.size > 0);
+  return stale.size === 0;
 }
 
 /** Remove the record, if there is one, and sync the directory. */
@@ -212,34 +247,35 @@ export async function installWorkingMemoryIdentity(
   const runtime = readGraphRuntimeOf(context.store);
   if (!runtime) return { marked: [], recorded: false };
   const recording = recordingOf(runtime);
-  const dataDir = recordingDirectory(runtime, context.dataDir);
+  const dirs = recordingDirectories(runtime, context.dataDir);
   const rule = workingMemoryIdentityRule(node);
   // Nothing is awaited from here until the rule, the marks and the record agree.
   const { marked, moved } = markWorkingMemoryReadGraphsDirty(runtime, runtime.workingMemoryIdentity, rule);
   if (moved.length > 0 || recording.node === undefined || !sameIdentity(recording.node, node)) {
     recording.recorded = false;
     // A record that cannot be removed holds the working-memory read graphs until a later turn removes it.
-    if (dataDir !== undefined) removeRecordOrHold(runtime, dataDir);
+    removeRecordsOrHold(runtime, dirs);
   }
   runtime.workingMemoryIdentity = rule;
   recording.node = node;
   for (const readGraph of moved) recording.owed.add(readGraph);
-  const turn = recording.queue.then(() => storeMarksAndRecord(context, runtime, recording, dataDir));
+  const turn = recording.queue.then(() => storeMarksAndRecord(context, runtime, recording));
   recording.queue = turn.then(() => undefined, () => undefined);
   return { marked, recorded: await turn };
 }
 
 /**
- * The data directory a backend's identity is recorded in: the one its start-up
- * noted, whichever directory an installation names, so that one record covers
- * the backend's read graphs. Without one noted, the first directory an
- * installation names is noted.
+ * The data directories a backend's identity is recorded in: those its
+ * start-ups noted, whichever directory an installation names, so that every
+ * record start-up may read covers the backend's read graphs. Without one
+ * noted, the first directory an installation names is noted.
  */
-function recordingDirectory(runtime: ReadGraphBackendRuntime, named: string | undefined): string | undefined {
+function recordingDirectories(runtime: ReadGraphBackendRuntime, named: string | undefined): string[] {
   const noted = DATA_DIRS.get(runtime);
-  if (noted !== undefined || named === undefined) return noted;
-  DATA_DIRS.set(runtime, named);
-  return named;
+  if (noted !== undefined && noted.size > 0) return [...noted];
+  if (named === undefined) return [];
+  noteDirectory(runtime, named);
+  return [named];
 }
 
 /**
@@ -251,18 +287,18 @@ async function storeMarksAndRecord(
   context: Pick<ReadGraphJobContext, 'dataDir' | 'signal' | 'source'> & { readonly store: TripleStore },
   runtime: ReadGraphBackendRuntime,
   recording: IdentityRecording,
-  dataDir: string | undefined,
 ): Promise<boolean> {
   // A mark the store took before its backend restarted, which no flush made durable, may be undone: it is owed again.
   const generation = readGraphRecoveryGeneration(context.store, runtime);
   oweUndoneMarks(recording, generation);
+  const records = recordingDirectories(runtime, context.dataDir).length > 0;
   // A mark owed by an installation that comes meanwhile is stored here too.
   for (const readGraph of recording.owed) {
     try {
       await markReadGraphDirty(context, readGraph);
       recording.owed.delete(readGraph);
       // Its durability matters only to a record, which needs a data directory.
-      if (dataDir !== undefined) recording.unflushed.set(readGraph, generation);
+      if (records) recording.unflushed.set(readGraph, generation);
     } catch {
       // The stored row did not take the mark: this process still does not serve the read graph.
       const current = runtime.mirror.get(readGraph);
@@ -271,19 +307,21 @@ async function storeMarksAndRecord(
     }
   }
   // A record that could not be removed: try again, and keep the working-memory read graphs held while it stays.
-  if (dataDir !== undefined && workingMemoryReadGraphsHeld(runtime) && !removeRecordOrHold(runtime, dataDir)) return false;
-  if (recording.owed.size > 0 || dataDir === undefined || recording.node === undefined) return false;
+  if (recording.stale.size > 0 && !removeRecordsOrHold(runtime, [...recording.stale])) return false;
+  const dirs = recordingDirectories(runtime, context.dataDir);
+  if (recording.owed.size > 0 || dirs.length === 0 || recording.node === undefined) return false;
   if (recording.recorded) return true;
   const node = recording.node;
   try {
-    if (!removeRecordOrHold(runtime, dataDir)) return false;
+    if (!removeRecordsOrHold(runtime, dirs)) return false;
     await context.store.flush?.();
     // The flush made durable the marks the backend still holds: those stored since its last restart.
     if (oweUndoneMarks(recording, readGraphRecoveryGeneration(context.store, runtime))) return false;
     recording.unflushed.clear();
     // An installation that came meanwhile records its own identity, once its marks are stored.
     if (recording.node !== node || recording.owed.size > 0) return false;
-    recordWorkingMemoryIdentity(dataDir, node);
+    // A data directory a later start-up named meanwhile is recorded in too.
+    for (const dir of recordingDirectories(runtime, context.dataDir)) recordWorkingMemoryIdentity(dir, node);
   } catch {
     return false;
   }

@@ -54,7 +54,7 @@ import {
   recordReadGraphRegistry,
 } from './registry-record.js';
 import type { ReadGraphRegistrySnapshot } from './membership.js';
-import { installRecordedWorkingMemoryIdentity } from './working-memory-identity.js';
+import { installRecordedWorkingMemoryIdentity, noteWorkingMemoryIdentityDirectory } from './working-memory-identity.js';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
   MAX_READ_GRAPH_GENERATION,
@@ -115,6 +115,7 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
   const loaded = LOADS.get(layer.runtime);
   if (loaded !== undefined && await loaded) {
     if (options.dataDir !== undefined) useReadGraphMarkJournal(layer.runtime, options.dataDir);
+    if (options.dataDir !== undefined) noteWorkingMemoryIdentityDirectory(layer.runtime, options.dataDir);
     const marked = options.dataDir === undefined ? 0 : await markJournaledRows(target, layer.runtime, options.dataDir, queryOptions);
     return { marked, maintained: layer.runtime.mirror.size };
   }
@@ -134,8 +135,8 @@ async function loadReadGraphs(
   queryOptions: QueryOptions,
 ): Promise<ReadGraphStartResult> {
   const { mirror, registries } = layer.runtime;
-  // Only the start-up that loads the mirror installs the recorded identity: a later one leaves the running rule, and the
-  // data directory its changes are recorded in, to the store objects already using them.
+  // Only the start-up that loads the mirror installs the recorded identity. A later one leaves the running rule to the
+  // store objects already using it, and its data directory records that identity from then on.
   const recorded = options.dataDir === undefined ? undefined : installRecordedWorkingMemoryIdentity(layer.runtime, options.dataDir);
   // The backend's recovery generation now is the one later restarts are told by.
   syncReadGraphRuntimeWithRecovery(store, layer.runtime);
