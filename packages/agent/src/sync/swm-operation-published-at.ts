@@ -142,7 +142,7 @@ export async function insertKeepingOnePublishedAt(
   // Backends without UPDATE keep harmless duplicate stamps for a later repair.
   for (const { graph, sparql } of retirementUpdates(plan.retirements)) {
     const supported = await tryUpdateWithTouchedGraphs(store, sparql, [graph],
-      { priority: 'background', source: `${source}.retirePublishedAt` });
+      { priority: 'background', source: `${source}.retirePublishedAt`, writtenGraphs: [graph] });
     if (!supported) break;
   }
   return inserted;
@@ -161,7 +161,7 @@ export async function deleteSwmOperationMetadata(store: TripleStore, graph: stri
   graph = assertSafeIri(graph); subject = assertSafeIri(subject);
   const where = `GRAPH <${graph}> { <${subject}> ?p ?o } FILTER (?p != <${PUBLISHED_AT}>)`;
   if (await tryUpdateWithTouchedGraphs(store,
-    `DELETE { GRAPH <${graph}> { <${subject}> ?p ?o } } WHERE { ${where} }`, [graph], options)) return;
+    `DELETE { GRAPH <${graph}> { <${subject}> ?p ?o } } WHERE { ${where} }`, [graph], { ...options, writtenGraphs: [graph] })) return;
   const result = await store.query(`CONSTRUCT { <${subject}> ?p ?o } WHERE { ${where} }`, options);
   if (result.type !== 'quads') throw new Error('Cannot read operation metadata for replacement');
   if (result.quads.length) await store.delete(result.quads.map(row => ({ ...row, graph })), options);
