@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { MemoryLayer, readGraphIri, readScope } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { READ_GRAPH_REGISTRY_PREDICATES as R, readReadGraphRegistry } from '../src/read-graph/registry.js';
 import {
@@ -139,6 +140,116 @@ describe('registry recognition in the read-graph layer', () => {
     expect(await storedRows()).toEqual([{ ...readyRow(wholeVm, 2), state: 'dirty' }]);
     expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
     expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
+  });
+
+  it('takes an IRI with angle brackets as the same IRI, as the stores do', async () => {
+    const { adapter, store, meta, fixture, layer, states } = await layered();
+    const docs = `${fixture.root}/docs`;
+    await store.insert([fact(meta, `<${docs}>`, `<${R.type}>`, `<${R.subGraphClass}>`), fact(meta, docs, `<${R.name}>`, '"docs"')]);
+    expect((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames).toEqual(['code', 'docs']);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
+    expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
+  });
+
+  it('never takes an IRI for a literal with the same text', async () => {
+    const { adapter, store, meta, fixture, layer, states } = await layered();
+    const named = `${fixture.root}/named`;
+    await store.insert([fact(meta, named, R.type, R.subGraphClass), fact(meta, named, R.name, '"urn:docs"')]);
+    for (const readGraph of Object.values(fixture.readGraphs)) layer.runtime.mirror.set({ ...layer.runtime.mirror.get(readGraph)!, state: 'ready' });
+    // The stored name is a literal: deleting the IRI with the same text removes nothing.
+    await store.delete([fact(meta, named, R.name, 'urn:docs')]);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'urn:docs']);
+    expect((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames).toEqual(['code', 'urn:docs']);
+    expect(states()).toEqual({ wholeVm: 'ready@2', wholeSwm: 'ready@2', codeVm: 'ready@1', agentWm: 'ready@2' });
+  });
+
+  it('keeps the registry a write installed when an older read of it returns later', async () => {
+    const { adapter, store, meta, fixture, layer } = await layered();
+    layer.runtime.registries.clear();
+    const query = adapter.query.bind(adapter);
+    let reads = 0;
+    let release!: () => void;
+    const late = new Promise<void>((resolve) => { release = resolve; });
+    adapter.query = async (sparql, options) => {
+      const result = await query(sparql, options);
+      // The first registry read runs now but answers only after the second write has registered `docs`.
+      if (options?.source === 'storage.readGraphRegistry' && (reads += 1) === 1) await late;
+      return result;
+    };
+    const first = store.insert([fact(meta, 'urn:asset:1', 'urn:test:p', '"m"')]);
+    await new Promise((resolve) => setImmediate(resolve));
+    await store.insert([fact(meta, `${fixture.root}/docs`, R.type, R.subGraphClass), fact(meta, `${fixture.root}/docs`, R.name, '"docs"')]);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
+    release();
+    await first;
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
+  });
+
+  it('settles every context graph whose registry a write may change, even when one cannot be read again', async () => {
+    const { adapter, store, fixture, layer, states } = await layered();
+    const kid = `${fixture.contextGraphId}/kid`;
+    const kidVm = readGraphIri({ scope: readScope(kid), layer: MemoryLayer.VerifiableMemory });
+    layer.runtime.mirror.set(readyRow(kidVm));
+    const kidMeta = `${fixture.root}/kid/_meta`;
+    const parentFacts = `<${fixture.root}/_meta>`;
+    const query = adapter.query.bind(adapter);
+    const update = adapter.update.bind(adapter);
+    let written = false;
+    adapter.update = async (sparql, options) => {
+      await update(sparql, options);
+      if (sparql.includes('/kid/docs')) written = true;
+    };
+    adapter.query = async (sparql, options) => {
+      if (written && options?.source === 'storage.readGraphRegistry' && sparql.includes(parentFacts)) throw new Error('connection reset');
+      return query(sparql, options);
+    };
+    const registration = `INSERT DATA { GRAPH <${kidMeta}> { <${fixture.root}/kid/docs> <${R.type}> <${R.subGraphClass}> ; <${R.name}> "docs" } }`;
+    await expect(store.update!(registration, { writtenGraphs: [kidMeta] })).rejects.toThrow('connection reset');
+    // The parent could not be read again, so all its read graphs are dirty; the child was read again all the same.
+    expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'dirty@2', agentWm: 'dirty@2' });
+    expect(layer.runtime.mirror.get(kidVm)).toMatchObject({ state: 'dirty', generation: 2 });
+    expect(layer.runtime.registries.get(kid)?.subGraphNames).toEqual(['docs']);
+    expect(layer.runtime.registries.facts(fixture.contextGraphId)).toBeUndefined();
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code']);
+  });
+
+  it('follows a registration in an asset group\'s metadata, in and out', async () => {
+    const { adapter, store, meta, fixture, layer, states } = await layered();
+    const graphUri = `${fixture.root}/_verifiable_memory/0x${'ab'.repeat(20)}/9`;
+    const asset = (metadataQuads: Quad[]) => ({ graphUri, graphQuads: [fact(graphUri, 'urn:s:9', 'urn:test:p', '"v"')], metaGraphUri: meta,
+      metadataSubject: 'urn:asset:9', metadataQuads });
+    await store.replaceAssetGroup!([asset([fact(meta, 'urn:asset:9', R.authenticatedSubGraphName, '"notes"')])]);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'notes']);
+    expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
+    for (const readGraph of Object.values(fixture.readGraphs)) layer.runtime.mirror.set({ ...layer.runtime.mirror.get(readGraph)!, state: 'ready' });
+    await store.replaceAssetGroup!([asset([fact(meta, 'urn:asset:9', 'urn:test:p', '"m"')])]);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code']);
+    expect((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames).toEqual(['code']);
+    expect(states()).toEqual({ wholeVm: 'dirty@3', wholeSwm: 'dirty@3', codeVm: 'ready@1', agentWm: 'dirty@3' });
+  });
+
+  it('reads the registry again after a write that ran but whose response was lost', async () => {
+    const { adapter, store, meta, fixture, layer, states } = await layered();
+    const insert = adapter.insert.bind(adapter);
+    adapter.insert = async (quads, options) => {
+      await insert(quads, options);
+      throw new Error('connection reset');
+    };
+    await expect(store.insert([fact(meta, `${fixture.root}/docs`, R.type, R.subGraphClass), fact(meta, `${fixture.root}/docs`, R.name, '"docs"')]))
+      .rejects.toThrow('connection reset');
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
+    expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
+    // An update whose registry effect is only known from the store, the same.
+    for (const readGraph of Object.values(fixture.readGraphs)) layer.runtime.mirror.set({ ...layer.runtime.mirror.get(readGraph)!, state: 'ready' });
+    const update = adapter.update.bind(adapter);
+    adapter.update = async (sparql, options) => {
+      await update(sparql, options);
+      if (sparql.includes('/notes')) throw new Error('connection reset');
+    };
+    const notes = `INSERT DATA { GRAPH <${meta}> { <${fixture.root}/notes> <${R.type}> <${R.subGraphClass}> ; <${R.name}> "notes" } }`;
+    await expect(store.update!(notes, { writtenGraphs: [meta] })).rejects.toThrow('connection reset');
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs', 'notes']);
+    expect(states()).toEqual({ wholeVm: 'dirty@3', wholeSwm: 'dirty@3', codeVm: 'ready@1', agentWm: 'dirty@3' });
   });
 
   it('marks the read graphs a sub-graph leaves dirty when its name goes', async () => {

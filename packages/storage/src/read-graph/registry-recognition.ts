@@ -24,7 +24,11 @@
  *   store compares literals (language tags, datatypes). Such a removal is
  *   predicted by lexical form, which can only over-count the facts removed.
  *   The read graphs are marked from that prediction before the write, and the
- *   facts are read again after it ({@link isExactRegistryWrite}).
+ *   facts are read again after it ({@link isExactRegistryWrite}). So are they
+ *   after a removal that names a blank node, whose label in a write is not
+ *   the one the store reports; the read graphs are then marked after it.
+ * Terms are compared as the stores take them: an IRI with or without angle
+ * brackets is one IRI, and a literal never equals an IRI.
  */
 
 import { contextGraphDataUri, contextGraphMetaUri, escapeSparqlLiteral, assertSafeIri } from '@origintrail-official/dkg-core';
@@ -160,9 +164,9 @@ export function registryFactsAfter(
         next.push(...registryFactsOf(part.added));
         return;
       case 'match':
-        next = next.filter((fact) => !(fact.graph === part.graph && (part.subject === undefined || fact.subject === part.subject)
-          && (part.predicate === undefined || fact.predicate === part.predicate)
-          && (part.object === undefined || lexical(fact.object) === lexical(part.object))));
+        next = next.filter((fact) => !(fact.graph === part.graph && (part.subject === undefined || fact.subject === iriTerm(part.subject))
+          && (part.predicate === undefined || fact.predicate === iriTerm(part.predicate))
+          && (part.object === undefined || sameObject(fact.object, iriTerm(part.object)))));
         return;
       case 'prefix':
         next = next.filter((fact) => !(fact.graph === part.graph && fact.subject.startsWith(part.prefix)));
@@ -172,8 +176,8 @@ export function registryFactsAfter(
         next.push(...registryFactsOf(part.quads));
         return;
       case 'subject':
-        next = next.filter((fact) => !(fact.graph === part.graph && fact.subject === part.subject
-          && (part.predicate === undefined || fact.predicate === part.predicate)));
+        next = next.filter((fact) => !(fact.graph === part.graph && fact.subject === iriTerm(part.subject)
+          && (part.predicate === undefined || fact.predicate === iriTerm(part.predicate))));
         next.push(...registryFactsOf(part.quads));
         return;
       case 'all':
@@ -189,18 +193,28 @@ export function registryFactsAfter(
 
 /**
  * Whether {@link registryFactsAfter} gives exactly the facts a write leaves.
- * It does not when the write removes a fact with a literal object by an exact
- * delete, or deletes by a pattern that names an object: which facts go then
- * depends on how the store compares literals, and the lexical prediction can
- * only over-count them.
+ * It does not when the write removes facts it names by a literal (which facts
+ * go then depends on how the store compares literals, and the lexical
+ * prediction can only over-count them) or by a blank node (whose label in a
+ * write is not the store's). IRIs compare exactly, and never equal a literal.
  */
 export function isExactRegistryWrite(contextGraphId: string, write: ReadGraphRegistryWrite): boolean {
   switch (write.kind) {
-    case 'quads': return !ownerFactsAmong(contextGraphId, write.removed).some((fact) => fact.object.startsWith('"'));
-    case 'match': return write.object === undefined;
+    case 'quads': return !ownerFactsAmong(contextGraphId, write.removed).some((fact) => isComparedLoosely(fact.subject) || isComparedLoosely(fact.object));
+    case 'match': return ![write.subject, write.object].some((term) => term !== undefined && isComparedLoosely(term));
+    case 'subject': return !isComparedLoosely(write.subject);
     case 'all': return write.parts.every((part) => isExactRegistryWrite(contextGraphId, part));
     default: return true;
   }
+}
+
+/**
+ * A literal, compared by lexical form, or a blank node, whose label in a
+ * write is not the one the store reports: a removal naming either can only
+ * be checked by reading the facts again.
+ */
+function isComparedLoosely(term: string): boolean {
+  return term.startsWith('"') || term.startsWith('_:');
 }
 
 /**
@@ -219,8 +233,8 @@ export async function readNamesOfNewSubGraphs(
 ): Promise<ReadGraphRegistryFact[] | undefined> {
   const meta = contextGraphMetaUri(contextGraphId);
   const typed = new Set(facts.filter((fact) => fact.graph === meta && isSubGraphType(fact)).map((fact) => fact.subject));
-  const subjects = [...new Set(addedQuadsOf(write).filter((quad) => quad.graph === meta && isSubGraphType(quad) && !typed.has(quad.subject))
-    .map((quad) => quad.subject))];
+  const subjects = [...new Set(registryFactsAmong(addedQuadsOf(write))
+    .filter((fact) => fact.graph === meta && isSubGraphType(fact) && !typed.has(fact.subject)).map((fact) => fact.subject))];
   if (subjects.length === 0) return [];
   let values: string;
   try {
@@ -247,8 +261,10 @@ export function sameRegistry(left: ReadGraphRegistrySnapshot, right: ReadGraphRe
 
 /** The quads that are registry facts: any of the registry predicates, with a class object for `rdf:type`. */
 function registryFactsAmong(quads: readonly Quad[]): ReadGraphRegistryFact[] {
-  return quads.flatMap((quad) => isRegistryPredicate(quad.predicate, quad.object) && registryOwnersOfGraph(quad.graph).length > 0
-    ? [{ graph: quad.graph, subject: quad.subject, predicate: quad.predicate, object: quad.object }] : []);
+  return quads.flatMap((quad) => {
+    const fact = { graph: quad.graph, subject: iriTerm(quad.subject), predicate: iriTerm(quad.predicate), object: iriTerm(quad.object) };
+    return isRegistryPredicate(fact.predicate, fact.object) && registryOwnersOfGraph(fact.graph).length > 0 ? [fact] : [];
+  });
 }
 
 function isRegistryPredicate(predicate: string, object: string): boolean {
@@ -282,14 +298,27 @@ function isChildFact(fact: ReadGraphRegistryFact): boolean {
   return (fact.predicate === P.type && fact.object === P.contextGraphClass) || fact.predicate === P.registrationStatus;
 }
 
-/**
- * A cached fact and a quad name the same triple, comparing a literal by its
- * lexical form: it can only over-count, and such a write is read again after
- * it ({@link isExactRegistryWrite}).
- */
+/** A cached fact and a quad name the same triple. */
 function sameFact(fact: ReadGraphRegistryFact, quad: Quad): boolean {
-  return fact.graph === quad.graph && fact.subject === quad.subject && fact.predicate === quad.predicate
-    && lexical(fact.object) === lexical(quad.object);
+  return fact.graph === quad.graph && fact.subject === iriTerm(quad.subject) && fact.predicate === iriTerm(quad.predicate)
+    && sameObject(fact.object, iriTerm(quad.object));
+}
+
+/**
+ * Two objects name the same term: IRIs and blank nodes exactly, and literals
+ * by their lexical form, which can only over-count; a write that removes a
+ * literal is read again after it ({@link isExactRegistryWrite}). A literal
+ * never equals an IRI with the same text.
+ */
+function sameObject(left: string, right: string): boolean {
+  const literal = left.startsWith('"');
+  if (literal !== right.startsWith('"')) return false;
+  return literal ? lexical(left) === lexical(right) : left === right;
+}
+
+/** An IRI as the stores and the registry query give it: without angle brackets, which the adapters accept too. */
+function iriTerm(term: string): string {
+  return term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term;
 }
 
 function lexical(term: string): string {

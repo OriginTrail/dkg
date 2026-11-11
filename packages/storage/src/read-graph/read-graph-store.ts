@@ -353,13 +353,34 @@ export class ReadGraphStore implements TripleStoreDecorator {
     throw new Error('The read graphs of a write kept changing while it waited for their locks');
   }
 
-  /** Read the registry facts of every context graph with read graphs that has none yet. */
+  /**
+   * Read the registry of every context graph with read graphs that has no
+   * snapshot yet. It runs without locks, so what it read is installed only if
+   * no write set or forgot the entry meanwhile: that write's entry is newer.
+   * Facts forgotten under a snapshot are read again under the locks, by the
+   * next write that may change the registry.
+   */
   private async loadRegistries(options: QueryOptions | undefined): Promise<void> {
     for (const contextGraphId of this.runtime.mirror.contextGraphIds()) {
-      if (this.runtime.registries.facts(contextGraphId)) continue;
+      if (this.runtime.registries.get(contextGraphId)) continue;
+      const version = this.runtime.registries.version(contextGraphId);
       const facts = await readReadGraphRegistryFacts(this.innerStore, contextGraphId, options);
-      this.runtime.registries.set(registrySnapshotOfFacts(contextGraphId, facts), facts);
+      if (this.runtime.registries.version(contextGraphId) === version) {
+        this.runtime.registries.set(registrySnapshotOfFacts(contextGraphId, facts), facts);
+      }
     }
+  }
+
+  /**
+   * Read a context graph's registry facts again, under the locks of its read
+   * graphs, mark the read graphs whose membership they change, and keep them.
+   */
+  private async refreshRegistry(contextGraphId: string, options: QueryOptions | undefined): Promise<readonly ReadGraphRegistryFact[]> {
+    const facts = await readReadGraphRegistryFacts(this.innerStore, contextGraphId, options);
+    const snapshot = registrySnapshotOfFacts(contextGraphId, facts);
+    await this.markMembershipChange(contextGraphId, snapshot);
+    this.runtime.registries.set(snapshot, facts);
+    return facts;
   }
 
   /** The context graphs with read graphs whose registry facts can sit in one of `graphs`. */
@@ -392,11 +413,13 @@ export class ReadGraphStore implements TripleStoreDecorator {
   ): Promise<T> {
     const predicted = new Map<string, ReadGraphRegistryFact[]>();
     for (const owner of owners) {
-      const cached = this.runtime.registries.facts(owner) ?? [];
+      let cached: readonly ReadGraphRegistryFact[];
       let names: ReadGraphRegistryFact[] | undefined;
       try {
+        cached = this.runtime.registries.facts(owner) ?? await this.refreshRegistry(owner, options);
         names = await readNamesOfNewSubGraphs(this.innerStore, owner, cached, registry, options);
       } catch (error) {
+        if (error instanceof ReadGraphWriteRefusedError) throw error;
         const reason = error instanceof Error ? error.message : String(error);
         throw new ReadGraphWriteRefusedError(operation, `the registry it changes could not be read: ${reason}`);
       }
@@ -407,26 +430,25 @@ export class ReadGraphStore implements TripleStoreDecorator {
       await this.markMembershipChange(owner, registrySnapshotOfFacts(owner, after), operation);
     }
     const settle = async (succeeded: boolean) => {
+      let failure: { readonly error: unknown } | undefined;
       for (const owner of owners) {
         const after = predicted.get(owner);
-        if (after !== undefined) {
-          // A write that failed may or may not have run: the facts are read again on next use.
-          if (succeeded) this.runtime.registries.set(registrySnapshotOfFacts(owner, after), after);
-          else this.runtime.registries.invalidate(owner);
+        if (succeeded && after !== undefined) {
+          this.runtime.registries.set(registrySnapshotOfFacts(owner, after), after);
           continue;
         }
+        // Opaque, or not exactly predicted, or failed and so may or may not have run: read the facts again.
         try {
-          const facts = await readReadGraphRegistryFacts(this.innerStore, owner, options);
-          const snapshot = registrySnapshotOfFacts(owner, facts);
-          await this.markMembershipChange(owner, snapshot);
-          this.runtime.registries.set(snapshot, facts);
+          await this.refreshRegistry(owner, options);
         } catch (error) {
-          // What the write did to the registry is unknown: every read graph of the context graph goes dirty.
+          // What the write did to this registry is unknown: every read graph of the context graph goes dirty,
+          // and the facts are read again before the next write that may change it. The other owners settle all the same.
           await this.markDirty(this.readGraphsOf(owner));
-          this.runtime.registries.invalidate(owner);
-          if (succeeded) throw error;
+          this.runtime.registries.forgetFacts(owner);
+          failure ??= { error };
         }
       }
+      if (succeeded && failure) throw failure.error;
     };
     let result: T;
     try {
