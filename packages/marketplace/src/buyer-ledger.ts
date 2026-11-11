@@ -63,14 +63,19 @@ export interface KeyCharge {
   at: number;
 }
 
+type KeyEntry = { type: 'key' } & KeyRecord;
+type RevokeEntry = { type: 'revoke'; keyId: string; at: number };
 type NonceRecord = { type: 'nonce'; epoch: number; subscriptionId: string; seller: string; nonce: string };
 type CallRecord = { type: 'call'; charge?: { value: string; at: number } } & HeldReceipt;
 type Entry =
-  | ({ type: 'key' } & KeyRecord)
-  | { type: 'revoke'; keyId: string; at: number }
+  | KeyEntry
+  | RevokeEntry
   | NonceRecord
   | CallRecord
   | { type: 'final'; epoch: number; rows: ReconciledRow[] };
+
+/** A nonce counter: one per subscription and seller. */
+const counterOf = (n: { subscriptionId: string; seller: string }): string => `${n.subscriptionId}:${n.seller}`;
 
 /** A key as the ledger holds it: as the node API shows it but `reserved`, with its secret's hash. */
 interface HeldKey {
@@ -139,7 +144,7 @@ export class BuyerLedger {
     await this.load();
     return this.lock.run('journal', async () => {
       if (this.keys.has(record.keyId)) return null;
-      const entry = { type: 'key' as const, ...record };
+      const entry: KeyEntry = { type: 'key', ...record };
       await this.journal.append(entry);
       this.apply(entry);
       return { ...this.keys.get(record.keyId)!.key };
@@ -191,9 +196,9 @@ export class BuyerLedger {
    */
   async takeNonce(epoch: number, subscriptionId: string, seller: bigint): Promise<bigint> {
     await this.load();
-    const key = `${subscriptionId}:${seller}`;
-    const nonce = (this.nonces.get(key) ?? -1n) + 1n;
-    this.nonces.set(key, nonce);
+    const counter = counterOf({ subscriptionId, seller: seller.toString() });
+    const nonce = (this.nonces.get(counter) ?? -1n) + 1n;
+    this.nonces.set(counter, nonce);
     this.epochs.add(epoch);
     await this.append({ type: 'nonce', epoch, subscriptionId, seller: seller.toString(), nonce: nonce.toString() });
     return nonce;
@@ -279,8 +284,8 @@ export class BuyerLedger {
 
   // --------------------------------------------------------- the journal
 
-  /** An entry on disk, then applied. */
-  private async write(entry: Exclude<Entry, CallRecord>): Promise<void> {
+  /** A key made or revoked: on disk, then applied. */
+  private async write(entry: KeyEntry | RevokeEntry): Promise<void> {
     await this.lock.run('journal', async () => {
       await this.journal.append(entry);
       this.apply(entry);
@@ -300,42 +305,35 @@ export class BuyerLedger {
     return entries;
   }
 
-  /** The journal read back: every entry applied, and each call from its last record, its charge counted once. */
+  /**
+   * The journal read back, as `fold` reads it: each key, then the revocations,
+   * each epoch made final, each nonce counter, and each call from its last
+   * record, oldest epoch first, its charge counted once.
+   */
   private replay(entries: readonly Entry[]): void {
-    const calls = new Map<string, CallRecord>();
-    for (const e of entries) {
-      if (e.type === 'call') calls.set(e.callId, e);
-      else this.apply(e);
+    const held = fold(entries);
+    for (const k of held.keys.values()) this.apply(k);
+    for (const r of held.revokes) this.apply(r);
+    for (const [epoch, rows] of held.finals) this.finals.set(epoch, rows);
+    for (const [counter, n] of held.nonces) {
+      this.nonces.set(counter, BigInt(n.nonce));
+      this.epochs.add(n.epoch);
     }
-    for (const { type: _call, charge, ...call } of [...calls.values()].sort((a, b) => a.epoch - b.epoch)) {
+    for (const { type: _call, charge, ...call } of [...held.calls.values()].sort((a, b) => a.epoch - b.epoch)) {
       this.calls.restore(call);
       this.epochs.add(call.epoch);
       if (charge) this.charged(call.keyId, BigInt(charge.value), charge.at);
     }
   }
 
-  private apply(e: Exclude<Entry, CallRecord>): void {
-    switch (e.type) {
-      case 'key': {
-        const { type: _key, ...record } = e;
-        this.keys.set(record.keyId, { key: keyOf(record), hash: Buffer.from(record.hash, 'hex') });
-        return;
-      }
-      case 'revoke': {
-        const held = this.keys.get(e.keyId);
-        if (held) held.key.revoked = true;
-        return;
-      }
-      case 'nonce': {
-        const key = `${e.subscriptionId}:${e.seller}`;
-        if (BigInt(e.nonce) > (this.nonces.get(key) ?? -1n)) this.nonces.set(key, BigInt(e.nonce));
-        this.epochs.add(e.epoch);
-        return;
-      }
-      case 'final':
-        this.finals.set(e.epoch, e.rows);
-        return;
+  private apply(e: KeyEntry | RevokeEntry): void {
+    if (e.type === 'key') {
+      const { type: _key, ...record } = e;
+      this.keys.set(record.keyId, { key: keyOf(record), hash: Buffer.from(record.hash, 'hex') });
+      return;
     }
+    const held = this.keys.get(e.keyId);
+    if (held) held.key.revoked = true;
   }
 
   private charged(keyId: string, value: bigint, at: number): void {
@@ -344,59 +342,82 @@ export class BuyerLedger {
   }
 }
 
+/** A journal as it is read: one record of each key, nonce counter, call and epoch made final, and every revocation, each in the order first written. */
+interface Folded {
+  keys: Map<string, KeyEntry>;
+  revokes: RevokeEntry[];
+  finals: Map<number, ReconciledRow[]>;
+  /** Counter => the record of the highest nonce it took. */
+  nonces: Map<string, NonceRecord>;
+  /** Call id => its last record. */
+  calls: Map<string, CallRecord>;
+}
+
 /**
- * What `entries` hold, as one record each, with `epoch` made final: each key
+ * The one reading of the journal, which the replay restores and the
+ * compaction rewrites: each key's and each call's last record, each epoch's
+ * last reconciliation, each counter's highest nonce, and every revocation.
+ */
+function fold(entries: readonly Entry[]): Folded {
+  const folded: Folded = { keys: new Map(), revokes: [], finals: new Map(), nonces: new Map(), calls: new Map() };
+  for (const e of entries) {
+    switch (e.type) {
+      case 'key':
+        folded.keys.set(e.keyId, e);
+        break;
+      case 'revoke':
+        folded.revokes.push(e);
+        break;
+      case 'nonce': {
+        const kept = folded.nonces.get(counterOf(e));
+        if (!kept || BigInt(e.nonce) > BigInt(kept.nonce)) folded.nonces.set(counterOf(e), e);
+        break;
+      }
+      case 'call':
+        folded.calls.set(e.callId, e);
+        break;
+      case 'final':
+        folded.finals.set(e.epoch, e.rows);
+        break;
+    }
+  }
+  return folded;
+}
+
+/** A folded journal written out whole: the keys, the revocations, the epochs made final, the nonce counters, then the calls. */
+function entriesOf(folded: Folded): Entry[] {
+  return [
+    ...folded.keys.values(),
+    ...folded.revokes,
+    ...[...folded.finals].map(([epoch, rows]) => ({ type: 'final' as const, epoch, rows })),
+    ...folded.nonces.values(),
+    ...folded.calls.values(),
+  ];
+}
+
+/**
+ * What `entries` hold, as `fold` reads them, with `epoch` made final: each key
  * with what the epoch's calls and `charges` cost folded into its total, its
  * revocation, each epoch made final, each other epoch's nonce counters and the
  * last record of each of its calls, in the order they were first written.
  */
 function compacted(entries: readonly Entry[], epoch: number, rows: ReconciledRow[], charges: readonly KeyCharge[]): Entry[] {
-  const keys = new Map<string, Extract<Entry, { type: 'key' }>>();
-  const revokes: Entry[] = [];
-  const finals = new Map<number, ReconciledRow[]>();
-  const nonces = new Map<string, NonceRecord>();
-  const calls = new Map<string, CallRecord>();
-  for (const e of entries) {
-    switch (e.type) {
-      case 'key':
-        keys.set(e.keyId, { ...e, spent: e.spent ?? '0', lastUsedAt: e.lastUsedAt ?? null });
-        break;
-      case 'revoke':
-        revokes.push(e);
-        break;
-      case 'nonce': {
-        const id = `${e.subscriptionId}:${e.seller}`;
-        const kept = nonces.get(id);
-        if (e.epoch !== epoch && (!kept || BigInt(e.nonce) > BigInt(kept.nonce))) nonces.set(id, e);
-        break;
-      }
-      case 'call':
-        calls.set(e.callId, e);
-        break;
-      case 'final':
-        finals.set(e.epoch, e.rows);
-        break;
-    }
-  }
+  // The epoch's nonce counters leave the journal: it is read without them.
+  const folded = fold(entries.filter((e) => e.type !== 'nonce' || e.epoch !== epoch));
+  for (const [keyId, k] of folded.keys) folded.keys.set(keyId, { ...k, spent: k.spent ?? '0', lastUsedAt: k.lastUsedAt ?? null });
   const charge = (keyId: string, value: bigint, at: number) => {
-    const k = keys.get(keyId);
+    const k = folded.keys.get(keyId);
     if (k) addCharge(k, value, at);
   };
   // The epoch's calls leave the journal; what they charged stays in their keys' totals.
-  for (const [callId, r] of calls) {
+  for (const [callId, r] of folded.calls) {
     if (r.epoch !== epoch) continue;
     if (r.charge) charge(r.keyId, BigInt(r.charge.value), r.charge.at);
-    calls.delete(callId);
+    folded.calls.delete(callId);
   }
   for (const c of charges) charge(c.keyId, c.value, c.at);
-  finals.set(epoch, rows);
-  return [
-    ...keys.values(),
-    ...revokes,
-    ...[...finals].map(([e, r]) => ({ type: 'final' as const, epoch: e, rows: r })),
-    ...nonces.values(),
-    ...calls.values(),
-  ];
+  folded.finals.set(epoch, rows);
+  return entriesOf(folded);
 }
 
 // ------------------------------------------------------- the journals it replaces
@@ -408,19 +429,18 @@ type LegacyKeyEntry =
 type LegacyNonce = { epoch: number; subscriptionId: string; seller: string; nonce: string };
 type LegacyFinal = { type: 'final'; epoch: number; rows: ReconciledRow[] };
 
+const isLegacyFinal = (e: HeldReceipt | LegacyFinal): e is LegacyFinal => (e as LegacyFinal).type === 'final';
+
 /**
- * The journals the ledger replaces, as its entries: each key with what its
- * calls cost folded in, as the access keys folded them, its revocation, each
- * epoch made final, each nonce counter and each call's last record. A call's
- * cost is in its key's total already, so no call record carries a charge.
+ * The access keys' journal as the ledger's entries, folded as the access keys
+ * folded it: each key as made last, with what its calls cost added to its
+ * total, then each revocation of a key made before it. What names no key is
+ * left out.
  */
-async function legacyEntries(dir: string): Promise<Entry[]> {
-  const keyLog = await new Journal<LegacyKeyEntry>(join(dir, 'access-keys.jsonl')).read();
-  const nonceLog = await new Journal<LegacyNonce>(join(dir, 'buyer-nonces.jsonl')).read();
-  const receipts = await new Journal<HeldReceipt | LegacyFinal>(join(dir, 'buyer-receipts.jsonl')).read();
-  const keys = new Map<string, Extract<Entry, { type: 'key' }>>();
-  const revokes: Entry[] = [];
-  for (const e of keyLog) {
+function legacyKeyEntries(log: readonly LegacyKeyEntry[]): Entry[] {
+  const keys = new Map<string, KeyEntry>();
+  const revokes: RevokeEntry[] = [];
+  for (const e of log) {
     if (e.type === 'make') {
       const { type: _make, ...record } = e;
       keys.set(record.keyId, { type: 'key', ...record });
@@ -429,25 +449,25 @@ async function legacyEntries(dir: string): Promise<Entry[]> {
       else addCharge(keys.get(e.keyId)!, BigInt(e.value), e.at);
     }
   }
-  const nonces = new Map<string, NonceRecord>();
-  for (const n of nonceLog) {
-    const id = `${n.subscriptionId}:${n.seller}`;
-    const kept = nonces.get(id);
-    if (!kept || BigInt(n.nonce) > BigInt(kept.nonce)) nonces.set(id, { type: 'nonce', ...n });
-  }
-  const finals = new Map<number, ReconciledRow[]>();
-  const calls = new Map<string, CallRecord>();
-  for (const e of receipts) {
-    if ((e as LegacyFinal).type === 'final') finals.set((e as LegacyFinal).epoch, (e as LegacyFinal).rows);
-    else calls.set((e as HeldReceipt).callId, { type: 'call', ...(e as HeldReceipt) });
-  }
-  return [
-    ...keys.values(),
-    ...revokes,
-    ...[...finals].map(([epoch, rows]) => ({ type: 'final' as const, epoch, rows })),
-    ...nonces.values(),
-    ...calls.values(),
-  ];
+  return [...keys.values(), ...revokes];
+}
+
+/**
+ * The journals the ledger replaces, as its entries, folded and written out as
+ * its own journal is: each key with what its calls cost folded in, as the
+ * access keys folded them, its revocation, each epoch made final, each nonce
+ * counter and each call's last record, copied as it was kept. A call's cost is
+ * in its key's total already, so no call record carries a charge.
+ */
+async function legacyEntries(dir: string): Promise<Entry[]> {
+  const keyLog = await new Journal<LegacyKeyEntry>(join(dir, 'access-keys.jsonl')).read();
+  const nonceLog = await new Journal<LegacyNonce>(join(dir, 'buyer-nonces.jsonl')).read();
+  const receipts = await new Journal<HeldReceipt | LegacyFinal>(join(dir, 'buyer-receipts.jsonl')).read();
+  return entriesOf(fold([
+    ...legacyKeyEntries(keyLog),
+    ...nonceLog.map((n): NonceRecord => ({ type: 'nonce', ...n })),
+    ...receipts.map((e): Entry => (isLegacyFinal(e) ? { type: 'final', epoch: e.epoch, rows: e.rows } : { type: 'call', ...e })),
+  ]));
 }
 
 async function exists(file: string): Promise<boolean> {
