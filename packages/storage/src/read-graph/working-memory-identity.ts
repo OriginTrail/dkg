@@ -10,9 +10,16 @@
  * addresses its agent owns, so it is valid only under the rule it was built
  * and maintained under. The record, a file in the node's data directory, lets
  * a later start keep those read graphs when the identity is the same.
+ *
+ * The record names an identity only while every working-memory row the store
+ * holds as `ready` is valid under it. A change of identity removes it before
+ * the new rule is installed. It is written again once every dirty mark the
+ * change needs is stored and the store has made them durable (`flush`): a
+ * stopped process leaves either no record, so start-up keeps no
+ * working-memory read graph, or a record with its marks.
  */
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { MemoryLayer, parseReadGraphIri } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '../triple-store.js';
@@ -33,9 +40,27 @@ export const READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE = 'read-graph-working-memor
 
 const DATA_DIRS = new WeakMap<ReadGraphBackendRuntime, string>();
 
-/** Note the data directory of the node that starts read graphs on a backend: identity changes are recorded there. */
-export function noteReadGraphDataDir(runtime: ReadGraphBackendRuntime, dataDir: string): void {
-  DATA_DIRS.set(runtime, dataDir);
+/** What a backend's runtime knows of its identity and its record. */
+interface IdentityRecording {
+  /** The identity its rule was installed from: the recorded one start-up installed, or the last installation's. */
+  node: WorkingMemoryNodeIdentity | undefined;
+  /** Whether the record names `node`, with every dirty mark it needs durable. */
+  recorded: boolean;
+  /** Working-memory read graphs marked dirty in the mirror for a change of identity, whose stored mark is owed. */
+  readonly owed: Set<string>;
+  /** The stored part of the installations, one at a time. */
+  queue: Promise<void>;
+}
+
+const RECORDINGS = new WeakMap<ReadGraphBackendRuntime, IdentityRecording>();
+
+function recordingOf(runtime: ReadGraphBackendRuntime): IdentityRecording {
+  let recording = RECORDINGS.get(runtime);
+  if (!recording) {
+    recording = { node: undefined, recorded: false, owed: new Set(), queue: Promise.resolve() };
+    RECORDINGS.set(runtime, recording);
+  }
+  return recording;
 }
 
 /** The identity recorded in `dataDir`; `undefined` when there is none or it cannot be read. */
@@ -57,18 +82,72 @@ export function recordedWorkingMemoryIdentity(dataDir: string): WorkingMemoryNod
   };
 }
 
+/**
+ * Start-up's part, before anything writes: note the node's data directory,
+ * where identity changes are recorded, and install the recorded identity's
+ * rule. Returns that identity, under which start-up may keep working-memory
+ * read graphs; `undefined` when there is no readable record, or when a change
+ * of identity in this process still owes a stored mark.
+ */
+export function installRecordedWorkingMemoryIdentity(
+  runtime: ReadGraphBackendRuntime,
+  dataDir: string,
+): WorkingMemoryNodeIdentity | undefined {
+  DATA_DIRS.set(runtime, dataDir);
+  const recording = recordingOf(runtime);
+  const recorded = recording.owed.size > 0 ? undefined : recordedWorkingMemoryIdentity(dataDir);
+  recording.node = recorded;
+  recording.recorded = recorded !== undefined;
+  if (recorded !== undefined) runtime.workingMemoryIdentity = workingMemoryIdentityRule(recorded);
+  return recorded;
+}
+
+/** Write the record: a new file, synced, renamed over the old one, and the directory synced. */
 function recordWorkingMemoryIdentity(dataDir: string, node: WorkingMemoryNodeIdentity): void {
   const path = join(dataDir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE);
   const next = `${path}.next`;
-  writeFileSync(next, `${JSON.stringify({ defaultAgentAddress: node.defaultAgentAddress, peerId: node.peerId })}\n`);
+  const file = openSync(next, 'w');
+  try {
+    writeFileSync(file, `${JSON.stringify({ defaultAgentAddress: node.defaultAgentAddress, peerId: node.peerId })}\n`);
+    fsyncSync(file);
+  } finally {
+    closeSync(file);
+  }
   renameSync(next, path);
+  syncDirectory(dataDir);
+}
+
+/** Remove the record, if there is one, and sync the directory. */
+function removeWorkingMemoryIdentityRecord(dataDir: string): void {
+  const path = join(dataDir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE);
+  if (!existsSync(path)) return;
+  rmSync(path, { force: true });
+  syncDirectory(dataDir);
+}
+
+function syncDirectory(dir: string): void {
+  // As for the store's own snapshot, best effort: not every platform syncs a directory.
+  try {
+    const handle = openSync(dir, 'r');
+    try {
+      fsyncSync(handle);
+    } finally {
+      closeSync(handle);
+    }
+  } catch {
+    // The rename or removal itself has happened.
+  }
+}
+
+function sameIdentity(left: WorkingMemoryNodeIdentity, right: WorkingMemoryNodeIdentity): boolean {
+  return left.defaultAgentAddress === right.defaultAgentAddress && left.peerId === right.peerId;
 }
 
 /** What one installation did. */
 export interface WorkingMemoryIdentityInstall {
   /** The working-memory read graphs marked dirty because their agent owns other addresses under the new rule. */
   readonly marked: readonly string[];
-  /** Whether every mark was stored and the identity recorded. When not, the next start compares again. */
+  /** Whether the record now names this identity. When not, the next start keeps no working-memory read graph. */
   readonly recorded: boolean;
 }
 
@@ -80,16 +159,18 @@ export interface WorkingMemoryIdentityInstall {
  * the layer, the recorded one that start-up installed, the runtime's own
  * (every address owns its drafts), or the one installed before. In one
  * synchronous step, every working-memory read graph with a row whose agent
- * owns other addresses under the new rule is marked dirty in the mirror, and
- * the rule is installed. So no reader sees the new owner with a read graph
- * built for the old one, nor the old rule beside the new default.
+ * owns other addresses under the new rule is marked dirty in the mirror, the
+ * record is removed when the identity changes, and the rule is installed. So
+ * no reader sees the new owner with a read graph built for the old one, nor
+ * the old rule beside the new default, and no later start keeps a read graph
+ * under the old record.
  *
  * Each mark is then stored, from the stored row and under the read graph's
- * lock. Once all are stored, the identity is recorded in the node's data
- * directory. A mark that cannot be stored leaves the record as it was, so the
- * next start compares again, and the mirror keeps the read graph dirty, so it
- * is not served meanwhile; the builder marks it again from the stored row
- * before it plans. A store without a read-graph layer is left as it is.
+ * lock, one installation at a time. A mark that cannot be stored stays owed:
+ * the mirror keeps the read graph out of service, and every later
+ * installation stores the owed marks first. Once none is owed, the store is
+ * flushed and the identity recorded. A store without a read-graph layer is
+ * left as it is.
  */
 export async function installWorkingMemoryIdentity(
   context: Pick<ReadGraphJobContext, 'dataDir' | 'signal' | 'source'> & { readonly store: TripleStore },
@@ -97,26 +178,65 @@ export async function installWorkingMemoryIdentity(
 ): Promise<WorkingMemoryIdentityInstall> {
   const runtime = readGraphRuntimeOf(context.store);
   if (!runtime) return { marked: [], recorded: false };
+  const recording = recordingOf(runtime);
+  const dataDir = context.dataDir ?? DATA_DIRS.get(runtime);
   const rule = workingMemoryIdentityRule(node);
-  // Nothing is awaited from here until both are visible.
+  // Nothing is awaited from here until the rule, the marks and the record agree.
   const marked = markWorkingMemoryReadGraphsDirty(runtime, runtime.workingMemoryIdentity, rule);
+  if (marked.length > 0 || recording.node === undefined || !sameIdentity(recording.node, node)) {
+    recording.recorded = false;
+    // A record that cannot be removed here is removed before the identity is recorded, or the installation reports it unrecorded.
+    try {
+      if (dataDir !== undefined) removeWorkingMemoryIdentityRecord(dataDir);
+    } catch {
+      // Below.
+    }
+  }
   runtime.workingMemoryIdentity = rule;
-  let stored = true;
-  for (const readGraph of marked) {
+  recording.node = node;
+  for (const readGraph of marked) recording.owed.add(readGraph);
+  const turn = recording.queue.then(() => storeMarksAndRecord(context, runtime, recording, dataDir));
+  recording.queue = turn.then(() => undefined, () => undefined);
+  return { marked, recorded: await turn };
+}
+
+/**
+ * Store every owed mark, then record the runtime's identity once none is owed
+ * and the store has made the marks durable, start-up's own included. Returns
+ * whether the record names that identity.
+ */
+async function storeMarksAndRecord(
+  context: Pick<ReadGraphJobContext, 'dataDir' | 'signal' | 'source'> & { readonly store: TripleStore },
+  runtime: ReadGraphBackendRuntime,
+  recording: IdentityRecording,
+  dataDir: string | undefined,
+): Promise<boolean> {
+  // A mark owed by an installation that comes meanwhile is stored here too.
+  for (const readGraph of recording.owed) {
     try {
       await markReadGraphDirty(context, readGraph);
+      recording.owed.delete(readGraph);
     } catch {
-      stored = false;
-      // The store kept its row, and the mirror followed it: this process still does not serve the read graph.
+      // The stored row did not take the mark: this process still does not serve the read graph.
       const current = runtime.mirror.get(readGraph);
       const dirty = current === undefined || current.state === 'dirty' ? undefined : nextReadGraphState(current, { kind: 'mark-dirty' });
       if (dirty !== undefined) runtime.mirror.set(dirty);
     }
   }
-  const dataDir = context.dataDir ?? DATA_DIRS.get(runtime);
-  if (!stored || dataDir === undefined) return { marked, recorded: false };
-  recordWorkingMemoryIdentity(dataDir, node);
-  return { marked, recorded: true };
+  if (recording.owed.size > 0 || dataDir === undefined || recording.node === undefined) return false;
+  if (recording.recorded) return true;
+  const node = recording.node;
+  try {
+    removeWorkingMemoryIdentityRecord(dataDir);
+    await context.store.flush?.();
+    // An installation that came meanwhile records its own identity, once its marks are stored.
+    if (recording.node !== node || recording.owed.size > 0) return false;
+    recordWorkingMemoryIdentity(dataDir, node);
+  } catch {
+    return false;
+  }
+  recording.recorded = true;
+  return true;
 }
 
 /** Whether `agent` owns other addresses under `after` than under `before`. */

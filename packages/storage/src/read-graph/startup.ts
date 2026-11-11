@@ -37,7 +37,6 @@ import { markReadGraphsDirtyAtStart } from '../read-graph-partition-startup.js';
 import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
-import { workingMemoryIdentityRule } from './membership.js';
 import { clearUnstoredReadGraphMarks, readUnstoredReadGraphMarks, useReadGraphMarkJournal } from './mark-journal.js';
 import { readGraphLayerOf } from './read-graph-store.js';
 import { keepsAnyReadGraph, readGraphModeOf } from './settings.js';
@@ -50,7 +49,7 @@ import {
   recordReadGraphRegistry,
 } from './registry-record.js';
 import type { ReadGraphRegistrySnapshot } from './membership.js';
-import { noteReadGraphDataDir, recordedWorkingMemoryIdentity } from './working-memory-identity.js';
+import { installRecordedWorkingMemoryIdentity } from './working-memory-identity.js';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
   MAX_READ_GRAPH_GENERATION,
@@ -98,9 +97,7 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
   if (!maintains || !layer || missingReadGraphMethods(layer.innerStore, layer.adapterCapabilities).length > 0) {
     return { marked: await markReadGraphsDirtyAtStart(store, options), maintained: 0 };
   }
-  const recorded = options.dataDir === undefined ? undefined : recordedWorkingMemoryIdentity(options.dataDir);
-  if (options.dataDir !== undefined) noteReadGraphDataDir(layer.runtime, options.dataDir);
-  if (recorded !== undefined) layer.runtime.workingMemoryIdentity = workingMemoryIdentityRule(recorded);
+  const recorded = options.dataDir === undefined ? undefined : installRecordedWorkingMemoryIdentity(layer.runtime, options.dataDir);
   const target = readGraphPartitionMaintenanceStore(store);
   const versions = options.versions ?? CURRENT_READ_GRAPH_VERSIONS;
   const queryOptions: QueryOptions = { priority: 'background', source: 'storage.readGraphStartup', ...(options.signal ? { signal: options.signal } : {}) };

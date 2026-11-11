@@ -68,6 +68,7 @@ import { PlanningOxigraphStore } from './helpers/read-graph-planning-store.js';
 class HookedStore extends PlanningOxigraphStore {
   onUpdate: ((sparql: string, options: UpdateOptions | undefined) => Promise<void> | void) | undefined;
   onInsert: (() => Promise<void>) | undefined;
+  onFlush: (() => Promise<void> | void) | undefined;
   readonly extraGraphs: string[] = [];
   constructor() {
     super();
@@ -85,6 +86,10 @@ class HookedStore extends PlanningOxigraphStore {
   override async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
     await this.onInsert?.();
     return super.insert(quads, options);
+  }
+  override async flush(): Promise<void> {
+    await this.onFlush?.();
+    return super.flush();
   }
 }
 
@@ -818,7 +823,7 @@ describe('installing the working-memory identity rule', () => {
     expect(await installWorkingMemoryIdentity({ store: new OxigraphStore() }, { defaultAgentAddress: AGENT })).toEqual({ marked: [], recorded: false });
   });
 
-  it('keeps the read graph out of service and the record as it was when a mark cannot be stored', async () => {
+  it('keeps the read graph out of service, and records nothing, when a mark cannot be stored', async () => {
     const { adapter, fixture, layer, context, dataDir } = await open();
     const { agentWm } = fixture.readGraphs;
     await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(agentWm, 4)));
@@ -831,6 +836,66 @@ describe('installing the working-memory identity rule', () => {
     expect(layer.runtime.mirror.get(agentWm)?.state).toBe('dirty');
     expect(layer.runtime.workingMemoryIdentity.addressesOf(AGENT)).toHaveLength(2);
     expect(recordedWorkingMemoryIdentity(dataDir)).toBeUndefined();
+  });
+
+  it('owes a mark it could not store, stores it at the next installation, and records the identity only then', async () => {
+    const { adapter, fixture, layer, context, dataDir } = await open();
+    const { agentWm } = fixture.readGraphs;
+    const first = { defaultAgentAddress: AGENT, peerId: 'peer-1' };
+    const second = { defaultAgentAddress: `0x${'cd'.repeat(20)}`, peerId: 'peer-1' };
+    // Recorded under the first identity, with AGENT's read graph built under it and its registry recorded.
+    expect(await installWorkingMemoryIdentity(context, first)).toEqual({ marked: [], recorded: true });
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(agentWm, 4)));
+    layer.runtime.mirror.set(readyRow(agentWm, 4));
+    await adapter.update!(readGraphRegistryRecordUpdate(fixture.registry));
+    // The second identity takes the peer ID's drafts from AGENT while the store refuses writes: the record goes.
+    adapter.onUpdate = () => { throw new Error('the store refused the write'); };
+    expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [agentWm], recorded: false });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toBeUndefined();
+    // The same identity again has nothing new to mark, and the owed mark still fails: nothing is recorded.
+    expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: false });
+    expect(await storedRows(adapter)).toEqual({ [agentWm]: 'ready@4' });
+    expect(layer.runtime.mirror.get(agentWm)?.state).toBe('dirty');
+    expect(recordedWorkingMemoryIdentity(dataDir)).toBeUndefined();
+    // Once the store takes writes, the same identity stores the owed mark first, then records.
+    adapter.onUpdate = undefined;
+    expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: true });
+    expect(await storedRows(adapter)).toEqual({ [agentWm]: 'dirty@5' });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(second);
+    // A later start under the second identity keeps nothing the first one built.
+    const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    await startReadGraphs(restarted, { dataDir, maintains: (key) => key.scope.contextGraphId === fixture.contextGraphId });
+    expect((await storedRows(adapter))[agentWm]).toMatch(/^dirty@/);
+  });
+
+  it('records the identity only once the store has made its marks durable, and not when it cannot', async () => {
+    const { adapter, fixture, layer, context, dataDir } = await open();
+    const { agentWm } = fixture.readGraphs;
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(agentWm, 4)));
+    layer.runtime.mirror.set(readyRow(agentWm, 4));
+    // The store's flush comes after the stored mark, and until it ends there is no record.
+    const seen: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    adapter.onFlush = async () => {
+      seen.push((await storedRows(adapter))[agentWm]!, String(recordedWorkingMemoryIdentity(dataDir)));
+      await held;
+    };
+    const installing = installWorkingMemoryIdentity(context, { defaultAgentAddress: AGENT, peerId: 'peer-1' });
+    await vi.waitFor(() => expect(seen).toHaveLength(2));
+    expect(seen).toEqual(['dirty@5', 'undefined']);
+    release();
+    expect(await installing).toEqual({ marked: [agentWm], recorded: true });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual({ defaultAgentAddress: AGENT, peerId: 'peer-1' });
+    // A store that cannot flush leaves no record; the same identity again records once it can.
+    await adapter.update!(readGraphStateCompareAndSet(row(agentWm, 'dirty', 5), readyRow(agentWm, 5)));
+    layer.runtime.mirror.set(readyRow(agentWm, 5));
+    adapter.onFlush = () => { throw new Error('no space left on the device'); };
+    expect(await installWorkingMemoryIdentity(context, { peerId: 'peer-1' })).toEqual({ marked: [agentWm], recorded: false });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toBeUndefined();
+    adapter.onFlush = undefined;
+    expect(await installWorkingMemoryIdentity(context, { peerId: 'peer-1' })).toEqual({ marked: [], recorded: true });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual({ peerId: 'peer-1' });
   });
 
   it('reads no identity from a missing or malformed record', async () => {
