@@ -112,7 +112,7 @@ describe('the printed report', () => {
     const none = { ...ENTRY, samples: 0, skipped: 1, uncomparable: 3, kinds: { 'none': 0, 'copies-removed': 0, 'rows-added': 0, 'rows-removed-or-changed': 0 }, shapes: [] };
     expect(formatViewSemanticsDeltaReport({ contextGraphs: [none] }).split('\n').slice(2)).toEqual([
       'cg-products: 0 sampled since 2026-11-11 02:00 UTC, 1 skipped (the read graph changed, or a read failed), '
-        + '3 not compared (the query generates values during evaluation, such as NOW())',
+        + '3 not compared (values generated during evaluation, or blank nodes their structure cannot tell apart)',
       '  No sampled query has been compared yet.',
     ]);
   });

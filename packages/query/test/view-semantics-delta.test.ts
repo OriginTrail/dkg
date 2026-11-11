@@ -62,6 +62,33 @@ describe('classifying the merged answer against the per-asset answer', () => {
       graph(['_:a', 'urn:next', '_:b'], ['_:a', 'urn:value', '"1"']))).toBe('rows-removed-or-changed');
   });
 
+  it('counts copies of rows with blank nodes as copies', () => {
+    const select = 'SELECT ?s ?o WHERE { ?s ?p ?o }';
+    expect(classifyViewSemanticsDelta(select, { bindings: [{ s: '_:a', o: 'urn:x' }, { s: '_:a', o: 'urn:x' }] },
+      { bindings: [{ s: '_:b', o: 'urn:x' }] })).toBe('copies-removed');
+    const construct = 'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }';
+    const graph = (...items: Array<[string, string, string]>): QueryResult => ({ bindings: [],
+      quads: items.map(([subject, predicate, object]) => ({ subject, predicate, object, graph: '' })) });
+    expect(classifyViewSemanticsDelta(construct, graph(['_:a', 'urn:p', 'urn:x'], ['_:a', 'urn:p', 'urn:x'], ['_:b', 'urn:q', 'urn:y']),
+      graph(['_:c', 'urn:p', 'urn:x'], ['_:d', 'urn:q', 'urn:y']))).toBe('copies-removed');
+    expect(classifyViewSemanticsDelta(construct, graph(['_:c', 'urn:p', 'urn:x'], ['_:d', 'urn:q', 'urn:y']),
+      graph(['_:a', 'urn:p', 'urn:x'], ['_:a', 'urn:p', 'urn:x'], ['_:b', 'urn:q', 'urn:y']))).toBe('rows-added');
+  });
+
+  it('does not compare answers whose blank nodes their structure cannot tell apart', () => {
+    const construct = 'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }';
+    const cycle = (...nodes: string[]): Array<[string, string, string]> =>
+      nodes.map((node, index) => [node, 'urn:next', nodes[(index + 1) % nodes.length]!]);
+    const graph = (...items: Array<[string, string, string]>): QueryResult => ({ bindings: [],
+      quads: items.map(([subject, predicate, object]) => ({ subject, predicate, object, graph: '' })) });
+    // One six-node cycle against two three-node cycles: every node looks the same.
+    expect(classifyViewSemanticsDelta(construct, graph(...cycle('_:a', '_:b', '_:c', '_:d', '_:e', '_:f')),
+      graph(...cycle('_:u', '_:v', '_:w'), ...cycle('_:x', '_:y', '_:z')))).toBeUndefined();
+    // Two nodes with the same rows, in one answer only.
+    expect(classifyViewSemanticsDelta(construct, graph(['_:a', 'urn:p', 'urn:x'], ['_:b', 'urn:p', 'urn:x']),
+      graph(['_:c', 'urn:p', 'urn:x']))).toBeUndefined();
+  });
+
   it('keeps which bindings share a blank node across variables and rows', () => {
     const select = 'SELECT ?a ?b WHERE { ?a ?p ?b }';
     const shared: QueryResult = { bindings: [{ a: '_:n', b: '_:n' }, { a: '_:m', b: 'urn:x' }] };
@@ -192,6 +219,14 @@ describe('the semantic-delta sampler', () => {
     await sampler.idle();
     expect(run).not.toHaveBeenCalled();
     expect(sampler.report()).toMatchObject([{ contextGraphId: 'cg-a', samples: 0, skipped: 0, uncomparable: 3 }]);
+  });
+
+  it('counts a sample whose answers cannot be compared as not compared', async () => {
+    const sampler = new ViewSemanticsDeltaSampler({ sampleRate: 1 });
+    const symmetric: QueryResult = { bindings: [{ s: '_:a', o: 'urn:x' }, { s: '_:b', o: 'urn:x' }] };
+    sampler.offer(sample({ perAsset: symmetric, merged: { bindings: [{ s: '_:c', o: 'urn:x' }] } }).offered);
+    await sampler.idle();
+    expect(sampler.report()).toMatchObject([{ samples: 0, skipped: 0, uncomparable: 1, shapes: [] }]);
   });
 
   it('keeps a sample when counting it elsewhere fails', async () => {

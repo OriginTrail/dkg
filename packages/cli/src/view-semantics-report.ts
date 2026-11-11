@@ -17,7 +17,7 @@ export interface ViewSemanticsDeltaReportEntry {
   readonly since: string;
   readonly samples: number;
   readonly skipped: number;
-  /** Sampled queries not compared, because they generate values during evaluation. */
+  /** Sampled queries not compared: values generated during evaluation, or blank nodes their structure cannot tell apart. */
   readonly uncomparable: number;
   readonly kinds: Readonly<Record<ViewSemanticsDeltaKind, number>>;
   readonly shapes: readonly ViewSemanticsDeltaShapeEntry[];
@@ -54,7 +54,7 @@ export function formatViewSemanticsDeltaReport(
   for (const graph of response.contextGraphs) {
     lines.push('', `${graph.contextGraphId}: ${graph.samples} sampled since ${minute(graph.since)}`
       + (graph.skipped ? `, ${graph.skipped} skipped (the read graph changed, or a read failed)` : '')
-      + (graph.uncomparable ? `, ${graph.uncomparable} not compared (the query generates values during evaluation, such as NOW())` : ''));
+      + (graph.uncomparable ? `, ${graph.uncomparable} not compared (values generated during evaluation, or blank nodes their structure cannot tell apart)` : ''));
     if (graph.samples === 0) {
       lines.push('  No sampled query has been compared yet.');
       continue;
