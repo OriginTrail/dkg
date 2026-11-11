@@ -28,21 +28,39 @@ function assignsGraphVariable(scope: PreparedSparqlQuery, opening: number, closi
 }
 
 /**
- * Whether a caller GRAPH ?var block assigns ?var anywhere inside it, at any
- * depth: a BIND, or a subquery's projection, `AS ?var`.
+ * The assignments of each caller GRAPH ?var block to ?var, at any depth inside
+ * it: `AS ?var` in a BIND or in a subquery's projection. An assignment of a
+ * single IRI is `constant`; any other expression, which may fail and leave
+ * ?var unbound, is `expression`.
  */
-export function hasCallerGraphAssignmentsInside(scope: PreparedSparqlQuery): boolean {
+function callerGraphAssignmentsInside(scope: PreparedSparqlQuery): Array<'constant' | 'expression'> {
   const { tokens } = scope.prepared;
-  return scope.graphTargets.some(target => {
-    if (target.kind !== 'variable') return false;
+  const found: Array<'constant' | 'expression'> = [];
+  for (const target of scope.graphTargets) {
+    if (target.kind !== 'variable') continue;
     const opening = target.targetTokenIndex + 1;
     const closing = scope.structure.braces.matchingTokenIndexes[opening] ?? -1;
     for (let index = opening + 1; index < closing - 1; index++) {
       const next = tokens[index + 1];
-      if (isSparqlKeyword(tokens, index, 'AS') && next?.kind === 'variable' && next.logicalValue.slice(1) === target.variable.logicalName) return true;
+      if (!isSparqlKeyword(tokens, index, 'AS') || next?.kind !== 'variable' || next.logicalValue.slice(1) !== target.variable.logicalName) continue;
+      const term = tokens[index - 1];
+      const before = tokens[index - 2];
+      const constant = (term?.kind === 'iri' || term?.kind === 'prefixed-name') && before?.kind === 'symbol' && before.logicalValue === '(';
+      found.push(constant ? 'constant' : 'expression');
     }
-    return false;
-  });
+  }
+  return found;
+}
+
+/** Whether caller GRAPH ?var blocks assign ?var inside them, every time to a single IRI. */
+export function hasCallerGraphAssignmentsInside(scope: PreparedSparqlQuery): boolean {
+  const found = callerGraphAssignmentsInside(scope);
+  return found.length > 0 && found.every(kind => kind === 'constant');
+}
+
+/** Whether a caller GRAPH ?var block assigns ?var an expression other than a single IRI, at any depth. */
+export function hasCallerGraphExpressionAssignments(scope: PreparedSparqlQuery): boolean {
+  return callerGraphAssignmentsInside(scope).includes('expression');
 }
 
 export function hasCallerGraphAssignments(scope: PreparedSparqlQuery): boolean {
