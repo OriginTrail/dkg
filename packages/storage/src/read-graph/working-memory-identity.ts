@@ -46,6 +46,7 @@ export interface WorkingMemoryNodeIdentity {
 /** The record, in the node's data directory, of the identity its working-memory read graphs are kept under. */
 export const READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE = 'read-graph-working-memory-identity.json';
 
+/** The data directory each backend's identity is recorded in. */
 const DATA_DIRS = new WeakMap<ReadGraphBackendRuntime, string>();
 
 /** What a backend's runtime knows of its identity and its record. */
@@ -211,7 +212,7 @@ export async function installWorkingMemoryIdentity(
   const runtime = readGraphRuntimeOf(context.store);
   if (!runtime) return { marked: [], recorded: false };
   const recording = recordingOf(runtime);
-  const dataDir = context.dataDir ?? DATA_DIRS.get(runtime);
+  const dataDir = recordingDirectory(runtime, context.dataDir);
   const rule = workingMemoryIdentityRule(node);
   // Nothing is awaited from here until the rule, the marks and the record agree.
   const { marked, moved } = markWorkingMemoryReadGraphsDirty(runtime, runtime.workingMemoryIdentity, rule);
@@ -226,6 +227,19 @@ export async function installWorkingMemoryIdentity(
   const turn = recording.queue.then(() => storeMarksAndRecord(context, runtime, recording, dataDir));
   recording.queue = turn.then(() => undefined, () => undefined);
   return { marked, recorded: await turn };
+}
+
+/**
+ * The data directory a backend's identity is recorded in: the one its start-up
+ * noted, whichever directory an installation names, so that one record covers
+ * the backend's read graphs. Without one noted, the first directory an
+ * installation names is noted.
+ */
+function recordingDirectory(runtime: ReadGraphBackendRuntime, named: string | undefined): string | undefined {
+  const noted = DATA_DIRS.get(runtime);
+  if (noted !== undefined || named === undefined) return noted;
+  DATA_DIRS.set(runtime, named);
+  return named;
 }
 
 /**
