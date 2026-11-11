@@ -51,7 +51,7 @@ import { matchesGraphNameTest, readGraphMembership, workingMemoryIdentityRule, t
 import { readGraphLayerOf, readGraphRuntimeOf } from './read-graph-store.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry, type ReadGraphRegistryFact } from './registry-recognition.js';
 import { noteUnstoredReadGraphMark } from './mark-journal.js';
-import { syncReadGraphRuntimeWithRecovery } from './recovery.js';
+import { invalidateReadGraphRuntime, readGraphRecoveryGeneration, syncReadGraphRuntimeWithRecovery } from './recovery.js';
 import { recordReadGraphRegistry } from './registry-record.js';
 import { ReadGraphLocks, type InMemoryReadGraphStateMirror, type ReadGraphBackendRuntime } from './runtime.js';
 import {
@@ -442,6 +442,8 @@ class ReadGraphJob {
   private batches = 0;
   /** Whether this job replaced a damaged row. */
   replacedRow = false;
+  /** The backend's recovery generation when the job began. */
+  private readonly recovery: number | undefined;
 
   constructor(private readonly context: ReadGraphJobContext, readonly readGraph: string, private readonly kind: ReadGraphJobKind) {
     const layer = readGraphLayerOf(context.store);
@@ -452,6 +454,7 @@ class ReadGraphJob {
     }
     this.runtime = layer.runtime;
     syncReadGraphRuntimeWithRecovery(context.store, this.runtime);
+    this.recovery = readGraphRecoveryGeneration(context.store, this.runtime);
     this.maintenance = readGraphPartitionMaintenanceStore(context.store);
     if (!this.maintenance.update) throw new ReadGraphJobError('This store cannot build read graphs: it has no update()');
     this.versions = context.versions ?? CURRENT_READ_GRAPH_VERSIONS;
@@ -676,10 +679,16 @@ class ReadGraphJob {
   }
 
   /** One batch: one lock hold, sent only while the row is still the job's. `false` when it is not. */
+  /** Whether the backend restarted since the job began: its progress may be gone, and the mirror is invalidated. */
+  restarted(): boolean {
+    syncReadGraphRuntimeWithRecovery(this.context.store, this.runtime);
+    return this.recovery !== readGraphRecoveryGeneration(this.context.store, this.runtime);
+  }
+
   async batch(inService: () => boolean, send: () => Promise<void>, pause = true): Promise<boolean> {
     const began = performance.now();
     const sent = await this.locked(async () => {
-      if (!inService()) return false;
+      if (this.restarted() || !inService()) return false;
       await send();
       return true;
     });
@@ -690,11 +699,21 @@ class ReadGraphJob {
     return sent;
   }
 
-  /** Publish `ready`: the compare-and-set, the read-back and the mirror in one lock hold. */
+  /**
+   * Publish `ready`: the compare-and-set, the read-back and the mirror in one
+   * lock hold. A backend restart before it ends the job; one that lands while
+   * it runs may have published a row whose contents the restart cut short, so
+   * the journal keeps it for a mark.
+   */
   async publish(row: ReadGraphStateRow, inService: () => boolean): Promise<ReadGraphJobResult> {
     const published = await this.locked(async () => {
-      if (!inService()) return { lost: true as const };
-      return { row: await this.transition(row, { kind: 'publish-ready' }) };
+      if (this.restarted() || !inService()) return { lost: true as const };
+      const stored = await this.transition(row, { kind: 'publish-ready' });
+      if (!this.restarted()) return { row: stored };
+      if (stored?.state === 'ready') noteUnstoredReadGraphMark(this.runtime, this.readGraph, stored.generation);
+      // The read-back put ready in the mirror over any invalidation a request that saw the restart first had made.
+      invalidateReadGraphRuntime(this.runtime);
+      return { lost: true as const };
     });
     if ('lost' in published) return this.lost();
     const done = published.row?.state === 'ready' && published.row.generation === row.generation;
