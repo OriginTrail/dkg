@@ -463,6 +463,32 @@ describe('building a read graph', () => {
     expect(reads).toBeGreaterThan(2);
   });
 
+  it('takes a sub-graph that becomes a child context graph out of its parent, marked before the registration is sent', async () => {
+    const { adapter, fixture, layer, store, context } = await open();
+    const [vm, , code] = fixture.keys as [ReadGraphKey, ReadGraphKey, ReadGraphKey];
+    for (const key of [vm, code]) expect(await buildReadGraph(context, key)).toMatchObject({ outcome: 'done' });
+    const { wholeVm, codeVm } = fixture.readGraphs;
+    const child = `${fixture.root}/code`;
+    // The sub-graph's member data, in the parent's read graph so far.
+    expect(await triplesOf(adapter, wholeVm)).toContain(`urn:s:4 ${P} "v4"`);
+    const seen: string[] = [];
+    adapter.onInsert = async () => {
+      const rows = await storedRows(adapter);
+      seen.push(`${rows[wholeVm]} ${rows[codeVm]}`);
+    };
+    // `code` is registered as a child context graph, in its own `_meta` graph.
+    await store.insert([{ subject: child, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://dkg.network/ontology#ContextGraph', graph: `${child}/_meta` }]);
+    adapter.onInsert = undefined;
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatch(/^dirty@\d+ dirty@\d+$/);
+    // What the child holds, and what it is written later, reach no read graph of the parent, before or after a rebuild.
+    await store.insert([q('urn:s:secret', '"secret"', `${child}/_verifiable_memory/${AGENT}/9`)]);
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    const rebuilt = await triplesOf(adapter, wholeVm);
+    expect(rebuilt.filter((triple) => triple.includes('"secret"') || triple.includes('"v4"'))).toEqual([]);
+    await expectCurrentUnion(adapter, layer, fixture, vm);
+  });
+
   it('ends without effect when a newer dirty mark overtakes it, and nothing of it lands after a newer ready', async () => {
     const { adapter, fixture, layer, context } = await open();
     const [vm] = fixture.keys as [ReadGraphKey];
