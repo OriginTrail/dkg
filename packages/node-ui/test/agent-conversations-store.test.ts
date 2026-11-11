@@ -6,15 +6,19 @@
 // `panel-right.component.test.ts`).
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { LocalAgentIntegration } from '../src/ui/api.js';
 
 const streamLocalAgentChatMock = vi.fn();
+const fetchLocalAgentHistoryMock = vi.fn();
 
 vi.mock('../src/ui/api.js', async () => {
   const actual = await vi.importActual<any>('../src/ui/api.js');
   return {
     ...actual,
     streamLocalAgentChat: streamLocalAgentChatMock,
+    fetchLocalAgentHistory: fetchLocalAgentHistoryMock,
   };
 });
 
@@ -31,6 +35,8 @@ const integration = {
 } as LocalAgentIntegration;
 
 const conversation = () => useAgentConversations.getState().conversations[KEY];
+// The conversation key is the session id, so this target loads into KEY.
+const target = { integrationId: 'openclaw', sessionId: KEY };
 const request = () => ({ conversationKey: KEY, integration, sessionId: 'session-1', contextEntries: [], contextGraphId: null });
 
 describe('agent conversation store', () => {
@@ -122,5 +128,47 @@ describe('agent conversation store', () => {
     conversationActions.setInput(KEY, 'draft');
     conversationActions.clear(KEY);
     expect(conversation()).toMatchObject({ messages: [], input: '', attachments: [], historyLoaded: true });
+  });
+
+  it('a history refresh keeps what is showing while it loads, and merges without duplicates', async () => {
+    fetchLocalAgentHistoryMock.mockResolvedValueOnce([
+      { uri: 'urn:msg:1', author: 'user', text: 'hi', ts: '2026-11-10T10:00:00Z', turnId: 'turn-1' },
+    ]);
+    await conversationActions.loadHistory(target);
+    expect(conversation().messages).toHaveLength(1);
+
+    let respond!: (value: unknown) => void;
+    fetchLocalAgentHistoryMock.mockReturnValueOnce(new Promise((resolve) => { respond = resolve; }));
+    const refresh = conversationActions.loadHistory(target, { refresh: true });
+    expect(conversation()).toMatchObject({ historyLoaded: true, messages: [expect.objectContaining({ content: 'hi' })] });
+
+    respond([
+      { uri: 'urn:msg:1', author: 'user', text: 'hi', ts: '2026-11-10T10:00:00Z', turnId: 'turn-1' },
+      { uri: 'urn:msg:2', author: 'agent', text: 'hello', ts: '2026-11-10T10:00:05Z', turnId: 'turn-1' },
+    ]);
+    expect(await refresh).toEqual({ ok: true });
+    expect(conversation().messages.map((m) => m.content)).toEqual(['hi', 'hello']);
+  });
+
+  it('a failed history refresh keeps the conversation and returns the failure', async () => {
+    fetchLocalAgentHistoryMock.mockResolvedValueOnce([
+      { uri: 'urn:msg:1', author: 'user', text: 'hi', ts: '2026-11-10T10:00:00Z', turnId: 'turn-1' },
+    ]);
+    await conversationActions.loadHistory(target);
+    const revision = useAgentConversations.getState().sessionsRevision;
+    const failure = new Error('node unreachable');
+    fetchLocalAgentHistoryMock.mockRejectedValueOnce(failure);
+
+    expect(await conversationActions.loadHistory(target, { refresh: true })).toEqual({ ok: false, error: failure });
+    expect(conversation()).toMatchObject({ historyLoaded: true, messages: [expect.objectContaining({ content: 'hi' })] });
+    expect(useAgentConversations.getState().sessionsRevision).toBe(revision);
+  });
+
+  it('needs no rendering code: it uses the message model, not the message renderer', () => {
+    const source = readFileSync(resolve(__dirname, '../src/ui/stores/agentConversations.ts'), 'utf-8');
+    expect(source).toContain("from '../components/Shell/PanelRight/message-model.js'");
+    expect(source).not.toContain('PanelRight/messages.js');
+    const model = readFileSync(resolve(__dirname, '../src/ui/components/Shell/PanelRight/message-model.ts'), 'utf-8');
+    expect(model).not.toMatch(/from 'react'|thinking-orbs|MarkdownMessage/);
   });
 });

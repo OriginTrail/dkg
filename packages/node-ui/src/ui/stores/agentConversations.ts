@@ -23,7 +23,7 @@ import {
   buildLiveFailedTurnDisplay,
   mapHistoryMessage,
   mergeLocalAgentMessages,
-} from '../components/Shell/PanelRight/messages.js';
+} from '../components/Shell/PanelRight/message-model.js';
 import { resolveLocalAgentConversation } from '../components/Shell/PanelRight/selection.js';
 import type {
   LocalAgentAttachmentDraft,
