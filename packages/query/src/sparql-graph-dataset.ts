@@ -9,6 +9,7 @@ import type { GraphAccessMode } from './sparql-graph-access.js';
 import { hasOuterDefaultGraphPattern, hasTopLevelDefaultGraphPattern } from './sparql-default-graph-pattern.js';
 import { bindCallerGraphsBeforeRead, hasCallerGraphAssignments } from './sparql-caller-graph-read.js';
 import { transitionGraphScope } from './sparql-query-transition.js';
+import { createVariableAllocator } from './sparql-rewrite-names.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { sparqlRewriteReady, sparqlRewriteUnsupported, type SparqlRewriteResult } from './sparql-rewrite-result.js';
 
@@ -66,22 +67,85 @@ function needsConstantCallerGraphs(scope: PreparedSparqlQuery): boolean {
   });
 }
 
-/**
- * Oxigraph does not evaluate a `GRAPH ?var` block per graph when the block holds
- * a subquery, a nested GRAPH or a VALUES: it leaves ?var unbound, or reads every
- * graph of the dataset inside the block. Such blocks are read per graph instead.
- */
-function hasGraphVariableBlockReadPerGraph(scope: PreparedSparqlQuery): boolean {
+/** Keywords that start a construct which is not itself a triple pattern. */
+const NON_TRIPLE_WORDS = new Set(['VALUES', 'BIND', 'FILTER', 'OPTIONAL', 'MINUS', 'UNION', 'EXISTS', 'NOT', 'GRAPH', 'SERVICE', 'SILENT', 'AS']);
+
+/** Whether the group between these braces has a triple pattern of its own, not only in nested groups. */
+function hasOwnTriplePattern(scope: PreparedSparqlQuery, opening: number, closing: number): boolean {
   const { tokens } = scope.prepared;
-  return scope.graphTargets.some(target => {
-    if (target.kind !== 'variable') return false;
-    const opening = target.targetTokenIndex + 1;
-    const closing = scope.structure.braces.matchingTokenIndexes[opening] ?? tokens.length;
-    for (let index = opening + 1; index < closing; index++) {
-      if (['SELECT', 'GRAPH', 'VALUES'].some(keyword => isSparqlKeyword(tokens, index, keyword))) return true;
+  const depth = scope.structure.braces.depthBefore[opening] + 1;
+  for (let index = opening + 1; index < closing; index++) {
+    if (scope.structure.braces.depthBefore[index] !== depth) continue;
+    const token = tokens[index];
+    if (token.kind === 'symbol') {
+      // An expression of BIND, FILTER or a VALUES header: no triple inside.
+      if (token.logicalValue === '(') index = scope.structure.parentheses.matchingTokenIndexes[index] ?? closing;
+      continue;
     }
-    return false;
+    if (token.kind === 'word' && NON_TRIPLE_WORDS.has(token.upper)) {
+      // The term after GRAPH, SERVICE or VALUES names a graph, an endpoint or a variable.
+      if ((token.upper === 'GRAPH' || token.upper === 'SERVICE' || token.upper === 'VALUES') && tokens[index + 1]?.kind !== 'symbol') index++;
+      continue;
+    }
+    // A function call of a FILTER written without brackets, such as regex(...).
+    const next = tokens[index + 1];
+    if (token.kind === 'word' && next?.kind === 'symbol' && next.logicalValue === '(') continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Oxigraph does not evaluate `GRAPH ?var { P }` once per graph of the dataset
+ * when P has no triple pattern of its own and holds a VALUES, a subquery or a
+ * nested GRAPH: such a read binds ?var differently or repeats rows differently
+ * than with a graph list. Those reads keep the list next to their dataset. P is
+ * a caller's GRAPH ?var block, or the whole pattern when the rewrite wraps it.
+ */
+export function readsNeedGraphList(scope: PreparedSparqlQuery): boolean {
+  const { tokens } = scope.prepared;
+  const groups: Array<readonly [number, number]> = scope.hasGraphClause
+    ? scope.graphTargets.flatMap(target => target.kind === 'variable'
+      ? [[target.targetTokenIndex + 1, scope.structure.braces.matchingTokenIndexes[target.targetTokenIndex + 1] ?? -1] as const] : [])
+    : scope.where ? [[scope.where.openingTokenIndex, scope.where.closingTokenIndex] as const] : [];
+  return groups.some(([opening, closing]) => {
+    if (closing < 0) return false;
+    let holds = false;
+    for (let index = opening + 1; index < closing && !holds; index++) {
+      holds = ['SELECT', 'GRAPH', 'VALUES'].some(keyword => isSparqlKeyword(tokens, index, keyword));
+    }
+    return holds && !hasOwnTriplePattern(scope, opening, closing);
   });
+}
+
+/**
+ * On Oxigraph a graph named in FROM NAMED counts as present even where the store
+ * holds none of its triples, so a GRAPH block whose pattern needs no triple of its
+ * own would match it. Each such block, and the whole pattern when the rewrite wraps
+ * it, gets a guard that its graph holds a triple.
+ */
+export function guardGraphBlocksWithoutTriples(scope: PreparedSparqlQuery): PreparedSparqlQuery {
+  const { tokens } = scope.prepared;
+  const closings = new Set<number>();
+  if (scope.hasGraphClause) {
+    for (const target of scope.graphTargets) {
+      if (target.kind === 'invalid') continue;
+      const opening = target.targetTokenIndex + 1;
+      const closing = scope.structure.braces.matchingTokenIndexes[opening] ?? -1;
+      if (closing > opening && !hasOwnTriplePattern(scope, opening, closing)) closings.add(closing);
+    }
+  } else if (scope.where && !hasOwnTriplePattern(scope, scope.where.openingTokenIndex, scope.where.closingTokenIndex)) {
+    closings.add(scope.where.closingTokenIndex);
+  }
+  if (closings.size === 0) return scope;
+  const allocate = createVariableAllocator(scope);
+  const guard = `FILTER EXISTS { ${allocate('__dkgHeldS')} ${allocate('__dkgHeldP')} ${allocate('__dkgHeldO')} }`;
+  let source = scope.source;
+  for (const closing of [...closings].sort((left, right) => right - left)) {
+    const at = tokens[closing].start;
+    source = `${source.slice(0, at)} ${guard} ${source.slice(at)}`;
+  }
+  return transitionGraphScope(scope, source);
 }
 
 export function planGraphDataset(
@@ -97,8 +161,10 @@ export function planGraphDataset(
   const repeatedPath = hasRepeatedPath(scope);
   const oxigraph = engine === 'oxigraph';
   // On Oxigraph the dataset's named graphs alone select the read's graphs: a list
-  // beside them would cost a dataset lookup per listed graph.
-  const graphAccess = oxigraph ? 'named'
+  // beside them would cost a dataset lookup per listed graph. Only the reads that
+  // Oxigraph evaluates differently without a list keep one.
+  const graphAccess = oxigraph
+    ? readsNeedGraphList(scope) ? nestedSelect ? 'dataset' : 'values' : 'named'
     : scopedDescription || nestedSelect || repeatedPath ? 'dataset' : 'values';
   // The dataset also scopes reads outside the graph wrapper: descriptions,
   // default and mixed expressions. Graphless descriptions need only FROM.
@@ -109,9 +175,8 @@ export function planGraphDataset(
     datasetClauses: graphlessDescription ? ['FROM']
       : !oxigraph || readsDefaultGraph ? ['FROM', 'FROM NAMED'] : ['FROM NAMED'],
     preservePattern: graphlessDescription || scope.readsOnlyDeclaredNamedSet,
-    bindCallerGraphs: !scopedDescription && scope.graphVariables.length > 0 && (oxigraph
-      ? hasGraphVariableBlockReadPerGraph(scope)
-      : graphAccess === 'dataset' && repeatedPath && needsConstantCallerGraphs(scope)),
+    bindCallerGraphs: !scopedDescription && graphAccess === 'dataset' && !oxigraph
+      && scope.graphVariables.length > 0 && repeatedPath && needsConstantCallerGraphs(scope),
     wrapDescriptionPattern: scopedDescription && scope.where !== null,
   };
 }
