@@ -234,6 +234,11 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: ['kosava_supporting'],
     evmScopes: [],
   },
+  'packages/marketplace': {
+    // The daemon runs the buyer: the CLI's lanes that boot it, as for local-llm.
+    lanes: ['bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    evmScopes: [],
+  },
   'packages/evm-module': {
     forceFull: true,
     lanes: [],
@@ -274,6 +279,7 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/network-sim': ['kosava_supporting'],
   'packages/kafka-plugin': ['kosava_hardhat_plugins'],
   'packages/kafka-source': ['kosava_supporting'],
+  'packages/marketplace': ['kosava_supporting'],
   'packages/evm-module': ['contracts'],
   demo: ['kosava_supporting'],
 });
@@ -315,8 +321,8 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
   /^packages\/node-ui\/src\/ui\/(?:lib\/(?:nativeGasSymbol|apiToken|randomUUID|read-cache|nodeStatusPolicy)|stores\/wallet)\.ts$/,
   /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
   // The daemon route the suite drives and the CLI modules it loads.
-  /^packages\/cli\/src\/daemon\/routes\/(?:identity-wallets|restricted-browser-wallet-rpc)\.ts$/,
-  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/async-admission-trace|daemon\/reconcile-unavailable|daemon\/write-context-graph-preflight|daemon\/write-preflight-coalescing|daemon\/write-preflight-diagnostics|daemon\/write-preflight-attribution|daemon\/read-authority-diagnostics|daemon\/warning-gate|daemon\/context-graph-write-readiness|daemon\/context-graph-catchup-progress|context-graph-identifiers|auth|boolean-env-override|config|config-file-source|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/,
+  /^packages\/cli\/src\/daemon\/routes\/(?:identity-wallets|restricted-browser-wallet-rpc|marketplace-gateway-paths)\.ts$/,
+  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/async-admission-trace|daemon\/async-admission-trace-diagnostics|daemon\/reconcile-unavailable|daemon\/write-context-graph-preflight|daemon\/write-preflight-coalescing|daemon\/write-preflight-diagnostics|daemon\/write-preflight-attribution|daemon\/read-authority-diagnostics|daemon\/warning-gate|daemon\/context-graph-write-readiness|daemon\/context-graph-catchup-progress|context-graph-identifiers|auth|boolean-env-override|config|config-file-source|daemon\/public-checkpoint-config|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/,
 ];
 
 // File-level triggers: lanes or EVM scopes that specific paths select on top
@@ -442,7 +448,7 @@ export const PATH_TRIGGERS = Object.freeze([
   // Files other packages load by relative path, outside their declared
   // dependencies.
   {
-    patterns: [/^packages\/publisher\/src\/(?:metadata|graph-metadata-envelope|graph-knowledge-asset-controls|materialization-assertion-version|assertion-lifecycle-events|entity-share-metadata|graph-knowledge-asset-metadata|workspace-metadata-subjects)\.ts$/],
+    patterns: [/^packages\/publisher\/src\/(?:metadata|metadata-iri|graph-metadata-reader|graph-metadata-envelope|graph-knowledge-asset-controls|materialization-assertion-version|assertion-lifecycle-events|entity-share-metadata|graph-knowledge-asset-metadata|workspace-metadata-subjects)\.ts$/],
     lanes: ['kosava_node_ui'],
     evmScopes: [],
     reason: 'the UI reserved-UAL regression loads the publisher metadata writer and its helpers',
@@ -466,12 +472,12 @@ export const PATH_TRIGGERS = Object.freeze([
     reason: 'the agent memory-layer tests load the CLI confirmed-publication proof helper',
   },
   {
-    patterns: [/^packages\/cli\/src\/(?:auth|boolean-env-override|config|config-file-source|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/],
+    patterns: [/^packages\/cli\/src\/(?:auth|boolean-env-override|config|config-file-source|daemon\/public-checkpoint-config|daemon\/routes\/marketplace-gateway-paths|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/],
     // The EPCIS lanes are Blazegraph and supporting; the CLI rule already
     // selects Blazegraph.
     lanes: ['kosava_supporting'],
     evmScopes: [],
-    reason: 'the EPCIS API tests import the CLI auth and config modules',
+    reason: 'the EPCIS API tests import the CLI auth and config modules, and what auth imports',
   },
   {
     patterns: [/^packages\/cli\/skills\/dkg-node\/SKILL\.md$/],

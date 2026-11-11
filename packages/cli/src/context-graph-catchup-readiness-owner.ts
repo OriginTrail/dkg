@@ -14,6 +14,7 @@ import {
   type ContextGraphReadinessStore,
 } from './context-graph-readiness.js';
 import { commitContextGraphReadinessPatches } from './context-graph-readiness-commit.js';
+import { runPrivateEmptyVmAttemptAtCatchup } from './context-graph-empty-vm-readiness.js';
 
 type CompletionInputs = Pick<
   Parameters<typeof classifyContextGraphCatchupReadiness>[0],
@@ -49,22 +50,26 @@ export async function classifyAndCommitContextGraphCatchup(input: CompletionInpu
       statePatch: classification.statePatch,
       readinessPatch: classification.readinessPatch,
     });
-    return classification;
+    return { value: classification, completion };
   };
 
-  // Finalized chain reads can take tens of seconds. Prepare that optional
-  // evidence first so catalog readiness for this graph is not lock-starved.
-  const preparation = await agent.prepareContextGraphReadinessWithPrivateEmptyVmV1({
-    contextGraphId,
-    attemptPrivateEmptyVm: privateZeroVmCandidate,
-    callerAgentAddress,
-  });
-  return withContextGraphReadinessMutationLock(agent, contextGraphId, () => {
-    // The agent owns one final live inspection for both proof outcomes. A
-    // failed proof cannot reuse admission-time authority, and no await can
-    // separate the final fence from classification or persistence.
-    return preparation.inspectAndCommit({
-      inspectMetadata: catchupResultHasCleanResponse(result) || privateZeroVmCandidate,
-    }, decide);
-  });
+  const attempt = async () => {
+    // Finalized chain reads can take tens of seconds. Prepare that optional
+    // evidence first so catalog readiness for this graph is not lock-starved.
+    const preparation = await agent.prepareContextGraphReadinessWithPrivateEmptyVmV1({
+      contextGraphId,
+      attemptPrivateEmptyVm: privateZeroVmCandidate,
+      callerAgentAddress,
+    });
+    return withContextGraphReadinessMutationLock(agent, contextGraphId, () => {
+      // The agent owns one final live inspection for both proof outcomes. A
+      // failed proof cannot reuse admission-time authority, and no await can
+      // separate the final fence from classification or persistence.
+      return preparation.inspectAndCommit({
+        inspectMetadata: catchupResultHasCleanResponse(result) || privateZeroVmCandidate,
+      }, decide);
+    });
+  };
+  if (!privateZeroVmCandidate || callerAgentAddress === undefined) return (await attempt()).value;
+  return runPrivateEmptyVmAttemptAtCatchup({ agent, store, contextGraphId, callerAgentAddress, attempt });
 }

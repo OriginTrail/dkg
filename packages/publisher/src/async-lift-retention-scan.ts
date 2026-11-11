@@ -96,8 +96,15 @@ export interface LiftScanPlan {
 
 const termNumber = (term: string | undefined): number => { const m = /^"?([^"^]*)"?(?:\^\^<[^>]*>)?$/.exec(String(term ?? '')); return m && m[1] !== '' ? Number(m[1]) : Number.NaN; };
 const byIri = (a: LiftScanRow, b: LiftScanRow) => (a.iri < b.iri ? -1 : a.iri > b.iri ? 1 : 0);
+/**
+ * The WALK ORDER: by finish time, then by subject (#3554). The tie scan returns the rows of one finish time in it (ORDER BY STR(?job), checked), and every plan sorts the
+ * rows it judges into it, so a batch never judges two rows of one finish time in the engine's order. The sweep's key rule compares records in this order.
+ */
+export const byWalk = (a: LiftScanRow, b: LiftScanRow): number => a.finalizedAt - b.finalizedAt || byIri(a, b);
 /** One row per subject, the first of an ordered answer (the oldest): a subject whose index holds several matching terms comes back once per term. */
 const distinctRows = (rows: readonly LiftScanRow[]): LiftScanRow[] => { const seen = new Set<string>(); return rows.filter(r => (seen.has(r.iri) ? false : (seen.add(r.iri), true))); };
+/** The rows to judge, in the walk order, one per subject (the oldest of its rows). */
+const inWalkOrder = (rows: readonly LiftScanRow[]): LiftScanRow[] => distinctRows([...rows].sort(byWalk));
 
 function parseScanRows(bindings: ReadonlyArray<Record<string, string>>): { rows: LiftScanRow[]; clean: boolean } {
   const rows: LiftScanRow[] = [];
@@ -118,7 +125,7 @@ export async function planFinalizedScan(ctx: LiftScanContext, cutoff: number, li
     const { finalizedAt, afterKey } = cursor.tie;
     const { rows, clean } = parseScanRows(expectBindings(await ctx.store.query(buildLiftRetentionTieQuery(ctx.graphUri, finalizedAt, limit, afterKey), SCAN_OPTIONS)));
     const ordered = clean && rows.length <= limit + 1 && rows.every((r, i) => r.finalizedAt === finalizedAt && (afterKey === undefined || r.iri > afterKey) && (i === 0 || rows[i - 1]!.iri <= r.iri));   // <=: a subject's own rows are adjacent
-    if (!ordered) return keepCursor(distinctRows([...rows].sort(byIri)).slice(0, limit));
+    if (!ordered) return keepCursor(inWalkOrder(rows).slice(0, limit));
     const judged = distinctRows(rows).slice(0, limit);
     // limit + 1 rows = a full window, which may hide more subjects even when repeats left fewer than limit + 1 of them: continue after the last subject judged
     return { plan: { judged, next: rows.length <= limit ? { after: finalizedAt } : { ...cursor, tie: { finalizedAt, afterKey: judged[judged.length - 1]!.iri } }, caughtUp: false }, anomaly: false, queries: 1 };
@@ -126,14 +133,14 @@ export async function planFinalizedScan(ctx: LiftScanContext, cutoff: number, li
   const { rows, clean } = parseScanRows(expectBindings(await ctx.store.query(buildLiftRetentionScanQuery(ctx.graphUri, cutoff, limit, cursor), SCAN_OPTIONS)));
   const afterOk = (t: number) => cursor.after === undefined || t > cursor.after;
   const ordered = clean && rows.length <= limit + 1 && rows.every((r, i) => afterOk(r.finalizedAt) && r.finalizedAt <= cutoff && (i === 0 || rows[i - 1]!.finalizedAt <= r.finalizedAt));
-  if (!ordered) return keepCursor(distinctRows([...rows].sort((a, b) => a.finalizedAt - b.finalizedAt)).slice(0, limit));
+  if (!ordered) return keepCursor(inWalkOrder(rows).slice(0, limit));
   if (rows.length <= limit) {                                                          // the end of the old-enough region: everything left is judged now
-    return { plan: { judged: distinctRows(rows), next: rows.length ? { after: rows[rows.length - 1]!.finalizedAt } : cursor, caughtUp: true }, anomaly: false, queries: 1 };
+    return { plan: { judged: inWalkOrder(rows), next: rows.length ? { after: rows[rows.length - 1]!.finalizedAt } : cursor, caughtUp: true }, anomaly: false, queries: 1 };
   }
   // limit + 1 rows came back: the last one may belong to a group that continues beyond the result, so judge only what is strictly older than it
   const last = rows[limit]!.finalizedAt;
   const older = rows.filter(r => r.finalizedAt < last);
-  if (older.length > 0) return { plan: { judged: distinctRows(older), next: { after: older[older.length - 1]!.finalizedAt }, caughtUp: false }, anomaly: false, queries: 1 };
+  if (older.length > 0) return { plan: { judged: inWalkOrder(older), next: { after: older[older.length - 1]!.finalizedAt }, caughtUp: false }, anomaly: false, queries: 1 };
   const walk = await planFinalizedScan(ctx, cutoff, limit, { ...cursor, tie: { finalizedAt: last } });   // one group larger than a batch: walk it by key, starting now
   return { ...walk, queries: walk.queries + 1 };
 }

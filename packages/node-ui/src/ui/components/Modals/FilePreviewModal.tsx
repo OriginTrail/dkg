@@ -124,7 +124,7 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId,
         {error && (
           <div className="v10-file-preview-error ds-card-nested">
             <p>{error}</p>
-            <p style={{ fontSize: 11, marginTop: 4 }}>
+            <p style={{ fontSize: 'var(--fs-label)', marginTop: 4 }}>
               File preview requires the extraction status to still be cached on the node.
               If the node was restarted, the preview metadata may be unavailable.
             </p>

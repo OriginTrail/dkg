@@ -1,19 +1,27 @@
 import {
   prepareSparqlQuery,
-  prepareSparql,
   type PreparedSparqlQuery,
   type SparqlGraphTarget as PreparedSparqlGraphTarget,
   type SparqlLexicalToken,
   type ValidPreparedSparql,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { assertSafeIri } from '@origintrail-official/dkg-core';
+import type { SparqlEngineFamily } from '@origintrail-official/dkg-storage';
 import {
   sparqlRewriteReady,
   sparqlRewriteUnsupported,
   type SparqlRewriteResult,
 } from './sparql-rewrite-result.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
+import { applyGraphDataset } from './sparql-graph-dataset.js';
 import { graphSubselectLimit } from './sparql-subselect-limit.js';
+import { renderDedupPattern } from './sparql-dedup-pattern-source.js';
+import { analyzeDedupPattern } from './sparql-dedup-pattern.js';
+import { hasTopLevelDefaultGraphPattern } from './sparql-default-graph-pattern.js';
+import { createGraphAccess, type GraphAccess } from './sparql-graph-access.js';
+import { createBlankNodeRenamer, createVariableAllocator, type VariableAllocator } from './sparql-rewrite-names.js';
+import { transitionGraphScope } from './sparql-query-transition.js';
+export { transitionGraphScope } from './sparql-query-transition.js';
 
 function iriValue(token: SparqlLexicalToken | undefined): string | null {
   return token?.kind === 'iri' ? token.logicalValue : null;
@@ -43,7 +51,6 @@ export type GraphScopeUnsupportedReason =
   | 'missing-where'
   | 'nested-union'
   | 'strategy-rejected'
-  | 'helper-variable-collision'
   | 'no-projected-variables';
 
 function ready(scope: PreparedGraphScope): GraphScopeRewriteResult {
@@ -63,22 +70,6 @@ export function requireGraphScopeRewrite(result: GraphScopeRewriteResult): Prepa
     throw new ScopedQueryViolationError('unable to locate a graph-scopable WHERE block');
   }
   throw new ScopedQueryViolationError(`graph rewrite is unsupported: ${result.reason}`);
-}
-
-/**
- * Own the state transition after a source edit. A no-op retains object identity;
- * every actual source change is prepared before it leaves this module.
- */
-export function transitionGraphScope(
-  scope: PreparedGraphScope,
-  source: string,
-): PreparedGraphScope {
-  if (source === scope.source) return scope;
-  const prepared = prepareSparql(source);
-  if (prepared.status !== 'valid') {
-    throw new ScopedQueryViolationError('graph rewrite produced malformed SPARQL');
-  }
-  return prepareGraphScope(prepared);
 }
 
 export function prepareGraphScope(
@@ -126,38 +117,12 @@ export function assertExplicitGraphIrisAllowed(
   }
 }
 
-function scopeGraphlessDescribe(
-  scope: PreparedGraphScope,
-  graphUris: readonly string[],
-): string | null {
-  if (scope.operation !== 'DESCRIBE' || scope.where !== null) return null;
-  if (scope.prepared.tokens.some(
-    (token) => token.kind === 'symbol' && token.logicalValue === '{',
-  )) return null;
-
-  const operationIndex = scope.prepared.prologue.endTokenIndex;
-  const tokens = scope.prepared.tokens.slice(operationIndex);
-  const modifiers = new Set(['GROUP', 'HAVING', 'ORDER', 'LIMIT', 'OFFSET']);
-  const modifier = tokens.slice(1).find(
-    (token) => token.kind === 'word' && modifiers.has(token.upper),
-  );
-  const last = tokens.at(-1);
-  const insertion = modifier?.start ?? last?.end ?? scope.prepared.tokens[operationIndex]?.end;
-  if (insertion === undefined) return null;
-  const clauses = graphUris.map((graph) => `FROM <${assertSafeIri(graph)}>`).join(' ');
-  return `${scope.source.slice(0, insertion)} ${clauses} ${scope.source.slice(insertion)}`;
-}
-
 export function wrapWithGraph(
   scope: PreparedGraphScope,
   graphUri: string,
 ): GraphScopeRewriteResult {
   if (scope.hasGraphClause) return ready(transitionGraphScope(scope, scope.source));
-  if (!scope.where) {
-    const describe = scopeGraphlessDescribe(scope, [graphUri]);
-    if (describe !== null) return ready(transitionGraphScope(scope, describe));
-    return unsupported('missing-where');
-  }
+  if (!scope.where) return unsupported('missing-where');
   const { openEnd, close } = scope.where;
   const before = scope.source.slice(0, openEnd);
   const inner = scope.source.slice(openEnd, close);
@@ -174,11 +139,7 @@ export function wrapWithGraphUnion(
 ): GraphScopeRewriteResult {
   if (scope.hasGraphClause) return ready(transitionGraphScope(scope, scope.source));
   if (graphUris.length === 0) return ready(transitionGraphScope(scope, scope.source));
-  if (!scope.where) {
-    const describe = scopeGraphlessDescribe(scope, graphUris);
-    if (describe !== null) return ready(transitionGraphScope(scope, describe));
-    return unsupported('missing-where');
-  }
+  if (!scope.where) return unsupported('missing-where');
   const { openEnd, close, hasUnion } = scope.where;
   const before = scope.source.slice(0, openEnd);
   const inner = scope.source.slice(openEnd, close);
@@ -190,25 +151,22 @@ export function wrapWithGraphUnion(
     ));
   }
   if (hasUnion) return unsupported('nested-union');
+  const branchSource = createBlankNodeRenamer(scope);
   const branches = graphUris
-    .map((graph) => `{ GRAPH <${assertSafeIri(graph)}> { ${inner} } }`)
+    .map((graph) => `{ GRAPH <${assertSafeIri(graph)}> { ${branchSource(openEnd, close)} } }`)
     .join(' UNION ');
   return ready(transitionGraphScope(scope, `${before} ${branches} ${after}`));
 }
 
-const VIEW_GRAPH_SENTINEL = '?__dkgViewGraph';
-const DEDUP_GRAPH_SENTINEL = '?__dkgDedupGraph';
-const DEDUP_RANK_SENTINEL = '?__dkgDedupRank';
-const DEDUP_PRIOR_GRAPH_SENTINEL = '?__dkgDedupPriorGraph';
-const DEDUP_PRIOR_RANK_SENTINEL = '?__dkgDedupPriorRank';
+interface ProjectedGraphPattern {
+  readonly pattern: string;
+  readonly distinct?: boolean;
+}
 
 function wrapWithProjectedGraphSubselect(
   scope: PreparedGraphScope,
   graphUris: readonly string[],
-  helperVariables: readonly string[],
-  buildGraphPattern: (inner: string, graphs: readonly string[]) => string,
-  acceptsScope: (scope: PreparedGraphScope) => boolean = () => true,
-  distinctMappings = false,
+  buildPattern: (inner: string, graphs: readonly string[]) => ProjectedGraphPattern | null,
 ): GraphScopeRewriteResult {
   if (scope.hasGraphClause) return ready(transitionGraphScope(scope, scope.source));
   if (graphUris.length === 0) return ready(transitionGraphScope(scope, scope.source));
@@ -224,91 +182,76 @@ function wrapWithProjectedGraphSubselect(
     ));
   }
   if (hasUnion) return unsupported('nested-union');
-  if (!acceptsScope(scope)) return unsupported('strategy-rejected');
-
-  const helperNames = new Set(helperVariables.map((variable) => variable.slice(1)));
-  if (scope.queryVariables.some((variable) => helperNames.has(variable.logicalName))) {
-    return unsupported('helper-variable-collision');
-  }
+  const built = buildPattern(inner, graphs);
+  if (!built) return unsupported('strategy-rejected');
+  const { pattern, distinct } = built;
 
   const innerVariables = scope.whereVariables;
   if (innerVariables.length === 0) return unsupported('no-projected-variables');
-  const graphPattern = buildGraphPattern(inner, graphs);
+  const variables = innerVariables.map(variable => variable.source).join(' ');
+  const replacement = `{ SELECT ${distinct ? 'DISTINCT ' : ''}${variables} WHERE { ${pattern} }${graphSubselectLimit(scope)} }`;
   return ready(transitionGraphScope(
     scope,
-    `${scope.source.slice(0, openEnd)} { SELECT ${distinctMappings ? 'DISTINCT ' : ''}${innerVariables.map((variable) => variable.source).join(' ')} WHERE { ${graphPattern} }${graphSubselectLimit(scope)} } ${scope.source.slice(close)}`,
+    `${scope.source.slice(0, openEnd)} ${replacement} ${scope.source.slice(close)}`,
   ));
 }
 
-function isDedupSafeBasicGraphPattern(scope: PreparedGraphScope): boolean {
-  if (!scope.where) return false;
-  const forbidden = new Set([
-    'OPTIONAL', 'MINUS', 'SERVICE', 'VALUES', 'BIND', 'SELECT', 'GRAPH', 'EXISTS',
-  ]);
-  return !scope.prepared.tokens
-    .slice(scope.where.openingTokenIndex + 1, scope.where.closingTokenIndex)
-    .some((token) => (
-      (token.kind === 'word' && forbidden.has(token.upper))
-      || (token.kind === 'symbol' && (token.logicalValue === '{' || token.logicalValue === '}'))
-    ));
-}
-
-function isSingleTripleSelect(scope: PreparedGraphScope): boolean {
-  if (scope.operation !== 'SELECT' || !scope.where) return false;
-  const tokens = scope.prepared.tokens.slice(
-    scope.where.openingTokenIndex + 1,
-    scope.where.closingTokenIndex,
-  );
-  const last = tokens.at(-1);
-  if (last?.kind === 'symbol' && last.logicalValue === '.') {
-    tokens.pop();
+/** Own graph choice and FILTER placement inside the shared projection boundary. */
+function buildDeduplicatedGraphPattern(
+  scope: PreparedGraphScope, access: GraphAccess, allocate: VariableAllocator,
+): ProjectedGraphPattern | null {
+  const plan = analyzeDedupPattern(scope);
+  if (!plan) return null;
+  const { uniqueMappings, filters } = plan;
+  // Deduplicate only mappings known to be unique within one graph. ASK uses
+  // the same row semantics, including its modifiers and volatile FILTERs.
+  const distinct = uniqueMappings;
+  const movedFilters = filters;
+  // Every retained row evaluates each moved FILTER once. Hidden blank-node
+  // variables stay private across graph selection and replay.
+  const inner = renderDedupPattern(scope, movedFilters, allocate);
+  const variables = scope.whereVariables.map(variable => variable.source).join(' ');
+  const filterVariables = movedFilters.map((_filter, index) => allocate(`__dkgDedupFilter${index}`));
+  // BIND evaluates on every retained row on the right of the rejoin. A raw
+  // FILTER can be pushed onto the grouped left side by either engine, sampling
+  // once for all identical mappings. Filtering these booleans after OPTIONAL
+  // also discards its unmatched fallback row and expression errors.
+  const filterBindings = movedFilters.map(({ expressionStart, end }, index) =>
+    `BIND(${scope.source.slice(expressionStart, end)} AS ${filterVariables[index]})`,
+  ).join(' ');
+  const bindings = { pattern: filterBindings, projectedVariables: filterVariables };
+  const graph = allocate('__dkgDedupGraph');
+  const matchGraph = distinct ? graph : allocate('__dkgDedupMatchGraph');
+  const candidate = access.candidate(inner, matchGraph);
+  if (distinct) {
+    if (!movedFilters.length) return { pattern: candidate, distinct };
+    const trailing = filterVariables.map(variable => `FILTER(${variable})`).join(' ');
+    return { pattern: `{ SELECT DISTINCT ${variables} WHERE { ${candidate} } } ${filterBindings} ${trailing}` };
   }
-  if (tokens.length !== 3) return false;
-  const [subject, predicate, object] = tokens;
-  return subject.kind === 'variable' && object.kind === 'variable'
-    && (predicate.kind === 'variable' || predicate.kind === 'iri'
-      || predicate.kind === 'prefixed-name'
-      || (predicate.kind === 'word' && predicate.logicalValue === 'a'));
+  // Choose one graph deterministically and replay its hidden-path multiplicity.
+  // The access implementation owns the barriers required by its backend plan.
+  const replay = access.replay(inner, graph, variables, bindings);
+  const trailing = filterVariables.map(variable => `FILTER(${variable})`).join(' ');
+  return {
+    pattern: `{ SELECT ${variables} (MIN(${matchGraph}) AS ${graph}) WHERE { ${candidate} } GROUP BY ${variables} } ${replay} ${trailing}`,
+  };
 }
 
-/** Scope a graph set while suppressing mappings already emitted by an earlier graph. */
+/** Scope a graph set, reading each mapping from one graph even when several hold it. */
 export function wrapWithDeduplicatedGraphValues(
   input: PreparedGraphScope,
   graphUris: readonly string[],
 ): GraphScopeRewriteResult {
-  // For one triple, DISTINCT over every matched variable removes graph mirrors
-  // without changing multiplicity after the caller's projection or aggregation.
-  // More complex patterns retain the existing graph-rank anti-join.
-  const distinctMappings = isSingleTripleSelect(input);
+  const allocate = createVariableAllocator(input);
+  return wrapWithDeduplicatedGraphSelection(input, graphUris, createGraphAccess('values', [...new Set(graphUris)], allocate), allocate);
+}
+
+function wrapWithDeduplicatedGraphSelection(
+  input: PreparedGraphScope, graphUris: readonly string[], access: GraphAccess, allocate: VariableAllocator,
+): GraphScopeRewriteResult {
   return wrapWithProjectedGraphSubselect(
-    input,
-    graphUris,
-    [
-      DEDUP_GRAPH_SENTINEL,
-      DEDUP_RANK_SENTINEL,
-      DEDUP_PRIOR_GRAPH_SENTINEL,
-      DEDUP_PRIOR_RANK_SENTINEL,
-    ],
-    (inner, graphs) => {
-      if (distinctMappings) {
-        const values = graphs.map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
-        return `VALUES ${DEDUP_GRAPH_SENTINEL} { ${values} } GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`;
-      }
-      const rows = graphs
-        .map((graph, rank) => `(<${assertSafeIri(graph)}> ${rank})`)
-        .join(' ');
-      return [
-        `VALUES (${DEDUP_GRAPH_SENTINEL} ${DEDUP_RANK_SENTINEL}) { ${rows} }`,
-        `GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`,
-        'FILTER NOT EXISTS {',
-        `  VALUES (${DEDUP_PRIOR_GRAPH_SENTINEL} ${DEDUP_PRIOR_RANK_SENTINEL}) { ${rows} }`,
-        `  FILTER (${DEDUP_PRIOR_RANK_SENTINEL} < ${DEDUP_RANK_SENTINEL})`,
-        `  GRAPH ${DEDUP_PRIOR_GRAPH_SENTINEL} { ${inner} }`,
-        '}',
-      ].join(' ');
-    },
-    isDedupSafeBasicGraphPattern,
-    distinctMappings,
+    input, graphUris,
+    () => buildDeduplicatedGraphPattern(input, access, allocate),
   );
 }
 
@@ -317,15 +260,8 @@ export function wrapWithGraphValues(
   input: PreparedGraphScope,
   graphUris: readonly string[],
 ): GraphScopeRewriteResult {
-  return wrapWithProjectedGraphSubselect(
-    input,
-    graphUris,
-    [VIEW_GRAPH_SENTINEL],
-    (inner, graphs) => {
-      const values = graphs.map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
-      return `VALUES ${VIEW_GRAPH_SENTINEL} { ${values} } GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} }`;
-    },
-  );
+  const access = createGraphAccess('values', [...new Set(graphUris)], createVariableAllocator(input));
+  return wrapWithProjectedGraphSubselect(input, graphUris, inner => ({ pattern: access.fallback(inner) }));
 }
 
 export type GraphSetRoutingPolicy =
@@ -338,19 +274,31 @@ export function rewriteGraphSet(
   scope: PreparedGraphScope,
   graphUris: readonly string[],
   policy: GraphSetRoutingPolicy,
+  engine: SparqlEngineFamily | null = null,
 ): GraphScopeRewriteResult {
-  const strategies = policy === 'deduplicated-values-union'
-    ? [wrapWithDeduplicatedGraphValues, wrapWithGraphValues, wrapWithGraphUnion]
-    : policy === 'values-union'
-      ? [wrapWithGraphValues, wrapWithGraphUnion]
-      : [wrapWithGraphUnion];
-  let last = unsupported('strategy-rejected');
-  for (const strategy of strategies) {
-    const result = strategy(scope, graphUris);
-    if (result.kind === 'ready') return result;
-    last = result;
-  }
-  return last;
+  return applyGraphDataset(scope, graphUris, engine, (graphAccess) => {
+    const allocate = createVariableAllocator(scope);
+    const access = createGraphAccess(graphAccess, [...new Set(graphUris)], allocate);
+    const strategies = [wrapWithGraphUnion];
+    if (policy !== 'union-only') {
+      strategies.unshift((input, graphs) => wrapWithProjectedGraphSubselect(input, graphs, inner => ({ pattern: access.fallback(inner) })));
+      if (policy === 'deduplicated-values-union') {
+        strategies.unshift((input, graphs) => wrapWithDeduplicatedGraphSelection(input, graphs, access, allocate));
+      }
+    }
+    let last = unsupported('strategy-rejected');
+    for (const strategy of strategies) {
+      const result = strategy(scope, graphUris);
+      if (result.kind === 'ready') return result;
+      last = result;
+    }
+    return last;
+  });
+}
+
+/** Scope a read to one graph on a store with this engine. */
+export function rewriteSingleGraph(scope: PreparedGraphScope, graphUri: string, engine: SparqlEngineFamily | null): GraphScopeRewriteResult {
+  return applyGraphDataset(scope, [graphUri], engine, () => wrapWithGraph(scope, graphUri));
 }
 
 /** Apply a graph-set policy and its single-graph compatibility fallback. */
@@ -360,13 +308,14 @@ export function rewriteGraphRoute(
   fallbackGraphUri: string,
   policy: GraphSetRoutingPolicy,
   fallbackPolicy: 'compatibility' | 'preserve-scope' = 'compatibility',
+  engine: SparqlEngineFamily | null = null,
 ): GraphScopeRewriteResult {
   if (graphUris.length > 0) {
-    const selected = rewriteGraphSet(scope, graphUris, policy);
+    const selected = rewriteGraphSet(scope, graphUris, policy, engine);
     if (selected.kind === 'ready') return selected;
     if (fallbackPolicy === 'preserve-scope' && graphUris.some(graph => graph !== fallbackGraphUri)) return selected;
   }
-  return wrapWithGraph(scope, fallbackGraphUri);
+  return rewriteSingleGraph(scope, fallbackGraphUri, engine);
 }
 
 /**
@@ -478,162 +427,11 @@ function nestedSelectContainsGraphVariable(scope: PreparedGraphScope): boolean {
 
 function graphVariablesAreTopLevel(scope: PreparedGraphScope): boolean {
   if (!scope.where) return false;
-  const outerDepth = scope.structure.braces.depthBefore[scope.where.openingTokenIndex] + 1;
-  return scope.graphTargets.every(
-    (target) => target.kind !== 'variable' || target.braceDepth === outerDepth,
-  );
-}
-
-function findBalancedParenthesisEnd(
-  tokens: readonly SparqlLexicalToken[],
-  openingIndex: number,
-  limit: number,
-): number {
-  let depth = 0;
-  for (let index = openingIndex; index < limit; index++) {
-    const token = tokens[index];
-    if (token.kind !== 'symbol') continue;
-    if (token.logicalValue === '(') depth++;
-    else if (token.logicalValue === ')') {
-      depth--;
-      if (depth === 0) return index;
-    }
-  }
-  return -1;
-}
-
-function hasTopLevelDefaultGraphPattern(scope: PreparedGraphScope): boolean {
-  const where = scope.where;
-  if (!where) return true;
-  return groupHasDefaultGraphPattern(
-    scope,
-    where.openingTokenIndex,
-    where.closingTokenIndex,
-  );
-}
-
-function nextGroupOpening(
-  scope: PreparedGraphScope,
-  start: number,
-  limit: number,
-  depth: number,
-): number {
-  for (let index = start; index < limit; index++) {
-    const token = scope.prepared.tokens[index];
-    if (
-      scope.structure.braces.depthBefore[index] === depth
-      && token.kind === 'symbol'
-      && token.logicalValue === '{'
-    ) return index;
-  }
-  return -1;
-}
-
-function groupHasDefaultGraphPattern(
-  scope: PreparedGraphScope,
-  openingIndex: number,
-  closingIndex: number,
-): boolean {
-  const { tokens } = scope.prepared;
-  const contentDepth = scope.structure.braces.depthBefore[openingIndex] + 1;
-  let firstIndex = -1;
-  for (let index = openingIndex + 1; index < closingIndex; index++) {
-    if (scope.structure.braces.depthBefore[index] === contentDepth) {
-      firstIndex = index;
-      break;
-    }
-  }
-  const first = firstIndex >= 0 ? tokens[firstIndex] : undefined;
-
-  // A nested SELECT's projection is not a default-graph pattern. Analyze only
-  // its WHERE group (or shorthand group), using the same token coordinates.
-  if (first?.kind === 'word' && first.upper === 'SELECT') {
-    let searchStart = firstIndex + 1;
-    for (let index = searchStart; index < closingIndex; index++) {
-      const token = tokens[index];
-      if (
-        scope.structure.braces.depthBefore[index] === contentDepth
-        && token.kind === 'word'
-        && token.upper === 'WHERE'
-      ) {
-        searchStart = index + 1;
-        break;
-      }
-    }
-    const nestedOpening = nextGroupOpening(scope, searchStart, closingIndex, contentDepth);
-    if (nestedOpening < 0) return true;
-    const nestedClosing = scope.structure.braces.matchingTokenIndexes[nestedOpening] ?? -1;
-    return nestedClosing < 0 || groupHasDefaultGraphPattern(scope, nestedOpening, nestedClosing);
-  }
-
-  for (let index = openingIndex + 1; index < closingIndex; index++) {
-    if (scope.structure.braces.depthBefore[index] !== contentDepth) continue;
-    const token = tokens[index];
-
-    if (token.kind === 'word' && token.upper === 'GRAPH') {
-      const graphOpening = nextGroupOpening(scope, index + 2, closingIndex, contentDepth);
-      if (graphOpening < 0) return true;
-      const graphClosing = scope.structure.braces.matchingTokenIndexes[graphOpening] ?? -1;
-      if (graphClosing < 0) return true;
-      index = graphClosing;
-      continue;
-    }
-    if (token.kind === 'word' && token.upper === 'VALUES') {
-      const valuesOpening = nextGroupOpening(scope, index + 1, closingIndex, contentDepth);
-      if (valuesOpening < 0) return true;
-      const valuesClosing = scope.structure.braces.matchingTokenIndexes[valuesOpening] ?? -1;
-      if (valuesClosing < 0) return true;
-      index = valuesClosing;
-      continue;
-    }
-    if (token.kind === 'word' && (token.upper === 'FILTER' || token.upper === 'BIND')) {
-      const expressionOpening = tokens[index + 1];
-      if (
-        expressionOpening?.kind !== 'symbol'
-        || expressionOpening.logicalValue !== '('
-      ) return true;
-      const expressionClosing = findBalancedParenthesisEnd(tokens, index + 1, closingIndex);
-      if (expressionClosing < 0) return true;
-      for (let nested = index + 2; nested < expressionClosing; nested++) {
-        const candidate = tokens[nested];
-        if (
-          candidate.kind === 'symbol'
-          && candidate.logicalValue === '{'
-        ) {
-          const nestedClosing = scope.structure.braces.matchingTokenIndexes[nested] ?? -1;
-          if (nestedClosing < 0 || groupHasDefaultGraphPattern(scope, nested, nestedClosing)) {
-            return true;
-          }
-          nested = nestedClosing;
-        }
-      }
-      index = expressionClosing;
-      continue;
-    }
-    if (token.kind === 'word' && (token.upper === 'OPTIONAL' || token.upper === 'MINUS')) {
-      const nestedOpening = nextGroupOpening(scope, index + 1, closingIndex, contentDepth);
-      if (nestedOpening < 0) return true;
-      const nestedClosing = scope.structure.braces.matchingTokenIndexes[nestedOpening] ?? -1;
-      if (nestedClosing < 0 || groupHasDefaultGraphPattern(scope, nestedOpening, nestedClosing)) {
-        return true;
-      }
-      index = nestedClosing;
-      continue;
-    }
-    if (token.kind === 'word' && token.upper === 'UNION') continue;
-    if (token.kind === 'word' && (token.upper === 'SERVICE' || token.upper === 'SELECT')) {
-      return true;
-    }
-    if (token.kind === 'symbol' && token.logicalValue === '{') {
-      const nestedClosing = scope.structure.braces.matchingTokenIndexes[index] ?? -1;
-      if (nestedClosing < 0 || groupHasDefaultGraphPattern(scope, index, nestedClosing)) return true;
-      index = nestedClosing;
-      continue;
-    }
-    if (token.kind === 'symbol' && ['.', ';', ','].includes(token.logicalValue)) continue;
-    return true;
-  }
-  return false;
+  const { openingTokenIndex, closingTokenIndex } = scope.where;
+  const outerDepth = scope.structure.braces.depthBefore[openingTokenIndex] + 1;
+  return scope.graphTargets.every((target) => target.kind !== 'variable'
+    || (target.braceDepth === outerDepth
+      && target.keywordTokenIndex > openingTokenIndex && target.keywordTokenIndex < closingTokenIndex));
 }
 
 /**

@@ -14,6 +14,7 @@ import type { KnowledgeAssetVersionSnapshotReadOptions } from './ka-version-snap
 import type { ethers } from 'ethers';
 import type { RpcRequestClass } from './rpc-request-transport.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
+import type { MarketplaceChain } from './marketplace.js';
 import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
 import type { ContextGraphAuthorityProjectionServedEvidence } from
   './context-graph-authority-index-projection.js';
@@ -1524,7 +1525,7 @@ export function operationalSigningOf(
  * V9 introduces publisher-namespaced UALs: did:dkg:{chainId}/{publisherAddress}/{localKAId}
  * Publishers reserve ID ranges via their signer address, then batch-mint KAs from those ranges.
  */
-export interface ChainAdapter {
+export interface ChainAdapter extends MarketplaceChain {
   /** Complete coherent public chain evidence for explicit snapshot recovery. */
   readPublicGraphSnapshot?(contextGraphId: string, onChainId: string, options?: ChainReadOptions): Promise<import('./public-graph-snapshot.js').PublicGraphSnapshot>;
 
@@ -1875,7 +1876,7 @@ export interface ChainAdapter {
   registerPublishingConvictionAgents?(accountId: bigint, agents: string[]): Promise<TxResult>;
   isPublishingConvictionAgent?(accountId: bigint, agent: string): Promise<boolean>;
   settlePublishingConvictionAccount?(accountId: bigint): Promise<TxResult>;
-  getPublishingConvictionAccountInfo?(accountId: bigint, opts?: { extended?: boolean }): Promise<V10PublishingConvictionAccountInfo | null>;
+  getPublishingConvictionAccountInfo?(accountId: bigint, opts?: { extended?: boolean; strict?: boolean }): Promise<V10PublishingConvictionAccountInfo | null>;
 
   /**
    * OT-RFC-51 designated primary node for a PCA — `accounts(accountId).primaryNode`.

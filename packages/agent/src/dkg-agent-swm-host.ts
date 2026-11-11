@@ -3551,6 +3551,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     persistCeiling: number | null;
     givenUpTotal: number;
     refusedTotal: number;
+    /** #3578 — update-lane scans a busy store refused since start; each range was scanned again. */
+    storeBusyScansTotal: number;
   } {
     const queue = this.vmRefreshQueue as VmRefreshQueue | undefined;
     const oldest = queue?.oldestBlockNumber();
@@ -3559,6 +3561,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       persistCeiling: oldest === undefined ? null : oldest - 1,
       givenUpTotal: queue?.givenUpTotal ?? 0,
       refusedTotal: queue?.refusedTotal ?? 0,
+      storeBusyScansTotal: this.chainPoller?.storeBusyScans('collectionUpdates') ?? 0,
     };
   }
 

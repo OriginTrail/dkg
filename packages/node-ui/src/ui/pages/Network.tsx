@@ -90,7 +90,7 @@ export function NetworkPage() {
                   <td className="mono">{shortId(c.peerId, 12)}</td>
                   <td><Badge tone={c.transport === 'direct' ? 'success' : 'neutral'} size="sm">{humanizeStatus(String(c.transport))}</Badge></td>
                   <td>{c.direction}</td>
-                  <td className="mono" style={{ fontSize: 11 }}>{c.remoteAddr}</td>
+                  <td className="mono" style={{ fontSize: 'var(--fs-label)' }}>{c.remoteAddr}</td>
                   <td>{formatDuration(c.durationMs)}</td>
                 </tr>
               ))}

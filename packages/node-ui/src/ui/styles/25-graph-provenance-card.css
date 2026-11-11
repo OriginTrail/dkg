@@ -21,7 +21,7 @@
   border: 1px solid var(--border-strong);
   box-shadow: var(--shadow-lift);
   backdrop-filter: blur(6px);
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-primary);
   pointer-events: auto;
 }
@@ -36,7 +36,7 @@
   gap: 8px;
 }
 .v10-graph-prov-glyph {
-  font-size: 14px;
+  font-size: var(--fs-body);
   line-height: 1;
   color: var(--layer-verified);
 }
@@ -44,7 +44,7 @@
   color: var(--text-tertiary);
 }
 .v10-graph-prov-title {
-  font-size: 12px;
+  font-size: var(--fs-control);
   font-weight: 700;
   letter-spacing: 0.01em;
   color: var(--text-primary);
@@ -54,7 +54,7 @@
   background: none;
   border: none;
   color: var(--text-tertiary);
-  font-size: 16px;
+  font-size: var(--fs-title);
   line-height: 1;
   cursor: pointer;
   padding: 0 2px;
@@ -65,7 +65,7 @@
 }
 
 .v10-graph-prov-entity {
-  font-size: 12px;
+  font-size: var(--fs-control);
   font-weight: 600;
   color: var(--text-secondary);
   word-break: break-word;
@@ -74,7 +74,7 @@
 }
 
 .v10-graph-prov-muted {
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--text-tertiary);
   padding: 4px 0 2px;
 }
@@ -87,7 +87,7 @@
 .v10-graph-prov-offchain-tag { align-self: flex-start; }
 .v10-graph-prov-offchain p {
   margin: 0;
-  font-size: 11px;
+  font-size: var(--fs-label);
   line-height: 1.45;
   color: var(--text-tertiary);
 }

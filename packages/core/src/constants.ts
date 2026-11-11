@@ -75,6 +75,10 @@ export const PROTOCOL_ACCESS = '/dkg/10.0.1/private-access';
 // at the app layer so this is semantically safe (see
 // docs/messenger.md "Response caching policy").
 export const PROTOCOL_QUERY_REMOTE = '/dkg/10.0.1/query-remote';
+// OT-RFC-27 marketplace, over the messenger as remote queries are: a seller's
+// live terms (`quote`) and one paid call (`serve`), each request and response.
+export const PROTOCOL_MARKETPLACE_QUOTE = '/dkg/10.0.1/marketplace-quote';
+export const PROTOCOL_MARKETPLACE_SERVE = '/dkg/10.0.1/marketplace-serve';
 // rc.9 PR-8: bumped from /dkg/10.0.0/swm-sender-key to opt into the
 // Universal Messenger substrate (same rationale as PROTOCOL_ACCESS).
 // SWM sender-key send sites in dkg-agent.ts route through

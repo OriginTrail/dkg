@@ -21,6 +21,7 @@ import { registerCclCommand } from './commands/ccl.js';
 import { registerIndexCommand } from './commands/index-command.js';
 import { registerSourceWorkerCommand } from './commands/source-worker.js';
 import { registerPcaCommand } from './commands/pca.js';
+import { registerMarketplaceCommand } from './commands/marketplace.js';
 import { registerPublisherCommand } from './commands/publisher.js';
 import { registerEpcisCommand } from './commands/epcis.js';
 import { registerNodeOpsCommands } from './commands/node-ops.js';
@@ -30,6 +31,7 @@ import { registerMaintenanceCommands } from './commands/maintenance.js';
 import { registerRandomSamplingCommand } from './commands/random-sampling.js';
 import { registerOkfCommand } from './commands/okf.js';
 import { registerLlmCommand } from './commands/llm.js';
+import { registerDebugCommand } from './commands/debug.js';
 
 const program = new Command();
 program
@@ -76,6 +78,7 @@ registerCclCommand(program);
 registerIndexCommand(program);
 registerSourceWorkerCommand(program);
 registerPcaCommand(program);
+registerMarketplaceCommand(program);
 registerPublisherCommand(program);
 registerEpcisCommand(program);
 registerNodeOpsCommands(program);
@@ -85,6 +88,7 @@ registerMaintenanceCommands(program);
 registerRandomSamplingCommand(program);
 registerOkfCommand(program);
 registerLlmCommand(program);
+registerDebugCommand(program);
 
 // ─── dkg integration ─────────────────────────────────────────────────
 

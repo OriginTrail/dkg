@@ -1,4 +1,5 @@
-import { hostOnlyRpcText } from '@origintrail-official/dkg-chain';
+import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
+import { jobFailureText } from './job-failure-reason.js';
 import type { LiftValidationDiagnostic } from './lift-validation-error.js';
 import type { LiftJobActiveState } from './lift-job-states.js';
 
@@ -113,12 +114,21 @@ export interface LiftJobFailurePolicy {
    *      transaction whose local recording failed, so a re-run can never double-publish.
    *   3. `resolution` is 'reset_to_accepted' — the job is completable by re-running it from
    *      the start, with no chain evidence to reconcile first.
-   * `quorum_unmet` (GH#1620), `workspace_unavailable` (GH#2270), and
-   * `fee_cap_below_base_fee` are the only codes that qualify today. The field is
-   * optional on this PUBLIC interface (external
+   * `quorum_unmet` (GH#1620), `workspace_unavailable` (GH#2270), `authority_unavailable`,
+   * `fee_cap_below_base_fee` and `insufficient_funds` (#3591) are the only codes that qualify
+   * today. `insufficient_funds` qualifies through `provenIneffective` below: the node refused the
+   * transaction before the mempool, or the adapter reported that no wallet could fund the
+   * publication, so nothing the attempt sent took effect (1 and 2), and the job re-runs from the
+   * start on a wallet that can pay (3). A revert whose text merely mentions funds is
+   * `tx_reverted`, which stays terminal.
+   * The field is optional on this PUBLIC interface (external
    * constructors keep compiling) but REQUIRED on every built-in table entry
    * via `BuiltInLiftJobFailurePolicy`: `autoRetry: false` is an explicit
    * policy decision (manual-only), never an omission a reader must interpret.
+   *
+   * Typed inconclusive PCA funding reads follow the same proof-gated workspace retry lane:
+   * persisted validated state and the publisher's never-dispatched evidence are both required.
+   * The funding error code alone never establishes that no publication was sent.
    *
    * EXCLUDED, and why — `rpc_unavailable`/`nonce_conflict`/`wallet_unavailable` are allowed
    * from 'broadcast' with no pre-send producer guarantee, and `rpc_unavailable` is additionally
@@ -143,8 +153,14 @@ export interface LiftJobFailurePolicy {
    *   - `insufficient_funds` — a DEFINITIVE pre-acceptance reject (see
    *     `isDefinitivePreAcceptanceSendFailure`): the node refused the transaction before it entered
    *     the mempool. The #1851 pre-send write-ahead may already have persisted a hash for that
-   *     attempt, and this is what lets an operator top the wallet up and re-submit instead of
-   *     waiting for proof that cannot arrive.
+   *     attempt, and this is what lets the job re-run (#3591: automatically, on a wallet that can
+   *     pay) instead of waiting for proof that cannot arrive.
+   *     The chain adapter surfaces this refusal only when no earlier attempt at the same signed
+   *     transaction may have been accepted; after such an attempt it reports an unknown outcome,
+   *     which stays held.
+   *
+   * Either proof covers only the failed attempt's own transaction: a job that also carries an
+   * earlier attempt's open hash stays held on it (`isHeldForChainProof`).
    *
    * Everything else is `false`, including every timeout and `confirmation_mismatch`, whose whole
    * meaning is that the local view and the chain disagree. Like `autoRetry` the field is optional
@@ -217,7 +233,9 @@ export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, BuiltInLiftJo
   // provenIneffective: the receipt exists and reports failure — the transaction published nothing.
   tx_reverted: { code: 'tx_reverted', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: true, autoRetry: false },
   // provenIneffective: a DEFINITIVE pre-acceptance reject — the node refused it before the mempool.
-  insufficient_funds: { code: 'insufficient_funds', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: true, autoRetry: false },
+  // #3591 — the wallet could not pay, the job is sound: the retry lane re-runs it, and funding-aware
+  // claims keep it accepted until a wallet that can pay claims it (a refused wallet waits for a top-up).
+  insufficient_funds: { code: 'insufficient_funds', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: true, autoRetry: true },
   nonce_conflict: { code: 'nonce_conflict', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
   // DEAD CODE — no production producer; see the dead-code follow-up.
   inclusion_timeout: { code: 'inclusion_timeout', phase: 'confirmation', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset', provenIneffective: false, autoRetry: false },
@@ -271,6 +289,8 @@ export function getLiftJobFailurePolicy(code: LiftJobFailureCode): BuiltInLiftJo
   return LIFT_JOB_FAILURE_POLICIES[code];
 }
 
+const failureLog = new Logger('AsyncLiftPublisher');
+
 export function createLiftJobFailureMetadata(
   params: Omit<LiftJobFailureMetadata, 'phase' | 'mode' | 'retryable' | 'resolution'>,
 ): LiftJobFailureMetadata {
@@ -299,12 +319,18 @@ export function createLiftJobFailureMetadata(
     throw new Error(`Timeout metadata is not allowed for non-timeout LiftJob failure code ${params.code}`);
   }
 
+  // Every persisted failure message is a short reason (`jobFailureText`): a provider's text carries the
+  // request URL (ethers embeds it, and a configured URL can carry an API key), the transaction and the
+  // JSON-RPC payload, and the failure record is echoed by the job routes. Callers classify on the raw
+  // text and pass it here; the reduction lives at the one writer. When the reason had to be cut, the
+  // rest of the text, reduced the same way, goes to the node's own log and nowhere else.
+  const { reason, detail } = jobFailureText(params.message);
+  if (reason !== detail) {
+    failureLog.warn(createOperationContext('publish'), `${params.errorPayloadRef} failed (${params.code}): ${detail}`);
+  }
   return {
     ...params,
-    // Every persisted failure message is host-only: a provider's text carries the request URL (ethers
-    // embeds it), a configured URL can carry an API key, and the failure record is echoed by the job
-    // routes. Callers classify on the raw text and pass it here; the reduction lives at the one writer.
-    message: hostOnlyRpcText(params.message),
+    message: reason,
     phase: policy.phase,
     mode: policy.mode,
     retryable: policy.retryable,

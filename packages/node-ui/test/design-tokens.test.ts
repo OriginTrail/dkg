@@ -16,6 +16,7 @@ type Kind = 'colour' | 'radius';
 /** Where colour values legitimately live. */
 const COLOUR_SOURCES = new Set([
   'styles/00-theme.css', // the tokens themselves
+  'styles/30-marketplace-tokens.css', // the Marketplace's own palette, scoped to its views
 ]);
 /** Canvas palettes: graph-viz draws with literal colours read from these. */
 const isPaletteFile = (file: string) => /(^|\/)[\w-]*-colors\.ts$/.test(file);
@@ -95,12 +96,20 @@ function collect(): Record<string, Hit[]> {
   return hits;
 }
 
-/** Every match of a pattern in the UI source, as "file  match". */
+/**
+ * Glyphs drawn to fit a fixed-size mark keep a raw size: the agent chip glyph
+ * and the small Context Graph mark (DESIGN.md · Type). Nothing else does.
+ */
+const GLYPH_RULE = /\.v10-agent-chip-glyph|\.v10-cg-mark-sm\b/;
+
+/** Every match of a pattern in the UI source, as "file  match", skipping glyph rules. */
 function findInUi(pattern: RegExp): string[] {
   return walk(UI).flatMap((full) => {
     const file = relative(UI, full).split('\\').join('/');
     if (isIgnored(file)) return [];
-    return [...readFileSync(full, 'utf8').matchAll(pattern)].map((m) => `  ${file}  ${m[0]}`);
+    return readFileSync(full, 'utf8').split('\n')
+      .filter((line) => !GLYPH_RULE.test(line))
+      .flatMap((line) => [...line.matchAll(pattern)].map((m) => `  ${file}  ${m[0]}`));
   });
 }
 
@@ -111,8 +120,8 @@ describe('design tokens', { timeout: 20_000 }, () => {
     expect(found, `Use a token instead (DESIGN.md · Colour / Shape and size):\n${found.join('\n')}`).toEqual([]);
   });
 
-  it('has no text below the 10px floor (DESIGN.md · Type)', () => {
-    const small = findInUi(/font-size:\s*(?:[0-9]|9\.\d+)px|fontSize:\s*[0-9](?:\.\d+)?\b/g);
+  it('has no text below the 11px floor (DESIGN.md · Type)', () => {
+    const small = findInUi(/font-size:\s*(?:[0-9]|10)(?:\.\d+)?px|fontSize:\s*(?:[0-9]|10)(?:\.\d+)?\b/g);
     expect(small, `Use --fs-micro or larger:\n${small.join('\n')}`).toEqual([]);
   });
 

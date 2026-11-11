@@ -1,5 +1,6 @@
 export * from './types.js';
 export { gzipBounded, gunzipBounded, BoundedGzipLimitError, BoundedGzipCapacityError, type BoundedGzipOptions } from './bounded-gzip.js';
+export { workerThreadEnv } from './worker-thread-env.js';
 export * from './constants.js';
 export * from './storage-ack-protocols.js';
 export * from './context-graph-storage-uri.js';
@@ -470,6 +471,7 @@ export {
   loadAuthToken,
   toEip55Checksum,
 } from './dkg-home.js';
+export * from './node-key-store.js';
 export {
   type Quad as ExtractionQuad,
   type ExtractionInput,
@@ -545,3 +547,4 @@ export * from './bulk-graph-transport.js';
 export { ProtocolReadLimitError } from './bounded-stream-read.js';
 
 export * from './async-admission-usage.js';
+export * from './async-admission-diagnostic-context.js';

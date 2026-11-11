@@ -29,8 +29,8 @@ export function headerNodeStatus(
 }
 
 /**
- * Render the multiline tooltip surfaced on the global header status
- * pill (BUG-020). Operators previously had no way to see the
+ * Render the multiline tooltip surfaced on the global header peer
+ * count (BUG-020). Operators previously had no way to see the
  * direct/relayed connection breakdown or the node uptime without
  * jumping to Settings; the tooltip puts both one hover away.
  *

@@ -13,13 +13,13 @@
 .v10-identity-wallet-description,
 .v10-identity-wallet-status {
   margin: 10px 0 0;
-  font-size: 11px;
+  font-size: var(--fs-label);
   line-height: 1.5;
   color: var(--text-tertiary);
 }
 
 .v10-identity-wallet-status {
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-secondary);
 }
 
@@ -57,7 +57,7 @@
 
 .v10-identity-wallet-subtitle {
   margin: 0 0 8px;
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 700;
   color: var(--text-secondary);
   text-transform: uppercase;
@@ -95,14 +95,14 @@
 
 .v10-identity-wallet-card h4 {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-body);
   color: var(--text-primary);
 }
 
 .v10-identity-wallet-card p,
 .v10-identity-wallet-card label {
   margin: 0;
-  font-size: 11px;
+  font-size: var(--fs-label);
   line-height: 1.45;
   color: var(--text-tertiary);
 }

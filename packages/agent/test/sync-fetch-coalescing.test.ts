@@ -1708,6 +1708,9 @@ describe('DKGAgent sync fetch coalescing', () => {
       (agent as any).isPrivateContextGraph = async () => false;
       (agent as any).resolvePreferredSyncPeerId = async () => undefined;
       (agent as any).primeCatchupConnections = async () => undefined;
+      // The peer is admitted throughout, so no identity probe fails and opens a backoff window.
+      (agent as any).networkAdmissionCoordinator.ensureAdmitted = async () => true;
+      (agent as any).ensurePeerConnected = async () => undefined;
       (agent as any).ensurePeerAdmittedForRecovery = async () => true;
       (agent as any).waitForSyncProtocol = async () => true;
       (agent as any).refreshMetaSyncedFlags = async () => undefined;

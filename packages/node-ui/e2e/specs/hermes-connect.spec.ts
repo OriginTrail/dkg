@@ -19,8 +19,8 @@ import { test, expect } from '../fixtures/base.js';
  * It deliberately does NOT click "Connect Hermes": the node-ui connect path
  * runs `connectLocalAgentIntegrationFromUi`, which kicks off a real Hermes
  * install/spawn that cannot reach chat-ready without a live Hermes gateway.
- * The full click-to-chat-ready journey is covered by the live-daemon manual
- * sanity checks (`agent-docs/hermes-parity/manual-sanity-checks.md`).
+ * The full click-to-chat-ready journey requires a separate manual check
+ * against a live Hermes gateway.
  */
 
 test.describe('Local-agent connect surface (real node)', () => {

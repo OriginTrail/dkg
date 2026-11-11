@@ -17,7 +17,7 @@
    ══════════════════════════════════════════ */
 
 /* Lazy route spinner */
-.lazy-spinner{display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-tertiary);font-size:13px}
+.lazy-spinner{display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-tertiary);font-size:var(--fs-body)}
 
 /* ══════════════════════════════════════════
    PROJECT OVERVIEW REDESIGN — Layer-centric UI
@@ -32,7 +32,7 @@
 }
 .v10-layer-switch-label { display: inline; }
 .v10-layer-switch-label-compact { display: none; }
-.v10-layer-switch-icon { font-size: 11px; }
+.v10-layer-switch-icon { font-size: var(--fs-label); }
 .v10-layer-switch-separator {
   flex: 0 0 auto;
   width: 1px;
@@ -72,7 +72,7 @@
   background: transparent;
   color: var(--text-secondary);
   font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: var(--fs-control);
   font-weight: 600;
   text-align: left;
   cursor: pointer;
@@ -133,14 +133,14 @@
   color: var(--v10-empty-accent);
   background: color-mix(in srgb, var(--v10-empty-accent) 15%, transparent);
   border: 1px solid color-mix(in srgb, var(--v10-empty-accent) 34%, var(--border-default));
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 700;
   line-height: 1;
 }
 .v10-empty-state.inline .v10-empty-state-icon {
   width: 18px;
   height: 18px;
-  font-size: 10px;
+  font-size: var(--fs-micro);
   background: transparent;
 }
 .v10-empty-state-copy {
@@ -153,18 +153,18 @@
 .v10-empty-state.inline .v10-empty-state-copy { max-width: none; }
 .v10-empty-state-title {
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: var(--fs-body);
   font-weight: 650;
   line-height: 1.35;
 }
 .v10-empty-state.inline .v10-empty-state-title {
   color: var(--text-tertiary);
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 500;
 }
 .v10-empty-state-desc {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--fs-control);
   line-height: 1.45;
 }
 .v10-empty-state-actions {
@@ -203,7 +203,7 @@
   order: 1;
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: 18px;
+  font-size: var(--fs-heading);
   font-weight: 700;
   line-height: 1.15;
   overflow-wrap: anywhere;
@@ -213,7 +213,7 @@
   order: 2;
   margin-top: 5px;
   color: var(--text-tertiary);
-  font-size: 10px;
+  font-size: var(--fs-micro);
   font-weight: 650;
   letter-spacing: 0.04em;
   line-height: 1.3;
@@ -224,7 +224,7 @@
   order: 3;
   margin-top: 4px;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--fs-label);
   line-height: 1.35;
 }
 .v10-stat-strip.compact {
@@ -250,7 +250,7 @@
 .v10-stat-strip.compact .v10-stat-strip-cell:last-child { border-bottom: 0; }
 .v10-stat-strip.compact .v10-stat-strip-value {
   order: 2;
-  font-size: 13px;
+  font-size: var(--fs-body);
 }
 .v10-stat-strip.compact .v10-stat-strip-label {
   order: 1;

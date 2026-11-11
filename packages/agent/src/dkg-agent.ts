@@ -1,5 +1,6 @@
-import type { StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
-import type { AssertionPullFromOptions, AssertionPullFromResult } from '@origintrail-official/dkg-publisher';
+import { queryAssertionHistory } from './assertion-history-query.js';
+import { PublicSnapshotSessionMethods } from './public-snapshot-session.js';
+import type { AssertionPullFromOptions, AssertionPullFromResult, StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
 import { StorageACKAdmission } from './storage-ack-admission.js';
 import { runStorageACKOperation } from './storage-ack-diagnostics.js';
 import { requireStorageACKContextGraphId } from './internal/storage-ack-context-graph.js';
@@ -8,7 +9,7 @@ import { snapshotCoreChainCacheNetworks } from './core-chain-cache-config.js';
 import { assertionLifecycleAuthorCandidates } from '@origintrail-official/dkg-publisher';
 import { durableAssertionShareMethods } from './internal/promote/durable-assertion-share.js';
 import { normalizeAgentPreparedCacheConfig } from './prepared-cache-config.js';
-import { PublicSnapshotMethods } from './dkg-agent-public-snapshot.js';
+import { PublicSnapshotMethods, PublicCheckpointMethods } from './dkg-agent-public-snapshot.js';
 import { CatalogRepairConditionErrorV1 } from './rfc64/catalog-repair-diagnostics-v1.js';
 import type { StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
 
@@ -553,8 +554,10 @@ import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { VmReconcileSchedulingMethods } from './dkg-agent-vm-reconcile-scheduling.js';
 import { VmPromotionMethods } from './dkg-agent-vm-promotion.js';
 import { AgentsPhonebookMethods } from './dkg-agent-agents-phonebook.js';
+import { MarketplaceAgentMethods } from './dkg-agent-marketplace.js';
 import { SwmChangeNoticeMethods } from './dkg-agent-swm-change-notice.js';
 import { WritePreflightGeneration, WritePreflightIdentityMethods, attachWritePreflightGeneration, withWritePreflightGeneration } from './dkg-agent-write-preflight.js';
+import { NodeHeldAuthorMethods, assertNodeHeldAuthorConfig } from './dkg-agent-node-held-author.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
 import { ContextGraphNameResolutionMethods } from './dkg-agent-cg-name-resolution.js';
 import { ContextGraphOnChainIdMethods } from './dkg-agent-cg-on-chain-id.js';
@@ -1064,6 +1067,7 @@ export class DKGAgent extends DKGAgentBase {
             headRevision: headDigest,
           };
         },
+        listFinalizedPrivateRepairsAsync: async signal => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.listAsync(signal) ?? [],
         listFinalizedPrivateRepairs: () => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? [],
         readPrivateFailure: (repair) => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.readFailure(repair) ?? null,
         writePrivateFailures: entries => {
@@ -1201,6 +1205,7 @@ export class DKGAgent extends DKGAgentBase {
         'DKGAgentConfig.contextGraphSubscriptionRehydrationEnabled must be a boolean',
       );
     }
+    assertNodeHeldAuthorConfig(inputConfig);
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
     const preparedContentCache = normalizeAgentPreparedCacheConfig(inputConfig);
     const normalizedConfig = normalizeStorageAckConfig({
@@ -3318,7 +3323,7 @@ export class DKGAgent extends DKGAgentBase {
       timeoutMs,
     });
     const sendLocal = this.storageACKRegistrationRuntime.createLocalSender();
-    return async (peerId: string, protocol: string, data: Uint8Array) => {
+    return async (peerId: string, protocol: string, data: Uint8Array, options) => {
       if (peerId === this.peerId) {
         if (!this.localACKCandidate().available) {
           throw new Error('Local StorageACK handler is not registered');
@@ -3326,12 +3331,12 @@ export class DKGAgent extends DKGAgentBase {
         if (!isStorageACKProtocol(protocol)) throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
         return sendLocal(timeoutMs, (endpoint, signal) => endpoint.dispatch({
           protocol, data, peerId: this.peerId, signal, context: expectedHead,
-        }));
+        }), options?.signal);
       }
       if (!this.networkAdmissionCoordinator.isAcceptedPeer(peerId)) {
         throw new Error(`peer ${peerId.slice(-8)} is not admitted for active-network ACK collection`);
       }
-      return send(peerId, protocol, data);
+      return send(peerId, protocol, data, options);
     };
   }
 
@@ -3371,9 +3376,9 @@ export class DKGAgent extends DKGAgentBase {
         this.ackOperationContext(protocol),
       ),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
-        ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
+        ? async (recoveredAddress: string, claimedIdentityId: bigint, options) => {
             try {
-              return await this.chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId);
+              return await this.chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId, options);
             } catch {
               return false;
             }
@@ -3385,9 +3390,9 @@ export class DKGAgent extends DKGAgentBase {
       // distinctly from definitive key/stake rejections — pre-PR this
       // try/catch swallowed RPC errors as `false`, conflating them.
       verifyIdentityDetailed: typeof this.chain.verifyACKIdentityDetailed === 'function'
-        ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
+        ? async (recoveredAddress: string, claimedIdentityId: bigint, options) => {
             try {
-              return await this.chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId);
+              return await this.chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId, options);
             } catch {
               return { valid: false, reason: 'rpc-error' as const };
             }
@@ -3458,7 +3463,7 @@ export class DKGAgent extends DKGAgentBase {
 
       const result = await admit(onDiagnostic => {
         return collector.collect({
-          onDiagnostic,
+          onDiagnostic, signal: this.workLifetime.signal,
           merkleRoot: params.merkleRoot,
           contextGraphId: cgIdBigInt,
           contextGraphIdStr: params.contextGraphId,
@@ -3519,18 +3524,18 @@ export class DKGAgent extends DKGAgentBase {
         this.ackOperationContext(protocol),
       ),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
-        ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
+        ? async (recoveredAddress: string, claimedIdentityId: bigint, options) => {
             try {
-              return await this.chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId);
+              return await this.chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId, options);
             } catch {
               return false;
             }
           }
         : undefined,
       verifyIdentityDetailed: typeof this.chain.verifyACKIdentityDetailed === 'function'
-        ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
+        ? async (recoveredAddress: string, claimedIdentityId: bigint, options) => {
             try {
-              return await this.chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId);
+              return await this.chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId, options);
             } catch {
               return { valid: false, reason: 'rpc-error' as const };
             }
@@ -3617,7 +3622,7 @@ export class DKGAgent extends DKGAgentBase {
 
       const result = await admit(onDiagnostic => {
         return collector.collectUpdate({
-          onDiagnostic,
+          onDiagnostic, signal: this.workLifetime.signal,
           kaId: params.kaId,
           contextGraphId: cgIdBigInt,
           preUpdateMerkleRootCount: params.preUpdateMerkleRootCount,
@@ -3661,7 +3666,7 @@ export class DKGAgent extends DKGAgentBase {
       /** Curated assertions stay on encrypted member channels. */
       curated?: boolean;
     },
-  ): Promise<void> {
+  ): Promise<readonly string[] | undefined> {
     // Use the public quads from the publish result to avoid leaking private
     // triples that are stored in the same data graph.
     const publicQuads = result.publicQuads ?? [];
@@ -3739,9 +3744,10 @@ export class DKGAgent extends DKGAgentBase {
     const topic = contextGraphPublishTopic(contextGraphId);
     this.log.info(ctx, `Broadcasting to topic ${topic}`);
     try {
-      await this.gossip.publish(topic, msg);
+      return await this.gossip.publish(topic, msg);
     } catch {
       this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+      return [];
     }
   }
 
@@ -3978,7 +3984,7 @@ export class DKGAgent extends DKGAgentBase {
         });
       },
 
-      async history(contextGraphId: string, name: string, opts?: { agentAddress?: string; subGraphName?: string }): Promise<AssertionHistoryDescriptor | null> {
+      async history(contextGraphId: string, name: string, opts?: { agentAddress?: string; subGraphName?: string; signal?: AbortSignal }): Promise<AssertionHistoryDescriptor | null> {
         let addr = opts?.agentAddress ?? agentAddress;
         const metaGraph = contextGraphMetaUri(contextGraphId);
         const DKG_NS = 'http://dkg.io/ontology/';
@@ -4005,7 +4011,7 @@ export class DKGAgent extends DKGAgentBase {
             name,
             opts?.subGraphName,
           );
-          const entityResult = await agent.store.query(
+          const entityResult = await queryAssertionHistory(agent.store,
             `SELECT ?state ?memoryLayer ?assertionGraph ?wm ?swm ?vm ?currentShareOpId ?kaNum ?reservedUal ?publishedUal ?contentScopeVersion WHERE {
               GRAPH <${metaGraph}> {
                 <${candidateLifecycleUri}> <${DKG_NS}state> ?state .
@@ -4021,7 +4027,7 @@ export class DKGAgent extends DKGAgentBase {
                 OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}contentScopeVersion> ?contentScopeVersion }
               }
             } LIMIT 1`,
-            { source: 'agent.history.lifecycleState' },
+            { source: 'agent.history.lifecycleState', ...(opts?.signal ? { signal: opts.signal } : {}) },
           );
           if (entityResult.type === 'bindings' && entityResult.bindings.length > 0) {
             addr = lifecycleAddress;
@@ -4068,7 +4074,7 @@ export class DKGAgent extends DKGAgentBase {
         //   - the event-side `dkg:rootEntity` rows are no longer written for
         //     promote events; OPTIONAL here for old-store rows, with the
         //     stable lifecycle-subject member stamp as the fallback below.
-        const eventsResult = await agent.store.query(
+        const eventsResult = await queryAssertionHistory(agent.store,
           `SELECT ?event ?type ?timestamp ?fromLayer ?toLayer ?shareOpId ?rootEntity WHERE {
             GRAPH <${metaGraph}> {
               { ?event <${PROV_NS}generated> <${lifecycleUri}> }
@@ -4084,18 +4090,18 @@ export class DKGAgent extends DKGAgentBase {
               OPTIONAL { ?event <${DKG_NS}rootEntity> ?rootEntity }
             }
           } ORDER BY ?timestamp`,
-          { source: 'agent.history.lifecycleEvents' },
+          { source: 'agent.history.lifecycleEvents', ...(opts?.signal ? { signal: opts.signal } : {}) },
         );
 
         // Member entities on the STABLE lifecycle subject (SUBSTRATE-1 stamp,
         // written at promote). Read-both (ENTITY_PRED_ALT) + DISTINCT because
         // dual-written replica rows carry the same object under both names.
         const subjectRoots: string[] = [];
-        const subjectRootsResult = await agent.store.query(
+        const subjectRootsResult = await queryAssertionHistory(agent.store,
           `SELECT DISTINCT ?root WHERE {
             GRAPH <${metaGraph}> { <${lifecycleUri}> ${ENTITY_PRED_ALT} ?root }
           }`,
-          { source: 'agent.history.lifecycleRoots' },
+          { source: 'agent.history.lifecycleRoots', ...(opts?.signal ? { signal: opts.signal } : {}) },
         );
         if (subjectRootsResult.type === 'bindings') {
           for (const b of subjectRootsResult.bindings) {
@@ -4186,11 +4192,8 @@ export class DKGAgent extends DKGAgentBase {
        * post-finalize) AND post-publish. Returns the same descriptor shape as
        * `history()`.
        */
-      async resolveByKaId(
-        contextGraphId: string,
-        kaId: bigint,
-        opts?: { subGraphName?: string },
-      ): Promise<AssertionHistoryDescriptor | null> {
+      async resolveByKaId(contextGraphId: string, kaId: bigint,
+        opts?: { subGraphName?: string; signal?: AbortSignal }): Promise<AssertionHistoryDescriptor | null> {
         const metaGraph = contextGraphMetaUri(contextGraphId);
         const DKG_NS = 'http://dkg.io/ontology/';
         // number = kaId & ((1<<96)-1) — the per-author low-96-bit half.
@@ -4200,7 +4203,7 @@ export class DKGAgent extends DKGAgentBase {
         // FILTER on the integer value so a typed literal ("N"^^xsd:integer)
         // matches regardless of the store's lexical canonicalisation.
         const PROV_NS = 'http://www.w3.org/ns/prov#';
-        const res = await agent.store.query(
+        const res = await queryAssertionHistory(agent.store,
           `SELECT ?lifecycle ?name ?author WHERE {
             GRAPH <${metaGraph}> {
               ?lifecycle <${DKG_NS}kaId> ?n .
@@ -4209,7 +4212,7 @@ export class DKGAgent extends DKGAgentBase {
               OPTIONAL { ?lifecycle <${PROV_NS}wasAttributedTo> ?author }
             }
           }`,
-          { source: 'agent.history.resolveByKaId' },
+          { source: 'agent.history.resolveByKaId', ...(opts?.signal ? { signal: opts.signal } : {}) },
         );
         if (res.type !== 'bindings' || res.bindings.length === 0) return null;
 
@@ -4258,6 +4261,7 @@ export class DKGAgent extends DKGAgentBase {
         if (!resolvedName || !resolvedAgent) return null;
         return this.history(contextGraphId, resolvedName, {
           subGraphName: opts?.subGraphName,
+          ...(opts?.signal ? { signal: opts.signal } : {}),
           ...(resolvedAgent ? { agentAddress: resolvedAgent } : {}),
         });
       },
@@ -4272,7 +4276,7 @@ export class DKGAgent extends DKGAgentBase {
         opts?: Pick<
           AssertionPromoteOptions,
           'entities' | 'subGraphName' | 'agentAddress' | 'authorAgentAddress'
-        >,
+        > & { signal?: AbortSignal },
       ): Promise<{ jobId: string }> {
         const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
         const jobId = await agent.promoteQueue.enqueue({
@@ -4282,7 +4286,7 @@ export class DKGAgent extends DKGAgentBase {
           entities: opts?.entities ?? 'all',
           ...(promoteAgentAddress ? { agentAddress: promoteAgentAddress } : {}),
           ...(opts?.authorAgentAddress ? { authorAgentAddress: opts.authorAgentAddress } : {}),
-        });
+        }, opts?.signal ? { signal: opts.signal } : undefined);
         return { jobId };
       },
       async getPromoteAsyncStatus(jobId: string): Promise<PromoteJob | null> {
@@ -4344,9 +4348,7 @@ export class DKGAgent extends DKGAgentBase {
   whenRfc64CatalogSupervisorsIdleV1(): Promise<void> {
     return this.rfc64CatalogRuntimeV1.whenIdle();
   }
-
 }
 
-
-export interface DKGAgent extends PrivateAccessMethods, PublicSnapshotMethods, ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, ContextGraphPartitionQueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64OwedShareInventoryMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods, WritePreflightIdentityMethods {}
-applyMixins(DKGAgent, [PrivateAccessMethods, PublicSnapshotMethods,ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, ContextGraphPartitionQueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64OwedShareInventoryMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods, WritePreflightIdentityMethods]);
+export interface DKGAgent extends PrivateAccessMethods, PublicSnapshotMethods, PublicSnapshotSessionMethods, PublicCheckpointMethods, ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, ContextGraphPartitionQueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64OwedShareInventoryMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods, WritePreflightIdentityMethods, NodeHeldAuthorMethods, MarketplaceAgentMethods {}
+applyMixins(DKGAgent, [PrivateAccessMethods, PublicSnapshotMethods, PublicSnapshotSessionMethods, PublicCheckpointMethods,ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, ContextGraphPartitionQueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64OwedShareInventoryMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods, WritePreflightIdentityMethods, NodeHeldAuthorMethods, MarketplaceAgentMethods]);

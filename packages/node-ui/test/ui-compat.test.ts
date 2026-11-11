@@ -32,6 +32,18 @@ function readStylesSources(): string {
   ].join('\n');
 }
 
+function readProductionUiSources(rel = ''): string {
+  const dir = resolve(UI_DIR, rel);
+  return readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .flatMap((entry) => {
+      const child = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) return child === 'dev' ? [] : [readProductionUiSources(child)];
+      return /\.tsx?$/.test(entry.name) ? [readRawFile(child)] : [];
+    })
+    .join('\n');
+}
+
 function readPanelRightSources(): string {
   return [
     readRawFile('components/Shell/PanelRight.tsx'),
@@ -118,11 +130,33 @@ describe('V10 CSS layout selectors', () => {
 });
 
 describe('V10 font imports', () => {
-  it('styles.css imports Google Fonts for Instrument Sans and JetBrains Mono', () => {
+  it('bundles Geist instead of loading runtime Google Fonts', () => {
     const css = readFile('styles.css');
-    expect(css).toMatch(/@import\s+url\s*\(/);
-    expect(css).toContain('Instrument+Sans');
-    expect(css).toContain('JetBrains+Mono');
+    expect(css).toContain("@import '@fontsource-variable/geist/wght.css'");
+    expect(css).toContain("--font-mono: 'SF Mono', ui-monospace, Menlo, monospace");
+    expect(css).not.toContain('fonts.googleapis.com');
+  });
+
+  it('uses the shared readable type scale for the app body', () => {
+    const css = readFile('styles.css');
+    expect(css).toContain("--font-sans: 'Geist Variable'");
+    expect(css).toContain('--font-size-body: 16px');
+    expect(css).toMatch(/html, body, #root\s*\{[\s\S]*?font-size:\s*var\(--font-size-body\)/);
+  });
+
+  it('keeps production inline styles on the shared readable type scale', () => {
+    expect(readProductionUiSources()).not.toMatch(/fontSize:\s*(?:9|10|11|12)(?=\s*[,}])/);
+  });
+});
+
+describe('header branding', () => {
+  const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
+
+  it('shows only the OriginTrail wordmark in the brand position', () => {
+    expect(header).toContain('aria-label="OriginTrail"');
+    expect(header).toContain('{ORIGINTRAIL_WORDMARK}');
+    expect(header).not.toContain('v10-header-logo-text');
+    expect(header).not.toContain('powered by');
   });
 });
 

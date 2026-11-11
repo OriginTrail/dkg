@@ -28,6 +28,7 @@ import {
   type FinalizationRecoveryDisplacement,
 } from './finalization-recovery-sqlite-displacement.js';
 import {
+  finalizationRecoveryCapacityHealth,
   hasFinalizationRecoveryCapacity,
   hasFinalizationRecoveryDeferredCapacity,
   pruneFinalizationRecoveryRowsWithinTransaction,
@@ -811,8 +812,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     return {
       available: true,
       closed: false,
-      ready: !capacity.capacityExhausted,
-      ...(capacity.capacityExhausted ? { degradedReason: 'capacity-exhausted' } : {}),
+      ...finalizationRecoveryCapacityHealth(capacity),
       stateCounts,
       livePayloadBytes: capacity.livePayloadBytes,
       dueEntries: Number(due.count),

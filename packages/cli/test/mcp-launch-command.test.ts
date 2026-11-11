@@ -20,7 +20,7 @@ const canonical = { command: '/home/alice/node 22/bin/node', args: ['/home/alice
   env: { DKG_HOME: '/home/alice/DKG data/$(touch injected); literal' } };
 
 describe('MCP client launch boundary', () => {
-// test-disable-allow: D1 #433 -- owner=cli lane=cli-unit-linux expires=2026-11-08 POSIX env execution runs in required Linux unit shards; Windows cannot execute /usr/bin/env.
+// test-disable-allow: D1 #433 -- owner=cli lane=cli-unit-linux expires=2026-12-09 POSIX env execution runs in required Linux unit shards; Windows cannot execute /usr/bin/env.
   it.skipIf(platform() === 'win32')('executes the Linux env payload with literal spaces and metacharacters', () => {
     process.env.WSL_DISTRO_NAME = 'Ubuntu';
     const entry = clientMcpEntry({ ...canonical, command: process.execPath,

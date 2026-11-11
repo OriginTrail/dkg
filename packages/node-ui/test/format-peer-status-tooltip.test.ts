@@ -4,12 +4,12 @@ import { NODE_UNAVAILABLE_AFTER_FAILURES, isNodeStatusFailure } from '../src/ui/
 import { useAgentsStore } from '../src/ui/stores/agents.js';
 
 /**
- * The status pill in the global header now exposes a multiline tooltip
+ * The peer count in the global header exposes a multiline tooltip
  * (BUG-020) that breaks down peers into direct/relayed and surfaces
- * uptime so operators don't have to jump into Settings to diagnose
- * sync issues. The helper is pure — these tests pin the exact shape so
- * a copy regression (e.g. "2 peers (1 direct, 1 relayed)" silently
- * becoming "2 peer (1 direct, 1 relayed)") is caught.
+ * uptime so operators don't have to jump into Settings to inspect
+ * connectivity. The helper is pure — these tests pin the exact shape so
+ * a copy regression (e.g. "0 peers (0 direct, 0 relayed)" silently
+ * becoming "0 peer (0 direct, 0 relayed)") is caught.
  */
 describe('headerNodeStatus', () => {
   it('says Connecting, neutral, before any status has loaded', () => {
@@ -85,7 +85,7 @@ describe('formatPeerStatusTooltip (BUG-020)', () => {
   it('omits the Uptime line when uptimeMs is 0 (avoids "Uptime 0m" noise on cold start)', () => {
     const out = formatPeerStatusTooltip(5, 3, 2, 0);
     expect(out).not.toContain('Uptime');
-    expect(out.split('\n')).toHaveLength(2);
+    expect(out.split('\n')).toHaveLength(1);
   });
 
   it('emits "Xh Ym" for sub-day uptime, omitting the days component', () => {

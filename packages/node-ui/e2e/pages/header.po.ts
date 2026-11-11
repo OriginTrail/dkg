@@ -6,7 +6,6 @@ export class HeaderPage {
   readonly root: Locator;
   readonly logo: Locator;
   readonly logoText: Locator;
-  readonly version: Locator;
   readonly sidebarToggle: Locator;
   readonly agentName: Locator;
   readonly status: Locator;
@@ -23,7 +22,6 @@ export class HeaderPage {
     this.root = page.locator(sel.header.root);
     this.logo = page.locator(sel.header.logo);
     this.logoText = page.locator(sel.header.logoText);
-    this.version = page.locator(sel.header.version);
     this.sidebarToggle = page.locator(sel.header.sidebarToggle);
     this.agentName = page.locator(sel.header.agentName);
     this.status = page.locator(sel.header.status);

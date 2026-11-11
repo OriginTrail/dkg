@@ -222,7 +222,7 @@ import {
   decodePipeSyncRequestTail,
   normalizeByteBudgetPageHint,
 } from './sync/auth/pipe-request-tail.js';
-import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
+import { authorizePrivateSyncRequest, syncAgentGateOf } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
 import {
@@ -262,12 +262,7 @@ type ListContextGraphsUncachedResult = {
   cacheable: boolean;
 };
 type ListContextGraphsPrivacy = 'public' | 'private' | 'unknown';
-class ListContextGraphsBudgetExceeded extends Error {
-  constructor(label: string) {
-    super(`${label} exceeded listContextGraphs budget`);
-    this.name = 'ListContextGraphsBudgetExceeded';
-  }
-}
+import { ListContextGraphsBudgetExceeded } from './context-graph-list-budget-error.js';
 import { multiaddr } from '@multiformats/multiaddr';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
@@ -706,7 +701,7 @@ const resolveBoundedCuratorWalletPeer: CuratorWalletRegistryResolver = async (
  *   can speak for the graph. `getCgMeta()` is a MERGED projection: it unions
  *   `<cg>/_meta` with the AGENTS, `_catalog` and ONTOLOGY graphs under first-wins
  *   precedence and discards which graph supplied each fact, so a creator
- *   contributed by an AGENTS-only declaration is indistinguishable from one the
+ *   contributed by an ONTOLOGY declaration is indistinguishable from one the
  *   graph declared about itself. The agent registry is queried strictly locally,
  *   so even a unique local match is not evidence of a network-wide binding.
  *   Both rank the walk and neither may end it.
@@ -764,8 +759,8 @@ async function resolveCuratorSyncPeerWithRegistry(
     let resolved = false;
 
     // Preferred: use the same projected metadata resolution as privacy and
-    // listing reads. AGENTS-only declarations can mark a graph private, so
-    // the refresh path must be able to discover their creator route too.
+    // listing reads. An ONTOLOGY definition can name the creator of a graph,
+    // so the refresh path must be able to discover that route too.
     const creatorCandidates = [
       meta.creator,
       ...meta.creators,
@@ -1471,7 +1466,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         : undefined,
       getParticipants: (contextGraphId, lookupOptions) => this.getPrivateContextGraphParticipants(contextGraphId, lookupOptions),
       getAllowedPeers: (contextGraphId, lookupOptions) => this.getContextGraphAllowedPeers(contextGraphId, lookupOptions),
-      getAgentGateAddresses: (contextGraphId, lookupOptions) => this.getContextGraphAgentGateAddresses(contextGraphId, lookupOptions),
+      getAgentGate: async (contextGraphId, lookupOptions) => syncAgentGateOf(await this.resolveContextGraphAgentGateAuthority(contextGraphId, lookupOptions), (await this.getCgMeta(contextGraphId, lookupOptions)).revokedAgents),
       getAllowedDelegateePeers: (contextGraphId, lookupOptions) => this.getContextGraphAllowedDelegateePeers(contextGraphId, lookupOptions),
       getAllowedDelegateeKeys: (contextGraphId, lookupOptions) => this.getContextGraphAllowedDelegateeKeys(contextGraphId, lookupOptions),
       // R9: FRESH `_meta`-only members-only gate for the recovery branch (no
@@ -2495,7 +2490,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     ): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const controller = new AbortController();
-      const timeoutError = new ListContextGraphsBudgetExceeded(label);
+      const timeoutError = new ListContextGraphsBudgetExceeded(label, budgetMs);
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => {

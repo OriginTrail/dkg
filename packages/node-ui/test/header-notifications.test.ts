@@ -16,7 +16,7 @@ import { createRoot, type Root } from 'react-dom/client';
 // approve/deny, the read model — incl. that opening the bell no longer
 // auto-marks-read) now lives in NotificationsBell/NotificationsPane and is
 // covered by `notifications-pane.dom.test.ts`. This file keeps only the
-// Header-LEVEL wiring: the bell badge/aria-label and the status-pill tooltip
+// Header-LEVEL wiring: the bell badge/aria-label and the peer-count tooltip
 // (BUG-020).
 // ─────────────────────────────────────────────────────────────────────
 
@@ -83,7 +83,7 @@ function findBellButton(container: HTMLElement): HTMLButtonElement {
   return btn;
 }
 
-describe('Header — notifications bell + status wiring', () => {
+describe('Header — notifications bell + peer status wiring', () => {
   beforeEach(() => {
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     document.body.innerHTML = '';
@@ -152,6 +152,7 @@ describe('Header — notifications bell + status wiring', () => {
     expect(tooltip).toContain('Connected to the network');
     expect(tooltip).toContain('3 peers (2 direct, 1 relayed)');
     expect(tooltip).toContain('Uptime');
+    expect(tooltip).not.toMatch(/sync(?:ed|ing)/i);
     expect(meta!.textContent).toContain('Connected');
     expect(meta!.textContent).toContain('3 peers');
   });

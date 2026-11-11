@@ -61,7 +61,7 @@
   text-align: left;
   cursor: pointer;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -102,7 +102,7 @@
 .v10-agents-summary {
   display: flex; align-items: center; gap: 12px;
   padding: 8px 0; margin-bottom: 8px;
-  font-size: 12px; color: var(--text-secondary);
+  font-size: var(--fs-control); color: var(--text-secondary);
 }
 .v10-agents-stat { display: flex; align-items: center; gap: 4px; }
 .v10-agents-stat-dot { width: 6px; height: 6px; border-radius: 50%; }
@@ -148,7 +148,7 @@
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--fs-control);
   font-weight: 500;
   white-space: nowrap;
   transition: background 0.15s, color 0.15s, border-color 0.15s;
@@ -166,12 +166,12 @@
   min-width: 32px;
   justify-content: center;
   padding: 0 12px;
-  font-size: 16px;
+  font-size: var(--fs-title);
   line-height: 1;
 }
-.v10-agents-loading { padding: 16px; color: var(--text-tertiary); font-size: 12px; text-align: center; }
+.v10-agents-loading { padding: 16px; color: var(--text-tertiary); font-size: var(--fs-control); text-align: center; }
 .v10-agents-section-label {
-  font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+  font-size: var(--fs-micro); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
   color: var(--text-tertiary); margin: 12px 0 6px; padding: 0 2px;
 }
 .v10-agent-add-surface { padding-top: 8px; }
@@ -198,13 +198,13 @@
    not decoration); we intentionally diverge from .v10-agent-card-meta's
    legacy tertiary here for AA on bg-elevated. */
 .v10-peer-card-name {
-  font-size: 12px; font-weight: 600; color: var(--text-primary);
+  font-size: var(--fs-control); font-weight: 600; color: var(--text-primary);
   flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .v10-peer-card-meta {
   display: flex; gap: 8px; margin-top: 4px;
-  font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono);
+  font-size: var(--fs-micro); color: var(--text-secondary); font-family: var(--font-mono);
   flex-wrap: wrap;
 }
 /* Agents-as-chips inside each peer card. flex-wrap handles long lists
@@ -226,7 +226,7 @@
   border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-micro);
   line-height: 1.4;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -269,7 +269,7 @@
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 700;
   color: var(--text-primary);
 }
@@ -300,7 +300,7 @@
 }
 .v10-local-agent-subtitle {
   margin-top: 4px;
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--text-tertiary);
   line-height: 1.5;
 }

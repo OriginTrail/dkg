@@ -17,6 +17,7 @@ import { countLeaseRecovery, isAutomaticallyRecoverablePostCommitFailure, missin
 /** RDF queue: immutable bound replay or conservative legacy recovery; one owner per assertion. */
 
 import { controlStoreOptions, deleteByPatternWithoutCount, withoutDefaultStoreWorkPriority, type TripleStore } from '@origintrail-official/dkg-storage';
+import { withoutAsyncAdmissionDiagnosticContext } from '@origintrail-official/dkg-core';
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
 import {
@@ -120,7 +121,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
 
   // Public surface — RFC §3.1–3.4
 
-  async enqueue(request: PromoteRequest): Promise<string> {
+  async enqueue(request: PromoteRequest, options?: { signal?: AbortSignal }): Promise<string> {
     this.validateRequest(request);
     const requestSnapshot = this.snapshotRequest(request);
     return this.admissions.run(requestSnapshot, admission => this.withMutationLock(async () => {
@@ -148,7 +149,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         : { phase: 'persist', admissionOutcome: 'not_admitted' }, persistence.cause);
       this.notifyWorkAvailable();
       return jobId;
-    }), this.admissionTimeoutMs);
+    }), this.admissionTimeoutMs, undefined, options?.signal);
   }
 
   async enqueueAndClaim(request: BoundPromoteRequest, workerId: string): Promise<BoundPromoteJob> {
@@ -546,9 +547,8 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   private notifyWorkAvailable(): void {
     this.nextIdleClaimAt = 0;
     try {
-      // Issued with no lane scope: the worker tick this starts synchronously (often from inside the mutex) inherits
-      // no ambient lane from the caller, so its data-plane work stays on the shared scheduler's default lane.
-      withoutDefaultStoreWorkPriority(() => this.workScheduler?.onWorkAvailable());
+      // Detached worker wakes inherit neither caller priority nor HTTP diagnostic context.
+      withoutDefaultStoreWorkPriority(() => withoutAsyncAdmissionDiagnosticContext(() => this.workScheduler?.onWorkAvailable()));
     } catch {
       // Queue persistence has already committed. A best-effort in-process
       // wake must never change the enqueue/recover result; periodic polling

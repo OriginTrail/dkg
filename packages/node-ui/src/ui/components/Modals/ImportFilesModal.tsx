@@ -234,14 +234,14 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                       </div>
                     ))}
                   </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 12 }}>
+                  <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginBottom: 12 }}>
                     {files.length} file{files.length !== 1 ? 's' : ''} selected · {formatSize(files.reduce((s, f) => s + f.file.size, 0))} total
                   </div>
                 </>
               )}
 
               <div className="v10-form-divider" />
-              <div className="v10-form-label" style={{ marginBottom: 8 }}>Ingestion options <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></div>
+              <div className="v10-form-label" style={{ marginBottom: 8 }}>Ingestion options <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></div>
               <label className="v10-import-option" style={{ opacity: 0.5, pointerEvents: 'none' }}>
                 <input type="checkbox" checked={storeOriginals} disabled readOnly />
                 Store original files as Knowledge Assets
@@ -255,10 +255,10 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
 
           {status === 'uploading' && (
             <div className="v10-import-progress ds-card-nested">
-              <div style={{ fontSize: 12, color: 'var(--text-secondary)', fontWeight: 500 }}>
+              <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', fontWeight: 500 }}>
                 Importing files… ({currentFile + 1} of {files.length})
               </div>
-              <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>
+              <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginTop: 4 }}>
                 {files[currentFile]?.file.name ?? '…'}
               </div>
               <div className="v10-import-progress-bar">

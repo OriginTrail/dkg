@@ -4,12 +4,12 @@
 
 /* Tooltip */
 
-p { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
+p { font-size: var(--fs-body); color: var(--text-secondary); line-height: 1.6; }
 
 /* Cards */
 .card{background:var(--bg-surface);border:1px solid var(--border-default);overflow:hidden;transition:border-color .15s}
 .card-header{padding:14px 18px;border-bottom:1px solid var(--border-default);display:flex;align-items:center;justify-content:space-between}
-.card-title{font-size:12px;font-weight:700;color:var(--text-primary);letter-spacing:.04em;text-transform:uppercase}
+.card-title{font-size:var(--fs-control);font-weight:700;color:var(--text-primary);letter-spacing:.04em;text-transform:uppercase}
 
 /* ── Settings page (cleanup): the page migrates the keep-cards onto the
    canonical .card idiom above. These add the body padding the idiom omits,
@@ -17,8 +17,8 @@ p { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
    previously-undefined .settings-card/.settings-grid/.prov-field-* hooks). */
 .card-body{padding:14px 18px}
 .settings-stack{display:flex;flex-direction:column;gap:16px;max-width:720px}
-.settings-field-label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text-tertiary);margin-bottom:3px}
-.settings-field-value{font-size:12px;color:var(--text-primary);word-break:break-word}
+.settings-field-label{font-size:var(--fs-micro);font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text-tertiary);margin-bottom:3px}
+.settings-field-value{font-size:var(--fs-control);color:var(--text-primary);word-break:break-word}
 .settings-field-value.mono{font-family:var(--font-mono)}
 
 /* ── Observability page shared components ───────────────────────────────── */
@@ -29,13 +29,13 @@ p { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
    don't scroll, so the page is its own scroll container. */
 .network-page { height: 100%; overflow-y: auto; padding: 20px 24px; }
 .network-page-back {
-  display: inline-flex; align-items: center; gap: 6px; margin-bottom: 12px; font-size: 13px;
+  display: inline-flex; align-items: center; gap: 6px; margin-bottom: 12px; font-size: var(--fs-body);
   color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline);
 }
 .network-page .card { margin-bottom: 12px; }
 .network-page .stat-label, .network-page .card-title { text-transform: none; letter-spacing: 0; }
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 16px 0 12px; }
-.page-title { font-size: 22px; font-weight: 700; color: var(--text-primary); margin: 0 0 4px; }
+.page-title { font-size: var(--fs-display); font-weight: 700; color: var(--text-primary); margin: 0 0 4px; }
 
 /* Tab bar (legacy v9-style, used by Observability page) */
 .tab-group {
@@ -52,7 +52,7 @@ p { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
 /* Form inputs and selects */
 .input {
   padding: 6px 10px;
-  font-size: 12px;
+  font-size: var(--fs-control);
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-control);
@@ -82,12 +82,12 @@ select.input {
 .data-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: var(--fs-control);
 }
 .data-table th {
   padding: 8px 14px;
   text-align: left;
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 600;
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-subtle);
@@ -130,8 +130,8 @@ select.input {
   color: var(--text-secondary);
   flex-shrink: 0;
 }
-.empty-state-title { font-size: 13px; font-weight: 700; color: var(--text-primary); }
-.empty-state-desc  { font-size: 12px; color: var(--text-secondary); max-width: 340px; line-height: 1.6; }
+.empty-state-title { font-size: var(--fs-body); font-weight: 700; color: var(--text-primary); }
+.empty-state-desc  { font-size: var(--fs-control); color: var(--text-secondary); max-width: 340px; line-height: 1.6; }
 
 /* Tx link icon */
 .tx-link-icon { color: var(--text-tertiary); opacity: 0.6; transition: opacity 0.15s; }
@@ -141,9 +141,9 @@ select.input {
 .stat-card{background:var(--bg-surface);border:1px solid var(--border-default);padding:16px 18px;flex:1;min-width:0;position:relative;overflow:hidden;transition:border-color .15s,box-shadow .15s}
 .stat-card:hover{border-color:var(--border-strong);box-shadow: var(--shadow-sm)}
 .stat-card .accent{position:absolute;top:0;left:0;right:0;height:2px}
-.stat-label{font-size:12px;color:var(--text-secondary);font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:6px}
-.stat-value{font-size:28px;font-weight:700;color:var(--text-primary);line-height:1}
-.stat-sub{font-size:13px;color:var(--text-secondary);margin-top:6px}
+.stat-label{font-size:var(--fs-control);color:var(--text-secondary);font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.stat-value{font-size:var(--fs-display);font-weight:700;color:var(--text-primary);line-height:1}
+.stat-sub{font-size:var(--fs-body);color:var(--text-secondary);margin-top:6px}
 
 /* ══════════════════════════════════════════
    MODAL STYLES (V10)
@@ -172,13 +172,13 @@ select.input {
   border-bottom: 1px solid var(--border-subtle);
 }
 .v10-modal-title {
-  font-size: 16px;
+  font-size: var(--fs-title);
   font-weight: 600;
   margin-bottom: 4px;
   color: var(--text-primary);
 }
 .v10-modal-subtitle {
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-tertiary);
   line-height: 1.5;
 }
@@ -200,7 +200,7 @@ select.input {
   background: var(--danger-bg);
   border: 1px solid var(--danger-border);
   margin-bottom: 16px;
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-danger);
   line-height: 1.5;
 }
@@ -210,7 +210,7 @@ select.input {
   background: var(--warning-bg);
   border: 1px solid var(--warning-border);
   margin-bottom: 16px;
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-warning);
   line-height: 1.5;
 }
@@ -220,7 +220,7 @@ select.input {
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   margin-bottom: 16px;
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--text-secondary);
   line-height: 1.6;
 }

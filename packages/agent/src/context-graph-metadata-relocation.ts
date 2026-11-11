@@ -53,6 +53,7 @@ import {
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
+import { ACCESS_ROW_ROOT_PREDICATES } from './curator-meta-member-list.js';
 import { stripLiteral } from './dkg-agent-utils.js';
 import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
 
@@ -358,10 +359,11 @@ async function copyMissingFactsToMeta(
 ): Promise<void> {
   // `_meta` already holds the authoritative copy of anything it has; only a
   // predicate it lacks is carried over, so a stale ontology value never adds
-  // a second name or binding.
+  // a second name or binding. Who may access the graph is never carried over:
+  // only `_meta` states it.
   const metaPredicates = new Set((await rowsOf(store, metaGraph, subject)).map((row) => row.predicate));
   const inserts: Quad[] = ontologyRows
-    .filter((row) => !metaPredicates.has(row.predicate))
+    .filter((row) => !metaPredicates.has(row.predicate) && !ACCESS_ROW_ROOT_PREDICATES.has(row.predicate))
     .map((row) => ({ subject, predicate: row.predicate, object: row.object, graph: metaGraph }));
   // Provenance activity IRIs embed the graph id, so they move with it.
   for (const activity of activities) {
