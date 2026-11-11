@@ -35,7 +35,7 @@ for (const theme of ['dark', 'light'] as const) {
     // Transitions would catch a look half way.
     await page.addStyleTag({ content: '*, *::before, *::after { transition: none !important; animation: none !important; }' });
 
-    for (const row of ['Button · primary', 'Button · secondary', 'Button · ghost', 'Button · danger', 'Button · swm', 'Button · vm', 'Tab', 'Segment', 'Filter chip', 'Context Graph chip']) {
+    for (const row of ['Button · primary', 'Button · secondary', 'Button · ghost', 'Button · danger', 'Button · swm', 'Button · vm', 'Tab', 'Segment', 'Filter chip', 'Context graph chip']) {
       await control(page, row).hover();
       const real = await look(page, row, 'Default');
       await page.mouse.move(0, 0);

@@ -1,11 +1,10 @@
 // The accessibility rules in DESIGN.md that can be read from the code: every
 // control has a name, clickable things work from the keyboard, dialogs are
 // named, and focus stays visible.
-import { readFileSync } from 'node:fs';
-import { relative } from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
-import { UI, attrsOf, hasSpread, jsxElements, opening, parseTsx, uiFiles as files, uiJsxElements, type Jsx } from './helpers/jsx.js';
+import { attrsOf, hasSpread, jsxElements, opening, parseTsx, uiJsxElements, type Jsx } from './helpers/jsx.js';
+import { cssFiles, findAll, read, tsxFiles, where, withoutCssComments } from './helpers/source.js';
 
 /** True when the node puts words on screen, as text or a value worked out at runtime. */
 function hasText(n: ts.Node): boolean {
@@ -28,8 +27,8 @@ function hasText(n: ts.Node): boolean {
 }
 
 function scan(visit: (n: Jsx, where: string, context: { inLabel: boolean; labelled: Set<string> }) => void) {
-  for (const file of files.filter((f) => f.endsWith('.tsx'))) {
-    const source = readFileSync(file, 'utf8');
+  for (const file of tsxFiles) {
+    const source = read(file);
     const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
     const labelled = new Set([...source.matchAll(/htmlFor=(?:"([^"]+)"|\{([^}]+)\})/g)].map((m) => m[1] ?? m[2]!));
     const walkTree = (n: ts.Node, inLabel: boolean) => {
@@ -37,7 +36,7 @@ function scan(visit: (n: Jsx, where: string, context: { inLabel: boolean; labell
       if (ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n)) {
         nextInLabel ||= opening(n).tagName.getText() === 'label';
         const line = tree.getLineAndCharacterOfPosition(n.getStart()).line + 1;
-        visit(n, `${relative(UI, file).replace(/\\/g, '/')}:${line}`, { inLabel, labelled });
+        visit(n, `${where(file)}:${line}`, { inLabel, labelled });
       }
       ts.forEachChild(n, (child) => walkTree(child, nextInLabel));
     };
@@ -143,15 +142,11 @@ describe('accessibility rules', { timeout: 30_000 }, () => {
   });
 
   it('keeps a visible focus style wherever the outline is removed for keyboard focus', () => {
-    const found: string[] = [];
-    for (const file of files.filter((f) => f.endsWith('.css'))) {
-      const css = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
-      for (const [, selector, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-        if (/:focus-visible/.test(selector!.replace(':not(:focus-visible)', '')) && /outline:\s*(none|0)/.test(body!) && !/box-shadow/.test(body!)) {
-          found.push(`${relative(UI, file)}: ${selector!.trim()}`);
-        }
-      }
-    }
+    const found = findAll(cssFiles, /([^{}]+)\{([^{}]*)\}/g, {
+      prepare: withoutCssComments,
+      keep: ([, selector, body]) => /:focus-visible/.test(selector!.replace(':not(:focus-visible)', '')) && /outline:\s*(none|0)/.test(body!) && !/box-shadow/.test(body!),
+      show: ([, selector]) => selector!.trim(),
+    });
     expect(found).toEqual([]);
   });
 });
