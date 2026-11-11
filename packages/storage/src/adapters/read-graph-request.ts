@@ -1,4 +1,4 @@
-import { stripSparqlLiteralsAndComments } from '@origintrail-official/dkg-core';
+import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import {
   spliceReadGraphPlan,
   type ReadGraphWriteOptions,
@@ -36,15 +36,16 @@ export function withReadGraphOperations(update: string, options: QueryOptions | 
 /**
  * {@link withReadGraphOperations} for a caller's own update text, which may end
  * with a `;` separator, also before a trailing comment. That separator is
- * removed first, because the splice adds its own.
+ * removed first, because the splice adds its own. It is found as the last
+ * token of the SPARQL lexical scanner, so a `;` inside a string, an IRI, a
+ * comment or an escaped prefixed name (`ex:a\;`) is never taken for it.
  */
 export function withReadGraphOperationsAroundCallerUpdate(sparql: string, options: QueryOptions | undefined): string {
   return operationsOf(options) ? withReadGraphOperations(withoutFinalSeparator(sparql), options) : sparql;
 }
 
 function withoutFinalSeparator(sparql: string): string {
-  // Same length as the text, with strings, IRIs and comments blanked.
-  const masked = stripSparqlLiteralsAndComments(sparql);
-  const end = masked.trimEnd().length;
-  return masked[end - 1] === ';' ? sparql.slice(0, end - 1) + sparql.slice(end) : sparql;
+  const { tokens } = prepareSparql(sparql);
+  const last = tokens[tokens.length - 1];
+  return last?.kind === 'symbol' && last.logicalValue === ';' ? sparql.slice(0, last.start) + sparql.slice(last.end) : sparql;
 }
