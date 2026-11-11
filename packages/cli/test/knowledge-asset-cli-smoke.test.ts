@@ -6,17 +6,13 @@ import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 const execFileAsync = promisify(execFile);
 interface CliInvocation { readonly env: NodeJS.ProcessEnv; readonly signal: AbortSignal; }
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, '..', '..', '..');
-const TSX_LOADER = join(REPO_ROOT, 'node_modules', 'tsx', 'dist', 'loader.mjs');
-const CLI_SOURCE = join(__dirname, '..', 'src', 'cli.ts');
-const TSX_LOADER_URL = pathToFileURL(TSX_LOADER).href;
+const CLI_ENTRY = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 const AUTHOR_AGENT_ADDRESS = `0x${'11'.repeat(20)}`;
 const PENDING_OBLIGATION = {
   status: 'confirmed', code: 'CONFIRMED_CATALOG_OBLIGATION_PENDING', catalogObligationPending: true,
@@ -923,7 +919,7 @@ function testInvocation(dkgHome: string, apiPort: string, onFinished: (cleanup: 
 
 async function runCli(args: string[], { env, signal }: CliInvocation): Promise<{ stdout: string; stderr: string }> {
   signal.throwIfAborted();
-  return execFileAsync('node', ['--import', TSX_LOADER_URL, CLI_SOURCE, ...args], { env, signal });
+  return execFileAsync(process.execPath, [CLI_ENTRY, ...args], { env, signal });
 }
 
 async function readJsonBody(req: Parameters<Parameters<typeof createServer>[0]>[0]): Promise<any> {

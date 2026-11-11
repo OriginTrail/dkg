@@ -1,0 +1,26 @@
+{
+  "node": "JPB",
+  "contextGraphId": "0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-data",
+  "assertionOwner": "0xf77258a965ba13adc77bca85da7c6a287272959a",
+  "snapshot": "urn:dmaast:jpb:trace:snapshot:6876805538656718c1b000b3b141edeccbef8465076ee8f81d4c7ac95d46591a",
+  "evidencePartition": "17347",
+  "records": [
+    { "iri": "urn:dmaast:jpb:trace:record:bf97e8ad8bb03b08c855013bfde5d8b4371f76458adfb1aef8da298f25e4bfda", "partition": "4085" },
+    { "iri": "urn:dmaast:jpb:trace:record:cbf0c0755a087cc12b70234e7e9a8d3ea88d4bd75c822cf12de230962665ec2e", "partition": "14902" },
+    { "iri": "urn:dmaast:jpb:trace:record:3789e86fc7cc194875b600483ee6930267f262959f5a36ebe8d94b3912ed7906", "partition": "4081" }
+  ],
+  "table": "GAMME",
+  "organisation": "JPB",
+  "orderNo": "62633",
+  "operationCodes": ["CUT", "USILU", "EBAVM"],
+  "fields": {
+    "operationCode": "COFRAIS",
+    "orderNo": "NAF",
+    "partNumber": "PARTNUMBER",
+    "routePhase": "PHASE",
+    "operation": "GA_DES"
+  },
+  "selection": "pinned-snapshot",
+  "evidenceSelection": "pinned-snapshot; not latest SQL state",
+  "meaning": "planned-route-reference; not operation execution"
+}

@@ -1,0 +1,35 @@
+name: Set up semantic runtime build tools
+description: Install the pinned Rust and Wasm tools required by semantic-runtime builds.
+
+runs:
+  using: composite
+  steps:
+    - name: Install pinned Rust and Wasm targets
+      shell: bash
+      run: |
+        rustup toolchain install nightly-2026-08-18 \
+          --profile minimal \
+          --target wasm32-unknown-unknown \
+          --target wasm32-wasip2 \
+          --component rustfmt \
+          --component clippy
+    - name: Restore Rust build and wasm-bindgen caches
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/bin/wasm-bindgen
+          ~/.cargo/bin/wasm-bindgen-test-runner
+          ~/.cargo/bin/wasm2es6js
+          ~/.cargo/registry
+          ~/.cargo/git
+          rust/target
+        key: semantic-runtime-${{ runner.os }}-${{ runner.arch }}-rust-nightly-2026-08-18-wbg-0.2.127-${{ hashFiles('rust/Cargo.lock') }}
+        restore-keys: |
+          semantic-runtime-${{ runner.os }}-${{ runner.arch }}-rust-nightly-2026-08-18-wbg-0.2.127-
+    - name: Install pinned wasm-bindgen CLI
+      shell: bash
+      run: |
+        if ! command -v wasm-bindgen >/dev/null 2>&1 \
+          || [[ "$(wasm-bindgen --version)" != "wasm-bindgen 0.2.127" ]]; then
+          cargo +nightly-2026-08-18 install wasm-bindgen-cli --version 0.2.127 --locked
+        fi
