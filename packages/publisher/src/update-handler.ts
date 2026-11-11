@@ -805,7 +805,7 @@ export class UpdateHandler {
       `INSERT DATA { GRAPH <${metaGraph}> {\n${metaTriples}\n} }`,
     ].filter(Boolean).join(';\n');
     await this.store.update(update, {
-      touchedGraphs: [vmGraph, metaGraph],
+      touchedGraphs: [vmGraph, metaGraph], writtenGraphs: [vmGraph, metaGraph],
       source: 'publisher.updateHandler.graphScopedMaterialization',
     });
     return true;

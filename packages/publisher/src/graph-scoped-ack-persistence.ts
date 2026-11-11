@@ -606,6 +606,7 @@ export class GraphScopedACKPersistence {
           // graph-set index current with one bounded probe; an undeclared
           // update makes the next graph listing rescan the whole store.
           touchedGraphs: [STORAGE_ACK_LEDGER_GRAPH],
+          writtenGraphs: [STORAGE_ACK_LEDGER_GRAPH],
         },
       );
       return;

@@ -1946,7 +1946,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       WHERE { OPTIONAL { GRAPH <${metaGraph}> {
         <${contextGraphUri}> <${RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1}> ?oldVersion .
       } } }
-    `, { touchedGraphs: [metaGraph], source: 'agent.rfc64.privateRosterRotate' });
+    `, { touchedGraphs: [metaGraph], writtenGraphs: [metaGraph], source: 'agent.rfc64.privateRosterRotate' });
     return next.toString(10);
   }
 

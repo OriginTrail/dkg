@@ -439,6 +439,9 @@ export async function deleteByPatternWithoutCount<Pattern>(
 
 /**
  * Run a server-side update whose affected named graphs are known by the caller.
+ * `options.writtenGraphs` names every graph whose triples the update may change:
+ * a store that holds read graphs refuses an update without it. `touchedGraphs`
+ * names the graphs whose existence it may change, for the graph-set index.
  * Returns `false` when the store does not support `update()` directly, or when
  * a decorator reports that its wrapped store lacks the capability. Genuine
  * update execution errors propagate so feature code cannot mask an outage or
@@ -448,7 +451,7 @@ export async function tryUpdateWithTouchedGraphs(
   store: TripleStore,
   sparql: string,
   touchedGraphs: readonly string[],
-  options: QueryOptions = {},
+  options: QueryOptions & { readonly writtenGraphs: readonly string[] },
 ): Promise<boolean> {
   const update = store.update;
   if (typeof update !== 'function') return false;
