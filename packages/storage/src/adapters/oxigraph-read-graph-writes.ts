@@ -32,11 +32,14 @@ const METHODS: readonly ReadGraphPlannedMethod[] = Object.freeze([
   'delete', 'deleteByPattern', 'deleteByPatternWithoutCount', 'deleteBySubjectPrefix', 'dropGraph', 'replaceAssetGroup',
   'replaceGraph', 'replaceGraphAndSubject', 'replaceSubject', 'replaceSubjectAndInsert', 'rfc64AuthorCommitCasV1', 'update',
 ]);
-export const OXIGRAPH_READ_GRAPH_CAPABILITIES: ReadGraphAdapterCapabilities = Object.freeze({ methods: METHODS, serialUpdates: true });
+export const OXIGRAPH_READ_GRAPH_CAPABILITIES: ReadGraphAdapterCapabilities = Object.freeze({
+  methods: METHODS, serialUpdates: true, plansBlankNodeDeletes: false,
+});
 /** The worker store has no `replaceAssetGroup`. */
 export const OXIGRAPH_WORKER_READ_GRAPH_CAPABILITIES: ReadGraphAdapterCapabilities = Object.freeze({
   methods: Object.freeze(METHODS.filter((method) => method !== 'replaceAssetGroup')),
   serialUpdates: true,
+  plansBlankNodeDeletes: false,
 });
 
 const statements = sparqlStatements('oxigraph');

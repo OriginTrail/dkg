@@ -159,6 +159,15 @@ export interface ReadGraphAdapterCapabilities {
    * it does not, the layer marks the read graphs of such a write dirty.
    */
   readonly serialUpdates: boolean;
+  /**
+   * Whether the adapter sends a planned `delete` whose quads include a blank
+   * node in one request, like any other delete. Absent means it does. `false`
+   * means it refuses that plan before anything changes, because its engine
+   * deletes a stored blank node by identity and SPARQL can name one only by
+   * shape; a `delete` without a plan keeps its exact semantics, so the layer
+   * marks the affected read graphs dirty and sends the delete without one.
+   */
+  readonly plansBlankNodeDeletes?: boolean;
 }
 
 /** An adapter that declares its read-graph capabilities. */

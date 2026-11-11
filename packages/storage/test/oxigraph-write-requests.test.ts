@@ -125,6 +125,8 @@ describe('OxigraphStore engine calls with read-graph operations', () => {
     expect(missingReadGraphMethods(store, readGraphCapabilitiesOf(store))).toEqual([]);
     expect([...store.readGraphCapabilities.methods].sort()).toEqual(plannedMethods(plannedCases));
     expect(store.readGraphCapabilities.serialUpdates).toBe(true);
+    // A planned delete of a quad with a blank node is refused (above), and the store says so.
+    expect(store.readGraphCapabilities.plansBlankNodeDeletes).toBe(false);
   });
 });
 
@@ -169,6 +171,7 @@ describe('OxigraphWorkerStore worker messages with read-graph operations', () =>
       expect(missingReadGraphMethods(store, readGraphCapabilitiesOf(store))).toEqual([]);
       expect([...store.readGraphCapabilities.methods].sort()).toEqual(plannedMethods(workerPlannedCases));
       expect(store.readGraphCapabilities.serialUpdates).toBe(true);
+      expect(store.readGraphCapabilities.plansBlankNodeDeletes).toBe(false);
     } finally {
       await store.close();
     }
