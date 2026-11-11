@@ -323,13 +323,14 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>, options?: QueryOptions): Promise<number> {
-    const matches = this.store.match(
+    const terms = [
       pattern.subject ? oxigraph.namedNode(pattern.subject) : null,
       pattern.predicate ? oxigraph.namedNode(pattern.predicate) : null,
       pattern.object ? parseTerm(pattern.object) : null,
       pattern.graph ? oxigraph.namedNode(pattern.graph) : null,
-    );
-    if (deleteMatching(() => this.writable, pattern, matches, options)) this.scheduleFlush();
+    ] as const;
+    const matches = this.store.match(...terms);
+    if (deleteMatching(() => this.writable, terms, matches, options)) this.scheduleFlush();
     this.writeGen.recordWrite(withReadGraphs(pattern.graph
       ? { kind: 'graphs', graphs: [pattern.graph] }
       : { kind: 'all' }, options));

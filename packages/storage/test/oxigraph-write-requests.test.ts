@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { OxigraphWorkerStore } from '../src/adapters/oxigraph-worker.js';
-import { sparqlStatements } from '../src/adapters/sparql-statements.js';
 import {
   missingReadGraphMethods,
   readGraphCapabilitiesOf,
@@ -15,7 +14,7 @@ import {
   recordOxigraphWrite,
   type OxigraphWriteCase,
 } from './helpers/oxigraph-write-requests.js';
-import { G, P, q, S } from './helpers/write-request-recording.js';
+import { G, P, S } from './helpers/write-request-recording.js';
 
 /**
  * What embedded Oxigraph is asked to do for each write method, recorded on the
@@ -61,7 +60,6 @@ const PLAN: ReadGraphWritePlan = {
   after: ['INSERT DATA { GRAPH <urn:test:rg:read> { <urn:test:rg:s> <urn:test:rg:p> "after-1" } }'],
 };
 const planned = (plan: ReadGraphWritePlan): ReadGraphWriteOptions => ({ readGraphPlan: plan });
-const statements = sparqlStatements('oxigraph');
 
 /** An engine `update` call with the plan's operations around `own`. */
 const carrying = (own: string, plan: ReadGraphWritePlan = PLAN) => `update\n${[...plan.before, own, ...plan.after].join('\n;\n')}`;
@@ -75,9 +73,9 @@ const plannedMethods = (cases: readonly OxigraphWriteCase[]) => [...new Set(case
  * carries the operations.
  */
 const ONE_UPDATE: Readonly<Record<string, string>> = {
-  'delete': statements.deleteData([q(S, '"one"')])!.update,
-  'deleteByPattern': statements.deleteByPattern({ graph: G, subject: S }).update,
-  'deleteByPatternWithoutCount': statements.deleteByPattern({ graph: G, predicate: P }).update,
+  'delete': `DELETE DATA { GRAPH <${G}> { <${S}> <${P}> "one" . } }`,
+  'deleteByPattern': `DELETE { GRAPH <${G}> { <${S}> ?p ?o } } WHERE { GRAPH <${G}> { <${S}> ?p ?o } }`,
+  'deleteByPatternWithoutCount': `DELETE { GRAPH <${G}> { ?s <${P}> ?o } } WHERE { GRAPH <${G}> { ?s <${P}> ?o } }`,
 };
 
 describe('OxigraphStore engine calls with read-graph operations', () => {

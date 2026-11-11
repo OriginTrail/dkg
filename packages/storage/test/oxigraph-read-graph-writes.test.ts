@@ -87,6 +87,21 @@ function blankNodeDeletes({ store, inScenario, graph }: ReadGraphWriteContext<Re
     }));
 }
 
+/** A planned delete is written only with the terms the engine parsed, so text in a caller's term cannot add an operation. */
+function injectedTermsChangeNothing({ store, inScenario, graph }: ReadGraphWriteContext<ReadGraphTestStore>): void {
+  it('writes a planned delete only with the terms the engine parsed: text in a term adds no operation', () =>
+    inScenario(async (s) => {
+      const before = { member: await graph(s.G1), other: await graph(s.OUTSIDE), read: await s.readGraph() };
+      const injected = `"missing" . } } ; CLEAR ALL ; DELETE DATA { GRAPH <${s.G1}> { <urn:rg-int:a> <${P}> "missing"`;
+      await store().delete([{ subject: 'urn:rg-int:a', predicate: P, object: injected, graph: s.G1 }], planned(s.reference(s.G1)));
+      await expect(store().deleteByPattern({ graph: `${s.G1}> } } ; CLEAR ALL ; #`, subject: 'urn:rg-int:a' },
+        planned(s.reference(s.G1)))).rejects.toThrow();
+      expect(await graph(s.G1)).toEqual(before.member);
+      expect(await graph(s.OUTSIDE)).toEqual(before.other);
+      expect(await s.readGraph()).toEqual(before.read);
+    }));
+}
+
 const dir = mkdtempSync(join(tmpdir(), 'dkg-read-graph-writes-'));
 const persistPath = join(dir, 'store.nq');
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -99,6 +114,7 @@ readGraphWriteSuite({
 }, (context) => {
   const { store, inScenario } = context;
   blankNodeDeletes(context);
+  injectedTermsChangeNothing(context);
   it('a store reopened from what it flushed holds the same read graph', () => inScenario(async (s) => {
     await s.maintained(s.reference(s.G1), (o) => store().replaceGraph(s.G1, [q('r', 'reopened', s.G1)], o));
     await store().flush();
@@ -125,4 +141,7 @@ readGraphWriteSuite({
   open: async () => new OxigraphWorkerStore(),
   requests: sentToWorker(),
   replaceAssetGroup: false,
-}, blankNodeDeletes);
+}, (context) => {
+  blankNodeDeletes(context);
+  injectedTermsChangeNothing(context);
+});

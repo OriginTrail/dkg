@@ -46,9 +46,26 @@ const statements = sparqlStatements('oxigraph');
 type Engine = InstanceType<typeof oxigraph.Store>;
 
 /**
- * Delete `quads`. With a plan: one `DELETE DATA` with the plan's operations
- * around it; a quad with a blank node is refused before anything changes.
- * Without a plan: one engine call per quad, as before.
+ * The one-update forms are written only with terms the engine has parsed: it
+ * refuses an invalid IRI and escapes a literal when it prints it, so text in a
+ * caller's term cannot end the statement or add an operation.
+ */
+function deleteDataUpdate(quads: readonly oxigraph.Quad[]): string {
+  const byGraph = new Map<string, string[]>();
+  for (const quad of quads) {
+    const graph = quad.graph.termType === 'DefaultGraph' ? '' : String(quad.graph);
+    byGraph.set(graph, [...byGraph.get(graph) ?? [], `${String(quad.subject)} ${String(quad.predicate)} ${String(quad.object)} .`]);
+  }
+  const blocks = [...byGraph].map(([graph, triples]) => (graph ? `GRAPH ${graph} { ${triples.join(' ')} }` : triples.join(' ')));
+  return `DELETE DATA { ${blocks.join(' ')} }`;
+}
+
+/**
+ * Delete `quads`. With a plan: one `DELETE DATA` of the quads the engine
+ * parsed, with the plan's operations around it, and a quad with a blank node
+ * refused before anything changes. Without a plan: one engine call per quad,
+ * as before. Either way a quad the engine cannot parse names no stored quad,
+ * and is skipped.
  */
 export function deleteQuads(
   writable: () => Engine,
@@ -56,39 +73,49 @@ export function deleteQuads(
   options: QueryOptions | undefined,
   toEngineQuad: (quad: Quad) => oxigraph.Quad | null,
 ): void {
-  if (operationsOf(options) && quads.some((quad) => isBlankNodeTerm(quad.subject) || isBlankNodeTerm(quad.object))) {
+  if (!operationsOf(options)) {
+    for (const quad of quads) {
+      const engineQuad = toEngineQuad(quad);
+      if (engineQuad) writable().delete(engineQuad);
+    }
+    return;
+  }
+  if (quads.some((quad) => isBlankNodeTerm(quad.subject) || isBlankNodeTerm(quad.object))) {
     throw new Error('OxigraphStore.delete cannot send read-graph operations with a quad that has a blank node: '
       + 'SPARQL names a stored blank node only by its shape, which may match other data');
   }
-  const update = operationsOf(options) ? statements.deleteData(quads)?.update : undefined;
-  if (update !== undefined) {
-    writable().update(withReadGraphOperations(update, options));
-    return;
-  }
-  for (const quad of quads) {
-    const engineQuad = toEngineQuad(quad);
-    if (engineQuad) writable().delete(engineQuad);
-  }
+  const engineQuads = quads.map(toEngineQuad).filter((quad): quad is oxigraph.Quad => quad !== null);
+  if (engineQuads.length > 0) writable().update(withReadGraphOperations(deleteDataUpdate(engineQuads), options));
 }
+
+/** The engine terms of a pattern delete, `null` for a term that matches anything: subject, predicate, object, graph. */
+export type EnginePattern = readonly [oxigraph.Term | null, oxigraph.Term | null, oxigraph.Term | null, oxigraph.Term | null];
 
 /**
  * Delete what matches `pattern`. With a plan: one update that deletes every
- * matching quad, with the plan's operations around it. Without a plan: one
- * engine call per quad of `matches`, as before. Returns whether anything was
- * sent that may have changed the store.
+ * matching quad, written with the pattern's engine terms, with the plan's
+ * operations around it; a blank node in the pattern is refused, as a DELETE
+ * template cannot hold one. Without a plan: one engine call per quad of
+ * `matches`, as before. Returns whether anything was sent that may have
+ * changed the store.
  */
 export function deleteMatching(
   writable: () => Engine,
-  pattern: Partial<Quad>,
+  pattern: EnginePattern,
   matches: readonly oxigraph.Quad[],
   options: QueryOptions | undefined,
 ): boolean {
-  if (operationsOf(options)) {
-    writable().update(withReadGraphOperations(statements.deleteByPattern(pattern).update, options));
-    return true;
+  if (!operationsOf(options)) {
+    for (const match of matches) writable().delete(match);
+    return matches.length > 0;
   }
-  for (const match of matches) writable().delete(match);
-  return matches.length > 0;
+  if (pattern.some((term) => term?.termType === 'BlankNode')) {
+    throw new Error('OxigraphStore.deleteByPattern cannot send read-graph operations with a blank node in its pattern');
+  }
+  const [subject, predicate, object, graph] = pattern.map((term, i) => (term ? String(term) : ['?s', '?p', '?o', '?g'][i]));
+  const triple = `${subject} ${predicate} ${object}`;
+  writable().update(withReadGraphOperations(`DELETE { GRAPH ${graph} { ${triple} } } WHERE { GRAPH ${graph} { ${triple} } }`, options));
+  return true;
 }
 
 /**
