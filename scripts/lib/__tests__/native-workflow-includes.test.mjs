@@ -41,16 +41,20 @@ test('every CLI test the native workflows run is discovered by vitest.unit.confi
   }
 });
 
-test('a selector commented out of the config is no longer discovered, and the check reports it', () => {
+test('a selector the config stops discovering is reported', () => {
   const { files } = nativeSelectors('oxigraph-lifecycle-native.yml');
   const victim = 'test/oxigraph-orphan-native.test.ts';
   assert.ok(files.includes(victim));
-  const source = readFileSync(`${CLI_ROOT}${UNIT_CONFIG}`, 'utf8');
-  const entry = `'${victim}',`;
-  assert.equal(source.split(entry).length, 2, `${victim} is listed once in ${UNIT_CONFIG}`);
-  // A sibling of the real config (same relative paths), named so no config scan picks it up.
+  // The real config with one more exclusion, beside it so relative paths
+  // resolve the same, and named so no config scan picks it up. It imports the
+  // config rather than copying it, so the config's formatting does not matter.
   const fixture = `.native-guard-${process.pid}.config.ts`;
-  writeFileSync(`${CLI_ROOT}${fixture}`, source.replace(entry, `// ${entry}`));
+  writeFileSync(`${CLI_ROOT}${fixture}`, [
+    "import { configDefaults, defineConfig, mergeConfig } from 'vitest/config';",
+    `import base from './${UNIT_CONFIG}';`,
+    `export default mergeConfig(base, defineConfig({ test: { exclude: [...(base.test?.exclude ?? configDefaults.exclude), ${JSON.stringify(victim)}] } }));`,
+    '',
+  ].join('\n'));
   try {
     const discovered = discoverVitestFiles(CLI_ROOT, { config: fixture });
     assert.deepEqual(undiscovered(files, discovered), [victim]);
