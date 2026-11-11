@@ -9,7 +9,7 @@ import { parse } from 'yaml';
 import { ALERT_ISSUES, ALERT_LABEL, alertIssue, compareRuns, planAlert, PROFILES, readAlertState, readRecovery, renderFailure } from '../canary-alert.mjs';
 import { CANARY_ALERT_JOB, CI_GATE_JOB, COVERAGE_JOB, PROFILE_JOB } from '../ci-health.mjs';
 import { createGitHubClient } from '../github-rest.mjs';
-import { runCanaryAlert, runProfile } from '../../ci/canary-alert.mjs';
+import { ALERT_LIMITS, alertClient, alertProfile, runCanaryAlert } from '../../ci/canary-alert.mjs';
 import { REPO_ROOT } from './ci-plan-fixtures.mjs';
 import { importClosure } from './script-imports.mjs';
 
@@ -609,21 +609,53 @@ test('the alert script skips other branches, and a dry run skips a cancelled run
   await assert.rejects(runCanaryAlert({ argv: [], env: { GITHUB_TOKEN: 't' }, client: featureApi.clientFor('x'), log: quiet }), /needs GITHUB_REPOSITORY and GITHUB_RUN_ID/);
 });
 
-test('the live job takes its profile from ci.yml and never guesses one; a dry run guesses as the report does', () => {
+test('the live job takes its profile from ci.yml and never infers one; a dry run reads it as the report does', () => {
   const push = apiRun();
   const manualNightly = nightlyRun({ actor: { login: 'dev' }, triggering_actor: { login: 'dev' } });
-  assert.equal(runProfile({ option: undefined, env: { CI_PROFILE: 'nightly-equivalent' }, live: true, run: manualNightly }), 'nightly-equivalent');
-  assert.equal(runProfile({ option: 'standard', env: { CI_PROFILE: 'nightly-equivalent' }, live: true, run: push }), 'standard');
+  assert.equal(alertProfile({ option: undefined, env: { CI_PROFILE: 'nightly-equivalent' }, live: true, run: manualNightly }), 'nightly-equivalent');
+  assert.equal(alertProfile({ option: 'standard', env: { CI_PROFILE: 'nightly-equivalent' }, live: true, run: push }), 'standard');
   for (const env of [{}, { CI_PROFILE: '' }]) {
-    assert.throws(() => runProfile({ option: undefined, env, live: true, run: nightlyRun() }), /needs --profile or CI_PROFILE/);
+    assert.throws(() => alertProfile({ option: undefined, env, live: true, run: nightlyRun() }), /needs --profile or CI_PROFILE/);
   }
-  assert.throws(() => runProfile({ option: 'nightly', env: {}, live: true, run: push }), /not nightly/);
-  // The dry-run guess is the report's runKind: a nightly-ci.yml dispatch,
-  // by actor or by triggering actor.
-  assert.equal(runProfile({ option: undefined, env: {}, live: false, run: nightlyRun() }), 'nightly-equivalent');
-  assert.equal(runProfile({ option: undefined, env: {}, live: false, run: nightlyRun({ actor: { login: 'dev' } }) }), 'nightly-equivalent');
-  assert.equal(runProfile({ option: undefined, env: {}, live: false, run: manualNightly }), 'standard');
-  assert.equal(runProfile({ option: undefined, env: {}, live: false, run: push }), 'standard');
+  assert.throws(() => alertProfile({ option: 'nightly', env: {}, live: true, run: push }), /not nightly/);
+  // A dry run reads the report's runProfile: a dispatch's recorded run name,
+  // or, for a dispatch from before ci.yml recorded it, the nightly-ci.yml
+  // dispatch by actor or triggering actor.
+  assert.equal(alertProfile({ option: undefined, env: {}, live: false, run: { ...manualNightly, display_title: 'CI (nightly-equivalent)' } }), 'nightly-equivalent');
+  assert.equal(alertProfile({ option: undefined, env: {}, live: false, run: { ...nightlyRun(), display_title: 'CI (standard)' } }), 'standard');
+  assert.equal(alertProfile({ option: undefined, env: {}, live: false, run: nightlyRun() }), 'nightly-equivalent');
+  assert.equal(alertProfile({ option: undefined, env: {}, live: false, run: nightlyRun({ actor: { login: 'dev' } }) }), 'nightly-equivalent');
+  assert.equal(alertProfile({ option: undefined, env: {}, live: false, run: manualNightly }), 'standard');
+  assert.equal(alertProfile({ option: undefined, env: {}, live: false, run: push }), 'standard');
+  assert.equal(alertProfile({ option: 'standard', env: {}, live: false, run: { ...manualNightly, display_title: 'CI (nightly-equivalent)' } }), 'standard', '--profile overrides the recorded one');
+});
+
+test('the alert gives up long before its job times out: a ten-minute rate-limit reset fails it at once', async () => {
+  const start = Date.parse('2026-11-11T12:00:00Z');
+  const sleeps = [];
+  const limited = alertClient({ GITHUB_TOKEN: 't' }, {
+    fetch: async () => new Response(JSON.stringify({ message: 'API rate limit exceeded' }), {
+      status: 403, headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String((start + 10 * 60_000) / 1000) },
+    }),
+    sleep: async (ms) => { sleeps.push(ms); },
+    now: () => start,
+  });
+  await assert.rejects(limited.request('GET', 'repos/o/r/actions/runs/1'), /waiting 601 s exceeds the 60 s bound/);
+  assert.deepEqual(sleeps, [], 'no waiting toward the job timeout');
+  // Shorter waits that add up stop at the deadline.
+  let clock = start;
+  const throttled = alertClient({ GITHUB_TOKEN: 't' }, {
+    fetch: async () => new Response('{}', { status: 429, headers: { 'retry-after': '50' } }),
+    sleep: async (ms) => { clock += ms; },
+    now: () => clock,
+  });
+  await assert.rejects(throttled.request('GET', 'repos/o/r/actions/runs/1'), /would pass the client's 180 s deadline/);
+  assert.equal(clock - start, 150_000);
+  // The job's timeout, which would cancel the run with it, leaves five minutes
+  // beyond the deadline for checkout and setup; its failure is tolerated.
+  const alert = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')).jobs['canary-alert'];
+  assert.ok(alert['timeout-minutes'] * 60_000 >= ALERT_LIMITS.deadlineMs + 5 * 60_000);
+  assert.equal(alert['continue-on-error'], true);
 });
 
 test('the ci.yml alert job runs after the gate on protected canary runs only, with its own narrow token', () => {
@@ -636,7 +668,7 @@ test('the ci.yml alert job runs after the gate on protected canary runs only, wi
   assert.deepEqual(workflow.permissions, { contents: 'read' }, 'the workflow default stays read-only');
   assert.deepEqual(alert.permissions, { contents: 'read', actions: 'read', issues: 'write' });
   assert.equal(alert['continue-on-error'], true);
-  assert.ok(alert['timeout-minutes'] <= 10);
+  assert.ok(alert['timeout-minutes'] <= 15, 'a stuck alert must not hold the nightly dispatcher for long');
   // Runs of one profile share the workflow's concurrency group, one at a time,
   // and each profile has its own issue, so no job lock is needed; one would
   // cancel a pending alert job, which turns the run cancelled.

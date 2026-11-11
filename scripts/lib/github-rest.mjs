@@ -67,6 +67,10 @@ export function createGitHubClient({
   retries = 4,
   backoffMs = 1000,
   maxWaitMs = 15 * 60 * SECOND,
+  // An optional budget for everything the client does, from its creation:
+  // no wait may end past it, no request starts after it, and each request is
+  // aborted at it.
+  deadlineMs,
   log = () => {},
 } = {}) {
   if (!token) throw new Error('a GitHub token is required (set GITHUB_TOKEN)');
@@ -75,11 +79,14 @@ export function createGitHubClient({
   // waited out before the next request instead of being spent on a 403.
   let remaining;
   let resetAt = 0;
+  const deadline = deadlineMs === undefined ? Infinity : now() + deadlineMs;
+  const budget = () => `the client's ${Math.ceil(deadlineMs / SECOND)} s deadline`;
 
   const wait = async (ms, reason) => {
     if (ms > maxWaitMs) {
       throw new Error(`GitHub API ${reason}: waiting ${Math.ceil(ms / SECOND)} s exceeds the ${Math.ceil(maxWaitMs / SECOND)} s bound`);
     }
+    if (now() + ms > deadline) throw new Error(`GitHub API ${reason}: waiting ${Math.ceil(ms / SECOND)} s would pass ${budget()}`);
     log(`GitHub API ${reason}; waiting ${Math.ceil(ms / SECOND)} s`);
     await sleep(ms);
   };
@@ -98,6 +105,7 @@ export function createGitHubClient({
         await wait(resetAt - now() + SECOND, `rate limit exhausted before ${label}`);
         remaining = undefined;
       }
+      if (now() >= deadline) throw new Error(`GitHub API ${label}: ${budget()} has passed`);
       requestCount += 1;
       let response;
       let data;
@@ -112,6 +120,7 @@ export function createGitHubClient({
             ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
           },
           body: body === undefined ? undefined : JSON.stringify(body),
+          ...(Number.isFinite(deadline) ? { signal: AbortSignal.timeout(Math.max(1, deadline - now())) } : {}),
         });
         // A large body can be cut off mid-stream ("terminated"): reading it is
         // part of the attempt.

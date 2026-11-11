@@ -126,6 +126,25 @@ test('rate limits are waited out: Retry-After, an exhausted primary limit, and a
   await assert.rejects(bounded.github.request('GET', 'x'), /exceeds the 60 s bound/);
 });
 
+test('a deadline stops a wait that would pass it and any request after it, and aborts each request at it', async () => {
+  let clock = 1_000_000;
+  const signals = [];
+  const { fetch } = scriptedFetch([{ status: 502 }, { status: 502 }, { body: 1 }]);
+  const recording = (url, init) => { signals.push(init.signal); return fetch(url, init); };
+  const github = createGitHubClient({ token: 't', fetch: recording, deadlineMs: 5_000, backoffMs: 2_000, now: () => clock, sleep: async (ms) => { clock += ms; } });
+  // 502, a 2 s wait; 502, and a 4 s wait would end past the 5 s deadline.
+  await assert.rejects(github.request('GET', 'x'), /waiting 4 s would pass the client's 5 s deadline/);
+  assert.equal(signals.length, 2);
+  assert.ok(signals.every((signal) => signal instanceof AbortSignal));
+  clock += 10_000;
+  await assert.rejects(github.request('GET', 'y'), /GET \/y: the client's 5 s deadline has passed/);
+  assert.equal(signals.length, 2, 'no request starts after the deadline');
+  // Without a deadline a request carries no signal.
+  const plain = createGitHubClient({ token: 't', fetch: recording });
+  assert.equal(await plain.request('GET', 'z'), 1);
+  assert.equal(signals[2], undefined);
+});
+
 test('pagination reads every page of arrays and of object pages, stopping at the total', async () => {
   const page = (count, offset = 0) => Array.from({ length: count }, (_, index) => offset + index);
   const arrays = client([{ body: page(2) }, { body: page(2, 2) }, { body: page(1, 4) }]);

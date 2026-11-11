@@ -1877,10 +1877,14 @@ jobs:
       && github.ref == 'refs/heads/testnet-canary'
       && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    # A timeout cancels the job, and a cancelled job turns the whole run
+    # `cancelled`, a green nightly included. The script gives up after three
+    # minutes (ALERT_LIMITS in scripts/ci/canary-alert.mjs), a failure that
+    # continue-on-error keeps out of the run, well inside this timeout.
+    timeout-minutes: 10
     continue-on-error: true
-    # No job concurrency group: it would cancel a pending alert job, and a
-    # cancelled job turns the whole run `cancelled`, a green nightly included.
+    # No job concurrency group: it would cancel a pending alert job, with the
+    # same effect.
     permissions:
       contents: read # check out the alert script at this run's commit
       actions: read # read this run and its jobs' failed steps

@@ -14,18 +14,28 @@ import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { ALERT_LABEL, alertIssue, compareRuns, isRed, planAlert, PROFILES, readRecovery } from '../lib/canary-alert.mjs';
-import { CANARY_ALERT_JOB, CANARY_BRANCH, CI_GATE_JOB, runKind } from '../lib/ci-health.mjs';
+import { CANARY_ALERT_JOB, CANARY_BRANCH, CI_GATE_JOB, runProfile } from '../lib/ci-health.mjs';
 import { createGitHubClient, ensureLabel, findOpenIssue, listRunJobs } from '../lib/github-rest.mjs';
+
+// The alert's time budget. A job that reaches its timeout is cancelled, and a
+// cancelled job turns the whole run cancelled, a green nightly included, so
+// the alert gives up long before ci.yml's timeout for its job: it waits at
+// most a minute for a rate limit and stops everything after three minutes.
+// It then fails, and the job's continue-on-error keeps that out of the run.
+export const ALERT_LIMITS = Object.freeze({ maxWaitMs: 60 * 1000, deadlineMs: 3 * 60 * 1000 });
+
+// The GitHub client the alert uses, within ALERT_LIMITS.
+export function alertClient(env, options = {}) {
+  return createGitHubClient({ token: env.GITHUB_TOKEN ?? env.GH_TOKEN, ...ALERT_LIMITS, ...options });
+}
 
 // The profile the run executed, whose issue it writes. The live job passes the
 // one ci.yml resolved (CI_PROFILE), and --profile overrides it. Only a dry run
-// of a past run without either guesses from the run (runKind in ci-health.mjs:
-// the dispatch nightly-ci.yml makes is the nightly, anything else standard),
-// a guess blind to a manual nightly-equivalent dispatch, so the live job never
-// relies on it.
-export function runProfile({ option, env, live, run }) {
-  const guess = live ? undefined : runKind(run) === 'nightly' ? 'nightly-equivalent' : 'standard';
-  const profile = option ?? (env.CI_PROFILE || undefined) ?? guess;
+// of a past run without either reads it from the run, as the weekly report
+// does (runProfile in ci-health.mjs), so the live job never relies on that.
+export function alertProfile({ option, env, live, run }) {
+  const recorded = live ? undefined : runProfile(run);
+  const profile = option ?? (env.CI_PROFILE || undefined) ?? recorded;
   if (!PROFILES.includes(profile)) throw new Error(`needs --profile or CI_PROFILE set to ${PROFILES.join(' or ')}, not ${profile ?? 'nothing'}`);
   return profile;
 }
@@ -121,7 +131,7 @@ export async function runCanaryAlert({ argv = process.argv.slice(2), env = proce
     throw new Error('needs GITHUB_REPOSITORY and GITHUB_RUN_ID, or --repo and --run-id');
   }
   const live = !options['dry-run'];
-  const github = client ?? createGitHubClient({ token: env.GITHUB_TOKEN ?? env.GH_TOKEN, log });
+  const github = client ?? alertClient(env, { log });
   const run = await github.request('GET', `repos/${repo}/actions/runs/${runId}`);
   if (run.head_branch !== CANARY_BRANCH || !['push', 'workflow_dispatch'].includes(run.event)) {
     log(`Run ${runId} is a ${run.event} run on ${run.head_branch}: the alert follows ${CANARY_BRANCH} pushes and dispatches only.`);
@@ -140,7 +150,7 @@ export async function runCanaryAlert({ argv = process.argv.slice(2), env = proce
       return { action: 'none', reason: 'the run was cancelled' };
     }
   }
-  const profile = runProfile({ option: options.profile, env, live, run });
+  const profile = alertProfile({ option: options.profile, env, live, run });
   const jobs = (await listRunJobs(github, { repo, runId, attempt, log })).filter((job) => job.name !== CANARY_ALERT_JOB);
   const gate = jobs.find((job) => job.name === CI_GATE_JOB);
   // A dry run reads the gate from the past run, never from this shell.
