@@ -788,6 +788,19 @@ describe('ApiClient', () => {
       expect(body.includeSharedMemoryMeta).toBe(true);
     });
 
+    it('query() sends the view and semantics, and returns the semantics the daemon states', async () => {
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200,
+        body: { result: { type: 'bindings', bindings: [] }, semantics: 'merged' } });
+      globalThis.fetch = fetch;
+      const response = await client.query('SELECT ?s WHERE { ?s ?p ?o }', 'my-contextGraph', {
+        view: 'verifiable-memory', semantics: 'merged',
+      });
+
+      const body = JSON.parse(calls[0].opts.body as string);
+      expect(body).toMatchObject({ contextGraphId: 'my-contextGraph', view: 'verifiable-memory', semantics: 'merged' });
+      expect(response.semantics).toBe('merged');
+    });
+
     // LU-2 (SPEC_CG_MEMORY_MODEL): the legacy participantIdentityIds /
     // requiredSignatures body surface is removed. The HTTP-client now
     // forwards only `private` (plus accessPolicy / allowedAgents / etc.).

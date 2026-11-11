@@ -279,6 +279,13 @@ DKG_QUERY_SCHEMA = {
                     "When supplied, context_graph_id is required."
                 ),
             },
+            "semantics": {
+                "type": "string",
+                "description": (
+                    "Optional with view: merged matches patterns outside GRAPH across the view's "
+                    "assets, as one graph; per-asset (the default) matches inside one asset at a time."
+                ),
+            },
             "agent_address": {
                 "type": "string",
                 "description": "Optional Working Memory owner address. Defaults to this node when view is working-memory.",
@@ -1497,6 +1504,9 @@ class DKGMemoryProvider(MemoryProvider):
         view = _first_text(args, "view")
         if view and view not in ("working-memory", "shared-working-memory", "verifiable-memory"):
             return tool_error('"view" must be one of: working-memory, shared-working-memory, verifiable-memory.')
+        semantics = _first_text(args, "semantics") or None
+        if semantics not in (None, "merged", "per-asset"):
+            return tool_error('"semantics" must be merged or per-asset.')
         if view and not _first_text(args, "context_graph_id"):
             return tool_error(f'"view: {view}" requires "context_graph_id".')
         if view and _first_text(args, "sub_graph_name"):
@@ -1522,6 +1532,7 @@ class DKGMemoryProvider(MemoryProvider):
             verified_graph=_first_text(args, "verified_graph"),
             graph_suffix=_first_text(args, "graph_suffix"),
             min_trust=args.get("min_trust") if "min_trust" in args else None,
+            semantics=semantics,
         )
         return json.dumps(result)
 

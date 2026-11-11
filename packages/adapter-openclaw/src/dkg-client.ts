@@ -12,6 +12,7 @@ import {
   serializeRawAgentListArgs,
   type AgentListOptions,
 } from './agent-list.js';
+import type { DkgQueryOptions } from './query-options.js';
 
 export type { AgentListOptions } from './agent-list.js';
 
@@ -515,31 +516,9 @@ export class DkgDaemonClient {
    * the `/api/query` route accepts -- `view` (`'working-memory' | 'shared-working-memory' | 'verifiable-memory'`),
    * `agentAddress` (required for WM reads), `assertionName` (scopes WM reads
    * to a single per-agent assertion), `subGraphName`, `verifiedGraph`,
-   * `graphSuffix`, `includeSharedMemory`.
+   * `graphSuffix`, `includeSharedMemory`, `semantics`.
    */
-  async query(
-    sparql: string,
-    opts?: {
-      contextGraphId?: string;
-      graphSuffix?: string;
-      includeSharedMemory?: boolean;
-      view?: 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
-      agentAddress?: string;
-      assertionName?: string;
-      subGraphName?: string;
-      verifiedGraph?: string;
-      /**
-       * P-13: minimum trust level. Only meaningful for
-       * `view: "verifiable-memory"`; ignored (silently) on WM/SWM views.
-       *
-       * The daemon implements only `SelfAttested` / `Endorsed` today --
-       * higher tiers (Q-1 follow-up) are rejected with HTTP 400, so the
-       * public client surface only advertises the implementable values.
-       * See `packages/query/src/query-engine.ts QueryOptions.minTrust`.
-       */
-      minTrust?: 'SelfAttested' | 'Endorsed' | 0 | 1;
-    },
-  ): Promise<any> {
+  async query(sparql: string, opts?: DkgQueryOptions): Promise<any> {
     const contextGraphId = optionalContextGraphId(opts?.contextGraphId);
     return this.post('/api/query', {
       sparql,
@@ -547,6 +526,7 @@ export class DkgDaemonClient {
       graphSuffix: opts?.graphSuffix,
       includeSharedMemory: opts?.includeSharedMemory,
       view: opts?.view,
+      semantics: opts?.semantics,
       agentAddress: opts?.agentAddress,
       assertionName: opts?.assertionName,
       subGraphName: opts?.subGraphName,

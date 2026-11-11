@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { ViewQuerySemantics } from '@origintrail-official/dkg-core';
 
 /** Public arguments accepted by the MCP daemon query client. */
 export interface QueryArgs {
@@ -10,6 +11,8 @@ export interface QueryArgs {
   includeContextGraphPartitions?: boolean;
   includeSharedMemoryMeta?: boolean;
   view?: 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
+  /** How a view query matches its patterns: `merged` across the view's assets, or `per-asset`. */
+  semantics?: ViewQuerySemantics;
   verifiedGraph?: string;
   assertionName?: string;
   /**
