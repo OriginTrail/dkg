@@ -51,6 +51,8 @@ import {
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { parseBlazegraphConstructNQuads } from './blazegraph-construct-nquads.js';
 import { readCompleteGraphCatalog } from '../graph-catalog-internal-limit.js';
+import { refuseReadGraphOperations, withReadGraphOperations, withReadGraphOperationsAroundCallerUpdate } from './read-graph-request.js';
+import type { ReadGraphAdapterCapabilities, ReadGraphCapableAdapter } from '../read-graph/adapter-contract.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
 import { isReadOnlyStoreOperation, type StoreOperation, type StoreOperationOutcome } from '../store-operation-outcome.js';
 import {
@@ -65,6 +67,15 @@ const statements = sparqlStatements('blazegraph');
 const NQUADS_CONTENT_TYPE = 'text/x-nquads';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
+
+/** Every planned write sends its read-graph operations in one request; the engine runs one update at a time. */
+const READ_GRAPH_CAPABILITIES: ReadGraphAdapterCapabilities = Object.freeze({
+  methods: Object.freeze([
+    'delete', 'deleteByPattern', 'deleteByPatternWithoutCount', 'deleteBySubjectPrefix', 'dropGraph', 'replaceAssetGroup',
+    'replaceGraph', 'replaceGraphAndSubject', 'replaceSubject', 'replaceSubjectAndInsert', 'rfc64AuthorCommitCasV1', 'update',
+  ] as const),
+  serialUpdates: true,
+});
 
 /**
  * Blazegraph's per-request server-side query deadline. The deployed 2.1.x
@@ -227,7 +238,7 @@ function createStoreOperationDeadline(
  * All operations are translated to standard SPARQL 1.1 Query / Update
  * plus Blazegraph's N-Quads bulk-insert endpoint.
  */
-export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapability {
+export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapability, ReadGraphCapableAdapter {
   private readonly queryAdmission = new QueryReadAdmission<AdmittedReadDeadline>();
 
   withQueryReadAdmission<T>(work: () => Promise<T>, options?: QueryOptions): Promise<T> {
@@ -238,6 +249,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
   readonly graphEnumerationVisibility = storeGraphEnumerationVisibility;
   readonly defaultGraphIsGraphUnion = true as const;
   readonly queryCancellation = 'interruptible' as const;
+  readonly readGraphCapabilities = READ_GRAPH_CAPABILITIES;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   readonly rfc64SemanticReadCertifiedV1 = true as const;
   readonly rfc64SharedProjectionStreamCertifiedV1 = true as const;
@@ -358,6 +370,9 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
   // -------------------------------------------------------------------
 
   async insert(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
+    // An N-Quads body cannot carry SPARQL operations. The read-graph layer adds
+    // its quads to the same call, or sends a write that needs operations as one update.
+    refuseReadGraphOperations(options, 'BlazegraphStore.insert');
     if (quads.length === 0) return;
     // The N-Quads body bypasses the SPARQL builders. Blazegraph rejects a
     // relative IRI here but stores an RFC 3987-invalid one verbatim.
@@ -438,7 +453,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
    */
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
     await this.sparqlUpdate(
-      sparql,
+      withReadGraphOperationsAroundCallerUpdate(sparql, options),
       { ...options, source: options?.source ?? 'blazegraph.update' },
       'update',
     );
@@ -452,7 +467,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     const plan = prepareAtomicGraphReplace('blazegraph', graphUri, quads);
     try {
       await this.sparqlUpdate(
-        plan.update,
+        withReadGraphOperations(plan.update, options),
         { ...options, source: options?.source ?? 'blazegraph.replaceGraph' },
         'replaceGraph',
       );
@@ -474,12 +489,12 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       // Choose the write strategy after admission. Receipt confirmation ends
       // publication; reclamation drains under the same physical scheduler slot.
       const bulk = buildBulkAssetGroupPlan(assets);
-      if (!bulk) return deadline.waitFor(this.postWriteRequest(buildAtomicAssetGroupUpdate(assets).update,
+      if (!bulk) return deadline.waitFor(this.postWriteRequest(withReadGraphOperations(buildAtomicAssetGroupUpdate(assets).update, options),
         SPARQL_UPDATE_CONTENT_TYPE, deadline, 'bulk group'));
       await executeReceiptConfirmedPublication({
         publish: async () => {
           await this.postWriteRequest(bulk.nquads, NQUADS_CONTENT_TYPE, deadline, 'bulk group');
-          await this.postWriteRequest(bulk.update, SPARQL_UPDATE_CONTENT_TYPE, deadline, 'bulk group');
+          await this.postWriteRequest(withReadGraphOperations(bulk.update, options), SPARQL_UPDATE_CONTENT_TYPE, deadline, 'bulk group');
         },
         readReceipt: async () => {
           const response = await this.postReadQuery(bulk.receiptQuery,
@@ -515,7 +530,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     );
     try {
       await this.sparqlUpdate(
-        plan.update,
+        withReadGraphOperations(plan.update, options),
         { ...options, source: options?.source ?? 'blazegraph.replaceGraphAndSubject' },
         'replaceGraphAndSubject',
       );
@@ -540,7 +555,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     // failed request commits nothing.
     const update = prepareAtomicSubjectReplace('blazegraph', graphUri, subject, quads);
     await this.sparqlUpdate(
-      update,
+      withReadGraphOperations(update, options),
       { ...options, source: options?.source ?? 'blazegraph.replaceSubject' },
       'replaceSubject',
     );
@@ -557,7 +572,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       'blazegraph', graphUri, subject, replacementQuads, insertQuads,
     );
     await this.sparqlUpdate(
-      update,
+      withReadGraphOperations(update, options),
       { ...options, source: options?.source ?? 'blazegraph.replaceSubjectAndInsert' },
       'replaceSubjectAndInsert',
     );
@@ -576,7 +591,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     statements.checkIris.rfc64AuthorCommitCasV1(plan);
     return executeRfc64AuthorCommitCasV1({
       executeUpdate: () => this.sparqlUpdate(
-        plan.update,
+        withReadGraphOperations(plan.update, options),
         { ...options, source: options?.source ?? 'blazegraph.rfc64AuthorCommitCasV1' },
         'rfc64AuthorCommitCasV1',
       ),
@@ -781,7 +796,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
   private async runUpdatePlan(plan: SparqlUpdatePlan | null, options?: QueryOptions): Promise<void> {
     if (plan === null) return;
     await this.sparqlUpdate(
-      plan.update,
+      withReadGraphOperations(plan.update, options),
       { ...options, source: options?.source ?? `blazegraph.${plan.operation}` },
       plan.operation,
     );
