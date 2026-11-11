@@ -467,4 +467,18 @@ export {
   type ReadGraphFence,
   type ReadGraphTarget,
 } from './read-graph/statements.js';
+export {
+  InMemoryReadGraphStateMirror,
+  ReadGraphLocks,
+  ReadGraphRegistryCache,
+  readGraphBackendIdentity,
+  readGraphBackendRuntime,
+  type ReadGraphBackendRuntime,
+} from './read-graph/runtime.js';
+export {
+  ReadGraphStore,
+  readGraphLayerOf,
+  wrapReadGraphLayer,
+  type ReadGraphStoreConfig,
+} from './read-graph/read-graph-store.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';

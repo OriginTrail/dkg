@@ -14,6 +14,7 @@ import {
   type ChangelogStoreOptions,
 } from './changelog-store.js';
 import type { TripleStore } from './triple-store.js';
+import type { ReadGraphStoreConfig } from './read-graph/read-graph-store.js';
 
 export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;
 
@@ -39,6 +40,12 @@ export interface TripleStoreConfig {
    * see the {@link ChangelogStore} single-writer caveat.
    */
   changelog?: boolean | ChangelogStoreOptions;
+  /**
+   * Settings of the read-graph layer. Every store gets the layer, directly
+   * above the adapter; it maintains the read graphs that exist on the backend
+   * and sends exactly today's requests while there are none.
+   */
+  readGraphs?: ReadGraphStoreConfig;
 }
 
 export function wrapChangelog(store: TripleStore, config: TripleStoreConfig): TripleStore {

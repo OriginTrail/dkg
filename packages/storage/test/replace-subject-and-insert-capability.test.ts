@@ -80,7 +80,7 @@ describe('replaceSubjectAndInsert capability and decorators', () => {
       while ('innerStore' in chain.at(-1)!) chain.push((chain.at(-1)! as TripleStoreDecorator).innerStore);
       expect(chain.map(item => item.constructor.name)).toEqual([
         'ChangelogStore', 'GraphSetIndexStore', 'SharedMemoryLiteralBlobStore', 'ReadGraphPartitionStore',
-        'OxigraphWorkerStore',
+        'ReadGraphStore', 'OxigraphWorkerStore',
       ]);
       const backend = chain.at(-1)!;
       const mutate = vi.spyOn(backend, 'replaceSubjectAndInsert');

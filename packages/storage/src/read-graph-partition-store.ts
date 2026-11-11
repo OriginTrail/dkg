@@ -4,6 +4,7 @@ import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './adapters/graph-enumer
 import { composeGraphEnumerationVisibility, isReadGraphPartitionGraph } from './graph-enumeration-visibility.js';
 import { sparqlUpdateReach } from './read-graph-partition-reference.js';
 import { describeRfc64AuthorCommitCasV1 } from './rfc64-author-commit-mutation.js';
+import { readGraphLayerOf } from './read-graph/read-graph-store.js';
 import {
   STORE_OPERATION_OUTCOME_TAG,
   type StoreOperation,
@@ -217,14 +218,15 @@ export function guardReadGraphPartition(store: TripleStore): TripleStore {
 }
 
 /**
- * The store below the partition guard, for storage-owned work on read-graph
- * partitions only: the start-up rule, the rollback drop and the read-graph
- * layer. A store without the guard is returned as it is.
+ * The store below the partition guard and the read-graph layer, for
+ * storage-owned work on read-graph partitions only: the start-up rule, the
+ * rollback drop, rebuilds and checks. A store without them is returned as it is.
  */
 export function readGraphPartitionMaintenanceStore(store: TripleStore): TripleStore {
   const guard = findTripleStoreCapability(store,
     (candidate): candidate is ReadGraphPartitionStore => candidate instanceof ReadGraphPartitionStore);
-  return guard?.innerStore ?? store;
+  const belowGuard = guard?.innerStore ?? store;
+  return readGraphLayerOf(belowGuard)?.innerStore ?? belowGuard;
 }
 
 const MAY_HOLD_PARTITIONS = new WeakSet<TripleStore>();

@@ -29,6 +29,7 @@ import type {
 } from './rfc64-exact-bindings-read-capability.js';
 import { getManagedOxigraphRuntimeConstructionAuthorityV1 } from './managed-oxigraph-runtime-store.js';
 import { guardReadGraphPartition } from './read-graph-partition-store.js';
+import { wrapReadGraphLayer } from './read-graph/read-graph-store.js';
 
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 
@@ -677,7 +678,9 @@ export async function createTripleStore(
     );
   }
   const constructionAuthority = getManagedOxigraphRuntimeConstructionAuthorityV1(config);
-  const store = guardReadGraphPartition(await factory(resolveAdapterOptions(config), constructionAuthority));
+  // The read-graph layer sits directly above the adapter and under the partition guard.
+  const adapter = await factory(resolveAdapterOptions(config), constructionAuthority);
+  const store = guardReadGraphPartition(wrapReadGraphLayer(adapter, config));
   const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
   const withLargeLiteralStorage = largeLiteralStorage
     ? new SharedMemoryLiteralBlobStore(store, largeLiteralStorage)
