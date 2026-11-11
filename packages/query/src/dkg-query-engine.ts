@@ -314,6 +314,12 @@ type ScopedQueryReadPlan = Extract<QueryReadPlan, { kind: 'scoped' }>;
 const SAMPLED_MERGED_PLAN = Symbol('sampled merged plan');
 type SampleReadOptions = QueryOptions & { readonly [SAMPLED_MERGED_PLAN]?: MergedViewDatasetPlan };
 
+/** Whether two lists name the same graphs, whatever their order and repeats. */
+function sameGraphs(left: readonly string[], right: readonly string[]): boolean {
+  const [a, b] = [new Set(left), new Set(right)];
+  return a.size === b.size && [...b].every(graph => a.has(graph));
+}
+
 /**
  * Local-only query engine that executes SPARQL against this node's own
  * triple store. No remote query capability — by design (Spec §1.6 Store
@@ -497,12 +503,12 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     let plan = sampled ?? planViewDataset(view, contextGraphId, options, this.readGraphs);
     for (let attempt = 1; plan.kind === 'merged'; attempt += 1) {
       const result = await this.queryMergedView(scope, plan, options, reads, catalogReads);
-      if (this.readGraphs && isViewDatasetPlanCurrent(plan, this.readGraphs)) {
+      if (result && this.readGraphs && isViewDatasetPlanCurrent(plan, this.readGraphs)) {
         this.offerViewSemanticsSample(scope, options);
         return { ...result, semantics: 'merged' };
       }
-      // The read graph changed while the query ran: its answer is dropped and the query planned
-      // once more. A sample's answer is only dropped.
+      // The read graph, or the member graphs its GRAPH portions read, changed while the query ran:
+      // its answer is dropped and the query planned once more. A sample's answer is only dropped.
       if (sampled || attempt === 2) throw new ViewNotReadyError();
       plan = planViewDataset(view, contextGraphId, options, this.readGraphs);
     }
@@ -540,7 +546,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   /**
    * A merged view query: the read graph is its default graph. GRAPH portions read the graphs
    * the per-asset route would, as named graphs, with explicit graph IRIs checked and graph
-   * variables constrained as there; patterns outside GRAPH may stand beside them.
+   * variables constrained as there; patterns outside GRAPH may stand beside them. `undefined`
+   * when its member graphs changed while it ran.
    */
   private async queryMergedView(
     scope: PreparedGraphScope,
@@ -548,7 +555,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     options: QueryOptions & { contextGraphId: string; view: GetView },
     reads: StoreReadLane,
     catalogReads: StoreReadLane,
-  ): Promise<QueryResult> {
+  ): Promise<QueryResult | undefined> {
     if (!scope.hasGraphClause) return this.execAndNormalize(withMergedViewDataset(scope, plan.readGraph, []), reads);
     // As on the per-asset route, a store other than Oxigraph cannot combine DESCRIBE with a GRAPH clause.
     if (scope.operation === 'DESCRIBE' && this.sparqlEngine !== 'oxigraph') {
@@ -561,7 +568,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // As on the per-asset route, some GRAPH portions keep their graph only with constant targets.
     const bound = needsCallerGraphBinding(constrained, this.sparqlEngine)
       ? transitionGraphScope(constrained, bindCallerGraphsBeforeRead(constrained, graphs).source) : constrained;
-    return this.execAndNormalize(withMergedViewDataset(bound, plan.readGraph, graphs), reads);
+    const result = await this.execAndNormalize(withMergedViewDataset(bound, plan.readGraph, graphs), reads);
+    // A new member graph reaches the read graph as it is written, and the named graphs only when
+    // they are listed again: the answer stands while the member graphs are those it read.
+    const after = await this.resolveViewGraphSet(options.view, options.contextGraphId, options, reads, catalogReads);
+    return sameGraphs(graphs, after) ? result : undefined;
   }
 
   /** The graphs a view reads per asset: its families, sub-graph fan-out and per-cgId graphs, without child context graphs. */

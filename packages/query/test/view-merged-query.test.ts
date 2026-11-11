@@ -173,7 +173,8 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     const sent = vi.spyOn(store, 'query');
     const mixed = await engine.query(MIXED, MERGED);
     expect(mixed.bindings).toEqual([{ g: G2, x: '"5"' }]);
-    const sparql = sent.mock.calls.at(-1)![0];
+    // The merged read is the one that carries the read graph as its default graph.
+    const sparql = sent.mock.calls.map(([query]) => query).find(query => query.includes(`FROM <${READ}>`))!;
     expect(sparql).toContain(`FROM <${READ}>`);
     expect(sparql).toContain(`FROM NAMED <${G1}>`);
     expect(sparql).toContain(`FROM NAMED <${G2}>`);
@@ -216,7 +217,7 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     // A repeated compound path gets constant graph targets, as on the per-asset route.
     const sent = vi.spyOn(store, 'query');
     expect(sortedRows((await viaFacade.query(REPEATED, MERGED)).bindings)).toEqual(sortedRows(REPEATED_ROWS));
-    expect(sent.mock.calls.at(-1)![0]).toContain(`GRAPH <${G1}> { VALUES ?g { <${G1}> }`);
+    expect(sent.mock.calls.some(([query]) => query.includes(`GRAPH <${G1}> { VALUES ?g { <${G1}> }`))).toBe(true);
   });
 
   it('reads working memory from the read graph of the agent that owns the address', async () => {
@@ -269,6 +270,36 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
       sent.mockRestore();
       await store.delete([newPrice]);
       await store.insert([oldPrice]);
+    }
+  });
+
+  it('drops an answer whose member graphs changed after they were listed, and plans once more', async () => {
+    fresh();
+    const G3 = `${ROOT}/_verifiable_memory/0xaa/3`;
+    const added = [quad('urn:p3', RDF_TYPE, 'urn:Product', G3), quad('urn:p3', 'urn:price', '"7"', G3)];
+    const maintained = added.map(row => ({ ...row, graph: READ }));
+    let written = false;
+    // A writer adds a member graph, and the read graph takes it in, right after the first listing.
+    type Listing = (...args: unknown[]) => Promise<unknown>;
+    const lister = store as unknown as Record<'readGraphInventory' | 'listGraphsByPrefix' | 'listGraphs', Listing | undefined>;
+    // Discovery lists graphs through the first of these that the store has.
+    const method = (['readGraphInventory', 'listGraphsByPrefix', 'listGraphs'] as const).find(name => lister[name])!;
+    const list = lister[method]!.bind(store);
+    vi.spyOn(lister as Record<typeof method, Listing>, method).mockImplementation(async (...args) => {
+      const listed = await list(...args);
+      if (!written) {
+        written = true;
+        await store.insert([...added, ...maintained]);
+      }
+      return listed;
+    });
+    try {
+      const result = await engine.query(MIXED, MERGED);
+      expect(sortedRows(result.bindings)).toEqual(sortedRows([{ g: G2, x: '"5"' }, { g: G3, x: '"7"' }]));
+      expect(result.semantics).toBe('merged');
+      expect(written).toBe(true);
+    } finally {
+      await store.delete([...added, ...maintained]);
     }
   });
 
