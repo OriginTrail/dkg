@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -1087,6 +1087,35 @@ describe('installing the working-memory identity rule', () => {
     expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(second);
     expect(await buildReadGraph(context, working)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
     expect((await storedRows(adapter))[readGraphIri(working)]).toMatch(/^ready@/);
+  });
+
+  it('holds working-memory read graphs while the record of the identity before cannot be reached, as while it cannot be removed', async () => {
+    const { fixture, context, dataDir } = await open();
+    const working = fixture.keys.find((key) => key.layer === MemoryLayer.WorkingMemory)!;
+    const first = { defaultAgentAddress: AGENT, peerId: 'peer-1' };
+    const second = { defaultAgentAddress: `0x${'cd'.repeat(20)}`, peerId: 'peer-1' };
+    expect(await installWorkingMemoryIdentity(context, first)).toEqual({ marked: [], recorded: true });
+    const record = join(dataDir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE);
+    const mode = statSync(dataDir).mode;
+    try {
+      // The data directory loses its search permission: the record is there, and can be neither seen nor removed.
+      chmodSync(dataDir, 0o600);
+      try {
+        statSync(record);
+        return; // Permissions do not apply to this process.
+      } catch {
+        // Good: the record cannot be reached.
+      }
+      expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: false });
+      await expect(buildReadGraph(context, working)).rejects.toThrow(/cannot be removed/);
+    } finally {
+      chmodSync(dataDir, mode);
+    }
+    // Once it can be reached, the next installation removes it, records, and releases the hold.
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(first);
+    expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: true });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(second);
+    expect(await buildReadGraph(context, working)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
   });
 
   it('publishes no working-memory read graph that a change of identity held while its build ran', async () => {
