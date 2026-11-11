@@ -16,9 +16,15 @@
  *   and add the facts among their new quads;
  * - an `update` declares only the graphs it writes, so when it writes a
  *   `_meta` graph the facts are read again after it.
- * A pattern delete is matched on its subject and predicate only, so it can only
- * over-count the facts it removes: a change it reports is checked against the
- * resulting registry, never assumed.
+ * Two gaps are closed around the write:
+ * - The facts hold the names of typed sub-graphs only. Before a write that
+ *   types a subject as a sub-graph, that subject's stored names are read
+ *   ({@link readNamesOfNewSubGraphs}).
+ * - Whether a delete removes a fact with a literal object depends on how the
+ *   store compares literals (language tags, datatypes). Such a removal is
+ *   predicted by lexical form, which can only over-count the facts removed.
+ *   The read graphs are marked from that prediction before the write, and the
+ *   facts are read again after it ({@link isExactRegistryWrite}).
  */
 
 import { contextGraphDataUri, contextGraphMetaUri, escapeSparqlLiteral, assertSafeIri } from '@origintrail-official/dkg-core';
@@ -38,8 +44,8 @@ export interface ReadGraphRegistryFact {
 export type ReadGraphRegistryWrite =
   /** Quads named one by one: those it adds and those it removes. */
   | { readonly kind: 'quads'; readonly added: readonly Quad[]; readonly removed: readonly Quad[] }
-  /** Every triple of one graph matching a subject and a predicate (unset matches anything). */
-  | { readonly kind: 'match'; readonly graph: string; readonly subject?: string; readonly predicate?: string }
+  /** Every triple of one graph matching a subject, a predicate and an object (unset matches anything). */
+  | { readonly kind: 'match'; readonly graph: string; readonly subject?: string; readonly predicate?: string; readonly object?: string }
   /** Every triple of one graph whose subject starts with a prefix. */
   | { readonly kind: 'prefix'; readonly graph: string; readonly prefix: string }
   /** A whole graph replaced by `quads` (none for a drop). */
@@ -145,11 +151,7 @@ export function registryFactsAfter(
   write: ReadGraphRegistryWrite,
 ): ReadGraphRegistryFact[] | undefined {
   if (isOpaqueRegistryWrite(write)) return undefined;
-  const meta = contextGraphMetaUri(contextGraphId);
-  const childPrefix = `${contextGraphDataUri(contextGraphId)}/`;
-  // Only facts this context graph's registry is read from: its own `_meta`, and its children's.
-  const registryFactsOf = (quads: readonly Quad[]) => registryFactsAmong(quads).filter((fact) => fact.graph === meta
-    || (isChildFact(fact) && fact.graph === `${fact.subject}${META_SUFFIX}` && fact.subject.startsWith(childPrefix)));
+  const registryFactsOf = (quads: readonly Quad[]) => ownerFactsAmong(contextGraphId, quads);
   let next = [...facts];
   const apply = (part: ReadGraphRegistryWrite): void => {
     switch (part.kind) {
@@ -159,7 +161,8 @@ export function registryFactsAfter(
         return;
       case 'match':
         next = next.filter((fact) => !(fact.graph === part.graph && (part.subject === undefined || fact.subject === part.subject)
-          && (part.predicate === undefined || fact.predicate === part.predicate)));
+          && (part.predicate === undefined || fact.predicate === part.predicate)
+          && (part.object === undefined || lexical(fact.object) === lexical(part.object))));
         return;
       case 'prefix':
         next = next.filter((fact) => !(fact.graph === part.graph && fact.subject.startsWith(part.prefix)));
@@ -184,6 +187,57 @@ export function registryFactsAfter(
   return next;
 }
 
+/**
+ * Whether {@link registryFactsAfter} gives exactly the facts a write leaves.
+ * It does not when the write removes a fact with a literal object by an exact
+ * delete, or deletes by a pattern that names an object: which facts go then
+ * depends on how the store compares literals, and the lexical prediction can
+ * only over-count them.
+ */
+export function isExactRegistryWrite(contextGraphId: string, write: ReadGraphRegistryWrite): boolean {
+  switch (write.kind) {
+    case 'quads': return !ownerFactsAmong(contextGraphId, write.removed).some((fact) => fact.object.startsWith('"'));
+    case 'match': return write.object === undefined;
+    case 'all': return write.parts.every((part) => isExactRegistryWrite(contextGraphId, part));
+    default: return true;
+  }
+}
+
+/**
+ * Before a write, the stored names of the subjects it types as sub-graphs in a
+ * context graph's `_meta` graph that the cached facts do not type: the facts
+ * hold the names of typed subjects only. `undefined` when one of them is no
+ * IRI the query can name, so only reading the facts again after the write
+ * tells.
+ */
+export async function readNamesOfNewSubGraphs(
+  store: TripleStore,
+  contextGraphId: string,
+  facts: readonly ReadGraphRegistryFact[],
+  write: ReadGraphRegistryWrite,
+  options: QueryOptions = {},
+): Promise<ReadGraphRegistryFact[] | undefined> {
+  const meta = contextGraphMetaUri(contextGraphId);
+  const typed = new Set(facts.filter((fact) => fact.graph === meta && isSubGraphType(fact)).map((fact) => fact.subject));
+  const subjects = [...new Set(addedQuadsOf(write).filter((quad) => quad.graph === meta && isSubGraphType(quad) && !typed.has(quad.subject))
+    .map((quad) => quad.subject))];
+  if (subjects.length === 0) return [];
+  let values: string;
+  try {
+    values = subjects.map((subject) => `<${assertSafeIri(subject)}>`).join(' ');
+  } catch {
+    return undefined;
+  }
+  const result = await store.query(`SELECT ?s ?o WHERE { VALUES ?s { ${values} } GRAPH <${assertSafeIri(meta)}> { ?s <${P.name}> ?o } }`, {
+    ...(options.priority ? { priority: options.priority } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
+    source: 'storage.readGraphRegistry',
+  });
+  if (result.type !== 'bindings') throw new Error('The read-graph registry query expected bindings');
+  return result.bindings.flatMap((row) => row.s && row.o !== undefined
+    ? [{ graph: meta, subject: row.s, predicate: P.name, object: row.o }] : []);
+}
+
 /** Whether two registries give the same membership. */
 export function sameRegistry(left: ReadGraphRegistrySnapshot, right: ReadGraphRegistrySnapshot): boolean {
   const same = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((value, i) => value === b[i]);
@@ -202,11 +256,37 @@ function isRegistryPredicate(predicate: string, object: string): boolean {
   return predicate === P.name || predicate === P.authenticatedSubGraphName || predicate === P.registrationStatus;
 }
 
+/** The registry facts among `quads` that a context graph's registry is read from: its own `_meta`, and its children's. */
+function ownerFactsAmong(contextGraphId: string, quads: readonly Quad[]): ReadGraphRegistryFact[] {
+  const meta = contextGraphMetaUri(contextGraphId);
+  const childPrefix = `${contextGraphDataUri(contextGraphId)}/`;
+  return registryFactsAmong(quads).filter((fact) => fact.graph === meta
+    || (isChildFact(fact) && fact.graph === `${fact.subject}${META_SUFFIX}` && fact.subject.startsWith(childPrefix)));
+}
+
+/** The quads a write adds. */
+function addedQuadsOf(write: ReadGraphRegistryWrite): readonly Quad[] {
+  switch (write.kind) {
+    case 'quads': return write.added;
+    case 'graph': case 'subject': return write.quads;
+    case 'all': return write.parts.flatMap(addedQuadsOf);
+    default: return [];
+  }
+}
+
+function isSubGraphType(fact: { readonly predicate: string; readonly object: string }): boolean {
+  return fact.predicate === P.type && fact.object === P.subGraphClass;
+}
+
 function isChildFact(fact: ReadGraphRegistryFact): boolean {
   return (fact.predicate === P.type && fact.object === P.contextGraphClass) || fact.predicate === P.registrationStatus;
 }
 
-/** A cached fact and a quad name the same triple, comparing a literal by its lexical form. */
+/**
+ * A cached fact and a quad name the same triple, comparing a literal by its
+ * lexical form: it can only over-count, and such a write is read again after
+ * it ({@link isExactRegistryWrite}).
+ */
 function sameFact(fact: ReadGraphRegistryFact, quad: Quad): boolean {
   return fact.graph === quad.graph && fact.subject === quad.subject && fact.predicate === quad.predicate
     && lexical(fact.object) === lexical(quad.object);

@@ -173,10 +173,78 @@ describe('registry recognition in the read-graph layer', () => {
   });
 
   it('follows an authenticated sub-graph name in a metadata subject replace, in and out', async () => {
-    const { store, meta, states } = await layered();
+    const { store, meta, states, layer, fixture } = await layered();
     await store.replaceSubject!(meta, 'urn:asset:x', [fact(meta, 'urn:asset:x', R.authenticatedSubGraphName, '"notes"')]);
     expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
+    // Rebuilt under the new registry, they are ready again before the name goes.
+    for (const readGraph of Object.values(fixture.readGraphs)) layer.runtime.mirror.set({ ...layer.runtime.mirror.get(readGraph)!, state: 'ready' });
     await store.replaceSubject!(meta, 'urn:asset:x', []);
+    expect(states()).toEqual({ wholeVm: 'dirty@3', wholeSwm: 'dirty@3', codeVm: 'ready@1', agentWm: 'dirty@3' });
+  });
+
+  it('reads the registry again after a delete whose effect depends on how the store compares literals', async () => {
+    const { adapter, store, meta, fixture, layer } = await layered();
+    const docs = `${fixture.root}/docs`;
+    const cached = () => layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames;
+    await store.insert([fact(meta, docs, R.type, R.subGraphClass), fact(meta, docs, R.name, '"docs"'), fact(meta, docs, R.name, '"manuals"'),
+      fact(meta, 'urn:asset:t', R.authenticatedSubGraphName, '"tagged"@en')]);
+    expect(cached()).toEqual(['code', 'docs', 'manuals', 'tagged']);
+    // A pattern delete by object removes one name of the subject and keeps the other.
+    await store.deleteByPattern({ graph: meta, subject: docs, predicate: R.name, object: '"docs"' });
+    // An exact delete of a plain literal leaves the tagged one in the store.
+    await store.delete([fact(meta, 'urn:asset:t', R.authenticatedSubGraphName, '"tagged"')]);
+    expect(cached()).toEqual(['code', 'manuals', 'tagged']);
+    expect(cached()).toEqual((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames);
+  });
+
+  it('reads the stored names of a subject that a write makes a sub-graph, and marks before the write', async () => {
+    const { adapter, store, meta, fixture, layer, states } = await layered();
+    const later = `${fixture.root}/later`;
+    // The name is stored while the subject is no sub-graph, and the registry read again then leaves it out.
+    await store.insert([fact(meta, later, R.name, '"later"')]);
+    layer.runtime.registries.invalidate(fixture.contextGraphId);
+    expect(states()).toEqual({ wholeVm: 'ready@1', wholeSwm: 'ready@1', codeVm: 'ready@1', agentWm: 'ready@1' });
+    const seen: string[] = [];
+    const insert = adapter.insert.bind(adapter);
+    adapter.insert = async (quads, options) => {
+      seen.push(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)!.state);
+      return insert(quads, options);
+    };
+    await store.insert([fact(meta, later, R.type, R.subGraphClass)]);
+    expect(seen).toEqual(['dirty']);
     expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'later']);
+  });
+
+  it('marks every read graph of the context graph dirty when the registry cannot be read again after a write', async () => {
+    const { adapter, store, meta, states } = await layered();
+    await store.insert([fact(meta, 'urn:asset:1', 'urn:test:p', '"m"')]);
+    const query = adapter.query.bind(adapter);
+    adapter.query = async (sparql, options) => {
+      if (options?.source === 'storage.readGraphRegistry') throw new Error('connection reset');
+      return query(sparql, options);
+    };
+    await expect(store.update!(`INSERT DATA { GRAPH <${meta}> { <urn:asset:1> <urn:test:p> "n" } }`, { writtenGraphs: [meta] }))
+      .rejects.toThrow('connection reset');
+    expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'dirty@2', agentWm: 'dirty@2' });
+  });
+
+  it('waits for the locks of the read graphs whose registry a write may change, though it writes no member graph', async () => {
+    const { adapter, store, meta, fixture, layer } = await layered();
+    await store.insert([fact(meta, 'urn:asset:1', 'urn:test:p', '"m"')]);
+    const sent: string[] = [];
+    const insert = adapter.insert.bind(adapter);
+    adapter.insert = async (quads, options) => {
+      sent.push('insert');
+      return insert(quads, options);
+    };
+    let release!: () => void;
+    const held = layer.runtime.locks.withLocks([fixture.readGraphs.codeVm], () => new Promise<void>((resolve) => { release = resolve; }));
+    const write = store.insert([fact(meta, 'urn:asset:2', 'urn:test:p', '"m"')]);
+    for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    expect(sent).toEqual([]);
+    release();
+    await Promise.all([held, write]);
+    expect(sent).toEqual(['insert']);
   });
 });

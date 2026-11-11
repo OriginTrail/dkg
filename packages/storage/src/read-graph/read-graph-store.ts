@@ -19,9 +19,12 @@
  * child context graph, which changes membership (`./registry-recognition.ts`).
  * The layer works out the registry a write leaves from the write's own
  * arguments and marks the read graphs whose membership changes dirty, under
- * their locks, before the write is sent. An `update` names only the graphs it
- * writes, so for one that writes a `_meta` graph the registry is read again
- * after it, under the same locks.
+ * their locks, before the write is sent; a mark the store does not take
+ * refuses the write. An `update` names only the graphs it writes, so for one
+ * that writes a `_meta` graph the registry is read again after it, under the
+ * same locks, and so it is after a delete whose effect depends on how the
+ * store compares literals. If that reading fails, every read graph of the
+ * context graph is marked dirty.
  *
  * While its backend holds read graphs the layer refuses, before anything is
  * sent, every write it cannot maintain: an `update` that does not declare the
@@ -70,6 +73,8 @@ import {
 } from './adapter-contract.js';
 import { readGraphMembership, readGraphsOfMemberGraph, type ReadGraphRegistrySnapshot, type WorkingMemoryIdentityRule } from './membership.js';
 import {
+  isExactRegistryWrite,
+  readNamesOfNewSubGraphs,
   readReadGraphRegistryFacts,
   registryFactsAfter,
   registryGraphsOfWrite,
@@ -263,7 +268,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
     if (!pattern.graph) return Promise.reject(new ReadGraphWriteRefusedError('deleteByPattern', 'a pattern delete must name its graph'));
     const { subject, predicate, object } = pattern;
     return this.maintain(method, { kind: 'delete-matching', graph: pattern.graph, pattern: { subject, predicate, object } }, options, send,
-      { kind: 'match', graph: pattern.graph, ...(subject ? { subject } : {}), ...(predicate ? { predicate } : {}) });
+      { kind: 'match', graph: pattern.graph, ...(subject ? { subject } : {}), ...(predicate ? { predicate } : {}), ...(object ? { object } : {}) });
   }
 
   private declaredUpdate(options: UpdateOptions | undefined, send: (options: UpdateOptions | undefined) => Promise<void>): Promise<void> {
@@ -387,9 +392,18 @@ export class ReadGraphStore implements TripleStoreDecorator {
   ): Promise<T> {
     const predicted = new Map<string, ReadGraphRegistryFact[]>();
     for (const owner of owners) {
-      const after = registryFactsAfter(owner, this.runtime.registries.facts(owner) ?? [], registry);
+      const cached = this.runtime.registries.facts(owner) ?? [];
+      let names: ReadGraphRegistryFact[] | undefined;
+      try {
+        names = await readNamesOfNewSubGraphs(this.innerStore, owner, cached, registry, options);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new ReadGraphWriteRefusedError(operation, `the registry it changes could not be read: ${reason}`);
+      }
+      const after = registryFactsAfter(owner, [...cached, ...(names ?? [])], registry);
       if (after === undefined) continue;
-      predicted.set(owner, after);
+      // Marked from the prediction either way; one that may over-count, or lacks a name, is read again after the write.
+      if (names !== undefined && isExactRegistryWrite(owner, registry)) predicted.set(owner, after);
       await this.markMembershipChange(owner, registrySnapshotOfFacts(owner, after), operation);
     }
     const settle = async (succeeded: boolean) => {
@@ -407,6 +421,8 @@ export class ReadGraphStore implements TripleStoreDecorator {
           await this.markMembershipChange(owner, snapshot);
           this.runtime.registries.set(snapshot, facts);
         } catch (error) {
+          // What the write did to the registry is unknown: every read graph of the context graph goes dirty.
+          await this.markDirty(this.readGraphsOf(owner));
           this.runtime.registries.invalidate(owner);
           if (succeeded) throw error;
         }
