@@ -6,8 +6,10 @@
  *
  * It reads every row once. The read graphs the process maintains (their mode
  * is `build` or `serve`, and the adapter declares every method the layer
- * plans) keep a `ready` row built under versions this release accepts: the
- * layer maintained every write since it was published. Every other row of
+ * plans) keep a `ready` row built under versions this release accepts, whose
+ * membership the registry recorded for its context graph still gives
+ * (`./registry-record.ts`): the layer maintained every write since it was
+ * published, and no registry change went unmarked. Every other row of
  * theirs gets a new generation and the state `dirty`, whatever its state, so
  * nothing an earlier process left in flight passes a fence; a damaged row, or
  * one whose generation cannot grow, is replaced by a dirty row at a new random
@@ -17,8 +19,9 @@
  * dirty, unless they already are.
  *
  * It then reads the rows back, makes the backend's mirror hold exactly the
- * maintained ones, and reads the registry of each context graph that has one,
- * so the layer maintains every write from the first. Without anything to
+ * maintained ones, reads the registry of each context graph that has one, so
+ * the layer maintains every write from the first, and records that registry.
+ * Without anything to
  * maintain it is the start-up of a release that does not maintain read graphs
  * (`markReadGraphsDirtyAtStart`), unchanged.
  */
@@ -31,7 +34,15 @@ import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
 import { readGraphLayerOf } from './read-graph-store.js';
-import { readReadGraphRegistryFacts, registrySnapshotOfFacts } from './registry-recognition.js';
+import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry, type ReadGraphRegistryFact } from './registry-recognition.js';
+import {
+  noteReadGraphRegistryRecord,
+  parseReadGraphRegistryRecords,
+  readGraphMembershipDiffers,
+  readGraphRegistryRecordsQuery,
+  recordReadGraphRegistry,
+} from './registry-record.js';
+import type { ReadGraphRegistrySnapshot } from './membership.js';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
   MAX_READ_GRAPH_GENERATION,
@@ -93,10 +104,31 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
     const key = parseReadGraphIri(readGraph);
     return key !== undefined && maintains(key);
   };
+  // The registry of each context graph with a row that could stay ready, and the one recorded for its ready rows.
+  const current = new Map<string, { readonly snapshot: ReadGraphRegistrySnapshot; readonly facts: ReadGraphRegistryFact[] }>();
+  const readRegistry = async (contextGraphId: string) => {
+    let read = current.get(contextGraphId);
+    if (!read) {
+      const facts = await readReadGraphRegistryFacts(target, contextGraphId, queryOptions);
+      read = { snapshot: registrySnapshotOfFacts(contextGraphId, facts), facts };
+      current.set(contextGraphId, read);
+    }
+    return read;
+  };
+  // A maintained row that may stay ready, if its registry did not move.
+  const mayKeep = (row: ReadGraphStateRow) => maintained(row.readGraph) && keepsReady(row, versions);
+  for (const row of found.rows) if (mayKeep(row)) await readRegistry(parseReadGraphIri(row.readGraph)!.scope.contextGraphId);
+  const records = await registryRecords(target, queryOptions);
+  const followsRecord = (row: ReadGraphStateRow) => {
+    const key = parseReadGraphIri(row.readGraph)!;
+    const record = records.get(key.scope.contextGraphId);
+    return record !== undefined
+      && !readGraphMembershipDiffers(key, record, current.get(key.scope.contextGraphId)!.snapshot, layer.runtime.workingMemoryIdentity);
+  };
   const marked: string[] = [];
   const replaced = found.damaged.filter((readGraph) => parseReadGraphIri(readGraph) !== undefined);
   for (const row of found.rows) {
-    if (maintained(row.readGraph) ? keepsReady(row, versions) : row.state === 'dirty') continue;
+    if (maintained(row.readGraph) ? mayKeep(row) && followsRecord(row) : row.state === 'dirty') continue;
     (row.generation < MAX_READ_GRAPH_GENERATION ? marked : replaced).push(row.readGraph);
   }
   if (marked.length + replaced.length > 0) {
@@ -120,9 +152,13 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
   const after = await stateRows(target, queryOptions);
   for (const row of after.rows) if (maintained(row.readGraph)) mirror.set(row);
   // Before anything writes: the facts go in with the snapshot, so the layer predicts its first registry write from them.
+  // Every row that does not follow this registry is dirty now, so it is the one to record.
   for (const contextGraphId of mirror.contextGraphIds()) {
-    const facts = await readReadGraphRegistryFacts(target, contextGraphId, queryOptions);
-    registries.set(registrySnapshotOfFacts(contextGraphId, facts), facts);
+    const { snapshot, facts } = await readRegistry(contextGraphId);
+    registries.set(snapshot, facts);
+    const record = records.get(contextGraphId);
+    if (record !== undefined && sameRegistry(record, snapshot)) noteReadGraphRegistryRecord(layer.runtime, record);
+    else await recordReadGraphRegistry(target, layer.runtime, snapshot, queryOptions);
   }
   const count = marked.length + replaced.length;
   if (count > 0) options.log?.(`Marked ${count} read graph(s) dirty at start; ${mirror.size} are maintained`);
@@ -133,6 +169,12 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
 function keepsReady(row: ReadGraphStateRow, versions: ReadGraphVersions): boolean {
   return row.state === 'ready' && isReadGraphRowAccepted(row, versions)
     && parseReadGraphIri(row.readGraph)?.layer !== MemoryLayer.WorkingMemory;
+}
+
+async function registryRecords(store: TripleStore, options: QueryOptions) {
+  const result = await store.query(readGraphRegistryRecordsQuery(), options);
+  if (result.type !== 'bindings') throw new Error('Read-graph start-up expected registry-record bindings');
+  return parseReadGraphRegistryRecords(result.bindings);
 }
 
 async function stateRows(store: TripleStore, options: QueryOptions) {

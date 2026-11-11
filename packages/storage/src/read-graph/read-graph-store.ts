@@ -105,6 +105,7 @@ export interface ReadGraphStoreConfig {
 }
 
 export const READ_GRAPH_WRITE_REFUSED_CODE = 'READ_GRAPH_WRITE_REFUSED';
+export const READ_GRAPH_MAINTENANCE_FAILED_CODE = 'READ_GRAPH_MAINTENANCE_FAILED';
 
 /**
  * The term policy of the read-graph operations. A valid term renders exactly
@@ -122,6 +123,25 @@ export class ReadGraphWriteRefusedError extends Error implements StoreOperationO
   constructor(readonly storeOperation: StoreOperation, reason: string) {
     super(`${storeOperation}() is refused while the store holds read graphs: ${reason}`);
     this.name = 'ReadGraphWriteRefusedError';
+  }
+}
+
+/**
+ * A write that completed, whose read-graph maintenance after it failed: the
+ * registry it may change could not be read again. Its read graphs are marked
+ * dirty. The outcome is `indeterminate` for the write itself, so no caller
+ * takes it for a write that never started and sends it again; the failure of
+ * the maintenance step is the `cause`.
+ */
+export class ReadGraphMaintenanceError extends Error implements StoreOperationOutcomeErrorLike {
+  readonly code = READ_GRAPH_MAINTENANCE_FAILED_CODE;
+  readonly storeOperationOutcomeTag = STORE_OPERATION_OUTCOME_TAG;
+  readonly outcome = 'indeterminate' as const;
+
+  constructor(readonly storeOperation: StoreOperation, cause: unknown) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    super(`${storeOperation}() ran, but the read-graph registry it may change could not be read again: ${reason}`, { cause });
+    this.name = 'ReadGraphMaintenanceError';
   }
 }
 
@@ -462,7 +482,8 @@ export class ReadGraphStore implements TripleStoreDecorator {
           failure ??= { error };
         }
       }
-      if (succeeded && failure) throw failure.error;
+      // The write ran: whatever classified the failure of this step does not describe the write.
+      if (succeeded && failure) throw new ReadGraphMaintenanceError(operation, failure.error);
     };
     let result: T;
     try {

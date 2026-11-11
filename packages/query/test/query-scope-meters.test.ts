@@ -9,6 +9,7 @@ import {
   classifyMeteredQuery, classifyQueryScope, meterQueryScope, QUERY_SCOPE_LIMIT_CANDIDATES, reportRoutedGraphs, sliceClass, startRoutedRead,
   type QueryScopeClass,
 } from '../src/query-scope-meters.js';
+import { graphsReadBy } from '../src/sparql-graph-dataset.js';
 import { prepareGraphScope } from '../src/sparql-graph-scope.js';
 
 interface Point { metric: string; value: number; attributes: Record<string, unknown> }
@@ -117,6 +118,26 @@ describe('query scope classes', () => {
     expect(QUERY_SCOPE_LIMIT_CANDIDATES).toEqual([1_000, 2_000, 5_000, 10_000, 20_000]);
     expect([0, 100, 101, 1_000, 1_001, 20_000, 20_001].map(sliceClass))
       .toEqual(['le_100', 'le_100', 'le_1000', 'le_1000', 'le_2000', 'le_20000', 'gt_20000']);
+  });
+});
+
+describe('the graphs a scoped read reads', () => {
+  const scopeOf = (sparql: string) => {
+    const prepared = prepareSparql(sparql);
+    if (prepared.status !== 'valid') throw new Error(`malformed test query: ${sparql}`);
+    return prepareGraphScope(prepared);
+  };
+  const set = ['urn:g:1', 'urn:g:2', 'urn:g:3'];
+
+  it('are the named graphs the set allows for an explicit read without a dataset, and the whole set otherwise', () => {
+    expect(graphsReadBy(scopeOf('SELECT * WHERE { GRAPH <urn:g:2> { ?s ?p ?o } GRAPH <urn:g:9> { ?s ?p ?o } }'), set, 'oxigraph')).toEqual(['urn:g:2']);
+    // An engine the query layer does not know gets the set as a dataset.
+    expect(graphsReadBy(scopeOf('SELECT * WHERE { GRAPH <urn:g:2> { ?s ?p ?o } }'), set, null)).toEqual(set);
+    expect(graphsReadBy(scopeOf('SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }'), set, 'oxigraph')).toEqual(set);
+    expect(graphsReadBy(scopeOf('SELECT * WHERE { ?s ?p ?o }'), set, 'oxigraph')).toEqual(set);
+    expect(graphsReadBy(scopeOf('SELECT * WHERE { GRAPH <urn:g:2> { ?s ?p ?o } }'), [], 'oxigraph')).toEqual([]);
+    // A read the dataset step refuses keeps the set; the rewrite refuses it.
+    expect(graphsReadBy(scopeOf('DESCRIBE <urn:s> WHERE { GRAPH <urn:g:2> { <urn:s> ?p ?o } }'), set, null)).toEqual(set);
   });
 });
 
@@ -232,13 +253,48 @@ describe('the query engine', () => {
     }
   });
 
-  it('labels a read of explicit graphs apart, and counts the set its route authorizes', async () => {
-    const answer = await engine.query(`SELECT ?name WHERE { GRAPH <${vmGraphs[0]}> { ?s <${NAME}> ?name } }`,
-      { contextGraphId: CG, view: 'verifiable-memory' });
+  it('labels a read of explicit graphs apart, and counts the graphs it reads', async () => {
+    const explicit = `SELECT ?name WHERE { GRAPH <${vmGraphs[0]}> { ?s <${NAME}> ?name } }`;
+    const answer = await engine.query(explicit, { contextGraphId: CG, view: 'verifiable-memory' });
     expect(answer.bindings).toEqual([{ name: '"item 10"' }]);
     expect(named(REQUESTS)).toEqual([{ metric: REQUESTS, value: 1, attributes: cls({ view: 'vm', graph: 'explicit' }) }]);
-    expect(named(SLICE)).toEqual([{ metric: SLICE, value: 1 + vmGraphs.length, attributes: { route: 'view', graph: 'explicit' } }]);
+    // Oxigraph gives this read no dataset, so it reads the one graph it names.
+    expect(named(SLICE)).toEqual([{ metric: SLICE, value: 1, attributes: { route: 'view', graph: 'explicit' } }]);
     expect(named(STORE_MS).map(({ attributes }) => attributes)).toEqual([{ route: 'view', graph: 'explicit', slice: 'le_100' }]);
+
+    telemetry.points.length = 0;
+    expect((await engine.query(explicit, { contextGraphId: CG })).bindings).toEqual([{ name: '"item 10"' }]);
+    expect(named(SLICE)).toEqual([{ metric: SLICE, value: 1, attributes: { route: 'legacy', graph: 'explicit' } }]);
+  });
+
+  it('counts the whole set for an explicit read that gets it as its dataset, and nothing for a refused one', async () => {
+    const explicit = `SELECT ?name WHERE { GRAPH <${vmGraphs[0]}> { ?s <${NAME}> ?name } }`;
+    // A pattern outside GRAPH as well: the read gets the set as its dataset.
+    const mixed = await engine.query(
+      `SELECT ?name ?o WHERE { <urn:item:11> <${NAME}> ?o . GRAPH <${vmGraphs[0]}> { ?s <${NAME}> ?name } }`,
+      { contextGraphId: CG, view: 'verifiable-memory' },
+    );
+    expect(mixed.bindings).toEqual([{ name: '"item 10"', o: '"item 11"' }]);
+    expect(named(SLICE)).toEqual([{ metric: SLICE, value: 1 + vmGraphs.length, attributes: { route: 'view', graph: 'explicit' } }]);
+
+    // A store whose engine the query layer does not know gets the set as the dataset of every explicit read.
+    telemetry.points.length = 0;
+    const unknownEngine = new DKGQueryEngine(new Proxy(store, {
+      get(target, key) {
+        if (key === 'sparqlEngine') return undefined;
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }));
+    expect((await unknownEngine.query(explicit, { contextGraphId: CG, view: 'verifiable-memory' })).bindings).toEqual([{ name: '"item 10"' }]);
+    expect(named(SLICE)).toEqual([{ metric: SLICE, value: 1 + vmGraphs.length, attributes: { route: 'view', graph: 'explicit' } }]);
+
+    // A named graph outside the view is refused as before, before any read.
+    telemetry.points.length = 0;
+    await expect(engine.query('SELECT * WHERE { GRAPH <urn:scope-meters:outside> { ?s ?p ?o } }', { contextGraphId: CG, view: 'verifiable-memory' }))
+      .rejects.toThrow(/outside the allowed graph set/);
+    expect(named(SLICE)).toEqual([{ metric: SLICE, value: 0, attributes: { route: 'view', graph: 'explicit' } }]);
+    expect(named(STORE_MS)).toEqual([]);
   });
 
   it('meters the legacy route by the graphs it routes, across data and shared memory', async () => {

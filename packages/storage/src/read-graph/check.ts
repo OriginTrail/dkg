@@ -261,12 +261,11 @@ function unchanged(context: CheckContext): boolean {
   return row !== undefined && row.state === 'ready' && row.generation === context.row.generation;
 }
 
-/** The member graphs of the read graph in `store`'s graph list, in code-point order. */
 /**
  * The member graphs the store holds now, enumerated by one query rather than
- * read from any graph list an adapter or a decorator may cache. It uses the
- * adapters' own enumeration of non-empty named graphs, narrowed to the
- * context graph, under the internal catalog ceiling.
+ * read from any graph list an adapter or a decorator may cache: the adapter's
+ * own listing form ({@link memberGraphListingQuery}), narrowed to the context
+ * graph, under the internal catalog ceiling.
  */
 async function storedMemberGraphs(context: CheckContext): Promise<string[]> {
   const query = memberGraphListingQuery(context.target, context.root);
@@ -277,14 +276,15 @@ async function storedMemberGraphs(context: CheckContext): Promise<string[]> {
 }
 
 /**
- * The query that lists the graphs under `root` that hold a quad, in the form
- * the store's adapter lists its graphs with, so that the store itself narrows
- * the list to `root`. Blazegraph applies that narrowing to the graph names of
- * its quads, but not to its named-graph enumeration, which the other adapters
- * read.
+ * The query that lists the context graph's graphs that hold a quad: its root
+ * graph and the graphs under `root/`, not those of a context graph whose ID
+ * extends this one. It takes the form the store's adapter lists its graphs
+ * with, so that the store itself narrows the list. Blazegraph applies that
+ * narrowing to the graph names of its quads, but not to its named-graph
+ * enumeration, which the other adapters read.
  */
 export function memberGraphListingQuery(target: TripleStore, root: string): string {
-  const under = `FILTER(STRSTARTS(STR(?g), "${escapeSparqlLiteral(root)}"))`;
+  const under = `FILTER(?g = <${assertSafeIri(root)}> || STRSTARTS(STR(?g), "${escapeSparqlLiteral(`${root}/`)}"))`;
   if (findTripleStoreCapability(target, (candidate): candidate is BlazegraphStore => candidate instanceof BlazegraphStore)) {
     // sparql-scan-allow: R2 -- Blazegraph's own graph listing (as its listGraphs), narrowed to one context graph, on the background lane
     return `SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } ${under} }`;
@@ -292,6 +292,7 @@ export function memberGraphListingQuery(target: TripleStore, root: string): stri
   return `SELECT ?g WHERE { ${nonEmptyNamedGraphEnumerationPattern('g')} ${under} }`;
 }
 
+/** The member graphs of the read graph in `store`'s graph list, in code-point order. */
 async function memberGraphs(context: CheckContext, store: TripleStore): Promise<string[]> {
   const listed = await readGraphInventoryByPrefix(store, `${context.root}/`, context.options);
   return [...new Set([context.root, ...listed.graphs])]
