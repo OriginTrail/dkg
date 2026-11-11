@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   formatIriPrefix,
   formatSparqlTerm,
+  isSparqlTermValidationError,
+  SPARQL_TERM_VALIDATION_ERROR_CODE,
   SparqlTermValidationError,
   UnsafeSparqlValueError,
   unwrapIri,
@@ -101,6 +103,32 @@ describe('the validation error', () => {
     expect(error).toBeInstanceOf(SparqlTermValidationError);
     expect(error).toMatchObject({ name: 'SparqlTermValidationError', kind: 'literal' });
     expect((error as Error).cause).toBeInstanceOf(Error);
+  });
+});
+
+describe('the validation error code', () => {
+  it('is an own property, so it survives the store worker, which keeps only name, message and code', () => {
+    const error = new SparqlTermValidationError('refused', 'literal');
+    expect(Object.getOwnPropertyDescriptor(error, 'code')?.value).toBe(SPARQL_TERM_VALIDATION_ERROR_CODE);
+    expect(SPARQL_TERM_VALIDATION_ERROR_CODE).toBe('SPARQL_TERM_INVALID');
+  });
+
+  it('identifies a refused term, also as a plain error carrying the code', () => {
+    let thrown: unknown;
+    try {
+      formatSparqlTerm('"v"@en_GB', { position: 'object' });
+    } catch (caught) {
+      thrown = caught;
+    }
+    expect(isSparqlTermValidationError(thrown)).toBe(true);
+    const crossed = Object.assign(new Error('refused'), {
+      name: 'SparqlTermValidationError',
+      code: SPARQL_TERM_VALIDATION_ERROR_CODE,
+    });
+    expect(isSparqlTermValidationError(crossed)).toBe(true);
+    expect(isSparqlTermValidationError(new Error('refused'))).toBe(false);
+    expect(isSparqlTermValidationError(Object.assign(new Error('x'), { code: 'OTHER' }))).toBe(false);
+    expect(isSparqlTermValidationError({ code: SPARQL_TERM_VALIDATION_ERROR_CODE })).toBe(false);
   });
 });
 

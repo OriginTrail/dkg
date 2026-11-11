@@ -8,14 +8,14 @@
  * one. The adapters' statement factory (`sparqlStatements` in
  * `sparql-statements.ts`) passes the reporter in `sparql-term-observer.ts`; the
  * deprecated compatibility helpers pass none. The adapters use
- * {@link ADAPTER_SPARQL_TERM_POLICY}, currently in observe mode: a failing
- * term is rendered exactly as before validation existed. Until the
- * hard-reject flip, that still means stripping characters from a malformed
- * IRI.
+ * {@link ADAPTER_SPARQL_TERM_POLICIES}: every update rejects a term the grammar
+ * refuses, so the statement is never built; queries stay in observe mode, in
+ * which a failing term is rendered exactly as before validation existed.
  *
  * On top of core's grammar, storage requires every IRI, a literal's datatype
  * included, to be an absolute RFC 3987 IRI (see {@link absoluteIriFailure}).
  * Such a term passes the grammar, so observe mode sends its rendering as is.
+ * Writes reject it; deletes observe it (see {@link ADAPTER_SPARQL_TERM_POLICIES}).
  */
 import { createHmac, randomBytes } from 'node:crypto';
 import {
@@ -122,14 +122,27 @@ export interface SparqlTermRenderer {
 }
 
 export interface SparqlTermPolicy {
+  /** What a statement does with a term that fails core's grammar. */
   readonly enforcement: SparqlTermEnforcement;
+  /** What it does with a term that passes the grammar but not the absolute-IRI rule. */
+  readonly absoluteIriEnforcement: SparqlTermEnforcement;
   /** A renderer for one statement built at `site`, reporting invalid terms to `onInvalidTerm`. */
   renderer(site: SparqlTermSite, onInvalidTerm: InvalidSparqlTermObserver): SparqlTermRenderer;
 }
 
-export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): SparqlTermPolicy {
+/**
+ * A policy that applies `enforcement` to a term failing core's grammar, and
+ * `absoluteIriEnforcement` (by default the same) to one that passes the
+ * grammar but breaks the absolute-IRI rule. A reported term carries the
+ * enforcement applied to it.
+ */
+export function createSparqlTermPolicy(
+  enforcement: SparqlTermEnforcement,
+  absoluteIriEnforcement: SparqlTermEnforcement = enforcement,
+): SparqlTermPolicy {
   return {
     enforcement,
+    absoluteIriEnforcement,
     renderer(site, onInvalidTerm) {
       /**
        * Tell the observer about an invalid term and, in reject mode, throw.
@@ -143,16 +156,19 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
         term: string,
         position: ObservedTermPosition,
       ): void {
+        const applied = kind === 'relative-iri' || kind === 'rfc3987-iri'
+          ? absoluteIriEnforcement
+          : enforcement;
         const invalidTerm: InvalidSparqlTerm = {
           site,
           position,
           kind,
-          enforcement,
+          enforcement: applied,
           length: term.length,
           fingerprint: invalidTermFingerprint(term),
         };
         onInvalidTerm(invalidTerm);
-        if (enforcement === 'reject') {
+        if (applied === 'reject') {
           // A fresh error, without `cause`: the validator's message quotes the term.
           throw new SparqlTermValidationError(
             `${site.adapter}.${site.operation}: invalid ${kind} in SPARQL ${position} ` +
@@ -231,17 +247,40 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
 }
 
 /**
- * The policy every adapter uses.
+ * The policy the adapters' queries use (`hasGraph`, `countQuads`).
  *
  * TODO(sparql-term-hard-reject): once a release shows
- * `dkg.store.sparql_invalid_terms_total` staying at zero, make this
- * `createSparqlTermPolicy('reject')` and delete the legacy renderers. Before
- * flipping, audit callers that pass `<…>`-wrapped graph names: the graph
- * position accepts only a bare IRI. The flip also makes the atomic-replace,
- * RFC-64 and N-Quads writes reject a relative or RFC 3987-invalid IRI before
- * sending it (`checkIris` in `sparql-statements.ts`).
+ * `dkg.store.sparql_invalid_terms_total` staying at zero for queries and for
+ * the deletes' absolute-IRI rule, make every policy in
+ * {@link ADAPTER_SPARQL_TERM_POLICIES} reject and delete the legacy renderers.
  */
 export const ADAPTER_SPARQL_TERM_POLICY = createSparqlTermPolicy('observe');
+
+/** The policy for each kind of statement the adapters build. */
+export interface AdapterSparqlTermPolicies {
+  /** Queries. */
+  readonly query: SparqlTermPolicy;
+  /**
+   * Inserts, and the IRI checks of the writes whose own builders render
+   * their terms (N-Quads loads, atomic replace, RFC-64 commits).
+   */
+  readonly write: SparqlTermPolicy;
+  /** `delete`, `deleteByPattern`, `deleteBySubjectPrefix` and `dropGraph`. */
+  readonly delete: SparqlTermPolicy;
+}
+
+/**
+ * The adapters' policies. A write rejects every invalid term before anything
+ * is sent. A delete rejects a term the grammar refuses too, which could never
+ * name a stored row as written, but sends one that breaks only the
+ * absolute-IRI rule: Blazegraph stores an RFC 3987-invalid IRI as written, and
+ * such a row must stay deletable. Queries keep observe mode.
+ */
+export const ADAPTER_SPARQL_TERM_POLICIES: AdapterSparqlTermPolicies = {
+  query: ADAPTER_SPARQL_TERM_POLICY,
+  write: createSparqlTermPolicy('reject'),
+  delete: createSparqlTermPolicy('reject', 'observe'),
+};
 
 // RFC 3986 §3.1: a letter, then letters, digits, `+`, `-` or `.`, then `:`.
 const IRI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;

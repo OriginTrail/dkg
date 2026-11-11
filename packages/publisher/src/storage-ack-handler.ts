@@ -30,7 +30,7 @@ import {
   getMetrics,
   computePublishACKDigest,
   computeUpdateACKDigest,
-  assertSafeIri,
+  assertSafeIri, isSparqlTermValidationError,
   STORAGE_ACK_DECLINE_CODES,
   DEFAULT_SEND_TIMEOUT_MS,
   boundedDeclineCodeLabel,
@@ -888,10 +888,10 @@ export class StorageACKHandler {
    * them and get a discriminated result they must narrow before proceeding.
    *
    * CONTRACT — what stays OUTSIDE these wrappers:
-   *   - `assertSafeIri(...)` on graph/entity IRIs. An unsafe IRI is a
-   *     malformed request (stream reset), NOT a store outage; callers run it
-   *     before invoking the persist helpers so an IRI-injection attempt still
-   *     throws and resets rather than being demoted to a transient decline.
+   *   - `assertSafeIri(...)` on graph/entity IRIs. An unsafe IRI or term is a
+   *     malformed request (stream reset), NOT a store outage; callers check
+   *     before invoking the persist helpers, and a term the store refuses
+   *     (SparqlTermValidationError) is rethrown, never a transient decline.
    *   - `parseSimpleNQuads` / merkle / catalog verification. Only the actual
    *     `store.*` calls (and `loadSWMQuads`, whose internal `store.query`
    *     is tagged `StoreUnavailableError`) run inside the wrapper.
@@ -910,7 +910,7 @@ export class StorageACKHandler {
       const value = await this.runWhileLive(op, signal);
       return { ok: true, value };
     } catch (err) {
-      if (isACKHandlerDeadlineAbort(err)) throw err;
+      if (isACKHandlerDeadlineAbort(err) || isSparqlTermValidationError(err)) throw err;
       signal?.throwIfAborted();
       return { ok: false, decline: this.declineTemporarilyUnavailable(cgId, 'store unavailable', err) };
     }

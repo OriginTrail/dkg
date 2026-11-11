@@ -5,7 +5,7 @@ import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observe
 
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
-it.each(['direct', 'overlapping', 'oversized'] as const)('preflights and reports each term once for the %s strategy', strategy => {
+it.each(['direct', 'overlapping', 'oversized'] as const)('preflights, then refuses and reports a relative IRI once, for the %s strategy', strategy => {
   // Each case gets a fresh warning window; counters are deliberately unthrottled.
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(Date.now() + ['direct', 'overlapping', 'oversized'].indexOf(strategy) * 60_001);
@@ -17,12 +17,17 @@ it.each(['direct', 'overlapping', 'oversized'] as const)('preflights and reports
   const literals = vi.spyOn(core, 'assertQuadLiteralsMutf8Safe');
   const observer = observeInvalidSparqlTerms();
   try {
-    const plan = prepareAtomicGraphAndSubjectReplace('blazegraph', graph, quads, meta, 'urn:metadata', []);
+    expect(() => prepareAtomicGraphAndSubjectReplace('blazegraph', graph, quads, meta, 'urn:metadata', []))
+      .toThrow(core.SparqlTermValidationError);
     expect(literals).toHaveBeenCalledTimes(1);
     expect(observer.counted).toEqual([{ value: 1, adapter: 'blazegraph', operation: 'replaceGraphAndSubject',
-      position: 'predicate', kind: 'relative-iri', enforcement: 'observe' }]);
+      position: 'predicate', kind: 'relative-iri', enforcement: 'reject' }]);
     expect(observer.warnings).toHaveLength(1);
+    // The same write with an absolute predicate builds the strategy's plan.
+    const absolute = quads.map((quad, i) => (i === 0 ? { ...quad, predicate: 'urn:value' } : quad));
+    const plan = prepareAtomicGraphAndSubjectReplace('blazegraph', graph, absolute, meta, 'urn:metadata', []);
     expect(plan.cleanup === '').toBe(strategy === 'direct');
+    expect(observer.counted).toHaveLength(1);
   } finally { observer.restore(); }
 }, 30_000);
 

@@ -1,11 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import {
+  assertWritableQuadTerms,
+  findMalformedQuadTerm,
   validateCanonicalGraphScopedKnowledgeAssetPayload,
   validateKnowledgeAssetPublishRequest,
   validatePublishRequest,
 } from '../src/validation.js';
 import type { KAManifestEntry } from '../src/publisher.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { SparqlTermValidationError } from '@origintrail-official/dkg-core';
 
 const P = 'test-contextGraph';
 const G = `did:dkg:context-graph:${P}`;
@@ -98,6 +101,58 @@ describe('validatePublishRequest', () => {
   });
 });
 
+describe('received quad terms', () => {
+  const root = 'urn:entity:root';
+
+  it.each<[string, Quad, 'subject' | 'predicate' | 'object']>([
+    ['a relative subject IRI', quad('relative-subject', 'http://ex.org/p', '"o"'), 'subject'],
+    ['a literal subject', quad('"o"', 'http://ex.org/p', '"o"'), 'subject'],
+    ['an RFC 3987-invalid predicate', quad(root, 'http://ex.org/%zz', '"o"'), 'predicate'],
+    ['a blank-node predicate', quad(root, '_:p', '"o"'), 'predicate'],
+    ['a language tag with a character a tag may not hold', quad(root, 'http://ex.org/p', '"o"@en_GB'), 'object'],
+    ['a blank-node label with a character a label may not hold', quad(root, 'http://ex.org/p', '_:node!refused'), 'object'],
+    ['a relative datatype', quad(root, 'http://ex.org/p', '"42"^^<integer>'), 'object'],
+    ['a literal holding a raw line break', quad(root, 'http://ex.org/p', '"line\nbreak"'), 'object'],
+  ])('refuses %s, naming its quad and position without quoting it', (_label, malformed, position) => {
+    const found = findMalformedQuadTerm([quad(root, 'http://ex.org/p', '"kept"'), malformed]);
+    expect(found?.message).toMatch(new RegExp(`^Invalid RDF ${position} in quad 1: must be `));
+    expect(found?.message).not.toContain(malformed[position]);
+    expect(() => assertWritableQuadTerms([malformed])).toThrow(SparqlTermValidationError);
+  });
+
+  it('accepts well-formed terms, bracketed IRIs and blank nodes, and returns the quads', () => {
+    const quads = [
+      quad(root, 'http://ex.org/p', '"o"@en-GB'),
+      quad(`<${root}>`, '<http://ex.org/p>', '<http://ex.org/o>'),
+      quad('_:b0', 'http://ex.org/p', '"42"^^<http://www.w3.org/2001/XMLSchema#integer>'),
+      quad(root, 'http://ex.org/p', '"5"^^http://www.w3.org/2001/XMLSchema#integer'),
+      // A peer serializes an astral character as a UTF-16 surrogate pair of escapes.
+      quad(root, 'http://ex.org/p', '"Women\\u2019s \\uD83D\\uDDD3"'),
+    ];
+    expect(findMalformedQuadTerm(quads, [root, `<${root}>`])).toBeNull();
+    expect(assertWritableQuadTerms(quads, [root])).toBe(quads);
+  });
+
+  it('refuses a root entity that is not an absolute IRI', () => {
+    expect(findMalformedQuadTerm([], [root, 'relative root'])).toEqual({
+      message: 'Invalid root entity 1: must be an absolute IRI',
+      kind: 'iri',
+    });
+    expect(() => assertWritableQuadTerms([], ['"literal root"'])).toThrow(SparqlTermValidationError);
+  });
+
+  it('Rule 6: validatePublishRequest refuses a malformed term, and a malformed root with no quads', () => {
+    const malformed = validatePublishRequest([quad(root, 'http://ex.org/p', '"o"@en_GB')], manifest(root), P, new Set());
+    expect(malformed.valid).toBe(false);
+    expect(malformed.errors).toEqual([
+      'Rule 6: Invalid RDF object in quad 0: must be a well-formed literal, absolute IRI or blank node',
+    ]);
+    // A fully private KA's root appears in no public quad; it is checked all the same.
+    const privateOnly = validatePublishRequest([], manifest('relative-root', 1n, { privateTripleCount: 1 }), P, new Set());
+    expect(privateOnly.errors).toEqual(['Rule 6: Invalid root entity 0: must be an absolute IRI']);
+  });
+});
+
 describe('canonical graph-scoped KA validation policy', () => {
   const publicCanonical = 'urn:dkg:ka-skolem:c14n0';
 
@@ -127,6 +182,11 @@ describe('canonical graph-scoped KA validation policy', () => {
     ['reserved graph', quad('urn:s', 'urn:p', '"x"', publicCanonical)],
     ['blank-node subject', quad('_:section', 'urn:p', '"x"')],
     ['blank-node object', quad('urn:s', 'urn:p', '_:section')],
+    ['RFC 3987-invalid subject', quad('urn:s:%zz', 'urn:p', '"x"')],
+    ['RFC 3987-invalid predicate', quad('urn:s', 'urn:p:%zz', '"x"')],
+    ['relative object IRI', quad('urn:s', 'urn:p', 'relative-object')],
+    ['relative literal datatype', quad('urn:s', 'urn:p', '"42"^^<integer>')],
+    ['malformed language tag', quad('urn:s', 'urn:p', '"x"@en_GB')],
   ])('rejects %s', (_label, malicious) => {
     const result = validateCanonicalGraphScopedKnowledgeAssetPayload([malicious], G, 1);
     expect(result.valid).toBe(false);

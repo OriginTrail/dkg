@@ -75,6 +75,7 @@ export default defineConfig({
           // #1828 — daemon-boot intent-index backfill wiring (fail-open contract).
           'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',
+          'test/agent-chat-update-term-validation.test.ts',
           'test/preferred-relays.test.ts',
           'test/lan-addresses.test.ts',
           'test/reconcile-503-mapping.test.ts',
@@ -373,6 +374,8 @@ export default defineConfig({
           'test/daemon-startup-wait.test.ts',
           'test/oxigraph-server.test.ts',
           'test/oxigraph-server-native.test.ts',
+          // A peer's write with a malformed term, on the pinned real server.
+          'test/peer-write-term-validation-oxigraph-server.test.ts',
           'test/oxigraph-server-wal.test.ts',
           'test/oxigraph-managed-start-options.test.ts',
           'test/oxigraph-wal-maintenance.test.ts',

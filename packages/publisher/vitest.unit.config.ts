@@ -159,6 +159,7 @@ export default defineConfig({
       'test/assertion-draft-recovery.test.ts',
       'test/ka-graph-update-ack.test.ts',
       'test/ka-graph-update-handler.test.ts',
+      'test/peer-write-term-validation.test.ts',
       'test/ka-graph-private-only-publish.test.ts',
       'test/ka-graph-private-access.test.ts',
       'test/rootless-access.test.ts',

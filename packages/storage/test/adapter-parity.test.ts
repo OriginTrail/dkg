@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { OxigraphStore, BlazegraphStore, SparqlHttpStore, type TripleStore } from '../src/index.js';
 import { startOxigraphSparqlEndpoint, type OxigraphSparqlEndpoint } from './helpers/oxigraph-sparql-endpoint.js';
+import { SparqlTermValidationError } from '@origintrail-official/dkg-core';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 let endpoint: OxigraphSparqlEndpoint;
@@ -36,7 +37,7 @@ it.each(STORES)('$name preserves real stored state across duplicate insert and s
   } finally { await store.close(); }
 });
 
-it.each(STORES)('$name counts a malformed graph IRI and a line-break subject prefix', async ({ name, adapter, createStore }) => {
+it.each(STORES)('$name refuses a malformed graph IRI and a line-break subject prefix, and counts them', async ({ name, adapter, createStore }) => {
   const observed = observeInvalidSparqlTerms();
   const store = createStore();
   const graph = `urn:parity:terms:${name}`;
@@ -44,22 +45,20 @@ it.each(STORES)('$name counts a malformed graph IRI and a line-break subject pre
   try {
     await store.insert([{ graph, subject: 'urn:one', predicate: 'urn:p', object: '"one"' }]);
 
-    // Observe mode still strips the caret (x^y → xy) as before, but no longer silently.
-    await expect(store.dropGraph(malformed)).resolves.toBeUndefined();
+    await expect(store.dropGraph(malformed)).rejects.toThrow(SparqlTermValidationError);
     expect(observed.counted).toEqual([{
-      value: 1, adapter, operation: 'dropGraph', position: 'graph', kind: 'iri', enforcement: 'observe',
+      value: 1, adapter, operation: 'dropGraph', position: 'graph', kind: 'iri', enforcement: 'reject',
     }]);
     expect(observed.warnings).toEqual([
       expect.stringContaining(`graph position (${malformed.length} chars, fingerprint `),
     ]);
     expect(observed.warnings[0]).not.toContain(malformed);
 
-    // A prefix no IRI can start with is counted, and still sent as before, so
-    // the update stays unparseable and the call fails instead of deleting nothing.
-    await expect(store.deleteBySubjectPrefix(graph, 'urn:o\nne')).rejects.toThrow();
+    // A prefix no IRI can start with is refused before the update is built.
+    await expect(store.deleteBySubjectPrefix(graph, 'urn:o\nne')).rejects.toThrow(SparqlTermValidationError);
     expect(await store.countQuads(graph)).toBe(1);
     expect(observed.counted.slice(1)).toEqual([{
-      value: 1, adapter, operation: 'deleteBySubjectPrefix', position: 'subject-prefix', kind: 'iri', enforcement: 'observe',
+      value: 1, adapter, operation: 'deleteBySubjectPrefix', position: 'subject-prefix', kind: 'iri', enforcement: 'reject',
     }]);
   } finally {
     observed.restore();

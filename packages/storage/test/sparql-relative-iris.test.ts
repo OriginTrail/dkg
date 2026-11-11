@@ -1,13 +1,14 @@
 /**
  * The storage absolute-IRI rule on every adapter write: a relative or RFC
  * 3987-invalid IRI is counted once, under the operation that writes it, and
- * the write goes out byte for byte as before (observe mode).
+ * the write is refused before anything is sent (reject mode).
  *
  * The sparql-http insert renders its terms through the statement builders.
  * The N-Quads inserts and the atomic-replace and RFC-64 writes do not, so
  * each adapter checks their quads with `checkIris` instead.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { SparqlTermValidationError } from '@origintrail-official/dkg-core';
 import {
   BlazegraphStore,
   OxigraphStore,
@@ -15,10 +16,7 @@ import {
   UnsupportedTripleStoreCapabilityError,
   type TripleStore,
 } from '../src/index.js';
-import {
-  ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
-  buildAtomicGraphReplaceUpdate,
-} from '../src/atomic-graph-replace.js';
+import { ATOMIC_GRAPH_REPLACE_STAGING_PREFIX } from '../src/atomic-graph-replace.js';
 import { buildRfc64AuthorCommitCasUpdateV1 } from '../src/rfc64-author-commit-cas.js';
 import {
   AUTHOR,
@@ -98,14 +96,17 @@ const counted = (adapter: string, operation: string) => ({
   operation,
   position: 'datatype',
   kind: 'relative-iri',
-  enforcement: 'observe',
+  enforcement: 'reject',
 });
+
+/** Whether any request carried the relative datatype: a refused write sends none. */
+const carried = (sent: SentRequest[]) => sent.some((request) => request.body.includes(RELATIVE_DATATYPE));
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('each adapter write counts a relative datatype once, under its own operation', () => {
+describe('each adapter write refuses a relative datatype, counted once under its own operation', () => {
   it.each(WRITES)('sparql-http %s', async (operation, write) => {
     const observed = observeInvalidSparqlTerms();
     const sent = stubSparqlEndpoint();
@@ -115,12 +116,12 @@ describe('each adapter write counts a relative datatype once, under its own oper
       consistencyProfile: 'atomic-readback',
     });
     try {
-      await write(store);
+      await expect(write(store)).rejects.toThrow(SparqlTermValidationError);
     } finally {
       await store.close();
     }
     expect(observed.counted).toEqual([counted('sparql-http', operation)]);
-    expect(sent.some((request) => request.body.includes(RELATIVE_DATATYPE))).toBe(true);
+    expect(carried(sent)).toBe(false);
   });
 
   it.each(WRITES)('blazegraph %s', async (operation, write) => {
@@ -128,21 +129,19 @@ describe('each adapter write counts a relative datatype once, under its own oper
     const sent = stubSparqlEndpoint();
     const store = new BlazegraphStore('http://blaze.test/sparql');
     try {
-      await write(store);
+      await expect(write(store)).rejects.toThrow(SparqlTermValidationError);
     } finally {
       await store.close();
     }
     expect(observed.counted).toEqual([counted('blazegraph', operation)]);
-    expect(sent.some((request) => request.body.includes(RELATIVE_DATATYPE))).toBe(true);
+    expect(carried(sent)).toBe(false);
   });
 
-  it.each(WRITES)('embedded oxigraph %s, which then fails the write', async (operation, write) => {
+  it.each(WRITES)('embedded oxigraph %s', async (operation, write) => {
     const observed = observeInvalidSparqlTerms();
     const store = new OxigraphStore();
     try {
-      // Unlike an HTTP endpoint, embedded Oxigraph has no base IRI to resolve
-      // a relative IRI against, so its parser rejects the write.
-      await expect(write(store)).rejects.toThrow(/No scheme found in an absolute IRI|IRI parsing failed/);
+      await expect(write(store)).rejects.toThrow(SparqlTermValidationError);
       expect(await store.countQuads()).toBe(0);
     } finally {
       await store.close();
@@ -152,55 +151,53 @@ describe('each adapter write counts a relative datatype once, under its own oper
 });
 
 describe('each adapter write counts the terms it names outside its quads', () => {
-  const ADAPTERS: Array<[string, () => TripleStore, boolean]> = [
+  const ADAPTERS: Array<[string, () => TripleStore]> = [
     ['sparql-http', () => new SparqlHttpStore({
       queryEndpoint: 'http://terms.test/query',
       updateEndpoint: 'http://terms.test/update',
       consistencyProfile: 'atomic-readback',
-    }), true],
-    ['blazegraph', () => new BlazegraphStore('http://blaze.test/sparql'), true],
-    // Embedded Oxigraph has no base IRI to resolve against, so the write then fails.
-    ['oxigraph', () => new OxigraphStore(), false],
+    })],
+    ['blazegraph', () => new BlazegraphStore('http://blaze.test/sparql')],
+    ['oxigraph', () => new OxigraphStore()],
   ];
 
-  async function run(create: () => TripleStore, succeeds: boolean, write: (store: TripleStore) => Promise<unknown>) {
+  async function refused(create: () => TripleStore, write: (store: TripleStore) => Promise<unknown>) {
     stubSparqlEndpoint();
     const store = create();
     try {
-      if (succeeds) await write(store);
-      else await expect(write(store)).rejects.toThrow(/IRI parsing failed/);
+      await expect(write(store)).rejects.toThrow(SparqlTermValidationError);
     } finally {
       await store.close();
     }
   }
 
-  it.each(ADAPTERS)('%s: an empty replaceGraph of a relative graph', async (adapter, create, succeeds) => {
+  it.each(ADAPTERS)('%s: an empty replaceGraph of a relative graph', async (adapter, create) => {
     const observed = observeInvalidSparqlTerms();
-    await run(create, succeeds, (store) => store.replaceGraph!('rel-g', []));
+    await refused(create, (store) => store.replaceGraph!('rel-g', []));
     expect(observed.counted).toEqual([{
-      value: 1, adapter, operation: 'replaceGraph', position: 'graph', kind: 'relative-iri', enforcement: 'observe',
+      value: 1, adapter, operation: 'replaceGraph', position: 'graph', kind: 'relative-iri', enforcement: 'reject',
     }]);
   });
 
-  it.each(ADAPTERS)('%s: a relative guard value of an RFC-64 author commit', async (adapter, create, succeeds) => {
+  it.each(ADAPTERS)('%s: a relative guard value of an RFC-64 author commit', async (adapter, create) => {
     const observed = observeInvalidSparqlTerms();
     const input = authorCommitInput();
-    // Only the current-head guard names `rel-old-head`: as its value and in its predecessor row.
-    await run(create, succeeds, (store) => store.rfc64AuthorCommitCasV1!(authorCommitInput({
+    // Only the current-head guard names `rel-old-head`; the first check refuses it.
+    await refused(create, (store) => store.rfc64AuthorCommitCasV1!(authorCommitInput({
       currentHead: {
         ...input.currentHead,
         expectedObject: 'rel-old-head',
         expectedQuads: [quad(AUTHOR, P_HEAD, 'rel-old-head', HEAD_GRAPH)],
       },
     })));
-    expect(observed.counted).toEqual(Array(2).fill({
+    expect(observed.counted).toEqual([{
       value: 1,
       adapter,
       operation: 'rfc64AuthorCommitCasV1',
       position: 'object',
       kind: 'relative-iri',
-      enforcement: 'observe',
-    }));
+      enforcement: 'reject',
+    }]);
   });
 
   it.each([
@@ -232,32 +229,25 @@ describe('each adapter write counts the terms it names outside its quads', () =>
   });
 });
 
-describe('the writes go out byte for byte as before', () => {
-  it('sparql-http insert sends the relative IRIs unchanged', async () => {
+describe('the writes are refused before anything is sent', () => {
+  it('sparql-http insert sends nothing', async () => {
     const observed = observeInvalidSparqlTerms();
     const sent = stubSparqlEndpoint();
     const store = new SparqlHttpStore({ queryEndpoint: 'http://terms.test/query', updateEndpoint: 'http://terms.test/update' });
     try {
-      await store.insert([
-        { subject: 'rel-s', predicate: P, object: RELATIVE_DATATYPE, graph: G },
+      await expect(store.insert([
         { subject: S, predicate: P, object: 'http://ex.org/%zz', graph: G },
-      ]);
+      ])).rejects.toThrow(SparqlTermValidationError);
     } finally {
       await store.close();
     }
-    expect(sent.map((request) => request.body)).toEqual([
-      'INSERT DATA {\n  GRAPH <http://ex.org/g> {\n' +
-        '    <rel-s> <http://ex.org/p> "42"^^<integer> .\n' +
-        '    <http://ex.org/s> <http://ex.org/p> <http://ex.org/%zz> .\n  }\n}',
-    ]);
-    expect(observed.counted.map((point) => [point.position, point.kind])).toEqual([
-      ['subject', 'relative-iri'],
-      ['datatype', 'relative-iri'],
-      ['object', 'rfc3987-iri'],
+    expect(sent).toEqual([]);
+    expect(observed.counted.map((point) => [point.position, point.kind, point.enforcement])).toEqual([
+      ['object', 'rfc3987-iri', 'reject'],
     ]);
   });
 
-  it('sparql-http replaceGraph sends exactly the atomic builder\'s update', async () => {
+  it('sparql-http replaceGraph sends nothing', async () => {
     const observed = observeInvalidSparqlTerms();
     const sent = stubSparqlEndpoint();
     const store = new SparqlHttpStore({
@@ -265,41 +255,32 @@ describe('the writes go out byte for byte as before', () => {
       updateEndpoint: 'http://terms.test/update',
       consistencyProfile: 'atomic-update',
     });
-    const quads = [{ subject: S, predicate: P, object: 'rel-o', graph: G }];
     try {
-      await store.replaceGraph(G, quads);
+      await expect(store.replaceGraph(G, [{ subject: S, predicate: P, object: 'rel-o', graph: G }]))
+        .rejects.toThrow(SparqlTermValidationError);
     } finally {
       await store.close();
     }
-    // The staging graph name is random; everything else must match.
-    const unstaged = (update: string) => update.replace(/atomic-graph-replace:[0-9a-f-]{36}/g, 'atomic-graph-replace:*');
-    expect(sent.map((request) => unstaged(request.body))).toEqual([unstaged(buildAtomicGraphReplaceUpdate(G, quads).update)]);
-    expect(sent[0].body).toContain('<http://ex.org/s> <http://ex.org/p> <rel-o> .');
+    expect(sent).toEqual([]);
     expect(observed.counted.map((point) => [point.operation, point.position, point.kind])).toEqual([
       ['replaceGraph', 'object', 'relative-iri'],
     ]);
   });
 
-  it('blazegraph insert posts the N-Quads unchanged', async () => {
+  it('blazegraph insert posts nothing', async () => {
     const observed = observeInvalidSparqlTerms();
     const sent = stubSparqlEndpoint();
     const store = new BlazegraphStore('http://blaze.test/sparql');
     try {
-      await store.insert([
-        { subject: S, predicate: P, object: RELATIVE_DATATYPE, graph: G },
+      await expect(store.insert([
+        { subject: S, predicate: P, object: '"v"', graph: G },
         { subject: S, predicate: P, object: 'http://user@@example.org/', graph: G },
-      ]);
+      ])).rejects.toThrow(SparqlTermValidationError);
     } finally {
       await store.close();
     }
-    expect(sent).toEqual([{
-      url: 'http://blaze.test/sparql',
-      contentType: 'text/x-nquads',
-      body: '<http://ex.org/s> <http://ex.org/p> "42"^^<integer> <http://ex.org/g> .\n' +
-        '<http://ex.org/s> <http://ex.org/p> <http://user@@example.org/> <http://ex.org/g> .\n',
-    }]);
+    expect(sent).toEqual([]);
     expect(observed.counted.map((point) => [point.operation, point.position, point.kind])).toEqual([
-      ['insert', 'datatype', 'relative-iri'],
       ['insert', 'object', 'rfc3987-iri'],
     ]);
   });
@@ -310,7 +291,7 @@ describe('the writes go out byte for byte as before', () => {
     const store = new SparqlHttpStore({ queryEndpoint: 'http://terms.test/query', updateEndpoint: 'http://terms.test/update' });
     const quads = [{ subject: S, predicate: P, object: RELATIVE_DATATYPE, graph: G }];
     try {
-      // The caller then takes its delete-then-insert fallback, whose insert is counted.
+      // The caller then takes its delete-then-insert fallback, whose insert refuses the term.
       await expect(store.replaceGraph(G, quads)).rejects.toBeInstanceOf(UnsupportedTripleStoreCapabilityError);
       await expect(store.replaceSubject(G, S, quads)).rejects.toBeInstanceOf(UnsupportedTripleStoreCapabilityError);
     } finally {

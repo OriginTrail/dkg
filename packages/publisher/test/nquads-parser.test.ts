@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { SparqlTermValidationError } from '@origintrail-official/dkg-core';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
+import { assertWritableQuadTerms, findMalformedQuadTerm } from '../src/validation.js';
 
 describe('parseSimpleNQuads', () => {
   it('parses a standard N-Quad with datatype', () => {
@@ -32,6 +34,16 @@ describe('parseSimpleNQuads', () => {
     const quads = parseSimpleNQuads(text);
     expect(quads).toHaveLength(1);
     expect(quads[0].object).toBe('"just text"');
+  });
+
+  it.each([
+    ['a language tag with a character a tag may not hold', '<urn:s> <urn:p> "x"@en_GB <urn:g> .', 'object'],
+    ['a blank-node label with a character a label may not hold', '_:node!refused <urn:p> "x" <urn:g> .', 'subject'],
+  ])('keeps %s as received, and the received-quad term check refuses it', (_label, line, position) => {
+    const quads = parseSimpleNQuads(line);
+    expect(quads).toHaveLength(1);
+    expect(findMalformedQuadTerm(quads)?.message).toMatch(new RegExp(`^Invalid RDF ${position} in quad 0:`));
+    expect(() => assertWritableQuadTerms(quads)).toThrow(SparqlTermValidationError);
   });
 
   it('handles empty input', () => {

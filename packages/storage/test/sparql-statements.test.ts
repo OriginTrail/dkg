@@ -119,44 +119,105 @@ describe('sparqlStatements', () => {
     }
   });
 
-  it.each(ADAPTERS)('reports each invalid term once, labelled with adapter %s and the plan\'s operation', (adapter) => {
+  it.each(ADAPTERS)('%s refuses an invalid term in every update, reporting it once under the update\'s operation', (adapter) => {
     const observed = observeInvalidSparqlTerms();
     try {
       const statements = sparqlStatements(adapter);
       const bad = 'http://ex.org/g^x';
       const quad = { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"v"', graph: bad };
-      const plans = [
-        statements.insertData([quad]),
-        statements.deleteData([quad])!,
-        statements.deleteByPattern({ graph: bad }),
-        statements.deleteBySubjectPrefix(bad, 'http://ex.org/'),
-        statements.dropGraph(bad),
-        statements.hasGraph(bad),
-        statements.countQuads(bad),
+      const updates = [
+        () => statements.insertData([quad]),
+        () => statements.deleteData([quad]),
+        () => statements.deleteByPattern({ graph: bad }),
+        () => statements.deleteBySubjectPrefix(bad, 'http://ex.org/'),
+        () => statements.dropGraph(bad),
       ];
+      for (const update of updates) expect(update).toThrow(SparqlTermValidationError);
 
-      expect(observed.counted.map((point) => [point.adapter, point.operation, point.position])).toEqual([
-        [adapter, 'insert', 'graph'],
-        [adapter, 'delete', 'graph'],
-        [adapter, 'deleteByPattern', 'graph'],
-        [adapter, 'deleteBySubjectPrefix', 'graph'],
-        [adapter, 'dropGraph', 'graph'],
-        [adapter, 'hasGraph', 'graph'],
-        [adapter, 'countQuads', 'graph'],
+      expect(observed.counted.map((point) => [point.adapter, point.operation, point.position, point.enforcement])).toEqual([
+        [adapter, 'insert', 'graph', 'reject'],
+        [adapter, 'delete', 'graph', 'reject'],
+        [adapter, 'deleteByPattern', 'graph', 'reject'],
+        [adapter, 'deleteBySubjectPrefix', 'graph', 'reject'],
+        [adapter, 'dropGraph', 'graph', 'reject'],
       ]);
-      // A plan runs as the same operation its terms were reported under, and
-      // carries no diagnostics of its own.
-      expect(plans.map((plan) => plan.operation)).toEqual(observed.counted.map((point) => point.operation));
-      for (const plan of plans) expect(plan).not.toHaveProperty('invalidTerms');
     } finally {
       observed.restore();
     }
   });
 
-  it('reports every invalid term of one statement, and nothing for an empty delete', () => {
+  it.each(ADAPTERS)('%s builds a query holding an invalid term as before, reporting it once (observe mode)', (adapter) => {
     const observed = observeInvalidSparqlTerms();
     try {
-      const statements = sparqlStatements('oxigraph');
+      const statements = sparqlStatements(adapter);
+      const plans = [statements.hasGraph('http://ex.org/g^x'), statements.countQuads('http://ex.org/g^x')];
+      expect(plans).toEqual([
+        { operation: 'hasGraph', sparql: 'ASK { GRAPH <http://ex.org/gx> { ?s ?p ?o } }' },
+        {
+          operation: 'countQuads',
+          sparql: 'SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://ex.org/gx> { ?s ?p ?o } }',
+        },
+      ]);
+      expect(observed.counted.map((point) => [point.adapter, point.operation, point.position, point.enforcement])).toEqual([
+        [adapter, 'hasGraph', 'graph', 'observe'],
+        [adapter, 'countQuads', 'graph', 'observe'],
+      ]);
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it.each([
+    ['a language tag with a character a tag may not hold', '"value"@en_GB'],
+    ['a blank-node label with a character a label may not hold', '_:node!refused'],
+    ['a literal holding a raw line break', '"line\nbreak"'],
+  ])('refuses %s in every update that renders an object', (_label, object) => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const statements = sparqlStatements('sparql-http');
+      const quad = { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object, graph: G };
+      expect(() => statements.insertData([quad])).toThrow(SparqlTermValidationError);
+      expect(() => statements.deleteData([quad])).toThrow(SparqlTermValidationError);
+      expect(() => statements.deleteByPattern({ graph: G, object })).toThrow(SparqlTermValidationError);
+      expect(() => statements.checkIris.insert([quad])).toThrow(SparqlTermValidationError);
+      expect(observed.counted.map((point) => [point.operation, point.position, point.enforcement])).toEqual([
+        ['insert', 'object', 'reject'],
+        ['delete', 'object', 'reject'],
+        ['deleteByPattern', 'object', 'reject'],
+        ['insert', 'object', 'reject'],
+      ]);
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('a delete sends an IRI that breaks only the absolute-IRI rule, so a stored row stays deletable', () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const statements = sparqlStatements('blazegraph');
+      const stored = 'http://ex.org/%zz';
+      expect(statements.dropGraph(stored).update).toBe('DROP SILENT GRAPH <http://ex.org/%zz>');
+      expect(statements.deleteData([
+        { subject: stored, predicate: 'http://ex.org/p', object: '"v"', graph: G },
+      ])!.update).toBe('DELETE DATA {\nGRAPH <http://ex.org/g> { <http://ex.org/%zz> <http://ex.org/p> "v" . }\n}');
+      // An insert of the same IRI is refused.
+      expect(() => statements.insertData([
+        { subject: stored, predicate: 'http://ex.org/p', object: '"v"', graph: G },
+      ])).toThrow(SparqlTermValidationError);
+      expect(observed.counted.map((point) => [point.operation, point.position, point.kind, point.enforcement])).toEqual([
+        ['dropGraph', 'graph', 'rfc3987-iri', 'observe'],
+        ['delete', 'subject', 'rfc3987-iri', 'observe'],
+        ['insert', 'subject', 'rfc3987-iri', 'reject'],
+      ]);
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('in observe mode reports every invalid term of one statement, and nothing for an empty delete', () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const statements = sparqlStatements('oxigraph', createSparqlTermPolicy('observe'));
       statements.deleteByPattern({ graph: 'http://ex.org/g^x', predicate: 'http://ex.org/p q' });
       expect(observed.counted.map((point) => [point.operation, point.position])).toEqual([
         ['deleteByPattern', 'predicate'],
@@ -192,10 +253,10 @@ describe('the absolute-IRI rule', () => {
   const META = 'http://ex.org/meta';
   const S = 'http://ex.org/s';
 
-  it('builds a statement holding relative and RFC 3987-invalid IRIs byte for byte as before', () => {
+  it('in observe mode builds a statement holding relative and RFC 3987-invalid IRIs byte for byte as before', () => {
     const observed = observeInvalidSparqlTerms();
     try {
-      const plan = sparqlStatements('sparql-http').insertData([
+      const plan = sparqlStatements('sparql-http', createSparqlTermPolicy('observe')).insertData([
         { subject: 'rel-s', predicate: 'http://ex.org/p', object: '"42"^^<integer>', graph: G },
         { subject: 'http://ex.org/s', predicate: '<rel-p>', object: 'http://ex.org/%zz', graph: 'rel-g' },
       ]);
@@ -215,10 +276,10 @@ describe('the absolute-IRI rule', () => {
     }
   });
 
-  it.each(ADAPTERS)('checkIris labels each %s write with its own operation, and builds nothing', (adapter) => {
+  it.each(ADAPTERS)('in observe mode checkIris labels each %s write with its own operation, and builds nothing', (adapter) => {
     const observed = observeInvalidSparqlTerms();
     try {
-      const { checkIris } = sparqlStatements(adapter);
+      const { checkIris } = sparqlStatements(adapter, createSparqlTermPolicy('observe'));
       const quads = [
         { subject: S, predicate: 'http://ex.org/p', object: '"42"^^integer', graph: G },
         { subject: '_:b0', predicate: 'http://ex.org/p', object: 'rel-o', graph: G },
@@ -242,7 +303,7 @@ describe('the absolute-IRI rule', () => {
   it('checkIris checks the terms a write names outside its quads', () => {
     const observed = observeInvalidSparqlTerms();
     try {
-      const { checkIris } = sparqlStatements('sparql-http');
+      const { checkIris } = sparqlStatements('sparql-http', createSparqlTermPolicy('observe'));
       // An empty replace still sends `DROP SILENT GRAPH <rel-g>` or a DELETE for its target.
       checkIris.replaceGraph('rel-g', []);
       checkIris.replaceSubject('http://ex.org:bad/g', 'rel-s', []);
@@ -276,7 +337,7 @@ describe('the absolute-IRI rule', () => {
     const observed = observeInvalidSparqlTerms();
     try {
       const inRelativeGraph = (object: string) => ({ subject: 'rel-s', predicate: 'rel-p', object, graph: 'rel-g' });
-      sparqlStatements('oxigraph').checkIris.replaceGraph('rel-g', [
+      sparqlStatements('oxigraph', createSparqlTermPolicy('observe')).checkIris.replaceGraph('rel-g', [
         inRelativeGraph('http://ex.org/o'),
         inRelativeGraph('"v"'),
       ]);
@@ -292,10 +353,29 @@ describe('the absolute-IRI rule', () => {
     }
   });
 
-  it('checkIris throws under the reject policy, and passes absolute IRIs', () => {
+  it('refuses an insert holding a relative or RFC 3987-invalid IRI, by default', () => {
     const observed = observeInvalidSparqlTerms();
     try {
-      const { checkIris } = sparqlStatements('oxigraph', createSparqlTermPolicy('reject'));
+      const statements = sparqlStatements('sparql-http');
+      expect(() => statements.insertData([
+        { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"42"^^<integer>', graph: G },
+      ])).toThrow(SparqlTermValidationError);
+      expect(() => statements.insertData([
+        { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: 'http://ex.org/%zz', graph: G },
+      ])).toThrow(SparqlTermValidationError);
+      expect(observed.counted.map((point) => [point.operation, point.position, point.kind, point.enforcement])).toEqual([
+        ['insert', 'datatype', 'relative-iri', 'reject'],
+        ['insert', 'object', 'rfc3987-iri', 'reject'],
+      ]);
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('checkIris throws by default, and passes absolute IRIs', () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const { checkIris } = sparqlStatements('oxigraph');
       expect(() => checkIris.insert([
         { subject: S, predicate: 'http://ex.org/p', object: '"42"^^<integer>', graph: G },
       ])).toThrow(SparqlTermValidationError);

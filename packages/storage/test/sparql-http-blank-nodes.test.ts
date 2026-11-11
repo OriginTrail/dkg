@@ -244,22 +244,20 @@ describe('deleteData — generated SPARQL shape', () => {
     }
   });
 
-  it('logs and counts a malformed term in a blank-node component instead of silently stripping it', () => {
+  it('refuses a malformed term in a blank-node component, and logs and counts it', () => {
     const observed = observeInvalidSparqlTerms();
     try {
       // What the adapter does: the statement factory builds the delete and reports its invalid terms.
-      const { update } = sparqlStatements('sparql-http').deleteData([
+      expect(() => sparqlStatements('sparql-http').deleteData([
         { subject: 'http://ex/s', predicate: 'http://ex/p|q', object: '_:b0', graph: G },
-      ])!;
-      // Observe mode: the pre-validation (stripped) predicate is still sent.
-      expect(update).toContain('<http://ex/s> <http://ex/pq> ?b0 .');
+      ])).toThrow(SparqlTermValidationError);
       expect(observed.counted).toEqual([{
         value: 1,
         adapter: 'sparql-http',
         operation: 'delete',
         position: 'predicate',
         kind: 'iri',
-        enforcement: 'observe',
+        enforcement: 'reject',
       }]);
       expect(observed.warnings).toEqual([
         expect.stringContaining('sparql-http.delete: invalid iri in SPARQL predicate position (13 chars, fingerprint '),
@@ -279,14 +277,13 @@ describe('deleteData — generated SPARQL shape', () => {
     try {
       // Observe mode: the malformed label is counted once, and its variable is
       // still shared, as before.
-      const { update } = sparqlStatements('sparql-http').deleteData(quads)!;
+      const { update } = sparqlStatements('sparql-http', createSparqlTermPolicy('observe')).deleteData(quads)!;
       expect(update).toContain('?b0 <http://ex/p> "x" .\n    ?b0 <http://ex/q> ?b1 .');
       const label = { value: 1, adapter: 'sparql-http', operation: 'delete', position: 'subject', kind: 'blank-node' };
       expect(observed.counted).toEqual([{ ...label, enforcement: 'observe' }]);
 
-      // Reject mode: the same delete throws before any SPARQL is built.
-      expect(() => sparqlStatements('sparql-http', createSparqlTermPolicy('reject')).deleteData(quads))
-        .toThrow(SparqlTermValidationError);
+      // Reject mode, the adapters' default: the same delete throws before any SPARQL is built.
+      expect(() => sparqlStatements('sparql-http').deleteData(quads)).toThrow(SparqlTermValidationError);
       expect(observed.counted.slice(1)).toEqual([{ ...label, enforcement: 'reject' }]);
     } finally {
       observed.restore();

@@ -505,6 +505,27 @@ describe('GossipPublishHandler', () => {
     expect(bindings[0]['o']).toBe('http://example.org/o');
   });
 
+  it.each([
+    ['a language tag with a character a tag may not hold', '<http://example.org/s> <http://example.org/p> "refused value"@en_GB .'],
+    ['a blank-node label with a character a label may not hold', '<http://example.org/s> <http://example.org/p> _:node!refused .'],
+    ['a relative object IRI', '<http://example.org/s> <http://example.org/p> <relative-object> .'],
+  ])('refuses a broadcast holding %s before anything is written', async (_label, nquads) => {
+    const { store, handler } = createHandler();
+    await handler.handlePublishMessage(makePublishMessage({ contextGraphId: CONTEXT_GRAPH, nquads }), CONTEXT_GRAPH);
+    expect(await store.countQuads()).toBe(0);
+  });
+
+  it('refuses a broadcast whose manifest root entity is not an absolute IRI', async () => {
+    const { store, handler } = createHandler();
+    await handler.handlePublishMessage(makePublishMessage({
+      ual: 'did:dkg:mock:31337/0x1/1',
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
+      kas: [{ tokenId: 1, rootEntity: 'relative root', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
+    }), CONTEXT_GRAPH);
+    expect(await store.countQuads()).toBe(0);
+  });
+
   it('registers the sub-graph of a publish once and hands the inserted rows to the metadata projection', async () => {
     const store = new OxigraphStore();
     const subscriptions = new Map<string, ContextGraphSub>();

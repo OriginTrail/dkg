@@ -24,7 +24,7 @@ import {
 import { decodeKAUpdateRequest } from '@origintrail-official/dkg-core';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { skolemizeByEntity } from './auto-partition.js';
-import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
+import { assertWritableQuadTerms, validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
 import { computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
 import { hasValidGraphScopedContent } from './graph-publish-envelope.js';
 import {
@@ -282,7 +282,7 @@ export class UpdateHandler {
         vmBatch & ((1n << 96n) - 1n),
       );
       const nquadsStr = new TextDecoder().decode(nquads);
-      const quads = parseSimpleNQuads(nquadsStr);
+      const quads = assertWritableQuadTerms(parseSimpleNQuads(nquadsStr), manifest.map((m) => m.rootEntity));
 
       const privateRoots = manifest
         .map((m) => m.privateMerkleRoot)

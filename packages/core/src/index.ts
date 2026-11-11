@@ -407,6 +407,8 @@ export {
 export {
   formatIriPrefix,
   formatSparqlTerm,
+  isSparqlTermValidationError,
+  SPARQL_TERM_VALIDATION_ERROR_CODE,
   SparqlTermValidationError,
   unwrapIri,
   type SparqlTermContext,

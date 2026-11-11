@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { metrics as otelMetrics } from '@opentelemetry/api';
-import { rebuildMetrics } from '@origintrail-official/dkg-core';
+import { rebuildMetrics, SparqlTermValidationError } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '../src/index.js';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
@@ -46,7 +46,7 @@ describe('dkg.store.sparql_invalid_terms_total', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const store = new OxigraphStore();
     const points = await captureCounters(async () => {
-      await store.dropGraph('urn:graph{x}');
+      await expect(store.dropGraph('urn:graph{x}')).rejects.toThrow(SparqlTermValidationError);
     });
     await store.close();
 
@@ -58,7 +58,7 @@ describe('dkg.store.sparql_invalid_terms_total', () => {
         operation: 'dropGraph',
         position: 'graph',
         kind: 'iri',
-        enforcement: 'observe',
+        enforcement: 'reject',
       },
     }]);
     expect(points.filter((point) => point.attributes && 'enforcement' in point.attributes)).toHaveLength(1);
@@ -68,13 +68,13 @@ describe('dkg.store.sparql_invalid_terms_total', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const store = new OxigraphStore();
     const points = await captureCounters(async () => {
-      // The N-Quads load rejects it, but only after the insert has counted it.
+      // The insert counts it, then refuses it before the N-Quads load.
       await expect(store.insert([{
         subject: 'http://ex.org/s',
         predicate: 'http://ex.org/p',
         object: '"42"^^<integer>',
         graph: 'http://ex.org/g',
-      }])).rejects.toThrow(/No scheme found in an absolute IRI/);
+      }])).rejects.toThrow(SparqlTermValidationError);
     });
     await store.close();
 
@@ -86,7 +86,7 @@ describe('dkg.store.sparql_invalid_terms_total', () => {
         operation: 'insert',
         position: 'datatype',
         kind: 'relative-iri',
-        enforcement: 'observe',
+        enforcement: 'reject',
       },
     }]);
   });
@@ -96,15 +96,16 @@ describe('dkg.store.sparql_invalid_terms_total', () => {
     const store = new OxigraphStore();
     let counted: typeof observed.counted;
     try {
-      await store.dropGraph('urn:graph^x');
-      await store.deleteBySubjectPrefix('urn:graph^x', 'urn:bad prefix');
+      await expect(store.dropGraph('urn:graph^x')).rejects.toThrow(SparqlTermValidationError);
+      await expect(store.deleteBySubjectPrefix('urn:graph^x', 'urn:ok/')).rejects.toThrow(SparqlTermValidationError);
+      await expect(store.deleteBySubjectPrefix('urn:graph', 'urn:bad prefix')).rejects.toThrow(SparqlTermValidationError);
       counted = observed.counted;
     } finally {
       observed.restore();
       await store.close();
     }
     const point = (operation: string, position: string) => ({
-      value: 1, adapter: 'oxigraph', operation, position, kind: 'iri', enforcement: 'observe',
+      value: 1, adapter: 'oxigraph', operation, position, kind: 'iri', enforcement: 'reject',
     });
     expect(counted).toEqual([
       point('dropGraph', 'graph'),
