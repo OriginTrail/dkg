@@ -137,6 +137,7 @@ export {
   getTracer, withSpan, linkedSpan, currentTraceIds, activeSpanContext,
   getMetrics, rebuildMetrics, type WithSpanOpts, type DkgMetrics,
 } from './telemetry-api.js';
+export { recordViewSemanticsDelta } from './view-semantics-delta-metric.js';
 export * from './crypto/index.js';
 export * from './proto/index.js';
 export {

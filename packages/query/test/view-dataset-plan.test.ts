@@ -11,7 +11,7 @@ import { ScopedQueryViolationError } from '../src/scoped-query-error.js';
 import { prepareGraphScope } from '../src/sparql-graph-scope.js';
 import {
   SemanticsUnsupportedError, VIEW_NOT_READY_RETRY_AFTER_SECONDS, ViewNotReadyError,
-  assertNoMergedSemanticsWithoutView, isViewDatasetPlanCurrent, planViewDataset, requestedViewSemantics,
+  assertNoMergedSemanticsWithoutView, isViewDatasetPlanCurrent, mergedViewDatasetPlan, planViewDataset, requestedViewSemantics,
   withMergedViewDataset, type MergedViewDatasetPlan, type ViewReadGraphs,
 } from '../src/view-dataset-plan.js';
 
@@ -27,7 +27,8 @@ function row(readGraph: string, state: ReadGraphState = 'ready', generation = 7,
 }
 
 function readGraphs(rows: readonly ReadGraphStateRow[], options: {
-  keeps?: (key: ReadGraphKey) => boolean; defaultSemantics?: ViewReadGraphs['defaultSemantics'];
+  keeps?: (key: ReadGraphKey) => boolean; serves?: (key: ReadGraphKey) => boolean;
+  defaultSemantics?: ViewReadGraphs['defaultSemantics'];
 } = {}): ViewReadGraphs & { kept: ReadGraphKey[] } {
   const kept: ReadGraphKey[] = [];
   const byGraph = new Map(rows.map(entry => [entry.readGraph, entry]));
@@ -37,6 +38,7 @@ function readGraphs(rows: readonly ReadGraphStateRow[], options: {
     state: (readGraph) => byGraph.get(readGraph),
     identity: workingMemoryIdentityRule({ defaultAgentAddress: DEFAULT_AGENT, peerId: PEER_ID }),
     defaultSemantics: options.defaultSemantics,
+    ...(options.serves ? { serves: options.serves } : {}),
   };
 }
 
@@ -147,6 +149,15 @@ describe('planning a view query', () => {
       .toMatchObject({ code: SEMANTICS_UNSUPPORTED_CODE, message: 'semantics "merged" does not apply to this scope on this node' });
   });
 
+  it('answers requests merged only from a read graph the node serves, when it says which', () => {
+    const kept = readGraphs([row(VM)], { serves: () => false, defaultSemantics: () => 'merged' });
+    expect(refusal(() => planViewDataset('verifiable-memory', CG, { semantics: 'merged' }, kept)))
+      .toMatchObject({ code: SEMANTICS_UNSUPPORTED_CODE, message: 'semantics "merged" does not apply to this scope on this node' });
+    expect(planViewDataset('verifiable-memory', CG, {}, kept)).toEqual({ kind: 'per-asset' });
+    const served = readGraphs([row(VM)], { serves: () => true });
+    expect(planViewDataset('verifiable-memory', CG, { semantics: 'merged' }, served)).toEqual({ kind: 'merged', readGraph: VM, generation: 7 });
+  });
+
   it('answers 503 for an explicit merged without a state row, and a default per asset', () => {
     const source = readGraphs([], { defaultSemantics: () => 'merged' });
     expect(refusal(() => planViewDataset('verifiable-memory', CG, { semantics: 'merged' }, source)))
@@ -169,6 +180,26 @@ describe('planning a view query', () => {
       expect(error).toMatchObject({ code: VIEW_NOT_READY_CODE, retryable: true, retryAfterSeconds: VIEW_NOT_READY_RETRY_AFTER_SECONDS });
       expect((error as ViewNotReadyError).hint).toContain('per-asset');
     }
+  });
+});
+
+describe('the merged plan of a sample', () => {
+  const plan: MergedViewDatasetPlan = { kind: 'merged', readGraph: VM, generation: 7 };
+
+  it('names the read graph whatever the query asked for, also where requests are not answered merged yet', () => {
+    for (const source of [readGraphs([row(VM)]), readGraphs([row(VM)], { serves: () => false })]) {
+      for (const semantics of [undefined, 'per-asset', 'merged'] as const) {
+        expect(mergedViewDatasetPlan('verifiable-memory', CG, { semantics }, source)).toEqual(plan);
+      }
+    }
+  });
+
+  it('has none where merged does not apply or the read graph is not ready, and never throws', () => {
+    expect(mergedViewDatasetPlan('verifiable-memory', CG, {}, undefined)).toBeUndefined();
+    expect(mergedViewDatasetPlan('verifiable-memory', CG, {}, readGraphs([row(VM)], { keeps: () => false }))).toBeUndefined();
+    expect(mergedViewDatasetPlan('verifiable-memory', CG, {}, readGraphs([row(VM, 'dirty')]))).toBeUndefined();
+    expect(mergedViewDatasetPlan('verifiable-memory', CG, { minTrust: TrustLevel.Endorsed }, readGraphs([row(VM)]))).toBeUndefined();
+    expect(mergedViewDatasetPlan('verifiable-memory', CG, { minTrust: 'Endorsed' as never }, readGraphs([row(VM)]))).toBeUndefined();
   });
 });
 
