@@ -218,16 +218,21 @@ export function isExactRegistryWrite(contextGraphId: string, write: ReadGraphReg
   // A store makes every inserted blank node a fresh one, whatever its label, so an added fact on a blank node
   // never joins a cached subject with the same label: only reading the facts after the write tells.
   const addsBlankNode = (quads: readonly Quad[]) => ownerFactsAmong(contextGraphId, quads).some((fact) => fact.subject.startsWith('_:'));
+  // An IRI the grammar refuses may reach the store rewritten, as some adapters drop the characters that break an IRI,
+  // so in the store it can name another term than here: only reading the facts again tells.
+  const ownQuads = (quads: readonly Quad[]) => quads.filter((quad) => registryOwnersOfGraph(quad.graph).includes(contextGraphId));
+  const namesUnsafeIri = (quads: readonly Quad[]) => ownQuads(quads).some((quad) => [quad.subject, quad.predicate, quad.object].some(isUnsafeIri));
   switch (write.kind) {
     case 'quads':
-      return !removesLoosely(write.removed) && !unreadable(write.added) && !addsBlankNode(write.added);
+      return !removesLoosely(write.removed) && !unreadable(write.added) && !addsBlankNode(write.added)
+        && !namesUnsafeIri(write.removed) && !namesUnsafeIri(write.added);
     case 'match':
       return ![write.subject, write.object].some((term) => term !== undefined && isComparedLoosely(term))
-        && ![write.subject, write.predicate, write.object].some((term) => term !== undefined && isBracketedIri(term));
+        && ![write.subject, write.predicate, write.object].some((term) => term !== undefined && (isBracketedIri(term) || isUnsafeIri(term)));
     case 'subject':
-      return !isComparedLoosely(write.subject) && ![write.subject, write.predicate].some((term) => term !== undefined && isBracketedIri(term))
-        && !unreadable(write.quads);
-    case 'graph': return !unreadable(write.quads);
+      return !isComparedLoosely(write.subject) && ![write.subject, write.predicate].some((term) => term !== undefined && (isBracketedIri(term) || isUnsafeIri(term)))
+        && !unreadable(write.quads) && !namesUnsafeIri(write.quads);
+    case 'graph': return !unreadable(write.quads) && !namesUnsafeIri(write.quads);
     case 'all': return write.parts.every((part) => isExactRegistryWrite(contextGraphId, part));
     default: return true;
   }
@@ -240,6 +245,17 @@ export function isExactRegistryWrite(contextGraphId: string, write: ReadGraphReg
  */
 function isComparedLoosely(term: string): boolean {
   return term.startsWith('"') || term.startsWith('_:');
+}
+
+/** A term that is no literal and no blank node, and that is no IRI a query can carry as written. */
+function isUnsafeIri(term: string): boolean {
+  if (term.startsWith('"') || term.startsWith('_:')) return false;
+  try {
+    assertSafeIri(unwrapIri(term));
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 /** An IRI written in angle brackets: a SPARQL adapter takes it as the IRI, the embedded engine's own delete skips it. */
