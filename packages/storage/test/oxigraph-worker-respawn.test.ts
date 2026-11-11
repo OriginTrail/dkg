@@ -149,6 +149,36 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
     }
   });
 
+  it('loses a write acknowledged after the last snapshot, and moves the recovery generation', async () => {
+    // What the read-graph runtime keys its reconciliation on: a respawned worker reloads the last snapshot, so a
+    // write it acknowledged but had not flushed yet is gone, and the generation has moved past the one the runtime
+    // last saw (with `ready` false until the replacement serves).
+    const store = makeStore(path);
+    try {
+      await store.insert(quads(10));
+      await store.flush();
+      const readRecovery = asStoreRecoveryGenerationReader(store)!;
+      const before = readRecovery()!;
+      expect(before.ready).toBe(true);
+
+      // Acknowledged, but only scheduled for the 50ms debounced flush. A 50k insert then keeps the single worker
+      // thread busy past that delay, so the thread dies before the flush can run.
+      await store.insert(quads(5, 'urn:test:unflushed'));
+      const busy = store.insert(quads(50_000, 'urn:test:busy'));
+      await killWorker(store);
+      await expect(busy).rejects.toThrow(/oxigraph-worker restarted — retry/);
+      expect(readRecovery()).toEqual({ generation: before.generation + 1, ready: false });
+
+      // The replacement holds the snapshot: the flushed write is there, the unflushed one is not.
+      expect(await store.countQuads('urn:test:g')).toBe(10);
+      expect(await store.countQuads('urn:test:unflushed')).toBe(0);
+      expect(await store.countQuads('urn:test:busy')).toBe(0);
+      expect(readRecovery()).toEqual({ generation: before.generation + 1, ready: true });
+    } finally {
+      await store.close().catch(() => {});
+    }
+  });
+
   it('rejects an in-flight op at kill time with the retryable "restarted — retry" message', async () => {
     const store = makeStore(path);
     try {
