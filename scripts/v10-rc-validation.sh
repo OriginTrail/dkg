@@ -287,10 +287,11 @@ section "5. VM REPLICATION — public data on other nodes"
 # Published KA quads live in the verifiable-memory layer on peer nodes.
 # The default query view is a legacy/local root-graph view and is not a
 # reliable cross-node replication assertion for the per-KA VM layout.
-# A core that is not in the update's storage set catches it up by sync, and on
-# a busy mesh that took a little over three minutes (187 s against a 180 s
-# budget). The poll still ends as soon as all three nodes see the update, so
-# the longer default only changes runs that would otherwise fail.
+# A core outside the update's storage set gets it by sync. On a devnet started
+# minutes earlier, its first sync attempt was refused, and after a backoff the
+# update came with a later reconcile pass: 187 s against a 180 s budget. The
+# poll still ends as soon as all three nodes see the update, so the longer
+# default only changes runs that would otherwise fail.
 GOSSIP_BUDGET_S="${RC_VALIDATION_GOSSIP_BUDGET_S:-300}"
 # Per-request curl timeout makes the poll budget real: if a node wedges
 # its HTTP socket, a bare `post` (no `--max-time`) would hang the whole
