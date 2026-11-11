@@ -494,8 +494,10 @@ export {
 } from './read-graph/runtime.js';
 export {
   READ_GRAPHS_UNSUPPORTED_CODE,
+  READ_GRAPH_MAINTENANCE_FAILED_CODE,
   READ_GRAPH_WRITE_REFUSED_CODE,
   ReadGraphStore,
+  ReadGraphMaintenanceError,
   ReadGraphWriteRefusedError,
   ReadGraphsUnsupportedError,
   readGraphLayerOf,
