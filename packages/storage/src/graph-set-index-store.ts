@@ -1,6 +1,7 @@
-import { filterGraphInventory, readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
+import { boundGraphInventory, filterGraphInventory, measureGraphInventory, readCompleteGraphInventory, readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
 import { graphCatalogFlightKey } from './graph-catalog-flight-key.js';
-import { isStoreResponseTooLargeError } from './http-response-limit.js';
+import { assertGraphCatalogWithinInternalLimit, internalCatalogReadOptions, isStoreInternalLimitError, readCompleteGraphCatalog } from './graph-catalog-internal-limit.js';
+import { graphCatalogRefreshKind, recordGraphCatalogSize, timeGraphCatalogRefresh } from './graph-catalog-metrics.js';
 import { composeGraphEnumerationVisibility, isStorageHiddenGraph } from './graph-enumeration-visibility.js';
 import { namedGraphsFromQuads, endsWithHighSurrogate, normalizeGraphUris, queryOptionsFromUpdateOptions } from "./graph-set-index-utils.js";
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
@@ -88,9 +89,12 @@ export async function loadSortedGraphCatalog(
     === 'function'
     ? store as TripleStore & SortedGraphSetSource
     : null;
-  const graphs = await (sortedSource
-    ? sortedSource.listGraphsSorted(options)
-    : createSortedUniqueStringCatalog(await store.listGraphs(options)));
+  const graphs = await readCompleteGraphCatalog(options, async internal => sortedSource
+    ? sortedSource.listGraphsSorted(internal)
+    : createSortedUniqueStringCatalog(await store.listGraphs(internal)));
+  // The ceiling bounds the list even if a store ignores byte options. The caller receives the complete
+  // list, so its own limit bounds that list too.
+  assertGraphCatalogWithinInternalLimit(graphs);
   assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
   return graphs;
 }
@@ -489,7 +493,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async listGraphsSorted(options?: QueryOptions): Promise<SortedGraphCatalog> {
-    if (this.enabled) return (await this.loadCurrentSortedGraphs(options)).graphs;
+    if (this.enabled) return boundGraphInventory(await this.loadCurrentSortedGraphs(options), options).graphs;
     return createSortedUniqueStringCatalog((await this.readGraphInventory(undefined, options)).graphs.filter(Boolean));
   }
 
@@ -498,22 +502,22 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async readGraphInventory(prefix: string | undefined, options?: QueryOptions): Promise<MeasuredGraphInventory> {
+    // A caller pays for, and is bounded by, what it receives; the full read under it is node work.
     if (!this.enabled) {
       const inventory = prefix === undefined ? await readGraphInventory(this.inner, options) : await readGraphInventoryByPrefix(this.inner, prefix, options);
-      assertGraphCatalogWithinResponseLimit(inventory.graphs, options?.maxResponseBytes);
       return filterGraphInventory(inventory, graph => !isStorageHiddenGraph(graph));
     }
     const inventory = await this.loadCurrentSortedGraphs(options);
-    if (prefix === undefined) return inventory;
+    if (prefix === undefined) return boundGraphInventory(inventory, options);
     // A split surrogate need not occupy a contiguous code-point-sorted range.
-    if (endsWithHighSurrogate(prefix)) return filterGraphInventory(inventory, graph => graph.startsWith(prefix));
+    if (endsWithHighSurrogate(prefix)) return boundGraphInventory(filterGraphInventory(inventory, graph => graph.startsWith(prefix)), options);
     const matches: string[] = [];
     for (let index = codePointLowerBound(inventory.graphs, prefix); index < inventory.graphs.length; index += 1) {
       const graph = inventory.graphs[index]!;
       if (!graph.startsWith(prefix)) break;
       matches.push(graph);
     }
-    return { graphs: matches, materializedBytes: inventory.materializedBytes };
+    return boundGraphInventory(measureGraphInventory(matches), options);
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
@@ -565,17 +569,22 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     options?: QueryOptions,
   ): Promise<ReadonlySet<string>> {
     const priority = refreshPriority(source, options);
+    // A full catalog read is node work under the internal ceiling: one flight for every caller. It carries
+    // no caller's signal; each caller races its own cancellation in ensureGraphSet.
+    const scanOptions = internalCatalogReadOptions({ ...options, signal: undefined });
     // The coordinator owns the complete promotion policy: lower-priority cold
     // seeds/revalidations cannot capture later normal or ACK readers, while
     // equal/lower-priority callers reuse the best in-flight scan.
     return this.refreshCoordinator.run(priority, async (flight) => {
       try {
-        return await this.refreshIndexLoop(source, options, flight);
+        return await this.refreshIndexLoop(source, scanOptions, flight);
       } catch (error: unknown) {
-        if (source !== 'revalidate' || isStoreResponseTooLargeError(error)) throw error;
-        // Cancellation, cold seeds, and mutation-dirty rebuilds are strict
-        // correctness paths even if another refresh published in parallel.
-        if (options?.signal?.aborted || !this.catalog.initialized || this.pendingFullRefresh) {
+        // A warm revalidation over the internal ceiling fails closed, like a cold seed; any
+        // other failed warm revalidation keeps the last catalog (below).
+        if (source !== 'revalidate' || isStoreInternalLimitError(error)) throw error;
+        // Cold seeds and mutation-dirty rebuilds are strict correctness paths
+        // even if another refresh published in parallel.
+        if (!this.catalog.initialized || this.pendingFullRefresh) {
           throw error;
         }
         // A newer promoted refresh already published a usable graph set. Do
@@ -591,7 +600,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         this.noteRevalidationFailure();
         return this.catalog.current!;
       }
-    }, graphCatalogFlightKey(options));
+    }, graphCatalogFlightKey(scanOptions));
   }
 
   private async refreshIndexLoop(
@@ -617,8 +626,8 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         ? { ...options, priority: 'background', source: 'graph-set-index.rebuild' }
         : options;
       const scan = this.refreshCoordinator.beginScan(flight);
-      const discovered = await readGraphInventory(this.inner, scanOptions);
-      assertGraphCatalogWithinResponseLimit(discovered.graphs, scanOptions?.maxResponseBytes);
+      const discovered = await timeGraphCatalogRefresh(graphCatalogRefreshKind(sourceForScan),
+        () => readCompleteGraphInventory(this.inner, scanOptions));
       const next = new Set(
         discovered.graphs.filter(
           (graph) => Boolean(graph) && !isStorageHiddenGraph(graph),
@@ -644,7 +653,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
           graphCount: next.size,
         });
       }
-      this.replaceGraphSet(next, sourceForScan, discovered.materializedBytes);
+      this.replaceGraphSet(next, sourceForScan);
       return this.catalog.current!;
     }
   }
@@ -699,8 +708,9 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     this.resetRevalidationSchedule();
   }
 
-  private replaceGraphSet(next: Set<string>, source: GraphSetRefreshSource, materializedBytes?: number): void {
-    const { added, removed } = this.catalog.replace(next, materializedBytes);
+  private replaceGraphSet(next: Set<string>, source: GraphSetRefreshSource): void {
+    const { added, removed } = this.catalog.replace(next);
+    recordGraphCatalogSize(this.catalog.measure());
     this.revalidateFailureCount = 0;
     this.nextRevalidateAt = this.now() + this.revalidateMs;
     if (added.length > 0 || removed.length > 0 || source !== 'seed') {
@@ -763,7 +773,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       // If another continuation invalidated/replaced the catalog after
       // ensureGraphSet() resolved, retry instead of manufacturing an empty or
       // stale enumeration from unrelated mutable state.
-      const sorted = this.catalog.measuredFor(members, options?.maxResponseBytes);
+      const sorted = this.catalog.measuredFor(members);
       if (sorted) return sorted;
       throwIfAborted(options?.signal);
     }

@@ -49,6 +49,7 @@ import {
   type SparqlUpdatePlan,
 } from './sparql-statements.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
+import { readCompleteGraphCatalog } from '../graph-catalog-internal-limit.js';
 import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
 import { isReadOnlyStoreOperation, type StoreOperation, type StoreOperationOutcome } from '../store-operation-outcome.js';
@@ -736,15 +737,14 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
   }
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
-    const r = await this.queryWithOperation(
+    // The complete list is node state: the internal catalog ceiling bounds the read, not a caller's limit.
+    const r = await readCompleteGraphCatalog(options, internal => this.queryWithOperation(
       'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
-      options,
+      internal,
       'listGraphs',
-    );
+    ));
     if (r.type !== 'bindings') return [];
-    return r.bindings
-      .map((b) => b.g)
-      .filter(this.graphEnumerationVisibility);
+    return r.bindings.map((b) => b.g).filter(this.graphEnumerationVisibility);
   }
 
   // -------------------------------------------------------------------
