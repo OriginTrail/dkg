@@ -27,7 +27,7 @@ describe('Edge and Core', () => {
   });
 
   it('are capitalised in UI text', () => {
-    const files = walk(resolve(__dirname, '../src/ui')).filter((f) => f.endsWith('.tsx'));
+    const files = walk(resolve(__dirname, '../src/ui')).filter((f) => f.endsWith('.tsx') || f.endsWith('copy.generated.ts')); // the Marketplace's text table is shown text too
     const found = files.flatMap((f) => lowerCaseRoles(withoutComments(readFileSync(f, 'utf8'))).map((hit) => `${f}: ${hit}`));
     expect(found).toEqual([]);
   });
