@@ -2,9 +2,12 @@ import { MemoryLayer, compareCodePoint, parseReadGraphIri } from '@origintrail-o
 import {
   READ_GRAPH_STATES,
   markReadGraphDirty,
+  parseReadGraphStateRows,
   readGraphLayerOf,
+  readGraphStateRowsQuery,
   removeReadGraph,
   type ReadGraphJobContext,
+  type ReadGraphStore,
 } from '@origintrail-official/dkg-storage';
 import { dkgDir } from '../../config.js';
 import {
@@ -55,10 +58,12 @@ interface ReadGraphRow {
  *
  * `status`, `rebuild` and `drop` take an optional `contextGraphId` and `layer`
  * (wm, swm, vm), as query parameters for `status` and in the JSON body for the
- * others, and work on the read graphs that have a row in the node's state, in
- * IRI order; a read graph that fails is reported and the others go on. A
- * caller that goes away ends the work: the running read graph stops at its
- * next store call and no other one starts.
+ * others, and work on the read graphs that have a state row, in the state
+ * mirror or in the store, in IRI order. A removal that stopped part way has
+ * taken its read graph out of the mirror but left its dirty row in the store,
+ * so it is listed and dropped again. A read graph that fails is reported and
+ * the others go on. A caller that goes away ends the work: the running read
+ * graph stops at its next store call and no other one starts.
  */
 export async function handleReadGraphRoutes(ctx: RequestContext, options: { dataDir?: string } = {}): Promise<void> {
   const { req, res, path } = ctx;
@@ -81,9 +86,10 @@ export async function handleReadGraphRoutes(ctx: RequestContext, options: { data
   }
   const store = ctx.agent.store;
   const layer = readGraphLayerOf(store);
+  const stored = layer ? await storedRows(layer, gone.signal) : [];
   if (action === 'status') {
     const status = ctx.agent.readGraphStatusV1();
-    const rows = selected(status?.readGraphs ?? layer?.runtime.mirror.rows() ?? [], parsed.request);
+    const rows = selected(withStored(status?.readGraphs ?? layer?.runtime.mirror.rows() ?? [], stored), parsed.request);
     return jsonResponse(res, 200, {
       readGraphs: rows.map(view),
       states: Object.fromEntries(READ_GRAPH_STATES.map((state) => [state, rows.filter((row) => row.state === state).length])),
@@ -95,7 +101,7 @@ export async function handleReadGraphRoutes(ctx: RequestContext, options: { data
 
   const job: ReadGraphJobContext = { store, dataDir: options.dataDir ?? dkgDir(), signal: gone.signal, source: `api.readGraphs.${action}` };
   const answers: Record<string, unknown>[] = [];
-  for (const { readGraph } of selected(layer?.runtime.mirror.rows() ?? [], parsed.request)) {
+  for (const { readGraph } of selected(withStored(layer?.runtime.mirror.rows() ?? [], stored), parsed.request)) {
     if (gone.signal.aborted) break;
     try {
       if (action === 'rebuild') {
@@ -120,6 +126,19 @@ function jsonOf(body: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+/** The state rows the store holds, read below the read-graph layer. */
+async function storedRows(layer: ReadGraphStore, signal: AbortSignal): Promise<ReadGraphRow[]> {
+  const result = await layer.innerStore.query(readGraphStateRowsQuery(), { priority: 'background', signal, source: 'api.readGraphs.rows' });
+  return parseReadGraphStateRows(result.type === 'bindings' ? result.bindings : []).rows;
+}
+
+/** The rows of the mirror, and the stored rows of read graphs the mirror does not hold. */
+function withStored(mirrored: readonly ReadGraphRow[], stored: readonly ReadGraphRow[]): ReadGraphRow[] {
+  const rows = new Map(stored.map((row) => [row.readGraph, row]));
+  for (const row of mirrored) rows.set(row.readGraph, row);
+  return [...rows.values()];
 }
 
 /** The rows of the read graphs a request names, in IRI order. */

@@ -134,6 +134,11 @@ function agentOf(store: TripleStore): ReturnType<typeof workloadAgent> {
   return agent;
 }
 
+async function triplesOf(adapter: TripleStore, graph: string): Promise<string[]> {
+  const result = await adapter.query(`SELECT ?s ?p ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
+  return (result.type === 'bindings' ? result.bindings : []).map((row) => `${row.s} ${row.p} ${row.o}`).sort();
+}
+
 function fakeReq(method: string, path: string, rawBody = '') {
   const req = Readable.from([]);
   Object.assign(req, { method, url: path, headers: { host: '127.0.0.1' }, __dkgPrebufferedBody: Buffer.from(rawBody, 'utf8') });
@@ -316,18 +321,6 @@ describe('POST /api/store/read-graphs/rebuild', () => {
     expect(dropped.body).toEqual({ removed: [{ readGraph: IRI.vm, outcome: 'current' }] });
     expect(store.runtime.mirror.get(IRI.vm)).toBeUndefined();
   });
-});
-
-describe('POST /api/store/read-graphs/drop', () => {
-  it('removes each read graph, its contents and its row', async () => {
-    const { adapter, dataDir, store, stateOf } = await node();
-    const answer = await call(store, 'POST', `${READ_GRAPHS_PATH}/drop`, { body: { contextGraphId: OTHER }, dataDir });
-    expect(answer).toEqual({ handled: true, status: 200, body: { removed: [{ readGraph: IRI.otherVm, outcome: 'done' }] } });
-    expect(stateOf(IRI.otherVm)).toBeUndefined();
-    const left = await adapter.query(`SELECT ?s WHERE { GRAPH <${IRI.otherVm}> { ?s ?p ?o } }`);
-    expect(left.type === 'bindings' ? left.bindings : undefined).toEqual([]);
-    expect(((await call(store, 'GET', READ_GRAPHS_PATH)).body!.readGraphs as unknown[])).toHaveLength(4);
-  });
 
   it('starts no other read graph once the caller has gone away', async () => {
     const { adapter, dataDir, store, stateOf } = await node();
@@ -341,6 +334,57 @@ describe('POST /api/store/read-graphs/drop', () => {
     const [first, ...rest] = [IRI.vm, IRI.swm, IRI.codeVm, IRI.wm].sort();
     expect((answer.body!.marked as Array<{ readGraph: string }>).map((marked) => marked.readGraph)).toEqual([first]);
     expect(rest.map(stateOf)).toEqual(rest.map(() => 'ready'));
+  });
+});
+
+describe('POST /api/store/read-graphs/drop', () => {
+  it('removes each read graph, its contents and its row', async () => {
+    const { adapter, dataDir, store, stateOf } = await node();
+    const answer = await call(store, 'POST', `${READ_GRAPHS_PATH}/drop`, { body: { contextGraphId: OTHER }, dataDir });
+    expect(answer).toEqual({ handled: true, status: 200, body: { removed: [{ readGraph: IRI.otherVm, outcome: 'done' }] } });
+    expect(stateOf(IRI.otherVm)).toBeUndefined();
+    const left = await adapter.query(`SELECT ?s WHERE { GRAPH <${IRI.otherVm}> { ?s ?p ?o } }`);
+    expect(left.type === 'bindings' ? left.bindings : undefined).toEqual([]);
+    expect(((await call(store, 'GET', READ_GRAPHS_PATH)).body!.readGraphs as unknown[])).toHaveLength(4);
+  });
+
+  it('stops the running removal when the caller goes away, starts no other, and lists it for a later drop that ends it', async () => {
+    const { adapter, dataDir, store, stateOf } = await node();
+    const [first, second] = [IRI.vm, IRI.codeVm].sort();
+    const res = fakeRes();
+    const afterClose: string[] = [];
+    let closed = false;
+    const query = adapter.query.bind(adapter);
+    const querySpy = vi.spyOn(adapter, 'query').mockImplementation(async (sparql, options) => {
+      // The caller goes away once the removal has taken the first read graph out of the mirror, before any of it is deleted.
+      if (!closed && sparql === `ASK { GRAPH <${first}> { ?s ?p ?o } }`) {
+        closed = true;
+        res.emit('close');
+      }
+      return query(sparql, options);
+    });
+    const update = adapter.update.bind(adapter);
+    const updateSpy = vi.spyOn(adapter, 'update').mockImplementation(async (sparql, options) => {
+      if (closed) afterClose.push(sparql);
+      return update(sparql, options);
+    });
+    const answer = await call(store, 'POST', `${READ_GRAPHS_PATH}/drop`, { body: { contextGraphId: CG, layer: 'vm' }, dataDir, res });
+    expect(closed).toBe(true);
+    expect(answer.body).toEqual({ removed: [{ readGraph: first, outcome: 'error', error: expect.any(String) }] });
+    // Nothing was sent after the caller left: the read graph keeps its triples, out of the mirror; the next one was not started.
+    expect(afterClose).toEqual([]);
+    expect(await triplesOf(adapter, first)).not.toEqual([]);
+    expect(stateOf(first)).toBeUndefined();
+    expect(stateOf(second)).toBe('ready');
+    querySpy.mockRestore();
+    updateSpy.mockRestore();
+    // The store still holds its dirty row: the status lists it, and the next drop ends the removal.
+    const listed = (await call(store, 'GET', `${READ_GRAPHS_PATH}?contextGraphId=${CG}&layer=vm`)).body!.readGraphs;
+    expect(listed).toEqual([expect.objectContaining({ readGraph: first, state: 'dirty' }), expect.objectContaining({ readGraph: second, state: 'ready' })]);
+    const again = await call(store, 'POST', `${READ_GRAPHS_PATH}/drop`, { body: { contextGraphId: CG, layer: 'vm' }, dataDir });
+    expect(again.body).toEqual({ removed: [first, second].map((readGraph) => ({ readGraph, outcome: 'done' })) });
+    expect(await triplesOf(adapter, first)).toEqual([]);
+    expect((await call(store, 'GET', `${READ_GRAPHS_PATH}?contextGraphId=${CG}&layer=vm`)).body!.readGraphs).toEqual([]);
   });
 });
 
