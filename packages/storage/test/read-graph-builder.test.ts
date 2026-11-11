@@ -1404,7 +1404,7 @@ describe('read-graph start-up', () => {
     expect(readUnstoredReadGraphMarks(second)).toEqual(new Map());
   });
 
-  it('leaves the working-memory identity of a backend this process already started, and where its changes are recorded, to the start-up that loaded it', async () => {
+  it('leaves the working-memory identity of a backend this process already started to the start-up that loaded it, and records it in every data directory a start-up named', async () => {
     const adapter = new HookedStore();
     const [first, second] = [mkdtempSync(join(tmpdir(), 'read-graph-builder-')), mkdtempSync(join(tmpdir(), 'read-graph-builder-'))];
     dirs.push(first, second);
@@ -1420,11 +1420,25 @@ describe('read-graph start-up', () => {
     const later = guardReadGraphPartition(wrapReadGraphLayer(adapter, config));
     expect(readGraphLayerOf(later)!.runtime).toBe(layer.runtime);
     expect(await startReadGraphs(later, { dataDir: second, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
-    // The running rule stays the one the first start-up installed, and its changes are recorded where that start-up noted.
+    // The running rule stays the one the first start-up installed. The later start-up's agent may be the one a later
+    // process starts alone, so its data directory records the running identity in place of the one it held.
     expect(layer.runtime.workingMemoryIdentity.addressesOf(AGENT)).toEqual([AGENT, 'peer-1']);
+    expect(recordedWorkingMemoryIdentity(second)).toEqual({ defaultAgentAddress: AGENT, peerId: 'peer-1' });
+    // A change of identity is recorded in both.
     expect(await installWorkingMemoryIdentity({ store }, { peerId: 'peer-1' })).toEqual({ marked: [], recorded: true });
     expect(recordedWorkingMemoryIdentity(first)).toEqual({ peerId: 'peer-1' });
-    expect(recordedWorkingMemoryIdentity(second)).toEqual({ defaultAgentAddress: other, peerId: 'peer-1' });
+    expect(recordedWorkingMemoryIdentity(second)).toEqual({ peerId: 'peer-1' });
+    // A later start-up while a change is not yet recorded keeps no record of the identity before it.
+    const third = mkdtempSync(join(tmpdir(), 'read-graph-builder-'));
+    dirs.push(third);
+    writeFileSync(join(third, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE), JSON.stringify({ defaultAgentAddress: other, peerId: 'peer-1' }));
+    adapter.onFlush = () => { throw new Error('no space left on the device'); };
+    expect(await installWorkingMemoryIdentity({ store }, { defaultAgentAddress: other, peerId: 'peer-1' })).toEqual({ marked: [], recorded: false });
+    adapter.onFlush = undefined;
+    expect(await startReadGraphs(guardReadGraphPartition(wrapReadGraphLayer(adapter, config)), { dataDir: third, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    expect([first, second, third].map((dir) => recordedWorkingMemoryIdentity(dir))).toEqual([undefined, undefined, undefined]);
+    expect(await installWorkingMemoryIdentity({ store }, { defaultAgentAddress: other, peerId: 'peer-1' })).toEqual({ marked: [], recorded: true });
+    expect([first, second, third].map((dir) => recordedWorkingMemoryIdentity(dir))).toEqual([0, 1, 2].map(() => ({ defaultAgentAddress: other, peerId: 'peer-1' })));
   });
 
   it('records a change of identity in the data directory its backend started from, whichever directory the installation names', async () => {
