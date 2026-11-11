@@ -39,6 +39,7 @@ import {
   readGraphStateMarkDirtyAtStart,
   readGraphStateRowQuery,
   readGraphStateRowsQuery,
+  servingReadGraphGeneration,
   type ReadGraphStateRow,
 } from '../src/read-graph/state.js';
 import { readGraphBackfillBatch, readGraphFencedDrop, readGraphHoldsTripleAsk } from '../src/read-graph/statements.js';
@@ -638,6 +639,34 @@ describe('marking a read graph dirty', () => {
     expect(await markReadGraphDirty(context, codeVm)).toBeUndefined();
     expect(layer.runtime.mirror.get(codeVm)).toBeUndefined();
     await expect(markReadGraphDirty(context, `${fixture.root}/plain`)).rejects.toThrow(/Not a read-graph IRI/);
+  });
+
+  it('keeps a read graph out of service while its dirty mark is not stored, until a build lands', async () => {
+    const { adapter, fixture, layer, context } = await open();
+    const [key] = fixture.keys as [ReadGraphKey];
+    const readGraph = readGraphIri(key);
+    expect(await buildReadGraph(context, key)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    const built = layer.runtime.mirror.get(readGraph)!;
+    // A check found a mismatch and marked the mirror, and its mark did not reach the store.
+    layer.runtime.mirror.set({ ...built, state: 'dirty', generation: built.generation + 1 });
+    const marking = `<${readGraph}> <${READ_GRAPH_STATE_PREDICATES.state}> "dirty"`;
+    let failures = 2;
+    adapter.onUpdate = (sparql) => {
+      if (failures > 0 && sparql.split('\n').some((line) => line.startsWith('INSERT {') && line.includes(marking))) {
+        failures -= 1;
+        throw new Error('connection reset');
+      }
+    };
+    // Neither the builder's mark nor a direct one lands: the stored row still says ready, and nothing serves it.
+    await expect(buildReadGraph(context, key)).rejects.toThrow('connection reset');
+    expect(servingReadGraphGeneration(layer.runtime.mirror.get(readGraph))).toBeUndefined();
+    await expect(markReadGraphDirty(context, readGraph)).rejects.toThrow('connection reset');
+    expect(layer.runtime.mirror.get(readGraph)?.state).toBe('dirty');
+    expect((await readStoredReadGraphRow(adapter, readGraph)).row).toEqual(built);
+    // Once a mark lands, the build rebuilds the read graph, and it serves again.
+    expect(await buildReadGraph(context, key)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    expect(servingReadGraphGeneration(layer.runtime.mirror.get(readGraph))).toBe(layer.runtime.mirror.get(readGraph)!.generation);
+    await expectUnion(adapter, layer, fixture, key);
   });
 
   it('reads the row back after a request that failed, and keeps a change that landed', async () => {

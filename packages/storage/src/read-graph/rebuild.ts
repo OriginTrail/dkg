@@ -460,7 +460,10 @@ class ReadGraphJob {
    * One checked change of the row, under the lock the caller holds, planned
    * from the stored row `from`. Returns the stored row read back afterwards,
    * which the mirror then holds. A request that failed but whose change reads
-   * back counts as done.
+   * back counts as done. One that failed and did not land throws; if it would
+   * have taken the read graph out of service, the mirror stays out of service
+   * even where the stored row still says ready: that row shows only that the
+   * change did not land, not that the contents are fit to serve.
    */
   async transition(from: ReadGraphStateRow | undefined, change: ReadGraphTransition): Promise<ReadGraphStateRow | undefined> {
     const to = nextReadGraphState(from, change);
@@ -473,8 +476,11 @@ class ReadGraphJob {
     }
     const stored = await this.stored();
     if (stored.damaged) throw new ReadGraphJobError(`The state row of ${this.readGraph} is damaged`);
+    if (failure && !sameRow(stored.row, to)) {
+      if (to?.state === 'ready' || stored.row?.state !== 'ready') setMirror(this.runtime.mirror, this.readGraph, stored.row);
+      throw failure.error;
+    }
     setMirror(this.runtime.mirror, this.readGraph, stored.row);
-    if (failure && !sameRow(stored.row, to)) throw failure.error;
     return stored.row;
   }
 
