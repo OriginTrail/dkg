@@ -86,7 +86,7 @@ describe("a backend's reasoning effort with tools", () => {
   it('is sent as the settings name it with a call that carries tools, and with no other', async () => {
     const seen = stubFetch(200, OK);
     const backend = connectorOf({ ...SOL, reasoningEffortWithTools: 'none' });
-    await backend.complete({ ...CALL, tools: TOOLS, toolChoice: 'auto' });
+    await backend.complete({ ...CALL, tools: TOOLS, tool_choice: 'auto' });
     expect(seen[0]!.body).toEqual({
       model: 'gpt-5.6-sol', messages: CALL.messages, max_completion_tokens: 7, stream: false, tools: TOOLS, tool_choice: 'auto', reasoning_effort: 'none',
     });
