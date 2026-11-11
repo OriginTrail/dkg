@@ -199,8 +199,12 @@ export interface ServeAnswerReceived extends Omit<ServeAnswer, 'receipt'> {
 
 export type ServeResponseReceived = ServeAnswerReceived | ServeRefusal;
 
-/** Why a seller refuses a call, in the order of its checks. */
+/**
+ * Why a seller refuses a call, in the order of its checks, and whether to retry it. A buyer reads only these codes:
+ * one it does not know is no answer, which leaves the seller out of routing for a while.
+ */
 export const SERVE_ERRORS = {
+  /** The call as sent: it does not decode, needs tools the service does not take, or the service's backend refused it as made. */
   BadRequest: false,
   NotServing: true,
   EpochEnding: true,
@@ -217,6 +221,7 @@ export const SERVE_ERRORS = {
   NonceUsed: false,
   BudgetExhausted: false,
   UnitsTooFew: false,
+  /** The service's backend failed: no answer, nothing to serve, or a refusal about the seller's key, quota or load. */
   UpstreamError: true,
   /** The seller could not check or serve the call now: a chain read or its ledger failed. */
   Unavailable: true,

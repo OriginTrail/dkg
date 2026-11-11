@@ -12,6 +12,16 @@ All notable changes to the DKG V10 node are documented here. The format is based
   `none` for that service. Calls with tools then carry
   `reasoning_effort: "none"`, and calls without tools keep the model's own
   reasoning.
+- An error from one service's backend no longer takes a seller's other
+  services away from buyers. When the backend refuses a call as made (400,
+  404, 413, 415 or 422), the seller refuses it with a code buyers don't
+  retry. Buyers then try other sellers first for ten minutes and still route
+  the seller's other services, where before they left the seller out of
+  every service for ten minutes. No answer, timeouts, and 401, 403, 408,
+  409, 429 and 5xx answers are handled as before. A service whose backend
+  refuses a call with tools before serving one stops offering tools until
+  the node restarts, so buyers answer such calls with `tools_unsupported`
+  instead of sending them.
 
 ## [10.1.0] - Unreleased
 

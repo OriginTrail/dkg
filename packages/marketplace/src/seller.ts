@@ -39,6 +39,14 @@
  *   unit cap the input could use up is refused before the backend runs, and
  *   the backend is asked for no more output than the cap pays for. A call
  *   whose backend ran but gave nothing to sign is not run again.
+ * - **A backend that refuses a call.** An answer about the call itself (400,
+ *   404, 413, 415 or 422) is refused as `BadRequest`, which a buyer does not
+ *   retry: it tries other sellers first for a while, and still routes this
+ *   seller's other services. Any other failure (no answer in time, or 401,
+ *   403, 408, 409, 429 or 5xx, about the seller's key, quota or load) is
+ *   `UpstreamError`, to retry. A service whose backend refuses a call with
+ *   tools (400 or 422) and has served none since the node started takes no
+ *   tool calls until the node restarts: its quotes stop saying it takes them.
  * - **The end of the epoch.** Within `stopServingSeconds` of it, new calls are
  *   refused: their receipts could not land in time.
  * - **The job.** Ticks every `tickSeconds` from the epoch's start, and once
@@ -99,6 +107,13 @@ export const MAX_BACKEND_TIMEOUT_MS = PEER_LIMITS.serveTimeoutMs - 10_000;
 const RECEIPT_SECONDS = 5;
 /** Calls whose backend ran but gave nothing to sign, kept so a repeat does not run it again: the newest this many. */
 const FAILED_CALLS_KEPT = 10_000;
+/**
+ * A backend's statuses about the call itself, not the seller's key, quota or load: the same call would be refused
+ * again, so it is refused as `BadRequest`, not to retry. Any other failure is `UpstreamError`, to retry.
+ */
+const CALL_REFUSED: ReadonlySet<number> = new Set([400, 404, 413, 415, 422]);
+/** Of those, the ones that say the backend cannot take what the call carries: for a call with tools, maybe its tools. */
+const CALL_INVALID: ReadonlySet<number> = new Set([400, 422]);
 
 export interface SellerService {
   /** The model's URN; `serviceId` is its keccak256. */
@@ -112,7 +127,10 @@ export interface SellerService {
   connector: Connector;
   /** The connector's time limit: a request that expires sooner, and the receipt after it, is refused. `DEFAULT_BACKEND_TIMEOUT_MS` by default. */
   backendTimeoutMs?: number;
-  /** Whether it takes tool calls: said in its quotes. Off unless set. */
+  /**
+   * Whether it takes tool calls: said in its quotes. Off unless set; off too, until the node restarts, once its
+   * backend refuses a call with tools as made (400 or 422) and has served none.
+   */
   tools?: boolean;
 }
 
@@ -154,6 +172,10 @@ export class Seller {
   private domain: MarketplaceDomain | undefined;
   /** service id => whether its backend answered the last call. */
   private readonly backends = new Map<string, 'up' | 'down'>();
+  /** The services whose backend has served a call with tools since the node started: it takes them. */
+  private readonly toolsServed = new Set<string>();
+  /** The services whose backend refused a call with tools as made and has served none: they take no tool calls now. */
+  private readonly toolsOff = new Set<string>();
   /** The chain's time as the last tick read it, and when, by this host's clock. */
   private lastTimes: { times: EpochTimes; at: number } | undefined;
   /** request digest => the refusal of a call whose backend ran but gave nothing to sign, oldest first. */
@@ -339,7 +361,7 @@ export class Seller {
       if (!s) continue;
       offers.push({
         serviceId: s.serviceId, pricePerUnit: (await this.priceFor(s, times.epoch, times.epoch)).toString(), available, capacity: s.capacity,
-        ...(s.tools ? { tools: true as const } : {}),
+        ...(this.takesTools(s) ? { tools: true as const } : {}),
       });
     }
     return { seller: this.identityId.toString(), epoch: times.epoch, offers };
@@ -382,7 +404,7 @@ export class Seller {
     const service = this.services.get(request.serviceId);
     if (!service) return refusal('UnknownService');
     // A buyer sends a call with tools only to a seller whose quote says it takes them.
-    if (!service.tools && usesTools(call.body)) return refusal('BadRequest', 'this service takes no tool calls');
+    if (!this.takesTools(service) && usesTools(call.body)) return refusal('BadRequest', 'this service takes no tool calls');
     if (request.pricePerUnit !== await this.priceFor(service, times.epoch, times.epoch)) return refusal('WrongPrice');
     // 2. A subscription of this epoch that funds the service, under its price cap.
     const subscription = await chain.getSubscription(request.subscriptionId);
@@ -444,11 +466,16 @@ export class Seller {
         ...(tools && parallelToolCalls !== undefined ? { parallelToolCalls } : {}),
       });
       this.backends.set(service.serviceId, 'up');
+      if (call.body.tools) this.toolsServedBy(service);
     } catch (err) {
       this.backends.set(service.serviceId, 'down');
-      // The backend's detail (a missing key's variable, an address) stays in the log.
+      // The backend's detail (a missing key's variable, an address, its own words) stays in the log.
       this.deps.log?.(`[marketplace] the backend of ${service.model} failed: ${err instanceof UpstreamError ? err.message : String(err)}`);
-      return this.failedOnce(requestDigest, refusal('UpstreamError'));
+      const status = err instanceof UpstreamError ? err.status : undefined;
+      // No answer, or one about the seller's key, quota or load: the call may be served later.
+      if (status === undefined || !CALL_REFUSED.has(status)) return this.failedOnce(requestDigest, refusal('UpstreamError'));
+      if (call.body.tools && CALL_INVALID.has(status)) this.toolsRefusedBy(service, status);
+      return this.failedOnce(requestDigest, refusal('BadRequest', `the service's backend refused the call (${status})`));
     }
     try {
       const input = BigInt(completion.promptTokens);
@@ -508,6 +535,28 @@ export class Seller {
     this.failed.set(requestDigest, refused);
     if (this.failed.size > FAILED_CALLS_KEPT) this.failed.delete(this.failed.keys().next().value!);
     return refused;
+  }
+
+  /** Whether a service takes tool calls now: its settings say so, and its backend has not refused them (`toolsRefusedBy`). */
+  private takesTools(service: SellerService): boolean {
+    return service.tools === true && !this.toolsOff.has(service.serviceId);
+  }
+
+  /** A call with tools served: the backend takes them, so a refusal of one is that call's own. */
+  private toolsServedBy(service: SellerService): void {
+    this.toolsServed.add(service.serviceId);
+    this.toolsOff.delete(service.serviceId);
+  }
+
+  /**
+   * A call with tools refused as made (400 or 422) by a backend that has served none since the node started: it may
+   * take no tools as this service sends them, so the service takes no tool calls until the node restarts, and buyers
+   * stop sending it calls it would only refuse. Once its backend has served one, a refusal is that call's own.
+   */
+  private toolsRefusedBy(service: SellerService, status: number): void {
+    if (this.toolsServed.has(service.serviceId) || this.toolsOff.has(service.serviceId)) return;
+    this.toolsOff.add(service.serviceId);
+    this.deps.log?.(`[marketplace] ${service.model} takes no tool calls until the node restarts: its backend refused one (${status}) and has served none`);
   }
 
   /** Whether `request` expires before the service's backend could answer and its receipt be signed, at chain time `now`. */
