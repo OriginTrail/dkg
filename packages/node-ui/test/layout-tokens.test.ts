@@ -1,20 +1,9 @@
 // Layers, breakpoints, motion and line height come from fixed scales (see
 // DESIGN.md · Layout and overlays).
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { cssFiles as css, findAll, read, tsxFiles as tsx, withoutCssComments as strip } from './helpers/source.js';
 
-const UI = join(__dirname, '../src/ui');
-const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (
-  e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]
-));
-const files = walk(UI);
-const css = files.filter((f) => f.endsWith('.css'));
-const tsx = files.filter((f) => f.endsWith('.tsx'));
-const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '');
-const matches = (list: string[], pattern: RegExp, keep: (m: RegExpMatchArray) => boolean = () => true) => list.flatMap((file) => (
-  [...strip(readFileSync(file, 'utf8')).matchAll(pattern)].filter(keep).map((m) => `${relative(UI, file)}: ${m[0].slice(0, 70)}`)
-));
+const matches = (list: string[], pattern: RegExp, keep: (m: RegExpMatchArray) => boolean = () => true) => findAll(list, pattern, { prepare: strip, keep });
 
 const OFF_SCALE_SPACING = 208;
 const INLINE_STYLES = 314;
@@ -51,14 +40,14 @@ describe('layout tokens', () => {
   it('does not add spacing outside the scale', () => {
     const sheets = css.filter((f) => !f.endsWith('00-theme.css'));
     const spacing = /(?:padding|margin|gap)[a-z-]*\s*:[^;}]*/g;
-    const offScale = sheets.flatMap((f) => [...strip(readFileSync(f, 'utf8')).matchAll(spacing)]
+    const offScale = sheets.flatMap((f) => [...strip(read(f)).matchAll(spacing)]
       .flatMap((m) => [...m[0].matchAll(/(?<![\w.#-])(\d+)px\b/g)].filter((v) => v[1] !== '1' && v[1] !== '0')));
     expect(offScale.length).toBeLessThanOrEqual(OFF_SCALE_SPACING);
   });
 
   it('does not add inline styles', () => {
     const count = tsx.filter((f) => !f.includes('design-system'))
-      .reduce((n, f) => n + (readFileSync(f, 'utf8').match(/style=\{\{/g) ?? []).length, 0);
+      .reduce((n, f) => n + (read(f).match(/style=\{\{/g) ?? []).length, 0);
     expect(count).toBeLessThanOrEqual(INLINE_STYLES);
   });
 

@@ -7,22 +7,11 @@
 // It reads names, not behaviour: a name that only survives in a comment counts
 // as used, and any class under a family built at runtime (`ds-tone-${tone}`)
 // counts as used.
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { ROOT, cssFiles, read, uiFiles, walk, withoutCssComments as withoutComments } from './helpers/source.js';
 
-const ROOT = resolve(__dirname, '..');
-const UI = join(ROOT, 'src/ui');
-
-const walk = (dir: string): string[] => readdirSync(dir).flatMap((name) => {
-  const path = join(dir, name);
-  return statSync(path).isDirectory() ? walk(path) : [path];
-});
-const read = (file: string) => readFileSync(file, 'utf-8');
-const withoutComments = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, '');
-
-const uiFiles = walk(UI);
-const css = uiFiles.filter((f) => f.endsWith('.css')).map((f) => withoutComments(read(f)));
+const css = cssFiles.map((f) => withoutComments(read(f)));
 const code = uiFiles.filter((f) => /\.(tsx?|html)$/.test(f)).map(read).join('\n');
 const codeWords = new Set(code.match(/[a-zA-Z_][\w-]*/g));
 
@@ -58,7 +47,7 @@ describe('retired names', () => {
   });
 
   it('every token is read somewhere', () => {
-    const theme = withoutComments(read(join(UI, 'styles/00-theme.css')));
+    const theme = withoutComments(read('styles/00-theme.css'));
     const tokens = [...new Set([...theme.matchAll(/(?:^|[;{\s])(--[a-z0-9-]+)\s*:/gm)].map((m) => m[1]!))];
     const readers = css.join('\n').replace(/--[a-z0-9-]+\s*:/g, '') + code;
     const isRead = (token: string) => new RegExp(`${token}(?![\\w-])`).test(readers);

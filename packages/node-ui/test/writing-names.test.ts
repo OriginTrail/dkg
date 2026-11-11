@@ -1,13 +1,8 @@
 // Edge and Core name the role a node performs, so they keep their capitals in
 // anything a person reads (DESIGN.md · Type). Comments and role values in code are fine.
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { read, tsxFiles, where } from './helpers/source.js';
 
-const walk = (dir: string): string[] => readdirSync(dir).flatMap((name) => {
-  const path = join(dir, name);
-  return statSync(path).isDirectory() ? walk(path) : [path];
-});
 const withoutComments = (source: string) => source
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .replace(/^\s*\/\/.*$/gm, '');
@@ -27,8 +22,7 @@ describe('Edge and Core', () => {
   });
 
   it('are capitalised in UI text', () => {
-    const files = walk(resolve(__dirname, '../src/ui')).filter((f) => f.endsWith('.tsx'));
-    const found = files.flatMap((f) => lowerCaseRoles(withoutComments(readFileSync(f, 'utf8'))).map((hit) => `${f}: ${hit}`));
+    const found = tsxFiles.flatMap((f) => lowerCaseRoles(withoutComments(read(f))).map((hit) => `${where(f)}: ${hit}`));
     expect(found).toEqual([]);
   });
 });

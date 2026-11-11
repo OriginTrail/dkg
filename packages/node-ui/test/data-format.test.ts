@@ -1,18 +1,12 @@
 // One format per kind of value (see DESIGN.md · Data display).
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, relative } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { bpsToPercent, formatBps, formatDateTime, formatNumber, truncateAddress } from '../src/ui/lib/format.js';
 import { classText, jsxElements, parseTsx, tagName, uiJsxElements } from './helpers/jsx.js';
+import { codeFiles, findAll, where } from './helpers/source.js';
 
-const UI = join(__dirname, '../src/ui');
-const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (
-  e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]
-));
-const code = walk(UI).filter((f) => /\.tsx?$/.test(f) && !f.endsWith(join('lib', 'format.ts')));
-const matches = (pattern: RegExp, list = code) => list.flatMap((file) => (
-  [...readFileSync(file, 'utf8').matchAll(pattern)].map(([m]) => `${relative(UI, file)}: ${m.slice(0, 70)}`)
-));
+// The shared formats themselves live in lib/format.ts.
+const code = codeFiles.filter((f) => where(f) !== 'lib/format.ts');
+const matches = (pattern: RegExp) => findAll(code, pattern);
 
 describe('shared formats', () => {
   it('shortens only what it can shorten', () => {

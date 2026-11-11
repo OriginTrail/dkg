@@ -57,21 +57,16 @@ export function useShellRouting(): void {
   // Going anywhere shows the page.
   useEffect(() => {
     const layout = useLayoutStore.getState();
-    const routeState = state as { openAgents?: boolean; agentsOpened?: boolean } | null;
-    if (routeState?.openAgents) {
-      // Wide screens get the panel expanded, narrow ones the floating panel. Both steps
-      // set a state rather than toggle one, so running this twice (StrictMode replays
-      // mount effects) leaves the panel open.
+    // The /agent-hub redirect replaces its entry with { openAgents }. That replace opens the
+    // panel: expanded on a wide screen, floating on a narrow one. Both steps set a state
+    // rather than toggle one, so StrictMode's replayed effect leaves the panel open. Coming
+    // back to the entry later with Back or Forward is a POP, and shows the page like any
+    // other navigation.
+    if ((state as { openAgents?: boolean } | null)?.openAgents && navigationType === NavigationType.Replace) {
       layout.openRight();
       if (!narrow) layout.setRightExpanded(true);
-      // Mark the entry as handled rather than clearing it, so the replace (or two, under
-      // StrictMode) is recognised below and doesn't count as going somewhere.
-      navigate(pathname + search, { replace: true, state: { agentsOpened: true } });
       return;
     }
-    // Only the redirect's own replace keeps the panel open. Coming back to the marked entry
-    // later with Back or Forward (a POP) is going somewhere like any other.
-    if (routeState?.agentsOpened && navigationType === NavigationType.Replace) return;
     layout.revealCentre();
     // Only a new address counts: a new history entry, or a path or query string that
     // changed without one (an entry pushed outside the router has no key).

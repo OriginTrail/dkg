@@ -1,10 +1,6 @@
 // Every page has one title style, one gutter and one width (DESIGN.md · Layout).
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-
-const UI = join(__dirname, '../src/ui');
-const read = (file: string) => readFileSync(join(UI, file), 'utf8');
+import { cssFiles, read, where } from './helpers/source.js';
 const PAGES = [
   'views/DashboardView.tsx', 'views/MemoryStackView.tsx', 'pages/Operations.tsx', 'pages/Settings.tsx',
   'pages/conviction/ConvictionOverview.tsx',
@@ -24,7 +20,7 @@ describe('pages', () => {
 
   it('takes the gutter from one token', () => {
     expect(read('styles/03-left-center.css')).toMatch(/\.v10-center-content \{[^}]*padding: var\(--page-gutter\)/);
-    const styles = readdirSync(join(UI, 'styles')).map((name) => read(`styles/${name}`)).join('\n');
+    const styles = cssFiles.filter((f) => where(f).startsWith('styles/')).map((f) => read(f)).join('\n');
     expect(styles).not.toMatch(/\.ds-page \{[^}]*padding/);
     expect(styles).not.toMatch(/margin: -24px -28px/);
   });
