@@ -11,12 +11,10 @@ import { MemoryLayer, readScope } from '@origintrail-official/dkg-core';
 import { BlazegraphStore } from '../../src/adapters/blazegraph.js';
 import { OxigraphStore } from '../../src/adapters/oxigraph.js';
 import { guardReadGraphPartition } from '../../src/read-graph-partition-store.js';
-import { workingMemoryIdentityRule } from '../../src/read-graph/membership.js';
 import { wrapReadGraphLayer } from '../../src/read-graph/read-graph-store.js';
 import { buildReadGraph } from '../../src/read-graph/rebuild.js';
 import type { TripleStoreConfig } from '../../src/triple-store-composition.js';
 import type { TripleStore } from '../../src/triple-store.js';
-import { AGENT } from './read-graph-layer-conformance.js';
 
 const contextGraphId = process.env.DKG_KILL_CG;
 if (!contextGraphId) throw new Error('DKG_KILL_CG is required');
@@ -53,7 +51,8 @@ adapter.update = async (sparql, options) => {
   if (n >= stopAfter) await new Promise(() => setInterval(() => undefined, 60_000));
 };
 
-const layer = wrapReadGraphLayer(adapter, { ...config, readGraphs: { workingMemoryIdentity: workingMemoryIdentityRule({ defaultAgentAddress: AGENT }) } });
+// A verifiable-memory read graph's membership does not depend on a working-memory identity, so the process needs none.
+const layer = wrapReadGraphLayer(adapter, config);
 const store = guardReadGraphPartition(layer);
 await buildReadGraph(
   { store, batching: { graphsPerBatch: 1, maxGraphsPerBatch: 1, pauseRatio: 0 } },

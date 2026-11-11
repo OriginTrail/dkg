@@ -6,6 +6,7 @@ import { MemoryLayer, readGraphIri, readScope } from '@origintrail-official/dkg-
 import { matchesGraphNameTest, readGraphMembership, workingMemoryIdentityRule } from '../../src/read-graph/membership.js';
 import type { TripleStore } from '../../src/triple-store.js';
 import { KILL_AT_COMMIT_AGENT, killAtCommitHolders, killAtCommitMember } from './read-graph-kill-fixture.js';
+import { killWriterOnLine } from './killed-writer-process.js';
 
 const REPO = fileURLToPath(new URL('../../../../', import.meta.url));
 const WRITER = fileURLToPath(new URL('./read-graph-kill-writer.ts', import.meta.url));
@@ -33,35 +34,13 @@ export async function killWriterAt(env: Readonly<Record<string, string>>, point:
   const child = spawn(process.execPath, ['--import', 'tsx', WRITER], {
     cwd: REPO, env: { ...process.env, ...env, DKG_KILL_TARGET: String(point.write) }, stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const arming = point.after === 'request' ? 'to-store' : 'returned';
+  const arming = `${point.after === 'request' ? 'to-store' : 'returned'} ${point.write}`;
+  const lines = await killWriterOnLine(child, line => line === arming, point.delayMs, 'The writer');
   const last: Record<string, number> = { sending: -1, 'to-store': -1, returned: -1 };
-  let output = '';
-  let stderr = '';
-  let killed = false;
-  let timedOut = false;
-  child.stderr.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-20_000); });
-  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
-    child.once('error', reject);
-    child.once('close', (code, signal) => resolve({ code, signal }));
-  });
-  const deadline = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 120_000);
-  child.stdout.on('data', (chunk: Buffer) => {
-    output += chunk.toString();
-    for (let end = output.indexOf('\n'); end >= 0; end = output.indexOf('\n')) {
-      const [event = '', n] = output.slice(0, end).split(' ');
-      output = output.slice(end + 1);
-      if (Object.hasOwn(last, event)) last[event] = Number(n);
-      if (!killed && event === arming && Number(n) === point.write) {
-        killed = true;
-        setTimeout(() => child.kill('SIGKILL'), point.delayMs);
-      }
-    }
-  });
-  try {
-    const { code, signal } = await exited;
-    if (timedOut) throw new Error(`The writer did not reach write ${point.write} within 120 s: ${stderr}`);
-    if (signal !== 'SIGKILL' || !killed) throw new Error(`The writer stopped by itself (code ${code}, signal ${signal}): ${stderr}`);
-  } finally { clearTimeout(deadline); }
+  for (const line of lines) {
+    const [event = '', n] = line.split(' ');
+    if (Object.hasOwn(last, event)) last[event] = Number(n);
+  }
   // The kill was timed from the target write itself, and the writer started nothing after it.
   expect(last.sending, 'the last write the writer started').toBe(point.write);
   expect(last['to-store'], 'the last write the layer handed to the store').toBe(point.write);

@@ -17,6 +17,7 @@ import { readGraphBackfillBatch, readGraphFencedDrop } from '../../src/read-grap
 import type { TripleStoreConfig } from '../../src/triple-store-composition.js';
 import type { TripleStore } from '../../src/triple-store.js';
 import { IDENTITY, expectEqualToMembers, memberData, readGraphTriples } from './read-graph-builder-qualification.js';
+import { killWriterOnLine } from './killed-writer-process.js';
 import { layerFixture } from './read-graph-layer-conformance.js';
 
 const REPO = fileURLToPath(new URL('../../../../', import.meta.url));
@@ -29,48 +30,31 @@ export interface BuilderKillPoint {
   readonly delayMs: number;
 }
 
-/** Run the builder process up to `point` and kill it with SIGKILL. It sends no copy batch after `point.batch`. */
-async function killBuilderAt(env: Readonly<Record<string, string>>, point: BuilderKillPoint): Promise<void> {
+/**
+ * Run the builder process up to `point` and kill it with SIGKILL. It sends no copy batch after
+ * `point.batch`. Resolves with whether that batch had returned when the process died.
+ */
+async function killBuilderAt(env: Readonly<Record<string, string>>, point: BuilderKillPoint): Promise<{ readonly returned: boolean }> {
   const child = spawn(process.execPath, ['--import', 'tsx', WRITER], {
     cwd: REPO, env: { ...process.env, ...env, DKG_KILL_BATCHES: String(point.batch) }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   const arming = point.after === 'request' ? `batch ${point.batch}` : `returned ${point.batch}`;
-  let output = '';
-  let stderr = '';
-  let killed = false;
-  let finished = false;
-  let timedOut = false;
-  child.stderr.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-20_000); });
-  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
-    child.once('error', reject);
-    child.once('close', (code, signal) => resolve({ code, signal }));
-  });
-  const deadline = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 120_000);
-  child.stdout.on('data', (chunk: Buffer) => {
-    output += chunk.toString();
-    for (let end = output.indexOf('\n'); end >= 0; end = output.indexOf('\n')) {
-      const line = output.slice(0, end);
-      output = output.slice(end + 1);
-      if (line === 'finished') finished = true;
-      if (!killed && line === arming) {
-        killed = true;
-        setTimeout(() => child.kill('SIGKILL'), point.delayMs);
-      }
-    }
-  });
-  try {
-    const { code, signal } = await exited;
-    if (timedOut) throw new Error(`The builder did not reach copy batch ${point.batch} within 120 s: ${stderr}`);
-    if (finished) throw new Error(`The build finished before copy batch ${point.batch}: the fixture needs more member graphs`);
-    if (signal !== 'SIGKILL' || !killed) throw new Error(`The builder stopped by itself (code ${code}, signal ${signal}): ${stderr}`);
-  } finally { clearTimeout(deadline); }
+  const lines = await killWriterOnLine(child, line => line === arming, point.delayMs, 'The builder');
+  if (lines.includes('finished')) throw new Error(`The build finished before copy batch ${point.batch}: the fixture needs more member graphs`);
+  expect(lines.filter(line => line.startsWith('batch ')).at(-1), 'the last copy batch the builder sent').toBe(`batch ${point.batch}`);
+  return { returned: lines.includes(`returned ${point.batch}`) };
 }
 
-/** Kill points: once a copy batch has returned, and while one is with the store. */
-export const BUILDER_KILL_POINTS: readonly BuilderKillPoint[] = [
-  { batch: 2, after: 'return', delayMs: 300 },
-  { batch: 3, after: 'request', delayMs: 0 },
-];
+/**
+ * Kill points for each engine. Blazegraph applies each request as it arrives: once a copy batch has
+ * returned, and while one is with the store, where the kill must land before the store's answer.
+ * Embedded Oxigraph applies a batch in memory at once and writes its file a moment later: once that
+ * dump has caught up, and right after a batch returned, before it has.
+ */
+export const BUILDER_KILL_POINTS: Readonly<Record<'oxigraph' | 'blazegraph', readonly BuilderKillPoint[]>> = {
+  blazegraph: [{ batch: 2, after: 'return', delayMs: 0 }, { batch: 3, after: 'request', delayMs: 0 }],
+  oxigraph: [{ batch: 2, after: 'return', delayMs: 300 }, { batch: 3, after: 'return', delayMs: 0 }],
+};
 
 /**
  * A build across a restart, on one engine through its production adapter: a builder process dies in
@@ -97,7 +81,7 @@ export function readGraphBuilderRestartSuite(backend: 'oxigraph' | 'blazegraph')
       if (manager && handles) await manager.disposeAll(handles);
     }, 60_000);
 
-    it.each(BUILDER_KILL_POINTS)('rebuilds to its members after a builder killed $delayMs ms after the $after of copy batch $batch', async (point) => {
+    it.each(BUILDER_KILL_POINTS[backend])('rebuilds to its members after a builder killed $delayMs ms after the $after of copy batch $batch', async (point) => {
       const fixture = layerFixture(`${run}-${sequence += 1}`);
       const dir = backend === 'oxigraph' ? await mkdtemp(join(tmpdir(), 'read-graph-restart-')) : undefined;
       const path = dir ? join(dir, 'store.nq') : undefined;
@@ -107,9 +91,11 @@ export function readGraphBuilderRestartSuite(backend: 'oxigraph' | 'blazegraph')
         const seeding = openAdapter();
         await seeding.insert([...fixture.facts, ...memberData(fixture)]);
         await seeding.close();
-        await killBuilderAt(path
+        const killed = await killBuilderAt(path
           ? { DKG_KILL_BACKEND: 'oxigraph', DKG_KILL_PATH: path, DKG_KILL_CG: fixture.contextGraphId }
           : { DKG_KILL_BACKEND: 'blazegraph', DKG_KILL_URL: url!, DKG_KILL_CG: fixture.contextGraphId }, point);
+        // A kill timed from a request landed before the store answered it: the batch was interrupted, not finished.
+        if (point.after === 'request') expect(killed.returned, 'the copy batch returned before the kill').toBe(false);
 
         // The next process opens the same store: this one, which has not touched these read graphs.
         const adapter = openAdapter();
@@ -119,7 +105,8 @@ export function readGraphBuilderRestartSuite(backend: 'oxigraph' | 'blazegraph')
           const [vm] = fixture.keys as [ReadGraphKey];
           const { wholeVm } = fixture.readGraphs;
           const left = (await readStoredReadGraphRow(adapter, wholeVm)).row;
-          if (backend === 'blazegraph' || point.after === 'return') expect(left, 'the row the dead builder left').toMatchObject({ state: 'building' });
+          // On Blazegraph every request the builder sent before the kill has its effect, and the embedded store has dumped its file 300 ms after a batch.
+          if (backend === 'blazegraph' || point.delayMs >= 300) expect(left, 'the row the dead builder left').toMatchObject({ state: 'building' });
           await startReadGraphs(store, { maintains: (key) => key.scope.contextGraphId === fixture.contextGraphId });
           if (left) {
             // The start leaves a build it does not own dirty, at a newer generation, before anything else runs.
