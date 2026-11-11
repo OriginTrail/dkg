@@ -4,6 +4,10 @@ import { MemoryLayer, READ_GRAPH_SEGMENT, readGraphIri, readGraphStateGraphIri, 
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { classifyScopedContentGraph, describeScopedContentGraph, isExcludedContentGraph } from '../src/scoped-content-partition.js';
 import { createScopedContentGraphRoutePolicy, selectLegacyScopedRouteGraphs } from '../src/scoped-content-graph-policy.js';
+import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
+import { ScopedQueryViolationError } from '../src/scoped-query-error.js';
+import { prepareGraphScope, rewriteGraphSet } from '../src/sparql-graph-scope.js';
+import type { QueryOptions } from '../src/query-engine.js';
 
 const CG = 'read-partition';
 const ROOT = `did:dkg:context-graph:${CG}`;
@@ -240,3 +244,31 @@ describe('queries and read-graph partitions', () => {
       .toEqual(byGraph(await reference.listContextGraphQueryPartitionReads(CG, { includeSharedMemory: true })));
   });
 });
+
+describe('read-graph partitions named by query options', () => {
+  const SELECT = 'SELECT ?s WHERE { ?s ?p ?o }';
+  const PARTITION_ID = `${CG}/${READ_GRAPH_SEGMENT}/cg/_verifiable_memory`;
+  it.each<[string, QueryOptions]>([
+    ['a view on a context graph ID inside a partition', { contextGraphId: PARTITION_ID, view: 'verifiable-memory' }],
+    ['a scoped read of that ID', { contextGraphId: PARTITION_ID }],
+    ['a legacy suffix', { contextGraphId: CG, graphSuffix: `${READ_GRAPH_SEGMENT}/cg/_shared_memory` as '_shared_memory' }],
+    ['an agent address', { contextGraphId: CG, view: 'working-memory', agentAddress: `0xab/${READ_GRAPH_SEGMENT}` }],
+    ['an agent alias', { contextGraphId: CG, view: 'working-memory', agentAddress: '0xab', agentAddressAliases: [`x/${READ_GRAPH_SEGMENT}`] }],
+    ['an assertion name', { contextGraphId: CG, view: 'working-memory', agentAddress: '0xab', assertionName: `${READ_GRAPH_SEGMENT}/state` }],
+    ['a verified graph', { contextGraphId: CG, view: 'verifiable-memory', verifiedGraph: `${READ_GRAPH_SEGMENT}/state` }],
+  ])('refuses %s', async (_, options) => {
+    await expect(new DKGQueryEngine(planted).query(SELECT, options)).rejects.toBeInstanceOf(ScopedQueryViolationError);
+  });
+
+  it('still answers the context graph itself', async () => {
+    const result = await new DKGQueryEngine(planted).query(SELECT, { contextGraphId: CG, view: 'verifiable-memory' });
+    expect(result.bindings.map(binding => binding.s)).toContain('urn:a');
+  });
+
+  it('refuses a scoped read whose graphs, however built, include a partition graph', () => {
+    const scope = prepareGraphScope(prepareSparql(SELECT));
+    expect(() => rewriteGraphSet(scope, [VM, READ_VM], 'values-union', 'oxigraph')).toThrow(ScopedQueryViolationError);
+    expect(rewriteGraphSet(scope, [VM, LEGACY], 'values-union', 'oxigraph').kind).toBe('ready');
+  });
+});
+
