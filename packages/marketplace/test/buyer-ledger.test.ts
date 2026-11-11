@@ -8,8 +8,8 @@
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { BUYER_LEDGER_FILE, BuyerLedger, type HeldReceipt, type KeyRecord } from '../src/index.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { BUYER_LEDGER_FILE, BuyerLedger, Journal, type HeldReceipt, type KeptReceipt, type KeyRecord } from '../src/index.js';
 
 const FIXTURE = join(__dirname, 'fixtures', 'legacy-buyer-journals');
 const SUB = (n: number) => `0x${n.toString(16).padStart(64, '0')}`;
@@ -30,11 +30,14 @@ function callOf(epoch: number, sub: string, nonce: number, value?: bigint, keyId
       : { state: 'held' as const, receipt: { requestDigest: sub, resultCommitment: sub, units: String(value), valueWei: String(value), completedAt: 6 }, receiptSignature: '0x' }),
   };
 }
+/** The same call accepted with its receipt, worth `value`. */
+const keptOf = (epoch: number, sub: string, nonce: number, value: bigint, keyId = KEY.keyId) => callOf(epoch, sub, nonce, value, keyId) as KeptReceipt;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'marketplace-buyer-ledger-'));
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -99,7 +102,7 @@ describe("the ledger's compaction", () => {
     for (const epoch of [1, 2]) {
       await ledger.takeNonce(epoch, SUB(epoch), 1n);
       await ledger.recordSent(callOf(epoch, SUB(epoch), 0));
-      await ledger.recordResult(callOf(epoch, SUB(epoch), 0, 7n), { value: 7n, at: 10 + epoch });
+      await ledger.recordAccepted(keptOf(epoch, SUB(epoch), 0, 7n), 10 + epoch);
     }
     await ledger.finalize(1, SUB(1), [], [{ keyId: KEY.keyId, value: 3n, at: 20 }]);
     expect(await ledgerLines()).toEqual([
@@ -133,12 +136,42 @@ describe("the ledger's compaction", () => {
   });
 });
 
+describe('an accepted call', () => {
+  it("is kept with its receipt's charge, then gives back the reservation it held; a write that fails gives back nothing", async () => {
+    const ledger = new BuyerLedger(dir);
+    await ledger.makeKey(KEY);
+    const send = async (nonce: number) => {
+      expect(await ledger.reserve(KEY.keyId, 100n)).toBe(true);
+      await ledger.recordSent(callOf(1, SUB(1), nonce));
+    };
+    // Its record cannot be written: counted at its receipt's value, the key not charged, the reservation still held.
+    await send(0);
+    vi.spyOn(Journal.prototype, 'append').mockRejectedValueOnce(new Error('disk full'));
+    await expect(ledger.recordAccepted(keptOf(1, SUB(1), 0, 7n), 3)).rejects.toThrow('disk full');
+    expect(ledger.calls.heldValue(`${SUB(1)}:0`)).toBe(7n);
+    expect((await ledger.keyList())[0]).toMatchObject({ spent: '0', lastUsedAt: null });
+    expect(ledger.reservedOf(KEY.keyId)).toBe(100n);
+    // Written: charged the receipt's value at the time given, and its own reservation given back.
+    await send(1);
+    await ledger.recordAccepted(keptOf(1, SUB(1), 1, 9n), 4);
+    expect((await ledger.keyList())[0]).toMatchObject({ spent: '9', lastUsedAt: 4 });
+    expect(ledger.reservedOf(KEY.keyId)).toBe(100n);
+    expect((await ledgerLines()).at(-1)).toEqual({ type: 'call', ...keptOf(1, SUB(1), 1, 9n), charge: { value: '9', at: 4 } });
+    // A call whose reservation the gateway's job gave back already gives back nothing more.
+    await send(2);
+    ledger.calls.release(callOf(1, SUB(1), 2));
+    await ledger.recordAccepted(keptOf(1, SUB(1), 2, 5n), 5);
+    expect((await ledger.keyList())[0]).toMatchObject({ spent: '14', lastUsedAt: 5 });
+    expect(ledger.reservedOf(KEY.keyId)).toBe(100n);
+  });
+});
+
 describe('a key the ledger does not hold', () => {
   it('cannot be revoked, reserves nothing, and is charged nothing', async () => {
     const ledger = new BuyerLedger(dir);
     expect(await ledger.revokeKey('dkgmk_none', 1)).toBeNull();
     expect(await ledger.reserve('dkgmk_none', 1n)).toBe(false);
-    await ledger.recordResult(callOf(1, SUB(1), 0, 5n, 'dkgmk_none'), { value: 5n, at: 2 });
+    await ledger.recordAccepted(keptOf(1, SUB(1), 0, 5n, 'dkgmk_none'), 2);
     await ledger.finalize(1, SUB(1), [], [{ keyId: 'dkgmk_none', value: 5n, at: 3 }]);
     expect(await ledger.keyList()).toEqual([]);
     expect(await ledgerLines()).toEqual([{ type: 'final', epoch: 1, rows: [] }]);

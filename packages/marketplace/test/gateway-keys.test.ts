@@ -9,7 +9,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AccessKeys, BUYER_LEDGER_FILE, Journal, type HeldReceipt } from '../src/index.js';
+import { AccessKeys, BUYER_LEDGER_FILE, Journal, type KeptReceipt } from '../src/index.js';
 
 let dir: string;
 const scopes = (budget: bigint) => ({ label: 'test-agent', budget, services: null, rps: 1_000, expiresAt: null });
@@ -17,7 +17,7 @@ const lines = async () => (await readFile(join(dir, BUYER_LEDGER_FILE), 'utf8'))
 const SUBSCRIPTION = `0x${'0a'.repeat(32)}`;
 let calls = 0;
 /** A call of `epoch` accepted with a receipt worth `value`, as the gateway records it. */
-const accepted = (keyId: string, value: bigint, epoch = 1): HeldReceipt => {
+const accepted = (keyId: string, value: bigint, epoch = 1): KeptReceipt => {
   const nonce = String(calls++);
   return {
     callId: `0x${nonce.padStart(64, '0')}`, epoch, subscriptionId: SUBSCRIPTION, budgetIndex: 0, seller: '1', keyId,
@@ -27,7 +27,7 @@ const accepted = (keyId: string, value: bigint, epoch = 1): HeldReceipt => {
   };
 };
 /** What the gateway does once a call's receipt is checked: the call kept with its key's charge, in one record. */
-const charge = (keys: AccessKeys, keyId: string, value: bigint, at: number, epoch = 1) => keys.ledger.recordResult(accepted(keyId, value, epoch), { value, at });
+const charge = (keys: AccessKeys, keyId: string, value: bigint, at: number, epoch = 1) => keys.ledger.recordAccepted(accepted(keyId, value, epoch), at);
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'marketplace-keys-'));

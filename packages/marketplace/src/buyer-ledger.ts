@@ -12,11 +12,13 @@
  *     call and charging its key is one record;
  *   - each epoch made final (`final`): its reconciliation.
  * Every change goes through one append, under one lock, and is applied in the
- * order each kind needs (`takeNonce`, `recordSent`, `recordResult`). One
- * compaction rewrites the journal when an epoch is made final, from what the
- * journal holds: the epoch's calls and nonce counters go, what they cost and
- * what the epoch's end charges fold into each key's total, and its
- * reconciliation is kept.
+ * order each kind needs (`takeNonce`, `recordSent`, `recordAccepted`,
+ * `recordUnresolved`); an accepted call is settled here whole, its record,
+ * its key's charge and the reservation it held given back. One compaction
+ * rewrites the journal when an epoch is made final, from what the journal
+ * holds: the epoch's calls and nonce counters go, what they cost and what the
+ * epoch's end charges fold into each key's total, and its reconciliation is
+ * kept.
  *
  * In memory it keeps the keys with what their calls in flight may still cost
  * (reservations, never written down), the calls not made final
@@ -30,7 +32,7 @@
  */
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CallBook, type HeldReceipt } from './gateway-book.js';
+import { CallBook, type HeldReceipt, type KeptReceipt } from './gateway-book.js';
 import { Journal, KeyedLock } from './journal.js';
 import type { KeptKey } from './keys.js';
 import type { ReconciledRow } from './reconcile.js';
@@ -202,16 +204,35 @@ export class BuyerLedger {
   }
 
   /**
-   * What came back for a sent call, in its record's place: counted at once,
-   * then on disk; a write that fails still leaves it counted while the node
-   * runs. A call accepted with its receipt carries `charge`, what it costs its
-   * key, in the same record, and the key takes it once that record is on disk.
+   * A sent call accepted with its checked receipt, settled in its record's
+   * place: counted at once at the receipt's value, then on disk with what it
+   * charges its key, the receipt's value at `at` (chain seconds). Once that
+   * record is on disk the key takes the charge, and the reservation the call
+   * held of the key's budget is given back. A write that fails leaves the call
+   * counted, its key not charged, and the reservation held.
    */
-  async recordResult(r: HeldReceipt, charge?: { value: bigint; at: number }): Promise<void> {
+  async recordAccepted(r: KeptReceipt, at: number): Promise<void> {
+    // Read before the record takes the call's place: a call kept with its receipt no longer holds its key.
+    const reserved = this.calls.isKeyHeld(r.callId) ? BigInt(r.request.maxValueWei) : 0n;
+    const value = BigInt(r.receipt.valueWei);
     this.epochs.add(r.epoch);
     this.calls.record(r);
-    await this.append({ type: 'call', ...r, ...(charge ? { charge: { value: charge.value.toString(), at: charge.at } } : {}) });
-    if (charge) this.charged(r.keyId, charge.value, charge.at);
+    await this.append({ type: 'call', ...r, charge: { value: value.toString(), at } });
+    this.charged(r.keyId, value, at);
+    this.release(r.keyId, reserved);
+  }
+
+  /**
+   * What came back for a sent call whose cost is not known, in its record's
+   * place: `refused`, its receipt failing a check, or `open`, its seller
+   * refusing it or never answering. Counted at once, its key's reservation
+   * still held, then on disk; a write that fails still leaves it counted while
+   * the node runs.
+   */
+  async recordUnresolved(r: HeldReceipt): Promise<void> {
+    this.epochs.add(r.epoch);
+    this.calls.record(r);
+    await this.append({ type: 'call', ...r });
   }
 
   /** The calls whose cost is not known, as read back, oldest epoch first: each its seller refused or never answered. */

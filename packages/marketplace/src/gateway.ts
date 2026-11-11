@@ -163,7 +163,7 @@ export interface GatewayDeps {
   log?: (message: string) => void;
 }
 
-export type { HeldReceipt } from './gateway-book.js';
+export type { HeldReceipt, KeptReceipt } from './gateway-book.js';
 
 /** How many calls `activity` answers. */
 const ACTIVITY_LIMIT = 200;
@@ -523,22 +523,17 @@ export class Gateway {
       return fail(502, 'seller_refused', `the seller refused the call: ${answer.code}`, { sellerCode: answer.code, retry: answer.retry });
     }
     const checked = await this.checkReceipt(domain, request, kept.callId, c.budgetIndex, answer);
-    // The key's reservation is the call's while it is held; checked, its receipt settles it below.
-    const reserved = this.book.isKeyHeld(kept.callId) ? request.maxValueWei : 0n;
-    const record: HeldReceipt = {
-      // A checked receipt is kept as decoded; a refused one as its seller sent it, whatever its shape.
-      ...kept, receipt: checked.receipt ? receiptToWire(checked.receipt) : (answer.receipt as ReceiptWire), receiptSignature: answer.receiptSignature,
-      state: checked.problem ? 'refused' : 'held', ...(checked.problem ? { problem: checked.problem } : {}),
-    };
     if (checked.problem) {
-      await this.ledger.recordResult(record);
+      // A receipt that fails a check is kept as its seller sent it, whatever its shape; the call keeps its key's reservation.
+      await this.ledger.recordUnresolved({
+        ...kept, receipt: answer.receipt as ReceiptWire, receiptSignature: answer.receiptSignature, state: 'refused', problem: checked.problem,
+      });
       router.failed(route.seller, c.times.epoch);
       return fail(502, 'bad_receipt', `the seller's receipt failed a check: ${checked.problem}`, { problem: checked.problem });
     }
     const receipt = checked.receipt!;
-    // Kept and charged to its key in one record; then its reservation goes.
-    await this.ledger.recordResult(record, { value: receipt.valueWei, at: c.times.now });
-    this.deps.keys.release(kept.keyId, reserved);
+    // Kept as decoded, its key charged the receipt's value in the same record; the ledger gives back the call's reservation.
+    await this.ledger.recordAccepted({ ...kept, receipt: receiptToWire(receipt), receiptSignature: answer.receiptSignature, state: 'held' }, c.times.now);
     const left = c.budget.value - used - this.book.heldValue(c.budgetKey);
     const { content, tool_calls: toolCalls, finish_reason: finish } = answer.result;
     const split = usageOf(answer.usage, receipt.units);
@@ -608,7 +603,7 @@ export class Gateway {
   /** A call its seller refused or never answered, kept; past `MAX_UNSETTLED_PER_SELLER` in its epoch, the seller is out for the rest of it. */
   private async keepUnsettled(r: HeldReceipt): Promise<void> {
     this.unsettled(r);
-    await this.ledger.recordResult(r);
+    await this.ledger.recordUnresolved(r);
   }
 
   private unsettled(r: HeldReceipt): void {
