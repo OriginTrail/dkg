@@ -112,6 +112,25 @@ describe('read-graph layer on embedded Oxigraph', () => {
       .toEqual({ failed: false, planned: true, mirror: 'ready@1', stored: 'ready@1' });
   });
 
+  it('deletes a blank node by its identity on such an adapter, leaving a twin with the same predicate and object', async () => {
+    // The embedded engine's own delete, which removes a stored blank node by its identity.
+    class ByIdentity extends OxigraphStore {
+      readonly readGraphCapabilities = Object.freeze({ methods: Object.freeze(['delete'] as const), serialUpdates: true, plansBlankNodeDeletes: false });
+    }
+    const { adapter, fixture, layer, store } = await layered(new ByIdentity());
+    const member = fixture.graphs[2]!;
+    await adapter.insert([q('_:twin', '"anchored"', member)]);
+    const labels = async () => {
+      const result = await adapter.query(`SELECT ?b WHERE { GRAPH <${member}> { ?b <${P}> "anchored" } }`);
+      return (result.type === 'bindings' ? result.bindings : []).map((row) => row.b!).sort();
+    };
+    const [first, second] = await labels();
+    expect([first, second].every((label) => label?.startsWith('_:'))).toBe(true);
+    await store.delete([q(first!, '"anchored"', member)]);
+    expect(await labels()).toEqual([second]);
+    expect(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)?.state).toBe('dirty');
+  });
+
   it('marks the read graphs of a write with an unknown outcome dirty, on an engine that may run it beside later requests', async () => {
     class Unsure extends PlanningOxigraphStore {
       override readonly readGraphCapabilities = { ...new PlanningOxigraphStore().readGraphCapabilities, serialUpdates: false };

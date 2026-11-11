@@ -276,12 +276,15 @@ function newRuntime(backend: string | undefined): ReadGraphBackendRuntime {
 }
 
 /**
- * The backend a store configuration names, from the option each built-in
- * adapter reads its location from (`createTripleStore`): the endpoint it
- * writes to for a server, the absolute path for an engine on disk. Other
- * options are ignored, so a stray one cannot change which store objects share
- * a runtime. `undefined` for an engine in memory, and for an adapter whose
- * location is not known here: such a store gets a runtime of its own.
+ * The backend a store configuration names. A built-in adapter is named by the
+ * option it reads its location from (`createTripleStore`): the endpoint it
+ * writes to for a server, the absolute path for an engine on disk; its other
+ * options cannot change which store objects share a runtime. An adapter
+ * registered under another name is named by the first location option it
+ * carries (an update or query endpoint, a URL, a path), so its store objects
+ * over one backend share a runtime too. `undefined` for an engine in memory,
+ * and for a configuration with no location: such a store gets a runtime of its
+ * own.
  */
 export function readGraphBackendIdentity(config: TripleStoreConfig): string | undefined {
   const options = config.options ?? {};
@@ -298,7 +301,13 @@ export function readGraphBackendIdentity(config: TripleStoreConfig): string | un
       const path = text('path');
       return path === undefined ? undefined : `path:${resolve(path)}`;
     }
-    default: return undefined;
+    case 'oxigraph': return undefined;
+    default: {
+      const url = text('updateEndpoint') ?? text('queryEndpoint') ?? text('url');
+      if (url !== undefined) return endpoint(url);
+      const path = text('path');
+      return path === undefined ? undefined : `path:${resolve(path)}`;
+    }
   }
 }
 
