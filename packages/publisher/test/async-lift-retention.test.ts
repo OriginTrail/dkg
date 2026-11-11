@@ -643,10 +643,11 @@ describe('the keep reasons', () => {
 
   it('are exercised: no reason in the vocabulary is dead (each is produced by a case in this file or in the holds file)', () => {
     // the cases above produce: index_mismatch, unreadable, unknown_state, bound_obligation, future_dated, older_sibling_kept, older_sibling_pending, siblings_unreadable;
-    // not_terminal, vanished and binding_would_change need a race or an adversarial store and are produced in async-lift-retention-holds.test.ts
+    // not_terminal, vanished and binding_would_change need a race or an adversarial store, and siblings_too_many a slow store, and are produced in
+    // async-lift-retention-holds.test.ts
     expect(PUBLISHER_RETENTION_KEEP_REASONS).toEqual([
       'unreadable', 'unknown_state', 'index_mismatch', 'not_terminal', 'bound_obligation', 'too_recent', 'future_dated',
-      'older_sibling_kept', 'older_sibling_pending', 'siblings_unreadable', 'binding_would_change', 'vanished',
+      'older_sibling_kept', 'older_sibling_pending', 'siblings_unreadable', 'siblings_too_many', 'binding_would_change', 'vanished',
     ]);
   });
 });

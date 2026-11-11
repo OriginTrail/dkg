@@ -1,4 +1,5 @@
 import { handlePrivatePlacementRetry } from './private-placement-retry.js';
+import { handleContextGraphMembers } from './context-graph-members.js';
 // daemon/routes/status.ts
 //
 // Route handlers for status, info, connections, host, wallet, chain, identity, integrations, shutdown.
@@ -74,7 +75,7 @@ import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
 import { parseStatusQuery, type StoreQuadsStatusFields } from '../../status-store-quads-wire.js';
 import { requestExternalStoreQuads, peekCachedExternalStoreQuads } from '../store-quads-cache.js';
 import { probeExternalStore } from '../store-reachability.js';
-import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -570,7 +571,6 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     publisherState,
     config,
     startedAt,
-    dashDb,
     opWallets,
     network,
     tracker,
@@ -661,17 +661,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
 
   // GET /api/context-graph/{id}/members — local SQL membership cache.
   // Kept in this early route group so the cache has a lightweight read path.
-  const contextGraphMembersMatch = path.match(/^\/api\/context-graph\/([^/]+)\/members$/);
-  if (req.method === "GET" && contextGraphMembersMatch) {
-    const contextGraphId = decodeURIComponent(contextGraphMembersMatch[1]);
-    if (!validateContextGraphId(contextGraphId).valid) {
-      return jsonResponse(res, 400, { error: 'Invalid context graph id' });
-    }
-    return jsonResponse(res, 200, {
-      contextGraphId,
-      members: dashDb.listContextGraphMembers(contextGraphId),
-    });
-  }
+  if (await handleContextGraphMembers(ctx)) return;
 
   // GET/HEAD /api/status — HEAD claims early so liveness probes never reach plugins.
   if ((req.method === "GET" || req.method === "HEAD") && path === "/api/status") {

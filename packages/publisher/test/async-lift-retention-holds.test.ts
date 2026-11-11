@@ -158,7 +158,7 @@ describe('the hold budget', () => {
     for (const r of results) if (r.deleted === 0 && r.holds > 0) expect(r.scanned).toBe(0);
   });
 
-  it('is a budget on the holds, whatever the mode: a report pass under a slow store shrinks its slice and defers nothing', async () => {
+  it('is a budget on the holds, whatever the mode: a report pass under a slow store shrinks its slice and judges every job once', async () => {
     let mono = 0;
     const specs = Array.from({ length: 6 }, (_, i) => fin(`j${i}`, `key${i}`, 10 + i));
     const t = await setup(specs, { before: () => { mono += 40; } });
@@ -167,6 +167,72 @@ describe('the hold budget', () => {
     expect(results.flatMap((r) => r.wouldDeleteJobs).map((j) => j.jobId).sort()).toEqual(specs.map((s) => s.id));
     expect(retention.counters().sliceSize).toBeLessThan(6);
     expect(retention.counters().holdBudgetExceeded).toBeGreaterThan(0);
+  });
+});
+
+describe('the hold budget covers the sibling verification (#3563)', () => {
+  /** One key's history of `n` old finalized jobs, accepted and finished in the same order. */
+  const history = (key: string, n: number): KeyedSpec[] => Array.from({ length: n }, (_, i) => fin(`${key}-${String(i).padStart(4, '0')}`, key, 1 + i * 0.02, 1.01 + i * 0.02));
+
+  it('a candidate behind a long history of its key holds the claim lock about one verify read past the budget, in report mode as in delete; an admission waits for no more', async () => {
+    // Every verify read takes 30 ms; nothing else takes time. One candidate per hold, so hold k judges the k-th job of the key. Report removes nothing, so the k-th job's
+    // k - 1 older jobs are all still there and are verified again, 100 a read: from the 102nd job on, a hold would need a second read past the budget. It stops after the
+    // first and keeps the job for the pass, and every job behind it waits too. Delete has removed the older jobs by then, so it verifies none and takes the whole key.
+    const specs = history('long', 130);
+    const order = specs.map((s) => s.id);
+    for (const mode of ['report', 'delete'] as const) {
+      let mono = 0;
+      let holdIndex = 0;
+      let admission: Promise<string> | undefined;
+      let admissionStartedAt: number | undefined;
+      let admittedAt: number | undefined;
+      const t = await setup(specs, {
+        before: (entry) => {
+          if (entry.source === `${RETENTION}walletLocks`) holdIndex += 1;            // a hold reads the wallet locks right after its first verify read
+          else if (entry.source === `${RETENTION}verify`) {
+            mono += 30;
+            // an unrelated admission, started while hold 120 verifies the history behind its job (119 older jobs in report mode: one more read without the budget)
+            if (holdIndex >= 120 && admission === undefined) {
+              admissionStartedAt = mono;
+              admission = t.mk(t.store, `newcomer-${mode}`).enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'newcomer' }));
+            }
+          } else if (entry.source === 'publisher.asyncLift.writeJob' && admission !== undefined) admittedAt ??= mono;
+        },
+      });
+      const retention = newRetention(t.publisher, { mode, monotonicNow: () => mono, sliceSize: 1, batchSize: 100 });
+      const results = await drain(retention);
+      expect(results.every((r) => r.error === undefined), mode).toBe(true);
+      expect(await admission, mode).toBe(`newcomer-${mode}`);
+      expect(admittedAt! - admissionStartedAt!, `${mode}: the admission waited for no further read of the hold it met`).toBe(0);
+      expect(retention.counters().maxHoldMs, mode).toBeLessThanOrEqual(60);         // the hold's own read and the first verify read
+      if (mode === 'report') {
+        expect(results.flatMap((r) => r.wouldDeleteJobs).map((j) => j.jobId)).toEqual(order.slice(0, 101));   // the oldest records: what is left is a suffix of the key
+        expect(kept(results)).toEqual({ siblings_too_many: 29 });
+      } else {
+        expect(ids(results)).toEqual(order);
+        expect(kept(results)).toEqual({});
+      }
+    }
+  }, 120_000);
+
+  it('a hold that runs out of budget on one key leaves the next key to the next hold, which judges it first, instead of keeping it', async () => {
+    // a-new is the only job of key a the scan meets: its 150 older jobs carry no finish-time index, so the plan must read them (and then refuses them). b1, of key b,
+    // finished right after it, in the same slice. Every verify read takes 20 ms against a 50 ms budget.
+    const unindexed = Array.from({ length: 150 }, (_, i) => ({ ...fin(`a-${String(i).padStart(3, '0')}`, 'a', 1 + i * 0.01), unindexed: true }));
+    for (const [label, specs] of [
+      ['the long key first', [...unindexed, fin('a-new', 'a', 5, 10), fin('b1', 'b', 6, 10.5)]],
+      ['the long key second', [...unindexed, fin('b1', 'b', 6, 9.5), fin('a-new', 'a', 5, 10)]],
+    ] as const) {
+      let mono = 0;
+      const t = await setup(specs, { before: (entry) => { if (entry.source === `${RETENTION}verify`) mono += 20; } });
+      const retention = newRetention(t.publisher, { monotonicNow: () => mono, holdBudgetMs: 50 });
+      const results = await drain(retention);
+      expect(results.every((r) => r.error === undefined), label).toBe(true);
+      expect(ids(results), label).toEqual(['b1']);
+      expect(kept(results), label).toEqual({ siblings_too_many: 1 });              // a-new: the first key of its hold, whose older jobs do not verify within it
+      expect(results.reduce((n, r) => n + r.holds, 0), label).toBe(2);
+      expect(retention.counters().maxHoldMs, label).toBeLessThanOrEqual(40);       // two verify reads, never the third the key would need
+    }
   });
 });
 

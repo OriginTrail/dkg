@@ -250,8 +250,8 @@ function ReplicationTab() {
           <ResponsiveContainer width="100%" height={220}>
             <AreaChart data={buckets}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
-              <XAxis dataKey="t" tick={{ fontSize: 11 }} />
-              <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
+              <XAxis dataKey="t" tick={{ fontSize: 'var(--fs-label)' }} />
+              <YAxis allowDecimals={false} tick={{ fontSize: 'var(--fs-label)' }} />
               <Tooltip />
               <Legend />
               <Area type="monotone" dataKey="promotes" stackId="1" stroke="var(--layer-verified)" fill="var(--layer-verified)" fillOpacity={0.55} name="promotes" />
@@ -632,8 +632,8 @@ function OperationStatsSection() {
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
-                    <YAxis tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={28} />
+                    <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} />
+                    <YAxis tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'var(--tint-strong)' }} />
                     <Legend wrapperStyle={{ fontSize: 'var(--fs-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
@@ -648,8 +648,8 @@ function OperationStatsSection() {
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
-                    <YAxis tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={32} />
+                    <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} />
+                    <YAxis tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
                     <Legend wrapperStyle={{ fontSize: 'var(--fs-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
@@ -664,8 +664,8 @@ function OperationStatsSection() {
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
-                    <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={28} />
+                    <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} />
+                    <YAxis domain={[0, 100]} tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
                     <Legend wrapperStyle={{ fontSize: 'var(--fs-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
@@ -680,8 +680,8 @@ function OperationStatsSection() {
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
-                    <YAxis tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={32} />
+                    <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} />
+                    <YAxis tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'var(--tint-strong)' }} />
                     <Legend wrapperStyle={{ fontSize: 'var(--fs-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
@@ -790,8 +790,8 @@ export function HardwareTab() {
               <ResponsiveContainer width="100%" height={140}>
                 <AreaChart data={hwChartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke={grid} />
-                  <XAxis dataKey="time" tick={{ fontSize: 10, fill: tick }} minTickGap={24} />
-                  <YAxis domain={c.pct ? [0, 100] : [0, 'auto']} allowDecimals={c.key !== 'peers'} tick={{ fontSize: 10, fill: tick }} width={32} />
+                  <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: tick }} minTickGap={24} />
+                  <YAxis domain={c.pct ? [0, 100] : [0, 'auto']} allowDecimals={c.key !== 'peers'} tick={{ fontSize: 'var(--fs-micro)', fill: tick }} width={32} />
                   <Tooltip contentStyle={TOOLTIP_STYLE} />
                   {c.warn != null && <ReferenceLine y={c.warn} stroke={warnLine} strokeDasharray="4 4" strokeOpacity={0.6} />}
                   {c.crit != null && <ReferenceLine y={c.crit} stroke={critLine} strokeDasharray="4 4" strokeOpacity={0.6} />}

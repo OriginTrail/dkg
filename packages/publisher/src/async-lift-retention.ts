@@ -18,11 +18,13 @@
  *     record of the key that this sweep could not delete itself (a payload it does not delete, a stored index the scan does not match) ends the prefix, like a failed one.
  *     In `delete` mode the survivors are removed ONE JOB AT A TIME, oldest first within a key, each through its own job lock from a fresh read, so a failure after any
  *     number of deletes leaves the key's newest record in place and its binding decision as it was. The claim lock is released between slices so admissions and claims
- *     interleave. A hold has a time budget (default 50 ms): no further delete starts once the next one would exceed it, and the slice size adapts. The store flush runs
- *     after the transaction is closed;
+ *     interleave. A hold has a time budget (default 50 ms): no further delete starts once the next one would exceed it, no further key's records are read or verified once
+ *     that would (a key left over is judged first by the next hold, and the first key of a hold that cannot verify its records within the budget is kept for the pass), and
+ *     the slice size adapts. The store flush runs after the transaction is closed;
  *  4. only after every slice succeeded does the cursor move past the judged rows.
- * `report` mode runs steps 1 to 3 unchanged and removes nothing: the rows it counts as `wouldDelete` are exactly the rows `delete` would remove from the same snapshot,
- * save one case in which `delete` removes more: two records of one key that finished at the same instant (see planDeletions). Report never names a row delete keeps.
+ * `report` mode runs steps 1 to 3 unchanged and removes nothing: the rows it counts as `wouldDelete` are exactly the rows `delete` would remove from the same snapshot (both
+ * walk a key's records in one order, see planDeletions), save a key whose older records cannot all be verified within one hold (`siblings_too_many`). Which hold first finds
+ * that depends on how fast the store answers, and report, which removes nothing, verifies more of a key's older records than delete, which has removed them.
  * It never throws for a store failure: the result carries the phase that failed and what completed before it (no cursor moves, so the next call judges the same rows
  * again - deleted ones are gone). Throws only for invalid configuration.
  *
@@ -39,13 +41,13 @@ import { compareAcceptedJobs, expectBindings, type AcceptanceOrderKey } from './
 import { decodeLiftJobPayload } from './lift-job-payload-codec.js';
 import type { LiftJob, PersistedLiftJob } from './lift-job.js';
 import { lifecycleKeyOfJob } from './lift-job-store-selectors.js';
-import { isUndecodableSiblingError, planKeyDeletion, recordsOfKey } from './async-lift-lifecycle-siblings.js';
+import { isUndecodableSiblingError, keyedIndexAgrees, planKeyDeletion, recordsOfKey } from './async-lift-lifecycle-siblings.js';
 import type { LiftRetentionAccess } from './async-lift-retention-access.js';
 import {
   PUBLISHER_RETENTION_MODES, PUBLISHER_RETENTION_WINDOW_MS, emptyClassCounts, emptyKeptCounts, judgeFinalizedRecord,
   type PublisherRetentionJobClass, type PublisherRetentionKeepReason, type PublisherRetentionMode, type PublisherRetentionPolicy,
 } from './async-lift-retention-policy.js';
-import { LIFT_JOB_SUBJECT_PREFIX, LiftRetentionScanState, exactFinishTime, planFinalizedScan, type LiftScanRow } from './async-lift-retention-scan.js';
+import { LIFT_JOB_SUBJECT_PREFIX, LiftRetentionScanState, byWalk, exactFinishTime, planFinalizedScan, type LiftScanRow } from './async-lift-retention-scan.js';
 import {
   HoldBudget, RETENTION_SKIPS, RETENTION_SWEEP_DEFAULTS, RetentionClockGuard, ageWindowMs, boundedInteger, claimBatch, errorMessage, lazyRetentionLogger, positiveFinite, sumInto,
   type RetentionLogger, type RetentionSkip,
@@ -230,8 +232,8 @@ const termString = (term: string | undefined): string | undefined => { try { ret
  */
 const indexAgrees = (states: ReadonlySet<string>, finishes: ReadonlySet<string>, finalizedAt: number | undefined): boolean =>
   states.size === 1 && termString([...states][0]) === 'finalized' && finishes.size === 1 && exactFinishTime([...finishes][0]) === finalizedAt;
-/** The stored lifecycle-key triples of a record whose payload has `key`: at most one with a key (which the key's own read then matches), none without one. */
-const keyedIndexAgrees = (keys: ReadonlySet<string>, key: string | null): boolean => keys.size <= (key === null ? 0 : 1);
+/** Where the scan's walk meets a finalized record (`byWalk`): its finish time, then its subject. */
+const walkPosition = (job: PersistedLiftJob): LiftScanRow => ({ iri: jobSubject(job.jobId), finalizedAt: job.timestamps.finalizedAt! });
 /** Most subjects one verify read names: a key with a long history is read in several queries. */
 const VERIFY_CHUNK = 100;
 
@@ -350,14 +352,16 @@ class PublisherRetentionImpl implements PublisherRetention {
    * they are verified again under a later hold. When the hold deleted anything the store is flushed once the claim transaction is closed.
    */
   private async hold(slice: readonly SliceRow[], b: BatchState, now: number): Promise<SliceRow[]> {
-    const deferred: SliceRow[] = [];
+    const deferred = new Set<SliceRow>();                                           // returned in the slice's order, which is the walk's
     const entries: PublisherRetentionJob[] = [];                                    // the jobs this hold deleted (delete mode only): logged once it ends
     try {
       await this.access.runClaimTransaction(async (tx) => {
         const startedAt = this.mono();
         b.phase = 'verify';
         const judged = await this.judgeCandidates(slice, b, now);
-        const doomed = await this.planDeletions(judged, tx, b, now);
+        const { doomed, unplanned } = await this.planDeletions(judged, tx, b, now, startedAt);
+        for (const j of unplanned) deferred.add(j.row);
+        let fitted = unplanned.length > 0 ? slice.length - unplanned.length : undefined;   // the rows the hold settled, when it left some to the next one
 
         if (this.mode !== 'delete') {
           for (const d of doomed) b.wouldDelete.push(d.entry);                       // report mode: counted, never logged job by job (the pass summary carries the numbers)
@@ -367,7 +371,7 @@ class PublisherRetentionImpl implements PublisherRetention {
           const held = new Set<string>();                                              // keys where a record turned out changed: the records behind it wait
           for (let i = 0; i < doomed.length; i++) {
             const d = doomed[i]!;
-            if (i > 0 && this.budget.wouldExceed(this.mono() - startedAt, lastOpMs)) { deferred.push(...doomed.slice(i).map(x => x.row)); break; }
+            if (i > 0 && this.budget.wouldExceed(this.mono() - startedAt, lastOpMs)) { for (const x of doomed.slice(i)) deferred.add(x.row); fitted = entries.length; break; }
             if (d.key !== null && held.has(d.key)) { b.kept.older_sibling_pending += 1; continue; }
             const opStartedAt = this.mono();
             b.indeterminate = d.row.jobId;
@@ -389,7 +393,7 @@ class PublisherRetentionImpl implements PublisherRetention {
             }
           }
         }
-        this.noteHold(b, this.mono() - startedAt, slice.length, deferred.length > 0 ? entries.length : undefined);
+        this.noteHold(b, this.mono() - startedAt, slice.length, fitted);
       });
     } finally {
       this.logJobs(entries, now);
@@ -397,7 +401,7 @@ class PublisherRetentionImpl implements PublisherRetention {
     // Durability, outside the claim transaction: the lock is released, so a flush (a full snapshot on a file-backed store) delays no admission or claim and is not part of
     // the hold's measured time or of the budget the next delete is predicted against. A crash before it only resurrects rows a later pass deletes again.
     if (this.mode === 'delete' && entries.length > 0) await this.access.store.flush?.();
-    return deferred;
+    return slice.filter(row => deferred.has(row));
   }
 
   /** The stored payload, status, finish time and key of `iris` (control path, inside the claim transaction), as a lookup of one column of one subject. */
@@ -441,10 +445,18 @@ class PublisherRetentionImpl implements PublisherRetention {
 
   /**
    * The key plans: for each lifecycle key among the candidates, read its records as admission does and let the plan (the deletable prefix, oldest first) decide each
-   * candidate. Returns the jobs to delete in the order to delete them: key by key, oldest first within a key.
+   * candidate. Returns the jobs to delete in the order to delete them (key by key, oldest first within a key), and the candidates of the keys left to the next hold.
+   *
+   * The hold budget bounds this work too (#3563). A key's sibling read and the verification of its older records run inside the claim lock, and a key with a long history
+   * brings many records. So a key after the first starts only while the budget, predicted from the key before it, allows it, and a verification that runs out of budget stops:
+   * that key and every key after it wait for the next hold, which starts with them. When the first key of a hold runs out, no hold would fit it, and its candidates are kept
+   * for this pass (`siblings_too_many`), with every record of the key behind them (its mark).
    */
-  private async planDeletions(judged: readonly Judged[], tx: { siblings(key: string): Promise<PersistedLiftJob[]> }, b: BatchState, now: number): Promise<Doomed[]> {
+  private async planDeletions(
+    judged: readonly Judged[], tx: { siblings(key: string): Promise<PersistedLiftJob[]> }, b: BatchState, now: number, startedAt: number,
+  ): Promise<{ doomed: Doomed[]; unplanned: Judged[] }> {
     const doomed: Doomed[] = [];
+    const unplanned: Judged[] = [];
     const doom = (j: Judged): void => {
       const finalizedAt = j.job.timestamps.finalizedAt!;
       doomed.push({ row: j.row, job: j.job, key: j.key, entry: { jobId: j.row.jobId, jobClass: 'finalized', state: j.job.status, finalizedAt, ageMs: now - finalizedAt } });
@@ -452,8 +464,12 @@ class PublisherRetentionImpl implements PublisherRetention {
     const byKey = new Map<string | null, Judged[]>();
     for (const j of judged) byKey.set(j.key, [...(byKey.get(j.key) ?? []), j]);
 
+    let keyStartedAt: number | undefined;                                                // when the last key this hold read began
     for (const [key, members] of byKey) {
       if (key === null) { for (const j of members) doom(j); continue; }              // no lifecycle key: no sibling can bind it
+      const first = keyStartedAt === undefined;
+      if (unplanned.length > 0 || (!first && this.budget.wouldExceed(this.mono() - startedAt, this.mono() - keyStartedAt!))) { unplanned.push(...members); continue; }
+      keyStartedAt = this.mono();
       let siblings: PersistedLiftJob[];
       try { siblings = await tx.siblings(key); } catch (cause) {
         if (!isUndecodableSiblingError(cause)) throw cause;                               // a store failure ends the batch; an undecodable record, or two of one job id, keeps the key's candidates
@@ -462,21 +478,23 @@ class PublisherRetentionImpl implements PublisherRetention {
         continue;
       }
       const ordered = [...members].sort((x, y) => compareAcceptedJobs(x.job, y.job));
-      const refused = await this.refusedSiblings(siblings, key, ordered);
+      const refused = await this.refusedSiblings(siblings, key, ordered, startedAt);
+      if (refused === undefined) {                                                      // the key's older records could not all be verified within the budget
+        if (!first) { unplanned.push(...members); continue; }
+        b.kept.siblings_too_many += members.length;
+        for (const j of members) this.block(key, j.job);
+        continue;
+      }
       const plan = planKeyDeletion(siblings, key, record => (refused.has(record.jobId) ? 'index_mismatch' : judgeFinalizedRecord(record, now, this.cfg.policy)));
       const inKey = new Set(plan.order.map(record => record.jobId));
-      // Records leave a key oldest first. The scan walks by finish time, and it meets the rows of one finish time in an order that need not be the key's (by subject when they
-      // are more than a batch, ORDER BY STR(?job); inside one batch, in the engine's order): so the records of the plan that go in THIS pass are those from the oldest up to the
-      // first whose finish is not strictly later than the one before it. A record accepted earlier but finished later (or at the same instant) may be met after its successors: those
-      // met before it wait, with every record behind them (the key's mark), for a later pass; it goes when the walk reaches it only if it is in such a run and before the mark. The rule reads
-      // the records stored now, so a slice or batch boundary, or the mode, changes the answer in one case only: a tie whose older record was judged in an earlier hold. The newer one
-      // goes in this pass only if delete removed the older one before the hold that judges the newer one (a removal the hold budget deferred is retried at the front of the next
-      // hold); otherwise, and always in report, which removes nothing, it waits. Nothing leaves out of order.
+      // Records leave a key oldest first. The scan walks the rows by finish time and the rows of one finish time by subject (`byWalk`: the tie scan reads them so, and every
+      // batch is judged so), which need not be the key's order. So the records of the plan that go in THIS pass are those from the oldest up to the first that the walk meets
+      // no later than the one before it. A record accepted earlier but met later may be met after its successors: those met before it wait, with every record behind them (the
+      // key's mark), for a later pass; it goes when the walk reaches it only if it is in such a run and before the mark. The run is a function of the stored records and the walk
+      // order alone, so report and delete name the same records (#3554: comparing finish times alone split two records finished at the same instant, which delete took in one
+      // pass once it had removed the older, while report, which removes nothing, kept the newer). Nothing leaves out of order.
       const inOrder = new Set<string>();
-      for (let last = Number.NEGATIVE_INFINITY, i = 0; i < plan.prefix.length && plan.prefix[i]!.timestamps.finalizedAt! > last; i++) {
-        last = plan.prefix[i]!.timestamps.finalizedAt!;
-        inOrder.add(plan.prefix[i]!.jobId);
-      }
+      for (let i = 0; i < plan.prefix.length && (i === 0 || byWalk(walkPosition(plan.prefix[i - 1]!), walkPosition(plan.prefix[i]!)) < 0); i++) inOrder.add(plan.prefix[i]!.jobId);
       for (const j of ordered) {
         const reason = plan.kept.get(j.row.jobId);
         if (!inKey.has(j.row.jobId)) { b.kept.index_mismatch += 1; this.block(key, j.job); continue; }   // admission cannot reach this record: its siblings cannot be judged
@@ -487,7 +505,7 @@ class PublisherRetentionImpl implements PublisherRetention {
         doom(j);
       }
     }
-    return doomed;
+    return { doomed, unplanned };
   }
 
   /**
@@ -496,9 +514,10 @@ class PublisherRetentionImpl implements PublisherRetention {
    * no obstacle. What `blockedSince` cannot know is a record the scan never meets: a pre-upgrade payload the sweep does not delete, a stored status or finish time that is missing
    * or disagrees with the payload, or a finish time stored as a term the scan does not read (not an `xsd:integer`). So the stored index of each is read and the candidate checks of
    * `judgeCandidates` are applied to it, the key triples included (a second one, which the scan meets, makes a record the sweep never deletes): one that would not pass is refused,
-   * and a refused record ends the plan's prefix. The answer is a function of the stored records alone, so report and delete mode give the same one.
+   * and a refused record ends the plan's prefix. The answer is a function of the stored records alone, so report and delete mode give the same one. The records are read a
+   * chunk at a time, and a chunk after the first only while the hold budget, predicted from the chunk before it, allows (#3563): undefined when one was not read.
    */
-  private async refusedSiblings(siblings: readonly PersistedLiftJob[], key: string, members: readonly Judged[]): Promise<Set<string>> {
+  private async refusedSiblings(siblings: readonly PersistedLiftJob[], key: string, members: readonly Judged[], startedAt: number): Promise<Set<string> | undefined> {
     const refused = new Set<string>();
     const youngest = members[members.length - 1]!.job;
     const candidates = new Set(members.map(j => j.row.jobId));
@@ -511,9 +530,13 @@ class PublisherRetentionImpl implements PublisherRetention {
       else refused.add(record.jobId);                                                  // never interpolate an id the job-id grammar does not allow
     }
     const iris = [...toRead.keys()];
+    let lastChunkMs = 0;
     for (let i = 0; i < iris.length; i += VERIFY_CHUNK) {
+      if (i > 0 && this.budget.wouldExceed(this.mono() - startedAt, lastChunkMs)) return undefined;
       const chunk = iris.slice(i, i + VERIFY_CHUNK);
+      const chunkStartedAt = this.mono();
       const stored = await this.readStored(chunk);
+      lastChunkMs = this.mono() - chunkStartedAt;
       for (const iri of chunk) {
         const record = toRead.get(iri)!;
         const payloads = stored(iri, 'payload');

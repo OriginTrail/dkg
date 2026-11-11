@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri, contextGraphMetaUri, DEFAULT_MAX_READ_BYTES } from '@origintrail-official/dkg-core';
-import { workspacePublicQuadsDigest, GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, parseStoredGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
+import { workspacePublicQuadsDigest, GRAPH_KNOWLEDGE_ASSET_STORED_ENVELOPE_PREDICATES, GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, parseStoredGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { heldMetadataControlsMatchReplay } from './held-metadata-controls.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
@@ -40,7 +40,8 @@ export async function readHeldGraphScopedAssets(
 
 ): Promise<Map<string, HeldGraphScopedAssetEvidence>> {
   const metaGraph = assertSafeIri(contextGraphMetaUri(request.contextGraphId));
-  const predicates = [AUTHENTICATED_SUB_GRAPH, ...GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, ...GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, ...['contextGraph', 'rootEntity', 'partOf'].map(name => `http://dkg.io/ontology/${name}`)].map((predicate) => `<${predicate}>`).join(' ');
+  // The publisher's stored projection is what its parser reads or refuses; the route and replay controls are ours.
+  const predicates = [AUTHENTICATED_SUB_GRAPH, ...GRAPH_KNOWLEDGE_ASSET_STORED_ENVELOPE_PREDICATES, ...GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES].map((predicate) => `<${predicate}>`).join(' ');
   const options = { priority: 'background' as const, signal: request.signal };
   const held = new Map<string, HeldGraphScopedAssetEvidence>();
   for (let start = 0; start < request.descriptors.length; start += chunkSize) {

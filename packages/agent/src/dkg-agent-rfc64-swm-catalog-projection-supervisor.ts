@@ -136,6 +136,7 @@ interface ProjectionOwnerDependenciesV1 {
   readonly readRepairRevision: (
     contextGraphId: ContextGraphIdV1, authorAddress: EvmAddressV1,
   ) => CatalogRepairRevisionHintV1 | null;
+  readonly listFinalizedPrivateRepairsAsync: (signal: AbortSignal) => Promise<readonly Rfc64FinalizedPrivatePlacementRepairV1[]>;
   readonly listFinalizedPrivateRepairs: () => readonly Readonly<
     Rfc64FinalizedPrivatePlacementRepairV1
   >[];
@@ -195,7 +196,8 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       localAuthors.map(authorAddress => ({ contextGraphId: policyEnvelope.payload.contextGraphId as ContextGraphIdV1, authorAddress })));
     discoverDurableCatalogRepairsV1(() => candidates, repairs, newPendingRepairV1, error => { throw error; });
     this.#discoverDurableRepairs(repairs, ctx);
-    const hasFinalizedPrivateRepairs = this.#dependencies.listFinalizedPrivateRepairs().length > 0;
+    // Discover even an empty private queue in the background, never by decoding
+    // its durable markers on the startup caller's stack.
     const existing = this.#state;
     if (existing !== undefined) {
       if (existing.runner.closed || existing.privatePlacement.closed) return;
@@ -223,10 +225,9 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         }
       }
       if (publicRepairRequested) existing.runner.request();
-      if (hasFinalizedPrivateRepairs) existing.privatePlacement.requestPass();
+      existing.privatePlacement.requestPass();
       return;
     }
-    if (repairs.length === 0 && !hasFinalizedPrivateRepairs && !this.#discoveryPending) return;
     const retryIntervalMs = partition?.retryIntervalMs
       ?? DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1;
     this.#state = this.#createState(
@@ -236,7 +237,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       ctx,
     );
     if (repairs.length > 0 || this.#discoveryPending) this.#state.runner.request();
-    if (hasFinalizedPrivateRepairs) this.#state.privatePlacement.requestPass();
+    this.#state.privatePlacement.requestPass();
   }
 
   request(params: Readonly<{

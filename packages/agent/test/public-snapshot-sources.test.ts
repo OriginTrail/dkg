@@ -1,3 +1,4 @@
+import { PublicSnapshotSessionMethods } from '../src/public-snapshot-session.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { PublicSnapshotProofRuntime } from '../src/public-snapshot-proof-runtime.js';
 import { getEventListeners } from 'node:events';
@@ -352,7 +353,7 @@ it('retains the snapshot slot and physical ownership until all cancelled probes 
     await new Promise<void>(resolve => { releases.push(resolve); });
     throw new Error('transport retired');
   });
-  const agent = { started: true, peerId: 'requester', workLifetime: lifetime, chain: f.chain,
+  const agent = { withPublicSnapshotSession: PublicSnapshotSessionMethods.prototype.withPublicSnapshotSession, started: true, peerId: 'requester', workLifetime: lifetime, chain: f.chain,
     contextGraphSubscriptionDormancyById: new Map(),
     waitForContextGraphSubscriptionActivation: LifecycleSyncMethods.prototype.waitForContextGraphSubscriptionActivation,
     subscribedContextGraphs: new Map(), contextGraphBindingState: { capture: () => 0, isGenerationCurrent: () => true },
@@ -400,13 +401,17 @@ it.each(['connected', 'registry-only'] as const)('commits a verified asset throu
   } } });
   Object.assign(chain, { getIdentityId: signing.chain.getIdentityId,
     signMessage: signing.chain.signMessage, verifyACKIdentity: signing.chain.verifyACKIdentity,
-    readPublicGraphSnapshot: async () => sealPublicGraphSnapshot({
-      version: 1, chainId: chain.chainId, deploymentId, ...scope,
-      nameHash: ethers.id(scope.contextGraphId), contextGraphStorage: `0x${'2'.repeat(40)}`,
-      assetStorage: `0x${'3'.repeat(40)}`, blockNumber: '1', blockHash: `0x${'4'.repeat(64)}`,
-      finalityConfirmations: 1, observedAt: Date.now(), expiresAt: Date.now() + 120000,
-      accessPolicy: 0, assets: [{ id: kaId.toString(), root: ethers.hexlify(root), version: '1' }],
-    }),
+    readPublicGraphSnapshot: async () => {
+      // One clock reading: two can be a millisecond apart, which is over the longest window a snapshot may declare.
+      const now = Date.now();
+      return sealPublicGraphSnapshot({
+        version: 1, chainId: chain.chainId, deploymentId, ...scope,
+        nameHash: ethers.id(scope.contextGraphId), contextGraphStorage: `0x${'2'.repeat(40)}`,
+        assetStorage: `0x${'3'.repeat(40)}`, blockNumber: '1', blockHash: `0x${'4'.repeat(64)}`,
+        finalityConfirmations: 1, observedAt: now, expiresAt: now + 120000,
+        accessPolicy: 0, assets: [{ id: kaId.toString(), root: ethers.hexlify(root), version: '1' }],
+      });
+    },
   });
   const agents: DKGAgent[] = [];
   try {

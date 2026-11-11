@@ -1,4 +1,4 @@
-import { appendFile, mkdir, mkdtemp, open, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { appendFile, link, mkdir, mkdtemp, open, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -82,6 +82,20 @@ describe('rotateDaemonLogIfNeeded', () => {
     expect(await names(join(path, '..'))).toEqual(['daemon.log.1', 'daemon.log.2', 'daemon.log.4']);
     expect(await readFile(`${path}.2`, 'utf-8')).toBe('newest\n');
     expect(await readFile(`${path}.4`, 'utf-8')).toBe('oldest\n');
+  });
+
+  it('recovers an interrupted hard-link move on the real filesystem without duplicating history', async () => {
+    const content = 'live-1\nlive-2\nlive-3\n';
+    const path = await tempLog(content);
+    await link(path, `${path}.1`);
+    await writeFile(`${path}.2`, 'older\n');
+
+    const result = await rotateDaemonLogIfNeeded(path, { maxBytes: 20, keepBytes: 10 });
+
+    expect(result).toMatchObject({ rotated: true, trimmed: false });
+    expect(await names(join(path, '..'))).toEqual(['daemon.log.1', 'daemon.log.3']);
+    expect(await readFile(`${path}.1`, 'utf-8')).toBe(content);
+    expect(await readFile(`${path}.3`, 'utf-8')).toBe('older\n');
   });
 
   it('removes rotated files whose newest line is past the retention window, and only those', async () => {

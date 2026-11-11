@@ -8,6 +8,9 @@ export const RFC64_UNIT_TESTS = [
   // #3134 — a full author catalog refuses a new asset once, visibly, and is not retried on a timer.
   "test/rfc64-author-catalog-capacity.test.ts",
   "test/rfc64-full-catalog-parking.test.ts",
+  // #3134 — a pass over thousands of parked markers does no per-marker work and yields to timers.
+  "test/finalized-private-placement-parked-backlog.test.ts",
+  "test/finalized-private-placement-warm-work.test.ts",
   "test/rfc64-full-author-catalog.test.ts",
   // #3134 — an author's row leaves its SWM inventory when the node retires the asset's finalized twin.
   "test/rfc64-finalized-twin-inventory-row.integration.test.ts",
@@ -35,6 +38,8 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-swm-inventory-shadow-runtime-v1.test.ts",
   "test/rfc64-catalog-shadow-observability-v1.test.ts",
   "test/rfc64-catalog-upsert-planner-v1.test.ts",
+  "test/rfc64-unpublished-catalog-revision.test.ts",
+  "test/catalog-asset-vm-boundary.test.ts",
   "test/rfc64-inventory-v1-candidate-plans.test.ts",
   "test/rfc64-inventory-v1-candidate-latency.test.ts",
   "test/rfc64-inventory-v1-candidate-faults.test.ts",
@@ -122,6 +127,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-unregistered-replica-authority.integration.test.ts",
   "test/rfc64-replay-worklist.integration.test.ts",
   "test/rfc64-catalog-replay-connection-runtime-v1.test.ts",
+  "test/rfc64-catalog-replay-connection-retry-v1.test.ts",
   "test/rfc64-catalog-replay-connection-adapter.test.ts",
   "test/rfc64-catalog-replay-run-reporter.test.ts",
   "test/rfc64-catalog-head-replay-peers.test.ts",

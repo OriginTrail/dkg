@@ -110,6 +110,12 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
         this.requireOpen();
         finalizedPrivatePlacementRepairs.writeFailures(...args);
       },
+      listAsync: async (signal: AbortSignal) => {
+        this.requireOpen();
+        const repairs = await finalizedPrivatePlacementRepairs.listAsync(signal);
+        this.requireOpen();
+        return repairs;
+      },
       list: () => {
         this.requireOpen();
         return finalizedPrivatePlacementRepairs.list();

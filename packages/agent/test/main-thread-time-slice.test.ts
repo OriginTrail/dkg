@@ -112,6 +112,37 @@ describe('main-thread time slice', () => {
     expect(timerRanAtIteration).toBeGreaterThan(0);
   });
 
+  it('returns no promise until the iteration budget is reached, then resets it', async () => {
+    vi.spyOn(performance, 'now').mockReturnValue(1_000);
+    const checkpoint = createMainThreadTimeSlice({ sliceMs: 8, maxIterations: 3 });
+    const probe = macrotaskProbe();
+    expect(checkpoint()).toBeUndefined();
+    expect(checkpoint()).toBeUndefined();
+    expect(probe.reached).toBe(false);
+    const turn = checkpoint();
+    expect(turn).toBeInstanceOf(Promise);
+    await turn;
+    expect(probe.reached).toBe(true);
+    expect(checkpoint()).toBeUndefined();
+    expect(checkpoint()).toBeUndefined();
+    await checkpoint();
+  });
+
+  it('yields on the time budget before the iteration limit and resets both budgets', async () => {
+    const now = vi.spyOn(performance, 'now').mockReturnValue(0);
+    const checkpoint = createMainThreadTimeSlice({ sliceMs: 8, maxIterations: 32 });
+    now.mockReturnValue(7.9);
+    expect(checkpoint()).toBeUndefined();
+    now.mockReturnValue(8);
+    const probe = macrotaskProbe();
+    await checkpoint();
+    expect(probe.reached).toBe(true);
+    for (let i = 0; i < 31; i++) expect(checkpoint()).toBeUndefined();
+    const turn = checkpoint();
+    expect(turn).toBeInstanceOf(Promise);
+    await turn;
+  });
+
   it('honours a caller-chosen slice length', async () => {
     const now = vi.spyOn(performance, 'now').mockReturnValue(0);
     const timeSlice = createMainThreadTimeSlice(5);

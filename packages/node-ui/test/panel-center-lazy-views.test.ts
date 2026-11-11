@@ -59,6 +59,8 @@ it('loads views on demand while preserving tab selection and mounted view state'
   try {
     await act(async () => root.render(React.createElement(PanelCenter)));
     expect(container.textContent).toContain('Dashboard ready');
+    expect(container.querySelector('.v10-center-content')?.classList)
+      .toContain('v10-center-content-enter');
     expect(loads).toEqual({ settings: 0, project: 0, layer: 0, stack: 0 });
 
     await open('settings');

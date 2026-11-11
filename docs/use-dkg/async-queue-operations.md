@@ -48,6 +48,14 @@ It is on by default. To turn it off, set `DKG_WRITE_PREFLIGHT_COALESCING=0` in t
 
 A share that fails with a retryable error gets up to 5 attempts in all. The wait starts at about 1 minute and doubles each time, up to 15 minutes. To change this, set `maxRetries`, `retryBaseMs` or `retryMaxMs` in a `promoteQueue` block in `~/.dkg/config.json`. A new attempt limit applies only to new jobs; each job shows its limit as `maxAttempts`. An invalid value stops the daemon from starting.
 
+A job's `attempts` counts the attempts made within its limit, so it never exceeds `maxAttempts`. Three recovery rules can run a job past its limit, and the attempts they add are shown on their own as `recoveryAttempts` (absent when there are none):
+
+- A failure whose prerequisite is temporarily unavailable keeps the job retrying, on the same backoff, until an hour after it was queued.
+- A synchronous share keeps retrying a recognized transient failure until it completes or needs inspection.
+- An attempt whose worker stopped before the share changed anything, for example in a restart, runs again.
+
+Recovering a job starts both counts from zero.
+
 A job that runs out of attempts stays `failed`. Read its last error, fix the cause, then recover it:
 
 ```bash
@@ -99,5 +107,5 @@ Its status read returns `404`. A resend after a job succeeded or finalized is ne
 ### Cautions
 
 - While cleanup is on, only the daemon may write the queue graphs: no scripts or other tools.
-- Don't turn on publish-queue cleanup on a node that has published one Knowledge Asset thousands of times: there a pass can stall new publish jobs for seconds, even in `report` mode.
+- On a node that has published one Knowledge Asset thousands of times, cleanup reads all of that asset's jobs each time it judges one of them, as a new publish of the asset does. It checks the older jobs only as far as its short time budget allows and keeps the rest of the asset's jobs for that pass, so there `report` counts fewer jobs than the first `delete` pass removes.
 - A forward clock jump, or minutes of host sleep, pauses cleanup until a restart. Correct the clock, then restart.

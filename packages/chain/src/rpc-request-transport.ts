@@ -4,6 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   FetchRequest,
   JsonRpcProvider,
+  Transaction,
 } from 'ethers';
 import type {
   FetchCancelSignal,
@@ -13,6 +14,8 @@ import type {
   JsonRpcResult,
   Network,
   Networkish,
+  TransactionResponse,
+  TransactionResponseParams,
 } from 'ethers';
 import { errorCode, errorMessage } from './evm-adapter-errors.js';
 import {
@@ -580,6 +583,22 @@ class RequestContextJsonRpcProvider extends JsonRpcProvider {
     const signal = activeRpcRequestAbortSignal();
     if (signal?.aborted) throwRpcRequestAbortReason(signal);
     return waitForActiveRpcRequest(super.getNetwork());
+  }
+
+  /**
+   * #3591 — the send and nothing else. ethers' version starts `eth_blockNumber` and a network lookup
+   * beside `eth_sendRawTransaction`, each its own request here, and any of them failing rejects the
+   * call. A throttled read would then pass for a throttled send although the endpoint took the
+   * transaction, and the broadcast loop reads a throttled send as proof that it did not.
+   *
+   * The response is not replaceable, because that needs the block number: every caller here waits by
+   * hash and handles replacements itself.
+   */
+  override async broadcastTransaction(signedTx: string): Promise<TransactionResponse> {
+    const hash: unknown = await this._perform({ method: 'broadcastTransaction', signedTransaction: signedTx });
+    const tx = Transaction.from(signedTx);
+    if (tx.hash !== hash) throw new Error('the hash the endpoint returned did not match the signed transaction');
+    return this._wrapTransactionResponse(tx as unknown as TransactionResponseParams, this._network);
   }
 
   override async send(

@@ -2,7 +2,8 @@ import {
   assertCanonicalDeterministicUalV1,
   canonicalizeSwmAuthorInventoryRowsBytesV1,
   compareSwmAuthorInventoryRowsV1,
-  parseCanonicalSwmAuthorInventoryRowsV1,
+  snapshotSwmAuthorInventoryRowV1,
+  snapshotSwmAuthorInventoryRowsV1,
   type SwmAuthorInventoryRowV1,
 } from '@origintrail-official/dkg-core';
 
@@ -34,12 +35,8 @@ export function snapshotSwmAuthorInventoryMutationV1(
   const candidate = snapshotPlainDataRecordV1(mutation, 'SWM author inventory mutation');
   if (candidate.kind === 'upsert') {
     assertExactFieldSetV1(candidate, ['kind', 'row'], 'SWM author inventory upsert mutation');
-    const rows = parseCanonicalSwmAuthorInventoryRowsV1(
-      canonicalizeSwmAuthorInventoryRowsBytesV1([
-        candidate.row as SwmAuthorInventoryRowV1,
-      ]),
-    );
-    return Object.freeze({ kind: 'upsert' as const, row: rows[0]! });
+    const row = snapshotSwmAuthorInventoryRowV1(candidate.row);
+    return Object.freeze({ kind: 'upsert' as const, row });
   }
   if (candidate.kind === 'remove' && typeof candidate.kaUal === 'string') {
     assertExactFieldSetV1(candidate, ['kind', 'kaUal'], 'SWM author inventory remove mutation');
@@ -88,9 +85,7 @@ function canonicalRows(
   rows: readonly SwmAuthorInventoryRowV1[],
 ): readonly SwmAuthorInventoryRowV1[] {
   const ordered = [...rows].sort(compareSwmAuthorInventoryRowsV1);
-  return parseCanonicalSwmAuthorInventoryRowsV1(
-    canonicalizeSwmAuthorInventoryRowsBytesV1(ordered),
-  );
+  return snapshotSwmAuthorInventoryRowsV1(ordered);
 }
 
 function rowsEqual(
