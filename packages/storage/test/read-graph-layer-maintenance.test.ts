@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { ReadGraphWriteRefusedError } from '../src/read-graph/read-graph-store.js';
 import { parseReadGraphStateRows, readGraphStateCompareAndSet, readGraphStateRowsQuery } from '../src/read-graph/state.js';
-import type { TripleStore } from '../src/triple-store.js';
+import type { Quad, TripleStore, UpdateOptions } from '../src/triple-store.js';
 import {
   expectLayerUnions,
   layerFixture,
@@ -129,6 +129,69 @@ describe('read-graph layer on embedded Oxigraph', () => {
     await store.delete([q(first!, '"anchored"', member)]);
     expect(await labels()).toEqual([second]);
     expect(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)?.state).toBe('dirty');
+  });
+
+  it('sends a delete naming a blank node only once its dirty marks are stored, and refuses it when one is not', async () => {
+    // The embedded engine's own delete, with the read graphs' dirty marks held back or failed on request.
+    class Gated extends OxigraphStore {
+      readonly readGraphCapabilities = Object.freeze({ methods: Object.freeze(['delete'] as const), serialUpdates: true, plansBlankNodeDeletes: false });
+      readonly calls: string[] = [];
+      gate: Promise<void> | undefined;
+      failMarks = 0;
+      override async update(sparql: string, options?: UpdateOptions): Promise<void> {
+        if (options?.source === 'storage.readGraphDirtyMark') {
+          this.calls.push('mark');
+          await this.gate;
+          if (this.failMarks > 0) {
+            this.failMarks -= 1;
+            throw new Error('connection reset');
+          }
+        }
+        return super.update(sparql, options);
+      }
+      override async delete(quads: Quad[]): Promise<void> {
+        this.calls.push('delete');
+        return super.delete(quads);
+      }
+    }
+    const gated = new Gated();
+    const { adapter, fixture, layer, store } = await layered(gated);
+    const { wholeVm } = fixture.readGraphs;
+    const member = fixture.graphs[2]!;
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(wholeVm)));
+    const anchored = async () => {
+      const result = await adapter.query(`SELECT ?b WHERE { GRAPH <${member}> { ?b <${P}> "anchored" } }`);
+      return (result.type === 'bindings' ? result.bindings : []).map((row) => row.b!);
+    };
+    const storedState = async () => {
+      const result = await adapter.query(readGraphStateRowsQuery());
+      const row = parseReadGraphStateRows(result.type === 'bindings' ? result.bindings : []).rows.find((found) => found.readGraph === wholeVm);
+      return `${row?.state}@${row?.generation}`;
+    };
+    // The fixture's blank node in this member graph.
+    const before = await anchored();
+    const [label] = before;
+    // A mark the store does not take: the delete is refused before it is sent, and the member keeps its data.
+    gated.failMarks = 1;
+    const refused = await store.delete([q(label!, '"anchored"', member)]).then(() => undefined, (error: unknown) => error);
+    expect(refused).toBeInstanceOf(ReadGraphWriteRefusedError);
+    expect(refused).toMatchObject({ code: 'READ_GRAPH_WRITE_REFUSED', outcome: 'not_started', storeOperation: 'delete' });
+    expect(gated.calls).toEqual(['mark']);
+    expect(await anchored()).toEqual(before);
+    expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
+    expect(await storedState()).toBe('ready@1');
+    // A mark that takes its time: nothing is deleted before it is stored, and it is sent although the mirror says dirty.
+    let open: (() => void) | undefined;
+    gated.gate = new Promise<void>((resolve) => { open = resolve; });
+    gated.calls.length = 0;
+    const deleting = store.delete([q(label!, '"anchored"', member)]);
+    await vi.waitFor(() => expect(gated.calls).toEqual(['mark']));
+    expect(await anchored()).toEqual(before);
+    open!();
+    await deleting;
+    expect(gated.calls).toEqual(['mark', 'delete']);
+    expect(await anchored()).toEqual(before.filter((each) => each !== label));
+    expect(await storedState()).toBe('dirty@2');
   });
 
   it('marks the read graphs of a write with an unknown outcome dirty, on an engine that may run it beside later requests', async () => {
