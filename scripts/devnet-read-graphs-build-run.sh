@@ -32,9 +32,10 @@
 #             (completeSuccess in its REPORT.json); a filtered run is
 #             INCONCLUSIVE;
 #   drills    a restart during a rebuild; a kill of the daemon worker during
-#             working-memory writes (every write the node acknowledged must be
-#             there after it, and the agent's working-memory read graph ready
-#             and consistent); a CLI write with the daemon down (`dkg publisher clear
+#             working-memory writes (the worker must be gone and a new one in
+#             its place; every write the node acknowledged must be there after
+#             it, and the agent's working-memory read graph ready and
+#             consistent); a CLI write with the daemon down (`dkg publisher clear
 #             finalized` on a node that has such jobs, which must stay
 #             cleared; a store opened outside the daemon marks every read
 #             graph it finds dirty before it writes, so each shared-layer read
@@ -744,9 +745,18 @@ drill_restart_during_rebuild() {
 
 # acked_count <file>: lines in a file of acknowledged writes.
 acked_count() { wc -l < "$1" | tr -d ' '; }
+# pid_alive <pid>: the process exists and is not a zombie.
+pid_alive() { local s; s="$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')"; [ -n "$s" ] && [ "${s#Z}" = "$s" ]; }
+# daemon_worker_pid <n>: the PID node <n>'s daemon.pid names, when that process is a live daemon worker; else nothing.
+daemon_worker_pid() {
+  local pid
+  pid="$(tr -d '[:space:]' < "$DEVNET_DIR/node$1/daemon.pid" 2>/dev/null)"
+  [ -n "$pid" ] && pid_alive "$pid" || return 0
+  case "$(ps -o command= -p "$pid" 2>/dev/null)" in *daemon-worker*|*daemon-foreground-worker*) echo "$pid" ;; esac
+}
 
 drill_kill_during_write() {
-  local n="$KILL_NODE" started cg pid command writer acked i resp missing body agent wm_graph
+  local n="$KILL_NODE" started cg pid new_pid writer acked i resp missing body agent wm_graph
   started="$(now)"; cg="read-graphs-drill-$(echo "$RUN_ID" | tr 'A-Z' 'a-z')"
   acked="$RESULTS/drill-kill.acked"; : > "$acked"
   # The writes go to the node's own agent; the read graph they maintain is that agent's working-memory read graph.
@@ -785,16 +795,28 @@ drill_kill_during_write() {
     record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "the writer did not run with acknowledged writes ($(acked_count "$acked") acknowledged), so no kill landed during writes"
     return
   fi
-  pid="$(tr -d '[:space:]' < "$DEVNET_DIR/node$n/daemon.pid" 2>/dev/null)"
-  command="$(ps -o command= -p "$pid" 2>/dev/null || true)"
-  case "$command" in
-    *daemon-worker*|*daemon-foreground-worker*) kill -9 "$pid" ;;
-    *) kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
-       record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "node$n's daemon.pid does not name its daemon worker"; return ;;
-  esac
+  # The crash must happen: SIGKILL delivered to the daemon worker, that worker gone, and a new worker in its place
+  # before anything is checked. A daemon that answered throughout would prove nothing.
+  pid="$(daemon_worker_pid "$n")"
+  if [ -z "$pid" ]; then
+    kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+    record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "node$n's daemon.pid does not name a running daemon worker"; return
+  fi
+  if ! kill -9 "$pid" 2>/dev/null; then
+    kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+    record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "SIGKILL could not be sent to node$n's daemon worker (PID $pid), so no crash happened"; return
+  fi
   kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+  for i in $(seq 1 40); do pid_alive "$pid" || break; sleep 0.5; done
+  if pid_alive "$pid"; then
+    record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "node$n's daemon worker (PID $pid) was still running 20 s after SIGKILL"; return
+  fi
   # The supervisor starts a new worker; restart the node if it does not.
   wait_up "$n" 120 || restart_node "$n" || { record drill-kill FAIL "$(( $(now) - started ))" "node$n did not come back after the kill"; return; }
+  new_pid="$(daemon_worker_pid "$n")"
+  if [ -z "$new_pid" ] || [ "$new_pid" = "$pid" ]; then
+    record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "node$n answers after the kill, but its daemon.pid names no new daemon worker (PID $pid was killed)"; return
+  fi
   # Every write the node acknowledged before the kill must be there after it.
   body="{\"contextGraphId\":\"$cg\",\"view\":\"working-memory\",\"sparql\":\"SELECT ?s WHERE { ?s <http://schema.org/name> ?name }\"}"
   resp="$(api "$n" POST /api/query "$body")"
@@ -811,7 +833,7 @@ drill_kill_during_write() {
   # The read graph those writes maintain must be there and ready; drill_end then checks it with the rest.
   wait_read_graph_ready "$n" "$wm_graph" "$READY_TIMEOUT" "$RESULTS/rows/drill-kill.wm.node$n" \
     || { record drill-kill FAIL "$(( $(now) - started ))" "the working-memory read graph <$wm_graph> was not listed ready after the kill"; return; }
-  drill_end drill-kill "$n" "$started" "killed node$n's daemon during working-memory writes; all $(acked_count "$acked") acknowledged writes were there after it, and their read graph was rebuilt and consistent"
+  drill_end drill-kill "$n" "$started" "killed node$n's daemon worker during working-memory writes and a new worker took over; all $(acked_count "$acked") acknowledged writes were there after it, and their read graph was rebuilt and consistent"
 }
 
 # finalized_jobs <n>: the node's count of finalized publish jobs, or "" when it cannot be read.
