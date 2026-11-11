@@ -7,11 +7,11 @@ import { classifyCoverage, type PcaCoverageResult } from '../../pca/coverage.js'
 import { PcaModalShell } from './PcaModalShell.js';
 import {
   WalletRow,
-  RetryButton,
   useCopy,
   nativeGasSymbol,
   isTestnetChain,
 } from '../../components/Pca/index.js';
+import { RetryButton } from '../../components/ds/RetryButton.js';
 import { Check } from 'lucide-react';
 import { Badge, StatusGlyph } from '../../components/ds/Badge.js';
 import { Loading } from '../../components/ds/Loading.js';
@@ -169,12 +169,15 @@ export function GetSponsoredPanel({
         : { kind: 'failed', message: `Couldn’t check PCA #${id} right now.`, retry: true };
     }
     // From here the PCA exists, so it can always be added read-only, whatever approval shows.
-    if (walletsReadError || wallets.length === 0) {
+    // Approval needs only the wallet addresses: a balance-read error (gas unknown) still
+    // probes every known wallet, and Ready stays off until gas is known.
+    if (wallets.length === 0) {
       return {
         kind: 'unverifiable',
         accountId: id,
+        // The wallet section above has its own Retry for an unreadable list.
         message: walletsReadError
-          ? `PCA #${id} exists, but this node’s wallets couldn’t be read, so we can’t check its approval.`
+          ? `PCA #${id} exists, but this node’s wallets couldn’t be read, so we can’t check its approval. Retry loading the wallets above.`
           : `PCA #${id} exists, but this node reported no publishing wallets to check.`,
         retry: false,
       };

@@ -1,5 +1,6 @@
 import React, { useId, useState } from 'react';
-import { HealthChip, RetryButton, formatExpiryShort, formatPcaTrac, truncateAddress } from '../../components/Pca/index.js';
+import { HealthChip, formatExpiryShort, formatPcaTrac, truncateAddress } from '../../components/Pca/index.js';
+import { RetryButton } from '../../components/ds/RetryButton.js';
 import type { ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
 import type { DiscoveredPca } from '../../hooks/useDiscoveredPcas.js';
 import { ownerModeWritesEnabled, type PcaOwnerMode } from '../../pca/ownerAccess.js';

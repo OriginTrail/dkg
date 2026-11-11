@@ -443,3 +443,20 @@ describe('GetSponsoredPanel — checking with no publishing wallets', () => {
     await unmount();
   });
 });
+
+describe('GetSponsoredPanel — a balance error with known wallet addresses', () => {
+  it('still probes the known wallets, tracks an approved PCA, and keeps Ready off without gas data', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null, error: 'RPC timeout' });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => ({
+      ...makePcaSnapshot({ accountId: id }),
+      probedKey: key ? { key, registered: true, adapterSupported: true } : undefined,
+    }));
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn(), initialAccountId: '7' }));
+    await waitForText(container, 'Approved on PCA #7: 1 of 1 wallets');
+    expect(mocks.fetchPca.mock.calls.filter(([id, key]) => id === '7' && key).map(([, key]) => key)).toEqual([W0]);
+    expect(usePcaStore.getState().trackedIds).toContain('7');
+    // Gas is unknown (no balances), so the node isn't declared ready to publish.
+    expect(container.textContent).not.toContain('Ready.');
+    await unmount();
+  });
+});

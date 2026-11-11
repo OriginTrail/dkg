@@ -12,7 +12,6 @@ export {
   isTestnetChain,
 } from './format.js';
 export { HealthChip, HEALTH_CHIP_META } from './HealthChip.js';
-export { RetryButton } from './RetryButton.js';
 // #1355 V2 — health derivation (healthForSnapshot / PcaHealthState / the threshold
 // constants) is imported DIRECTLY from the domain module `pca/health.js` by every
 // consumer, so the barrel no longer re-exports it.

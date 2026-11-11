@@ -16,8 +16,8 @@ import {
   formatPcaTrac,
   formatWeiToTrac,
   formatExpiryShort,
-  RetryButton,
 } from '../../components/Pca/index.js';
+import { RetryButton } from '../../components/ds/RetryButton.js';
 import { healthForSnapshot } from '../../pca/health.js';
 import { StatStrip } from '../../components/ContextGraphPrimitives.js';
 import { FundingSection } from './FundingSection.js';

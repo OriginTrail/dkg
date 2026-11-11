@@ -4,7 +4,7 @@ import { useAgentsStore } from '../../stores/agents.js';
 import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { usePcaOverview } from '../../hooks/usePcaOverview.js';
 import { usePcaScopeBootstrap } from '../../hooks/usePcaScopeBootstrap.js';
-import { RetryButton } from '../../components/Pca/RetryButton.js';
+import { RetryButton } from '../../components/ds/RetryButton.js';
 import { formatBps } from '../../lib/format.js';
 
 function pct(bps: number | null): string {

@@ -1,6 +1,6 @@
 import React from 'react';
 import { ArrowRight } from 'lucide-react';
-import { RetryButton } from '../../components/Pca/RetryButton.js';
+import { RetryButton } from '../../components/ds/RetryButton.js';
 import { useAgentsStore } from '../../stores/agents.js';
 import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { usePcaOverview } from '../../hooks/usePcaOverview.js';
