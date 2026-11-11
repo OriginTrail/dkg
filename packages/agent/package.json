@@ -237,8 +237,8 @@
     "@libp2p/crypto": "5.2.0",
     "@opentelemetry/sdk-metrics": "^2.8.0",
     "@types/js-yaml": "^4.0.9",
-    "@vitest/coverage-v8": "^4.0.18",
-    "vitest": "^4.0.18"
+    "@vitest/coverage-v8": "^5.1.0",
+    "vitest": "^5.1.0"
   },
   "publishConfig": {
     "access": "public"
