@@ -80,6 +80,7 @@ import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 import {
   createQueryStoreReadContext,
+  estimateMaterializedBytes,
   requireQueryDataset,
   type QueryStoreReadContext,
   type StoreReadLane,
@@ -448,8 +449,13 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     switch (plan.discovery.catalog.kind) {
       case 'none': return execute(null);
       case 'shared': return this.resolveScopedContentGraphDiscovery(plan.policy.contextGraphId, reads).then(execute);
-      case 'admission-owned': return plan.discovery.catalog.owner.withQueryReadAdmission(async () =>
-        execute(await this.discoverScopedContentGraphDiscovery(plan.policy.contextGraphId, reads.catalog)), storeOptions(options));
+      case 'admission-owned': return plan.discovery.catalog.owner.withQueryReadAdmission(async () => {
+        // Complete admission needs a store that names its visible graphs, so the discovery reads them
+        // with the registry facts in one query; the caller pays for the graph names it returns.
+        const discovery = await this.discoverScopedContentGraphDiscovery(plan.policy.contextGraphId, reads.catalog);
+        reads.materializationBudget?.consumeBytes(estimateMaterializedBytes(discovery.inventory));
+        return execute(discovery);
+      }, storeOptions(options));
     }
   }
 
@@ -1016,8 +1022,13 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       laneKey: reads.shared.cacheKey,
       graphPrefix,
       signal: reads.signal,
-      load: () => reads.shared.measure(discoveryReads =>
-        this.discoverScopedContentGraphDiscovery(contextGraphId, discoveryReads)),
+      // The caller pays for the graph names the discovery returns, read by a prefix listing or
+      // with the registry facts in one query; the registry and authority answers stay node work.
+      load: async () => {
+        const { snapshot } = await reads.shared.measure(discoveryReads =>
+          this.discoverScopedContentGraphDiscovery(contextGraphId, discoveryReads));
+        return { snapshot, byteCount: estimateMaterializedBytes(snapshot.inventory) };
+      },
     });
     return reads.shared.replay(discovery);
   }

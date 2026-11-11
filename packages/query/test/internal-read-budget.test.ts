@@ -80,8 +80,6 @@ describe('internal reads leave the caller budget', () => {
     ['a working-memory read by assertion name', `SELECT ?name WHERE { ?s <${NAME}> ?name }`,
       { view: 'working-memory', agentAddress: AGENT, assertionName: 'draft' }],
     ['a scoped read with private data', `SELECT ?name WHERE { ?s <${NAME}> ?name }`, { includePrivate: true }],
-    ['a scoped read across partitions', `SELECT ?name WHERE { GRAPH ?g { ?s <${NAME}> ?name } }`,
-      { includeContextGraphPartitions: true }],
   ])('charges %s for its slices and results only', async (_shape, sparql, shape) => {
     const inner = new OxigraphStore();
     await inner.insert(fixture());
@@ -103,6 +101,38 @@ describe('internal reads leave the caller budget', () => {
       expect(results.map(read => read.limit)).toEqual(results.map(() => CALLER_LIMIT));
       // The caller pays for its slices and its results; no internal answer is in its charges.
       expect(sum(charges)).toBe(sum(slices) + sum(results.map(read => read.bytes)));
+    } finally { await inner.close(); }
+  });
+
+  it.each([false, true])('charges a read across partitions for the graph names its discovery returns, cached or not (complete admission: %s)', async (owned) => {
+    const inner = new OxigraphStore();
+    const swm = (n: number) => `${ROOT}/_shared_memory/0xabc/${n}`;
+    await inner.insert(Array.from({ length: 1_000 }, (_, n) => quad(swm(n), `urn:s:${n}`, NAME, `"v${n}"`)));
+    // A store that offers complete read admission runs the discovery under it; one that does not shares it.
+    const store = new Proxy(inner, { get(target, key) {
+      if (key === 'withQueryReadAdmission') return owned ? async (work: () => Promise<unknown>) => work() : undefined;
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const engine = new DKGQueryEngine(store);
+    const sparql = 'SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } }';
+    const options: QueryOptions = { contextGraphId: ID, includeContextGraphPartitions: true };
+    const names = bytes(Array.from({ length: 1_000 }, (_, n) => swm(n)));
+    try {
+      // The graph names alone are far over a 1 KiB budget, although the answer is one row.
+      await expect(engine.query(sparql, { ...options, maxMaterializedBytes: 1024 }))
+        .rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: 1024 });
+      for (const round of ['first', 'cached'] as const) {
+        const charges: number[] = [];
+        class RecordingBudget extends QueryMaterializationBudget {
+          override consumeBytes(value: number): void { charges.push(value); super.consumeBytes(value); }
+        }
+        const answer = await engine.query(sparql, { ...options, materializationBudget: new RecordingBudget(CALLER_LIMIT) });
+        expect(answer.bindings).toHaveLength(1);
+        // One charge holds every graph name of the context graph; the registry answer is not charged.
+        expect(Math.max(...charges), round).toBeGreaterThanOrEqual(names);
+        expect(charges.filter(charge => charge >= names), round).toHaveLength(1);
+      }
     } finally { await inner.close(); }
   });
 
