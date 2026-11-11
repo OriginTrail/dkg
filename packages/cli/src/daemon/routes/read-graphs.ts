@@ -52,7 +52,8 @@ interface ReadGraphRow {
  *   the node's read-graph background slot, through the agent's read-graph
  *   workload, which keeps the result for the status;
  * - `POST …/rebuild`: mark each read graph dirty, which the node's builder
- *   rebuilds at its next pass;
+ *   rebuilds at its next pass; refused with 409 while the builder does not
+ *   run, since nothing would rebuild them;
  * - `POST …/drop`: remove each read graph, its contents and its state row; a
  *   removal takes the backend's background slot, as the builder's jobs do.
  *
@@ -83,6 +84,12 @@ export async function handleReadGraphRoutes(ctx: RequestContext, options: { data
 
   if (action === 'check') {
     return jsonResponse(res, 200, await ctx.agent.checkReadGraphsV1({ mode: parsed.request.mode ?? 'full', signal: gone.signal }));
+  }
+  if (action === 'rebuild' && ctx.agent.readGraphStatusV1()?.builder === undefined) {
+    return jsonResponse(res, 409, {
+      code: 'READ_GRAPH_BUILDER_NOT_RUNNING',
+      error: 'The node\'s read-graph builder does not run, so nothing would rebuild these read graphs. Switch read graphs on for this node first, or drop them.',
+    });
   }
   const store = ctx.agent.store;
   const layer = readGraphLayerOf(store);

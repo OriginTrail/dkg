@@ -70,7 +70,7 @@ export function registerReadGraphsCommand(program: Command): void {
       }));
 
   scoped('rebuild')
-    .description('Mark the read graphs dirty; the node\'s builder rebuilds them at its next pass. Exits 1 if one could not be marked')
+    .description('Mark the read graphs dirty; the node\'s builder rebuilds them at its next pass. Refused while the builder does not run. Exits 1 if one could not be marked')
     .action((options: CommandOptions) => run('rebuild', scopeOf(options), async (client, request) => {
       const answer = await client.readGraphs<ReadGraphsRebuildAnswer>('rebuild', request);
       const failed = answer.marked.some((marked) => marked.error);

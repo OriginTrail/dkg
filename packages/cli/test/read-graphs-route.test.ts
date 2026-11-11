@@ -126,6 +126,12 @@ function workloadAgent(store: TripleStore) {
   };
 }
 
+/** The agent with its builder started and idle, as when read graphs are switched on. */
+function buildingAgent(store: TripleStore) {
+  const agent = agentOf(store);
+  return { ...agent, readGraphStatusV1: () => ({ ...agent.readGraphStatusV1(), builder: { running: false, pending: 0, retrying: [] } }) };
+}
+
 const agents = new WeakMap<object, ReturnType<typeof workloadAgent>>();
 /** One agent per store, so a check and a later status meet. */
 function agentOf(store: TripleStore): ReturnType<typeof workloadAgent> {
@@ -300,9 +306,17 @@ describe('POST /api/store/read-graphs/check', () => {
 });
 
 describe('POST /api/store/read-graphs/rebuild', () => {
+  it('is refused while the node\'s builder does not run, and marks nothing', async () => {
+    const { dataDir, store, stateOf } = await node();
+    const answer = await call(store, 'POST', `${READ_GRAPHS_PATH}/rebuild`, { body: { contextGraphId: CG }, dataDir });
+    expect(answer.status).toBe(409);
+    expect(answer.body).toMatchObject({ code: 'READ_GRAPH_BUILDER_NOT_RUNNING', error: expect.stringMatching(/builder does not run/) });
+    expect(Object.values(IRI).map(stateOf)).toEqual(Object.values(IRI).map(() => 'ready'));
+  });
+
   it('marks each read graph dirty for the builder, and leaves the others', async () => {
     const { dataDir, store, stateOf } = await node();
-    const answer = await call(store, 'POST', `${READ_GRAPHS_PATH}/rebuild`, { body: { contextGraphId: CG, layer: 'swm' }, dataDir });
+    const answer = await call(store, 'POST', `${READ_GRAPHS_PATH}/rebuild`, { body: { contextGraphId: CG, layer: 'swm' }, dataDir, agent: buildingAgent(store) });
     expect(answer).toEqual({ handled: true, status: 200, body: { marked: [{ readGraph: IRI.swm, state: 'dirty' }] } });
     expect(stateOf(IRI.swm)).toBe('dirty');
     expect(stateOf(IRI.vm)).toBe('ready');
@@ -313,7 +327,7 @@ describe('POST /api/store/read-graphs/rebuild', () => {
   it('reports a read graph its store cannot maintain', async () => {
     const store = wrapReadGraphLayer(undeclared(new OxigraphStore()), { backend: 'oxigraph' });
     store.runtime.mirror.set({ readGraph: IRI.vm, state: 'ready', generation: 1, ...CURRENT_READ_GRAPH_VERSIONS });
-    const rebuilt = await call(store, 'POST', `${READ_GRAPHS_PATH}/rebuild`, { body: {} });
+    const rebuilt = await call(store, 'POST', `${READ_GRAPHS_PATH}/rebuild`, { body: {}, agent: buildingAgent(store) });
     expect(rebuilt.body).toEqual({ marked: [{ readGraph: IRI.vm, error: expect.stringMatching(/cannot maintain read graphs/) }] });
     expect(store.runtime.mirror.get(IRI.vm)?.state).toBe('ready');
     // Such a read graph can still be dropped.
@@ -330,7 +344,7 @@ describe('POST /api/store/read-graphs/rebuild', () => {
       await update(sparql, options);
       res.emit('close');
     });
-    const answer = await call(store, 'POST', `${READ_GRAPHS_PATH}/rebuild`, { body: { contextGraphId: CG }, dataDir, res });
+    const answer = await call(store, 'POST', `${READ_GRAPHS_PATH}/rebuild`, { body: { contextGraphId: CG }, dataDir, res, agent: buildingAgent(store) });
     const [first, ...rest] = [IRI.vm, IRI.swm, IRI.codeVm, IRI.wm].sort();
     expect((answer.body!.marked as Array<{ readGraph: string }>).map((marked) => marked.readGraph)).toEqual([first]);
     expect(rest.map(stateOf)).toEqual(rest.map(() => 'ready'));
