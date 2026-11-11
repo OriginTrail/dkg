@@ -62,11 +62,11 @@ async function refusal(role: 'core' | 'edge'): Promise<QueryConfigError | undefi
 
 describe('read graphs and the Edge rollback target', () => {
   it('refuses read graphs while the recorded previous version is older than the first recognizing release', async () => {
-    await writeFile(join(home, 'previous-version'), '10.1.0\n');
+    await writeFile(join(home, 'previous-version'), '10.1.1\n');
     const error = await refusal('edge');
     expect(error?.issues).toEqual([{
       key: 'query.readGraphs',
-      message: `must be "off" while the rollback target (${join(home, 'previous-version')}: 10.1.0) is older than `
+      message: `must be "off" while the rollback target (${join(home, 'previous-version')}: 10.1.1) is older than `
         + `${READ_GRAPHS_FIRST_RECOGNIZING_RELEASE}, the first release that recognizes read graphs`,
     }]);
     await expect(assertRollbackTargetRecognizesReadGraphs(OFF, 'edge')).resolves.toBeUndefined();
@@ -74,7 +74,7 @@ describe('read graphs and the Edge rollback target', () => {
 
   it('counts a prerelease or an unreadable version as older, and the first release or later as recognizing', async () => {
     for (const [version, refused] of [
-      ['10.1.1-rc.1', true], ['not-a-version', true], ['10.1.1', false], ['10.2.0', false], ['11.0.0-beta.1', false],
+      ['10.1.1', true], ['10.1.2-rc.1', true], ['not-a-version', true], ['10.1.2', false], ['10.2.0', false], ['11.0.0-beta.1', false],
     ] as const) {
       await writeFile(join(home, 'previous-version'), version);
       expect(Boolean(await refusal('edge')), version).toBe(refused);
@@ -92,9 +92,9 @@ describe('read graphs and the Edge rollback target', () => {
 describe('read graphs and the Core rollback target', () => {
   it('reads the other slot, and refuses read graphs while it holds an older release', async () => {
     await activate('a');
-    await slot('b', '10.1.0');
-    expect(await readGraphRollbackTarget('core')).toEqual({ kind: 'release', source: 'slot b', version: '10.1.0', holdsPartitionGuard: false });
-    expect((await refusal('core'))?.issues[0]?.message).toContain('(slot b: 10.1.0)');
+    await slot('b', '10.1.1');
+    expect(await readGraphRollbackTarget('core')).toEqual({ kind: 'release', source: 'slot b', version: '10.1.1', holdsPartitionGuard: false });
+    expect((await refusal('core'))?.issues[0]?.message).toContain('(slot b: 10.1.1)');
   });
 
   it('accepts a slot whose build holds the partition guard, whatever version it reports', async () => {
@@ -112,7 +112,7 @@ describe('read graphs and the Core rollback target', () => {
     expect(await readGraphRollbackTarget('core')).toEqual({ kind: 'none' });
     await mkdir(join(home, 'releases', 'a'), { recursive: true });
     expect(await refusal('core')).toBeUndefined();
-    await slot('a', '10.1.1');
+    await slot('a', '10.1.2');
     expect(rollbackTargetRecognizesReadGraphs(await readGraphRollbackTarget('core'))).toBe(true);
   });
 });

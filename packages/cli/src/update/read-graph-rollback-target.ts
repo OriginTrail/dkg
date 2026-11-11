@@ -15,7 +15,7 @@ import { compareSemver } from './npm-registry.js';
 import { readSlotVersion } from './rollback-stores.js';
 
 /** The first release that recognizes read graphs. A prerelease counts as older than its release. */
-export const READ_GRAPHS_FIRST_RECOGNIZING_RELEASE = '10.1.1';
+export const READ_GRAPHS_FIRST_RECOGNIZING_RELEASE = '10.1.2';
 
 /**
  * The read-graph partition guard in a slot's build, in the git and the npm layouts. A slot that holds it recognizes read graphs whatever version it reports,
