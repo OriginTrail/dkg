@@ -68,7 +68,20 @@ export function readUnstoredReadGraphMarks(dataDir: string): Map<string, Set<num
   return marks;
 }
 
-/** Remove the journal, once every mark it held is stored. */
-export function clearUnstoredReadGraphMarks(dataDir: string): void {
+/** The journal as it stands, or `undefined` without one. */
+export function unstoredReadGraphMarksText(dataDir: string): string | undefined {
+  try {
+    return readFileSync(readGraphMarkJournalPath(dataDir), 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Remove the journal, once every mark it held is stored. With `ifText`, only
+ * while it still reads so: a mark noted meanwhile keeps it.
+ */
+export function clearUnstoredReadGraphMarks(dataDir: string, ifText?: string): void {
+  if (ifText !== undefined && unstoredReadGraphMarksText(dataDir) !== ifText) return;
   rmSync(readGraphMarkJournalPath(dataDir), { force: true });
 }
