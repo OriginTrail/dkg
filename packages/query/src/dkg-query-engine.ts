@@ -72,6 +72,8 @@ import {
   type PreparedGraphScope,
 } from './sparql-graph-scope.js';
 import { injectMinTrustFilter } from './sparql-min-trust.js';
+import { ExplicitGraphMembershipCheck, explicitGraphTargets, laneOverNamedGraphs,
+  type ExplicitGraphMembershipCounts } from './explicit-graph-membership.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 import {
@@ -330,6 +332,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   private readonly sparqlEngine: SparqlEngineFamily | null;
   private readonly graphManager: GraphManager;
   private readonly scopedContentGraphDiscoveryMemo: ScopedContentGraphDiscoveryMemo;
+  private readonly explicitGraphMembership = new ExplicitGraphMembershipCheck();
 
   constructor(store: TripleStore) {
     this.store = store;
@@ -338,6 +341,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     this.scopedContentGraphDiscoveryMemo = new ScopedContentGraphDiscoveryMemo(
       asGraphWriteRevisionSource(store),
     );
+  }
+
+  /** Counts of the explicit-graph membership check, which runs beside the enumeration. */
+  explicitGraphMembershipCounts(): ExplicitGraphMembershipCounts {
+    return this.explicitGraphMembership.snapshot();
   }
 
   /** Carry admission requirements with the authorized inventory across caller boundaries. */
@@ -425,16 +433,16 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   private async executeScoped(initialGraphScope: PreparedGraphScope,
     plan: ScopedQueryReadPlan, reads: StoreReadLane, variableContentGraphs: readonly string[], catalogReads: StoreReadLane): Promise<QueryResult> {
     const { subGraphName, staticPrivateAllowList } = plan.policy;
-    const partitions = new Map<string, string[]>();
-    for (const { root, prefix } of plan.discovery.contentPrefixes) {
-      partitions.set(root, await this.discoverGraphsByPrefix(prefix, reads));
-    }
-    const { policy } = plan;
-    const allowedGraphs = selectLegacyScopedRouteGraphs(policy, partitions);
+    const allowedGraphs = await this.discoverLegacyRouteGraphs(plan, reads);
     const privateAllowList = plan.discovery.privatePartitions
       ? [...staticPrivateAllowList, ...(await this.discoverGraphScopedPrivateGraphs(plan.policy.contextGraphId, catalogReads, subGraphName))]
       : staticPrivateAllowList;
     const explicitAllowedGraphs = [...allowedGraphs, ...privateAllowList];
+    const named = plan.discovery.contentPrefixes.length > 0 ? explicitGraphTargets(initialGraphScope) : null;
+    if (named) {
+      await this.compareExplicitGraphMembership('legacy route', named, explicitAllowedGraphs, catalogReads,
+        async lane => [...(await this.discoverLegacyRouteGraphs(plan, lane)), ...privateAllowList]);
+    }
     const variableAllowedGraphs = [...new Set([...explicitAllowedGraphs, ...variableContentGraphs])];
     // Explicit IRIs retain static route authority; only opted-in variables gain
     // classified same-CG content selected for this caller and sub-graph.
@@ -453,6 +461,27 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       return mergeSharedMemoryAndDataResults(dataResult, smResult);
     }
     return this.execWithExclusions(await resolve(route.target), reads, plan.excludedGraphPrefixes);
+  }
+
+  /** The legacy route's graphs: its static graphs and the listed graphs under its content prefixes. */
+  private async discoverLegacyRouteGraphs(plan: ScopedQueryReadPlan, reads: StoreReadLane): Promise<string[]> {
+    const partitions = new Map<string, string[]>();
+    for (const { root, prefix } of plan.discovery.contentPrefixes) {
+      partitions.set(root, await this.discoverGraphsByPrefix(prefix, reads));
+    }
+    return selectLegacyScopedRouteGraphs(plan.policy, partitions);
+  }
+
+  /**
+   * Counting mode: the enumeration decides. Beside it, the route's own graph rule
+   * judges the named graphs over a catalog of just those the store holds, which
+   * it finds by looking each one up instead of listing a prefix.
+   */
+  private compareExplicitGraphMembership(route: string, named: readonly string[], enumerated: readonly string[],
+    catalogReads: StoreReadLane, collect: (lane: StoreReadLane) => Promise<readonly string[]>): Promise<void> {
+    const visible = this.store.graphEnumerationVisibility?.bind(this.store);
+    return this.explicitGraphMembership.compare(route, named, enumerated,
+      () => collect(laneOverNamedGraphs(named, catalogReads, visible)));
   }
 
   private async execWithExclusions(scope: PreparedGraphScope, reads: StoreReadLane, excludedGraphPrefixes: readonly string[] = []): Promise<QueryResult> {
@@ -481,17 +510,16 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   }
 
   /**
-   * Execute a SPARQL query scoped to a declared V10 state view.
+   * A view's graphs: its fixed graphs, and the graphs `reads` lists under its
+   * prefixes. Graphs of a registered child context graph are left out.
    */
-  private async queryWithView(
-    initialScope: PreparedGraphScope,
+  private async collectViewGraphs(
     view: GetView,
     contextGraphId: string,
     options: QueryOptions,
     reads: StoreReadLane,
     catalogReads: StoreReadLane,
-  ): Promise<QueryResult> {
-    const sparql = initialScope.source;
+  ): Promise<string[]> {
     const fanOut = !options.subGraphName && !options.verifiedGraph
       && !(view === 'working-memory' && options.assertionName);
     const subGraphs = fanOut ? await readRegisteredViewSubGraphs(contextGraphId, catalogReads.query) : [];
@@ -586,9 +614,27 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
     // Parent authorization never grants access to a registered child context graph.
     const children = await readChildContextGraphAuthority(contextGraphId, catalogReads.query);
-    const dedupedGraphs = [...new Set(allGraphs)].filter(graph => !isKnownChildContextGraphPartition(graph, children));
-    allGraphs.length = 0;
-    allGraphs.push(...dedupedGraphs);
+    return [...new Set(allGraphs)].filter(graph => !isKnownChildContextGraphPartition(graph, children));
+  }
+
+  /**
+   * Execute a SPARQL query scoped to a declared V10 state view.
+   */
+  private async queryWithView(
+    initialScope: PreparedGraphScope,
+    view: GetView,
+    contextGraphId: string,
+    options: QueryOptions,
+    reads: StoreReadLane,
+    catalogReads: StoreReadLane,
+  ): Promise<QueryResult> {
+    const sparql = initialScope.source;
+    const allGraphs = await this.collectViewGraphs(view, contextGraphId, options, reads, catalogReads);
+    const named = explicitGraphTargets(initialScope);
+    if (named) {
+      await this.compareExplicitGraphMembership(`${view} view`, named, allGraphs, catalogReads,
+        lane => this.collectViewGraphs(view, contextGraphId, options, lane, catalogReads));
+    }
 
     if (allGraphs.length === 0) {
       // PR #239 / r17-2: a zero-graph resolution (e.g. a `verifiable-memory`
