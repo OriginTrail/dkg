@@ -30,6 +30,7 @@
 
 import { setImmediate as nextTurn, setTimeout as sleep } from 'node:timers/promises';
 import {
+  MemoryLayer,
   assertSafeIri,
   compareCodePoint,
   isReadGraphPartitionIri,
@@ -42,8 +43,9 @@ import { readGraphInventory, readGraphInventoryByPrefix } from '../graph-invento
 import { noteReadGraphPartitions } from '../read-graph-partition-marker.js';
 import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
-import { matchesGraphNameTest, readGraphMembership, type GraphNameTest } from './membership.js';
-import { readGraphRuntimeOf } from './read-graph-store.js';
+import { missingReadGraphMethods } from './adapter-contract.js';
+import { matchesGraphNameTest, readGraphMembership, workingMemoryIdentityRule, type GraphNameTest, type ReadGraphRegistrySnapshot } from './membership.js';
+import { readGraphLayerOf, readGraphRuntimeOf } from './read-graph-store.js';
 import { readReadGraphRegistry } from './registry.js';
 import type { InMemoryReadGraphStateMirror, ReadGraphBackendRuntime } from './runtime.js';
 import {
@@ -161,6 +163,7 @@ const MAX_PRESSURE_WAIT_MS = 5_000;
  */
 export async function buildReadGraph(context: ReadGraphJobContext, key: ReadGraphKey): Promise<ReadGraphJobResult> {
   const job = new ReadGraphJob(context, readGraphIri(key), 'build');
+  await job.refreshRegistry(key.scope.contextGraphId);
   const begun = await job.locked(async (): Promise<Begun<{ readonly membership: GraphNameTest }>> => {
     const stored = await job.reconcile();
     if (stored?.state === 'ready' && isReadGraphRowAccepted(stored, job.versions)) return { ended: 'current', row: stored };
@@ -259,15 +262,36 @@ export async function removeReadGraph(context: ReadGraphJobContext, readGraph: s
 export async function markReadGraphDirty(context: ReadGraphJobContext, readGraph: string): Promise<ReadGraphStateRow | undefined> {
   if (!parseReadGraphIri(readGraph)) throw new ReadGraphJobError(`Not a read-graph IRI: ${readGraph}`);
   const job = new ReadGraphJob(context, readGraph, 'mark');
-  return job.locked(async () => {
-    const stored = await job.stored();
-    if (stored.damaged) return job.reset();
-    if (stored.row === undefined) {
-      job.runtime.mirror.remove(readGraph);
-      return undefined;
-    }
-    return job.transition(stored.row, { kind: 'mark-dirty' });
-  });
+  return job.locked(() => job.markDirtyHeld());
+}
+
+const INSTALLED_IDENTITIES = new WeakMap<ReadGraphBackendRuntime, string>();
+
+/**
+ * Install the node's working-memory identity rule on the store's read-graph
+ * runtime. When the identity differs from the one installed before, every
+ * working-memory read graph with a row is marked dirty under its lock first,
+ * because it was built and maintained under the old rule. The first install
+ * in a process marks nothing: start-up has already marked them dirty.
+ */
+export async function installWorkingMemoryIdentity(
+  context: ReadGraphJobContext,
+  node: { readonly defaultAgentAddress?: string; readonly peerId?: string },
+): Promise<void> {
+  const runtime = readGraphRuntimeOf(context.store);
+  if (!runtime) return;
+  const identity = JSON.stringify([node.defaultAgentAddress ?? null, node.peerId ?? null]);
+  const installed = INSTALLED_IDENTITIES.get(runtime);
+  if (identity === installed) return;
+  if (installed !== undefined) {
+    const workingMemory = runtime.mirror.rows().map((row) => row.readGraph)
+      .filter((readGraph) => parseReadGraphIri(readGraph)?.layer === MemoryLayer.WorkingMemory);
+    await runtime.locks.withLocks(workingMemory, async () => {
+      for (const readGraph of workingMemory) await new ReadGraphJob(context, readGraph, 'mark').markDirtyHeld();
+    });
+  }
+  runtime.workingMemoryIdentity = workingMemoryIdentityRule(node);
+  INSTALLED_IDENTITIES.set(runtime, identity);
 }
 
 /**
@@ -324,9 +348,13 @@ class ReadGraphJob {
   private batches = 0;
 
   constructor(private readonly context: ReadGraphJobContext, readonly readGraph: string, private readonly kind: ReadGraphJobKind) {
-    const runtime = readGraphRuntimeOf(context.store);
-    if (!runtime) throw new ReadGraphJobError('This store has no read-graph layer');
-    this.runtime = runtime;
+    const layer = readGraphLayerOf(context.store);
+    if (!layer) throw new ReadGraphJobError('This store has no read-graph layer');
+    // A row in the mirror makes the layer maintain every write to its members: only where the adapter can.
+    if (kind !== 'remove' && missingReadGraphMethods(layer.innerStore, layer.adapterCapabilities).length > 0) {
+      throw new ReadGraphJobError('This store\'s adapter cannot maintain read graphs');
+    }
+    this.runtime = layer.runtime;
     this.maintenance = readGraphPartitionMaintenanceStore(context.store);
     if (!this.maintenance.update) throw new ReadGraphJobError('This store cannot build read graphs: it has no update()');
     this.versions = context.versions ?? CURRENT_READ_GRAPH_VERSIONS;
@@ -402,6 +430,38 @@ class ReadGraphJob {
     if (stored.damaged) throw new ReadGraphJobError(`The state row of ${this.readGraph} is damaged`);
     setMirror(this.runtime.mirror, this.readGraph, stored.row);
     return stored.row;
+  }
+
+  /** Mark the read graph dirty from its stored row, under the lock the caller holds. */
+  async markDirtyHeld(): Promise<ReadGraphStateRow | undefined> {
+    const stored = await this.stored();
+    if (stored.damaged) return this.reset();
+    if (stored.row === undefined) {
+      this.runtime.mirror.remove(this.readGraph);
+      return undefined;
+    }
+    return this.transition(stored.row, { kind: 'mark-dirty' });
+  }
+
+  /**
+   * Bring the runtime's registry snapshot of a context graph up to what is
+   * stored, holding no lock on entry. When the cache holds another snapshot,
+   * every read graph of the context graph with a row is marked dirty under its
+   * lock before the cache takes the new one: the layer maintained it under the
+   * old membership, and a build must not mix the two.
+   */
+  async refreshRegistry(contextGraphId: string): Promise<void> {
+    const fresh = await readReadGraphRegistry(this.maintenance, contextGraphId, this.options);
+    const cached = this.runtime.registries.get(contextGraphId);
+    if (cached !== undefined && sameRegistry(cached, fresh)) return;
+    const affected = this.runtime.mirror.rows().map((row) => row.readGraph)
+      .filter((readGraph) => parseReadGraphIri(readGraph)?.scope.contextGraphId === contextGraphId);
+    await this.runtime.locks.withLocks(affected, async () => {
+      if (cached !== undefined) {
+        for (const readGraph of affected) await new ReadGraphJob(this.context, readGraph, 'mark').markDirtyHeld();
+      }
+      this.runtime.registries.set(fresh);
+    });
   }
 
   noteMayHoldPartitions(): void {
@@ -534,6 +594,11 @@ class ReadGraphJob {
       await sleep(PRESSURE_POLL_MS, undefined, signal ? { signal } : undefined);
     }
   }
+}
+
+function sameRegistry(left: ReadGraphRegistrySnapshot, right: ReadGraphRegistrySnapshot): boolean {
+  const same = (a: readonly string[], b: readonly string[]) => a.length === b.length && [...a].sort().every((value, i) => value === [...b].sort()[i]);
+  return same(left.subGraphNames, right.subGraphNames) && same(left.childContextGraphRoots, right.childContextGraphRoots);
 }
 
 function fenceOf(row: ReadGraphStateRow): ReadGraphFence {

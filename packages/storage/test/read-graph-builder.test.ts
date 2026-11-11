@@ -12,6 +12,7 @@ import { readGraphMembership, type GraphNameTest } from '../src/read-graph/membe
 import { wrapReadGraphLayer, type ReadGraphStore } from '../src/read-graph/read-graph-store.js';
 import {
   buildReadGraph,
+  installWorkingMemoryIdentity,
   markReadGraphDirty,
   readGraphEnumerationRoots,
   readStoredReadGraphRow,
@@ -255,6 +256,9 @@ describe('building a read graph', () => {
     const [vm] = fixture.keys as [ReadGraphKey];
     const writes: Promise<void>[] = [];
     let batches = 0;
+    let copied = false;
+    let deleted = false;
+    const first = fixture.graphs[1]!;
     adapter.onUpdate = (sparql) => {
       if (!sparql.includes('VALUES ?g')) return;
       batches += 1;
@@ -262,11 +266,41 @@ describe('building a read graph', () => {
       // Each write waits for the lock this batch holds, and lands before the next batch.
       writes.push(store.insert([q(`urn:s:during-${batches}`, '"d"', graph)]));
       writes.push(store.delete([q('urn:s:shared', '"both"', fixture.graphs[2]!)]));
+      // Once a member is copied, a delete of a triple only it holds has to leave the read graph.
+      if (copied && !deleted) {
+        deleted = true;
+        writes.push(store.delete([q('urn:s:1', '"v1"', first)]));
+      }
+      if (sparql.includes(`<${first}>`)) copied = true;
     };
     expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done' });
     await Promise.all(writes);
     expect(batches).toBeGreaterThan(1);
+    expect(deleted).toBe(true);
+    expect(await triplesOf(adapter, fixture.readGraphs.wholeVm)).not.toContain(`urn:s:1 ${P} "v1"`);
     await expectUnion(adapter, layer, fixture, vm);
+  });
+
+  it('takes a registry that changed since it was cached, and marks the read graphs built under the old one dirty first', async () => {
+    const { adapter, fixture, layer, context } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done' });
+    const before = layer.runtime.mirror.get(fixture.readGraphs.wholeVm)!;
+    // A sub-graph registered after the snapshot was cached, with data of its own.
+    const docs = `${fixture.root}/docs`;
+    await adapter.insert([
+      { subject: docs, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph', graph: `${fixture.root}/_meta` },
+      { subject: docs, predicate: 'http://schema.org/name', object: '"docs"', graph: `${fixture.root}/_meta` },
+      q('urn:s:docs', '"d"', `${docs}/_verifiable_memory/${AGENT}/9`),
+    ]);
+    const docsVm: ReadGraphKey = { scope: readScope(fixture.contextGraphId, 'docs'), layer: MemoryLayer.VerifiableMemory };
+    expect(await buildReadGraph(context, docsVm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    expect(await triplesOf(adapter, readGraphIri(docsVm))).toEqual([`urn:s:docs ${P} "d"`]);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
+    // The whole graph's read graph was maintained under the old membership: dirty, then rebuilt with the sub-graph.
+    expect(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)).toMatchObject({ state: 'dirty', generation: before.generation + 1 });
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done' });
+    expect(await triplesOf(adapter, fixture.readGraphs.wholeVm)).toContain(`urn:s:docs ${P} "d"`);
   });
 
   it('ends without effect when a newer dirty mark overtakes it, and nothing of it lands after a newer ready', async () => {
@@ -339,8 +373,13 @@ describe('building a read graph', () => {
     const plain = new OxigraphStore();
     const [vm] = layerFixture('plain').keys as [ReadGraphKey];
     await expect(buildReadGraph({ store: plain }, vm)).rejects.toThrow(/no read-graph layer/);
-    const layer = wrapReadGraphLayer(Object.assign(new OxigraphStore(), { update: undefined }), { backend: 'oxigraph' });
-    await expect(buildReadGraph({ store: layer }, vm)).rejects.toThrow(/no update\(\)/);
+    const noUpdate = wrapReadGraphLayer(Object.assign(new HookedStore(), { update: undefined }), { backend: 'oxigraph' });
+    await expect(buildReadGraph({ store: noUpdate }, vm)).rejects.toThrow(/no update\(\)/);
+    // An adapter that cannot send read-graph operations with its writes gets no read graph to maintain.
+    const unable = wrapReadGraphLayer(new OxigraphStore(), { backend: 'oxigraph' });
+    await expect(buildReadGraph({ store: unable }, vm)).rejects.toThrow(/cannot maintain read graphs/);
+    await expect(markReadGraphDirty({ store: unable }, readGraphIri(vm))).rejects.toThrow(/cannot maintain read graphs/);
+    expect(unable.runtime.mirror.size).toBe(0);
   });
 });
 
@@ -443,6 +482,28 @@ describe('marking a read graph dirty', () => {
     };
     await expect(markReadGraphDirty(context, wholeVm)).rejects.toThrow('refused');
     expect(layer.runtime.mirror.get(wholeVm)).toEqual(row(wholeVm, 'dirty', 5));
+  });
+});
+
+describe('installing the working-memory identity rule', () => {
+  it('marks working-memory read graphs dirty when the identity changes, and only then', async () => {
+    const { adapter, fixture, layer, context } = await open();
+    const { wholeVm, agentWm } = fixture.readGraphs;
+    for (const readGraph of [wholeVm, agentWm]) {
+      await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(readGraph, 4)));
+      layer.runtime.mirror.set(readyRow(readGraph, 4));
+    }
+    const other = `0x${'cd'.repeat(20)}`;
+    await installWorkingMemoryIdentity(context, { defaultAgentAddress: AGENT, peerId: 'peer-1' });
+    await installWorkingMemoryIdentity(context, { defaultAgentAddress: AGENT, peerId: 'peer-1' });
+    expect(layer.runtime.mirror.get(agentWm)).toEqual(readyRow(agentWm, 4));
+    expect(layer.runtime.workingMemoryIdentity.addressesOf(AGENT)).toHaveLength(2);
+    await installWorkingMemoryIdentity(context, { defaultAgentAddress: other, peerId: 'peer-1' });
+    expect(layer.runtime.mirror.get(agentWm)).toEqual(row(agentWm, 'dirty', 5));
+    expect(layer.runtime.mirror.get(wholeVm)).toEqual(readyRow(wholeVm, 4));
+    expect(await storedRows(adapter)).toEqual({ [wholeVm]: 'ready@4', [agentWm]: 'dirty@5' });
+    expect(layer.runtime.workingMemoryIdentity.addressesOf(AGENT)).toEqual([AGENT]);
+    await installWorkingMemoryIdentity({ store: new OxigraphStore() }, { defaultAgentAddress: AGENT });
   });
 });
 

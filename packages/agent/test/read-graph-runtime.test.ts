@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, createOperationContext, readGraphIri, readScope, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
-  createTripleStore,
+  OxigraphStore,
+  READ_GRAPH_PLANNED_METHODS,
   readGraphRuntimeOf,
   readGraphLayerOf,
   readGraphStateCompareAndSet,
+  wrapReadGraphLayer,
 } from '@origintrail-official/dkg-storage';
 import { READ_GRAPHS_OFF, ReadGraphWorkloadOwnerV1, createReadGraphWorkloadV1, type ReadGraphModesV1 } from '../src/read-graph-runtime.js';
 
@@ -15,8 +17,19 @@ const AGENT = `0x${'ab'.repeat(20)}`;
 const OTHER = `0x${'cd'.repeat(20)}`;
 const ctx = createOperationContext('system');
 
+/** Embedded Oxigraph that offers no write the read-graph layer would have to plan, so its read graphs are maintained. */
+class InsertOnlyOxigraph extends OxigraphStore {
+  readonly readGraphCapabilities = Object.freeze({ methods: Object.freeze(['update'] as const), serialUpdates: true });
+  constructor() {
+    super();
+    for (const method of READ_GRAPH_PLANNED_METHODS.filter((name) => name !== 'update')) {
+      Object.defineProperty(this, method, { value: undefined, configurable: true, writable: true });
+    }
+  }
+}
+
 async function agentView(options: { readonly subscribed?: readonly string[] } = {}) {
-  const store = await createTripleStore({ backend: 'oxigraph' });
+  const store = wrapReadGraphLayer(new InsertOnlyOxigraph(), { backend: 'oxigraph' });
   await store.insert([
     { subject: `${ROOT}/code`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph', graph: `${ROOT}/_meta` },
     { subject: `${ROOT}/code`, predicate: 'http://schema.org/name', object: '"code"', graph: `${ROOT}/_meta` },

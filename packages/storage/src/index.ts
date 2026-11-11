@@ -494,6 +494,7 @@ export {
   DEFAULT_READ_GRAPH_BATCHING,
   ReadGraphJobError,
   buildReadGraph,
+  installWorkingMemoryIdentity,
   markReadGraphDirty,
   readGraphEnumerationRoots,
   readStoredReadGraphRow,

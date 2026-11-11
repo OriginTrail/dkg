@@ -16,7 +16,6 @@
 import {
   MemoryLayer,
   isReadGraphEligibleContextGraphId,
-  parseReadGraphIri,
   readScope,
   type OperationContext,
   type ReadGraphKey,
@@ -24,11 +23,9 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   ReadGraphBuilder,
-  markReadGraphDirty,
-  readGraphRuntimeOf,
+  installWorkingMemoryIdentity,
   readReadGraphRegistry,
   registeredSubGraphNames,
-  workingMemoryIdentityRule,
   type ReadGraphBuilderStatus,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
@@ -70,7 +67,6 @@ export class ReadGraphWorkloadOwnerV1 {
   readonly #options: ReadGraphWorkloadOptionsV1;
   readonly #modes: ReadGraphModesV1;
   #builder: ReadGraphBuilder | undefined;
-  #identity: string | undefined;
 
   constructor(agent: ReadGraphAgentViewV1, options: ReadGraphWorkloadOptionsV1) {
     this.#agent = agent;
@@ -134,26 +130,12 @@ export class ReadGraphWorkloadOwnerV1 {
     return keys;
   }
 
-  /**
-   * Set the node's identity rule on the store's read-graph runtime. When it
-   * changes after it was first set, every working-memory read graph is marked
-   * dirty before the new rule applies, because it was built under the old one.
-   * Start-up has already marked them dirty once.
-   */
+  /** Install the node's working-memory identity rule; storage marks the read graphs built under another one dirty. */
   async syncIdentity(signal?: AbortSignal): Promise<void> {
-    const runtime = readGraphRuntimeOf(this.#agent.store);
-    if (!runtime) return;
-    const node = { defaultAgentAddress: this.#agent.getDefaultAgentAddress(), peerId: this.#agent.peerId };
-    const identity = JSON.stringify([node.defaultAgentAddress ?? null, node.peerId]);
-    if (identity === this.#identity) return;
-    if (this.#identity !== undefined) {
-      for (const row of runtime.mirror.rows()) {
-        if (parseReadGraphIri(row.readGraph)?.layer !== MemoryLayer.WorkingMemory) continue;
-        await markReadGraphDirty({ store: this.#agent.store, dataDir: this.#options.dataDir, ...(signal ? { signal } : {}) }, row.readGraph);
-      }
-    }
-    runtime.workingMemoryIdentity = workingMemoryIdentityRule(node);
-    this.#identity = identity;
+    await installWorkingMemoryIdentity(
+      { store: this.#agent.store, dataDir: this.#options.dataDir, ...(signal ? { signal } : {}) },
+      { defaultAgentAddress: this.#agent.getDefaultAgentAddress(), peerId: this.#agent.peerId },
+    );
   }
 }
 
