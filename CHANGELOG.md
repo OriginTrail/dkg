@@ -6,6 +6,11 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Fixed
 
+- A node built from source without the semantic runtime's pinned Rust
+  toolchain builds again. Its build skips the semantic runtime's Wasm with a
+  warning, where it used to fail the whole build and stop git-based updates;
+  that node can't run the semantic runtime until the toolchain is installed.
+  CI and release packing still require the Wasm.
 - An error from one service's backend no longer takes a seller's other
   services away from buyers. When the backend refuses a call as made (400,
   404, 413, 415 or 422), the seller refuses it with a code buyers don't
