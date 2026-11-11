@@ -32,6 +32,7 @@ import { MemoryLayer, parseReadGraphIri } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '../triple-store.js';
 import { workingMemoryIdentityRule, type WorkingMemoryIdentityRule } from './membership.js';
 import { readGraphRuntimeOf } from './read-graph-store.js';
+import { endReadGraphFences } from './registry-fences.js';
 import { addReadGraphDataDirectory, readGraphDataDirectories } from './data-directories.js';
 import { markReadGraphDirty, type ReadGraphJobContext } from './rebuild.js';
 import { readGraphRecoveryGeneration, syncReadGraphRuntimeWithRecovery } from './recovery.js';
@@ -246,6 +247,9 @@ export async function installWorkingMemoryIdentity(
   const rule = workingMemoryIdentityRule(node);
   // Nothing is awaited from here until the rule, the marks and the record agree.
   const { marked, moved } = markWorkingMemoryReadGraphsDirty(runtime, runtime.workingMemoryIdentity, rule);
+  // A registry fence may already hold one of them out of service: lifting it must not put back a read graph built
+  // under the rule before.
+  endReadGraphFences(runtime, moved);
   if (moved.length > 0 || recording.node === undefined || !sameIdentity(recording.node, node)) {
     recording.recorded = false;
     // A record that cannot be removed holds the working-memory read graphs until a later turn removes it.
