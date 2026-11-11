@@ -1057,8 +1057,24 @@ jobs:
           path: /tmp
       - name: Restore devnet EVM artifacts
         run: tar -xzf /tmp/evm-devnet-test-artifacts.tgz
+      - name: Resolve the Playwright version
+        id: playwright
+        run: echo "version=$(node -p "require('./packages/node-ui/node_modules/@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      # The browser build is fixed by the Playwright version, so every shard
+      # can reuse one download instead of fetching it from Playwright's CDN.
+      - name: Restore the Playwright browser
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      # `--with-deps` also apt-installs fonts the runner image lacks. When
+      # GitHub's apt mirror is unreachable (it was on 2026-11-11, failing every
+      # shard), install the browser alone: the image already ships the system
+      # libraries Chromium needs.
       - name: Install Playwright Chromium
-        run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps
+        run: |
+          pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps \
+            || { echo "::warning::Installing Chromium's OS packages failed; installing the browser alone."; pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium; }
       - name: Apply resolved execution profile
         env:
           PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
