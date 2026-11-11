@@ -580,7 +580,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     );
   }
 
-  /** One background flight; past the internal limit it drops the catalog, so the next read seeds cold and fails as a seed does. */
+  /** One background flight; past the internal limit it drops the catalog unless a newer one was published meanwhile, so the next read seeds cold and fails as a seed does. */
   private revalidateInBackground(): void {
     this.backgroundRevalidation.start(() => this.refreshIndex('revalidate', BACKGROUND_REVALIDATION), (error) => {
       if (isStoreInternalLimitError(error)) this.clearIndex();
@@ -734,6 +734,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
 
   private replaceGraphSet(next: Set<string>, source: GraphSetRefreshSource, refreshMs: number): void {
     const { added, removed } = this.catalog.replace(next);
+    this.backgroundRevalidation.notePublished();
     recordGraphCatalogSize(this.catalog.measure());
     this.revalidateFailureCount = 0;
     this.nextRevalidateAt = this.now() + graphSetRevalidationDelayMs(this.revalidateMs, refreshMs);
