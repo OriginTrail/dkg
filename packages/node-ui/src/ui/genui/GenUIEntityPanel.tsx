@@ -11,7 +11,7 @@ import React from 'react';
 import { Renderer } from '@openuidev/react-lang';
 import { genuiLibrary, getGenuiLibraryPrompt } from './registry.js';
 import { streamGenUI } from './streamGenUI.js';
-import { useTabsStore } from '../stores/tabs.js';
+import { chooseTab as openTab } from '../lib/shellNavigation.js';
 import { Settings, ArrowRight } from 'lucide-react';
 
 export interface GenUIEntityPanelProps {
@@ -103,7 +103,6 @@ export const GenUIEntityPanel: React.FC<GenUIEntityPanelProps> = ({
 const LLM_NOT_CONFIGURED_HINT = 'LLM not configured';
 
 const GenUIErrorBlock: React.FC<{ error: string }> = ({ error }) => {
-  const openTab = useTabsStore((s) => s.openTab);
   const isLlmMissing = error.includes(LLM_NOT_CONFIGURED_HINT);
 
   if (!isLlmMissing) {

@@ -7,7 +7,7 @@ import {
 } from '../../api.js';
 import { refreshContextGraphInventoryAfterMutation } from '../../hooks/useContextGraphInventory.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
-import { useTabsStore } from '../../stores/tabs.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { useNodeEvents } from '../../hooks/useNodeEvents.js';
 import { normalizeAccessPolicy } from '../../lib/contextGraphSidebar.js';
 import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
@@ -335,7 +335,6 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   const [wiredProjectName, setWiredProjectName] = useState<string>('');
 
   const { contextGraphs, setActiveProject } = useProjectsStore();
-  const { openTab } = useTabsStore();
 
   useEffect(() => {
     if (initialContextGraphId) setInviteCode(initialContextGraphId);

@@ -15,7 +15,7 @@ const THEMES: Theme[] = ['dark', 'light'];
 
 /** Surfaces a badge or count can sit on. */
 const SURFACES = ['--bg-root', '--bg-panel', '--bg-surface', '--bg-elevated'] as const;
-const BADGE_TONES = ['neutral', 'success', 'warning', 'danger', 'wm', 'swm', 'vm', 'role', 'muted'];
+const BADGE_TONES = ['neutral', 'success', 'warning', 'danger', 'pending', 'wm', 'swm', 'vm', 'role', 'muted'];
 const STATUS_TONES = ['success', 'warning', 'danger', 'pending'];
 const COUNTS = [['neutral', 'ds-count'], ['attention', 'ds-count ds-tone-attention'], ['quiet', 'ds-count ds-tone-quiet']] as const;
 
@@ -132,6 +132,18 @@ test('the check fails a colour below AA', async ({ page }) => {
   const boxed = await render(page, 'ds-badge ds-tone-success', '--bg-surface');
   expect(ratio(boxed)).toBeLessThan(4.5);
   await page.evaluate(() => document.getElementById('unreadable-status')!.remove());
+  // Pending text in the decoration-only ghost colour is caught, in both themes.
+  await page.evaluate(() => {
+    const style = document.createElement('style');
+    style.id = 'ghost-pending';
+    style.textContent = '.ds-badge.ds-tone-pending { --badge-fg: var(--text-ghost); }';
+    document.head.appendChild(style);
+  });
+  for (const theme of THEMES) {
+    await setTheme(page, theme);
+    expect(ratio(await render(page, 'ds-badge ds-tone-pending', '--bg-surface')), `${theme} ghost pending`).toBeLessThan(4.5);
+  }
+  await page.evaluate(() => document.getElementById('ghost-pending')!.remove());
   // A token set on a parent doesn't override the badge's own rule.
   const outer = await render(page, 'ds-badge ds-tone-success', '--bg-surface', { '--badge-bg': 'var(--text-success)' });
   expect(outer.background).toBe('rgba(0, 0, 0, 0)');

@@ -11,6 +11,9 @@ import { useLayoutStore } from '../src/ui/stores/layout.js';
 import { useTabsStore } from '../src/ui/stores/tabs.js';
 import { useShellRouting } from '../src/ui/hooks/useShellRouting.js';
 import { chooseOpenTab, chooseTab } from '../src/ui/lib/shellNavigation.js';
+import { readFileSync } from 'node:fs';
+import { relative } from 'node:path';
+import { UI, uiFiles } from './helpers/jsx.js';
 
 const seen = { path: '', navigate: null as NavigateFunction | null };
 function Shell() {
@@ -102,5 +105,17 @@ describe('showing the page on navigation', () => {
     expect(seen.path).toBe('/settings');
     expect(useLayoutStore.getState().rightCollapsed).toBe(false);
     expect(expanded()).toBe(true);
+  });
+});
+
+describe('one way to open a tab from the UI', () => {
+  it('goes through lib/shellNavigation, which shows the page even when the tab is already open', () => {
+    // Only the store, the helper and the shell routing (which follows the address) touch openTab.
+    const allowed = new Set(['stores/tabs.ts', 'lib/shellNavigation.ts', 'hooks/useShellRouting.ts']);
+    const raw = uiFiles
+      .filter((f) => /\.tsx?$/.test(f) && !allowed.has(relative(UI, f).replace(/\\/g, '/')))
+      .filter((f) => /useTabsStore[^;\n]*\bopenTab\b|\{[^}]*\bopenTab\b[^}]*\} = useTabsStore/.test(readFileSync(f, 'utf8')))
+      .map((f) => relative(UI, f));
+    expect(raw).toEqual([]);
   });
 });

@@ -16,7 +16,7 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useProjectsStore } from '../../stores/projects.js';
-import { useTabsStore } from '../../stores/tabs.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { useNotificationsFeed } from '../../hooks/useNotificationsFeed.js';
 import { usePcaAlerts } from '../../hooks/usePcaAlerts.js';
 import { NotificationsPane } from '../Notifications/NotificationsPane.js';
@@ -38,7 +38,6 @@ export function NotificationsBell() {
   const wrapRef = useRef<HTMLDivElement>(null);
   const bellRef = useRef<HTMLButtonElement>(null);
   const setActiveProject = useProjectsStore((s) => s.setActiveProject);
-  const { openTab } = useTabsStore();
 
   const paneRef = useRef<HTMLDivElement>(null);
 

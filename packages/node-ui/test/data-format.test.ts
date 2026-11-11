@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { bpsToPercent, formatBps, formatDateTime, formatNumber, truncateAddress } from '../src/ui/lib/format.js';
+import { classText, jsxElements, parseTsx, tagName, uiJsxElements } from './helpers/jsx.js';
 
 const UI = join(__dirname, '../src/ui');
 const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (
@@ -91,7 +92,31 @@ describe('formats come from one place', () => {
     expect(matches(/…\$\{[\w.]+\.slice\(-\d+\)\}|\+ '…' \+ [\w.]+\.slice\(-\d+\)/g)).toEqual([]);
   });
 
+  // A table is wrapped when an element around it, in the same JSX, has ds-table-scroll.
+  // Markdown tables (v10-md-table) scroll with their message instead.
+  const unwrappedTables = (elements: Iterable<{ node: Parameters<typeof tagName>[0]; ancestors: Parameters<typeof tagName>[0][]; where: string }>) => [...elements]
+    .filter(({ node }) => tagName(node) === 'table' && !/\bv10-md-table\b/.test(classText(node)))
+    .filter(({ ancestors }) => !ancestors.some((a) => /\bds-table-scroll\b/.test(classText(a))))
+    .map(({ where }) => where);
+
   it('keeps every data table in a scroll wrapper', () => {
-    expect(matches(/(?<!ds-table-scroll[^<]*"?>)<table(?! className="v10-md-table")/g, code.filter((f) => f.endsWith('.tsx')))).toEqual([]);
+    expect(unwrappedTables(uiJsxElements())).toEqual([]);
+  });
+
+  it('reads the wrapper from the element tree, however the source is laid out', () => {
+    const check = (source: string) => unwrappedTables(jsxElements(parseTsx(source)));
+    expect(check('const A = () => <div className="ds-table-scroll"><table><tbody /></table></div>;')).toEqual([]);
+    expect(check(`const A = () => (
+      <div className="ds-table-scroll">
+        <table>
+          <tbody />
+        </table>
+      </div>
+    );`)).toEqual([]);
+    // The wrapper can carry other classes, and sit further up.
+    expect(check('const A = () => <div className={`ds-table-scroll ${x}`}><section><table /></section></div>;')).toEqual([]);
+    expect(check('const A = () => <table className="v10-md-table" />;')).toEqual([]);
+    expect(check('const A = () => <div className="card"><table><tbody /></table></div>;')).toHaveLength(1);
+    expect(check('const A = () => <table />;')).toHaveLength(1);
   });
 });

@@ -24,6 +24,8 @@ interface LayoutState {
   closeNarrowPanel: () => void;
   /** Show the centre: collapse the expanded right panel and close a floating one. */
   revealCentre: () => void;
+  /** Open the right panel: floating on a narrow screen, docked otherwise. Already open stays open. */
+  openRight: () => void;
   toggleBottom: () => void;
   toggleBottomMaximised: () => void;
   toggleLeftSectionMyProjects: () => void;
@@ -220,6 +222,15 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
   },
   closeNarrowPanel: () => set({ narrowPanel: null }),
   revealCentre: () => set({ rightExpanded: false, narrowPanel: null }),
+  openRight: () => {
+    if (isNarrowViewport()) {
+      set({ narrowPanel: 'right' });
+      return;
+    }
+    if (!get().rightCollapsed) return;
+    set({ rightCollapsed: false });
+    persist(snapshot(get()));
+  },
   toggleBottom: () => {
     set((s) => ({ bottomCollapsed: !s.bottomCollapsed, bottomMaximised: false }));
     persist(snapshot(get()));

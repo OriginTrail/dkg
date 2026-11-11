@@ -133,11 +133,14 @@
   cursor: pointer;
   transition: background-color var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
 }
-.ds-btn:hover:not(:disabled) {
+/* Preview states: each hover and focus rule below also names .dsp-hover or .dsp-focus,
+   so the reference page's state matrix shows the same declarations without a pointer or
+   keyboard. The app never sets those classes. */
+.ds-btn:is(:hover, .dsp-hover):not(:disabled) {
   background: var(--bg-hover);
   border-color: var(--border-prominent);
 }
-.ds-btn:focus-visible {
+.ds-btn:is(:focus-visible, .dsp-focus) {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
@@ -178,7 +181,7 @@
   border-color: var(--accent-primary);
   color: var(--text-on-primary);
 }
-.ds-btn.ds-primary:hover:not(:disabled) {
+.ds-btn.ds-primary:is(:hover, .dsp-hover):not(:disabled) {
   background: color-mix(in srgb, var(--accent-primary) 86%, var(--bg-root));
   border-color: color-mix(in srgb, var(--accent-primary) 86%, var(--bg-root));
 }
@@ -189,7 +192,7 @@
   border-color: transparent;
   color: var(--text-secondary);
 }
-.ds-btn.ds-ghost:hover:not(:disabled) {
+.ds-btn.ds-ghost:is(:hover, .dsp-hover):not(:disabled) {
   background: var(--bg-hover);
   border-color: transparent;
   color: var(--text-primary);
@@ -203,7 +206,7 @@
   border-color: color-mix(in srgb, var(--text-danger) 45%, transparent);
   color: var(--text-danger);
 }
-.ds-btn.ds-danger:hover:not(:disabled) {
+.ds-btn.ds-danger:is(:hover, .dsp-hover):not(:disabled) {
   background: color-mix(in srgb, var(--text-danger) 12%, transparent);
   border-color: color-mix(in srgb, var(--text-danger) 65%, transparent);
 }
@@ -214,7 +217,7 @@
   border-color: color-mix(in srgb, var(--layer-shared-border) 70%, transparent);
   color: var(--layer-shared-text);
 }
-.ds-btn.ds-swm:hover:not(:disabled) {
+.ds-btn.ds-swm:is(:hover, .dsp-hover):not(:disabled) {
   background: color-mix(in srgb, var(--layer-shared) 22%, var(--layer-shared-bg));
   border-color: var(--layer-shared-border);
 }
@@ -223,7 +226,7 @@
   border-color: var(--accent-vm);
   color: var(--text-on-vm);
 }
-.ds-btn.ds-vm:hover:not(:disabled) {
+.ds-btn.ds-vm:is(:hover, .dsp-hover):not(:disabled) {
   background: var(--accent-vm-hover);
   border-color: var(--accent-vm-hover);
 }
@@ -253,14 +256,14 @@
   cursor: pointer;
   transition: color var(--motion-fast), border-color var(--motion-fast);
 }
-.ds-tab:hover {
+.ds-tab:is(:hover, .dsp-hover) {
   color: var(--text-secondary);
 }
 .ds-tab.active, .ds-tab[aria-selected="true"] {
   color: var(--text-primary);
   border-bottom-color: var(--text-primary);
 }
-.ds-tab:focus-visible {
+.ds-tab:is(:focus-visible, .dsp-focus) {
   outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
 }
@@ -301,13 +304,13 @@
   cursor: pointer;
   transition: color var(--motion-fast), background-color var(--motion-fast);
 }
-.ds-seg-item:hover { color: var(--text-primary); }
+.ds-seg-item:is(:hover, .dsp-hover) { color: var(--text-primary); }
 .ds-seg-item.active, .ds-seg-item[aria-pressed="true"] {
   background: var(--bg-active);
   color: var(--text-primary);
   box-shadow: inset 0 0 0 1px var(--border-strong);
 }
-.ds-seg-item:focus-visible {
+.ds-seg-item:is(:focus-visible, .dsp-focus) {
   outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
@@ -336,7 +339,7 @@
   transition: background-color var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
 }
 .ds-filter.ds-sm { height: var(--h-control-sm); padding: 0 var(--space-8); font-size: var(--fs-label); }
-.ds-filter:hover {
+.ds-filter:is(:hover, .dsp-hover) {
   background: var(--bg-hover);
   border-color: var(--border-strong);
   color: var(--text-primary);
@@ -346,7 +349,7 @@
   border-color: var(--sg-color, var(--border-strong));
   color: var(--text-primary);
 }
-.ds-filter:focus-visible {
+.ds-filter:is(:focus-visible, .dsp-focus) {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
@@ -375,8 +378,8 @@
 .ds-entity-chip-name { overflow: hidden; text-overflow: ellipsis; }
 .ds-entity-chip .v10-cg-mark { width: 18px; height: 18px; border-radius: var(--radius-xs); font-size: var(--fs-micro); }
 .ds-entity-chip.interactive { cursor: pointer; transition: background-color var(--motion-fast), border-color var(--motion-fast); }
-.ds-entity-chip.interactive:hover { background: var(--bg-hover); border-color: var(--border-strong); }
-.ds-entity-chip.interactive:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.ds-entity-chip.interactive:is(:hover, .dsp-hover) { background: var(--bg-hover); border-color: var(--border-strong); }
+.ds-entity-chip.interactive:is(:focus-visible, .dsp-focus) { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 /* Light: the selected segment is the white surface lifted off a grey track. */
 body.light .ds-seg-item.active,
@@ -426,7 +429,7 @@ body.light .ds-seg-item[aria-pressed="true"] {
 }
 /* A combobox is unfinished until something is picked, not wrong, so it stays neutral. */
 .ds-input[aria-invalid="true"]:not([role="combobox"]) { border-color: var(--accent-red); }
-.ds-input:focus-visible,
+.ds-input:is(:focus-visible, .dsp-focus),
 :where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, select):focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 0;
@@ -476,7 +479,7 @@ button.ds-crumb:hover { color: var(--text-primary); text-decoration: underline; 
 }
 .ds-toggle[aria-checked="true"] { background: var(--accent-primary); }
 .ds-toggle[aria-busy="true"] { opacity: .6; cursor: wait; }
-.ds-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.ds-toggle:is(:focus-visible, .dsp-focus) { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .ds-toggle-knob {
   position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%;
   background: var(--bg-surface); transition: left var(--motion-base);

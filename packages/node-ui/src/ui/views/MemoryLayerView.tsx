@@ -30,10 +30,10 @@ const OnChainProvenanceCard = lazy(() =>
 type MemoryLayer = 'wm' | 'swm' | 'vm';
 type ViewMode = 'table' | 'graph';
 
-const LAYER_META: Record<MemoryLayer, { label: string; icon: React.ReactNode; description: string }> = {
-  wm: { label: 'Working Memory', icon: <LayerGlyph layer="wm" />, description: 'Private agent drafts. Fast local storage.' },
-  swm: { label: 'Shared Working Memory', icon: <LayerGlyph layer="swm" />, description: 'Shared proposals with collaborators. TTL-bounded.' },
-  vm: { label: 'Verifiable Memory', icon: <LayerGlyph layer="vm" />, description: 'Endorsed, published, on-chain knowledge.' },
+const LAYER_META: Record<MemoryLayer, { label: string; description: string }> = {
+  wm: { label: 'Working Memory', description: 'Private agent drafts. Fast local storage.' },
+  swm: { label: 'Shared Working Memory', description: 'Shared proposals with collaborators. TTL-bounded.' },
+  vm: { label: 'Verifiable Memory', description: 'Endorsed, published, on-chain knowledge.' },
 };
 
 const TABLE_ICON = (
@@ -224,7 +224,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
   return (
     <div className="v10-memory-layer-view">
       <div className="v10-mlv-header">
-        <span className={`v10-mlv-icon v10-layer-tone-text layer-tone-${layer}`}>{meta.icon}</span>
+        <span className={`v10-mlv-icon v10-layer-tone-text layer-tone-${layer}`}><LayerGlyph layer={layer} /></span>
         <PageHeader title={meta.label} description={meta.description} />
       </div>
 
