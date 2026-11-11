@@ -186,7 +186,7 @@ const App: React.FC = () => {
         <Row label="Role and access" note="facts about you and the graph">
           {['--role', '--role-text', '--role-bg', '--role-border'].map((t) => <Swatch key={t} token={t} theme={theme} />)}
         </Row>
-        <Row label="Data palette" note="fixed order, never cycled; also Context Graph colours">
+        <Row label="Data palette" note="fixed order, never cycled; also context graph colours">
           {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => <Swatch key={n} token={`--data-${n}`} theme={theme} />)}
         </Row>
       </Section>
@@ -297,8 +297,8 @@ const App: React.FC = () => {
         </Row>
       </Section>
 
-      <Section id="things-you-open" title="Things you open" lead="A leading mark says “this opens”: a tile for a Context Graph, a circle with initials for an agent.">
-        <Row label="Context Graph" note="<ContextGraphChip>">
+      <Section id="things-you-open" title="Things you open" lead="A leading mark says “this opens”: a tile for a context graph, a circle with initials for an agent.">
+        <Row label="Context graph" note="<ContextGraphChip>">
           <ContextGraphChip id="cg:climate-science" name="Climate science" onOpen={() => undefined} />
           <ContextGraphChip id="cg:supply-chain-eu" name="EU supply chain" />
         </Row>

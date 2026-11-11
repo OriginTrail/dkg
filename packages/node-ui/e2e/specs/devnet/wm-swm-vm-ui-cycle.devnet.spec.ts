@@ -96,7 +96,7 @@ test.beforeAll(async () => {
       cgs = await listContextGraphs(1);
     }
   }
-  requireDevnetPrecondition(test, cgs.length === 0, 'No Context Graphs on devnet');
+  requireDevnetPrecondition(test, cgs.length === 0, 'No context graphs on devnet');
 
   // #1464 — provision a DEDICATED, unique-per-run context graph so the UI's
   // promote-all (`widget-promote-all-btn`) sees ONLY this spec's own clean,
@@ -173,7 +173,7 @@ async function openProjectTab(page: Page, name: string) {
 }
 
 async function openImportModal(page: Page) {
-  const importBtn = page.locator('button[aria-label="Import into Context Graph"]');
+  const importBtn = page.locator('button[aria-label="Import into context graph"]');
   await expect(importBtn).toBeVisible({ timeout: 10_000 });
   await importBtn.click();
 }

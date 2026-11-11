@@ -384,7 +384,7 @@ export function GetSponsoredPanel({
             Ready. At least 1 wallet is approved and has gas, so this node can publish with PCA #{checked!.accountId}.{' '}
             {/* L9: no global publish target — the discount applies at any per-CG
                 publish. Guidance hint, not an inert "Go to publish →" button. */}
-            Publish from any Context Graph. The discount applies automatically to approved wallets.
+            Publish from any context graph. The discount applies automatically to approved wallets.
           </div>
         )}
       </div>

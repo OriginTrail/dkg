@@ -189,7 +189,7 @@ const DEFAULT_SUBGRAPH_FALLBACK = (slug: string): SubGraphBinding => ({
 const ROOT_SUBGRAPH_BINDING: SubGraphBinding = {
   slug: ROOT_SLUG_SENTINEL,
   displayName: 'Root',
-  description: 'Entities not in any subgraph (Context Graph root)',
+  description: 'Entities not in any subgraph (context graph root)',
   icon: '⊘',
   // color is left unset so consumers fall through to their own
   // neutral default (CSS var --text-tertiary on the chip / detail

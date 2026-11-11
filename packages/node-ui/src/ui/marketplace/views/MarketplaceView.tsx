@@ -4,22 +4,13 @@
 // and what this epoch's subscription has left for each service it funds.
 // "Add to plan" hands the service to Plans.
 import React, { useMemo, useState } from 'react';
-import { Check, Cloud, Link, X } from 'lucide-react';
+import { Check, Cloud, Link } from 'lucide-react';
 import { PageHeader } from '../../components/ds/PageHeader.js';
-const YES = '\uE000Y';
-const NO = '\uE000N';
-const mark = (ok: boolean) => (ok ? YES : NO);
-/** A copy line with its check and cross marks drawn as icons. */
-function withMarks(text: string): React.ReactNode {
-  return text.split(/(\uE000[YN])/).map((p, i) => (p === YES ? <Check key={i} size={12} aria-label="yes" />
-    : p === NO ? <X key={i} size={12} aria-label="no" /> : p));
-}
-
 import { copy } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi } from '../api/client.js';
 import type { CatalogAnswer, Fx, Offer, Service, Storefront } from '../api/types.js';
 import { fmtMicro, fmtTrac, modelName, usdPerMillion } from '../amounts.js';
-import { ErrorCard, OffCard, sellerName, useLoad, useMarketplaceNav } from '../shared.js';
+import { CheckMark, ErrorCard, MarketplacePage, OffCard, richCopy, sellerName, useLoad, useMarketplaceNav } from '../shared.js';
 import { useMarketplaceDraftStore } from '../draftStore.js';
 import { Playground } from './Playground.js';
 
@@ -92,10 +83,10 @@ function StorefrontBody({ store, fx, label }: { store: Storefront; fx: Fx; label
   return (
     <>
       <p className="mkt-muted mkt-xs" data-copy="store.gate">
-        {withMarks(copy('store.gate', {
-          profile: mark(g.profile), table: mark(g.shardingTable),
+        {richCopy('store.gate', {
+          profile: <CheckMark ok={g.profile} />, table: <CheckMark ok={g.shardingTable} />,
           stake: fmtTrac(g.stake), min: fmtTrac(g.minimumStake), factor,
-        }))}
+        })}
       </p>
       <h3 data-copy="store.offers">{copy('store.offers')}</h3>
       {store.offers.length === 0 && <div className="mkt-muted mkt-xs" data-copy="store.offers.none">{copy('store.offers.none')}</div>}
@@ -197,19 +188,19 @@ export function MarketplaceView(): React.ReactElement {
     return [...out.entries()].sort((a, b) => a[0] - b[0]);
   }, [catalog]);
 
-  if (isMarketplaceOff(cat.err)) return <div className="mkt-frame" data-testid="mkt-marketplace" data-state="off"><PageHeader title="Neurosymbolic Marketplace" description="Models you can call through this node, priced for this epoch" /><OffCard /></div>;
-  if (isMarketplaceAbsent(cat.err)) return <div className="mkt-frame" data-testid="mkt-marketplace" data-state="absent"><PageHeader title="Neurosymbolic Marketplace" description="Models you can call through this node, priced for this epoch" /><OffCard absent /></div>;
+  if (isMarketplaceOff(cat.err)) return <MarketplacePage page="browse" state="off"><OffCard /></MarketplacePage>;
+  if (isMarketplaceAbsent(cat.err)) return <MarketplacePage page="browse" state="absent"><OffCard absent /></MarketplacePage>;
   if (cat.err && !catalog) {
     return (
-      <div className="mkt-frame" data-testid="mkt-marketplace" data-state="error"><PageHeader title="Neurosymbolic Marketplace" description="Models you can call through this node, priced for this epoch" />
+      <MarketplacePage page="browse" state="error">
         <div className="mkt-card">
           <div data-copy="catalog.error">{copy('catalog.error')}</div>
           <ErrorCard err={cat.err} onRetry={cat.reload} retryKey="catalog.retry" />
         </div>
-      </div>
+      </MarketplacePage>
     );
   }
-  if (!catalog) return <div className="mkt-frame" data-testid="mkt-marketplace" data-state="loading"><PageHeader title="Neurosymbolic Marketplace" description="Models you can call through this node, priced for this epoch" /><div className="mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></div>;
+  if (!catalog) return <MarketplacePage page="browse" state="loading"><div className="mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></MarketplacePage>;
 
   if (seller !== null) return <StorefrontPage identityId={seller} catalog={catalog} onBack={() => setSeller(null)} />;
   const service = selected ? catalog.services.find((s) => s.serviceId === selected) : undefined;
@@ -239,7 +230,7 @@ export function MarketplaceView(): React.ReactElement {
   );
 
   return (
-    <div className="mkt-frame" data-testid="mkt-marketplace" data-state="ok"><PageHeader title="Neurosymbolic Marketplace" description="Models you can call through this node, priced for this epoch" />
+    <MarketplacePage page="browse" state="ok">
       <div className="mkt-fchips mkt-tabs" role="tablist">
         <button type="button" role="tab" aria-selected={tab === 'models'} className={tab === 'models' ? 'on' : ''} data-copy="nav.models" onClick={() => setTab('models')}>{copy('nav.models')}</button>
         <button type="button" role="tab" aria-selected={tab === 'playground'} className={tab === 'playground' ? 'on' : ''} data-copy="nav.playground" onClick={() => setTab('playground')}>{copy('nav.playground')}</button>
@@ -279,6 +270,6 @@ export function MarketplaceView(): React.ReactElement {
           </div>
         </>
       )}
-    </div>
+    </MarketplacePage>
   );
 }

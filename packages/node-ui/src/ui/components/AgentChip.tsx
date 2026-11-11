@@ -139,6 +139,12 @@ export const AgentChip: React.FC<AgentChipProps> = ({
       className={`v10-agent-chip v10-agent-chip-${size}${interactive ? ' interactive' : ''} ${className}`}
       style={agentColorVar(color)}
       onClick={handle ? (e) => { e.stopPropagation(); handle(); } : undefined}
+      onKeyDown={handle ? (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        e.stopPropagation();
+        handle();
+      } : undefined}
       title={title}
       role={interactive ? 'button' : undefined}
       tabIndex={interactive ? 0 : undefined}
