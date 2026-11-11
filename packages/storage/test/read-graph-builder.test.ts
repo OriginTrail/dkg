@@ -1513,6 +1513,27 @@ describe('the read-graph builder', () => {
     await builder.close();
   });
 
+  it('runs a pass at each interval after the first, which builds what is wanted since, and none once closed', async () => {
+    const { fixture, layer, store, dataDir } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    let wanted: ReadGraphKey[] = [];
+    let passes = 0;
+    const builder = new ReadGraphBuilder({ store, dataDir, wanted: () => { passes += 1; return wanted; }, batching: { pauseRatio: 0 }, intervalMs: 20 });
+    builder.start();
+    await builder.whenIdle();
+    expect(layer.runtime.mirror.get(readGraphIri(vm))).toBeUndefined();
+    // Wanted after the first pass: a later one builds it, with no request.
+    wanted = [vm];
+    for (let wait = 0; wait < 200 && layer.runtime.mirror.get(readGraphIri(vm))?.state !== 'ready'; wait += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(layer.runtime.mirror.get(readGraphIri(vm))?.state).toBe('ready');
+    await builder.close();
+    const closed = passes;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(passes).toBe(closed);
+  });
+
   it('aborts the build in progress on close, and leaves the read graph out of service', async () => {
     const { adapter, fixture, layer, store } = await open();
     const [vm] = fixture.keys as [ReadGraphKey];
