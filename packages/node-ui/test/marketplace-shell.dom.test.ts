@@ -24,7 +24,7 @@ vi.mock('../src/ui/views/DashboardView.js', () => ({
 }));
 
 const VIEWS = [
-  { row: 'Browse', path: '/marketplace', tab: 'marketplace', label: 'NS Marketplace', view: 'mkt-marketplace', loaded: 'ok' },
+  { row: 'Browse', path: '/marketplace', tab: 'marketplace', label: 'NeuroSymbolic Marketplace', view: 'mkt-marketplace', loaded: 'ok' },
   { row: 'Plans', path: '/marketplace/plans', tab: 'marketplace-plans', label: 'Plans', view: 'mkt-plans', loaded: 'active' },
   { row: 'Access', path: '/marketplace/access', tab: 'marketplace-access', label: 'Access', view: 'mkt-access', loaded: 'ok' },
   { row: 'Operate', path: '/marketplace/operate', tab: 'marketplace-operate', label: 'Operate', view: 'mkt-operate', loaded: 'active' },
