@@ -1,5 +1,6 @@
-import { lazy, Suspense, useMemo, useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
+import { useMemo, useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { useFetch } from '../hooks.js';
+import { ProgramEditorDialog } from '../components/Programs/ProgramEditorDialog.js';
 import { useMemoryEntityDetails } from '../hooks/useMemoryEntityDetails.js';
 import { api } from '../api-wrapper.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
@@ -44,7 +45,6 @@ interface ProjectViewProps {
   contextGraphId: string;
 }
 
-const ProgramEditor = lazy(() => import('../components/Programs/ProgramEditor.js'));
 
 type MemoryLayerView = Extract<LayerView, 'wm' | 'swm' | 'vm'>;
 type ParticipantsStatus = 'loading' | 'ok' | 'error';
@@ -994,10 +994,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         contextGraphId={cg.id}
         contextGraphName={cg.name}
       />
-      {showProgramEditor && <Suspense fallback={<div role="status">Loading Program editor…</div>}>
-        <ProgramEditor contextGraphId={contextGraphId} onClose={() => setShowProgramEditor(false)} onSaved={rawMemory.refresh}
-          onExecution={(iri, layer) => { setShowProgramEditor(false); handleNavigate(iri, undefined, layer); }} />
-      </Suspense>}
+      <ProgramEditorDialog open={showProgramEditor} contextGraphId={contextGraphId} onClose={() => setShowProgramEditor(false)}
+        onSaved={rawMemory.refresh} onExecution={(iri, layer) => { setShowProgramEditor(false); handleNavigate(iri, undefined, layer); }} />
       <ShareProjectModal
         open={showShare}
         onClose={() => setShowShare(false)}

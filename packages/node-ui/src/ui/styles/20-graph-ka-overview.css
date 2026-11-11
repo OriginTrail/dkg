@@ -192,7 +192,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-ka-prop:last-child { border-bottom: none; }
 .v10-ka-prop-key { color: var(--text-tertiary); font-weight: 600; min-width: 120px; flex-shrink: 0; font-family: var(--font-mono); font-size: var(--fs-micro); }
 .v10-ka-prop-val { color: var(--text-secondary); word-break: break-all; }
-.v10-ka-prop-structured { flex-direction: column; gap: 4px; padding: 12px 0; min-width: 0; }
+.v10-ka-prop-structured { flex-direction: column; gap: var(--space-4); padding: var(--space-12) 0; min-width: 0; }
 .v10-ka-prop-structured > .v10-ka-prop-val { width: 100%; min-width: 0; }
 .v10-ka-program-source { word-break: normal; }
 .v10-ka-program-source .v10-md-pre { margin: 0; }
@@ -408,3 +408,8 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-ka-meta-row { display: flex; justify-content: space-between; }
 .v10-ka-meta-label { color: var(--text-tertiary); }
 .v10-ka-meta-value { color: var(--text-primary); font-weight: 600; font-family: var(--font-mono); }
+
+/* Graph Computer: the Program panel in a knowledge asset. */
+.semantic-program-gap { margin-top: var(--space-12); }
+.semantic-program-gap-sm { margin-top: var(--space-8); }
+.semantic-program-actions { display: flex; gap: var(--space-8); margin-top: var(--space-8); }
