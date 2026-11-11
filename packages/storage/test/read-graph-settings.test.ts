@@ -9,6 +9,7 @@ import {
   viewSemanticsOf,
   wrapReadGraphLayer,
   type ReadGraphModes,
+  type TripleStore,
 } from '../src/index.js';
 
 /** An adapter that declares every planned method, as one that maintains read graphs does. */
@@ -95,9 +96,9 @@ describe('read-graph settings on the backend runtime', () => {
 describe('read-graph settings on an adapter that cannot keep read graphs', () => {
   it('are refused, naming the methods its adapter does not maintain, before they reach the runtime', async () => {
     const config = { backend: 'oxigraph-worker', options: { path: `/tmp/read-graph-settings-${Math.random()}` } };
-    const adapter = new OxigraphStore();
+    // An adapter that implements a planned write and declares no read-graph capabilities.
     let closed = false;
-    adapter.close = async () => { closed = true; };
+    const adapter = { delete: async () => undefined, close: async () => { closed = true; } } as unknown as TripleStore;
     const attempt = () => wrapReadGraphLayer(adapter, { ...config, readGraphs: { modes: { contextGraphs: { notes: { default: 'build' } } } } });
     expect(attempt).toThrow(ReadGraphsUnsupportedError);
     try {
