@@ -307,6 +307,19 @@ describe('registry recognition in the read-graph layer', () => {
     expect(layer.runtime.registries.facts(fixture.contextGraphId)).toBeUndefined();
   });
 
+  it('reads the registry again after a write naming an IRI the grammar refuses, which an adapter may rewrite', async () => {
+    const { adapter, store, meta, fixture, layer, states } = await layered();
+    const brokenType = `${R.type.slice(0, -2)}{${R.type.slice(-2)}`;
+    expect(isExactRegistryWrite(fixture.contextGraphId, { kind: 'match', graph: meta, predicate: brokenType })).toBe(false);
+    expect(isExactRegistryWrite(fixture.contextGraphId, { kind: 'quads', added: [fact(meta, `${fixture.root}/a{b`, R.name, '"ab"')], removed: [] })).toBe(false);
+    // The adapter drops the `{`, so this removes the registration types: `code` is no longer a sub-graph.
+    await store.deleteByPattern({ graph: meta, predicate: brokenType });
+    const stored = (await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames;
+    expect(stored).not.toContain('code');
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(stored);
+    expect(states().wholeVm).toMatch(/^dirty@/);
+  });
+
   it('takes a literal in the form the store reports, with its escapes decoded', async () => {
     const { adapter, store, meta, fixture, layer, states } = await layered();
     const seen: string[] = [];
