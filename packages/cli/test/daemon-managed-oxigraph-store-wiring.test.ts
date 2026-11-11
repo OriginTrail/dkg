@@ -6,7 +6,9 @@ import {
   asChangelogReader,
   createManagedOxigraphRuntimeStoreConfigV1,
   createTripleStore,
+  readGraphLayerOf,
   type ChangelogEraGuard,
+  type ReadGraphStoreConfig,
 } from '@origintrail-official/dkg-storage';
 
 import { buildAgentRuntimeStoreConfig } from '../src/daemon/agent-runtime-store-config.js';
@@ -86,5 +88,43 @@ describe('daemon managed Oxigraph store construction', () => {
     } finally {
       await copied.close();
     }
+  });
+
+  it('carries the read-graph settings to every store object over the backend, managed or not', async () => {
+    // Modes that keep none: no adapter in this test declares read-graph capabilities.
+    const readGraphs: ReadGraphStoreConfig = { modes: { default: 'off' }, viewSemantics: { default: 'merged' } };
+    const endpoint = `http://127.0.0.1:7878/${Math.random().toString(36).slice(2)}`;
+    const managedStore = createManagedOxigraphRuntimeStoreConfigV1({
+      backend: 'sparql-http',
+      options: { queryEndpoint: `${endpoint}/query`, updateEndpoint: `${endpoint}/update`, managedByDkg: true },
+    }, { getRecoveryState: () => ({ recovering: false, generation: 0 }) });
+    const managed = buildAgentRuntimeStoreConfig({
+      runtimeStore: managedStore, managedStore, changelogEnabled: false, changelogEraGuard: undefined, readGraphs,
+    });
+    expect(managed?.readGraphs).toBe(readGraphs);
+    const plain = buildAgentRuntimeStoreConfig({
+      runtimeStore: { backend: 'sparql-http', options: { queryEndpoint: `${endpoint}-plain/query` } },
+      managedStore: undefined, changelogEnabled: false, changelogEraGuard: undefined, readGraphs,
+    });
+    expect(plain?.readGraphs).toBe(readGraphs);
+
+    const store = await createTripleStore(managed!);
+    try {
+      expect(readGraphLayerOf(store)?.runtime.modes).toBe(readGraphs.modes);
+      expect(readGraphLayerOf(store)?.runtime.viewSemantics).toBe(readGraphs.viewSemantics);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('gives the default embedded store the settings of a written query section, and nothing else changes without one', () => {
+    const readGraphs: ReadGraphStoreConfig = { modes: { default: 'build' } };
+    const base = { runtimeStore: undefined, managedStore: undefined, changelogEnabled: false, changelogEraGuard: undefined };
+    expect(buildAgentRuntimeStoreConfig({ ...base, readGraphs, dataDir: '/tmp/dkg-home' })).toEqual({
+      backend: 'oxigraph-worker',
+      options: { path: '/tmp/dkg-home/store.nq' },
+      readGraphs,
+    });
+    expect(buildAgentRuntimeStoreConfig({ ...base, dataDir: '/tmp/dkg-home' })).toBeUndefined();
   });
 });

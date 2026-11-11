@@ -1,0 +1,102 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { MemoryLayer, readGraphIri, readScope } from '@origintrail-official/dkg-core';
+import {
+  CURRENT_READ_GRAPH_VERSIONS,
+  createTripleStore,
+  parseReadGraphStateRows,
+  readGraphStateCompareAndSet,
+  readGraphStateRowsQuery,
+  type ReadGraphStateRow,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
+// The same module instance as the CLI's own storage import: the write below the partition guard.
+import { readGraphPartitionMaintenanceStore } from '@origintrail-official/dkg-storage/dist/read-graph-partition-store.js';
+import type { DkgConfig } from '../src/config.js';
+import { createPublisherStore, publisherStoreConfig } from '../src/publisher-store.js';
+import { QueryConfigError } from '../src/read-graphs-config.js';
+
+const DATA_DIR = '/tmp/dkg-publisher-store-test';
+
+function config(overrides: Partial<DkgConfig>): DkgConfig {
+  return { name: 'test', apiPort: 0, listenPort: 0, nodeRole: 'edge', ...overrides } as DkgConfig;
+}
+
+describe('the store of a publisher runtime outside the daemon', () => {
+  it('carries the read-graph settings and keeps the change log off for a configured store', () => {
+    const built = publisherStoreConfig(DATA_DIR, config({
+      store: { backend: 'sparql-http', options: { queryEndpoint: 'http://127.0.0.1:7878/query' }, changelog: true },
+      query: { readGraphs: { layers: { 'verifiable-memory': 'build' } }, viewSemantics: 'merged' },
+    }));
+    expect(built.backend).toBe('sparql-http');
+    expect(built.changelog).toBe(false);
+    expect(built.largeLiteralStorage).toBeUndefined();
+    expect(built.readGraphs).toEqual({
+      modes: { layers: { VM: 'build' } },
+      viewSemantics: { default: 'merged' },
+    });
+  });
+
+  it('carries them for the default embedded store too, read-only when asked', () => {
+    const built = publisherStoreConfig(DATA_DIR, config({ query: { viewSemantics: 'merged' } }), true);
+    expect(built).toMatchObject({
+      backend: 'oxigraph-worker',
+      options: { path: join(DATA_DIR, 'store.nq'), readOnly: true },
+      readGraphs: { modes: { default: 'off' }, viewSemantics: { default: 'merged' } },
+    });
+  });
+
+  it('carries no settings without a query section, so it never resets those of the backend', () => {
+    expect(publisherStoreConfig(DATA_DIR, config({})).readGraphs).toBeUndefined();
+    expect(publisherStoreConfig(DATA_DIR, config({ store: { backend: 'sparql-http' } })).readGraphs).toBeUndefined();
+  });
+
+  it('refuses a query section with an offending key', () => {
+    expect(() => publisherStoreConfig(DATA_DIR, config({ query: { readGraphs: 'on' as never } }))).toThrow(QueryConfigError);
+  });
+});
+
+const READY: ReadGraphStateRow = {
+  readGraph: readGraphIri({ scope: readScope('ledger'), layer: MemoryLayer.VerifiableMemory }),
+  state: 'ready', generation: 1,
+  ruleVersion: CURRENT_READ_GRAPH_VERSIONS.ruleVersion, builderVersion: CURRENT_READ_GRAPH_VERSIONS.builderVersion,
+};
+
+async function stateRows(store: TripleStore): Promise<ReadGraphStateRow[]> {
+  const result = await readGraphPartitionMaintenanceStore(store).query(readGraphStateRowsQuery());
+  return parseReadGraphStateRows(result.type === 'bindings' ? result.bindings : []).rows;
+}
+
+describe('a publisher store opened while the daemon is down', () => {
+  it('leaves no read graph ready across its writes; a read-only one marks nothing', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-publisher-store-'));
+    try {
+      // The daemon left a read graph ready in the default embedded store.
+      const daemonStore = await createTripleStore({ backend: 'oxigraph-worker', options: { path: join(dir, 'store.nq') } });
+      await readGraphPartitionMaintenanceStore(daemonStore).update!(readGraphStateCompareAndSet(undefined, READY));
+      await daemonStore.close();
+
+      const inspector = await createPublisherStore(dir, config({}), true);
+      try {
+        expect((await stateRows(inspector)).map((row) => row.state)).toEqual(['ready']);
+      } finally {
+        await inspector.close();
+      }
+
+      const writer = await createPublisherStore(dir, config({}));
+      try {
+        expect((await stateRows(writer)).map((row) => row.state)).toEqual(['dirty']);
+        await writer.insert([{ subject: 'urn:asset', predicate: 'urn:p', object: '"changed"', graph: 'did:dkg:context-graph:ledger' }]);
+        const [after] = await stateRows(writer);
+        expect(after).toMatchObject({ readGraph: READY.readGraph, state: 'dirty' });
+        expect(after!.generation).toBeGreaterThan(READY.generation);
+      } finally {
+        await writer.close();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

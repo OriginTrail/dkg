@@ -475,6 +475,8 @@ import { configureApiQueryPriority } from './api-query-priority.js';
 import { configureWritePreflightCoalescing } from './write-preflight-coalescing.js';
 import { startRetention, type RetentionHandle } from './retention-sweeps.js';
 import { resolveRetentionConfig } from '../retention-config.js';
+import { readGraphStoreSettings, resolveQueryConfig } from '../read-graphs-config.js';
+import { assertRollbackTargetRecognizesReadGraphs } from '../update/read-graph-rollback-target.js';
 import { applyGraphCatalogConfig } from '../graph-catalog-config.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
@@ -1394,6 +1396,9 @@ async function runDaemonInnerWithStartupOwnership(
   }
   // OT-RFC-73 P10b: a bad queue-retention value fails the boot here and the error names the key (the default is off for both queues).
   const retentionSettings = resolveRetentionConfig(config.queueRetention);
+  // OT-RFC-74: a bad `query` value fails the boot here, and so do read graphs that the rollback target would not recognize.
+  const queryConfig = resolveQueryConfig(config.query);
+  await assertRollbackTargetRecognizesReadGraphs(queryConfig, role);
   // A bad `store.graphCatalog` or DKG_STORE_GRAPH_CATALOG_MAX_BYTES fails the boot here; a good value bounds every catalog read of this process.
   const graphCatalog = applyGraphCatalogConfig(config.store?.graphCatalog);
   const { name: selectedNetworkConfig, network } = await loadResolvedNetworkConfig(
@@ -1793,6 +1798,9 @@ async function runDaemonInnerWithStartupOwnership(
     managedStore: managed?.storeConfig,
     changelogEnabled: Boolean(config.store?.changelog),
     changelogEraGuard: protocolStores.changelogEraGuard,
+    // Only a written `query` section is carried, so a node without one builds its stores exactly as before.
+    readGraphs: config.query === undefined ? undefined : readGraphStoreSettings(queryConfig),
+    dataDir: dkgDir(),
     graphCatalog,
   });
 

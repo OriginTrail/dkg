@@ -72,8 +72,10 @@ describe('the graph catalog ceiling from the store config', () => {
       await store.flush?.();
       const refused = { code: 'STORE_INTERNAL_LIMIT', limitName: 'STORE_GRAPH_CATALOG_MAX_BYTES', limitBytes: 200 };
       await expect(store.listGraphs()).rejects.toMatchObject(refused);
-      // An unexpected exit respawns the thread, which takes the configured value again.
-      await (store as unknown as { worker: Worker }).worker.terminate();
+      // An unexpected exit respawns the thread, which takes the configured value again. The worker
+      // store sits under the read-graph layer that every store gets.
+      const adapter = (storage.readGraphLayerOf(store) as unknown as { innerStore: { worker: Worker } }).innerStore;
+      await adapter.worker.terminate();
       await expect(store.listGraphs()).rejects.toMatchObject(refused);
     } finally {
       await store.close();

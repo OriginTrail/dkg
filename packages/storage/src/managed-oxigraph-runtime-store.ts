@@ -7,6 +7,7 @@ const MANAGED_RUNTIME_DECORATOR_KEYS = [
   'largeLiteralStorage',
   'graphSetIndex',
   'changelog',
+  'readGraphs',
   'graphCatalog',
 ] as const;
 type ManagedRuntimeDecoratorKey = typeof MANAGED_RUNTIME_DECORATOR_KEYS[number];
@@ -162,7 +163,7 @@ export function withManagedOxigraphRuntimeStoreConfigV1(
   config: ManagedOxigraphRuntimeStoreConfigV1,
   updates: Readonly<Partial<Pick<
     TripleStoreConfig,
-    'largeLiteralStorage' | 'graphSetIndex' | 'changelog' | 'graphCatalog'
+    'largeLiteralStorage' | 'graphSetIndex' | 'changelog' | 'readGraphs' | 'graphCatalog'
   >>>,
 ): ManagedOxigraphRuntimeStoreConfigV1 {
   const hooks = getManagedOxigraphRuntimeHooksV1(config);

@@ -3,6 +3,12 @@ export { sparqlEngineOf, type SparqlEngineFamily } from './sparql-engine-capabil
 export { SparqlTsvResultsShapeError } from './sparql-tsv-query-result.js';
 export { SparqlResultsShapeError } from './sparql-results-shape-error.js';
 export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumeration-query.js';
+export { preparedSparqlNamesReadGraphPartition } from './read-graph-partition-reference.js';
+export { isReadGraphPartitionGraph } from './graph-enumeration-visibility.js';
+export { dropReadGraphPartitions, noteStoreMayHoldReadGraphPartitions, storeMayHoldReadGraphPartitions } from './read-graph-partition-store.js';
+export { clearReadGraphPartitionsNote, mayHoldReadGraphPartitions } from './read-graph-partition-marker.js';
+export { markReadGraphsDirtyAtStart } from './read-graph-partition-startup.js';
+export { isQueryDatasetUnrestrictedError } from './withheld-graph-query.js';
 export {
   BlazegraphNamespaceManager,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
@@ -403,4 +409,109 @@ export {
   type GraphCatalogStoreConfig,
   type StoreInternalLimitErrorLike,
 } from './graph-catalog-internal-limit.js';
+
+// Read graphs: membership, state rows and the contract with the adapters.
+export {
+  READ_GRAPH_MEMBERSHIP_RULE_VERSION,
+  isReadGraphMember,
+  matchesGraphNameTest,
+  readGraphMembership,
+  readGraphsOfMemberGraph,
+  registeredSubGraphNames,
+  workingMemoryIdentityRule,
+  type GraphNameTest,
+  type ReadGraphRegistrySnapshot,
+  type WorkingMemoryIdentityRule,
+} from './read-graph/membership.js';
+export {
+  CURRENT_READ_GRAPH_VERSIONS,
+  MAX_READ_GRAPH_GENERATION,
+  READ_GRAPH_BUILDER_VERSION,
+  READ_GRAPH_STATES,
+  READ_GRAPH_STATE_PREDICATES,
+  ReadGraphTransitionError,
+  isReadGraphRowAccepted,
+  newReadGraphGeneration,
+  nextReadGraphState,
+  parseReadGraphStateRows,
+  readGraphStateCompareAndSet,
+  readGraphStateFencePattern,
+  readGraphStateMarkAllDirty,
+  readGraphStateMarkDirty,
+  readGraphStateReset,
+  readGraphStateRowsQuery,
+  servingReadGraphGeneration,
+  type ReadGraphState,
+  type ReadGraphStateMirror,
+  type ReadGraphStateRow,
+  type ReadGraphTransition,
+  type ReadGraphVersions,
+} from './read-graph/state.js';
+export {
+  READ_GRAPH_METHOD_MAINTENANCE,
+  READ_GRAPH_PLANNED_METHODS,
+  missingReadGraphMethods,
+  readGraphCapabilitiesOf,
+  spliceReadGraphPlan,
+  type ReadGraphAdapterCapabilities,
+  type ReadGraphCapableAdapter,
+  type ReadGraphMaintenance,
+  type ReadGraphPlannedMethod,
+  type ReadGraphWriteOptions,
+  type ReadGraphWritePlan,
+  type TripleStoreMethodName,
+} from './read-graph/adapter-contract.js';
+export {
+  ReadGraphDeltaFormError,
+  readGraphBackfillBatch,
+  readGraphCopy,
+  readGraphDeltaDelete,
+  readGraphDeltaDeleteBySubjectPrefix,
+  readGraphDeltaDeleteMatching,
+  readGraphFencedDrop,
+  readGraphFirstHolderCountQuery,
+  readGraphInsertQuads,
+  readGraphMissingTripleAsk,
+  readGraphReferenceProcedure,
+  readGraphRepairLeave,
+  readGraphRetraction,
+  readGraphSizeQuery,
+  readGraphUnheldSubjectAsk,
+  renderGraphNameTest,
+  type ReadGraphFence,
+  type ReadGraphTarget,
+} from './read-graph/statements.js';
+export {
+  InMemoryReadGraphStateMirror,
+  ReadGraphLocks,
+  ReadGraphRegistryCache,
+  ReadGraphWriteTracker,
+  readGraphBackendIdentity,
+  readGraphBackendRuntime,
+  type ReadGraphBackendRuntime,
+} from './read-graph/runtime.js';
+export {
+  READ_GRAPHS_UNSUPPORTED_CODE,
+  READ_GRAPH_WRITE_REFUSED_CODE,
+  ReadGraphStore,
+  ReadGraphWriteRefusedError,
+  ReadGraphsUnsupportedError,
+  readGraphLayerOf,
+  readGraphRuntimeOf,
+  wrapReadGraphLayer,
+  type ReadGraphStoreConfig,
+} from './read-graph/read-graph-store.js';
+export { readReadGraphRegistry } from './read-graph/registry.js';
+export {
+  READ_GRAPH_MODES,
+  VIEW_SEMANTICS,
+  keepsAnyReadGraph,
+  readGraphModeOf,
+  viewSemanticsOf,
+  type ReadGraphMode,
+  type ReadGraphModeRule,
+  type ReadGraphModes,
+  type ViewSemantics,
+  type ViewSemanticsSettings,
+} from './read-graph/settings.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';

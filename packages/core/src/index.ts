@@ -15,6 +15,7 @@ export * from './context-graph-join-policy.js';
 export * from './catalog.js';
 export { parseDotenvValue } from './dotenv.js';
 export * from './memory-model.js';
+export * from './read-graph-names.js';
 export * from './ka-content-scope.js';
 export * from './rfc64-shared-projection-address-v1.js';
 export * from './graph-knowledge-asset-metadata.js';

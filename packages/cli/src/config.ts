@@ -591,23 +591,14 @@ export interface LocalAgentIntegrationConfig {
   updatedAt?: string;
 }
 
-export interface QueryAccessConfig {
-  defaultPolicy: 'deny' | 'public';
-  contextGraphs?: Record<string, {
-    policy: 'deny' | 'public' | 'allowList';
-    allowedPeers?: string[];
-    allowedLookupTypes?: Array<'ENTITY_BY_UAL' | 'ENTITIES_BY_TYPE' | 'ENTITY_TRIPLES' | 'SPARQL_QUERY'>;
-    sparqlEnabled?: boolean;
-    sparqlTimeout?: number;
-    sparqlMaxResults?: number;
-  }>;
-  rateLimitPerMinute?: number;
-}
+export type { QueryAccessConfig } from './read-graphs-config.js';
 
 export interface GraphSetIndexConfig {
   enabled?: boolean;
   /** Revalidate the named-graph index after this many milliseconds. 0 means every read. */
   revalidateMs?: number;
+  /** `background` (the default) answers from a warm index while it revalidates; `blocking` makes the caller that finds it due wait. */
+  revalidate?: 'background' | 'blocking';
 }
 
 /**
@@ -761,7 +752,8 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
   /** Local daemon logging controls. */
   logging?: LoggingConfig;
   /** Cross-agent query access policy for inbound query-remote requests. */
-  queryAccess?: QueryAccessConfig;
+  queryAccess?: import('./read-graphs-config.js').QueryAccessConfig;
+  query?: import('./read-graphs-config.js').QueryConfigInput; // OT-RFC-74 read graphs (default off) and view matching (default per-asset)
   marketplace?: { enabled?: boolean; seller?: { enabled?: boolean }; [setting: string]: unknown }; // OT-RFC-27; packages/marketplace reads it.
   autoUpdate?: AutoUpdateConfig;
   /**
