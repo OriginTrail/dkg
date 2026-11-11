@@ -373,12 +373,18 @@ describe('the membership check never changes an answer', () => {
 
   it('when the caller aborts while the check waits on the store', async () => {
     let lookups = 0;
+    let lookupSignal: AbortSignal | undefined;
+    let lookupEnded = false;
     const engine = new DKGQueryEngine(over({
       query: (sparql: string, queryOptions?: { signal?: AbortSignal }) => {
         if (!sparql.includes('VALUES ?graph')) return inner.query(sparql, queryOptions as never);
         lookups++;
+        lookupSignal = queryOptions?.signal;
         // A lookup that never answers on its own: only the caller's abort ends it.
-        return new Promise((_, reject) => queryOptions?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+        return new Promise((_, reject) => queryOptions?.signal?.addEventListener('abort', () => {
+          lookupEnded = true;
+          reject(new Error('aborted'));
+        }, { once: true }));
       },
     }));
     const controller = new AbortController();
@@ -390,6 +396,9 @@ describe('the membership check never changes an answer', () => {
       new Promise(resolve => setTimeout(() => resolve('still waiting'), 2_000)),
     ]);
     expect(outcome).toBe('settled');
+    // The abort reaches the lookup itself: it gets a signal, which the caller's abort ends.
+    expect(lookupSignal?.aborted).toBe(true);
+    expect(lookupEnded).toBe(true);
     expect(engine.explicitGraphMembershipCounts()).toEqual({ checked: 0, disagreed: 0, failed: 0 });
   });
 
