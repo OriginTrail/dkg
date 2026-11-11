@@ -649,7 +649,10 @@ gate_verdict() {
   if [ -f "$report" ]; then
     node -e '
       const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-      if (r.outcome === "FAIL" || r.selectionOutcome === "FAIL") console.log("FAIL");
+      // A suite that failed is a failure, also when the run stopped early or left suites missing (an incomplete run
+      // reports its outcome as INCONCLUSIVE, with the failure only in its totals).
+      const failed = Number(r.totals?.fail ?? 0);
+      if (r.outcome === "FAIL" || r.selectionOutcome === "FAIL" || (Number.isFinite(failed) && failed > 0)) console.log("FAIL");
       else if (process.argv[2] === "0" && r.phase === "complete" && r.completeSuccess === true) console.log("PASS");
       else console.log("INCONCLUSIVE");
     ' "$report" "$1" 2>/dev/null || echo INCONCLUSIVE
