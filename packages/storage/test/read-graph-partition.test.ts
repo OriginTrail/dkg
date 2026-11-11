@@ -24,6 +24,7 @@ import {
 import {
   READ_GRAPH_PARTITION_WRITE_CODE,
   ReadGraphPartitionStore,
+  isReadGraphPartitionWriteTarget,
   ReadGraphPartitionWriteError,
   dropReadGraphPartitions,
   noteStoreMayHoldReadGraphPartitions,
@@ -99,6 +100,13 @@ describe('read-graph partition names in storage', () => {
       expect(storeGraphEnumerationVisibility(graph), graph).toBe(true);
     }
     expect(storeGraphEnumerationVisibility('')).toBe(false);
+    // A caller's name is checked as given and as an adapter writes it, with IRI-breaking characters deleted.
+    for (const graph of [`<${STATE}>`, STATE.replace(READ_GRAPH_SEGMENT, '_~re^ad'), `${VM_READ}\``, `"${SWM_READ}"`]) {
+      expect(isReadGraphPartitionWriteTarget(graph), graph).toBe(true);
+    }
+    for (const graph of [`<${ASSET}>`, `${LEGACY_SHARED}|`, `<${ROOT}/${READ_GRAPH_SEGMENT}er>`]) {
+      expect(isReadGraphPartitionWriteTarget(graph), graph).toBe(false);
+    }
     // One parse names the owner, and tells state graphs from read graphs.
     expect(PARTITION_GRAPHS.map(readGraphPartitionOwner)).toEqual([CG, CG, CG, CG]);
     expect(readGraphPartitionOwner(`did:dkg:context-graph:a/b/${READ_GRAPH_SEGMENT}/state`)).toBe('a/b');
@@ -231,6 +239,13 @@ describe('the read-graph partition guard', () => {
       ['query', () => store.query(`INSERT DATA { GRAPH <${STRAY}> { <urn:s> <urn:p> "v" } }`)],
       ['query', () => store.query(computed)],
       ['query', () => store.query(COMMENTED_GRAPH_VARIABLE)],
+      // A name the adapters would render with its IRI-breaking characters deleted targets that graph.
+      ['dropGraph', () => store.dropGraph(`<${STATE}>`)],
+      ['insert', () => store.insert([quad(`<${VM_READ}>`)])],
+      ['deleteByPattern', () => store.deleteByPattern({ graph: `${SWM_READ.slice(0, 30)}{${SWM_READ.slice(30)}` })],
+      ['replaceGraph', () => store.replaceGraph!(`${STATE}|`, [])],
+      ['dropGraph', () => store.dropGraph(STATE.replace(READ_GRAPH_SEGMENT, '_~re^ad'))],
+      ['update', () => store.update!('CLEAR SILENT DEFAULT', { touchedGraphs: [`<${VM_READ}>`] })],
     ];
     for (const [operation, write] of refusals) {
       const error = await write().then(() => undefined, (caught: unknown) => caught);
@@ -317,6 +332,8 @@ describe('the read-graph partition guard', () => {
     for (const graph of PARTITION_GRAPHS) {
       expect(await planted.hasGraph(graph), graph).toBe(false);
       expect(await planted.countQuads(graph), graph).toBe(0);
+      expect(await planted.hasGraph(`<${graph}>`), graph).toBe(false);
+      expect(await planted.countQuads(`<${graph}>`), graph).toBe(0);
       expect(await readGraphPartitionMaintenanceStore(planted).hasGraph(graph), graph).toBe(true);
     }
     for (const graph of [ASSET, LEGACY_ASSET, LEGACY_SHARED]) {

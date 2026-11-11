@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { isSparqlUpdateOperation, parseReadGraphIri } from '@origintrail-official/dkg-core';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './adapters/graph-enumeration-query.js';
+import { legacyStrippedIriValue } from './adapters/sparql-term-policy.js';
 import { composeGraphEnumerationVisibility, isReadGraphPartitionGraph } from './graph-enumeration-visibility.js';
 import { sparqlUpdateReach } from './read-graph-partition-reference.js';
 import { describeRfc64AuthorCommitCasV1 } from './rfc64-author-commit-mutation.js';
@@ -35,8 +36,18 @@ export class ReadGraphPartitionWriteError extends Error implements StoreOperatio
   }
 }
 
+/**
+ * Whether a caller's graph name targets a read-graph partition: as given, or
+ * as an adapter writes a name that fails validation, with its IRI-breaking
+ * characters deleted (`legacyStrippedIriValue`, the renderer's own rule).
+ * Every check of a caller's graph name against the partition goes through it.
+ */
+export function isReadGraphPartitionWriteTarget(graph: string): boolean {
+  return isReadGraphPartitionGraph(graph) || isReadGraphPartitionGraph(legacyStrippedIriValue(graph));
+}
+
 function refuseGraph(graph: string | undefined, operation: StoreOperation): void {
-  if (graph !== undefined && isReadGraphPartitionGraph(graph)) throw new ReadGraphPartitionWriteError(operation, graph);
+  if (graph !== undefined && isReadGraphPartitionWriteTarget(graph)) throw new ReadGraphPartitionWriteError(operation, graph);
 }
 
 /**
@@ -178,7 +189,7 @@ export class ReadGraphPartitionStore implements TripleStoreDecorator {
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
-    if (isReadGraphPartitionGraph(graphUri)) return false;
+    if (isReadGraphPartitionWriteTarget(graphUri)) return false;
     return this.innerStore.hasGraph(graphUri, options);
   }
 
@@ -202,7 +213,7 @@ export class ReadGraphPartitionStore implements TripleStoreDecorator {
   }
 
   async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
-    if (graphUri !== undefined && isReadGraphPartitionGraph(graphUri)) return 0;
+    if (graphUri !== undefined && isReadGraphPartitionWriteTarget(graphUri)) return 0;
     return this.innerStore.countQuads(graphUri, options);
   }
 
