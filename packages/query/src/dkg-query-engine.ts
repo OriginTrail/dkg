@@ -8,6 +8,7 @@ import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog, readRegisteredViewSubGraphs, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
 import { resolveLegacyRouteScope } from './legacy-route-scope.js';
 import { resolveQueryReadPlan, type QueryReadPlan } from './query-read-plan.js';
+import { classifyMeteredQuery, meterQueryScope, reportRoutedGraphs, startRoutedRead } from './query-scope-meters.js';
 import { storeOptions } from './query-store-options.js';
 import {
   asGraphWriteRevisionSource, asQueryReadAdmissionCapability,
@@ -358,6 +359,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    return meterQueryScope(() => this.runQuery(sparql, options));
+  }
+
+  private async runQuery(sparql: string, options?: QueryOptions): Promise<QueryResult> {
     const prepared = prepareSparql(sparql);
     if (prepared.status === 'malformed-uchar') {
       throw new Error('SPARQL rejected: malformed Unicode code-point escape');
@@ -385,6 +390,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const admission = asQueryReadAdmissionCapability(this.store);
     const plan = resolveQueryReadPlan(initialGraphScope, options,
       this.store.graphEnumerationVisibility ? admission : null);
+    classifyMeteredQuery(initialGraphScope, plan, options);
     const reads = createQueryStoreReadContext(this.store, options);
     if (options?.withheldGraphRoots?.length && plan.kind !== 'unscoped') {
       throw new Error('withheldGraphRoots applies only to queries without a contextGraphId');
@@ -597,6 +603,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     allGraphs.length = 0;
     allGraphs.push(...dedupedGraphs);
 
+    // The scope meter counts the graphs this view routes per asset.
+    reportRoutedGraphs(allGraphs);
     if (allGraphs.length === 0) {
       // PR #239 / r17-2: a zero-graph resolution (e.g. a `verifiable-memory`
       // query with `minTrust=Endorsed` on a context graph that has not
@@ -952,6 +960,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
    */
   private async execCallerQuery(scope: PreparedGraphScope, reads: StoreReadLane) {
     const sparql = materializePreparedSparql(scope.prepared);
+    const endRead = startRoutedRead();
     try {
       return await reads.query(sparql);
     } catch (err) {
@@ -960,6 +969,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         throw new CallerSparqlRejectedError(err.message, err.status, { cause: err });
       }
       throw err;
+    } finally {
+      endRead?.();
     }
   }
 

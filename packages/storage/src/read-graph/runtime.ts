@@ -29,6 +29,8 @@ import type { ReadGraphStateMirror, ReadGraphStateRow } from './state.js';
  */
 export class ReadGraphLocks {
   private readonly tails = new Map<string, Promise<void>>();
+  /** How often each lock was asked for; never pruned, so it only grows. */
+  private readonly requests = new Map<string, number>();
 
   async withLocks<T>(readGraphs: Iterable<string>, work: () => Promise<T>): Promise<T> {
     const order = [...new Set(readGraphs)].sort(compareCodePoint);
@@ -46,7 +48,17 @@ export class ReadGraphLocks {
     return this.tails.has(readGraph);
   }
 
+  /**
+   * How many times the lock of a read graph has been asked for in this
+   * process, counted when it is asked for. Work that ran while the lock was
+   * free at its start and its end, with the same count, overlapped no holder.
+   */
+  turns(readGraph: string): number {
+    return this.requests.get(readGraph) ?? 0;
+  }
+
   private async acquire(readGraph: string): Promise<() => void> {
+    this.requests.set(readGraph, this.turns(readGraph) + 1);
     const previous = this.tails.get(readGraph) ?? Promise.resolve();
     let release!: () => void;
     const held = new Promise<void>((done) => { release = done; });
