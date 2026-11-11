@@ -187,6 +187,13 @@ describe('Blazegraph read-graph operations in the write request (live server)', 
       `PREFIX rg: <urn:rg-int:> INSERT DATA { GRAPH <${s.G3}> { rg:n <${P}> "fourteen" } } ; # done`,
       { ...o, touchedGraphs: [s.G3] }));
     expect(await graph(s.G3)).toHaveLength(3);
+    // A caller update may end with a prefixed name whose last character is an escaped semicolon.
+    const ending = `${s.member}0xaa/ends;`;
+    await store.insert([q('p', 'sixteen', ending), ...readGraphInsertQuads(s.R, [q('p', 'sixteen', ending)])]);
+    await s.maintained(s.reference(ending), (o) => store.update(
+      `PREFIX m: <${s.member}0xaa/> DROP SILENT GRAPH m:ends\\;`, { ...o, touchedGraphs: [ending] }));
+    expect(await graph(ending)).toEqual([]);
+    expect(has(await s.readGraph(), 'sixteen')).toBe(false);
   }));
 
   it('replaceAssetGroup through the bulk plan and through one direct update', () => inScenario(async (s) => {

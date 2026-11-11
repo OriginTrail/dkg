@@ -294,9 +294,14 @@ function invalidTermFingerprint(term: string): string {
 
 const LEGACY_BARE_DATATYPE_LITERAL = /^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/;
 
+/** The IRI the pre-validation renderer targets for a term: the term with its IRI-breaking characters deleted. */
+export function legacyStrippedIriValue(term: string): string {
+  return term.replace(/[<>"{}|\\^`]/g, '');
+}
+
 /** Former `escapeUri`: deletes IRI-breaking characters, retargeting the IRI. */
 function legacyStrippedIri(term: string): string {
-  return `<${term.replace(/[<>"{}|\\^`]/g, '')}>`;
+  return `<${legacyStrippedIriValue(term)}>`;
 }
 
 /** Former `formatTerm`: passes literals, blank nodes and `<…>` through unchecked. */

@@ -31,11 +31,16 @@ describe('read-graph layer on embedded Oxigraph', () => {
     await expect(store.update!(text, { touchedGraphs: [member] })).rejects.toThrow(/writtenGraphs/);
     await expect(store.query(text)).rejects.toBeInstanceOf(ReadGraphWriteRefusedError);
     await expect(store.deleteByPattern({ subject: 'urn:s:1' })).rejects.toThrow(/must name its graph/);
-    // A graph name in angle brackets is read by an adapter as the graph inside them.
-    await expect(store.insert([q('urn:s:x', '"x"', `<${member}>`)])).rejects.toThrow(/bare IRI/);
-    await expect(store.dropGraph(`<${member}>`)).rejects.toThrow(/bare IRI/);
-    await expect(store.dropGraph(`<${fixture.readGraphs.wholeVm}>`)).rejects.toThrow(/bare IRI/);
-    await expect(store.update!(text, { writtenGraphs: [`<${member}>`] })).rejects.toThrow(/bare IRI/);
+    // An adapter writes a name with IRI-breaking characters under the name without them.
+    const rewritten = /writes as given/;
+    await expect(store.insert([q('urn:s:x', '"x"', `<${member}>`)])).rejects.toThrow(rewritten);
+    await expect(store.dropGraph(`<${member}>`)).rejects.toThrow(rewritten);
+    await expect(store.dropGraph(`${member}^`)).rejects.toThrow(rewritten);
+    await expect(store.deleteByPattern({ graph: `${member}|`, subject: 'urn:s:1' })).rejects.toThrow(rewritten);
+    await expect(store.update!(text, { writtenGraphs: [`<${member}>`] })).rejects.toThrow(rewritten);
+    const stray = fixture.readGraphs.wholeVm.replace('_~read', '_~re^ad');
+    await expect(store.dropGraph(stray)).rejects.toThrow();
+    expect(await layer.innerStore.countQuads(fixture.readGraphs.wholeVm)).toBeGreaterThan(0);
     const refused = await store.update!(text).catch((error: unknown) => error);
     expect(refused).toMatchObject({ code: 'READ_GRAPH_WRITE_REFUSED', outcome: 'not_started', storeOperation: 'update' });
 
