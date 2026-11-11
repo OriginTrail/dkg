@@ -2,7 +2,7 @@
 // limit. One engine per run: Blazegraph when BLAZEGRAPH_TEST_URL is set (or
 // DKG_LARGE_CATALOG_ENGINE=blazegraph), embedded Oxigraph otherwise.
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   BlazegraphNamespaceManager,
   BlazegraphStore,
@@ -18,7 +18,7 @@ import { isQueryMaterializationTooLargeError } from '../src/query-materializatio
 import type { QueryResult } from '../src/query-engine.js';
 import {
   AGENT, FIXTURE_QUERIES, FIXTURE_READS, SMALL_CONTEXT_GRAPH, UNRELATED_GRAPH_PREFIXES, expectedSubjects, jsonBytes,
-  loadLargeCatalog, type FixtureRead, type LargeCatalogFixture, type View,
+  loadLargeCatalog, loadUnrelatedGraphs, type FixtureRead, type LargeCatalogFixture, type View,
 } from './large-catalog-fixture.js';
 
 const endpoint = process.env.BLAZEGRAPH_TEST_URL;
@@ -232,10 +232,113 @@ describe(`a graph catalog larger than any caller limit, on ${engine}`, () => {
       // Before the catalog is due, the read is answered from it without a store read.
       expect(answer('SELECT', await withCeiling(ceiling, read))).toEqual(expected('SELECT', vm));
       expect(counter.reads).toBe(1);
-      // Once it is due, the read revalidates: exactly one full read, which fails closed at the ceiling.
+      // Once it is due, the read is still answered from it while one background read revalidates it.
+      // That read fails closed at the ceiling, and the next read fails as a cold seed does.
       now = 30_001;
-      expectNodeSideLimit(await failure(withCeiling(ceiling, read)), ceiling);
-      expect(counter.reads).toBe(2);
+      await withCeiling(ceiling, async () => {
+        expect(answer('SELECT', await read())).toEqual(expected('SELECT', vm));
+        await vi.waitFor(async () => expectNodeSideLimit(await failure(read()), ceiling), { timeout: 60_000, interval: 50 });
+      });
+      expect(counter.reads).toBeGreaterThanOrEqual(3);
     });
   });
+});
+
+// RFC §6.1 assertion 4: a small context graph's reads do not slow down as an
+// unrelated catalog grows tenfold, and no caller waits for a revalidation.
+describe(`a small context graph beside a catalog that grows from 10,000 to 100,000 graphs, on ${engine}`, () => {
+  const SAMPLES = 60;
+  const WARMUP = 5;
+  // Below a few milliseconds, timer and scheduler jitter exceed 20 %.
+  const JITTER_MS = 5;
+  const vm: FixtureRead = { view: 'verifiable-memory' };
+  const clock = { now: 0 };
+  // A full graph-list read can be held open; slice and data reads never are.
+  const hold = { gate: null as Promise<void> | null, fullReads: 0, finished: 0 };
+  let index: GraphSetIndexStore;
+  let reader: DKGQueryEngine;
+  let fixture: LargeCatalogFixture;
+  let dispose: () => Promise<void> = async () => {};
+
+  beforeAll(async () => {
+    let store: TripleStore;
+    if (engine === 'blazegraph') {
+      const manager = new BlazegraphNamespaceManager({ namespaceApiUrl: blazegraphNamespaceApiUrlFromSparqlEndpoint(endpoint!) });
+      const handles = await manager.acquireMany([`large-catalog-growth-${randomUUID()}`]);
+      const blazegraph = new BlazegraphStore(handles[0]!.sparqlUrl, { timeout: 120_000 });
+      store = blazegraph;
+      dispose = async () => {
+        await blazegraph.close();
+        await manager.disposeAll(handles, { reconcileAttempts: 3 });
+      };
+    } else {
+      store = new OxigraphStore();
+      dispose = () => store.close();
+    }
+    const held = new Proxy(store, {
+      get(target, property) {
+        const value: unknown = Reflect.get(target, property, target);
+        if (typeof value !== 'function') return value;
+        if (property === 'listGraphs') {
+          return async (...args: unknown[]) => {
+            hold.fullReads++;
+            try {
+              if (hold.gate) await hold.gate;
+              return await value.apply(target, args);
+            } finally {
+              hold.finished++;
+            }
+          };
+        }
+        return value.bind(target);
+      },
+    });
+    // The managed stack with its default revalidation, on a clock the test moves. Every write goes through it.
+    index = new GraphSetIndexStore(held, { now: () => clock.now });
+    reader = new DKGQueryEngine(index);
+    fixture = await loadLargeCatalog(index, { unrelatedGraphs: 10_000 });
+  }, 600_000);
+
+  afterAll(() => dispose(), 120_000);
+
+  const options = () => ({
+    contextGraphId: SMALL_CONTEXT_GRAPH, view: vm.view, maxResponseBytes: REQUEST_LIMIT_BYTES,
+    maxMaterializedBytes: REQUEST_LIMIT_BYTES, priority: 'background' as const, source: 'large-catalog-growth',
+  });
+  const select = async () => (await reader.query(FIXTURE_QUERIES.SELECT, options())).bindings.map(row => row.s!).sort();
+
+  async function p95(): Promise<number> {
+    for (let n = 0; n < WARMUP; n++) await select();
+    const times: number[] = [];
+    for (let n = 0; n < SAMPLES; n++) {
+      const started = performance.now();
+      expect(await select()).toEqual(expectedSubjects(fixture.assets, vm));
+      times.push(performance.now() - started);
+    }
+    times.sort((a, b) => a - b);
+    return times[Math.ceil(SAMPLES * 0.95) - 1]!;
+  }
+
+  it('keeps its p95 within 20 %, and answers every read while a revalidation is held open', async () => {
+    const at10k = await p95();
+    const grown = await loadUnrelatedGraphs(index, { from: 10_000 });
+    expect(10_000 + grown.length + fixture.smallGraphs.length).toBeGreaterThanOrEqual(100_000);
+    const at100k = await p95();
+    console.log(`[large-catalog-growth] ${JSON.stringify({ engine, p95At10k: Math.round(at10k * 10) / 10,
+      p95At100k: Math.round(at100k * 10) / 10 })}`);
+    expect(at100k).toBeLessThanOrEqual(Math.max(at10k * 1.2, at10k + JITTER_MS));
+
+    // The catalog was seeded at 0 on the test's clock; at 30 s it is due. Its full read is held open.
+    let release!: () => void;
+    hold.gate = new Promise<void>((resolve) => { release = resolve; });
+    const fullReads = hold.fullReads;
+    clock.now = 30_000;
+    for (let n = 0; n < 5; n++) expect(await select()).toEqual(expectedSubjects(fixture.assets, vm));
+    // Exactly one revalidation started, and every read above was answered while it was held.
+    expect(hold.fullReads).toBe(fullReads + 1);
+    expect(hold.finished).toBe(fullReads);
+    hold.gate = null;
+    release();
+    await vi.waitFor(() => expect(hold.finished).toBe(fullReads + 1), { timeout: 120_000, interval: 50 });
+  }, 600_000);
 });

@@ -110,8 +110,15 @@ export interface LargeCatalogFixture {
   readonly loadMs: number;
 }
 
-/** Load the fixture through the store's own insert, a few thousand graphs per request. */
-export async function loadLargeCatalog(store: TripleStore): Promise<LargeCatalogFixture> {
+/**
+ * Load the fixture through the store's own insert, a few thousand graphs per
+ * request. With `unrelatedGraphs`, only that many of the graphs that make the
+ * catalog large are loaded; `loadUnrelatedGraphs` loads the rest later.
+ */
+export async function loadLargeCatalog(
+  store: TripleStore,
+  { unrelatedGraphs }: { unrelatedGraphs?: number } = {},
+): Promise<LargeCatalogFixture> {
   const started = performance.now();
   const assets = fixtureAssets();
   const root = contextGraphRoot(SMALL_CONTEXT_GRAPH);
@@ -124,20 +131,31 @@ export async function loadLargeCatalog(store: TripleStore): Promise<LargeCatalog
   ]);
   const graphs = new Set([meta, ...assets.map(asset => asset.graph)]);
   const smallGraphs = [...graphs];
+  for (const graph of await loadUnrelatedGraphs(store, { to: unrelatedGraphs })) graphs.add(graph);
+  return { assets, smallGraphs, graphCount: graphs.size, catalogBytes: jsonBytes([...graphs]),
+    loadMs: performance.now() - started };
+}
+
+/** Load the graphs that make the catalog large, from `from` up to `to` in load order, and return their names. */
+export async function loadUnrelatedGraphs(
+  store: TripleStore,
+  { from = 0, to = Number.POSITIVE_INFINITY }: { from?: number; to?: number } = {},
+): Promise<string[]> {
+  const loaded: string[] = [];
   let batch: Quad[] = [];
-  let batchGraphs = 0;
+  let position = 0;
   for (const asset of unrelatedAssets()) {
-    graphs.add(asset.graph);
+    if (position >= to) break;
+    if (position++ < from) continue;
+    loaded.push(asset.graph);
     batch.push(...assetQuads(asset));
-    if (++batchGraphs === GRAPHS_PER_INSERT) {
+    if (loaded.length % GRAPHS_PER_INSERT === 0) {
       await store.insert(batch);
       batch = [];
-      batchGraphs = 0;
     }
   }
   if (batch.length) await store.insert(batch);
-  return { assets, smallGraphs, graphCount: graphs.size, catalogBytes: jsonBytes([...graphs]),
-    loadMs: performance.now() - started };
+  return loaded;
 }
 
 export const jsonBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
