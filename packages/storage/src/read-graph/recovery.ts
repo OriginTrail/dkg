@@ -22,6 +22,7 @@
 import { asStoreRecoveryGenerationReader, type StoreRecoveryGenerationReader } from '../store-recovery-generation.js';
 import type { TripleStore } from '../triple-store.js';
 import { RECORDED_REGISTRIES } from './recorded-registries.js';
+import { endAllReadGraphFences } from './registry-fences.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
 import { nextReadGraphState } from './state.js';
 
@@ -30,9 +31,15 @@ const SEEN = new WeakMap<ReadGraphBackendRuntime, number>();
 /** How often each runtime was invalidated. */
 const INVALIDATIONS = new WeakMap<ReadGraphBackendRuntime, number>();
 
-/** Take every read graph of a runtime out of service, and forget its cached registries and records. */
+/**
+ * Take every read graph of a runtime out of service, and forget its cached
+ * registries and records. A registry fence in place ends too: the row it
+ * saved described the store before it went back, so lifting the fence must
+ * not put that row back into service.
+ */
 export function invalidateReadGraphRuntime(runtime: ReadGraphBackendRuntime): void {
   INVALIDATIONS.set(runtime, (INVALIDATIONS.get(runtime) ?? 0) + 1);
+  endAllReadGraphFences(runtime);
   for (const row of runtime.mirror.rows()) {
     if (row.state !== 'dirty') runtime.mirror.set(nextReadGraphState(row, { kind: 'mark-dirty' })!);
   }
@@ -55,10 +62,11 @@ export function syncReadGraphRuntimeWithRecovery(store: TripleStore, runtime: Re
 
 /**
  * The runtime's recovery generation: how often it was invalidated, by a
- * backend restart a sync saw or by a restore it was told of. Read it after
- * `syncReadGraphRuntimeWithRecovery`, so a restart is counted first.
+ * backend restart or by a restore it was told of. It syncs with `store`'s
+ * backend first, so a restart nothing saw yet is counted.
  */
-export function readGraphRecoveryGeneration(_store: TripleStore, runtime: ReadGraphBackendRuntime): number {
+export function readGraphRecoveryGeneration(store: TripleStore, runtime: ReadGraphBackendRuntime): number {
+  syncReadGraphRuntimeWithRecovery(store, runtime);
   return INVALIDATIONS.get(runtime) ?? 0;
 }
 
