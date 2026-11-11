@@ -185,6 +185,29 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     expect(sortedRows(merged.bindings)).toEqual(sortedRows((await engine.query(REPEATED, VM)).bindings));
   });
 
+  it('answers GRAPH portions that assign their graph, or hold no triple pattern of their own, as per asset', async () => {
+    fresh();
+    // One row per match, in the graph the block names.
+    const assigned = [
+      `SELECT ?g ?s WHERE { GRAPH ?g { BIND(<${G2}> AS ?g) ?s <urn:in> ?o } }`,
+      `SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:in> ?o { SELECT (<${G1}> AS ?g) WHERE {} } } }`,
+    ];
+    expect((await engine.query(assigned[0]!, MERGED)).bindings).toEqual([{ g: G2, s: 'urn:shared' }]);
+    expect((await engine.query(assigned[1]!, MERGED)).bindings).toEqual([{ g: G1, s: 'urn:shared' }]);
+    const perAsset: QueryOptions = { ...VM, semantics: 'per-asset' };
+    for (const sparql of [
+      ...assigned,
+      'SELECT ?g ?x WHERE { GRAPH ?g { VALUES ?x { <urn:x:1> <urn:x:2> } } }',
+      'SELECT ?g WHERE { GRAPH ?g {} }',
+      'SELECT ?g ?s WHERE { GRAPH ?g { { SELECT ?s WHERE { ?s <urn:in> ?o } } } }',
+    ]) {
+      const merged = (await engine.query(sparql, MERGED)).bindings;
+      // Blazegraph's answers to GRAPH blocks without a triple pattern differ from Oxigraph's; on both, merged equals per asset.
+      if (!endpoint) expect(merged.length, sparql).toBeGreaterThan(0);
+      expect(sortedRows(merged), sparql).toEqual(sortedRows((await engine.query(sparql, perAsset)).bindings));
+    }
+  });
+
   it('never shows the read graph, or another context graph, to a GRAPH portion', async () => {
     fresh();
     const graphs = await engine.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }', MERGED);
