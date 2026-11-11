@@ -83,6 +83,22 @@ export async function assertRollbackTargetRecognizesReadGraphs(config: ResolvedQ
 }
 
 /**
+ * The daemon's boot check of the `query` settings. A node that starts from a
+ * public checkpoint gets its store from the checkpoint, which keeps no read
+ * graphs, so settings that keep one are refused there; elsewhere the rollback
+ * target must recognize read graphs.
+ */
+export async function assertQueryConfigFitsNode(config: ResolvedQueryConfig, role: 'core' | 'edge', checkpoint: boolean): Promise<void> {
+  if (checkpoint && keepsAnyReadGraph(config.readGraphs)) {
+    throw new QueryConfigError([{
+      key: 'query.readGraphs',
+      message: 'must be "off" on a node that starts from a public checkpoint, whose store the checkpoint builds',
+    }]);
+  }
+  await assertRollbackTargetRecognizesReadGraphs(config, role);
+}
+
+/**
  * The `dkg start` form, before a detached daemon could hide a problem: resolve the `query` section and check the rollback target, log every offending key and
  * stop the start. Returns the resolved settings when they are accepted.
  */
