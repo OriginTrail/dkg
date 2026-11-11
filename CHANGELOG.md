@@ -29,6 +29,14 @@ Marketplace, the MCP server and the public catalog.
 - A node refuses a public catalog head it cannot apply before it writes
   anything to shared memory, so shared memory and Verifiable Memory stay
   untouched.
+- An agent built on a pre-built chain adapter verifies finalized public
+  catalog heads over the RPC endpoints its adapter names, as a node does.
+
+### Documentation
+
+- The MCP guide explains how to configure a client by hand when setup does
+  not detect it, with the supported client locations and formats, and how
+  to recover when authenticated tools answer `401`.
 
 ## [10.1.0] - Unreleased
 
