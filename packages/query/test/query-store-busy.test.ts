@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   StoreSchedulerBusyError,
   type QueryResult as StoreQueryResult,
@@ -123,5 +123,70 @@ describe('QueryHandler store-busy responses', () => {
       lookupType: 'ENTITY_BY_UAL',
       ual: 'did:dkg:testnet:31337/0xabc/1',
     }, 'peer-busy')).resolves.toEqual(expectedBusyResponse('busy-ual', 'queue_full'));
+  });
+});
+
+describe('QueryHandler node-side store limit', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  // Structural, as it crosses package and worker boundaries; the sizes stay on this node.
+  const internalLimit = () => Object.assign(new Error('Graph catalog exceeds the node-side limit'), {
+    code: 'STORE_INTERNAL_LIMIT', limitName: 'STORE_GRAPH_CATALOG_MAX_BYTES', limitBytes: 1024, actualBytes: 2048,
+  });
+  const expectedInternalLimit = (operationId: string): QueryBusyResponse => ({
+    operationId,
+    status: 'BUSY',
+    truncated: false,
+    resultCount: 0,
+    error: 'Node storage reached an internal limit. Retry later.',
+    code: 'STORE_INTERNAL_LIMIT',
+    retryable: true,
+    retryAfterMs: 1_000,
+  });
+
+  it('answers the retryable BUSY status with the code, directly and on the wire, and warns once per window', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const store = queryOnlyStore(async (): Promise<StoreQueryResult> => { throw internalLimit(); });
+    const handler = new QueryHandler(new DKGQueryEngine(store), {
+      defaultPolicy: 'public',
+      contextGraphs: { [CONTEXT_GRAPH_ID]: { policy: 'public', sparqlEnabled: true } },
+    });
+    const request = {
+      operationId: 'limit-op',
+      lookupType: 'SPARQL_QUERY' as const,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+    };
+
+    await expect(handler.handle(request, 'peer-limit')).resolves.toEqual(expectedInternalLimit('limit-op'));
+    const wireResponse = await handler.handler(
+      new TextEncoder().encode(JSON.stringify(request)),
+      { toString: () => 'peer-limit', toBytes: () => new Uint8Array() } as Parameters<QueryHandler['handler']>[1],
+    );
+    const wire = JSON.parse(new TextDecoder().decode(wireResponse));
+    expect(wire).toEqual(expectedInternalLimit('limit-op'));
+    expect(JSON.stringify(wire)).not.toContain('2048');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      '[query-handler] Node-side store limit reached, answered BUSY STORE_INTERNAL_LIMIT: limit=STORE_GRAPH_CATALOG_MAX_BYTES',
+    );
+  });
+
+  it('answers the same through UAL resolution', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    class LimitedUalQueryEngine extends DKGQueryEngine {
+      override async resolveKnowledgeAsset(): Promise<never> {
+        throw internalLimit();
+      }
+    }
+    const handler = new QueryHandler(
+      new LimitedUalQueryEngine(queryOnlyStore(async () => ({ type: 'bindings', bindings: [] }))),
+      { defaultPolicy: 'public' },
+    );
+    await expect(handler.handle({
+      operationId: 'limit-ual',
+      lookupType: 'ENTITY_BY_UAL',
+      ual: 'did:dkg:testnet:31337/0xabc/1',
+    }, 'peer-limit')).resolves.toEqual(expectedInternalLimit('limit-ual'));
   });
 });

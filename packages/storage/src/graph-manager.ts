@@ -1,4 +1,5 @@
 import { listStoredContextGraphOwnerCandidates } from './stored-context-graph-owners.js';
+import { readGraphInventoryByPrefix } from './graph-inventory-materialization.js';
 import type { Quad, QueryOptions, TripleStore } from './triple-store.js';
 import {
   contextGraphDataUri,
@@ -169,9 +170,8 @@ async function listGraphsByPrefix(
   prefix: string,
   options?: QueryOptions,
 ): Promise<string[]> {
-  return store.listGraphsByPrefix
-    ? store.listGraphsByPrefix(prefix, options)
-    : (await store.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
+  // Without a prefix listing the complete list is node work; the caller's byte limit bounds the slice.
+  return [...(await readGraphInventoryByPrefix(store, prefix, options)).graphs];
 }
 
 /**
@@ -970,9 +970,8 @@ export class ContextGraphManager {
    * persisted storage graphs. This is an inventory boundary only: callers
    * still resolve read authority for every returned candidate.
    */
-  async listStoredContextGraphOwnerCandidates(options: QueryOptions = {},
-    materializationMeter?: { consumeBytes(bytes: number): void }): Promise<string[]> {
-    return listStoredContextGraphOwnerCandidates(this.store, options, materializationMeter);
+  async listStoredContextGraphOwnerCandidates(options: QueryOptions = {}): Promise<string[]> {
+    return listStoredContextGraphOwnerCandidates(this.store, options);
   }
 
   /**

@@ -1,19 +1,24 @@
 import { readGraphInventoryByPrefix } from './graph-inventory-materialization.js';
+import { readCompleteGraphCatalog } from './graph-catalog-internal-limit.js';
+import type { CurrentGraphCatalogReadOptions } from './graph-set-refresh.js';
 // SPDX-License-Identifier: Apache-2.0
 import { contextGraphStorageOwnerCandidates } from '@origintrail-official/dkg-core';
 import { readGraphPartitionOwner } from './graph-enumeration-visibility.js';
 import type { QueryOptions, TripleStore } from './triple-store.js';
 const CG_PREFIX = 'did:dkg:context-graph:';
 
-/** Read and meter the complete inventory before projecting possible owners. */
-export async function listStoredContextGraphOwnerCandidates(store: TripleStore, options: QueryOptions,
-  materializationMeter?: { consumeBytes(bytes: number): void }): Promise<string[]> {
+/**
+ * Every possible owner of a stored graph, for unscoped query admission. The inventory
+ * read is node work: it runs under the internal catalog ceiling, never a caller's byte
+ * limit, and nothing is charged to the caller. It reads a current catalog.
+ */
+export async function listStoredContextGraphOwnerCandidates(store: TripleStore, options: QueryOptions): Promise<string[]> {
     options.signal?.throwIfAborted();
     const readOptions = { ...options, source: options.source ?? 'storage.contextGraphOwnerCandidates' };
-    const graphUris = await readGraphInventoryByPrefix(store, CG_PREFIX, readOptions);
-    // Charge the decoded inventory before filtering or deduplicating owners.
-    // The fallback reads the whole inventory, so it charges that whole response.
-    materializationMeter?.consumeBytes(graphUris.materializedBytes);
+    // The internal options keep only the caller's lane, label and cancellation, so the current-catalog request goes on them.
+    const current: CurrentGraphCatalogReadOptions = { currentCatalog: true };
+    const graphUris = await readCompleteGraphCatalog(readOptions,
+      internal => readGraphInventoryByPrefix(store, CG_PREFIX, { ...internal, ...current }));
     const candidates = new Set<string>();
     let visited = 0;
     for (const graph of graphUris.graphs) {

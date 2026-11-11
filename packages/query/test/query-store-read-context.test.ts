@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ChangelogStore, GraphManager, GraphSetIndexStore, SharedMemoryLiteralBlobStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { createQueryStoreReadContext, QueryMaterializationBudget, requireQueryDataset } from '../src/query-store-read-context.js';
+import { createQueryStoreReadContext, requireQueryDataset } from '../src/query-store-read-context.js';
 import { ScopedQueryViolationError } from '../src/scoped-query-error.js';
 
 describe('query store-read materialization budget', () => {
@@ -47,36 +47,48 @@ describe('query store-read materialization budget', () => {
 describe('fallback inventory materialization', () => {
   const graphs = Array.from({ length: 1000 }, (_, index) => `urn:unrelated:${index}:${'x'.repeat(500)}`);
   const rawBytes = Buffer.byteLength(JSON.stringify(graphs), 'utf8');
+  const slicePrefix = 'urn:unrelated:999:';
+  const slice = graphs.filter(graph => graph.startsWith(slicePrefix));
+  const sliceBytes = Buffer.byteLength(JSON.stringify(slice), 'utf8');
+  const emptyBytes = Buffer.byteLength(JSON.stringify([]), 'utf8');
   const result = { type: 'bindings' as const, bindings: [{ value: '"ok"' }] };
   const resultBytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
   const store = { listGraphs: async () => graphs, query: async () => result } as unknown as TripleStore;
 
-  it.each(['enumeration', 'catalog', 'withheld'] as const)('charges the full nonmatching inventory in the %s lane', async kind => {
+  it.each(['enumeration', 'catalog', 'withheld'] as const)('charges only the slice it returns in the %s lane', async kind => {
+    expect(slice).toHaveLength(1);
+    expect(rawBytes).toBeGreaterThan(100 * sliceBytes);
     const context = createQueryStoreReadContext(store, { maxMaterializedBytes: 1024 });
     const lane = kind === 'enumeration' ? context : kind === 'catalog' ? context.catalog : context.withWithheldGraphRoots([]);
-    await expect(lane.listGraphsByPrefix('urn:absent:')).rejects.toMatchObject({
-      code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: 1024, actualBytes: rawBytes,
+    await expect(lane.listGraphsByPrefix('urn:absent:')).resolves.toEqual([]);
+    await expect(lane.listGraphsByPrefix(slicePrefix)).resolves.toEqual(slice);
+    // The request's enumeration reads a prefix once: reading it again is not charged, the next
+    // prefix is. The catalog and withheld lanes read, and charge, every time.
+    if (kind === 'enumeration') await expect(lane.listGraphsByPrefix(slicePrefix)).resolves.toEqual(slice);
+    const next = kind === 'enumeration' ? 'urn:unrelated:998:' : slicePrefix;
+    await expect(lane.listGraphsByPrefix(next)).rejects.toMatchObject({
+      code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: 1024, actualBytes: emptyBytes + 2 * sliceBytes,
     });
   });
 
-  it('retains raw discovery cost for cache replay and caller-local cumulative charging', async () => {
-    const loader = createQueryStoreReadContext(store, { maxMaterializedBytes: rawBytes });
-    const discovery = await loader.shared.measure(reads => reads.listGraphsByPrefix('urn:absent:'));
-    expect(discovery).toEqual({ snapshot: [], byteCount: rawBytes });
-    expect(loader.shared.replay(discovery)).toEqual([]);
-    await expect(loader.query('SELECT * WHERE {}')).rejects.toMatchObject({ actualBytes: rawBytes + resultBytes });
-    const other = createQueryStoreReadContext(store, { maxMaterializedBytes: rawBytes + resultBytes });
-    expect(other.shared.replay(discovery)).toEqual([]);
+  it('retains the slice cost for cache replay and caller-local cumulative charging', async () => {
+    const loader = createQueryStoreReadContext(store, { maxMaterializedBytes: sliceBytes });
+    const discovery = await loader.shared.measure(reads => reads.listGraphsByPrefix(slicePrefix));
+    expect(discovery).toEqual({ snapshot: slice, byteCount: sliceBytes });
+    expect(loader.shared.replay(discovery)).toEqual(slice);
+    await expect(loader.query('SELECT * WHERE {}')).rejects.toMatchObject({ actualBytes: sliceBytes + resultBytes });
+    const other = createQueryStoreReadContext(store, { maxMaterializedBytes: sliceBytes + resultBytes });
+    expect(other.shared.replay(discovery)).toEqual(slice);
     await expect(other.query('SELECT * WHERE {}')).resolves.toEqual(result);
-    const small = createQueryStoreReadContext(store, { maxMaterializedBytes: 1024 });
-    expect(() => small.shared.replay(discovery)).toThrow(expect.objectContaining({ actualBytes: rawBytes }));
+    const small = createQueryStoreReadContext(store, { maxMaterializedBytes: sliceBytes - 1 });
+    expect(() => small.shared.replay(discovery)).toThrow(expect.objectContaining({ actualBytes: sliceBytes }));
   });
 
   it('charges direct fallback enumeration once, then adds the query result', async () => {
-    const reads = createQueryStoreReadContext(store, { maxMaterializedBytes: rawBytes + resultBytes });
-    await expect(reads.listGraphsByPrefix('urn:absent:')).resolves.toEqual([]);
+    const reads = createQueryStoreReadContext(store, { maxMaterializedBytes: sliceBytes + resultBytes });
+    await expect(reads.listGraphsByPrefix(slicePrefix)).resolves.toEqual(slice);
     await expect(reads.query('SELECT * WHERE {}')).resolves.toEqual(result);
-    await expect(reads.query('SELECT * WHERE {}')).rejects.toMatchObject({ actualBytes: rawBytes + 2 * resultBytes });
+    await expect(reads.query('SELECT * WHERE {}')).rejects.toMatchObject({ actualBytes: sliceBytes + 2 * resultBytes });
   });
 });
 
@@ -95,21 +107,23 @@ describe('decorated inventory materialization', () => {
     return new GraphSetIndexStore(visible, { enabled: kind === 'index-enabled' });
   };
   it.each(['visibility', 'blob', 'index-disabled', 'index-enabled'])
-    ('retains full fallback cost through %s and cache replay without exposing reserved graphs', async kind => {
+    ('charges the visible slice through %s and cache replay without exposing reserved graphs', async kind => {
       const store = decorate(kind);
-      const reads = createQueryStoreReadContext(store, { maxMaterializedBytes: inventoryBytes });
+      // The reserved graph is the only match: the visible slice is empty, whatever the inventory behind it.
+      const emptyBytes = Buffer.byteLength(JSON.stringify([]));
+      expect(inventoryBytes).toBeGreaterThan(1000 * emptyBytes);
+      const reads = createQueryStoreReadContext(store, { maxMaterializedBytes: emptyBytes });
       const discovery = await reads.shared.measure(lane => lane.listGraphsByPrefix('did:dkg:context-graph:'));
-      expect(discovery).toEqual({ snapshot: [], byteCount: inventoryBytes });
+      expect(discovery).toEqual({ snapshot: [], byteCount: emptyBytes });
       expect(reads.shared.replay(discovery)).toEqual([]);
       await expect(reads.query('SELECT * WHERE {}')).rejects.toMatchObject({
-        code: 'QUERY_MATERIALIZATION_TOO_LARGE', actualBytes: inventoryBytes + resultBytes,
+        code: 'QUERY_MATERIALIZATION_TOO_LARGE', actualBytes: emptyBytes + resultBytes,
       });
-      const exact = createQueryStoreReadContext(store, { maxMaterializedBytes: inventoryBytes + resultBytes });
+      const exact = createQueryStoreReadContext(store, { maxMaterializedBytes: emptyBytes + resultBytes });
       await expect(exact.listGraphsByPrefix('did:dkg:context-graph:')).resolves.toEqual([]);
       await expect(exact.query('SELECT * WHERE {}')).resolves.toEqual(result);
-      const budget = new QueryMaterializationBudget(inventoryBytes);
-      await expect(new GraphManager(store).listStoredContextGraphOwnerCandidates({}, budget)).resolves.toEqual([]);
-      expect(() => budget.consume(result)).toThrow(expect.objectContaining({ actualBytes: inventoryBytes + resultBytes }));
+      // The owner inventory of unscoped admission is node work: it is read, never charged.
+      await expect(new GraphManager(store).listStoredContextGraphOwnerCandidates({})).resolves.toEqual([]);
     });
 });
 

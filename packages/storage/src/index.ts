@@ -208,6 +208,7 @@ export {
   type SortedGraphCatalog,
   type SortedGraphSetSource,
 } from './graph-set-index-store.js';
+export type { GraphSetRevalidation } from './graph-set-refresh.js';
 export {
   CHANGELOG_GRAPH,
   CHANGELOG_SCHEMA_VERSION,
@@ -501,4 +502,14 @@ export {
   type ViewSemantics,
   type ViewSemanticsSettings,
 } from './read-graph/settings.js';
+export {
+  DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
+  STORE_GRAPH_CATALOG_LIMIT_NAME,
+  STORE_GRAPH_CATALOG_MAX_BYTES_ENV,
+  STORE_INTERNAL_LIMIT,
+  StoreInternalLimitError,
+  isStoreInternalLimitError,
+  storeGraphCatalogMaxBytes,
+  type StoreInternalLimitErrorLike,
+} from './graph-catalog-internal-limit.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';
