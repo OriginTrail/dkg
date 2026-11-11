@@ -438,6 +438,33 @@ describe('registry recognition in the read-graph layer', () => {
       .toEqual((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames);
   });
 
+  it('reports a dirty mark the store does not take after a registry write, and marks again on the next one', async () => {
+    const { adapter, fixture, layer, store, meta } = await layered();
+    const wholeVm = fixture.readGraphs.wholeVm;
+    await adapter.update(readGraphStateCompareAndSet(undefined, readyRow(wholeVm)));
+    const storedState = async () => {
+      const result = await adapter.query(readGraphStateRowsQuery());
+      const row = parseReadGraphStateRows(result.type === 'bindings' ? result.bindings : []).rows.find((found) => found.readGraph === wholeVm);
+      return `${row?.state}@${row?.generation}`;
+    };
+    const update = adapter.update.bind(adapter);
+    let unreachable = true;
+    adapter.update = async (sparql, options) => {
+      if (unreachable && options?.source === 'storage.readGraphDirtyMark') throw new Error('connection reset');
+      return update(sparql, options);
+    };
+    const docs = `${fixture.root}/docs`;
+    await expect(store.update!(`INSERT DATA { GRAPH <${meta}> { <${docs}> <${R.type}> <${R.subGraphClass}> ; <${R.name}> "docs" } }`,
+      { writtenGraphs: [meta] })).rejects.toThrow('connection reset');
+    expect(await storedState()).toBe('ready@1');
+    expect(layer.runtime.registries.facts(fixture.contextGraphId)).toBeUndefined();
+    // The next write that may change the registry reads it again, finds the change and stores the mark.
+    unreachable = false;
+    await store.insert([fact(meta, 'urn:asset:1', 'urn:test:p', '"m"')]);
+    expect(await storedState()).toBe('dirty@2');
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
+  });
+
   it('marks the read graphs a sub-graph leaves dirty when its name goes', async () => {
     const { store, meta, fixture, states } = await layered();
     await store.delete([fact(meta, `${fixture.root}/code`, R.name, '"code"')]);

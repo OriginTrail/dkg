@@ -386,6 +386,8 @@ export class ReadGraphStore implements TripleStoreDecorator {
   /**
    * Read a context graph's registry facts again, under the locks of its read
    * graphs, mark the read graphs whose membership they change, and keep them.
+   * If a mark is not stored, this throws before they are kept: the cached
+   * registry stays the one the marks were measured against.
    */
   private async refreshRegistry(contextGraphId: string, options: QueryOptions | undefined): Promise<readonly ReadGraphRegistryFact[]> {
     const facts = await readReadGraphRegistryFacts(this.innerStore, contextGraphId, options);
@@ -433,7 +435,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
       } catch (error) {
         if (error instanceof ReadGraphWriteRefusedError) throw error;
         const reason = error instanceof Error ? error.message : String(error);
-        throw new ReadGraphWriteRefusedError(operation, `the registry it changes could not be read: ${reason}`);
+        throw new ReadGraphWriteRefusedError(operation, `the registry it changes could not be read and settled: ${reason}`);
       }
       const after = registryFactsAfter(owner, [...cached, ...(names ?? [])], registry);
       if (after === undefined) continue;
@@ -484,11 +486,12 @@ export class ReadGraphStore implements TripleStoreDecorator {
 
   /**
    * Mark dirty the read graphs of a context graph whose membership the
-   * registry `next` changes. With `unsent`, the operation of a write not yet
-   * sent: each mark goes to the store from whatever row it holds, so one an
-   * earlier attempt could not confirm is sent again, and a mark the store does
-   * not take refuses the write. No stored `ready` row then outlives a change
-   * it misses.
+   * registry `next` changes: in the mirror, then in the store from whatever
+   * row it holds, so a mark an earlier attempt could not store is sent again.
+   * A mark the store does not take throws. Before the write (`unsent`, its
+   * operation) the write is refused; after it, the caller leaves the registry
+   * unsettled, so the next write that may change it reads it and marks again.
+   * No stored `ready` row then outlives a change it misses.
    */
   private async markMembershipChange(contextGraphId: string, next: ReadGraphRegistrySnapshot, unsent?: StoreOperation): Promise<void> {
     const current = this.runtime.registries.get(contextGraphId);
@@ -499,7 +502,6 @@ export class ReadGraphStore implements TripleStoreDecorator {
       return key !== undefined
         && JSON.stringify(readGraphMembership(key, current, identity)) !== JSON.stringify(readGraphMembership(key, next, identity));
     });
-    if (unsent === undefined) return this.markDirty(changed);
     const rows = changed.flatMap((readGraph) => this.runtime.mirror.get(readGraph) ?? []);
     for (const row of rows) if (row.state !== 'dirty') this.runtime.mirror.set(nextReadGraphState(row, { kind: 'mark-dirty' })!);
     for (const { readGraph } of rows) {
@@ -507,6 +509,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
         if (!this.innerStore.update) throw new Error('its adapter has no update()');
         await this.innerStore.update(readGraphStateMarkDirty(readGraph), { source: 'storage.readGraphDirtyMark' });
       } catch (error) {
+        if (unsent === undefined) throw error;
         const reason = error instanceof Error ? error.message : String(error);
         throw new ReadGraphWriteRefusedError(unsent, `a read graph whose membership it changes could not be marked dirty: ${reason}`);
       }
