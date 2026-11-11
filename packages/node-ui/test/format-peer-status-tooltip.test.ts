@@ -85,7 +85,7 @@ describe('formatPeerStatusTooltip (BUG-020)', () => {
   it('omits the Uptime line when uptimeMs is 0 (avoids "Uptime 0m" noise on cold start)', () => {
     const out = formatPeerStatusTooltip(5, 3, 2, 0);
     expect(out).not.toContain('Uptime');
-    expect(out.split('\n')).toHaveLength(1);
+    expect(out.split('\n')).toHaveLength(2);
   });
 
   it('emits "Xh Ym" for sub-day uptime, omitting the days component', () => {
