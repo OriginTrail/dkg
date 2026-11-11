@@ -1,7 +1,8 @@
 // Edge and Core name the role a node performs, so they keep their capitals in
 // anything a person reads (DESIGN.md · Type). Comments and role values in code are fine.
 import { describe, expect, it } from 'vitest';
-import { codeFiles, read, tsxFiles, where } from './helpers/source.js';
+import { read, tsxFiles, where } from './helpers/source.js';
+import { shownLines } from './helpers/visible-text.js';
 
 const withoutComments = (source: string) => source
   .replace(/\/\*[\s\S]*?\*\//g, '')
@@ -22,9 +23,10 @@ describe('Edge and Core', () => {
   });
 
   it('are capitalised in UI text', () => {
-    // The Marketplace's text table is shown text too, though it isn't a .tsx file.
-    const files = [...tsxFiles, ...codeFiles.filter((f) => where(f) === 'marketplace/copy.generated.ts')];
-    const found = files.flatMap((f) => lowerCaseRoles(withoutComments(read(f))).map((hit) => `${where(f)}: ${hit}`));
-    expect(found).toEqual([]);
+    // The shown text the word check reads (helpers/visible-text.ts), the Marketplace's text table included,
+    // and the .tsx source, which also holds the code patterns a role can leak through (`nodeRole ?? `).
+    const inText = shownLines.flatMap((line) => lowerCaseRoles(line.text).map((hit) => `${line.where}: ${hit}`));
+    const inSource = tsxFiles.flatMap((f) => lowerCaseRoles(withoutComments(read(f))).map((hit) => `${where(f)}: ${hit}`));
+    expect([...inText, ...inSource]).toEqual([]);
   });
 });
