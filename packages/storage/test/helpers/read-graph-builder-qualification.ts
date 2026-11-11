@@ -8,7 +8,7 @@ import { guardReadGraphPartition } from '../../src/read-graph-partition-store.js
 import { checkReadGraph } from '../../src/read-graph/check.js';
 import { matchesGraphNameTest, readGraphMembership, workingMemoryIdentityRule, type ReadGraphRegistrySnapshot } from '../../src/read-graph/membership.js';
 import { wrapReadGraphLayer } from '../../src/read-graph/read-graph-store.js';
-import { buildReadGraph, readStoredReadGraphRow, type ReadGraphJobContext } from '../../src/read-graph/rebuild.js';
+import { buildReadGraph, markReadGraphDirty, readStoredReadGraphRow, type ReadGraphJobContext } from '../../src/read-graph/rebuild.js';
 import { readGraphStateCompareAndSet } from '../../src/read-graph/state.js';
 import { readGraphBackfillBatch, readGraphFencedDrop } from '../../src/read-graph/statements.js';
 import type { TripleStoreConfig } from '../../src/triple-store-composition.js';
@@ -119,22 +119,16 @@ export function readGraphBuilderQualificationSuite(backend: 'oxigraph' | 'blazeg
 
     it('ends a build that a newer dirty mark overtakes, lands nothing of it later, and rebuilds to its members', async () => {
       const opened = await open();
-      const { fixture, adapter, watch, layer, context } = opened;
+      const { fixture, adapter, watch, context } = opened;
       try {
         await adapter.insert([...fixture.facts, ...memberData(fixture)]);
         const [vm] = fixture.keys as [ReadGraphKey];
         const { wholeVm } = fixture.readGraphs;
-        const runtime = layer.runtime;
-        let marked: Promise<void> | undefined;
+        let marked: Promise<unknown> | undefined;
         watch.onUpdate = (sparql) => {
           if (marked || !sparql.includes('VALUES ?g')) return;
           // A dirty mark, as a write through the layer or a check makes one, queued behind this copy batch.
-          marked = runtime.locks.withLocks([wholeVm], async () => {
-            const current = runtime.mirror.get(wholeVm)!;
-            const dirty = { ...current, state: 'dirty' as const, generation: current.generation + 1 };
-            runtime.mirror.set(dirty);
-            await adapter.update!(readGraphStateCompareAndSet(current, dirty));
-          });
+          marked = markReadGraphDirty(context, wholeVm);
         };
         const lost = await buildReadGraph(context, vm);
         await marked;
