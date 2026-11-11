@@ -80,3 +80,12 @@ export function printAsyncJobFailure(err: unknown, kind: AsyncJobKind, opts: { j
     console.error(`  ${'Note:'.padEnd(19)}this request created no job`);
   }
 }
+
+/** Keep the daemon's structured clear refusal alongside any explanatory message. */
+export function printClearJobFailure(err: unknown): void {
+  console.error(toErrorMessage(err));
+  const reason = answerBody(err)?.reason;
+  if (typeof reason === 'string' && reason.trim().length > 0) {
+    console.error(`Clear refused: ${reason}`);
+  }
+}

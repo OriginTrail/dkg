@@ -30,7 +30,8 @@ const KEY_LIFETIME_SECONDS = 3_600;
  * the next key revokes it, so at most one playground key per browser is live.
  */
 export const PLAYGROUND_KEY_STORAGE = 'dkg-marketplace-playground-key';
-const KEY_ID_RE = /^dkgmk_[0-9a-f]{8}$/;
+/** A key's id: 16 hex digits after the prefix, as a node makes them since 10.1.x, or 8, as 10.1.0 made them. */
+const KEY_ID_RE = /^dkgmk_(?:[0-9a-f]{16}|[0-9a-f]{8})$/;
 
 function lastKeyId(): string | null {
   try {

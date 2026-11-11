@@ -15,7 +15,9 @@
  *      time, a few wait, and the gateway takes a bounded number at once, from
  *      before the reads of steps 2 and 3; a call with no room is refused at
  *      once (429, or 503 for the gateway);
- *   5. a seller, from the router;
+ *   5. a seller, from the router; a call with tools (`usesTools`) only one
+ *      whose quote says it takes them, and 400 `tools_unsupported` before
+ *      anything is signed when no seller that serves now does;
  *   6. the soft ceiling: what the budget used on chain, what this node's calls
  *      on it may still cost, and this call's most value stay under 95% of the
  *      budget;
@@ -26,8 +28,9 @@
  *      `issuedAt` half a minute before the chain's time, for a seller whose
  *      head is a block or two behind, and never before `startsAt`; an expiry
  *      ten minutes on, or at the stop time if that is sooner; `maxUnits` the
- *      input's UTF-8 bytes, which a tokenizer never exceeds, plus `max_tokens`
- *      and an allowance per message; `maxValueWei` those units at the quoted
+ *      input's UTF-8 bytes, which a tokenizer never exceeds, with its tools'
+ *      and tool calls' JSON, plus `max_tokens` and an allowance per message
+ *      and per tool (seller-bounds.ts); `maxValueWei` those units at the quoted
  *      price. The call is on disk (gateway-book.ts) before it is sent;
  *   9. the seller's answer, and its receipt's checks: it answers this request,
  *      `units` within `maxUnits`, `valueWei` the units at the price, completed
@@ -36,6 +39,9 @@
  *      Core Node signed it. A receipt that fails takes the seller out of
  *      routing for the epoch, and the call fails;
  *  10. the receipt is kept before the answer goes back, and the key charged.
+ *      The answer is OpenAI's: the text or the tool calls, the finish reason,
+ *      and the usage, split into prompt and completion tokens when the seller
+ *      said how and that adds up to the receipt's units, else the total alone.
  * A call whose client goes away before it is sent leaves its queue, or stops,
  * and is never signed, sent or charged. Once sent, a call counts whatever
  * comes back, since its seller may land a receipt for any request the session
@@ -75,6 +81,7 @@ import { CallerGone, Turns, TurnsFull, type TurnLimits } from './gateway-turns.j
 import type { AccessKey, AccessKeys } from './keys.js';
 import { Journal, KeyedLock } from './journal.js';
 import { serviceIdOf } from './offers.js';
+import { inputUnitsBound } from './seller-bounds.js';
 import { reconcileSubscription, type ReconciledRow } from './reconcile.js';
 import type { Route, Router } from './router.js';
 import { receiptSignerOf, DEFAULT_STOP_SERVING_SECONDS } from './seller.js';
@@ -91,10 +98,12 @@ import {
   requestToWire,
   resultCommitmentOf,
   serveResponseFromWire,
+  usesTools,
   type InferenceBody,
   type ReceiptWire,
   type ServeAnswerReceived,
   type ServeResponseReceived,
+  type ServeUsage,
 } from './wire.js';
 
 /** Calls stop at this share of a budget's value. */
@@ -113,9 +122,6 @@ const BUSY_RETRY_AFTER_SECONDS = 5;
 export const ISSUED_BEFORE_SECONDS = 30;
 /** The calls one seller may refuse or leave unanswered in an epoch before it is out of routing for the rest of it. */
 export const MAX_UNSETTLED_PER_SELLER = 8;
-/** Units allowed per message for the chat template, and per call. */
-const UNITS_PER_MESSAGE = 8;
-const UNITS_PER_CALL = 16;
 const DEFAULT_MAX_TOKENS = 512;
 
 export interface GatewayAnswer {
@@ -395,12 +401,17 @@ export class Gateway {
   }
 
   async chatCompletion(caller: GatewayCaller, raw: unknown, options: CallOptions = {}): Promise<GatewayAnswer> {
-    const call = raw as { model?: unknown; messages?: unknown; max_tokens?: unknown; stream?: unknown } | null;
+    const call = raw as {
+      model?: unknown; messages?: unknown; max_tokens?: unknown; stream?: unknown; tools?: unknown; tool_choice?: unknown; parallel_tool_calls?: unknown;
+    } | null;
     if (typeof call?.model !== 'string' || call.model === '') return fail(400, 'bad_request', 'model is required');
     if (call.stream === true) return fail(400, 'bad_request', 'streamed answers are not supported');
     let body: InferenceBody;
     try {
-      body = inferenceBodyFromWire({ messages: call.messages, max_tokens: call.max_tokens ?? DEFAULT_MAX_TOKENS });
+      body = inferenceBodyFromWire({
+        messages: call.messages, max_tokens: call.max_tokens ?? DEFAULT_MAX_TOKENS,
+        tools: call.tools, tool_choice: call.tool_choice, parallel_tool_calls: call.parallel_tool_calls,
+      });
     } catch (err) {
       return fail(400, 'bad_request', err instanceof WireError ? err.message : 'bad request');
     }
@@ -450,8 +461,13 @@ export class Gateway {
     // Its client left while it waited: nothing is done for it.
     if (c.signal?.aborted) return gone();
     const chain = this.deps.chain;
-    const route = await this.deps.router.pick(c.serviceId, c.times.epoch, c.budget.maxPricePerUnit);
-    if (!route) return fail(503, 'no_seller', 'no seller serves this service now', { serviceId: c.serviceId });
+    const picked = await this.deps.router.pickFor(c.serviceId, c.times.epoch, c.budget.maxPricePerUnit, { tools: usesTools(c.body) });
+    if (!picked.route) {
+      return picked.reason === 'tools_unsupported'
+        ? fail(400, 'tools_unsupported', 'no seller of this service takes tool calls now', { serviceId: c.serviceId })
+        : fail(503, 'no_seller', 'no seller serves this service now', { serviceId: c.serviceId });
+    }
+    const route = picked.route;
     const maxUnits = unitsBound(c.body);
     const maxValueWei = maxUnits * route.pricePerUnit;
     const used = c.budget.value - await chain.budgetLeft(c.subscriptionId, c.budgetIndex);
@@ -555,6 +571,8 @@ export class Gateway {
     const receipt = checked.receipt!;
     await this.deps.keys.settle(kept.keyId, reserved, receipt.valueWei, c.times.now);
     const left = c.budget.value - used - this.book.heldValue(c.budgetKey);
+    const { content, tool_calls: toolCalls, finish_reason: finish } = answer.result;
+    const split = usageOf(answer.usage, receipt.units);
     return {
       status: 200,
       body: {
@@ -562,8 +580,14 @@ export class Gateway {
         object: 'chat.completion',
         created: receipt.completedAt,
         model: c.model,
-        choices: [{ index: 0, message: { role: 'assistant', content: answer.result.content }, finish_reason: 'stop' }],
-        usage: { total_tokens: Number(receipt.units) },
+        choices: [{
+          index: 0,
+          message: toolCalls ? { role: 'assistant', content, tool_calls: toolCalls } : { role: 'assistant', content },
+          finish_reason: finish ?? (toolCalls ? 'tool_calls' : 'stop'),
+        }],
+        usage: split
+          ? { prompt_tokens: split.promptTokens, completion_tokens: split.completionTokens, total_tokens: Number(receipt.units) }
+          : { total_tokens: Number(receipt.units) },
         marketplace: {
           callId: kept.callId, serviceId: c.serviceId, seller: Number(route.seller), units: Number(receipt.units),
           ...amount('value', receipt.valueWei), ...amount('budgetLeft', left > 0n ? left : 0n),
@@ -591,7 +615,7 @@ export class Gateway {
     if (receipt.units > request.maxUnits) return { problem: 'units_over_max' };
     if (receipt.valueWei !== receipt.units * request.pricePerUnit || receipt.valueWei > request.maxValueWei) return { problem: 'value_mismatch' };
     if (receipt.completedAt < request.issuedAt || receipt.completedAt > request.expiry) return { problem: 'outside_time' };
-    if (receipt.resultCommitment !== resultCommitmentOf(answer.result.content)) return { problem: 'result_mismatch' };
+    if (receipt.resultCommitment !== resultCommitmentOf(answer.result)) return { problem: 'result_mismatch' };
     const signer = receiptSignerOf(domain, receipt, answer.receiptSignature);
     if (!signer) return { problem: 'bad_signature' };
     const verdict = await this.deps.chain.verifyACKIdentityDetailed(signer, request.seller);
@@ -724,8 +748,12 @@ export class Gateway {
   }
 }
 
-/** The most units a call can take: its input's UTF-8 bytes, an allowance per message and per call, and `max_tokens`. */
+/** The most units a call can take: the most its input can (`inputUnitsBound`, as its seller counts it), and `max_tokens`. */
 export function unitsBound(body: InferenceBody): bigint {
-  const input = body.messages.reduce((n, m) => n + ethers.toUtf8Bytes(m.content).length + UNITS_PER_MESSAGE, UNITS_PER_CALL);
-  return BigInt(input + body.max_tokens);
+  return inputUnitsBound(body) + BigInt(body.max_tokens);
+}
+
+/** A seller's split of a call's units, when it adds up to the receipt's: it is not signed, and the receipt's units are. */
+function usageOf(usage: ServeUsage | undefined, units: bigint): ServeUsage | undefined {
+  return usage && BigInt(usage.promptTokens) + BigInt(usage.completionTokens) === units ? usage : undefined;
 }

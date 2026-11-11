@@ -19,9 +19,15 @@
  *   it. The job runs at every tick, beside the landing and never inside it.
  * - **Each call** is checked, cheapest check first, then
  *   served by the service's backend, cut to the units the request allows, and
- *   its receipt signed by an operational wallet. The call, its result and its
- *   receipt are in the ledger before the answer goes back; if that write fails,
- *   the answer is an error and no result. A repeat of a call already served
+ *   its receipt signed by an operational wallet. A call with tools is taken
+ *   only by a service that takes tool calls (`tools`, said in its quotes);
+ *   its tools go to the backend, and the tools the model called come back in
+ *   the result, which the receipt commits to with its text. An answer cut short
+ *   is its text alone: a tool call cut short is no call. The answer says,
+ *   unsigned, how its units split between prompt and completion tokens. The
+ *   call, its result and its receipt are in the ledger before the answer goes
+ *   back; if that write fails, the answer is an error and no result. A repeat
+ *   of a call already served
  *   gets the stored answer, but only from the peer it was served to: once its
  *   receipt lands, the request and its signature are public. Calls on one
  *   subscription run one at a time, so a nonce is claimed once and a budget's
@@ -33,6 +39,20 @@
  *   unit cap the input could use up is refused before the backend runs, and
  *   the backend is asked for no more output than the cap pays for. A call
  *   whose backend ran but gave nothing to sign is not run again.
+ * - **A backend that refuses a call.** An answer about the call itself (400,
+ *   404, 413, 415 or 422) is refused as `BadRequest`, which a buyer does not
+ *   retry: it tries other sellers first for a while, and still routes this
+ *   seller's other services. Any other failure (no answer in time, or 401,
+ *   403, 408, 409, 429 or 5xx, about the seller's key, quota or load) is
+ *   `UpstreamError`, to retry. When the backend refuses a call with tools as
+ *   made (400 or 422) and has shown nothing of tools since the node started,
+ *   it is checked with minimal calls with tools of the seller's own, which no
+ *   buyer's content is in: the model's own choice of tools, then the function
+ *   named (seller-backend.ts). Both refused as made, the service takes no tool
+ *   calls until the node restarts, and its quotes stop saying it takes them;
+ *   either served, the refusal was that call's own, and the service keeps its
+ *   tools. The refused call waits for that a few seconds at most, and never
+ *   past its backend's time limit, which the buyer's wait for it outlasts.
  * - **The end of the epoch.** Within `stopServingSeconds` of it, new calls are
  *   refused: their receipts could not land in time.
  * - **The job.** Ticks every `tickSeconds` from the epoch's start, and once
@@ -56,11 +76,12 @@ import {
   type ServiceRequest,
 } from '@origintrail-official/dkg-chain';
 import { MarketplaceRefusal } from './buyer.js';
-import { UpstreamError, type Connector } from './connector.js';
+import { UpstreamError, type Completion, type Connector } from './connector.js';
 import { KeyedLock, setAside, writeDurably } from './journal.js';
 import { DEFAULT_LANDING, Lander, nextLandingAt, secondsToNextTick, secondsToRetry, type LandingReport, type LandingSettings } from './landing.js';
 import { SellerLedger, type ServedCall } from './ledger.js';
 import { OfferJob, type OfferAssets } from './offer-job.js';
+import { ServiceBackend } from './seller-backend.js';
 import { inputUnitsBound } from './seller-bounds.js';
 import {
   PEER_LIMITS,
@@ -71,11 +92,13 @@ import {
   requestToWire,
   resultCommitmentOf,
   serveRequestFromWire,
+  usesTools,
   type InferenceBody,
   type QuoteResponse,
   type ServeAnswer,
   type ServeRefusal,
   type ServeResponse,
+  type ServeResult,
 } from './wire.js';
 
 /** New calls stop this long before an epoch ends. */
@@ -91,6 +114,11 @@ export const MAX_BACKEND_TIMEOUT_MS = PEER_LIMITS.serveTimeoutMs - 10_000;
 const RECEIPT_SECONDS = 5;
 /** Calls whose backend ran but gave nothing to sign, kept so a repeat does not run it again: the newest this many. */
 const FAILED_CALLS_KEPT = 10_000;
+/**
+ * A backend's statuses about the call itself, not the seller's key, quota or load: the same call would be refused
+ * again, so it is refused as `BadRequest`, not to retry. Any other failure is `UpstreamError`, to retry.
+ */
+const CALL_REFUSED: ReadonlySet<number> = new Set([400, 404, 413, 415, 422]);
 
 export interface SellerService {
   /** The model's URN; `serviceId` is its keccak256. */
@@ -104,6 +132,11 @@ export interface SellerService {
   connector: Connector;
   /** The connector's time limit: a request that expires sooner, and the receipt after it, is refused. `DEFAULT_BACKEND_TIMEOUT_MS` by default. */
   backendTimeoutMs?: number;
+  /**
+   * Whether it takes tool calls: said in its quotes. Off unless set; off too, until the node restarts, once its
+   * backend refuses the seller's own minimal calls with tools as made (`ServiceBackend`).
+   */
+  tools?: boolean;
 }
 
 export interface SellerDeps {
@@ -142,8 +175,8 @@ export class Seller {
   private identityId = 0n;
   private open = false;
   private domain: MarketplaceDomain | undefined;
-  /** service id => whether its backend answered the last call. */
-  private readonly backends = new Map<string, 'up' | 'down'>();
+  /** service id => its backend: whether the last call answered, and what it has shown of tools. */
+  private readonly backends: ReadonlyMap<string, ServiceBackend>;
   /** The chain's time as the last tick read it, and when, by this host's clock. */
   private lastTimes: { times: EpochTimes; at: number } | undefined;
   /** request digest => the refusal of a call whose backend ran but gave nothing to sign, oldest first. */
@@ -154,6 +187,10 @@ export class Seller {
 
   constructor(private readonly deps: SellerDeps) {
     this.services = new Map(deps.services.map((s) => [s.serviceId.toLowerCase(), s]));
+    this.backends = new Map(deps.services.map((s) => [
+      s.serviceId.toLowerCase(),
+      new ServiceBackend(s.connector, { model: s.model, takesTools: s.tools === true, timeoutMs: s.backendTimeoutMs ?? DEFAULT_BACKEND_TIMEOUT_MS }, deps.log),
+    ]));
     this.landing = deps.landing ?? DEFAULT_LANDING;
     this.ledger = new SellerLedger(deps.dir, deps.log);
     this.lander = new Lander({ chain: deps.chain, ledger: this.ledger, settings: this.landing, ...(deps.log ? { log: deps.log } : {}) });
@@ -187,7 +224,7 @@ export class Seller {
 
   /** Whether a service's backend answered its last call: `up` until one fails. */
   backendOf(serviceId: string): 'up' | 'down' {
-    return this.backends.get(serviceId.toLowerCase()) ?? 'up';
+    return this.backends.get(serviceId.toLowerCase())?.state ?? 'up';
   }
 
   /** When the next landing is due, in chain seconds. */
@@ -327,7 +364,10 @@ export class Seller {
     for (const id of services) {
       const s = this.services.get(id);
       if (!s) continue;
-      offers.push({ serviceId: s.serviceId, pricePerUnit: (await this.priceFor(s, times.epoch, times.epoch)).toString(), available, capacity: s.capacity });
+      offers.push({
+        serviceId: s.serviceId, pricePerUnit: (await this.priceFor(s, times.epoch, times.epoch)).toString(), available, capacity: s.capacity,
+        ...(this.backendFor(s).takesTools ? { tools: true as const } : {}),
+      });
     }
     return { seller: this.identityId.toString(), epoch: times.epoch, offers };
   }
@@ -368,6 +408,8 @@ export class Seller {
     if (times.endsAt - times.now <= this.deps.stopServingSeconds) return refusal('EpochEnding');
     const service = this.services.get(request.serviceId);
     if (!service) return refusal('UnknownService');
+    // A buyer sends a call with tools only to a seller whose quote says it takes them.
+    if (!this.backendFor(service).takesTools && usesTools(call.body)) return refusal('BadRequest', 'this service takes no tool calls');
     if (request.pricePerUnit !== await this.priceFor(service, times.epoch, times.epoch)) return refusal('WrongPrice');
     // 2. A subscription of this epoch that funds the service, under its price cap.
     const subscription = await chain.getSubscription(request.subscriptionId);
@@ -419,17 +461,23 @@ export class Seller {
     const { requestDigest, unitCap } = at;
     let completion;
     try {
-      completion = await service.connector.complete({
+      const { tools, tool_choice: toolChoice, parallel_tool_calls: parallelToolCalls } = call.body;
+      // A call with tools refused as made may first wait, within its time limit, for the check of the backend's tools.
+      completion = await this.backendFor(service).complete({
         messages: call.body.messages,
         // No more output than the cap pays for once the input takes the most it could.
         maxTokens: Number(minBig(BigInt(call.body.max_tokens), at.room)),
+        ...(tools ? { tools } : {}),
+        ...(tools && toolChoice !== undefined ? { toolChoice } : {}),
+        ...(tools && parallelToolCalls !== undefined ? { parallelToolCalls } : {}),
       });
-      this.backends.set(service.serviceId, 'up');
     } catch (err) {
-      this.backends.set(service.serviceId, 'down');
-      // The backend's detail (a missing key's variable, an address) stays in the log.
+      // The backend's detail (a missing key's variable, an address, its own words) stays in the log.
       this.deps.log?.(`[marketplace] the backend of ${service.model} failed: ${err instanceof UpstreamError ? err.message : String(err)}`);
-      return this.failedOnce(requestDigest, refusal('UpstreamError'));
+      const status = err instanceof UpstreamError ? err.status : undefined;
+      // No answer, or one about the seller's key, quota or load: the call may be served later.
+      if (status === undefined || !CALL_REFUSED.has(status)) return this.failedOnce(requestDigest, refusal('UpstreamError'));
+      return this.failedOnce(requestDigest, refusal('BadRequest', `the service's backend refused the call (${status})`));
     }
     try {
       const input = BigInt(completion.promptTokens);
@@ -438,11 +486,11 @@ export class Seller {
       // The chain refuses a receipt completed after its request's expiry: no receipt, and no answer.
       if (completedAt > request.expiry) return this.failedOnce(requestDigest, refusal('Expired'));
       const output = minBig(BigInt(completion.completionTokens), unitCap - input);
-      const content = cutTo(completion.content, completion.completionTokens, Number(output));
+      const result = resultOf(completion, Number(output));
       const units = input + output;
       const receipt: QueryInferenceReceipt = {
         requestDigest,
-        resultCommitment: resultCommitmentOf(content),
+        resultCommitment: resultCommitmentOf(result),
         units,
         valueWei: units * request.pricePerUnit,
         completedAt,
@@ -457,7 +505,8 @@ export class Seller {
         signature: call.signature,
         receipt: receiptToWire(receipt),
         receiptSignature,
-        result: { content },
+        result,
+        usage: { promptTokens: Number(input), completionTokens: Number(output) },
         peerId: at.from,
       };
       await this.ledger.recordServed(served);
@@ -488,6 +537,11 @@ export class Seller {
     this.failed.set(requestDigest, refused);
     if (this.failed.size > FAILED_CALLS_KEPT) this.failed.delete(this.failed.keys().next().value!);
     return refused;
+  }
+
+  /** The service's backend: one per service, made with the seller. */
+  private backendFor(service: SellerService): ServiceBackend {
+    return this.backends.get(service.serviceId.toLowerCase())!;
   }
 
   /** Whether `request` expires before the service's backend could answer and its receipt be signed, at chain time `now`. */
@@ -522,7 +576,29 @@ export class Seller {
 }
 
 function answerOf(call: ServedCall): ServeAnswer {
-  return { ok: true, result: call.result, receipt: call.receipt, receiptSignature: call.receiptSignature, budgetIndex: call.budgetIndex };
+  return {
+    ok: true, result: call.result, receipt: call.receipt, receiptSignature: call.receiptSignature, budgetIndex: call.budgetIndex,
+    ...(call.usage ? { usage: call.usage } : {}),
+  };
+}
+
+/** Why a backend stopped before it finished: an answer stopped so is its text alone. */
+const CUT_SHORT: ReadonlySet<string> = new Set(['length', 'content_filter']);
+
+/**
+ * A completion as a served call's result, its output cut to `allowed` tokens: text, or the tools the model called.
+ * A completion cut short is its text alone, as a tool call cut short is no call: cut here to the units the request
+ * pays for, or stopped by its backend before the end (`length`, or `content_filter`), whose reason it keeps. A
+ * completion its backend finished (`stop`, `tool_calls`, or no reason) returns its tool calls.
+ */
+function resultOf(completion: Completion, allowed: number): ServeResult {
+  if (allowed < completion.completionTokens) {
+    return { content: cutTo(completion.content ?? '', completion.completionTokens, allowed), finish_reason: 'length' };
+  }
+  const reason = completion.finishReason;
+  if (reason && CUT_SHORT.has(reason)) return { content: completion.content ?? '', finish_reason: reason };
+  if (completion.tool_calls) return { content: completion.content, tool_calls: completion.tool_calls, finish_reason: 'tool_calls' };
+  return { content: completion.content };
 }
 
 /** The frozen prices a prices file holds: service id => epoch => wei per unit. `null` when it holds anything else. */

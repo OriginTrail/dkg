@@ -1901,7 +1901,7 @@ describe('listContextGraphs merge', () => {
       });
 
       await expect(agent.listContextGraphs({ callerAgentAddress: null }))
-        .rejects.toThrow('ontology/agents definition scan');
+        .rejects.toMatchObject({ code: 'CONTEXT_GRAPH_LIST_BUDGET_EXCEEDED', retryable: true, timeoutMs: 1 });
       await scanSettled;
       expect(sawAbort).toBe(true);
     } finally {

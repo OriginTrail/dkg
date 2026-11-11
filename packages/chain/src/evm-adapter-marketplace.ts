@@ -11,7 +11,8 @@
  * `EVMChainAdapter` with `applyMixins` (evm-adapter.ts). A receipt batch is
  * sent as a random-sampling proof is, from any registered operational wallet,
  * preferring an idle one, and again from the primary wallet on
- * `ProfileDoesntExist`, with a hook of the caller's before its broadcast.
+ * `ProfileDoesntExist` (`sendFromRegisteredSigner`), with a hook of the
+ * caller's before its broadcast.
  *
  * - Every address comes from the Hub by name on each call, through
  *   `resolveContract`'s address memo, which a Hub rotation clears.
@@ -491,15 +492,9 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
       );
     };
     const receipt = await this.withHubStaleRetryAny(async () => {
-      const signer = await this.nextRandomSamplingSigner();
       try {
-        return await sendFrom(signer);
+        return await this.sendFromRegisteredSigner(sendFrom);
       } catch (err) {
-        if (signer.address.toLowerCase() !== this.signer.address.toLowerCase() && enrichEvmError(err) === 'ProfileDoesntExist') {
-          this.registeredOperationalAddresses.delete(signer.address.toLowerCase());
-          this.clearIdentityIdForAddress(signer.address);
-          return sendFrom(this.signer);
-        }
         enrichEvmError(err);
         throw err;
       }

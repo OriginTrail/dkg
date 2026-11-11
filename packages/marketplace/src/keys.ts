@@ -7,6 +7,9 @@
  * node or agent token is not a key.
  *   - The secret is shown once, when the key is made; the node keeps only its
  *     sha256, and compares hashes in constant time.
+ *   - Its id is the secret's first `KEY_ID_HEX` hex digits after the prefix,
+ *     64 bits; a new key whose id another key has is made again. Keys made
+ *     with 10.1.0's 8-digit ids keep them.
  *   - Each key has a label, a budget in wei, the services it may call (or all),
  *     a rate in calls per second, and an expiry.
  *   - A revocation takes effect at the next call.
@@ -27,6 +30,10 @@ import { Journal, KeyedLock } from './journal.js';
 const PREFIX = 'dkgmk_';
 /** Charges between two compactions of the journal. */
 export const KEYS_COMPACT_EVERY = 1_000;
+/** Hex digits of a key's id after its prefix: 64 bits. 10.1.0 made ids of 8. */
+export const KEY_ID_HEX = 16;
+/** How many secrets a key's making draws before it gives up on an id of its own. */
+const MAKE_ATTEMPTS = 8;
 
 export interface AccessKeyScopes {
   label: string;
@@ -117,20 +124,37 @@ export class AccessKeys {
   /** Charges in the journal since it was last compacted. */
   private uses = 0;
 
-  constructor(dir: string, private readonly compactEvery = KEYS_COMPACT_EVERY) {
+  constructor(
+    dir: string,
+    private readonly compactEvery = KEYS_COMPACT_EVERY,
+    /** The secrets' randomness; node's `randomBytes` but in tests. */
+    private readonly random: (size: number) => Buffer = randomBytes,
+  ) {
     this.journal = new Journal(join(dir, 'access-keys.jsonl'));
   }
 
-  /** Make a key. Its secret is returned this once and never kept. */
+  /**
+   * Make a key. Its secret is returned this once and never kept. Its id is checked against every key's under the
+   * journal's lock, so two makes at once never share one.
+   */
   async make(scopes: AccessKeyScopes, now: number): Promise<{ secret: string; key: AccessKey }> {
     if (!Number.isSafeInteger(scopes.rps) || scopes.rps < 1) throw new Error('rps must be a positive integer');
-    const secret = `${PREFIX}${randomBytes(24).toString('hex')}`;
-    const keyId = secret.slice(0, PREFIX.length + 8);
-    await this.append({
-      type: 'make', keyId, hash: hashOf(secret).toString('hex'), label: scopes.label, budget: scopes.budget.toString(),
-      services: scopes.services, rps: scopes.rps, expiresAt: scopes.expiresAt, at: now,
+    return this.lock.run('journal', async () => {
+      const keys = await this.keys();
+      for (let attempt = 0; attempt < MAKE_ATTEMPTS; attempt++) {
+        const secret = `${PREFIX}${this.random(24).toString('hex')}`;
+        const keyId = secret.slice(0, PREFIX.length + KEY_ID_HEX);
+        if (keys.has(keyId)) continue;
+        const entry: MakeEntry = {
+          type: 'make', keyId, hash: hashOf(secret).toString('hex'), label: scopes.label, budget: scopes.budget.toString(),
+          services: scopes.services, rps: scopes.rps, expiresAt: scopes.expiresAt, at: now,
+        };
+        await this.journal.append(entry);
+        apply(keys, entry);
+        return { secret, key: this.shown(keys.get(keyId)!.key) };
+      }
+      throw new Error(`no key id of its own after ${MAKE_ATTEMPTS} secrets`);
     });
-    return { secret, key: this.shown((await this.keys()).get(keyId)!.key) };
   }
 
   async revoke(keyId: string, now: number): Promise<AccessKey | null> {

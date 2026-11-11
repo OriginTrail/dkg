@@ -33,7 +33,7 @@ it('boots the real MCP server, advertises its tool families, and serves a daemon
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   bridge.server = serverTransport;
   const fetcher = vi.fn<typeof fetch>(async () =>
-    Response.json({ contextGraphs: [{ id: 'team', name: 'Shared knowledge' }] }),
+    Response.json({ contextGraphs: [{ id: 'team', name: 'Shared knowledge', callerInvolved: true }] }),
   );
   vi.stubGlobal('fetch', fetcher);
   const client = new Client({ name: 'startup-contract-test', version: '1.0.0' });

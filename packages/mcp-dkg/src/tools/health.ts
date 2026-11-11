@@ -13,6 +13,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { DkgClient } from '../client.js';
 import type { DkgConfig } from '../config.js';
+import { MISSING_TOKEN_HELP } from '../auth-diagnostics.js';
 
 type ToolResult = {
   content: Array<{ type: 'text'; text: string }>;
@@ -31,7 +32,7 @@ const formatError = (e: unknown): string =>
 export function registerHealthTools(
   server: McpServer,
   client: DkgClient,
-  _config: DkgConfig,
+  config: DkgConfig,
 ): void {
   // ── dkg_status ──────────────────────────────────────────────────
   server.registerTool(
@@ -50,7 +51,7 @@ export function registerHealthTools(
         // Render a compact JSON block — the daemon's status payload
         // shape is stable and readable as JSON; no need to flatten
         // into prose here.
-        return ok(`DKG node status:\n\n\`\`\`json\n${JSON.stringify(status, null, 2)}\n\`\`\``);
+        return ok(`DKG node status:\n\n\`\`\`json\n${JSON.stringify({ ...status, mcpAuth: config.token ? { state: 'token-configured', verified: false } : { state: 'missing-token', guidance: MISSING_TOKEN_HELP } }, null, 2)}\n\`\`\``);
       } catch (e) {
         return errResult(`Failed to fetch node status: ${formatError(e)}`);
       }

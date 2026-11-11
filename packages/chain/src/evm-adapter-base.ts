@@ -96,7 +96,13 @@ import {
 import { SharedAdapterInitialization, initializationBinder } from './evm-adapter-shared-init.js';
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
-import { preferredFundableCandidate } from './signer-selection.js';
+import {
+  preferredFundableCandidate,
+  type FundingMode,
+  type NativeAndTracFundingMode,
+  type SelectSignerSpec,
+} from './signer-selection.js';
+export type { FundingMode, NativeAndTracFundingMode, NativeOnlyFundingMode, PcaFundingMode, SelectSignerSpec } from './signer-selection.js';
 import type { PublisherCandidateFundingAssessment, PublisherUnfundedCandidateFundingAssessment, PublisherFundingSelection } from './evm-publisher-funding.js';
 import type { PublisherConvictionPlanReader } from './publisher-plan.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
@@ -558,72 +564,6 @@ async function contractAddress(contract: Contract): Promise<string> {
   if (target !== undefined) return target;
   throw new Error('DKGKnowledgeAssets address is unavailable from the resolved contract handle.');
 }
-
-/**
- * Per-tx-type funding requirement for operational-wallet selection. A
- * discriminated union so "native-only" (RS challenge/proof, relay, settle —
- * gas only, no TRAC transfer) is UNREPRESENTABLE-AS-TRAC-GATED: applying a
- * publish TRAC floor to a gas-only tx would wrongly reject a valid,
- * gas-funded, zero-TRAC wallet. `native+trac` (publish/update) additionally
- * requires own-TRAC to cover the publish above the operator floor, with an
- * explicit Publishing Conviction Account (PCA) policy: disabled, provisional
- * signer discovery, or an exact epoch-bearing publish plan.
- */
-export type PcaFundingMode =
-  | { kind: 'none' }
-  /** Candidate discovery while an omitted lifetime is still signer-dependent. */
-  | { kind: 'provisional-publish' }
-  /** Exact publish plan: the PCA lock must equal `epochs`. */
-  | { kind: 'publish'; epochs: number };
-
-export type FundingMode =
-  | { kind: 'native-only'; nativeFloorWei: bigint }
-  | {
-      kind: 'native+trac';
-      nativeFloorWei: bigint;
-      tracFloorWei: bigint;
-      requiredTracWei: bigint;
-      /** Explicit PCA semantics; exact publish checks cannot omit the lock. */
-      pca: PcaFundingMode;
-    };
-
-export type NativeOnlyFundingMode = Extract<FundingMode, { kind: 'native-only' }>;
-export type NativeAndTracFundingMode = Extract<FundingMode, { kind: 'native+trac' }>;
-
-/**
- * Generalized operational-wallet selection request. The discriminant fixes the
- * eligible-wallet scope and the required funding model together, so invalid
- * combinations (for example, publish policy selection without a context graph or
- * with native-only funding) do not compile.
- *
- * - `rotatable-policy`  → publish: eligible = on-chain authorized publishers
- *                          for `contextGraphId` (whole pool when no ContextGraphs surface).
- * - `rotatable-funded`  → update: eligible = whole pool, native+TRAC funding.
- * - `rotatable-free`    → RS / relay / settle: eligible = whole pool, native-only funding.
- */
-export type SelectSignerSpec =
-  | {
-      txClass: 'rotatable-policy';
-      funding: NativeAndTracFundingMode;
-      /** The CG whose authorized publishers gate publish eligibility. */
-      contextGraphId: bigint;
-      /** Soft, fail-open bias toward a funded wallet whose per-wallet lock is free. Default false. */
-      preferIdle?: boolean;
-    }
-  | {
-      txClass: 'rotatable-funded';
-      funding: NativeAndTracFundingMode;
-      contextGraphId?: never;
-      /** Soft, fail-open bias toward a funded wallet whose per-wallet lock is free. Default false. */
-      preferIdle?: boolean;
-    }
-  | {
-      txClass: 'rotatable-free';
-      funding: NativeOnlyFundingMode;
-      contextGraphId?: never;
-      /** Soft, fail-open bias toward a funded wallet whose per-wallet lock is free. Default false. */
-      preferIdle?: boolean;
-    };
 
 /** Initialization tolerates only genuine Hub absence, while cancellation wins a raced miss. */
 async function resolveOptionalHubBinding(resolve: () => Promise<void>): Promise<void> {
@@ -2642,6 +2582,39 @@ export class EVMChainAdapterBase {
         `[chain] RS signer ${chosen.address} no longer resolves to this node's identity ` +
         `(on-chain identityId=${onChainId}, ours=${ourId}) — evicted from RS rotation; re-selecting.`,
       );
+    }
+  }
+
+  /**
+   * Send through {@link nextRandomSamplingSigner}'s wallet, with a self-heal for
+   * STALE eligibility, for every caller that rotates its writes that way (a
+   * random-sampling challenge or proof, a marketplace receipt batch). If the
+   * chosen wallet reverts `ProfileDoesntExist` — its operational key was removed
+   * out-of-band (a second instance sharing the identity, or a direct admin
+   * `removeKey` tx), so this process's `registeredOperationalAddresses` set is
+   * stale and the wallet now resolves to identity 0 on-chain — evict it from the
+   * set, drop its cached identityId, and retry ONCE on the primary signer (pool[0],
+   * the always-registered identity anchor). The revert is a pre-state-change
+   * modifier check (`profileExists`), so the retry is idempotent. A revert of the
+   * primary itself, or any other error, propagates unchanged, and the revert is
+   * decoded only once the chosen wallet is known not to be the primary.
+   *
+   * `send` owns everything else: the transaction it builds, the dispatcher that
+   * signs and broadcasts it (and any broadcast hooks or replacements), and it is
+   * called with the wallet of each attempt. The caller's Hub self-heal retry
+   * wraps this whole operation, or the call inside it, as that caller needs.
+   */
+  protected async sendFromRegisteredSigner<T>(send: (signer: EvmSigner) => Promise<T>): Promise<T> {
+    const signer = await this.nextRandomSamplingSigner();
+    try {
+      return await send(signer);
+    } catch (err) {
+      if (signer.address.toLowerCase() === this.signer.address.toLowerCase() || enrichEvmError(err) !== 'ProfileDoesntExist') {
+        throw err;
+      }
+      this.registeredOperationalAddresses.delete(signer.address.toLowerCase());
+      this.clearIdentityIdForAddress(signer.address);
+      return send(this.signer);
     }
   }
 
