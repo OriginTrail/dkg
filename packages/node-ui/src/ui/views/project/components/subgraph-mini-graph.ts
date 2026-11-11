@@ -28,7 +28,7 @@ export function subGraphMiniGraphOptions(
       defaultNodeColor: cardColor,
       defaultEdgeColor: palette.neutral.edge,
       edgeWidth: 1.0,
-      fontSize: 12,
+      fontSize: 12 /* px: the canvas renderer takes a number */,
       gradient: true,
       gradientIntensity: 0.35,
     },

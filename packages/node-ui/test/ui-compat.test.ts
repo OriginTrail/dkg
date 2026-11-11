@@ -129,23 +129,23 @@ describe('V10 CSS layout selectors', () => {
   });
 });
 
-describe('V10 font imports', () => {
-  it('bundles Geist instead of loading runtime Google Fonts', () => {
+describe('V10 fonts and type scale', () => {
+  it('uses Instrument Sans for the interface and JetBrains Mono for identifiers (DESIGN.md · Type)', () => {
     const css = readFile('styles.css');
-    expect(css).toContain("@import '@fontsource-variable/geist/wght.css'");
-    expect(css).toContain("--font-mono: 'SF Mono', ui-monospace, Menlo, monospace");
-    expect(css).not.toContain('fonts.googleapis.com');
+    expect(css).toContain("--font-sans: 'Instrument Sans'");
+    expect(css).toContain("--font-mono: 'JetBrains Mono'");
   });
 
-  it('uses the shared readable type scale for the app body', () => {
+  it('sets the app body on the shared type scale, with an 11px floor', () => {
     const css = readFile('styles.css');
-    expect(css).toContain("--font-sans: 'Geist Variable'");
-    expect(css).toContain('--font-size-body: 16px');
-    expect(css).toMatch(/html, body, #root\s*\{[\s\S]*?font-size:\s*var\(--font-size-body\)/);
+    expect(css).toContain('--fs-micro: 11px');
+    expect(css).toContain('--fs-body: 14px');
+    expect(css).toMatch(/html, body, #root\s*\{[\s\S]*?font-size:\s*var\(--fs-body\)/);
   });
 
-  it('keeps production inline styles on the shared readable type scale', () => {
-    expect(readProductionUiSources()).not.toMatch(/fontSize:\s*(?:9|10|11|12)(?=\s*[,}])/);
+  it('keeps production inline styles on the shared type scale', () => {
+    // Canvas renderer configs take a number and say so in a comment, which this allows.
+    expect(readProductionUiSources()).not.toMatch(/fontSize:\s*\d+(?:\.\d+)?(?=\s*[,}])/);
   });
 });
 

@@ -259,6 +259,8 @@ export function PanelLeft() {
   }, []);
 
   const showEmptyCard = contextGraphs.length === 0 && stage <= 1 && !inventoryError && !inventoryLoading;
+  // On first run the empty card carries New and Join; otherwise they close the group.
+  const showCardActions = showEmptyCard && stage === 1;
 
   const membershipNote = inventoryError
     ? 'Context graph membership unavailable.'
@@ -318,17 +320,17 @@ export function PanelLeft() {
           onToggle={toggleLeftSectionMyProjects}
         >
           {showEmptyCard ? (
-            <div className="v10-journey-empty-card ds-card">
-              <div className="v10-jec-title">No context graphs yet</div>
-              <div className="v10-jec-hint">
+            <div className="v10-sidebar-empty v10-sidebar-first-run">
+              <strong>No context graphs yet</strong>
+              <span>
                 {stage === 0
                   ? 'Connect an agent to get started.'
                   : 'Create your first context graph to give your agent structured memory, or join one by ID.'}
-              </div>
-              {stage === 1 && (
+              </span>
+              {showCardActions && (
                 <div className="v10-sidebar-inline-actions">
-                  <button type="button" className="ds-btn ds-primary ds-sm" onClick={() => setShowCreateModal(true)}>New Context Graph</button>
-                  <button type="button" className="ds-btn ds-sm" onClick={() => openJoinModal()}>Join</button>
+                  <button type="button" className="ds-btn ds-primary ds-sm" aria-label="New Context Graph" onClick={() => setShowCreateModal(true)}>New</button>
+                  <button type="button" className="ds-btn ds-sm" aria-label="Join Context Graph" onClick={() => openJoinModal()}>Join</button>
                 </div>
               )}
             </div>
@@ -363,10 +365,10 @@ export function PanelLeft() {
             </button>
           )}
 
-          {!showEmptyCard && (
+          {!showCardActions && (
             <div className="v10-sidebar-inline-actions">
-              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="New Context Graph" onClick={() => setShowCreateModal(true)}>+ New</button>
-              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="Join Context Graph" onClick={() => openJoinModal()}>↗ Join</button>
+              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="New Context Graph" onClick={() => setShowCreateModal(true)}>New</button>
+              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="Join Context Graph" onClick={() => openJoinModal()}>Join</button>
             </div>
           )}
         </SidebarSection>

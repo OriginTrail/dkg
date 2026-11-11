@@ -44,10 +44,13 @@
 /* Collapsible sidebar groups (SidebarSection): My Context Graphs, Public
    graphs, Marketplace, Integrations. Headers use the .v10-peer-group pattern. */
 .v10-sidebar-group-body { gap: 0; padding: 2px 0 8px; }
-.v10-sidebar-empty { margin: 2px 8px 6px; padding: 8px; color: var(--text-tertiary); font-size: var(--fs-label); line-height: 1.5; }
+.v10-sidebar-empty { display: grid; gap: 4px; margin: 2px 8px 6px; padding: 8px; color: var(--text-tertiary); font-size: var(--fs-label); line-height: 1.5; }
+.v10-sidebar-empty strong { color: var(--text-primary); font-size: var(--fs-control); font-weight: 600; }
+/* First run: the empty group is a card, and carries New and Join. */
+.v10-sidebar-first-run { padding: 12px; gap: 8px; border: 1px solid var(--border-default); border-radius: var(--radius-card); background: var(--bg-surface); }
 .v10-sidebar-inline-actions { display: flex; gap: 8px; padding: 4px 8px 0; }
 .v10-sidebar-inline-actions .ds-btn { flex: 1; }
-.v10-journey-empty-card .v10-sidebar-inline-actions { padding: 0; }
+.v10-sidebar-first-run .v10-sidebar-inline-actions { padding: 0; }
 
 /* Tree sections (project list) */
 .v10-tree-section { margin-bottom: 2px; }
@@ -129,8 +132,6 @@
   background: var(--bg-surface);
   text-align: center;
 }
-.v10-jec-title { font-size: var(--fs-body); font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
-.v10-jec-hint { font-size: var(--fs-label); color: var(--text-tertiary); line-height: 1.5; margin-bottom: 10px; }
 
 /* Tree items are toggled via React state — no CSS display:none needed */
 

@@ -37,7 +37,7 @@ export const sel = {
     // memory-layer rows / fixture CG names — all gone for multiple
     // PRs); this PR only triages the cases its removals directly broke.
     treeContent: '.v10-tree-content',
-    dashboard: '.v10-sidebar-nav-row',
+    dashboard: '.v10-tree-dashboard',
     newProjectBtn: '.v10-sidebar-inline-actions button',
     emptyCard: '.v10-sidebar-empty',
     emptyTitle: '.v10-sidebar-empty strong',
