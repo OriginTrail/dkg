@@ -74,17 +74,6 @@ export interface ReadGraphStoreConfig {
   readonly workingMemoryIdentity?: WorkingMemoryIdentityRule;
 }
 
-/** The options of an `update` on a store that may hold read graphs. */
-export interface ReadGraphUpdateOptions extends UpdateOptions {
-  /**
-   * Every named graph whose triples the update may change. While the backend
-   * holds read graphs, an update without it is refused; an empty list declares
-   * that it changes no graph's triples. `touchedGraphs` names only the graphs
-   * whose existence changes, so it is not read as this declaration.
-   */
-  readonly writtenGraphs?: readonly string[];
-}
-
 export const READ_GRAPH_WRITE_REFUSED_CODE = 'READ_GRAPH_WRITE_REFUSED';
 
 /** A write the read-graph layer cannot maintain, refused before anything was sent. */
@@ -170,6 +159,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
     if (this.runtime.mirror.size === 0) return this.innerStore.insert(quads, options);
     const write: ReadGraphWrite = { kind: 'insert', quads };
+    refuseWrappedGraphNames('insert', write);
     return this.withMaintainedReadGraphs(write, options, (maintained) => {
       const added = joinReadGraphWriteChanges(maintained.map(({ target, members }) =>
         readGraphWriteChange(write, target, members, this.renderer('insert')))).insertQuads;
@@ -236,7 +226,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
 
   private declaredUpdate(options: UpdateOptions | undefined, send: (options: UpdateOptions | undefined) => Promise<void>): Promise<void> {
     if (this.runtime.mirror.size === 0) return send(options);
-    const written = (options as ReadGraphUpdateOptions | undefined)?.writtenGraphs;
+    const written = options?.writtenGraphs;
     if (written === undefined) {
       return Promise.reject(new ReadGraphWriteRefusedError('update', 'it does not declare the graphs it writes (writtenGraphs)'));
     }
@@ -251,6 +241,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
     send: (options: O | undefined) => Promise<T>,
   ): Promise<T> {
     if (this.runtime.mirror.size === 0) return send(options);
+    refuseWrappedGraphNames(method, write);
     return this.withMaintainedReadGraphs(write, options, (maintained) => {
       const change = joinReadGraphWriteChanges(maintained.map(({ target, members }) =>
         readGraphWriteChange(write, target, members, this.renderer(method))));
@@ -375,6 +366,17 @@ export function readGraphLayerOf(store: unknown): ReadGraphStore | null {
 
 function termSiteOf(backend: TripleStoreConfig['backend']): SparqlTermSite['adapter'] {
   return backend === 'blazegraph' || backend === 'sparql-http' ? backend : 'oxigraph';
+}
+
+/**
+ * Refuse a write that names a graph in angle brackets. An adapter that accepts
+ * one writes the graph inside them, which no read graph would know as its
+ * member, so the write would skip maintenance.
+ */
+function refuseWrappedGraphNames(method: ReadGraphPlannedMethod | 'insert', write: ReadGraphWrite): void {
+  if (readGraphWriteGraphs(write).some((graph) => graph.startsWith('<') || graph.endsWith('>'))) {
+    throw new ReadGraphWriteRefusedError(storeOperationOf(method), 'a graph name must be a bare IRI, without angle brackets');
+  }
 }
 
 function storeOperationOf(method: ReadGraphPlannedMethod | 'insert'): StoreOperation {
