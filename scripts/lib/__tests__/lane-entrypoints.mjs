@@ -74,6 +74,7 @@ export const BROWSER_SUITE_DEFERRED = Object.freeze([
   'packages/agent',
   'packages/chain',
   'packages/epcis',
+  'packages/graph-computer',
   'packages/http-utils',
   'packages/local-llm',
   'packages/marketplace',
@@ -83,6 +84,7 @@ export const BROWSER_SUITE_DEFERRED = Object.freeze([
   'packages/publisher',
   'packages/query',
   'packages/random-sampling',
+  'packages/semantic-runtime',
   'packages/storage',
 ]);
 

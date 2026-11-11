@@ -13,6 +13,7 @@ import {
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, StoreOperationTimeoutError, type Quad, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { LocalContextGraphProvenance } from '../../agent/src/local-context-graph-provenance.js';
 import { ContextGraphResolveMethods } from '../../agent/src/dkg-agent-cg-resolve.js';
 import {
   WritePreflightGeneration,
@@ -75,6 +76,7 @@ async function seamAgent(options: { now?: () => number; unresolvedWindowMs?: num
     store,
     config: {},
     subscribedContextGraphs: subs,
+    localContextGraphProvenance: new LocalContextGraphProvenance(),
     getSubscribedContextGraphs: () => subs,
     contextGraphExists: resolveProto.contextGraphExists,
     contextGraphHasLocalContent: resolveProto.contextGraphHasLocalContent,

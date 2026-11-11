@@ -40,7 +40,9 @@ describe('approved metadata for an existing registered participant', () => {
       const owner = await agent.registerAgent('curator', { framework: 'test' });
       await agent.markDefaultAgent(owner.agentAddress);
       await agent.start();
-      const member = ethers.Wallet.createRandom();
+      // The Graph Computer branch requires a verified recipient encryption key.
+      const registered = await agent.registerAgent('member', { framework: 'test' });
+      const member = new ethers.Wallet(agent.getCustodialAgentPrivateKey(registered.agentAddress)!);
       const contextGraphId = 'participant-approval-' + mode;
       await agent.createContextGraph({
         id: contextGraphId,
@@ -109,7 +111,9 @@ describe('approved metadata for an existing registered participant', () => {
     const owner = await agent.registerAgent('curator', { framework: 'test' });
     await agent.markDefaultAgent(owner.agentAddress);
     await agent.start();
-    const member = ethers.Wallet.createRandom();
+    // The Graph Computer branch requires a verified recipient encryption key.
+    const registered = await agent.registerAgent('member', { framework: 'test' });
+    const member = new ethers.Wallet(agent.getCustodialAgentPrivateKey(registered.agentAddress)!);
     const contextGraphId = 'manual-participant-approval';
     await agent.createContextGraph({
       id: contextGraphId, name: 'Manual participant approval', accessPolicy: 1,
