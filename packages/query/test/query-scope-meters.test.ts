@@ -5,7 +5,10 @@ import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import type { QueryOptions } from '../src/query-engine.js';
 import { resolveQueryReadPlan } from '../src/query-read-plan.js';
-import { classifyQueryScope, QUERY_SCOPE_LIMIT_CANDIDATES, QueryScopeMeter, sliceClass, type QueryScopeClass } from '../src/query-scope-meters.js';
+import {
+  classifyMeteredQuery, classifyQueryScope, meterQueryScope, QUERY_SCOPE_LIMIT_CANDIDATES, reportRoutedGraphs, sliceClass, startRoutedRead,
+  type QueryScopeClass,
+} from '../src/query-scope-meters.js';
 import { prepareGraphScope } from '../src/sparql-graph-scope.js';
 
 interface Point { metric: string; value: number; attributes: Record<string, unknown> }
@@ -116,19 +119,27 @@ describe('query scope classes', () => {
 
 describe('the meter of one query', () => {
   const graphs = (count: number, from = 0) => Array.from({ length: count }, (_, n) => `urn:graph:${from + n}`);
+  /** Classify the running query as `sparql` with `options` would be. */
+  const classifyAs = (sparql: string, options?: QueryOptions) => {
+    const prepared = prepareSparql(sparql);
+    if (prepared.status !== 'valid') throw new Error(`malformed test query: ${sparql}`);
+    const scope = prepareGraphScope(prepared);
+    classifyMeteredQuery(scope, resolveQueryReadPlan(scope, options, null), options);
+  };
+  const vmView = { contextGraphId: CG, view: 'verifiable-memory' as const };
 
-  it('times only the reads of its caller lane, and records once when the answer fails', async () => {
+  it('times the reads it is told about, and records once when the answer fails', async () => {
     let clock = 0;
     const now = vi.spyOn(performance, 'now').mockImplementation(() => clock);
-    const answer = async (ms: number) => { clock += ms; return { type: 'bindings' as const, bindings: [] }; };
-    const catalog = { query: () => answer(1_000), listGraphsByPrefix: async () => [] };
-    const meter = new QueryScopeMeter(cls({ view: 'vm' }));
-    const reads = meter.observe({ query: () => answer(30), listGraphsByPrefix: async () => [], catalog });
     try {
-      await reads.catalog.query('internal');
-      await reads.query('caller');
-      meter.route(graphs(4));
-      await expect(meter.settle(Promise.reject(new Error('no answer')))).rejects.toThrow('no answer');
+      await expect(meterQueryScope(async () => {
+        classifyAs(QUERY, vmView);
+        reportRoutedGraphs(graphs(4));
+        const endRead = startRoutedRead()!;
+        clock += 30;
+        endRead();
+        throw new Error('no answer');
+      })).rejects.toThrow('no answer');
     } finally { now.mockRestore(); }
     expect(meters()).toEqual([
       { metric: REQUESTS, value: 1, attributes: cls({ view: 'vm' }) },
@@ -138,12 +149,13 @@ describe('the meter of one query', () => {
   });
 
   it('counts the distinct graphs of every list it routes, and each candidate limit they exceed', async () => {
-    const meter = new QueryScopeMeter(cls({ route: 'legacy', graph: 'variable' }));
-    const shared = graphs(600);
-    meter.route(shared);
-    meter.route(shared);
-    meter.route(graphs(1_000, 401));
-    await meter.settle(Promise.resolve(null));
+    await meterQueryScope(async () => {
+      classifyAs('SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }', { contextGraphId: CG });
+      const shared = graphs(600);
+      reportRoutedGraphs(shared);
+      reportRoutedGraphs(shared);
+      reportRoutedGraphs(graphs(1_000, 401));
+    });
     expect(named(SLICE)).toEqual([{ metric: SLICE, value: 1_401, attributes: { route: 'legacy', graph: 'variable' } }]);
     expect(named(OVER_LIMIT)).toEqual([
       { metric: OVER_LIMIT, value: 1, attributes: { route: 'legacy', graph: 'variable', limit: '1000' } },
@@ -152,10 +164,47 @@ describe('the meter of one query', () => {
     expect(named(STORE_MS)).toEqual([]);
 
     telemetry.points.length = 0;
-    const atLimit = new QueryScopeMeter(cls({}));
-    atLimit.route(graphs(1_000));
-    await atLimit.settle(Promise.resolve(null));
+    await meterQueryScope(async () => {
+      classifyAs(QUERY, vmView);
+      reportRoutedGraphs(graphs(1_000));
+    });
     expect(named(OVER_LIMIT)).toEqual([]);
+  });
+
+  it('counts nothing for a query rejected before it was classified, or outside a metered query', async () => {
+    await meterQueryScope(async () => { reportRoutedGraphs(graphs(3)); });
+    reportRoutedGraphs(graphs(3));
+    expect(startRoutedRead()).toBeUndefined();
+    expect(meters()).toEqual([]);
+  });
+
+  it('keeps concurrent and nested queries apart, and ignores a report after the answer', async () => {
+    const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
+    let late: Promise<void> | undefined;
+    await Promise.all([
+      meterQueryScope(async () => {
+        classifyAs(QUERY, vmView);
+        await turn();
+        reportRoutedGraphs(graphs(2));
+        // Work the query leaves running reports after its answer.
+        late = new Promise((resolve) => setTimeout(() => { reportRoutedGraphs(graphs(50)); resolve(); }, 5));
+      }),
+      meterQueryScope(async () => {
+        classifyAs('SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }', { contextGraphId: CG });
+        reportRoutedGraphs(graphs(7));
+        await turn();
+        // A query run inside this one is metered on its own.
+        await meterQueryScope(async () => {
+          classifyAs(QUERY, { contextGraphId: CG, view: 'shared-working-memory' });
+          reportRoutedGraphs(graphs(5));
+        });
+        reportRoutedGraphs(graphs(1, 100));
+      }),
+    ]);
+    await late;
+    expect(named(SLICE).map(({ value, attributes }) => [attributes.route, attributes.graph, value]).sort())
+      .toEqual([['legacy', 'variable', 8], ['view', 'none', 2], ['view', 'none', 5]]);
+    expect(named(REQUESTS)).toHaveLength(3);
   });
 });
 
@@ -270,5 +319,17 @@ describe('the query engine', () => {
     await expect(engine.query(`SELECT ?s WHERE { GRAPH <${ROOT}/_meta> { ?s ?p ?o } }`, { contextGraphId: CG }))
       .resolves.toMatchObject({ bindings: [] });
     expect(meters()).toEqual([]);
+  });
+
+  it('keeps the meters of concurrent queries apart', async () => {
+    await Promise.all([
+      engine.query(QUERY, { contextGraphId: CG, view: 'verifiable-memory' }),
+      engine.query(QUERY, { contextGraphId: LARGE_CG, view: 'shared-working-memory' }),
+      engine.query(QUERY, { contextGraphId: CG, view: 'working-memory', agentAddress: AGENT }),
+    ]);
+    expect(named(SLICE).map(({ value }) => value).sort((a, b) => a - b))
+      .toEqual([wmGraphs.length, 1 + vmGraphs.length, 1 + LARGE_SWM_GRAPHS]);
+    expect(named(REQUESTS)).toHaveLength(3);
+    expect(named(STORE_MS)).toHaveLength(3);
   });
 });
