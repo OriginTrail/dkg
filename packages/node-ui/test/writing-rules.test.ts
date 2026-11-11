@@ -28,6 +28,7 @@ const WORDS: [RegExp, string][] = [
   [/\bcarried out\b/i, 'Done'],
   [/\bnot admitted\b/i, 'Refused'],
   [/\bContext Graphs?\b/, 'context graph'],
+  [/\b(?:neuro[ -]?[Ss]ymbolic|Neuro(?:[ -][Ss]ymbolic|symbolic))\b/, 'NeuroSymbolic Marketplace, or NS Marketplace'],
   [/\bSPEC_[A-Z]/, 'no spec notes on screen'],
   [/^\d+ · /, 'a label and its detail take a colon'],
 ];
@@ -374,7 +375,8 @@ describe('writing rules', () => {
     expect(problemsIn(asLines(['Check the daemon'])).map((problem) => problem.use)).toEqual(['node']);
     expect(problemsIn(asLines(['2 · Commitment'])).map((problem) => problem.use)).toEqual(['a label and its detail take a colon']);
     expect(problemsIn(asLines(['Open the Context Graph'])).map((problem) => problem.use)).toEqual(['context graph']);
-    expect(problemsIn(asLines(['PDF · 8.4 MB', 'Check the node', 'Context graph size', 'My context graphs']))).toEqual([]);
+    expect(problemsIn(asLines(['Neurosymbolic Marketplace'])).map((problem) => problem.use)).toEqual(['NeuroSymbolic Marketplace, or NS Marketplace']);
+    expect(problemsIn(asLines(['PDF · 8.4 MB', 'Check the node', 'Context graph size', 'My context graphs', 'NeuroSymbolic Marketplace', 'NS Marketplace']))).toEqual([]);
   });
 
   it('keeps UI text to the word list', () => {

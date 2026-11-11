@@ -1,7 +1,7 @@
 // The marketplace section's centre tabs and their deep-link paths.
 
 export const MARKETPLACE_TABS = {
-  browse: { id: 'marketplace', label: 'Neurosymbolic Marketplace', path: '/marketplace' },
+  browse: { id: 'marketplace', label: 'NS Marketplace', path: '/marketplace' },
   plans: { id: 'marketplace-plans', label: 'Plans', path: '/marketplace/plans' },
   access: { id: 'marketplace-access', label: 'Access', path: '/marketplace/access' },
   operate: { id: 'marketplace-operate', label: 'Operate', path: '/marketplace/operate' },
