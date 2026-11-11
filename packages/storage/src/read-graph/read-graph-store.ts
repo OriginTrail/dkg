@@ -85,7 +85,7 @@ import {
   type ReadGraphRegistryWrite,
 } from './registry-recognition.js';
 import { readGraphBackendIdentity, readGraphBackendRuntime, type ReadGraphBackendRuntime } from './runtime.js';
-import { nextReadGraphState, readGraphStateCompareAndSet, readGraphStateMarkDirty } from './state.js';
+import { nextReadGraphState, readGraphStateMarkDirty } from './state.js';
 import type { ReadGraphTarget } from './statements.js';
 import {
   joinReadGraphWriteChanges,
@@ -467,6 +467,15 @@ export class ReadGraphStore implements TripleStoreDecorator {
       result = await send();
     } catch (error) {
       await settle(false);
+      // On an engine that may run it beside later requests, a write whose outcome is unknown can still change the
+      // registry after any reading of it: every read graph of its context graphs goes dirty, and the facts are read
+      // again before the next write that may change them.
+      if (!this.adapterCapabilities?.serialUpdates && !hasStoreOperationOutcome(error, operation, 'not_started')) {
+        for (const owner of owners) {
+          await this.markDirty(this.readGraphsOf(owner));
+          this.runtime.registries.forgetFacts(owner);
+        }
+      }
       throw error;
     }
     await settle(true);
@@ -544,12 +553,11 @@ export class ReadGraphStore implements TripleStoreDecorator {
   private async markDirty(readGraphs: readonly string[]): Promise<void> {
     for (const readGraph of readGraphs) {
       const row = this.runtime.mirror.get(readGraph);
-      if (!row || row.state === 'dirty') continue;
-      const dirty = nextReadGraphState(row, { kind: 'mark-dirty' })!;
-      this.runtime.mirror.set(dirty);
-      // If this request fails as well, the stored row is older than the mirror's;
-      // a rebuild then starts from the stored row.
-      await this.innerStore.update?.(readGraphStateCompareAndSet(row, dirty), { source: 'storage.readGraphDirtyMark' })
+      if (!row) continue;
+      if (row.state !== 'dirty') this.runtime.mirror.set(nextReadGraphState(row, { kind: 'mark-dirty' })!);
+      // From whatever row is stored, and even when the mirror already says dirty: an earlier mark may not have
+      // reached the store. If this request fails as well, a rebuild starts from the stored row.
+      await this.innerStore.update?.(readGraphStateMarkDirty(readGraph), { source: 'storage.readGraphDirtyMark' })
         .catch(() => undefined);
     }
   }

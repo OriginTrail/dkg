@@ -344,6 +344,56 @@ describe('registry recognition in the read-graph layer', () => {
       .toEqual((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames);
   });
 
+  it('sends a dirty mark the store did not take again, although the mirror already says dirty', async () => {
+    const { adapter, fixture, store, meta } = await layered();
+    const wholeVm = fixture.readGraphs.wholeVm;
+    await adapter.update(readGraphStateCompareAndSet(undefined, readyRow(wholeVm)));
+    const storedState = async () => {
+      const result = await adapter.query(readGraphStateRowsQuery());
+      const row = parseReadGraphStateRows(result.type === 'bindings' ? result.bindings : []).rows.find((found) => found.readGraph === wholeVm);
+      return `${row?.state}@${row?.generation}`;
+    };
+    const update = adapter.update.bind(adapter);
+    let unreachable = true;
+    adapter.update = async (sparql, options) => {
+      if (unreachable && options?.source === 'storage.readGraphDirtyMark') throw new Error('connection reset');
+      return update(sparql, options);
+    };
+    const docs = `${fixture.root}/docs`;
+    await expect(store.insert([fact(meta, docs, R.type, R.subGraphClass), fact(meta, docs, R.name, '"docs"')]))
+      .rejects.toMatchObject({ code: 'READ_GRAPH_WRITE_REFUSED' });
+    expect(await storedState()).toBe('ready@1');
+    // The same registration through an update: the mark after it reaches the store this time.
+    unreachable = false;
+    await store.update!(`INSERT DATA { GRAPH <${meta}> { <${docs}> <${R.type}> <${R.subGraphClass}> ; <${R.name}> "docs" } }`, { writtenGraphs: [meta] });
+    expect(await storedState()).toBe('dirty@2');
+  });
+
+  it('marks every read graph of the context graph dirty after a registry write with an unknown outcome, on an engine that may run it later', async () => {
+    class Late extends PlanningOxigraphStore {
+      override readonly readGraphCapabilities = { ...new PlanningOxigraphStore().readGraphCapabilities, serialUpdates: false };
+    }
+    const adapter = new Late();
+    const fixture = layerFixture(`recognition-late-${sequence += 1}`);
+    const { layer, store } = await layeredStore(adapter, { backend: 'oxigraph' }, fixture);
+    const meta = `${fixture.root}/_meta`;
+    await store.insert([fact(meta, 'urn:asset:1', 'urn:test:p', '"m"')]);
+    const update = adapter.update.bind(adapter);
+    let late: Promise<void> | undefined;
+    adapter.update = async (sparql, options) => {
+      if (!sparql.includes('/docs')) return update(sparql, options);
+      // The response is lost, and the request still runs after the layer has read the registry again.
+      late = new Promise((resolve) => setTimeout(resolve, 20)).then(() => update(sparql, options));
+      throw new Error('connection reset');
+    };
+    const registration = `INSERT DATA { GRAPH <${meta}> { <${fixture.root}/docs> <${R.type}> <${R.subGraphClass}> ; <${R.name}> "docs" } }`;
+    await expect(store.update!(registration, { writtenGraphs: [meta] })).rejects.toThrow('connection reset');
+    const states = Object.fromEntries(Object.entries(fixture.readGraphs).map(([name, readGraph]) => [name, layer.runtime.mirror.get(readGraph)!.state]));
+    expect(states).toEqual({ wholeVm: 'dirty', wholeSwm: 'dirty', codeVm: 'dirty', agentWm: 'dirty' });
+    expect(layer.runtime.registries.facts(fixture.contextGraphId)).toBeUndefined();
+    await late;
+  });
+
   it('marks the read graphs a sub-graph leaves dirty when its name goes', async () => {
     const { store, meta, fixture, states } = await layered();
     await store.delete([fact(meta, `${fixture.root}/code`, R.name, '"code"')]);
