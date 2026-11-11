@@ -13,7 +13,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { ALERT_LABEL, alertIssue, isRed, planAlert, PROFILES, readRecovery } from '../lib/canary-alert.mjs';
+import { ALERT_LABEL, alertIssue, compareRuns, isRed, planAlert, PROFILES, readRecovery } from '../lib/canary-alert.mjs';
 import { CANARY_ALERT_JOB, CANARY_BRANCH, CI_GATE_JOB, runKind } from '../lib/ci-health.mjs';
 import { createGitHubClient, ensureLabel, findOpenIssue, listRunJobs } from '../lib/github-rest.mjs';
 
@@ -46,7 +46,7 @@ export async function findLastClosedAlert(client, repo, profile, log = () => {})
     const recovered = own
       .map((issue) => ({ issue, recovery: readRecovery(issue.body, profile) }))
       .filter(({ recovery }) => recovery)
-      .sort((a, b) => Date.parse(b.recovery.createdAt) - Date.parse(a.recovery.createdAt));
+      .sort((a, b) => compareRuns(b.recovery, a.recovery));
     return recovered[0] ?? (own[0] && { issue: own[0], recovery: undefined });
   } catch (error) {
     log(`Could not read the closed ${profile} alerts (${error.message}); deciding as if none recovered.`);

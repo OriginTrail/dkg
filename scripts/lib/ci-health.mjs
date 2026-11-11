@@ -84,11 +84,31 @@ export function concurrencyGroup(run) {
   return `ref ${run.head_branch} ${kind === 'nightly' ? 'nightly-equivalent' : 'standard'}`;
 }
 
+// When a run's latest attempt executed: from the first start to the last
+// completion of its own jobs, leaving out skipped ones and the copies a re-run
+// carries over from an earlier attempt (they keep that attempt's times), and
+// from no later than the attempt's start (run_started_at, which a re-run
+// resets). With no job times, from that start to the run's last update.
+export function attemptWindow(run, jobs = []) {
+  const attempts = [...jobsByAttempt(jobs).values()];
+  const key = (job) => [job.name, job.started_at, job.completed_at, job.conclusion].join('\u0000');
+  const earlier = new Set(attempts.slice(0, -1).flat().map(key));
+  const own = (attempts.at(-1) ?? []).filter((job) => job.conclusion !== 'skipped' && !earlier.has(key(job)) && duration(job) >= 0);
+  const started = time(run.run_started_at ?? run.created_at);
+  if (own.length === 0) return { start: started, end: time(run.updated_at) };
+  return {
+    start: Math.min(...own.map((job) => time(job.started_at)), Number.isFinite(started) ? started : Infinity),
+    end: Math.max(...own.map((job) => time(job.completed_at))),
+  };
+}
+
 // Each run's stream and outcome: success; failure (failed, timed out or never
 // started); superseded (cancelled because a newer run of its concurrency group
-// started: churn, not a verdict); cancelled (by a job timeout, by hand or by
-// the merge queue dropping its entry); pending; other (skipped, neutral, ...).
-export function classifyRuns(runs) {
+// was created while its latest attempt ran: churn, not a verdict); cancelled
+// (by a job timeout, by hand or by the merge queue dropping its entry);
+// pending; other (skipped, neutral, ...). `jobsByRun` narrows a cancelled
+// run's latest attempt to when its jobs ran (attemptWindow).
+export function classifyRuns(runs, jobsByRun = new Map()) {
   const groups = groupBy(runs, concurrencyGroup);
   return runs.map((run) => {
     let outcome = 'other';
@@ -96,9 +116,11 @@ export function classifyRuns(runs) {
     else if (run.conclusion === 'success') outcome = 'success';
     else if (['failure', 'timed_out', 'startup_failure'].includes(run.conclusion)) outcome = 'failure';
     else if (run.conclusion === 'cancelled') {
+      const { start, end } = attemptWindow(run, jobsByRun.get(run.id));
       const superseded = groups.get(concurrencyGroup(run)).some((other) => other.id !== run.id
         && time(other.created_at) > time(run.created_at)
-        && time(other.created_at) <= time(run.updated_at));
+        && time(other.created_at) >= start
+        && time(other.created_at) <= end);
       outcome = superseded ? 'superseded' : 'cancelled';
     }
     return { run, kind: runKind(run), outcome };
@@ -424,7 +446,7 @@ export function buildHealthReport({
   generatedAt,
   requestCount,
 }) {
-  const classified = classifyRuns(runs);
+  const classified = classifyRuns(runs, jobsByRun);
   const within = ({ start, end }) => classified.filter(({ run }) => time(run.created_at) >= start && time(run.created_at) < end);
   const current = within(window);
   const previous = within(previousWindow);

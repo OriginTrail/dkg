@@ -179,20 +179,32 @@ const RUN_SEARCH_LIMIT = 1000;
 
 // Every run of `workflow` created in [since, until), oldest first. A
 // `created` search returns at most 1000 runs, so the window is read a day at
-// a time and a day that reaches the cap is split in half until each part fits.
-export async function listWorkflowRuns(client, { repo, workflow, since, until, query = {} }) {
+// a time, and a range whose first page reports the cap or more (GitHub may
+// report the cap itself) is split in half, until each part fits, before any
+// page past the first is asked for: no request goes past result 1000.
+export async function listWorkflowRuns(client, { repo, workflow, since, until, query = {}, perPage = 100 }) {
   const runs = new Map();
   const path = `repos/${repo}/actions/workflows/${encodeURIComponent(workflow)}/runs`;
   const read = async (from, to) => {
-    const { items, totalCount = items.length } = await client.paginate(path, {
-      query: { ...query, created: `${iso(from)}..${iso(to)}` },
-      itemsKey: 'workflow_runs',
-    });
-    if (totalCount >= RUN_SEARCH_LIMIT && to - from > 2 * SECOND) {
+    const created = `${iso(from)}..${iso(to)}`;
+    const page = async (number) => {
+      const data = await client.request('GET', path, { query: { ...query, created, per_page: perPage, page: number } });
+      if (!Array.isArray(data?.workflow_runs) || !Number.isInteger(data.total_count)) throw new Error(`GitHub API ${path} returned a page without workflow_runs`);
+      return data;
+    };
+    const first = await page(1);
+    if (first.total_count >= RUN_SEARCH_LIMIT) {
+      if (to - from < 2 * SECOND) throw new Error(`${workflow} has ${first.total_count} runs created ${created}, more than one search can list`);
       const middle = from + Math.floor((to - from) / 2 / SECOND) * SECOND;
       await read(from, middle);
       await read(middle + SECOND, to);
       return;
+    }
+    const items = [...first.workflow_runs];
+    for (let number = 2; items.length < first.total_count && (number - 1) * perPage < RUN_SEARCH_LIMIT; number += 1) {
+      const next = await page(number);
+      if (next.workflow_runs.length === 0) break;
+      items.push(...next.workflow_runs);
     }
     for (const run of items) runs.set(run.id, run);
   };

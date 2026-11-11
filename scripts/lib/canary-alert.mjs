@@ -78,6 +78,15 @@ function parseState(body, profile) {
 }
 const dated = (record) => Number.isFinite(time(record?.createdAt));
 
+// Two runs in the order the alert compares them: by creation time, then, for
+// attempts of one run (which share its creation time), by attempt. A failing
+// later attempt of the run a recovery recorded is newer than that recovery;
+// an earlier or equal attempt of it, or another run created no later, is not.
+export function compareRuns(a, b) {
+  return time(a.createdAt) - time(b.createdAt) || (a.id === b.id ? (a.attempt ?? 1) - (b.attempt ?? 1) : 0);
+}
+const isNewer = (run, than) => compareRuns(run, than) > 0;
+
 // An open alert's state, or undefined when there is none to read (a hand edit
 // included). An unreadable `after` is dropped, and an open alert has no
 // recovery.
@@ -189,7 +198,7 @@ export function planAlert({ issue, run, gateResult, jobs, closed }) {
     // one later. With none closed yet there is no recovery to keep.
     if (!issue) {
       if (!closed?.issue) return { action: 'none', reason: `CI gate passed; no ${run.profile} alert is open or closed` };
-      if (closed.recovery && time(closed.recovery.createdAt) >= time(run.createdAt)) {
+      if (closed.recovery && !isNewer(run, closed.recovery)) {
         return { action: 'none', reason: `CI gate passed; closed #${closed.issue.number} already records a recovery no older (#${closed.recovery.id})` };
       }
       const advanced = { ...(parseState(closed.issue.body, run.profile) ?? { version: 1, profile: run.profile }), recovered: recorded(run) };
@@ -203,7 +212,7 @@ export function planAlert({ issue, run, gateResult, jobs, closed }) {
     }
     // An older commit passing late proves nothing about a newer red one. An
     // issue whose state is unreadable closes on any pass of its profile.
-    if (state && time(state.run.createdAt) > time(run.createdAt)) {
+    if (state && isNewer(state.run, run)) {
       return { action: 'none', reason: `CI gate passed, but #${issue.number} records a newer red run (#${state.run.id})` };
     }
     // The closed issue keeps this pass as the profile's latest recovery, so a
@@ -223,13 +232,13 @@ export function planAlert({ issue, run, gateResult, jobs, closed }) {
   // the one an open alert recorded when it opened. A run no newer than that
   // pass, such as a failing re-run of an older commit, proves nothing now.
   const after = issue ? state?.after : closed?.recovery;
-  if (dated(after) && time(run.createdAt) <= time(after.createdAt)) {
+  if (dated(after) && !isNewer(run, after)) {
     return {
       action: 'none',
       reason: `CI gate ${gateResult}, but a newer run (#${after.id}) has passed since this one was created; ${issue ? `leaving #${issue.number} as it is` : `not reopening the ${run.profile} alert`}`,
     };
   }
-  const newer = !state || time(run.createdAt) >= time(state.run.createdAt);
+  const newer = !state || !isNewer(state.run, run);
   const next = {
     version: 1,
     profile: run.profile,

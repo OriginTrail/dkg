@@ -9,6 +9,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
 import {
+  attemptWindow,
   buildHealthReport,
   CI_GATE_JOB,
   classifyRuns,
@@ -116,6 +117,37 @@ test('runs are sorted into streams, and a cancellation is superseded only by a n
   assert.equal(canaryRow.cancelRate, 2 / 3);
   assert.equal(table.all.runs, runs.length);
   assert.equal(table.all.cancelRate, 6 / 12, 'pending runs are not in the cancel rate');
+});
+
+test('a cancelled retry is judged by when its own attempt ran: a run that finished before the retry did not cancel it', () => {
+  // A is created Monday 10:00 and re-run Tuesday 10:00, where it times out;
+  // B, in the same group, ran Monday 11:00 and finished. The retry carries
+  // over Monday's passing job with Monday's times.
+  const day = 1440;
+  const canary = { event: 'push', branch: 'testnet-canary' };
+  const a = run({ id: 1, ...canary, conclusion: 'cancelled', attempt: 2, created: 0, started: day, updated: day + 45 });
+  const b = run({ id: 2, ...canary, created: 60, updated: 100 });
+  const aJobs = [
+    job('Build packages', { start: 0, minutes: 6 }),
+    failedLane('Tornado: agent [1/11]', 'Agent tests (shard 1/11)', { start: 6, minutes: 14 }),
+    job('Build packages', { attempt: 2, start: 0, minutes: 6 }),
+    job('Tornado: agent [1/11]', { attempt: 2, conclusion: 'cancelled', start: day, minutes: 45, steps: [['Agent tests (shard 1/11)', 'cancelled']] }),
+    gate({ attempt: 2, conclusion: 'failure', start: day + 45 }),
+  ];
+  assert.deepEqual(attemptWindow(a, aJobs), { start: T0 + day * MINUTE, end: T0 + (day + 45.2) * MINUTE });
+  const outcome = (runs, jobsByRun) => classifyRuns(runs, jobsByRun).find(({ run: { id } }) => id === 1).outcome;
+  assert.equal(outcome([a, b]), 'cancelled', 'before its jobs are read, from the retry\'s start');
+  assert.equal(outcome([a, b], new Map([[1, aJobs]])), 'cancelled', 'with its jobs, from when the retry\'s own jobs ran');
+  const end = T0 + 3 * day * MINUTE;
+  const weeks = { window: { start: end - 7 * day * MINUTE, end }, previousWindow: { start: end - 14 * day * MINUTE, end: end - 7 * day * MINUTE } };
+  assert.ok(runsNeedingJobs(classifyRuns([a, b]), weeks).some(({ id }) => id === 1), 'its jobs are read for the report');
+  assert.equal(topRootFailures([{ run: a, kind: 'canary-push', jobs: aJobs }])[0].lane, 'Tornado: agent');
+  // A run created while the retry ran still cancelled it.
+  const c = run({ id: 3, ...canary, created: day + 20, updated: day + 60 });
+  assert.equal(outcome([a, b, c]), 'superseded');
+  assert.equal(outcome([a, b, c], new Map([[1, aJobs]])), 'superseded');
+  // Without a retry, or job times, the run's own span decides as before.
+  assert.deepEqual(attemptWindow(b), { start: T0 + 60 * MINUTE, end: T0 + 100 * MINUTE });
 });
 
 test('root failures skip the aggregates, treat merged coverage as derivative, and fall back to a cancelled job', () => {

@@ -141,28 +141,49 @@ test('pagination reads every page of arrays and of object pages, stopping at the
   await assert.rejects(malformed.github.paginate('jobs', { itemsKey: 'jobs' }), /without jobs/);
 });
 
-test('a run search reads the window a day at a time and splits a day that reaches the 1000-run cap', async () => {
+test('a run search splits a range that reaches the 1000-run cap before paging past it, and recovers every run once', async () => {
+  // GitHub's run search: newest first, 100 a page, and nothing past result
+  // 1000 of one query. Nov 1 has 1150 runs, Nov 2 exactly 1000 (GitHub may
+  // report the cap itself), one a minute from midnight; Oct 31 has one.
   const since = Date.parse('2026-11-01T00:00:00Z');
   const until = since + 2 * 86_400_000;
-  const run = (id, created) => ({ id, created_at: created });
-  const ranges = [];
+  const minute = (day, index) => new Date(since + day * 86_400_000 + index * 60_000).toISOString().replace('.000Z', 'Z');
+  const all = [
+    { id: 1, created_at: '2026-10-31T23:00:00Z' },
+    ...Array.from({ length: 1150 }, (_, index) => ({ id: 1000 + index, created_at: minute(0, index) })),
+    ...Array.from({ length: 1000 }, (_, index) => ({ id: 5000 + index, created_at: minute(1, index) })),
+  ];
+  const asked = [];
   const answer = (url) => {
     const [from, to] = url.searchParams.get('created').split('..');
-    ranges.push([from, to]);
-    if (from === '2026-11-01T00:00:00Z' && to === '2026-11-01T23:59:59Z') return { body: { total_count: 1000, workflow_runs: [] } };
-    const runs = [run(1, '2026-11-01T03:00:00Z'), run(2, '2026-11-01T15:00:00Z'), run(3, '2026-11-02T08:00:00Z'), run(4, '2026-10-31T23:00:00Z')]
-      .filter(({ created_at: created }) => created >= from && created <= to);
-    return { body: { total_count: runs.length, workflow_runs: runs } };
+    const page = Number(url.searchParams.get('page'));
+    const perPage = Number(url.searchParams.get('per_page'));
+    asked.push(`${from}..${to} page ${page}`);
+    if (perPage !== 100) throw new Error(`per_page ${perPage}`);
+    if ((page - 1) * perPage >= 1000) throw new Error(`asked for page ${page} of ${from}..${to}, past the 1000-result cap`);
+    const matching = all.filter(({ created_at: created }) => created >= from && created <= to).reverse();
+    return { body: { total_count: matching.length, workflow_runs: matching.slice((page - 1) * perPage, page * perPage) } };
   };
-  const { github } = client(Array.from({ length: 4 }, () => answer));
+  const { github } = client(Array.from({ length: 40 }, () => answer));
   const runs = await listWorkflowRuns(github, { repo: 'o/r', workflow: 'ci.yml', since, until });
-  assert.deepEqual(runs.map(({ id }) => id), [1, 2, 3]);
-  assert.deepEqual(ranges, [
-    ['2026-11-01T00:00:00Z', '2026-11-01T23:59:59Z'],
-    ['2026-11-01T00:00:00Z', '2026-11-01T11:59:59Z'],
-    ['2026-11-01T12:00:00Z', '2026-11-01T23:59:59Z'],
-    ['2026-11-02T00:00:00Z', '2026-11-02T23:59:59Z'],
+  assert.deepEqual(runs.map(({ id }) => id), all.slice(1).map(({ id }) => id), 'every run in the window, once, oldest first');
+  // Each capped day was split after its first page, and each half paged to its end.
+  assert.deepEqual(asked.filter((entry) => entry.endsWith(' page 1')), [
+    '2026-11-01T00:00:00Z..2026-11-01T23:59:59Z page 1',
+    '2026-11-01T00:00:00Z..2026-11-01T11:59:59Z page 1',
+    '2026-11-01T12:00:00Z..2026-11-01T23:59:59Z page 1',
+    '2026-11-02T00:00:00Z..2026-11-02T23:59:59Z page 1',
+    '2026-11-02T00:00:00Z..2026-11-02T11:59:59Z page 1',
+    '2026-11-02T12:00:00Z..2026-11-02T23:59:59Z page 1',
   ]);
+  assert.equal(asked.filter((entry) => entry.startsWith('2026-11-01T00:00:00Z..2026-11-01T11:59:59Z')).length, 8, '720 runs, 8 pages');
+  for (const day of ['2026-11-01', '2026-11-02']) {
+    const whole = `${day}T00:00:00Z..${day}T23:59:59Z`;
+    assert.deepEqual(asked.filter((entry) => entry.startsWith(`${whole} `)), [`${whole} page 1`], 'a capped day is never paged');
+  }
+  // A range that cannot be split further and still reaches the cap is an error, not a silent gap.
+  const crowded = client([() => ({ body: { total_count: 1000, workflow_runs: [] } })]);
+  await assert.rejects(listWorkflowRuns(crowded.github, { repo: 'o/r', workflow: 'ci.yml', since, until: since + 1000 }), /more than one search can list/);
 });
 
 test('a job listing that keeps failing with a server error is read again in smaller pages', async () => {
