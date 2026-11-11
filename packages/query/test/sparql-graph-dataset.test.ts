@@ -3,6 +3,7 @@ import {
   ChangelogStore, OxigraphStore, OxigraphWorkerStore, createManagedOxigraphRuntimeStoreConfigV1, createTripleStore,
   sparqlEngineOf, type Quad, type TripleStore,
 } from '@origintrail-official/dkg-storage';
+import { TRUST_LEVEL_PREDICATE, TrustLevel } from '@origintrail-official/dkg-core';
 import { materializePreparedSparql, prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { resolveQueryReadPlan } from '../src/query-read-plan.js';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
@@ -757,6 +758,24 @@ describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind,
     const subquery = `?s <urn:label> ?l { SELECT (IF(?missing, <${SHARED[0]}>, <${SHARED[1]}>) AS ?g) WHERE {} }`;
     expect(await read(subquery)).toEqual(await asListed(subquery));
     expect(await read(subquery)).toEqual(plain);
+  });
+
+  it('applies a minimum trust level to a path that can match without a triple', async () => {
+    const trusted = 'dataset-stores-trust';
+    const asset = `did:dkg:context-graph:${trusted}/_verifiable_memory/0xa/1`;
+    await opened.store.insert([
+      { subject: 'urn:trust:x', predicate: 'urn:p', object: 'urn:trust:y', graph: asset },
+      { subject: 'urn:trust:x', predicate: TRUST_LEVEL_PREDICATE, object: `"${TrustLevel.Endorsed}"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: asset },
+      { subject: 'urn:trust:u', predicate: 'urn:p', object: 'urn:trust:v', graph: asset },
+    ]);
+    const engine = new DKGQueryEngine(opened.store);
+    const options: QueryOptions = { contextGraphId: trusted, view: 'verifiable-memory', minTrust: TrustLevel.Endorsed };
+    const objects = async (sparql: string) => (await engine.query(sparql, options)).bindings.map(row => row.o).sort();
+    for (const path of ['*', '?']) {
+      expect(await objects(`SELECT ?o WHERE { <urn:trust:x> <urn:p>${path} ?o }`), path).toEqual(['urn:trust:x', 'urn:trust:y']);
+      // A subject without trust metadata gives nothing.
+      expect(await objects(`SELECT ?o WHERE { <urn:trust:u> <urn:p>${path} ?o }`), path).toEqual([]);
+    }
   });
 
   it('answers a constant graph assignment on a view with more graphs than the branches allow', async () => {
