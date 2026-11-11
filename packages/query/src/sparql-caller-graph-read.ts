@@ -27,29 +27,64 @@ function assignsGraphVariable(scope: PreparedSparqlQuery, opening: number, closi
   return false;
 }
 
+type Assignment = 'constant' | 'expression';
+
 /**
- * The assignments of each caller GRAPH ?var block to ?var, at any depth inside
- * it: `AS ?var` in a BIND or in a subquery's projection. An assignment of a
- * single IRI is `constant`; any other expression, which may fail and leave
- * ?var unbound, is `expression`.
+ * Visit the variables a group binds for the pattern around it: each assignment
+ * `( … AS ?var )` (a BIND, or a subquery's projection or grouping), as
+ * `constant` when it is a single IRI and `expression` otherwise, and every
+ * other variable. The parts whose bindings stay inside them are left out: a
+ * MINUS group, an EXISTS group, a FILTER constraint and an assignment's
+ * expression.
  */
-function callerGraphAssignmentsInside(scope: PreparedSparqlQuery): Array<'constant' | 'expression'> {
+function visitGroupBindings(
+  scope: PreparedSparqlQuery, opening: number, closing: number,
+  visit: (index: number, name: string, assignment?: Assignment) => void,
+): void {
   const { tokens } = scope.prepared;
-  const found: Array<'constant' | 'expression'> = [];
+  const braces = scope.structure.braces.matchingTokenIndexes;
+  const parentheses = scope.structure.parentheses.matchingTokenIndexes;
+  const isSymbol = (index: number, value: string) => tokens[index]?.kind === 'symbol' && tokens[index].logicalValue === value;
+  for (let index = opening + 1; index < closing; index++) {
+    let end = -1;
+    if ((isSparqlKeyword(tokens, index, 'MINUS') || isSparqlKeyword(tokens, index, 'EXISTS')) && isSymbol(index + 1, '{')) {
+      end = braces[index + 1] ?? -1;
+    } else if (isSparqlKeyword(tokens, index, 'FILTER')) {
+      // FILTER ( … ), or a call: FILTER regex( … ), FILTER <f>( … ), FILTER x:f( … ).
+      const call = isSymbol(index + 1, '(') ? index + 1 : index + 2;
+      if (isSymbol(call, '(')) end = parentheses[call] ?? -1;
+    } else if (isSymbol(index, '(')) {
+      const last = parentheses[index] ?? -1;
+      const target = tokens[last - 1];
+      if (last > index && isSparqlKeyword(tokens, last - 2, 'AS') && target?.kind === 'variable') {
+        const term = tokens[index + 1];
+        const constant = last - 2 === index + 2 && (term?.kind === 'iri' || term?.kind === 'prefixed-name');
+        visit(last - 1, target.logicalValue.slice(1), constant ? 'constant' : 'expression');
+        end = last;
+      }
+    } else {
+      const token = tokens[index];
+      if (token.kind === 'variable') visit(index, token.logicalValue.slice(1));
+    }
+    if (end > index) index = end;
+  }
+}
+
+/**
+ * The assignments of each caller GRAPH ?var block to ?var that bind it for the
+ * block, at any depth inside it, in a block that holds a subquery: a block
+ * without one reads its assignment under another name instead.
+ */
+function callerGraphAssignmentsInside(scope: PreparedSparqlQuery): Assignment[] {
+  const found: Assignment[] = [];
   for (const target of scope.graphTargets) {
     if (target.kind !== 'variable') continue;
     const opening = target.targetTokenIndex + 1;
     const closing = scope.structure.braces.matchingTokenIndexes[opening] ?? -1;
-    // A block without a subquery reads its assignment under another name instead.
     if (!holdsSubquery(scope, opening, closing)) continue;
-    for (let index = opening + 1; index < closing - 1; index++) {
-      const next = tokens[index + 1];
-      if (!isSparqlKeyword(tokens, index, 'AS') || next?.kind !== 'variable' || next.logicalValue.slice(1) !== target.variable.logicalName) continue;
-      const term = tokens[index - 1];
-      const before = tokens[index - 2];
-      const constant = (term?.kind === 'iri' || term?.kind === 'prefixed-name') && before?.kind === 'symbol' && before.logicalValue === '(';
-      found.push(constant ? 'constant' : 'expression');
-    }
+    visitGroupBindings(scope, opening, closing, (_index, name, assignment) => {
+      if (assignment && name === target.variable.logicalName) found.push(assignment);
+    });
   }
   return found;
 }
@@ -64,25 +99,29 @@ function holdsSubquery(scope: PreparedSparqlQuery, opening: number, closing: num
   return false;
 }
 
-function assignsVariableInside(scope: PreparedSparqlQuery, opening: number, closing: number, name: string): boolean {
-  const { tokens } = scope.prepared;
-  for (let index = opening + 1; index < closing - 1; index++) {
-    const next = tokens[index + 1];
-    if (isSparqlKeyword(tokens, index, 'AS') && next?.kind === 'variable' && next.logicalValue.slice(1) === name) return true;
-  }
-  return false;
+/** The block's own assignments to ?name, and every other variable it binds for the pattern around it. */
+function readGraphBlockBindings(scope: PreparedSparqlQuery, opening: number, closing: number, name: string) {
+  const assignments: number[] = [];
+  const others = new Set<string>();
+  visitGroupBindings(scope, opening, closing, (index, variable, assignment) => {
+    if (variable !== name) others.add(`?${variable}`);
+    else if (assignment) assignments.push(index);
+  });
+  return { assignments, others };
 }
 
 /**
  * Oxigraph reads the patterns of a GRAPH ?var block that assigns ?var in the
  * graph it assigns, once for every graph of the dataset, so the block repeats
  * rows and a graph without triples still contributes them. A block without a
- * subquery reads instead with its own ?var renamed, inside a subquery that
- * projects the block's variables, and keeps only the rows whose assigned value
- * is the graph it reads or that assign nothing:
- * `{ SELECT ?var … WHERE { GRAPH ?var { P[?var := ?a] } FILTER(COALESCE(sameTerm(?a, ?var), true)) } }`.
- * (`COALESCE` keeps a row whose assignment failed, which `!BOUND(?a)` would not
- * on Oxigraph 0.5.5.) A block with a subquery is left to the graph branches.
+ * subquery reads instead with its assignments to ?var renamed, inside a
+ * subquery that projects the variables the block binds, and keeps only the
+ * rows whose assigned value is the graph it reads or that assign nothing:
+ * `{ SELECT ?var … WHERE { GRAPH ?var { P[AS ?var := AS ?a] } FILTER(COALESCE(sameTerm(?a, ?var), true)) } }`.
+ * Other reads of ?var in the block keep the graph's binding. (`COALESCE` keeps
+ * a row whose assignment failed, which `!BOUND(?a)` would not on Oxigraph
+ * 0.5.5.) An assignment inside MINUS, EXISTS or a FILTER binds nothing for the
+ * block and stays as it is. A block with a subquery is left to the graph branches.
  */
 export function isolateCallerGraphAssignments(scope: PreparedSparqlQuery): PreparedSparqlQuery {
   const { tokens } = scope.prepared;
@@ -90,29 +129,22 @@ export function isolateCallerGraphAssignments(scope: PreparedSparqlQuery): Prepa
     if (target.kind !== 'variable') return [];
     const opening = target.targetTokenIndex + 1;
     const closing = scope.structure.braces.matchingTokenIndexes[opening] ?? -1;
-    if (closing < 0 || holdsSubquery(scope, opening, closing)
-      || !assignsVariableInside(scope, opening, closing, target.variable.logicalName)) return [];
-    return [{ target, opening, closing }];
+    if (closing < 0 || holdsSubquery(scope, opening, closing)) return [];
+    const bindings = readGraphBlockBindings(scope, opening, closing, target.variable.logicalName);
+    return bindings.assignments.length > 0 ? [{ target, opening, closing, ...bindings }] : [];
   }).filter((block, _index, all) => !all.some(other => other.opening < block.opening && block.closing < other.closing));
   if (blocks.length === 0) return scope;
   const allocate = createVariableAllocator(scope);
   let source = scope.source;
-  for (const { target, opening, closing } of blocks.sort((left, right) => right.opening - left.opening)) {
+  for (const { target, opening, closing, assignments, others } of blocks.sort((left, right) => right.opening - left.opening)) {
     const name = target.variable.logicalName;
     const assigned = allocate(`__dkgAssigned${name}`);
-    const projected = new Set<string>([`?${name}`]);
+    const projected = new Set<string>([`?${name}`, ...others]);
     let inner = '';
     let from = tokens[opening].end;
-    for (let index = opening + 1; index < closing; index++) {
-      const token = tokens[index];
-      if (token.kind !== 'variable') continue;
-      const variable = token.logicalValue.slice(1);
-      if (variable !== name) {
-        projected.add(`?${variable}`);
-        continue;
-      }
-      inner += `${source.slice(from, token.start)}${assigned}`;
-      from = token.end;
+    for (const index of assignments) {
+      inner += `${source.slice(from, tokens[index].start)}${assigned}`;
+      from = tokens[index].end;
     }
     inner += source.slice(from, tokens[closing].start);
     const graph = `GRAPH ?${name} {${inner}}`;
