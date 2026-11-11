@@ -214,7 +214,7 @@ A leading mark says "this opens":
 
 The centre of the app works like browser tabs:
 
-- **Places** are the node's fixed screens (Dashboard, Memory stack, Observability, Publisher Conviction, Settings). They live in the sidebar: Dashboard and Memory stack at the top, the rest in the Node group. Between them, New and Join sit above two collapsible lists, My context graphs and Public context graphs. The header holds status, notifications, theme and panel toggles only, no navigation.
+- **Places** are the node's fixed screens (Dashboard, Memory stack, Observability, Publisher Conviction, Settings). They live in the sidebar: Dashboard and Memory stack at the top, the rest in the Node group. Between them sit collapsible groups: Marketplace (when it is on), My context graphs, which ends with New and Join (they form its empty state on first run), Public graphs and Integrations. The header holds status, notifications, theme and panel toggles only, no navigation.
 - **Things you open** (a context graph, an agent, a PCA) open as tabs next to the current one.
 - Every tab has a web address (`src/ui/lib/tab-routes.ts`): `/`, `/observability`, `/settings`, `/conviction`, `/graph/<id>`, `/agent/<graph>/<slug>`, `/pca/<n>`. Back, forward, refresh and bookmarks land on the same tab.
 - Open tabs, their order, the active tab and recently closed tabs are saved in the browser (`stores/tabs.ts`) and restored on refresh.

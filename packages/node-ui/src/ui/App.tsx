@@ -162,7 +162,7 @@ function AppShell() {
           <button type="button" className="v10-panel-scrim" aria-label="Close panel" onClick={closeNarrowPanel} />
         )}
         {/* A closed side panel unmounts, so its polling and listeners stop. What
-            must outlive it lives in the shell: the Context Graph dialogs
+            must outlive it lives in the shell: the context graph dialogs
             (ContextGraphDialogs) and agent conversations (stores/agentConversations). */}
         {leftOpen && (
           <>

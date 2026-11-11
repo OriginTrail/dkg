@@ -3,7 +3,7 @@
 // wide screen and floating on a narrow one, over the tab that was open.
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useTabsStore } from '../src/ui/stores/tabs.js';
 import { useLayoutStore } from '../src/ui/stores/layout.js';
@@ -26,11 +26,12 @@ vi.mock('../src/ui/hooks/useNodeState.js', () => ({ useNodeStatusPolling: () => 
 
 const { App } = await import('../src/ui/App.js');
 
-const seen = { path: '', state: null as unknown };
+const seen = { path: '', state: null as unknown, navigate: null as null | ReturnType<typeof useNavigate> };
 function Probe() {
   const loc = useLocation();
   seen.path = loc.pathname;
   seen.state = loc.state;
+  seen.navigate = useNavigate();
   return null;
 }
 
@@ -109,5 +110,35 @@ describe('/agent-hub', () => {
     await act(async () => { useTabsStore.getState().openTab({ id: 'dashboard', label: 'Dashboard', closable: false }); });
     expect(seen.path).toBe('/');
     expect(useLayoutStore.getState().rightExpanded).toBe(false);
+  });
+
+  // The redirect marks its entry, and only its own replace keeps the panel open.
+  for (const strict of [false, true]) {
+    it(`Back to the redirected entry shows the page${strict ? ' (StrictMode)' : ''}`, async () => {
+      setNarrow(false);
+      await visit('/agent-hub', strict);
+      expect(seen.path).toBe('/settings');
+      expect(useLayoutStore.getState().rightExpanded).toBe(true);
+      await act(async () => { useTabsStore.getState().openTab({ id: 'operations', label: 'Observability', closable: true }); });
+      expect(seen.path).toBe('/observability');
+      await act(async () => { useLayoutStore.getState().setRightExpanded(true); });
+      await act(async () => { seen.navigate!(-1); });
+      expect(seen.path).toBe('/settings');
+      expect(seen.state).toEqual({ agentsOpened: true });
+      expect(useTabsStore.getState().activeTabId).toBe('settings');
+      expect(useLayoutStore.getState().rightExpanded).toBe(false);
+    });
+  }
+
+  it('Back to the redirected entry closes the floating panel on a narrow screen', async () => {
+    setNarrow(true);
+    await visit('/agent-hub');
+    expect(useLayoutStore.getState().narrowPanel).toBe('right');
+    await act(async () => { useTabsStore.getState().openTab({ id: 'operations', label: 'Observability', closable: true }); });
+    await act(async () => { useLayoutStore.getState().openRight(); });
+    expect(useLayoutStore.getState().narrowPanel).toBe('right');
+    await act(async () => { seen.navigate!(-1); });
+    expect(seen.path).toBe('/settings');
+    expect(useLayoutStore.getState().narrowPanel).toBe(null);
   });
 });
