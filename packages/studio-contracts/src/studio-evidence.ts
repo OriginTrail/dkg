@@ -156,7 +156,7 @@ export function parseStudioCapability(v: unknown): StudioCapability {
   if (
     !studioRecord(v) ||
     !bounded(v.kaRef, 240) ||
-    !(v.kind === 'program' ? programIri(v.kaRef) : v.kaRef.startsWith('urn:nos:component:')) ||
+    !(v.kind === 'program' ? programIri(v.kaRef) : /^urn:(?:nos|demo:n8n):component:[a-z0-9:-]{1,160}$/.test(v.kaRef)) ||
     !sha(v.sourceHash) ||
     typeof v.available !== 'boolean' ||
     !['component', 'program'].includes(String(v.kind)) ||

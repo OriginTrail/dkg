@@ -3,7 +3,8 @@
 Studio owns these implementations directly. No source-rewriting overlay or nOS
 checkout is needed to load them. Build the runtime workspace first; the
 `@origintrail-official/dkg-studio-contracts` private package is included in
-`pnpm build:runtime:packages`.
+`pnpm build:runtime:packages` and the CLI development dependency closure used by
+the Graph Runtime and Native LLM CI lanes.
 
 ## One versioned interface
 
@@ -45,6 +46,15 @@ execution's recorded input to the authenticated invocation journal. The selected
 operation profile still controls graph access, credentials and current authority.
 MCP retains its existing read-only operation policy.
 
+New graphs with entry-row bindings use compiler 7. Host admission and the generated
+Program validate the effective rows after fixed and named bindings, so an Extract
+File entry can receive `file` through a JSON argument with `itemsJson: "[{}]"`.
+The admitted/journalled envelope retains those original rows and separate arguments;
+the native guard applies the bindings. Invalid files and combined row-size violations
+are rejected before native dispatch. Compiler 6 and older source bytes remain readable
+without changing existing KA or native pins; saving with the new compiler creates a
+new version, and varying its invocation arguments does not.
+
 ## Publish and compose
 
 `POST /spike/ka/accounts/<account>/capabilities/studio/components` accepts an
@@ -56,6 +66,8 @@ authorization and the execution graph's private Working Memory lane.
 
 The resulting capability has `descriptor.id = "workflow-component"`, immutable
 recipe/source pins, a typed public interface, and inherited export authorization.
+The shared capability parser accepts both the existing `urn:demo:n8n:component:`
+native identities and `urn:nos:component:` identities without rewriting their pins.
 Save a compact graph through `/studio/save`. The service resolves selected
 recipes, verifies approval and dependencies, expands them and persists both the
 execution graph and its pinned authoring snapshot. Reopening/executing that KA

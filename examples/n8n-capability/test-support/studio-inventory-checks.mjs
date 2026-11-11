@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
+import { parseStudioCapability } from '../../../packages/studio-contracts/dist/studio-evidence.js';
 
 /** Exercise the native HTTP handler without opening a listener. */
 export async function verifyInventory(root, state, descriptor, savedWorkflow) {
@@ -137,6 +138,8 @@ export async function verifyInventory(root, state, descriptor, savedWorkflow) {
       assert.equal(response.status, 200);
       assert.equal(response.body.capabilities.length, 1);
       assert.equal(response.body.capabilities[0].kaRef, kaRef);
+      assert.deepEqual(response.body.capabilities.map(parseStudioCapability), response.body.capabilities);
+      assert.throws(() => parseStudioCapability({ ...response.body.capabilities[0], kaRef: 'urn:unknown:component:edit-fields' }));
       assert.deepEqual(response.body.workflows, [savedWorkflow]);
       const parent = {
         ...savedWorkflow.definition,
@@ -196,6 +199,7 @@ export async function verifyInventory(root, state, descriptor, savedWorkflow) {
     );
     const inventory = await request('/spike/ka/accounts/account-a/capabilities/studio');
     assert.equal(inventory.status, 200);
+    assert.deepEqual(inventory.body.capabilities.map(parseStudioCapability), inventory.body.capabilities);
     assert.deepEqual(
       inventory.body.capabilities.find((c) => c.kaRef === published.body.kaRef),
       published.body,

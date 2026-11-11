@@ -3,6 +3,7 @@ import { expandStudioComponents } from '../../packages/studio-contracts/dist/stu
 import { isDeepStrictEqual } from 'node:util';
 import { assertStudioSourceBudget, STUDIO_SOURCE_LIMIT } from './studio-source-budget.mjs';
 import { validateInvocationBindings, invocationGrant, invocationParameter, invocationParameters, invocationProgramBody, invocationItem, normalizeInputValueNodes } from './studio-inputs.mjs';
+import { hasEntryInputBindings } from './studio-entry-input.mjs';
 import { normalizeStudioTopology } from './studio-topology.mjs';
 import { validateDkgTopology } from './dkg-components.mjs';
 import { createHash } from 'node:crypto';
@@ -117,7 +118,7 @@ export function compileStudio(value, { graphId, owner, headerCredential, credent
   const { kind, definition } = normalizeStudioExecution(value, registry);
   if (kind === 'dkg-program') return compileProgramWorkflow(definition, registry);
   // Embedded helper definitions need a new immutable source identity.
-  const compiler = definition.inputs !== undefined ? 6 : definition.nodes.some(n => n.componentId === 'execute-workflow') ? 5 : 4;
+  const compiler = hasEntryInputBindings(definition) ? 7 : definition.inputs !== undefined ? 6 : definition.nodes.some(n => n.componentId === 'execute-workflow') ? 5 : 4;
   const revision = createHash('sha256').update(JSON.stringify({ compiler, definition })).digest('hex');
   const kaRef = STUDIO_PREFIX + definition.id + ':' + revision.slice(0, 20), workflowName = 'nOS Studio ' + revision;
   const workflowId = providerId ?? 'nos_studio_' + createHash('sha256').update(JSON.stringify([graphId, owner, compiler, definition])).digest('hex').slice(0, 32);
@@ -183,12 +184,12 @@ function uncheckedStudioProgramSource(compiled, grant, registry) {
   if (compiled.kind !== 'native-n8n' || !record(grant)) fail('A native Studio execution grant is required.');
   if (compiled.legacy) return studioProgramSourceV1(compiled, grant);
   const metadata = { definition: compiled.definition, grant, mode: compiled.mode,
-    ...([4, 5, 6].includes(compiled.compiler) ? { compiler: compiled.compiler } : {}) };
+    ...([4, 5, 6, 7].includes(compiled.compiler) ? { compiler: compiled.compiler } : {}) };
   const root = compiled.definition.nodes.find(n => n.id === compiled.definition.entryId);
   const descriptor = { ...componentExecutionDescriptor(component(root.componentId)), ...(compiled.mode === 'schedule' ? { mode: 'action' } : {}) };
   return marker + Buffer.from(JSON.stringify(metadata)).toString('base64') + '\n'
     + `import { invoke_tool } from '@origintrail-official/dkg-graph-computer/program';\n${componentValidationSource()}`
-    + (compiled.definition.inputs !== undefined ? invocationProgramBody(compiled, descriptor, registry) : `export function run(input: unknown) { const value = normalize(${JSON.stringify(descriptor)}, input); if (value.paramsJson !== ${JSON.stringify(JSON.stringify(root.params))} || value.executionId) throw new Error('Use the saved workflow parameters.'); return invoke_tool('urn:dkg:tool:n8n', value); }\n`);
+    + (compiled.compiler === 7 || compiled.definition.inputs !== undefined ? invocationProgramBody(compiled, descriptor, registry) : `export function run(input: unknown) { const value = normalize(${JSON.stringify(descriptor)}, input); if (value.paramsJson !== ${JSON.stringify(JSON.stringify(root.params))} || value.executionId) throw new Error('Use the saved workflow parameters.'); return invoke_tool('urn:dkg:tool:n8n', value); }\n`);
 }
 
 /** @returns {StudioExecution} */
@@ -199,10 +200,10 @@ export function readStudio(source, registry = defaultComponentRegistry) {
   if (typeof source !== 'string' || !source.startsWith(marker) || source.length > STUDIO_SOURCE_LIMIT) fail('Saved Studio source is invalid.');
   const data = JSON.parse(Buffer.from(source.split('\n')[0].slice(marker.length), 'base64').toString('utf8'));
   const definition = normalizeStudio(data.definition, registry);
-  if (data.compiler !== undefined && ![4, 5, 6].includes(data.compiler)) fail('Unknown Studio compiler contract.');
+  if (data.compiler !== undefined && ![4, 5, 6, 7].includes(data.compiler)) fail('Unknown Studio compiler contract.');
   const compiler = data.compiler ?? (definition.nodes.some(n => n.componentId === 'invoke-dkg-program') ? 3 : 2);
   const revision = createHash('sha256').update(JSON.stringify({ compiler, definition })).digest('hex');
-  const compiled = { kind: 'native-n8n', ...([4, 5, 6].includes(data.compiler) ? { compiler: data.compiler } : {}), definition, grant: data.grant, mode: data.mode, kaRef: STUDIO_PREFIX + definition.id + ':' + revision.slice(0, 20),
+  const compiled = { kind: 'native-n8n', ...([4, 5, 6, 7].includes(data.compiler) ? { compiler: data.compiler } : {}), definition, grant: data.grant, mode: data.mode, kaRef: STUDIO_PREFIX + definition.id + ':' + revision.slice(0, 20),
     requiresExportAuthorization: definition.nodes.some(n => needsExport(component(n.componentId))) };
   if (studioProgramSource(compiled, compiled.grant, registry) !== source) fail('Saved Studio source differs from its reviewed definition.');
   return compiled;

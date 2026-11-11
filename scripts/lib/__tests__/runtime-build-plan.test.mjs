@@ -39,6 +39,7 @@ const REQUIRED_RUNTIME_PACKAGES = [
   '@origintrail-official/dkg-rdf-utils',
   '@origintrail-official/dkg-semantic-runtime',
   '@origintrail-official/dkg-storage',
+  '@origintrail-official/dkg-studio-contracts',
   '@origintrail-official/kafka-plugin',
 ];
 
@@ -184,6 +185,8 @@ test('release runtime build plan includes workspace dependencies but excludes Ha
     maxBuffer: 10 * 1024 * 1024,
   })));
   const prerequisiteNames = new Set(phasePlans[0].map((workspace) => workspace.name));
+  assert.ok(prerequisiteNames.has('@origintrail-official/dkg-studio-contracts'),
+    'CLI dependency builds used by both integration lanes must compile Studio contracts');
   const preparedCliNames = new Set(phasePlans[1].map((workspace) => workspace.name));
   const dependentNames = new Set(phasePlans[2].map((workspace) => workspace.name));
 

@@ -11,6 +11,8 @@ on:
       - 'packages/graph-viz/**'
       - 'packages/query/**'
       - 'packages/semantic-runtime/**'
+      - 'packages/studio-contracts/**'
+      - 'examples/n8n-capability/**'
       - 'pnpm-lock.yaml'
   workflow_dispatch:
 
@@ -74,6 +76,8 @@ jobs:
             test/semantic-runtime-execution-output.test.ts test/semantic-runtime-graph-configuration-limits.test.ts \
             test/local-private-first-write.test.ts test/write-preflight-resilience.test.ts \
             test/context-graph-authority-route.test.ts --maxWorkers=1
+      - name: Verify Studio contracts, native inventory and invocation bindings
+        run: pnpm test:studio
       - name: Verify authorized cross-KA reads and graph resource cleanup
         run: |
           pnpm --filter @origintrail-official/dkg-query exec vitest run

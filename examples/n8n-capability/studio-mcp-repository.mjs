@@ -55,7 +55,8 @@ export function createStudioMcpRepository(db) {
   }
   return {
     recordSavedNative(compiled, published) {
-      const snapshot = { definition: compiled.definition, grant: compiled.grant, mode: compiled.mode, kaRef: compiled.kaRef };
+      const snapshot = { definition: compiled.definition, grant: compiled.grant, mode: compiled.mode, kaRef: compiled.kaRef,
+        ...(compiled.compiler === 7 ? { compiler: 7 } : {}) };
       // A repeat save never replaces an immutable snapshot or reverses withdrawal.
       db.prepare('INSERT INTO studio_saved_native (ka_ref,compiled_json,published_json) VALUES (?,?,?) ON CONFLICT(ka_ref) DO NOTHING')
         .run(compiled.kaRef, JSON.stringify(snapshot), JSON.stringify(published));

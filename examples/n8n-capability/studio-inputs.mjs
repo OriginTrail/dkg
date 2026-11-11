@@ -13,6 +13,7 @@ import {
   normalizeComponentInput,
 } from './component-registry.mjs';
 import { nativeLiteral } from './component-workflows.mjs';
+import { normalizeBoundEntry } from './studio-entry-input.mjs';
 
 const fail = (message) => {
   throw Object.assign(new Error(message), { code: 'INVALID_WORKFLOW', status: 400 });
@@ -86,6 +87,18 @@ export function invocationGrant(definition, grant) {
   };
 }
 
+/** Manual and MCP admission validate the same packet the generated Program receives. */
+export function workflowInvocationInput(compiled, values, input, descriptor, registry = defaultComponentRegistry) {
+  const admitted = invocationInput(compiled.definition, values, input, registry);
+  const { argumentsJson, ...base } = admitted;
+  const root = compiled.definition.nodes.find(node => node.id === compiled.definition.entryId);
+  const value = compiled.compiler === 7
+    ? normalizeBoundEntry(root, compiled.definition.inputs ?? [], JSON.parse(argumentsJson ?? '{}'),
+      descriptor, base, normalizeComponentInput, resolveStudioInputParams)
+    : normalizeComponentInput(descriptor, base);
+  return { ...value, ...(argumentsJson === undefined ? {} : { argumentsJson }) };
+}
+
 export function invocationParameter(definition, node, key) {
   const input = definition.inputs?.find((input) =>
     input.targets.some((t) => t.kind !== 'input' && t.nodeId === node.id && t.parameter === key),
@@ -104,6 +117,7 @@ export function invocationParameters(definition, node) {
 
 /** Trusted source generator. Every substituted value is JSON, never executable user code. */
 export function invocationProgramBody(compiled, descriptor, registry = defaultComponentRegistry) {
+  if (compiled.compiler === 7) return boundInvocationProgramBody(compiled, descriptor, registry);
   const { component } = registry;
   const definition = compiled.definition;
   const root = definition.nodes.find((n) => n.id === definition.entryId);
@@ -123,6 +137,32 @@ export function run(input: unknown) {
   const value = normalize(${JSON.stringify(descriptor)}, base);
   if (value.paramsJson !== ${JSON.stringify(JSON.stringify(root.params))} || value.executionId) throw new Error('Use the saved workflow parameters.');
   const admitted = { ...value, argumentsJson: JSON.stringify(args) };
+  if (JSON.stringify(admitted).length > 16384) throw new Error('Workflow invocation exceeds the input budget.');
+  return invoke_tool('urn:dkg:tool:n8n', admitted);
+}\n`;
+}
+
+function boundInvocationProgramBody(compiled, descriptor, registry) {
+  const { definition } = compiled;
+  const root = definition.nodes.find(node => node.id === definition.entryId);
+  const checks = definition.nodes.map(node => ({ node,
+    descriptor: componentExecutionDescriptor(registry.component(node.componentId)) }));
+  return `${studioInputValidationSource(true)}
+${normalizeBoundEntry.toString()}
+export function run(input: unknown) {
+  if (!studioRecord(input)) throw new Error('Workflow input required.');
+  const { argumentsJson, ...base } = input;
+  ${definition.inputs !== undefined
+    ? "if (typeof argumentsJson !== 'string' || argumentsJson.length > 8192) throw new Error('Named workflow arguments required.');"
+    : "if (argumentsJson !== undefined) throw new Error('This workflow does not declare named arguments.');"}
+  const inputs = ${JSON.stringify(definition.inputs ?? [])};
+  const args = normalizeStudioArguments(inputs, ${definition.inputs !== undefined ? 'JSON.parse(argumentsJson)' : '{}'});
+  for (const { node, descriptor } of ${JSON.stringify(checks)}) {
+    normalize(descriptor, { itemsJson: JSON.stringify(descriptor.sampleItems), paramsJson: JSON.stringify(resolveStudioInputParams(node.params, inputs, node.id, args)), executionId: '' });
+  }
+  const value = normalizeBoundEntry(${JSON.stringify(root)}, inputs, args, ${JSON.stringify(descriptor)}, base, normalize, resolveStudioInputParams);
+  if (value.paramsJson !== ${JSON.stringify(JSON.stringify(root.params))} || value.executionId) throw new Error('Use the saved workflow parameters.');
+  const admitted = ${definition.inputs !== undefined ? '{ ...value, argumentsJson: JSON.stringify(args) }' : 'value'};
   if (JSON.stringify(admitted).length > 16384) throw new Error('Workflow invocation exceeds the input budget.');
   return invoke_tool('urn:dkg:tool:n8n', admitted);
 }\n`;
@@ -175,14 +215,15 @@ export function normalizeInputValueNodes(value, normalize) {
 export function namedMcpInput(value, workflow, registry = defaultComponentRegistry) {
   const { component, profile } = registry;
   const root = workflow.definition.nodes.find((node) => node.id === workflow.definition.entryId);
-  const input = invocationInput(
-    workflow.definition,
+  const input = workflowInvocationInput(
+    workflow,
     value.arguments,
-    normalizeComponentInput(component(root.componentId), {
+    {
       itemsJson: '[{}]',
       paramsJson: JSON.stringify(root.params),
       executionId: '',
-    }),
+    },
+    component(root.componentId),
     registry,
   );
   if (root.componentId === 'dkg-read') {

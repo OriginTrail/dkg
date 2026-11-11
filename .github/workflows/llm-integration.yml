@@ -9,6 +9,8 @@ on:
       - 'packages/mcp-dkg/**'
       - 'packages/graph-computer/**'
       - 'packages/semantic-runtime/**'
+      - 'packages/studio-contracts/**'
+      - 'examples/n8n-capability/**'
       - 'pnpm-lock.yaml'
   workflow_dispatch:
 

@@ -1,0 +1,130 @@
+{
+  "compiled": {
+    "kind": "native-n8n",
+    "compiler": 6,
+    "definition": {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "name": "Unit native graph",
+      "entryId": "n0",
+      "nodes": [
+        {
+          "id": "n0",
+          "componentId": "extract-file",
+          "kaRef": "urn:demo:n8n:component:extract-file:unit",
+          "sourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "params": {
+            "format": "csv"
+          },
+          "x": 0,
+          "y": 100
+        }
+      ],
+      "edges": [],
+      "inputs": [
+        {
+          "name": "file",
+          "label": "File",
+          "required": true,
+          "spec": {
+            "type": "json",
+            "label": "File",
+            "default": {},
+            "maxLength": 7000
+          },
+          "targets": [
+            {
+              "nodeId": "n0",
+              "parameter": "file",
+              "kind": "input"
+            }
+          ]
+        }
+      ]
+    },
+    "grant": {
+      "toolIri": "urn:dkg:tool:n8n",
+      "workflowId": "nos_studio_9acec0a5343875370b9887c0fb8d6c5d",
+      "workflowSha256": "2721b9738ed3d5a44cf2847894f33a17941d1fef3e22b86bf2376ec7723560c8",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "itemsJson": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "paramsJson": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "executionId": {
+            "type": "string",
+            "maxLength": 20
+          },
+          "argumentsJson": {
+            "type": "string",
+            "maxLength": 8192
+          }
+        },
+        "required": [
+          "itemsJson",
+          "paramsJson",
+          "executionId",
+          "argumentsJson"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "itemsJson": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "portsJson": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "error": {
+            "type": "string",
+            "maxLength": 512
+          },
+          "traceJson": {
+            "type": "string",
+            "maxLength": 8192
+          }
+        },
+        "required": [
+          "ok",
+          "itemsJson",
+          "portsJson",
+          "error",
+          "traceJson"
+        ],
+        "additionalProperties": false
+      },
+      "result": {
+        "nodes": [
+          "Block n0"
+        ],
+        "sinks": [
+          {
+            "node": "Block n0",
+            "port": 0,
+            "name": "n0 main"
+          }
+        ],
+        "traceNodes": [
+          "Block n0"
+        ],
+        "allowObservation": false
+      }
+    },
+    "mode": "action",
+    "kaRef": "urn:demo:nos:studio:00000000-0000-4000-8000-000000000001:ebcc688bc2e7c5011896",
+    "requiresExportAuthorization": false
+  },
+  "sourceHash": "d4df9b6e402b62b991acf283cbdb1a3f7ddb33333897cc45c4a586b9fe4352b1"
+}

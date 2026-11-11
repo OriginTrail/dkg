@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { createProgramCatalog } from './program-catalog.mjs';
 import { createStudioRepository } from './studio-repository.mjs';
 import { createStudioService } from './studio-service.mjs';
+import { parseStudioCapability } from '../../packages/studio-contracts/dist/studio-evidence.js';
 import { compileStudio, normalizeStudio, readStudio, studioProgramSource, validateStudioCapabilities } from './studio-definition.mjs';
 
 function fixture(mode, programIri = 'urn:test:root-program') {
@@ -38,6 +39,7 @@ for (const length of [230, 240]) test(`catalog offers a ${length}-character Prog
   const capabilities = await f.list();
   assert.equal(capabilities.length, 1);
   assert.equal(capabilities[0].kaRef, ref);
+  assert.deepEqual(parseStudioCapability(capabilities[0]), capabilities[0]);
   const definition = normalizeStudio(programDefinition(capabilities[0]));
   validateStudioCapabilities(definition, capabilities);
   const compiled = compileStudio(definition);
