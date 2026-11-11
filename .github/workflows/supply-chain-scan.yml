@@ -91,7 +91,7 @@ concurrency:
 jobs:
   zizmor:
     name: zizmor (GitHub Actions audit)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 15 min ceiling — zizmor's online audits (impostor-commit,
     # ref-confusion, known-vulnerable-actions, stale-action-refs) walk
     # every released tag of every action via `compare_commits`. With
@@ -285,7 +285,7 @@ jobs:
     # The scanner self-validates via a lockfile sanity-check and exits 2
     # if the scan path is broken (rather than 0 / clean) so a future
     # refactor cannot silently turn this into a no-op.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     permissions:
       contents: read
@@ -316,7 +316,7 @@ jobs:
 
   npm-audit:
     name: pnpm audit (informational)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -537,7 +537,7 @@ jobs:
 
   actionlint:
     name: actionlint (workflow syntax + schema)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -607,7 +607,7 @@ jobs:
     #
     # Only runs on the weekly cron + manual dispatch — drift is a
     # cadence problem, not a per-PR problem.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:

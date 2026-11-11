@@ -3,6 +3,9 @@ name: MCP config native metadata
 on:
   pull_request:
     paths:
+      # Not packages/cli/vitest.unit.config.ts: it lists every CLI unit test, so it
+      # changes whenever one is added, and this job runs named files with it. The
+      # disabled-test audit fails any change that excludes them from discovery.
       - 'packages/cli/src/mcp-*.ts'
       - 'packages/cli/test/fixtures/mcp-config-wsl.fixture.ts'
       - 'packages/cli/test/fixtures/mcp-windows-client.fixture.cjs'
@@ -11,7 +14,6 @@ on:
       - 'packages/cli/.gitattributes'
       - 'packages/cli/package.json'
       - 'packages/cli/test/mcp-config-metadata.test.ts'
-      - 'packages/cli/vitest.unit.config.ts'
       - 'pnpm-lock.yaml'
       - '.github/workflows/mcp-config-native.yml'
   workflow_dispatch:
@@ -31,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-26, windows-2025-vs2026]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:

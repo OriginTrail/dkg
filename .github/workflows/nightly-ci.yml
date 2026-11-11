@@ -17,7 +17,7 @@ jobs:
   nightly:
     name: Run full nightly CI on testnet-canary
     if: github.repository == 'OriginTrail/dkg'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     # This job only calls GitHub's API; it never checks out or executes repo code.
     # The dispatched CI retains its own contents: read permissions.

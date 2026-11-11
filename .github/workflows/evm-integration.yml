@@ -11,7 +11,8 @@ on:
 
 concurrency:
   group: evm-integration-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # As in ci.yml: supersede pull requests and manual runs, finish branch pushes.
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 # Minimum-needed token scope (see ci.yml header for rationale).
 permissions:
@@ -20,7 +21,7 @@ permissions:
 jobs:
   plan:
     name: Plan EVM delta
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       evm_matrix: ${{ steps.plan.outputs.evm_matrix }}
@@ -98,7 +99,7 @@ jobs:
     name: Build EVM integration packages
     needs: plan
     if: needs.plan.outputs.evm_matrix != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -154,7 +155,7 @@ jobs:
     name: "Tornado EVM integration: ${{ matrix.scope }}"
     needs: [plan, build]
     if: needs.plan.outputs.evm_matrix != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     strategy:
@@ -198,7 +199,7 @@ jobs:
     name: EVM integration gate
     if: always()
     needs: [plan, build, evm-integration]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:
       - name: Checkout trusted CI controller

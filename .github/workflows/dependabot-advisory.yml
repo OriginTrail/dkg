@@ -88,7 +88,7 @@ jobs:
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.event.pull_request.user.id == 49699333 &&
       github.event.pull_request.user.type == 'Bot'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 10 min ceiling — worst-case is a `transitive` group bump with
     # ~30 packages * (1 GHSA + 2 OSV + 1 node-filter) = ~120 ops.
     # Each individual call is sub-second under normal conditions;
@@ -987,7 +987,7 @@ jobs:
     name: '🚨 DO NOT MERGE — COMPROMISED DEPENDENCY DETECTED'
     needs: advisory-check
     if: always() && needs.advisory-check.outputs.compromised == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 1
     steps:
       - name: Fail check with unmissable name

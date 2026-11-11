@@ -37,7 +37,10 @@ concurrency:
   # Keep campaigns independent of ordinary pushes/PRs; supersede duplicate
   # campaigns on the same ref, without disabling ordinary cancellation.
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'nightly-equivalent')) && 'nightly-equivalent' || 'standard' }}
-  cancel-in-progress: true
+  # A newer commit supersedes a pull request or manual run, but a protected
+  # branch push is the only full run some merges get: let it finish. GitHub
+  # still keeps just one pending push run per branch, the newest.
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 # Minimum-needed token scope. All jobs only check out and run tests; nothing
 # pushes back to the repo, comments on PRs, publishes packages, or creates
@@ -50,6 +53,9 @@ concurrency:
 permissions:
   contents: read
 
+# Runner images are pinned rather than `*-latest`: on 2026-11-02
+# `ubuntu-latest` moved to Ubuntu 26.04 under every job at once, and
+# Playwright could not install there. Move images in a reviewed change.
 jobs:
   # ------------------------------------------------------------------
   # Produce one fail-closed test plan for every workflow in this repository.
@@ -61,7 +67,7 @@ jobs:
   # ------------------------------------------------------------------
   changes:
     name: Plan CI delta
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       profile: ${{ steps.profile.outputs.profile }}
@@ -217,7 +223,7 @@ jobs:
     name: Build packages
     needs: changes
     if: needs.changes.outputs.run_node == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -420,7 +426,7 @@ jobs:
     name: Compile EVM test artifacts (0.8.20/london)
     needs: changes
     if: needs.changes.outputs.node_test_artifacts == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -449,7 +455,7 @@ jobs:
     name: Compile devnet EVM artifacts (0.8.24/cancun)
     needs: changes
     if: needs.changes.outputs.kosava_node_ui_e2e == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -486,7 +492,7 @@ jobs:
     name: "Tornado: ${{ matrix.label }}"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_core == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -562,7 +568,7 @@ jobs:
     name: "Tornado: storage Blazegraph integration (live server)"
     needs: [changes, build]
     if: needs.changes.outputs.tornado_blazegraph == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
       blazegraph:
@@ -714,7 +720,7 @@ jobs:
     name: "Tornado: publisher [${{ matrix.shard }}/${{ matrix.shards }}]"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_publisher == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -776,7 +782,7 @@ jobs:
     name: "Tornado: agent [${{ matrix.shard }}/${{ matrix.shards }}]"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_agent == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Inventory policy grants native runs headroom for coverage/report cleanup.
     timeout-minutes: ${{ matrix.timeoutMinutes }}
     strategy:
@@ -848,7 +854,7 @@ jobs:
     name: "Bura: cli [${{ matrix.shard }}/${{ matrix.shards }}]"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.bura_cli == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -912,7 +918,7 @@ jobs:
     name: "Bura: query"
     needs: [changes, build]
     if: needs.changes.outputs.bura_query == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -963,7 +969,7 @@ jobs:
     name: "Kosava: node-ui"
     needs: [changes, build]
     if: needs.changes.outputs.kosava_node_ui == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -1110,7 +1116,7 @@ jobs:
     name: "Kosava: adapters + utilities + demo"
     needs: [changes, build]
     if: needs.changes.outputs.kosava_supporting == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -1191,7 +1197,7 @@ jobs:
     name: "Kosava: random-sampling + kafka-plugin (real Hardhat)"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.kosava_hardhat_plugins == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -1245,7 +1251,7 @@ jobs:
     name: "Tornado: ABI freshness (committed abi/ vs hardhat compile)"
     needs: changes
     if: needs.changes.outputs.abi_freshness == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1325,7 +1331,7 @@ jobs:
   solidity:
     name: "Tornado: Solidity [${{ matrix.shard }}/4]"
     needs: changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     # Candidate lane — sharded 4 ways. Protected pushes and manual runs use the
     # separate coverage+ratchet job below.
@@ -1464,7 +1470,7 @@ jobs:
   solidity-coverage:
     name: "Tornado: Solidity coverage (push safety net)"
     needs: changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
     steps:
@@ -1537,7 +1543,7 @@ jobs:
   tornado-static-analysis:
     name: "Tornado: static analysis (informational)"
     needs: changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Always run on push (refreshes Code Scanning baseline). On PR,
     # only run when contracts changed (paths-filter, see `changes`).
@@ -1685,7 +1691,7 @@ jobs:
     name: Verify merged package coverage
     if: always()
     needs: [changes, tornado-core, tornado-publisher, tornado-agent, bura-cli, bura-supporting, kosava-node-ui, kosava-supporting, kosava-hardhat-plugins]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1737,7 +1743,7 @@ jobs:
     name: Verify execution profile
     if: always()
     needs: [changes, tornado-publisher, kosava-node-ui-e2e]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1799,7 +1805,7 @@ jobs:
       - coverage-results
       - profile-results
       - inventory-windows
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:
       # The aggregate verdict must come from the same immutable controller as

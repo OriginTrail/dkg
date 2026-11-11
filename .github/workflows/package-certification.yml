@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   certify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       CANDIDATE: ${{ github.event_name == 'push' && github.sha || inputs.candidate }}
