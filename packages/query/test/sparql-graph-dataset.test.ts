@@ -148,6 +148,9 @@ describe('planGraphDataset', () => {
     ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o BIND(IF(?x, <urn:g:1>, <urn:g:2>) AS ?g) } }', expected('named', named), expected('values', both)],
     // With a subquery, an assignment of an expression, which may fail and leave ?g unbound, keeps the graph list.
     ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o { SELECT (COALESCE(?k, <urn:g:2>) AS ?g) WHERE { BIND(<urn:g:1> AS ?k) } } } }', expected('dataset', named), expected('dataset', both)],
+    // An assignment inside MINUS or EXISTS binds nothing for the block.
+    ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o { SELECT ?x WHERE {} } MINUS { BIND(IF(?x, <urn:g:1>, <urn:g:2>) AS ?g) } } }', expected('named', named), expected('dataset', both)],
+    ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o FILTER EXISTS { SELECT (<urn:g:1> AS ?g) WHERE {} } } }', expected('named', named), expected('dataset', both)],
     ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o FILTER(?g != <urn:g:2>) } }', expected('named', named), expected('values', both)],
   ] as const)('fully plans %s', (query, oxigraph, other) => {
     expect(planGraphDataset(scope(query), 'oxigraph')).toEqual(oxigraph);
@@ -155,10 +158,25 @@ describe('planGraphDataset', () => {
   });
 
   it('reads the assignment of a block\'s own graph variable under another name, and keeps rows whose value is that graph', () => {
+    // Other reads of the graph variable keep the graph's binding.
     const isolated = isolateCallerGraphAssignments(scope('SELECT ?g ?s WHERE { GRAPH ?g { BIND(<urn:g:1> AS ?g) ?s ?p ?o FILTER(?g != <urn:g:2>) } }'));
     expect(isolated.source).toBe('SELECT ?g ?s WHERE { { SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { BIND(<urn:g:1> AS ?__dkgAssignedg) ?s ?p ?o '
-      + 'FILTER(?__dkgAssignedg != <urn:g:2>) } FILTER(COALESCE(sameTerm(?__dkgAssignedg, ?g), true)) } } }');
+      + 'FILTER(?g != <urn:g:2>) } FILTER(COALESCE(sameTerm(?__dkgAssignedg, ?g), true)) } } }');
     expect(() => scope(isolated.source)).not.toThrow();
+    const optional = isolateCallerGraphAssignments(scope('SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o OPTIONAL { ?s ?q ?x BIND(<urn:g:1> AS ?g) } FILTER(?g = <urn:g:2>) } }'));
+    expect(optional.source).toContain('OPTIONAL { ?s ?q ?x BIND(<urn:g:1> AS ?__dkgAssignedg) } FILTER(?g = <urn:g:2>)');
+    // The subquery projects only the variables the block binds: not those of a FILTER, EXISTS, MINUS or an assigned expression.
+    const projected = isolateCallerGraphAssignments(scope('SELECT ?g WHERE { GRAPH ?g { BIND(<urn:g:1> AS ?g) OPTIONAL { ?s ?p ?o } VALUES ?k { <urn:k> } '
+      + 'FILTER EXISTS { ?hidden ?p ?o } MINUS { ?gone ?p ?o } FILTER(?other != ?s) BIND(STR(?unused) AS ?label) GRAPH ?h { ?t ?p ?o } } BIND(1 AS ?hidden) }'));
+    expect(projected.source).toMatch(/^SELECT \?g WHERE \{ \{ SELECT \?g \?s \?p \?o \?k \?label \?h \?t WHERE \{ GRAPH \?g \{ BIND\(<urn:g:1> AS \?__dkgAssignedg\) /);
+    // An assignment inside MINUS or EXISTS binds nothing for the block: it is left as it is, also beside one that does.
+    for (const body of ['?s ?p ?o MINUS { BIND(<urn:g:1> AS ?g) }', '?s ?p ?o FILTER NOT EXISTS { BIND(<urn:g:1> AS ?g) }',
+      '?s ?p ?o BIND(EXISTS { BIND(<urn:g:1> AS ?g) } AS ?e)', '?s ?p ?o FILTER(EXISTS { BIND(<urn:g:1> AS ?g) })']) {
+      const unchanged = scope(`SELECT ?g ?s WHERE { GRAPH ?g { ${body} } }`);
+      expect(isolateCallerGraphAssignments(unchanged), body).toBe(unchanged);
+    }
+    const beside = isolateCallerGraphAssignments(scope('SELECT ?g ?s WHERE { GRAPH ?g { BIND(<urn:g:1> AS ?g) ?s ?p ?o MINUS { BIND(<urn:g:2> AS ?g) } } }'));
+    expect(beside.source).toContain('BIND(<urn:g:1> AS ?__dkgAssignedg) ?s ?p ?o MINUS { BIND(<urn:g:2> AS ?g) }');
     // Only the outer of two nested blocks that assign their variables; none without an assignment or with a subquery.
     const nested = isolateCallerGraphAssignments(scope('SELECT * WHERE { GRAPH ?g { BIND(<urn:g:1> AS ?g) GRAPH ?h { BIND(<urn:g:2> AS ?h) ?s ?p ?o } } }'));
     expect(nested.source.match(/SELECT \?g/g)).toHaveLength(1);
@@ -704,6 +722,41 @@ describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind,
     const optional = await engine.query(`SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:label> ?l OPTIONAL { BIND(<${SHARED[0]}> AS ?g) } } }`, shared);
     expect(rows(optional.bindings)).toEqual(rows(labelled));
     expect(plain.bindings.length).toBeGreaterThan(labelled.length);
+  });
+
+  it('binds the graph only by the assignments that reach its block, and keeps the graph binding for other reads', async () => {
+    const engine = new DKGQueryEngine(opened.store);
+    const shared: QueryOptions = { contextGraphId: ID, view: 'shared-working-memory' };
+    const perGraph = (bindings: readonly Record<string, string>[]) => bindings.map(row => `${row.g} ${row.s}`).sort();
+    const read = async (body: string) => perGraph((await engine.query(`SELECT ?g ?s WHERE { GRAPH ?g { ${body} } }`, shared)).bindings);
+    const viewGraphs = [`${ROOT}/_shared_memory`, ...SHARED];
+    const asListed = async (body: string) => {
+      const listed = await opened.store.query(`SELECT ?g ?s ${viewGraphs.map(graph => `FROM NAMED <${graph}>`).join(' ')} `
+        + `WHERE { VALUES ?g { ${viewGraphs.map(graph => `<${graph}>`).join(' ')} } GRAPH ?g { ${body} } }`);
+      return perGraph(listed.type === 'bindings' ? listed.bindings : []);
+    };
+    const plain = await read('?s <urn:label> ?l');
+    const inGraph = (graph: string) => plain.filter(row => row.startsWith(`${graph} `));
+    expect(inGraph(SHARED[0]).length).toBeGreaterThan(0);
+    expect(inGraph(SHARED[1]).length).toBeGreaterThan(0);
+    // An assignment inside MINUS binds nothing for the block: the rows are those the graph list gives.
+    const minus = `?s <urn:label> ?l MINUS { BIND(<${SHARED[0]}> AS ?g) }`;
+    expect(await read(minus)).toEqual(await asListed(minus));
+    expect(await read(minus)).toEqual(inGraph(SHARED[1]));
+    // A read of the graph variable beside an assignment that fails, or an OPTIONAL one that finds nothing, reads the graph.
+    const failing = `?s <urn:label> ?l BIND(IF(?missing, <${SHARED[0]}>, <${SHARED[1]}>) AS ?g) FILTER(?g = <${SHARED[0]}>)`;
+    expect(await read(failing)).toEqual(await asListed(failing));
+    expect(await read(failing)).toEqual(inGraph(SHARED[0]));
+    const optional = `?s <urn:label> ?l OPTIONAL { ?s <urn:p> ?x BIND(<${SHARED[0]}> AS ?g) } FILTER(?g = <${SHARED[1]}>)`;
+    expect(await read(optional)).toEqual([`${SHARED[1]} urn:shared`]);
+    // A variable of the block's EXISTS stays out of scope after the block.
+    const hidden = await engine.query(`SELECT ?g ?hidden WHERE { GRAPH ?g { BIND(<${SHARED[0]}> AS ?g) FILTER EXISTS { ?hidden <urn:p> ?o } } BIND(1 AS ?hidden) }`, shared);
+    expect(hidden.bindings.map(row => row.g)).toEqual([SHARED[0]]);
+    expect(hidden.bindings[0]?.hidden).toMatch(/^"?1"?/);
+    // With a subquery, an assignment that fails keeps the graph list: every row as the read with that list gives it, each as often.
+    const subquery = `?s <urn:label> ?l { SELECT (IF(?missing, <${SHARED[0]}>, <${SHARED[1]}>) AS ?g) WHERE {} }`;
+    expect(await read(subquery)).toEqual(await asListed(subquery));
+    expect(await read(subquery)).toEqual(plain);
   });
 
   it('answers a constant graph assignment on a view with more graphs than the branches allow', async () => {

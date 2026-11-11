@@ -37,3 +37,12 @@ export function nonEmptyNamedGraphEnumerationPattern(variable = 'g'): string {
 }
 export const NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY =
   `SELECT ?g WHERE { ${nonEmptyNamedGraphEnumerationPattern()} }`;
+
+/**
+ * SPARQL that enumerates every registered named graph, emptied ones included:
+ * bare `GRAPH ?g {}`, the pattern above without its non-empty filter. A graph
+ * emptied by DELETE stays registered on Oxigraph until it is dropped, and
+ * Oxigraph answers this from its graph index. Blazegraph keeps no empty
+ * graphs, so there it lists the graphs that hold a quad.
+ */
+export const REGISTERED_NAMED_GRAPH_ENUMERATION_QUERY = 'SELECT ?g WHERE { GRAPH ?g {} }';
