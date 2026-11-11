@@ -25,8 +25,12 @@ interface LayoutState {
   closeNarrowPanel: () => void;
   /** Show the centre: collapse the expanded right panel and close a floating one. */
   revealCentre: () => void;
-  /** Open the right panel: floating on a narrow screen, docked otherwise. Already open stays open. */
-  openRight: () => void;
+  /**
+   * Open the right panel: floating on a narrow screen, docked otherwise, and with
+   * `expandOnDesktop` expanded over the centre on a wide one, in one update. Already open
+   * stays open, so calling it twice changes nothing.
+   */
+  openRight: (options?: { expandOnDesktop?: boolean }) => void;
   toggleBottom: () => void;
   toggleBottomMaximised: () => void;
   toggleLeftSectionMarketplace: () => void;
@@ -230,13 +234,14 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
   },
   closeNarrowPanel: () => set({ narrowPanel: null }),
   revealCentre: () => set({ rightExpanded: false, narrowPanel: null }),
-  openRight: () => {
+  openRight: ({ expandOnDesktop = false } = {}) => {
     if (isNarrowViewport()) {
       set({ narrowPanel: 'right' });
       return;
     }
-    if (!get().rightCollapsed) return;
-    set({ rightCollapsed: false });
+    const { rightCollapsed, rightExpanded } = get();
+    if (!rightCollapsed && (!expandOnDesktop || rightExpanded)) return;
+    set(expandOnDesktop ? { rightCollapsed: false, rightExpanded: true } : { rightCollapsed: false });
     persist(snapshot(get()));
   },
   toggleBottom: () => {

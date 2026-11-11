@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { NavigationType, useLocation, useNavigate, useNavigationType } from 'react-router-dom';
 import { useTabsStore } from '../stores/tabs.js';
-import { useLayoutStore, useShellPanels } from '../stores/layout.js';
+import { useLayoutStore } from '../stores/layout.js';
 import { useProjectsStore } from '../stores/projects.js';
 import { isPassiveCatalogueGraph } from '../lib/contextGraphSidebar.js';
 import { pathToTab, tabIdToPath } from '../lib/tab-routes.js';
@@ -39,7 +39,6 @@ import { tabContextGraphId } from '../lib/tab-target.js';
 export function useShellRouting(): void {
   const { pathname, search, key, state } = useLocation();
   const navigationType = useNavigationType();
-  const { narrow } = useShellPanels();
   const navigate = useNavigate();
   const activeTabId = useTabsStore((s) => s.activeTabId);
   // The address as rendered: tab actions compare against it before pushing.
@@ -58,13 +57,12 @@ export function useShellRouting(): void {
   useEffect(() => {
     const layout = useLayoutStore.getState();
     // The /agent-hub redirect replaces its entry with { openAgents }. That replace opens the
-    // panel: expanded on a wide screen, floating on a narrow one. Both steps set a state
-    // rather than toggle one, so StrictMode's replayed effect leaves the panel open. Coming
-    // back to the entry later with Back or Forward is a POP, and shows the page like any
-    // other navigation.
+    // panel, which the layout store presents for the screen: expanded on a wide one, floating
+    // on a narrow one. Opening sets a state rather than toggling one, so StrictMode's replayed
+    // effect leaves the panel open. Coming back to the entry later with Back or Forward is a
+    // POP, and shows the page like any other navigation.
     if ((state as { openAgents?: boolean } | null)?.openAgents && navigationType === NavigationType.Replace) {
-      layout.openRight();
-      if (!narrow) layout.setRightExpanded(true);
+      layout.openRight({ expandOnDesktop: true });
       return;
     }
     layout.revealCentre();
