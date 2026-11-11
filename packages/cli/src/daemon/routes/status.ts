@@ -448,15 +448,16 @@ function buildPublicInfoChainSummary(
   };
 }
 
-function createRouteEvmProvider(
+async function withRouteEvmProvider<T>(
   rpcUrl: string,
   rpcUrls: string[] | undefined,
-  routeTransport?: DaemonRouteRpcTransport,
-): ethers.JsonRpcProvider | ethers.FallbackProvider {
+  routeTransport: DaemonRouteRpcTransport | undefined,
+  read: (provider: ethers.JsonRpcProvider | ethers.FallbackProvider) => Promise<T>,
+): Promise<T> {
   if (routeTransport === undefined) {
     throw new Error('Daemon RPC transport unavailable');
   }
-  return routeTransport.createProvider(rpcUrl, rpcUrls);
+  return routeTransport.withProvider(rpcUrl, rpcUrls, read);
 }
 
 async function getRegistryCacheSnapshot(): Promise<RegistryCacheSnapshot> {
@@ -1083,39 +1084,46 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       });
     }
     try {
-      const provider = createRouteEvmProvider(rpcUrl, chain?.rpcUrls, routeRpcTransport);
-      const tokenAddr = chain?.tokenAddress
-        ?? (await new ethers.Contract(
-          hubAddress,
-          ["function getContractAddress(string) view returns (address)"],
-          provider,
-        ).getContractAddress("Token").catch(() => null));
-      let token: ethers.Contract | null = null;
-      let tokenSymbol = "TRAC";
-      if (tokenAddr && tokenAddr !== ethers.ZeroAddress) {
-        token = new ethers.Contract(
-          tokenAddr,
-          [
-            "function balanceOf(address) view returns (uint256)",
-            "function symbol() view returns (string)",
-          ],
-          provider,
-        );
-        tokenSymbol = await token.symbol().catch(() => "TRAC");
-      }
-      const balances = await Promise.all(
-        opWallets.wallets.map(async (w) => {
-          const [ethBal, tracBal] = await Promise.all([
-            provider.getBalance(w.address),
-            token ? token.balanceOf(w.address) : Promise.resolve(0n),
-          ]);
-          return {
-            address: w.address,
-            eth: ethers.formatEther(ethBal),
-            trac: ethers.formatEther(tracBal),
-            symbol: tokenSymbol,
-          };
-        }),
+      const { balances, tokenSymbol } = await withRouteEvmProvider(
+        rpcUrl,
+        chain?.rpcUrls,
+        routeRpcTransport,
+        async (provider) => {
+          const tokenAddr = chain?.tokenAddress
+            ?? (await new ethers.Contract(
+              hubAddress,
+              ["function getContractAddress(string) view returns (address)"],
+              provider,
+            ).getContractAddress("Token").catch(() => null));
+          let token: ethers.Contract | null = null;
+          let tokenSymbol = "TRAC";
+          if (tokenAddr && tokenAddr !== ethers.ZeroAddress) {
+            token = new ethers.Contract(
+              tokenAddr,
+              [
+                "function balanceOf(address) view returns (uint256)",
+                "function symbol() view returns (string)",
+              ],
+              provider,
+            );
+            tokenSymbol = await token.symbol().catch(() => "TRAC");
+          }
+          const balances = await Promise.all(
+            opWallets.wallets.map(async (w) => {
+              const [ethBal, tracBal] = await Promise.all([
+                provider.getBalance(w.address),
+                token ? token.balanceOf(w.address) : Promise.resolve(0n),
+              ]);
+              return {
+                address: w.address,
+                eth: ethers.formatEther(ethBal),
+                trac: ethers.formatEther(tracBal),
+                symbol: tokenSymbol,
+              };
+            }),
+          );
+          return { balances, tokenSymbol };
+        },
       );
       return jsonResponse(res, 200, {
         wallets: opWallets.wallets.map((w) => w.address),
