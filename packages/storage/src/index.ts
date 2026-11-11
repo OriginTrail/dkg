@@ -484,4 +484,16 @@ export {
   type ReadGraphStoreConfig,
 } from './read-graph/read-graph-store.js';
 export { readReadGraphRegistry } from './read-graph/registry.js';
+export {
+  READ_GRAPH_MODES,
+  VIEW_SEMANTICS,
+  keepsAnyReadGraph,
+  readGraphModeOf,
+  viewSemanticsOf,
+  type ReadGraphMode,
+  type ReadGraphModeRule,
+  type ReadGraphModes,
+  type ViewSemantics,
+  type ViewSemanticsSettings,
+} from './read-graph/settings.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';
