@@ -528,7 +528,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
             onClick={handleWireDone}
             aria-label="Close wire workspace dialog"
             title="Close (Esc)"
-            style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-title)', lineHeight: 1, padding: 4, zIndex: 1 }}
+            style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4, zIndex: 1 }}
           >
             <X size={14} />
           </button>
@@ -577,7 +577,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           onClick={onClose}
           aria-label="Close join context graph dialog"
           title="Close (Esc)"
-          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-title)', lineHeight: 1, padding: 4, zIndex: 1 }}
+          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4, zIndex: 1 }}
         >
           <X size={14} />
         </button>

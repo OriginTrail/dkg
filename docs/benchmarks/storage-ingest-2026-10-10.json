@@ -1,0 +1,82 @@
+{
+  "date": "2026-10-10",
+  "dkgBase": "493e6a1fbe9b801631205b11ff2202e46632b8f6",
+  "assets": 564,
+  "dataQuads": 3751526,
+  "inputNQuadsBytes": 580640763,
+  "inputPreparationSeconds": 3.555,
+  "manifestSha256": "d62cc71781ab24a48be25d346f6567e8b479600cabbaf96fbad3b170b06c64b8",
+  "blazegraphJarSha256": "930c38b5bce7c0ae99701c1f6ef3057c52f3f385d938e1397a3e05561c7df5de",
+  "runtime": {
+    "database": "Blazegraph 2.1.6-RC standalone",
+    "java": "OpenJDK 11",
+    "heap": "3 GiB",
+    "activeProcessors": 4,
+    "store": "fresh DiskRW journal per trial; quads enabled; text index disabled; group commit disabled"
+  },
+  "trials": [
+    {
+      "trial": "pilot",
+      "mode": "atomic",
+      "writeSeconds": 2.6185096660000005,
+      "wallSeconds": 2.989268917,
+      "quads": 75000,
+      "restartPassed": true
+    },
+    {
+      "trial": "atomic-1",
+      "mode": "atomic",
+      "writeSeconds": 116.68518970199997,
+      "wallSeconds": 135.74059354099998,
+      "quads": 3751526,
+      "restartPassed": true
+    },
+    {
+      "trial": "rdf-1",
+      "mode": "rdf",
+      "writeSeconds": 20.04368295699999,
+      "wallSeconds": 42.327183125000005,
+      "quads": 3751526,
+      "restartPassed": true
+    },
+    {
+      "trial": "rdf-2",
+      "mode": "rdf",
+      "writeSeconds": 20.513982541,
+      "wallSeconds": 42.841814125,
+      "quads": 3751526,
+      "restartPassed": true
+    },
+    {
+      "trial": "atomic-2",
+      "mode": "atomic",
+      "writeSeconds": 118.07706220800006,
+      "wallSeconds": 136.78466783300001,
+      "quads": 3751526,
+      "restartPassed": true
+    },
+    {
+      "trial": "atomic-3",
+      "mode": "atomic",
+      "writeSeconds": 119.1651012050001,
+      "wallSeconds": 138.309132125,
+      "quads": 3751526,
+      "restartPassed": true
+    },
+    {
+      "trial": "rdf-3",
+      "mode": "rdf",
+      "writeSeconds": 20.27395625200001,
+      "wallSeconds": 43.457007667,
+      "quads": 3751526,
+      "restartPassed": true
+    }
+  ],
+  "limitations": [
+    "Reconstructed saved RDF projection, not byte-identical to network payload. Normalized predicates and remapped graph names; unselected triples and original provenance metadata absent.",
+    "One synthetic metadata triple per asset. Counts checked per graph; restart verification checks persisted total.",
+    "Native JVM, not the container runtime used by earlier network measurements.",
+    "RDF mode is a fresh-store ingestion floor, not atomic graph replacement and not approved as a live import path.",
+    "Other local development work continued during trials; these are local measurements, not controlled cross-machine claims."
+  ]
+}

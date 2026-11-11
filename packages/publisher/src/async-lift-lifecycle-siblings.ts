@@ -36,6 +36,14 @@ import { LiftJobPayloadUnreadableError } from './lift-job-payload-unreadable.js'
  */
 export const isUndecodableSiblingError = (cause: unknown): boolean => cause instanceof LiftJobPayloadUnreadableError;
 
+/**
+ * Do the lifecycle-key triples stored for a record (`keys`, the terms as the store answers them) agree with its payload's key? A record with a key carries at most one
+ * such triple and one without a key none: a triple beyond the payload's names a key whose admission reads this record and refuses it (the index does not match), and
+ * removing the record would change that answer (online review 4395740472, #3562). One triple is not compared with the payload's key here (its U+001F separators are
+ * spelled the engine's way): the key's own sibling read is made by that very triple, so a caller checks that the record is among the records that read returned.
+ */
+export const keyedIndexAgrees = (keys: ReadonlySet<string>, key: string | null): boolean => keys.size <= (key === null ? 0 : 1);
+
 /** The records of `key` among `candidates`, oldest first (the order that makes the last one the key's newest). */
 export function recordsOfKey(candidates: readonly PersistedLiftJob[], key: string): PersistedLiftJob[] {
   return candidates.filter((job) => lifecycleKeyOfJob(job) === key).sort(compareAcceptedJobs);

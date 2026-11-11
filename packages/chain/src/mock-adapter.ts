@@ -49,13 +49,9 @@ import type { RandomSamplingReadContextReader } from './random-sampling-read-con
 import type { ContextGraphLiveAuthority } from './chain-adapter.js';
 import type { RandomSamplingAvailability } from './random-sampling-availability.js';
 import { emptyRpcUsageWindow, type RpcUsageWindow } from './rpc-usage.js';
-import {
-  NoEligibleContextGraphError,
-  NoEligibleKnowledgeCollectionError,
-  MerkleRootMismatchError,
-  ChallengeNoLongerActiveError,
-} from './chain-adapter.js';
+import { NoEligibleContextGraphError, NoEligibleKnowledgeCollectionError, MerkleRootMismatchError, ChallengeNoLongerActiveError } from './chain-adapter.js';
 import { ethers } from 'ethers';
+import { MockMarketplaceMethods } from './mock-adapter-marketplace.js';
 import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
 import {
   isNonexistentContextGraphStorageRevert,
@@ -208,8 +204,9 @@ function applyV10UpdateContext(
 /**
  * In-memory mock chain adapter for off-chain development.
  * Implements both V9 (UAL-based) and V8 (legacy KC) interfaces.
+ * Its base class models the marketplace (mock-adapter-marketplace.ts).
  */
-export class MockChainAdapter implements ChainAdapter {
+export class MockChainAdapter extends MockMarketplaceMethods implements ChainAdapter {
   readonly chainType = 'evm' as const;
   readonly chainId: string;
   readonly signerAddress: string;
@@ -266,6 +263,7 @@ export class MockChainAdapter implements ChainAdapter {
     signerAddress = MOCK_DEFAULT_SIGNER,
     options: Readonly<MockChainAdapterOptions> = {},
   ) {
+    super();
     this.chainId = chainId;
     this.signerAddress = signerAddress;
     this.allowedPublisherAddresses = new Set([ethers.getAddress(signerAddress).toLowerCase()]);
@@ -2311,7 +2309,7 @@ export class MockChainAdapter implements ChainAdapter {
     this.events.push({ type, blockNumber: this.nextBlock, data });
   }
 
-  private txResult(success: boolean): TxResult {
+  protected txResult(success: boolean): TxResult {
     const blockNumber = this.nextBlock;
     const txIndex = this.txIndexInBlock++;
     const hash = `0x${blockNumber.toString(16).padStart(64, '0')}${txIndex.toString(16).padStart(4, '0')}`;
@@ -2681,45 +2679,47 @@ export class MockChainAdapter implements ChainAdapter {
     }
   }
 
-  async getKnowledgeAssetUpdateContext(kaId: bigint): Promise<KnowledgeAssetUpdateContext> {
+  private collectionOf(kaId: bigint): MockKnowledgeCollection {
     const entry = this.collections.get(kaId);
     if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return { ...entry.updateContext };
+    return entry;
+  }
+
+  async getKnowledgeAssetUpdateContext(kaId: bigint): Promise<KnowledgeAssetUpdateContext> {
+    return { ...this.collectionOf(kaId).updateContext };
+  }
+
+  /** Charged as the contract charges an extension, at an ask of 1 wei per KiB and epoch; refused once the asset expired. */
+  async extendKnowledgeAssetLifetime(kaId: bigint, epochs: number) {
+    const context = this.collectionOf(kaId).updateContext;
+    if (this.rsEpoch > context.endEpoch) throw new Error(`Mock: Knowledge Asset ${kaId} expired at epoch ${context.endEpoch}`);
+    const tokenAmount = (context.byteSize * BigInt(epochs)) / 1024n || 1n;
+    Object.assign(context, { endEpoch: context.endEpoch + BigInt(epochs), tokenAmount: context.tokenAmount + tokenAmount });
+    return { ...this.txResult(true), tokenAmount, endEpoch: Number(context.endEpoch) };
   }
 
   async getMerkleLeafCount(kaId: bigint): Promise<number> {
-    const entry = this.collections.get(kaId);
-    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.updateContext.merkleLeafCount;
+    return this.collectionOf(kaId).updateContext.merkleLeafCount;
   }
 
   async getCatalogRoot(kaId: bigint): Promise<Uint8Array> {
-    const entry = this.collections.get(kaId);
-    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.catalogRoot;
+    return this.collectionOf(kaId).catalogRoot;
   }
 
   async getCatalogLeafCount(kaId: bigint): Promise<number> {
-    const entry = this.collections.get(kaId);
-    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.catalogLeafCount;
+    return this.collectionOf(kaId).catalogLeafCount;
   }
 
   async getLatestMerkleRootPublisher(kaId: bigint): Promise<string> {
-    const entry = this.collections.get(kaId);
-    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.publisherAddress;
+    return this.collectionOf(kaId).publisherAddress;
   }
 
   async getLatestMerkleRootAuthor(kaId: bigint): Promise<string> {
-    const entry = this.collections.get(kaId);
-    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.authorAddress;
+    return this.collectionOf(kaId).authorAddress;
   }
 
   async getKAContextGraphId(kaId: bigint): Promise<bigint> {
-    const entry = this.collections.get(kaId);
-    return entry?.cgId ?? 0n;
+    return this.collections.get(kaId)?.cgId ?? 0n;
   }
 
   /**

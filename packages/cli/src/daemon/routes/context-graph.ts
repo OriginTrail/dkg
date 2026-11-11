@@ -1,4 +1,5 @@
 import { handlePublicSnapshotJob } from './public-snapshot-job.js';
+import { handlePublicCheckpointJob } from './public-checkpoint-job.js';
 import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // daemon/routes/context-graph.ts
 //
@@ -667,6 +668,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // Node-wide gates consume the principal established by authentication; route code must not
   // reinterpret token storage or agent-token resolution.
   const isNodeAdminCaller = (): boolean => canAdministerNode(authentication);
+  if (path === '/api/context-graph/snapshot-checkpoint') {
+    if (!isNodeAdminCaller()) { jsonResponse(res,403,{error:'Node administrator required'}); return; }
+    await handlePublicCheckpointJob(ctx);
+    return;
+  }
   if (path === '/api/context-graph/snapshot-sync') {
     if (!isNodeAdminCaller()) { jsonResponse(res,403,{error:'Node administrator required'}); return; }
     await handlePublicSnapshotJob(ctx);

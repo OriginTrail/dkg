@@ -177,6 +177,25 @@ describe('requester per-CG priority admission', () => {
     expect(summary.complete).toBe(false);
   });
 
+  it.each([
+    ['refused at once', new SyncBackpressureBusyError('Sync backpressure rejected durable:second:peer', 'queue_full', 'global inflight=1/1, queued=0/0'), []],
+    ['displaced', new SyncBackpressureBusyError('Sync backpressure displaced second', 'displaced'), [
+      'Deferring durable sync at CG second due to local backpressure: Sync backpressure displaced second',
+    ]],
+  ] as const)('logs a durable deferral %s only when the admission did not report it', async (_case, refusal, expected) => {
+    const lines: string[] = [];
+    const agent = lifecycleAgent({}, async (contextGraphId, work) => {
+      if (contextGraphId === 'second') throw refusal;
+      return work();
+    });
+    (agent.log as { info: (ctx: unknown, message: string) => void }).info = (_ctx, message) => { lines.push(message); };
+
+    const summary = await (LifecycleSyncMethods.prototype.runLegacyDurableSync as any).call(agent, ctx, 'peer', ['first', 'second']);
+
+    expect(summary.deferredBackpressure).toBe(1);
+    expect(lines.filter((line) => line.startsWith('Deferring'))).toEqual(expected);
+  });
+
   it('marks changelog admission pressure deferred without routing that graph to legacy', async () => {
     const admissions: string[] = [];
     const emptyResult = {

@@ -2,6 +2,7 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { GRAPH_KA_CONTENT_SCOPE_VERSION, MemoryLayer, createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri, assertSafeIri, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 const DKG = 'http://dkg.io/ontology/';
 
 export interface ConfirmedGraphKnowledgeAssetMetadataEnvelope {
@@ -157,7 +158,7 @@ function decodeGraphFields(fields: MetadataFields): DecodedGraphFields {
     // Context is admitted separately; unrelated external-context rows retain their old acceptance rules.
   };
 }
-const stripWireLiteral = (raw: string) => raw.replace(/^"(.*)"(?:\^\^.*|@.*)?$/, '$1');
+const stripWireLiteral = (raw: string) => rdfLiteralBody(raw) ?? raw;
 function decodeWireGraphFields(rows: readonly MetadataRow[]): { fields: DecodedGraphFields; context(): string | undefined } {
   const objects = metadataObjectsByPredicate(rows);
   for (const [predicate, values] of objects) objects.set(predicate, [...new Set(values.map(stripWireLiteral))]);
@@ -242,6 +243,15 @@ export function parseGraphKnowledgeAssetMetadataEnvelope(
   return parseMetadataEnvelope(rows, () =>
     validateGraphStructure(decodeStoredGraphFields(rows).fields, input.ual, input.contextGraphId));
 }
+
+/**
+ * Canonical projection for bounded readers of a stored envelope (the parser
+ * below): the confirmed projection, the context binding it requires, and the
+ * legacy root bindings it refuses.
+ */
+export const GRAPH_KNOWLEDGE_ASSET_STORED_ENVELOPE_PREDICATES: readonly string[] = Object.freeze([
+  ...GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, ...['contextGraph', 'rootEntity', 'partOf'].map(name => `${DKG}${name}`),
+]);
 
 /** Held-content readers must bind stored rows to the requested context and named graph. */
 export function parseStoredGraphKnowledgeAssetMetadataEnvelope(

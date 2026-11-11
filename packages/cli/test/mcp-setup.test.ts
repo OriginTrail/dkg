@@ -102,6 +102,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
   let originalHome: string | undefined;
   let originalUserprofile: string | undefined;
   let originalAppdata: string | undefined;
+  let originalLocalAppdata: string | undefined;
   let originalDkgHome: string | undefined;
   let originalXdgConfigHome: string | undefined;
   let logSpy: ReturnType<typeof captureWrites>;
@@ -114,6 +115,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     originalHome = process.env.HOME;
     originalUserprofile = process.env.USERPROFILE;
     originalAppdata = process.env.APPDATA;
+    originalLocalAppdata = process.env.LOCALAPPDATA;
     // Codex Round-2 Bug A: mcpSetupAction now sets DKG_HOME for the
     // duration of the action so adapter-openclaw / dkg-core flows
     // pick up the resolved home. Save+restore it like HOME/APPDATA
@@ -134,6 +136,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // path resolver lands inside the test sandbox on Win32. macOS
     // and Linux ignore APPDATA.
     process.env.APPDATA = join(tmpHome, 'AppData', 'Roaming');
+    process.env.LOCALAPPDATA = join(tmpHome, 'AppData', 'Local');
     logSpy = captureWrites(console, 'log');
     warnSpy = captureWrites(console, 'warn');
     errorSpy = captureWrites(console, 'error');
@@ -154,6 +157,8 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     else delete process.env.USERPROFILE;
     if (originalAppdata !== undefined) process.env.APPDATA = originalAppdata;
     else delete process.env.APPDATA;
+    if (originalLocalAppdata !== undefined) process.env.LOCALAPPDATA = originalLocalAppdata;
+    else delete process.env.LOCALAPPDATA;
     if (originalDkgHome !== undefined) process.env.DKG_HOME = originalDkgHome;
     else delete process.env.DKG_HOME;
     if (originalXdgConfigHome !== undefined) process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
@@ -274,6 +279,18 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       ...overrides,
     };
   }
+
+  it('formats structured missing-client paths with manual setup guidance', async () => {
+    const checkedPaths = [join(tmpHome, 'Roaming', 'Claude', 'claude_desktop_config.json'), join(tmpHome, 'Local', 'Claude-Data', 'claude_*', 'claude_desktop_config.json')];
+    await mcpSetupAction({ start: false, fund: false, verify: false }, makeDeps({
+      detectClients: ({ reportMissing } = {}) => {
+        reportMissing?.({ id: 'claude-desktop', name: 'Claude Desktop', location: 'native', checkedPaths });
+        return [];
+      },
+    }));
+    const logged = logSpy.calls.map((call) => call.join(' ')).join('\n');
+    for (const text of ['Claude Desktop: not detected', ...checkedPaths, 'dkg mcp setup --print-only']) expect(logged).toContain(text);
+  });
 
   it('on a clean machine: creates config, starts daemon, writes client entry', async () => {
     // Pre-create a Cursor-style config dir so `detectClients` finds Cursor
@@ -3170,11 +3187,11 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       mkdirSync(join(winUserProfile, '.codex'), { recursive: true });
 
       const { detectClients } = await import('../src/mcp-client-registry.js');
-      const detected = detectClients((envVarName) => {
+      const detected = detectClients({ resolveWslWindowsEnvPath: (envVarName) => {
         if (envVarName === 'USERPROFILE') return winUserProfile;
         if (envVarName === 'APPDATA') return winAppData;
         return null;
-      });
+      } });
 
       expect(
         detected.some((c) => c.name === 'Cursor (Windows-side via WSL)'),

@@ -250,8 +250,8 @@ function ReplicationTab() {
           <ResponsiveContainer width="100%" height={220}>
             <AreaChart data={buckets}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
-              <XAxis dataKey="t" tick={{ fontSize: 11 }} />
-              <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
+              <XAxis dataKey="t" tick={{ fontSize: 'var(--fs-label)' }} />
+              <YAxis allowDecimals={false} tick={{ fontSize: 'var(--fs-label)' }} />
               <Tooltip />
               <Legend />
               <Area type="monotone" dataKey="promotes" stackId="1" stroke="var(--layer-verified)" fill="var(--layer-verified)" fillOpacity={0.55} name="promotes" />
@@ -639,8 +639,8 @@ function OperationStatsSection() {
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
-                    <YAxis tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={28} />
+                    <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} />
+                    <YAxis tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'var(--tint-strong)' }} />
                     <Legend wrapperStyle={{ fontSize: 'var(--fs-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
@@ -655,8 +655,8 @@ function OperationStatsSection() {
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
-                    <YAxis tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={32} />
+                    <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} />
+                    <YAxis tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
                     <Legend wrapperStyle={{ fontSize: 'var(--fs-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
@@ -671,8 +671,8 @@ function OperationStatsSection() {
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
-                    <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={28} />
+                    <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} />
+                    <YAxis domain={[0, 100]} tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
                     <Legend wrapperStyle={{ fontSize: 'var(--fs-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
@@ -687,8 +687,8 @@ function OperationStatsSection() {
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
-                    <YAxis tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={32} />
+                    <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} />
+                    <YAxis tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'var(--tint-strong)' }} />
                     <Legend wrapperStyle={{ fontSize: 'var(--fs-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
@@ -762,7 +762,7 @@ export function HardwareTab() {
         {statCards.map(stat => (
           <div key={stat.label} className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
             <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
-            <div style={{ fontSize: 'var(--fs-title)', fontWeight: 700, color: hw ? LEVEL_TEXT[stat.lv] : IDLE, lineHeight: 1, marginBottom: 3 }}>{stat.value}{warnIcon(stat.lv)}</div>
+            <div style={{ fontSize: 'var(--fs-heading)', fontWeight: 700, color: hw ? LEVEL_TEXT[stat.lv] : IDLE, lineHeight: 1, marginBottom: 3 }}>{stat.value}{warnIcon(stat.lv)}</div>
             {stat.pct !== null ? (
               <div style={{ height: 3, background: 'var(--bg-elevated)', borderRadius: 'var(--radius-hair)', margin: '5px 0 3px' }}>
                 <div style={{ height: 3, width: `${Math.min(stat.pct, 100)}%`, background: LEVEL_COLOR[stat.lv], borderRadius: 'var(--radius-hair)', transition: 'width .4s ease' }} />
@@ -776,12 +776,12 @@ export function HardwareTab() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 12 }}>
         <div className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
           <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>Peers</div>
-          <div style={{ fontSize: 'var(--fs-title)', fontWeight: 700, color: hw ? LEVEL_TEXT[peersLv] : IDLE, lineHeight: 1 }}>{hw ? hw.peers : '—'}{warnIcon(peersLv)}</div>
+          <div style={{ fontSize: 'var(--fs-heading)', fontWeight: 700, color: hw ? LEVEL_TEXT[peersLv] : IDLE, lineHeight: 1 }}>{hw ? hw.peers : '—'}{warnIcon(peersLv)}</div>
           <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 3 }}>{hw ? 'connected' : 'waiting…'}</div>
         </div>
         <div className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
           <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>RPC Latency</div>
-          <div style={{ fontSize: 'var(--fs-title)', fontWeight: 700, color: hw ? LEVEL_TEXT[rpcLv] : IDLE, lineHeight: 1 }}>
+          <div style={{ fontSize: 'var(--fs-heading)', fontWeight: 700, color: hw ? LEVEL_TEXT[rpcLv] : IDLE, lineHeight: 1 }}>
             {hw ? (hw.rpcMs !== null ? `${hw.rpcMs} ms` : '—') : '—'}{warnIcon(rpcLv)}
           </div>
           <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 3 }}>{hw ? 'last measurement' : 'waiting…'}</div>
@@ -798,8 +798,8 @@ export function HardwareTab() {
               <ResponsiveContainer width="100%" height={140}>
                 <AreaChart data={hwChartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke={grid} />
-                  <XAxis dataKey="time" tick={{ fontSize: 10, fill: tick }} minTickGap={24} />
-                  <YAxis domain={c.pct ? [0, 100] : [0, 'auto']} allowDecimals={c.key !== 'peers'} tick={{ fontSize: 10, fill: tick }} width={32} />
+                  <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: tick }} minTickGap={24} />
+                  <YAxis domain={c.pct ? [0, 100] : [0, 'auto']} allowDecimals={c.key !== 'peers'} tick={{ fontSize: 'var(--fs-micro)', fill: tick }} width={32} />
                   <Tooltip contentStyle={TOOLTIP_STYLE} />
                   {c.warn != null && <ReferenceLine y={c.warn} stroke={warnLine} strokeDasharray="4 4" strokeOpacity={0.6} />}
                   {c.crit != null && <ReferenceLine y={c.crit} stroke={critLine} strokeDasharray="4 4" strokeOpacity={0.6} />}
@@ -1499,7 +1499,7 @@ function LogsTab() {
             padding: '8px 0',
             background: 'var(--log-bg)',
             fontFamily: LOG_FONT,
-            fontSize: 'var(--fs-label)',
+            fontSize: 'var(--fs-micro)',
             lineHeight: 'var(--lh-body)',
           }}
         >
@@ -1552,7 +1552,7 @@ function LogContainer({ children, maxHeight = 300 }: { children: React.ReactNode
   return (
     <div style={{
       maxHeight, overflowY: 'auto', background: LOG_COLORS.bg, borderRadius: 'var(--radius-control)', padding: '6px 0',
-      fontFamily: LOG_FONT, fontSize: 'var(--fs-label)', lineHeight: 'var(--lh-body)',
+      fontFamily: LOG_FONT, fontSize: 'var(--fs-micro)', lineHeight: 'var(--lh-body)',
     }}>
       {children}
     </div>

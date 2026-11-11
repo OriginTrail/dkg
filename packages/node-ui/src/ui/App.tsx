@@ -204,6 +204,10 @@ function AgentHubRoute() {
   return <Navigate to={tabIdToPath(useTabsStore.getState().activeTabId)} replace state={{ openAgents: true }} />;
 }
 
+const MarketplaceGalleryRoute = React.lazy(() =>
+  import('./marketplace/GalleryView.js').then((m) => ({ default: m.MarketplaceGalleryView }))
+);
+
 function ContextGraphPrimerRoute() {
 
   useLayoutEffect(() => {
@@ -231,6 +235,12 @@ export function App() {
           Redirect stale bookmarks for /ui/apps/... back to the dashboard so upgraded
           nodes don't silently render AppShell under a dead URL. */}
       <Route path="/apps/*" element={<Navigate to="/" replace />} />
+      {/* Fixture-fed marketplace component gallery (never live data). */}
+      <Route path="/dev/gallery" element={
+        <React.Suspense fallback={<div className="lazy-spinner">Loading...</div>}>
+          <MarketplaceGalleryRoute />
+        </React.Suspense>
+      } />
       <Route path="*" element={<AppShell />} />
     </Routes>
   );

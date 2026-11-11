@@ -254,7 +254,7 @@ describe('handleEventsQuery', () => {
       { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
-    expect(calls[0].sparql).toContain('epcis:readPoint <urn:epc:id:sgln:4012345.00001.0>');
+    expect(calls[0].sparql).toContain('?event ?_epcis_readPoint_value <urn:epc:id:sgln:4012345.00001.0>');
   });
 
   it('passes extension configurationId and shipmentId filters through to SPARQL', async () => {

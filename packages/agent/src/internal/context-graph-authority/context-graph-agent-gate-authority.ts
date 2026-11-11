@@ -50,7 +50,7 @@ function conclusiveTransportGate(
       seen.add(key);
       accepted.push(checksum);
     }
-    return { kind: 'available', agentAddresses: accepted };
+    return { kind: 'available', agentAddresses: accepted, conclusive: true };
   }
   if (transportAuthority.kind === 'unavailable') {
     return unavailableAuthority(transportAuthority.reason, transportAuthority.detail);

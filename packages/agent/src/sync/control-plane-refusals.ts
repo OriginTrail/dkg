@@ -1,19 +1,21 @@
 import { createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
 import type { SyncBackpressureBusyError } from './backpressure.js';
-import type { SyncAdmissionSource } from './policy.js';
+import { normalizeSyncAdmissionSource, type SyncAdmissionSource, type SyncSchedulerLane } from './policy.js';
 
 /**
- * One log line per interval, with a count, for control-plane fetches refused
- * for want of a sync slot.
+ * One log line per interval, with a count, for control-plane fetches and
+ * durable syncs refused for want of a sync slot.
  *
  * A standalone control-plane fetch (a curator metadata refresh, see
  * `control-plane-reserve.ts`) that finds every general slot and its reserved
  * slot busy is refused at once, and its caller asks again later. Logged one by
  * one, each refusal is two lines, the admission's and the refresh's warning;
  * after a restart a busy Core refuses dozens to hundreds of them per 10
- * minutes, and they change nothing the node holds. Every other refusal, and a
- * control-plane fetch that ends any other way (displaced, timed out, failed),
- * logs a line of its own.
+ * minutes, and they change nothing the node holds. A durable sync refused at
+ * once is deferred and asked again later in the same way: while one graph's
+ * catch-up holds the slot, the others are refused up to hundreds of times a
+ * minute. Every other refusal, and work that ends any other way (displaced,
+ * timed out, failed), logs a line of its own.
  *
  * Each node owns one summary (`DKGAgentBase.controlPlaneRefusals`), written
  * through its logger; the admission reaches it through `syncRefusalReporter`.
@@ -109,20 +111,24 @@ export function controlPlaneRefusalSummary(
 
 /**
  * The refusal reporter of one admission (`withGlobalSyncBackpressure`'s
- * `reportRefusal`): a control-plane fetch refused at once is counted in
- * `summary`, which logs its open interval when `stop` (the node's stop
- * signal) fires, and every other refusal, or any without a summary, is one
- * `logInfo` line.
+ * `reportRefusal`): a control-plane fetch or a durable sync refused at once is
+ * counted in `summary`, which logs its open interval when `stop` (the node's
+ * stop signal) fires, and every other refusal, or any without a summary, is
+ * one `logInfo` line. Durable syncs are counted per admission source
+ * (`durable:vm-recovery`, `durable:on-connect`, …), not per graph and peer.
  */
 export function syncRefusalReporter(
-  admission: { label: string; source?: SyncAdmissionSource; contextGraphId?: string },
+  admission: { label: string; lane?: SyncSchedulerLane; source?: SyncAdmissionSource; contextGraphId?: string },
   summary: ControlPlaneRefusalSummary | undefined,
   logInfo: (ctx: OperationContext, message: string) => void,
   stop?: AbortSignal,
 ): (ctx: OperationContext, error: SyncBackpressureBusyError) => void {
+  const label = admission.source === 'control-plane'
+    ? admission.label
+    : admission.lane === 'durable' ? `durable:${normalizeSyncAdmissionSource(admission.source)}` : undefined;
   return (ctx, error) => {
-    if (summary && admission.source === 'control-plane' && error.state !== undefined) {
-      summary.note(admission.label, error.state, admission.contextGraphId, stop);
+    if (summary && label !== undefined && error.state !== undefined) {
+      summary.note(label, error.state, admission.contextGraphId, stop);
     } else {
       logInfo(ctx, error.message);
     }

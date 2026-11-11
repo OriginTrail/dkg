@@ -400,7 +400,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
         defaultNodeColor: focalColor,
         defaultEdgeColor: palette.neutral.edge,
         edgeWidth: 1.0,
-        fontSize: 11,
+        fontSize: 11 /* px: the canvas renderer takes a number */,
       },
       hexagon: { baseSize: 7, minSize: 4, maxSize: 10, scaleWithDegree: true },
       focus: { maxNodes: 500, hops: 999 },

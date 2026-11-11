@@ -290,6 +290,7 @@ holds the private payload, and it does not depend on VM reconciliation.
 | `storageAckDeclinesLastHour` | StorageACK declines per reason over the last hour |
 | `coreHostedGraphs` | Graphs recorded as core-hosted |
 | `audit` | The last ACK promotion audit (below) |
+| `refresh` | Refreshes of Verified Memory copies after Knowledge Asset updates: `heldTargets` (refreshes waiting), `persistCeiling` (the highest block the update event lane may save as scanned while they wait, or `null`), `givenUpTotal` (refreshes given up at their maximum age), `refusedTotal` (refreshes refused because the set was full) and `storeBusyScansTotal` (scans of the update event lane that a busy store refused; each range is scanned again) |
 
 ### ACK promotion audit
 

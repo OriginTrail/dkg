@@ -16,6 +16,7 @@ type Kind = 'colour' | 'radius';
 /** Where colour values legitimately live. */
 const COLOUR_SOURCES = new Set([
   'styles/00-theme.css', // the tokens themselves
+  'styles/30-marketplace-tokens.css', // the Marketplace's own palette, scoped to its views
 ]);
 /** Canvas palettes: graph-viz draws with literal colours read from these. */
 const isPaletteFile = (file: string) => /(^|\/)[\w-]*-colors\.ts$/.test(file);
@@ -111,8 +112,8 @@ describe('design tokens', { timeout: 20_000 }, () => {
     expect(found, `Use a token instead (DESIGN.md · Colour / Shape and size):\n${found.join('\n')}`).toEqual([]);
   });
 
-  it('has no text below the 10px floor (DESIGN.md · Type)', () => {
-    const small = findInUi(/font-size:\s*(?:[0-9]|9\.\d+)px|fontSize:\s*[0-9](?:\.\d+)?\b/g);
+  it('has no text below the 11px floor (DESIGN.md · Type)', () => {
+    const small = findInUi(/font-size:\s*(?:[0-9]|10)(?:\.\d+)?px|fontSize:\s*(?:[0-9]|10)(?:\.\d+)?\b/g);
     expect(small, `Use --fs-micro or larger:\n${small.join('\n')}`).toEqual([]);
   });
 
