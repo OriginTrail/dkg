@@ -9,7 +9,7 @@ import {
   readGraphStateCompareAndSet,
   wrapReadGraphLayer,
 } from '@origintrail-official/dkg-storage';
-import { READ_GRAPHS_OFF, ReadGraphWorkloadOwnerV1, createReadGraphWorkloadV1, type ReadGraphModesV1 } from '../src/read-graph-runtime.js';
+import { READ_GRAPHS_OFF, ReadGraphWorkloadOwnerV1, type ReadGraphModesV1 } from '../src/read-graph-runtime.js';
 
 const CG = 'read-graph-runtime';
 const ROOT = `did:dkg:context-graph:${CG}`;
@@ -53,7 +53,7 @@ describe('the agent read-graph workload', () => {
   it('does not start while every read graph is off', async () => {
     const { view } = await agentView();
     expect(READ_GRAPHS_OFF.modeOf({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory })).toBe('off');
-    const owner = createReadGraphWorkloadV1(view, { logger: logger() });
+    const owner = new ReadGraphWorkloadOwnerV1(view, { logger: logger() });
     owner.start(ctx);
     expect(owner.status()).toBeUndefined();
     await owner.whenIdle();

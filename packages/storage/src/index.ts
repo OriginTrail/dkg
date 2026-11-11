@@ -496,6 +496,8 @@ export {
   buildReadGraph,
   installWorkingMemoryIdentity,
   markReadGraphDirty,
+  refreshReadGraphRegistry,
+  withReadGraphBackgroundSlot,
   readGraphEnumerationRoots,
   readStoredReadGraphRow,
   removeReadGraph,
@@ -510,7 +512,6 @@ export { startReadGraphs, type ReadGraphStartOptions, type ReadGraphStartResult 
 export {
   DEFAULT_READ_GRAPH_BUILD_INTERVAL_MS,
   ReadGraphBuilder,
-  withReadGraphBackgroundSlot,
   type ReadGraphBuilderOptions,
   type ReadGraphBuilderStatus,
 } from './read-graph/builder.js';

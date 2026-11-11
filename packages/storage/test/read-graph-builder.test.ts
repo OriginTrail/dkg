@@ -7,7 +7,7 @@ import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { mayHoldReadGraphPartitions } from '../src/read-graph-partition-marker.js';
 import { missingReadGraphMethods } from '../src/read-graph/adapter-contract.js';
 import { guardReadGraphPartition, storeMayHoldReadGraphPartitions } from '../src/read-graph-partition-store.js';
-import { ReadGraphBuilder, withReadGraphBackgroundSlot } from '../src/read-graph/builder.js';
+import { ReadGraphBuilder } from '../src/read-graph/builder.js';
 import { readGraphMembership, type GraphNameTest } from '../src/read-graph/membership.js';
 import { wrapReadGraphLayer, type ReadGraphStore } from '../src/read-graph/read-graph-store.js';
 import {
@@ -19,6 +19,7 @@ import {
   removeReadGraph,
   repairReadGraph,
   ReadGraphJobError,
+  withReadGraphBackgroundSlot,
   type ReadGraphJobContext,
 } from '../src/read-graph/rebuild.js';
 import {
@@ -433,6 +434,24 @@ describe('repairing a read graph', () => {
     await expectUnion(adapter, layer, fixture, vm);
   });
 
+  it('leaves a read graph whose damaged row it had to replace for a full build', async () => {
+    const { adapter, fixture, layer, context } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    const { wholeVm } = fixture.readGraphs;
+    await adapter.update!(readGraphStateCompareAndSet(undefined, { ...row(wholeVm, 'dirty', 3), ruleVersion: 99 }));
+    await adapter.insert([
+      { subject: wholeVm, predicate: 'http://dkg.io/ontology/readGraphGeneration', object: '"4"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: `${fixture.root}/_~read/state` },
+      q('urn:s:old', '"built under another rule"', wholeVm),
+    ]);
+    const membership = readGraphMembership(vm, fixture.registry, layer.runtime.workingMemoryIdentity);
+    const repaired = await repairReadGraph(context, vm, { joined: [], leaving: [], membership });
+    expect(repaired).toMatchObject({ outcome: 'lost', row: { state: 'dirty', ruleVersion: CURRENT_READ_GRAPH_VERSIONS.ruleVersion } });
+    expect(await triplesOf(adapter, wholeVm)).toEqual([`urn:s:old ${P} "built under another rule"`]);
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done' });
+    expect(await triplesOf(adapter, wholeVm)).not.toContain(`urn:s:old ${P} "built under another rule"`);
+    await expectUnion(adapter, layer, fixture, vm);
+  });
+
   it('repairs only a row built under the current rule and an accepted builder', async () => {
     const { adapter, fixture, layer, context } = await open();
     const [vm] = fixture.keys as [ReadGraphKey];
@@ -664,6 +683,34 @@ describe('the read-graph builder', () => {
     await builder.close();
   });
 
+  it('rebuilds ready read graphs whose membership a registry change moved', async () => {
+    const { adapter, fixture, layer, store } = await open();
+    const [vm, , code] = fixture.keys as [ReadGraphKey, ReadGraphKey, ReadGraphKey];
+    const { wholeVm, codeVm } = fixture.readGraphs;
+    const warnings: string[] = [];
+    const builder = new ReadGraphBuilder({ store, wanted: () => [vm, code], batching: { pauseRatio: 0 }, intervalMs: 60_000, warn: (line) => warnings.push(line) });
+    builder.start();
+    await builder.whenIdle();
+    expect(await triplesOf(adapter, wholeVm)).toContain(`urn:s:3 ${P} "v3"`);
+    // The sub-graph's registration goes; its data stays.
+    await adapter.delete(fixture.facts.filter((quad) => quad.subject === `${fixture.root}/code`));
+    builder.request();
+    await builder.whenIdle();
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual([]);
+    expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('ready');
+    expect(await triplesOf(adapter, wholeVm)).not.toContain(`urn:s:3 ${P} "v3"`);
+    expect(await triplesOf(adapter, codeVm)).toEqual([]);
+    expect(warnings).toEqual([]);
+    // A registry that cannot be read is reported, and the pass goes on.
+    const query = adapter.query.bind(adapter);
+    adapter.query = (sparql, options) => (sparql.includes('ontology/SubGraph') ? Promise.reject(new Error('down')) : query(sparql, options));
+    builder.request();
+    await builder.whenIdle();
+    expect(warnings).toEqual([expect.stringContaining('could not be read: down')]);
+    adapter.query = query;
+    await builder.close();
+  });
+
   it('tries a failed build again later, after a delay that grows', async () => {
     const { adapter, fixture, layer, store } = await open();
     const [vm] = fixture.keys as [ReadGraphKey];
@@ -710,6 +757,31 @@ describe('the read-graph builder', () => {
     await builder.close();
     expect(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)?.state).toBe('building');
     expect(builder.status().running).toBe(false);
+  });
+
+  it('runs build jobs one at a time per backend, whoever starts them', async () => {
+    const { adapter, fixture, context } = await open();
+    const [vm, swm] = fixture.keys as [ReadGraphKey, ReadGraphKey];
+    const { wholeVm, wholeSwm } = fixture.readGraphs;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let holding = false;
+    adapter.onUpdate = async (sparql) => {
+      if (!holding && sparql.includes('VALUES ?g') && sparql.includes(`<${wholeVm}>`)) {
+        holding = true;
+        await held;
+      }
+    };
+    adapter.requests.length = 0;
+    const first = buildReadGraph(context, vm);
+    for (let turn = 0; turn < 50 && !holding; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+    expect(holding).toBe(true);
+    const second = buildReadGraph(context, swm);
+    for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+    expect(adapter.requests.some((request) => request.includes(wholeSwm))).toBe(false);
+    release();
+    expect(await first).toMatchObject({ outcome: 'done' });
+    expect(await second).toMatchObject({ outcome: 'done' });
   });
 
   it('runs heavy background work one job at a time per backend', async () => {

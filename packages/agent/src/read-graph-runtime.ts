@@ -139,7 +139,3 @@ export class ReadGraphWorkloadOwnerV1 {
   }
 }
 
-/** The agent's read-graph workload. */
-export function createReadGraphWorkloadV1(agent: ReadGraphAgentViewV1, options: ReadGraphWorkloadOptionsV1): ReadGraphWorkloadOwnerV1 {
-  return new ReadGraphWorkloadOwnerV1(agent, options);
-}
