@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer, request as forward } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,23 +25,88 @@ import { layerFixture } from './read-graph-layer-conformance.js';
 const REPO = fileURLToPath(new URL('../../../../', import.meta.url));
 const WRITER = fileURLToPath(new URL('./read-graph-builder-kill-writer.ts', import.meta.url));
 
-/** Where the builder process dies: `delayMs` after copy batch `batch` went to the store, or after it returned. */
+/**
+ * Where the builder process dies: `delayMs` after copy batch `batch` returned to it, or after the
+ * store received and answered that batch while the answer is kept from the builder.
+ */
 export interface BuilderKillPoint {
   readonly batch: number;
-  readonly after: 'request' | 'return';
+  readonly after: 'receipt' | 'return';
   readonly delayMs: number;
+}
+
+/** A proxy holding back the store's answer to one copy batch. */
+export interface CopyBatchProxy {
+  /** The SPARQL endpoint to give the builder: the store's own path, on the proxy. */
+  readonly url: string;
+  /** Resolves with the store's status once the store has answered the held copy batch. */
+  readonly received: Promise<number>;
+  close(): Promise<void>;
+}
+
+/**
+ * A forwarding proxy in front of a Blazegraph SPARQL endpoint. It passes every request and answer
+ * through, except copy batch `batch`, the `batch`-th SPARQL update naming member graphs in a VALUES
+ * list (the batches the builder process numbers): that one it sends to the store whole, and it never
+ * passes the store's answer on. A copy batch that is never sent leaves `received` pending.
+ */
+export async function holdCopyBatch(endpoint: string, batch: number): Promise<CopyBatchProxy> {
+  const store = new URL(endpoint);
+  let copies = 0;
+  let resolveReceived!: (status: number) => void;
+  let rejectReceived!: (error: unknown) => void;
+  const received = new Promise<number>((resolve, reject) => { resolveReceived = resolve; rejectReceived = reject; });
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks);
+      const copyBatch = String(req.headers['content-type'] ?? '').startsWith('application/sparql-update') && body.includes('VALUES ?g');
+      if (copyBatch) copies += 1;
+      const held = copyBatch && copies === batch;
+      const upstream = forward({
+        host: store.hostname, port: store.port, path: req.url, method: req.method, headers: { ...req.headers, host: store.host },
+      }, (answer) => {
+        if (held) {
+          answer.resume();
+          answer.on('end', () => resolveReceived(answer.statusCode ?? 0));
+          return;
+        }
+        res.writeHead(answer.statusCode ?? 502, answer.headers);
+        answer.pipe(res);
+      });
+      upstream.on('error', (error) => {
+        if (held) rejectReceived(error);
+        else if (!res.headersSent) { res.writeHead(502); res.end(String(error)); } else res.destroy(error);
+      });
+      upstream.end(body);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}${store.pathname}${store.search}`,
+    received,
+    close: () => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }),
+  };
 }
 
 /**
  * Run the builder process up to `point` and kill it with SIGKILL. It sends no copy batch after
- * `point.batch`. Resolves with whether that batch had returned when the process died.
+ * `point.batch`. A `receipt` point is armed by `received` alone, never by a line the builder prints.
+ * Resolves with whether that batch had returned to the builder when the process died.
  */
-async function killBuilderAt(env: Readonly<Record<string, string>>, point: BuilderKillPoint): Promise<{ readonly returned: boolean }> {
+async function killBuilderAt(
+  env: Readonly<Record<string, string>>,
+  point: BuilderKillPoint,
+  received?: Promise<number>,
+): Promise<{ readonly returned: boolean }> {
+  if ((point.after === 'receipt') !== (received !== undefined)) throw new Error('A receipt kill point needs the store\'s receipt, and only it does');
   const child = spawn(process.execPath, ['--import', 'tsx', WRITER], {
     cwd: REPO, env: { ...process.env, ...env, DKG_KILL_BATCHES: String(point.batch) }, stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const arming = point.after === 'request' ? `batch ${point.batch}` : `returned ${point.batch}`;
-  const lines = await killWriterOnLine(child, line => line === arming, point.delayMs, 'The builder');
+  const arming = point.after === 'return' ? `returned ${point.batch}` : undefined;
+  const lines = await killWriterOnLine(child, line => line === arming, point.delayMs, 'The builder', received);
   if (lines.includes('finished')) throw new Error(`The build finished before copy batch ${point.batch}: the fixture needs more member graphs`);
   expect(lines.filter(line => line.startsWith('batch ')).at(-1), 'the last copy batch the builder sent').toBe(`batch ${point.batch}`);
   return { returned: lines.includes(`returned ${point.batch}`) };
@@ -47,12 +114,12 @@ async function killBuilderAt(env: Readonly<Record<string, string>>, point: Build
 
 /**
  * Kill points for each engine. Blazegraph applies each request as it arrives: once a copy batch has
- * returned, and while one is with the store, where the kill must land before the store's answer.
- * Embedded Oxigraph applies a batch in memory at once and writes its file a moment later: once that
- * dump has caught up, and right after a batch returned, before it has.
+ * returned, and once the store has received and answered one whose answer a proxy keeps from the
+ * builder. Embedded Oxigraph applies a batch in memory at once and writes its file a moment later:
+ * once that dump has caught up, and right after a batch returned, before it has.
  */
 export const BUILDER_KILL_POINTS: Readonly<Record<'oxigraph' | 'blazegraph', readonly BuilderKillPoint[]>> = {
-  blazegraph: [{ batch: 2, after: 'return', delayMs: 0 }, { batch: 3, after: 'request', delayMs: 0 }],
+  blazegraph: [{ batch: 2, after: 'return', delayMs: 0 }, { batch: 3, after: 'receipt', delayMs: 0 }],
   oxigraph: [{ batch: 2, after: 'return', delayMs: 300 }, { batch: 3, after: 'return', delayMs: 0 }],
 };
 
@@ -82,20 +149,26 @@ export function readGraphBuilderRestartSuite(backend: 'oxigraph' | 'blazegraph')
     }, 60_000);
 
     it.each(BUILDER_KILL_POINTS[backend])('rebuilds to its members after a builder killed $delayMs ms after the $after of copy batch $batch', async (point) => {
+      // Only Blazegraph has a request in flight: the builder reaches it through a proxy that keeps the answer to the batch.
+      if (point.after === 'receipt' && backend !== 'blazegraph') throw new Error('An embedded store has no request in flight to hold');
       const fixture = layerFixture(`${run}-${sequence += 1}`);
       const dir = backend === 'oxigraph' ? await mkdtemp(join(tmpdir(), 'read-graph-restart-')) : undefined;
       const path = dir ? join(dir, 'store.nq') : undefined;
       const openAdapter = (): TripleStore => (path ? new OxigraphStore(path) : new BlazegraphStore(url!, { timeout: 120_000 }));
       const config: TripleStoreConfig = path ? { backend: 'oxigraph-persistent', options: { path } } : { backend: 'blazegraph', options: { url } };
+      const proxy = point.after === 'receipt' ? await holdCopyBatch(url!, point.batch) : undefined;
       try {
         const seeding = openAdapter();
         await seeding.insert([...fixture.facts, ...memberData(fixture)]);
         await seeding.close();
         const killed = await killBuilderAt(path
           ? { DKG_KILL_BACKEND: 'oxigraph', DKG_KILL_PATH: path, DKG_KILL_CG: fixture.contextGraphId }
-          : { DKG_KILL_BACKEND: 'blazegraph', DKG_KILL_URL: url!, DKG_KILL_CG: fixture.contextGraphId }, point);
-        // A kill timed from a request landed before the store answered it: the batch was interrupted, not finished.
-        if (point.after === 'request') expect(killed.returned, 'the copy batch returned before the kill').toBe(false);
+          : { DKG_KILL_BACKEND: 'blazegraph', DKG_KILL_URL: proxy?.url ?? url!, DKG_KILL_CG: fixture.contextGraphId }, point, proxy?.received);
+        if (proxy) {
+          // The store received the whole copy batch and answered it, and the builder died before the answer reached it.
+          expect(await proxy.received, 'the store\'s answer to the copy batch in flight').toBe(200);
+          expect(killed.returned, 'the copy batch returned before the kill').toBe(false);
+        }
 
         // The next process opens the same store: this one, which has not touched these read graphs.
         const adapter = openAdapter();
@@ -122,7 +195,10 @@ export function readGraphBuilderRestartSuite(backend: 'oxigraph' | 'blazegraph')
           expect(await buildReadGraph({ store, batching: { pauseRatio: 0 } }, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
           await expectEqualToMembers(opened, vm, fixture.registry, 'after the restart and the rebuild');
         } finally { await adapter.close(); }
-      } finally { if (dir) await rm(dir, { recursive: true, force: true }); }
+      } finally {
+        await proxy?.close();
+        if (dir) await rm(dir, { recursive: true, force: true });
+      }
     }, 180_000);
   });
 }
