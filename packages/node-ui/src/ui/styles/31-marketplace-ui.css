@@ -16,7 +16,7 @@
 /* standalone /dev/gallery route: the shell locks body scroll (01-base);
    the gallery page carries its own scroll container */
 .mktx--page { height: 100vh; overflow-y: auto; }
-.mktx .state-label { margin: var(--sp-10) 0 var(--sp-3); color: var(--text-muted);
+.mktx .state-label { margin: var(--sp-10) 0 var(--sp-3); color: var(--text-tertiary);
   font-size: var(--fs-xs); font-weight: var(--fw-semibold);
   text-transform: uppercase; letter-spacing: 0.08em;
   display: flex; align-items: center; gap: var(--sp-2); }

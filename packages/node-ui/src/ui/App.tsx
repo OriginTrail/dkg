@@ -233,9 +233,16 @@ const NetworkDebugPage = React.lazy(() =>
   import('./pages/Network.js').then((m) => ({ default: m.NetworkPage }))
 );
 
-const MarketplaceGalleryRoute = React.lazy(() =>
+const MarketplaceGalleryView = React.lazy(() =>
   import('./marketplace/GalleryView.js').then((m) => ({ default: m.MarketplaceGalleryView }))
 );
+
+/** The gallery renders outside AppShell, so it applies the saved theme itself. */
+function MarketplaceGalleryRoute() {
+  const theme = useLayoutStore((s) => s.theme);
+  useEffect(() => { applyTheme(theme); }, [theme]);
+  return <MarketplaceGalleryView />;
+}
 
 function ContextGraphPrimerRoute() {
   const openTab = useTabsStore((s) => s.openTab);
