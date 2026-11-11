@@ -41,19 +41,19 @@ export function withReadGraphOperations(update: string, options: QueryOptions | 
  * request, before the plan's operations: Oxigraph accepts a prologue only
  * there, and the plan's operations use absolute IRIs, which it does not change.
  *
- * Both come from one pass of the SPARQL lexical scanner, which treats comments
- * as whitespace and masks strings, IRIs and comments.
+ * Both come from one linear pass of the SPARQL lexical scanner. A comment counts
+ * as whitespace, and the separator is the last token only when it is a `;` of
+ * its own, so a `;` inside a string, an IRI, a comment or an escaped prefixed
+ * name (`ex:a\;`) is never taken for it.
  */
 export function withReadGraphOperationsAroundCallerUpdate(sparql: string, options: QueryOptions | undefined): string {
   if (!operationsOf(options)) return sparql;
-  const { tokens, prologue, masked } = prepareSparql(sparql);
+  const { tokens, prologue } = prepareSparql(sparql);
   const start = prologue.endTokenIndex > 0 ? tokens[prologue.endTokenIndex - 1]!.end : 0;
-  const spliced = withReadGraphOperations(withoutFinalSeparator(sparql.slice(start), masked.slice(start)), options);
+  const last = tokens.length > prologue.endTokenIndex ? tokens[tokens.length - 1] : undefined;
+  const operations = last?.kind === 'symbol' && last.logicalValue === ';'
+    ? sparql.slice(start, last.start) + sparql.slice(last.end)
+    : sparql.slice(start);
+  const spliced = withReadGraphOperations(operations, options);
   return start > 0 ? `${sparql.slice(0, start)}\n${spliced}` : spliced;
-}
-
-/** `text` without a final `;`, found in `masked`: the same text with strings, IRIs and comments blanked. */
-function withoutFinalSeparator(text: string, masked: string): string {
-  const end = masked.trimEnd().length;
-  return masked[end - 1] === ';' ? text.slice(0, end - 1) + text.slice(end) : text;
 }

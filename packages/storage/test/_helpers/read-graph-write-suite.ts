@@ -239,6 +239,13 @@ export function readGraphWriteSuite<T extends ReadGraphTestStore>(
         `PREFIX rg: # the test namespace\n<urn:rg-int:> INSERT DATA { GRAPH <${s.G3}> { rg:o <${P}> "fifteen" } }`,
         { ...o, touchedGraphs: [s.G3] }));
       expect(await s.graph(s.G3)).toHaveLength(4);
+      // A caller update may end with a prefixed name whose last character is an escaped semicolon.
+      const ending = `${s.member}0xaa/ends;`;
+      await store().insert([q('p', 'sixteen', ending), ...readGraphInsertQuads(s.R, [q('p', 'sixteen', ending)])]);
+      await s.maintained(s.reference(ending), (o) => store().update(
+        `PREFIX m: <${s.member}0xaa/> DROP SILENT GRAPH m:ends\\;`, { ...o, touchedGraphs: [ending] }));
+      expect(await s.graph(ending)).toEqual([]);
+      expect(has(await s.readGraph(), 'sixteen')).toBe(false);
     }));
 
     if (engine.replaceAssetGroup !== false) it('replaceAssetGroup: the replaced triples leave R, the new ones join it', () =>

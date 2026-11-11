@@ -103,6 +103,10 @@ describe('SparqlHttpStore write requests with read-graph operations', () => {
     ['a separator only inside a string', 'INSERT DATA { <urn:test:s> <urn:test:p> "a ;" }', 'INSERT DATA { <urn:test:s> <urn:test:p> "a ;" }'],
     ['a separator only inside an IRI', 'DROP SILENT GRAPH <urn:test:g;>', 'DROP SILENT GRAPH <urn:test:g;>'],
     ['a separator only inside a comment', 'DROP SILENT GRAPH <urn:test:g> # done;', 'DROP SILENT GRAPH <urn:test:g> # done;'],
+    ['an escaped semicolon ending a prefixed name',
+      'PREFIX ex: <urn:test:> DROP SILENT GRAPH ex:member\\;', 'PREFIX ex: <urn:test:> DROP SILENT GRAPH ex:member\\;'],
+    ['a final separator after an escaped semicolon',
+      'PREFIX ex: <urn:test:> DROP SILENT GRAPH ex:member\\; ;', 'PREFIX ex: <urn:test:> DROP SILENT GRAPH ex:member\\; '],
   ])('a caller update with %s stays one valid request', async (_case, sparql, own) => {
     const { requests } = await recordSparqlHttpWrite((store) => store.update(sparql, planned(PLAN)));
     expect(requests).toEqual([carrying(`application/sparql-update\n${own}`)]);
