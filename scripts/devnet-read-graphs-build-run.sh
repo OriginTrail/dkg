@@ -29,10 +29,12 @@
 #             INCONCLUSIVE;
 #   drills    a restart during a rebuild; a kill of the daemon worker during
 #             working-memory writes (every write the node acknowledged must be
-#             there after it); a CLI write with the daemon down (`dkg publisher clear
+#             there after it, and the agent's working-memory read graph ready
+#             and consistent); a CLI write with the daemon down (`dkg publisher clear
 #             finalized` on a node that has such jobs, which must stay
 #             cleared); a rollback and forward again (the earlier release is
-#             built first; after the rollback step the node's store must hold
+#             built first; `dkg rollback --stores-for <its version>` readies the
+#             stopped node's stores, and after it the node's store must hold
 #             no read-graph partition and every asset graph as before, and
 #             after the forward start every asset graph again, so the drill
 #             node needs a store that stays up with its daemon down:
@@ -89,9 +91,7 @@ BACKFILL_TIMEOUT="${READ_GRAPHS_BACKFILL_TIMEOUT:-1800}"
 READY_TIMEOUT="${READ_GRAPHS_READY_TIMEOUT:-900}"
 DIRECT_WRITE_CGS="${READ_GRAPHS_DIRECT_WRITE_CGS:-catalog-fixture-small-graph}"
 ROLLBACK_FROM="${READ_GRAPHS_ROLLBACK_FROM:-prev}"
-# The module of the step `dkg rollback` runs before it switches versions, and the devnet's store endpoint
-# resolver (a test can point either elsewhere).
-ROLLBACK_MODULE="${READ_GRAPHS_ROLLBACK_MODULE:-$REPO_ROOT/packages/cli/dist/update/rollback-read-graphs.js}"
+# The devnet's store endpoint resolver (a test can point it elsewhere).
 ENDPOINT_RESOLVER="${READ_GRAPHS_ENDPOINT_RESOLVER:-$REPO_ROOT/scripts/lib/qa/devnet-storage-endpoint.mjs}"
 LISTING_MODULE="$REPO_ROOT/scripts/lib/qa/context-graph-listing.mjs"
 # The build's own read-graph rules: names and eligibility (core), modes (storage), the setting's parser (CLI).
@@ -242,6 +242,30 @@ expected_read_graphs() {
       }
     }
   '
+}
+# wm_read_graph <n> <context graph> <agent address>: the IRI of that agent's working-memory read graph in the context
+# graph, by the build's own rules, when node <n>'s setting keeps it; nothing when the setting does not.
+wm_read_graph() {
+  local setting
+  setting="$(read_graphs_setting "$1")"
+  SETTING_JSON="${setting:-\"off\"}" CORE_MODULE="$CORE_MODULE" STORAGE_MODULE="$STORAGE_MODULE" QUERY_CONFIG_MODULE="$QUERY_CONFIG_MODULE" \
+    CG="$2" AGENT="$3" node --input-type=module -e '
+    const core = await import(process.env.CORE_MODULE);
+    const { readGraphModeOf } = await import(process.env.STORAGE_MODULE);
+    const { resolveQueryConfig } = await import(process.env.QUERY_CONFIG_MODULE);
+    const modes = resolveQueryConfig({ readGraphs: JSON.parse(process.env.SETTING_JSON) }).readGraphs;
+    const key = { scope: core.readScope(process.env.CG), layer: core.MemoryLayer.WorkingMemory, agentAddress: process.env.AGENT };
+    if (readGraphModeOf(modes, key) !== "off") console.log(core.readGraphIri(key));
+  '
+}
+# wait_read_graph_ready <n> <read graph> <timeout> <rows file>: until node <n>'s status lists that read graph as ready.
+wait_read_graph_ready() {
+  local deadline=$(( $(now) + $3 ))
+  while [ "$(now)" -lt "$deadline" ]; do
+    read_graph_rows "$1" > "$4" 2>/dev/null && awk -v g="$2" '$3 == g && $1 == "ready" { found = 1 } END { exit !found }' "$4" && return 0
+    sleep 5
+  done
+  return 1
 }
 node_commit() { field "$(body_of "$(api "$1" GET /api/status)")" version; printf ' '; field "$(body_of "$(api "$1" GET /api/status)")" commitShort; }
 # store_endpoint <n>: the node's store query URL, from the devnet's own resolver; "" for a store that only
@@ -646,9 +670,15 @@ drill_restart_during_rebuild() {
 acked_count() { wc -l < "$1" | tr -d ' '; }
 
 drill_kill_during_write() {
-  local n="$KILL_NODE" started cg pid command writer acked i resp missing body
+  local n="$KILL_NODE" started cg pid command writer acked i resp missing body agent wm_graph
   started="$(now)"; cg="read-graphs-drill-$(echo "$RUN_ID" | tr 'A-Z' 'a-z')"
   acked="$RESULTS/drill-kill.acked"; : > "$acked"
+  # The writes go to the node's own agent; the read graph they maintain is that agent's working-memory read graph.
+  agent="$(field "$(body_of "$(api "$n" GET /api/agent/identity)")" agentAddress)"
+  [ -n "$agent" ] || { record drill-kill INCONCLUSIVE 0 "node$n's agent address could not be read"; return; }
+  wm_graph="$(wm_read_graph "$n" "$cg" "$agent")" \
+    || { record drill-kill INCONCLUSIVE 0 "the working-memory read graph for node$n's agent could not be named"; return; }
+  [ -n "$wm_graph" ] || { record drill-kill INCONCLUSIVE 0 "node$n's setting keeps no working-memory read graph, so its writes maintain none"; return; }
   # Bodies go into variables first: bash 3.2 brace-expands a JSON body with a comma written inline in
   # a command substitution that is itself an argument, and the node gets half of it.
   body="{\"id\":\"$cg\",\"name\":\"Read-graph drill\"}"
@@ -702,7 +732,10 @@ drill_kill_during_write() {
       process.stdout.write(acked.filter((i) => !seen.has(i)).join(" "));
     });' "$acked")"
   [ -z "$missing" ] || { record drill-kill FAIL "$(( $(now) - started ))" "writes acknowledged before the kill are missing after it: $missing"; return; }
-  drill_end drill-kill "$n" "$started" "killed node$n's daemon during working-memory writes; all $(acked_count "$acked") acknowledged writes were there after it"
+  # The read graph those writes maintain must be there and ready; drill_end then checks it with the rest.
+  wait_read_graph_ready "$n" "$wm_graph" "$READY_TIMEOUT" "$RESULTS/rows/drill-kill.wm.node$n" \
+    || { record drill-kill FAIL "$(( $(now) - started ))" "the working-memory read graph <$wm_graph> was not listed ready after the kill"; return; }
+  drill_end drill-kill "$n" "$started" "killed node$n's daemon during working-memory writes; all $(acked_count "$acked") acknowledged writes were there after it, and their read graph was rebuilt and consistent"
 }
 
 # finalized_jobs <n>: the node's count of finalized publish jobs, or "" when it cannot be read.
@@ -771,12 +804,14 @@ members_lost() {
   ' "$1" "$2" "$3"
 }
 
-# rollback_steps <n> <endpoint>: the rollback drill's changes, with node <n> stopped and its store at <endpoint>.
+# rollback_steps <n> <endpoint> <version>: the rollback drill's changes, with node <n> stopped, its store at
+# <endpoint>, and <version> the earlier release.
 # It prints one line of four fields, outcome, detail, dropped and version, separated by the ASCII unit separator
 # (a field may be empty): an empty outcome means every step held. The caller restores the node whatever it prints.
 rollback_steps() {
-  local n="$1" endpoint="$2" partition_before partition_after members_before members_after members_earlier dropped version lost
+  local n="$1" endpoint="$2" target_version="$3" before partition_before partition_after members_before members_after members_earlier dropped version lost
   partition_before="$RESULTS/rows/rollback.partition-before.node$n"; partition_after="$RESULTS/rows/rollback.partition-after.node$n"
+  before="$partition_before"
   members_before="$RESULTS/rows/rollback.members-before.node$n.json"; members_after="$RESULTS/rows/rollback.members-after.node$n.json"
   members_earlier="$RESULTS/rows/rollback.members-earlier.node$n.json"
   # The store must show the partition and some asset data with the daemon down, or the checks below prove nothing.
@@ -785,13 +820,12 @@ rollback_steps() {
   [ -s "$partition_before" ] || { printf 'INCONCLUSIVE\037%s\037\037\n' "node$n's store showed no read-graph partition before the rollback step"; return; }
   grep -q 'did:dkg:context-graph:' "$members_before" \
     || { printf 'INCONCLUSIVE\037%s\037\037\n' "node$n's store holds no asset data, so keeping it cannot be checked"; return; }
-  # The step `dkg rollback` runs before it switches versions.
-  dropped="$(DKG_HOME="$DEVNET_DIR/node$n" node --input-type=module -e '
-    const { dropReadGraphsForRollback } = await import(process.argv[1]);
-    const dropped = await dropReadGraphsForRollback(process.env.DKG_HOME, (line) => console.error(line));
-    console.log(dropped ?? 0);
-  ' "$ROLLBACK_MODULE" 2>> "$RESULTS/drill-rollback.log")"
-  case "$dropped" in ''|*[!0-9]*|0) printf 'FAIL\037%s\037\037\n' "the rollback step dropped nothing on node$n (drill-rollback.log)"; return ;; esac
+  # The public rollback command readies the stopped node's stores for the earlier release, as `dkg rollback` does before
+  # it switches versions: it drops the read graphs and readies the inventory. The devnet then switches versions.
+  if ! dkg_cli "$n" rollback --stores-for "$target_version" >> "$RESULTS/drill-rollback.log" 2>&1; then
+    printf 'FAIL\037%s\037\037\n' "\`dkg rollback --stores-for $target_version\` failed on node$n (drill-rollback.log)"; return
+  fi
+  dropped="$(wc -l < "$before" | tr -d ' ')"
   # Whatever the step reports: the whole partition gone, and every asset graph holding exactly the triples it held.
   partition_graphs "$endpoint" "$partition_after" && member_graphs "$endpoint" "$members_after" \
     || { printf 'FAIL\037%s\037%s\037\n' "node$n's store could not be read after the rollback step" "$dropped"; return; }
@@ -813,19 +847,24 @@ rollback_steps() {
 }
 
 drill_rollback_and_forward() {
-  local n="$ROLLBACK_NODE" started endpoint restore result outcome detail dropped version lost
+  local n="$ROLLBACK_NODE" started endpoint restore result outcome detail dropped version lost rc version_dir target_version
   started="$(now)"
   [ "$ROLLBACK_FROM" != none ] || { record drill-rollback INCONCLUSIVE 0 "not run (READ_GRAPHS_ROLLBACK_FROM=none)"; return; }
   endpoint="$(store_endpoint "$n")"
   [ -n "$endpoint" ] || { record drill-rollback INCONCLUSIVE 0 "node$n's store cannot be read from outside its daemon, so the rollback cannot be checked: use a node on Blazegraph or an external SPARQL endpoint"; return; }
   read_graph_rows "$n" > "$RESULTS/rows/rollback.before.node$n" && [ -s "$RESULTS/rows/rollback.before.node$n" ] \
     || { record drill-rollback INCONCLUSIVE 0 "node$n has no read graph to drop"; return; }
-  # Build the earlier release first, while nothing has changed yet.
-  "$DEVNET_SH" prepare-version "$ROLLBACK_FROM" >> "$RESULTS/devnet-sh.log" 2>&1 \
-    || { record drill-rollback INCONCLUSIVE "$(( $(now) - started ))" "could not prepare $ROLLBACK_FROM (devnet-sh.log)"; return; }
+  # Build the earlier release first, while nothing has changed yet. Its node needs only the ABIs the repository holds,
+  # not compiled contracts (the devnet's chain runs from this checkout), so the contract compile is skipped.
+  DKG_SKIP_EVM_BUILD=1 "$DEVNET_SH" prepare-version "$ROLLBACK_FROM" > "$RESULTS/prepare-version.log" 2>&1; rc=$?
+  cat "$RESULTS/prepare-version.log" >> "$RESULTS/devnet-sh.log"
+  [ "$rc" = 0 ] || { record drill-rollback INCONCLUSIVE "$(( $(now) - started ))" "could not prepare $ROLLBACK_FROM (devnet-sh.log)"; return; }
+  version_dir="$(sed -n "s/.*prepared at \([^ ]*\).*/\1/p" "$RESULTS/prepare-version.log" | tail -1)"
+  target_version="$(node -e 'console.log(require(process.argv[1]).version)' "$version_dir/packages/cli/package.json" 2>/dev/null)"
+  [ -n "$target_version" ] || { record drill-rollback INCONCLUSIVE "$(( $(now) - started ))" "the version of $ROLLBACK_FROM could not be read (prepare-version.log)"; return; }
   restore="$(read_graphs_setting "$n")"
   stop_node "$n" || { record drill-rollback INCONCLUSIVE 0 "could not stop node$n"; return; }
-  result="$(rollback_steps "$n" "$endpoint")"
+  result="$(rollback_steps "$n" "$endpoint" "$target_version")"
   IFS="$(printf '\037')" read -r outcome detail dropped version <<EOF_RESULT
 $result
 EOF_RESULT
@@ -840,7 +879,7 @@ EOF_RESULT
   member_graphs "$endpoint" "$RESULTS/rows/rollback.members-forward.node$n.json" \
     && lost="$(members_lost "$RESULTS/rows/rollback.members-before.node$n.json" "$RESULTS/rows/rollback.members-forward.node$n.json" kept)" \
     || { record drill-rollback FAIL "$(( $(now) - started ))" "node$n's asset data after the forward start: ${lost:-unreadable}"; return; }
-  drill_end drill-rollback "$n" "$started" "dropped $dropped graphs, left no read-graph partition and every asset triple, ran $version, then rebuilt from nothing"
+  drill_end drill-rollback "$n" "$started" "\`dkg rollback --stores-for $target_version\` removed all $dropped read-graph partition graphs and kept every asset triple; ran $version, then rebuilt from nothing"
 }
 
 drill_flag_off_and_back() {
