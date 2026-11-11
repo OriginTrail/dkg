@@ -4,6 +4,7 @@ import {
 } from '../../packages/studio-contracts/dist/studio-evidence.js';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { normalizeComponentParameters } from './component-registry.mjs';
 import {
   expandStudioComponents,
   studioAuthoringDefinition,
@@ -217,13 +218,22 @@ export function createWorkflowComponents({
       reject('Save the authoring graph; composition snapshots are resolved by the service.');
     const selected = value?.nodes?.filter((n) => n.componentId === 'workflow-component') ?? [];
     if (!selected.length) return value;
-    parseStudioGraph(value);
+    // Validate structure first; named parameter targets may rely on native defaults.
+    parseStudioGraph({ ...value, inputs: undefined });
     if (
       value.schemaVersion ||
       value.nodes.some((n) => ['schedule', 'webhook', 'run-program'].includes(n.componentId))
     )
       reject('Workflow components currently support native manual workflows.');
     const [catalog, inventory] = await Promise.all([records(), capabilities()]);
+    value = { ...value, nodes: value.nodes.map(node => {
+      if (node.componentId === 'workflow-component') return node;
+      const descriptor = inventory.find(c => c.kaRef === node.kaRef && c.sourceHash === node.sourceHash
+        && c.descriptor.id === node.componentId)?.descriptor;
+      if (!descriptor) reject('A native component revision is unavailable.');
+      return { ...node, params: normalizeComponentParameters(descriptor, JSON.stringify(node.params)) };
+    }) };
+    parseStudioGraph(value);
     const pins = [
       ...new Map(
         selected.map((node) => [JSON.stringify([node.kaRef, node.sourceHash]), node]),
@@ -242,7 +252,9 @@ export function createWorkflowComponents({
     const expanded = normalize(expandStudioComponents(value, components).definition);
     // Check the same persisted representation the browser reads before native save
     // can produce effects. Unsupported normalization must never poison inventory.
-    return parseStudioDefinition({ ...expanded, composition: { definition: value, components } });
+    return parseStudioDefinition({ ...expanded, composition: {
+      definition: { ...value, name: expanded.name }, components,
+    } });
   }
   async function save(value, authorize) {
     let definition;

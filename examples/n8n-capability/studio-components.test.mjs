@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import { assertStudioSourceBudget, STUDIO_SOURCE_LIMIT } from './studio-source-budget.mjs';
 import assert from 'node:assert/strict';
 import { createWorkflowComponents } from './studio-components.mjs';
+import { normalizeStudio } from './studio-definition.mjs';
+import { environment, catalog } from './test-support/studio-service-fixture.mjs';
 import {
   parseStudioDefinition,
   parseStudioGraph,
@@ -84,7 +86,7 @@ function fixture() {
     normalize: (d) => {
       if (state.obsolete && d.nodes.some((n) => n.params.profileRevision === 'old'))
         throw Error('Obsolete profile revision');
-      return d;
+      return state.normalize ? state.normalize(d) : d;
     },
     persist: async (_a, _g, _name, _owner, quads, _h, _layer, authorize) => {
       writes.push({ graphId: _g, owner: _owner, layer: _layer });
@@ -550,4 +552,41 @@ test('rejects malformed export requests before workflow or catalog reads', async
   assert.equal(f.reads.length, 0);
   assert.equal(f.queries.length, 0);
   assert.equal(f.writes.length, 0);
+});
+
+test('mixed native/reusable defaults survive native save and reopen', async () => {
+  const f = fixture(), runtime = environment();
+  try {
+    f.state.normalize = normalizeStudio;
+    f.leaf.descriptor = catalog.find(c => c.descriptor.id === 'edit-fields').descriptor;
+    f.original.definition = normalizeStudio(f.original.definition);
+    const component = await f.service.publish(f.request);
+    const parent = { ...definition, name: ' Defaulted composition ', entryId: 'before',
+      nodes: [
+        { ...definition.nodes[0], id: 'before', params: {} },
+        { ...definition.nodes[0], componentId: 'workflow-component', kaRef: component.kaRef,
+          sourceHash: component.sourceHash, params: { fields: { city: 'Belgrade' } } },
+      ], edges: [{ from: 'before', to: 'set', output: 0, input: 0 }],
+      inputs: [{ name: 'keep', label: 'Keep fields', required: false,
+        spec: { type: 'string', label: 'Keep fields', default: 'yes', maxLength: 256, options: ['yes', 'no'] },
+        targets: [{ nodeId: 'before', parameter: 'keepInput' }] }] };
+    const prepared = (await f.service.save(parent)).definition;
+    assert.deepEqual(parent.nodes[0].params, {}, 'Admission must not mutate the submitted draft');
+    assert.deepEqual(prepared.composition.definition.nodes[0].params, { fields: { team: 'DKG' }, keepInput: 'yes' });
+    assert.equal(prepared.composition.definition.name, 'Defaulted composition');
+    runtime.setCatalog([{ ...catalog.find(c => c.descriptor.id === 'edit-fields'), kaRef: native.kaRef }]);
+    const saved = await runtime.service.save(prepared);
+    runtime.restart();
+    const reopened = (await runtime.service.get(saved.kaRef, saved.sourceHash)).workflow;
+    assert.deepEqual(reopened.definition, prepared);
+    assert.deepEqual(parseStudioDefinition(reopened.definition), prepared);
+    assert.deepEqual(normalizeStudio(prepared), prepared);
+    await runtime.service.run({ kaRef: saved.kaRef, sourceHash: saved.sourceHash, itemsJson: '[{}]',
+      invocationId: '123e4567-e89b-42d3-a456-426614174021', arguments: {} });
+    assert.equal(runtime.invocations.length, 1);
+    const tampered = structuredClone(prepared);
+    tampered.composition.definition.nodes[0].params.fields = { forged: true };
+    assert.throws(() => parseStudioDefinition(tampered));
+    assert.throws(() => normalizeStudio(tampered));
+  } finally { runtime.close(); }
 });

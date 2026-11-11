@@ -112,7 +112,6 @@ export function parseStudioReusableComponent(value: unknown): StudioReusableComp
     !bounded(recipe.workflow.kaRef, 240) ||
     !recipe.workflow.kaRef.startsWith('urn:demo:nos:studio:') ||
     !sha(recipe.workflow.sourceHash) ||
-    definition.schemaVersion !== undefined ||
     definition.nodes.some(
       (n) =>
         isWorkflowComponent(n) || ['schedule', 'webhook', 'run-program'].includes(n.componentId),

@@ -26,15 +26,6 @@ export type StudioGraph = {
   entryId: string;
   nodes: StudioBlock[];
   edges: StudioEdge[];
-  /** Document adapter binding; native-only graphs retain their existing binding. */
-  schemaVersion?: 1;
-  target?: {
-    jobId: string;
-    peerId: string;
-    nodeBuild: string;
-    graphName: string;
-    layer: 'working-memory' | 'verifiable-memory';
-  };
   groups?:
     { id: string; name: string; tone: 'purple' | 'teal' | 'amber' | 'neutral' }[] | undefined;
 };

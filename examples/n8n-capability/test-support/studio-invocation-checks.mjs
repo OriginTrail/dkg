@@ -1,38 +1,12 @@
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
-import { runInNewContext } from 'node:vm';
-import ts from 'typescript';
+import { programAdmission } from './studio-program-vm.mjs';
 import { createHash } from 'node:crypto';
 import { studioInputValidationSource } from '../../../packages/studio-contracts/dist/studio-inputs.js';
 import { expandStudioComponents } from '../../../packages/studio-contracts/dist/studio-composition.js';
 
-// Evaluate the actual compiler output unchanged; the VM sees only fixture invocation data.
-function nativeExpression(value, packet, item = {}) {
-  assert.ok(value.startsWith('={{ ') && value.endsWith(' }}'));
-  const parsed = [];
-  const result = runInNewContext(
-    value.slice(3, -2),
-    {
-      $json: item,
-      $input: { all: () => [{ json: item }] },
-      $: (name) => {
-        assert.equal(name, 'Receive input');
-        return { first: () => ({ json: { body: { input: packet } } }) };
-      },
-      JSON: {
-        stringify: JSON.stringify,
-        parse: (text) => {
-          const result = JSON.parse(text);
-          parsed.push(result);
-          return result;
-        },
-      },
-    },
-    { timeout: 1000 },
-  );
-  return { result: JSON.parse(JSON.stringify(result)), parsed };
-}
+import { nativeExpression } from './studio-native-expression.mjs';
 function parameter(compiled, name, key) {
   const node = compiled.workflow.nodes.find((node) => node.name === name);
   assert.ok(node, name);
@@ -84,7 +58,7 @@ export async function verifyInvocation(root) {
     const saved = await f.service.save(graph);
     const source = f.sources.get(saved.kaRef).source;
     const compiled = runtime.readStudio(source);
-    assert.equal(compiled.compiler, 6);
+    assert.equal(compiled.compiler, 8);
     assert.deepEqual(compiled.definition.inputs, graph.inputs);
     const pin = [
       saved.kaRef,
@@ -135,7 +109,7 @@ export async function verifyInvocation(root) {
       // Observe JSON parsing without replacing or modifying any generated source.
       for (const node of graph.nodes) {
         const checked = nativeExpression(
-          parameter(emitted, `Block ${node.id} check 0`, 'jsonOutput'),
+          emitted, parameter(emitted, `Block ${node.id} check 0`, 'jsonOutput'),
           packet,
           { original: 'kept' },
         );
@@ -149,11 +123,11 @@ export async function verifyInvocation(root) {
         assert.deepEqual(checked.result, { original: 'kept' });
       }
       assert.equal(
-        nativeExpression(parameter(emitted, 'Block n1', 'maxItems'), packet).result,
+        nativeExpression(emitted, parameter(emitted, 'Block n1', 'maxItems'), packet).result,
         args.count,
       );
       assert.deepEqual(
-        nativeExpression(parameter(emitted, 'Block n0', 'jsonOutput'), packet, { original: 'kept' })
+        nativeExpression(emitted, parameter(emitted, 'Block n0', 'jsonOutput'), packet, { original: 'kept' })
           .result,
         graph.nodes[0].params.keepInput === 'yes'
           ? { original: 'kept', ...args.fields }
@@ -175,30 +149,12 @@ export async function verifyInvocation(root) {
       );
     assert.equal(f.invocations.length, before);
 
-    // Execute only the trusted generated Program with a counted invoke_tool seam.
-    const sourceWithoutImport = source.replace(
-      "import { invoke_tool } from '@origintrail-official/dkg-graph-computer/program';",
-      '',
-    );
-    const js = ts.transpileModule(sourceWithoutImport, {
-      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-    }).outputText;
-    let effects = 0;
-    const context = {
-      exports: {},
-      invoke_tool: (_tool, value) => {
-        effects++;
-        return value;
-      },
-    };
-    runInNewContext(js, context);
+    const guest = programAdmission(source);
     const packet = f.invocations[0].inputs[0];
-    assert.deepEqual(JSON.parse(JSON.stringify(context.exports.run(packet))), packet);
-    assert.equal(effects, 1);
-    assert.throws(() =>
-      context.exports.run({ ...packet, argumentsJson: '{"fields":{},"count":99}' }),
-    );
-    assert.equal(effects, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(guest.run(packet))), packet);
+    assert.equal(guest.calls.length, 1);
+    assert.throws(() => guest.run({ ...packet, argumentsJson: '{"fields":{},"count":99}' }));
+    assert.equal(guest.calls.length, 1);
     assert.throws(
       () => invocationInput(compiled.definition, { fields: { x: 'x'.repeat(3000) } }, packet),
       /parameter|bounded|Fields/i,
@@ -239,9 +195,9 @@ export async function verifyInvocation(root) {
       arguments: args[0],
     };
     await mcp.run(request, actor);
-    await mcp.run(request, actor);
+    await mcp.run({ ...request, arguments: { fields: { city: 'Belgrade' }, count: 2 } }, actor);
     assert.equal(dispatches, 1);
-    await assert.rejects(mcp.run({ ...request, arguments: args[1] }, actor));
+    await assert.rejects(mcp.run({ ...request, arguments: args[1] }, actor), { code: 'STUDIO_RUN_KEY_CONFLICT' });
     assert.equal(dispatches, 1);
     await assert.rejects(mcp.run({ ...request, runKey: 'invalid', arguments: {} }, actor), {
       code: 'STUDIO_INVALID_ARGUMENTS',
@@ -351,7 +307,7 @@ export async function verifyInvocation(root) {
       const item = descriptor.sampleItems[0] ?? {};
       for (let port = 0; port < (descriptor.inputs ?? 1); port++) {
         const value = nativeExpression(
-          parameter(emitted, `Block ${nodeId} check ${port}`, 'jsonOutput'),
+          emitted, parameter(emitted, `Block ${nodeId} check ${port}`, 'jsonOutput'),
           { argumentsJson: '{"status":"approved"}' },
           item,
         ).result;
@@ -369,22 +325,32 @@ export async function verifyInvocation(root) {
       graphId,
       owner,
     });
+    const routeProgram = programAdmission(f.sources.get(routed.kaRef).source);
     for (const [status, output] of [
       ['approved', 0],
       ['rejected', 1],
     ]) {
-      const packet = { argumentsJson: JSON.stringify({ status }) };
+      const packet = { itemsJson: '[{"other":7}]', paramsJson: JSON.stringify(nativeRoute.definition.nodes[0].params),
+        executionId: '', argumentsJson: JSON.stringify({ status }) };
+      assert.deepEqual(JSON.parse(JSON.stringify(routeProgram.run(packet))), packet);
       const row = nativeExpression(
-        parameter(nativeRoute, 'Block n0 check 0', 'jsonOutput'),
+        nativeRoute, parameter(nativeRoute, 'Block n0 check 0', 'jsonOutput'),
         packet,
         { other: 7 },
       ).result;
       assert.deepEqual(row, { other: 7, status });
       assert.equal(
-        nativeExpression(parameter(nativeRoute, 'Block n0', 'output'), packet, row).result,
+        nativeExpression(nativeRoute, parameter(nativeRoute, 'Block n0', 'output'), packet, row).result,
         output,
       );
     }
+    assert.equal(routeProgram.calls.length, 2);
+    for (const argumentsJson of ['{}', '{"status":1}', '{"status":"{{ $json.secret }}"}',
+      JSON.stringify({ status: 'x'.repeat(41) })]) {
+      assert.throws(() => routeProgram.run({ itemsJson: '[{}]', executionId: '',
+        paramsJson: JSON.stringify(nativeRoute.definition.nodes[0].params), argumentsJson }));
+    }
+    assert.equal(routeProgram.calls.length, 2, 'Invalid data-field arguments cannot dispatch a tool');
     assert.deepEqual(nativeRoute.definition.nodes[0].params, {
       field: 'status',
       equals: 'approved',
@@ -442,12 +408,12 @@ export async function verifyInvocation(root) {
       ]) {
         const packet = { argumentsJson: JSON.stringify(dynamic ? { decision } : {}) };
         const row = nativeExpression(
-          parameter(emitted, `Block ${inner.id} check 0`, 'jsonOutput'),
+          emitted, parameter(emitted, `Block ${inner.id} check 0`, 'jsonOutput'),
           packet,
         ).result;
         assert.deepEqual(row, { status: dynamic ? decision : 'approved' });
         assert.equal(
-          nativeExpression(parameter(emitted, `Block ${inner.id}`, 'output'), packet, row).result,
+          nativeExpression(emitted, parameter(emitted, `Block ${inner.id}`, 'output'), packet, row).result,
           dynamic ? branch : 0,
         );
       }

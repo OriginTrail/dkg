@@ -7,10 +7,11 @@ import { environment, definition, graphId, owner } from './test-support/studio-s
 import { expandStudioComponents } from '../../packages/studio-contracts/dist/studio-composition.js';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { nativeExpression } from './test-support/studio-native-expression.mjs';
 import { namedMcpInput } from './studio-inputs.mjs';
 
-test('compiler 6 file snapshots retain their original source, KA and native pins', () => {
-  const { compiled, sourceHash } = JSON.parse(readFileSync(new URL('./test-support/compiler6-file-snapshot.json', import.meta.url)));
+for (const revision of ['compiler6-file', 'compiler7-data']) test(`${revision} snapshots retain their original source, KA and native pins`, () => {
+  const { compiled, sourceHash } = JSON.parse(readFileSync(new URL(`./test-support/${revision}-snapshot.json`, import.meta.url)));
   const source = studioProgramSource(compiled);
   assert.equal(createHash('sha256').update(source).digest('hex'), sourceHash);
   assert.deepEqual(readStudio(source), compiled);
@@ -32,10 +33,7 @@ function program(source) {
 }
 function nativeGuard(compiled, packet, row = {}) {
   const guard = compiled.workflow.nodes.find(node => node.name === `Block ${compiled.definition.entryId} check 0`);
-  return plain(runInNewContext(guard.parameters.jsonOutput.slice(3, -2), {
-    $json: row, $input: { all: () => [{ json: row }] },
-    $: () => ({ first: () => ({ json: { body: { input: packet } } }) }),
-  }));
+  return nativeExpression(compiled, guard.parameters.jsonOutput, packet, row).result;
 }
 for (const mode of ['named', 'fixed', 'composed-fixed']) test(`${mode} entry file binding survives save/reopen and validates before dispatch`, async () => {
   const f = environment();
@@ -53,7 +51,7 @@ for (const mode of ['named', 'fixed', 'composed-fixed']) test(`${mode} entry fil
     }
     const saved = await f.service.save(body), source = f.sources.get(saved.kaRef).source;
     const compiled = readStudio(source), emitted = compileStudio(body, { fixture: true, graphId, owner });
-    assert.equal(compiled.compiler, 7);
+    assert.equal(compiled.compiler, mode === 'fixed' ? 7 : 8);
     f.restart();
     assert.deepEqual((await f.service.get(saved.kaRef, saved.sourceHash)).workflow, saved);
     const guest = program(source);

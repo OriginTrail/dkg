@@ -66,7 +66,7 @@ function noWrite(h: any) {
   expect(h.controls.callbackErrors.map((e: any) => e.code)).toEqual(['PROGRAM_AUTHORITY_REVOKED', 'PROGRAM_AUTHORITY_REVOKED']);
 }
 
-it('compiler 7 bound-entry input retains signed invocation identity and pins across replay and reopen', async () => {
+it('compiler 8 bound-entry input retains signed invocation identity and pins across replay and reopen', async () => {
   const { f, h, workflow, invocation } = await studio({ namedInput: true });
   try {
     const original = await f.manager.programs.getSource({ graphId: graph, programIri: workflow.kaRef, programLayer: 'wm' });

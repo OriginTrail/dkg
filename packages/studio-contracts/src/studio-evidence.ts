@@ -204,25 +204,10 @@ export function parseStudioCapability(v: unknown): StudioCapability {
   }
   return v as StudioCapability;
 }
-export function parseStudioDefinition(
-  v: unknown,
-  draft = false,
-  allowDocuments = false,
-  allowLibrary = false,
-): StudioDefinition {
-  return validateStudioDefinition(v, draft, allowDocuments, allowLibrary, false);
-}
-
-function validateStudioDefinition(
-  v: unknown,
-  draft: boolean,
-  allowDocuments: boolean,
-  allowLibrary: boolean,
-  archived: boolean,
-): StudioDefinition {
+export function parseStudioDefinition(v: unknown, draft = false): StudioDefinition {
   if (!studioRecord(v)) return invalid();
   const { composition, ...body } = v;
-  const graph = parseStudioGraph(body, draft, allowDocuments, allowLibrary, archived);
+  const graph = parseStudioGraph(body, draft);
   if (composition !== undefined) {
     if (!studioRecord(composition) || !Array.isArray(composition.components)) return invalid();
     const authored = parseStudioGraph(composition.definition);
@@ -267,13 +252,7 @@ export function parseStudioWorkflow(v: unknown): StudioWorkflow {
     typeof v.activation.active !== 'boolean'
   )
     return invalid();
-  validateStudioDefinition(
-    v.definition,
-    false,
-    false,
-    false,
-    v.approved === false && typeof v.unavailableReason === 'string',
-  );
+  parseStudioDefinition(v.definition);
   return v as StudioWorkflow;
 }
 export function parseStudioOutput(v: unknown): StudioOutput {

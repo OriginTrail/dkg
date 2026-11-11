@@ -217,3 +217,14 @@ it('distinguishes input-record fields from settings with the same name', () => {
       ),
     ).toThrow();
 });
+
+it('the native graph boundary rejects application adapter metadata and identities', () => {
+  const native = graph();
+  expect(parseStudioGraph(native)).toEqual(native);
+  for (const extra of [{ schemaVersion: 1 }, { target: {} }])
+    expect(() => parseStudioGraph({ ...native, ...extra }, true)).toThrow();
+  for (const kaRef of ['urn:nos:workflow-block:document:v1', 'urn:nos:studio-library:input:v1'])
+    expect(() => parseStudioGraph({ ...native, nodes: [{ ...native.nodes[0], kaRef }] }, true)).toThrow();
+  for (const x of [-1, 0.5])
+    expect(() => parseStudioGraph({ ...native, nodes: [{ ...native.nodes[0], x }] }, true)).toThrow();
+});

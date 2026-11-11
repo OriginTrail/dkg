@@ -1,3 +1,6 @@
+import { studioInputGuestSource as nativeGuestSource } from './studio-input-guest-data-v2.js';
+import { studioInputGuestSource as parameterGuestSource } from './studio-input-guest-parameters-v1.js';
+import { studioInputGuestSource as dataGuestSource } from './studio-input-guest-data-v1.js';
 import type { StudioGraph } from './workflow-definition.js';
 import {
   studioInputsSchema,
@@ -210,17 +213,10 @@ export function studioInputSchema(inputs: StudioComponentInput[]) {
   };
 }
 
-/** Trusted helper source embedded by the native compiler; user data stays in literals. */
-export function studioInputValidationSource(dataTargets = false) {
-  // Existing compiler-6 KA source is immutable, including the embedded helper text.
-  // Emit its original predicate when the graph uses only parameter bindings.
-  const resolver = dataTargets
-    ? resolveStudioInputParams.toString()
-    : resolveStudioInputParams.toString().replace("target.kind !== 'input' && ", '');
-  return `const fail = message => { throw new Error(message); };
-const studioRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
-${canonicalJson.toString()}
-${validateComponentValue.toString()}
-${normalizeStudioArguments.toString()}
-${resolver}`;
+/** Immutable guest ABI selected by the compiler revision, independent of host formatting. */
+export function studioInputValidationSource(revision: 'parameters-v1' | 'data-v1' | 'data-v2' = 'parameters-v1') {
+  if (revision === 'parameters-v1') return parameterGuestSource;
+  if (revision === 'data-v1') return dataGuestSource;
+  if (revision === 'data-v2') return nativeGuestSource;
+  throw new Error('Unknown Studio input guest revision.');
 }
