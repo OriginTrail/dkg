@@ -1192,17 +1192,20 @@ describe('a store restored to an earlier state', () => {
     await expectUnion(adapter, layer, fixture, vm);
   });
 
-  it('keeps a row published while its backend restarted for a start-up mark, and ends the build', async () => {
-    const { adapter, fixture, layer, context, dataDir } = await open();
+  it('keeps a row published while its backend restarted for a start-up mark, and ends the build out of service', async () => {
+    const { adapter, fixture, layer, store, context, dataDir } = await open();
     useReadGraphMarkJournal(layer.runtime, dataDir);
     let recovery = { generation: 1, ready: true };
     registerStoreRecoveryGeneration(adapter, () => recovery);
     const [vm] = fixture.keys as [ReadGraphKey];
     const { wholeVm } = fixture.readGraphs;
     const publishing = `<${wholeVm}> <${READ_GRAPH_STATE_PREDICATES.state}> "ready"`;
-    adapter.onUpdate = (sparql) => {
-      // The restart lands after the check before the publication, while its request is on its way.
-      if (sparql.split('\n').some((line) => line.startsWith('INSERT {') && line.includes(publishing))) recovery = { generation: 2, ready: true };
+    adapter.onUpdate = async (sparql) => {
+      if (!sparql.split('\n').some((line) => line.startsWith('INSERT {') && line.includes(publishing))) return;
+      // The restart lands after the check before the publication, while its request is on its way, and a query
+      // sees it first: the publication's own check then finds the restart already seen.
+      recovery = { generation: 2, ready: true };
+      await store.query('ASK { ?s ?p ?o }');
     };
     expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'lost' });
     adapter.onUpdate = undefined;
