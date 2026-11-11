@@ -81,7 +81,7 @@ export function MemoryStackView() {
           <div className="v10-memstack-colheads">
             <div className="v10-memstack-colhead project" />
             {LAYERS.map(L => (
-              <div key={L.key} className={`v10-memstack-colhead v10-layer-tone-text layer-tone-${L.short.toLowerCase()}`}>
+              <div key={L.key} className={`v10-memstack-colhead v10-layer-tone-text layer-tone-${L.tabPrefix}`}>
                 <span className="v10-memstack-colhead-icon">{L.icon}</span>
                 <span className="v10-memstack-colhead-title">{L.title}</span>
                 <span className="v10-memstack-colhead-desc">{L.desc}</span>
