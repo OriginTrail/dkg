@@ -8,6 +8,7 @@ import { asChangelogReader, createManagedOxigraphRuntimeStoreConfigV1 } from '@o
 const wiring = vi.hoisted(() => ({
   config: {} as Record<string, unknown>,
   managed: null as null | { storeConfig: unknown; handle: { stop: () => Promise<void> } },
+  started: 0,
 }));
 
 vi.mock('../src/config.js', async (importOriginal) => ({
@@ -17,7 +18,7 @@ vi.mock('../src/config.js', async (importOriginal) => ({
 
 vi.mock('../src/daemon/oxigraph-managed.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../src/daemon/oxigraph-managed.js')>(),
-  startManagedOxigraph: async () => wiring.managed,
+  startManagedOxigraph: async () => { wiring.started += 1; return wiring.managed; },
 }));
 
 import { dropReadGraphsForRollback, openStoppedNodeStore } from '../src/update/rollback-read-graphs.js';
@@ -39,6 +40,7 @@ beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'dkg-rollback-read-graphs-'));
   wiring.config = {};
   wiring.managed = null;
+  wiring.started = 0;
 });
 afterEach(async () => { await rm(dataDir, { recursive: true, force: true }); });
 
@@ -102,6 +104,21 @@ describe('opening a stopped node store for the rollback', () => {
     wiring.config = { store: { backend: 'oxigraph', options: { path } } };
     await expect(dropReadGraphsForRollback(dataDir, () => undefined)).resolves.toBe(0);
     expect(mayHoldReadGraphPartitions(dataDir)).toBe(false);
+  });
+
+  it('refuses a managed Oxigraph directory it cannot match to the node\'s before it starts the server, and keeps the note', async () => {
+    writeFileSync(join(dataDir, 'read-graph-partitions'), '');
+    wiring.managed = { storeConfig: { backend: 'sparql-http' }, handle: { stop: vi.fn(async () => undefined) } };
+    wiring.config = { store: { backend: 'oxigraph-server', options: { location: 'db' } } };
+    await expect(dropReadGraphsForRollback(dataDir, () => undefined)).rejects.toThrow(/store\.options\.location "db" is relative/);
+    wiring.config = { store: { backend: 'oxigraph-server', options: { location: join(dataDir, 'moved-db') } } };
+    await expect(dropReadGraphsForRollback(dataDir, () => undefined)).rejects.toThrow(/does not exist/);
+    expect(wiring.started).toBe(0);
+    expect(mayHoldReadGraphPartitions(dataDir)).toBe(true);
+    // The default directory in the data directory is the server's own, and starts as before.
+    wiring.config = { store: { backend: 'oxigraph-server', options: {} } };
+    await expect(openStoppedNodeStore(dataDir, () => undefined)).rejects.toThrow('no authenticated control plane');
+    expect(wiring.started).toBe(1);
   });
 
   it('opens the default embedded store in the data directory when none is configured', async () => {

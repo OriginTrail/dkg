@@ -27,24 +27,38 @@ export type OpenStoppedNodeStore = (dataDir: string, log: (message: string) => v
 /** Embedded backends whose store is a file or directory that the configuration names. */
 const EMBEDDED_STORE_BACKENDS: ReadonlySet<string> = new Set(['oxigraph', 'oxigraph-worker', 'oxigraph-persistent']);
 
+/** The configured location of a store this process opens itself: an embedded store's path, a managed server's directory. */
+function configuredStoreLocation(config: TripleStoreConfig): { readonly option: string; readonly location: string } | undefined {
+  const options = config.options as { readonly path?: unknown; readonly location?: unknown } | undefined;
+  if (EMBEDDED_STORE_BACKENDS.has(config.backend) && typeof options?.path === 'string' && options.path !== '') {
+    return { option: 'store.options.path', location: options.path };
+  }
+  if (config.backend === 'oxigraph-server' && typeof options?.location === 'string' && options.location.trim() !== '') {
+    return { option: 'store.options.location', location: options.location };
+  }
+  return undefined;
+}
+
 /**
- * Refuse a configured embedded store whose location this process cannot match
- * to the daemon's. A relative path resolves against each process's own working
- * directory, and a path with nothing behind it would open a new, empty store:
- * either way the drop would find no read graph while the node's store keeps
- * them. A store without a path holds nothing once the daemon stops.
+ * Refuse a configured store location that this process cannot match to the
+ * daemon's: an embedded store's path, or the directory of the Oxigraph server
+ * the node manages. A relative location resolves against each process's own
+ * working directory, and one with nothing behind it would open a new, empty
+ * store: either way the drop would find no read graph while the node's store
+ * keeps them. A store without a configured location is the data directory's,
+ * or holds nothing once the daemon stops.
  */
 export function assertStoppedStoreLocation(config: TripleStoreConfig): void {
-  if (!EMBEDDED_STORE_BACKENDS.has(config.backend)) return;
-  const path = (config.options as { readonly path?: unknown } | undefined)?.path;
-  if (typeof path !== 'string' || path === '') return;
-  if (!isAbsolute(path)) {
-    throw new Error(`The configured store path "${path}" is relative, so it cannot be matched to the store the node used. `
-      + 'Set store.options.path to an absolute path in config.json, then run the rollback again.');
+  const configured = configuredStoreLocation(config);
+  if (!configured) return;
+  const { option, location } = configured;
+  if (!isAbsolute(location)) {
+    throw new Error(`The configured ${option} "${location}" is relative, so it cannot be matched to the store the node used. `
+      + `Set ${option} to an absolute path in config.json, then run the rollback again.`);
   }
-  if (!existsSync(path)) {
-    throw new Error(`The configured store ${path} does not exist, so its read graphs cannot be dropped. `
-      + 'Set store.options.path to the store the node used, then run the rollback again.');
+  if (!existsSync(location)) {
+    throw new Error(`The configured store ${location} does not exist, so its read graphs cannot be dropped. `
+      + `Set ${option} to the store the node used, then run the rollback again.`);
   }
 }
 
@@ -55,6 +69,9 @@ export function assertStoppedStoreLocation(config: TripleStoreConfig): void {
  */
 export const openStoppedNodeStore: OpenStoppedNodeStore = async (dataDir, log) => {
   const config = await loadConfig();
+  const configured = config.store as TripleStoreConfig | undefined;
+  // Before anything is started or opened: a location this process cannot match to the node's is refused.
+  if (configured) assertStoppedStoreLocation(configured);
   const managed = await startManagedOxigraph({ config, dataDir, log });
   if (managed) {
     try {
@@ -65,8 +82,6 @@ export const openStoppedNodeStore: OpenStoppedNodeStore = async (dataDir, log) =
       throw error;
     }
   }
-  const configured = config.store as TripleStoreConfig | undefined;
-  if (configured) assertStoppedStoreLocation(configured);
   const store = await createTripleStore({
     ...(configured ?? { backend: 'oxigraph-worker', options: { path: join(dataDir, 'store.nq') } }),
     changelog: false,
