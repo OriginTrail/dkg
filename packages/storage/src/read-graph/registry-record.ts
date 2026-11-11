@@ -26,8 +26,11 @@
 
 import { assertSafeIri, readGraphStateGraphIri, validateSubGraphName, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
+import { noteReadGraphPartitionsOfRuntime } from './data-directories.js';
+import { noteStoreMayHoldReadGraphPartitions } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { readGraphMembership, type ReadGraphRegistrySnapshot, type WorkingMemoryIdentityRule } from './membership.js';
+import { RECORDED_REGISTRIES as RECORDED } from './recorded-registries.js';
 import { sameRegistry } from './registry-recognition.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
 
@@ -87,7 +90,11 @@ export function readGraphMembershipDiffers(
   return JSON.stringify(readGraphMembership(key, before, identity)) !== JSON.stringify(readGraphMembership(key, after, identity));
 }
 
-const RECORDED = new WeakMap<ReadGraphBackendRuntime, Map<string, ReadGraphRegistrySnapshot>>();
+
+/** Forget what the stored records hold, so each is written again: the store may hold older ones. */
+export function forgetReadGraphRegistryRecords(runtime: ReadGraphBackendRuntime): void {
+  RECORDED.delete(runtime);
+}
 
 /** Note what a context graph's stored record holds, as start-up read or wrote it. */
 export function noteReadGraphRegistryRecord(runtime: ReadGraphBackendRuntime, snapshot: ReadGraphRegistrySnapshot): void {
@@ -102,16 +109,24 @@ export function noteReadGraphRegistryRecord(runtime: ReadGraphBackendRuntime, sn
 /**
  * Record a context graph's registry, unless the stored record already holds
  * it. The caller holds a registry every ready row of the context graph follows.
+ * The record lives in the read-graph partition, so before it is written the
+ * store, `dataDir` where there is one, and each of the runtime's data
+ * directories (`./data-directories.ts`) note that the partition may exist:
+ * unscoped reads leave it out from then on, across a restart too, and a
+ * rollback from any of those directories drops it.
  */
 export async function recordReadGraphRegistry(
   store: TripleStore,
   runtime: ReadGraphBackendRuntime,
   snapshot: ReadGraphRegistrySnapshot,
   options: QueryOptions = {},
+  dataDir?: string,
 ): Promise<void> {
   const recorded = RECORDED.get(runtime)?.get(snapshot.contextGraphId);
   if (recorded !== undefined && sameRegistry(recorded, snapshot)) return;
   if (!store.update) throw new Error('This store cannot record a read-graph registry: it has no update()');
+  noteReadGraphPartitionsOfRuntime(runtime, dataDir);
+  noteStoreMayHoldReadGraphPartitions(store);
   await store.update(readGraphRegistryRecordUpdate(snapshot), { ...options, source: 'storage.readGraphRegistryRecord' });
   if (encodeRecord(snapshot) !== undefined) noteReadGraphRegistryRecord(runtime, snapshot);
 }

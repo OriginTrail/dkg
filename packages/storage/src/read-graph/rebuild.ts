@@ -42,7 +42,7 @@ import {
 import { isReadGraphStateGraph } from '../graph-enumeration-visibility.js';
 import { readGraphInventoryByPrefix } from '../graph-inventory-materialization.js';
 import { assertGraphCatalogWithinInternalLimit, readCompleteGraphCatalog } from '../graph-catalog-internal-limit.js';
-import { noteReadGraphPartitions } from '../read-graph-partition-marker.js';
+import { noteReadGraphPartitionsOfRuntime } from './data-directories.js';
 import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
@@ -51,6 +51,7 @@ import { matchesGraphNameTest, readGraphMembership, workingMemoryIdentityRule, t
 import { readGraphLayerOf, readGraphRuntimeOf } from './read-graph-store.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry, type ReadGraphRegistryFact } from './registry-recognition.js';
 import { noteUnstoredReadGraphMark } from './mark-journal.js';
+import { invalidateReadGraphRuntime, readGraphRecoveryGeneration, syncReadGraphRuntimeWithRecovery } from './recovery.js';
 import { recordReadGraphRegistry } from './registry-record.js';
 import { ReadGraphLocks, type InMemoryReadGraphStateMirror, type ReadGraphBackendRuntime } from './runtime.js';
 import {
@@ -333,7 +334,7 @@ export async function refreshReadGraphRegistry(context: ReadGraphJobContext, con
     // The same membership can come from other facts, and the layer predicts later writes from the facts.
     const cachedFacts = runtime.registries.facts(contextGraphId);
     if (cached !== undefined && !changed && cachedFacts !== undefined && sameFacts(cachedFacts, facts)) {
-      await recordReadGraphRegistry(target, runtime, fresh, jobOptions(context));
+      await recordReadGraphRegistry(target, runtime, fresh, jobOptions(context), context.dataDir);
       return false;
     }
     const affected = runtime.mirror.rows().map((row) => row.readGraph)
@@ -343,7 +344,7 @@ export async function refreshReadGraphRegistry(context: ReadGraphJobContext, con
       if (changed) for (const readGraph of affected) await new ReadGraphJob(context, readGraph, 'mark').markDirtyHeld();
       runtime.registries.set(fresh, facts);
       // After the marks: every ready row of the context graph follows this registry.
-      await recordReadGraphRegistry(target, runtime, fresh, jobOptions(context));
+      await recordReadGraphRegistry(target, runtime, fresh, jobOptions(context), context.dataDir);
       return true;
     });
     if (installed) return changed;
@@ -441,6 +442,8 @@ class ReadGraphJob {
   private batches = 0;
   /** Whether this job replaced a damaged row. */
   replacedRow = false;
+  /** The runtime's recovery generation when the job began (`./recovery.ts`). */
+  private readonly recovery: number | undefined;
 
   constructor(private readonly context: ReadGraphJobContext, readonly readGraph: string, private readonly kind: ReadGraphJobKind) {
     const layer = readGraphLayerOf(context.store);
@@ -450,6 +453,8 @@ class ReadGraphJob {
       throw new ReadGraphJobError('This store\'s adapter cannot maintain read graphs');
     }
     this.runtime = layer.runtime;
+    syncReadGraphRuntimeWithRecovery(context.store, this.runtime);
+    this.recovery = readGraphRecoveryGeneration(context.store, this.runtime);
     this.maintenance = readGraphPartitionMaintenanceStore(context.store);
     if (!this.maintenance.update) throw new ReadGraphJobError('This store cannot build read graphs: it has no update()');
     this.versions = context.versions ?? CURRENT_READ_GRAPH_VERSIONS;
@@ -565,7 +570,7 @@ class ReadGraphJob {
   }
 
   noteMayHoldPartitions(): void {
-    if (this.context.dataDir !== undefined) noteReadGraphPartitions(this.context.dataDir);
+    noteReadGraphPartitionsOfRuntime(this.runtime, this.context.dataDir);
     noteStoreMayHoldReadGraphPartitions(this.maintenance);
   }
 
@@ -674,10 +679,16 @@ class ReadGraphJob {
   }
 
   /** One batch: one lock hold, sent only while the row is still the job's. `false` when it is not. */
+  /** Whether the store went back to an earlier state since the job began: its progress may be gone, and the mirror is invalidated. */
+  restarted(): boolean {
+    syncReadGraphRuntimeWithRecovery(this.context.store, this.runtime);
+    return this.recovery !== readGraphRecoveryGeneration(this.context.store, this.runtime);
+  }
+
   async batch(inService: () => boolean, send: () => Promise<void>, pause = true): Promise<boolean> {
     const began = performance.now();
     const sent = await this.locked(async () => {
-      if (!inService()) return false;
+      if (this.restarted() || !inService()) return false;
       await send();
       return true;
     });
@@ -688,11 +699,21 @@ class ReadGraphJob {
     return sent;
   }
 
-  /** Publish `ready`: the compare-and-set, the read-back and the mirror in one lock hold. */
+  /**
+   * Publish `ready`: the compare-and-set, the read-back and the mirror in one
+   * lock hold. A backend restart before it ends the job; one that lands while
+   * it runs may have published a row whose contents the restart cut short, so
+   * the journal keeps it for a mark.
+   */
   async publish(row: ReadGraphStateRow, inService: () => boolean): Promise<ReadGraphJobResult> {
     const published = await this.locked(async () => {
-      if (!inService()) return { lost: true as const };
-      return { row: await this.transition(row, { kind: 'publish-ready' }) };
+      if (this.restarted() || !inService()) return { lost: true as const };
+      const stored = await this.transition(row, { kind: 'publish-ready' });
+      if (!this.restarted()) return { row: stored };
+      if (stored?.state === 'ready') noteUnstoredReadGraphMark(this.runtime, this.readGraph, stored.generation);
+      // The read-back put ready in the mirror over any invalidation a request that saw the restart first had made.
+      invalidateReadGraphRuntime(this.runtime);
+      return { lost: true as const };
     });
     if ('lost' in published) return this.lost();
     const done = published.row?.state === 'ready' && published.row.generation === row.generation;

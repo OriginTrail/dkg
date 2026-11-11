@@ -512,6 +512,7 @@ export {
   type ReadGraphStoreConfig,
 } from './read-graph/read-graph-store.js';
 export { readReadGraphRegistry } from './read-graph/registry.js';
+export { noteReadGraphStoreRestored } from './read-graph/store-restored.js';
 export {
   READ_GRAPH_MODES,
   VIEW_SEMANTICS,

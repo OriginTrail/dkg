@@ -11,10 +11,11 @@
  * read graph, whose results the status keeps.
  *
  * Which read graphs the node keeps comes from a mode per read graph: `off`,
- * `build` or `serve`. The node's settings carry no modes yet, so every read
- * graph is `off` ({@link READ_GRAPHS_OFF}): the builder does not start, and
- * the start-up before the first write (`startReadGraphs`) marks every read
- * graph it finds dirty, as before.
+ * `build` or `serve`, from the node's settings (`query.readGraphs`) on the
+ * store's read-graph runtime. With every read graph `off`, or a store without
+ * a read-graph layer ({@link READ_GRAPHS_OFF}), the builder does not start,
+ * and the start-up before the first write (`startReadGraphs`) marks every
+ * read graph it finds dirty, as before.
  */
 
 import {
@@ -29,7 +30,10 @@ import {
   ReadGraphBuilder,
   checkReadGraph,
   installWorkingMemoryIdentity,
+  keepsAnyReadGraph,
   readGraphLayerOf,
+  readGraphModeOf,
+  readGraphRuntimeOf,
   readReadGraphRegistry,
   registeredSubGraphNames,
   startReadGraphChecks,
@@ -38,14 +42,22 @@ import {
   type ReadGraphCheckMode,
   type ReadGraphCheckResult,
   type ReadGraphCheckSchedule,
+  type ReadGraphMode,
   type ReadGraphState,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 
-export type ReadGraphMode = 'off' | 'build' | 'serve';
+export type { ReadGraphMode };
 
-/** The modes until the node's settings carry them: every read graph is off. */
+/** Every read graph off: the modes of a store without a read-graph layer. */
 export const READ_GRAPHS_OFF: ReadGraphModesV1 = Object.freeze({ modeOf: () => 'off', keepsAny: () => false });
+
+/** The modes the node's settings (`query.readGraphs`) give on the store's read-graph runtime, read when asked. */
+export function readGraphModesOfStore(store: TripleStore): ReadGraphModesV1 {
+  const runtime = readGraphRuntimeOf(store);
+  if (!runtime) return READ_GRAPHS_OFF;
+  return { modeOf: (key) => readGraphModeOf(runtime.modes, key), keepsAny: () => keepsAnyReadGraph(runtime.modes) };
+}
 
 export interface ReadGraphModesV1 {
   /** The mode of one read graph. A sub-graph's read graph follows its context graph's. */
@@ -115,7 +127,7 @@ export class ReadGraphWorkloadOwnerV1 {
   constructor(agent: ReadGraphAgentViewV1, options: ReadGraphWorkloadOptionsV1) {
     this.#agent = agent;
     this.#options = options;
-    this.#modes = options.modes ?? READ_GRAPHS_OFF;
+    this.#modes = options.modes ?? readGraphModesOfStore(agent.store);
     OWNERS.set(agent, this);
   }
 

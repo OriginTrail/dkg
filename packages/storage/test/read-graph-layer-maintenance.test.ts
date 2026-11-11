@@ -139,6 +139,29 @@ describe('read-graph layer on embedded Oxigraph', () => {
     await reference.close();
   });
 
+  it('keeps a read graph a blank-node delete marked dirty out of service, though a registry fence set by the same delete is lifted', async () => {
+    class ByIdentity extends OxigraphStore {
+      readonly readGraphCapabilities = Object.freeze({ methods: Object.freeze(['delete'] as const), serialUpdates: true, plansBlankNodeDeletes: false });
+    }
+    const { adapter, fixture, layer, store } = await layered(new ByIdentity());
+    const { wholeVm, wholeSwm } = fixture.readGraphs;
+    const member = fixture.graphs[2]!;
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(wholeVm)));
+    const result = await adapter.query(`SELECT ?b WHERE { GRAPH <${member}> { ?b <${P}> "anchored" } }`);
+    const [label] = (result.type === 'bindings' ? result.bindings : []).map((row) => row.b!);
+    // One delete: a stored blank node of a member graph, and a registry name the store does not hold.
+    await store.delete([
+      q(label!, '"anchored"', member),
+      { subject: `${fixture.root}/nothere`, predicate: 'http://schema.org/name', object: '"nothere"', graph: `${fixture.root}/_meta` },
+    ]);
+    const rows = await adapter.query(readGraphStateRowsQuery());
+    const stored = parseReadGraphStateRows(rows.type === 'bindings' ? rows.bindings : []).rows.find((row) => row.readGraph === wholeVm);
+    expect(`${layer.runtime.mirror.get(wholeVm)?.state}@${layer.runtime.mirror.get(wholeVm)?.generation}`).toBe('dirty@2');
+    expect(`${stored?.state}@${stored?.generation}`).toBe('dirty@2');
+    // The registry did not change: a read graph the delete did not touch is back in service.
+    expect(layer.runtime.mirror.get(wholeSwm)?.state).toBe('ready');
+  });
+
   it('deletes a blank node by its identity on such an adapter, leaving a twin with the same predicate and object', async () => {
     // The embedded engine's own delete, which removes a stored blank node by its identity.
     class ByIdentity extends OxigraphStore {
