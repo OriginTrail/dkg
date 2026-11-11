@@ -33,6 +33,7 @@ import {
   type ReadGraphJobContext,
 } from '../src/read-graph/rebuild.js';
 import { readReadGraphRegistry } from '../src/read-graph/registry.js';
+import { fenceReadGraphs, liftReadGraphFences } from '../src/read-graph/registry-fences.js';
 import {
   parseReadGraphRegistryRecords,
   readGraphRegistryRecordsQuery,
@@ -1118,6 +1119,22 @@ describe('installing the working-memory identity rule', () => {
     expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: true });
     expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(second);
     expect(await buildReadGraph(context, working)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+  });
+
+  it('keeps a working-memory read graph that a registry fence holds out of service when a change of identity moves it', async () => {
+    const { adapter, fixture, layer, context } = await open();
+    const { agentWm } = fixture.readGraphs;
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(agentWm, 4)));
+    layer.runtime.mirror.set(readyRow(agentWm, 4));
+    // A registry write fences the read graph, and the node's identity changes before the write settles.
+    const fences = fenceReadGraphs(layer.runtime, [agentWm]);
+    const installing = installWorkingMemoryIdentity(context, { defaultAgentAddress: AGENT, peerId: 'peer-1' });
+    // Lifting the fence must not put back the row built under the rule before.
+    liftReadGraphFences(layer.runtime, fences, undefined);
+    expect(layer.runtime.mirror.get(agentWm)?.state).toBe('dirty');
+    expect(await installing).toMatchObject({ recorded: true });
+    expect((await storedRows(adapter))[agentWm]).toMatch(/^dirty@/);
+    expect(layer.runtime.mirror.get(agentWm)?.state).toBe('dirty');
   });
 
   it('publishes no working-memory read graph that a change of identity held while its build ran', async () => {
