@@ -648,13 +648,23 @@ describe('PanelRight component', () => {
       await Promise.resolve();
     });
 
-    // Reopen while the request is still pending: only the stream can have
-    // put the partial text there, because no final text has arrived.
+    // Reopen while the request is still pending. History on reopen already
+    // holds an earlier snapshot of this turn, stored under its own URI: it must
+    // not replace the row the stream is still writing to.
+    const snapshot = 'Persisted snapshot';
+    fetchLocalAgentHistoryMock.mockResolvedValue([
+      { uri: 'urn:dkg:chat:user-closed', author: 'user', text: 'Answer while I look away', ts: new Date().toISOString(), turnId: options.correlationId, persistStatus: 'stored' },
+      { uri: 'urn:dkg:chat:reply-closed', author: 'assistant', text: snapshot, ts: new Date().toISOString(), turnId: options.correlationId, persistStatus: 'pending' },
+    ]);
+    const historyCalls = fetchLocalAgentHistoryMock.mock.calls.length;
     root = createRoot(container);
     await act(async () => { root.render(React.createElement(PanelRight)); });
     const count = (s: string) => container.textContent!.split(s).length - 1;
     try {
+      await waitForAssertion(() => expect(fetchLocalAgentHistoryMock.mock.calls.length).toBeGreaterThan(historyCalls));
+      await act(async () => { await Promise.resolve(); });
       await waitForAssertion(() => expect(container.textContent).toContain(partial));
+      expect(container.textContent).not.toContain(snapshot);
       expect(container.querySelector('button[aria-label="Stop reply"]')).toBeTruthy();
 
       // A later delta reaches the reopened panel and appears once.
