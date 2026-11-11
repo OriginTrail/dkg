@@ -9,6 +9,7 @@ import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import type { QueryOptions } from '../src/query-engine.js';
 import { ScopedQueryViolationError } from '../src/scoped-query-error.js';
 import { SemanticsUnsupportedError, ViewNotReadyError, type ViewReadGraphs } from '../src/view-dataset-plan.js';
+import { VIEW_SEMANTICS_DELTA_SOURCE, ViewSemanticsDeltaSampler } from '../src/view-semantics-delta.js';
 
 // CI's tornado-blazegraph lane runs this file on a live server; elsewhere it runs on Oxigraph.
 const endpoint = process.env.BLAZEGRAPH_TEST_URL;
@@ -48,9 +49,15 @@ class FakeReadGraphs implements ViewReadGraphs {
   readonly rows = new Map<string, ReadGraphStateRow>();
   readonly identity = workingMemoryIdentityRule({ defaultAgentAddress: DEFAULT_AGENT, peerId: PEER_ID });
   defaultSemantics?: ViewReadGraphs['defaultSemantics'];
+  withWriteLock?: ViewReadGraphs['withWriteLock'];
+  serving = true;
 
   keeps(): boolean {
     return true;
+  }
+
+  serves(): boolean {
+    return this.serving;
   }
 
   state(readGraph: string): ReadGraphStateRow | undefined {
@@ -273,6 +280,74 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
       .rejects.toBeInstanceOf(SemanticsUnsupportedError);
     expect((await engine.query(JOIN, { contextGraphId: id })).semantics).toBeUndefined();
     expect((await engine.query('SELECT ?s WHERE { ?s ?p ?o } LIMIT 1')).semantics).toBeUndefined();
+  });
+
+  it('samples view queries that could be answered merged, and runs each both ways once', async () => {
+    fresh();
+    // Every store read of a sample runs while the read graph's write lock is held.
+    const locked: string[] = [];
+    let holding = false;
+    readGraphs.withWriteLock = async <T>(readGraph: string, work: () => Promise<T>): Promise<T> => {
+      locked.push(readGraph);
+      holding = true;
+      try {
+        return await work();
+      } finally {
+        holding = false;
+      }
+    };
+    const query = store.query.bind(store);
+    const sampleReads: boolean[] = [];
+    vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+      if (options?.source === VIEW_SEMANTICS_DELTA_SOURCE) sampleReads.push(holding);
+      return query(sparql, options);
+    });
+    const sampler = new ViewSemanticsDeltaSampler({ sampleRate: 1 });
+    const sampling = new DKGQueryEngine(store, { readGraphs, viewSemanticsDelta: sampler });
+    const unpriced = 'SELECT ?p WHERE { ?p a <urn:Product> FILTER NOT EXISTS { ?p <urn:price> ?x } }';
+    // The caller's signal ends with its answer; the sample reads with its own.
+    const caller = new AbortController();
+    await sampling.query(JOIN, { ...VM, signal: caller.signal });
+    caller.abort();
+    await sampling.query(unpriced, MERGED);
+    // Merged does not apply here, so there is nothing to compare.
+    await sampling.query(JOIN, { ...VM, minTrust: TrustLevel.Endorsed });
+    await sampler.idle();
+    expect(locked).toEqual([READ, READ]);
+    expect(sampleReads.length).toBeGreaterThanOrEqual(4);
+    expect(sampleReads.every(Boolean)).toBe(true);
+    const [summary, ...others] = sampling.viewSemanticsDeltaReport([id]);
+    expect(others).toEqual([]);
+    expect(summary).toMatchObject({ contextGraphId: id, samples: 2, skipped: 0,
+      kinds: { 'none': 0, 'copies-removed': 0, 'rows-added': 1, 'rows-removed-or-changed': 1 } });
+    expect(summary!.shapes.map(shape => [shape.view, shape.shape]).sort()).toEqual([
+      ['verifiable-memory', 'SELECT ?p ?x WHERE { ?p a <…> . ?p <…> ?x }'],
+      ['verifiable-memory', 'SELECT ?p WHERE { ?p a <…> FILTER NOT EXISTS { ?p <…> ?x } }'],
+    ].sort());
+    // Without read graphs there is no merged answer to compare with.
+    const plain = new DKGQueryEngine(store, { viewSemanticsDelta: new ViewSemanticsDeltaSampler({ sampleRate: 1 }) });
+    await plain.query(JOIN, VM);
+    expect(plain.viewSemanticsDeltaReport()).toEqual([]);
+    expect(new DKGQueryEngine(store).viewSemanticsDeltaReport()).toEqual([]);
+  });
+
+  it('samples queries from a read graph that requests are not answered from yet', async () => {
+    fresh();
+    readGraphs.serving = false;
+    const sampler = new ViewSemanticsDeltaSampler({ sampleRate: 1 });
+    const sampling = new DKGQueryEngine(store, { readGraphs, viewSemanticsDelta: sampler });
+    await expect(sampling.query(JOIN, MERGED)).rejects.toBeInstanceOf(SemanticsUnsupportedError);
+    expect(await sampling.query(JOIN, VM)).toEqual({ bindings: [] });
+    await sampler.idle();
+    expect(sampling.viewSemanticsDeltaReport([id])).toMatchObject([{ samples: 1, skipped: 0,
+      kinds: { 'none': 0, 'copies-removed': 0, 'rows-added': 1, 'rows-removed-or-changed': 0 } }]);
+    // A sample whose read graph changes while it runs is dropped, not planned again.
+    const changingSampler = new ViewSemanticsDeltaSampler({ sampleRate: 1 });
+    const changing = new DKGQueryEngine(store, { readGraphs, viewSemanticsDelta: changingSampler });
+    await changing.query(JOIN, VM);
+    readGraphs.set(READ, 'ready', 8);
+    await changingSampler.idle();
+    expect(changing.viewSemanticsDeltaReport([id])).toMatchObject([{ samples: 0, skipped: 1 }]);
   });
 
   it('answers merged requests as unsupported on a node that keeps no read graphs', async () => {

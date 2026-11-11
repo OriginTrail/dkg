@@ -18,6 +18,11 @@ import { transitionGraphScope } from './sparql-query-transition.js';
 export interface ViewReadGraphs {
   /** Whether the node keeps this read graph: read graphs are on for its context graph and layer. */
   keeps(key: ReadGraphKey): boolean;
+  /**
+   * Whether requests are answered from this kept read graph; every kept one is when absent.
+   * One that is kept but not served still answers the semantic-delta sampler.
+   */
+  serves?(key: ReadGraphKey): boolean;
   /** The state row of a read graph in the node's process-wide copy, or `undefined` while it has none. */
   state(readGraph: string): ReadGraphStateRow | undefined;
   /** Which agent owns the drafts written under a working-memory address. */
@@ -26,6 +31,8 @@ export interface ViewReadGraphs {
   defaultSemantics?(contextGraphId: string): ViewQuerySemantics;
   /** The read-graph versions this release serves; the current ones when absent. */
   readonly versions?: ReadGraphVersions;
+  /** Runs work under a read graph's write lock, so no write lands in it meanwhile. */
+  withWriteLock?<T>(readGraph: string, work: () => Promise<T>): Promise<T>;
 }
 
 /** A view query's plan: today's per-asset route, or one read graph at the generation it was planned with. */
@@ -108,7 +115,7 @@ const SHARED_LAYERS = {
  * - the semantics it asked for, or else the node's default for the context graph, or `per-asset`;
  * - `merged` does not apply to a working-memory read by assertion name, a `verifiedGraph`
  *   read, `minTrust` above SelfAttested, `includePrivate`, `graphSuffix` or
- *   `includeSharedMemory`, nor to a scope this node keeps no read graph for. Asked for there,
+ *   `includeSharedMemory`, nor to a scope this node keeps or serves no read graph for. Asked for there,
  *   it is refused with {@link SemanticsUnsupportedError}; by default, the query is per asset;
  * - a merged plan names the scope's read graph and the generation it is ready at. A read
  *   graph that is not ready is answered with {@link ViewNotReadyError}; by default, one
@@ -123,7 +130,7 @@ export function planViewDataset(
   const requested = requestedViewSemantics(options);
   const semantics = requested ?? readGraphs?.defaultSemantics?.(contextGraphId) ?? 'per-asset';
   if (semantics === 'per-asset') return { kind: 'per-asset' };
-  const target = mergedReadGraph(view, contextGraphId, options, readGraphs);
+  const target = mergedReadGraph(view, contextGraphId, options, readGraphs, 'request');
   if (target.kind === 'unsupported') {
     if (requested === 'merged') throw new SemanticsUnsupportedError(target.what);
     return { kind: 'per-asset' };
@@ -135,6 +142,24 @@ export function planViewDataset(
   const generation = servingReadGraphGeneration(row, target.readGraphs.versions ?? CURRENT_READ_GRAPH_VERSIONS);
   if (generation === undefined) throw new ViewNotReadyError();
   return { kind: 'merged', readGraph: target.readGraph, generation };
+}
+
+/**
+ * The merged plan a sample of a view query is measured with, whatever semantics the query asked
+ * for, also where requests are not answered merged yet: `undefined` where merged does not apply
+ * or the read graph is not ready. It never throws.
+ */
+export function mergedViewDatasetPlan(
+  view: GetView, contextGraphId: string, options: QueryOptions, readGraphs: ViewReadGraphs | undefined,
+): MergedViewDatasetPlan | undefined {
+  try {
+    const target = mergedReadGraph(view, contextGraphId, options, readGraphs, 'sample');
+    if (target.kind === 'unsupported') return undefined;
+    const generation = servingGeneration(target.readGraphs, target.readGraph);
+    return generation === undefined ? undefined : { kind: 'merged', readGraph: target.readGraph, generation };
+  } catch {
+    return undefined;
+  }
 }
 
 /** Whether a merged query's read graph is still ready at the generation it was planned with. */
@@ -166,9 +191,10 @@ type MergedTarget =
   | { readonly kind: 'read-graph'; readonly readGraph: string; readonly readGraphs: ViewReadGraphs }
   | { readonly kind: 'unsupported'; readonly what: string };
 
-/** The read graph a merged view query reads, or what merged does not apply to. */
+/** The read graph a merged view query reads, for a request or for a sample, or what merged does not apply to. */
 function mergedReadGraph(
   view: GetView, contextGraphId: string, options: QueryOptions, readGraphs: ViewReadGraphs | undefined,
+  use: 'request' | 'sample',
 ): MergedTarget {
   const unsupported = (what: string): MergedTarget => ({ kind: 'unsupported', what });
   if (view === 'working-memory' && options.assertionName) return unsupported('a working-memory read by assertion name');
@@ -193,7 +219,7 @@ function mergedReadGraph(
   } else {
     key = { scope, layer: SHARED_LAYERS[view] };
   }
-  if (!readGraphs.keeps(key)) return noReadGraph;
+  if (!readGraphs.keeps(key) || (use === 'request' && readGraphs.serves?.(key) === false)) return noReadGraph;
   try {
     return { kind: 'read-graph', readGraph: readGraphIri(key), readGraphs };
   } catch {
