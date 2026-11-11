@@ -57,10 +57,18 @@ for (const packageName of ['cli', 'chain']) {
       0,
     );
     if (unknownCount === 0) {
-      const loads = first.map((shard) => shard.estimatedMs);
+      // A file longer than an even share cannot be split: its shard holds it alone and stands above the rest.
+      const evenShareMs = first.reduce((sum, shard) => sum + shard.estimatedMs, 0) / first.length;
+      const loads = first
+        .filter((shard) => !(shard.files.length === 1 && shard.estimatedMs > evenShareMs))
+        .map((shard) => shard.estimatedMs);
       assert.ok(
         Math.max(...loads) - Math.min(...loads) < 1_000,
-        'latest-run weights should keep shard estimates within one second',
+        'latest-run weights should keep shard estimates within one second, apart from a shard that holds one long file alone',
+      );
+      assert.ok(
+        Math.max(...first.map((shard) => shard.estimatedMs)) < 10 * 60_000,
+        'every shard should be estimated well inside the 15-minute job',
       );
     }
   });
