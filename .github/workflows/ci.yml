@@ -214,6 +214,7 @@ jobs:
   build:
     outputs:
       test_matrices: ${{ steps.test-matrices.outputs.matrices }}
+      expired_test_exceptions: ${{ steps.lint.outputs.expired_test_exceptions }}
     name: Build packages
     needs: changes
     if: needs.changes.outputs.run_node == 'true'
@@ -274,7 +275,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # A test exception whose monthly review lapsed is a warning here: its
+      # deadline passes on every branch at once, so failing would fail every
+      # unrelated change. The CI gate fails on it under the nightly profile.
       - name: Lint source and repository tooling
+        id: lint
+        env:
+          DKG_TEST_EXCEPTION_EXPIRY: warn
         run: pnpm lint
 
       - name: Validate npm metadata points to v10
@@ -1825,6 +1832,17 @@ jobs:
         env:
           PROFILE_RESULT: ${{ needs.profile-results.result }}
         run: test "$PROFILE_RESULT" = success
+      # The nightly is where a lapsed test-exception review fails, after every
+      # lane has run; pull requests, the merge queue and pushes only warn.
+      - name: Require renewed test exceptions on the nightly profile
+        if: always() && needs.changes.outputs.profile == 'nightly-equivalent'
+        env:
+          EXPIRED_TEST_EXCEPTIONS: ${{ needs.build.outputs.expired_test_exceptions }}
+        run: |
+          if [ "${EXPIRED_TEST_EXCEPTIONS:-0}" != 0 ]; then
+            echo "::error::${EXPIRED_TEST_EXCEPTIONS} test exception(s) are past their review deadline; the build job's lint warnings name them."
+            exit 1
+          fi
       - name: Require the coverage verdict
         if: always()
         env:
