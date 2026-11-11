@@ -11,7 +11,10 @@
 #   1. reads the small context graph through POST /api/query: ASK, SELECT and
 #      CONSTRUCT on working, shared and verifiable memory, with and without a
 #      sub-graph and a trust floor, and on the legacy route. Every read must
-#      answer 200 with exactly the fixture's rows;
+#      answer 200 with exactly the fixture's rows. After a restart a node
+#      answers shared-memory reads as denied until it has accepted the graph's
+#      authority again, so the reads start once shared memory answers, after
+#      at most three minutes;
 #   2. restarts the node with its node-side catalog ceiling
 #      (DKG_STORE_GRAPH_CATALOG_MAX_BYTES) below the catalog, and expects a read
 #      to answer 503 STORE_INTERNAL_LIMIT and the node to log a line naming the
