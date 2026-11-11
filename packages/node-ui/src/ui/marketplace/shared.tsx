@@ -5,25 +5,44 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, X } from 'lucide-react';
 import { copy, type CopyKey } from './copy.generated.js';
 import { isMarketplaceError } from './api/client.js';
-import { spanOf } from './amounts.js';
+import { fmtTracGrouped, spanOf } from './amounts.js';
 import { MARKETPLACE_TABS } from './tabs.js';
 import { chooseTab } from '../lib/shellNavigation.js';
 import { PageHeader } from '../components/ds/PageHeader.js';
 
-/**
- * A copy string whose parameters may be rendered content (an icon, a link) as well as text.
- * Placeholders without a parameter stay as written, as `copy` leaves them.
- */
-export function richCopy(key: CopyKey, params: Record<string, React.ReactNode>): React.ReactNode {
-  return copy(key).split(/(\{\w+\})/).map((part, i) => {
-    const name = /^\{(\w+)\}$/.exec(part)?.[1];
-    return name !== undefined && name in params ? <React.Fragment key={i}>{params[name]}</React.Fragment> : part;
-  });
-}
-
 /** Whether a check passed, as an icon named for screen readers. */
 export function CheckMark({ ok }: { ok: boolean }): React.ReactElement {
   return ok ? <Check size={12} aria-label="yes" /> : <X size={12} aria-label="no" />;
+}
+
+/** One of a Core node's requirements: its words, and whether it is met (no mark when it isn't a check). */
+export interface CoreNodeCheck { label: React.ReactNode; ok?: boolean }
+
+/** The requirements every Core node line shows: a profile, a place in the sharding table, and the minimum stake. */
+export function coreNodeBasics(g: { profile: boolean; shardingTable: boolean; stake: string; minimumStake: string }): CoreNodeCheck[] {
+  return [
+    { ok: g.profile, label: copy('gate.profile') },
+    { ok: g.shardingTable, label: copy('gate.table') },
+    { ok: BigInt(g.stake) >= BigInt(g.minimumStake), label: copy('gate.stake', { stake: fmtTracGrouped(g.stake), min: fmtTracGrouped(g.minimumStake) }) },
+  ];
+}
+
+/**
+ * A Core node's requirements as separate items, each with its own check before it. The gaps
+ * between items separate them, so the line needs no dots, and it wraps on a narrow screen.
+ */
+export function CoreNodeChecks({ items }: { items: CoreNodeCheck[] }): React.ReactElement {
+  return (
+    <span className="mkt-corenode">
+      <span className="mkt-sec">{copy('gate.core')}</span>
+      {items.map((item, i) => (
+        <span key={i} className="mkt-corenode-item">
+          {item.ok !== undefined && <CheckMark ok={item.ok} />}
+          {item.label}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 /** Each Marketplace page: its tab (for the title) and its one-line purpose. */

@@ -9,7 +9,7 @@ import { copy, type CopyKey } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi } from '../api/client.js';
 import type { LandNowAnswer, LandingReport, LandingStop, Listing, ListingProblem, Offering } from '../api/types.js';
 import { fmtAt, fmtHex, fmtMicro, fmtTrac, modelName, weiOfMicro } from '../amounts.js';
-import { CheckMark, ErrorCard, MarketplacePage, OffCard, relAt, richCopy, useLoad } from '../shared.js';
+import { CoreNodeChecks, ErrorCard, MarketplacePage, OffCard, coreNodeBasics, relAt, useLoad } from '../shared.js';
 
 /** Why an offer is not listed, in plain words. */
 const LISTING_PROBLEM: Record<ListingProblem, CopyKey> = {
@@ -146,11 +146,10 @@ export function OperateView(): React.ReactElement {
 
       <div className="mkt-card" data-testid="mkt-ledger">
         <h2 data-copy="operate.epoch.title">{copy('operate.epoch.title')}</h2>
-        <div className="mkt-muted mkt-xs" data-copy="operate.gate">
-          {richCopy('operate.gate', {
-            profile: <CheckMark ok={g.profile} />, table: <CheckMark ok={g.shardingTable} />, stake: fmtTrac(g.stake), min: fmtTrac(g.minimumStake),
-            proved: s.scoredThisEpoch ? <>{copy('operate.proved')} <CheckMark ok /></> : copy('operate.proved.not'),
-          })}
+        <div className="mkt-muted mkt-xs" data-copy="gate.core" data-testid="mkt-operate-gate">
+          {/* Not proved yet is pending while the epoch runs, not a failed check, so it has no mark. */}
+          <CoreNodeChecks items={[...coreNodeBasics(g),
+            s.scoredThisEpoch ? { ok: true, label: copy('operate.proved') } : { label: copy('operate.proved.not') }]} />
         </div>
         <div className="mkt-sec mkt-sm" data-testid="mkt-ledger-counts" data-copy="operate.ledger">{copy('operate.ledger', { served: l.served, sent: l.sent, landed: l.landed, refused: l.refused, missed: l.missed })}</div>
         <div className="mkt-muted mkt-xs" data-copy="operate.ledger.value">{copy('operate.ledger.value', { held: fmtTrac(l.heldValue), landed: fmtTrac(l.landedValue), counted: fmtTrac(l.counted) })}</div>
