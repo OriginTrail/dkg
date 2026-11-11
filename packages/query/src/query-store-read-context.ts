@@ -73,9 +73,8 @@ export interface MeasuredDiscovery<T> {
 
 /**
  * One request's reads. `listGraphsByPrefix` reads each prefix once per request, and
- * `registry.query` each registry query once per request; nothing is kept for another
- * request. `catalog.query` always reads: an authority check that must see a
- * registration made during discovery reads through it.
+ * nothing is kept for another request. `catalog.query` always reads: an authority
+ * check that must see a registration made during discovery reads through it.
  *
  * Discovery, registry, authority and metadata reads are node work under the node's
  * catalog bound. The caller is charged for the graphs a discovery returns and for its
@@ -85,7 +84,6 @@ export interface QueryStoreReadContext extends StoreReadLane {
   readonly signal: AbortSignal | undefined;
   readonly materializationBudget: QueryMaterializationBudget | undefined;
   readonly catalog: StoreReadLane;
-  readonly registry: Pick<StoreReadLane, 'query'>;
   withWithheldGraphRoots(roots: readonly string[]): StoreReadLane;
   readonly shared: {
     readonly cacheKey: string;
@@ -160,7 +158,6 @@ export function createQueryStoreReadContext(
   };
   const catalog = createInternalReadLane(store, catalogOptions, budget);
   const discoveries = new Map<string, Promise<readonly string[]>>();
-  const registryReads = new Map<string, Promise<StoreQueryResult>>();
   return {
     ...lane,
     // Enumeration may share an upstream refresh, but each caller owns its abort race.
@@ -173,7 +170,6 @@ export function createQueryStoreReadContext(
     materializationBudget: budget,
     withWithheldGraphRoots: roots => createStoreReadLane(store, { ...options, withheldGraphRoots: [...roots] }, budget),
     catalog,
-    registry: { query: sparql => readOnce(registryReads, sparql, () => catalog.query(sparql)) },
     shared: {
       measure,
       replay<T>(discovery: MeasuredDiscovery<T>): T {
