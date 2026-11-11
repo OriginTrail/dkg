@@ -7,7 +7,7 @@ import {
 import type { SparqlEngineFamily } from '@origintrail-official/dkg-storage';
 import type { GraphAccessMode } from './sparql-graph-access.js';
 import { hasOuterDefaultGraphPattern, hasTopLevelDefaultGraphPattern } from './sparql-default-graph-pattern.js';
-import { bindCallerGraphsBeforeRead, hasCallerGraphAssignments } from './sparql-caller-graph-read.js';
+import { bindCallerGraphsBeforeRead, hasCallerGraphAssignments, hasCallerGraphAssignmentsInside } from './sparql-caller-graph-read.js';
 import { transitionGraphScope } from './sparql-query-transition.js';
 import { createVariableAllocator } from './sparql-rewrite-names.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
@@ -195,10 +195,10 @@ export function planGraphDataset(
     datasetClauses: graphlessDescription ? ['FROM']
       : !oxigraph || readsDefaultGraph ? ['FROM', 'FROM NAMED'] : ['FROM NAMED'],
     preservePattern: graphlessDescription || scope.readsOnlyDeclaredNamedSet,
-    // Oxigraph repeats the rows of a GRAPH ?var block that assigns ?var once per graph
-    // it iterates; a constant branch per graph keeps one row per matching graph.
+    // Oxigraph repeats the rows of a GRAPH ?var block that assigns ?var, at any depth,
+    // once per graph it iterates; a constant branch per graph keeps one row per match.
     bindCallerGraphs: !scopedDescription && scope.graphVariables.length > 0 && (oxigraph
-      ? hasCallerGraphAssignments(scope)
+      ? hasCallerGraphAssignmentsInside(scope)
       : graphAccess === 'dataset' && repeatedPath && needsConstantCallerGraphs(scope)),
     wrapDescriptionPattern: scopedDescription && scope.where !== null,
   };

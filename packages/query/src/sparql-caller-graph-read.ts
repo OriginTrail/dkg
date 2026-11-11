@@ -27,6 +27,24 @@ function assignsGraphVariable(scope: PreparedSparqlQuery, opening: number, closi
   return false;
 }
 
+/**
+ * Whether a caller GRAPH ?var block assigns ?var anywhere inside it, at any
+ * depth: a BIND, or a subquery's projection, `AS ?var`.
+ */
+export function hasCallerGraphAssignmentsInside(scope: PreparedSparqlQuery): boolean {
+  const { tokens } = scope.prepared;
+  return scope.graphTargets.some(target => {
+    if (target.kind !== 'variable') return false;
+    const opening = target.targetTokenIndex + 1;
+    const closing = scope.structure.braces.matchingTokenIndexes[opening] ?? -1;
+    for (let index = opening + 1; index < closing - 1; index++) {
+      const next = tokens[index + 1];
+      if (isSparqlKeyword(tokens, index, 'AS') && next?.kind === 'variable' && next.logicalValue.slice(1) === target.variable.logicalName) return true;
+    }
+    return false;
+  });
+}
+
 export function hasCallerGraphAssignments(scope: PreparedSparqlQuery): boolean {
   return scope.graphTargets.some(target => {
     if (target.kind !== 'variable') return false;
