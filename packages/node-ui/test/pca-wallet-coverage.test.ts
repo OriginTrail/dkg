@@ -12,7 +12,7 @@ const account = (id: string, probes: Array<[string, boolean | null]>, snap: Part
   walletProbes: probes.map(([wallet, registered]) => ({ wallet, registered })),
 });
 const ctx = { walletsInconclusive: false, lookupError: false, accountCount: 1 };
-/** An extended read whose budget fields came back: topUp empty, this epoch's allowance as given. */
+/** An extended read whose budget fields came back: topUp empty, this billing period's allowance as given. */
 const budget = (remainingAllowance: string | undefined): Partial<PcaSnapshot> =>
   ({ extendedRequested: true, topUpBuffer: '0', remainingAllowance });
 
@@ -76,12 +76,12 @@ describe('summarizeCoverage', () => {
     expect(s.sub).not.toContain('no TRAC left');
   });
 
-  it('says "no TRAC left this epoch" only when a live PCA’s budget is confirmed empty', () => {
+  it('says "no TRAC left in this billing period" only when a live PCA’s budget is confirmed empty', () => {
     const node = nodeCoverage([W0], [account('7', [[W0, true]], budget('0'))], false, NOW);
     expect(node.wallets[0]).toEqual({ kind: 'inactive', wallet: W0, accountId: '7', expired: false });
     expect(summarizeCoverage(node, ctx)).toMatchObject({
       value: 'None',
-      sub: 'Your wallets are on PCA #7, which has no TRAC left this epoch. They pay the full fee.',
+      sub: 'Your wallets are on PCA #7, which has no TRAC left in this billing period. They pay the full fee.',
     });
   });
 

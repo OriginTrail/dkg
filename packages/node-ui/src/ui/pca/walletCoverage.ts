@@ -26,7 +26,7 @@ export interface CoverageAccount {
 /** One publishing wallet, in precedence order: covered, unknown budget, inactive, then unknown probe. */
 export type WalletCoverage =
   | { kind: 'covered'; wallet: string; accountId: string }
-  /** Approved on a PCA that definitely can't pay: expired or swept, or this epoch's budget is confirmed empty. */
+  /** Approved on a PCA that definitely can't pay: expired or swept, or this billing period's budget is confirmed empty. */
   | { kind: 'inactive'; wallet: string; accountId: string; expired: boolean }
   /** Coverage can't be stated either way (#9): a probe or a budget couldn't be read. */
   | { kind: 'unknown'; wallet: string }
@@ -121,7 +121,7 @@ export function summarizeCoverage(
   const anyUnknown = coverage.some((c) => c.kind === 'unknown');
   const inactive = coverage.find((c): c is Extract<WalletCoverage, { kind: 'inactive' }> => c.kind === 'inactive');
   const inactiveLabel = inactive
-    ? `PCA #${inactive.accountId}, ${inactive.expired ? 'which has expired' : 'which has no TRAC left this epoch'}`
+    ? `PCA #${inactive.accountId}, ${inactive.expired ? 'which has expired' : 'which has no TRAC left in this billing period'}`
     : null;
   // #9 - never say "None" while the wallets, the PCA lookup or any wallet's approval can't be read.
   const unconfirmed = !hasCoveredWallet && (ctx.walletsInconclusive || ctx.lookupError || anyUnknown);

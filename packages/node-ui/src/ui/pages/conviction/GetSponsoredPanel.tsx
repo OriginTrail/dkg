@@ -89,7 +89,7 @@ function inactiveReason(accountId: string, rows: ProbeRow[]): string | null {
   if (uncovered.length === 0) return null;
   return uncovered.some((c) => c.dead)
     ? `PCA #${accountId} has expired, so publishes pay the full fee.`
-    : `PCA #${accountId} has no TRAC left this epoch, so publishes pay the full fee until the next epoch.`;
+    : `PCA #${accountId} has no TRAC left in this billing period, so publishes pay the full fee until its next billing period starts.`;
 }
 
 /** Summary icon: all covered is a success, none approved an error, the rest need a look. */
