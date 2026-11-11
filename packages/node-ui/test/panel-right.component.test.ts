@@ -26,6 +26,7 @@ const streamLocalAgentChatMock = vi.fn();
 const connectLocalAgentIntegrationMock = vi.fn();
 const disconnectLocalAgentIntegrationMock = vi.fn();
 const clearLocalLlmSessionMock = vi.fn();
+const refreshLocalAgentIntegrationMock = vi.fn();
 const apiFetchMemorySessionsMock = vi.fn();
 
 vi.mock('../src/ui/api.js', async () => {
@@ -43,6 +44,7 @@ vi.mock('../src/ui/api.js', async () => {
     connectLocalAgentIntegration: connectLocalAgentIntegrationMock,
     disconnectLocalAgentIntegration: disconnectLocalAgentIntegrationMock,
     clearLocalLlmSession: clearLocalLlmSessionMock,
+    refreshLocalAgentIntegration: refreshLocalAgentIntegrationMock,
   };
 });
 
@@ -1383,5 +1385,102 @@ describe('PanelRight component', () => {
       root.unmount();
     });
     container.remove();
+  });
+
+  it('follows a replacement Prime session: the turn shows once and the next send goes to the new session', async () => {
+    const staleSessionId = 'prime-agent:dkg-ui:s1';
+    const liveSessionId = 'prime-agent:dkg-ui:s2';
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'prime-agent',
+      name: 'Prime Agent',
+      description: 'Prime bridge',
+      connectSupported: true,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: false,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'chat_ready',
+      statusLabel: 'Ready',
+      detail: 'ready',
+      source: 'live',
+      defaultSessionId: staleSessionId,
+      liveSessions: [{ sessionId: staleSessionId, rawSessionId: 's1' }],
+    }] });
+    streamLocalAgentChatMock
+      .mockResolvedValueOnce({ text: 'Answered after a restart', turnId: 'prime-turn-1', sessionId: liveSessionId })
+      .mockResolvedValueOnce({ text: 'Second answer', turnId: 'prime-turn-2', sessionId: liveSessionId });
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const send = async (text: string) => {
+      const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, text);
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')!
+          .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+    };
+    try {
+      await act(async () => root.render(React.createElement(PanelRight)));
+      await waitForAssertion(() => expect(container.textContent).toContain('Prime Agent'));
+
+      await send('First question');
+      await waitForAssertion(() => {
+        expect(container.textContent).toContain('Answered after a restart');
+        expect(container.textContent).toContain('Prime Agent restarted; switched chat to the live session.');
+      });
+      expect(streamLocalAgentChatMock.mock.calls[0][2]).toMatchObject({ sessionId: staleSessionId });
+      expect(container.textContent!.split('Answered after a restart').length - 1).toBe(1);
+      expect(container.textContent!.split('First question').length - 1).toBe(1);
+
+      await send('Second question');
+      await waitForAssertion(() => expect(container.textContent).toContain('Second answer'));
+      expect(streamLocalAgentChatMock.mock.calls[1][2]).toMatchObject({ sessionId: liveSessionId });
+      expect(container.textContent).toContain('Answered after a restart');
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  it('a failed conversation refresh keeps the messages and says why', async () => {
+    fetchLocalAgentHistoryMock.mockResolvedValue([
+      { uri: 'urn:msg:1', author: 'user', text: 'Earlier question', ts: '2026-11-10T10:00:00Z', turnId: 'turn-1' },
+    ]);
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(React.createElement(PanelRight)));
+      await waitForAssertion(() => expect(container.textContent).toContain('Earlier question'));
+
+      refreshLocalAgentIntegrationMock.mockResolvedValue({ integration: (await fetchLocalAgentIntegrationsMock()).integrations[0] });
+      fetchLocalAgentHistoryMock.mockRejectedValueOnce(new Error('History is unavailable right now'));
+      await act(async () => {
+        container.querySelector('.v10-agent-tab-menu-trigger')!
+          .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      const refreshItem = Array.from(container.querySelectorAll<HTMLButtonElement>('.v10-agent-tab-menu-item'))
+        .find((item) => /refresh/i.test(item.textContent ?? ''));
+      expect(refreshItem).toBeTruthy();
+      await act(async () => refreshItem!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+
+      await waitForAssertion(() => expect(container.textContent).toContain('History is unavailable right now'));
+      expect(refreshLocalAgentIntegrationMock).toHaveBeenCalledWith('openclaw');
+      expect(container.textContent).toContain('Earlier question');
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 });

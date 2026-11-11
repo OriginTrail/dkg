@@ -6,6 +6,7 @@ export * from './attachments.js';
 export * from './chat-context.js';
 export * from './constants.js';
 export * from './format.js';
+export * from './message-model.js';
 export * from './messages.js';
 export * from './peer-model.js';
 export * from './selection.js';
