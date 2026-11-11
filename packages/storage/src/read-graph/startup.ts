@@ -31,6 +31,7 @@ import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
 import { readGraphLayerOf } from './read-graph-store.js';
+import { keepsAnyReadGraph, readGraphModeOf } from './settings.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts } from './registry-recognition.js';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
@@ -56,7 +57,8 @@ export interface ReadGraphStartOptions {
   readonly log?: (message: string) => void;
   /**
    * Whether this process maintains the read graph of a key: its mode is
-   * `build` or `serve`. Without it the process maintains none.
+   * `build` or `serve`. Without it, those that the runtime's settings
+   * (`query.readGraphs`) keep; with no setting other than `off`, none.
    */
   readonly maintains?: (key: ReadGraphKey) => boolean;
   readonly versions?: ReadGraphVersions;
@@ -72,7 +74,9 @@ export interface ReadGraphStartResult {
 /** Start read graphs on a store before anything writes. See the module documentation. */
 export async function startReadGraphs(store: TripleStore, options: ReadGraphStartOptions = {}): Promise<ReadGraphStartResult> {
   const layer = readGraphLayerOf(store);
-  const maintains = options.maintains;
+  const modes = layer?.runtime.modes;
+  const maintains = options.maintains
+    ?? (modes && keepsAnyReadGraph(modes) ? (key: ReadGraphKey) => readGraphModeOf(modes, key) !== 'off' : undefined);
   if (!maintains || !layer || missingReadGraphMethods(layer.innerStore, layer.adapterCapabilities).length > 0) {
     return { marked: await markReadGraphsDirtyAtStart(store, options), maintained: 0 };
   }
