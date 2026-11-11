@@ -661,43 +661,61 @@ gate_verdict() {
 }
 
 # watch_mismatches <n> <out> <lost> <since>: in the background, append to <out> every read-graph check mismatch line
-# that node <n> logs from now on. The daemon rotates daemon.log by renaming it to daemon.log.1: the watcher keeps its
-# file open, so it reads a rotated file to its end before it opens the new one. When the daemon cannot rename, it
-# trims the live file in place, and lines written since the last read may be gone: that is noted in <lost>, and the
-# trimmed file is read again from its start (lines stamped before <since>, the log's local "YYYY-MM-DD HH:MM:SS",
-# skipped). Prints the PID.
+# that node <n> logs from now on. The daemon rotates daemon.log by renaming it to daemon.log.1: the watcher keeps each
+# file open, reads it once more when it sees the rename, and goes on reading it until it has stayed unchanged for four
+# polls, so a line written just before (or as) the file was renamed is read. When the daemon cannot rename, it trims
+# the live file in place, and lines written since the last read may be gone: that is noted in <lost>, and the trimmed
+# file is read again from its start (lines stamped before <since>, the log's local "YYYY-MM-DD HH:MM:SS", skipped).
+# Prints the PID.
 watch_mismatches() {
   LOG="$DEVNET_DIR/node$1/daemon.log" OUT="$2" LOST="$3" SINCE="$4" node -e '
     const fs = require("fs");
     const { LOG, OUT, LOST, SINCE } = process.env;
     const stamped = /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d/;
     const keep = (line) => line.includes("[read-graph-check] Read graph <") && !(stamped.test(line) && line.slice(0, 19) < SINCE);
-    const identity = (stat) => `${stat.dev}:${stat.ino}`;
-    let fd = null, current = null, offset = 0, rest = "";
-    const open = (fromEnd) => {
-      try { fd = fs.openSync(LOG, "r"); } catch { fd = null; return; }
-      const stat = fs.fstatSync(fd); current = identity(stat); offset = fromEnd ? stat.size : 0; rest = "";
-    };
     const emit = (lines) => { const hits = lines.filter(keep); if (hits.length > 0) fs.appendFileSync(OUT, hits.join("\n") + "\n"); };
-    const drain = () => {
-      if (fd === null) return;
-      const size = fs.fstatSync(fd).size;
-      if (size < offset) { fs.appendFileSync(LOST, `${LOG} was trimmed in place at ${new Date().toISOString()}\n`); offset = 0; rest = ""; }
-      if (size === offset) return;
-      const buffer = Buffer.alloc(size - offset);
-      fs.readSync(fd, buffer, 0, buffer.length, offset); offset = size;
-      const lines = (rest + buffer.toString("utf8")).split("\n"); rest = lines.pop(); emit(lines);
+    const identity = (stat) => `${stat.dev}:${stat.ino}`;
+    // A file being read: its descriptor, its identity, how far it was read, the unfinished last line, quiet polls.
+    const openFile = (fromEnd) => {
+      let fd;
+      try { fd = fs.openSync(LOG, "r"); } catch { return null; }
+      const stat = fs.fstatSync(fd);
+      return { fd, id: identity(stat), offset: fromEnd ? stat.size : 0, rest: "", quiet: 0 };
     };
+    // Read what was appended; whether anything was. A file shorter than what was read was trimmed in place.
+    const drain = (file) => {
+      const size = fs.fstatSync(file.fd).size;
+      if (size < file.offset) {
+        fs.appendFileSync(LOST, `${LOG} was trimmed in place at ${new Date().toISOString()}\n`); file.offset = 0; file.rest = "";
+      }
+      if (size === file.offset) return false;
+      const buffer = Buffer.alloc(size - file.offset);
+      fs.readSync(file.fd, buffer, 0, buffer.length, file.offset); file.offset = size;
+      const lines = (file.rest + buffer.toString("utf8")).split("\n"); file.rest = lines.pop(); emit(lines);
+      return true;
+    };
+    let live = openFile(true);
+    let rotated = [];
     const tick = () => {
-      drain();
+      rotated = rotated.filter((file) => {
+        file.quiet = drain(file) ? 0 : file.quiet + 1;
+        if (file.quiet < 4) return true;
+        emit([file.rest]); fs.closeSync(file.fd); return false;
+      });
+      if (live) drain(live);
       let stat;
       try { stat = fs.statSync(LOG); } catch { return; }
-      if (fd === null) { open(false); drain(); return; }
-      if (identity(stat) !== current) { emit([rest]); fs.closeSync(fd); open(false); drain(); }
+      if (!live) { live = openFile(false); if (live) drain(live); return; }
+      if (identity(stat) !== live.id) {
+        drain(live);
+        rotated.push(live);
+        live = openFile(false); if (live) drain(live);
+      }
     };
-    open(true);
     setInterval(tick, 500);
-    process.on("SIGTERM", () => { try { tick(); emit([rest]); } finally { process.exit(0); } });
+    process.on("SIGTERM", () => {
+      try { tick(); for (const file of [...rotated, live]) if (file) { drain(file); emit([file.rest]); } } finally { process.exit(0); }
+    });
   ' > /dev/null 2>&1 &
   echo $!
 }
@@ -893,7 +911,9 @@ drill_kill_during_write() {
   writer=$!
   # The crash must land on a working-memory write the worker holds: once three were acknowledged, kill the daemon worker
   # while one is in flight, then require evidence that the worker held it. The send and the kill race, so up to three
-  # crashes are tried; each one is a full crash with its own recovery.
+  # crashes are tried; each one is a full crash with its own recovery. What this proves is that the worker died holding
+  # an uploaded write request. Whether its store change had begun cannot be seen from outside the daemon; a kill in the
+  # middle of an engine write is covered by the storage tests (oxigraph-worker-respawn.test.ts).
   overlap=""; attempt=0; last_write=0
   while [ -z "$overlap" ] && [ "$attempt" -lt 3 ]; do
     attempt=$((attempt + 1))
@@ -920,12 +940,13 @@ drill_kill_during_write() {
     # The crash must happen: SIGKILL delivered to the daemon worker, that worker gone, and a new worker in its place
     # before anything is checked. A daemon that answered throughout would prove nothing.
     pid="$(daemon_worker_pid "$n")"
+    # The evidence must come after this line, taken before the kill: an outcome the kill caused can be logged at once.
+    kill_line="$(wc -l < "$answers" | tr -d ' ')"
     if [ -z "$pid" ] || ! kill -9 "$pid" 2>/dev/null; then
       kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
       record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "SIGKILL could not be sent to node$n's daemon worker (PID ${pid:-none}), so no crash happened"; return
     fi
     echo "killed during write $inflight_write" >> "$answers"
-    kill_line="$(wc -l < "$answers" | tr -d ' ')"
     # Evidence that the worker died holding that write: its whole request was uploaded, and its connection was dropped
     # unanswered (curl exit 52 or 56), logged after the kill. A write that never connected (it was not sent yet), or
     # that was answered, did not overlap the crash.
