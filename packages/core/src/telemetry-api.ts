@@ -136,6 +136,8 @@ const BYTE_BUCKETS = [
 ];
 const QUAD_COUNT_BUCKETS = [100, 500, 1_000, 5_000, 10_000, 50_000, 100_000, 250_000, 500_000, 1_000_000];
 const PAGE_COUNT_BUCKETS = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000];
+/** Graphs one query routes per asset. */
+const GRAPH_COUNT_BUCKETS = [1, 10, 100, 500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000];
 /**
  * Duration buckets (ms) for a whole context-graph catch-up job, out to ~30 min.
  *
@@ -243,6 +245,28 @@ export interface DkgMetrics {
   backpressureQueueWaitMs: Histogram;
   /** admitted-work duration by bounded scheduler, lane, and outcome */
   backpressureActiveDurationMs: Histogram;
+  /** graphs in the node's graph catalog at its last refresh; no labels */
+  storeGraphCatalogGraphs: Gauge;
+  /** bytes; measured size of the node's graph catalog at its last refresh; no labels */
+  storeGraphCatalogBytes: Gauge;
+  /** ms; one full graph catalog scan. kind={seed|revalidate|rebuild}, outcome={ok|error} */
+  storeGraphCatalogRefreshMs: Histogram;
+  /** failed graph catalog scans. kind={seed|revalidate|rebuild},
+   *  reason={internal_limit|timeout|busy|aborted|error} */
+  storeGraphCatalogRefreshFailuresTotal: Counter;
+  /** named graphs in the store, as the graph catalog last counted them; no labels */
+  storeGraphsTotal: Gauge;
+  /** store reads refused by a node-side limit. limit=<limit name, a fixed set, else `other`> */
+  queryInternalLimitTotal: Counter;
+  /** queries by route={view|legacy|unscoped}, view={wm|swm|vm|none|other},
+   *  graph={none|variable|explicit}, min_trust={true|false}, private={true|false} */
+  queryScopeRequestsTotal: Counter;
+  /** graphs one query routes per asset (its slice). route={view|legacy}, graph */
+  queryScopeSliceGraphs: Histogram;
+  /** ms; store time of a query's routed reads. route, graph, slice={le_100|le_1000|…|le_20000|gt_20000} */
+  queryScopeStoreMs: Histogram;
+  /** queries whose slice is over a candidate scope limit. route, graph, limit=<candidate> */
+  queryScopeOverLimitTotal: Counter;
   /** bounded materialized result rows by static source */
   storeQueryResultRows: Histogram;
   /** conservative bounded materialized bytes by static source */
@@ -514,7 +538,39 @@ function buildMetrics(): DkgMetrics {
       description: 'Scheduler admitted-work duration by bounded scheduler, lane, and outcome',
       advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
     }),
-    storeQueryResultRows: meter.createHistogram('dkg.store.query_result_rows', {
+    storeGraphCatalogGraphs: meter.createGauge('dkg.store.graph_catalog_graphs', {
+      description: 'Graphs in the node graph catalog at its last refresh',
+    }),
+    storeGraphCatalogBytes: meter.createGauge('dkg.store.graph_catalog_bytes', {
+      unit: 'By', description: 'Measured size of the node graph catalog at its last refresh',
+    }),
+    storeGraphCatalogRefreshMs: meter.createHistogram('dkg.store.graph_catalog_refresh_ms', {
+      unit: 'ms', description: 'Duration of one full graph catalog scan',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    storeGraphCatalogRefreshFailuresTotal: meter.createCounter('dkg.store.graph_catalog_refresh_failures_total', {
+      description: 'Failed graph catalog scans by kind and bounded reason',
+    }),
+    storeGraphsTotal: meter.createGauge('dkg.store.graphs_total', {
+      description: 'Named graphs in the store, as the graph catalog last counted them',
+    }),
+    queryInternalLimitTotal: meter.createCounter('dkg.query.internal_limit_total', {
+      description: 'Store reads refused by a node-side limit, by limit name',
+    }),
+    queryScopeRequestsTotal: meter.createCounter('dkg.query.scope_requests_total', {
+      description: 'Queries by route and class',
+    }),
+    queryScopeSliceGraphs: meter.createHistogram('dkg.query.scope_slice_graphs', {
+      description: 'Graphs one query routes per asset', advice: { explicitBucketBoundaries: GRAPH_COUNT_BUCKETS },
+    }),
+    queryScopeStoreMs: meter.createHistogram('dkg.query.scope_store_ms', {
+      unit: 'ms', description: 'Store time of the reads a query routes per asset, by slice size',
+      advice: { explicitBucketBoundaries: SYNC_OPERATION_DURATION_BUCKETS },
+    }),
+    queryScopeOverLimitTotal: meter.createCounter('dkg.query.scope_over_limit_total', {
+      description: 'Queries whose slice is over a candidate scope limit; none is refused',
+    }),
+    storeQueryResultRows:meter.createHistogram('dkg.store.query_result_rows', {
       description: 'Rows retained by bounded expensive store reads',
       advice: { explicitBucketBoundaries: QUAD_COUNT_BUCKETS },
     }),

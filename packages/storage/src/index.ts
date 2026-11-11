@@ -484,4 +484,14 @@ export {
   type ReadGraphStoreConfig,
 } from './read-graph/read-graph-store.js';
 export { readReadGraphRegistry } from './read-graph/registry.js';
+export {
+  DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
+  STORE_GRAPH_CATALOG_LIMIT_NAME,
+  STORE_GRAPH_CATALOG_MAX_BYTES_ENV,
+  STORE_INTERNAL_LIMIT,
+  StoreInternalLimitError,
+  isStoreInternalLimitError,
+  storeGraphCatalogMaxBytes,
+  type StoreInternalLimitErrorLike,
+} from './graph-catalog-internal-limit.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';

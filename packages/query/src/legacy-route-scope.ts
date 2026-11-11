@@ -8,6 +8,8 @@ interface LegacyRouteScopeOptions {
   authorizedDatasetGraphs: readonly string[];
   fallbackPolicy?: 'compatibility' | 'preserve-scope';
   engine?: SparqlEngineFamily | null;
+  /** Receives the graph list the query is routed over. */
+  onRoute?: (graphs: readonly string[]) => void;
 }
 
 /**
@@ -16,12 +18,17 @@ interface LegacyRouteScopeOptions {
  * instead of replacing it with an unfiltered prefix scan here.
  */
 export async function resolveLegacyRouteScope(scope: PreparedGraphScope, {
-  root, family, discover, authorizedDatasetGraphs, fallbackPolicy = 'compatibility', engine = null,
+  root, family, discover, authorizedDatasetGraphs, fallbackPolicy = 'compatibility', engine = null, onRoute,
 }: LegacyRouteScopeOptions): Promise<PreparedGraphScope> {
-  if (scope.hasGraphClause) return requireGraphScopeRewrite(rewriteGraphSet(scope, authorizedDatasetGraphs, 'union-only', engine));
+  if (scope.hasGraphClause) {
+    onRoute?.(authorizedDatasetGraphs);
+    return requireGraphScopeRewrite(rewriteGraphSet(scope, authorizedDatasetGraphs, 'union-only', engine));
+  }
   const data = family === 'data';
   const graphs = await discover(data ? `${root}/_verifiable_memory/` : `${root}/`);
-  return requireGraphScopeRewrite(rewriteGraphRoute(scope,
-    data && graphs.length ? [root, ...graphs] : graphs, root,
+  const routed = data && graphs.length ? [root, ...graphs] : graphs;
+  // With no graph found, the route reads its root graph alone.
+  onRoute?.(routed.length ? routed : [root]);
+  return requireGraphScopeRewrite(rewriteGraphRoute(scope, routed, root,
     data ? 'deduplicated-values-union' : 'union-only', fallbackPolicy, engine));
 }

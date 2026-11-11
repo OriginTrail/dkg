@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import { withDefaultStoreWorkPriority, type TripleStore, type StorePressureSnapshot } from '@origintrail-official/dkg-storage';
+import {
+  GraphSetIndexStore,
+  OxigraphStore,
+  STORE_GRAPH_CATALOG_MAX_BYTES_ENV,
+  withDefaultStoreWorkPriority,
+  type TripleStore,
+  type StorePressureSnapshot,
+} from '@origintrail-official/dkg-storage';
 import { QueryMaterializationBudget, DKGQueryEngine } from '@origintrail-official/dkg-query';
 import {
   canReadUnscopedQuery,
@@ -34,6 +41,27 @@ function deferred<T>() {
 }
 
 describe('unscoped query admission', () => {
+  it('rejects admission with STORE_INTERNAL_LIMIT once a warm catalog passes its ceiling through another writer', async () => {
+    let now = 1_000;
+    const readable = 'did:dkg:context-graph:readable';
+    const inner = new OxigraphStore();
+    await inner.insert([{ graph: readable, subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
+    const store = new GraphSetIndexStore(inner, { revalidateMs: 100, now: () => now });
+    const canRead = vi.fn(async (id: string) => id === 'readable');
+    const deps = { store, knownContextGraphIds: [], canReadContextGraph: canRead } satisfies UnscopedQueryAdmissionDependencies;
+    try {
+      await expect(canReadUnscopedQuery(deps)).resolves.toBe(true);
+      // A write through the inner store adds a context graph, and the catalog passes its ceiling.
+      vi.stubEnv(STORE_GRAPH_CATALOG_MAX_BYTES_ENV, String(Buffer.byteLength(JSON.stringify([readable]))));
+      await inner.insert([{ graph: 'did:dkg:context-graph:other', subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
+      now += 100;
+      await expect(canReadUnscopedQuery(deps)).rejects.toMatchObject({ code: 'STORE_INTERNAL_LIMIT' });
+    } finally {
+      vi.unstubAllEnvs();
+      await store.close();
+    }
+  });
+
   it('charges policy discovery and passes the same response cap to graph inventory', async () => {
     const canRead = vi.fn(async () => true);
     const deps = admissionDependencies(canRead, []);
