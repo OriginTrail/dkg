@@ -61,10 +61,17 @@ export interface MeasuredDiscovery<T> {
   readonly byteCount: number;
 }
 
+/**
+ * One request's reads. `listGraphsByPrefix` reads each prefix once per request, and
+ * `registry.query` each registry query once per request; nothing is kept for another
+ * request. `catalog.query` always reads: an authority check that must see a
+ * registration made during discovery reads through it.
+ */
 export interface QueryStoreReadContext extends StoreReadLane {
   readonly signal: AbortSignal | undefined;
   readonly materializationBudget: QueryMaterializationBudget | undefined;
   readonly catalog: StoreReadLane;
+  readonly registry: Pick<StoreReadLane, 'query'>;
   withWithheldGraphRoots(roots: readonly string[]): StoreReadLane;
   readonly shared: {
     readonly cacheKey: string;
@@ -91,6 +98,13 @@ export function createStoreReadLane(
   };
 }
 
+/** The first read of a key in this request; a failed read fails every use of it. */
+function readOnce<T>(reads: Map<string, Promise<T>>, key: string, read: () => Promise<T>): Promise<T> {
+  let pending = reads.get(key);
+  if (!pending) reads.set(key, pending = read());
+  return pending;
+}
+
 /** Reads that must set their own dataset: one without it is refused before it reaches the store. */
 export function requireQueryDataset(reads: QueryStoreReadContext): QueryStoreReadContext {
   return { ...reads, query: (sparql, withDataset) => withDataset ? reads.query(sparql, withDataset)
@@ -114,17 +128,22 @@ export function createQueryStoreReadContext(
     });
     return { snapshot: await load(measured), byteCount };
   };
+  const catalog = createStoreReadLane(store, catalogOptions, budget);
+  const discoveries = new Map<string, Promise<readonly string[]>>();
+  const registryReads = new Map<string, Promise<StoreQueryResult>>();
   return {
     ...lane,
     // Enumeration may share an upstream refresh, but each caller owns its abort race.
-    listGraphsByPrefix: async prefix => {
-      const discovery = await raceAgainstCallerAbort(measure(reads => reads.listGraphsByPrefix(prefix)), options?.signal);
+    // A prefix read again in this request reuses the first read and is not charged again.
+    listGraphsByPrefix: async prefix => [...await raceAgainstCallerAbort(readOnce(discoveries, prefix, async () => {
+      const discovery = await measure(reads => reads.listGraphsByPrefix(prefix));
       budget?.consumeBytes(discovery.byteCount); return discovery.snapshot;
-    },
+    }), options?.signal)],
     signal: options?.signal,
     materializationBudget: budget,
     withWithheldGraphRoots: roots => createStoreReadLane(store, { ...options, withheldGraphRoots: [...roots] }, budget),
-    catalog: createStoreReadLane(store, catalogOptions, budget),
+    catalog,
+    registry: { query: sparql => readOnce(registryReads, sparql, () => catalog.query(sparql)) },
     shared: {
       measure,
       replay<T>(discovery: MeasuredDiscovery<T>): T {

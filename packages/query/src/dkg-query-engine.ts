@@ -388,7 +388,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     switch (plan.kind) {
       case 'scoped': return this.queryScoped(initialGraphScope, options, plan, this.requireReadDatasets(reads));
       case 'view': return this.queryWithView(initialGraphScope, plan.options.view,
-        plan.options.contextGraphId, plan.options, this.requireReadDatasets(reads), reads.catalog);
+        plan.options.contextGraphId, plan.options, this.requireReadDatasets(reads), reads.catalog, reads.registry);
       case 'unscoped': {
         // The store answers over its dataset without the withheld graphs.
         const withheld = options?.withheldGraphRoots ?? [];
@@ -490,11 +490,12 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     options: QueryOptions,
     reads: StoreReadLane,
     catalogReads: StoreReadLane,
+    registryReads: Pick<StoreReadLane, 'query'>,
   ): Promise<QueryResult> {
     const sparql = initialScope.source;
     const fanOut = !options.subGraphName && !options.verifiedGraph
       && !(view === 'working-memory' && options.assertionName);
-    const subGraphs = fanOut ? await readRegisteredViewSubGraphs(contextGraphId, catalogReads.query) : [];
+    const subGraphs = fanOut ? await readRegisteredViewSubGraphs(contextGraphId, registryReads.query) : [];
     // Uniform layout (rc.17): a by-name working-memory read must target the per-KA
     // graph `…/_working_memory/{addr}/{number}` the data was written to. Resolve the
     // KA number from the `dkg:kaId` stamped on the lifecycle URN in `_meta` and pass
