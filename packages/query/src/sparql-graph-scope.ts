@@ -13,7 +13,7 @@ import {
   type SparqlRewriteResult,
 } from './sparql-rewrite-result.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
-import { applyGraphDataset } from './sparql-graph-dataset.js';
+import { applyGraphDataset, withDatasetClauses } from './sparql-graph-dataset.js';
 import { graphSubselectLimit } from './sparql-subselect-limit.js';
 import { renderDedupPattern } from './sparql-dedup-pattern-source.js';
 import { analyzeDedupPattern } from './sparql-dedup-pattern.js';
@@ -117,6 +117,22 @@ export function assertExplicitGraphIrisAllowed(
   }
 }
 
+/** Merge only the already-authorized partitions into a default dataset.
+ * The caller's dataset clauses are rejected before this host-owned rewrite.
+ * This supports joins between KAs without exposing any other named graph.
+ */
+export function mergeDefaultGraphDataset(
+  scope: PreparedGraphScope,
+  graphUris: readonly string[],
+): GraphScopeRewriteResult {
+  if (scope.hasGraphClause || scope.hasDatasetClause || graphUris.length === 0) {
+    return unsupported('strategy-rejected');
+  }
+  const source = withDatasetClauses(scope, graphUris, 'FROM');
+  return source === null
+    ? unsupported('missing-where')
+    : ready(transitionGraphScope(scope, source));
+}
 export function wrapWithGraph(
   scope: PreparedGraphScope,
   graphUri: string,

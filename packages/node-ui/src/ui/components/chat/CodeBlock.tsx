@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Check, Copy } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { normalizeShikiLanguage } from './shikiLanguages.js';
+import { copyText } from '../common/copyText.js';
 
 type Highlighter = {
   codeToHtml: (code: string, opts: { lang: string; theme: string }) => string;
@@ -66,7 +67,7 @@ export function CodeBlock({ code, lang }: CodeBlockProps) {
 
   const onCopy = async () => {
     try {
-      await navigator.clipboard.writeText(code);
+      await copyText(code);
       setCopied(true);
       if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
       copyTimerRef.current = setTimeout(() => setCopied(false), 1200);
