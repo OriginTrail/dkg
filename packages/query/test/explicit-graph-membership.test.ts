@@ -293,8 +293,13 @@ describe.each([
     const before = engine.explicitGraphMembershipCounts();
     const view: QueryOptions = { contextGraphId: id, view: 'verifiable-memory' };
     await engine.query('SELECT ?s WHERE { GRAPH ?g { ?s <urn:p> ?o } }', view);
-    await engine.query(`SELECT ?s WHERE { ?s <urn:p> ?o . GRAPH <${ROOT}> { ?s <urn:p> ?o } }`, view).catch(() => undefined);
-    await engine.query(`DESCRIBE ?s WHERE { GRAPH <${ROOT}> { ?s <urn:p> ?o } }`, view).catch(() => undefined);
+    // A default-graph pattern beside the GRAPH clause is answered; it reads no named graph alone.
+    const mixed = await engine.query(`SELECT ?s WHERE { ?s <urn:p> ?o . GRAPH <${ROOT}> { ?s <urn:p> ?o } }`, view);
+    expect(Array.isArray(mixed.bindings)).toBe(true);
+    // A description with a GRAPH clause is answered on Oxigraph and refused, before any read, on Blazegraph.
+    const described = engine.query(`DESCRIBE ?s WHERE { GRAPH <${ROOT}> { ?s <urn:p> ?o } }`, view);
+    if (endpoint) await expect(described).rejects.toThrow('DESCRIBE cannot be combined with a GRAPH clause');
+    else expect(Array.isArray((await described).quads)).toBe(true);
     // The route's own graphs are allowed without listing anything, so there is nothing to compare.
     await engine.query(`SELECT ?s WHERE { GRAPH <${ROOT}/_meta> { ?s <urn:p> ?o } }`, { contextGraphId: id });
     expect(engine.explicitGraphMembershipCounts()).toEqual(before);
@@ -369,6 +374,32 @@ describe('the membership check never changes an answer', () => {
       .rejects.toThrow('outside the allowed graph set');
     expect([count('ontology/kaId'), count('ontology#ContextGraph')]).toEqual([1, 2]);
     expect(engine.explicitGraphMembershipCounts()).toMatchObject({ checked: 2, disagreed: 0, failed: 0 });
+  });
+
+  it('when the caller has aborted before the check starts', async () => {
+    let lookups = 0;
+    const engine = new DKGQueryEngine(over({
+      query: (sparql: string, queryOptions?: unknown) => {
+        if (sparql.includes('VALUES ?graph')) lookups++;
+        return inner.query(sparql, queryOptions as never);
+      },
+    }));
+    const controller = new AbortController();
+    // The caller aborts after discovery, just as the check starts.
+    const compare = vi.spyOn(ExplicitGraphMembershipCheck.prototype, 'compare').mockImplementation(function (this: ExplicitGraphMembershipCheck, ...args) {
+      controller.abort(new Error('caller stopped'));
+      return realCompare.apply(this, args);
+    });
+    let compared = 0;
+    try {
+      await engine.query(`SELECT ?s WHERE { GRAPH <${GRAPH}> { ?s <urn:p> ?o } }`, { ...options, signal: controller.signal }).catch(() => undefined);
+    } finally {
+      compared = compare.mock.calls.length;
+      compare.mockRestore();
+    }
+    expect(compared).toBe(1);
+    expect(lookups).toBe(0);
+    expect(engine.explicitGraphMembershipCounts()).toEqual({ checked: 0, disagreed: 0, failed: 0 });
   });
 
   it('when the caller aborts while the check waits on the store', async () => {

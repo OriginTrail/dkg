@@ -86,7 +86,7 @@ import {
   type QueryStoreReadContext,
   type StoreReadLane,
 } from './query-store-read-context.js';
-import { raceAgainstCallerAbort } from './caller-abort.js';
+import { callerAbortReason, raceAgainstCallerAbort } from './caller-abort.js';
 
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { assertWithheldGraphQuery } from './withheld-graph-scope.js';
@@ -510,8 +510,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const visible = this.store.graphEnumerationVisibility?.bind(this.store);
     const reads = createStoreReadLane(this.store, { ...storeOptions(options),
       maxResponseBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES, maxLiteralHydrationBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES });
-    return this.explicitGraphMembership.compare(route, named, enumerated, () => raceAgainstCallerAbort(
-      collect(laneOverNamedGraphs(named, reads, visible), reads), options?.signal), options?.signal);
+    const signal = options?.signal;
+    return this.explicitGraphMembership.compare(route, named, enumerated, () => signal?.aborted
+      // A caller that has already aborted starts no lookup.
+      ? Promise.reject(callerAbortReason(signal))
+      : raceAgainstCallerAbort(collect(laneOverNamedGraphs(named, reads, visible), reads), signal), signal);
   }
 
   private async execWithExclusions(scope: PreparedGraphScope, reads: StoreReadLane, excludedGraphPrefixes: readonly string[] = []): Promise<QueryResult> {
