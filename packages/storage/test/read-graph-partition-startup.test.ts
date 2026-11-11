@@ -167,7 +167,8 @@ describe('marking read graphs dirty at start', () => {
     }
     const after = await rows(store);
     expect(after.damaged).toEqual([]);
-    expect(after.rows.every(({ state }) => state === 'dirty')).toBe(true);
+    // Every row is back, each dirty at a new generation of its own.
+    expect(after.rows.map(({ readGraph, state }) => `${readGraph} ${state}`).sort()).toEqual(graphs.map(graph => `${graph} dirty`).sort());
     expect(await stateValues(store, readGraphStateGraphIri('elsewhere'))).toEqual([]);
   });
 
@@ -178,7 +179,9 @@ describe('marking read graphs dirty at start', () => {
     const update = vi.spyOn(readGraphPartitionMaintenanceStore(store), 'update');
     expect(await markReadGraphsDirtyAtStart(store)).toBe(1_001);
     expect(update).toHaveBeenCalledTimes(2);
-    expect((await rows(store)).rows.every(({ state, generation }) => state === 'dirty' && generation === 2)).toBe(true);
+    const after = await rows(store);
+    expect(after.damaged).toEqual([]);
+    expect(after.rows.sort(byGraph)).toEqual(graphs.map(graph => row(graph, 'dirty', 2)).sort(byGraph));
   });
 
   it('runs below the partition guard', async () => {
