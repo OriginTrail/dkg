@@ -146,6 +146,12 @@ export interface ReadGraphBackendRuntime {
    * written under its own address.
    */
   workingMemoryIdentity: WorkingMemoryIdentityRule;
+  /**
+   * Whether the backend may hold read-graph partitions, as recorded by
+   * `noteStoreMayHoldReadGraphPartitions` through any store object over it.
+   * Unset means not recorded.
+   */
+  mayHoldPartitions?: boolean;
 }
 
 const SHARED_RUNTIMES = new Map<string, ReadGraphBackendRuntime>();
