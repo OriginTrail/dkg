@@ -51,6 +51,8 @@ const swmGraphs = [1, 2].map(n => layerGraph(CG, MemoryLayer.SharedWorkingMemory
 const wmGraphs = [1, 2].map(n => layerGraph(CG, MemoryLayer.WorkingMemory, n));
 const LARGE_CG = 'scope-meters-large';
 const LARGE_SWM_GRAPHS = 2_050;
+const UNION_CG = 'scope-meters-union';
+const UNION_VM_GRAPHS = 1_050;
 
 const cls = (overrides: Partial<QueryScopeClass>): QueryScopeClass => ({
   route: 'view', view: 'none', graph: 'none', min_trust: 'false', private: 'false', ...overrides,
@@ -74,6 +76,7 @@ beforeAll(async () => {
     ...swmGraphs.map((graph, n) => quad(graph, 20 + n)),
     ...wmGraphs.map((graph, n) => quad(graph, 30 + n)),
     ...Array.from({ length: LARGE_SWM_GRAPHS }, (_, n) => quad(layerGraph(LARGE_CG, MemoryLayer.SharedWorkingMemory, n + 1), n)),
+    ...Array.from({ length: UNION_VM_GRAPHS }, (_, n) => quad(layerGraph(UNION_CG, MemoryLayer.VerifiableMemory, n + 1), n)),
   ]);
   engine = new DKGQueryEngine(store);
 });
@@ -260,6 +263,46 @@ describe('the query engine', () => {
     telemetry.points.length = 0;
     await engine.query(QUERY, { contextGraphId: 'scope-meters-empty' });
     expect(named(SLICE)).toEqual([{ metric: SLICE, value: 1, attributes: { route: 'legacy', graph: 'none' } }]);
+  });
+
+  it('times exactly the reads of the caller query, every one of them, and no discovery read', async () => {
+    let clock = 0;
+    const marker = 'urn:scope-meters:timed';
+    // Each caller read takes 30 ms on this clock, and each discovery read 100 ms.
+    const timed = new Proxy(store, {
+      get(target, key) {
+        const value = Reflect.get(target, key, target);
+        if (typeof value !== 'function') return value;
+        if (key === 'query') {
+          return async (sparql: string, options: Parameters<TripleStore['query']>[1]) => {
+            clock += sparql.includes(marker) ? 30 : 100;
+            return target.query(sparql, options);
+          };
+        }
+        if (key === 'listGraphsByPrefix' || key === 'readGraphInventory') {
+          return async (...args: unknown[]) => { clock += 100; return (value as (...a: unknown[]) => unknown).apply(target, args); };
+        }
+        return value.bind(target);
+      },
+    });
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    try {
+      const timedEngine = new DKGQueryEngine(timed);
+      const query = `SELECT ?s WHERE { ?s <${marker}> ?o }`;
+      await timedEngine.query(query, { contextGraphId: CG, view: 'verifiable-memory' });
+      // Data and shared memory: two caller reads.
+      await timedEngine.query(query, { contextGraphId: CG, includeSharedMemory: true });
+    } finally { now.mockRestore(); }
+    expect(named(STORE_MS).map(({ value, attributes }) => [attributes.route, value])).toEqual([['view', 30], ['legacy', 60]]);
+  });
+
+  it('records the root graph alone when the legacy route falls back to it', async () => {
+    // The graph-set rewrites decline a top-level UNION, so the route reads its root graph alone.
+    const answer = await engine.query(`SELECT ?s WHERE { { ?s <${NAME}> ?o } UNION { ?s <urn:scope-meters:q> ?o } }`, { contextGraphId: UNION_CG });
+    expect(answer.bindings).toEqual([]);
+    expect(named(SLICE)).toEqual([{ metric: SLICE, value: 1, attributes: { route: 'legacy', graph: 'none' } }]);
+    expect(named(OVER_LIMIT)).toEqual([]);
+    expect(named(STORE_MS).map(({ attributes }) => attributes.slice)).toEqual(['le_100']);
   });
 
   it('counts an unscoped query and records no slice for it', async () => {

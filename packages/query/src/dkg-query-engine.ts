@@ -588,8 +588,9 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const dedupedGraphs = [...new Set(allGraphs)].filter(graph => !isKnownChildContextGraphPartition(graph, children));
     allGraphs.length = 0;
     allGraphs.push(...dedupedGraphs);
-    reportRoutedGraphs(allGraphs);
 
+    // The scope meter counts the graphs this view routes per asset.
+    reportRoutedGraphs(allGraphs);
     if (allGraphs.length === 0) {
       // PR #239 / r17-2: a zero-graph resolution (e.g. a `verifiable-memory`
       // query with `minTrust=Endorsed` on a context graph that has not
