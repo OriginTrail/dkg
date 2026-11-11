@@ -8,8 +8,9 @@
  * agent owns its own, and the node's default agent also those written under
  * the node's peer ID. A working-memory read graph holds the drafts of the
  * addresses its agent owns, so it is valid only under the rule it was built
- * and maintained under. The record, a file in the node's data directory, lets
- * a later start keep those read graphs when the identity is the same.
+ * and maintained under. The record, a file in each data directory of the
+ * backend's runtime (`./data-directories.ts`), lets a later start keep those
+ * read graphs when the identity is the same.
  *
  * The record names an identity only while every working-memory row the store
  * holds as `ready` is valid under it. A change of identity removes it before
@@ -31,6 +32,7 @@ import { MemoryLayer, parseReadGraphIri } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '../triple-store.js';
 import { workingMemoryIdentityRule, type WorkingMemoryIdentityRule } from './membership.js';
 import { readGraphRuntimeOf } from './read-graph-store.js';
+import { addReadGraphDataDirectory, readGraphDataDirectories } from './data-directories.js';
 import { markReadGraphDirty, type ReadGraphJobContext } from './rebuild.js';
 import { readGraphRecoveryGeneration } from './recovery.js';
 import { holdWorkingMemoryReadGraphs } from './working-memory-hold.js';
@@ -45,18 +47,6 @@ export interface WorkingMemoryNodeIdentity {
 
 /** The record, in the node's data directory, of the identity its working-memory read graphs are kept under. */
 export const READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE = 'read-graph-working-memory-identity.json';
-
-/**
- * The data directories each backend's identity is recorded in: every one a
- * start-up over the backend named, since any of their agents may be the one a
- * later process starts alone.
- */
-const DATA_DIRS = new WeakMap<ReadGraphBackendRuntime, Set<string>>();
-
-function noteDirectory(runtime: ReadGraphBackendRuntime, dataDir: string): void {
-  const dirs = DATA_DIRS.get(runtime) ?? new Set<string>();
-  DATA_DIRS.set(runtime, dirs.add(dataDir));
-}
 
 /** What a backend's runtime knows of its identity and its record. */
 interface IdentityRecording {
@@ -119,7 +109,7 @@ export function installRecordedWorkingMemoryIdentity(
   runtime: ReadGraphBackendRuntime,
   dataDir: string,
 ): WorkingMemoryNodeIdentity | undefined {
-  noteDirectory(runtime, dataDir);
+  addReadGraphDataDirectory(runtime, dataDir);
   const recording = recordingOf(runtime);
   const recorded = recording.owed.size > 0 || recording.unflushed.size > 0 ? undefined : recordedWorkingMemoryIdentity(dataDir);
   recording.node = recorded;
@@ -135,7 +125,7 @@ export function installRecordedWorkingMemoryIdentity(
  * replaced by the running identity's, or removed while none is recorded.
  */
 export function noteWorkingMemoryIdentityDirectory(runtime: ReadGraphBackendRuntime, dataDir: string): void {
-  noteDirectory(runtime, dataDir);
+  addReadGraphDataDirectory(runtime, dataDir);
   const recording = recordingOf(runtime);
   if (recording.recorded && recording.node !== undefined) {
     try {
@@ -270,16 +260,17 @@ export async function installWorkingMemoryIdentity(
 }
 
 /**
- * The data directories a backend's identity is recorded in: those its
- * start-ups noted, whichever directory an installation names, so that every
- * record start-up may read covers the backend's read graphs. Without one
- * noted, the first directory an installation names is noted.
+ * The data directories a backend's identity is recorded in: the runtime's
+ * (`./data-directories.ts`), which its start-ups added, whichever directory an
+ * installation names, so that every record start-up may read covers the
+ * backend's read graphs. Without one, the first directory an installation
+ * names is added.
  */
 function recordingDirectories(runtime: ReadGraphBackendRuntime, named: string | undefined): string[] {
-  const noted = DATA_DIRS.get(runtime);
-  if (noted !== undefined && noted.size > 0) return [...noted];
+  const noted = readGraphDataDirectories(runtime);
+  if (noted.length > 0) return [...noted];
   if (named === undefined) return [];
-  noteDirectory(runtime, named);
+  addReadGraphDataDirectory(runtime, named);
   return [named];
 }
 
