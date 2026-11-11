@@ -424,6 +424,7 @@ export {
   readGraphStateCompareAndSet,
   readGraphStateFencePattern,
   readGraphStateMarkAllDirty,
+  readGraphStateMarkDirty,
   readGraphStateReset,
   readGraphStateRowsQuery,
   servingReadGraphGeneration,

@@ -9,6 +9,7 @@ import type { GraphAccessMode } from './sparql-graph-access.js';
 import { hasOuterDefaultGraphPattern, hasTopLevelDefaultGraphPattern } from './sparql-default-graph-pattern.js';
 import { bindCallerGraphsBeforeRead, hasCallerGraphAssignments } from './sparql-caller-graph-read.js';
 import { transitionGraphScope } from './sparql-query-transition.js';
+import { isReadGraphPartitionGraph } from '@origintrail-official/dkg-storage';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { sparqlRewriteReady, sparqlRewriteUnsupported, type SparqlRewriteResult } from './sparql-rewrite-result.js';
 
@@ -116,6 +117,11 @@ export function applyGraphDataset<Reason extends string>(
   engine: SparqlEngineFamily | null,
   rewrite: (access: GraphAccessMode) => SparqlRewriteResult<PreparedSparqlQuery, Reason>,
 ): SparqlRewriteResult<PreparedSparqlQuery, Reason | 'missing-where'> {
+  // The last check before a caller's scoped read reaches the store: whatever built
+  // these graphs, none of them is in a read-graph partition.
+  if (graphs.some(isReadGraphPartitionGraph)) {
+    throw new ScopedQueryViolationError('the query would read a graph in a read-graph partition');
+  }
   const plan = planGraphDataset(scope, engine);
   const result = plan.preservePattern ? sparqlRewriteReady(scope) : rewrite(plan.graphAccess);
   if (plan.datasetClauses.length === 0 || result.kind !== 'ready') return result;
