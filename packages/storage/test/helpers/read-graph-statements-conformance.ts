@@ -29,6 +29,7 @@ import {
   parseReadGraphStateRows,
   readGraphStateCompareAndSet,
   readGraphStateMarkAllDirty,
+  readGraphStateMarkDirty,
   readGraphStateRowsQuery,
   type ReadGraphStateRow,
 } from '../../src/read-graph/state.js';
@@ -483,6 +484,28 @@ export function readGraphStatementsConformance(backend: 'oxigraph' | 'blazegraph
       expect((await lookup()).rows.find((row) => row.readGraph === wm)).toEqual({ readGraph: wm, state: 'dirty', generation: 41, ...versions() });
       await update(readGraphStateMarkAllDirty());
       expect(mine((await lookup()).rows).map((row) => row.generation).sort()).toEqual([12, 4].sort());
+    });
+
+    it('marks one read graph dirty from whatever row is stored, and leaves a dirty row, a missing one and every other row alone', async () => {
+      const cg = freshContextGraph();
+      const vm = readGraphIri({ scope: readScope(cg), layer: MemoryLayer.VerifiableMemory });
+      const swm = readGraphIri({ scope: readScope(cg), layer: MemoryLayer.SharedWorkingMemory });
+      const missing = readGraphIri({ scope: readScope(cg, 'code'), layer: MemoryLayer.VerifiableMemory });
+      await setState({ readGraph: vm, state: 'rebuilding', generation: 6, ...versions() });
+      await setState({ readGraph: swm, state: 'ready', generation: 9, ...versions() });
+      const lookup = async () => parseReadGraphStateRows(await select(readGraphStateRowsQuery()));
+      const mine = async () => (await lookup()).rows.filter((row) => row.readGraph === vm || row.readGraph === swm)
+        .sort((a, b) => a.readGraph.localeCompare(b.readGraph));
+      await update(readGraphStateMarkDirty(vm));
+      await update(readGraphStateMarkDirty(missing));
+      const marked = await mine();
+      expect(marked).toEqual([{ readGraph: vm, state: 'dirty', generation: 7, ...versions() }, { readGraph: swm, state: 'ready', generation: 9, ...versions() }]
+        .sort((a, b) => a.readGraph.localeCompare(b.readGraph)));
+      const found = await lookup();
+      expect([...found.rows.map((row) => row.readGraph), ...found.damaged]).not.toContain(missing);
+      // Sent again, as after a lost response, it changes nothing.
+      await update(readGraphStateMarkDirty(vm));
+      expect(await mine()).toEqual(marked);
     });
 
     it('finds a missing and an extra triple in both directions of the check', async () => {
