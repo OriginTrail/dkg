@@ -12,6 +12,7 @@ import { queryWithPublicSnapshotTrust } from './public-snapshot-evidence.js';
 
 import { sharedMemoryAdmissionError, sharedMemoryAdmissionFailsClosed } from './swm-read-admission.js';
 import { deniedResult } from './query-denied-result.js';
+import { holdsContextGraphGraphs } from './context-graph-held-graphs.js';
 import { resolveCallerDraftAccess, resolveWorkingMemoryIdentityAliases } from './working-memory-identity.js';
 import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { resolveRfc64PrivateReadRoster } from './rfc64/private-read-roster-v1.js';
@@ -510,23 +511,23 @@ export class QueryMethods extends DKGAgentBase {
         isLocalFirstUnregistered: (id) => this.isLocalFirstUnregisteredContextGraph(id),
         readCurrentBinding: (id) => this.subscribedContextGraphs.get(id),
       });
+      // No declaration, subscription or well-known graph; a malformed id never counts, so no reply built on this depends on it.
+      const holdsNothing = async () => validateContextGraphId(scopedContextGraphId).valid
+        && !isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(scopedContextGraphId))
+        && !this.localContextGraphProvenance.hasLocalCreate(scopedContextGraphId)
+        && !await this.contextGraphExists(scopedContextGraphId, { signal: opts.signal });
       if (scopedReadAuthority.outcome === 'unavailable') {
         // An exact finalized name absence or a transient authority-circuit
-        // failure cannot expose data when this node has no local declaration,
-        // subscription, or graph. Return an empty scoped result without
-        // touching the store's graph partitions. A replica that has local
-        // data or join intent remains on the retryable authority path.
-        // The id comes straight from the caller: a malformed one never gets
-        // this answer, so the reply cannot depend on the existence check.
+        // failure cannot expose data when this node holds nothing of the
+        // graph. Return an empty scoped result without touching the store's
+        // graph partitions. A replica that has local data or join intent
+        // remains on the retryable authority path.
         if (
           opts.accessDenied !== 'error' && (
             scopedReadAuthority.reason === 'finalized-name-absence-unaccepted'
             || scopedReadAuthority.reason === 'authority-circuit-open'
           )
-          && validateContextGraphId(scopedContextGraphId).valid
-          && !isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(scopedContextGraphId))
-          && !this.localContextGraphProvenance.hasLocalCreate(scopedContextGraphId)
-          && !await this.contextGraphExists(scopedContextGraphId, { signal: opts.signal })
+          && await holdsNothing()
         ) {
           return deniedResult(sparql, opts.accessDenied);
         }
@@ -542,6 +543,9 @@ export class QueryMethods extends DKGAgentBase {
         // instead of a SELECT-shaped `{ bindings: [] }`.
         return deniedResult(sparql, opts.accessDenied);
       }
+      // Semantics other than per asset, for a graph this node holds no graph of: a denied caller's answer, before any read-graph state.
+      if (opts.semantics !== undefined && opts.semantics !== 'per-asset' && opts.accessDenied !== 'error'
+        && await holdsNothing() && !await holdsContextGraphGraphs(this.store, scopedContextGraphId, opts.signal)) return deniedResult(sparql, opts.accessDenied);
     }
 
     if (opts.contextGraphId && targetsSharedMemory) {
@@ -650,7 +654,7 @@ export class QueryMethods extends DKGAgentBase {
       maxResponseBytes: opts.maxResponseBytes,
       ...budget,
       maxLiteralHydrationBytes: opts.maxLiteralHydrationBytes,
-      view: opts.view,
+      view: opts.view, semantics: opts.semantics,
       agentAddress: effectiveWmAddress,
       agentAddressAliases: wmAddressAliases,
       verifiedGraph: opts.verifiedGraph,
@@ -679,11 +683,7 @@ export class QueryMethods extends DKGAgentBase {
               this, ids, { callerAgentAddress: callerAgentAddressStr, signal },
             )
           ),
-        }, {
-          signal: opts.signal,
-          maxResponseBytes: opts.maxResponseBytes,
-          materializationBudget: budget.materializationBudget,
-        }),
+        }, { signal: opts.signal }),
         execute,
         denied: () => {
           this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');

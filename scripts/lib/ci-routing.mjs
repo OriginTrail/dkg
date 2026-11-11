@@ -322,7 +322,7 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
   /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
   // The daemon route the suite drives and the CLI modules it loads.
   /^packages\/cli\/src\/daemon\/routes\/(?:identity-wallets|restricted-browser-wallet-rpc|marketplace-gateway-paths)\.ts$/,
-  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/async-admission-trace|daemon\/async-admission-trace-diagnostics|daemon\/reconcile-unavailable|daemon\/write-context-graph-preflight|daemon\/write-preflight-coalescing|daemon\/write-preflight-diagnostics|daemon\/write-preflight-attribution|daemon\/read-authority-diagnostics|daemon\/warning-gate|daemon\/context-graph-write-readiness|daemon\/context-graph-catchup-progress|context-graph-identifiers|auth|boolean-env-override|config|config-file-source|daemon\/public-checkpoint-config|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/,
+  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/async-admission-trace|daemon\/async-admission-trace-diagnostics|daemon\/reconcile-unavailable|daemon\/write-context-graph-preflight|daemon\/write-preflight-coalescing|daemon\/write-preflight-diagnostics|daemon\/write-preflight-attribution|daemon\/read-authority-diagnostics|daemon\/warning-gate|daemon\/store-internal-limit|daemon\/context-graph-write-readiness|daemon\/context-graph-catchup-progress|context-graph-identifiers|auth|boolean-env-override|config|config-file-source|daemon\/public-checkpoint-config|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/,
 ];
 
 // File-level triggers: lanes or EVM scopes that specific paths select on top

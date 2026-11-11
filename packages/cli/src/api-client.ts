@@ -6,6 +6,7 @@ import type { QueryOptions } from './query-options.js';
 import { shareJobsPath, shareReconciliationPath, type ShareJobsListOptions, type ShareJobsListResult } from './share-job-client-paths.js';
 import { publisherJobsPath, type PublisherJobsPageOptions, type PublisherJobsResult } from './publisher-job-client-paths.js';
 import { createEntityClient } from './entity-search/client.js';
+import { createViewSemanticsClient } from './view-semantics-client.js';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import type {
@@ -2440,15 +2441,13 @@ export class ApiClient {
   }
 
   private authHeaders(): Record<string, string> {
-    if (!this.token) return {};
-    return { Authorization: `Bearer ${this.token}` };
+    return this.token ? { Authorization: `Bearer ${this.token}` } : {};
   }
 
-  private async get<T>(path: string, opts: { auth?: boolean } = {}): Promise<T> {
-    return this.send<T>(path, { headers: opts.auth === false ? {} : this.authHeaders() });
-  }
+  private async get<T>(path: string, opts: { auth?: boolean } = {}): Promise<T> { return this.send<T>(path, { headers: opts.auth === false ? {} : this.authHeaders() }); }
 
   readonly entities = createEntityClient((path, body, deadline) => this.post(path, body, deadline));
+  readonly viewSemantics = createViewSemanticsClient(<T>(path: string) => this.get<T>(path));
 
   private async post<T>(path: string, body: unknown, deadline: RequestDeadline = {}): Promise<T> {
     return this.send<T>(path, {

@@ -16,6 +16,7 @@ import {
 } from './sparql-caller-graph-read.js';
 import { transitionGraphScope } from './sparql-query-transition.js';
 import { createVariableAllocator } from './sparql-rewrite-names.js';
+import { isReadGraphPartitionGraph } from '@origintrail-official/dkg-storage';
 import { heldGraphGuard } from './sparql-held-graph-guard.js';
 import { graphBlockNeedsList, hasOwnTriplePattern, isSubqueryGroup } from './sparql-graph-block.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
@@ -73,6 +74,18 @@ function needsConstantCallerGraphs(scope: PreparedSparqlQuery): boolean {
       || (part.kind === 'word' && part.logicalValue === 'a')
       || (part.kind === 'symbol' && ['/', '|', '^', '!', '(', ')', '*', '+', '?'].includes(part.logicalValue)));
   });
+}
+
+/**
+ * Whether a read must bind its caller's GRAPH variables to constant graph targets before
+ * evaluation (`bindCallerGraphsBeforeRead`). On Oxigraph: a GRAPH ?var block that assigns ?var
+ * a constant at any depth. On another store, outside DESCRIBE: a repeated compound path, a
+ * nested SELECT or a caller assignment of the graph variable.
+ */
+export function needsCallerGraphBinding(scope: PreparedSparqlQuery, engine: SparqlEngineFamily | null): boolean {
+  if (scope.graphVariables.length === 0) return false;
+  if (engine === 'oxigraph') return hasCallerGraphAssignmentsInside(scope);
+  return scope.operation !== 'DESCRIBE' && hasRepeatedPath(scope) && needsConstantCallerGraphs(scope);
 }
 
 /**
@@ -205,9 +218,7 @@ export function planGraphDataset(
     preservePattern: graphlessDescription || scope.readsOnlyDeclaredNamedSet,
     // Oxigraph repeats the rows of a GRAPH ?var block that assigns ?var a constant, at any
     // depth, once per graph it iterates; a constant branch per graph keeps one row per match.
-    bindCallerGraphs: !scopedDescription && scope.graphVariables.length > 0 && (oxigraph
-      ? hasCallerGraphAssignmentsInside(scope)
-      : graphAccess === 'dataset' && repeatedPath && needsConstantCallerGraphs(scope)),
+    bindCallerGraphs: !scopedDescription && (oxigraph || graphAccess === 'dataset') && needsCallerGraphBinding(scope, engine),
     wrapDescriptionPattern: scopedDescription && scope.where !== null,
   };
 }
@@ -239,6 +250,11 @@ export function applyGraphDataset<Reason extends string>(
   engine: SparqlEngineFamily | null,
   rewrite: (access: GraphAccessMode) => SparqlRewriteResult<PreparedSparqlQuery, Reason>,
 ): SparqlRewriteResult<PreparedSparqlQuery, Reason | 'missing-where'> {
+  // The last check before a caller's scoped read reaches the store: whatever built
+  // these graphs, none of them is in a read-graph partition.
+  if (graphs.some(isReadGraphPartitionGraph)) {
+    throw new ScopedQueryViolationError('the query would read a graph in a read-graph partition');
+  }
   const plan = planGraphDataset(scope, engine);
   const result = plan.preservePattern ? sparqlRewriteReady(scope) : rewrite(plan.graphAccess);
   if (result.kind !== 'ready') return result;

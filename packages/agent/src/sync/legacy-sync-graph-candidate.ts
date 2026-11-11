@@ -2,6 +2,7 @@ import {
   contextGraphDataUri,
   isRfc64SemanticControlGraphV1,
 } from '@origintrail-official/dkg-core';
+import { isReadGraphPartitionGraph } from '@origintrail-official/dkg-storage';
 
 export type LegacySyncLane = 'durable-data' | 'changelog';
 
@@ -27,6 +28,8 @@ export function isLegacySyncGraphCandidateV1(
   const rawSegments = graph.slice(cg.length + 1).split('/');
   const segments = rawSegments.filter(Boolean);
   if (segments.includes('_private')) return false;
+  // Read graphs and their state are node-local derived data, never synced.
+  if (isReadGraphPartitionGraph(graph)) return false;
   if (segments.includes('_working_memory')) return false;
   if (
     segments.includes('_shared_memory')

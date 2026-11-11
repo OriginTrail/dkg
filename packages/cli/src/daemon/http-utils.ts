@@ -46,6 +46,7 @@ import { enforceSignedRequestPostBody } from '../auth.js';
 import { knownNotWritableAnswer, resolveAwaitingWriteReadiness, type ContextGraphSubscriptionReader, type KnownNotWritable, type WriteReadinessOutcome } from './context-graph-write-readiness.js';
 import type { CorsAllowlist } from './state.js';
 import { admissionStep, noteAdmissionResponse } from './async-admission-trace.js';
+import { isStoreInternalLimit, storeInternalLimitResponseBody } from './store-internal-limit.js';
 
 export function isPayloadTooLargeError(err: unknown): err is PayloadTooLargeError {
   if (err instanceof PayloadTooLargeError) return true;
@@ -89,9 +90,9 @@ export interface StoreUnavailableClassification {
 }
 
 /**
- * Pure store-failure classification. Routes with partial-success context can
- * extend `body` before rendering it instead of losing that context through the
- * ordinary all-or-nothing responder below.
+ * Store-failure classification. Routes with partial-success context can extend
+ * `body` before rendering it instead of losing that context through the
+ * ordinary all-or-nothing responder below. A node-side limit logs its line here.
  */
 export function classifyStoreUnavailable(
   err: unknown,
@@ -110,6 +111,7 @@ export function classifyStoreUnavailable(
     };
   }
 
+  if (isStoreInternalLimit(err)) return { outcome: 'indeterminate', body: storeInternalLimitResponseBody(err) };
   if (!isStoreOperationTimeoutError(err)) return null;
   const outcome = err.outcome ?? 'indeterminate';
   return {

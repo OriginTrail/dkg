@@ -156,6 +156,9 @@ export default defineConfig({
       "test/query-refused-aggregate.test.ts",
       "test/query-source-labels.test.ts",
       "test/query-private-authority-pending.test.ts",
+      "test/view-semantics-authority-order.test.ts",
+      "test/view-semantics-delta-report.test.ts",
+      "test/context-graph-held-graphs.test.ts",
       "test/unscoped-query-admission.test.ts",
       "test/prepare-unscoped-context-graph-read-checks.test.ts",
       "test/unscoped-query-consistency.test.ts",
@@ -354,6 +357,8 @@ export default defineConfig({
       "test/selected-swm-meta-transfer-coordinator.test.ts",
       "test/selected-swm-meta-budget.test.ts",
       "test/legacy-sync-graph-candidate.test.ts",
+      // Read-graph partitions stay out of every enumerating surface.
+      "test/read-graph-partition-comparison.test.ts",
       "test/outbox-shutdown-lifecycle.test.ts",
       // Keyed persist scheduler shared by membership and subscription writes,
       // and the subscription drain / reopen that stop() and start() drive.

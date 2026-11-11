@@ -445,7 +445,11 @@ function graphVariablesAreTopLevel(scope: PreparedGraphScope): boolean {
 export function constrainGraphVariablesToAllowedSet(
   scope: PreparedGraphScope,
   allowedGraphs: readonly string[],
-  { boundByDataset = false }: { boundByDataset?: boolean } = {},
+  { boundByDataset = false, allowDefaultGraphPatterns = false }: {
+    boundByDataset?: boolean;
+    /** A merged view query reads patterns outside GRAPH from its own default graph, beside GRAPH portions. */
+    allowDefaultGraphPatterns?: boolean;
+  } = {},
 ): GraphScopeRewriteResult {
   if (nestedSelectContainsGraphVariable(scope)) {
     throw new ScopedQueryViolationError(
@@ -461,7 +465,7 @@ export function constrainGraphVariablesToAllowedSet(
       'GRAPH variables must appear at the top level of scoped local queries',
     );
   }
-  if (hasTopLevelDefaultGraphPattern(scope)) {
+  if (!allowDefaultGraphPatterns && hasTopLevelDefaultGraphPattern(scope)) {
     throw new ScopedQueryViolationError(
       'GRAPH variables cannot be mixed with default-graph triple patterns on scoped local queries',
     );

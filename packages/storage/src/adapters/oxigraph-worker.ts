@@ -1,4 +1,4 @@
-import { oxigraphGraphEnumerationVisibility } from '../graph-enumeration-visibility.js';
+import { storeGraphEnumerationVisibility } from '../graph-enumeration-visibility.js';
 import { serializableQueryOptions } from './serializable-query-options.js';
 import { registerStoreRecoveryGeneration, storeWorkerExecutionFailure } from '../store-recovery-generation.js';
 import { runTrackedStoreWrite } from '../tracked-store-write.js';
@@ -186,7 +186,7 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 ]);
 
 export class OxigraphWorkerStore implements TripleStore {
-  readonly graphEnumerationVisibility = oxigraphGraphEnumerationVisibility;
+  readonly graphEnumerationVisibility = storeGraphEnumerationVisibility;
   readonly sparqlEngine = 'oxigraph' as const;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'interruptible' as const;

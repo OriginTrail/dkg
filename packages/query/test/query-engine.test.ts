@@ -323,7 +323,7 @@ describe('DKGQueryEngine', () => {
     expect(secondController.signal.aborted).toBe(false);
   });
 
-  it('coalesces bounded discovery while accounting independently per request', async () => {
+  it('coalesces bounded discovery and charges no request for its registry answer', async () => {
     let releaseDiscovery!: () => void;
     const discoveryGate = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
     let discoveryStarted!: () => void;
@@ -361,7 +361,7 @@ describe('DKGQueryEngine', () => {
 
     const first = boundedEngine.query(sparql, {
       ...commonOptions,
-      maxMaterializedBytes: 100,
+      maxMaterializedBytes: 10 * 1024 * 1024,
     });
     await started;
     const second = boundedEngine.query(sparql, {
@@ -369,10 +369,7 @@ describe('DKGQueryEngine', () => {
       maxMaterializedBytes: 10 * 1024 * 1024,
     });
     releaseDiscovery();
-    await expect(first).rejects.toMatchObject({
-      code: 'QUERY_MATERIALIZATION_TOO_LARGE',
-      maxBytes: 100,
-    });
+    await expect(first).resolves.toMatchObject({ bindings: expect.any(Array) });
     await expect(second).resolves.toMatchObject({ bindings: expect.any(Array) });
     expect(boundedStore.sharedOptions).toHaveLength(1);
     for (const seen of boundedStore.sharedOptions) {
@@ -387,13 +384,15 @@ describe('DKGQueryEngine', () => {
     await boundedEngine.query(sparql, {
       ...commonOptions, materializationBudget: new RecordingBudget(10 * 1024 * 1024),
     });
-    const cachedBytes = Buffer.byteLength(JSON.stringify({ type: 'bindings', bindings: Array.from({ length: 64 }, () => ({})) }));
-    expect(charges).toContain(cachedBytes);
-    const totalBytes = charges.reduce((sum, bytes) => sum + bytes, 0);
-    const ceiling = totalBytes - 1;
-    expect(totalBytes - cachedBytes).toBeLessThan(ceiling); // Fresh reads alone fit.
-    await expect(boundedEngine.query(sparql, { ...commonOptions, maxMaterializedBytes: ceiling }))
-      .rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: ceiling });
+    // The shared registry answer is node work: no request is charged for it, cached or fresh. Each
+    // request pays for its result and for the graph names its discovery returns.
+    const registryBytes = Buffer.byteLength(JSON.stringify({ type: 'bindings', bindings: Array.from({ length: 64 }, () => ({})) }));
+    expect(charges).not.toContain(registryBytes);
+    const chargedBytes = charges.reduce((sum, bytes) => sum + bytes, 0);
+    await expect(boundedEngine.query(sparql, { ...commonOptions, maxMaterializedBytes: chargedBytes }))
+      .resolves.toMatchObject({ bindings: expect.any(Array) });
+    await expect(boundedEngine.query(sparql, { ...commonOptions, maxMaterializedBytes: chargedBytes - 1 }))
+      .rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: chargedBytes - 1 });
     expect(boundedStore.sharedOptions).toHaveLength(1);
   });
 
@@ -1067,8 +1066,8 @@ describe('DKGQueryEngine', () => {
       const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
       store.query = async (...args) => {
         const result = await originalQuery(...args);
+        // Registry and authority answers are node work: only the slices and the content are charged.
         if (args[0].includes('http://ex.org/p1')) content.push(size(result));
-        else discoveryBytes += size(result);
         return result;
       };
       store.listGraphsByPrefix = async (...args) => {
