@@ -18,7 +18,6 @@ const PEER_ID = 'peer-read-graph-qualification';
 const PRIVATE_CG = `${OWNER}/qualification-private`;
 const MISSING_CG = `${OWNER}/qualification-never-created`;
 const ROOT = `did:dkg:context-graph:${PRIVATE_CG}`;
-const ON_CHAIN_ID = 7n;
 const VM: ReadGraphKey = { scope: readScope(PRIVATE_CG), layer: MemoryLayer.VerifiableMemory };
 const SWM: ReadGraphKey = { scope: readScope(PRIVATE_CG), layer: MemoryLayer.SharedWorkingMemory };
 const PRODUCT = 'urn:qualification:product';
@@ -76,21 +75,11 @@ describe('merged view queries on a private context graph, over built read graphs
     agent = created;
     hostIdentity(created, PEER_ID);
 
-    // Only the chain registration is replaced. Read authority, the read-graph source and query execution stay real.
-    let registered = false;
-    const resolveRegistration = created.resolveContextGraphRegistrationBinding.bind(created);
-    vi.spyOn(created, 'resolveContextGraphRegistrationBinding').mockImplementation(async (id) => (
-      registered && id === PRIVATE_CG
-        ? { kind: 'registered' as const, onChainId: ON_CHAIN_ID, provenance: 'numeric-id' as const }
-        : resolveRegistration(id)));
-    vi.spyOn(chain, 'resolveContextGraphIdsByNameHashes').mockImplementation(async (names) => new Map(names.map((name) => [
-      name, registered && name === created.contextGraphNameCommitment(PRIVATE_CG) ? ON_CHAIN_ID : null,
-    ])));
-    vi.spyOn(chain, 'isContextGraphActiveOnChain').mockImplementation(async (id) => registered && id === ON_CHAIN_ID);
-    vi.spyOn(chain, 'getContextGraphAccessPolicy').mockResolvedValue(1);
-    vi.spyOn(chain, 'getContextGraphParticipantAgents').mockResolvedValue([OWNER]);
+    // Created here, then registered on the mock chain: private, with OWNER its only participant.
     await created.createContextGraph({ id: PRIVATE_CG, name: 'Private graph', accessPolicy: 1, callerAgentAddress: OWNER });
-    registered = true;
+    await chain.createOnChainContextGraph({
+      accessPolicy: 1, publishPolicy: 1, participantAgents: [OWNER], nameHash: created.contextGraphNameCommitment(PRIVATE_CG),
+    });
 
     await created.store.insert([
       { subject: PRODUCT, predicate: DKG_ONTOLOGY.RDF_TYPE, object: PRODUCT_CLASS, graph: `${ROOT}/_verifiable_memory/${OWNER}/1` },
