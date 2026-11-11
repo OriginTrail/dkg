@@ -23,9 +23,9 @@
       "require": "./dist/parsers/index.cjs"
     },
     "./agent-initials": {
-      "types": "./dist/agent-initials/agent-initials.d.ts",
-      "import": "./dist/agent-initials/agent-initials.js",
-      "require": "./dist/agent-initials/agent-initials.cjs"
+      "types": "./dist/agent-initials/index.d.ts",
+      "import": "./dist/agent-initials/index.js",
+      "require": "./dist/agent-initials/index.cjs"
     }
   },
   "files": [

@@ -30,7 +30,7 @@ export default defineConfig([
     splitting: true,
   },
   {
-    entry: ['src/agent-initials.ts'],
+    entry: ['src/agent-initials/index.ts'],
     format: ['esm', 'cjs'],
     dts: true,
     sourcemap: true,

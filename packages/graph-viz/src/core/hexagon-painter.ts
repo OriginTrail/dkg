@@ -1,7 +1,7 @@
 import type { GraphNode, GraphEdge, HexagonConfig } from './types.js';
 import { StyleEngine } from './style-engine.js';
 import { PrefixManager } from './prefix-manager.js';
-import { agentInitials, agentInitialsColor } from '../agent-initials.js';
+import { agentInitials, agentInitialsColor } from '../agent-initials/index.js';
 
 export { agentInitials };
 

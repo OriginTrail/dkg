@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { agentInitialsColor } from '../src/agent-initials.js';
+import { agentInitialsColor } from '../src/agent-initials/index.js';
 
 const channel = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
 const luminance = (hex: string) => {
