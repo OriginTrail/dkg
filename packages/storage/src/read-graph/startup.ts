@@ -170,7 +170,7 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
     registries.set(snapshot, facts);
     const record = records.get(contextGraphId);
     if (record !== undefined && sameRegistry(record, snapshot)) noteReadGraphRegistryRecord(layer.runtime, record);
-    else await recordReadGraphRegistry(target, layer.runtime, snapshot, queryOptions);
+    else await recordReadGraphRegistry(target, layer.runtime, snapshot, queryOptions, options.dataDir);
   }
   const count = marked.length + replaced.length;
   if (count > 0) options.log?.(`Marked ${count} read graph(s) dirty at start; ${mirror.size} are maintained`);

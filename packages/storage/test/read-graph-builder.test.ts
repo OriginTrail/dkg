@@ -335,6 +335,23 @@ describe('building a read graph', () => {
     await expectUnion(adapter, layer, fixture, key);
   });
 
+  it('notes that the store may hold read-graph partitions before its first registry record exists', async () => {
+    const { adapter, fixture, context, dataDir } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    expect(mayHoldReadGraphPartitions(dataDir)).toBe(false);
+    let seen: { readonly records: number; readonly note: boolean; readonly marker: boolean } | undefined;
+    const update = adapter.update.bind(adapter);
+    adapter.update = async (sparql, options) => {
+      await update(sparql, options);
+      if (seen !== undefined || !sparql.includes('<http://dkg.io/ontology/readGraphRegistry>')) return;
+      // Right after the first record, before any row exists: unscoped reads leave the partition out by these
+      // markers, and a restart with read graphs off by the data directory's note.
+      seen = { records: (await storedRecords(adapter)).size, note: mayHoldReadGraphPartitions(dataDir), marker: storeMayHoldReadGraphPartitions(adapter) };
+    };
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done' });
+    expect(seen).toEqual({ records: 1, note: true, marker: true });
+  });
+
   it('records the registry it builds under, and the one a later refresh takes', async () => {
     const { adapter, fixture, store, context } = await open();
     const [key] = fixture.keys as [ReadGraphKey];
@@ -632,6 +649,14 @@ describe('building a read graph', () => {
     adapter.listGraphs = async () => { throw new Error('the whole graph list was read'); };
     expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
     await expectUnion(adapter, layer, fixture, vm);
+    // The context graph's own list stays under the catalog's internal ceiling.
+    vi.stubEnv('DKG_STORE_GRAPH_CATALOG_MAX_BYTES', '64');
+    try {
+      layer.runtime.mirror.set({ ...layer.runtime.mirror.get(fixture.readGraphs.wholeVm)!, state: 'dirty' });
+      await expect(buildReadGraph(context, vm)).rejects.toMatchObject({ code: 'STORE_INTERNAL_LIMIT' });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('lists members by prefix where the backend can, pauses between batches, and lets queued foreground work go first', async () => {
