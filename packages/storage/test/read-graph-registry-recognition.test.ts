@@ -3,6 +3,7 @@ import { MemoryLayer, readGraphIri, readScope } from '@origintrail-official/dkg-
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { READ_GRAPH_REGISTRY_PREDICATES as R, readReadGraphRegistry } from '../src/read-graph/registry.js';
 import {
+  isExactRegistryWrite,
   readReadGraphRegistryFacts,
   registryFactsAfter,
   registryOwnersOfGraph,
@@ -58,8 +59,19 @@ describe('registry facts', () => {
     const names = (facts: ReadGraphRegistryFact[] | undefined) => registrySnapshotOfFacts('w', facts ?? []).subGraphNames;
     expect(names(registryFactsAfter('w', [], { kind: 'quads', added: code.map(({ graph, subject, predicate, object }) => fact(graph, subject, predicate, object)), removed: [] })))
       .toEqual(['code']);
-    // A literal matches whichever form the store gave it in.
-    expect(names(registryFactsAfter('w', code, { kind: 'quads', added: [], removed: [fact(meta, 'urn:sg:1', R.name, 'code')] }))).toEqual([]);
+    // A literal matches whichever form the store gave it in, and never an IRI with the same text.
+    const typedCode = '"code"^^<http://www.w3.org/2001/XMLSchema#string>';
+    expect(names(registryFactsAfter('w', code, { kind: 'quads', added: [], removed: [fact(meta, 'urn:sg:1', R.name, typedCode)] }))).toEqual([]);
+    expect(names(registryFactsAfter('w', code, { kind: 'quads', added: [], removed: [fact(meta, 'urn:sg:1', R.name, 'code')] }))).toEqual(['code']);
+    // An IRI in angle brackets is the same IRI.
+    expect(names(registryFactsAfter('w', [], { kind: 'quads', added: [fact(meta, '<urn:sg:2>', `<${R.type}>`, `<${R.subGraphClass}>`),
+      fact(meta, 'urn:sg:2', R.name, '"two"')], removed: [] }))).toEqual(['two']);
+    // A removal named by a literal or a blank node is read again after the write.
+    expect(isExactRegistryWrite('w', { kind: 'quads', added: [], removed: [fact(meta, 'urn:sg:1', R.name, '"code"')] })).toBe(false);
+    expect(isExactRegistryWrite('w', { kind: 'quads', added: [], removed: [fact(meta, 'urn:sg:1', R.type, R.subGraphClass)] })).toBe(true);
+    expect(isExactRegistryWrite('w', { kind: 'match', graph: meta, predicate: R.name, object: '"code"' })).toBe(false);
+    expect(isExactRegistryWrite('w', { kind: 'match', graph: meta, object: 'urn:x' })).toBe(true);
+    expect(isExactRegistryWrite('w', { kind: 'subject', graph: meta, subject: '_:b1', quads: [] })).toBe(false);
     expect(names(registryFactsAfter('w', code, { kind: 'match', graph: meta, predicate: R.name }))).toEqual([]);
     expect(names(registryFactsAfter('w', code, { kind: 'match', graph: meta, subject: 'urn:other' }))).toEqual(['code']);
     expect(names(registryFactsAfter('w', code, { kind: 'prefix', graph: meta, prefix: 'urn:sg' }))).toEqual([]);
@@ -215,7 +227,8 @@ describe('registry recognition in the read-graph layer', () => {
 
   it('follows a registration in an asset group\'s metadata, in and out', async () => {
     const { adapter, store, meta, fixture, layer, states } = await layered();
-    const graphUri = `${fixture.root}/_verifiable_memory/0x${'ab'.repeat(20)}/9`;
+    // The asset's data graph is in no read graph, so only its metadata matters here.
+    const graphUri = `${fixture.root}/_private/assets/9`;
     const asset = (metadataQuads: Quad[]) => ({ graphUri, graphQuads: [fact(graphUri, 'urn:s:9', 'urn:test:p', '"v"')], metaGraphUri: meta,
       metadataSubject: 'urn:asset:9', metadataQuads });
     await store.replaceAssetGroup!([asset([fact(meta, 'urn:asset:9', R.authenticatedSubGraphName, '"notes"')])]);
