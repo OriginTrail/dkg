@@ -14,6 +14,21 @@ export function sparqlEngineOf(store: unknown): SparqlEngineFamily | null {
       && (candidate as Partial<SparqlEngineCapability>).sparqlEngine === 'oxigraph')?.sparqlEngine ?? null;
 }
 
+interface DefaultGraphUnionCapability {
+  readonly defaultGraphIsGraphUnion: true;
+}
+
+/**
+ * Whether the store answers a pattern outside GRAPH, in a query that names no
+ * dataset, from the set merge of all its graphs, and lets `GRAPH ?g` range over
+ * every graph of that merge, its own default graph included.
+ */
+export function storeDefaultGraphIsGraphUnion(store: unknown): boolean {
+  return findTripleStoreCapability(store, (candidate): candidate is DefaultGraphUnionCapability =>
+    typeof candidate === 'object' && candidate !== null
+      && (candidate as Partial<DefaultGraphUnionCapability>).defaultGraphIsGraphUnion === true) !== null;
+}
+
 interface QueryDatasetRestrictionCapability {
   readonly restrictsQueryDataset: true;
 }

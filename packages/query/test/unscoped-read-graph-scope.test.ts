@@ -43,9 +43,9 @@ function scope(source: string) {
 const hidden = (source: string) => materializePreparedSparql(hideReadGraphPartitions(scope(source)).prepared);
 const FILTER_G = readGraphPartitionExclusionFilter('?g');
 
-function refusal(source: string): unknown {
+function refusal(source: string, store: { readonly defaultGraphIsGraphUnion?: boolean } = {}): unknown {
   try {
-    hideReadGraphPartitions(scope(source));
+    hideReadGraphPartitions(scope(source), store);
   } catch (error) {
     return error;
   }
@@ -92,7 +92,14 @@ describe('the read-graph partition filter', () => {
   });
 });
 
-describe('unscoped queries the filter cannot keep out of read-graph partitions', () => {
+function expectRefusal(error: unknown): void {
+  expect(error).toBeInstanceOf(UnscopedReadGraphQueryError);
+  expect(error).toBeInstanceOf(ScopedQueryViolationError);
+  expect((error as UnscopedReadGraphQueryError).code).toBe(UNSCOPED_READ_GRAPH_QUERY_CODE);
+  expect((error as Error).message).toMatch(/^Scoped query violation: .*give the query a context graph$/);
+}
+
+describe('unscoped reads outside GRAPH on a store whose default graph does not merge every graph', () => {
   it.each([
     ['a pattern outside GRAPH', 'SELECT ?s WHERE { ?s ?p ?o }'],
     ['a pattern outside GRAPH in OPTIONAL', 'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } OPTIONAL { ?s ?q ?y } }'],
@@ -102,6 +109,26 @@ describe('unscoped queries the filter cannot keep out of read-graph partitions',
     ['a pattern outside GRAPH in a sub-select', 'SELECT ?n WHERE { { SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o } } }'],
     ['the short CONSTRUCT', 'CONSTRUCT WHERE { ?s ?p ?o }'],
     ['DESCRIBE without WHERE', 'DESCRIBE <urn:a>'],
+    ['a pattern outside GRAPH in a projected EXISTS', 'SELECT ?s (EXISTS { ?s ?q ?y } AS ?e) WHERE { GRAPH ?g { ?s ?p ?o } }'],
+    ['a pattern outside GRAPH in ORDER BY', 'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY (EXISTS { ?s ?q ?y })'],
+    ['a pattern outside GRAPH in HAVING', 'SELECT ?s (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?s HAVING (EXISTS { ?s ?q ?y })'],
+  ])('refuses %s', (_label, source) => {
+    expectRefusal(refusal(source));
+    // A store whose default graph merges every graph answers them through the rewrite.
+    expect(refusal(source, { defaultGraphIsGraphUnion: true })).toBeUndefined();
+  });
+
+  it('refuses a short CONSTRUCT with a blank node on either store', () => {
+    expectRefusal(refusal('CONSTRUCT WHERE { ?s <urn:p> [] }'));
+    expectRefusal(refusal('CONSTRUCT WHERE { ?s <urn:p> [] }', { defaultGraphIsGraphUnion: true }));
+  });
+});
+
+describe.each([
+  ['any store', {}],
+  ['a store whose default graph merges every graph', { defaultGraphIsGraphUnion: true }],
+] as const)('unscoped queries the rewrite cannot keep out of read-graph partitions, on %s', (_store, store) => {
+  it.each([
     ['DESCRIBE over GRAPH', 'DESCRIBE ?s WHERE { GRAPH ?g { ?s ?p ?o } }'],
     ['FROM', 'SELECT ?s FROM <urn:g> WHERE { GRAPH ?g { ?s ?p ?o } }'],
     ['FROM NAMED', 'SELECT ?s FROM NAMED <urn:g> WHERE { GRAPH ?g { ?s ?p ?o } }'],
@@ -127,31 +154,28 @@ describe('unscoped queries the filter cannot keep out of read-graph partitions',
     ['a repeated group path in GRAPH', 'SELECT ?g WHERE { GRAPH ?g { ?s (<urn:p>/<urn:q>)* ?o } }'],
     ['a repeated path inside EXISTS in GRAPH', 'SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o FILTER EXISTS { ?s pre:p+ ?x } } }'],
     ['an escaped a with a repetition in GRAPH', 'SELECT ?g WHERE { GRAPH ?g { ?s \\u0061* ?o } }'],
-    ['a pattern outside GRAPH in a projected EXISTS', 'SELECT ?s (EXISTS { ?s ?q ?y } AS ?e) WHERE { GRAPH ?g { ?s ?p ?o } }'],
-    ['a pattern outside GRAPH in ORDER BY', 'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY (EXISTS { ?s ?q ?y })'],
-    ['a pattern outside GRAPH in HAVING', 'SELECT ?s (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?s HAVING (EXISTS { ?s ?q ?y })'],
     ['a hint IRI completed by a local name', 'PREFIX h: <http://www.bigdata.com/> SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o . h:queryHints\\#Prior h:queryHints\\#runFirst "true" } }'],
   ])('refuses %s', (_label, source) => {
-    const error = refusal(source);
-    expect(error).toBeInstanceOf(UnscopedReadGraphQueryError);
-    expect(error).toBeInstanceOf(ScopedQueryViolationError);
-    expect((error as UnscopedReadGraphQueryError).code).toBe(UNSCOPED_READ_GRAPH_QUERY_CODE);
-    expect((error as Error).message).toMatch(/^Scoped query violation: .*give the query a context graph$/);
+    expectRefusal(refusal(source, store));
   });
 
   it('does not take a hint prefix bound elsewhere, or a hint in a string, for a hint', () => {
-    expect(refusal('PREFIX hint: <urn:not-hints#> SELECT ?s WHERE { GRAPH ?g { ?s hint:p ?o } }')).toBeUndefined();
-    expect(refusal('SELECT ?s WHERE { GRAPH ?g { ?s ?p "http://www.bigdata.com/queryHints#Prior" } }')).toBeUndefined();
-    expect(refusal('PREFIX h: <http://www.bigdata.com/> SELECT ?s WHERE { GRAPH ?g { ?s h:other ?o } }')).toBeUndefined();
+    expect(refusal('PREFIX hint: <urn:not-hints#> SELECT ?s WHERE { GRAPH ?g { ?s hint:p ?o } }', store)).toBeUndefined();
+    expect(refusal('SELECT ?s WHERE { GRAPH ?g { ?s ?p "http://www.bigdata.com/queryHints#Prior" } }', store)).toBeUndefined();
+    expect(refusal('PREFIX h: <http://www.bigdata.com/> SELECT ?s WHERE { GRAPH ?g { ?s h:other ?o } }', store)).toBeUndefined();
   });
 
   it('refuses a GRAPH clause whose group it cannot find', () => {
     const malformed = scope('SELECT ?s WHERE { GRAPH ?g ?s }');
-    expect(() => hideReadGraphPartitions(malformed)).toThrow(UnscopedReadGraphQueryError);
+    expect(() => hideReadGraphPartitions(malformed, store)).toThrow(UnscopedReadGraphQueryError);
   });
 });
 
-/** A store that answers every query over all of its graphs and refuses to withhold any, as a remote SPARQL store does. */
+/**
+ * A store that refuses to withhold graphs, as a remote SPARQL store does. Its
+ * default graph is the store's own, as with any SPARQL endpoint that does not
+ * merge its graphs into it.
+ */
 class UnrestrictedStore {
   readonly sent: string[] = [];
 
@@ -197,11 +221,25 @@ describe('DKGQueryEngine on a store that cannot restrict its dataset', () => {
   it('refuses what the filter cannot cover, before the store sees it', async () => {
     noteStoreMayHoldReadGraphPartitions(store as unknown as TripleStore);
     const engine = new DKGQueryEngine(store as unknown as TripleStore);
-    await expect(engine.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toBeInstanceOf(UnscopedReadGraphQueryError);
+    // Its default graph holds triples that no graph holds, which no check on graphs could keep.
+    await planted.insert([{ graph: '', subject: 'urn:default', predicate: 'urn:p', object: 'urn:x' }]);
+    await expect(engine.query('SELECT ?s WHERE { ?s <urn:p> ?o }')).rejects.toBeInstanceOf(UnscopedReadGraphQueryError);
+    await expect(engine.query('SELECT (COUNT(*) AS ?n) WHERE { ?s <urn:p> ?o }')).rejects.toBeInstanceOf(UnscopedReadGraphQueryError);
     await expect(engine.query('DESCRIBE <urn:a>')).rejects.toBeInstanceOf(UnscopedReadGraphQueryError);
     await expect(engine.query('SELECT ?s WITH { SELECT ?s WHERE { ?s <urn:p> <urn:x> } } AS %rows '
       + 'WHERE { GRAPH <urn:visible> { ?a ?b ?c . INCLUDE %rows } }')).rejects.toBeInstanceOf(UnscopedReadGraphQueryError);
     expect(store.sent).toEqual([]);
+  });
+
+  it('sends patterns outside GRAPH with an existence check per pattern when the default graph merges every graph', async () => {
+    const union = Object.assign(store, { defaultGraphIsGraphUnion: true as const });
+    noteStoreMayHoldReadGraphPartitions(union as unknown as TripleStore);
+    const engine = new DKGQueryEngine(union as unknown as TripleStore);
+    await engine.query('SELECT ?s WHERE { ?s <urn:p> ?o }');
+    expect(union.sent.at(-1)).toContain(`FILTER EXISTS { GRAPH ?_holder { ?s <urn:p> ?o } ${readGraphPartitionExclusionFilter('?_holder')} }`);
+    await expect(engine.query('SELECT ?s WHERE { ?s <urn:p>* ?o }')).rejects.toBeInstanceOf(UnscopedReadGraphQueryError);
+    await expect(engine.query('DESCRIBE *')).rejects.toBeInstanceOf(UnscopedReadGraphQueryError);
+    expect(union.sent).toHaveLength(1);
   });
 
   it('leaves scoped queries and withheld roots to their own rules', async () => {

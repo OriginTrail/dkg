@@ -222,8 +222,7 @@ function createStoreOperationDeadline(
 
 /**
  * BlazegraphStore — TripleStore adapter backed by a remote Blazegraph
- * SPARQL endpoint over HTTP.  Works with any Blazegraph 2.x instance
- * (standalone JAR, Docker, or embedded NanoSparqlServer).
+ * SPARQL endpoint over HTTP.  Works with any Blazegraph 2.x instance (standalone JAR, Docker, or embedded NanoSparqlServer).
  *
  * All operations are translated to standard SPARQL 1.1 Query / Update
  * plus Blazegraph's N-Quads bulk-insert endpoint.
@@ -237,6 +236,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
   }
   readonly queryResponseLimitMode = 'pre-materialization' as const;
   readonly graphEnumerationVisibility = storeGraphEnumerationVisibility;
+  readonly defaultGraphIsGraphUnion = true as const;
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   readonly rfc64SemanticReadCertifiedV1 = true as const;
