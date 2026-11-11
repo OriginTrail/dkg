@@ -825,3 +825,46 @@ test('the repository debt gate rejects a newly disabled aliased test', () => {
     assert.match(result.stderr, /new disabled test.*test\.skip/);
   } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
 });
+
+test('a lapsed exception review fails locally, warns in CI and is counted for the nightly gate', () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'disabled-expiry-gate-'));
+  const day = (offset) => new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+  // Concatenated, not a template: the audit's comment scanner must not read
+  // these fixture strings in this file as real exceptions.
+  const waiver = (expires) => '// test-disable-allow: D1 #433 -- owner=cli lane=cli-unit-linux expires=' + expires + ' POSIX-only case.';
+  try {
+    fs.mkdirSync(path.join(fixture, 'test-policy'));
+    fs.mkdirSync(path.join(fixture, 'test'));
+    fs.writeFileSync(path.join(fixture, 'test-policy/disabled-tests.json'), '[]');
+    fs.writeFileSync(path.join(fixture, 'test/platform.test.ts'), [
+      "import { it } from 'vitest';",
+      waiver(day(-2)),
+      "it.skipIf(process.platform === 'win32')('expired review', () => {});",
+      waiver(day(3)),
+      "it.skipIf(process.platform === 'win32')('review due soon', () => {});",
+    ].join('\n'));
+    execFileSync('git', ['init', '-q'], { cwd: fixture });
+    const run = (overrides) => {
+      const env = { ...process.env, GITHUB_ACTIONS: '', GITHUB_OUTPUT: '', ...overrides };
+      if (!overrides.DKG_TEST_EXCEPTION_EXPIRY) delete env.DKG_TEST_EXCEPTION_EXPIRY;
+      return spawnSync(process.execPath, [path.join(REPO_ROOT, 'scripts/ci/check-disabled-tests.mjs')], { cwd: fixture, encoding: 'utf8', env });
+    };
+
+    const local = run({});
+    assert.equal(local.status, 1, local.stdout + local.stderr);
+    assert.match(local.stderr, new RegExp(`test/platform\\.test\\.ts:2: test exception expired on ${day(-2)}; confirm lane=cli-unit-linux`));
+
+    const output = path.join(fixture, 'github-output');
+    const ci = run({ DKG_TEST_EXCEPTION_EXPIRY: 'warn', GITHUB_ACTIONS: 'true', GITHUB_OUTPUT: output });
+    assert.equal(ci.status, 0, ci.stdout + ci.stderr);
+    assert.match(ci.stdout, new RegExp(`::warning file=test/platform\\.test\\.ts,line=2::test exception expired on ${day(-2)}`));
+    assert.match(ci.stdout, new RegExp(`::warning file=test/platform\\.test\\.ts,line=4::test exception expires on ${day(3)} \\(3 day\\(s\\) left\\)`));
+    assert.equal(fs.readFileSync(output, 'utf8'), 'expired_test_exceptions=1\nexpiring_test_exceptions=1\n');
+
+    fs.writeFileSync(path.join(fixture, 'test/platform.test.ts'), ["import { it } from 'vitest';", '// test-disable-allow: D1 #433 -- owner=cli expires=' + day(3), "it.skipIf(process.platform === 'win32')('no lane', () => {});"].join('\n'));
+    const malformed = run({ DKG_TEST_EXCEPTION_EXPIRY: 'warn' });
+    assert.equal(malformed.status, 1, malformed.stdout + malformed.stderr);
+    assert.match(malformed.stderr, /requires owner=NAME, lane=EXECUTION-OBLIGATION/);
+    assert.equal(run({ DKG_TEST_EXCEPTION_EXPIRY: 'off' }).status, 1);
+  } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
+});

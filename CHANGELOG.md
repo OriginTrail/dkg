@@ -54,6 +54,15 @@ and gives the node UI a new design system.
   If the backend refuses both, the service stops offering tools until the
   node restarts, so buyers answer such calls with `tools_unsupported`
   instead of sending them.
+- A node with an endpoint in `chain.rpcUrls` that never answers no longer
+  piles up RPC requests while its node UI is open. Each
+  `GET /api/wallets/balances`, which the UI's Settings page sends every
+  60 seconds, left behind a connection that asked that endpoint for its
+  chain id once a second until the node restarted, through the same request
+  budget as the node's own chain work. On a mainnet Core node this filled
+  the budget within a day and stopped its proofs. The route now uses the
+  configured chain's network, so it asks no endpoint for it, and closes its
+  connections once it answers.
 - An MCP server registered by hand, with no `DKG_HOME` or workspace config
   selected, now loads the default node home's credentials, so its
   authenticated tools no longer answer `401`. An explicit home or workspace
