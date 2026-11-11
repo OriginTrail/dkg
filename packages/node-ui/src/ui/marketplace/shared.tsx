@@ -6,7 +6,7 @@ import { copy, type CopyKey } from './copy.generated.js';
 import { isMarketplaceError } from './api/client.js';
 import { spanOf } from './amounts.js';
 import { MARKETPLACE_TABS } from './tabs.js';
-import { useTabsStore } from '../stores/tabs.js';
+import { chooseTab } from '../lib/shellNavigation.js';
 
 /** A refusal's code → its plain words. The codes are the node's, so any string; the words are the table's. */
 const CODE_COPY: Record<string, CopyKey> = {
@@ -197,11 +197,8 @@ export const sellerName = (identityId: number): string => copy('seller.name', { 
 
 /** Open another marketplace tab in the centre panel. */
 export function useMarketplaceNav(): (tab: keyof typeof MARKETPLACE_TABS) => void {
-  const openTab = useTabsStore((s) => s.openTab);
-  const setActiveTab = useTabsStore((s) => s.setActiveTab);
   return (tab) => {
     const t = MARKETPLACE_TABS[tab];
-    openTab({ id: t.id, label: t.label, closable: true });
-    setActiveTab(t.id);
+    chooseTab({ id: t.id, label: t.label, closable: true });
   };
 }

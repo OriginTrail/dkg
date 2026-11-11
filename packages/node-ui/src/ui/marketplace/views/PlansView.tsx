@@ -6,6 +6,7 @@
 // the user with no flow on show for it (a funding of unknown outcome, a plan
 // not saved) is shown above the page, with what it allows.
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { PageHeader } from '../../components/ds/PageHeader.js';
 import { copy } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi } from '../api/client.js';
 import type { CatalogAnswer, Plan, Subscription } from '../api/types.js';
@@ -196,17 +197,17 @@ export function PlansView(): React.ReactElement {
   }, [ask, catalog, subs.data, current, takeAsk, mayEditPlan, planned.loading]);
 
   const loadErr = cat.err ?? subs.err ?? planned.err;
-  if ([cat.err, subs.err, planned.err, funding.err].some(isMarketplaceOff)) return <div className="mkt-frame" data-testid="mkt-plans" data-state="off"><OffCard /></div>;
-  if ([cat.err, subs.err, planned.err, funding.err].some(isMarketplaceAbsent)) return <div className="mkt-frame" data-testid="mkt-plans" data-state="absent"><OffCard absent /></div>;
+  if ([cat.err, subs.err, planned.err, funding.err].some(isMarketplaceOff)) return <div className="mkt-frame" data-testid="mkt-plans" data-state="off"><PageHeader title="Plans" description="What this node pays for each epoch, and how much of it has landed" /><OffCard /></div>;
+  if ([cat.err, subs.err, planned.err, funding.err].some(isMarketplaceAbsent)) return <div className="mkt-frame" data-testid="mkt-plans" data-state="absent"><PageHeader title="Plans" description="What this node pays for each epoch, and how much of it has landed" /><OffCard absent /></div>;
   if (loadErr && !(catalog && subs.data)) {
     return (
-      <div className="mkt-frame" data-testid="mkt-plans" data-state="error">
+      <div className="mkt-frame" data-testid="mkt-plans" data-state="error"><PageHeader title="Plans" description="What this node pays for each epoch, and how much of it has landed" />
         <div className="mkt-card"><div data-copy="empty.error">{copy('empty.error')}</div><ErrorCard err={loadErr} onRetry={reloadAll} /></div>
       </div>
     );
   }
   if (!catalog || !subs.data || planPending) {
-    return <div className="mkt-frame" data-testid="mkt-plans" data-state="loading"><div className="mkt-card mkt-muted" data-copy="plans.loading">{copy('plans.loading')}</div></div>;
+    return <div className="mkt-frame" data-testid="mkt-plans" data-state="loading"><PageHeader title="Plans" description="What this node pays for each epoch, and how much of it has landed" /><div className="mkt-card mkt-muted" data-copy="plans.loading">{copy('plans.loading')}</div></div>;
   }
 
   const endsAt = funding.data?.epochEndsAt ?? current?.endsAt ?? null;
@@ -223,7 +224,7 @@ export function PlansView(): React.ReactElement {
     // Whether to onboard or to fund the plan's next epoch turns on the plan: unknown, neither is offered.
     if (!mayEditPlan) {
       return (
-        <div className="mkt-frame" data-testid="mkt-plans" data-state="plan-unread">
+        <div className="mkt-frame" data-testid="mkt-plans" data-state="plan-unread"><PageHeader title="Plans" description="What this node pays for each epoch, and how much of it has landed" />
           <div className="mkt-card"><div data-copy="empty.error">{copy('empty.error')}</div>{planErr}</div>
         </div>
       );
@@ -233,9 +234,9 @@ export function PlansView(): React.ReactElement {
       const funded = !!w && BigInt(w.trac) > 0n || (funding.data?.accounts ?? []).some((a) => a.serviceCapable && a.grant?.live);
       const f = shown?.kind === 'fund' ? shown : { kind: 'fund' as const, epoch: 'current' as const };
       return (
-        <div className="mkt-frame" data-testid="mkt-plans" data-state="never-subscribed">
+        <div className="mkt-frame" data-testid="mkt-plans" data-state="never-subscribed"><PageHeader title="Plans" description="What this node pays for each epoch, and how much of it has landed" />
           {notices}
-          <h1 className="mkt-h1" data-copy="onboard.p5.title">{copy('onboard.p5.title')}</h1>
+          <h2 data-copy="onboard.p5.title">{copy('onboard.p5.title')}</h2>
           {!funded && <ProgressSteps step={1} />}
           {treasury}
           {funded && fundFlow(f, true)}
@@ -243,7 +244,7 @@ export function PlansView(): React.ReactElement {
       );
     }
     return (
-      <div className="mkt-frame" data-testid="mkt-plans" data-state="period-ended">
+      <div className="mkt-frame" data-testid="mkt-plans" data-state="period-ended"><PageHeader title="Plans" description="What this node pays for each epoch, and how much of it has landed" />
         {notices}
         {shown?.kind === 'fund' ? fundFlow(shown, false) : (
           <div className="mkt-card">
@@ -278,7 +279,7 @@ export function PlansView(): React.ReactElement {
     .filter((id) => !(shown?.kind === 'top-up' && shown.serviceId === id))
     .map((id) => <WaitingTopUp key={id} catalog={catalog} subscription={current} serviceId={id} onOpen={() => setFlow({ kind: 'top-up', serviceId: id })} />);
   return (
-    <div className="mkt-frame" data-testid="mkt-plans" data-state="active">
+    <div className="mkt-frame" data-testid="mkt-plans" data-state="active"><PageHeader title="Plans" description="What this node pays for each epoch, and how much of it has landed" />
       {notices}
       {waitingTopUps}
       {flowNode}

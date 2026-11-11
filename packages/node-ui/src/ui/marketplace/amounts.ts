@@ -2,6 +2,7 @@
 // `…Trac` siblings), prices in wei per unit, times in chain seconds. Math on
 // amounts is BigInt; USD is display-only and shown only when the node has a
 // reference rate.
+import { truncateAddress } from '../lib/format.js';
 
 const WEI_PER_TRAC = 10n ** 18n;
 const WEI_PER_MICRO = 10n ** 12n;
@@ -125,7 +126,7 @@ export function spanOf(at: number, nowMs: number): { n: number; unit: 'min' | 'h
 }
 
 /** `0x1234…cdef`: an address, transaction or key, shortened. */
-export const fmtHex = (h: string | null | undefined): string => (h && h.length > 14 ? `${h.slice(0, 6)}…${h.slice(-4)}` : h ?? '—');
+export const fmtHex = (h: string | null | undefined): string => (h ? truncateAddress(h) : '—');
 
 /** A model's name from its URN: the part after the last colon. */
 export const modelName = (label: string): string => label.slice(label.lastIndexOf(':') + 1) || label;

@@ -34,7 +34,10 @@ describe('marketplace Browse: catalog, service page, storefront, playground', ()
     expect(c.querySelectorAll('[data-testid^="mkt-provider-"]').length).toBe(2);
     expect(byTestId(c, 'mkt-provider-12')?.textContent).toContain('205 ms from this node');
     expect(byTestId(c, 'mkt-provider-31')?.textContent).toContain('latency: no data yet');
-    expect(c.textContent).toContain('your subscription covers this ✓');
+    expect(c.textContent).toContain('your subscription covers this');
+    // The mark is an icon, not a character.
+    expect(c.querySelector('[data-copy="model.covered"] svg.lucide-check')).toBeTruthy();
+    expect(c.textContent).not.toMatch(/[✓✗]/);
     await click(byTestId(c, 'mkt-open-seller-31'));
     await waitForText(c, 'Served value by epoch');
     expect(byTestId(c, 'mkt-storefront')?.textContent).toContain('stake factor 1.25');

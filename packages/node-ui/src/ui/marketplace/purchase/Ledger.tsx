@@ -47,6 +47,7 @@ function ReconciledRows({ catalog, epoch }: { catalog: CatalogAnswer; epoch: num
       )}
       {r.data && rows.length === 0 && <div className="mkt-muted mkt-xs" data-copy="recon.none">{copy('recon.none')}</div>}
       {rows.length > 0 && (
+        <div className="ds-table-scroll">
         <table className="mkt-act" data-testid="mkt-recon-rows">
           <tbody>
             {rows.map((x) => (
@@ -60,6 +61,7 @@ function ReconciledRows({ catalog, epoch }: { catalog: CatalogAnswer; epoch: num
             ))}
           </tbody>
         </table>
+        </div>
       )}
     </div>
   );
@@ -81,6 +83,7 @@ export function Activity({ catalog, calls, err }: { catalog: CatalogAnswer; call
         </span>
       </div>
       {needsNodeAdmin(err) ? <div className="mkt-muted mkt-xs" data-copy="activity.admin">{copy('activity.admin')}</div> : err ? <ErrorCard err={err} /> : null}
+      <div className="ds-table-scroll">
       <table className="mkt-act">
         <tbody>
           {shown.slice(0, 20).map((c) => (
@@ -95,6 +98,7 @@ export function Activity({ catalog, calls, err }: { catalog: CatalogAnswer; call
           ))}
         </tbody>
       </table>
+      </div>
       {calls && shown.length === 0 && <div className="mkt-muted mkt-xs" data-copy="empty.activity">{copy('empty.activity')}</div>}
       <div className="mkt-muted mkt-xs" data-copy="activity.note">{copy('activity.note')}</div>
     </div>

@@ -4,6 +4,7 @@
 // Minting shows the secret once; revoking stops the key at its next call.
 // Keys are the node admin's alone.
 import React, { useMemo, useState } from 'react';
+import { PageHeader } from '../../components/ds/PageHeader.js';
 import { copy } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi, needsNodeAdmin } from '../api/client.js';
 import type { Key, MadeKey } from '../api/types.js';
@@ -64,17 +65,17 @@ export function AccessView(): React.ReactElement {
     marketplaceApi.revokeKey(keyId).then(() => keys.reload()).catch((err: unknown) => setRevokeErr({ keyId, err })).finally(() => setBusy(null));
   };
 
-  if (isMarketplaceOff(keys.err)) return <div className="mkt-frame" data-testid="mkt-access" data-state="off"><OffCard /></div>;
-  if (isMarketplaceAbsent(keys.err)) return <div className="mkt-frame" data-testid="mkt-access" data-state="absent"><OffCard absent /></div>;
-  if (needsNodeAdmin(keys.err)) return <div className="mkt-frame" data-testid="mkt-access" data-state="admin"><AdminCard what="admin.access" /></div>;
+  if (isMarketplaceOff(keys.err)) return <div className="mkt-frame" data-testid="mkt-access" data-state="off"><PageHeader title={copy('access.title')} description="Access keys that let your agents call the models in your plan" /><OffCard /></div>;
+  if (isMarketplaceAbsent(keys.err)) return <div className="mkt-frame" data-testid="mkt-access" data-state="absent"><PageHeader title={copy('access.title')} description="Access keys that let your agents call the models in your plan" /><OffCard absent /></div>;
+  if (needsNodeAdmin(keys.err)) return <div className="mkt-frame" data-testid="mkt-access" data-state="admin"><PageHeader title={copy('access.title')} description="Access keys that let your agents call the models in your plan" /><AdminCard what="admin.access" /></div>;
   if (keys.err && !keys.data) {
     return (
-      <div className="mkt-frame" data-testid="mkt-access" data-state="error">
+      <div className="mkt-frame" data-testid="mkt-access" data-state="error"><PageHeader title={copy('access.title')} description="Access keys that let your agents call the models in your plan" />
         <div className="mkt-card"><div data-copy="empty.error">{copy('empty.error')}</div><ErrorCard err={keys.err} onRetry={keys.reload} /></div>
       </div>
     );
   }
-  if (!keys.data) return <div className="mkt-frame" data-testid="mkt-access" data-state="loading"><div className="mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></div>;
+  if (!keys.data) return <div className="mkt-frame" data-testid="mkt-access" data-state="loading"><PageHeader title={copy('access.title')} description="Access keys that let your agents call the models in your plan" /><div className="mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></div>;
 
   const scopeOf = (k: Key) => [
     k.services ? copy('access.scope.models', { n: k.services.length }) : copy('access.models.all'),
@@ -84,10 +85,9 @@ export function AccessView(): React.ReactElement {
   ].join(' · ');
 
   return (
-    <div className="mkt-frame" data-testid="mkt-access" data-state="ok">
+    <div className="mkt-frame" data-testid="mkt-access" data-state="ok"><PageHeader title={copy('access.title')} description="Access keys that let your agents call the models in your plan" />
       <div className="mkt-card">
         <div className="mkt-planhead">
-          <h1 data-copy="access.title">{copy('access.title')}</h1>
           <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-mint-open" data-copy="access.mint" aria-expanded={formOpen} onClick={() => setFormOpen((o) => !o)}>{copy('access.mint')}</button>
         </div>
         {keys.err ? <ErrorCard err={keys.err} onRetry={keys.reload} /> : null}

@@ -56,7 +56,7 @@ export function Meters({ subscription: s, catalog, plan, calls, onTopUp, nowMs =
   return (
     <div className="mkt-card" data-testid="mkt-subscription" data-epoch={s.epoch}>
       <div className="mkt-planhead">
-        <h1 data-copy="meter.summary">{copy('meter.summary', { n: s.epoch, pct: Math.round(landed), held: Math.round(held) })}</h1>
+        <h2 data-copy="meter.summary">{copy('meter.summary', { n: s.epoch, pct: Math.round(landed), held: Math.round(held) })}</h2>
         <span className="mkt-sec" data-copy="meter.resets">{copy('meter.resets', { t: relAt(s.endsAt, nowMs) })}</span>
       </div>
       <p className="mkt-muted mkt-xs" data-copy="meter.summary.note">{copy('meter.summary.note', { value: fmtTrac(value), cost: fmtTrac(s.cost) })}</p>

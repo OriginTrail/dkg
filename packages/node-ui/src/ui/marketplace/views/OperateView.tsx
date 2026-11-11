@@ -5,6 +5,17 @@
 // and weighted value and the pool so far, each ended epoch's gross; and the
 // operational wallets' ETH. Selling switched off is an explicit card.
 import React, { useState } from 'react';
+import { Check, X } from 'lucide-react';
+import { PageHeader } from '../../components/ds/PageHeader.js';
+const YES = '\uE000Y';
+const NO = '\uE000N';
+const mark = (ok: boolean) => (ok ? YES : NO);
+/** A copy line with its check and cross marks drawn as icons. */
+function withMarks(text: string): React.ReactNode {
+  return text.split(/(\uE000[YN])/).map((p, i) => (p === YES ? <Check key={i} size={12} aria-label="yes" />
+    : p === NO ? <X key={i} size={12} aria-label="no" /> : p));
+}
+
 import { copy, type CopyKey } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi } from '../api/client.js';
 import type { LandNowAnswer, LandingReport, LandingStop, Listing, ListingProblem, Offering } from '../api/types.js';
@@ -83,20 +94,20 @@ export function OperateView(): React.ReactElement {
 
   if (isMarketplaceOff(st.err)) {
     return (
-      <div className="mkt-frame" data-testid="mkt-operate" data-state="inactive">
+      <div className="mkt-frame" data-testid="mkt-operate" data-state="inactive"><PageHeader title="Operate" description="Sell this node's models: set prices and follow this epoch's calls" />
         <OffCard selling testId="mkt-operate-inactive" />
       </div>
     );
   }
-  if (isMarketplaceAbsent(st.err)) return <div className="mkt-frame" data-testid="mkt-operate" data-state="absent"><OffCard absent /></div>;
+  if (isMarketplaceAbsent(st.err)) return <div className="mkt-frame" data-testid="mkt-operate" data-state="absent"><PageHeader title="Operate" description="Sell this node's models: set prices and follow this epoch's calls" /><OffCard absent /></div>;
   if (st.err && !st.data) {
     return (
-      <div className="mkt-frame" data-testid="mkt-operate" data-state="error">
+      <div className="mkt-frame" data-testid="mkt-operate" data-state="error"><PageHeader title="Operate" description="Sell this node's models: set prices and follow this epoch's calls" />
         <div className="mkt-card"><div data-copy="operate.error">{copy('operate.error')}</div><ErrorCard err={st.err} onRetry={st.reload} /></div>
       </div>
     );
   }
-  if (!st.data) return <div className="mkt-frame" data-testid="mkt-operate" data-state="loading"><div className="mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></div>;
+  if (!st.data) return <div className="mkt-frame" data-testid="mkt-operate" data-state="loading"><PageHeader title="Operate" description="Sell this node's models: set prices and follow this epoch's calls" /><div className="mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></div>;
   const s = st.data;
   const epoch = s.epoch;
   const g = s.gate;
@@ -105,7 +116,7 @@ export function OperateView(): React.ReactElement {
   const line = report ? landedLine(report) : null;
 
   return (
-    <div className="mkt-frame" data-testid="mkt-operate" data-state="active">
+    <div className="mkt-frame" data-testid="mkt-operate" data-state="active"><PageHeader title="Operate" description="Sell this node's models: set prices and follow this epoch's calls" />
       {st.err ? <ErrorCard err={st.err} onRetry={st.reload} /> : null}
       <div className="mkt-card">
         <h2 data-copy="operate.price.title">{copy('operate.price.title')}</h2>
@@ -147,10 +158,10 @@ export function OperateView(): React.ReactElement {
       <div className="mkt-card" data-testid="mkt-ledger">
         <h2 data-copy="operate.epoch.title">{copy('operate.epoch.title')}</h2>
         <div className="mkt-muted mkt-xs" data-copy="operate.gate">
-          {copy('operate.gate', {
-            profile: g.profile ? '✓' : '✗', table: g.shardingTable ? '✓' : '✗', stake: fmtTrac(g.stake), min: fmtTrac(g.minimumStake),
-            proved: copy(s.scoredThisEpoch ? 'operate.proved' : 'operate.proved.not'),
-          })}
+          {withMarks(copy('operate.gate', {
+            profile: mark(g.profile), table: mark(g.shardingTable), stake: fmtTrac(g.stake), min: fmtTrac(g.minimumStake),
+            proved: s.scoredThisEpoch ? `${copy('operate.proved')} ${YES}` : copy('operate.proved.not'),
+          }))}
         </div>
         <div className="mkt-sec mkt-sm" data-testid="mkt-ledger-counts" data-copy="operate.ledger">{copy('operate.ledger', { served: l.served, sent: l.sent, landed: l.landed, refused: l.refused, missed: l.missed })}</div>
         <div className="mkt-muted mkt-xs" data-copy="operate.ledger.value">{copy('operate.ledger.value', { held: fmtTrac(l.heldValue), landed: fmtTrac(l.landedValue), counted: fmtTrac(l.counted) })}</div>
@@ -166,6 +177,7 @@ export function OperateView(): React.ReactElement {
       <div className="mkt-card" data-testid="mkt-batches">
         <h2 data-copy="operate.batches">{copy('operate.batches')}</h2>
         {s.batches.length === 0 && <div className="mkt-muted mkt-xs" data-copy="operate.batches.none">{copy('operate.batches.none')}</div>}
+        <div className="ds-table-scroll">
         <table className="mkt-act">
           <tbody>
             {s.batches.slice(0, 10).map((b) => (
@@ -179,8 +191,10 @@ export function OperateView(): React.ReactElement {
             ))}
           </tbody>
         </table>
+        </div>
         <h3 data-copy="operate.ended">{copy('operate.ended')}</h3>
         {s.ended.length === 0 && <div className="mkt-muted mkt-xs" data-copy="operate.ended.none">{copy('operate.ended.none')}</div>}
+        <div className="ds-table-scroll">
         <table className="mkt-act" data-testid="mkt-ended">
           <tbody>
             {s.ended.map((e) => (
@@ -192,6 +206,7 @@ export function OperateView(): React.ReactElement {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       <div className="mkt-card">
