@@ -123,6 +123,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
   constructor(inner: TripleStore, runtime: ReadGraphBackendRuntime, private readonly termSite: SparqlTermSite['adapter'] = 'oxigraph') {
     this.innerStore = inner;
     this.runtime = runtime;
+    RUNTIME_BELOW_LAYER.set(inner, runtime);
     this.adapterCapabilities = readGraphCapabilitiesOf(inner);
     // The layer hides nothing itself; the adapter's own rule passes through.
     if (inner.graphEnumerationVisibility) this.graphEnumerationVisibility = inner.graphEnumerationVisibility.bind(inner);
@@ -381,6 +382,20 @@ export function wrapReadGraphLayer(adapter: TripleStore, config: TripleStoreConf
 /** The read-graph layer of a store's decorator chain, or `null` when it has none. */
 export function readGraphLayerOf(store: unknown): ReadGraphStore | null {
   return findTripleStoreCapability(store, (candidate): candidate is ReadGraphStore => candidate instanceof ReadGraphStore);
+}
+
+/** The runtime of each store a layer wraps, so the store below the layer finds its backend's runtime too. */
+const RUNTIME_BELOW_LAYER = new WeakMap<object, ReadGraphBackendRuntime>();
+
+/**
+ * The read-graph runtime of a store: the runtime of the layer in its chain,
+ * or, for the store a layer wraps (what `readGraphPartitionMaintenanceStore`
+ * returns), that layer's. `undefined` for a store no layer is above or in.
+ */
+export function readGraphRuntimeOf(store: unknown): ReadGraphBackendRuntime | undefined {
+  const layer = readGraphLayerOf(store);
+  if (layer) return layer.runtime;
+  return typeof store === 'object' && store !== null ? RUNTIME_BELOW_LAYER.get(store) : undefined;
 }
 
 function termSiteOf(backend: TripleStoreConfig['backend']): SparqlTermSite['adapter'] {

@@ -481,6 +481,7 @@ export {
   ReadGraphStore,
   ReadGraphWriteRefusedError,
   readGraphLayerOf,
+  readGraphRuntimeOf,
   wrapReadGraphLayer,
   type ReadGraphStoreConfig,
 } from './read-graph/read-graph-store.js';
