@@ -26,12 +26,13 @@ const REPO = fileURLToPath(new URL('../../../../', import.meta.url));
 const WRITER = fileURLToPath(new URL('./read-graph-builder-kill-writer.ts', import.meta.url));
 
 /**
- * Where the builder process dies: `delayMs` after copy batch `batch` returned to it, or after the
- * store received and answered that batch while the answer is kept from the builder.
+ * Where the builder process dies: `delayMs` after copy batch `batch` returned to it, after the
+ * builder flushed the store to its file following that batch, or after the store received and
+ * answered that batch while the answer is kept from the builder.
  */
 export interface BuilderKillPoint {
   readonly batch: number;
-  readonly after: 'receipt' | 'return';
+  readonly after: 'receipt' | 'return' | 'flush';
   readonly delayMs: number;
 }
 
@@ -94,33 +95,38 @@ export async function holdCopyBatch(endpoint: string, batch: number): Promise<Co
 /**
  * Run the builder process up to `point` and kill it with SIGKILL. It sends no copy batch after
  * `point.batch`. A `receipt` point is armed by `received` alone, never by a line the builder prints.
- * Resolves with whether that batch had returned to the builder when the process died.
+ * Resolves with whether that batch had returned to the builder when the process died, and the member
+ * graphs of every copy batch it sent.
  */
 async function killBuilderAt(
   env: Readonly<Record<string, string>>,
   point: BuilderKillPoint,
   received?: Promise<number>,
-): Promise<{ readonly returned: boolean }> {
+): Promise<{ readonly returned: boolean; readonly copied: readonly string[] }> {
   if ((point.after === 'receipt') !== (received !== undefined)) throw new Error('A receipt kill point needs the store\'s receipt, and only it does');
   const child = spawn(process.execPath, ['--import', 'tsx', WRITER], {
-    cwd: REPO, env: { ...process.env, ...env, DKG_KILL_BATCHES: String(point.batch) }, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: REPO,
+    env: { ...process.env, ...env, DKG_KILL_BATCHES: String(point.batch), DKG_KILL_FLUSH: point.after === 'flush' ? '1' : '0' },
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const arming = point.after === 'return' ? `returned ${point.batch}` : undefined;
+  const arming = point.after === 'return' ? `returned ${point.batch}` : point.after === 'flush' ? `flushed ${point.batch}` : undefined;
   const lines = await killWriterOnLine(child, line => line === arming, point.delayMs, 'The builder', received);
   if (lines.includes('finished')) throw new Error(`The build finished before copy batch ${point.batch}: the fixture needs more member graphs`);
-  expect(lines.filter(line => line.startsWith('batch ')).at(-1), 'the last copy batch the builder sent').toBe(`batch ${point.batch}`);
-  return { returned: lines.includes(`returned ${point.batch}`) };
+  const batches = lines.filter(line => line.startsWith('batch ')).map(line => line.split(' '));
+  expect(batches.map(([, n]) => Number(n)), 'the copy batches the builder sent').toEqual(Array.from({ length: point.batch }, (_, i) => i + 1));
+  return { returned: lines.includes(`returned ${point.batch}`), copied: batches.flatMap(([, , ...graphs]) => graphs) };
 }
 
 /**
  * Kill points for each engine. Blazegraph applies each request as it arrives: once a copy batch has
  * returned, and once the store has received and answered one whose answer a proxy keeps from the
  * builder. Embedded Oxigraph applies a batch in memory at once and writes its file a moment later:
- * once that dump has caught up, and right after a batch returned, before it has.
+ * once the builder's explicit flush has written the file, and right after a batch returned, before
+ * the file need hold it.
  */
 export const BUILDER_KILL_POINTS: Readonly<Record<'oxigraph' | 'blazegraph', readonly BuilderKillPoint[]>> = {
   blazegraph: [{ batch: 2, after: 'return', delayMs: 0 }, { batch: 3, after: 'receipt', delayMs: 0 }],
-  oxigraph: [{ batch: 2, after: 'return', delayMs: 300 }, { batch: 3, after: 'return', delayMs: 0 }],
+  oxigraph: [{ batch: 2, after: 'flush', delayMs: 0 }, { batch: 3, after: 'return', delayMs: 0 }],
 };
 
 /**
@@ -148,7 +154,7 @@ export function readGraphBuilderRestartSuite(backend: 'oxigraph' | 'blazegraph')
       if (manager && handles) await manager.disposeAll(handles);
     }, 60_000);
 
-    it.each(BUILDER_KILL_POINTS[backend])('rebuilds to its members after a builder killed $delayMs ms after the $after of copy batch $batch', async (point) => {
+    it.each(BUILDER_KILL_POINTS[backend])('rebuilds to its members after a builder killed at the $after of copy batch $batch, +$delayMs ms', async (point) => {
       // Only Blazegraph has a request in flight: the builder reaches it through a proxy that keeps the answer to the batch.
       if (point.after === 'receipt' && backend !== 'blazegraph') throw new Error('An embedded store has no request in flight to hold');
       const fixture = layerFixture(`${run}-${sequence += 1}`);
@@ -181,8 +187,16 @@ export function readGraphBuilderRestartSuite(backend: 'oxigraph' | 'blazegraph')
           const [vm] = fixture.keys as [ReadGraphKey];
           const { wholeVm } = fixture.readGraphs;
           const left = (await readStoredReadGraphRow(adapter, wholeVm)).row;
-          // On Blazegraph every request the builder sent before the kill has its effect, and the embedded store has dumped its file 300 ms after a batch.
-          if (backend === 'blazegraph' || point.delayMs >= 300) expect(left, 'the row the dead builder left').toMatchObject({ state: 'building' });
+          // On Blazegraph every request the builder sent before the kill has its effect; the embedded store's file holds what was flushed.
+          if (backend === 'blazegraph' || point.after === 'flush') {
+            expect(left, 'the row the dead builder left').toMatchObject({ state: 'building' });
+            // The partial read graph the store kept: exactly the member graphs of the batches the builder sent.
+            expect(killed.copied, 'one member graph per copy batch').toHaveLength(point.batch);
+            const copied = new Set(killed.copied);
+            const partial = [...new Set(seeded.filter(quad => copied.has(quad.graph)).map(quad => `${quad.subject} ${quad.predicate} ${quad.object}`))].sort();
+            expect(partial.length, 'the copied member graphs hold data').toBeGreaterThan(0);
+            expect(await readGraphTriples(adapter, fixture, wholeVm), 'the read graph the dead builder left').toEqual(partial);
+          }
           await startReadGraphs(store, { maintains: (key) => key.scope.contextGraphId === fixture.contextGraphId });
           if (left) {
             // The start leaves a build it does not own dirty, at a newer generation, before anything else runs.

@@ -1,8 +1,9 @@
 /**
  * A builder process for the restart lane, run as its own process with `node --import tsx`. It builds
  * one context graph's whole verifiable-memory read graph, one member graph per copy batch. It prints
- * `batch <n>` before copy batch n goes to the store and `returned <n>` once the store answered, and
- * after copy batch DKG_KILL_BATCHES has returned it stops and waits to be killed.
+ * `batch <n> <member graphs>` before copy batch n goes to the store and `returned <n>` once the store
+ * answered. With DKG_KILL_FLUSH=1 it then flushes the store to its file and prints `flushed <n>`. After
+ * copy batch DKG_KILL_BATCHES it stops and waits to be killed.
  *
  * DKG_KILL_BACKEND is `blazegraph` (with DKG_KILL_URL) or `oxigraph` (with DKG_KILL_PATH, a persistent
  * store, which dumps itself shortly after each write). DKG_KILL_CG names the context graph.
@@ -17,6 +18,7 @@ const contextGraphId = process.env.DKG_KILL_CG;
 if (!contextGraphId) throw new Error('DKG_KILL_CG is required');
 const stopAfter = Number(process.env.DKG_KILL_BATCHES);
 if (!Number.isSafeInteger(stopAfter) || stopAfter < 1) throw new Error('DKG_KILL_BATCHES must name a copy batch by its number');
+const flushEach = process.env.DKG_KILL_FLUSH === '1';
 
 const { adapter, config } = openKillWriterStore();
 
@@ -27,9 +29,15 @@ adapter.update = async (sparql, options) => {
   if (!sparql.includes('VALUES ?g')) return update(sparql, options);
   copies += 1;
   const n = copies;
-  process.stdout.write(`batch ${n}\n`);
+  const graphs = [...(/VALUES \?g \{([^}]*)\}/.exec(sparql)?.[1] ?? '').matchAll(/<([^>]+)>/g)].map(match => match[1]);
+  process.stdout.write(`batch ${n} ${graphs.join(' ')}\n`);
   await update(sparql, options);
   process.stdout.write(`returned ${n}\n`);
+  if (flushEach) {
+    // An explicit flush: once it returns, the store's file holds this batch.
+    await adapter.flush!();
+    process.stdout.write(`flushed ${n}\n`);
+  }
   // No batch after this one: hold the lock and wait for the kill.
   if (n >= stopAfter) await new Promise(() => setInterval(() => undefined, 60_000));
 };
