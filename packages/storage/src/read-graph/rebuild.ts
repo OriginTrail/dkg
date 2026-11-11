@@ -188,7 +188,7 @@ async function build(job: ReadGraphJob, key: ReadGraphKey): Promise<ReadGraphJob
   if (begun.ended !== undefined) return job.result(begun.ended, begun.row);
   const { started, membership } = begun;
   const inService = job.mirrorHolds(started);
-  await job.settled();
+  if (!(await job.settledUnderRegistry(key.scope.contextGraphId, inService))) return job.lost();
   if (!(await job.drop(started, inService))) return job.lost();
   const members = await job.members(membership);
   if (!(await job.copy(started, members.constants, inService, 1)) || !(await job.copy(started, members.listed, inService))) return job.lost();
@@ -224,7 +224,7 @@ async function repair(job: ReadGraphJob, input: ReadGraphRepairInput): Promise<R
   if (begun.ended !== undefined) return job.result(begun.ended, begun.row);
   const { started } = begun;
   const inService = job.mirrorHolds(started);
-  await job.settled();
+  if (!(await job.settledUnderRegistry(parseReadGraphIri(job.readGraph)!.scope.contextGraphId, inService))) return job.lost();
   const joined = [...new Set(input.joined)].sort(compareCodePoint);
   if (!(await job.copy(started, joined, inService))) return job.lost();
   const leaving = [...new Set(input.leaving)].sort(compareCodePoint);
@@ -561,6 +561,19 @@ class ReadGraphJob {
 
   settled(): Promise<void> {
     return this.runtime.writes.settled(this.context.signal);
+  }
+
+  /**
+   * Wait for the writes in flight, then read the registry again. A write that
+   * began before the row existed passed the registry by, so the membership
+   * the job took may be older than what it left. A change marks this row
+   * dirty, and the job, no longer in service, must end before it copies.
+   * Returns whether the row is still the job's.
+   */
+  async settledUnderRegistry(contextGraphId: string, inService: () => boolean): Promise<boolean> {
+    await this.settled();
+    await this.refreshRegistry(contextGraphId);
+    return inService();
   }
 
   async holdsTriple(): Promise<boolean> {
