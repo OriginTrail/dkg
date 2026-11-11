@@ -345,9 +345,9 @@ describe('dkg_list_context_graphs — rename + UX-note pair', () => {
     expect(server.tools.has('dkg_list_projects')).toBe(false);
   });
 
-  it("description includes the canonical-naming reconciliation note: \"called 'projects' in the DKG node UI\"", () => {
+  it("description includes the canonical-naming reconciliation note: \"shown as 'Context Graphs' in the DKG node UI\"", () => {
     const tool = server.get('dkg_list_context_graphs');
-    expect(tool.config.description).toContain("called 'projects' in the DKG node UI");
+    expect(tool.config.description).toContain("shown as 'Context Graphs' in the DKG node UI");
   });
 
   it('happy path: invokes client.listProjects and renders rows', async () => {

@@ -26,6 +26,8 @@ On Windows, Claude Desktop may keep its config in `%APPDATA%\Claude` or `%LOCALA
 2. Inspect the client's DKG tool list. Ask it to call the discovered status and Context Graph listing tools.
 3. Complete the [quickstart](../getting-started/quickstart.md), including retrieval in a new conversation.
 
+The Context Graph listing defaults to `scope: "mine"`, matching **My Context Graphs** in the Node UI: explicit caller membership, or a matching curator identity for older list responses. Discovery and subscription alone do not establish membership. Use `scope: "all"` to inspect every known graph, including discovered and system graphs; unresolved names are labelled rather than repeated as names. Query-catalog discovery uses the same membership rule.
+
 If the client cannot find tools, confirm that setup detected the intended installation, restart it, and inspect its MCP logs. A source checkout and a globally installed CLI use different setup modes and homes; see the [package reference](https://github.com/OriginTrail/dkg/blob/main/packages/mcp-dkg/README.md).
 
 ## Remove the connection
