@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { nativeExpression } from './test-support/studio-native-expression.mjs';
 import { namedMcpInput } from './studio-inputs.mjs';
 
-for (const revision of ['compiler6-file', 'compiler7-data']) test(`${revision} snapshots retain their original source, KA and native pins`, () => {
+for (const revision of ['compiler6-file', 'compiler7-data', 'compiler8-data']) test(`${revision} snapshots retain their original source, KA and native pins`, () => {
   const { compiled, sourceHash } = JSON.parse(readFileSync(new URL(`./test-support/${revision}-snapshot.json`, import.meta.url)));
   const source = studioProgramSource(compiled);
   assert.equal(createHash('sha256').update(source).digest('hex'), sourceHash);
@@ -51,7 +51,7 @@ for (const mode of ['named', 'fixed', 'composed-fixed']) test(`${mode} entry fil
     }
     const saved = await f.service.save(body), source = f.sources.get(saved.kaRef).source;
     const compiled = readStudio(source), emitted = compileStudio(body, { fixture: true, graphId, owner });
-    assert.equal(compiled.compiler, mode === 'fixed' ? 7 : 8);
+    assert.equal(compiled.compiler, 9);
     f.restart();
     assert.deepEqual((await f.service.get(saved.kaRef, saved.sourceHash)).workflow, saved);
     const guest = program(source);
@@ -81,6 +81,10 @@ for (const mode of ['named', 'fixed', 'composed-fixed']) test(`${mode} entry fil
     }
     assert.equal(f.invocations.length, before);
     assert.equal(guest.calls.length, effects);
+    for (const patch of [{ paramsJson: '[]' }, { paramsJson: '{"constructor":1}' },
+      { paramsJson: ' '.repeat(2049) }, { executionId: 'invalid' }, { extra: true }])
+      assert.throws(() => guest.run({ ...packet, ...patch }));
+    assert.equal(guest.calls.length, effects, 'Malformed raw envelopes cannot dispatch');
   } finally { f.close(); }
 });
 

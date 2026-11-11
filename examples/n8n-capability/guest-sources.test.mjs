@@ -1,3 +1,4 @@
+import { normalizeComponentEnvelope, inspectComponentValue } from './component-envelope.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -27,12 +28,12 @@ test('host function formatting or loader rewrites cannot change persisted guest 
 });
 
 test('named-input guest revisions remain independent of host serialization', () => {
-  const snapshots = ['compiler6-file', 'compiler7-data'].map(name =>
+  const snapshots = ['compiler6-file', 'compiler7-data', 'compiler8-data'].map(name =>
     JSON.parse(readFileSync(new URL(`./test-support/${name}-snapshot.json`, import.meta.url))).compiled);
   const sources = () => [studioInputValidationSource('parameters-v1'), studioInputValidationSource('data-v1'), studioInputValidationSource('data-v2'),
     ...snapshots.map(compiled => studioProgramSource(compiled))];
   const expected = sources();
-  const helpers = [normalizeStudioArguments, resolveStudioInputParams, validateComponentValue, canonicalJson, normalizeBoundEntry];
+  const helpers = [normalizeStudioArguments, resolveStudioInputParams, validateComponentValue, canonicalJson, normalizeBoundEntry, normalizeComponentEnvelope, inspectComponentValue];
   try {
     for (const helper of helpers) helper.toString = () => { throw Error('Host serialization is forbidden'); };
     assert.deepEqual(sources(), expected);

@@ -97,8 +97,8 @@ export function createWorkflowComponents({
     );
     return c;
   }
-  async function list() {
-    const inventory = await capabilities();
+  async function list(inventory) {
+    inventory ??= await capabilities();
     return Promise.all(
       (await records()).map(async (item) => {
         let enabled = false;

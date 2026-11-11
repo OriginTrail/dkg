@@ -58,7 +58,7 @@ export async function verifyInvocation(root) {
     const saved = await f.service.save(graph);
     const source = f.sources.get(saved.kaRef).source;
     const compiled = runtime.readStudio(source);
-    assert.equal(compiled.compiler, 8);
+    assert.equal(compiled.compiler, 9);
     assert.deepEqual(compiled.definition.inputs, graph.inputs);
     const pin = [
       saved.kaRef,

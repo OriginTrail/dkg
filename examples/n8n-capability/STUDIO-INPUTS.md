@@ -46,20 +46,23 @@ execution's recorded input to the authenticated invocation journal. The selected
 operation profile still controls graph access, credentials and current authority.
 MCP retains its existing read-only operation policy.
 
-New graphs with named inputs use compiler 8. A native admission node validates the
+New graphs with named inputs use compiler 9. A native admission node validates the
 complete pinned input interface before any component runs, including calls from
 other approved Programs that bypass the supplied wrapper. Parameter and data-field
-expressions consume its admitted/defaulted values. Fixed entry-row bindings without
-named inputs retain compiler 7. Host admission and the generated
+expressions consume its admitted/defaulted values. Before releasing execution, it
+also validates every block's resolved native parameters, including HTTP URL rules;
+an invalid downstream parameter cannot run earlier side effects. Fixed entry-row
+bindings without named inputs also use compiler 9. Host admission and the generated
 Program validate the effective rows after fixed and named bindings, so an Extract
 File entry can receive `file` through a JSON argument with `itemsJson: "[{}]"`.
 The admitted/journalled envelope retains those original rows and separate arguments;
 the native guard applies the bindings. Invalid files and combined row-size violations
-are rejected before native dispatch. Compiler 7 and older source bytes remain readable
+are rejected before native dispatch. Raw envelope structure is validated explicitly,
+before binding rows and applying the real entry descriptor. Compiler 8 and older source bytes remain readable
 without changing existing KA or native pins; saving with the new compiler creates a
 new version, and varying its invocation arguments does not.
 
-The stronger native admission applies to newly saved compiler-8 workflows. Existing
+The complete native admission applies to newly saved compiler-9 workflows. Existing
 immutable native workflows are not rewritten; save a new revision to install it.
 Input guest helpers are frozen source artifacts selected explicitly by compiler
 revision, independent of host formatting and TypeScript transforms.

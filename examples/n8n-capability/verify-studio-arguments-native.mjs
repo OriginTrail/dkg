@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { resolve, join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { compileStudio } from './studio-definition.mjs';
+import { component } from './component-registry.mjs';
 import { definition, graphId, owner } from './test-support/studio-service-fixture.mjs';
 
 assert.ok(process.argv[2], 'Supply the installed n8n package directory (2.43.8).');
@@ -50,4 +51,18 @@ for (const args of [{ count: 1 }, { status: 'approved', count: 10 },
   assert.equal(admitted, undefined);
 }
 assert.equal(effects, 2);
-console.log(JSON.stringify({ n8nVersion: version, compiler: compiled.compiler, valid: 2, rejectedBeforeComponents: 4 }));
+const writeGraph = definition(['google-sheets', 'http-request'], [[0, 0, 1, 0]]);
+writeGraph.inputs = [{ name: 'url', label: 'URL', required: false,
+  spec: { ...component('http-request').parameters.url, default: 'https://api.github.com' },
+  targets: [{ nodeId: 'n1', parameter: 'url' }] }];
+const writeCompiled = compileStudio(writeGraph, { fixture: true, graphId, owner });
+const writeGate = writeCompiled.workflow.nodes.find(n => n.name === 'Admit arguments').parameters.jsonOutput;
+for (const url of ['http://127.0.0.1:4631/internal', 'https://internal.local', '   ']) {
+  packet = { argumentsJson: JSON.stringify({ url }) };
+  assert.equal(evaluate(writeGate), undefined, 'Invalid downstream URL must not release the earlier Google Sheets block');
+}
+for (const args of [{}, { url: 'https://api.github.com/zen' }]) {
+  packet = { argumentsJson: JSON.stringify(args) };
+  assert.deepEqual(evaluate(writeGate).values, { url: args.url ?? 'https://api.github.com' });
+}
+console.log(JSON.stringify({ n8nVersion: version, compiler: compiled.compiler, valid: 4, rejectedBeforeComponents: 7 }));

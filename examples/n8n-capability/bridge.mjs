@@ -145,7 +145,14 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     workflows: async ({ res }) => json(res, 200, { workflows: await workflows.list() }),
     workflowSave: async ({ res, value, authorize }) => json(res, 200, await workflows.save(value, authorize)),
     workflowRun: async ({ res, value, authorize }) => json(res, 200, await workflows.run(value, authorize)),
-    studio: async ({ res, ownerAccess }) => json(res, 200, { capabilities: [...(await list()).filter(c => c.kind === 'component'), ...await listPrograms(), ...await reusable.list().catch(() => [])], workflows: await studio.list(), canInvoke: ownerAccess }),
+    studio: async ({ res, ownerAccess }) => {
+      const native = list();
+      const [inventory, programs, saved, recipes] = await Promise.all([
+        native, listPrograms(), studio.list(), native.then(snapshot => reusable.list(snapshot)).catch(() => []),
+      ]);
+      return json(res, 200, { capabilities: [...inventory.filter(c => c.kind === 'component'), ...programs, ...recipes],
+        workflows: saved, canInvoke: ownerAccess });
+    },
     studioSave: async ({ res, value, authorize }) => json(res, 200, await reusable.save(value, authorize)),
     studioRun: async ({ res, value, authorize, actor }) => json(res, 200, await studio.run(value, authorize, actor)),
     studioActivation: async ({ res, value, authorize }) => json(res, 200, await studio.activate(value, authorize)),

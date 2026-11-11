@@ -1,4 +1,5 @@
-import { parseStudioGraph } from '../../packages/studio-contracts/dist/studio-graph.js';
+import { normalizeComponentEnvelope } from './component-envelope.mjs';
+import { entryValidationSource } from './guest-sources/studio-entry-v9.mjs';
 /** Named values flow in the admitted invocation; saved graphs and native pins never change. */
 import {
   parseStudioInputs,
@@ -11,6 +12,7 @@ import {
   defaultComponentRegistry,
   componentExecutionDescriptor,
   normalizeComponentInput,
+  componentValidationSource,
 } from './component-registry.mjs';
 import { nativeLiteral } from './component-workflows.mjs';
 import { normalizeBoundEntry } from './studio-entry-input.mjs';
@@ -93,9 +95,9 @@ export function workflowInvocationInput(compiled, values, input, descriptor, reg
   const admitted = invocationInput(compiled.definition, values, input, registry);
   const { argumentsJson, ...base } = admitted;
   const root = compiled.definition.nodes.find(node => node.id === compiled.definition.entryId);
-  const value = [7, 8].includes(compiled.compiler)
+  const value = [7, 8, 9].includes(compiled.compiler)
     ? normalizeBoundEntry(root, compiled.definition.inputs ?? [], JSON.parse(argumentsJson ?? '{}'),
-      descriptor, base, normalizeComponentInput, resolveStudioInputParams)
+      descriptor, base, normalizeComponentInput, resolveStudioInputParams, normalizeComponentEnvelope)
     : normalizeComponentInput(descriptor, base);
   return { ...value, ...(argumentsJson === undefined ? {} : { argumentsJson }) };
 }
@@ -118,7 +120,7 @@ export function invocationParameters(definition, node) {
 
 /** Trusted source generator. Every substituted value is JSON, never executable user code. */
 export function invocationProgramBody(compiled, descriptor, registry = defaultComponentRegistry) {
-  if ([7, 8].includes(compiled.compiler)) return boundInvocationProgramBody(compiled, descriptor, registry);
+  if ([7, 8, 9].includes(compiled.compiler)) return boundInvocationProgramBody(compiled, descriptor, registry);
   const { component } = registry;
   const definition = compiled.definition;
   const root = definition.nodes.find((n) => n.id === definition.entryId);
@@ -148,8 +150,8 @@ function boundInvocationProgramBody(compiled, descriptor, registry) {
   const root = definition.nodes.find(node => node.id === definition.entryId);
   const checks = definition.nodes.map(node => ({ node,
     descriptor: componentExecutionDescriptor(registry.component(node.componentId)) }));
-  return `${studioInputValidationSource(compiled.compiler === 8 ? 'data-v2' : 'data-v1')}
-${normalizeBoundEntrySource}
+  return `${studioInputValidationSource(compiled.compiler >= 8 ? 'data-v2' : 'data-v1')}
+${compiled.compiler === 9 ? entryValidationSource : normalizeBoundEntrySource}
 export function run(input: unknown) {
   if (!studioRecord(input)) throw new Error('Workflow input required.');
   const { argumentsJson, ...base } = input;
@@ -161,7 +163,7 @@ export function run(input: unknown) {
   for (const { node, descriptor } of ${JSON.stringify(checks)}) {
     normalize(descriptor, { itemsJson: JSON.stringify(descriptor.sampleItems), paramsJson: JSON.stringify(resolveStudioInputParams(node.params, inputs, node.id, args)), executionId: '' });
   }
-  const value = normalizeBoundEntry(${JSON.stringify(root)}, inputs, args, ${JSON.stringify(descriptor)}, base, normalize, resolveStudioInputParams);
+  const value = normalizeBoundEntry(${JSON.stringify(root)}, inputs, args, ${JSON.stringify(descriptor)}, base, normalize, resolveStudioInputParams${compiled.compiler === 9 ? ", normalizeComponentEnvelope" : ""});
   if (value.paramsJson !== ${JSON.stringify(JSON.stringify(root.params))} || value.executionId) throw new Error('Use the saved workflow parameters.');
   const admitted = ${definition.inputs !== undefined ? '{ ...value, argumentsJson: JSON.stringify(args) }' : 'value'};
   if (JSON.stringify(admitted).length > 16384) throw new Error('Workflow invocation exceeds the input budget.');
@@ -196,22 +198,6 @@ export function invocationItem(definition, node, item = '$json') {
         );
   return values.length ? `({ ...${item}, ${values.join(',')} })` : item;
 }
-export function normalizeInputValueNodes(value, normalize) {
-  const definition = normalize({
-    ...value,
-    nodes: value.nodes.map(({ inputValues: _inputValues, ...node }) => node),
-  });
-  return parseStudioGraph({
-    ...definition,
-    nodes: definition.nodes.map((node) => {
-      const original = value.nodes.find((item) => item.id === node.id);
-      return original?.inputValues === undefined
-        ? node
-        : { ...node, inputValues: original.inputValues };
-    }),
-  });
-}
-
 /** Named MCP admission shares manual validation and the existing read-profile restrictions. */
 export function namedMcpInput(value, workflow, registry = defaultComponentRegistry) {
   const { component, profile } = registry;
@@ -241,10 +227,19 @@ export function namedMcpInput(value, workflow, registry = defaultComponentRegist
 }
 
 /** Native admission is required even when another approved Program dispatches this grant. */
-export function nativeArgumentAdmission(definition) {
+export function nativeArgumentAdmission(definition, registry = defaultComponentRegistry) {
+  const checks = definition.nodes.map(node => ({ node,
+    descriptor: componentExecutionDescriptor(registry.component(node.componentId)) }));
   return `(() => { ${studioInputValidationSource('data-v2')}
+    ${componentValidationSource()}
     const raw = $('Receive input').first().json.body.input.argumentsJson;
     if (typeof raw !== 'string' || raw.length > 8192) throw new Error('Named workflow arguments required.');
-    return { values: normalizeStudioArguments(${nativeLiteral(definition.inputs)}, JSON.parse(raw)) };
+    const inputs = ${nativeLiteral(definition.inputs)};
+    const values = normalizeStudioArguments(inputs, JSON.parse(raw));
+    for (const { node, descriptor } of ${nativeLiteral(checks)}) {
+      normalize(descriptor, { itemsJson: JSON.stringify(descriptor.sampleItems),
+        paramsJson: JSON.stringify(resolveStudioInputParams(node.params, inputs, node.id, values)), executionId: '' });
+    }
+    return { values };
   })()`;
 }

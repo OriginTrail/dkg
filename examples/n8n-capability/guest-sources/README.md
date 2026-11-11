@@ -10,3 +10,8 @@ data-target and compiler-7 bytes, and `data-v2` is the compiler-8 variant with l
 braces escaped for n8n's expression parser. `studio-entry-v7.mjs` freezes the entry-row
 helper shared by compilers 7 and 8. Old source snapshots and serialization-poisoning
 tests cover these revisions. Never rewrite the frozen text from current host functions.
+
+Compiler 9 retains the `data-v2` argument helper and uses `studio-entry-v9.mjs` for
+explicit envelope and bound-row validation. Native admission also validates every
+resolved native parameter before any component executes. Compiler 6/7/8 snapshots
+remain read-only compatibility fixtures, including normalized property ordering.

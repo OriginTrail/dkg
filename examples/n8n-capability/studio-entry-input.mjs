@@ -1,10 +1,10 @@
-/** Compiler 7 validates effective entry rows, retaining the unbound invocation envelope.
- * This pure helper is embedded verbatim in the Program and called by host admission.
+/** Validate effective entry rows, retaining the unbound invocation envelope.
+ * Compiler 9 embeds a frozen copy; historical compilers retain their original artifacts.
  * The native per-node guard still performs the actual binding exactly once.
  */
-export function normalizeBoundEntry(root, inputs, args, descriptor, input, normalize, resolveParams) {
+export function normalizeBoundEntry(root, inputs, args, descriptor, input, normalize, resolveParams, normalizeEnvelope) {
   // Validate raw JSON structure/budgets first, before applying the entry's semantic contract.
-  const value = normalize({ ...descriptor, id: 'studio-entry', input: 'items' }, input);
+  const value = normalizeEnvelope(input);
   const bindings = { ...root.inputValues };
   for (const argument of inputs)
     for (const target of argument.targets)

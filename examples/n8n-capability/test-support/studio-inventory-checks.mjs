@@ -20,7 +20,8 @@ export async function verifyInventory(root, state, descriptor, savedWorkflow) {
   });
   let failure = 'query',
     saves = 0,
-    sourceReads = 0;
+    sourceReads = 0, nativeLoads = 0, nativeSourceReads = 0, nativeApprovalReads = 0;
+  let releaseNative, nativeBarrier, programsStarted, workflowsStarted;
   const assets = new Map(),
     mutations = [];
   const recipeRows = [];
@@ -65,19 +66,21 @@ export async function verifyInventory(root, state, descriptor, savedWorkflow) {
             ],
           };
         }
+        nativeLoads++;
+        if (nativeBarrier) await nativeBarrier;
         return { bindings: [{ program: kaRef }] };
       },
     },
     client: {
       programs: {
-        listApprovals: async () => [],
-        getSource: async () => ({
+        listApprovals: async () => { programsStarted = true; return []; },
+        getSource: async () => { nativeSourceReads++; return ({
           sourceHash: sha,
           authorAgentAddress: owner,
           label: 'Edit Fields',
           version: '1.0.0',
-        }),
-        getApproval: async () => ({
+        }); },
+        getApproval: async () => { nativeApprovalReads++; return ({
           binding: {
             enabled: true,
             n8n: {},
@@ -93,11 +96,11 @@ export async function verifyInventory(root, state, descriptor, savedWorkflow) {
               authorAgentAddress: owner,
             },
           },
-        }),
+        }); },
       },
     },
   });
-  bridge.studio.list = async () => [savedWorkflow];
+  bridge.studio.list = async () => { workflowsStarted = true; return [savedWorkflow]; };
   bridge.studio.get = async (ref, hash) => {
     sourceReads++;
     assert.equal(ref, savedWorkflow.kaRef);
@@ -110,6 +113,7 @@ export async function verifyInventory(root, state, descriptor, savedWorkflow) {
   };
   async function request(path, value, authorization = 'Bearer l1-owner-a') {
     let status, body;
+    const before = [nativeLoads, nativeSourceReads, nativeApprovalReads];
     const req = {
       method: value ? 'POST' : 'GET',
       url: path,
@@ -130,9 +134,22 @@ export async function verifyInventory(root, state, descriptor, savedWorkflow) {
       },
       path,
     );
+    if (path.endsWith('/capabilities/studio') && status === 200) {
+      assert.deepEqual([nativeLoads, nativeSourceReads, nativeApprovalReads].map((n, i) => n - before[i]), [1, 1, 1],
+        'Each inventory response loads one native catalog and one pair of metadata reads per component');
+    }
     return { status, body };
   }
   try {
+    nativeBarrier = new Promise(resolve => { releaseNative = resolve; });
+    const pendingInventory = request('/spike/ka/accounts/account-a/capabilities/studio');
+    // Let authentication/body dispatch settle while the native catalog remains blocked.
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(programsStarted, true);
+    assert.equal(workflowsStarted, true);
+    releaseNative();
+    assert.equal((await pendingInventory).status, 200);
+    nativeBarrier = undefined;
     for (failure of ['query', 'malformed']) {
       const response = await request('/spike/ka/accounts/account-a/capabilities/studio');
       assert.equal(response.status, 200);
