@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { asChangelogReader, createManagedOxigraphRuntimeStoreConfigV1 } from '@origintrail-official/dkg-storage';
+import { asChangelogReader, createManagedOxigraphRuntimeStoreConfigV1, storeGraphCatalogMaxBytes } from '@origintrail-official/dkg-storage';
 
 const wiring = vi.hoisted(() => ({
   config: {} as Record<string, unknown>,
@@ -126,5 +126,19 @@ describe('opening a stopped node store for the rollback', () => {
     await opened.store.insert([QUAD]);
     await opened.close();
     expect(existsSync(join(dataDir, 'store.nq'))).toBe(true);
+  });
+
+  it('opens the default embedded store, with its settings, for a store section that holds only settings', async () => {
+    vi.stubEnv('DKG_STORE_GRAPH_CATALOG_MAX_BYTES', '');
+    try {
+      wiring.config = { store: { graphCatalog: { maxBytes: 536_870_912 } } };
+      const opened = await openStoppedNodeStore(dataDir, () => undefined);
+      try {
+        expect(storeGraphCatalogMaxBytes()).toBe(536_870_912);
+        await opened.store.insert([QUAD]);
+        expect(await opened.store.listGraphs()).toEqual([QUAD.graph]);
+      } finally { await opened.close(); }
+      expect(existsSync(join(dataDir, 'store.nq'))).toBe(true);
+    } finally { vi.unstubAllEnvs(); }
   });
 });

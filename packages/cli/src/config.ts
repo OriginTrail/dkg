@@ -766,8 +766,8 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
   entitySearch?: { embedding: import('./entity-search/types.js').EntityEmbeddingConfig };
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
-  /** Triple store backend override (default: oxigraph-worker with file persistence). `controlReservedSlots`: the async queues' store control path (OT-RFC-73 P14), the values of DKG_STORE_CONTROL_RESERVED_SLOTS, which wins when set; absent = the default (on for blazegraph and oxigraph-server on more than 2 CPUs). */
-  store?: { backend: string; options?: Record<string, unknown>; graphSetIndex?: boolean | GraphSetIndexConfig; changelog?: boolean; controlReservedSlots?: string | number };
+  /** Triple store backend override (default: oxigraph-worker with file persistence). `controlReservedSlots`: the async queues' store control path (OT-RFC-73 P14), the values of DKG_STORE_CONTROL_RESERVED_SLOTS, which wins when set; absent = the default (on for blazegraph and oxigraph-server on more than 2 CPUs). `graphCatalog.maxBytes`: the graph catalog's bound, the values of DKG_STORE_GRAPH_CATALOG_MAX_BYTES, which wins when set (graph-catalog-config.ts). */
+  store?: { backend: string; options?: Record<string, unknown>; graphSetIndex?: boolean | GraphSetIndexConfig; changelog?: boolean; controlReservedSlots?: string | number; graphCatalog?: import('./graph-catalog-config.js').GraphCatalogConfig };
   /**
    * Intentional cap on how many persisted context-graph subscriptions a node
    * ACTIVATES on boot (gossip + sync). A large stale backlog otherwise fans out

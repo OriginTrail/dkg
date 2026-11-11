@@ -69,7 +69,8 @@ export function assertStoppedStoreLocation(config: TripleStoreConfig): void {
  */
 export const openStoppedNodeStore: OpenStoppedNodeStore = async (dataDir, log) => {
   const config = await loadConfig();
-  const configured = config.store as TripleStoreConfig | undefined;
+  // A store section with only settings (no backend) keeps the default store, with those settings, as the daemon does.
+  const configured = config.store?.backend ? config.store as TripleStoreConfig : undefined;
   // Before anything is started or opened: a location this process cannot match to the node's is refused.
   if (configured) assertStoppedStoreLocation(configured);
   const managed = await startManagedOxigraph({ config, dataDir, log });
@@ -83,7 +84,7 @@ export const openStoppedNodeStore: OpenStoppedNodeStore = async (dataDir, log) =
     }
   }
   const store = await createTripleStore({
-    ...(configured ?? { backend: 'oxigraph-worker', options: { path: join(dataDir, 'store.nq') } }),
+    ...(configured ?? { backend: 'oxigraph-worker', options: { path: join(dataDir, 'store.nq') }, graphCatalog: config.store?.graphCatalog }),
     changelog: false,
   });
   return { store, close: () => store.close() };

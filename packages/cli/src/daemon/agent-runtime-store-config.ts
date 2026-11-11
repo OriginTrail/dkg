@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import {
   withManagedOxigraphRuntimeStoreConfigV1,
   type ChangelogEraGuard,
+  type GraphCatalogStoreConfig,
   type ManagedOxigraphRuntimeStoreConfigV1,
   type ReadGraphStoreConfig,
   type TripleStoreConfig,
@@ -16,6 +17,8 @@ export interface AgentRuntimeStoreConfigInput {
   readonly readGraphs?: ReadGraphStoreConfig;
   /** The data directory, where the agent keeps its default store when no store is configured. */
   readonly dataDir?: string;
+  /** `store.graphCatalog`, checked and applied at boot; carried on the store config the agent builds. */
+  readonly graphCatalog?: GraphCatalogStoreConfig;
 }
 
 /** Assemble the exact store config passed from the daemon into DKGAgent.create. */
@@ -27,7 +30,7 @@ export function buildAgentRuntimeStoreConfig(
     // same store, configured explicitly; the agent adds its default large-literal storage as it does by default.
     return input.readGraphs === undefined || input.dataDir === undefined
       ? undefined
-      : { backend: 'oxigraph-worker', options: { path: join(input.dataDir, 'store.nq') }, readGraphs: input.readGraphs };
+      : { backend: 'oxigraph-worker', options: { path: join(input.dataDir, 'store.nq') }, readGraphs: input.readGraphs, graphCatalog: input.graphCatalog };
   }
   if (input.changelogEnabled && !input.changelogEraGuard) {
     throw new Error('enabled changelog requires its durable era guard');
@@ -41,12 +44,14 @@ export function buildAgentRuntimeStoreConfig(
     graphSetIndex: input.runtimeStore.graphSetIndex,
     changelog,
     readGraphs: input.readGraphs,
+    graphCatalog: input.graphCatalog,
   };
   return input.managedStore
     ? withManagedOxigraphRuntimeStoreConfigV1(input.managedStore, {
       graphSetIndex: complete.graphSetIndex,
       changelog: complete.changelog,
       readGraphs: complete.readGraphs,
+      graphCatalog: complete.graphCatalog,
     })
     : complete;
 }

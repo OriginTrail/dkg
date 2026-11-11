@@ -478,6 +478,7 @@ import { startRetention, type RetentionHandle } from './retention-sweeps.js';
 import { resolveRetentionConfig } from '../retention-config.js';
 import { readGraphStoreSettings, resolveQueryConfig } from '../read-graphs-config.js';
 import { assertRollbackTargetRecognizesReadGraphs } from '../update/read-graph-rollback-target.js';
+import { applyGraphCatalogConfig } from '../graph-catalog-config.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
 import { buildChatMemoryStack } from './memory-tool-context.js';
@@ -1399,6 +1400,8 @@ async function runDaemonInnerWithStartupOwnership(
   // OT-RFC-74: a bad `query` value fails the boot here, and so do read graphs that the rollback target would not recognize.
   const queryConfig = resolveQueryConfig(config.query);
   await assertRollbackTargetRecognizesReadGraphs(queryConfig, role);
+  // A bad `store.graphCatalog` or DKG_STORE_GRAPH_CATALOG_MAX_BYTES fails the boot here; a good value bounds every catalog read of this process.
+  const graphCatalog = applyGraphCatalogConfig(config.store?.graphCatalog);
   const { name: selectedNetworkConfig, network } = await loadResolvedNetworkConfig(
     config,
     loadNetworkConfig,
@@ -1547,7 +1550,8 @@ async function runDaemonInnerWithStartupOwnership(
   // For the directory-backed blob/snapshot stores we use the managed
   // defaults (the rewritten sparql-http backend has no `options.path` to
   // infer a directory from, unlike the local Oxigraph backend).
-  const runtimeStore = managed?.storeConfig ?? config.store;
+  // A store section that holds only settings (no backend) keeps the default store.
+  const runtimeStore = managed?.storeConfig ?? (config.store?.backend ? config.store : undefined);
   const runtimeLargeLiteralStorage =
     managed?.largeLiteralStorage ?? config.largeLiteralStorage;
   const runtimeSnapshotStorage =
@@ -1798,6 +1802,7 @@ async function runDaemonInnerWithStartupOwnership(
     // Only a written `query` section is carried, so a node without one builds its stores exactly as before.
     readGraphs: config.query === undefined ? undefined : readGraphStoreSettings(queryConfig),
     dataDir: dkgDir(),
+    graphCatalog,
   });
 
   const agentConfig: DKGAgentConfig = {

@@ -14,15 +14,53 @@ import type { QueryOptions } from './triple-store.js';
  */
 export const STORE_GRAPH_CATALOG_LIMIT_NAME = 'STORE_GRAPH_CATALOG_MAX_BYTES';
 export const DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES = 256 * 1024 * 1024;
-/** Overrides the ceiling, in bytes. Anything but a positive safe integer keeps the default. */
+/**
+ * Overrides the ceiling, in bytes, over the store config's `graphCatalog.maxBytes`.
+ * Here anything but a positive safe integer is ignored; the daemon refuses it at boot.
+ */
 export const STORE_GRAPH_CATALOG_MAX_BYTES_ENV = 'DKG_STORE_GRAPH_CATALOG_MAX_BYTES';
 
-/** The configured ceiling, read at each use so that a process sees one value everywhere. */
+/** `TripleStoreConfig.graphCatalog`: the node's configured ceiling, which the environment variable overrides. */
+export interface GraphCatalogStoreConfig {
+  /** Bytes, a positive safe integer. */
+  readonly maxBytes?: number;
+}
+
+let configuredMaxBytes: number | undefined;
+
+/** Why `value` cannot be the ceiling, or `undefined` for a positive safe integer of bytes. */
+export function graphCatalogMaxBytesProblem(value: unknown): string | undefined {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return undefined;
+  return `must be a positive whole number of bytes, not ${typeof value === 'string' ? JSON.stringify(value) : String(value)}`;
+}
+
+/**
+ * Set this process's ceiling from its store config. A process keeps one ceiling, so every
+ * catalog read of the node is bounded alike: a second, different value is refused.
+ */
+export function configureStoreGraphCatalogMaxBytes(maxBytes: unknown): void {
+  const problem = graphCatalogMaxBytesProblem(maxBytes);
+  if (problem) throw new Error(`store.graphCatalog.maxBytes ${problem}`);
+  if (configuredMaxBytes !== undefined && configuredMaxBytes !== maxBytes) {
+    throw new Error(`store.graphCatalog.maxBytes is ${configuredMaxBytes} in this process already; a store config asked for ${maxBytes}`);
+  }
+  configuredMaxBytes = maxBytes as number;
+}
+
+/** The value set from a store config, if any. A worker thread has its own copy of this module, so its store is given this value. */
+export function configuredStoreGraphCatalogMaxBytes(): number | undefined {
+  return configuredMaxBytes;
+}
+
+/**
+ * The ceiling: the environment variable when it holds a positive safe integer, else the
+ * configured value, else the default. Read at each use, so a process sees one value everywhere.
+ */
 export function storeGraphCatalogMaxBytes(): number {
   const raw = process.env[STORE_GRAPH_CATALOG_MAX_BYTES_ENV]?.trim();
-  if (!raw) return DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES;
-  const parsed = Number(raw);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES;
+  const parsed = raw ? Number(raw) : Number.NaN;
+  if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+  return configuredMaxBytes ?? DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES;
 }
 
 export const STORE_INTERNAL_LIMIT = 'STORE_INTERNAL_LIMIT';

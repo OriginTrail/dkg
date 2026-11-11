@@ -406,9 +406,12 @@ export {
   STORE_GRAPH_CATALOG_MAX_BYTES_ENV,
   STORE_INTERNAL_LIMIT,
   StoreInternalLimitError,
+  configureStoreGraphCatalogMaxBytes,
+  graphCatalogMaxBytesProblem,
   isStoreInternalLimitError,
   recordStoreInternalLimit,
   storeGraphCatalogMaxBytes,
+  type GraphCatalogStoreConfig,
   type StoreInternalLimitErrorLike,
 } from './graph-catalog-internal-limit.js';
 

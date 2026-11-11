@@ -15,6 +15,7 @@ import {
 } from './changelog-store.js';
 import type { TripleStore } from './triple-store.js';
 import type { ReadGraphStoreConfig } from './read-graph/read-graph-store.js';
+import type { GraphCatalogStoreConfig } from './graph-catalog-internal-limit.js';
 
 export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;
 
@@ -46,6 +47,8 @@ export interface TripleStoreConfig {
    * and sends exactly today's requests while there are none.
    */
   readGraphs?: ReadGraphStoreConfig;
+  /** The node's graph catalog ceiling; it applies to the whole process (see `configureStoreGraphCatalogMaxBytes`). */
+  graphCatalog?: GraphCatalogStoreConfig;
 }
 
 export function wrapChangelog(store: TripleStore, config: TripleStoreConfig): TripleStore {

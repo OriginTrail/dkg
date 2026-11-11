@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { createTripleStore, markReadGraphsDirtyAtStart, type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
 import type { DkgConfig } from './config.js';
 import { readGraphStoreSettings, resolveQueryConfig } from './read-graphs-config.js';
+import { applyGraphCatalogConfig } from './graph-catalog-config.js';
 
 /**
  * The store configuration of a publisher runtime or inspector built outside the daemon (`dkg publisher run`). Like every store object the node builds over
@@ -11,7 +12,7 @@ import { readGraphStoreSettings, resolveQueryConfig } from './read-graphs-config
 export function publisherStoreConfig(dataDir: string, config: DkgConfig, readOnly = false): TripleStoreConfig {
   const readGraphs = config.query === undefined ? undefined : readGraphStoreSettings(resolveQueryConfig(config.query));
   const storeConfig = config.store;
-  if (storeConfig) {
+  if (storeConfig?.backend) { // a store section with only settings keeps the default store
     return {
       ...storeConfig,
       // Only the embedded Oxigraph adapters write a store file back; an external store is a server the inspector only queries.
@@ -36,6 +37,7 @@ export function publisherStoreConfig(dataDir: string, config: DkgConfig, readOnl
     options: { path: join(dataDir, 'store.nq'), readOnly },
     largeLiteralStorage: defaultLargeLiteralStorage(dataDir, config),
     readGraphs,
+    ...(storeConfig?.graphCatalog === undefined ? {} : { graphCatalog: storeConfig.graphCatalog }),
   };
 }
 
@@ -45,6 +47,8 @@ export function publisherStoreConfig(dataDir: string, config: DkgConfig, readOnl
  * does at start (`markReadGraphsDirtyAtStart`): no row stays `ready` across its writes. A read-only store writes nothing and marks nothing.
  */
 export async function createPublisherStore(dataDir: string, config: DkgConfig, readOnly = false): Promise<TripleStore> {
+  // A bad `store.graphCatalog` or DKG_STORE_GRAPH_CATALOG_MAX_BYTES stops it here, before the store opens.
+  applyGraphCatalogConfig(config.store?.graphCatalog);
   const store = await createTripleStore(publisherStoreConfig(dataDir, config, readOnly));
   if (readOnly) return store;
   try {
