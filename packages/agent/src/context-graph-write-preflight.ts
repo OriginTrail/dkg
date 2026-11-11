@@ -2,7 +2,8 @@ import { ethers } from 'ethers';
 import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { ContextGraphSub, ContextGraphSubscriptionStore, ContextGraphWritePreflightProbe } from './dkg-agent-types.js';
-import { stripLiteral } from './dkg-agent-utils.js';
+import { strip, stripLiteral } from './dkg-agent-utils.js';
+import { agentsGraphMayState, ontologyGraphMayState } from './context-graph-meta-sources.js';
 import { classifyWritePreflightFailure, type WritePreflightFailure, type WritePreflightFailureSite } from './write-preflight-attribution.js';
 
 /** Read-only dependencies of this point probe; the agent mixin remains its adapter. */
@@ -21,6 +22,9 @@ export interface WritePreflightHost {
 /** What a probe call may carry besides the context graph id. */
 export interface WritePreflightProbeOptions {
   callerAgentAddress?: string | null;
+  /** Daemon writability checks may omit content discovery when fresh facts suffice.
+   * Full probes remain the default; omitted content is unknown, not false. */
+  contentCheck?: 'always' | 'when-needed-for-write';
   /**
    * Called when the caller's authorization consulted the chain (an on-chain identity-ID entry of
    * the allowlist). Such an answer can change without any local write, so a result cache must not keep it.
@@ -40,6 +44,13 @@ export function normalizeWritePreflightCaller(callerAgentAddress: string | null 
   const rawAddress = rawCaller.startsWith(didPrefix) ? rawCaller.slice(didPrefix.length) : rawCaller;
   return ethers.isAddress(rawAddress) ? ethers.getAddress(rawAddress) : null;
 }
+
+/** The predicate each kind of declaration row reads; a gate row reads the graph's own `_meta` only. */
+const DECLARATION_ROW_PREDICATES: Readonly<Partial<Record<string, string>>> = {
+  declared: DKG_ONTOLOGY.RDF_TYPE,
+  access: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+  curator: DKG_ONTOLOGY.DKG_CURATOR,
+};
 
 interface WritePreflightSubscriptions {
   readonly store?: Pick<ContextGraphSubscriptionStore, 'load'>;
@@ -62,16 +73,18 @@ export async function probeContextGraphWritePreflight(
     const persistedSubscriptionPromise = subscriptionStore?.load
       ? subscriptionStore.load(contextGraphId)
       : Promise.resolve(null);
-    // One bounded point projection over the three trusted metadata sources.
+    // One bounded point projection over the three metadata sources.
     // Facts are intentionally collected independently: the established
     // ContextGraphMetaProjection model permits the declaration to live in one
     // source and policy/curator/gates in another. Requiring every source to
     // repeat rdf:type would both reject valid gate-only graphs and, worse,
-    // ignore a cross-source private-policy ratchet. Gate presence uses EXISTS
-    // so this path returns at most one gate row per source instead of expanding
-    // a potentially large allowlist.
+    // ignore a cross-source private-policy ratchet. As in that projection, the
+    // gates come from the graph's own `_meta`, and the rows of a shared graph pass
+    // the projection's source rules, applied below. Gate presence uses EXISTS so
+    // this path returns at most one gate row per source instead of expanding a
+    // potentially large allowlist.
     const declarationPromise = host.store.query(`
-      SELECT ?kind ?value WHERE {
+      SELECT ?kind ?value ?sourceGraph WHERE {
         VALUES (?sourceGraph ?sourceSubject) {
           (<${ontologyGraph}> <${contextGraphUri}>)
           (<${agentsGraph}> <${contextGraphUri}>)
@@ -100,8 +113,8 @@ export async function probeContextGraphWritePreflight(
               <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}>
               <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}>
             }
-            GRAPH ?sourceGraph {
-              ?sourceSubject ?gatePredicate ?gateValue .
+            GRAPH <${cgMetaGraph}> {
+              <${metaSubjectUri}> ?gatePredicate ?gateValue .
             }
           }
           BIND("gate" AS ?kind)
@@ -120,10 +133,13 @@ export async function probeContextGraphWritePreflight(
     // definitive deny) and `storeUnavailable` carries the first failure
     // message for diagnostics, while the in-memory registry state always
     // survives.
+    // The daemon can defer the content read until authorization and the
+    // final subscription snapshot establish whether it is needed at all.
+    const deferContent = opts?.contentCheck === 'when-needed-for-write';
     const [existsRead, hasLocalContentRead, persistedSubscriptionRead, declarationRead] =
       await Promise.allSettled([
         host.contextGraphExists(contextGraphId),
-        host.contextGraphHasLocalContent(contextGraphId),
+        deferContent ? Promise.resolve(undefined) : host.contextGraphHasLocalContent(contextGraphId),
         persistedSubscriptionPromise,
         declarationPromise,
       ]);
@@ -142,7 +158,7 @@ export async function probeContextGraphWritePreflight(
     const exists = existsRead.status === 'fulfilled'
       ? existsRead.value
       : noteStoreFailure('existence', existsRead.reason);
-    const hasLocalContent = hasLocalContentRead.status === 'fulfilled'
+    let hasLocalContent = hasLocalContentRead.status === 'fulfilled'
       ? hasLocalContentRead.value
       : noteStoreFailure('content', hasLocalContentRead.reason);
     const persistedSubscription = persistedSubscriptionRead.status === 'fulfilled'
@@ -157,6 +173,15 @@ export async function probeContextGraphWritePreflight(
     // failed, so a store outage can never masquerade as "no declaration".
     let declarationFound: boolean | undefined = declarationResult === undefined ? undefined : false;
     const curators: string[] = [];
+    const sourceMayState = (sourceGraph: string | undefined, kind: string, value: string | undefined): boolean => {
+      const predicate = DECLARATION_ROW_PREDICATES[kind];
+      if (predicate === undefined) return true;
+      const source = typeof sourceGraph === 'string' ? strip(sourceGraph) : undefined;
+      if (source === cgMetaGraph) return true;
+      if (source === ontologyGraph) return ontologyGraphMayState(predicate);
+      // The agents graph, and any source this query does not name, as strictly.
+      return agentsGraphMayState(predicate, typeof value === 'string' ? stripLiteral(strip(value)) : '');
+    };
     if (declarationResult && declarationResult.type === 'bindings') {
       let sawPublic = false;
       let sawPrivate = false;
@@ -166,6 +191,7 @@ export async function probeContextGraphWritePreflight(
           ? stripLiteral(row['kind']).trim().toLowerCase()
           : '';
         const value = row['value'];
+        if (!sourceMayState(row['sourceGraph'], kind, value)) continue;
         if (kind === 'declared') declarationFound = true;
         if (kind === 'access' && typeof value === 'string') {
           const normalized = stripLiteral(value).trim().toLowerCase();
@@ -213,12 +239,31 @@ export async function probeContextGraphWritePreflight(
       }
     }
 
-    const inMemorySubscription = subscriptions.current(contextGraphId);
+    let inMemorySubscription = subscriptions.current(contextGraphId);
+    // Authorization may have awaited an allowlist/chain read. Decide only
+    // from the subscription that exists now, not a snapshot from probe start.
+    // These are the exact positive facts the daemon needs for a synced graph;
+    // content cannot add writability evidence in this case.
+    const contentIsRedundant = !storeUnavailable && exists === true && declarationFound === true
+      && accessPolicy !== undefined && (!checksum || callerAuthorized === true)
+      && inMemorySubscription?.subscribed === true && inMemorySubscription.synced === true;
+    if (deferContent && !contentIsRedundant) {
+      try {
+        hasLocalContent = await host.contextGraphHasLocalContent(contextGraphId);
+      } catch (err) {
+        noteStoreFailure('content', err);
+      }
+      inMemorySubscription = subscriptions.current(contextGraphId);
+    }
+    // No await between deciding to omit content and copying this snapshot.
+
     return {
       // Required typed boundary: `storeAvailable` is the inverse of
       // `storeUnavailable`, emitted unconditionally so consumers cannot read
       // any store-derived fact below without first establishing the store was
-      // up. The optional `storeUnavailable`/`storeErrorMessage` pair is kept
+      // up for every attempted read. The writability mode can omit a
+      // redundant content read; it never suppresses an attempted read failure.
+      // The optional `storeUnavailable`/`storeErrorMessage` pair is kept
       // for the 503-diagnostics path (unchanged wire behaviour).
       storeAvailable: !storeUnavailable,
       ...(exists !== undefined ? { exists } : {}),

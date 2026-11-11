@@ -7,12 +7,14 @@
  * queue. The control method owns every reason INCLUDING `malformed` (a corrupt persisted
  * payload — or an unsafe jobId — is only detectable inside the method, never at the HTTP
  * route). Never throws and never mutates on a reject. `already_absent` is a SUCCESS
- * (idempotent repeat), distinct from a rejection.
+ * (idempotent repeat), distinct from a rejection. `pending_transaction` (lift queue only, #3573):
+ * a failed job that may have sent a transaction (held for chain proof, or owned by recovery), which
+ * only the pending-transaction override of the node operator or of the enqueuing agent clears.
  */
 export type TerminalJobClearOutcome =
   | { readonly outcome: 'cleared' }
   | { readonly outcome: 'already_absent' }
-  | { readonly outcome: 'rejected'; readonly reason: 'nonterminal' | 'unknown' | 'malformed' };
+  | { readonly outcome: 'rejected'; readonly reason: 'nonterminal' | 'pending_transaction' | 'unknown' | 'malformed' };
 
 /**
  * Authenticated authority for the destructive, exact-job pending-transaction override.

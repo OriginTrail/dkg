@@ -11,7 +11,7 @@ import { LAYER_CONFIG, buildLayerGraphOptions, agentNodeColors, humanizeLabel, f
 import { EmptyState, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { AgentDot, AgentDotStack } from '../../../components/AgentDot.js';
 import { agentHexForUri } from '../../../hooks/useAgents.js';
-import { Badge } from '../../../components/ds/Badge.js';
+import { Badge, LayerGlyph } from '../../../components/ds/Badge.js';
 import { Anchor, X } from 'lucide-react';
 import { useModalDismiss } from '../../../components/Modals/useModalDismiss.js';
 import { Loading } from '../../../components/ds/Loading.js';
@@ -557,7 +557,7 @@ export function LayerGraphPanel({
             <EmptyState
               compact
               tone={toneForLayer(layer)}
-              icon={LAYER_CONFIG[layer].icon}
+              icon={<LayerGlyph layer={layer} />}
               title={`No triples in ${title}`}
               description="The graph will appear when this layer has connected triples."
             />

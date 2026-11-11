@@ -32,6 +32,18 @@ function readStylesSources(): string {
   ].join('\n');
 }
 
+function readProductionUiSources(rel = ''): string {
+  const dir = resolve(UI_DIR, rel);
+  return readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .flatMap((entry) => {
+      const child = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) return child === 'dev' ? [] : [readProductionUiSources(child)];
+      return /\.tsx?$/.test(entry.name) ? [readRawFile(child)] : [];
+    })
+    .join('\n');
+}
+
 function readPanelRightSources(): string {
   return [
     readRawFile('components/Shell/PanelRight.tsx'),
@@ -117,12 +129,34 @@ describe('V10 CSS layout selectors', () => {
   });
 });
 
-describe('V10 font imports', () => {
-  it('styles.css imports Google Fonts for Instrument Sans and JetBrains Mono', () => {
+describe('V10 fonts and type scale', () => {
+  it('uses Instrument Sans for the interface and JetBrains Mono for identifiers (DESIGN.md · Type)', () => {
     const css = readFile('styles.css');
-    expect(css).toMatch(/@import\s+url\s*\(/);
-    expect(css).toContain('Instrument+Sans');
-    expect(css).toContain('JetBrains+Mono');
+    expect(css).toContain("--font-sans: 'Instrument Sans'");
+    expect(css).toContain("--font-mono: 'JetBrains Mono'");
+  });
+
+  it('sets the app body on the shared type scale, with an 11px floor', () => {
+    const css = readFile('styles.css');
+    expect(css).toContain('--fs-micro: 11px');
+    expect(css).toContain('--fs-body: 14px');
+    expect(css).toMatch(/html, body, #root\s*\{[\s\S]*?font-size:\s*var\(--fs-body\)/);
+  });
+
+  it('keeps production inline styles on the shared type scale', () => {
+    // Canvas renderer configs take a number and say so in a comment, which this allows.
+    expect(readProductionUiSources()).not.toMatch(/fontSize:\s*\d+(?:\.\d+)?(?=\s*[,}])/);
+  });
+});
+
+describe('header branding', () => {
+  const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
+
+  it('shows only the OriginTrail wordmark in the brand position', () => {
+    expect(header).toContain('aria-label="OriginTrail"');
+    expect(header).toContain('{ORIGINTRAIL_WORDMARK}');
+    expect(header).not.toContain('v10-header-logo-text');
+    expect(header).not.toContain('powered by');
   });
 });
 

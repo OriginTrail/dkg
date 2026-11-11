@@ -155,7 +155,7 @@
 .v10-empty-state.inline .v10-empty-state-copy { max-width: none; }
 .v10-empty-state-title {
   color: var(--text-primary);
-  font-size: var(--fs-title);
+  font-size: var(--fs-body);
   font-weight: 600;
   line-height: var(--lh-snug);
 }
@@ -205,7 +205,7 @@
   order: 1;
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: var(--fs-title);
+  font-size: var(--fs-heading);
   font-weight: 700;
   line-height: var(--lh-tight);
   overflow-wrap: anywhere;

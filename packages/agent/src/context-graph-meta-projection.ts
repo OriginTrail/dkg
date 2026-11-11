@@ -12,6 +12,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { resolveWorkspaceAgentRecipientKeys, WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES as RECIPIENT_AUTHORITY_PREDICATES } from '@origintrail-official/dkg-publisher';
 import { storeLaneInflightLimit, type Quad, type QueryOptions, type TripleStore } from '@origintrail-official/dkg-storage';
+import { LEGACY_SCHEMA_NS, agentsGraphMayState, ontologyGraphMayState } from './context-graph-meta-sources.js';
 import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { cloneMetaRecord } from './internal/context-graph-meta-record-copy.js';
@@ -33,7 +34,6 @@ export interface ContextGraphReadAuthorityFactsSnapshot {
 
 const DKG_NS = 'https://dkg.network/ontology#';
 const LEGACY_DKG_NS = 'http://dkg.io/ontology/';
-const LEGACY_SCHEMA_NS = 'http://schema.org/';
 const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
 
 const SUB_GRAPH_TYPE_URIS = new Set([
@@ -103,6 +103,7 @@ const CATALOG_META_PREDICATES = new Set<string>([
   DKG_ONTOLOGY.RDF_TYPE,
   DKG_ONTOLOGY.DCT_ACCESS_RIGHTS,
 ]);
+const isCatalogFact = (predicate: string): boolean => CATALOG_META_PREDICATES.has(predicate);
 const PROJECTION_RECORD_PREDICATES: ReadonlySet<string> = new Set([
   ...DIRECT_META_PREDICATES, ...SUB_GRAPH_META_PREDICATES, ...DELEGATION_META_PREDICATES, ...CATALOG_META_PREDICATES]);
 const AGENT_ROSTER_PREDICATES: ReadonlySet<string> = new Set([
@@ -479,14 +480,13 @@ export class ContextGraphMetaProjection {
   /**
    * Facts the Context Graph declared about ITSELF in its own `_meta` graph.
    *
-   * `get()` deliberately unions `_meta`, AGENTS, `_catalog` and ONTOLOGY under
-   * first-wins precedence, which is right for privacy and listing reads — an
-   * AGENTS-only declaration can legitimately mark a graph private. It is NOT
-   * right for deciding who speaks for the graph: the merged record discards
-   * WHICH graph supplied each fact, so a creator contributed by AGENTS or
-   * `_catalog` (both of which carry THIRD-PARTY assertions — other agents'
-   * self-declarations and peer-fetchable catalog records) is indistinguishable
-   * from one the Context Graph declared about itself.
+   * `get()` deliberately unions `_meta` with what AGENTS, `_catalog` and ONTOLOGY
+   * may state under first-wins precedence, which is right for privacy and listing
+   * reads — an AGENTS-only declaration can legitimately mark a graph private. It
+   * is NOT right for deciding who speaks for the graph: the merged record discards
+   * WHICH graph supplied each fact, so a creator contributed by ONTOLOGY (which
+   * carries THIRD-PARTY assertions) is indistinguishable from one the Context
+   * Graph declared about itself.
    *
    * Only `<cg>/_meta` is read. ONTOLOGY is deliberately NOT included even
    * though a PUBLIC graph writes its definition there
@@ -540,14 +540,15 @@ export class ContextGraphMetaProjection {
 
     const record = emptyContextGraphMetaRecord(contextGraphId, uri);
 
-    // Authoritative (local, fully trusted) sources first, meta-first so its
-    // scalars win via first-wins (`??=`) precedence. The floor-filtered `_catalog`
-    // source (untrusted, peer-fetchable) sits below them but above the shared
-    // ONTOLOGY seed and can only contribute existence + a private access class.
+    // The graph's own `_meta` first, so its scalars win via first-wins (`??=`)
+    // precedence, and it alone states who may access the graph. The filtered
+    // AGENTS and `_catalog` sources can only contribute existence, description and
+    // a private access class. The shared ONTOLOGY seed keeps a public graph's
+    // definition.
     await this.loadContextGraphFacts(metaGraph, uri, record, options);
-    await this.loadContextGraphFacts(agentsGraph, uri, record, options);
-    await this.loadContextGraphFacts(catalogGraph, uri, record, options, CATALOG_META_PREDICATES);
-    await this.loadContextGraphFacts(ontologyGraph, uri, record, options);
+    await this.loadContextGraphFacts(agentsGraph, uri, record, options, agentsGraphMayState);
+    await this.loadContextGraphFacts(catalogGraph, uri, record, options, isCatalogFact);
+    await this.loadContextGraphFacts(ontologyGraph, uri, record, options, ontologyGraphMayState);
     record.delegations = await this.loadDelegations(contextGraphId, options);
     record.subGraphs = await this.loadSubGraphs(contextGraphId, options);
 
@@ -618,7 +619,7 @@ export class ContextGraphMetaProjection {
     contextGraphUri: string,
     record: ContextGraphMetaRecord,
     options: QueryOptions,
-    allowedPredicates?: ReadonlySet<string>,
+    admits?: (predicate: string, object: string) => boolean,
   ): Promise<void> {
     const result = await this.store.query(
       `SELECT ?p ?o WHERE {
@@ -634,9 +635,9 @@ export class ContextGraphMetaProjection {
       const predicate = typeof row['p'] === 'string' ? strip(row['p']) : undefined;
       const object = typeof row['o'] === 'string' ? stripTerm(row['o']) : undefined;
       if (!predicate || object === undefined) continue;
-      // Untrusted sources (the peer-fetchable `_catalog` graph) are restricted to
-      // their disclosure floor — never let them feed authz-bearing fields.
-      if (allowedPredicates && !allowedPredicates.has(predicate)) continue;
+      // Shared and peer-fetchable sources are restricted to what they may state —
+      // never let them feed authz-bearing fields.
+      if (admits && !admits(predicate, object)) continue;
       this.applyFact(record, predicate, object);
     }
   }

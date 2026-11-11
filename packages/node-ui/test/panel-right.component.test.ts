@@ -80,7 +80,9 @@ async function waitForAssertion(assertion: () => void): Promise<void> {
 
 describe('PanelRight component', () => {
   afterEach(() => vi.unstubAllGlobals());
-  beforeEach(() => {
+  beforeEach(async () => {
+    // Conversations live in a store that outlives the panel, so each test starts clean.
+    (await import('../src/ui/stores/agentConversations.js')).resetAgentConversations();
     vi.clearAllMocks();
     fetchContextGraphsMock.mockImplementation(async () => {
       const { useProjectsStore } = await import('../src/ui/stores/projects.js');
@@ -569,6 +571,114 @@ describe('PanelRight component', () => {
     });
     container.remove();
   });
+
+  it('a reply in flight survives closing the panel, and Stop in the reopened panel aborts it', async () => {
+    let signal: AbortSignal | undefined;
+    streamLocalAgentChatMock.mockImplementation((_id: string, _text: string, options: any) => {
+      signal = options.signal;
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      });
+    });
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    await act(async () => { await Promise.resolve(); });
+
+    const textarea = container.querySelector('textarea');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, 'Keep going while closed');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      (container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement).click();
+    });
+    await waitForAssertion(() => expect(container.querySelector('button[aria-label="Stop reply"]')).toBeTruthy());
+
+    // Close the panel (unmount) and open it again (a new instance).
+    await act(async () => { root.unmount(); });
+    root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    try {
+      await waitForAssertion(() => expect(container.textContent).toContain('Keep going while closed'));
+      const stop = container.querySelector('button[aria-label="Stop reply"]') as HTMLButtonElement | null;
+      expect(stop).toBeTruthy();
+      await act(async () => { stop!.click(); });
+      expect(signal?.aborted).toBe(true);
+      await waitForAssertion(() => expect(container.querySelector('button[aria-label="Send message"]')).toBeTruthy());
+    } finally {
+      await act(async () => { root.unmount(); });
+      container.remove();
+    }
+  }, 20_000);
+
+  it('a reply that streams while the panel is closed keeps its text, and later deltas and the finish add to it once', async () => {
+    let options: any;
+    let finish: (value: unknown) => void = () => {};
+    streamLocalAgentChatMock.mockImplementation((_id: string, _text: string, opts: any) => {
+      options = opts;
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    await act(async () => { await Promise.resolve(); });
+
+    const textarea = container.querySelector('textarea');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, 'Answer while I look away');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      (container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement).click();
+    });
+    await waitForAssertion(() => expect(options).toBeTruthy());
+
+    // Close the panel; part of the reply streams in while it is closed.
+    await act(async () => { root.unmount(); });
+    const partial = 'Streamed while the panel was closed';
+    await act(async () => {
+      options.onEvent?.({ type: 'text_delta', delta: partial });
+      await Promise.resolve();
+    });
+
+    // Reopen while the request is still pending: only the stream can have
+    // put the partial text there, because no final text has arrived.
+    root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    const count = (s: string) => container.textContent!.split(s).length - 1;
+    try {
+      await waitForAssertion(() => expect(container.textContent).toContain(partial));
+      expect(container.querySelector('button[aria-label="Stop reply"]')).toBeTruthy();
+
+      // A later delta reaches the reopened panel and appears once.
+      const rest = ', and kept streaming once it reopened';
+      await act(async () => {
+        options.onEvent?.({ type: 'text_delta', delta: rest });
+        await Promise.resolve();
+      });
+      const reply = partial + rest;
+      await waitForAssertion(() => expect(container.textContent).toContain(reply));
+      expect(count(reply)).toBe(1);
+
+      // Finishing keeps the transcript: the reply once, and the panel ready to send.
+      await act(async () => {
+        finish({ text: reply, correlationId: 'corr-closed' });
+        await Promise.resolve();
+      });
+      await waitForAssertion(() => expect(container.querySelector('button[aria-label="Send message"]')).toBeTruthy());
+      expect(count(reply)).toBe(1);
+      expect(count('Answer while I look away')).toBe(1);
+      expect(container.querySelector('button[aria-label="Stop reply"]')).toBeNull();
+    } finally {
+      await act(async () => { root.unmount(); });
+      container.remove();
+    }
+  }, 20_000);
 
   it('persists failed Hermes turns so timeout sessions survive refresh', async () => {
     fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{

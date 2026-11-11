@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-agent",
-  "version": "10.0.27",
+  "version": "10.1.0",
   "type": "module",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
@@ -143,6 +143,7 @@
     "./dist/rfc64/inventory-v1/swm-author-inventory-contracts.js": null,
     "./dist/rfc64/inventory-persistence-failure.js": null,
     "./dist/rfc64/inventory-v1/open-error.js": null,
+    "./dist/rfc64/inventory-v1/sqlite-header.js": null,
     "./dist/rfc64/finalized-policy-agent-precommit-v1.js": null,
     "./dist/rfc64/finalized-policy-verifier-v1.js": null,
     "./dist/rfc64/finalized-vm-agent-precommit-v1.js": null,
@@ -189,11 +190,17 @@
     "./dist/rfc64/inventory-v1/finalized-private-repair-persistence.js": null,
     "./dist/rfc64/inventory-v1/schema-migrations.js": null,
     "./dist/rfc64/inventory-v1/pre-migration-copy.js": null,
-    "./dist/rfc64/inventory-v1/rollback.js": null
+    "./dist/rfc64/inventory-v1/rollback.js": null,
+    "./context-graph-list-budget-error": {
+      "types": "./dist/context-graph-list-budget-error.d.ts",
+      "import": "./dist/context-graph-list-budget-error.js",
+      "default": "./dist/context-graph-list-budget-error.js"
+    }
   },
   "scripts": {
     "build": "tsc && pnpm run test:types && pnpm run test:package-root",
-    "benchmark:catalog-placement": "vitest run --config vitest.bench.config.ts",
+    "benchmark:catalog-placement": "vitest run --config vitest.bench.config.ts test/benchmarks/catalog-placement-cost.bench.ts",
+    "benchmark:private-placement-pass": "vitest run --config vitest.bench.config.ts test/benchmarks/finalized-private-pass-cost.bench.ts",
     "benchmark:code-point-comparator": "pnpm run build && node --expose-gc scripts/code-point-comparator-benchmark.cjs",
     "benchmark:graph-membership-snapshot": "pnpm run build && node --expose-gc scripts/graph-membership-snapshot-benchmark.cjs",
     "benchmark:sync-responder-pages": "node --expose-gc scripts/sync-responder-page-benchmark.cjs",

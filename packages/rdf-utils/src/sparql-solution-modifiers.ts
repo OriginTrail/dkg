@@ -1,4 +1,4 @@
-import type { ValidPreparedSparql } from './sparql-lexical-scanner.js';
+import { isSparqlWordPayload, type ValidPreparedSparql } from './sparql-lexical-scanner.js';
 import type { PreparedSparqlQuery } from './sparql-query.js';
 import type { SparqlStructure } from './sparql-structure.js';
 
@@ -15,7 +15,7 @@ export function readSolutionModifiers(prepared: ValidPreparedSparql, structure: 
   let hasLimit = false, hasOffset = false, hasOrderBy = false;
   let insertionOffset = prepared.source.length;
   for (const [index, token] of prepared.tokens.entries()) {
-    if (token.kind !== 'word' || structure.braces.depthBefore[index] !== 0) continue;
+    if (token.kind !== 'word' || structure.braces.depthBefore[index] !== 0 || isSparqlWordPayload(prepared.tokens, index)) continue;
     if (token.upper === 'LIMIT') hasLimit = true;
     if (token.upper === 'OFFSET') hasOffset = true;
     if (token.upper === 'VALUES') insertionOffset = Math.min(insertionOffset, token.start);

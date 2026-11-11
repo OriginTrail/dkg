@@ -25,7 +25,7 @@ const GRAPH = 'urn:dkg:publisher:control-plane';
 
 interface Tally {
   cases: number; deleted: number; keptBehindFailed: number; inversions: number; futureDated: number; faultsInjected: number; keys: number; reportEqualsDelete: number; clockSkips: number;
-  heldByUnreachable: number; midPassClears: number; clockPassedFutureUpdate: number; tiedPrefixes: number; tiedNewestFirst: number; reportShortOnTie: number;
+  heldByUnreachable: number; midPassClears: number; clockPassedFutureUpdate: number; tiedPrefixes: number; tiedNewestFirst: number; reportEqualsDeleteOnTie: number;
   sameMsNewerFirst: number;
 }
 
@@ -152,16 +152,14 @@ async function oneCase(seed: number, templates: RetentionTemplates, tally: Tally
     }
     const finalLeft = await left(publisher);
     expect(new Set(specs.filter((s) => !finalLeft.has(s.id) && !cleared.has(s.id)).map((s) => s.id)), 'exactly what the spec says is gone').toEqual(allowedAt(tEnd));
-    // report names what the first pass of delete removes from the same snapshot (a record that finished out of order waits for the next pass in both modes). The one
-    // exception is a key two of whose records finished at the same instant: when the walk meets the older one a hold before the newer, delete has removed it by then
-    // and takes the newer one (and what is behind it) in the same pass, while report, which removes nothing, keeps finding the older one in front. Report never names more.
+    // report names what the first pass of delete removes from the same snapshot (a record that finished out of order waits for the next pass in both modes), for a key two
+    // of whose records finished at the same instant too (#3554): both modes walk such records by subject and compare them in that order, so delete having removed the older
+    // one by the time it meets the newer one changes nothing. (The monotonic clock stands still here, so no hold runs out of budget: see async-lift-retention-holds.test.ts.)
     for (const id of wouldDelete) expect(expectedDeleted.has(id), `${id} reported but not allowed`).toBe(true);
     if (!injectFault) {
       const deletedFirst = new Set(first.flatMap((res) => res.deletedJobs.map((j) => j.jobId)));
-      for (const id of wouldDelete) expect(deletedFirst.has(id), `${id} reported but kept by the first delete pass`).toBe(true);
-      const untied = (ids: ReadonlySet<string>) => new Set(specs.filter((s) => ids.has(s.id) && !ties.has(s.key)).map((s) => s.id));
-      expect(untied(deletedFirst), 'report == the first delete pass, on the same snapshot, for every key without a tie').toEqual(untied(wouldDelete));
-      if (deletedFirst.size > wouldDelete.size) tally.reportShortOnTie += 1;
+      expect(deletedFirst, 'report == the first delete pass, on the same snapshot').toEqual(wouldDelete);
+      if (specs.some((s) => ties.has(s.key) && wouldDelete.has(s.id))) tally.reportEqualsDeleteOnTie += 1;
       tally.reportEqualsDelete += 1;
     }
 
@@ -206,7 +204,7 @@ it('retention never deletes anything but old finalized records, never changes th
   const templates = await createRetentionTemplates();
   const tally: Tally = {
     cases: 0, deleted: 0, keptBehindFailed: 0, inversions: 0, futureDated: 0, faultsInjected: 0, keys: 0, reportEqualsDelete: 0, clockSkips: 0,
-    heldByUnreachable: 0, midPassClears: 0, clockPassedFutureUpdate: 0, tiedPrefixes: 0, tiedNewestFirst: 0, reportShortOnTie: 0, sameMsNewerFirst: 0,
+    heldByUnreachable: 0, midPassClears: 0, clockPassedFutureUpdate: 0, tiedPrefixes: 0, tiedNewestFirst: 0, reportEqualsDeleteOnTie: 0, sameMsNewerFirst: 0,
   };
   // Count the turns the event loop takes while the cases run (the floor below). Every term Oxigraph hands back from a query is a wasm object that is freed by a
   // FinalizationRegistry callback, and V8 runs those callbacks as tasks between two turns of the loop. A case is microtasks from start to end (the in-memory store never
@@ -248,5 +246,5 @@ it('retention never deletes anything but old finalized records, never changes th
       expect(tally.sameMsNewerFirst).toBeGreaterThan(0);                                 // keys whose run holds two records accepted in one millisecond, the newer finished first
     }
   }
-  console.log(`publisher retention AC7 property: seed=${options.seed} runs=${tally.cases} deleted=${tally.deleted} keys=${tally.keys} held-back-keys=${tally.keptBehindFailed} out-of-order-keys=${tally.inversions} future-dated=${tally.futureDated} faults=${tally.faultsInjected} unreachable-held=${tally.heldByUnreachable} mid-pass-clears=${tally.midPassClears} clock-passed=${tally.clockPassedFutureUpdate} tied-keys=${tally.tiedPrefixes} tied-newest-first=${tally.tiedNewestFirst} report-short-on-tie=${tally.reportShortOnTie} same-ms-newer-first=${tally.sameMsNewerFirst}`);
+  console.log(`publisher retention AC7 property: seed=${options.seed} runs=${tally.cases} deleted=${tally.deleted} keys=${tally.keys} held-back-keys=${tally.keptBehindFailed} out-of-order-keys=${tally.inversions} future-dated=${tally.futureDated} faults=${tally.faultsInjected} unreachable-held=${tally.heldByUnreachable} mid-pass-clears=${tally.midPassClears} clock-passed=${tally.clockPassedFutureUpdate} tied-keys=${tally.tiedPrefixes} tied-newest-first=${tally.tiedNewestFirst} report-equals-delete-on-tie=${tally.reportEqualsDeleteOnTie} same-ms-newer-first=${tally.sameMsNewerFirst}`);
 }, 600_000);

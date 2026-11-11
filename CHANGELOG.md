@@ -4,6 +4,261 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+## [10.1.0] - Unreleased
+
+10.1.0 opens the NeuroSymbolic Marketplace on testnet, where nodes that opt
+in buy and sell inference. It also keeps publishing and recovery steady
+under load and gives the node UI a new look. This entry describes a release
+candidate; publication and production qualification are still pending.
+
+### Highlights
+
+- **The NeuroSymbolic Marketplace on testnet.** Nodes that opt in buy
+  inference through an OpenAI-compatible gateway, and Core Nodes sell it
+  from an inference backend they configure, with their offers in the
+  Verifiable Memory of the testnet Marketplace Context Graph.
+  Subscriptions and receipts settle on the marketplace contracts on Base
+  Sepolia. On mainnet the marketplace stays inactive until its contracts
+  are deployed there (#3645, #3720, #3721, #3738, #3742, #3747, #3756).
+- **A new look for the node UI.** A fresh theme and type across the app
+  (#3721).
+- **Correct catalog content after draft edits.** The catalog follows an
+  asset's latest draft when it is shared, edited and shared again before
+  its first publication (#3667).
+- **Less repeated work.** Catalog backlog scans yield, parked placement
+  passes reuse validated state, inventory validation encodes each value
+  once, and a graph's presence check asks the store directly (#3599,
+  #3631, #3640, #3600, #3694, #3708, #3712, #3722, #3754).
+- **Publishing that keeps going.** Settled ACK rounds retire unused
+  requests, funded wallets get work fairly, retry budgets and job cleanup
+  keep their safety bounds, seal checks at admission use the publisher's
+  control lane when it is on, and a funding read that fails before
+  anything is sent retries on its own (#3647, #3613, #3614, #3612, #3594,
+  #3595, #3699, #3728).
+- **Lower transaction fees on Gnosis.** Transactions pay the priority fee
+  the RPC suggests instead of at least 1 gwei, and the maximum fee keeps
+  its 2 gwei floor and its headroom for base-fee spikes (#3731).
+- **Private members can recover.** Approvals repair missing metadata for
+  existing participants, and an empty private graph keeps proving
+  membership until synchronization completes (#3689, #3630).
+- **No more event-loop stalls from gossip mesh tags.** Gossipsub no longer
+  tags each mesh peer with every topic it shares in the peer store. On
+  nodes with many subscriptions, those tags made each reconnect block the
+  event loop for seconds (#3755).
+- **Useful operational evidence.** Operators can record a running node's
+  CPU profile, inspect rolling prover health, see why a daemon worker
+  exited, and correlate queue admission with store waits (#3606, #2627,
+  #3653, #3698).
+
+### Before you upgrade
+
+- Nothing to set. A node that does not opt in to the marketplace needs no
+  new setting, store migration or schema change, and its `config.json`
+  works as it is.
+- The NeuroSymbolic Marketplace is available on testnet, and nodes opt in:
+  `marketplace.enabled` turns on buying, and `marketplace.seller.enabled`
+  turns on selling, which also needs a Core Node, a configured inference
+  backend and TRAC to publish its offers. Testnet nodes use the testnet
+  Marketplace Context Graph, `testnet-marketplace`, by default. On mainnet
+  the marketplace stays inactive until its contracts are deployed there.
+- Tools that read `GET /api/diagnostics/rpc-usage` and pin its consumer
+  labels should accept `consumerVocabularyVersion` 4.
+- A seller with an `openai` backend now takes tool calls for its services
+  by default. Set `marketplace.seller.services[].tools` to `false` for a
+  backend that does not support tools.
+- `dkg rollback` returns a node to 10.0.27. "Updating from 10.0.27" in
+  `docs/use-dkg/updates-and-rollback.md` has the details.
+
+The details follow.
+
+### Fixed
+
+- Daemon workers run steadily on every supported Node.js line, with or
+  without optional native addons (#3650, #3658).
+- Keep store settings when initialization rewrites the configuration, and
+  open the store read-only for offline publisher reads (#3608, #3588).
+- Rotate contended chain requests fairly, prefer recent agent peers, retry
+  unfinished catalog replay on connected peers, and respect identity-probe
+  backoff and open relay circuits (#3200, #3632, #3633, #3590, #3587).
+- End durable recovery rounds on local backpressure, give graphs turns at
+  the sync slot, and represent recovery outcomes explicitly (#3596, #3637).
+- Repeat retryable publication recipient reads, treat a busy store as no
+  membership verdict, and close finalization inbox entries whose content
+  is already verified (#3617, #3616, #3607).
+- Check read access on context graph membership reads (#3586).
+- Report the fields of failed async jobs, keep failure messages to a
+  bounded length, and log busy background poll reads as warnings (#3610,
+  #3609, #3615).
+- Answer supported filtered single-triple queries and parse RDF literals
+  with less work (#3659, #3593).
+- Return EPCIS events without document containers or unrelated resources,
+  while recognizing the supported EPCIS namespaces (#2490).
+- Close native checkpoint resources on startup failure and preserve
+  shutdown ownership during daemon startup (#3589).
+- Verify a native checkpoint's assets two at a time, so starting from a
+  checkpoint of three or more assets stays within the compression memory
+  budget (#3734).
+- Check one graph's presence with the store's exact query while the graph
+  catalog waits for its refresh (#3722).
+- Stop a share request's admission when its client disconnects before the
+  job is stored (#3727).
+- Retry a queued publication on its normal bounded lane when its funding
+  read fails and the publisher has proved that nothing was sent (#3728).
+- Set the query dataset on graph-list reads (#3684).
+- Resolve context-graph metadata from the graph's own `_meta` (#3730).
+- Skip local-content discovery in a daemon write check when fresh
+  metadata, the caller's authorization and an active synced subscription
+  already show that the target is writable (#3744).
+- Add `jobCreated: false` and `retryable: true` to the 503 answers of
+  `POST /api/knowledge-assets/:name/vm/publish-async` when its context
+  graph checks cannot run, so a client knows that no job was created and
+  can try again (#3745).
+- Cancel a Knowledge Asset descriptor read's storage queries when its
+  caller times out or disconnects (#3746).
+- Answer the buyer's funding and accounts views within a few seconds: the
+  node keeps each buyer's account list and reads only the blocks it has not
+  seen, instead of scanning the event log on every request (#3750).
+- On Windows, accept a healthy managed Oxigraph server whose socket is
+  reported as established rather than listening, so the node API starts
+  (#3701).
+- Wait up to 120 seconds in `dkg start` for a live worker and a successful
+  status answer, with `--timeout` for longer, so a slow store recovery no
+  longer looks like a failed start (#3707).
+- Keep every older daemon log when a rotation cannot list or move the log
+  files completely (#3705).
+- Answer `GET /api/context-graph/list` with 503, `retryable: true` and
+  `Retry-After` instead of 500 when a listing runs out of its time budget
+  (#3702).
+- Find Claude Desktop's relocated Windows configuration in `dkg mcp setup`
+  and `dkg mcp uninstall`, natively and through WSL (#3704).
+
+### Added
+
+- **NeuroSymbolic Marketplace contracts (OT-RFC-27).** Buyers fund a
+  subscription per epoch from a wallet or from a Conviction Account's
+  allowance; sellers land buyer-signed receipts in batches that count as
+  they land, up to the budget left; and `StakingV10` claims pay each
+  node's share of the query/inference pool. New contracts:
+  `ServiceSubscriptionsStorage`, `ServiceSubscriptions`,
+  `ServiceSubscriptionsWallet`, `QueryInferenceStorage`,
+  `QueryInferenceSettlement`, `StakingV10Ledger` and
+  `ConvictionWithdrawalStorage`; updated: `PublishingConviction` 10.2.0,
+  `StakingV10` 10.1.0 and `StakingKPI` 10.1.0. Deployed on testnet (Base
+  Sepolia); the deploy steps skip mainnet networks (#3645, #3717).
+- **The marketplace on the node, available on testnet (OT-RFC-27).** Nodes
+  opt in. The code ships in the new `@origintrail-official/dkg-marketplace`
+  package (#3720, #3738, #3742).
+  - Buying, with `marketplace.enabled`: the node buys inference through an
+    OpenAI-compatible gateway, `GET /api/marketplace/v1/models` and
+    `POST /api/marketplace/v1/chat/completions`, which takes `dkgmk_`
+    access keys only, and a renewal job funds its standing plan ahead of
+    each epoch. The gateway routes calls from the offers in the graph's
+    Verifiable Memory, checks each seller's quote and answer before using
+    them, and refuses a receipt completed outside its request's time
+    window.
+  - Selling, with `marketplace.seller.enabled`, on a Core Node with an
+    inference backend configured for each service it sells: the node sells
+    over the DKG peer protocol and lands its receipts in batches through
+    the epoch. It recovers each batch after a restart, including one it
+    recorded but did not broadcast, which it sends again as signed.
+  - Each seller publishes one signed offer per service to the Verifiable
+    Memory of the Marketplace Context Graph, which costs TRAC. A price
+    change updates the same Knowledge Asset, and an offer with two epochs
+    or fewer left is extended. Until an offer is listed, its offering's
+    `listing` in `GET /api/marketplace/seller` says why.
+  - On testnet, buyers and sellers use the testnet Marketplace Context
+    Graph, `testnet-marketplace`, by default; a node that sets
+    `marketplace.contextGraphId` keeps its own value (#3747).
+  - A busy gateway answers with `Retry-After`: 429 `budget_busy` when too
+    many calls wait on one service, or 503 `gateway_busy` when the gateway
+    holds as many calls as it takes.
+  - Subscription top-ups are idempotent per key: a top-up that carries an
+    `idempotencyKey` is sent at most once for that key, and a repeat gets
+    the first answer, also after a restart.
+  - If buying or selling fails to start, that part stays off, and the node
+    keeps running.
+  - The `/api/marketplace` routes cover the catalog, plans and funding,
+    access keys and the seller's operations; every write needs the node
+    admin token. `dkg marketplace` drives them from the CLI.
+- **A Marketplace section in the node UI, hidden by default.** Services and
+  seller storefronts with a playground, plans with a dry run before each
+  funding, access keys, and a seller's operations. Opening the node UI once
+  with `?marketplace` in its address shows the section in that browser
+  (#3721).
+- **Authors held on the node, with a remote signer.** A node whose remote
+  signer holds payer accounts only can set `chain.signer.nodeHeldAuthor` to
+  `true`: the node's own agent key then authors and owns its Knowledge
+  Assets and signs its graph traffic, and the remote signer signs payer
+  transactions only. It is off by default and cannot be combined with
+  `chain.signer.author` (#3729).
+- JSON-LD document ingestion with inline contexts, named graphs, blank nodes,
+  lists, language tags and datatypes. Remote contexts and imports are
+  rejected without network access. Default-finalizing asset creation rejects
+  named-graph documents with guidance to use `--no-finalize` (#2506).
+- Experimental native public snapshot bootstrap for an explicitly configured
+  fresh Edge, with a pinned Java runtime, complete journal verification and
+  authenticated catch-up. Automatic/default activation remains disabled;
+  existing data directories are not migrated (#3566).
+- **Tool calls through the marketplace gateway.** Calls carry `tools`,
+  `tool_choice` and the tool results, and answers carry the model's tool
+  calls. A seller says in its quote whether a service takes tool calls, the
+  router sends such calls only to sellers that do, and the gateway answers
+  400 `tools_unsupported` before anything is reserved or sent when none
+  does. Answers report prompt and completion tokens separately when the
+  seller provides the split. New access keys get 64-bit ids, and existing
+  keys keep working (#3756).
+- `dkg publisher clear-job <job-id>` and `dkg ka clear-share-job <job-id>`
+  remove one finished job from a running node's queue (#3709).
+
+### Changed
+
+- The node UI has a new look: a new theme and type scale across the app
+  frame, the panels, the agent composer, the views, and the Publisher
+  Conviction and wallet pages (#3721).
+- `GET /api/diagnostics/rpc-usage` reports `consumerVocabularyVersion` 4:
+  its consumer labels include the marketplace's contract lookups and views
+  (#3720).
+
+### Validation and tooling
+
+- Pin browser CI to Ubuntu 24.04, stabilize live-store timing fixtures and
+  offline-read startup synchronization, and add RDF ingestion floor
+  benchmarks (#3687, #3649, #3626, #3138).
+- Remove internal working plans from the published source tree and document
+  sustained monitoring after mainnet rollout (#3665, #3620).
+- Rehearse the marketplace contract deployment on a local fork of the
+  testnet chain, add a testnet smoke test, give the Solidity coverage job
+  60 minutes, and extend three dated test exceptions (#3691, #3693, #3719,
+  #3725).
+- Share one registered-signer fallback between rotated sends, and move the
+  RPC-usage consumer vocabulary into a module of its own, with no change in
+  behaviour (#3739, #3740).
+
+### Before promotion
+
+- There are no smart-contract source or deployment registry changes in this
+  candidate relative to `main` at `689dd4b540`, which already holds the
+  marketplace contracts (#3645); #3720 vendors their ABIs into
+  `packages/chain`. They are deployed on testnet only; mainnet needs its own
+  deployment before the marketplace can run there.
+- Keep native snapshot bootstrap opt-in. Its default rollout still needs a
+  mainnet cold/warm/restart comparison, including rule sampling and RPC use.
+- Catalog cache measurements establish CPU savings, not faster end-to-end
+  publication or resolution of every storage queue timeout. Validate the
+  combined candidate under representative load.
+- Smoke-test buying and selling on testnet nodes that use the testnet
+  Marketplace Context Graph by default, with the sellers' offers listed in
+  its Verifiable Memory, before mainnet promotion.
+- Qualify the final candidate commit and package bytes through the release
+  procedure, including the new `@origintrail-official/dkg-marketplace`
+  package, a runtime dependency of the CLI that is published with it.
+  Earlier canary CI and per-PR tests do not certify this release commit.
+  Verify upgrade/rollback from 10.0.27, private graph recovery, publication
+  settlement and testnet smoke before mainnet promotion.
+- After promotion, verify the running build through `/api/status` and monitor
+  catch-up and resource use through the rollout observation period in
+  `RELEASE_PROCESS.md`.
+
 ## [10.0.27] - 2026-10-29
 
 10.0.27 makes nodes steadier and faster under load. Core nodes settle

@@ -72,21 +72,12 @@ function useDragResize(onDrag: (delta: number) => void, axis: 'x' | 'y') {
   return useCallback((node: HTMLDivElement | null) => setHandle(node), []);
 }
 
-/** True from the first render where `value` is true, and from then on. */
-function useOnceTrue(value: boolean): boolean {
-  const seen = useRef(false);
-  if (value) seen.current = true;
-  return seen.current;
-}
-
 function AppShell() {
   useNodeStatusPolling();
   useKeyboardShortcuts();
   useShellRouting();
   const { bottomCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
   const { narrow, leftOpen, rightOpen } = useShellPanels();
-  const leftMounted = useOnceTrue(narrow || leftOpen);
-  const rightMounted = useOnceTrue(narrow || rightOpen);
   const closeNarrowPanel = useLayoutStore((s) => s.closeNarrowPanel);
   // Resizing past the breakpoint shows the page, not a floating panel. Navigation does the
   // same in useShellRouting. The create and join dialogs belong to the shell
@@ -170,15 +161,17 @@ function AppShell() {
         {narrow && (leftOpen || rightOpen) && (
           <button type="button" className="v10-panel-scrim" aria-label="Close panel" onClick={closeNarrowPanel} />
         )}
-        {/* Once a side panel has mounted it stays mounted, hidden while closed, so
-            closing it, a resize or opening the other panel keeps what's in it
-            (a chat draft, queued files, a form). */}
-        {leftMounted && (
-          <div className="v10-panel-left" role="complementary" aria-label="Context Graphs and node" style={{ width: leftWidth }} hidden={!leftOpen}>
-            <PanelLeft />
-          </div>
+        {/* A closed side panel unmounts, so its polling and listeners stop. What
+            must outlive it lives in the shell: the Context Graph dialogs
+            (ContextGraphDialogs) and agent conversations (stores/agentConversations). */}
+        {leftOpen && (
+          <>
+            <div className="v10-panel-left" role="complementary" aria-label="Context Graphs and node" style={{ width: leftWidth }}>
+              <PanelLeft />
+            </div>
+            <div className="v10-resize-handle-h" ref={leftHandle} />
+          </>
         )}
-        {leftOpen && <div className="v10-resize-handle-h" ref={leftHandle} />}
 
         <div className="v10-center-region" style={{ flex: 1, minWidth: 0, display: expanded ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
@@ -188,11 +181,13 @@ function AppShell() {
           <PanelBottom />
         </div>
 
-        {rightOpen && !expanded && <div className="v10-resize-handle-h" ref={rightHandle} />}
-        {rightMounted && (
-          <div id="agents-panel" tabIndex={-1} className="v10-panel-right" role="complementary" aria-label="Agents" style={expanded ? { flex: 1, minWidth: 0 } : { width: rightWidth }} hidden={!rightOpen}>
-            <PanelRight />
-          </div>
+        {rightOpen && (
+          <>
+            {!expanded && <div className="v10-resize-handle-h" ref={rightHandle} />}
+            <div id="agents-panel" tabIndex={-1} className="v10-panel-right" role="complementary" aria-label="Agents" style={expanded ? { flex: 1, minWidth: 0 } : { width: rightWidth }}>
+              <PanelRight />
+            </div>
+          </>
         )}
       </div>
     </div>
@@ -208,6 +203,10 @@ function NetworkRoute() {
 function AgentHubRoute() {
   return <Navigate to={tabIdToPath(useTabsStore.getState().activeTabId)} replace state={{ openAgents: true }} />;
 }
+
+const MarketplaceGalleryRoute = React.lazy(() =>
+  import('./marketplace/GalleryView.js').then((m) => ({ default: m.MarketplaceGalleryView }))
+);
 
 function ContextGraphPrimerRoute() {
 
@@ -236,6 +235,12 @@ export function App() {
           Redirect stale bookmarks for /ui/apps/... back to the dashboard so upgraded
           nodes don't silently render AppShell under a dead URL. */}
       <Route path="/apps/*" element={<Navigate to="/" replace />} />
+      {/* Fixture-fed marketplace component gallery (never live data). */}
+      <Route path="/dev/gallery" element={
+        <React.Suspense fallback={<div className="lazy-spinner">Loading...</div>}>
+          <MarketplaceGalleryRoute />
+        </React.Suspense>
+      } />
       <Route path="*" element={<AppShell />} />
     </Routes>
   );

@@ -5,7 +5,7 @@ import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection 
 import { completionTrace } from './async-lift-completion-trace.js';
 import { traceProcessNext } from './async-lift-claim-trace.js';
 import { LiftJobListingSelectors } from './lift-job-listing-selectors.js';
-import { clearTerminalJobsGuarded, LIFT_CLEAR_SIBLINGS_SOURCE } from './async-lift-guarded-clear.js';
+import { clearTerminalJobsGuarded, LIFT_CLEAR_SIBLINGS_SOURCE, readStoredLifecycleKeys } from './async-lift-guarded-clear.js';
 import { createLiftRetentionAccess, type LiftRetentionAccess } from './async-lift-retention-access.js';
 import { lifecycleKeyOfJob } from './lift-job-store-selectors.js';
 import { AsyncLiftQueueScheduler } from './async-lift-queue-scheduler.js';
@@ -101,6 +101,7 @@ import {
   isAutomaticallyRetryableLiftJob,
   isClearableTerminalLiftJob,
   isTargetedClearableLiftJob,
+  needsPendingTransactionOverride,
   decideChainProofDisposition,
   hasAutomaticRecoveryExit,
   resolveHeldJobSettlementCapability,
@@ -120,6 +121,8 @@ import {
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
 import { isKnowledgeAssetPublishPreconditionFailure, mapExecutionFailure } from './async-lift-execution-failure.js';
+import { AsyncLiftWalletFunding } from './async-lift-wallet-funding.js';
+import { isInheritedTxHashAccounted } from './lift-job-tx-hash-accounting.js';
 import { prepareAsyncPublishPayload, type AsyncPreparedPublishPayload, type LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import { validateLiftPublishPayload } from './async-lift-validation.js';
 import { computePrivateRootV10 } from './merkle.js';
@@ -597,6 +600,8 @@ export class TripleStoreAsyncLiftPublisher
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   private readonly publicSnapshotStore?: AsyncLiftPublisherConfig['publicSnapshotStore'];
   private readonly graphManager: GraphManager;
+  /** #3591 — keeps a wallet the chain refused for funds out of claims until it can pay. */
+  private readonly walletFunding: AsyncLiftWalletFunding;
   private readonly claimCoordinator: AsyncLiftClaimCoordinator;
   readonly claimControl = createAsyncLiftClaimControl(commit =>
     this.journalCompletion.runPublicOperation(owner => this.claimCoordinator.runClaimTransaction(owner,
@@ -702,6 +707,11 @@ export class TripleStoreAsyncLiftPublisher
       hasNamedRecoveryResolver: config.knowledgeAssetVmPublishRecoveryResolver !== undefined,
     });
     this.graphManager = new GraphManager(store);
+    this.walletFunding = new AsyncLiftWalletFunding({
+      readBalances: config.walletBalanceReader,
+      now: this.now,
+      onReading: (walletId) => this.queueScheduler.walletRelease(walletId),
+    });
     this.claimCoordinator = new AsyncLiftClaimCoordinator(
       store,
       {
@@ -732,6 +742,7 @@ export class TripleStoreAsyncLiftPublisher
           );
         },
         notifyWalletRelease: (walletId) => this.notifyWalletRelease(walletId),
+        walletMayClaim: (walletId) => this.walletFunding.mayClaim(walletId),
         mutations: {
           update: async (current, scope, status, data = {}) =>
             await this.applyClaimUpdateTransition(current, scope, status, data),
@@ -2704,11 +2715,11 @@ export class TripleStoreAsyncLiftPublisher
       }
       case 'reset': {
         // The job may re-run, on the SAME jobId, through the one reset builder — which carries the
-        // hash forward for audit, MARKED ACCOUNTED. This is the ONLY place that mark is written,
-        // and it is what stops a released job from being re-held on a transaction this dispatcher
-        // has just proven does not exist: it could never be proven a second time, because nothing
-        // new was ever sent. A later attempt that actually signs something records fresh broadcast
-        // evidence, and that holds unconditionally.
+        // hash forward for audit, MARKED ACCOUNTED. This is the only place chain proof writes that
+        // mark (a later reaccept keeps it), and it is what stops a released job from being re-held
+        // on a transaction this dispatcher has just proven does not exist: it could never be proven
+        // a second time, because nothing new was ever sent. A later attempt that actually signs
+        // something records fresh broadcast evidence, and that holds unconditionally.
         // Reset BEFORE release — the release poke must find the accepted state claim-visible.
         await scope.commitRecoveryReset(
           resetFailedLiftJobToAccepted(job, this.now(), { txHashAccounted: true }),
@@ -2837,11 +2848,13 @@ export class TripleStoreAsyncLiftPublisher
       // #1837 — the shared terminal-clear authority (skips retry_recovery-failed jobs, whose pending tx recovery may still finalize),
       // narrowed for the bulk lane by GH#2270's evidence guard; since OT-RFC-73 P11 also the sibling guard (async-lift-guarded-clear.ts).
       return await clearTerminalJobsGuarded({
+        status,
         jobs: await this.list({ status }),
         transact: (jobId, work) => this.claimCoordinator.runClaimJobTransaction(owner, jobId, async (transaction) => {
           if (transaction.kind !== 'missing') await work(transaction.current, transaction.scope);
         }),
-        siblings: (key) => this.jobSelectors.vmPublishCandidates(key, controlStoreOptions('publisher', LIFT_CLEAR_SIBLINGS_SOURCE)),
+        siblings: (key) => this.jobSelectors.vmPublishCandidates(key, controlStoreOptions('publisher', LIFT_CLEAR_SIBLINGS_SOURCE), true),
+        storedKeys: (jobId) => readStoredLifecycleKeys(this.store, this.graphUri, jobId),
       });
     });
   }
@@ -2895,7 +2908,8 @@ export class TripleStoreAsyncLiftPublisher
         // settles authority and state eligibility together, so a call site cannot read the
         // canonical predicate while forgetting the ownership half.
         if (!isTargetedClearableLiftJob(job, options)) {
-          return { outcome: 'rejected', reason: 'nonterminal' };
+          // #3573 — a finished job that may have sent a transaction is refused with the reason the override is for.
+          return { outcome: 'rejected', reason: needsPendingTransactionOverride(job) ? 'pending_transaction' : 'nonterminal' };
         }
         await scope.commitRemoval();
         return { outcome: 'cleared' };
@@ -3102,14 +3116,17 @@ export class TripleStoreAsyncLiftPublisher
   ): Promise<LiftJob> {
     // What failed and how it is recorded is decided by the pure `mapExecutionFailure`; this method only
     // reads the persisted record (under the transition lock) and persists the answer.
-    return await this.commitFailure(current, scope, mapExecutionFailure({
+    const failure = mapExecutionFailure({
       jobId: current.jobId,
       currentStatus: current.status,
       requestedOrigin: failedFromState,
       error,
       evidence,
       now: () => this.now(),
-    }));
+    });
+    // #3591 — the wallet that was refused leaves the claim rotation before the commit releases it.
+    if (failure.code === 'insufficient_funds' && current.claim) this.walletFunding.recordRefusal(current.claim.walletId, error);
+    return await this.commitFailure(current, scope, failure);
   }
 
   /**
@@ -3280,6 +3297,9 @@ export class TripleStoreAsyncLiftPublisher
       now: this.now(),
       recoveredFrom: recoveredFromStatus,
       txHashChecked,
+      // #3591 — an interrupted re-run must not reopen what is settled: a later failure before
+      // signing would hold the job on a transaction no proof can settle again.
+      ...(isInheritedTxHashAccounted(job, txHashChecked) ? { txHashAccounted: true } : {}),
       stampRetriedAt: false,
       ...(liftJobOperationKindMarker(job) ? { operationKind: liftJobOperationKindMarker(job) } : {}),
       // r21 (🔴 3812632539) — the signer travels with the hash. Prefer the broadcast this reset
@@ -3461,8 +3481,10 @@ export class TripleStoreAsyncLiftPublisher
     // record for a transaction/account pair that never existed on chain. `origin.lookup` is
     // already built from the evidence carrier (see `chainProofLookupFor`), so it is the same
     // envelope the hash came from.
-    const broadcast = job.broadcast
-      ?? { txHash: origin.txHash, walletId: origin.lookup.walletId };
+    // #3591 — and it must be THAT transaction: a refused attempt's own record is not the one proven.
+    const broadcast = job.broadcast?.txHash?.toLowerCase() === origin.txHash.toLowerCase()
+      ? job.broadcast
+      : { txHash: origin.txHash, walletId: origin.lookup.walletId };
     return {
       ...withoutFailure,
       status: 'finalized',
@@ -3545,12 +3567,13 @@ export class TripleStoreAsyncLiftPublisher
    * GH#2270 — re-record a held job's failure as `tx_reverted` once the chain has PROVEN its
    * transaction reverted.
    *
-   * The code is not cosmetic: `isHeldForChainProof` is `hasBroadcastEvidence && !provenIneffective`,
-   * and `tx_reverted` is one of the two codes the registry marks proven-ineffective. Writing it is
-   * therefore how the hold is released — through the disposition module's own rule rather than
-   * around it — while the evidence stays on the job (the merge keeps `broadcast`/`recovery`), so
-   * an operator can still see which transaction was checked. `isOccupyingLifecycleJob` then stops
-   * binding the KA's lifecycle, which is what lets the same KA be published again.
+   * The code is not cosmetic: `isHeldForChainProof` lets a proven-ineffective failure go unless it
+   * also carries an older open hash, and `tx_reverted` is one of the two codes the registry marks
+   * proven-ineffective. Writing it is therefore how the hold is released — through the disposition
+   * module's own rule rather than around it — while `broadcast` stays on the job and the rebuild
+   * drops `recovery`, so an operator can still see which transaction was checked.
+   * `isOccupyingLifecycleJob` then stops binding the KA's lifecycle, which is what lets the same
+   * KA be published again.
    *
    * No retry is scheduled: a revert is terminal by registry policy, and re-running it would spend
    * gas to revert again.

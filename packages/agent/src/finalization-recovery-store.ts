@@ -286,9 +286,19 @@ export function planFinalizationRecoveryAttempt(
 export interface FinalizationRecoveryHealth {
   available: boolean;
   closed: boolean;
+  /**
+   * Whether the inbox can take new finalizations. A node-wide limit makes it
+   * false; a full source or graph quota alone does not (see `fullQuotas`).
+   */
   ready?: boolean;
   canonicalReceiptCapability?: 'supported' | 'unsupported' | 'not-configured' | 'unknown';
   degradedReason?: string;
+  /**
+   * How many source peers and Context Graphs are at their own live quota. A
+   * new finalization of theirs waits in the deferred spool; every other source
+   * and graph is still admitted, so a full quota alone keeps `ready`.
+   */
+  fullQuotas?: { sourcePeers: number; contextGraphs: number };
   stateCounts: Partial<Record<FinalizationRecoveryState, number>>;
   livePayloadBytes: number;
   dueEntries: number;

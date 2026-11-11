@@ -17,16 +17,14 @@ import { RpcRequestGovernor as GovernorBeforeTurns } from './fixtures/rpc-reques
  *
  * What is checked, for every schedule:
  *   - a foreground request waits for one admission of the other foreground
- *     kind at most, and an authority read for one background admission at
- *     most (the turn rule);
- *   - beside sustained ordinary foreground work, a waiting background backlog
- *     is admitted at half of what its bucket and a third of the lane allow, or
- *     better (its turn);
- *   - a schedule that lacks one of the two foreground kinds is admitted
- *     exactly as by the governor before the rule: same order, same instants,
- *     same refusals. That covers each class alone, the background class's
- *     grace period and bucket, and a stream of authority reads in front of
- *     background work.
+ *     kind at most, and for one background admission at most;
+ *   - beside sustained foreground work, of either kind or both, a waiting
+ *     background backlog is admitted at half of what its bucket and a third
+ *     of the lane allow, or better;
+ *   - a schedule of one class alone is admitted exactly as by the governor
+ *     before the rule: same order, same instants, same refusals. That covers
+ *     each class's whole rate and, for the background class, its bucket, its
+ *     start-up rule and its own authority passes.
  */
 
 type Kind = 'authority' | 'ordinary' | 'background' | 'background-authority';
@@ -204,7 +202,7 @@ function passedWhileOldest(requests: readonly Request[], kind: Kind): Array<Reco
 
 const SEEDS = 300;
 /** The backlog schedules run hot for ten seconds each; fewer of them cover the same policies. */
-const BACKLOG_SEEDS = 120;
+const BACKLOG_SEEDS = 60;
 const ALL_KINDS: readonly Kind[] = ['authority', 'ordinary', 'background', 'background-authority'];
 
 describe('RpcRequestGovernor: the turn rule over seeded schedules', () => {
@@ -216,25 +214,26 @@ describe('RpcRequestGovernor: the turn rule over seeded schedules', () => {
     vi.useRealTimers();
   });
 
-  it('lets a foreground request wait for one admission of the other foreground kind at most, and an authority read for one background admission at most', async () => {
+  it('lets a foreground request wait for one admission of the other foreground kind at most, and for one background admission at most', async () => {
     let authorityReadsPassed = 0;
     let ordinaryRequestsPassed = 0;
+    let passedByBackground = 0;
     for (let seed = 1; seed <= SEEDS; seed += 1) {
       const schedule = scheduleFor(seed, ALL_KINDS);
       const requests = await run(RpcRequestGovernor, schedule);
       const label = describeSchedule(seed, schedule);
 
-      for (const passed of passedWhileOldest(requests, 'authority')) {
-        expect(passed.ordinary, `${label}: ordinary admissions in front of authority read ${passed.id}`).toBeLessThanOrEqual(1);
-        expect(
-          passed.background + passed['background-authority'],
-          `${label}: background admissions in front of authority read ${passed.id}`,
-        ).toBeLessThanOrEqual(1);
-        authorityReadsPassed += passed.ordinary;
-      }
-      for (const passed of passedWhileOldest(requests, 'ordinary')) {
-        expect(passed.authority, `${label}: authority admissions in front of ordinary request ${passed.id}`).toBeLessThanOrEqual(1);
-        ordinaryRequestsPassed += passed.authority;
+      for (const [kind, other] of [['authority', 'ordinary'], ['ordinary', 'authority']] as const) {
+        for (const passed of passedWhileOldest(requests, kind)) {
+          expect(passed[other], `${label}: ${other} admissions in front of ${kind} request ${passed.id}`).toBeLessThanOrEqual(1);
+          expect(
+            passed.background + passed['background-authority'],
+            `${label}: background admissions in front of ${kind} request ${passed.id}`,
+          ).toBeLessThanOrEqual(1);
+          if (kind === 'authority') authorityReadsPassed += passed.ordinary;
+          else ordinaryRequestsPassed += passed.authority;
+          passedByBackground += passed.background + passed['background-authority'];
+        }
       }
       // Nothing is left waiting that was not refused and did not give up.
       const foregroundLeft = requests.filter((request) => (
@@ -242,28 +241,37 @@ describe('RpcRequestGovernor: the turn rule over seeded schedules', () => {
       ));
       expect(foregroundLeft.map((request) => request.id), `${label}: foreground requests never admitted`).toEqual([]);
     }
-    // The schedules do put the two kinds in each other's way, both ways round.
+    // The schedules do put the kinds in each other's way, every way round.
     expect(authorityReadsPassed).toBeGreaterThan(500);
     expect(ordinaryRequestsPassed).toBeGreaterThan(500);
+    expect(passedByBackground).toBeGreaterThan(500);
   }, 300_000);
 
-  it('admits a waiting background backlog beside sustained ordinary foreground work, whatever the authority reads do', async () => {
+  it.each([
+    ['ordinary foreground requests', ['ordinary']],
+    ['authority reads', ['authority']],
+    ['authority reads and ordinary foreground requests', ['authority', 'ordinary']],
+  ] as const)('admits a waiting background backlog beside sustained %s, whatever else arrives', async (_name, sustained) => {
     for (let seed = 1; seed <= BACKLOG_SEEDS; seed += 1) {
       const next = random(seed * 7_919);
       const policy: Policy = { ...policyFor(next), maxQueueSize: 10_000 };
       const windowMs = 10_000;
       const perSecond = policy.maxRequestsPerSecond;
-      // Ordinary foreground work that asks for the whole lane for the whole
-      // window, a background backlog that is there from the start, and
-      // authority reads that arrive as the seed has it: none, some, or more
-      // than the lane.
-      const authorityEveryMs = pick(next, [0, 2_000, 400, 150, 60]);
+      // Foreground work that asks for the whole lane for the whole window, a
+      // background backlog that is there from the start, and requests of the
+      // other foreground kind that arrive as the seed has it: none, some, or
+      // more than the lane.
+      const other: Kind = sustained.length === 2 || sustained[0] === 'ordinary' ? 'authority' : 'ordinary';
+      const otherEveryMs = pick(next, [0, 2_000, 400, 150, 60]);
       const arrivals: Arrival[] = [
-        ...Array.from({ length: 4 }, (): Arrival => ({ atMs: 0, kind: 'ordinary', repeats: 1_000_000, thinkMs: 0 })),
+        ...sustained.flatMap((kind) => Array.from(
+          { length: 4 },
+          (): Arrival => ({ atMs: 0, kind, repeats: 1_000_000, thinkMs: 0 }),
+        )),
         ...Array.from({ length: 400 }, (): Arrival => ({ atMs: 0, kind: 'background', repeats: 0, thinkMs: 0 })),
-        ...(authorityEveryMs === 0 ? [] : Array.from(
-          { length: Math.floor(windowMs / authorityEveryMs) },
-          (_, index): Arrival => ({ atMs: index * authorityEveryMs, kind: 'authority', repeats: 0, thinkMs: 0 }),
+        ...(otherEveryMs === 0 ? [] : Array.from(
+          { length: Math.floor(windowMs / otherEveryMs) },
+          (_, index): Arrival => ({ atMs: index * otherEveryMs, kind: other, repeats: 0, thinkMs: 0 }),
         )),
       ];
       const requests = await run(RpcRequestGovernor, { policy, arrivals, runMs: windowMs });
@@ -275,18 +283,16 @@ describe('RpcRequestGovernor: the turn rule over seeded schedules', () => {
       const owed = Math.floor(0.5 * ((windowMs - 2_000) / 1_000) * Math.min(backgroundPerSecond, perSecond / 3));
       expect(
         backgroundAdmitted,
-        `seed ${seed}, policy ${JSON.stringify(policy)}, an authority read every ${authorityEveryMs} ms`,
+        `seed ${seed}, policy ${JSON.stringify(policy)}, one ${other} request every ${otherEveryMs} ms`,
       ).toBeGreaterThanOrEqual(owed);
     }
   }, 300_000);
 
   it.each([
-    ['ordinary foreground requests and no authority reads', ['ordinary', 'background', 'background-authority']],
-    ['authority reads and no ordinary foreground requests', ['authority', 'background', 'background-authority']],
-    ['ordinary foreground requests alone', ['ordinary']],
-    ['authority reads alone', ['authority']],
-    ['the background class alone', ['background', 'background-authority']],
-  ] as const)('admits a schedule of %s exactly as the governor did before the rule', async (_name, kinds) => {
+    ['ordinary foreground requests', ['ordinary']],
+    ['authority reads', ['authority']],
+    ['the background class', ['background', 'background-authority']],
+  ] as const)('admits a schedule of %s alone exactly as the governor did before the rule', async (_name, kinds) => {
     let admissions = 0;
     for (let seed = 1; seed <= SEEDS; seed += 1) {
       const schedule = scheduleFor(seed * 104_729, kinds);

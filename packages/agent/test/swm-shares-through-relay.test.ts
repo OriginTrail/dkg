@@ -636,6 +636,7 @@ describe('a share into a public graph that has followers', () => {
       const connected = options.connected ?? [];
       const connects: string[] = [];
       const owners = options.owners ?? [OWNER];
+      target.agent.discovery.findCurrentAgentPeerIds = async () => (typeof owners === 'function' ? owners() : owners);
       Object.assign(target.host, {
         isPrivateContextGraph: async () => options.isPrivate === true,
         resolveCuratorPeerIdsForCg: async () => (options.own === true

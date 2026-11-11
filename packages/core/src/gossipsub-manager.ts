@@ -100,9 +100,15 @@ export class GossipSubManager {
     this.topicHandlers.delete(topic);
   }
 
-  async publish(topic: string, data: Uint8Array): Promise<void> {
+  /**
+   * Resolves with the peers the message was sent to, empty when nobody got it,
+   * or undefined when the pubsub implementation does not say. Being sent a
+   * message does not mean a peer acts on it: a receiver drops gossip from a peer
+   * it has not admitted, and gossip has no acknowledgement.
+   */
+  async publish(topic: string, data: Uint8Array): Promise<string[] | undefined> {
     const wireTopic = this.toWireTopic(topic);
-    await withRetry(
+    const result = await withRetry(
       () => this.node.libp2p.services.pubsub.publish(wireTopic, data),
       {
         maxAttempts: 3,
@@ -112,6 +118,7 @@ export class GossipSubManager {
         },
       },
     );
+    return result?.recipients?.map((peer) => peer.toString());
   }
 
   onMessage(topic: string, handler: GossipMessageHandler): void {

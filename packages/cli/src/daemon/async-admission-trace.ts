@@ -1,9 +1,11 @@
 import type { ServerResponse } from 'node:http';
 import {
   asyncAdmissionUsage,
+  createAsyncAdmissionDiagnosticTrace,
   type AsyncAdmissionPhase,
   type AsyncAdmissionRoute,
 } from '@origintrail-official/dkg-core';
+import { reportAdmissionTrace } from './async-admission-trace-diagnostics.js';
 
 /**
  * Follows one async admission request (`POST .../swm/share-async` and `.../vm/publish-async`)
@@ -48,8 +50,10 @@ interface AdmissionTrace {
   readonly route: AsyncAdmissionRoute;
   readonly startedAtMs: number;
   readonly clock: () => number;
+  readonly diagnostic: ReturnType<typeof createAsyncAdmissionDiagnosticTrace>;
   /** The step the request is in now. */
   phase: AsyncAdmissionPhase;
+  closed?: boolean;
   /** The first answer, with the phase it was given in. */
   answer?: { status: number; code: string; phase: AsyncAdmissionPhase; atMs: number };
 }
@@ -65,7 +69,10 @@ export function beginAsyncAdmissionTrace(
 ): void {
   const route = matchAsyncAdmissionRoute(method, pathname);
   if (route === null) return;
-  const trace: AdmissionTrace = { route, startedAtMs: clock(), clock, phase: 'request' };
+  const trace: AdmissionTrace = {
+    route, startedAtMs: clock(), clock, phase: 'request',
+    diagnostic: createAsyncAdmissionDiagnosticTrace(route),
+  };
   traces.set(res, trace);
   res.once('close', () => finishTrace(res, trace));
 }
@@ -80,7 +87,7 @@ export async function admissionStep<T>(
   if (trace === undefined) return run();
   const previous = trace.phase;
   trace.phase = phase;
-  const result = await run();
+  const result = await trace.diagnostic.run(phase, run);
   trace.phase = previous;
   return result;
 }
@@ -90,12 +97,17 @@ export function noteAdmissionResponse(res: ServerResponse, status: number, body:
   const trace = traces.get(res);
   if (trace === undefined || trace.answer !== undefined) return;
   const ok = status >= 200 && status < 300;
-  trace.answer = {
+  const answer = trace.answer = {
     status,
     code: ok ? '-' : errorCode(body),
     phase: ok ? 'enqueue' : trace.phase,
     atMs: trace.clock(),
   };
+  if (trace.closed) {
+    reportAdmissionTrace({
+      requestId: trace.diagnostic.requestId, route: trace.route, phase: answer.phase,
+    }, answer.status, answer.atMs - trace.startedAtMs, 'answer_after_close');
+  }
 }
 
 function errorCode(body: string): string {
@@ -109,17 +121,24 @@ function errorCode(body: string): string {
 }
 
 function finishTrace(res: ServerResponse, trace: AdmissionTrace): void {
-  if (traces.get(res) !== trace) return;
-  traces.delete(res);
+  if (traces.get(res) !== trace || trace.closed) return;
+  trace.closed = true;
+  // Weak ownership retains correlation for subsequent steps after a client close.
+  // It does not retain the response after the route and its work have finished.
   const { answer } = trace;
   // An answer sent outside the JSON helper (rate limiting, load shedding) is seen only here.
   const status = answer?.status ?? (res.headersSent ? res.statusCode : 0);
   const ok = status >= 200 && status < 300;
+  const phase = answer?.phase ?? (ok ? 'enqueue' : trace.phase);
+  const latencyMs = (answer?.atMs ?? trace.clock()) - trace.startedAtMs;
+  // Local correlation survives a client's close in the already-running step.
+  // Neither this event nor a late answer implies non-admission or retry authority.
+  reportAdmissionTrace({ requestId: trace.diagnostic.requestId, route: trace.route, phase }, status, latencyMs);
   asyncAdmissionUsage.recordHttpOutcome({
     route: trace.route,
-    phase: answer?.phase ?? (ok ? 'enqueue' : trace.phase),
+    phase,
     status,
     code: answer?.code ?? (status === 0 ? 'client_closed' : '-'),
-    latencyMs: (answer?.atMs ?? trace.clock()) - trace.startedAtMs,
+    latencyMs,
   });
 }

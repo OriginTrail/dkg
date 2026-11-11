@@ -68,9 +68,49 @@ type OverridesConfig = {
 type EnvironmentParametersConfig = BaseEnvironmentParametersConfig &
   OverridesConfig;
 
-type ParametersConfig = {
+export type ParametersConfig = {
   [environment: string]: EnvironmentParametersConfig;
 };
+
+/** One value parameters.json asks for: the getter's arguments and the value it must return, and the setter that sets it. */
+export type ParameterEntry = {
+  getterArgs: any[];
+  desiredValue: any;
+  setter: string;
+  setterArgs: any[];
+};
+
+/**
+ * What parameters.json sets on `contractName` on `network`, by getter name: the
+ * environment's parameters with the network's overrides over them, each entry
+ * read from its plain or `{ setter, setterArgs }` form, a list giving several.
+ */
+export function contractParameters(
+  config: ParametersConfig,
+  environment: string,
+  network: string,
+  contractName: string,
+): Record<string, ParameterEntry[]> {
+  const parameters: ContractParametersConfig = {
+    ...config[environment]?.[contractName],
+    ...config[environment]?.overrides?.[network]?.[contractName],
+  };
+  const entries: Record<string, ParameterEntry[]> = {};
+  for (const [getterName, paramValue] of Object.entries(parameters)) {
+    const defaultSetter = `set${getterName.charAt(0).toUpperCase() + getterName.slice(1)}`;
+    entries[getterName] = (Array.isArray(paramValue) ? paramValue : [paramValue]).map((value) =>
+      value instanceof Object
+        ? {
+            getterArgs: value.getterArgs ? value.getterArgs : [],
+            desiredValue: value.setterArgs.length === 1 ? value.setterArgs[0] : value.desiredValue,
+            setter: value.setter ? value.setter : defaultSetter,
+            setterArgs: value.setterArgs,
+          }
+        : { getterArgs: [], desiredValue: value, setter: defaultSetter, setterArgs: [value] },
+    );
+  }
+  return entries;
+}
 
 type EvmWallet = {
   address: string;
@@ -265,51 +305,19 @@ export class Helpers {
     contractName: string,
     contract: Contract,
   ) {
-    let parameters =
-      this.parametersConfig[this.hre.network.config.environment]?.[
-        contractName
-      ];
-
-    const overrideParameters =
-      this.parametersConfig[this.hre.network.config.environment]?.overrides?.[
-        this.hre.network.name
-      ]?.[contractName];
-
-    parameters = { ...parameters, ...overrideParameters };
-
-    if (!parameters) {
-      return;
-    }
+    const parameters = contractParameters(
+      this.parametersConfig,
+      this.hre.network.config.environment,
+      this.hre.network.name,
+      contractName,
+    );
 
     const forwardCall: HubLib.ForwardCallInputArgsStruct = {
       contractName,
       encodedData: [],
     };
-    for (const [getterName, paramValue] of Object.entries(parameters)) {
-      const values = Array.isArray(paramValue) ? paramValue : [paramValue];
-
-      for (const value of values) {
-        let getterArgs = [];
-        let desiredValue;
-        let setterName;
-        let setterArgs;
-
-        if (value instanceof Object) {
-          getterArgs = value.getterArgs ? value.getterArgs : [];
-          desiredValue =
-            value.setterArgs.length === 1
-              ? value.setterArgs[0]
-              : value.desiredValue;
-          setterName = value.setter
-            ? value.setter
-            : `set${getterName.charAt(0).toUpperCase() + getterName.slice(1)}`;
-          setterArgs = value.setterArgs;
-        } else {
-          desiredValue = value;
-          setterName = `set${getterName.charAt(0).toUpperCase() + getterName.slice(1)}`;
-          setterArgs = [value];
-        }
-
+    for (const [getterName, values] of Object.entries(parameters)) {
+      for (const { getterArgs, desiredValue, setter: setterName, setterArgs } of values) {
         if (contract.interface.hasFunction(getterName)) {
           const currentValue = await contract[getterName](...getterArgs);
 

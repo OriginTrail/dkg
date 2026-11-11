@@ -1,4 +1,4 @@
-import { parseWireGraphKnowledgeAssetStructure, parseStoredGraphKnowledgeAssetMetadataEnvelope } from '../src/graph-metadata-envelope.js';
+import { parseWireGraphKnowledgeAssetStructure, parseStoredGraphKnowledgeAssetMetadataEnvelope, GRAPH_KNOWLEDGE_ASSET_STORED_ENVELOPE_PREDICATES } from '../src/graph-metadata-envelope.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri,
@@ -9,7 +9,7 @@ import {
   generateGraphKnowledgeAssetMetadata,
   parseConfirmedGraphKnowledgeAssetMetadataEnvelope,
   parseGraphKnowledgeAssetMetadataEnvelope,
-  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
+  readConfirmedGraphKnowledgeAssetMetadataEnvelope, readGraphKnowledgeAssetMetadataEnvelope,
 } from '../src/metadata.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -37,6 +37,8 @@ async function compareWithReader(rows: readonly Pick<Quad, 'predicate' | 'object
   expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope({ query } as unknown as TripleStore, input)).toEqual(parsed);
   expect(query).toHaveBeenCalledOnce();
   expect(query.mock.calls[0]?.length).toBe(1);
+  expect(await readGraphKnowledgeAssetMetadataEnvelope({ query } as unknown as TripleStore, input))
+    .toEqual(parseGraphKnowledgeAssetMetadataEnvelope(rows, input));
   return parsed;
 }
 
@@ -92,11 +94,14 @@ describe('confirmed graph metadata parser', () => {
   });
 });
 
-it('preserves tentative envelopes without requiring chain provenance or upgrading their status', () => {
+it('preserves tentative envelopes without requiring chain provenance or upgrading their status', async () => {
   const rows = fixture().filter(q => ![`${DKG}batchId`, `${DKG}transactionHash`].includes(q.predicate))
     .map(q => q.predicate === `${DKG}status` ? { ...q, object: '"tentative"' } : q);
   expect(parseConfirmedGraphKnowledgeAssetMetadataEnvelope(rows, input)).toEqual({ state: 'invalid' });
   expect(parseGraphKnowledgeAssetMetadataEnvelope(rows, input)).toMatchObject({ state: 'tentative', envelope: { assertionVersion: '3' } });
+  const query = vi.fn(async () => ({ type: 'bindings' as const, bindings: rows }));
+  await expect(readGraphKnowledgeAssetMetadataEnvelope({ query } as unknown as TripleStore, input))
+    .resolves.toMatchObject({ state: 'tentative', envelope: { assertionVersion: '3' } });
   const corrupt = rows.map(q => q.predicate === `${DKG}assertionGraph` ? { ...q, object: 'urn:wrong' } : q);
   expect(parseGraphKnowledgeAssetMetadataEnvelope(corrupt, input)).toEqual({ state: 'invalid' });
   expect(parseGraphKnowledgeAssetMetadataEnvelope([...rows, { ...rows[0]!, predicate: `${DKG}status`, object: '"confirmed"' }], input)).toEqual({ state: 'invalid' });
@@ -133,5 +138,18 @@ describe('shared structural parsing policies', () => {
       expect(parseGraphKnowledgeAssetMetadataEnvelope(rows, input).state).toBe('confirmed');
       expect(parseStoredGraphKnowledgeAssetMetadataEnvelope(rows, input)).toEqual({ state: 'invalid' });
       expect(() => parseWireGraphKnowledgeAssetStructure(rows, input.ual)).toThrow();
+    });
+
+  it.each(['canonical', 'missing-context', 'wrong-context', 'wrong-meta-graph', 'rootEntity', 'partOf'])(
+    'decides a stored envelope on its exported projection alone (%s)', fault => {
+      let rows = fixture(2, 'documents');
+      if (fault === 'missing-context') rows = rows.filter(row => row.predicate !== `${DKG}contextGraph`);
+      else if (fault === 'wrong-context') rows.find(row => row.predicate === `${DKG}contextGraph`)!.object = 'did:dkg:context-graph:other';
+      else if (fault === 'wrong-meta-graph') rows = rows.map(row => ({ ...row, graph: 'urn:wrong' }));
+      else if (fault !== 'canonical') rows.push({ ...rows[0]!, predicate: `${DKG}${fault}`, object: 'urn:legacy' });
+      const projected = rows.filter(row => GRAPH_KNOWLEDGE_ASSET_STORED_ENVELOPE_PREDICATES.includes(row.predicate));
+      const parsed = parseStoredGraphKnowledgeAssetMetadataEnvelope(rows, input);
+      expect(parsed.state).toBe(fault === 'canonical' ? 'confirmed' : 'invalid');
+      expect(parseStoredGraphKnowledgeAssetMetadataEnvelope(projected, input)).toEqual(parsed);
     });
 });

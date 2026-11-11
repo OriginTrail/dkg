@@ -34,12 +34,13 @@ export function livenessElapsedMs(start: number): number {
   return Number.isFinite(elapsed) ? Math.min(2_147_483_647, Math.max(0, Math.round(elapsed))) : 0;
 }
 
-/** Any parsed HTTP response is alive; neither authentication nor store health is required. */
+/** Any parsed response proves liveness; readiness callers choose a path and require a successful status. */
 export function probeWorkerLiveness(
   port: number,
   host = '127.0.0.1',
   timeoutMs = LIVENESS_PROBE_TIMEOUT_MS,
   signal?: AbortSignal,
+  path = '/api/__dkg_liveness_probe__',
 ): Promise<LivenessProbeResult> {
   return new Promise((resolve) => {
     const started = performance.now();
@@ -63,7 +64,7 @@ export function probeWorkerLiveness(
     if (signal?.aborted) { cancel(); return; }
     signal?.addEventListener('abort', cancel, { once: true });
     try {
-      probe = request({ host, port, method: 'HEAD', path: '/api/__dkg_liveness_probe__', agent: false },
+      probe = request({ host, port, method: 'HEAD', path, agent: false },
         (response) => {
           headersReceived = true;
           response.resume();

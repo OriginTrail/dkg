@@ -137,7 +137,7 @@ import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck, type SkillAclCheck } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
-import { AGENT_REGISTRY_CONTEXT_GRAPH, advertisedRelayAddress, canonicalAgentDidSubject, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
+import { advertisedRelayAddress, canonicalAgentDidSubject, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
 import {
   signAgentDelegation,
   verifyAgentDelegation,
@@ -550,7 +550,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
     const profileCtx = createOperationContext('publish');
     this.log.info(profileCtx, `Publishing agent profile`);
     const result = await this.profileManager.publishProfile(profileConfig);
-    await this.broadcastPublish(AGENT_REGISTRY_CONTEXT_GRAPH, result, profileCtx);
+    await this.broadcastAgentProfile(result, profileCtx);
 
     return result;
   }
@@ -687,6 +687,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
     const ctx = createOperationContext('system');
     this.log.info(ctx, `Registered agent "${name}" (${record.mode}) → ${record.agentAddress}`);
+    if (this.config?.nodeHeldAuthor === true) await this.adoptNodeHeldDefaultAgent(record);
     return record;
   }
 
@@ -1398,15 +1399,15 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
   /**
    * Settle the node's default agent once at start, after `loadAgentsFromStore` restored the persisted one,
-   * and persist it when it changes: with an external signer, the account `externalSignerDefaultAgent` picks;
-   * otherwise the persisted default, else the first agent, else one from the operational key.
+   * and persist it when it changes: with an external signer, the account `externalSignerDefaultAgent` picks; with authors
+   * held on the node, the agent key `nodeHeldDefaultAgentOr` picks; otherwise (or with no such key) the persisted default, else the first agent, else one from the operational key.
    */
   async reconcileDefaultAgent(this: DKGAgent): Promise<void> {
     const authors = signsThroughExternalSigner(this.chain) ? this.config?.authorSigners : undefined;
     if (this.localAgents.size === 0 && authors === undefined) return this.autoRegisterDefaultAgent();
     const previous = this.defaultAgentAddress;
     const kept = previous ?? this.localAgents.values().next().value?.agentAddress;
-    const target = authors === undefined ? kept : await externalSignerDefaultAgent(this, authors, kept, this.config.name ?? 'owner', this.config.framework);
+    const target = authors === undefined ? (this.config?.nodeHeldAuthor === true ? this.nodeHeldDefaultAgentOr(kept) : kept) : await externalSignerDefaultAgent(this, authors, kept, this.config.name ?? 'owner', this.config.framework);
     if (target === undefined || target.toLowerCase() === previous?.toLowerCase()) return;
     this.defaultAgentAddress = target;
     await this.markDefaultAgent(target).catch(() => {});

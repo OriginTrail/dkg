@@ -44,7 +44,7 @@ export async function requireKnowledgeAssetRead(
   return requireReadAuthority(ctx, input.cg, CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query, async (cg, callerAgentAddress, signal) => {
     const resolution = await resolveKnowledgeAssetRead(ctx.agent, { ...input, cg }, { callerAgentAddress, signal });
     return { ...resolution, value: resolution.target };
-  }, () => resolveKnowledgeAssetReadTarget(ctx.agent, input));
+  }, signal => resolveKnowledgeAssetReadTarget(ctx.agent, input, { signal }));
 }
 
 async function requireReadAuthority<T>(
@@ -52,15 +52,19 @@ async function requireReadAuthority<T>(
   contextGraphId: unknown,
   site: ContextGraphAuthorityRpcSite,
   resolveAuthority: (id: string, caller: string | undefined, signal: AbortSignal) => Promise<ContextGraphCallerReadAdmission & { value: T }>,
-  operatorValue: () => Promise<T>,
+  operatorValue: (signal: AbortSignal) => Promise<T>,
 ): Promise<T | null> {
   if (!validateRequiredContextGraphId(contextGraphId, ctx.res)) return null;
   const validatedId = contextGraphId as string;
   const actor = actorFromRequestContext(ctx);
-  if (hasNodeOperatorReadAccess(ctx)) return operatorValue();
   const lifecycle = createStoreQueryRequestLifecycle(ctx.req, ctx.res, 'api.context_graph.read_authority');
   try {
     lifecycle.signal.throwIfAborted();
+    if (hasNodeOperatorReadAccess(ctx)) {
+      const value = await operatorValue(lifecycle.signal);
+      lifecycle.signal.throwIfAborted();
+      return value;
+    }
     const resolution = await withRpcUsageSite(site, () => resolveAuthority(
       validatedId, actor.authenticatedAgentAddress, lifecycle.signal,
     ));
