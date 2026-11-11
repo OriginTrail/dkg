@@ -169,6 +169,13 @@
     "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
   },
   {
+    "pattern": "packages/storage/test-live/read-graph-builder.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Read-graph builds, start-up, dirty marks and removal through the Blazegraph adapter, run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
     "pattern": "packages/storage/test-live/read-graph-check.blazegraph.test.ts",
     "lane": "tornado-blazegraph",
     "reason": "The sampled and full read-graph checks, both directions, on the Blazegraph adapter, run by the existing Blazegraph CI lane's storage config",

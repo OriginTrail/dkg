@@ -36,6 +36,7 @@ import { withDefaultStoreWorkPriority } from '../store-priority-scheduler.js';
 import { findTripleStoreCapability, type QueryOptions, type TripleStore } from '../triple-store.js';
 import { matchesGraphNameTest, readGraphMembership } from './membership.js';
 import { readGraphLayerOf, type ReadGraphStore } from './read-graph-store.js';
+import { noteUnstoredReadGraphMark } from './mark-journal.js';
 import { readReadGraphRegistry } from './registry.js';
 import { nextReadGraphState, readGraphStateCompareAndSet, type ReadGraphStateRow } from './state.js';
 import {
@@ -244,6 +245,7 @@ async function mismatch(context: CheckContext, direction: ReadGraphCheckDirectio
     await context.target.update?.(readGraphStateCompareAndSet(context.row, dirty), { ...context.options });
   } catch (error) {
     stored = `it is marked dirty in this process, but its stored state could not be changed (${error instanceof Error ? error.message : String(error)})`;
+    noteUnstoredReadGraphMark(context.layer.runtime, context.readGraph, context.row.generation);
   }
   const what = direction === 'missing'
     ? 'a member graph holds a triple it lacks'

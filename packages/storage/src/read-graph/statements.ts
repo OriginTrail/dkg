@@ -266,8 +266,8 @@ export function readGraphRepairLeave(target: ReadGraphTarget, fence: ReadGraphFe
 /**
  * Empty R, fenced: the first step of a rebuild and of a removal. With `limit`,
  * one batch that removes at most that many triples; send batches until
- * {@link readGraphSizeQuery} gives 0, so a large read graph never holds the
- * store's writer for long.
+ * {@link readGraphHoldsTripleAsk} answers `false`, so a large read graph never
+ * holds the store's writer for long.
  */
 export function readGraphFencedDrop(readGraph: string, fence: ReadGraphFence, options: { readonly limit?: number } = {}): string {
   const target = checkedReadGraph(readGraph);
@@ -283,6 +283,11 @@ export function readGraphFencedDrop(readGraph: string, fence: ReadGraphFence, op
 export function readGraphMissingTripleAsk(readGraph: string, graph: string): string {
   const target = checkedReadGraph(readGraph);
   return `ASK {\n  GRAPH <${checkedGraph(graph)}> { ?s ?p ?o }\n  FILTER NOT EXISTS { GRAPH <${target}> { ?s ?p ?o } }\n}`;
+}
+
+/** `true` while R holds a triple: the end test of a drop in batches, which no engine answers by counting. */
+export function readGraphHoldsTripleAsk(readGraph: string): string {
+  return `ASK { GRAPH <${checkedReadGraph(readGraph)}> { ?s ?p ?o } }`;
 }
 
 /** The number of triples in R, as `?n`. */

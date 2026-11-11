@@ -5,6 +5,7 @@ import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
 import { checkReadGraph, memberGraphListingQuery } from '../src/read-graph/check.js';
 import { ReadGraphCheckSchedule, startReadGraphChecks } from '../src/read-graph/check-schedule.js';
+import { withReadGraphBackgroundSlot } from '../src/read-graph/rebuild.js';
 import { readGraphStateCompareAndSet } from '../src/read-graph/state.js';
 import type { QueryOptions, QueryResult } from '../src/triple-store.js';
 import { captureMetrics, readGraphCheckConformance } from './helpers/read-graph-check-conformance.js';
@@ -241,6 +242,33 @@ describe('the read-graph check schedule', () => {
     expect(checks.filter((attributes) => attributes.mode === 'sampled')).toEqual([]);
     expect(checks).toHaveLength(4);
     expect(checks.every((attributes) => attributes.outcome === 'consistent')).toBe(true);
+    await schedule.close();
+    await adapter.close();
+  });
+
+  it('runs each check in the backend background slot, so no check runs beside a build', async () => {
+    const { adapter, layer, store } = await hooked();
+    const schedule = new ReadGraphCheckSchedule(store, { sampledIntervalMs: 3_600_000, fullIntervalMs: 3_600_000 });
+    let counts = 0;
+    adapter.hook = { matches: isSizeQuery, before: async () => { counts += 1; } };
+    let release: (() => void) | undefined;
+    const { recorded } = await captureMetrics(async () => {
+      // A build holds the slot until it is released.
+      const build = withReadGraphBackgroundSlot(layer.runtime, () => new Promise<void>((resolve) => { release = resolve; }));
+      expect(schedule.requestFullCheck()).toBe(true);
+      let idle = false;
+      const ended = schedule.whenIdle().then(() => { idle = true; });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(counts).toBe(0);
+      expect(idle).toBe(false);
+      release!();
+      await build;
+      await ended;
+    });
+    const checks = recorded.filter((entry) => entry.metric === 'dkg.store.read_graph_checks_total').map((entry) => entry.attributes);
+    expect(counts).toBeGreaterThan(0);
+    expect(checks).toHaveLength(4);
+    expect(checks.every((attributes) => attributes.mode === 'full' && attributes.outcome === 'consistent')).toBe(true);
     await schedule.close();
     await adapter.close();
   });

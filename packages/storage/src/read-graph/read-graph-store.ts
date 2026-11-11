@@ -90,6 +90,7 @@ import {
 } from './registry-recognition.js';
 import { readGraphBackendIdentity, readGraphBackendRuntime, type ReadGraphBackendRuntime } from './runtime.js';
 import { keepsAnyReadGraph, type ReadGraphModes, type ViewSemanticsSettings } from './settings.js';
+import { noteUnstoredReadGraphMark } from './mark-journal.js';
 import { nextReadGraphState, readGraphStateMarkDirty } from './state.js';
 import type { ReadGraphTarget } from './statements.js';
 import {
@@ -606,9 +607,10 @@ export class ReadGraphStore implements TripleStoreDecorator {
       if (!row) continue;
       if (row.state !== 'dirty') this.runtime.mirror.set(nextReadGraphState(row, { kind: 'mark-dirty' })!);
       // From whatever row is stored, and even when the mirror already says dirty: an earlier mark may not have
-      // reached the store. If this request fails as well, a rebuild starts from the stored row.
+      // reached the store. If this request fails as well, a rebuild starts from the stored row, and the journal
+      // keeps the mark for a start-up (an earlier failure kept it already).
       await this.innerStore.update?.(readGraphStateMarkDirty(readGraph), { source: 'storage.readGraphDirtyMark' })
-        .catch(() => undefined);
+        .catch(() => { if (row.state !== 'dirty') noteUnstoredReadGraphMark(this.runtime, readGraph, row.generation); });
     }
   }
 

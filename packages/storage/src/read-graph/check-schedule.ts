@@ -3,6 +3,7 @@ import { CoalescingRecurringTask, compareCodePoint, getMetrics } from '@origintr
 import type { TripleStore } from '../triple-store.js';
 import { checkReadGraph, type ReadGraphCheckMode, type ReadGraphCheckOptions } from './check.js';
 import { readGraphLayerOf } from './read-graph-store.js';
+import { withReadGraphBackgroundSlot } from './rebuild.js';
 import { READ_GRAPH_STATES } from './state.js';
 
 export interface ReadGraphCheckScheduleOptions extends Omit<ReadGraphCheckOptions, 'signal'> {
@@ -41,7 +42,9 @@ export function startReadGraphChecks(store: TripleStore, options: ReadGraphCheck
  * Every pass first records how many read graphs the state mirror holds in each
  * state. A store without the read-graph layer, or with no read graphs, makes
  * every pass a no-op. Passes run one at a time per kind, on the background
- * lane; a check that fails is reported and the pass goes on.
+ * lane, and each check takes the backend's background slot
+ * (`withReadGraphBackgroundSlot`), so it never runs beside a build, a repair
+ * or another check. A check that fails is reported and the pass goes on.
  */
 export class ReadGraphCheckSchedule {
   private readonly sampled: CoalescingRecurringTask;
@@ -121,7 +124,10 @@ export class ReadGraphCheckSchedule {
     for (const readGraph of selected) {
       signal.throwIfAborted();
       try {
-        await checkReadGraph(this.store, readGraph, mode, { ...this.options, signal });
+        await withReadGraphBackgroundSlot(layer.runtime, async () => {
+          signal.throwIfAborted();
+          return checkReadGraph(this.store, readGraph, mode, { ...this.options, signal });
+        });
       } catch (error) {
         if (signal.aborted) throw error;
         this.report(error, readGraph);
