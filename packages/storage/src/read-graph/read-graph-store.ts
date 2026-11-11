@@ -86,7 +86,7 @@ import {
 } from './registry-recognition.js';
 import { readGraphBackendIdentity, readGraphBackendRuntime, type ReadGraphBackendRuntime } from './runtime.js';
 import { noteUnstoredReadGraphMark } from './mark-journal.js';
-import { nextReadGraphState, readGraphStateMarkDirty } from './state.js';
+import { nextReadGraphState, readGraphStateMarkDirty, type ReadGraphStateRow } from './state.js';
 import type { ReadGraphTarget } from './statements.js';
 import {
   joinReadGraphWriteChanges,
@@ -144,6 +144,12 @@ export class ReadGraphMaintenanceError extends Error implements StoreOperationOu
     super(`${storeOperation}() ran, but the read-graph registry it may change could not be read again: ${reason}`, { cause });
     this.name = 'ReadGraphMaintenanceError';
   }
+}
+
+/** A ready row taken out of service in the mirror while a registry write runs, and the row it was. */
+interface ReadGraphFence {
+  readonly row: ReadGraphStateRow;
+  readonly fence: ReadGraphStateRow;
 }
 
 /** A read graph a write touches, and the graphs of the write that are its members. */
@@ -425,6 +431,37 @@ export class ReadGraphStore implements TripleStoreDecorator {
     return [...new Set(graphs.flatMap(registryOwnersOfGraph))].filter((owner) => withRows.has(owner)).sort(compareCodePoint);
   }
 
+  /** Take the ready read graphs of a context graph out of service, in the mirror only, and return what to put back. */
+  private fence(contextGraphId: string): ReadGraphFence[] {
+    return this.readGraphsOf(contextGraphId).flatMap((readGraph) => {
+      const row = this.runtime.mirror.get(readGraph);
+      if (row?.state !== 'ready') return [];
+      const fence = nextReadGraphState(row, { kind: 'mark-dirty' })!;
+      this.runtime.mirror.set(fence);
+      return [{ row, fence }];
+    });
+  }
+
+  /**
+   * Put back each fenced read graph the mirror still holds as fenced: in
+   * service again where its membership is the same under the registry from
+   * before the write (`before`) and the one now cached, and as it was before
+   * the fence otherwise, for a mark from its row. A refresh that moved a
+   * membership has marked that read graph already.
+   */
+  private liftFence(fences: readonly ReadGraphFence[], before: ReadGraphRegistrySnapshot | undefined): void {
+    const identity = this.runtime.workingMemoryIdentity;
+    for (const { row, fence } of fences) {
+      const current = this.runtime.mirror.get(row.readGraph);
+      if (!current || current.state !== fence.state || current.generation !== fence.generation) continue;
+      const key = parseReadGraphIri(row.readGraph);
+      const after = key ? this.runtime.registries.get(key.scope.contextGraphId) : undefined;
+      const kept = before !== undefined && after !== undefined && key !== undefined
+        && JSON.stringify(readGraphMembership(key, before, identity)) === JSON.stringify(readGraphMembership(key, after, identity));
+      if (kept || before === undefined) this.runtime.mirror.set(row);
+    }
+  }
+
   /** The read graphs of one context graph that have a row. */
   private readGraphsOf(contextGraphId: string): string[] {
     return this.runtime.mirror.rows().map((row) => row.readGraph)
@@ -447,6 +484,9 @@ export class ReadGraphStore implements TripleStoreDecorator {
     send: () => Promise<T>,
   ): Promise<T> {
     const predicted = new Map<string, ReadGraphRegistryFact[]>();
+    // Where only a read after the write tells what it changes, its context graph's ready read graphs are out of
+    // service in this process until that read: no query takes a union the store's new registry no longer gives.
+    const fenced = new Map<string, readonly ReadGraphFence[]>();
     for (const owner of owners) {
       let cached: readonly ReadGraphRegistryFact[];
       let names: ReadGraphRegistryFact[] | undefined;
@@ -459,10 +499,12 @@ export class ReadGraphStore implements TripleStoreDecorator {
         throw new ReadGraphWriteRefusedError(operation, `the registry it changes could not be read and settled: ${reason}`);
       }
       const after = registryFactsAfter(owner, [...cached, ...(names ?? [])], registry);
-      if (after === undefined) continue;
-      // Marked from the prediction either way; one that may over-count, or lacks a name, is read again after the write.
-      if (names !== undefined && isExactRegistryWrite(owner, registry)) predicted.set(owner, after);
-      await this.markMembershipChange(owner, registrySnapshotOfFacts(owner, after), operation);
+      if (after !== undefined) {
+        // Marked from the prediction either way; one that may over-count, or lacks a name, is read again after the write.
+        if (names !== undefined && isExactRegistryWrite(owner, registry)) predicted.set(owner, after);
+        await this.markMembershipChange(owner, registrySnapshotOfFacts(owner, after), operation);
+      }
+      if (!predicted.has(owner)) fenced.set(owner, this.fence(owner));
     }
     const settle = async (succeeded: boolean) => {
       let failure: { readonly error: unknown } | undefined;
@@ -473,11 +515,14 @@ export class ReadGraphStore implements TripleStoreDecorator {
           continue;
         }
         // Opaque, or not exactly predicted, or failed and so may or may not have run: read the facts again.
+        const before = this.runtime.registries.get(owner);
         try {
           await this.refreshRegistry(owner, options);
+          this.liftFence(fenced.get(owner) ?? [], before);
         } catch (error) {
           // What the write did to this registry is unknown: every read graph of the context graph goes dirty,
           // and the facts are read again before the next write that may change it. The other owners settle all the same.
+          this.liftFence(fenced.get(owner) ?? [], undefined);
           await this.markDirty(this.readGraphsOf(owner));
           this.runtime.registries.forgetFacts(owner);
           failure ??= { error };
