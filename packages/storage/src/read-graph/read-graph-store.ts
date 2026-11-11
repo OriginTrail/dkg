@@ -91,6 +91,7 @@ import {
 import { readGraphBackendIdentity, readGraphBackendRuntime, type ReadGraphBackendRuntime } from './runtime.js';
 import { keepsAnyReadGraph, type ReadGraphModes, type ViewSemanticsSettings } from './settings.js';
 import { noteUnstoredReadGraphMark } from './mark-journal.js';
+import { syncReadGraphRuntimeWithRecovery } from './recovery.js';
 import { nextReadGraphState, readGraphStateMarkDirty, type ReadGraphStateRow } from './state.js';
 import type { ReadGraphTarget } from './statements.js';
 import {
@@ -259,6 +260,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
   }
 
   insert(quads: Quad[], options?: QueryOptions): Promise<void> {
+    this.syncRecovery();
     return this.runtime.writes.track(this.maintainInsert(quads, options));
   }
 
@@ -282,6 +284,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
   }
 
   query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    this.syncRecovery();
     if (!isSparqlUpdateOperation(sparql)) return this.innerStore.query(sparql, options);
     if (this.runtime.mirror.size > 0) {
       return Promise.reject(new ReadGraphWriteRefusedError('query', 'send it through update() and declare the graphs it writes'));
@@ -325,6 +328,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
     options: QueryOptions | undefined,
     send: (options: QueryOptions | undefined) => Promise<T>,
   ): Promise<T> {
+    this.syncRecovery();
     if (this.runtime.mirror.size === 0) return this.runtime.writes.track(send(options));
     if (!pattern.graph) return Promise.reject(new ReadGraphWriteRefusedError('deleteByPattern', 'a pattern delete must name its graph'));
     const { subject, predicate, object } = pattern;
@@ -333,6 +337,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
   }
 
   private declaredUpdate(options: UpdateOptions | undefined, send: (options: UpdateOptions | undefined) => Promise<void>): Promise<void> {
+    this.syncRecovery();
     if (this.runtime.mirror.size === 0) return this.runtime.writes.track(send(options));
     const written = options?.writtenGraphs;
     if (written === undefined) {
@@ -352,7 +357,13 @@ export class ReadGraphStore implements TripleStoreDecorator {
     send: (options: O | undefined) => Promise<T>,
     registry?: ReadGraphRegistryWrite,
   ): Promise<T> {
+    this.syncRecovery();
     return this.runtime.writes.track(this.sendMaintained(method, write, options, send, registry));
+  }
+
+  /** A backend that restarted from a snapshot since the last look leaves nothing of the mirror to trust (`./recovery.ts`). */
+  private syncRecovery(): void {
+    syncReadGraphRuntimeWithRecovery(this.innerStore, this.runtime);
   }
 
   private async sendMaintained<T, O extends QueryOptions>(

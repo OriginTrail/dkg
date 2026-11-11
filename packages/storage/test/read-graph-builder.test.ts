@@ -56,6 +56,8 @@ import {
   installWorkingMemoryIdentity,
   recordedWorkingMemoryIdentity,
 } from '../src/read-graph/working-memory-identity.js';
+import { noteReadGraphStoreRestored } from '../src/read-graph/store-restored.js';
+import { registerStoreRecoveryGeneration } from '../src/store-recovery-generation.js';
 import type { Quad, QueryOptions, TripleStore, UpdateOptions } from '../src/triple-store.js';
 import { AGENT, isLayerMember, layerFixture, P, q, readyRow, type LayerFixture } from './helpers/read-graph-layer-conformance.js';
 import { PlanningOxigraphStore } from './helpers/read-graph-planning-store.js';
@@ -1371,6 +1373,48 @@ describe('read-graph start-up', () => {
     expect(await startReadGraphs(store, { maintains: () => true })).toEqual({ marked: 1, maintained: 0 });
     expect(await storedRows(adapter)).toEqual({ [fixture.readGraphs.wholeVm]: 'dirty@4' });
     expect(layer.runtime.mirror.size).toBe(0);
+  });
+});
+
+describe('a store restored to an earlier state', () => {
+  it('takes every read graph out of service and rebuilds it from what the store holds', async () => {
+    const { adapter, fixture, layer, store, context } = await open();
+    const [vm, swm] = fixture.keys as [ReadGraphKey, ReadGraphKey];
+    for (const key of [vm, swm]) expect(await buildReadGraph(context, key)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    const { wholeVm, wholeSwm } = fixture.readGraphs;
+    // The engine's last snapshot predates the whole-graph VM read graph: neither its row nor its contents are there.
+    await adapter.update!(`DELETE WHERE { GRAPH <${fixture.root}/_~read/state> { <${wholeVm}> ?p ?o } }`);
+    await adapter.update!(`DROP SILENT GRAPH <${wholeVm}>`);
+    noteReadGraphStoreRestored(store);
+    for (const readGraph of [wholeVm, wholeSwm]) expect(servingReadGraphGeneration(layer.runtime.mirror.get(readGraph))).toBeUndefined();
+    expect(layer.runtime.registries.get(fixture.contextGraphId)).toBeUndefined();
+    // The next builds take what the store holds: one row is created again, the other marked dirty from its stored row.
+    for (const key of [vm, swm]) {
+      expect(await buildReadGraph(context, key)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+      await expectUnion(adapter, layer, fixture, key);
+    }
+    // A store without the read-graph layer needs nothing.
+    expect(() => noteReadGraphStoreRestored(new OxigraphStore())).not.toThrow();
+  });
+
+  it('takes every read graph out of service once a supervised backend tells of a restart, before the next query is served', async () => {
+    const { adapter, fixture, layer, store, context } = await open();
+    let recovery = { generation: 1, ready: true };
+    registerStoreRecoveryGeneration(adapter, () => recovery);
+    const [vm] = fixture.keys as [ReadGraphKey];
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    const { wholeVm } = fixture.readGraphs;
+    await store.query('ASK { ?s ?p ?o }');
+    expect(servingReadGraphGeneration(layer.runtime.mirror.get(wholeVm))).toBeDefined();
+    // The worker exits and its replacement reloads a snapshot from before the build.
+    recovery = { generation: 2, ready: true };
+    await adapter.update!(`DELETE WHERE { GRAPH <${fixture.root}/_~read/state> { <${wholeVm}> ?p ?o } }`);
+    await adapter.update!(`DROP SILENT GRAPH <${wholeVm}>`);
+    await store.query('ASK { ?s ?p ?o }');
+    expect(servingReadGraphGeneration(layer.runtime.mirror.get(wholeVm))).toBeUndefined();
+    expect(layer.runtime.registries.get(fixture.contextGraphId)).toBeUndefined();
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    await expectUnion(adapter, layer, fixture, vm);
   });
 });
 

@@ -51,6 +51,7 @@ import { readGraphLayerOf } from './read-graph-store.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry, type ReadGraphRegistryFact } from './registry-recognition.js';
 import { noteUnstoredReadGraphMark } from './mark-journal.js';
 import { isHeldReadGraph } from './working-memory-hold.js';
+import { syncReadGraphRuntimeWithRecovery } from './recovery.js';
 import { recordReadGraphRegistry } from './registry-record.js';
 import { ReadGraphLocks, type InMemoryReadGraphStateMirror, type ReadGraphBackendRuntime } from './runtime.js';
 import {
@@ -430,6 +431,7 @@ class ReadGraphJob {
       throw new ReadGraphJobError('This store\'s adapter cannot maintain read graphs');
     }
     this.runtime = layer.runtime;
+    syncReadGraphRuntimeWithRecovery(context.store, this.runtime);
     this.maintenance = readGraphPartitionMaintenanceStore(context.store);
     if (!this.maintenance.update) throw new ReadGraphJobError('This store cannot build read graphs: it has no update()');
     this.versions = context.versions ?? CURRENT_READ_GRAPH_VERSIONS;
