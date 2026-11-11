@@ -29,9 +29,11 @@ test('a lapsed review deadline is told apart from a malformed exception, and a n
   ].join('\n');
   const result = analyzeTestSource(source, 'example.test.ts', { now: new Date('2026-09-05T00:00:00Z') });
   assert.equal(EXCEPTION_RENEWAL_WARNING_DAYS, 7);
+  assert.deepEqual(result.exceptions.map(({ line, state }) => [line, state]), [[1, 'expired'], [2, 'expiring'], [3, 'valid'], [4, 'malformed'], [5, 'malformed']]);
+  assert.deepEqual(result.exceptions[0], { line: 1, state: 'expired', expires: '2026-09-04', owner: 'cli', lane: 'bura-cli', daysLeft: -1 });
+  assert.deepEqual(result.exceptions[1], { line: 2, state: 'expiring', expires: '2026-09-07', owner: 'cli', lane: 'bura-cli', daysLeft: 2 });
+  // The older invalid-line list is the malformed and expired records.
   assert.deepEqual(result.invalidExceptions, [1, 4, 5]);
-  assert.deepEqual(result.expiredExceptions, [{ line: 1, expires: '2026-09-04', owner: 'cli', lane: 'bura-cli' }]);
-  assert.deepEqual(result.expiringExceptions, [{ line: 2, expires: '2026-09-07', owner: 'cli', lane: 'bura-cli', daysLeft: 2 }]);
 });
 
 test('focused and disabled tests share namespace, computed member, alias and chaining resolution', async () => {

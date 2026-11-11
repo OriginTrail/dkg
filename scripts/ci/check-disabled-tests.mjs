@@ -24,17 +24,14 @@ let expired = 0;
 let expiring = 0;
 for (const { filePath: file, ...extra } of analysis) {
   for (const line of extra.focused) { console.error(`${file}:${line}: focused test is forbidden`); invalid++; }
-  const lapsed = new Map(extra.expiredExceptions.map((exception) => [exception.line, exception]));
-  for (const line of extra.invalidExceptions) {
-    const exception = lapsed.get(line);
-    if (!exception) { console.error(`${file}:${line}: test exception requires owner=NAME, lane=EXECUTION-OBLIGATION and expires=YYYY-MM-DD within 31 days`); invalid++; continue; }
-    const message = `test exception expired on ${exception.expires}; confirm lane=${exception.lane} still runs it, then renew expires= (at most 31 days ahead)`;
-    expired++;
-    if (expiryMode === 'fail') { console.error(`${file}:${line}: ${message}`); invalid++; } else warn(file, line, message);
-  }
-  for (const exception of extra.expiringExceptions) {
-    expiring++;
-    warn(file, exception.line, `test exception expires on ${exception.expires} (${exception.daysLeft} day(s) left); confirm lane=${exception.lane} still runs it and renew expires=`);
+  for (const { line, state, expires, lane, daysLeft } of extra.exceptions) {
+    if (state === 'malformed') { console.error(`${file}:${line}: test exception requires owner=NAME, lane=EXECUTION-OBLIGATION and expires=YYYY-MM-DD within 31 days`); invalid++; }
+    if (state === 'expired') {
+      const message = `test exception expired on ${expires}; confirm lane=${lane} still runs it, then renew expires= (at most 31 days ahead)`;
+      expired++;
+      if (expiryMode === 'fail') { console.error(`${file}:${line}: ${message}`); invalid++; } else warn(file, line, message);
+    }
+    if (state === 'expiring') { expiring++; warn(file, line, `test exception expires on ${expires} (${daysLeft} day(s) left); confirm lane=${lane} still runs it and renew expires=`); }
   }
 }
 if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, `expired_test_exceptions=${expired}\nexpiring_test_exceptions=${expiring}\n`);
