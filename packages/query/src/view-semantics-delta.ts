@@ -95,21 +95,24 @@ class BlankNodeNaming {
     return this.classes === this.occurrences.size;
   }
 
-  /** How often each row occurs, with its blank nodes written by their names. */
-  rowCounts(): Map<string, number> {
+  /** How often each row occurs, with its blank nodes written by their names, and which rows hold blank nodes. */
+  rowCounts(): { readonly counts: Map<string, number>; readonly withBlankNodes: Set<string> } {
     const counts = new Map<string, number>();
+    const withBlankNodes = new Set<string>();
     for (const row of this.rows) {
       const key = JSON.stringify(row.map(term => this.names.get(term) ?? term));
       counts.set(key, (counts.get(key) ?? 0) + 1);
+      if (row.some(isBlankNode)) withBlankNodes.add(key);
     }
-    return counts;
+    return { counts, withBlankNodes };
   }
 }
 
 /**
  * Classify the difference between the two answers of one query. Row order and blank node labels are
  * ignored. `undefined` when the answers cannot be compared reliably: when blank nodes in either one
- * are not told apart by their structure, such as the nodes of a cycle.
+ * are not told apart by their structure, such as the nodes of a cycle, or when a row with a blank
+ * node is missing from the merged answer, since a node that gains or loses rows is named anew.
  */
 export function classifyViewSemanticsDelta(sparql: string, perAsset: QueryResult, merged: QueryResult): ViewSemanticsDeltaKind | undefined {
   if (detectSparqlQueryForm(sparql) === 'ASK') {
@@ -123,9 +126,12 @@ export function classifyViewSemanticsDelta(sparql: string, perAsset: QueryResult
   }
   if (namings.some(naming => !naming.namesEachNode())) return undefined;
   const [before, after] = namings.map(naming => naming.rowCounts());
-  if ([...before.keys()].some(key => !after.has(key))) return 'rows-removed-or-changed';
-  if ([...after].some(([key, count]) => count > (before.get(key) ?? 0))) return 'rows-added';
-  return [...before].some(([key, count]) => count > (after.get(key) ?? 0)) ? 'copies-removed' : 'none';
+  const missing = [...before.counts.keys()].filter(key => !after.counts.has(key));
+  // A missing row of a blank node may still be there under the node's new name: not compared.
+  if (missing.some(key => before.withBlankNodes.has(key))) return undefined;
+  if (missing.length > 0) return 'rows-removed-or-changed';
+  if ([...after.counts].some(([key, count]) => count > (before.counts.get(key) ?? 0))) return 'rows-added';
+  return [...before.counts].some(([key, count]) => count > (after.counts.get(key) ?? 0)) ? 'copies-removed' : 'none';
 }
 
 /**

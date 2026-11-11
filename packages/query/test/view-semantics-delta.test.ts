@@ -43,23 +43,29 @@ describe('classifying the merged answer against the per-asset answer', () => {
     expect(classifyViewSemanticsDelta(construct, quads(['urn:a', 'urn:o']), quads())).toBe('rows-removed-or-changed');
   });
 
-  it('keeps which rows share a blank node, whatever its label', () => {
+  it('compares answers whose blank nodes keep their rows, and does not compare those where nodes gain, lose or swap rows', () => {
     const construct = 'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }';
     const graph = (...items: Array<[string, string, string]>): QueryResult => ({ bindings: [],
       quads: items.map(([subject, predicate, object]) => ({ subject, predicate, object, graph: '' })) });
     // Two nodes become one.
     expect(classifyViewSemanticsDelta(construct, graph(['_:a', 'urn:p', 'urn:x'], ['_:b', 'urn:q', 'urn:y']),
-      graph(['_:z', 'urn:p', 'urn:x'], ['_:z', 'urn:q', 'urn:y']))).toBe('rows-removed-or-changed');
+      graph(['_:z', 'urn:p', 'urn:x'], ['_:z', 'urn:q', 'urn:y']))).toBeUndefined();
     // One node becomes two.
     expect(classifyViewSemanticsDelta(construct, graph(['_:a', 'urn:p', 'urn:x'], ['_:a', 'urn:p', 'urn:y']),
-      graph(['_:b', 'urn:p', 'urn:x'], ['_:c', 'urn:p', 'urn:y']))).toBe('rows-removed-or-changed');
+      graph(['_:b', 'urn:p', 'urn:x'], ['_:c', 'urn:p', 'urn:y']))).toBeUndefined();
+    // A node gains a row; its first row is still there under the node's new name.
+    expect(classifyViewSemanticsDelta(construct, graph(['_:a', 'urn:p', 'urn:x']),
+      graph(['_:b', 'urn:p', 'urn:x'], ['_:b', 'urn:q', 'urn:y']))).toBeUndefined();
     // The same structure under other labels, with nodes linked to each other.
     expect(classifyViewSemanticsDelta(construct,
       graph(['_:a', 'urn:next', '_:b'], ['_:b', 'urn:next', '_:c'], ['_:c', 'urn:value', '"1"']),
       graph(['_:z', 'urn:value', '"1"'], ['_:x', 'urn:next', '_:y'], ['_:y', 'urn:next', '_:z']))).toBe('none');
     // A link reversed is another structure.
     expect(classifyViewSemanticsDelta(construct, graph(['_:a', 'urn:next', '_:b'], ['_:b', 'urn:value', '"1"']),
-      graph(['_:a', 'urn:next', '_:b'], ['_:a', 'urn:value', '"1"']))).toBe('rows-removed-or-changed');
+      graph(['_:a', 'urn:next', '_:b'], ['_:a', 'urn:value', '"1"']))).toBeUndefined();
+    // A row without blank nodes that is gone is a removal, beside blank-node rows that kept theirs.
+    expect(classifyViewSemanticsDelta(construct, graph(['urn:s', 'urn:p', 'urn:x'], ['_:a', 'urn:q', '"_:not-a-node"']),
+      graph(['_:b', 'urn:q', '"_:not-a-node"']))).toBe('rows-removed-or-changed');
   });
 
   it('counts copies of rows with blank nodes as copies', () => {
@@ -94,7 +100,10 @@ describe('classifying the merged answer against the per-asset answer', () => {
     const shared: QueryResult = { bindings: [{ a: '_:n', b: '_:n' }, { a: '_:m', b: 'urn:x' }] };
     expect(classifyViewSemanticsDelta(select, shared, { bindings: [{ a: '_:k', b: 'urn:x' }, { a: '_:j', b: '_:j' }] })).toBe('none');
     expect(classifyViewSemanticsDelta(select, shared, { bindings: [{ a: '_:k', b: '_:j' }, { a: '_:m', b: 'urn:x' }] }))
-      .toBe('rows-removed-or-changed');
+      .toBeUndefined();
+    // A row added beside unchanged blank-node rows.
+    expect(classifyViewSemanticsDelta(select, shared, { bindings: [...shared.bindings, { a: 'urn:y', b: 'urn:z' }] }))
+      .toBe('rows-added');
   });
 });
 
