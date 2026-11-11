@@ -557,6 +557,43 @@ describe('ConvictionOverview — failed approval checks', () => {
   });
 });
 
+describe('ConvictionOverview — a tracked PCA that can’t be read', () => {
+  const discount = (c: HTMLElement) => c.querySelector('[data-testid="pca-discount-value"]');
+
+  it('says Unknown with Retry when the account read fails, then shows the discount after Retry', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0], balances: [], chainId: '84532', rpcUrl: null });
+    let readFails = true;
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      if (!key && readFails) throw new HttpError(504, 'timeout', { code: 'RPC_TIMEOUT' });
+      const base = { ...snapFixture(id), owner: '0xSOMEONEELSE0000000000000000000000000000' };
+      return key ? { ...base, probedKey: { key, registered: true } } : base;
+    });
+    usePcaStore.setState({ trackedIds: ['7'], createPending: null });
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'You may still have a discount');
+    expect(discount(container)?.textContent).toBe('Unknown');
+    expect(container.textContent).not.toContain('pay the full TRAC fee');
+    const card = container.querySelector('[data-testid="pca-coverage-summary"]')!;
+    const retry = Array.from(card.querySelectorAll('button')).find((b) => b.textContent?.includes('Retry'));
+    expect(retry).toBeTruthy();
+    readFails = false;
+    await act(async () => { retry!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'All 1 publishing wallets covered');
+    expect(discount(container)?.textContent).toBe('30%');
+    await unmount();
+  });
+
+  it('does not say Unknown for a tracked PCA that doesn’t exist (404)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockRejectedValue(new HttpError(404, 'not found', { error: 'UnknownAccount' }));
+    usePcaStore.setState({ trackedIds: ['7'], createPending: null });
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'pay the full TRAC fee');
+    expect(discount(container)?.textContent).toBe('None yet');
+    await unmount();
+  });
+});
+
 describe('ConvictionOverview — Already have a PCA? hands the ID to Get added', () => {
   it('checks the typed ID in Get added, can add an unapproved PCA, and reopens without a stale ID', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0], balances: [], chainId: '84532', rpcUrl: null });

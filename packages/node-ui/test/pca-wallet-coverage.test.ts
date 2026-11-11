@@ -17,6 +17,7 @@ const account = (id: string, probes: Array<[string, boolean | null]>, snap: Part
   return {
     accountId: id,
     snapshot,
+    notFound: false,
     walletProbes: probes.map(([wallet, registered]) => ({
       wallet,
       coverage: registered === null
@@ -149,5 +150,27 @@ describe('NodeCoverage status and uncertainty', () => {
 
   it('an inconclusive probe with nothing covered is uncertain', () => {
     expect(nodeCoverage([W0], [account('7', [[W0, null]])], READ)).toMatchObject({ status: 'uncertain', uncertainty: 'probe-inconclusive' });
+  });
+});
+
+describe('NodeCoverage with a PCA that couldn’t be read', () => {
+  const unread = (id: string, notFound: boolean): CoverageAccount => ({ accountId: id, snapshot: null, notFound, walletProbes: [] });
+
+  it('a failed account read leaves every wallet unknown, with Retry', () => {
+    const node = nodeCoverage([W0], [unread('7', false)], READ);
+    expect(node.wallets).toEqual([{ kind: 'unknown', wallet: W0 }]);
+    expect(node).toMatchObject({ status: 'uncertain', uncertainty: 'probe-inconclusive', recovery: 'retry-read' });
+    expect(summarizeCoverage(node).value).toBe('Unknown');
+  });
+
+  it('a PCA that doesn’t exist (404) confirms nothing', () => {
+    const node = nodeCoverage([W0], [unread('7', true)], READ);
+    expect(node.wallets).toEqual([{ kind: 'uncovered', wallet: W0 }]);
+    expect(node).toMatchObject({ status: 'not-covered', uncertainty: null, recovery: null });
+  });
+
+  it('another PCA that covers the wallet still wins', () => {
+    const node = nodeCoverage([W0], [unread('8', false), account('7', [[W0, true]])], READ);
+    expect(node).toMatchObject({ status: 'covered', covered: true });
   });
 });

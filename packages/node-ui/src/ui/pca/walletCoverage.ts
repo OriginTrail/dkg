@@ -17,7 +17,10 @@ export interface CoverageProbe {
 /** What the coverage model needs from a PCA. The overview hook's resolved account extends it. */
 export interface CoverageAccount {
   accountId: string;
+  /** null when the account couldn't be read, or doesn't exist (`notFound`). */
   snapshot: PcaSnapshot | null;
+  /** The daemon returned 404: the PCA doesn't exist, so it confirms no coverage. */
+  notFound: boolean;
   /** One probe per node publishing wallet. */
   walletProbes: CoverageProbe[];
 }
@@ -25,8 +28,9 @@ export interface CoverageAccount {
 /**
  * One publishing wallet, aggregated from its probes' canonical outcomes across PCAs.
  * Precedence: `covers` anywhere → covered; else any `inconclusive` (a probe or a budget
- * couldn't be read) → unknown, because it might still cover (#9); else `uncovered` →
- * inactive; else uncovered.
+ * couldn't be read), or a tracked PCA that couldn't be read at all (so it was never
+ * probed) → unknown, because it might still cover (#9); else `uncovered` → inactive;
+ * else uncovered. A PCA that doesn't exist (404) confirms nothing is covered by it.
  */
 export type WalletCoverage =
   | { kind: 'covered'; wallet: string; accountId: string }
@@ -38,8 +42,8 @@ export type WalletCoverage =
 
 /**
  * Why coverage can't be fully confirmed, most fundamental first (#9): this node's wallet
- * list couldn't be read, finding this node's PCAs failed, or a wallet's approval or a
- * PCA's budget couldn't be read.
+ * list couldn't be read, finding this node's PCAs failed, or a tracked PCA, a wallet's
+ * approval on it or its budget couldn't be read (`probe-inconclusive`).
  */
 export type CoverageUncertainty = 'wallets-unreadable' | 'lookup-failed' | 'probe-inconclusive';
 
@@ -107,6 +111,9 @@ export function nodeCoverage(
   sources: CoverageSources,
 ): NodeCoverage {
   const { walletsUnreadable } = sources;
+  // A tracked PCA whose account read failed (not a 404) was never probed, so it might
+  // cover any wallet: no wallet it doesn't beat with a `covers` is confirmed uncovered.
+  const unreadAccount = accounts.some((a) => a.snapshot == null && !a.notFound);
   let best: number | null = null;
   const states = wallets.map((wallet): WalletCoverage => {
     const results = accounts.flatMap((account) => account.walletProbes
@@ -118,7 +125,7 @@ export function nodeCoverage(
     }
     const covering = results.find((r) => r.coverage.outcome === 'covers');
     if (covering) return { kind: 'covered', wallet, accountId: covering.account.accountId };
-    if (walletsUnreadable || results.some((r) => r.coverage.outcome === 'inconclusive')) return { kind: 'unknown', wallet };
+    if (walletsUnreadable || unreadAccount || results.some((r) => r.coverage.outcome === 'inconclusive')) return { kind: 'unknown', wallet };
     const inactive = results.find((r) => r.coverage.outcome === 'uncovered');
     if (inactive && inactive.coverage.outcome === 'uncovered') {
       return { kind: 'inactive', wallet, accountId: inactive.account.accountId, expired: inactive.coverage.dead };
