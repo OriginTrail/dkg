@@ -1,16 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { walletCoverage, walletCoverageRow, nodeCoverage, summarizeCoverage } from '../src/ui/pca/walletCoverage.js';
+import { walletCoverage, walletCoverageRow, nodeCoverage, summarizeCoverage, type CoverageAccount } from '../src/ui/pca/walletCoverage.js';
 import { makePcaSnapshot } from '../src/ui/mocks/pca.js';
+import type { PcaSnapshot } from '../src/ui/api.js';
 
 const W0 = '0x9A3f000000000000000000000000000000000E41D';
 const W1 = '0xB7c2000000000000000000000000000000000A12';
 const NOW = 2_000_000_000;
-const account = (id: string, probes: Array<[string, boolean | null]>, snap: Record<string, unknown> = {}) => ({
+const account = (id: string, probes: Array<[string, boolean | null]>, snap: Partial<PcaSnapshot> = {}): CoverageAccount => ({
   accountId: id,
   snapshot: makePcaSnapshot({ accountId: id, discountBps: 3000, expiresAtTimestamp: NOW + 86400 * 90, ...snap }),
   walletProbes: probes.map(([wallet, registered]) => ({ wallet, registered })),
-}) as never;
+});
 const ctx = { walletsInconclusive: false, lookupError: false, accountCount: 1 };
+/** An extended read whose budget fields came back: topUp empty, this epoch's allowance as given. */
+const budget = (remainingAllowance: string | undefined): Partial<PcaSnapshot> =>
+  ({ extendedRequested: true, topUpBuffer: '0', remainingAllowance });
 
 describe('walletCoverage', () => {
   it('orders covered before inactive before unknown', () => {
@@ -61,6 +65,30 @@ describe('summarizeCoverage', () => {
       value: 'Unknown',
       sub: "Couldn't check whether a PCA covers this node's wallets. You may still have a discount.",
     });
+  });
+
+  it('says Unknown, not "no TRAC left", when an approving PCA’s budget couldn’t be read', () => {
+    // The extended read omitted remainingAllowance; the wallet probe still confirmed registration.
+    const node = nodeCoverage([W0], [account('7', [[W0, true]], budget(undefined))], false, NOW);
+    expect(node.wallets[0]!.kind).toBe('unknown');
+    const s = summarizeCoverage(node, ctx);
+    expect(s).toMatchObject({ value: 'Unknown', anyUnknown: true }); // anyUnknown shows Retry on the Overview
+    expect(s.sub).not.toContain('no TRAC left');
+  });
+
+  it('says "no TRAC left this epoch" only when a live PCA’s budget is confirmed empty', () => {
+    const node = nodeCoverage([W0], [account('7', [[W0, true]], budget('0'))], false, NOW);
+    expect(node.wallets[0]).toEqual({ kind: 'inactive', wallet: W0, accountId: '7', expired: false });
+    expect(summarizeCoverage(node, ctx)).toMatchObject({
+      value: 'None',
+      sub: 'Your wallets are on PCA #7, which has no TRAC left this epoch. They pay the full fee.',
+    });
+  });
+
+  it('a swept PCA reads as expired, even with a future expiry time', () => {
+    const node = nodeCoverage([W0], [account('7', [[W0, true]], { fullySwept: true })], false, NOW);
+    expect(node.wallets[0]).toEqual({ kind: 'inactive', wallet: W0, accountId: '7', expired: true });
+    expect(summarizeCoverage(node, ctx).sub).toBe('Your wallets are on PCA #7, which has expired. They pay the full fee.');
   });
 
   it('still says None yet when every wallet is confirmed not covered', () => {

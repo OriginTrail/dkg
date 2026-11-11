@@ -27,6 +27,7 @@ vi.mock('../src/ui/api.js', async (orig) => {
 const { GetSponsoredPanel } = await import('../src/ui/pages/conviction/GetSponsoredPanel.js');
 const { usePcaStore } = await import('../src/ui/stores/pca.js');
 const { makePcaSnapshot } = await import('../src/ui/mocks/pca.js');
+const { HttpError } = await import('../src/ui/api.js');
 
 const W0 = '0x71D4000000000000000000000000000000009Ac2';
 const W1 = '0x3F8a0000000000000000000000000000000000C1b7';
@@ -118,7 +119,8 @@ describe('GetSponsoredPanel', () => {
     // No typing or clicking: the ID is pre-filled and checked once.
     await waitForText(container, 'Approved on PCA #7: 1 of 2 wallets');
     expect((container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement).value).toBe('7');
-    expect(mocks.fetchPca.mock.calls.filter(([id]) => id === '7')).toHaveLength(2);
+    // One read of the PCA itself, then one probe per wallet.
+    expect(mocks.fetchPca.mock.calls.filter(([id]) => id === '7')).toHaveLength(3);
     await unmount();
   });
 
@@ -388,6 +390,37 @@ describe('GetSponsoredPanel', () => {
     const checkDiscovered = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check PCA #7')!;
     await act(async () => { checkDiscovered.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     expect((container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement).value).toBe('7');
+    await unmount();
+  });
+});
+
+describe('GetSponsoredPanel — checking with no publishing wallets', () => {
+  it('reads the PCA itself, says there are no wallets to check, and offers Add for a PCA that exists', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation(async (id: string) => makePcaSnapshot({ accountId: id }));
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn(), initialAccountId: '999' }));
+    await waitForText(container, 'PCA #999 exists, but this node reported no publishing wallets to check.');
+    // One read of the PCA itself, and no per-wallet probes.
+    expect(mocks.fetchPca.mock.calls).toEqual([['999']]);
+    expect(container.textContent).not.toContain('Approved on PCA #999');
+    expect(usePcaStore.getState().trackedIds).not.toContain('999');
+    const add = container.querySelector('[data-testid="pca-sponsor-track"]') as HTMLButtonElement;
+    expect(add.textContent).toBe('Add PCA #999 to your list');
+    await act(async () => { add.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(usePcaStore.getState().trackedIds).toContain('999');
+    await unmount();
+  });
+
+  it('never offers Add for a PCA that doesn’t exist', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockRejectedValue(new HttpError(404, 'Not found', { error: 'PCA_NOT_FOUND' }));
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn(), initialAccountId: '999' }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+    expect(mocks.fetchPca).toHaveBeenCalledWith('999');
+    expect(container.querySelector('[role="alert"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="pca-sponsor-track"]')).toBeNull();
+    expect(container.textContent).not.toContain('Approved on PCA #999');
+    expect(usePcaStore.getState().trackedIds).not.toContain('999');
     await unmount();
   });
 });

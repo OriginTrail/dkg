@@ -5,7 +5,7 @@
  */
 import type { PcaSnapshot } from '../api.js';
 import { isPcaSpendable } from './coverage.js';
-import { isPcaExpired } from './pca-primitives.js';
+import { isPcaDead, pcaBudgetState } from './pca-primitives.js';
 import { eqAddress } from '../web3/address.js';
 import { formatBps } from '../lib/format.js';
 
@@ -23,12 +23,12 @@ export interface CoverageAccount {
   walletProbes: CoverageProbe[];
 }
 
-/** One publishing wallet, in precedence order: covered, then inactive, then unknown. */
+/** One publishing wallet, in precedence order: covered, unknown budget, inactive, then unknown probe. */
 export type WalletCoverage =
   | { kind: 'covered'; wallet: string; accountId: string }
-  /** Approved on a PCA that can't pay right now (expired, or no TRAC left this epoch). */
+  /** Approved on a PCA that definitely can't pay: expired or swept, or this epoch's budget is confirmed empty. */
   | { kind: 'inactive'; wallet: string; accountId: string; expired: boolean }
-  /** A probe couldn't be read, so coverage can't be stated either way (#9). */
+  /** Coverage can't be stated either way (#9): a probe or a budget couldn't be read. */
   | { kind: 'unknown'; wallet: string }
   | { kind: 'uncovered'; wallet: string };
 
@@ -38,18 +38,16 @@ export function walletCoverage(
   walletsInconclusive: boolean,
   nowSec?: number,
 ): WalletCoverage[] {
-  return wallets.map((wallet) => {
-    const approvedOn = (spendable: boolean) => accounts.find((account) =>
-      account.snapshot
-      && isPcaSpendable(account.snapshot, nowSec) === spendable
-      && account.walletProbes.some((probe) => eqAddress(probe.wallet, wallet) && probe.registered === true),
-    );
-    const covering = approvedOn(true);
+  return wallets.map((wallet): WalletCoverage => {
+    const approving = accounts.filter((account) =>
+      account.snapshot && account.walletProbes.some((probe) => eqAddress(probe.wallet, wallet) && probe.registered === true));
+    const covering = approving.find((account) => isPcaSpendable(account.snapshot!, nowSec));
     if (covering) return { kind: 'covered', wallet, accountId: covering.accountId };
-    const inactive = approvedOn(false);
-    if (inactive) {
-      return { kind: 'inactive', wallet, accountId: inactive.accountId, expired: !!inactive.snapshot && isPcaExpired(inactive.snapshot, nowSec) };
-    }
+    // A live PCA whose budget couldn't be read might still cover: never call that empty.
+    const budgetUnknown = approving.some((account) => !isPcaDead(account.snapshot!, nowSec) && pcaBudgetState(account.snapshot!) === null);
+    if (budgetUnknown) return { kind: 'unknown', wallet };
+    const inactive = approving[0];
+    if (inactive) return { kind: 'inactive', wallet, accountId: inactive.accountId, expired: isPcaDead(inactive.snapshot!, nowSec) };
     const unknown = walletsInconclusive || accounts.some((account) =>
       account.walletProbes.some((probe) => eqAddress(probe.wallet, wallet) && probe.registered == null),
     );

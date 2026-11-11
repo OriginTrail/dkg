@@ -162,6 +162,22 @@ export function GetSponsoredPanel({
     setChecking(true);
     setProbeError(null);
     try {
+      // Read the PCA itself first: nothing is offered for an ID that doesn't exist
+      // (a missing PCA throws here and lands in the catch below).
+      await fetchPca(id);
+      // Without this node's wallets there's nothing to check approval for. The PCA exists,
+      // so it can still be added read-only, but its coverage stays unknown.
+      if (walletsReadError || wallets.length === 0) {
+        setProbed(null);
+        setProbeError({
+          message: walletsReadError
+            ? `PCA #${id} exists, but this node’s wallets couldn’t be read, so we can’t check its approval.`
+            : `PCA #${id} exists, but this node reported no publishing wallets to check.`,
+          retry: false,
+          trackableId: id,
+        });
+        return;
+      }
       const rows = await Promise.all(
         wallets.map((w) =>
           fetchPca(id, w, { extended: true })
@@ -200,7 +216,13 @@ export function GetSponsoredPanel({
       if (rows.some((r) => r.coverage.registered === true)) trackAccount(id);
       setProbed({ accountId: id, rows });
     } catch (err) {
-      setProbeError({ message: describePcaError(err, { accountId: id })?.message ?? 'Couldn’t check approval.', retry: false });
+      // A missing or unreadable PCA: no result and nothing to add, and no stale result from before.
+      // A known daemon error says what happened; anything else is a transient read failure.
+      setProbed(null);
+      const described = describePcaError(err, { accountId: id });
+      setProbeError(described
+        ? { message: described.message, retry: described.code === 'ServerError' }
+        : { message: `Couldn’t check PCA #${id} right now.`, retry: true });
     } finally {
       setChecking(false);
     }
@@ -209,11 +231,13 @@ export function GetSponsoredPanel({
   // An ID entered on the Overview is checked as soon as this node's wallets are known.
   const autoChecked = useRef(false);
   useEffect(() => {
-    if (!initialAccountId || autoChecked.current || walletsLoading || wallets.length === 0) return;
+    // Wait until the wallet read has finished, either way: check() reports no or unreadable wallets itself.
+    const walletsSettled = !walletsLoading && (wb != null || walletsReadError != null);
+    if (!initialAccountId || autoChecked.current || !walletsSettled) return;
     autoChecked.current = true;
     void check(initialAccountId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialAccountId, walletsLoading, walletsKey]);
+  }, [initialAccountId, walletsLoading, walletsKey, wb, walletsReadError]);
   // Bring that first result into view: it sits below the wallets to share.
   const resultsRef = useRef<HTMLDivElement>(null);
   const scrolledToResult = useRef(false);
@@ -325,7 +349,7 @@ export function GetSponsoredPanel({
               placeholder="PCA ID from owner (e.g. 7)"
               aria-label="PCA ID from owner"
             />
-            <button type="button" className="v10-pca-card-btn primary ds-btn ds-primary" onClick={() => void check()} disabled={checking}>
+            <button type="button" className="v10-pca-card-btn primary ds-btn ds-primary" onClick={() => void check()} disabled={checking || walletsLoading}>
               {checking ? 'Checking…' : 'Check approval'}
             </button>
           </div>
