@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { BlazegraphStore } from '../../src/adapters/blazegraph.js';
 import { BlazegraphNamespaceManager, blazegraphNamespaceApiUrlFromSparqlEndpoint } from '../../src/blazegraph-namespace-manager.js';
 import { SharedMemoryLiteralBlobStore } from '../../src/shared-memory-literal-blob-store.js';
+import { workingMemoryIdentityRule } from '../../src/read-graph/membership.js';
 import type { TripleStoreConfig } from '../../src/triple-store-composition.js';
 import type { Quad, TripleStore } from '../../src/triple-store.js';
 import { AGENT, P, expectLayerUnions, layerFixture, layeredStore, q, type LayerFixture } from './read-graph-layer-conformance.js';
@@ -13,6 +14,11 @@ import { PlanningOxigraphStore } from './read-graph-planning-store.js';
 
 /** The copy counts of the qualification matrix's engine-cost row. */
 export const COPY_COUNTS = [100, 1_000, 10_000] as const;
+
+/** The node's peer ID: the default agent, `AGENT`, also owns the drafts written under it. */
+const PEER = '12D3KooWQualificationPeer';
+const OTHER_AGENT = '0x' + 'ef'.repeat(20);
+const IDENTITY = workingMemoryIdentityRule({ defaultAgentAddress: AGENT, peerId: PEER });
 
 /** One timed removal of a triple that many graphs hold. */
 export interface CopyRemovalTiming {
@@ -43,7 +49,8 @@ export function readGraphQualificationSuite(backend: 'oxigraph' | 'blazegraph', 
     /** Embedded Oxigraph gets a new store each time; Blazegraph shares one namespace, with a new context graph each time. */
     const open = async (fixture: LayerFixture) => {
       const { adapter, config } = shared ?? { adapter: new PlanningOxigraphStore(), config: { backend: 'oxigraph' } as TripleStoreConfig };
-      return { adapter, ...(await layeredStore(adapter, config, fixture)), close: shared ? async () => {} : () => adapter.close() };
+      const withIdentity: TripleStoreConfig = { ...config, readGraphs: { workingMemoryIdentity: IDENTITY } };
+      return { adapter, ...(await layeredStore(adapter, withIdentity, fixture)), close: shared ? async () => {} : () => adapter.close() };
     };
 
     beforeAll(async () => {
@@ -87,6 +94,27 @@ export function readGraphQualificationSuite(backend: 'oxigraph' | 'blazegraph', 
         await rm(blobDir, { recursive: true, force: true });
         await close();
       }
+    }, 120_000);
+
+    it("keeps the default agent's drafts under its peer ID and another spelling of its address in its read graph, and no other agent's", async () => {
+      const fixture = freshFixture();
+      const { adapter, layer, store, close } = await open(fixture);
+      try {
+        const wm = fixture.readGraphs.agentWm;
+        const peerDraft = `${fixture.root}/_working_memory/${PEER}/30`;
+        const spelledDraft = `${fixture.root}/_working_memory/0x${AGENT.slice(2).toUpperCase()}/31`;
+        const otherDraft = `${fixture.root}/_working_memory/${OTHER_AGENT}/32`;
+        await store.insert([q('urn:s:note', '"same"', peerDraft), q('urn:s:note', '"same"', spelledDraft), q('urn:s:theirs', '"theirs"', otherDraft)]);
+        expect(await holds(adapter, wm, 'urn:s:note', '"same"')).toBe(true);
+        expect(await holds(adapter, wm, 'urn:s:theirs', '"theirs"')).toBe(false);
+        await expectLayerUnions(adapter, layer, fixture, 'drafts under the peer ID, another spelling and another agent');
+        // Discarding one draft keeps the triple the other draft still holds; discarding both lets it go.
+        await store.delete([q('urn:s:note', '"same"', peerDraft)]);
+        expect(await holds(adapter, wm, 'urn:s:note', '"same"')).toBe(true);
+        await store.dropGraph(spelledDraft);
+        expect(await holds(adapter, wm, 'urn:s:note', '"same"')).toBe(false);
+        await expectLayerUnions(adapter, layer, fixture, 'both drafts discarded');
+      } finally { await close(); }
     }, 120_000);
 
     it('removes a triple whose last two copies two concurrent writes remove', async () => {
