@@ -315,7 +315,7 @@ describe('a refresh is node work', () => {
     const inner = new OxigraphStore();
     await inner.insert([q(small)]);
     const counting = new CountingStore(inner);
-    const store = new GraphSetIndexStore(counting, { revalidateMs: 100, revalidateFailureBackoffMs: 10, now: () => now });
+    const store = new GraphSetIndexStore(counting, { revalidateMs: 100, revalidate: 'blocking', revalidateFailureBackoffMs: 10, now: () => now });
     try {
       expect(await store.listGraphsByPrefix(`${CG}small/`)).toEqual([small]);
       // Another failure of a warm refresh keeps the last catalog.

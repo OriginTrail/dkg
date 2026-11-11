@@ -55,7 +55,10 @@ describe('unscoped query admission', () => {
       vi.stubEnv(STORE_GRAPH_CATALOG_MAX_BYTES_ENV, String(Buffer.byteLength(JSON.stringify([readable]))));
       await inner.insert([{ graph: 'did:dkg:context-graph:other', subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
       now += 100;
-      await expect(canReadUnscopedQuery(deps)).rejects.toMatchObject({ code: 'STORE_INTERNAL_LIMIT' });
+      // The read that finds the catalog due is answered from it; the background revalidation then
+      // fails at the ceiling, and admission fails closed.
+      await expect(canReadUnscopedQuery(deps)).resolves.toBe(true);
+      await vi.waitFor(() => expect(canReadUnscopedQuery(deps)).rejects.toMatchObject({ code: 'STORE_INTERNAL_LIMIT' }));
     } finally {
       vi.unstubAllEnvs();
       await store.close();
