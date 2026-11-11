@@ -74,6 +74,8 @@ export async function layeredStore(adapter: TripleStore, config: TripleStoreConf
   await adapter.insert([
     ...fixture.facts,
     ...fixture.graphs.flatMap((graph, i) => [q('urn:s:shared', '"both"', graph), q(`urn:s:${i}`, `"v${i}"`, graph), q(`urn:s:${i}`, 'urn:o:iri', graph)]),
+    // A blank node anchored in one member graph, which only the reference procedure can retract.
+    q('_:anchor', '"anchored"', fixture.graphs[2]!),
   ]);
   for (const key of fixture.keys) {
     const readGraph = readGraphIri(key);
@@ -133,7 +135,15 @@ export function readGraphLayerConformance(backend: 'oxigraph' | 'blazegraph') {
       const steps: Array<[string, () => Promise<unknown>]> = [
         ['insert', () => store.insert([q('urn:s:new', '"n"', vm1), q('urn:s:new', '"n"', code), q('urn:s:new', '"n"', child)])],
         ['delete', () => store.delete([q('urn:s:1', '"v1"', vm1), q('urn:s:shared', '"both"', vm1)])],
-        ['delete with a blank node', () => store.delete([{ subject: '_:b1', predicate: P, object: '"b"', graph: vm2 }])],
+        ['delete with a blank node', async () => {
+          const held = async (graph: string) => {
+            const result = await adapter.query(`ASK { GRAPH <${graph}> { ?b <${P}> "anchored" FILTER(isBlank(?b)) } }`);
+            return result.type === 'boolean' ? result.value : undefined;
+          };
+          expect([await held(vm2), await held(fixture.readGraphs.wholeVm)]).toEqual([true, true]);
+          await store.delete([q('_:anchor', '"anchored"', vm2)]);
+          expect([await held(vm2), await held(fixture.readGraphs.wholeVm)]).toEqual([false, false]);
+        }],
         ['deleteByPattern', () => store.deleteByPattern({ graph: code, subject: 'urn:s:4' })],
         ['deleteByPatternWithoutCount', () => store.deleteByPatternWithoutCount!({ graph: swm4, object: 'urn:o:iri' })],
         ['deleteBySubjectPrefix', () => store.deleteBySubjectPrefix(wm, 'urn:s:')],

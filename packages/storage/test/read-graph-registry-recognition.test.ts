@@ -8,7 +8,6 @@ import {
   registrySnapshotOfFacts,
   type ReadGraphRegistryFact,
 } from '../src/read-graph/registry-recognition.js';
-import type { ReadGraphUpdateOptions } from '../src/read-graph/read-graph-store.js';
 import {
   parseReadGraphStateRows,
   readGraphStateCompareAndSet,
@@ -135,7 +134,7 @@ describe('registry recognition in the read-graph layer', () => {
 
   it('reads the registry again after an update that writes a _meta graph', async () => {
     const { store, meta, fixture, states } = await layered();
-    const written = { writtenGraphs: [meta] } as ReadGraphUpdateOptions;
+    const written = { writtenGraphs: [meta] };
     await store.update!(`INSERT DATA { GRAPH <${meta}> { <urn:asset:1> <urn:test:p> "m" } }`, written);
     expect(states()).toEqual({ wholeVm: 'ready@1', wholeSwm: 'ready@1', codeVm: 'ready@1', agentWm: 'ready@1' });
     await store.update!(`INSERT DATA { GRAPH <${meta}> { <${fixture.root}/notes> <${R.type}> <${R.subGraphClass}> ; <${R.name}> "notes" } }`, written);
