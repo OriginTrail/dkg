@@ -4,7 +4,6 @@
 .v10-pca-unavailable,
 .v10-pca-detail { max-width: 880px; }
 .v10-pca-role-chip { text-transform: capitalize; }
-.v10-pca-overview-wallet { margin-left: auto; }
 .v10-pca-overview-caveat { font-size: var(--fs-label); color: var(--text-tertiary); line-height: var(--lh-body); margin: var(--space-12) 0 0; }
 .v10-pca-section {
   margin-top: var(--space-16);
@@ -24,6 +23,8 @@
   flex: 1 1 320px;
   min-width: 0;
 }
+/* "Already have a PCA?": the ID field keeps its natural width, so Check stays beside it. */
+.v10-pca-section-head .v10-form-input { width: auto; }
 .v10-pca-section-head > .v10-pca-overview-cta-group {
   flex: 0 0 auto;
   justify-content: flex-end;
@@ -34,10 +35,6 @@
   font-size: var(--fs-body);
   font-weight: 700;
   color: var(--text-primary);
-}
-.v10-pca-coverage-summary {
-  padding: 14px 0 var(--space-4);
-  border-top: 1px solid var(--border-subtle);
 }
 .v10-pca-overview-cta-group {
   display: flex;
@@ -53,7 +50,7 @@
   flex-direction: column;
   gap: var(--space-6);
   max-width: 680px;
-  margin-top: 10px;
+  margin-top: var(--space-12);
 }
 .v10-pca-coverage-summary .v10-pca-wallet-list {
   display: grid;
@@ -62,30 +59,22 @@
   max-width: none;
   justify-content: start;
 }
-.v10-pca-inline-status {
-  margin: var(--space-12) 0 0;
-  font-size: var(--fs-control);
-  line-height: var(--lh-body);
-  color: var(--text-secondary);
-}
+.v10-pca-notice { margin: 0; align-self: stretch; }
+.v10-pca-status { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: var(--space-12); }
+.v10-pca-ways-in { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: var(--space-16); }
+.v10-pca-way-in { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-8); }
+.v10-pca-way-in .v10-pca-settings-line { margin: 0; flex: 1; }
+.v10-pca-row-actions { display: inline-flex; gap: var(--space-8); }
+.v10-pca-list td:not(:nth-child(3)) { white-space: nowrap; }
+.v10-pca-retry-block { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-8); }
+.v10-pca-text-link { color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline); text-underline-offset: 3px; }
 
 /* ----- PcaAccountCard ----- */
-.v10-pca-card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(440px, 1fr));
-  gap: var(--space-16);
-}
-@media (max-width: 600px) {
-  .v10-pca-card-grid { grid-template-columns: 1fr; }
-}
-.v10-pca-card-title { display: flex; align-items: center; gap: var(--space-8); margin-bottom: var(--space-12); }
-.v10-pca-card-id { font-size: var(--fs-body); font-weight: 700; color: var(--text-primary); }
-.v10-pca-card-sponsor { font-size: var(--fs-label); color: var(--text-tertiary); }
+
 .v10-pca-card-spacer { flex: 1; }
-.v10-pca-card-owner { display: flex; align-items: center; gap: var(--space-8); margin-top: var(--space-12); }
+
 .v10-pca-card-owner-lbl { font-size: var(--fs-label); color: var(--text-tertiary); min-width: 44px; }
-.v10-pca-card-owner-note { font-size: var(--fs-label); color: var(--text-tertiary); margin: var(--space-4) 0 0; line-height: var(--lh-body); }
-.v10-pca-card-explorer { color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline); text-underline-offset: 3px; font-size: var(--fs-body); }
+
 .v10-pca-card-warn {
   margin: 10px 0 0;
   padding: var(--pad-nested-sm);
@@ -94,64 +83,9 @@
   color: var(--text-warning);
   background: var(--warning-bg);
 }
-.v10-pca-card-meta { font-size: var(--fs-label); color: var(--text-secondary); margin: 10px 0 0; }
-.v10-pca-card-meta-sep { color: var(--text-ghost); }
-.v10-pca-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); margin-top: 14px; }
-.v10-pca-owned-groups,
-.v10-pca-account-group {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.v10-pca-account-group + .v10-pca-account-group { margin-top: var(--space-16); }
-.v10-pca-account-group-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-8);
-}
-.v10-pca-account-group-title {
-  margin: 0;
-  font-size: var(--fs-body);
-  font-weight: 700;
-  color: var(--text-primary);
-}
+
 .v10-pca-card-btn:disabled { opacity: var(--opacity-disabled); }
-.v10-pca-inline-btn {
-  text-decoration: underline;
-  text-decoration-color: var(--link-underline);
-  text-underline-offset: 3px;
-  border: none;
-  background: transparent;
-  color: var(--text-link);
-  font: inherit;
-  font-weight: 700;
-  padding: 0;
-  cursor: pointer;
-  text-decoration: underline;
-}
-.v10-pca-inline-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .v10-pca-card-error { display: flex; flex-direction: column; gap: 10px; font-size: var(--fs-control); color: var(--text-secondary); }
 .v10-pca-card-skeleton { min-height: 180px; opacity: 0.5; }
 
-/* ----- Track-by-id disclosure ----- */
-.v10-pca-track { margin-top: var(--space-16); }
-.v10-pca-track-toggle {
-  text-decoration: underline;
-  text-decoration-color: var(--link-underline);
-  text-underline-offset: 3px;
-  border: none;
-  background: transparent;
-  color: var(--text-link);
-  font-size: var(--fs-control);
-  cursor: pointer;
-  padding: 0;
-}
-.v10-pca-track-panel { display: flex; align-items: center; gap: var(--space-8); margin-top: var(--space-8); flex-wrap: wrap; }
-.v10-pca-track-panel .v10-form-input { max-width: 220px; }
-.v10-pca-track-status {
-  margin: var(--space-8) 0 0;
-  color: var(--text-secondary);
-  font-size: var(--fs-control);
-  line-height: var(--lh-snug);
-}
 

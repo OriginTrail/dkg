@@ -1,5 +1,6 @@
 import { type Page, type Locator } from '@playwright/test';
 import { sel } from '../helpers/selectors.js';
+import { fetchApiInPage } from '../helpers/page-api.js';
 
 /**
  * Page object for the GREENFIELD Publisher Conviction (PCA) tab
@@ -23,9 +24,8 @@ export class PublishingConvictionPage {
   readonly unavailable: Locator;
   readonly recheckBtn: Locator;
   readonly landing: Locator;
-  readonly trackToggle: Locator;
-  readonly trackInput: Locator;
-  readonly trackSubmit: Locator;
+  readonly checkInput: Locator;
+  readonly checkSubmit: Locator;
   readonly accountCard: Locator;
   readonly healthChip: Locator;
   readonly tierLadder: Locator;
@@ -60,9 +60,8 @@ export class PublishingConvictionPage {
     this.unavailable = page.locator(sel.conviction.unavailable);
     this.recheckBtn = page.locator(sel.conviction.recheckBtn);
     this.landing = page.locator(sel.conviction.landing);
-    this.trackToggle = page.locator(sel.conviction.trackToggle);
-    this.trackInput = page.locator(sel.conviction.trackInput);
-    this.trackSubmit = page.locator(sel.conviction.trackSubmit);
+    this.checkInput = page.locator(sel.conviction.checkInput);
+    this.checkSubmit = page.locator(sel.conviction.checkSubmit);
     this.accountCard = page.locator(sel.conviction.accountCard);
     this.healthChip = page.locator(sel.conviction.healthChip);
     this.tierLadder = page.locator(sel.conviction.tierLadder);
@@ -106,15 +105,41 @@ export class PublishingConvictionPage {
     return this.unavailable.isVisible().catch(() => false);
   }
 
-  /** Track a known PCA by accountId (S1 pre-discovery manual path, P0). The
-   *  track-by-id input lives in a collapsed disclosure — expand it first. */
+  /** Add a known PCA to the list by accountId, the way a user does: type it beside
+   *  "Already have a PCA?", press Check, and in Get added either let an approved
+   *  wallet add it automatically or press "Add PCA #N to your list". */
   async trackAccount(accountId: string) {
-    if (!(await this.trackInput.isVisible().catch(() => false))) {
-      await this.trackToggle.first().click();
-    }
-    await this.trackInput.fill(accountId);
-    await this.trackSubmit.click();
+    await this.checkInput.first().fill(accountId);
+    await this.checkSubmit.first().click();
+    const dialog = this.page.getByTestId('pca-get-sponsored');
+    await dialog.waitFor({ state: 'visible' });
+    const add = dialog.getByTestId('pca-sponsor-track');
+    // The check is done when there's a result, an Add offer, or the PCA is already in the list.
+    await dialog
+      .locator('[data-testid="pca-sponsor-track"], [data-testid="pca-sponsor-tracked"], .v10-pca-approve-results')
+      .first()
+      .waitFor({ state: 'visible', timeout: 15_000 });
+    if (await add.isVisible()) await add.click();
+    await dialog.getByRole('button', { name: 'Close', exact: true }).click();
     await this.accountCard.first().waitFor({ state: 'visible', timeout: 15_000 });
+  }
+
+  /**
+   * Put PCA IDs in this browser's tracked list directly, without checking them on chain,
+   * then reload so the app reads them. For tests that only need "a PCA is tracked" (the
+   * chip's mount gate) and mustn't depend on another test having minted one. The key
+   * matches stores/pca.ts: `dkg-pca:` + pcaStorageScopeForContracts(contracts).
+   */
+  async seedTrackedIds(ids: string[]) {
+    const res = await fetchApiInPage<{ chainId: string | number; nft: string; token: string }>(this.page, '/api/pca/contracts');
+    if (!res.ok || !res.json) throw new Error(`seedTrackedIds: /api/pca/contracts returned ${res.status}`);
+    const { chainId, nft, token } = res.json;
+    const key = `dkg-pca:${[String(chainId), nft, token].map((p) => p.toLowerCase()).join(':')}`;
+    await this.page.evaluate(
+      ({ key, ids }) => localStorage.setItem(key, JSON.stringify({ trackedIds: ids, createPending: null, topUpPending: {} })),
+      { key, ids },
+    );
+    await this.page.reload();
   }
 
   /**

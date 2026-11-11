@@ -17,6 +17,9 @@
   min-width: 0;
 }
 .v10-wallet-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
   font-size: var(--fs-label);
   font-weight: 600;
   color: var(--text-secondary);

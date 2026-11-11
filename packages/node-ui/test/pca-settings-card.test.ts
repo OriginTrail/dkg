@@ -19,7 +19,10 @@ const state = vi.hoisted(() => ({
   bootstrapScope: vi.fn(),
 }));
 
-vi.mock('../src/ui/hooks/usePcaOverview.js', () => ({ usePcaOverview: () => state.overview }));
+// The components read uncertainty from the coverage state; derive it from the test's flag.
+vi.mock('../src/ui/hooks/usePcaOverview.js', () => ({
+  usePcaOverview: () => ({ ...state.overview, coverage: { uncertainty: state.overview.walletsInconclusive ? 'wallets-unreadable' : null } }),
+}));
 vi.mock('../src/ui/hooks/usePcaScopeBootstrap.js', () => ({ usePcaScopeBootstrap: () => state.bootstrapScope() }));
 vi.mock('../src/ui/stores/tabs.js', () => ({
   useTabsStore: Object.assign((sel: (s: unknown) => unknown) => sel({ openTab: state.openTab }), {
@@ -50,7 +53,8 @@ describe('PcaSettingsCard', () => {
   it('no tracked account → the no-tracked line', async () => {
     const { container, unmount } = await render(React.createElement(PcaSettingsCard));
     expect(state.bootstrapScope).toHaveBeenCalled();
-    expect(container.textContent).toContain('No tracked Publisher Conviction Account');
+    expect(container.textContent).toContain('This node has no Publisher Conviction Accounts (PCAs) yet.');
+    expect(container.textContent).not.toContain('Manage PCA'); // nothing to manage yet
     await unmount();
   });
 
@@ -58,33 +62,35 @@ describe('PcaSettingsCard', () => {
     state.overview = { accounts: [{}], covered: true, bestCoveringDiscountBps: 1000, walletsInconclusive: false };
     const { container, unmount } = await render(React.createElement(PcaSettingsCard));
     expect(container.textContent).toContain('10%');
-    expect(container.textContent).toContain('This node’s approved publishing wallets use a');
+    expect(container.textContent).toContain('This node’s approved publishing wallets get a');
+    expect(container.textContent).toContain('Publisher Conviction Account (PCA)');
     expect(container.textContent).not.toContain('pending confirmation');
     await unmount();
   });
 
   // T2/#9 — unreadable wallets must not read as "none currently covers".
-  it('tracked + walletsInconclusive → "couldn’t verify your wallets — retry", not "none covers"', async () => {
+  it('tracked + walletsInconclusive → "couldn’t check" with a Retry button, not "none covers"', async () => {
     state.overview = { accounts: [{}], covered: false, bestCoveringDiscountBps: null, walletsInconclusive: true };
     const { container, unmount } = await render(React.createElement(PcaSettingsCard));
-    expect(container.textContent?.toLowerCase()).toContain('couldn’t verify this node’s wallets'.toLowerCase());
-    expect(container.textContent).not.toContain('none currently covers');
+    expect(container.textContent).toContain('Couldn’t check this node’s wallets');
+    expect(container.textContent).not.toContain('covers this node');
+    expect(Array.from(container.querySelectorAll('button')).map((b) => b.textContent)).toEqual(['Retry', 'Manage PCA']);
     await unmount();
   });
 
-  it('tracked but uncovered → the count + "none currently covers" line', async () => {
+  it('tracked but uncovered → the count + "covers" line', async () => {
     state.overview = { accounts: [{}, {}], covered: false, bestCoveringDiscountBps: null, walletsInconclusive: false };
     const { container, unmount } = await render(React.createElement(PcaSettingsCard));
-    expect(container.textContent).toContain('Tracking 2 accounts');
-    expect(container.textContent).toContain('none currently covers');
+    expect(container.textContent).toContain('None of the Publisher Conviction Accounts (PCAs) you’ve added (2) covers this node’s publishes.');
     await unmount();
   });
 
   it('Manage CTA opens the conviction tab', async () => {
+    state.overview = { accounts: [{}], covered: true, bestCoveringDiscountBps: 1000, walletsInconclusive: false };
     const { container, unmount } = await render(React.createElement(PcaSettingsCard));
     await act(async () => {
       Array.from(container.querySelectorAll('button'))
-        .find((b) => /Manage publisher conviction/i.test(b.textContent ?? ''))!
+        .find((b) => /Manage PCA/.test(b.textContent ?? ''))!
         .dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(state.openTab).toHaveBeenCalledWith({ id: 'conviction', label: 'Publisher Conviction', closable: true });

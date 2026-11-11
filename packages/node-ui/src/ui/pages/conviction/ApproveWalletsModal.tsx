@@ -310,7 +310,7 @@ export function ApproveWalletsModal({
               // Renew (#1344) — these are the node's OWN carried-over wallets,
               // not a third party, so the sponsor-can't-verify warning is wrong here.
               <div className="v10-modal-warning ds-card-nested" data-testid="pca-renew-reapprove-note">
-                ⓘ Re-approving PCA #{deregisterFrom}’s wallets on #{accountId}. Each wallet is MOVED —
+                <StatusGlyph tone="warning" /> Re-approving PCA #{deregisterFrom}’s wallets on #{accountId}. Each wallet is MOVED —
                 deregistered from #{deregisterFrom}, then approved on #{accountId} (two txs per wallet,
                 owner gas). Account expiry alone doesn’t free a wallet, so this is required to re-use them.
                 {seedAgentsResolved === false && (

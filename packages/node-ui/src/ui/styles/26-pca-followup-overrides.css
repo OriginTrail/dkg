@@ -1,30 +1,14 @@
 /* PCA styles — PCA UX follow-up override layer. Split from 26-pca.css (#1354); class names + cascade order unchanged. MUST import LAST — equal-specificity overrides that win by source order across overview/primitives/modals. */
 
 /* ----- PCA UX follow-up: combined coverage + compact controls ----- */
-.v10-pca-linked-pcas {
-  margin-top: var(--space-16);
-  padding-top: 14px;
-  border-top: 1px solid var(--border-subtle);
-}
-.v10-pca-card-grid-compact {
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  margin-top: 10px;
-}
-.v10-pca-card-summary {
-  margin: 10px 0 0;
-  font-size: var(--fs-control);
-  line-height: var(--lh-body);
-  color: var(--text-secondary);
-}
+
 .v10-pca-overview-wallet {
   width: auto;
   max-width: min(420px, 100%);
   margin-left: 0;
-  margin-top: var(--space-8);
-}
-.v10-pca-overview-wallet + .v10-pca-owned-groups {
   margin-top: var(--space-16);
 }
+
 .v10-wallet-connect.compact {
   min-width: 0;
   max-width: 420px;

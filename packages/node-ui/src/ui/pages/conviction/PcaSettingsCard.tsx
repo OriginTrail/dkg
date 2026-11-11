@@ -1,8 +1,10 @@
 import React from 'react';
 import { ArrowRight } from 'lucide-react';
+import { useAgentsStore } from '../../stores/agents.js';
 import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { usePcaOverview } from '../../hooks/usePcaOverview.js';
 import { usePcaScopeBootstrap } from '../../hooks/usePcaScopeBootstrap.js';
+import { RetryButton } from '../../components/ds/RetryButton.js';
 import { formatBps } from '../../lib/format.js';
 
 function pct(bps: number | null): string {
@@ -18,8 +20,15 @@ function pct(bps: number | null): string {
  */
 export function PcaSettingsCard() {
   usePcaScopeBootstrap();
-  const { accounts, covered, bestCoveringDiscountBps, walletsInconclusive } = usePcaOverview();
+  const role = useAgentsStore((s) => (s.nodeStatus as { nodeRole?: string } | null)?.nodeRole);
+  const { accounts, covered, bestCoveringDiscountBps, coverage, refresh } = usePcaOverview();
+  // Unreadable wallets: coverage can't be confirmed either way (T2/#9).
+  const walletsUnreadable = coverage.uncertainty === 'wallets-unreadable';
   const tracked = accounts.length;
+  // With no PCA there's nothing to manage, so the button matches the dashboard's.
+  const action = tracked === 0 && !covered && !walletsUnreadable
+    ? role === 'edge' ? 'Get added to a PCA' : 'Set up PCA'
+    : 'Manage PCA';
 
   return (
     <section className="card ds-card">
@@ -27,30 +36,35 @@ export function PcaSettingsCard() {
         <h2 className="card-title">Publisher Conviction</h2>
       </div>
       <div className="card-body">
-        {tracked === 0 ? (
-          <p className="v10-pca-settings-line">No tracked Publisher Conviction Account on this node.</p>
-        ) : covered ? (
+        {covered ? (
           <p className="v10-pca-settings-line">
-            This node’s approved publishing wallets use a <strong>{pct(bestCoveringDiscountBps)}</strong> discount.
+            This node’s approved publishing wallets get a <strong>{pct(bestCoveringDiscountBps)}</strong> discount
+            from a Publisher Conviction Account (PCA).
           </p>
-        ) : walletsInconclusive ? (
+        ) : walletsUnreadable ? (
           // T2/#9 — don't assert "none covers" off unreadable wallets.
           <p className="v10-pca-settings-line" role="status">
-            Couldn’t verify this node’s wallets — retry.
+            Couldn’t check this node’s wallets, so we can’t confirm a Publisher Conviction Account (PCA) discount.
+          </p>
+        ) : tracked === 0 ? (
+          <p className="v10-pca-settings-line">
+            This node has no Publisher Conviction Accounts (PCAs) yet. A PCA gives your publishes a discount of up to 75%.
           </p>
         ) : (
           <p className="v10-pca-settings-line">
-            Tracking {tracked} account{tracked === 1 ? '' : 's'}, but none currently covers this
-            node’s publishes.
+            None of the Publisher Conviction Accounts (PCAs) you’ve added ({tracked}) covers this node’s publishes.
           </p>
         )}
-        <button
-          type="button"
-          className="v10-pca-card-btn ds-btn"
-          onClick={() => openTab({ id: 'conviction', label: 'Publisher Conviction', closable: true })}
-        >
-          Manage publisher conviction<ArrowRight size={14} aria-hidden="true" />
-        </button>
+        <div className="v10-pca-settings-actions">
+          {walletsUnreadable && <RetryButton size="md" onClick={() => refresh()} />}
+          <button
+            type="button"
+            className="v10-pca-card-btn ds-btn"
+            onClick={() => openTab({ id: 'conviction', label: 'Publisher Conviction', closable: true })}
+          >
+            {action}<ArrowRight size={14} aria-hidden="true" />
+          </button>
+        </div>
       </div>
     </section>
   );

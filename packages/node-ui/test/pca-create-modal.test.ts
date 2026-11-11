@@ -184,7 +184,7 @@ describe('CreatePcaModal', () => {
     const { container, unmount } = await render(
       React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn() }),
     );
-    await waitForText(container, 'Owner key');
+    await waitForText(container, 'Owner wallet');
     expect((container.querySelector('input[value="hardware"]') as HTMLInputElement).checked).toBe(true);
     expect((container.querySelector('input[value="hot"]') as HTMLInputElement).checked).toBe(false);
     await unmount();

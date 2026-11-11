@@ -363,7 +363,7 @@ async function connectWallet(page: Page, root?: Locator) {
   // The identity-management section deliberately has its own connect control.
   // Default PCA-owner flows must target the owner section instead of matching
   // both controls and tripping Playwright strict-mode resolution.
-  const scope = root ?? page.getByTestId('pca-owned-section');
+  const scope = root ?? page.getByTestId('pca-landing');
   await expect(scope.getByTestId('pca-wallet-connect')).toBeVisible();
   await scope.getByTestId('pca-wallet-connect').click();
   await expect(page.getByText(/via Mock Hardware Wallet/i).first()).toBeVisible();
@@ -372,7 +372,7 @@ async function connectWallet(page: Page, root?: Locator) {
 async function openWalletManagedPca(page: Page) {
   await openPca(page);
   await connectWallet(page);
-  const walletCard = page.locator('[data-testid="pca-account-card"][data-owner-mode="wallet"]').filter({ hasText: `PCA #${ACCOUNT_ID}` });
+  const walletCard = page.locator('[data-testid="pca-account-row"][data-owner-mode="wallet"]').filter({ hasText: `#${ACCOUNT_ID}` });
   await expect(walletCard).toBeVisible();
   await walletCard.getByRole('button', { name: 'Manage' }).click();
   await expect(page.getByTestId('pca-detail')).toBeVisible();
@@ -392,10 +392,10 @@ test.describe('Publisher Conviction hardware-wallet mock lane', () => {
     await openPca(page);
     await connectWallet(page);
 
-    const walletCard = page.locator('[data-testid="pca-account-card"][data-owner-mode="wallet"]').filter({ hasText: `PCA #${ACCOUNT_ID}` });
+    const walletCard = page.locator('[data-testid="pca-account-row"][data-owner-mode="wallet"]').filter({ hasText: `#${ACCOUNT_ID}` });
     await expect(walletCard).toBeVisible();
-    await expect(walletCard).toContainText(/wallet-managed/i);
-    await expect(page.getByTestId('pca-discovered-strip')).toHaveCount(0);
+    await expect(walletCard).toContainText('Your wallet');
+    await expect(page.getByTestId('pca-discovered-row')).toHaveCount(0);
   });
 
   test('blocks hardware create on wrong network until the wallet switches chains', async ({ page }) => {
@@ -459,7 +459,7 @@ test.describe('Publisher Conviction hardware-wallet mock lane', () => {
   test('wallet-managed approve registers a publishing wallet through the connected wallet', async ({ page }) => {
     await openPca(page);
     await connectWallet(page);
-    const walletCard = page.locator('[data-testid="pca-account-card"][data-owner-mode="wallet"]').filter({ hasText: `PCA #${ACCOUNT_ID}` });
+    const walletCard = page.locator('[data-testid="pca-account-row"][data-owner-mode="wallet"]').filter({ hasText: `#${ACCOUNT_ID}` });
     await walletCard.getByRole('button', { name: 'Approve wallets' }).click();
     await expect(page.getByTestId('pca-approve-modal')).toBeVisible();
     await page.getByTestId('pca-approve-address').fill('0x4444444444444444444444444444444444444444');

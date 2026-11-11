@@ -1,11 +1,12 @@
 // Buttons declare their look on the element (ds-btn + variant/size), not via
 // per-screen names registered in the design-system stylesheet (review:
 // "apply shared button classes at the element").
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import type ts from 'typescript';
 import { describe, expect, it } from 'vitest';
+import { UI, classText, jsxElements, parseTsx, tagName, tsxFiles } from './helpers/jsx.js';
 
-const UI = resolve(__dirname, '../src/ui');
 const SCREEN_BUTTONS = [
   'retry-btn', 'header-icon-btn', 'notif-btn', 'tree-hide-btn', 'tree-catalogue-btn', 'new-project-btn',
   'agent-link-btn', 'agent-send-btn', 'mlv-run-btn', 'mlv-save-btn', 'mlv-clear-btn', 'btn-promote-all',
@@ -15,26 +16,36 @@ const SCREEN_BUTTONS = [
   'ws-pca-cta', 'wallet-connect-btn', 'wallet-pill-btn', 'modal-close', 'graph-expanded-close', 'agents-refresh',
   'md-copy', 'publish-panel-refresh', 'notif-pane-markread', 'bottom-toggle', 'peer-chip-more',
 ].map(n => `v10-${n}`);
+const BUTTON_COMPONENTS = new Set(['Button', 'RetryButton']);
 const NAME = new RegExp(`(?<![\\w-])(${SCREEN_BUTTONS.join('|')})(?![\\w-])`);
 
-function tsxFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap(name => {
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) return tsxFiles(full);
-    return name.endsWith('.tsx') && !name.startsWith('__') ? [full] : [];
-  });
+/** Elements with a screen button class but no ds-btn. <Button> and the components built
+ *  on it render ds-btn themselves, so they're exempt by tag, read from the JSX tree. */
+function missingDsBtn(tree: ts.SourceFile, file?: string): string[] {
+  const missing: string[] = [];
+  for (const { node, where } of jsxElements(tree, file)) {
+    if (BUTTON_COMPONENTS.has(tagName(node))) continue;
+    const cls = classText(node);
+    if (NAME.test(cls) && !cls.includes('ds-btn')) missing.push(`${where}: ${cls}`);
+  }
+  return missing;
 }
 
 describe('button classes', () => {
   it('every element with a screen button class also declares ds-btn', () => {
-    const missing: string[] = [];
-    for (const file of tsxFiles(UI)) {
-      const src = readFileSync(file, 'utf8');
-      for (const m of src.matchAll(/className=(\{`[^`]*`\}|"[^"]*"|\{\[[^\]]*\])/g)) {
-        if (NAME.test(m[1]) && !m[1].includes('ds-btn')) missing.push(`${relative(UI, file)}: ${m[1]}`);
-      }
-    }
+    const missing = tsxFiles
+      .filter((file) => !basename(file).startsWith('__'))
+      .flatMap((file) => missingDsBtn(parseTsx(readFileSync(file, 'utf8'), file), file));
     expect(missing).toEqual([]);
+  });
+
+  it('exempts <Button> and <RetryButton> by their tag, whatever props come first', () => {
+    const tree = parseTsx(`<>
+      <Button children={<span>Retry</span>} className="v10-ws-pca-cta" />
+      <RetryButton className="v10-ws-pca-cta" onClick={() => undefined} />
+      <button type="button" className="v10-ws-pca-cta">Not a ds button</button>
+    </>`);
+    expect(missingDsBtn(tree).map((m) => m.replace(/^.*?: /, ''))).toEqual(['"v10-ws-pca-cta"']);
   });
 
   it('the shared button rules name only ds-* classes', () => {

@@ -82,7 +82,7 @@ export function PcaAgentList({
                   <>
                     {explorer && (
                       <a
-                        className="v10-pca-card-explorer"
+                        className="v10-pca-text-link"
                         href={`${explorer}/address/${addr}`}
                         target="_blank"
                         rel="noreferrer"

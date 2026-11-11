@@ -87,7 +87,7 @@ describe('PCA display formatters', () => {
 });
 
 describe('HealthChip', () => {
-  const states: PcaHealthState[] = ['healthy', 'expiring', 'expired', 'insolvent', 'swept', 'cap-near'];
+  const states: PcaHealthState[] = ['healthy', 'expiring', 'expired', 'insolvent', 'cap-near'];
 
   it('renders a text label (never glyph-only) and an aria-hidden glyph for every state', async () => {
     for (const state of states) {
@@ -158,8 +158,8 @@ describe('healthForSnapshot (single source of truth for S1/S3/S5)', () => {
     expect(healthForSnapshot({ ...base, expiresAtTimestamp: NOW }, NOW)).toBe('expired');
   });
 
-  it('swept outranks cap-near and expiring (when not expired)', () => {
-    expect(healthForSnapshot({ ...base, fullySwept: true, agentCount: 100 }, NOW)).toBe('swept');
+  it('a fully swept PCA reads as expired, ahead of cap-near and expiring', () => {
+    expect(healthForSnapshot({ ...base, fullySwept: true, agentCount: 100 }, NOW)).toBe('expired');
   });
 
   it('cap-near fires at the threshold and outranks expiring', () => {
@@ -215,7 +215,7 @@ describe('healthForSnapshot (single source of truth for S1/S3/S5)', () => {
     const zero = { topUpBuffer: '0', baseEpochAllowance: '0', remainingAllowance: '0', extendedRequested: true };
     // expired / swept win over insolvent
     expect(healthForSnapshot({ ...base, ...zero, expiresAtTimestamp: NOW - 1 }, NOW)).toBe('expired');
-    expect(healthForSnapshot({ ...base, ...zero, fullySwept: true }, NOW)).toBe('swept');
+    expect(healthForSnapshot({ ...base, ...zero, fullySwept: true }, NOW)).toBe('expired');
     // insolvent wins over cap-near and expiring
     expect(healthForSnapshot({ ...base, ...zero, agentCount: 100 }, NOW)).toBe('insolvent');
     expect(healthForSnapshot({ ...base, ...zero, expiresAtTimestamp: NOW + 100 }, NOW)).toBe('insolvent');

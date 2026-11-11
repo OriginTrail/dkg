@@ -12,6 +12,7 @@ import { createRoot } from 'react-dom/client';
 import './styles.css';
 import { Badge, Count, LayerBadge, type BadgeTone, LayerGlyph, StatusGlyph } from './components/ds/Badge.js';
 import { Button, type ButtonVariant } from './components/ds/Button.js';
+import { RetryButton } from './components/ds/RetryButton.js';
 import { Toggle } from './components/ds/Toggle.js';
 import { ContextGraphChip } from './components/ds/ContextGraphChip.js';
 import { AgentChip, AgentTitle } from './components/AgentChip.js';
@@ -359,6 +360,10 @@ const App: React.FC = () => {
           <EmptyState compact tone="danger" title="Could not load peers" description="The node didn't respond." actions={[{ label: 'Retry', onClick: () => undefined }]} />
           <div><Button disabled>Disabled</Button></div>
         </div>
+        <Row label="Retry · beside or below its message">
+          <RetryButton onClick={() => undefined} />
+          <RetryButton size="md" onClick={() => undefined} />
+        </Row>
       </Section>
 
       <Section id="inputs" title="Inputs" lead="Same corners and heights as the buttons beside them; one focus ring.">

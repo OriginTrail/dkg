@@ -3,7 +3,7 @@
 The rules behind the node UI's look and behaviour. The values live in code; this file explains what each one is for, so the next screen uses them the same way.
 
 - **Tokens:** `src/ui/styles/00-theme.css` (colours per theme, then the shape and size scale)
-- **Components:** `src/ui/components/ds/` (`Button`, `Toggle`, `Badge`, `Count`, `LayerBadge`, `ContextGraphChip`) plus `AgentChip` and `AgentDot`
+- **Components:** `src/ui/components/ds/` (`Button`, `RetryButton`, `Toggle`, `Badge`, `Count`, `LayerBadge`, `ContextGraphChip`) plus `AgentChip` and `AgentDot`
 - **Component CSS:** `src/ui/styles/27-ds-components.css`, loaded last
 - **Reference page (development only):** run `pnpm dev:ui` and open <http://127.0.0.1:5173/ui/design-system.html>. It renders every token and component live in both themes. `vite build` only bundles `index.html`, so the page is not part of the released UI.
 - **Checks:** `test/design-tokens.test.ts`, `test/class-has-css.test.ts` and `test/design-docs.test.ts` (see [Checks](#checks))
@@ -292,7 +292,7 @@ Every view that waits on data shows one of four states, and says which.
 | --- | --- | --- |
 | Loading | `<Loading label="Loading peers…" />`, `block` to fill a view | Name what's loading and end with `…`. `EmptyState busy` when a sentence of context helps. |
 | Empty | `<EmptyState title description actions />`, `compact inline` inside a card | Centre it when it fills a view or pane; align it left inside a card or sidebar. Say what will appear, or what to do next. One line of text is enough inside a list. |
-| Error | `EmptyState tone="danger"` for a view, `role="alert"` on `v10-modal-error` inside a form, `aria-invalid` on a field | Say what failed and offer a way forward. Never leave a view loading after a failure. |
+| Error | `EmptyState tone="danger"` for a view, `role="alert"` on `v10-modal-error` inside a form, `aria-invalid` on a field | Say what failed and offer a way forward. Retry is `<RetryButton size>` (small by default, `md` beside a default-size button) and sits outside the message, below it or beside it, never inside the sentence or box. Never leave a view loading after a failure. |
 | Disabled | `disabled` on the control | `--opacity-disabled`, the one disabled look. Say why nearby when the reason isn't obvious. |
 
 ## Accessibility

@@ -5,6 +5,11 @@
 .v10-pca-detail-band { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-12); margin-bottom: var(--space-16); }
 .v10-pca-detail-committed { font-size: var(--fs-control); color: var(--text-secondary); }
 .v10-pca-detail-owner { display: flex; align-items: center; gap: var(--space-8); margin-top: var(--space-16); }
+/* The owner-wallet tip: its line, then the wallet control, 8px apart (a button keeps 8px from text). */
+.v10-pca-wallet-surface { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-8); }
+.v10-pca-wallet-surface-copy { margin: 0; font-size: inherit; color: inherit; line-height: inherit; }
+/* The notice + Retry wrapper keeps the 16px the warning box had on its own. */
+.v10-pca-detail > .v10-pca-retry-block { margin-bottom: var(--space-16); }
 .v10-pca-detail .v10-stat-strip-value {
   min-height: 42px;
 }

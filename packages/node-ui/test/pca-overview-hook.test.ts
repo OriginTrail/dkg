@@ -152,8 +152,9 @@ describe('usePcaOverview', () => {
     };
     mocks.fetchPca.mockImplementation((id: string, wallet?: string) => {
       if (wallet === undefined) return Promise.resolve(snaps[id]);
+      // A probe returns that PCA's own snapshot plus probedKey (as the daemon does).
       // '8' has no approved wallet (0-approved); all others approve W1.
-      return Promise.resolve(snap({ probedKey: { wallet: W1, registered: id !== '8' } }));
+      return Promise.resolve({ ...snaps[id], probedKey: { wallet: W1, registered: id !== '8' } });
     });
     const { unmount } = await render();
     expect(latest!.bestCoveringDiscountBps).toBe(4000);
@@ -167,12 +168,63 @@ describe('usePcaOverview', () => {
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W1], balances: [], chainId: '84532', rpcUrl: null });
     mocks.fetchPca.mockImplementation((id: string, wallet?: string) => {
       // healthy (future expiry, not swept), approved, but ZERO budget (override the snap() default topUpBuffer:'1').
-      if (wallet === undefined) return Promise.resolve(snap({ accountId: '7', topUpBuffer: '0', baseEpochAllowance: '0' }));
-      return Promise.resolve(snap({ probedKey: { wallet: W1, registered: true } }));
+      const account = snap({ accountId: '7', topUpBuffer: '0', baseEpochAllowance: '0' });
+      if (wallet === undefined) return Promise.resolve(account);
+      // The probe returns the same PCA's snapshot plus probedKey.
+      return Promise.resolve({ ...account, probedKey: { wallet: W1, registered: true } });
     });
     const { unmount } = await render();
     expect(latest!.covered).toBe(false);
     expect(latest!.bestCoveringDiscountBps).toBeNull();
+    await unmount();
+  });
+
+  // The discount follows the wallet probe's own classifyCoverage outcome, not the
+  // account-level read: here the account read still shows allowance, but the probe
+  // (the fresher, per-wallet read) shows none, so nothing is covered and no discount shows.
+  it('takes coverage and the discount from the probe, not the account read, when their budgets differ', async () => {
+    usePcaStore.setState({ trackedIds: ['7'] });
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W1], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation((id: string, wallet?: string) => {
+      const base = { accountId: '7', discountBps: 3000, extendedRequested: true, topUpBuffer: '0' };
+      if (wallet === undefined) return Promise.resolve(snap({ ...base, remainingAllowance: '10' }));
+      return Promise.resolve(snap({ ...base, remainingAllowance: '0', probedKey: { wallet: W1, registered: true } }));
+    });
+    const { unmount } = await render();
+    expect(latest!.coverage.wallets).toEqual([{ kind: 'inactive', wallet: W1, accountId: '7', expired: false }]);
+    expect(latest!.covered).toBe(false);
+    expect(latest!.bestCoveringDiscountBps).toBeNull();
+    await unmount();
+  });
+
+  it('a failed account read leaves coverage unknown with Retry, and recovers to the discount', async () => {
+    usePcaStore.setState({ trackedIds: ['7'] });
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W1], balances: [], chainId: '84532', rpcUrl: null });
+    let readFails = true;
+    mocks.fetchPca.mockImplementation((id: string, wallet?: string) => {
+      if (wallet === undefined && readFails) return Promise.reject(new HttpError(504, 'timeout', { code: 'RPC_TIMEOUT' }));
+      return Promise.resolve(snap({ accountId: id, ...(wallet ? { probedKey: { wallet, registered: true } } : {}) }));
+    });
+    const { unmount } = await render();
+    // The account read failed before any probe: never a confirmed "not covered".
+    expect(mocks.fetchPca.mock.calls.some(([, wallet]) => wallet)).toBe(false);
+    expect(latest!.coverage).toMatchObject({
+      status: 'uncertain', uncertainty: 'probe-inconclusive', recovery: 'retry-read',
+      wallets: [{ kind: 'unknown', wallet: W1 }],
+    });
+    readFails = false;
+    await act(async () => { latest!.refresh(); });
+    for (let i = 0; i < 50 && !latest!.covered; i++) await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+    expect(latest!.coverage).toMatchObject({ status: 'covered', uncertainty: null, bestCoveringDiscountBps: 1000 });
+    await unmount();
+  });
+
+  it('a tracked PCA that doesn’t exist (404) confirms no coverage, with nothing to retry', async () => {
+    usePcaStore.setState({ trackedIds: ['7'] });
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W1], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockRejectedValue(new HttpError(404, 'not found', { error: 'UnknownAccount' }));
+    const { unmount } = await render();
+    expect(latest!.coverage).toMatchObject({ status: 'not-covered', uncertainty: null, recovery: null, wallets: [{ kind: 'uncovered', wallet: W1 }] });
     await unmount();
   });
 

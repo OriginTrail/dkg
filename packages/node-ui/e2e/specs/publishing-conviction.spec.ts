@@ -83,13 +83,13 @@ test.describe('Publisher Conviction tab (PCA) — P0', () => {
     await page.screenshot({ path: `${SHOT_DIR}/503-gate.png`, fullPage: true });
   });
 
-  test('S1: core overview shows the owner Create-PCA affordance + track-by-id discovery', async ({ conviction, page }) => {
+  test('S1: core overview shows the owner Create-PCA affordance + the PCA ID check', async ({ conviction, page }) => {
     await conviction.open();
     // A fresh CORE node owns no PCAs → the role-adaptive landing (S7) leads with
-    // the owner Create-PCA CTA and the manual track-by-id discovery disclosure
-    // (no enumeration API yet). Read-only, deterministic on an empty node.
+    // the owner Create-PCA CTA, and "Already have a PCA?" offers the ID check.
+    // Read-only, deterministic on an empty node.
     await expect(conviction.createBtn).toBeVisible();          // core/owner-capable
-    await expect(conviction.trackToggle.first()).toBeVisible(); // S1 manual discovery
+    await expect(conviction.checkInput.first()).toBeVisible(); // S1 ID check
     await page.screenshot({ path: `${SHOT_DIR}/s1-core-overview.png`, fullPage: true });
   });
 
@@ -213,8 +213,11 @@ test.describe('Publisher Conviction tab (PCA) — P0', () => {
     const cgName = list[0]!.name;
 
     // Track a PCA so the chip is expected to render (gate: trackedIds.length > 0).
+    // Seeded browser-locally, so this test needs no PCA on chain and doesn't depend on
+    // another test having minted one. (Get added still rejects an ID that doesn't exist.)
     await conviction.open();
-    await conviction.trackAccount('1');
+    test.skip(await conviction.isUnavailable(), 'PCA not deployed on this network');
+    await conviction.seedTrackedIds(['1']);
 
     // Navigate to the CG project → SWM layer (the SWM→VM publish CTA; chip is !isWm).
     await expect(async () => {
