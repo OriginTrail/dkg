@@ -42,7 +42,7 @@ import {
 import { isReadGraphStateGraph } from '../graph-enumeration-visibility.js';
 import { readGraphInventoryByPrefix } from '../graph-inventory-materialization.js';
 import { assertGraphCatalogWithinInternalLimit, readCompleteGraphCatalog } from '../graph-catalog-internal-limit.js';
-import { noteReadGraphPartitions } from '../read-graph-partition-marker.js';
+import { noteReadGraphPartitionsOfRuntime } from './data-directories.js';
 import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
@@ -570,7 +570,7 @@ class ReadGraphJob {
   }
 
   noteMayHoldPartitions(): void {
-    if (this.context.dataDir !== undefined) noteReadGraphPartitions(this.context.dataDir);
+    noteReadGraphPartitionsOfRuntime(this.runtime, this.context.dataDir);
     noteStoreMayHoldReadGraphPartitions(this.maintenance);
   }
 

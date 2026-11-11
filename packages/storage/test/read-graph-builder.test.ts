@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { mkdir } from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, readGraphIri, readScope, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
@@ -14,6 +15,7 @@ import {
   noteUnstoredReadGraphMark,
   readGraphMarkJournalPath,
   readUnstoredReadGraphMarks,
+  unstoredReadGraphMarksText,
   useReadGraphMarkJournal,
 } from '../src/read-graph/mark-journal.js';
 import { matchesGraphNameTest, readGraphMembership, type GraphNameTest } from '../src/read-graph/membership.js';
@@ -1251,6 +1253,39 @@ describe('read-graph start-up', () => {
     const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
     expect(await startReadGraphs(restarted, { dataDir: second, maintains: () => true })).toEqual({ marked: 1, maintained: 1 });
     expect((await storedRows(adapter))[wholeVm]).toBe(`dirty@${built.generation + 1}`);
+  });
+
+  it('fails a start-up whose data directory holds a journal it cannot read, rather than take it for an empty one', async () => {
+    const { store, other, first, second } = await sharedBackend();
+    // A directory where the journal's file belongs: reading it fails, as it does without permission.
+    await mkdir(readGraphMarkJournalPath(first));
+    expect(() => readUnstoredReadGraphMarks(first)).toThrow(/EISDIR/);
+    expect(() => unstoredReadGraphMarksText(first)).toThrow(/EISDIR/);
+    await expect(startReadGraphs(store, { dataDir: first, maintains: () => true })).rejects.toThrow(/EISDIR/);
+    rmSync(readGraphMarkJournalPath(first), { recursive: true });
+    expect(await startReadGraphs(store, { dataDir: first, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    // A start-up that joins the loaded mirror fails the same way.
+    await mkdir(readGraphMarkJournalPath(second));
+    await expect(startReadGraphs(other, { dataDir: second, maintains: () => true })).rejects.toThrow(/EISDIR/);
+  });
+
+  it('notes read-graph partitions in the data directory of every start-up over the backend, whenever they appear', async () => {
+    // A rollback drops the partitions only from a data directory that notes them.
+    const partitions = (...dirs: string[]) => dirs.map((dataDir) => mayHoldReadGraphPartitions(dataDir));
+    // Partitions built after both start-ups: every directory notes them.
+    const later = await sharedBackend();
+    expect(await startReadGraphs(later.store, { dataDir: later.first, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    expect(await startReadGraphs(later.other, { dataDir: later.second, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    expect(partitions(later.first, later.second)).toEqual([false, false]);
+    await buildReadGraph(later.context, later.fixture.keys[0]!);
+    expect(partitions(later.first, later.second)).toEqual([true, true]);
+    // Partitions there before a start-up joins: its directory notes them as it joins.
+    const earlier = await sharedBackend();
+    expect(await startReadGraphs(earlier.store, { dataDir: earlier.first, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    await buildReadGraph(earlier.context, earlier.fixture.keys[0]!);
+    expect(partitions(earlier.second)).toEqual([false]);
+    expect(await startReadGraphs(earlier.other, { dataDir: earlier.second, maintains: () => true })).toEqual({ marked: 0, maintained: 1 });
+    expect(partitions(earlier.second)).toEqual([true]);
   });
 
   it('replaces damaged rows and rows whose generation cannot grow, and notes nothing without rows', async () => {

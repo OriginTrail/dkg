@@ -36,6 +36,7 @@ import { markReadGraphsDirtyAtStart } from '../read-graph-partition-startup.js';
 import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
+import { noteReadGraphPartitionsOfRuntime } from './data-directories.js';
 import { clearUnstoredReadGraphMarks, readUnstoredReadGraphMarks, unstoredReadGraphMarksText, useReadGraphMarkJournal } from './mark-journal.js';
 import { syncReadGraphRuntimeWithRecovery } from './recovery.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
@@ -135,7 +136,7 @@ async function loadReadGraphs(
   // A registry record can outlive the last state row of its context graph: the partition exists all the same.
   const records = await registryRecords(target, queryOptions);
   const holdsPartitions = found.count > 0 || records.size > 0;
-  if (holdsPartitions && options.dataDir !== undefined) noteReadGraphPartitions(options.dataDir);
+  if (holdsPartitions) noteReadGraphPartitionsOfRuntime(layer.runtime, options.dataDir);
   if (holdsPartitions || (options.dataDir !== undefined && mayHoldReadGraphPartitions(options.dataDir))) {
     noteStoreMayHoldReadGraphPartitions(target);
   }
