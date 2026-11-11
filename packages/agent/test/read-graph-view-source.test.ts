@@ -9,9 +9,11 @@ import {
   type ReadGraphStoreConfig,
 } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
-import { viewReadGraphsOf } from '../src/read-graph-view-source.js';
+import { installReadGraphWorkingMemoryIdentity, viewReadGraphsOf } from '../src/read-graph-view-source.js';
 
 const AGENT = `0x${'ab'.repeat(20)}`;
+const OTHER = `0x${'cd'.repeat(20)}`;
+const PEER = '12D3KooWPeerOfTheNode';
 const vm = (contextGraphId: string): ReadGraphKey => ({ scope: readScope(contextGraphId), layer: MemoryLayer.VerifiableMemory });
 const swm = (contextGraphId: string): ReadGraphKey => ({ scope: readScope(contextGraphId), layer: MemoryLayer.SharedWorkingMemory });
 
@@ -47,6 +49,21 @@ describe('the read-graph source of merged view queries', () => {
     expect(source.identity).toBe(rule);
   });
 
+  it('installs the node\'s working-memory rule on the runtime, read at each use', () => {
+    const store = layered({});
+    const node: { defaultAgentAddress?: string; peerId?: string } = { defaultAgentAddress: AGENT, peerId: PEER };
+    installReadGraphWorkingMemoryIdentity(store, () => node);
+    const identity = viewReadGraphsOf(store)!.identity;
+    expect(identity.ownerOf(PEER)).toBe(AGENT);
+    expect(identity.ownerOf(OTHER)).toBe(OTHER);
+    node.defaultAgentAddress = OTHER;
+    expect(identity.ownerOf(PEER)).toBe(OTHER);
+    // A node that cannot be read, such as one that has stopped: the rule knows neither.
+    installReadGraphWorkingMemoryIdentity(store, () => { throw new Error('DKGNode not started'); });
+    expect(store.runtime.workingMemoryIdentity.ownerOf(PEER)).toBe(PEER);
+    expect(() => installReadGraphWorkingMemoryIdentity(new OxigraphStore(), () => node)).not.toThrow();
+  });
+
   it('is absent for a store without a read-graph layer', () => {
     expect(viewReadGraphsOf(new OxigraphStore())).toBeUndefined();
     expect(viewReadGraphsOf(undefined)).toBeUndefined();
@@ -66,6 +83,9 @@ describe('the agent', () => {
       name: 'ReadGraphSource', listenHost: '127.0.0.1', listenPort: 0, chainAdapter: new MockChainAdapter(), nodeRole: 'edge', store,
     });
     await agent.start();
+    // Started, the node maps the drafts under its peer ID to its default agent, whichever that is now.
+    (agent as unknown as { defaultAgentAddress?: string }).defaultAgentAddress = AGENT;
+    expect(store.runtime.workingMemoryIdentity.ownerOf(agent.peerId)).toBe(AGENT);
     // Context graphs the node holds: on one it holds nothing of, merged gets an empty answer before any read-graph state.
     for (const id of ['served', 'built']) await agent.createContextGraph({ id, name: id, description: 'read-graph source test' });
     const merged = (contextGraphId: string) => agent!.query('SELECT ?s WHERE { ?s ?p ?o }', {
