@@ -15,8 +15,13 @@ test('shared Linux build artifacts restore the executable safe-LLM runner for CL
   const steps = jobs.build.steps;
   const nativeBuild = steps.findIndex((step) => step.name === 'Build native safe-LLM runner for downstream CLI tests');
   assert.ok(nativeBuild > steps.findIndex((step) => step.uses === setup));
-  assert.ok(nativeBuild < steps.findIndex((step) => step.name === 'Test repository scripts'));
   assert.ok(nativeBuild < steps.findIndex((step) => step.name === 'Package build outputs'));
+  // The repository-script tests run in the repository checks job, on the
+  // restored build outputs, which carry the runner built above.
+  const checks = jobs['repository-checks'];
+  assert.ok([checks.needs].flat().includes('build'));
+  const restoreOutputs = checks.steps.findIndex((step) => step.name === 'Restore build outputs');
+  assert.ok(restoreOutputs !== -1 && restoreOutputs < checks.steps.findIndex((step) => step.name === 'Test repository scripts'));
   assert.equal(steps[nativeBuild].if, undefined, 'native output must also be built after a Turbo cache hit');
   assert.match(steps[nativeBuild].run, /cargo \+nightly-2026-08-18 build --manifest-path rust\/Cargo.toml --package dkg-safe-llm-runner --release --locked/);
   const packageOutputs = jobs.build.steps.find((step) => step.name === 'Package build outputs').run;

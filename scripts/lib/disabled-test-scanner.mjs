@@ -337,7 +337,9 @@ export function analyzeTestSource(source, filePath, { now = new Date(), d1 = isD
   const comments = sourceComments(source, sourceFile, filePath);
   const findings = [];
   const focused = [];
-  const invalidExceptions = invalidExceptionLines(comments, now);
+  const exceptions = classifyExceptions(comments, now);
+  // The invalid-line list predates the states and is derived from them.
+  const invalidExceptions = exceptions.filter(({ state }) => state === 'malformed' || state === 'expired').map(({ line }) => line);
 
   const addFinding = (node, api, pattern, titleNode, fallbackNode = node) => {
     const location = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
@@ -429,7 +431,7 @@ export function analyzeTestSource(source, filePath, { now = new Date(), d1 = isD
   };
 
   visit(sourceFile);
-  return { disabled: applyWaivers ? findings.filter((finding) => !isAllowed(finding, comments)) : findings, focused: [...new Set(focused)], invalidExceptions };
+  return { disabled: applyWaivers ? findings.filter((finding) => !isAllowed(finding, comments)) : findings, focused: [...new Set(focused)], exceptions, invalidExceptions };
 }
 
 // Compatibility entry points for the reviewed D1/D2 delta and fingerprint API.
@@ -440,14 +442,24 @@ export function analyzeD2Source(source, filePath) {
   return analyzeTestSource(source, filePath, { d1: false }).disabled;
 }
 
-function invalidExceptionLines(comments, now) {
-  return comments.filter(({ text }) => {
-    if (!text.includes('test-disable-allow:')) return false;
+// Days before an exception's deadline at which the audit starts warning.
+export const EXCEPTION_RENEWAL_WARNING_DAYS = 7;
+
+// One record per exception, by state: `malformed` when it lacks an owner, an
+// execution obligation or a real deadline at most 31 days away; `expired` once
+// that deadline has passed; `expiring` within the warning window; else `valid`.
+function classifyExceptions(comments, now) {
+  const exceptions = [];
+  for (const { text, line } of comments) {
+    if (!text.includes('test-disable-allow:')) continue;
     const expiry = /\bexpires=(\d{4}-\d{2}-\d{2})\b/.exec(text)?.[1];
     const owner = /\bowner=([\w@.-]+)/.exec(text)?.[1];
     const lane = /\blane=([\w:-]+)/.exec(text)?.[1];
     const date = expiry ? new Date(`${expiry}T23:59:59Z`) : new Date(NaN);
     const remaining = date.valueOf() - now.valueOf();
-    return !owner || !lane || !Number.isFinite(remaining) || date.toISOString().slice(0, 10) !== expiry || remaining < 0 || remaining > 31 * 86_400_000;
-  }).map(({ line }) => line);
+    const wellFormed = Boolean(owner && lane) && Number.isFinite(remaining) && date.toISOString().slice(0, 10) === expiry && remaining <= 31 * 86_400_000;
+    const state = !wellFormed ? 'malformed' : remaining < 0 ? 'expired' : remaining <= EXCEPTION_RENEWAL_WARNING_DAYS * 86_400_000 ? 'expiring' : 'valid';
+    exceptions.push({ line, state, expires: expiry, owner, lane, daysLeft: wellFormed ? Math.floor(remaining / 86_400_000) : undefined });
+  }
+  return exceptions;
 }
