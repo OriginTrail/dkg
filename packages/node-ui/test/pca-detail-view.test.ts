@@ -187,8 +187,9 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
     await waitForText(container, 'Funding');
     const tip = (id: string) => container.querySelector(`[data-stat-id="${id}"]`)?.getAttribute('title');
-    expect(tip('buffer')).toBe('TRAC the owner added on top of the commitment. Publishes use it once this epoch’s share of the committed TRAC runs out.');
-    expect(tip('per-epoch')).toBe('The committed TRAC is split into equal shares, one for each epoch (the protocol’s billing period). This is one epoch’s share.');
+    expect(tip('buffer')).toBe('TRAC the owner added on top of the commitment. Publishes use it once the current billing period’s share of the committed TRAC runs out.');
+    // Billing periods are creation-anchored, epoch-long windows, not the network's numbered epochs.
+    expect(tip('per-epoch')).toBe('The committed TRAC is split into equal shares, one for each billing period. A billing period is an epoch long, counted from when the PCA was created. This is one period’s share.');
     expect(tip('wallets')).toBe('Wallets approved to publish with this PCA, out of 100.');
     expect(container.querySelector('.v10-pca-detail-band [data-testid="pca-primer-link"]')?.textContent).toBe('What is a PCA?');
     await unmount();

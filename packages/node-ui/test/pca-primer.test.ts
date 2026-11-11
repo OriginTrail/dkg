@@ -59,6 +59,11 @@ describe('PcaPrimerLink', () => {
     expect(text).toContain('signed by one of a node’s publishing wallets');
     expect(text).toContain('Topping up doesn’t make the PCA last longer');
     expect(text).not.toMatch(/\block/i);
+    // The allowance resets with the PCA's own billing periods, counted from creation, not at
+    // the network's next epoch.
+    expect(text).toContain('counts from when the PCA was created');
+    expect(text).toContain('until the PCA’s next billing period starts');
+    expect(text).not.toContain('next epoch');
     // The tier ladder shows every tier with none highlighted (no amount entered).
     const rows = d.querySelectorAll('.v10-pca-tier-row');
     expect(rows.length).toBe(7);

@@ -23,8 +23,9 @@ export function PcaPrimerDialog({ onClose }: { onClose: () => void }) {
         <section className="v10-pca-primer-section">
           <h3 className="v10-pca-primer-title">What you commit</h3>
           <p className="v10-pca-primer-copy">
-            At least 25,000 TRAC, paid when you create the PCA. A PCA runs for a fixed number of epochs
-            (the protocol’s billing periods) that the protocol sets. Committed TRAC isn’t returned, even if
+            At least 25,000 TRAC, paid when you create the PCA. A PCA runs for a fixed number of billing
+            periods that the protocol sets. Each one is an epoch long and counts from when the PCA was
+            created, so it doesn’t line up with the network’s epochs. Committed TRAC isn’t returned, even if
             you don’t use it all. The PCA page shows when yours ends.
           </p>
         </section>
@@ -51,16 +52,16 @@ export function PcaPrimerDialog({ onClose }: { onClose: () => void }) {
         <section className="v10-pca-primer-section">
           <h3 className="v10-pca-primer-title">How it’s spent</h3>
           <p className="v10-pca-primer-copy">
-            The committed TRAC is split into equal shares, one for each epoch. Publishes use the current
-            epoch’s share first, then the top-up buffer: extra TRAC the owner can add while the PCA is active.
-            When both run out, publishes pay the full fee until the next epoch starts. Topping up doesn’t make
-            the PCA last longer.
+            The committed TRAC is split into equal shares, one for each billing period. Publishes use the
+            current period’s share first, then the top-up buffer: extra TRAC the owner can add while the PCA is
+            active. When both run out, publishes pay the full fee until the PCA’s next billing period starts.
+            Topping up doesn’t make the PCA last longer.
           </p>
         </section>
         <section className="v10-pca-primer-section">
           <h3 className="v10-pca-primer-title">When it ends</h3>
           <p className="v10-pca-primer-copy">
-            After its last epoch, the PCA expires and publishes pay the full fee again. Any top-up TRAC left
+            After its last billing period, the PCA expires and publishes pay the full fee again. Any top-up TRAC left
             over goes to stakers, not back to you. To keep the discount, create a new PCA: it can copy over the
             approved wallets.
           </p>

@@ -676,7 +676,7 @@ export function CreatePcaModal({
             approve in the next step get it.
           </p>
           <div className="v10-modal-tip ds-card-nested">
-            A PCA runs for a fixed number of epochs that the protocol sets, so there’s no length to choose.
+            A PCA runs for a fixed number of epoch-long billing periods that the protocol sets, so there’s no length to choose.
             Committed TRAC isn’t returned, even if you don’t use it all. The owner wallet also needs gas to pay
             for creating the PCA.
           </div>

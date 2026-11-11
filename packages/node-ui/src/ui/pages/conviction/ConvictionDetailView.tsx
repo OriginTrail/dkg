@@ -204,8 +204,8 @@ function DetailBody({
 
       <StatStrip
         items={[
-          { id: 'buffer', label: 'Top-up buffer', value: `${formatPcaTrac(snapshot.topUpBufferTrac)} TRAC`, tooltip: 'TRAC the owner added on top of the commitment. Publishes use it once this epoch’s share of the committed TRAC runs out.' },
-          { id: 'per-epoch', label: 'Per-epoch allowance', value: `${formatWeiToTrac(snapshot.baseEpochAllowance)} TRAC`, tooltip: 'The committed TRAC is split into equal shares, one for each epoch (the protocol’s billing period). This is one epoch’s share.' },
+          { id: 'buffer', label: 'Top-up buffer', value: `${formatPcaTrac(snapshot.topUpBufferTrac)} TRAC`, tooltip: 'TRAC the owner added on top of the commitment. Publishes use it once the current billing period’s share of the committed TRAC runs out.' },
+          { id: 'per-epoch', label: 'Per-epoch allowance', value: `${formatWeiToTrac(snapshot.baseEpochAllowance)} TRAC`, tooltip: 'The committed TRAC is split into equal shares, one for each billing period. A billing period is an epoch long, counted from when the PCA was created. This is one period’s share.' },
           // GAP-4/5 — the precise current-epoch remaining allowance (extended snapshot,
           // best-effort). Display only — the coverage spine stays the coarse proxy (#1349
           // is a separate decision). Omitted when the extended read didn't return it.
@@ -215,8 +215,8 @@ function DetailBody({
                 label: 'Remaining this epoch',
                 value: `${formatPcaTrac(snapshot.remainingAllowanceTrac)} TRAC`,
                 tooltip: snapshot.currentEpoch != null
-                  ? `What’s left of this epoch’s allowance. Current epoch ${snapshot.currentEpoch}.`
-                  : 'What’s left of this epoch’s allowance.',
+                  ? `What publishes can still use now: what’s left of this billing period’s share, plus the top-up buffer. Current epoch ${snapshot.currentEpoch}.`
+                  : 'What publishes can still use now: what’s left of this billing period’s share, plus the top-up buffer.',
               }]
             : []),
           { id: 'wallets', label: 'Publishing wallets', value: `${snapshot.agentCount} / 100`, tooltip: 'Wallets approved to publish with this PCA, out of 100.' },

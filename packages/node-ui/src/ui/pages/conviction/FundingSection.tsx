@@ -132,7 +132,7 @@ export function FundingSection({
     <section className="v10-pca-detail-section">
       <h3 className="v10-pca-detail-section-title">Funding</h3>
       <p className="v10-pca-detail-hint">
-        A top-up adds TRAC that publishes use after each epoch’s share runs out. It does <strong>not</strong>
+        A top-up adds TRAC that publishes use after each billing period’s share runs out. It does <strong>not</strong>
         make the PCA last longer: when the PCA expires, you create a new one.
       </p>
       {ownerTrac != null && <p className="v10-pca-detail-hint">Owner balance: {formatPcaTrac(ownerTrac)} TRAC</p>}
