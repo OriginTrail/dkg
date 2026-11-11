@@ -46,5 +46,10 @@ describe('a node whose settings build one context graph\'s verifiable memory', (
     await vi.waitFor(() => expect(store.runtime.mirror.get(VM)?.state).toBe('ready'), { timeout: 30_000, interval: 50 });
     const held = await adapter.query(`SELECT ?o WHERE { GRAPH <${VM}> { ?s ?p ?o } }`);
     expect(held.type === 'bindings' && held.bindings).toEqual([{ o: '"v"' }]);
+
+    // Once a read graph has a row, every update must name the graphs it writes: registering the context graph persists
+    // its registration status through such an update, and the read graph stays ready.
+    await agent.registerContextGraph(CG);
+    expect(store.runtime.mirror.get(VM)?.state).toBe('ready');
   }, 60_000);
 });
