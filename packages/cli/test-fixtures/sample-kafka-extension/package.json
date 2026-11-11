@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@origintrail-official/kafka-plugin": "workspace:*",
-    "zod": "^3.25.76"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "typescript": "^5.4.5"
