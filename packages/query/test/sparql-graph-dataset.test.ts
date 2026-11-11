@@ -26,6 +26,7 @@ import {
   wrapWithDeduplicatedGraphValues,
   wrapWithGraphValues,
 } from '../src/sparql-graph-scope.js';
+import { callerGraphBranchesFit } from '../src/sparql-caller-graph-read.js';
 
 const graphs = ['urn:g:1', 'urn:g:2'];
 const NAMED = 'FROM NAMED <urn:g:1> FROM NAMED <urn:g:2>';
@@ -172,6 +173,18 @@ describe('planGraphDataset', () => {
     const whole = guardGraphBlocksWithoutTriples(scope('SELECT ?s WHERE { SELECT ?s WHERE { ?s ?p ?o } }'));
     expect(whole.source).toMatch(/WHERE \{ \{ SELECT \?s WHERE \{ \?s \?p \?o \}\s+\} FILTER EXISTS/);
     expect(() => scope(whole.source)).not.toThrow();
+  });
+
+  it('keeps the graph list for a constant graph assignment over more graphs than the branches allow', () => {
+    const query = scope('SELECT ?s WHERE { VALUES ?g { <urn:wide:1> } GRAPH ?g { BIND(<urn:wide:1> AS ?g) ?s <urn:p> ?o } }');
+    const fits = Array.from({ length: 128 }, (_, i) => `urn:wide:${i + 1}`);
+    const wide = [...fits, 'urn:wide:129'];
+    expect(callerGraphBranchesFit(query, fits)).toBe(true);
+    expect(callerGraphBranchesFit(query, wide)).toBe(false);
+    expect(ready(rewriteGraphSet(query, fits, 'values-union', 'oxigraph'))).toContain('GRAPH <urn:wide:128>');
+    const kept = ready(rewriteGraphSet(query, wide, 'values-union', 'oxigraph'));
+    expect(kept).not.toContain('GRAPH <urn:wide:1>');
+    expect(kept).toContain('FROM NAMED <urn:wide:129>');
   });
 
   it('writes the graph list beside the dataset for a read that keeps one', () => {
@@ -664,6 +677,18 @@ describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind,
     const optional = await engine.query(`SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:label> ?l OPTIONAL { BIND(<${SHARED[0]}> AS ?g) } } }`, shared);
     expect(rows(optional.bindings)).toEqual(rows(plain.bindings));
     expect(plain.bindings.length).toBeGreaterThan(labelled.length);
+  });
+
+  it('answers a constant graph assignment on a view with more graphs than the branches allow', async () => {
+    const wide = 'dataset-stores-wide';
+    const wideRoot = `did:dkg:context-graph:${wide}`;
+    const members = Array.from({ length: 130 }, (_, i) => `${wideRoot}/_verifiable_memory/0xa/${i + 1}`);
+    await opened.store.insert(members.map((graph, i) => ({ subject: `urn:wide:s${i + 1}`, predicate: 'urn:p', object: `"w${i + 1}"`, graph })));
+    const engine = new DKGQueryEngine(opened.store);
+    const result = await engine.query(`SELECT ?s WHERE { VALUES ?g { <${members[0]}> } GRAPH ?g { BIND(<${members[0]}> AS ?g) ?s <urn:p> ?o } }`,
+      { contextGraphId: wide, view: 'verifiable-memory' });
+    expect(result.bindings.length).toBeGreaterThan(0);
+    expect(new Set(result.bindings.map(row => row.s))).toEqual(new Set(['urn:wide:s1']));
   });
 
   it('leaves graphs the store does not hold out of patterns that need no triple', async () => {
