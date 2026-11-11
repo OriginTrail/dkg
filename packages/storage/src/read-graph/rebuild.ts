@@ -333,7 +333,7 @@ export async function refreshReadGraphRegistry(context: ReadGraphJobContext, con
     // The same membership can come from other facts, and the layer predicts later writes from the facts.
     const cachedFacts = runtime.registries.facts(contextGraphId);
     if (cached !== undefined && !changed && cachedFacts !== undefined && sameFacts(cachedFacts, facts)) {
-      await recordReadGraphRegistry(target, runtime, fresh, jobOptions(context));
+      await recordReadGraphRegistry(target, runtime, fresh, jobOptions(context), context.dataDir);
       return false;
     }
     const affected = runtime.mirror.rows().map((row) => row.readGraph)
@@ -343,7 +343,7 @@ export async function refreshReadGraphRegistry(context: ReadGraphJobContext, con
       if (changed) for (const readGraph of affected) await new ReadGraphJob(context, readGraph, 'mark').markDirtyHeld();
       runtime.registries.set(fresh, facts);
       // After the marks: every ready row of the context graph follows this registry.
-      await recordReadGraphRegistry(target, runtime, fresh, jobOptions(context));
+      await recordReadGraphRegistry(target, runtime, fresh, jobOptions(context), context.dataDir);
       return true;
     });
     if (installed) return changed;
