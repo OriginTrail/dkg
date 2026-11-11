@@ -1,3 +1,5 @@
+import { invocationDefinition } from './studio-inputs.mjs';
+import { createComponentRegistry } from './component-registry.mjs';
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { requireDkgOperation, validateDkgProfile } from './dkg-profile.mjs';
@@ -44,6 +46,7 @@ export function validateDkgTopology(definition) {
 /** Transport journal only. Scheduling, transformations and joins remain in native n8n. */
 export function dkgComponentStore(db, profile = null) {
   if (profile) profile = validateDkgProfile(profile);
+  const registry = createComponentRegistry(profile);
   const inputSnapshots = new Map(), operationInputs = {};
   for (const [id, operation] of Object.entries(profile?.operations ?? {})) {
     if (!inputSnapshots.has(operation.loadInputs)) inputSnapshots.set(operation.loadInputs, operation.loadInputs?.() ?? []);
@@ -79,8 +82,13 @@ export function dkgComponentStore(db, profile = null) {
     if (old && (old.actor !== null && old.actor !== actorText || profile?.requiresNosActor && old.actor === null))
       throw fail('This invocation belongs to a different account or principal.');
     assertDkgEnabled(workflow.definition, profile);
-    for (const id of new Set(workflow.definition.nodes.filter(n => isDkg(n.componentId)).map(n => n.componentId)))
-      requireDkgOperation(profile, id).validateInput(workflow.definition, input, operationInputs[id]);
+    const resolved = invocationDefinition(workflow.definition, input, registry);
+    validateDkgTopology(resolved);
+    if (workflow.definition.inputs !== undefined)
+      for (const node of resolved.nodes.filter(n => isDkg(n.componentId)))
+        requireDkgOperation(profile, node.componentId).validateNode(node, JSON.parse(input.itemsJson), input);
+    for (const id of new Set(resolved.nodes.filter(n => isDkg(n.componentId)).map(n => n.componentId)))
+      requireDkgOperation(profile, id).validateInput(resolved, input, operationInputs[id]);
     const encoded = JSON.stringify(input);
     if (
       old &&
@@ -154,7 +162,7 @@ export function dkgComponentStore(db, profile = null) {
     assertCurrentProfile();
     if (profile.requiresNosActor) await profile.authorize(actor);
     assertCurrentProfile();
-    const node = definition.nodes.find(
+    let node = definition.nodes.find(
       (n) => n.id === value.blockId && isDkg(n.componentId),
     );
     if (!node) throw fail("DKG block is not in this pinned workflow.");
@@ -167,13 +175,17 @@ export function dkgComponentStore(db, profile = null) {
       JSON.stringify(rows).length > 8192
     )
       throw fail("Bounded DKG component input required.");
+    if (!isDeepStrictEqual(receivedInput, { invocationId: value.effectId, input }))
+      throw fail('Native execution did not receive this invocation grant and its exact input.');
+    workflow = { ...workflow, definition: invocationDefinition(definition, input, registry) };
+    node = workflow.definition.nodes.find(n => n.id === node.id);
+    validateDkgTopology(workflow.definition);
     const capability = requireDkgOperation(profile, node.componentId);
     capability.validateNode(node, rows, input);
     const invocationCalls = calls.invocation(id), requestHash = hash(value);
     const readPrior = () => invocationCalls.read(node.id, requestHash);
     const previous = readPrior();
-    if (!isDeepStrictEqual(receivedInput, { invocationId: value.effectId, input }))
-      throw fail('Native execution did not receive this invocation grant and its exact input.');
+
     const binding = db.prepare('SELECT * FROM dkg_component_native_executions WHERE id=?').get(id);
     if (!binding && invocationCalls.hasCalls())
       throw fail('Legacy DKG calls lack a verified native execution binding; operator reconciliation required.');

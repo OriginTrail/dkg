@@ -2,6 +2,8 @@
 > See [DKG execution profiles](./DKG-PROFILES.md) before installing or running them.
 > The JPB sections below describe the opt-in demo policy, not generic component defaults.
 
+> Named invocation inputs and reusable components: [Studio inputs](./STUDIO-INPUTS.md).
+
 # Invoke an n8n capability as a Program KA
 
 An agent invokes `urn:demo:n8n:normalize-text:1` through the ordinary signed Graph

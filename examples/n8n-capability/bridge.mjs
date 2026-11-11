@@ -3,7 +3,7 @@ import { isDkg, dkgComponentStore } from './dkg-components.mjs';
 import { canonicalizeJson } from '../../packages/core/dist/index.js';
 import { mapWithConcurrency } from '../../packages/agent/dist/map-with-concurrency.js';
 import { loadExecutionOutputs } from '../../packages/cli/dist/semantic-runtime-execution-persistence.js';
-import { iriValue, resultRows } from '../../packages/cli/dist/semantic-runtime-values.js';
+import { iriValue, literalValue, resultRows, programGraphAuthor } from '../../packages/cli/dist/semantic-runtime-values.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
@@ -16,6 +16,7 @@ import { createStudioProvider } from './studio-provider.mjs';
 import { createStudioRepository } from './studio-repository.mjs';
 import { createStudioService } from './studio-service.mjs';
 import { normalizeComponentInput } from './component-registry.mjs';
+import { createWorkflowComponents } from './studio-components.mjs';
 import { STUDIO_PREFIX } from './studio-definition.mjs';
 import { createProgramCatalog } from './program-catalog.mjs';
 import { capabilityPrefix, capabilityRoutes, matchCapabilityRoute } from './capability-routes.mjs';
@@ -136,13 +137,16 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
       executionIri: result.executionIri, n8nExecutionId: output.n8nExecutionId, workflowSha256: output.workflowSha256,
       output: output.output, persisted: result.persisted, readbackVerified: true };
   }
+  const reusable = studio ? createWorkflowComponents({ agent, owner, graphId, studio, capabilities: list,
+    normalize: compiler.normalizeStudio, persist: persistProgramKnowledgeAsset, resultRows, iriValue, literalValue, programGraphAuthor }) : null;
   const handlers = {
+    studioComponentSave: async ({ res, value }) => json(res, 200, await reusable.publish(value)),
     list: async ({ res, ownerAccess }) => json(res, 200, { capabilities: (await list()).filter(c => c.kind !== 'component'), canInvoke: ownerAccess }),
     workflows: async ({ res }) => json(res, 200, { workflows: await workflows.list() }),
     workflowSave: async ({ res, value, authorize }) => json(res, 200, await workflows.save(value, authorize)),
     workflowRun: async ({ res, value, authorize }) => json(res, 200, await workflows.run(value, authorize)),
-    studio: async ({ res, ownerAccess }) => json(res, 200, { capabilities: [...(await list()).filter(c => c.kind === 'component'), ...await listPrograms()], workflows: await studio.list(), canInvoke: ownerAccess }),
-    studioSave: async ({ res, value, authorize }) => json(res, 200, await studio.save(value, authorize)),
+    studio: async ({ res, ownerAccess }) => json(res, 200, { capabilities: [...(await list()).filter(c => c.kind === 'component'), ...await listPrograms(), ...await reusable.list().catch(() => [])], workflows: await studio.list(), canInvoke: ownerAccess }),
+    studioSave: async ({ res, value, authorize }) => json(res, 200, await reusable.save(value, authorize)),
     studioRun: async ({ res, value, authorize, actor }) => json(res, 200, await studio.run(value, authorize, actor)),
     studioActivation: async ({ res, value, authorize }) => json(res, 200, await studio.activate(value, authorize)),
     studioHistory: async ({ res, params, ownerAccess, authorize }) => json(res, 200, await studio.history(params.get('kaRef'), needsExport => {
@@ -228,5 +232,5 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     }
     return true;
   }
-  return { list, listPrograms, invoke, workflows, studio, handle, close() { studio?.stop(); repository?.close(); } };
+  return { list, listPrograms, invoke, workflows, studio, reusable, handle, close() { studio?.stop(); repository?.close(); } };
 }

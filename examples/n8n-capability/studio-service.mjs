@@ -4,6 +4,7 @@ import { studioExecutionPlan, prepareStudioExecution } from './studio-execution-
 import { createHash } from 'node:crypto';
 import { createStudioEventController, eventHistorySnapshot } from './studio-events.mjs';
 import { isDeepStrictEqual } from 'node:util';
+import { invocationInput } from './studio-inputs.mjs';
 import { normalizeComponentInput } from './component-registry.mjs';
 import { component as componentV1, normalizeComponentInput as normalizeComponentInputV1 } from './component-registry-v1.mjs';
 import { createStudioCompiler } from './studio-definition.mjs';
@@ -89,7 +90,7 @@ export function createStudioService({ graphId, owner, client, repository, provid
     return execute(value, { authorizeExport: authorize, actor, prepareExecution: events?.prepareExecution });
   }
   async function execute(value, { authorizeExport, beforeDispatch, actor, prepareExecution }) {
-    if (!value || Object.keys(value).some(k => !['kaRef', 'sourceHash', 'itemsJson', 'invocationId'].includes(k))) throw reject('Invalid graph invocation.');
+    if (!value || Object.keys(value).some(k => !['kaRef', 'sourceHash', 'itemsJson', 'invocationId', 'arguments'].includes(k))) throw reject('Invalid graph invocation.');
     const invocationId = workflowUuid(value.invocationId), { compiled, workflow } = await get(value.kaRef, value.sourceHash);
     if (!workflow.approved) throw reject('This graph is not approved.');
     const root = compiled.definition.nodes.find(n => n.id === compiled.definition.entryId);
@@ -100,6 +101,7 @@ export function createStudioService({ graphId, owner, client, repository, provid
     if (requiresExportAuthorization) authorizeExport();
     let input; try { input = (compiled.legacy ? normalizeComponentInputV1 : normalizeComponentInput)(preparation.descriptor, { itemsJson: value.itemsJson, paramsJson: JSON.stringify(root.params), executionId: '' }); }
     catch (e) { throw reject(e.message); }
+    input = invocationInput(compiled.definition, value.arguments, input, compiler.registry);
     const authorizeDispatch = () => {
       beforeDispatch?.(requiresExportAuthorization);
       preparation.beforeDispatch?.(requiresExportAuthorization);

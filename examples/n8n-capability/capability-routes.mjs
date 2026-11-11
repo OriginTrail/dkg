@@ -2,6 +2,7 @@ export const capabilityPrefix = (accountId = 'account-a') => '/spike/ka/accounts
 
 /** HTTP policy shared by the bridge and preview. Handlers stay with their owning service. */
 export const capabilityRoutes = Object.freeze([
+  { id: 'studioComponentSave', path: '/studio/components', methods: ['POST'], role: 'owner', preview: true, exportHeader: false, bodyLimit: 16384, studio: true },
   { id: 'list', path: '', methods: ['GET'], role: 'member', preview: true, exportHeader: false, bodyLimit: 0 },
   { id: 'invoke', path: '/invoke', methods: ['POST'], role: 'owner', preview: true, exportHeader: true, bodyLimit: 16384 },
   { id: 'inspect', path: '/inspect', methods: ['GET'], role: 'member', preview: true, exportHeader: false, bodyLimit: 0 },

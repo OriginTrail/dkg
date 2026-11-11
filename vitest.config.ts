@@ -11,6 +11,7 @@ export default defineConfig({
       'packages/marketplace',
       'packages/rdf-utils',
       'packages/core',
+      'packages/studio-contracts',
       'packages/http-utils',
       'packages/graph-computer',
       'packages/storage',

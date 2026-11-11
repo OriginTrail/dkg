@@ -7,7 +7,7 @@ const tools = [
   ['studio_list', 'List saved read-only native Studio workflows.', schema({}), 'list'],
   ['studio_get', 'Inspect one exact saved workflow revision.', schema(pin), 'get'],
   ['studio_run', 'Admit one native run; retain runKey and read until terminal. Never mint a new key to retry.',
-    schema({ ...pin, runKey: text, arguments: { type: 'object', additionalProperties: { type: ['string', 'number', 'boolean'] } } }), 'run'],
+    schema({ ...pin, runKey: text, arguments: { type: 'object', additionalProperties: true } }), 'run'],
   ['studio_run_read', 'Read or reconcile the same account run without dispatching it again.', schema({ runKey: text }), 'readRun'],
   ['studio_withdraw', 'Owner only: withdraw a saved revision from future tool runs.', schema(pin), 'withdraw'],
 ];
