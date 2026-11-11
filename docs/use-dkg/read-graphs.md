@@ -83,15 +83,15 @@ Watch the state of the context graph's read graphs:
 dkg store read-graphs status -c my-project
 ```
 
-When they show `ready`, compare each read graph with its asset graphs, in both directions:
+When they show `ready`, compare every `ready` read graph on the node with its asset graphs, in both directions:
 
 ```bash
-dkg store read-graphs check -c my-project
+dkg store read-graphs check
 ```
 
 - **What the full check finds:** a triple an asset graph holds that the read graph lacks, and a triple the read graph holds that no asset graph holds.
 - **The answer:** each read graph is `consistent`, `mismatch`, `skipped` (not `ready`) or `interrupted` (writes kept overlapping it). Run it again until every one is `consistent`.
-- **A mismatch:** the read graph is marked dirty and rebuilt before it serves, and the command exits 1.
+- **A mismatch:** the read graph is marked dirty and rebuilt before it serves, and the command exits 1. It also exits 1 when the check itself fails.
 - **The sampled check:** `--sampled` runs a quicker one. The node also runs it in the background for as long as the read graph exists.
 
 ### 3. Run your workload, then check again
@@ -105,7 +105,7 @@ Let the node take its usual traffic, or drive every kind of write it takes:
 - sub-graph registration;
 - drafts.
 
-Then run `dkg store read-graphs check -c my-project` again.
+Then run `dkg store read-graphs check` again.
 
 ### 4. Read the delta report with the context graph's owner
 
@@ -180,12 +180,12 @@ At any step, set the layer back to `off` and restart.
 
 | Command | What it does |
 | --- | --- |
-| `status` | Each read graph with its layer, state and generation, and a count per state |
-| `check` | The full check; `--sampled` for the quicker one |
+| `status` | Each read graph with its layer, state and generation, a count per state, what the builder is doing, and the last check |
+| `check` | The full check of every `ready` read graph; `--sampled` for the quicker one |
 | `rebuild` | Marks read graphs dirty; the node rebuilds them on its next pass. Watch with `status`. |
 | `drop --yes` | Removes read graphs and frees their space |
 
-- **Options:** each command takes `-c <context graph ID>` and `--layer wm|swm|vm` to narrow it, and `--json` to print the node's answer.
+- **Options:** `status`, `rebuild` and `drop` take `-c <context graph ID>` and `--layer wm|swm|vm` to narrow them. Every command takes `--json` to print the node's answer.
 - **HTTP:** the same calls are `GET /api/store/read-graphs` and `POST /api/store/read-graphs/check`, `/rebuild` and `/drop`.
 
 ## What you'll see
@@ -209,5 +209,5 @@ Metrics are exported once an OTLP endpoint is set; see [Monitor Store and Queue 
 | The daemon stops at start, with `READ_GRAPHS_UNSUPPORTED` in its log | The store cannot maintain read graphs. Set `off`, or move to a store listed above. |
 | `dkg start` refuses: the rollback target is older than the first release that recognizes read graphs | Update so that the rollback target recognizes read graphs, or set `off`. |
 | A read graph stays `dirty` or `rebuilding` | Merged requests get `503` until it is `ready`; per-asset answers keep working. Look for the check line in the daemon log. If it repeats, set `off` and open an issue with those log lines. |
-| You suspect a read graph's answers | Run `dkg store read-graphs check -c <id>`. To start it over, run `dkg store read-graphs rebuild -c <id>`. |
+| You suspect a read graph's answers | Run `dkg store read-graphs check`. To start one over, run `dkg store read-graphs rebuild -c <id>`. |
 | Writes are slower | Compare the store's queue waits with the layer on and off ([Monitor Store and Queue Pressure](backpressure-observability.md)). Set `off` for the layer if they rise. |

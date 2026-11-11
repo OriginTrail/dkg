@@ -19,11 +19,15 @@
 #   gate      run READ_GRAPHS_GATE_CMD (default scripts/devnet-comprehensive.sh)
 #             with read graphs on, wait for `ready`, then run the full check
 #             again;
-#   drills    a restart during a rebuild, a kill during writes, a CLI write
-#             with the daemon down, a rollback and forward again, and the
-#             setting to `off` and back. Each must end as designed (a new
-#             generation, or a dropped partition), and then be `ready` again
-#             with a clean full check.
+#   drills    a restart during a rebuild; a kill of the daemon worker during
+#             writes (every write the node acknowledged must be there after
+#             it); a CLI write with the daemon down (`dkg publisher clear
+#             finalized` on a node that has such jobs, which must stay
+#             cleared); a rollback and forward again (the earlier release is
+#             built first); and the setting to `off` and back. Each must end
+#             as designed (a new generation, or a dropped partition), and then
+#             be `ready` again with a clean full check. A drill whose workload
+#             did not happen is INCONCLUSIVE, never a pass.
 #
 # It writes report.md and results.tsv to READ_GRAPHS_RUN_RESULTS (default
 # $DEVNET_DIR/read-graphs-build-run/<UTC timestamp>; no spaces). At the end it
@@ -70,8 +74,10 @@ BACKFILL_TIMEOUT="${READ_GRAPHS_BACKFILL_TIMEOUT:-1800}"
 READY_TIMEOUT="${READ_GRAPHS_READY_TIMEOUT:-900}"
 DIRECT_WRITE_CGS="${READ_GRAPHS_DIRECT_WRITE_CGS:-catalog-fixture-small-graph}"
 ROLLBACK_FROM="${READ_GRAPHS_ROLLBACK_FROM:-prev}"
-# The module of the step `dkg rollback` runs before it switches versions (a test can point elsewhere).
+# The module of the step `dkg rollback` runs before it switches versions, and the devnet's store endpoint
+# resolver (a test can point either elsewhere).
 ROLLBACK_MODULE="${READ_GRAPHS_ROLLBACK_MODULE:-$REPO_ROOT/packages/cli/dist/update/rollback-read-graphs.js}"
+ENDPOINT_RESOLVER="${READ_GRAPHS_ENDPOINT_RESOLVER:-$REPO_ROOT/scripts/lib/qa/devnet-storage-endpoint.mjs}"
 RESTART_NODE="${READ_GRAPHS_DRILL_RESTART_NODE:-5}"
 KILL_NODE="${READ_GRAPHS_DRILL_KILL_NODE:-6}"
 CLI_NODE="${READ_GRAPHS_DRILL_CLI_NODE:-3}"
@@ -160,29 +166,25 @@ read_graphs_setting() {
   ' "$DEVNET_DIR/node$1/config.json"
 }
 same_json() { node -e 'const [a, b] = process.argv.slice(1); process.exit(JSON.stringify(JSON.parse(a)) === JSON.stringify(JSON.parse(b)) ? 0 : 1)' "$1" "$2" 2>/dev/null; }
-# context_graph_count <n>: the context graphs the node lists as subscribed ("" when the list cannot be read).
+# context_graph_count <n>: the context graphs the node subscribes to that can have read graphs, by the
+# core package's own rule (IDs from before the rule for new IDs get none); "" when the list cannot be read.
 context_graph_count() {
   local resp
   resp="$(api "$1" GET /api/context-graph/list)"
   [ "$(code_of "$resp")" = "200" ] || return 1
-  body_of "$resp" | node -e '
-    let d = ""; process.stdin.on("data", (c) => d += c); process.stdin.on("end", () => {
-      const j = JSON.parse(d);
-      const list = Array.isArray(j) ? j : (j.contextGraphs ?? []);
-      process.stdout.write(String(list.filter((cg) => cg.subscribed !== false).length));
-    });'
+  body_of "$resp" | node --input-type=module -e '
+    const core = await import(process.argv[1]).catch(() => ({}));
+    const eligible = core.isReadGraphEligibleContextGraphId ?? (() => true);
+    let d = ""; for await (const chunk of process.stdin) d += chunk;
+    const j = JSON.parse(d);
+    const list = Array.isArray(j) ? j : (j.contextGraphs ?? []);
+    process.stdout.write(String(list.filter((cg) => cg.subscribed !== false && eligible(String(cg.id ?? cg.contextGraphId ?? ""))).length));
+  ' "$REPO_ROOT/packages/core/dist/index.js"
 }
 node_commit() { field "$(body_of "$(api "$1" GET /api/status)")" version; printf ' '; field "$(body_of "$(api "$1" GET /api/status)")" commitShort; }
-# store_endpoint <n>: the node's store query URL, or "" for a store only the daemon can read (embedded).
-store_endpoint() {
-  node -e '
-    const cfg = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-    const { backend, options = {} } = cfg.store ?? {};
-    if (backend === "oxigraph-server") process.stdout.write(`http://127.0.0.1:${options.port || 7878}/query`);
-    else if (backend === "blazegraph" && typeof options.url === "string") process.stdout.write(options.url);
-    else if (backend === "sparql-http" && typeof options.queryEndpoint === "string") process.stdout.write(options.queryEndpoint);
-  ' "$DEVNET_DIR/node$1/config.json"
-}
+# store_endpoint <n>: the node's store query URL, from the devnet's own resolver; "" for a store that only
+# the daemon can read (embedded), or one that is not this checkout's local devnet.
+store_endpoint() { node "$ENDPOINT_RESOLVER" "$DEVNET_DIR" "http://127.0.0.1:$(node_port "$1")" 2>/dev/null || true; }
 
 # ── the read-graph commands: the one place that parses their output ────────
 # read_graph_rows <n>: one line per read graph, "<state> <generation> <read graph IRI>".
@@ -197,18 +199,21 @@ read_graph_rows() {
 # read_graph_check <n> <out>: the full check (the default), both directions, as JSON in <out>. Its exit code
 # says only whether a read graph mismatched or failed; check_verdict reads the rest.
 read_graph_check() { dkg_cli "$1" store read-graphs check --json > "$2" 2>> "$RESULTS/cli-errors.log"; }
-# check_verdict <out>: "clean" when every read graph checked is consistent; "bad" when one mismatched,
-# failed, or the answer cannot be read; "incomplete" when one was skipped (not ready) or interrupted.
+# check_verdict <out> <rows>: "clean" when every read graph that status listed just before (<rows>) was
+# checked and found consistent; "bad" when one mismatched, failed, or the answer cannot be read;
+# "incomplete" when one was skipped (not ready), interrupted, or not reported at all.
 check_verdict() {
   node -e '
+    const fs = require("fs");
     let results;
-    try { results = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).results; } catch { results = undefined; }
+    try { results = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).results; } catch { results = undefined; }
     if (!Array.isArray(results)) { console.log("bad"); process.exit(0); }
-    const outcomes = results.map((r) => r.outcome);
-    if (outcomes.some((o) => o !== "consistent" && o !== "skipped" && o !== "interrupted")) console.log("bad");
-    else if (outcomes.some((o) => o !== "consistent")) console.log("incomplete");
+    const expected = fs.readFileSync(process.argv[2], "utf8").split("\n").filter(Boolean).map((line) => line.split(" ")[2]);
+    const reported = new Set(results.map((r) => r.readGraph));
+    if (results.some((r) => !["consistent", "skipped", "interrupted"].includes(r.outcome))) console.log("bad");
+    else if (results.some((r) => r.outcome !== "consistent") || expected.some((graph) => !reported.has(graph))) console.log("incomplete");
     else console.log("clean");
-  ' "$1"
+  ' "$1" "$2"
 }
 # read_graph_rebuild <n> [context graph]: mark the node's read graphs dirty, or those of one context graph;
 # the builder rebuilds them at its next pass (rebuilding, then ready).
@@ -257,16 +262,22 @@ wait_all_ready() {
   done
   return 0
 }
-# full_checks <label> [nodes]: the full check on every node. A node whose check skipped or was
-# interrupted is checked again, up to three times, once its read graphs are ready.
+# full_checks <label> [nodes]: the full check on every node. A node whose check skipped, was
+# interrupted, or left out a read graph status listed is checked again, up to three times, once its
+# read graphs are ready.
 # Returns 0 when every node is clean, 1 when one is bad, 2 when one stays incomplete;
 # checks/<label>.failed names the nodes.
 full_checks() {
   local label="$1" nodes="${2:-$NODES}" n attempt verdict bad="" incomplete=""
   for n in $nodes; do
     for attempt in 1 2 3; do
-      read_graph_check "$n" "$RESULTS/checks/$label.node$n.json"
-      verdict="$(check_verdict "$RESULTS/checks/$label.node$n.json")"
+      # The read graphs the check must report: those status lists right before it.
+      if read_graph_rows "$n" > "$RESULTS/checks/$label.node$n.rows"; then
+        read_graph_check "$n" "$RESULTS/checks/$label.node$n.json"
+        verdict="$(check_verdict "$RESULTS/checks/$label.node$n.json" "$RESULTS/checks/$label.node$n.rows")"
+      else
+        verdict=incomplete
+      fi
       [ "$verdict" = incomplete ] || break
       sleep 15
       wait_all_ready "$label-recheck" "$READY_TIMEOUT" "$n" || break
@@ -278,7 +289,7 @@ full_checks() {
     esac
   done
   if [ -n "$bad" ]; then echo "$bad (bad)$incomplete" > "$RESULTS/checks/$label.failed"; return 1; fi
-  if [ -n "$incomplete" ]; then echo "$incomplete (skipped or interrupted)" > "$RESULTS/checks/$label.failed"; return 2; fi
+  if [ -n "$incomplete" ]; then echo "$incomplete (a read graph skipped, interrupted, or left out of the check)" > "$RESULTS/checks/$label.failed"; return 2; fi
   return 0
 }
 # generation_of <rows file> <read graph>
@@ -336,8 +347,8 @@ phase_seed() {
   started="$(now)"
   if "$SEED_CMD" > "$RESULTS/seed.log" 2>&1; then
     for n in $NODES; do count="$(context_graph_count "$n")" && total=$((total + count)); done
-    if [ "$total" -gt 0 ]; then record seed PASS "$(( $(now) - started ))" "$total context graph subscriptions across the nodes"
-    else record seed INCONCLUSIVE "$(( $(now) - started ))" "no node lists a context graph: the backfill would build nothing"; fi
+    if [ "$total" -gt 0 ]; then record seed PASS "$(( $(now) - started ))" "$total subscriptions to context graphs that can have read graphs, across the nodes"
+    else record seed INCONCLUSIVE "$(( $(now) - started ))" "no node subscribes to a context graph that can have read graphs: the backfill would build nothing"; fi
   else
     record seed FAIL "$(( $(now) - started ))" "$(basename "$SEED_CMD") failed (seed.log)"
   fi
@@ -390,7 +401,7 @@ phase_measure() {
   for n in $NODES; do
     du -sk "$DEVNET_DIR/node$n" | awk -v n="$n" '{ print "node" n " " $1 }' >> "$RESULTS/measure/size-after.txt"
     endpoint="$(store_endpoint "$n")"
-    if [ -z "$endpoint" ]; then note "measure: node$n's store is embedded; only its states are recorded"; continue; fi
+    if [ -z "$endpoint" ]; then note "measure: node$n's store cannot be read from outside the daemon; only its states are recorded"; continue; fi
     node "$REPO_ROOT/scripts/read-graph-store-report.mjs" --endpoint "$endpoint" > "$RESULTS/measure/node$n.json" 2>> "$RESULTS/measure/errors.log" || { ok=0; continue; }
     node -e '
       const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
@@ -463,7 +474,7 @@ drill_end() {
 }
 
 drill_restart_during_rebuild() {
-  local n="$RESTART_NODE" started before caught="" i state graph gen_before gen_after older=""
+  local n="$RESTART_NODE" started before caught="" i state graph gen_before gen_after renewed=0 finished="" gone=""
   started="$(now)"; before="$RESULTS/rows/restart.before.node$n"
   read_graph_rows "$n" > "$before" && all_ready "$before" || { record drill-restart INCONCLUSIVE 0 "node$n had no ready read graph to rebuild"; return; }
   read_graph_rebuild "$n" || { record drill-restart FAIL "$(( $(now) - started ))" "rebuild refused on node$n (cli.log)"; return; }
@@ -476,34 +487,59 @@ drill_restart_during_rebuild() {
   [ -n "$caught" ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "no read graph on node$n was seen being rebuilt, so no restart could land during one"; return; }
   restart_node "$n" || { record drill-restart FAIL "$(( $(now) - started ))" "node$n did not come back"; return; }
   if ! wait_all_ready drill-restart "$READY_TIMEOUT" "$n"; then record drill-restart FAIL "$(( $(now) - started ))" "node$n's read graphs not ready after the restart"; return; fi
-  # Each read graph the restart caught unfinished must have a new generation.
+  # A read graph the restart caught unfinished gets a new generation at start. One whose rebuild ended in
+  # the moment before the daemon stopped keeps its generation; that is fine, but proves nothing.
   while read -r state gen_before graph; do
     [ "$state" = ready ] && continue
     gen_after="$(generation_of "$RESULTS/rows/drill-restart.node$n" "$graph")"
-    [ -n "$gen_after" ] && [ "$gen_after" != "$gen_before" ] || older="$older <$graph>"
+    if [ -z "$gen_after" ]; then gone="$gone <$graph>"
+    elif [ "$gen_after" != "$gen_before" ]; then renewed=$((renewed + 1))
+    else finished="$finished <$graph>"; fi
   done < "$RESULTS/rows/restart.caught.node$n"
-  [ -z "$older" ] || { record drill-restart FAIL "$(( $(now) - started ))" "no new generation for:$older"; return; }
-  drill_end drill-restart "$n" "$started" "unfinished read graphs got a new generation and were rebuilt"
+  [ -z "$gone" ] || { record drill-restart FAIL "$(( $(now) - started ))" "read graphs gone after the restart:$gone"; return; }
+  [ "$renewed" -gt 0 ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "every rebuild seen on node$n ended before the restart stopped the daemon"; return; }
+  [ -z "$finished" ] || note "drill-restart: rebuilt before the daemon stopped, so they kept their generation:$finished"
+  drill_end drill-restart "$n" "$started" "$renewed read graphs the restart caught unfinished got a new generation and were rebuilt"
 }
 
+# acked_count <file>: lines in a file of acknowledged writes.
+acked_count() { wc -l < "$1" | tr -d ' '; }
+
 drill_kill_during_write() {
-  local n="$KILL_NODE" started cg pid command writer
+  local n="$KILL_NODE" started cg pid command writer acked i resp missing body
   started="$(now)"; cg="read-graphs-drill-$(echo "$RUN_ID" | tr 'A-Z' 'a-z')"
-  case "$(code_of "$(api "$n" POST /api/context-graph/create "{\"id\":\"$cg\",\"name\":\"Read-graph drill\"}")")" in
+  acked="$RESULTS/drill-kill.acked"; : > "$acked"
+  # Bodies go into variables first: bash 3.2 brace-expands a JSON body with a comma written inline in
+  # a command substitution that is itself an argument, and the node gets half of it.
+  body="{\"id\":\"$cg\",\"name\":\"Read-graph drill\"}"
+  resp="$(api "$n" POST /api/context-graph/create "$body")"
+  case "$(code_of "$resp")" in
     200|201|409) ;;
-    *) record drill-kill INCONCLUSIVE 0 "could not create context graph $cg on node$n"; return ;;
+    *) record drill-kill INCONCLUSIVE 0 "could not create context graph $cg on node$n (HTTP $(code_of "$resp"))"; return ;;
   esac
+  # The writer records each working-memory write the node acknowledged (HTTP 2xx), and shares it on.
   (
     export DKG_API_MAXTIME=15
     for i in $(seq 1 300); do
       api "$n" POST /api/knowledge-assets "{\"contextGraphId\":\"$cg\",\"name\":\"drill-$i\"}" > /dev/null 2>&1 || true
-      api "$n" POST "/api/knowledge-assets/drill-$i/wm/write" \
-        "{\"contextGraphId\":\"$cg\",\"quads\":[{\"subject\":\"urn:read-graphs-drill:$i\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"drill $i\\\"\"}]}" > /dev/null 2>&1 || true
+      body="{\"contextGraphId\":\"$cg\",\"quads\":[{\"subject\":\"urn:read-graphs-drill:$i\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"drill $i\\\"\"}]}"
+      resp="$(api "$n" POST "/api/knowledge-assets/drill-$i/wm/write" "$body")"
+      case "$(code_of "$resp")" in 2??) echo "$i" >> "$acked" ;; esac
       api "$n" POST "/api/knowledge-assets/drill-$i/swm/share" "{\"contextGraphId\":\"$cg\",\"entities\":\"all\"}" > /dev/null 2>&1 || true
     done
   ) &
   writer=$!
-  sleep 5
+  # Kill only once writes are being acknowledged, while the writer still runs.
+  for i in $(seq 1 60); do
+    [ "$(acked_count "$acked")" -ge 3 ] && break
+    kill -0 "$writer" 2>/dev/null || break
+    sleep 1
+  done
+  if [ "$(acked_count "$acked")" -lt 3 ] || ! kill -0 "$writer" 2>/dev/null; then
+    kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+    record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "the writer did not run with acknowledged writes ($(acked_count "$acked") acknowledged), so no kill landed during writes"
+    return
+  fi
   pid="$(tr -d '[:space:]' < "$DEVNET_DIR/node$n/daemon.pid" 2>/dev/null)"
   command="$(ps -o command= -p "$pid" 2>/dev/null || true)"
   case "$command" in
@@ -514,50 +550,90 @@ drill_kill_during_write() {
   kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
   # The supervisor starts a new worker; restart the node if it does not.
   wait_up "$n" 120 || restart_node "$n" || { record drill-kill FAIL "$(( $(now) - started ))" "node$n did not come back after the kill"; return; }
-  drill_end drill-kill "$n" "$started" "killed node$n's daemon during writes to $cg"
+  # Every write the node acknowledged before the kill must be there after it.
+  body="{\"contextGraphId\":\"$cg\",\"view\":\"working-memory\",\"sparql\":\"SELECT ?s WHERE { ?s <http://schema.org/name> ?name }\"}"
+  resp="$(api "$n" POST /api/query "$body")"
+  if [ "$(code_of "$resp")" != 200 ]; then
+    record drill-kill FAIL "$(( $(now) - started ))" "the acknowledged writes could not be read back after the kill (HTTP $(code_of "$resp"))"; return
+  fi
+  missing="$(body_of "$resp" | node -e '
+    let d = ""; process.stdin.on("data", (c) => d += c); process.stdin.on("end", () => {
+      const seen = new Set([...d.matchAll(/urn:read-graphs-drill:(\d+)/g)].map((m) => m[1]));
+      const acked = require("fs").readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
+      process.stdout.write(acked.filter((i) => !seen.has(i)).join(" "));
+    });' "$acked")"
+  [ -z "$missing" ] || { record drill-kill FAIL "$(( $(now) - started ))" "writes acknowledged before the kill are missing after it: $missing"; return; }
+  drill_end drill-kill "$n" "$started" "killed node$n's daemon during writes; all $(acked_count "$acked") acknowledged writes were there after it"
+}
+
+# finalized_jobs <n>: the node's count of finalized publish jobs, or "" when it cannot be read.
+finalized_jobs() {
+  dkg_cli "$1" publisher stats 2>/dev/null | node -e '
+    let d = ""; process.stdin.on("data", (c) => d += c); process.stdin.on("end", () => {
+      try { const value = JSON.parse(d).finalized; if (Number.isSafeInteger(value)) process.stdout.write(String(value)); } catch {}
+    });'
 }
 
 drill_cli_write_daemon_down() {
-  local n="$CLI_NODE" started rc
+  local n="" candidate started before="" after output rc cleared
   started="$(now)"
+  # A node with finalized publish jobs, so the offline write has something to change; the drill node first.
+  for candidate in "$CLI_NODE" $NODES; do
+    before="$(finalized_jobs "$candidate")"
+    if [ -n "$before" ] && [ "$before" -gt 0 ]; then n="$candidate"; break; fi
+  done
+  [ -n "$n" ] || { record drill-cli INCONCLUSIVE 0 "no node has a finalized publish job, so an offline clear would change nothing"; return; }
   stop_node "$n" || { record drill-cli INCONCLUSIVE 0 "could not stop node$n"; return; }
-  dkg_cli "$n" publisher clear failed > "$RESULTS/drill-cli.log" 2>&1; rc=$?
+  output="$(dkg_cli "$n" publisher clear finalized 2>&1)"; rc=$?
+  printf '%s\n' "$output" > "$RESULTS/drill-cli.log"
   start_node "$n" || { record drill-cli FAIL "$(( $(now) - started ))" "node$n did not come back"; return; }
-  [ "$rc" = 0 ] || { record drill-cli FAIL "$(( $(now) - started ))" "\`dkg publisher clear failed\` exited $rc with the daemon down (drill-cli.log)"; return; }
-  drill_end drill-cli "$n" "$started" "\`dkg publisher clear failed\` opened and wrote node$n's store with the daemon down"
+  [ "$rc" = 0 ] || { record drill-cli FAIL "$(( $(now) - started ))" "\`dkg publisher clear finalized\` exited $rc with the daemon down (drill-cli.log)"; return; }
+  cleared="$(printf '%s\n' "$output" | sed -n 's/^Cleared \([0-9][0-9]*\) publisher job.*/\1/p' | head -1)"
+  if [ -z "$cleared" ] || [ "$cleared" = 0 ]; then
+    record drill-cli FAIL "$(( $(now) - started ))" "with $before finalized jobs, the offline clear changed nothing (drill-cli.log)"; return
+  fi
+  # What the CLI wrote with the daemon down must hold once the daemon is back.
+  after="$(finalized_jobs "$n")"
+  if [ -z "$after" ] || [ "$after" -gt $((before - cleared)) ]; then
+    record drill-cli FAIL "$(( $(now) - started ))" "node$n lists ${after:-?} finalized jobs after the restart; $before before, $cleared cleared offline"; return
+  fi
+  drill_end drill-cli "$n" "$started" "with node$n's daemon down, \`dkg publisher clear finalized\` cleared $cleared of $before jobs, and they stayed cleared"
 }
 
-drill_rollback_and_forward() {
-  local n="$ROLLBACK_NODE" started dropped version
-  started="$(now)"
-  [ "$ROLLBACK_FROM" != none ] || { record drill-rollback INCONCLUSIVE 0 "not run (READ_GRAPHS_ROLLBACK_FROM=none)"; return; }
-  read_graph_rows "$n" > "$RESULTS/rows/rollback.before.node$n" && [ -s "$RESULTS/rows/rollback.before.node$n" ] \
-    || { record drill-rollback INCONCLUSIVE 0 "node$n has no read graph to drop"; return; }
-  stop_node "$n" || { record drill-rollback INCONCLUSIVE 0 "could not stop node$n"; return; }
-  # The step `dkg rollback` runs before it switches versions.
+# rollback_steps: the rollback drill's changes, run with the node stopped. On a failed step it sets
+# outcome and detail; the caller always restores the node afterwards.
+rollback_steps() {
   dropped="$(DKG_HOME="$DEVNET_DIR/node$n" node --input-type=module -e '
     const { dropReadGraphsForRollback } = await import(process.argv[1]);
     const dropped = await dropReadGraphsForRollback(process.env.DKG_HOME, (line) => console.error(line));
     console.log(dropped ?? 0);
   ' "$ROLLBACK_MODULE" 2>> "$RESULTS/drill-rollback.log")"
-  case "$dropped" in ''|*[!0-9]*|0)
-    start_node "$n" > /dev/null
-    record drill-rollback FAIL "$(( $(now) - started ))" "the rollback step dropped nothing on node$n (drill-rollback.log)"; return ;;
-  esac
+  case "$dropped" in ''|*[!0-9]*|0) outcome=FAIL; detail="the rollback step dropped nothing on node$n (drill-rollback.log)"; return ;; esac
   # The earlier release does not know the setting; it runs without it.
   set_read_graphs "$n" "-"
-  if ! start_node "$n" DEVNET_VERSION_LAYOUT="all:current,$n:$ROLLBACK_FROM"; then
-    set_read_graphs "$n" "$SETTING"; start_node "$n" > /dev/null
-    record drill-rollback FAIL "$(( $(now) - started ))" "node$n did not start on $ROLLBACK_FROM (devnet-sh.log)"; return
-  fi
+  start_node "$n" DEVNET_VERSION_LAYOUT="all:current,$n:$ROLLBACK_FROM" \
+    || { outcome=FAIL; detail="node$n did not start on $ROLLBACK_FROM (devnet-sh.log)"; return; }
   version="$(node_commit "$n")"
-  if [ "$version" = "$UNDER_TEST" ]; then
-    stop_node "$n"; set_read_graphs "$n" "$SETTING"; start_node "$n" DEVNET_VERSION_LAYOUT="all:current" > /dev/null
-    record drill-rollback FAIL "$(( $(now) - started ))" "node$n still ran the build under test ($version), not $ROLLBACK_FROM"; return
-  fi
-  stop_node "$n"
+  [ "$version" != "$UNDER_TEST" ] || { outcome=FAIL; detail="node$n still ran the build under test ($version), not $ROLLBACK_FROM"; }
+}
+
+drill_rollback_and_forward() {
+  local n="$ROLLBACK_NODE" started dropped="" version="" outcome="" detail=""
+  started="$(now)"
+  [ "$ROLLBACK_FROM" != none ] || { record drill-rollback INCONCLUSIVE 0 "not run (READ_GRAPHS_ROLLBACK_FROM=none)"; return; }
+  read_graph_rows "$n" > "$RESULTS/rows/rollback.before.node$n" && [ -s "$RESULTS/rows/rollback.before.node$n" ] \
+    || { record drill-rollback INCONCLUSIVE 0 "node$n has no read graph to drop"; return; }
+  # Build the earlier release first, while nothing has changed yet.
+  "$DEVNET_SH" prepare-version "$ROLLBACK_FROM" >> "$RESULTS/devnet-sh.log" 2>&1 \
+    || { record drill-rollback INCONCLUSIVE "$(( $(now) - started ))" "could not prepare $ROLLBACK_FROM (devnet-sh.log)"; return; }
+  stop_node "$n" || { record drill-rollback INCONCLUSIVE 0 "could not stop node$n"; return; }
+  rollback_steps
+  # One restoration, whatever happened: the setting back, and the node on the build under test.
+  stop_node "$n" > /dev/null 2>&1 || true
   set_read_graphs "$n" "$SETTING"
-  start_node "$n" DEVNET_VERSION_LAYOUT="all:current" || { record drill-rollback FAIL "$(( $(now) - started ))" "node$n did not come back on the build under test"; return; }
+  start_node "$n" DEVNET_VERSION_LAYOUT="all:current" \
+    || { record drill-rollback FAIL "$(( $(now) - started ))" "node$n did not come back on the build under test${detail:+ ($detail)}"; return; }
+  [ -z "$outcome" ] || { record drill-rollback "$outcome" "$(( $(now) - started ))" "$detail"; return; }
   drill_end drill-rollback "$n" "$started" "dropped $dropped read-graph graphs, ran $version, then rebuilt from nothing"
 }
 

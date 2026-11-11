@@ -59,7 +59,10 @@ function contextGraphRoot(readGraph) {
 }
 
 async function main() {
-  const graphs = await select(`SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), ${literal(`${PARTITION}/`)})) }`);
+  const graphs = await select(`SELECT DISTINCT ?g WHERE {
+    # sparql-scan-allow: R2 -- a report an operator runs by hand, off any request path; it reads the read-graph names once
+    GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), ${literal(`${PARTITION}/`)}))
+  }`);
   const readGraphs = [];
   const skipped = [];
   for (const iri of graphs.map((row) => row.g?.value).filter(Boolean).sort()) {
@@ -70,6 +73,8 @@ async function main() {
     const outside = `?g = <${root}> || (STRSTARTS(STR(?g), ${literal(`${root}/`)}) && STR(?g) != ${literal(`${root}${PARTITION}`)}`
       + ` && !STRSTARTS(STR(?g), ${literal(`${root}${PARTITION}/`)}))`;
     const histogram = await select(`SELECT ?copies (COUNT(*) AS ?triples) WHERE {
+      # sparql-scan-allow: R1 -- the triples come from one exact read graph, at most --sample of them
+      # sparql-scan-allow: R2 -- ?s ?p ?o are bound by that sample, so GRAPH ?g looks up one bound triple at a time
       { SELECT ?s ?p ?o (COUNT(DISTINCT ?g) AS ?copies) WHERE {
           { SELECT ?s ?p ?o WHERE { GRAPH <${iri}> { ?s ?p ?o } } LIMIT ${sample} }
           GRAPH ?g { ?s ?p ?o }
