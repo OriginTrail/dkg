@@ -840,6 +840,21 @@ describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind,
     }
   });
 
+  it('counts the matches of a pattern without variables in every graph of the view', async () => {
+    const counted = 'dataset-stores-count';
+    const members = [`did:dkg:context-graph:${counted}/_verifiable_memory/0xa/1`, `did:dkg:context-graph:${counted}/_verifiable_memory/0xb/2`];
+    await opened.store.insert([
+      { subject: 'urn:count:a', predicate: 'urn:p', object: 'urn:count:target', graph: members[0] },
+      { subject: 'urn:count:b', predicate: 'urn:p', object: 'urn:count:target', graph: members[1] },
+    ]);
+    const query = 'SELECT (COUNT(*) AS ?n) WHERE { [] <urn:p>/<urn:q>* <urn:count:target> }';
+    const scoped = await new DKGQueryEngine(opened.store).query(query, { contextGraphId: counted, view: 'verifiable-memory' });
+    // As the same query over a default graph made of the view's graphs alone.
+    const reference = await opened.store.query(query.replace(' WHERE', ` ${members.map(graph => `FROM <${graph}>`).join(' ')} WHERE`));
+    expect(scoped.bindings).toEqual(reference.type === 'bindings' ? reference.bindings : []);
+    expect(scoped.bindings[0]?.n).toMatch(/^"?2"?/);
+  });
+
   it('answers a constant graph assignment on a view with more graphs than the branches allow', async () => {
     const wide = 'dataset-stores-wide';
     const wideRoot = `did:dkg:context-graph:${wide}`;
