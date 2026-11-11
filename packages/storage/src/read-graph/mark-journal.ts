@@ -16,6 +16,12 @@
  *
  * The file is a line per mark, `{generation} {read graph}`. Start-up removes it
  * once its own marks are stored.
+ *
+ * Agents of one process over the same backend share its runtime, and any of
+ * them may be the one a later process starts alone. So a mark goes to the
+ * journal of every data directory a start-up over that backend named. Once
+ * one start-up stores a mark, the row moves on to a newer generation, and the
+ * same mark in another journal finds nothing to do.
  */
 
 import { appendFileSync, readFileSync, rmSync } from 'node:fs';
@@ -25,28 +31,33 @@ import type { ReadGraphBackendRuntime } from './runtime.js';
 
 export const READ_GRAPH_MARK_JOURNAL = 'read-graph-unstored-marks';
 
-const JOURNALS = new WeakMap<ReadGraphBackendRuntime, string>();
+/** Each runtime's journals: one per data directory that a start-up over its backend named. */
+const JOURNALS = new WeakMap<ReadGraphBackendRuntime, Set<string>>();
 
 export function readGraphMarkJournalPath(dataDir: string): string {
   return join(dataDir, READ_GRAPH_MARK_JOURNAL);
 }
 
-/** Keep the marks a runtime's stores could not store in this data directory's journal. */
+/** Keep the marks a runtime's stores could not store in this data directory's journal too. */
 export function useReadGraphMarkJournal(runtime: ReadGraphBackendRuntime, dataDir: string): void {
-  JOURNALS.set(runtime, readGraphMarkJournalPath(dataDir));
+  const files = JOURNALS.get(runtime) ?? new Set<string>();
+  JOURNALS.set(runtime, files.add(readGraphMarkJournalPath(dataDir)));
 }
 
 /**
- * Note that the stored row of `readGraph`, at `generation`, may still say
- * ready although the read graph is dirty. Without a journal it notes nothing.
+ * Note in each of the runtime's journals that the stored row of `readGraph`,
+ * at `generation`, may still say ready although the read graph is dirty.
+ * Without a journal it notes nothing.
  */
 export function noteUnstoredReadGraphMark(runtime: ReadGraphBackendRuntime, readGraph: string, generation: number): void {
-  const file = JOURNALS.get(runtime);
-  if (file === undefined || !Number.isSafeInteger(generation) || /\s/.test(readGraph)) return;
-  try {
-    appendFileSync(file, `${generation} ${readGraph}\n`);
-  } catch {
-    // The data directory cannot be written either: nothing more can keep the mark.
+  const files = JOURNALS.get(runtime);
+  if (files === undefined || !Number.isSafeInteger(generation) || /\s/.test(readGraph)) return;
+  for (const file of files) {
+    try {
+      appendFileSync(file, `${generation} ${readGraph}\n`);
+    } catch {
+      // This data directory cannot be written either; the others still keep the mark.
+    }
   }
 }
 

@@ -1501,6 +1501,27 @@ describe('read-graph start-up', () => {
     expect(readUnstoredReadGraphMarks(second)).toEqual(new Map());
   });
 
+  it('journals a mark the store refused in the data directory of every start-up over the backend, so either agent may start alone next', async () => {
+    const { adapter, fixture, layer, store, other, context, first, second } = await sharedBackend();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    const { wholeVm } = fixture.readGraphs;
+    expect(await startReadGraphs(store, { dataDir: first, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    const built = (await buildReadGraph(context, vm)).row!;
+    expect(await startReadGraphs(other, { dataDir: second, maintains: () => true })).toEqual({ marked: 0, maintained: 1 });
+    // A full check through the second agent finds a triple no member holds, and the store refuses its dirty mark.
+    await adapter.insert([q('urn:s:stray', '"stray"', wholeVm)]);
+    adapter.onUpdate = (sparql) => { if (sparql.includes('"dirty"')) throw new Error('connection reset'); };
+    expect(await checkReadGraph(other, wholeVm, 'full', { alert: () => undefined })).toMatchObject({ outcome: 'mismatch', direction: 'unheld' });
+    adapter.onUpdate = undefined;
+    expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
+    expect((await readStoredReadGraphRow(adapter, wholeVm)).row).toEqual(built);
+    for (const dataDir of [first, second]) expect(readUnstoredReadGraphMarks(dataDir)).toEqual(new Map([[wholeVm, new Set([built.generation])]]));
+    // The next process starts the second agent alone over the same store, with only its own data directory.
+    const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    expect(await startReadGraphs(restarted, { dataDir: second, maintains: () => true })).toEqual({ marked: 1, maintained: 1 });
+    expect((await storedRows(adapter))[wholeVm]).toBe(`dirty@${built.generation + 1}`);
+  });
+
   it('replaces damaged rows and rows whose generation cannot grow, and notes nothing without rows', async () => {
     const empty = await open();
     expect(await startReadGraphs(empty.store, { dataDir: empty.dataDir, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
