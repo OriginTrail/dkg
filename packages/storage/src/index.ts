@@ -471,6 +471,7 @@ export {
   InMemoryReadGraphStateMirror,
   ReadGraphLocks,
   ReadGraphRegistryCache,
+  ReadGraphWriteTracker,
   readGraphBackendIdentity,
   readGraphBackendRuntime,
   type ReadGraphBackendRuntime,
@@ -482,6 +483,7 @@ export {
   ReadGraphWriteRefusedError,
   ReadGraphsUnsupportedError,
   readGraphLayerOf,
+  readGraphRuntimeOf,
   wrapReadGraphLayer,
   type ReadGraphStoreConfig,
 } from './read-graph/read-graph-store.js';
