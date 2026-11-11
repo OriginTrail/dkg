@@ -36,7 +36,7 @@ import {
 } from '../rfc64-exact-bindings-read-capability.js';
 import { blazegraphSchedulers, type BlazegraphStoreOptions } from './blazegraph-scheduler.js';
 export type { BlazegraphStoreOptions } from './blazegraph-scheduler.js';
-import { isAtomicGraphReplaceStagingGraph } from '../atomic-graph-replace.js';
+import { storeGraphEnumerationVisibility } from '../graph-enumeration-visibility.js';
 import {
   buildRfc64AuthorCommitCasUpdateV1,
   executeRfc64AuthorCommitCasV1,
@@ -236,7 +236,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     return this.runStoreWork('query', options, deadline => this.queryAdmission.run(deadline, work));
   }
   readonly queryResponseLimitMode = 'pre-materialization' as const;
-  readonly graphEnumerationVisibility = (graph: string): boolean => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph);
+  readonly graphEnumerationVisibility = storeGraphEnumerationVisibility;
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   readonly rfc64SemanticReadCertifiedV1 = true as const;

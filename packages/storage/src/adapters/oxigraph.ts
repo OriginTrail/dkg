@@ -1,4 +1,4 @@
-import { oxigraphGraphEnumerationVisibility } from '../graph-enumeration-visibility.js';
+import { storeGraphEnumerationVisibility } from '../graph-enumeration-visibility.js';
 import { assertJsonResponseWithinLimit, mapBoundedSelectResult, mapBoundedConstructResult } from './bounded-query-result.js';
 import type { QueryOptions } from '../triple-store.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
@@ -72,7 +72,7 @@ type OxQuad = oxigraph.Quad;
 
 export class OxigraphStore implements TripleStore {
   readonly writeRevisionCoverage = 'all-writers' as const;
-  readonly graphEnumerationVisibility = oxigraphGraphEnumerationVisibility;
+  readonly graphEnumerationVisibility = storeGraphEnumerationVisibility;
   readonly sparqlEngine = 'oxigraph' as const;
   readonly queryCancellation = 'pre-dispatch' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
@@ -351,7 +351,7 @@ export class OxigraphStore implements TripleStore {
     // cannot interrupt this native call mid-flight. Use oxigraph-worker or an
     // HTTP backend when long sync queries need prompt cancellation.
     const withheld = options?.withheldGraphRoots;
-    const result = withheld?.length
+    const result = withheld
       ? this.store.query(sparql, withheldGraphQueryDataset(this.store, withheld, this.graphEnumerationVisibility))
       : this.store.query(sparql);
     throwIfAborted(options?.signal);
