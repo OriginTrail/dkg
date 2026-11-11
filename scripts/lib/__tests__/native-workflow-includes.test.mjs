@@ -4,6 +4,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { discoverVitestFiles } from '../../ci/discover-vitest-files.mjs';
+import { simpleCommands } from './ci-execution-graph.mjs';
 
 // The macOS/Windows/Linux MCP metadata and macOS Oxigraph workflows run named
 // CLI test files with vitest.unit.config.ts, but do not trigger on that config,
@@ -16,11 +17,19 @@ const CLI_ROOT = fileURLToPath(new URL('../../../packages/cli/', import.meta.url
 const UNIT_CONFIG = 'vitest.unit.config.ts';
 const read = (file) => readFileSync(new URL(`../../../${file}`, import.meta.url), 'utf8');
 
+// The test files a step's vitest commands run with the unit config, read
+// through the repository's shell tokenizer (quotes, continuations, `&&`).
+export function unitConfigSelectors(run) {
+  return simpleCommands(run)
+    .filter(({ words }) => words.includes('vitest') && words[words.indexOf('--config') + 1] === UNIT_CONFIG)
+    .flatMap(({ words }) => words.filter((word) => /^test\/\S+\.test\.ts$/.test(word)));
+}
+
 export function nativeSelectors(workflowFile) {
   const workflow = parse(read(`.github/workflows/${workflowFile}`));
   const runs = Object.values(workflow.jobs).flatMap((job) => job.steps.map((step) => step.run ?? ''))
-    .filter((run) => run.includes(`--config ${UNIT_CONFIG}`));
-  return { workflow, runs, files: runs.flatMap((run) => run.split(/\s+/).filter((word) => /^test\/\S+\.test\.ts$/.test(word))) };
+    .filter((run) => unitConfigSelectors(run).length > 0);
+  return { workflow, runs, files: runs.flatMap(unitConfigSelectors) };
 }
 
 export function undiscovered(selectors, discovered) {
@@ -62,4 +71,15 @@ test('a selector the config stops discovering is reported', () => {
     rmSync(`${CLI_ROOT}${fixture}`, { force: true });
   }
   assert.deepEqual(undiscovered(['test/a.test.ts', 'test/b.test.ts'], ['test/b.test.ts']), ['test/a.test.ts']);
+});
+
+test('quoted, continued and chained spellings of a native command name the same files', () => {
+  const expected = ['test/a.test.ts', 'test/b.test.ts'];
+  for (const run of [
+    `pnpm --dir packages/cli exec vitest run --config ${UNIT_CONFIG} test/a.test.ts test/b.test.ts`,
+    `pnpm --dir packages/cli exec vitest run --config '${UNIT_CONFIG}' 'test/a.test.ts' "test/b.test.ts"`,
+    `pnpm --dir packages/cli exec vitest run --config ${UNIT_CONFIG} \\\n  test/a.test.ts \\\n  test/b.test.ts`,
+    `pnpm install && pnpm --dir packages/cli exec vitest run --config ${UNIT_CONFIG} test/a.test.ts test/b.test.ts`,
+  ]) assert.deepEqual(unitConfigSelectors(run), expected, run);
+  assert.deepEqual(unitConfigSelectors('pnpm --dir packages/cli exec vitest run --config vitest.config.ts test/a.test.ts'), []);
 });
