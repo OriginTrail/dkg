@@ -166,10 +166,14 @@ export class OxigraphStore implements TripleStore {
 
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private flushing = false;
+  /** Writes begun, and how many of them the last completed dump holds (see persistBarrier). */
+  private writes = 0;
+  private persistedWrites = 0;
 
   /** The native store for a write. A read-only store refuses before anything changes. */
   private get writable(): OxStore {
     if (this.readOnly) throw new OxigraphStoreReadOnlyError(this.persistPath);
+    this.writes += 1;
     return this.store;
   }
 
@@ -227,6 +231,7 @@ export class OxigraphStore implements TripleStore {
       // Capture once before any awaited writes: concurrent mutations cannot mix
       // two graph/seal generations in this snapshot. The native API returns an
       // array; it avoids a complete-store string but still uses memory per quad.
+      const captured = this.writes;
       const quads = this.store.match();
 
       // 1+2: write to tmp, fsync to commit bytes.
@@ -242,6 +247,7 @@ export class OxigraphStore implements TripleStore {
 
       // 3: atomic rename — POSIX-atomic on the same filesystem.
       await rename(tmpPath, this.persistPath);
+      this.persistedWrites = Math.max(this.persistedWrites, captured);
 
       // 4: fsync the directory so the rename itself survives a power loss.
       // Best-effort: some filesystems / Node versions don't expose dir-fd
@@ -693,6 +699,11 @@ export class OxigraphStore implements TripleStore {
       await new Promise<void>((resolve) => setTimeout(resolve, 5));
     }
     await this.flushNow();
+  }
+
+  /** Resolve once every write begun so far is on disk; no dump when none is pending. */
+  async persistBarrier(): Promise<void> {
+    if (this.persistPath && !this.readOnly && this.persistedWrites !== this.writes) await this.flush();
   }
 
   /**

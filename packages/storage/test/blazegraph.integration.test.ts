@@ -250,6 +250,74 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
     15_000,
   );
 
+  describe('a read with a work deadline stops on the server, not only in the client', () => {
+    const GRAPH_STOP = `${GRAPH}:work-stop`;
+    // A three-way join under COUNT: the server sends nothing until it is done,
+    // which over 400 rows takes far longer than any limit below.
+    const heavy = `SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${GRAPH_STOP}> {
+      ?s1 <${PRED}> ?o1 . ?s2 <${PRED}> ?o2 . ?s3 <${PRED}> ?o3 } }`;
+    const statusUrl = `${(BLAZEGRAPH_URL ?? '').replace(/\/namespace\/.*$/, '').replace(/\/sparql$/, '')}/status`;
+    const runningQueries = async (): Promise<number> => {
+      const text = await (await fetch(statusUrl, { signal: AbortSignal.timeout(5_000) })).text();
+      const count = /Running query count=\s*(?:<[^>]*>\s*)?(\d+)/.exec(text);
+      if (!count) throw new Error(`no running query count on ${statusUrl}`);
+      return Number(count[1]);
+    };
+    const settlesTo = async (baseline: number, withinMs: number): Promise<number> => {
+      const until = performance.now() + withinMs;
+      let running = await runningQueries();
+      while (running > baseline && performance.now() < until) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        running = await runningQueries();
+      }
+      return running;
+    };
+
+    beforeAll(async () => {
+      await store.insert(makeQuads(400).map((quad) => ({ ...quad, graph: GRAPH_STOP })));
+    });
+
+    afterAll(async () => {
+      await store.dropGraph(GRAPH_STOP).catch(() => {});
+    });
+
+    it('stops at its limit, and the server is running nothing of it afterwards', async () => {
+      const baseline = await runningQueries();
+      const startedAt = performance.now();
+      const pending = store.query(heavy, { workDeadline: performance.now() + 1_500 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      expect(await runningQueries()).toBeGreaterThan(baseline);
+      await expect(pending).rejects.toMatchObject({ code: 'QUERY_WORK_STOPPED', outcome: 'stopped', backend: 'blazegraph' });
+      expect(performance.now() - startedAt).toBeLessThan(4_000);
+      expect(await settlesTo(baseline, 3_000)).toBe(baseline);
+    }, 30_000);
+
+    it('stops when its caller leaves before the limit', async () => {
+      const baseline = await runningQueries();
+      const controller = new AbortController();
+      const reason = new Error('caller left');
+      // A limit a minute away: only the cancel can end the query this soon.
+      const pending = store.query(heavy, { workDeadline: performance.now() + 60_000, signal: controller.signal });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      expect(await runningQueries()).toBeGreaterThan(baseline);
+      controller.abort(reason);
+      await expect(pending).rejects.toMatchObject({ code: 'QUERY_WORK_STOPPED', outcome: 'stopped', cause: reason });
+      expect(await settlesTo(baseline, 3_000)).toBe(baseline);
+    }, 30_000);
+
+    it('answers a read within its limit exactly as without one', async () => {
+      const queries = [
+        `SELECT ?s ?o WHERE { GRAPH <${GRAPH_STOP}> { ?s <${PRED}> ?o } } ORDER BY ?s LIMIT 3`,
+        `ASK { GRAPH <${GRAPH_STOP}> { ?s <${PRED}> ?o } }`,
+        `CONSTRUCT { ?s <${PRED}> ?o } WHERE { GRAPH <${GRAPH_STOP}> { ?s <${PRED}> ?o } } ORDER BY ?s LIMIT 2`,
+      ];
+      for (const query of queries) {
+        const limited = await store.query(query, { workDeadline: performance.now() + 20_000 });
+        expect(limited).toEqual(await store.query(query));
+      }
+    }, 30_000);
+  });
+
   it(
     'large DELETE DATA (publish path) succeeds — the form-content-limit regression',
     async () => {

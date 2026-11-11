@@ -645,6 +645,7 @@ export class QueryMethods extends DKGAgentBase {
       draftAccess: resolveCallerDraftAccess({ defaultAgentAddress: this.defaultAgentAddress, peerId: this.peerId }, callerAgentAddressStr, opts.excludeWorkingMemoryPartitions === true),
       includePrivate: opts.includePrivate,
       signal: opts.signal,
+      workDeadline: opts.workDeadline,
       priority: opts.priority,
       source: opts.source,
       maxResponseBytes: opts.maxResponseBytes,

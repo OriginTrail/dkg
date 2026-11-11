@@ -494,3 +494,13 @@ it.each(['finalized-name-absence-unaccepted', 'authority-circuit-open'])(
     expect(fixture.queryEngine.query).not.toHaveBeenCalled();
   },
 );
+
+it('hands the request work deadline to the engine with the caller query', async () => {
+  const fixture = runtimePrivateQueryAgent();
+  const workDeadline = performance.now() + 5_000;
+  await QueryMethods.prototype.query.call(fixture.agent as never, 'SELECT ?s WHERE { ?s ?p ?o }', {
+    contextGraphId: RUNTIME_PRIVATE_CG, view: 'verifiable-memory', callerAgentAddress: REMOTE_MEMBER, workDeadline,
+  });
+  expect(fixture.queryEngine.query).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(fixture.queryEngine.query).mock.calls[0][1]).toMatchObject({ workDeadline });
+});

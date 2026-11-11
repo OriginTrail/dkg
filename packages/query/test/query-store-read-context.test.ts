@@ -111,3 +111,24 @@ describe('decorated inventory materialization', () => {
       expect(() => budget.consume(result)).toThrow(expect.objectContaining({ actualBytes: inventoryBytes + resultBytes }));
     });
 });
+
+describe('a work deadline reaches only the caller\'s own reads', () => {
+  it('passes it with the caller query, never with shared discovery or catalog reads', async () => {
+    const seen: Array<Record<string, unknown> | undefined> = [];
+    const store = {
+      async query(_sparql: string, options?: Record<string, unknown>) {
+        seen.push(options);
+        return { type: 'bindings' as const, bindings: [] };
+      },
+    } as unknown as TripleStore;
+    const workDeadline = performance.now() + 5_000;
+    const reads = createQueryStoreReadContext(store, { workDeadline, source: 'api.query' });
+
+    await reads.query('SELECT * WHERE { ?s ?p ?o }');
+    await reads.withWithheldGraphRoots(['urn:withheld']).query('SELECT * WHERE { ?s ?p ?o }');
+    await reads.catalog.query('SELECT * WHERE { ?s ?p ?o }');
+    await reads.shared.measure((shared) => shared.query('SELECT * WHERE { ?s ?p ?o }'));
+
+    expect(seen.map((options) => options?.workDeadline)).toEqual([workDeadline, workDeadline, undefined, undefined]);
+  });
+});

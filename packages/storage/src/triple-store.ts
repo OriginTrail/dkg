@@ -35,7 +35,7 @@ import type {
 import {
   getManagedOxigraphRuntimeConstructionAuthorityV1,
 } from './managed-oxigraph-runtime-store.js';
-
+import type { QueryWorkLimitOptions } from './query-work-stop.js';
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 
 export interface Quad {
@@ -98,7 +98,7 @@ export interface StorePressureSnapshot {
   backgroundInflightLimit?: number;
 }
 
-export interface QueryOptions {
+export interface QueryOptions extends QueryWorkLimitOptions {
   /** Human-readable caller tag used by adapters for diagnostics/telemetry. */
   source?: string;
   /**
