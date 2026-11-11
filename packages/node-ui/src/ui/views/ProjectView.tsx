@@ -876,7 +876,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       )}
 
       {/* Overview View — S2 finalize section order (§4.2.1):
-          identity row + At a glance + Knowledge Pipeline + Participant
+          identity row + At a glance + Knowledge pipeline + Participant
           agents live inside ProjectOverviewCard. Pending join requests
           is a peer section below it (curator-only). Recent activity
           moves to the last content row before the primer escape hatch

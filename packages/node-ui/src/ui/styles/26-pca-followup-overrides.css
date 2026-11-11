@@ -66,14 +66,18 @@
 .v10-pca-get-added-body .v10-pca-detail-agentlist {
   margin-top: 8px;
 }
+/* The field and its button share a row, and the button wraps under the
+   field when the dialog is too narrow for both. */
 .v10-pca-get-added-body .v10-pca-detail-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   max-width: 420px;
 }
 .v10-pca-get-added-body .v10-pca-detail-form .v10-form-input {
+  flex: 1 1 240px;
+  min-width: 0;
   max-width: none;
 }
 .v10-pca-discovered-check {
@@ -117,7 +121,10 @@
   font-weight: 700;
   opacity: 1;
 }
+/* The list is its own size container, so the options re-flow to the width the
+   dialog gives them. Nothing in it is fixed-position, so the container traps nothing. */
 .v10-pca-node-picker-list {
+  container: pca-node-picker / inline-size;
   list-style: none;
   margin: 8px 0 0;
   padding: 0;
@@ -166,8 +173,8 @@
   flex-wrap: wrap;
   margin-top: 8px;
   padding: 10px 12px;
-  border: 1px solid rgba(96, 165, 250, 0.35);
-  background: rgba(96, 165, 250, 0.08);
+  border: 1px solid var(--border-strong);
+  background: var(--tint-subtle);
   color: var(--text-secondary);
   font-size: var(--fs-control);
   line-height: 1.4;
@@ -207,20 +214,12 @@
 .v10-pca-detail .v10-pca-device-progress + .v10-stat-strip {
   margin-top: 16px;
 }
-@media (max-width: 720px) {
-  .v10-pca-section-head > .v10-pca-overview-cta-group {
+.v10-center-content[data-narrow] .v10-pca-section-head > .v10-pca-overview-cta-group {
     justify-content: flex-end;
-    margin-left: auto;
-  }
-  .v10-pca-get-added-body .v10-pca-detail-form {
-    grid-template-columns: 1fr;
-  }
-  .v10-pca-node-picker-option {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
+    margin-left: auto; }
+@container pca-node-picker (max-width: 560px) {
+  .v10-pca-node-picker-option { grid-template-columns: auto minmax(0, 1fr); }
   .v10-pca-node-picker-option .ds-badge,
   .v10-pca-node-picker-stake,
-  .v10-pca-node-picker-own {
-    grid-column: 2;
-  }
+  .v10-pca-node-picker-own { grid-column: 2; }
 }

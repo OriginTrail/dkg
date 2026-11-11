@@ -64,7 +64,7 @@ export async function waitForContextGraph(
   timeoutMs = 120_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  let lastErr = 'context graph never appeared';
+  let lastErr = 'Context graph never appeared';
   while (Date.now() < deadline) {
     try {
       const cgs = await listContextGraphs(nodeNum);

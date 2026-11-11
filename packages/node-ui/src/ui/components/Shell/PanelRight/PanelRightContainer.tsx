@@ -50,6 +50,7 @@ import {
   upsertLocalAgentIntegrationState,
 } from './selection.js';
 import type { AgentInfo, ConnectionRow, LocalAgentAttachmentDraft, LocalAgentAttachmentStatus, LocalAgentMessage, LocalAgentSessionSummary } from './types.js';
+import { conversationRequests, useConversationField } from '../../../stores/agentConversations.js';
 
 export function PanelRight() {
   const { stage, advance } = useJourneyStore();
@@ -74,11 +75,13 @@ export function PanelRight() {
   const [refreshBusyId, setRefreshBusyId] = useState<string | null>(null);
   const [clearBusyId, setClearBusyId] = useState<string | null>(null);
 
-  const [localMessagesByConversation, setLocalMessagesByConversation] = useState<Record<string, LocalAgentMessage[]>>({});
-  const [localInputByConversation, setLocalInputByConversation] = useState<Record<string, string>>({});
-  const [localSendingByConversation, setLocalSendingByConversation] = useState<Record<string, boolean>>({});
-  const [localHistoryLoadedByConversation, setLocalHistoryLoadedByConversation] = useState<Record<string, boolean>>({});
-  const [attachmentDraftsByConversation, setAttachmentDraftsByConversation] = useState<Record<string, LocalAgentAttachmentDraft[]>>({});
+  // Conversations outlive the panel: it unmounts when closed, and drafts,
+  // queued files, messages and sends in flight are still there when it opens.
+  const [localMessagesByConversation, setLocalMessagesByConversation] = useConversationField('messages');
+  const [localInputByConversation, setLocalInputByConversation] = useConversationField('inputs');
+  const [localSendingByConversation, setLocalSendingByConversation] = useConversationField('sending');
+  const [localHistoryLoadedByConversation, setLocalHistoryLoadedByConversation] = useConversationField('historyLoaded');
+  const [attachmentDraftsByConversation, setAttachmentDraftsByConversation] = useConversationField('attachmentDrafts');
 
   // AbortControllers keyed by `conversationKey` so the stop-button on
   // conversation A always aborts A's in-flight request and never B's.
@@ -86,7 +89,6 @@ export function PanelRight() {
   // user switched conversations mid-stream and started a send in the
   // new one — clicking Stop in the original conversation would then
   // abort the wrong request. Codex CIV4a / CIcaM / CIlg0.
-  const localAbortRef = useRef<Map<string, AbortController>>(new Map());
   const autoFocusedLocalAgentRef = useRef(false);
   const localChatEndRef = useRef<HTMLDivElement>(null);
   const memorySessionsRef = useRef<MemorySession[]>([]);
@@ -544,7 +546,7 @@ export function PanelRight() {
       // ref. Multiple conversations can stream concurrently, and the
       // user can switch tabs mid-stream — each Stop button must abort
       // its own request.
-      localAbortRef.current.set(conversationKey, controller);
+      conversationRequests.start(conversationKey, controller);
       const contextEntries = [
         ...buildChatContextEntries(availableProjects, activeProjectId, currentAgent),
       ];
@@ -706,9 +708,7 @@ export function PanelRight() {
       // in-flight conversation's entry alone. Compare-and-delete so a
       // late `finally` from a previous send can't accidentally wipe a
       // newer entry under the same key after a quick retry.
-      if (localAbortRef.current.get(conversationKey) === controller) {
-        localAbortRef.current.delete(conversationKey);
-      }
+      conversationRequests.finish(conversationKey, controller);
     }
   }, [
     activeProjectId,
@@ -742,8 +742,7 @@ export function PanelRight() {
     // "Request cancelled." and dropping `streaming: false`, so a
     // single `.abort()` here is enough — no additional teardown.
     if (!selectedConversationKey) return;
-    const controller = localAbortRef.current.get(selectedConversationKey);
-    controller?.abort();
+    conversationRequests.stop(selectedConversationKey);
   }, [selectedConversationKey]);
 
   const connectIntegration = useCallback(async (integrationId: string) => {
@@ -851,7 +850,7 @@ export function PanelRight() {
       setLocalInputByConversation((prev) => ({ ...prev, [conversation.stateKey]: '' }));
       setAttachmentDraftsByConversation((prev) => ({ ...prev, [conversation.stateKey]: [] }));
       setLocalHistoryLoadedByConversation((prev) => ({ ...prev, [conversation.stateKey]: true }));
-      setConnectNotice('DKG Local LLM session cleared. You can now select a different Context Graph.');
+      setConnectNotice('DKG Local LLM session cleared. You can now select a different context graph.');
       await refreshLocalIntegrations();
     } catch (err: any) {
       setConnectError(err?.message ?? 'Failed to clear the local LLM session.');

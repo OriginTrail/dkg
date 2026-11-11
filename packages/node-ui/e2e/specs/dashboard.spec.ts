@@ -23,14 +23,14 @@ test.describe('Dashboard (rc.12)', () => {
   });
 
   test('shows My Context Graphs stat card', async ({ page }) => {
-    await expect(page.locator('.stat-label').filter({ hasText: 'My Context Graphs' })).toBeVisible();
+    await expect(page.locator('.stat-label').filter({ hasText: 'My context graphs' })).toBeVisible();
   });
 
-  test('shows Context Graph Size stat card', async ({ page }) => {
-    await expect(page.locator('.stat-label').filter({ hasText: 'Context Graph Size' })).toBeVisible();
+  test('shows Context Graph size stat card', async ({ page }) => {
+    await expect(page.locator('.stat-label').filter({ hasText: 'Context graph size' })).toBeVisible();
   });
 
-  test('sidebar lists seeded context graphs under My Context Graphs', async ({ leftPanel }) => {
+  test('sidebar lists seeded Context Graphs under My Context Graphs', async ({ leftPanel }) => {
     const names = await leftPanel.getProjectNames();
     expect(names.length).toBeGreaterThanOrEqual(2);
     expect(names).toContain(PRIMARY_CG);
@@ -59,14 +59,14 @@ test.describe('Dashboard (rc.12)', () => {
 
   test('renders exactly the three rc.12 stat cards', async ({ dashboard }) => {
     const labels = (await dashboard.getStatCards()).map((s) => s.label);
-    expect(labels).toEqual(['My Context Graphs', 'Context Graph Size', 'Collaborating Agents']);
+    expect(labels).toEqual(['My context graphs', 'Context graph size', 'Collaborating agents']);
   });
 
   test('"My Context Graphs" stat value equals the number of CG rows', async ({ dashboard }) => {
     await dashboard.waitForCgRowsLoaded();
     const rowCount = await dashboard.cgRows.count();
     expect(rowCount).toBeGreaterThanOrEqual(2);
-    const stat = (await dashboard.getStatCards()).find((s) => s.label === 'My Context Graphs');
+    const stat = (await dashboard.getStatCards()).find((s) => s.label === 'My context graphs');
     expect(stat?.value.trim()).toBe(String(rowCount));
   });
 
@@ -127,8 +127,8 @@ test.describe('Dashboard (rc.12)', () => {
     expect(value).toMatch(/Chain\s+\d+|Hardhat|Local|Base|Sepolia|Ethereum/i);
   });
 
-  test('Context Graph Size card shows entities, triples and a WM/SWM/VM layer bar', async ({ page }) => {
-    const card = page.locator('.stat-card').filter({ hasText: 'Context Graph Size' });
+  test('Context Graph size card shows entities, triples and a WM/SWM/VM layer bar', async ({ page }) => {
+    const card = page.locator('.stat-card').filter({ hasText: 'Context graph size' });
     await expect(card).toBeVisible();
     const nums = card.locator('.v10-cg-size-num');
     // The card body (counts + layer bar) hydrates from an async aggregate query;

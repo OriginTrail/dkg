@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useCallback, lazy, Suspense } from 'react';
+import { LayerGlyph } from '../components/ds/Badge.js';
 import { useFetch } from '../hooks.js';
 import { executeQuery, fetchStatus, listAssertions, promoteAssertion, publishAssertionsToVm, partialPublishWarning, outcomeUnknownPublishNote, describePromoteResult, describePromoteError, type AssertionInfo, type BatchPublishResult } from '../api.js';
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
@@ -26,10 +27,10 @@ const OnChainProvenanceCard = lazy(() =>
 type MemoryLayer = 'wm' | 'swm' | 'vm';
 type ViewMode = 'table' | 'graph';
 
-const LAYER_META: Record<MemoryLayer, { label: string; color: string; icon: string; description: string }> = {
-  wm: { label: 'Working Memory', color: 'var(--layer-working)', icon: '◇', description: 'Private agent drafts. Fast local storage.' },
-  swm: { label: 'Shared Working Memory', color: 'var(--layer-shared)', icon: '◈', description: 'Shared proposals with collaborators. TTL-bounded.' },
-  vm: { label: 'Verifiable Memory', color: 'var(--layer-verified)', icon: '◉', description: 'Endorsed, published, on-chain knowledge.' },
+const LAYER_META: Record<MemoryLayer, { label: string; color: string; description: string }> = {
+  wm: { label: 'Working Memory', color: 'var(--layer-working)', description: 'Private agent drafts. Fast local storage.' },
+  swm: { label: 'Shared Working Memory', color: 'var(--layer-shared)', description: 'Shared proposals with collaborators. TTL-bounded.' },
+  vm: { label: 'Verifiable Memory', color: 'var(--layer-verified)', description: 'Endorsed, published, on-chain knowledge.' },
 };
 
 const TABLE_ICON = (
@@ -220,7 +221,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
   return (
     <div className="v10-memory-layer-view">
       <div className="v10-mlv-header">
-        <span className="v10-mlv-icon" style={{ color: meta.color }}>{meta.icon}</span>
+        <span className="v10-mlv-icon" style={{ color: meta.color }}><LayerGlyph layer={layer} /></span>
         <div>
           <h2 className="v10-mlv-title">{meta.label}</h2>
           <p className="v10-mlv-desc">{meta.description}</p>
@@ -367,7 +368,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       {!loading && results.length > 0 && viewMode === 'table' && (
         <div className="v10-mlv-table-wrap ds-card-nested">
           <div className="v10-mlv-result-count">{results.length} triples</div>
-          <table className="v10-mlv-table">
+          <div className="ds-table-scroll"><table className="v10-mlv-table">
             <thead>
               <tr>
                 <th>Subject</th>
@@ -384,7 +385,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         </div>
       )}
 

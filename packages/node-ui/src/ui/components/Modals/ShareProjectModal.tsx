@@ -239,7 +239,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
           style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}
         >
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div id="dkg-share-modal-title" className="v10-modal-title">Share Context Graph</div>
+            <div id="dkg-share-modal-title" className="v10-modal-title">Share context graph</div>
             <div className="v10-modal-subtitle">
               Invite agents to collaborate on <strong>{contextGraphName}</strong>.
             </div>
@@ -280,11 +280,11 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                 position: 'relative',
               }}
             >
-              Join Requests
+              Join requests
               {pendingRequests.length > 0 && (
                 <span style={{
                   position: 'absolute', top: 4, right: 4,
-                  background: 'var(--accent-red, #ef4444)', color: 'var(--text-on-accent)',
+                  background: 'var(--accent-red)', color: 'var(--text-on-accent)',
                   borderRadius: 'var(--radius-pill)', fontSize: 'var(--fs-micro)', fontWeight: 700,
                   padding: '1px 5px', minWidth: 16, textAlign: 'center',
                 }}>
@@ -298,12 +298,12 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
             <>
               {/* Allowed Agents — read-only audit list. Agents are added
                   exclusively via the text-invite + signed-join-request flow
-                  (see Invite Code below + the Join Requests tab). The ✕
+                  (see Invite code below + the Join requests tab). The ✕
                   button revokes access for an existing participant. */}
               <div className="v10-form-group">
-                <label className="v10-form-label">Allowed Agents</label>
+                <label className="v10-form-label">Allowed agents</label>
                 <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginBottom: 8 }}>
-                  Only agents on this list can read and write to the context graph. To add someone, share the Invite Code below — they'll send a signed join request you can approve in the <strong>Join Requests</strong> tab.
+                  Only agents on this list can read and write to the context graph. To add someone, share the invite code below — they'll send a signed join request you can approve in the <strong>Join requests</strong> tab.
                 </div>
 
                 {allowedAgents.length > 0 && (
@@ -355,7 +355,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
 
               {/* Invite code */}
               <div className="v10-form-group">
-                <label className="v10-form-label">Invite Code</label>
+                <label className="v10-form-label">Invite code</label>
                 {invitePayload === null ? (
                   <div style={{
                     padding: '8px 12px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)',
@@ -392,7 +392,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
 
           {activeTab === 'requests' && (
             <div className="v10-form-group">
-              <label className="v10-form-label">Pending Join Requests</label>
+              <label className="v10-form-label">Pending join requests</label>
               <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginBottom: 8 }}>
                 Agents who submitted a signed request to join this context graph. Approve to add them to the allowlist.
               </div>
@@ -432,8 +432,8 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                       onClick={() => handleApprove(req.agentAddress)}
                       disabled={processingRequest === req.agentAddress}
                       style={{
-                        background: 'rgba(34, 197, 94, 0.15)', color: 'var(--text-success)',
-                        border: '1px solid rgba(34, 197, 94, 0.3)', cursor: 'pointer',
+                        background: 'var(--success-bg-strong)', color: 'var(--text-success)',
+                        border: '1px solid var(--success-border)', cursor: 'pointer',
                         borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-micro)', padding: '4px 10px', fontWeight: 600,
                       }}
                     >
@@ -443,8 +443,8 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                       onClick={() => handleReject(req.agentAddress)}
                       disabled={processingRequest === req.agentAddress}
                       style={{
-                        background: 'rgba(239, 68, 68, 0.1)', color: 'var(--text-danger)',
-                        border: '1px solid rgba(239, 68, 68, 0.2)', cursor: 'pointer',
+                        background: 'var(--danger-bg)', color: 'var(--text-danger)',
+                        border: '1px solid var(--danger-border)', cursor: 'pointer',
                         borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-micro)', padding: '4px 10px', fontWeight: 600,
                       }}
                     >

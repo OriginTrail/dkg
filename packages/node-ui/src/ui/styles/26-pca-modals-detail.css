@@ -28,7 +28,7 @@
   font-size: var(--fs-label);
   line-height: 1.5;
   color: var(--text-warning);
-  background: var(--amber-dim);
+  background: var(--warning-bg);
 }
 .v10-pca-create-tx { font-size: var(--fs-label); color: var(--text-secondary); margin: 8px 0 0; word-break: break-all; }
 .v10-pca-create-review { display: flex; flex-direction: column; gap: 6px; }

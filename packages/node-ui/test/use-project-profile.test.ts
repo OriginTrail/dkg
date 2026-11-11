@@ -209,7 +209,7 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
     expect(binding!.slug).toBe(ROOT_SLUG_SENTINEL);
     expect(binding!.displayName).toBe('Root');
     expect(binding!.icon).toBe('⊘');
-    expect(binding!.description).toBe('Entities not in any subgraph (Context Graph root)');
+    expect(binding!.description).toBe('Entities not in any subgraph (context graph root)');
   });
 
   it('keeps the daemon-resolved binding path intact for non-Root slugs', async () => {
@@ -235,7 +235,7 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
     } finally { document.documentElement.classList.remove('light'); }
   });
 
-  it('keeps a hostile context graph id inside one literal at every profile query sink', async () => {
+  it('keeps a hostile Context Graph id inside one literal at every profile query sink', async () => {
     const contextGraphId = ['cg-', '\\', '"', '\n', '") } UNION { ?s ?p ?o } #'].join('');
     const prefix = `did:dkg:context-graph:${contextGraphId}/meta`;
     const expectedFilter = `FILTER(strstarts(str(?g), ${JSON.stringify(prefix)}))`;

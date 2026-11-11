@@ -1,6 +1,6 @@
 /* ── Sub-graph detail view header + filters ── */
 .v10-subgraph-detail {
-  border-top: 3px solid color-mix(in srgb, var(--sg-color, #64748b) 40%, transparent);
+  border-top: 3px solid color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 40%, transparent);
 }
 .v10-subgraph-detail-header {
   padding: 12px 16px;
@@ -8,7 +8,7 @@
   display: flex; align-items: center; gap: 12px;
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--sg-color, #64748b) 8%, transparent) 0%,
+    color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 8%, transparent) 0%,
     transparent 100%
   );
 }
@@ -41,7 +41,7 @@
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   padding: 8px 16px;
   border-bottom: 1px solid var(--border-subtle);
-  background: rgba(255,255,255,0.015);
+  background: var(--tint-faint);
 }
 .v10-subgraph-savedqueries-label {
   font-size: var(--fs-micro); font-weight: 700; text-transform: uppercase;
@@ -51,9 +51,9 @@
 .v10-subgraph-savedquery {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 4px 10px;
-  background: rgba(255,255,255,0.02);
+  background: var(--tint-faint);
   border: 1px solid var(--border-subtle);
-  border-radius: 14px;
+  border-radius: var(--radius-overlay);
   font-size: var(--fs-label); color: var(--text-secondary);
   font-family: var(--font-sans);
   cursor: pointer;
@@ -82,7 +82,7 @@
   display: flex; flex-direction: column; gap: 6px;
   padding: 8px 16px;
   border-bottom: 1px solid var(--border-subtle);
-  background: rgba(255,255,255,0.01);
+  background: var(--tint-faint);
 }
 .v10-subgraph-filter-row {
   display: flex; align-items: center; gap: 10px;
@@ -120,8 +120,8 @@
   text-align: center;
 }
 .v10-subgraph-timeline-empty code {
-  background: rgba(255,255,255,0.06);
-  padding: 1px 4px; border-radius: 3px;
+  background: var(--tint-strong);
+  padding: 1px 4px; border-radius: var(--radius-hair);
   font-family: var(--font-mono); font-size: var(--fs-label);
 }
 .v10-subgraph-timeline-bucket { display: flex; flex-direction: column; gap: 6px; }
@@ -132,7 +132,7 @@
 }
 .v10-subgraph-timeline-bucket-dot {
   width: 8px; height: 8px; border-radius: 50%;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sg-color, #64748b) 20%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 20%, transparent);
 }
 .v10-subgraph-timeline-bucket-label {
   font-size: var(--fs-control); font-weight: 700; letter-spacing: 0.04em;
@@ -149,9 +149,9 @@
 .v10-subgraph-timeline-item {
   display: flex; align-items: center; gap: 10px;
   padding: 6px 10px;
-  background: rgba(255,255,255,0.015);
+  background: var(--tint-faint);
   border: 1px solid var(--border-subtle);
-  border-left: 2px solid color-mix(in srgb, var(--sg-color, #64748b) 60%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 60%, transparent);
   border-radius: var(--radius-xs);
   font-size: var(--fs-control); color: var(--text-secondary);
   font-family: var(--font-sans);
@@ -160,7 +160,7 @@
 }
 .v10-subgraph-timeline-item:hover {
   border-color: var(--border-strong);
-  background: rgba(255,255,255,0.04);
+  background: var(--tint-subtle);
   color: var(--text-primary);
 }
 .v10-subgraph-timeline-item-icon { width: 14px; text-align: center; }
@@ -173,8 +173,8 @@
 }
 .v10-subgraph-chip-badge { margin-left: 6px; }
 @keyframes v10-pulse-red {
-  0%, 100% { box-shadow: 0 0 4px rgba(239,68,68,0.6); }
-  50%      { box-shadow: 0 0 8px rgba(239,68,68,0.9); }
+  0%, 100% { box-shadow: 0 0 4px color-mix(in srgb, var(--accent-red) 60%, transparent); }
+  50%      { box-shadow: 0 0 8px color-mix(in srgb, var(--accent-red) 90%, transparent); }
 }
 
 /* ── Cross-reference sub-graph badge (inside KA detail links) ── */
@@ -185,8 +185,8 @@
   border-radius: var(--radius-nested);
   font-size: var(--fs-micro); font-weight: 600;
   letter-spacing: 0.04em;
-  background: color-mix(in srgb, var(--sg-color, #64748b) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--sg-color, #64748b) 35%, transparent);
+  background: color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 35%, transparent);
   color: var(--text-secondary);
   font-family: var(--font-sans);
   white-space: nowrap;

@@ -169,15 +169,15 @@ describe('header uses live status', () => {
     expect(header).toContain('connectedPeers');
   });
 
-  it('App.tsx polls status via useLiveStatus and stores in agents store', () => {
-    const app = readFile('App.tsx');
-    expect(app).toContain('useLiveStatus');
-    expect(app).toContain('setNodeStatus');
-    expect(app).toContain('api.fetchStatus()');
+  it('the shell polls status and stores it in the agents store', () => {
+    expect(readFile('App.tsx')).toContain('useNodeStatusPolling()');
+    const hook = readFile('hooks/useNodeState.ts');
+    expect(hook).toContain('setNodeStatus');
+    expect(hook).toContain('api.fetchStatus()');
   });
 
   it('header gracefully handles missing status data', () => {
-    expect(header).toMatch(/nodeStatus\?\.connectedPeers\s*\?\?\s*nodeStatus\?\.peerCount/);
+    expect(readFile('hooks/useNodeState.ts')).toMatch(/nodeStatus\?\.connectedPeers\s*\?\?\s*nodeStatus\?\.peerCount/);
   });
 });
 
@@ -187,7 +187,7 @@ describe('header uses live status', () => {
 // behavioral coverage (approve/deny, read model, states, a11y) lives in the
 // dedicated component tests + the QA matrix.
 describe('notifications pane extraction', () => {
-  const header = readFile('components/Shell/Header.tsx');
+  const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
   const bell = readFile('components/Shell/NotificationsBell.tsx');
   const pane = readFile('components/Notifications/NotificationsPane.tsx');
   const rows = readFile('components/Notifications/rows.tsx');
@@ -235,7 +235,7 @@ describe('notifications pane extraction', () => {
   });
 });
 
-describe('right-rail agent shell replaces Agent Hub', () => {
+describe('right-rail agent shell replaces Agent hub', () => {
   const app = readFile('App.tsx');
   const panelLeft = readFile('components/Shell/PanelLeft.tsx');
   const panelCenter = readFile('components/Shell/PanelCenter.tsx');
@@ -257,12 +257,12 @@ describe('right-rail agent shell replaces Agent Hub', () => {
 
   it('emits a resize signal after side rail toggles so measured panes recalculate', () => {
     expect(app).toContain("window.dispatchEvent(new Event('resize'))");
-    expect(app).toContain('[leftCollapsed, rightCollapsed]');
+    expect(app).toContain('[leftOpen, rightOpen]');
   });
 
-  it('hides the duplicate left-nav Agent Hub entry while keeping the internal route alive', () => {
+  it('hides the duplicate left-nav Agent hub entry while keeping the internal route alive', () => {
     expect(panelLeft).not.toContain("id: 'agent-hub'");
-    expect(panelLeft).not.toContain('Agent Hub');
+    expect(panelLeft).not.toContain('Agent hub');
     expect(panelCenter).toContain("activeTabId === 'agent-hub'");
   });
 
@@ -338,13 +338,16 @@ describe('retired installable apps framework (V10)', () => {
   });
 });
 
-describe('header peer status logic', () => {
+describe('header node status', () => {
   const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
 
-  it('shows peer connectivity without making a global sync claim', () => {
-    expect(header).toContain("connectedPeers} peer{connectedPeers !== 1 ? 's' : ''}");
-    expect(header).not.toContain('v10-header-status-dot');
-    expect(header).not.toMatch(/>synced<|>syncing</);
+  it('derives the status from loaded state, peers and failed checks, not a sync flag', () => {
+    expect(readFile('hooks/useNodeState.ts')).toContain('headerNodeStatus(nodeStatus != null, peers, failures)');
+    expect(header).not.toContain('nodeStatus?.synced');
+  });
+
+  it('draws the status with the shared Badge', () => {
+    expect(header).toContain('<Badge tone={nodeState.tone}>');
   });
 });
 

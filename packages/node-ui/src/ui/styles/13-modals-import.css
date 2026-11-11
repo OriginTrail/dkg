@@ -6,7 +6,7 @@
 .v10-file-preview-loading { padding: 32px 24px; text-align: center; font-size: var(--fs-control); color: var(--text-tertiary); }
 .v10-file-preview-error {
   margin: 16px 24px; padding: 14px;
-  background: rgba(239, 68, 68, 0.06); border: 1px solid rgba(239, 68, 68, 0.2);
+  background: var(--danger-bg); border: 1px solid var(--danger-border);
   color: var(--text-danger); font-size: var(--fs-control);
 }
 .v10-file-preview-meta {
@@ -145,9 +145,9 @@
 
 /* Light theme modal overrides */
 body.light .v10-modal-box {
-  background: #ffffff;
+  background: var(--bg-surface);
   border-color: var(--border-default);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-modal);
 }
 
 /* ═══════════════════════════════════════════
@@ -232,14 +232,14 @@ body.light .v10-modal-box {
 .v10-import-progress-bar {
   height: 4px;
   background: var(--border-subtle);
-  border-radius: 2px;
+  border-radius: var(--radius-hair);
   overflow: hidden;
   margin-top: 8px;
 }
 .v10-import-progress-fill {
   height: 100%;
-  background: var(--accent-blue, #3b82f6);
-  border-radius: 2px;
+  background: var(--accent-blue);
+  border-radius: var(--radius-hair);
   transition: width 0.3s ease;
 }
 .v10-import-progress-text {
@@ -254,17 +254,17 @@ body.light .v10-modal-box {
   line-height: 1.6;
 }
 .v10-import-result.success {
-  background: rgba(34, 197, 94, 0.08);
-  border: 1px solid rgba(34, 197, 94, 0.25);
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
   color: var(--text-success);
 }
 .v10-import-result.error {
-  background: rgba(239, 68, 68, 0.08);
-  border: 1px solid rgba(239, 68, 68, 0.25);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
   color: var(--text-danger);
 }
 
 /* Light overrides for import UI */
-body.light .v10-import-dropzone { border-color: #d4d4d4; }
+body.light .v10-import-dropzone { border-color: var(--border-default); }
 body.light .v10-import-dropzone:hover,
-body.light .v10-import-dropzone.drag-over { border-color: #b0b0b0; background: #e8e8e8; }
+body.light .v10-import-dropzone.drag-over { border-color: var(--border-strong); background: var(--bg-hover); }

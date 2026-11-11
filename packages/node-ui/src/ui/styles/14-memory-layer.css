@@ -46,7 +46,7 @@
   background: var(--accent-amber);
   color: var(--bg-root);
   font-weight: 600;
-  border-radius: 3px;
+  border-radius: var(--radius-hair);
   font-size: var(--fs-micro);
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -71,7 +71,7 @@
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   padding: 14px 16px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-menu);
   z-index: 20;
   font-size: var(--fs-control);
   color: var(--text-primary);

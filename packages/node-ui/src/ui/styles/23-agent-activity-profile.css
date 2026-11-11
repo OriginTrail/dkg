@@ -5,8 +5,8 @@
   gap: 6px;
   padding: 2px 8px 2px 2px;
   border-radius: var(--radius-pill);
-  border: 1px solid color-mix(in srgb, var(--agent-color, #64748b) 30%, var(--border-subtle));
-  background: color-mix(in srgb, var(--agent-color, #64748b) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--agent-color, var(--identity-fallback)) 30%, var(--border-subtle));
+  background: color-mix(in srgb, var(--agent-color, var(--identity-fallback)) 6%, transparent);
   color: var(--text-secondary);
   font-family: var(--font-sans);
   vertical-align: middle;
@@ -15,8 +15,8 @@
 }
 .v10-agent-chip.interactive { cursor: pointer; transition: background 0.15s, border-color 0.15s; }
 .v10-agent-chip.interactive:hover {
-  background: color-mix(in srgb, var(--agent-color, #64748b) 14%, transparent);
-  border-color: color-mix(in srgb, var(--agent-color, #64748b) 50%, var(--border-default));
+  background: color-mix(in srgb, var(--agent-color, var(--identity-fallback)) 14%, transparent);
+  border-color: color-mix(in srgb, var(--agent-color, var(--identity-fallback)) 50%, var(--border-default));
 }
 .v10-agent-chip-avatar {
   position: relative;
@@ -25,8 +25,8 @@
   justify-content: center;
   flex-shrink: 0;
   border-radius: 50%;
-  background: var(--agent-color, #64748b);
-  color: #fff;
+  background: var(--agent-color, var(--identity-fallback));
+  color: var(--text-on-identity);
   font-weight: 700;
   line-height: 1;
 }
@@ -38,13 +38,13 @@
   position: absolute;
   bottom: -2px;
   right: -4px;
-  background: var(--bg-surface, #1a1d23);
-  border: 1px solid color-mix(in srgb, var(--agent-color, #64748b) 50%, var(--border-default));
+  background: var(--bg-surface);
+  border: 1px solid color-mix(in srgb, var(--agent-color, var(--identity-fallback)) 50%, var(--border-default));
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--agent-color, #64748b);
+  color: var(--agent-color, var(--identity-fallback));
   line-height: 1;
 }
 .v10-agent-chip-body {
@@ -72,7 +72,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.v10-agent-chip-fw { font-weight: 700; color: var(--agent-color, #64748b); }
+.v10-agent-chip-fw { font-weight: 700; color: var(--agent-color, var(--identity-fallback)); }
 .v10-agent-chip-sep { opacity: 0.5; }
 .v10-agent-chip-op { opacity: 0.85; }
 
@@ -80,11 +80,11 @@
 /* Avatars 20 / 24 / 32 on the shared scale; chip heights match the controls. */
 .v10-agent-chip-sm { height: var(--h-control-sm); box-sizing: border-box; padding: 0 9px 0 2px; font-size: var(--fs-label); }
 .v10-agent-chip-sm .v10-agent-chip-avatar { width: 20px; height: 20px; font-size: var(--fs-micro); }
-.v10-agent-chip-sm .v10-agent-chip-glyph { width: 10px; height: 10px; font-size: 7px; bottom: -2px; right: -4px; }
+.v10-agent-chip-sm .v10-agent-chip-glyph { width: 12px; height: 12px; font-size: var(--fs-micro); bottom: -3px; right: -4px; }
 
 .v10-agent-chip-md { height: 28px; box-sizing: border-box; padding: 0 10px 0 2px; font-size: var(--fs-control); }
 .v10-agent-chip-md .v10-agent-chip-avatar { width: 24px; height: 24px; font-size: var(--fs-micro); }
-.v10-agent-chip-md .v10-agent-chip-glyph { width: 12px; height: 12px; font-size: 8px; bottom: -2px; right: -4px; }
+.v10-agent-chip-md .v10-agent-chip-glyph { width: 14px; height: 14px; font-size: var(--fs-micro); bottom: -3px; right: -4px; }
 
 .v10-agent-chip-lg { min-height: 40px; box-sizing: border-box; padding: 4px 14px 4px 4px; font-size: var(--fs-body); }
 .v10-agent-chip-lg .v10-agent-chip-avatar { width: 32px; height: 32px; font-size: var(--fs-control); }
@@ -98,7 +98,7 @@
   justify-content: center;
   flex-shrink: 0;
   border-radius: 50%;
-  color: #fff;
+  color: var(--text-on-identity);
   font-family: var(--font-mono);
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -108,7 +108,7 @@
 .v10-agent-dot-stack { display: inline-flex; align-items: center; }
 .v10-agent-dot-stack .v10-agent-dot { box-shadow: 0 0 0 2px var(--bg-surface); }
 .v10-agent-dot-stack .v10-agent-dot + .v10-agent-dot { margin-left: -3px; }
-.v10-agent-dot-more { background: var(--bg-elevated); color: var(--text-secondary); }
+.v10-agent-dot-more { box-sizing: border-box; padding: 0 3px; border-radius: var(--radius-pill); background: var(--bg-elevated); color: var(--text-secondary); }
 
 /* ── Activity feed ── */
 .v10-activity-feed {
@@ -116,7 +116,7 @@
   padding: 14px 16px;
   border-top: 1px solid var(--border-subtle);
   border-bottom: 1px solid var(--border-subtle);
-  background: rgba(255, 255, 255, 0.015);
+  background: var(--tint-faint);
 }
 .v10-activity-feed-title {
   display: flex; align-items: baseline; gap: 8px;
@@ -151,7 +151,7 @@
    * yet", but still quieter than the loud `EmptyState` primitive. */
   margin-top: 8px;
   padding: 6px 8px;
-  border-left: 2px solid var(--accent-warn, #f59e0b);
+  border-left: 2px solid var(--accent-amber);
   font-size: var(--fs-control); font-weight: 400; line-height: 1.5;
   color: var(--text-tertiary);
 }
@@ -187,7 +187,7 @@
   font-family: var(--font-sans);
   transition: background 0.12s;
 }
-.v10-activity-feed-row:hover { background: rgba(255,255,255,0.04); }
+.v10-activity-feed-row:hover { background: var(--tint-subtle); }
 .v10-activity-feed-row + .v10-activity-feed-row {
   border-top: 1px solid var(--border-subtle);
   border-radius: 0;
@@ -242,7 +242,7 @@
   border-bottom: 1px solid var(--border-subtle);
   background: linear-gradient(
     180deg,
-    rgba(255,255,255,0.04) 0%,
+    var(--tint-subtle) 0%,
     transparent 100%
   );
 }
@@ -299,7 +299,7 @@
   display: inline-flex; flex-direction: column; gap: 2px;
   padding: 6px 12px;
   border: 1px solid var(--border-subtle);
-  background: var(--bg-elevated, rgba(255,255,255,0.03));
+  background: var(--bg-elevated);
   cursor: pointer;
   color: var(--text-secondary);
   font-family: var(--font-sans);

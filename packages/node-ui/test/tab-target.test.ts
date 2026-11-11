@@ -22,7 +22,7 @@ describe('decodeTabId', () => {
     for (const id of ['agent:', 'agent:cg-1|', 'agent:|slug', 'nonsense', '']) expect(decodeTabId(id), id).toEqual({ kind: 'other', id });
   });
 
-  it('names the context graph a tab belongs to', () => {
+  it('names the Context Graph a tab belongs to', () => {
     expect(tabContextGraphId('project:cg-1')).toBe('cg-1');
     expect(tabContextGraphId('agent:cg-2|hermes')).toBe('cg-2');
     expect(tabContextGraphId('swm:cg-3')).toBe('cg-3');

@@ -278,9 +278,9 @@ export function PcaAccountCard({
           <Badge size="sm" icon="◉" className="v10-pca-card-discount">{pct(snapshot.discountBps)}</Badge>
           <span className="v10-pca-card-spacer" />
           {inconclusive ? (
-            <Badge tone="warning" size="sm" icon="⚠">Couldn’t verify approvals</Badge>
+            <Badge tone="warning" size="sm">Couldn’t verify approvals</Badge>
           ) : !allApproved && account.walletCount > 0 ? (
-            <Badge tone="warning" size="sm" icon="⚠">
+            <Badge tone="warning" size="sm">
               {account.approvedCount} of {account.walletCount} wallets approved
             </Badge>
           ) : null}

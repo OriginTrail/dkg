@@ -5,7 +5,7 @@
    Shared sub-components (HealthChip, WalletRow, AddressCrux,
    DiscountTierLadder, DiscountAppliedBadge, EligibilityVerdictBanner,
    SponsorshipHandshake). Warning semantics resolve to `--text-warning`
-   (NOT the SWM `--layer-shared` #f59e0b layer-identity accent).
+   (NOT the SWM `--layer-shared` var(--accent-amber) layer-identity accent).
    ══════════════════════════════════════════ */
 
 /* ----- Copy button (shared) ----- */
@@ -82,7 +82,7 @@
 }
 .v10-pca-tier-row:last-child { border-bottom: none; }
 .v10-pca-tier-row.active {
-  background: var(--green-dim);
+  background: var(--success-bg);
   color: var(--text-primary);
   font-weight: 600;
 }
@@ -110,18 +110,18 @@
 .v10-pca-verdict-actions { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; }
 
 .v10-pca-verdict-green {
-  background: var(--green-dim);
-  border-color: rgba(34, 197, 94, 0.25);
+  background: var(--success-bg);
+  border-color: var(--success-border);
 }
 .v10-pca-verdict-green .v10-pca-verdict-glyph { color: var(--text-success); }
 .v10-pca-verdict-amber {
-  background: var(--amber-dim);
-  border-color: rgba(245, 158, 11, 0.3);
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
 }
 .v10-pca-verdict-amber .v10-pca-verdict-glyph { color: var(--text-warning); }
 .v10-pca-verdict-danger {
-  background: var(--red-dim);
-  border-color: rgba(239, 68, 68, 0.35);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
 }
 .v10-pca-verdict-danger .v10-pca-verdict-glyph { color: var(--text-danger); }
 .v10-pca-verdict-neutral {
@@ -207,13 +207,12 @@
   color: var(--text-warning);
 }
 /* ----- SponsorshipHandshake ----- */
+/* Two halves side by side when the dialog has room, stacked when it doesn't:
+   the grid adapts to its own width, not the page's. */
 .v10-pca-handshake {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   gap: 12px;
-}
-@media (max-width: 640px) {
-  .v10-pca-handshake { grid-template-columns: 1fr; }
 }
 .v10-pca-handshake-half {
   display: flex;

@@ -28,10 +28,13 @@ export interface AgentDotProps {
   className?: string;
 }
 
+/** Initials scale with the avatar but stop at the 10px type floor (DESIGN.md · Type). */
+const initialsSize = (size: number) => Math.max(11, Math.round(size * 0.45));
+
 export const AgentDot: React.FC<AgentDotProps> = ({ uri, label, color, size = 18, title, className = '' }) => (
   <span
     className={`v10-agent-dot ${className}`}
-    style={{ background: color ?? agentColorForUri(uri), width: size, height: size, fontSize: Math.round(size * 0.45) }}
+    style={{ background: color ?? agentColorForUri(uri), width: size, height: size, fontSize: initialsSize(size) }}
     title={title ?? (label ? `${label}\n${uri}` : uri)}
     aria-hidden="true"
     data-agent={uri}
@@ -54,7 +57,7 @@ export const AgentDotStack: React.FC<{
     <span className="v10-agent-dot-stack" role="img" aria-label={label ?? `${agents.length} agent${agents.length === 1 ? '' : 's'}`}>
       {shown.map(a => <AgentDot key={a.uri} uri={a.uri} label={a.label} color={a.color} size={size} />)}
       {rest > 0 && (
-        <span className="v10-agent-dot v10-agent-dot-more" style={{ width: size, height: size, fontSize: Math.round(size * 0.42) }} aria-hidden="true">
+        <span className="v10-agent-dot v10-agent-dot-more" style={{ minWidth: size, height: size, fontSize: initialsSize(size) }} aria-hidden="true">
           +{rest}
         </span>
       )}

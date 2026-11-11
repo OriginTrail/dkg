@@ -1,12 +1,10 @@
 import React, { useCallback, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { Activity, ClipboardList, KeyRound, Store } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
 import { useJourneyStore } from '../../stores/journey.js';
-import { CreateProjectModal } from '../Modals/CreateProjectModal.js';
-import { JoinProjectModal } from '../Modals/JoinProjectModal.js';
+import { useContextGraphDialogs } from '../../stores/contextGraphDialogs.js';
 import { useContextGraphInventory, refreshContextGraphInventory } from '../../hooks/useContextGraphInventory.js';
 import { useVisibilityPolling } from '../../hooks/useVisibilityPolling.js';
 import { useHiddenContextGraphIds as useHiddenProjectIds } from '../../hooks/useHiddenContextGraphIds.js';
@@ -129,16 +127,16 @@ function OracleCatalogueItem({
 function localAgentDotColor(status: LocalAgentIntegrationStatus): string {
   switch (status) {
     case 'chat_ready':
-      return 'var(--accent-green, #22c55e)';
+      return 'var(--accent-green)';
     case 'connecting':
-      return 'var(--accent-yellow, #eab308)';
+      return 'var(--accent-amber)';
     case 'degraded':
     case 'bridge_offline':
-      return 'var(--accent-orange, #f97316)';
+      return 'var(--accent-red)';
     case 'available':
     case 'coming_soon':
     default:
-      return 'var(--text-tertiary, #6b7280)';
+      return 'var(--text-tertiary)';
   }
 }
 
@@ -168,7 +166,7 @@ function IntegrationsSectionBody() {
         Agents
       </div>
       {localAgentsError && (
-        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--accent-orange, #f97316)', padding: '4px 12px 4px 24px' }}>
+        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-danger)', padding: '4px 12px 4px 24px' }}>
           {localAgentsError}
         </div>
       )}
@@ -244,19 +242,10 @@ export function PanelLeft() {
     { tab: MARKETPLACE_TABS.operate, label: 'Operate', icon: <Activity size={14} aria-hidden="true" /> },
   ];
 
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showJoinModal, setShowJoinModal] = useState(false);
-  const [joinContextGraphId, setJoinContextGraphId] = useState<string | undefined>();
-
-  const openJoinModal = useCallback((contextGraphId?: string) => {
-    setJoinContextGraphId(contextGraphId);
-    setShowJoinModal(true);
-  }, []);
-
-  const closeJoinModal = useCallback(() => {
-    setShowJoinModal(false);
-    setJoinContextGraphId(undefined);
-  }, []);
+  // The create and join dialogs belong to the shell (ContextGraphDialogs), so
+  // they outlive this panel closing on navigation or a resize.
+  const openCreateModal = useContextGraphDialogs((s) => s.openCreate);
+  const openJoinModal = useContextGraphDialogs((s) => s.openJoin);
 
   const showEmptyCard = contextGraphs.length === 0 && stage <= 1 && !inventoryError && !inventoryLoading;
   // On first run the empty card carries New and Join; otherwise they close the group.
@@ -314,7 +303,7 @@ export function PanelLeft() {
         )}
 
         <SidebarSection
-          label="My Context Graphs"
+          label="My context graphs"
           count={myProjects.length}
           open={leftSectionMyProjectsOpen}
           onToggle={toggleLeftSectionMyProjects}
@@ -329,8 +318,8 @@ export function PanelLeft() {
               </span>
               {showCardActions && (
                 <div className="v10-sidebar-inline-actions">
-                  <button type="button" className="ds-btn ds-primary ds-sm" aria-label="New Context Graph" onClick={() => setShowCreateModal(true)}>New</button>
-                  <button type="button" className="ds-btn ds-sm" aria-label="Join Context Graph" onClick={() => openJoinModal()}>Join</button>
+                  <button type="button" className="ds-btn ds-primary ds-sm" aria-label="New context graph" onClick={openCreateModal}>New</button>
+                  <button type="button" className="ds-btn ds-sm" aria-label="Join context graph" onClick={() => openJoinModal()}>Join</button>
                 </div>
               )}
             </div>
@@ -367,8 +356,8 @@ export function PanelLeft() {
 
           {!showCardActions && (
             <div className="v10-sidebar-inline-actions">
-              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="New Context Graph" onClick={() => setShowCreateModal(true)}>New</button>
-              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="Join Context Graph" onClick={() => openJoinModal()}>Join</button>
+              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="New context graph" onClick={openCreateModal}>New</button>
+              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="Join context graph" onClick={() => openJoinModal()}>Join</button>
             </div>
           )}
         </SidebarSection>
@@ -454,20 +443,6 @@ export function PanelLeft() {
           </button>
         ))}
       </nav>
-
-      {/* Modals render on document.body so no panel style (a transform,
-          filter or backdrop-filter) becomes their containing block. */}
-      {createPortal(
-        <>
-          <CreateProjectModal open={showCreateModal} onClose={() => setShowCreateModal(false)} />
-          <JoinProjectModal
-            open={showJoinModal}
-            onClose={closeJoinModal}
-            initialContextGraphId={joinContextGraphId}
-          />
-        </>,
-        document.body,
-      )}
     </div>
   );
 }

@@ -1,7 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { useFetch, formatBytes } from '../hooks.js';
 import {
-  fetchStatus,
   fetchWalletsBalances,
   shutdownNode,
   fetchMetrics,
@@ -13,6 +12,9 @@ import {
 import { formatEth, formatEthTooltip } from '../lib/formatEth.js';
 import { formatTracSymbol, formatTrac, formatTracTooltip } from '../lib/formatTrac.js';
 import { redactRpcUrl } from '../lib/redactRpcUrl.js';
+import { formatUptime } from '../lib/formatPeerStatus.js';
+import { useNodeState } from '../hooks/useNodeState.js';
+import { Badge } from '../components/ds/Badge.js';
 import { PcaSettingsCard } from './conviction/PcaSettingsCard.js';
 import { IdentityWalletsSection } from './identity-wallets/IdentityWalletsSection.js';
 
@@ -39,7 +41,7 @@ function RpcUrlField({ rpcUrl }: { rpcUrl: string }) {
         <button
           type="button"
           onClick={() => setReveal((v) => !v)}
-          style={{ background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 'var(--fs-micro)', fontWeight: 600, padding: '1px 6px', borderRadius: 'var(--radius-xs)' }}
+          style={{ background: 'none', border: '1px solid var(--border-default)', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-micro)', fontWeight: 600, padding: '1px 6px', borderRadius: 'var(--radius-xs)' }}
           aria-label={reveal ? 'Redact RPC URL' : 'Reveal RPC URL'}
           title={reveal ? 'Hide the path-token (recommended for screen-shares)' : 'Show full URL — careful, may contain a tenant secret'}
         >
@@ -113,16 +115,16 @@ function NetworkTelemetrySection() {
 
   return (
     <section className="card ds-card">
-      <div className="card-header"><h2 className="card-title">Network Telemetry</h2></div>
+      <div className="card-header"><h2 className="card-title">Network telemetry</h2></div>
       <div className="card-body">
-        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.6 }}>
+        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 1.6 }}>
           Local metrics are stored in SQLite and displayed in the Observability page.
         </div>
 
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '10px 0' }}>
           <div>
             <div style={{ fontSize: 'var(--fs-control)', fontWeight: 600 }}>Share telemetry with the network</div>
-            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', marginTop: 2, lineHeight: 1.5 }}>
               When enabled, metrics and logs are streamed to the OriginTrail network dashboard for network-wide diagnostics.
             </div>
           </div>
@@ -136,22 +138,22 @@ function NetworkTelemetrySection() {
             aria-label="Share telemetry with the network"
             onClick={toggleTelemetry}
             style={{
-              width: 38, height: 22, borderRadius: 11, border: 'none', flexShrink: 0,
-              background: telemetryEnabled ? 'var(--green)' : 'var(--border)',
+              width: 38, height: 22, borderRadius: 'var(--radius-pill)', border: 'none', flexShrink: 0,
+              background: telemetryEnabled ? 'var(--accent-green)' : 'var(--border-default)',
               transition: 'background .2s', position: 'relative', marginLeft: 16,
               cursor: telemetrySaving ? 'wait' : 'pointer', opacity: telemetrySaving ? 0.6 : 1,
             }}
           >
             <span style={{
               position: 'absolute', top: 3, left: telemetryEnabled ? 19 : 3,
-              width: 16, height: 16, borderRadius: '50%', background: '#fff',
+              width: 16, height: 16, borderRadius: '50%', background: 'var(--text-on-identity)',
               transition: 'left .2s', display: 'block',
             }} />
           </button>
         </div>
         <div aria-live="polite">
           {telemetryError && (
-            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--red)', marginTop: 4 }}>{telemetryError}</div>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--accent-red)', marginTop: 4 }}>{telemetryError}</div>
           )}
         </div>
       </div>
@@ -159,7 +161,7 @@ function NetworkTelemetrySection() {
       {showConsentModal && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 9999,
-          background: 'rgba(0,0,0,.55)', display: 'flex',
+          background: 'var(--scrim)', display: 'flex',
           alignItems: 'center', justifyContent: 'center',
         }}>
           <div
@@ -168,32 +170,32 @@ function NetworkTelemetrySection() {
             aria-modal="true"
             aria-label="Enable Telemetry Streaming?"
             style={{
-              background: 'var(--surface)', border: '1px solid var(--border)',
+              background: 'var(--bg-surface)', border: '1px solid var(--border-default)',
               borderRadius: 'var(--radius-overlay)', padding: '24px 28px', maxWidth: 440, width: '90%',
-              boxShadow: '0 8px 32px rgba(0,0,0,.3)',
+              boxShadow: 'var(--shadow-popover)',
             }}
           >
             <div style={{ fontSize: 'var(--fs-title)', fontWeight: 700, marginBottom: 16 }}>
               Enable Telemetry Streaming?
             </div>
-            <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: 12 }}>
+            <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', lineHeight: 1.7, marginBottom: 12 }}>
               When enabled, the following data is streamed to the OriginTrail team:
             </div>
-            <ul style={{ fontSize: 'var(--fs-control)', color: 'var(--text)', lineHeight: 1.8, margin: '0 0 14px 18px', padding: 0 }}>
+            <ul style={{ fontSize: 'var(--fs-control)', color: 'var(--text-primary)', lineHeight: 1.8, margin: '0 0 14px 18px', padding: 0 }}>
               <li>Operation logs (publish, query, sync, gossip events)</li>
               <li>Performance metrics (durations, throughput, error rates)</li>
               <li>Node identity (peer ID, node name, network)</li>
             </ul>
-            <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: 12 }}>
-              The following data is <strong style={{ color: 'var(--text)' }}>NEVER</strong> shared via telemetry:
+            <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', lineHeight: 1.7, marginBottom: 12 }}>
+              The following data is <strong style={{ color: 'var(--text-primary)' }}>NEVER</strong> shared via telemetry:
             </div>
-            <ul style={{ fontSize: 'var(--fs-control)', color: 'var(--text)', lineHeight: 1.8, margin: '0 0 16px 18px', padding: 0 }}>
+            <ul style={{ fontSize: 'var(--fs-control)', color: 'var(--text-primary)', lineHeight: 1.8, margin: '0 0 16px 18px', padding: 0 }}>
               <li>Private keys or wallet credentials</li>
               <li>Authentication tokens or API keys</li>
               <li>Private triple content or personal data</li>
               <li>File system paths or environment variables</li>
             </ul>
-            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-dim)', marginBottom: 20, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginBottom: 20, lineHeight: 1.5 }}>
               You can disable streaming at any time from this page.
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
@@ -201,9 +203,9 @@ function NetworkTelemetrySection() {
                 type="button"
                 onClick={() => { setShowConsentModal(false); toggleRef.current?.focus(); }}
                 style={{
-                  padding: '7px 18px', borderRadius: 7, fontSize: 'var(--fs-control)', fontWeight: 600,
-                  cursor: 'pointer', border: '1px solid var(--border)',
-                  background: 'var(--surface)', color: 'var(--text-muted)',
+                  padding: '7px 18px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-control)', fontWeight: 600,
+                  cursor: 'pointer', border: '1px solid var(--border-default)',
+                  background: 'var(--bg-surface)', color: 'var(--text-secondary)',
                 }}
               >
                 Cancel
@@ -212,9 +214,9 @@ function NetworkTelemetrySection() {
                 type="button"
                 onClick={confirmTelemetry}
                 style={{
-                  padding: '7px 18px', borderRadius: 7, fontSize: 'var(--fs-control)', fontWeight: 700,
-                  cursor: 'pointer', border: '1px solid rgba(74,222,128,.4)',
-                  background: 'rgba(74,222,128,.1)', color: 'var(--green)',
+                  padding: '7px 18px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-control)', fontWeight: 700,
+                  cursor: 'pointer', border: '1px solid var(--success-border)',
+                  background: 'var(--success-bg)', color: 'var(--accent-green)',
                 }}
               >
                 Enable Streaming
@@ -283,7 +285,7 @@ function LocalDataRetentionSection() {
 
   return (
     <section className="card ds-card">
-      <div className="card-header"><h2 className="card-title">Local Data Retention</h2></div>
+      <div className="card-header"><h2 className="card-title">Local data retention</h2></div>
       <div className="card-body">
         <label htmlFor="retention-select" className="settings-field-label" style={{ display: 'block', marginBottom: 5 }}>
           Keep local data for
@@ -304,11 +306,11 @@ function LocalDataRetentionSection() {
           </select>
           <span aria-live="polite">
             {retentionSaved && (
-              <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--green)', fontWeight: 600 }}>Saved</span>
+              <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--accent-green)', fontWeight: 600 }}>Saved</span>
             )}
           </span>
           {storeBytes != null && (
-            <span className="mono" style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)' }}>
+            <span className="mono" style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>
               Store: {formatBytes(storeBytes)}
             </span>
           )}
@@ -319,13 +321,13 @@ function LocalDataRetentionSection() {
             aria-label="Confirm retention reduction"
             style={{
               marginTop: 8, padding: '10px 14px', borderRadius: 'var(--radius-nested)',
-              background: 'rgba(251,191,36,.06)', border: '1px solid rgba(251,191,36,.2)',
+              background: 'var(--warning-bg)', border: '1px solid var(--warning-border)',
             }}
           >
-            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--amber)', fontWeight: 600, marginBottom: 4 }}>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--accent-amber)', fontWeight: 600, marginBottom: 4 }}>
               Reduce retention to {pendingRetention} days?
             </div>
-            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 8 }}>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: 8 }}>
               Operations, logs, and metrics older than {pendingRetention} days will be permanently deleted.
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
@@ -335,7 +337,7 @@ function LocalDataRetentionSection() {
                 onClick={confirmRetention}
                 style={{
                   padding: '5px 14px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)', fontWeight: 700, cursor: 'pointer',
-                  border: '1px solid rgba(251,191,36,.4)', background: 'rgba(251,191,36,.1)', color: 'var(--amber)',
+                  border: '1px solid var(--warning-border)', background: 'var(--warning-bg)', color: 'var(--accent-amber)',
                 }}
               >
                 Prune &amp; Save
@@ -345,7 +347,7 @@ function LocalDataRetentionSection() {
                 onClick={() => setPendingRetention(null)}
                 style={{
                   padding: '5px 14px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)', fontWeight: 600, cursor: 'pointer',
-                  border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text-muted)',
+                  border: '1px solid var(--border-default)', background: 'var(--bg-surface)', color: 'var(--text-secondary)',
                 }}
               >
                 Cancel
@@ -354,30 +356,19 @@ function LocalDataRetentionSection() {
           </div>
         )}
         {pendingRetention == null && (
-          <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)', marginTop: 4 }}>
+          <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 4 }}>
             Operations and metric snapshots older than this are pruned automatically. Warning and error logs
             keep this window; high-volume routine logs also have a size safety cap.
           </div>
         )}
         <div aria-live="polite">
           {retentionError && (
-            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--red)', marginTop: 4 }}>{retentionError}</div>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--accent-red)', marginTop: 4 }}>{retentionError}</div>
           )}
         </div>
       </div>
     </section>
   );
-}
-
-function formatUptime(ms: number): string {
-  const sec = Math.floor(ms / 1000);
-  if (sec < 60) return `${sec}s`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ${sec % 60}s`;
-  const hrs = Math.floor(min / 60);
-  if (hrs < 24) return `${hrs}h ${min % 60}m`;
-  const days = Math.floor(hrs / 24);
-  return `${days}d ${hrs % 24}h`;
 }
 
 function truncateAddress(addr: string): string {
@@ -403,7 +394,7 @@ export function SettingsPage() {
     <div className="page-section">
       <div style={{ marginBottom: 20 }}>
         <h1 className="page-title" style={{ marginBottom: 0 }}>Settings</h1>
-        <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)', marginTop: 4 }}>Node configuration and preferences</p>
+        <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', marginTop: 4 }}>Node configuration and preferences</p>
       </div>
       <GeneralSettingsTab />
     </div>
@@ -411,16 +402,14 @@ export function SettingsPage() {
 }
 
 function GeneralSettingsTab() {
-  const { data: status } = useFetch(fetchStatus, [], 30_000);
   const { data: wallets } = useFetch(fetchWalletsBalances, [], 60_000);
-  const s = status as any;
   const w = wallets as any;
 
   const [shutdownConfirm, setShutdownConfirm] = useState(false);
   const [shuttingDown, setShuttingDown] = useState(false);
 
-  const peerCount = s?.connectedPeers ?? 0;
-  const isOnline = s?.peerId != null;
+  // The shell's status poll feeds the whole card, so every field shows the same check.
+  const { nodeStatus: s, peers: peerCount, state: nodeState } = useNodeState();
 
   const handleShutdown = useCallback(async () => {
     if (!shutdownConfirm) {
@@ -441,24 +430,20 @@ function GeneralSettingsTab() {
     <div className="settings-stack">
       {/* Node Identity */}
       <section className="card ds-card">
-        <div className="card-header"><h2 className="card-title">Node Identity</h2></div>
+        <div className="card-header"><h2 className="card-title">Node identity</h2></div>
         <div className="card-body">
           <Field label="Name" value={s?.name ?? '—'} />
           <Field label="Peer ID" value={s?.peerId ?? '—'} mono />
           <Field label="Role" value={s?.nodeRole ?? '—'} />
           <Field label="Network" value={s?.networkName ?? (s?.networkId ? `Network ${s.networkId}` : '—')} />
           <Field label="Store" value={s?.storeBackend ?? '—'} mono />
-          <div style={{ padding: '10px 14px', borderRadius: 'var(--radius-nested)', background: isOnline ? 'var(--green-dim)' : 'rgba(248,113,113,.05)', border: `1px solid ${isOnline ? 'rgba(74,222,128,.2)' : 'rgba(248,113,113,.2)'}` }}>
-            <div className="mono" style={{ fontSize: 'var(--fs-micro)', color: isOnline ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>
-              {isOnline ? '● ONLINE' : '● OFFLINE'}
-            </div>
+          <div className="settings-node-status ds-card-nested">
+            <Badge tone={nodeState.tone}>{nodeState.word}</Badge>
             <div
-              style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)', marginTop: 4 }}
+              style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', marginTop: 4 }}
               title="Peers = unique remote nodes. Direct + Relayed counts are libp2p connections — a single peer can hold both a direct and a relayed link, so they sum to ≥ Peers, not exactly equal to it."
             >
-              {isOnline
-                ? `${peerCount} peer${peerCount !== 1 ? 's' : ''} · ${s?.connections?.direct ?? 0} direct, ${s?.connections?.relayed ?? 0} relayed link${(s?.connections?.relayed ?? 0) === 1 ? '' : 's'} · up ${formatUptime(s?.uptimeMs ?? 0)}`
-                : 'Node is not responding'}
+              {nodeState.tooltip ?? `${peerCount} peer${peerCount !== 1 ? 's' : ''} · ${s?.connections?.direct ?? 0} direct, ${s?.connections?.relayed ?? 0} relayed link${(s?.connections?.relayed ?? 0) === 1 ? '' : 's'} · up ${formatUptime(s?.uptimeMs ?? 0)}`}
             </div>
           </div>
         </div>
@@ -469,42 +454,42 @@ function GeneralSettingsTab() {
 
       {/* Blockchain Config */}
       <section className="card ds-card">
-        <div className="card-header"><h2 className="card-title">Blockchain Config</h2></div>
+        <div className="card-header"><h2 className="card-title">Blockchain config</h2></div>
         <div className="card-body">
           <Field label="Chain" value={chainLabel(w?.chainId)} />
           {w?.balances?.length > 0 ? (
             w.balances.map((b: any, i: number) => (
               <div key={b.address} style={{ marginBottom: 10 }}>
-                <Field label={w.balances.length > 1 ? `Wallet ${i + 1}` : 'Operational Wallet'} value={b.address} mono />
+                <Field label={w.balances.length > 1 ? `Wallet ${i + 1}` : 'Operational wallet'} value={b.address} mono />
                 <div style={{ display: 'flex', gap: 16, marginTop: -6 }}>
                   <span
                     className="mono"
-                    style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)' }}
+                    style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}
                     title={formatEthTooltip(b.eth)}
                   >
                     {formatEth(b.eth)} ETH
                   </span>
-                  <span className="mono" style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)' }} title={formatTracTooltip(b.trac)}>
+                  <span className="mono" style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }} title={formatTracTooltip(b.trac)}>
                     {formatTrac(b.trac)} {formatTracSymbol(b.symbol, w?.chainId)}
                   </span>
                 </div>
               </div>
             ))
           ) : (
-            <Field label="Operational Wallet" value={w?.wallets?.[0] ? truncateAddress(w.wallets[0]) : '—'} mono />
+            <Field label="Operational wallet" value={w?.wallets?.[0] ? truncateAddress(w.wallets[0]) : '—'} mono />
           )}
           {w?.rpcUrl && (
             <RpcUrlField rpcUrl={w.rpcUrl} />
           )}
           {w?.error ? (
-            <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'rgba(248,113,113,.05)', border: '1px solid rgba(248,113,113,.2)' }}>
-              <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--red)', marginBottom: 2 }}>⚠ Error</div>
-              <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)' }}>{w.error}</div>
+            <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)' }}>
+              <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--accent-red)', marginBottom: 2 }}>⚠ Error</div>
+              <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>{w.error}</div>
             </div>
           ) : w?.chainId?.includes('84532') || w?.chainId?.includes('31337') || w?.chainId?.includes('11155111') ? (
-            <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--amber-dim)', border: '1px solid rgba(251,191,36,.2)' }}>
-              <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--amber)', marginBottom: 2 }}>⚠ Testnet Mode</div>
-              <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)' }}>No real TRAC is spent. Perfect for development.</div>
+            <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--warning-bg)', border: '1px solid var(--warning-border)' }}>
+              <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--accent-amber)', marginBottom: 2 }}>⚠ Testnet Mode</div>
+              <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>No real TRAC is spent. Perfect for development.</div>
             </div>
           ) : null}
         </div>
@@ -520,8 +505,8 @@ function GeneralSettingsTab() {
       <LocalDataRetentionSection />
 
       {/* Danger Zone (full-width footer; last in the stack) */}
-      <section className="card ds-card" style={{ borderColor: 'rgba(248,113,113,.2)', background: 'rgba(248,113,113,.03)' }}>
-        <div className="card-header"><h2 className="card-title" style={{ color: 'var(--red)' }}>Danger Zone</h2></div>
+      <section className="card ds-card" style={{ borderColor: 'var(--danger-border)', background: 'var(--danger-bg)' }}>
+        <div className="card-header"><h2 className="card-title" style={{ color: 'var(--accent-red)' }}>Danger zone</h2></div>
         <div className="card-body">
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
             <button
@@ -529,9 +514,9 @@ function GeneralSettingsTab() {
               disabled={shuttingDown}
               style={{
                 padding: '8px 16px', borderRadius: 'var(--radius-nested)',
-                border: `1px solid ${shutdownConfirm ? 'var(--red)' : 'rgba(251,191,36,.3)'}`,
-                background: shutdownConfirm ? 'rgba(248,113,113,.15)' : 'rgba(251,191,36,.07)',
-                color: shutdownConfirm ? 'var(--red)' : 'var(--amber)',
+                border: `1px solid ${shutdownConfirm ? 'var(--accent-red)' : 'var(--warning-border)'}`,
+                background: shutdownConfirm ? 'var(--danger-bg-strong)' : 'var(--warning-bg)',
+                color: shutdownConfirm ? 'var(--accent-red)' : 'var(--accent-amber)',
                 fontSize: 'var(--fs-control)', fontWeight: 600,
                 cursor: shuttingDown ? 'not-allowed' : 'pointer',
                 opacity: shuttingDown ? 0.5 : 1,
@@ -541,7 +526,7 @@ function GeneralSettingsTab() {
             </button>
             <span aria-live="polite">
               {shutdownConfirm && (
-                <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)' }}>Click again to confirm. The node process will terminate.</span>
+                <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>Click again to confirm. The node process will terminate.</span>
               )}
             </span>
           </div>

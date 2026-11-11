@@ -83,7 +83,7 @@ export const AgentChip: React.FC<AgentChipProps> = ({
   const kind = agent?.kind ?? 'ai';
   const framework = agent?.framework;
   const glyph = framedGlyph(framework, kind);
-  const color = agent?.color ?? 'hsl(0, 0%, 55%)';
+  const color = agent?.color ?? 'var(--identity-fallback)';
   const title = [
     name,
     framework ? `framework: ${framework}` : null,

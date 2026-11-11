@@ -1,9 +1,10 @@
 import React, { useId, useMemo, useState, useCallback } from 'react';
 import type { ReactNode } from 'react';
+import { LayerGlyph } from '../../../components/ds/Badge.js';
 import { listAssertions, promoteAssertion, describePromoteError, publishAssertionsToVm, partialPublishWarning, outcomeUnknownPublishNote, type ConvictionCostCovered } from '../../../api.js';
 import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
-import { LAYER_CONFIG, entityMeta, layerNoun, VM_TRIPLE_STAT } from '../helpers.js';
+import { entityMeta, layerNoun, VM_TRIPLE_STAT } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { useVmPublishGate } from '../../../pages/conviction/useVmPublishGate.js';
 import { PublishEligibilityChipView } from '../../../pages/conviction/PublishEligibilityChip.js';
@@ -57,7 +58,7 @@ export function TypeBreakdownWidget({ entities }: { entities: MemoryEntity[] }) 
   if (breakdown.length === 0) return null;
 
   return (
-    <GenWidget title="Entity Types">
+    <GenWidget title="Entity types">
       <StatStrip
         compact
         items={breakdown.map(([type, { icon, count }]) => ({
@@ -86,7 +87,7 @@ export function LayerStatsWidget({ entities, entityCount, triples, layer }: {
   );
   const avgConns = entities.length > 0 ? (totalConns / entities.length).toFixed(1) : '0';
   return (
-    <GenWidget title="Layer Stats">
+    <GenWidget title="Layer stats">
       <StatStrip
         compact
         layer={layer}
@@ -367,7 +368,7 @@ export function LayerWidgetStrip({ layer, entities, entityCount, actionEntityCou
         <EmptyState
           compact
           tone={toneForLayer(layer)}
-          icon={LAYER_CONFIG[layer].icon}
+          icon={<LayerGlyph layer={layer} />}
           title={`No ${layerNoun(layer, 2).toLowerCase()} yet`}
           description={
             layer === 'wm'

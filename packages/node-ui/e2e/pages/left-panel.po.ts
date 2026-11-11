@@ -50,7 +50,7 @@ export class LeftPanelPage {
   }
 
   private myCgSections() {
-    return this.section('My Context Graphs')
+    return this.section('My context graphs')
       .locator(sel.myContextGraphs.peerGroupBody)
       .locator(sel.leftPanel.section);
   }
@@ -89,7 +89,7 @@ export class LeftPanelPage {
   }
 
   private memoryStackControl() {
-    return this.root.locator(sel.leftPanel.dashboard).filter({ hasText: 'Memory Stack' });
+    return this.root.locator(sel.leftPanel.dashboard).filter({ hasText: 'Memory stack' });
   }
 
   async isVisible() {
@@ -106,7 +106,7 @@ export class LeftPanelPage {
       await sidebar.click();
       return;
     }
-    throw new Error('Memory Stack navigation control not found in the structured sidebar');
+    throw new Error('Memory stack navigation control not found in the structured sidebar');
   }
 
   async isMemoryStackVisible() {

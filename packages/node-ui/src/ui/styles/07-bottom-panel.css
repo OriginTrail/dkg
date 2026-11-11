@@ -22,7 +22,7 @@
   transition: background 0.15s;
 }
 .v10-resize-handle-v:hover,
-.v10-resize-handle-v.active { background: var(--accent-blue, #3b82f6); }
+.v10-resize-handle-v.active { background: var(--accent-blue); }
 .v10-bottom-tabs {
   height: var(--tab-h);
   min-height: var(--tab-h);
@@ -85,7 +85,7 @@
   white-space: pre-wrap;
   word-break: break-all;
 }
-.v10-log-line:hover { background: rgba(255,255,255,.03); }
+.v10-log-line:hover { background: var(--tint-subtle); }
 
 /* ══════════════════════════════════════════
    AGENT CHAT (V10)

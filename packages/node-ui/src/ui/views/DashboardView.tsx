@@ -628,7 +628,7 @@ export function DashboardView() {
       ) : null}
       <div className="v10-dash-stats v10-dash-stats-3">
         <StatCard
-          label="My Context Graphs"
+          label="My context graphs"
           className="v10-stat-tight"
           icon={<Share2 size={13} aria-hidden />}
           value={cgsResolving ? <span className="v10-stat-loading">loading…</span> : graphCount}
@@ -643,7 +643,7 @@ export function DashboardView() {
           ) : null}
         </StatCard>
         <StatCard
-          label="Context Graph Size"
+          label="Context graph size"
           icon={<TrendingUp size={13} aria-hidden />}
           className="v10-stat-tight"
         >
@@ -685,7 +685,7 @@ export function DashboardView() {
           </div>
         </StatCard>
         <StatCard
-          label="Collaborating Agents"
+          label="Collaborating agents"
           icon={<UsersRound size={13} aria-hidden />}
           value={!agg.hasCgs
             ? <span className="v10-stat-empty">—</span>
@@ -714,7 +714,7 @@ export function DashboardView() {
           <div className="v10-dash-section-header">
             <div className="v10-dash-section-title">
               <Share2 size={13} aria-hidden />
-              <h3>My Context Graphs</h3>
+              <h3>My context graphs</h3>
             </div>
             <Count value={cgsResolving ? '…' : graphCount} className="v10-dash-section-badge" />
           </div>

@@ -16,7 +16,7 @@
 }
 .v10-graph-overlay .v10-swm-legend,
 .v10-graph-overlay .v10-vm-legend {
-  box-shadow: 0 18px 36px -24px rgba(0,0,0,0.85);
+  box-shadow: var(--shadow-lift);
   backdrop-filter: blur(6px);
 }
 .v10-graph-rail {
@@ -57,7 +57,7 @@
   overflow: hidden;
   border: 1px solid var(--border-default);
   background: color-mix(in srgb, var(--bg-panel) 92%, transparent);
-  box-shadow: 0 14px 34px -20px rgba(0,0,0,0.8);
+  box-shadow: var(--shadow-lift);
 }
 .v10-graph-singleton-head {
   display: flex;
@@ -102,7 +102,7 @@
   z-index: 1000;
   display: flex;
   padding: 24px;
-  background: rgba(0,0,0,0.82);
+  background: var(--scrim-strong);
 }
 .v10-graph-expanded-panel {
   flex: 1 1 auto;
@@ -113,7 +113,7 @@
   overflow: hidden;
   border: 1px solid var(--border-default);
   background: var(--bg-panel);
-  box-shadow: 0 24px 70px -28px rgba(0,0,0,0.9);
+  box-shadow: var(--shadow-modal);
 }
 .v10-graph-expanded-head {
   flex: 0 0 auto;
@@ -155,7 +155,7 @@
 body.light .v10-ka-graph-shell,
 body.light .v10-ka-graph-shell .v10-graph-view,
 body.light .v10-ka-graph-shell .v10-graph-canvas {
-  background: #ffffff;
+  background: var(--bg-surface);
 }
 .v10-graph-placeholder {
   color: var(--text-tertiary); font-size: var(--fs-control); font-family: var(--font-mono);
@@ -173,7 +173,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   display: flex; flex-direction: column; gap: 8px; flex-shrink: 0;
 }
 .v10-ka-back {
-  align-self: flex-start; border: 1px solid var(--border-default); border-radius: 5px;
+  align-self: flex-start; border: 1px solid var(--border-default); border-radius: var(--radius-xs);
   background: none; color: var(--text-secondary); font-size: var(--fs-label); font-weight: 600;
   padding: 4px 10px; cursor: pointer; font-family: var(--font-sans); transition: all 0.15s;
 }
@@ -261,14 +261,14 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-sgov-card {
   display: flex; flex-direction: column;
   min-height: 320px;
-  background: var(--surface-1, rgba(255,255,255,0.02));
-  border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  background: var(--tint-faint);
+  border: 1px solid var(--border-subtle);
   overflow: hidden;
   transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
 }
 .v10-sgov-card:hover {
   transform: translateY(-1px);
-  box-shadow: 0 8px 24px -12px var(--sg-color, rgba(100,116,139,0.6));
+  box-shadow: 0 8px 24px -12px var(--sg-color, var(--identity-fallback));
 }
 /* GH #813 — Root mini-card chrome. Solid `--border-subtle` reads
    as a quieter daemon-emitted card vs the tinted named-subgraph
@@ -299,7 +299,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-sgov-card-head {
   display: flex; align-items: flex-start; gap: 10px;
   padding: 10px 12px 8px 12px;
-  border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+  border-bottom: 1px solid var(--border-subtle);
 }
 .v10-sgov-card-icon { font-size: var(--fs-heading); line-height: 1; margin-top: 1px; }
 .v10-sgov-card-title-wrap { flex: 1; min-width: 0; }
@@ -322,12 +322,12 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-sgov-card-open:hover {
   color: var(--sg-color, var(--text-primary));
   border-color: var(--sg-color, var(--border-strong));
-  background: color-mix(in srgb, var(--sg-color, #64748b) 10%, transparent);
+  background: color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 10%, transparent);
 }
 .v10-sgov-card-stats {
   display: flex; gap: 12px; padding: 6px 12px;
   font-size: var(--fs-label); color: var(--text-tertiary);
-  border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+  border-bottom: 1px solid var(--border-subtle);
 }
 .v10-sgov-card-stat b {
   color: var(--text-primary); font-weight: 600; margin-right: 3px;
@@ -337,9 +337,9 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   position: relative; flex: 1; min-height: 220px;
   background:
     radial-gradient(ellipse at center,
-      color-mix(in srgb, var(--sg-color, #64748b) 6%, transparent) 0%,
+      color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 6%, transparent) 0%,
       transparent 70%),
-    var(--surface-0, rgba(0,0,0,0.2));
+    var(--shade);
 }
 .v10-sgov-card-empty {
   position: absolute; inset: 0;
@@ -361,8 +361,8 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 }
 .v10-minibar-bar {
   display: flex; height: 6px; width: 100%;
-  border-radius: 3px; overflow: hidden;
-  background: rgba(255,255,255,0.04);
+  border-radius: var(--radius-hair); overflow: hidden;
+  background: var(--tint-subtle);
 }
 .v10-minibar-seg {
   height: 100%;

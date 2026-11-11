@@ -297,7 +297,7 @@ vi.mock('../src/ui/views/project/components.js', () => ({
     React.createElement('section', { 'data-testid': 'entity-detail', 'data-entity': entity.uri, 'data-trust': entity.trustLevel, 'data-connections': String(entity.connections.length), 'data-subgraphs': [...entity.subGraphs].sort().join(',') },
       React.createElement('div', {}, entity.label),
       React.createElement('button', { 'data-testid': 'open-related-entity', onClick: () => onNavigate('urn:entity:other') }, 'Open related'),
-      React.createElement('button', { 'data-testid': 'detail-back', onClick: onClose }, 'Back to Context Graph')),
+      React.createElement('button', { 'data-testid': 'detail-back', onClick: onClose }, 'Back to context graph')),
   SubGraphDetailView: ({ slug, activeTab = 'items', onTabChange, onSelectEntity, initialLayer, initialEnabledLayers, onEnabledLayersChange }: {
     slug: string;
     activeTab?: string;
@@ -400,11 +400,11 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       'data-sub-graph-fetch-failed': subGraphFetchFailed ? 'true' : 'false',
     },
       'Overview',
-      React.createElement('button', { 'data-testid': 'open-primer', onClick: onOpenPrimer }, 'What is a Context Graph?')),
+      React.createElement('button', { 'data-testid': 'open-primer', onClick: onOpenPrimer }, 'What is a context graph?')),
   PendingJoinRequestsSection: () => null,
   OverviewPrimerEntry: ({ onOpenPrimer }: { onOpenPrimer: () => void }) =>
     React.createElement('div', { 'data-testid': 'primer-footer' },
-      React.createElement('button', { 'data-testid': 'open-primer-footer', onClick: onOpenPrimer }, 'What is a Context Graph?')),
+      React.createElement('button', { 'data-testid': 'open-primer-footer', onClick: onOpenPrimer }, 'What is a context graph?')),
   curatorStatusForOverview: () => 'not-curator',
   SubGraphOverviewGrid: ({ onSelectSubGraph }: { onSelectSubGraph: (slug: string) => void }) =>
     React.createElement('button', {
@@ -412,7 +412,7 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       onClick: () => onSelectSubGraph('demo'),
     }, 'Open demo subgraph'),
   SubGraphExplorerHeader: () =>
-    React.createElement('div', { 'data-testid': 'subgraph-explorer-header' }, 'Subgraph Explorer'),
+    React.createElement('div', { 'data-testid': 'subgraph-explorer-header' }, 'Subgraph explorer'),
   ContextGraphQueryView: () => null,
   LayerDetailView: ({ layer, activeTab, onTabChange, onSelectEntity, onNodeClick }: {
     layer: string;
@@ -467,7 +467,7 @@ describe('ProjectView entity detail navigation', () => {
         && (!layer || t.layer === ({ wm: 'working', swm: 'shared', vm: 'verified' } as Record<string, string>)[layer])),
     }));
     apiWrapperMock.fetchContextGraphs.mockResolvedValue({
-      contextGraphs: [{ id: 'cg-test', name: 'Context Graph Test' }],
+      contextGraphs: [{ id: 'cg-test', name: 'Context graph Test' }],
     });
     apiWrapperMock.fetchCurrentAgent.mockResolvedValue({
       agentDid: 'did:dkg:agent:0xabc',
@@ -684,7 +684,7 @@ describe('ProjectView entity detail navigation', () => {
 
     expect(tabsStoreMock.openTab).toHaveBeenCalledWith({
       id: 'context-graph-primer',
-      label: 'What is a Context Graph?',
+      label: 'What is a context graph?',
       closable: true,
     });
     expect(pushStateSpy).not.toHaveBeenCalled();
@@ -692,7 +692,7 @@ describe('ProjectView entity detail navigation', () => {
     pushStateSpy.mockRestore();
   });
 
-  it('does not pass participants loaded for another context graph into Overview', async () => {
+  it('does not pass participants loaded for another Context Graph into Overview', async () => {
     await act(async () => {
       root.unmount();
     });
@@ -703,8 +703,8 @@ describe('ProjectView entity detail navigation', () => {
 
     apiWrapperMock.fetchContextGraphs.mockResolvedValue({
       contextGraphs: [
-        { id: 'cg-test', name: 'Context Graph Test' },
-        { id: 'cg-next', name: 'Next Context Graph' },
+        { id: 'cg-test', name: 'Context graph Test' },
+        { id: 'cg-next', name: 'Next context graph' },
       ],
     });
     apiWrapperMock.listParticipants.mockReset();
@@ -904,7 +904,7 @@ describe('ProjectView entity detail navigation', () => {
     expect(query('subgraph-detail').dataset.initialLayer).toBe('wm');
   });
 
-  it('keeps initialLayer === undefined on fresh entry from Subgraph Explorer overview (Bug H regression guard)', async () => {
+  it('keeps initialLayer === undefined on fresh entry from Subgraph explorer overview (Bug H regression guard)', async () => {
     // 1. Land on the Subgraphs tab — no activeSubGraph yet, the
     //    bar mounts layer-agnostic.
     await click('switch-subgraphs');

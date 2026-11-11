@@ -116,7 +116,7 @@
 }
 .v10-cg-query-catalog-group {
   padding: 10px 0 14px 12px;
-  border-left: 2px solid color-mix(in srgb, var(--sg-color, #38bdf8) 45%, var(--border-subtle));
+  border-left: 2px solid color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 45%, var(--border-subtle));
   background: transparent;
 }
 .v10-cg-query-catalog-group + .v10-cg-query-catalog-group {
@@ -167,7 +167,7 @@
 }
 .v10-cg-query-chip:hover,
 .v10-cg-query-chip.active {
-  border-color: color-mix(in srgb, var(--sg-color, #38bdf8) 52%, var(--border-strong));
+  border-color: color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 52%, var(--border-strong));
   color: var(--text-primary);
 }
 .v10-cg-query-chip-title {
@@ -322,16 +322,14 @@
   white-space: nowrap;
 }
 .v10-mlv-table tr:hover td { background: var(--bg-hover); }
-@media (max-width: 900px) {
-  .v10-vm-search-header { flex-direction: column; align-items: stretch; }
-  .v10-cg-query-zone-header { flex-direction: column; align-items: stretch; }
-  .v10-vm-search-controls,
-  .v10-mlv-query-bar,
-  .v10-cg-query-editor { grid-template-columns: 1fr; display: flex; flex-direction: column; }
-  .v10-cg-query-actions { flex-direction: row; }
-  .v10-cg-query-save-panel { grid-template-columns: 1fr; }
-  .v10-cg-query-save-actions { justify-content: flex-end; }
-}
+.v10-center-content[data-narrow] .v10-vm-search-header { flex-direction: column; align-items: stretch; }
+.v10-center-content[data-narrow] .v10-cg-query-zone-header { flex-direction: column; align-items: stretch; }
+.v10-center-content[data-narrow] .v10-vm-search-controls,
+.v10-center-content[data-narrow] .v10-mlv-query-bar,
+.v10-center-content[data-narrow] .v10-cg-query-editor { grid-template-columns: 1fr; display: flex; flex-direction: column; }
+.v10-center-content[data-narrow] .v10-cg-query-actions { flex-direction: row; }
+.v10-center-content[data-narrow] .v10-cg-query-save-panel { grid-template-columns: 1fr; }
+.v10-center-content[data-narrow] .v10-cg-query-save-actions { justify-content: flex-end; }
 
 /* ── Assertion List (WM → SWM) ── */
 .v10-assertion-list { margin-bottom: 16px; border: 1px solid var(--border-default); overflow: hidden; }
@@ -343,7 +341,7 @@
 .v10-assertion-items { max-height: 220px; overflow-y: auto; }
 .v10-assertion-item {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 8px 12px; border-bottom: 1px solid var(--border-subtle, rgba(128,128,128,.08));
+  padding: 8px 12px; border-bottom: 1px solid var(--border-subtle);
 }
 .v10-assertion-item:last-child { border-bottom: none; }
 .v10-assertion-item-info { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1; }
@@ -355,14 +353,14 @@
 .v10-btn-promote { flex-shrink: 0; }
 .v10-btn-promote:disabled { opacity: .5; }
 .v10-promote-result { padding: 8px 12px; font-size: var(--fs-control); }
-.v10-promote-result.success { color: var(--text-success); background: rgba(34,197,94,.06); }
-.v10-promote-result.error { color: var(--text-danger); background: rgba(239,68,68,.06); }
+.v10-promote-result.success { color: var(--text-success); background: var(--success-bg); }
+.v10-promote-result.error { color: var(--text-danger); background: var(--danger-bg); }
 /* Issue #864 (Codex review on #874) — the `info` variant now backs
    the no-op promote outcome ("Nothing to promote — already up to
    date"). Without this rule the message rendered with bare base
    styling, indistinguishable from a stray <div>. Muted grey-blue so
    it reads as informational, not success / not error. */
-.v10-promote-result.info { color: var(--text-secondary); background: rgba(59,130,246,.06); }
+.v10-promote-result.info { color: var(--text-secondary); background: var(--tint-subtle); }
 
 /* ── Publish Panel (SWM → VM) ── */
 .v10-publish-panel {
@@ -377,7 +375,7 @@
 .v10-publish-panel-empty { padding: 16px 12px; font-size: var(--fs-control); color: var(--text-tertiary); text-align: center; }
 .v10-publish-select-bar {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  padding: 8px 12px; border-bottom: 1px solid var(--border-subtle, rgba(128,128,128,.08));
+  padding: 8px 12px; border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-primary);
 }
 .v10-publish-select-all {
@@ -395,8 +393,8 @@
   margin: 0 12px 12px; padding: 12px; border-radius: var(--radius-control); font-size: var(--fs-control);
 }
 .v10-publish-result-card:first-of-type { margin-top: 12px; }
-.v10-publish-result-card.success { background: rgba(34,197,94,.06); border: 1px solid rgba(34,197,94,.2); }
-.v10-publish-result-card.error { background: rgba(239,68,68,.06); border: 1px solid rgba(239,68,68,.2); color: var(--text-danger); }
+.v10-publish-result-card.success { background: var(--success-bg); border: 1px solid var(--success-border); }
+.v10-publish-result-card.error { background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--text-danger); }
 .v10-publish-result-title { font-weight: 600; color: var(--text-success); margin-bottom: 8px; }
 .v10-publish-result-details { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-label); color: var(--text-secondary); }
 .v10-publish-result-label { font-weight: 600; color: var(--text-primary); margin-right: 4px; }

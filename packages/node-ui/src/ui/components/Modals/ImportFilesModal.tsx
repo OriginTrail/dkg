@@ -241,7 +241,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
               )}
 
               <div className="v10-form-divider" />
-              <div className="v10-form-label" style={{ marginBottom: 8 }}>Ingestion Options <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></div>
+              <div className="v10-form-label" style={{ marginBottom: 8 }}>Ingestion options <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></div>
               <label className="v10-import-option" style={{ opacity: 0.5, pointerEvents: 'none' }}>
                 <input type="checkbox" checked={storeOriginals} disabled readOnly />
                 Store original files as Knowledge Assets

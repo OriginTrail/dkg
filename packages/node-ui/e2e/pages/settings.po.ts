@@ -4,8 +4,8 @@ import { sel } from '../helpers/selectors.js';
 /**
  * Page object for the rewritten Settings page (pages/Settings.tsx). The page
  * opens as a closable center tab from the header gear button and renders five
- * `.card` sections: Node Identity, Blockchain Config, Network Telemetry, Local
- * Data Retention, Danger Zone.
+ * `.card` sections: Node identity, Blockchain config, Network telemetry, Local
+ * Data retention, Danger zone.
  *
  * Every interactive control on this page is either reversible (telemetry
  * consent → Cancel) or non-destructive on first activation (shutdown is a
@@ -39,7 +39,7 @@ export class SettingsPage {
 
   /**
    * Wait until the Node-Identity card has hydrated from `/api/status`. The card
-   * paints immediately with "—" placeholders + an OFFLINE pill and only fills in
+   * paints immediately with "—" placeholders + a Connecting status and only fills in
    * once the async status fetch resolves. Under the high local worker count the
    * status endpoint can be slow, so identity assertions must wait for the real
    * value rather than racing the first paint (otherwise they read "—").
@@ -57,7 +57,7 @@ export class SettingsPage {
     );
   }
 
-  /** Card titles in render order (e.g. "Node Identity", "Danger Zone"). */
+  /** Card titles in render order (e.g. "Node identity", "Danger zone"). */
   async getSectionTitles(): Promise<string[]> {
     return this.page.locator(sel.settings.cardTitle).allTextContents().then((t) => t.map((s) => s.trim()));
   }
@@ -70,13 +70,9 @@ export class SettingsPage {
       .locator('xpath=following-sibling::*[1]');
   }
 
-  /** The "● ONLINE" / "● OFFLINE" status pill inside the Node Identity card. */
-  get onlinePill(): Locator {
-    return this.page.locator(sel.settings.onlinePill).filter({ hasText: /ONLINE|OFFLINE/ });
-  }
-
-  async getOnlinePillText(): Promise<string> {
-    return (await this.onlinePill.first().textContent())?.trim() ?? '';
+  /** The node status in the Node identity card, the same one the header shows. */
+  get nodeStatus(): Locator {
+    return this.page.locator(sel.settings.nodeStatus);
   }
 
   async getRetentionOptions(): Promise<string[]> {

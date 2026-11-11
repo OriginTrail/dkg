@@ -86,13 +86,13 @@
   font-size: var(--fs-micro); color: var(--text-ghost);
   font-style: italic;
 }
-.v10-memstack-project-status.error { color: var(--accent-red, #ef4444); }
+.v10-memstack-project-status.error { color: var(--accent-red); }
 
 .v10-memstack-cell {
   display: flex; flex-direction: column; gap: 6px;
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--cell-color, #64748b) 20%, var(--border-subtle));
-  background: color-mix(in srgb, var(--cell-color, #64748b) 3%, transparent);
+  border: 1px solid color-mix(in srgb, var(--cell-color, var(--identity-fallback)) 20%, var(--border-subtle));
+  background: color-mix(in srgb, var(--cell-color, var(--identity-fallback)) 3%, transparent);
   min-height: 130px;
 }
 .v10-memstack-cell.empty {
@@ -139,7 +139,7 @@
 }
 .v10-memstack-cell-recent-bullet {
   width: 4px; height: 4px; border-radius: 50%;
-  background: var(--cell-color, #64748b);
+  background: var(--cell-color, var(--identity-fallback));
   flex-shrink: 0;
 }
 .v10-memstack-cell-recent-label {
@@ -162,7 +162,7 @@
   align-self: flex-start;
   padding: 3px 10px;
   background: none;
-  border: 1px solid color-mix(in srgb, var(--cell-color, #64748b) 30%, var(--border-subtle));
+  border: 1px solid color-mix(in srgb, var(--cell-color, var(--identity-fallback)) 30%, var(--border-subtle));
   border-radius: var(--radius-control);
   color: var(--cell-color, var(--text-secondary));
   font-size: var(--fs-micro); font-weight: 700;
@@ -173,7 +173,7 @@
   transition: background 0.15s, color 0.15s;
 }
 .v10-memstack-cell-open:hover {
-  background: color-mix(in srgb, var(--cell-color, #64748b) 16%, transparent);
+  background: color-mix(in srgb, var(--cell-color, var(--identity-fallback)) 16%, transparent);
   color: var(--text-primary);
 }
 
@@ -422,34 +422,24 @@
   font-size: var(--fs-body);
   line-height: 1.55;
 }
-
-@media (max-width: 760px) {
-  .v10-graph-shell {
-    min-height: clamp(360px, 68vh, 620px);
-  }
-  .v10-graph-body {
-    flex-direction: column;
-  }
-  .v10-graph-rail {
+.v10-center-content[data-narrow] .v10-graph-shell {
+    min-height: clamp(360px, 68vh, 620px); }
+.v10-center-content[data-narrow] .v10-graph-body {
+    flex-direction: column; }
+.v10-center-content[data-narrow] .v10-graph-rail {
     flex: 0 0 auto;
     width: 100%;
     max-height: 180px;
     border-left: 0;
-    border-top: 1px solid var(--border-subtle);
-  }
-  .v10-graph-expanded-backdrop {
-    padding: 10px;
-  }
-  .v10-graph-singleton-shelf {
-    max-height: 26%;
-  }
-  .v10-primer-view { padding: 22px 18px; }
-  .v10-primer-pipeline {
-    grid-template-columns: 1fr;
-  }
-  .v10-primer-pipeline .connector {
+    border-top: 1px solid var(--border-subtle); }
+.v10-center-content[data-narrow] .v10-graph-expanded-backdrop {
+    padding: 10px; }
+.v10-center-content[data-narrow] .v10-graph-singleton-shelf {
+    max-height: 26%; }
+.v10-center-content[data-narrow] .v10-primer-view { padding: 22px 18px; }
+.v10-center-content[data-narrow] .v10-primer-pipeline {
+    grid-template-columns: 1fr; }
+.v10-center-content[data-narrow] .v10-primer-pipeline .connector {
     width: 1px;
     height: 18px;
-    justify-self: center;
-  }
-}
+    justify-self: center; }

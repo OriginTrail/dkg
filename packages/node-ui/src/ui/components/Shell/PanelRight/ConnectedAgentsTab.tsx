@@ -338,7 +338,7 @@ export function ConnectedAgentsTab(props: {
 
       {showAddFlow ? (
         <div className="v10-agent-add-surface">
-          <div className="v10-agents-section-label">Connect Another Agent</div>
+          <div className="v10-agents-section-label">Connect another agent</div>
           {connectNotice && <div className="v10-local-agent-notice ds-card-nested">{connectNotice}</div>}
           {connectError && <div className="v10-local-agent-error ds-card-nested">{connectError}</div>}
           <div className="v10-local-agent-list" aria-label="Available agent integrations">

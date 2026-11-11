@@ -8,6 +8,7 @@ export class HeaderPage {
   readonly logoText: Locator;
   readonly sidebarToggle: Locator;
   readonly agentName: Locator;
+  readonly status: Locator;
   readonly meta: Locator;
   readonly notifWrap: Locator;
   readonly notifBadge: Locator;
@@ -23,6 +24,7 @@ export class HeaderPage {
     this.logoText = page.locator(sel.header.logoText);
     this.sidebarToggle = page.locator(sel.header.sidebarToggle);
     this.agentName = page.locator(sel.header.agentName);
+    this.status = page.locator(sel.header.status);
     this.meta = page.locator(sel.header.meta);
     this.notifWrap = page.locator(sel.header.notifWrap);
     this.notifBadge = page.locator(sel.header.notifBadge);

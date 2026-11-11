@@ -103,7 +103,7 @@
   font-size: var(--fs-label);
   line-height: 1.5;
   color: var(--text-warning);
-  background: var(--amber-dim);
+  background: var(--warning-bg);
 }
 .v10-pca-card-meta { font-size: var(--fs-label); color: var(--text-secondary); margin: 10px 0 0; }
 .v10-pca-card-meta-sep { color: var(--text-ghost); }

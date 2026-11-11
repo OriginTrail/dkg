@@ -68,7 +68,7 @@ function addGraph(id: string, options: {
 async function render() {
   await act(async () => { root.render(React.createElement(DashboardView)); });
   const card = [...container.querySelectorAll('.stat-card')]
-    .find((element) => element.querySelector('.stat-label')?.textContent === 'Context Graph Size')!;
+    .find((element) => element.querySelector('.stat-label')?.textContent === 'Context graph size')!;
   return {
     card,
     values: [...card.querySelectorAll('.v10-cg-size-big')].map((element) => element.textContent),

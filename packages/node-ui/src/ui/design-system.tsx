@@ -164,6 +164,12 @@ const App: React.FC = () => {
         <Row label="Signals" note="state only, never identity">
           {['--text-success', '--text-warning', '--text-danger'].map((t) => <Swatch key={t} token={t} on="--bg-panel" theme={theme} />)}
         </Row>
+        <Row label="Signal tints" note="notices, result cards, highlighted rows">
+          {['success', 'warning', 'danger'].flatMap((s) => [`--${s}-bg`, `--${s}-bg-strong`, `--${s}-border`]).map((t) => <Swatch key={t} token={t} theme={theme} />)}
+        </Row>
+        <Row label="Neutral tints" note="hover rows, wells, tracks; read in both themes">
+          {['--tint-faint', '--tint-subtle', '--tint-strong', '--shade'].map((t) => <Swatch key={t} token={t} theme={theme} />)}
+        </Row>
         <Row label="Actions and focus">
           <Swatch token="--accent-primary" note="primary button" theme={theme} />
           <Swatch token="--accent-vm" note="Publish to VM only" theme={theme} />
@@ -197,12 +203,18 @@ const App: React.FC = () => {
 
       <Section id="shape" title="Shape" lead="The corner says what something is. Read-only facts are pills; things you click are rectangles.">
         <Row label="Corners">
+          <Spec token="--radius-hair · 2"><span className="dsp-box" style={{ borderRadius: 'var(--radius-hair)' }}>Bar, track, swatch</span></Spec>
           <Spec token="--radius-xs · 4"><span className="dsp-box" style={{ borderRadius: 'var(--radius-xs)' }}>Menu row, segment</span></Spec>
           <Spec token="--radius-control · 6"><span className="dsp-box" style={{ borderRadius: 'var(--radius-control)' }}>Button, input, filter</span></Spec>
           <Spec token="--radius-nested · 8"><span className="dsp-box" style={{ borderRadius: 'var(--radius-nested)' }}>Inside a card, menu</span></Spec>
           <Spec token="--radius-card · 10"><span className="dsp-box" style={{ borderRadius: 'var(--radius-card)' }}>Card, panel</span></Spec>
           <Spec token="--radius-overlay · 12"><span className="dsp-box" style={{ borderRadius: 'var(--radius-overlay)' }}>Dialog, overlay</span></Spec>
           <Spec token="--radius-pill"><span className="dsp-box" style={{ borderRadius: 'var(--radius-pill)' }}>Badge, count, chip</span></Spec>
+        </Row>
+        <Row label="Elevation" note="one shadow per kind of surface">
+          {[['--shadow-sm', 'Hovered card'], ['--shadow-menu', 'Menu, floating panel'], ['--shadow-popover', 'Popover'], ['--shadow-lift', 'Raised graph card'], ['--shadow-modal', 'Dialog'], ['--shadow-drawer', 'Side sheet']].map(([t, use]) => (
+            <Spec key={t} token={t}><span className="dsp-box" style={{ boxShadow: `var(${t})`, borderRadius: 'var(--radius-nested)' }}>{use}</span></Spec>
+          ))}
         </Row>
         <Row label="Heights" note="controls side by side share a height">
           <Spec token="--h-badge-sm · 18"><span className="dsp-bar" style={{ height: 'var(--h-badge-sm)' }} /></Spec>

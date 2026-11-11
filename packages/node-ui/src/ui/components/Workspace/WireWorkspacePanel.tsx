@@ -234,7 +234,7 @@ export function WireWorkspacePanel({
       <div>
         <div style={{
           padding: '12px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 14, fontSize: 'var(--fs-control)',
-          background: 'rgba(34, 197, 94, 0.08)', border: '1px solid rgba(34, 197, 94, 0.25)',
+          background: 'var(--success-bg)', border: '1px solid var(--success-border)',
           color: 'var(--accent-green)',
         }}>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Workspace wired.</div>
@@ -312,8 +312,8 @@ export function WireWorkspacePanel({
     <div>
       <div style={{
         padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 14, fontSize: 'var(--fs-control)',
-        background: 'rgba(59, 130, 246, 0.08)', border: '1px solid rgba(59, 130, 246, 0.25)',
-        color: 'var(--accent-primary, #3b82f6)',
+        background: 'var(--tint-subtle)', border: '1px solid var(--border-default)',
+        color: 'var(--accent-primary)',
       }}>
         <div style={{ fontWeight: 600, marginBottom: 4 }}>
           {variant === 'create' ? 'Wire your local workspace' : 'Wire this project locally'}

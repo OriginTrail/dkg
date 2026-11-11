@@ -173,7 +173,7 @@ async function warmInviteCuratorConnection(invite: ParsedInvite): Promise<void> 
   }
   if (invite.legacyMultiaddr) {
     console.warn(
-      '[DKG] This invite uses a legacy multiaddr (deprecated). Ask the curator to regenerate using the current Share Context Graph modal — V10 invites carry a peer id and resolve via DHT, so they survive relay rotations.',
+      '[DKG] This invite uses a legacy multiaddr (deprecated). Ask the curator to regenerate using the current Share context graph modal — V10 invites carry a peer id and resolve via DHT, so they survive relay rotations.',
     );
     await connectToPeerWithTimeout(invite.legacyMultiaddr).catch(() => {});
   }
@@ -192,7 +192,7 @@ export function validateInvite(
   // `forwardJoinRequest`). A discovered graph whose explicit access policy is
   // public uses `/api/subscribe` instead and deliberately needs no invite.
   if (!invite.curatorPeerId && !invite.legacyMultiaddr && !options.allowBareContextGraphId) {
-    return 'This invite is missing the curator peer id. Ask the curator to regenerate the invite from the Share Context Graph dialog.';
+    return 'This invite is missing the curator peer id. Ask the curator to regenerate the invite from the Share context graph dialog.';
   }
   if (invite.legacyMultiaddr) {
     if (!invite.legacyMultiaddr.startsWith('/')) return 'Invalid curator multiaddr';
@@ -582,9 +582,9 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           ×
         </button>
         <div className="v10-modal-header">
-          <div id="dkg-join-cg-title" className="v10-modal-title">Join a Context Graph</div>
+          <div id="dkg-join-cg-title" className="v10-modal-title">Join a context graph</div>
           <div id="dkg-join-cg-subtitle" className="v10-modal-subtitle">
-            Enter a discovered public Context Graph ID to subscribe, or paste a curator invite for a private graph.
+            Enter a discovered public context graph ID to subscribe, or paste a curator invite for a private graph.
           </div>
         </div>
 
@@ -594,8 +594,8 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           {pending && (
             <div style={{
               padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 'var(--fs-control)',
-              background: 'rgba(59, 130, 246, 0.08)', border: '1px solid rgba(59, 130, 246, 0.25)',
-              color: 'var(--accent-primary, #3b82f6)',
+              background: 'var(--tint-subtle)', border: '1px solid var(--border-default)',
+              color: 'var(--accent-primary)',
             }}>
               Join request sent. Waiting for the curator to approve — this modal will move forward automatically once they do.
             </div>
@@ -604,7 +604,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           {approved && (
             <div style={{
               padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 'var(--fs-control)',
-              background: 'rgba(34, 197, 94, 0.08)', border: '1px solid rgba(34, 197, 94, 0.25)',
+              background: 'var(--success-bg)', border: '1px solid var(--success-border)',
               color: 'var(--accent-green)',
             }}>
               Approved! Loading context graph…
@@ -614,20 +614,20 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           {rejected && (
             <div style={{
               padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 'var(--fs-control)',
-              background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.25)',
-              color: 'var(--accent-warning, #f59e0b)',
+              background: 'var(--warning-bg)', border: '1px solid var(--warning-border)',
+              color: 'var(--text-warning)',
             }}>
               The curator declined this join request.
             </div>
           )}
 
           <div className="v10-form-group">
-            <label className="v10-form-label" htmlFor="dkg-cg-invite">Context Graph ID or Invite Code</label>
+            <label className="v10-form-label" htmlFor="dkg-cg-invite">Context graph ID or invite code</label>
             <textarea
               id="dkg-cg-invite"
               name="dkg-cg-invite"
               className="v10-form-textarea ds-input"
-              placeholder={"Public: paste a Context Graph ID\n\nPrivate: paste the curator invite\nmy-context-graph-abc123\n12D3KooW..."}
+              placeholder={"Public: paste a context graph ID\n\nPrivate: paste the curator invite\nmy-context-graph-abc123\n12D3KooW..."}
               value={inviteCode}
               onChange={(e) => setInviteCode(e.target.value)}
               autoFocus
@@ -650,7 +650,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
                 checked={keepSynced}
                 onChange={(event) => setKeepSynced(event.target.checked)}
                 disabled={sending}
-                aria-label="Keep this Context Graph synchronized after restart"
+                aria-label="Keep this context graph synchronized after restart"
               />
               <span>
                 Keep synchronized after restart

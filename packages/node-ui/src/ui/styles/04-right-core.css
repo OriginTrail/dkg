@@ -109,7 +109,7 @@
 .v10-agents-stat-dot.connected { background: var(--accent-green); }
 .v10-agents-stat-dot.known { background: var(--text-tertiary); }
 .v10-agents-stat-dot.offline { background: var(--accent-red); }
-.v10-agents-stat-dot.degraded { background: #f59e0b; }
+.v10-agents-stat-dot.degraded { background: var(--accent-amber); }
 .v10-agents-refresh { margin-left: auto; }
 .v10-agents-refresh.disconnect { margin-left: 0; }
 .v10-agent-subtabs {
@@ -135,7 +135,7 @@
 .v10-agent-subtab-group.active > .v10-agent-subtab.active {
   background: transparent;
   border-right-color: transparent;
-  border-radius: 4px 0 0 4px;
+  border-radius: var(--radius-xs) 0 0 var(--radius-xs);
   padding-right: 8px;
 }
 .v10-agent-subtab {
@@ -189,7 +189,7 @@
 .v10-agent-card-dot.self { background: var(--accent-blue); }
 .v10-agent-card-dot.connected { background: var(--accent-green); }
 .v10-agent-card-dot.known { background: var(--text-tertiary); }
-.v10-agent-card-dot.degraded { background: #f59e0b; }
+.v10-agent-card-dot.degraded { background: var(--accent-amber); }
 .v10-agent-card-badge { flex-shrink: 0; }
 
 /* Peer-axis Network-tab card — extends .v10-agent-card. The peer's

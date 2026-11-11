@@ -200,7 +200,6 @@
 .v10-center-tab:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .v10-center-tab-label { overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
 .v10-tab-mark-icon { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; color: currentColor; }
-.v10-center-tab .v10-agent-dot { font-size: 7px; }
 .v10-center-tab-close {
   display: inline-grid;
   place-items: center;
@@ -297,8 +296,8 @@
 .v10-cg-mark{display:inline-grid;place-items:center;flex:none;border-radius:var(--radius-xs);font-family:var(--font-sans);font-weight:700;line-height:1;letter-spacing:0;
   color:var(--cg-color);background:color-mix(in srgb,var(--cg-color) 20%,var(--bg-surface));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--cg-color) 55%,transparent)}
 .v10-cg-mark::before{content:attr(data-initial)}
-.v10-cg-mark-sm{width:16px;height:16px;font-size:9.5px}
-.v10-cg-mark-md{width:20px;height:20px;font-size:var(--fs-label);border-radius:5px}
+.v10-cg-mark-sm{width:16px;height:16px;font-size: var(--fs-micro)}
+.v10-cg-mark-md{width:20px;height:20px;font-size:var(--fs-label);border-radius: var(--radius-xs)}
 .v10-cg-name{display:flex;align-items:center;gap:8px;min-width:0}
 .v10-select-option{display:flex;align-items:center;gap:8px}
 .v10-select-mark{display:inline-flex;margin-right:6px}

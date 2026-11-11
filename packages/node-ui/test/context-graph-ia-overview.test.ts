@@ -157,7 +157,7 @@ describe('Context Graph IA and Overview', () => {
       'Shared Working Memory',
       'Verifiable Memory',
       'Subgraphs',
-      'More Context Graph views',
+      'More context graph views',
     ]);
     expect(container.textContent).not.toContain('Graph Overview');
     expect(container.textContent).not.toContain('Shared Memory4');
@@ -171,7 +171,7 @@ describe('Context Graph IA and Overview', () => {
       more!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    expect(container.textContent).toContain('Query Catalogue');
+    expect(container.textContent).toContain('Query catalogue');
     const query = container.querySelector<HTMLButtonElement>('.v10-layer-more-item');
     await act(async () => {
       query!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -197,17 +197,17 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => {
       more!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
-    expect(container.textContent).toContain('Query Catalogue');
+    expect(container.textContent).toContain('Query catalogue');
 
     await act(async () => {
       document.dispatchEvent(new Event('pointerdown', { bubbles: true }));
     });
-    expect(container.textContent).not.toContain('Query Catalogue');
+    expect(container.textContent).not.toContain('Query catalogue');
 
     await act(async () => root.unmount());
   });
 
-  it('renders Overview as a summary with one clickable Knowledge Pipeline', async () => {
+  it('renders Overview as a summary with one clickable Knowledge pipeline', async () => {
     const onSwitchLayer = vi.fn();
     const onOpenPrimer = vi.fn();
     const { container, root } = await render(
@@ -215,7 +215,7 @@ describe('Context Graph IA and Overview', () => {
         cg: {
           id: 'cg-test',
           name: 'UI Rework',
-          description: 'Context Graph UI test',
+          description: 'Context graph UI test',
           accessPolicy: 'private',
           curator: 'did:dkg:agent:0xabcdefabcdefabcdefabcdefabcdefabcdefabcd',
           callerInvolved: true,
@@ -244,7 +244,7 @@ describe('Context Graph IA and Overview', () => {
     expect(roleBadge?.getAttribute('data-role')).toBe('curator');
     const typeLabel = pairs[1].querySelector('.v10-po-identity-label');
     const typeBadge = pairs[1].querySelector('.v10-po-badge');
-    expect(typeLabel?.textContent?.trim()).toBe('Context Graph:');
+    expect(typeLabel?.textContent?.trim()).toBe('Context graph:');
     expect(typeBadge?.textContent?.trim()).toBe('Curated');
     expect(typeBadge?.getAttribute('data-cg-type')).toBe('curated');
     expect(container.textContent).toContain('Agents with access');
@@ -260,7 +260,7 @@ describe('Context Graph IA and Overview', () => {
       .map(node => node.textContent?.trim());
     expect(statLabels).toEqual(['Entities', 'Triples', 'Subgraphs', 'Agents with access']);
 
-    expect(container.textContent).toContain('Knowledge Pipeline');
+    expect(container.textContent).toContain('Knowledge pipeline');
     expect(container.textContent).toContain('published assertion bundles become Knowledge Assets');
     expect(container.querySelector('.v10-memory-strip')).toBeNull();
     expect(container.querySelectorAll('.v10-po-pipeline-step')).toHaveLength(3);
@@ -581,7 +581,7 @@ describe('Context Graph IA and Overview', () => {
     );
 
     expect(container.textContent).toContain('Participant agents');
-    expect(container.textContent).toContain('This Context Graph is public — anyone can subscribe.');
+    expect(container.textContent).toContain('This context graph is public — anyone can subscribe.');
     expect(container.textContent).not.toContain('No participant agents recorded yet.');
     expect(container.querySelectorAll('.v10-po-participant')).toHaveLength(0);
 
@@ -603,7 +603,7 @@ describe('Context Graph IA and Overview', () => {
       }),
     );
 
-    expect(container.textContent).toContain('This Context Graph is public — anyone can subscribe.');
+    expect(container.textContent).toContain('This context graph is public — anyone can subscribe.');
     expect(container.textContent).not.toContain('Participant list unavailable.');
     expect(container.textContent).not.toContain('Loading participant agents');
     expect(container.querySelectorAll('.v10-po-participant')).toHaveLength(0);
@@ -622,7 +622,7 @@ describe('Context Graph IA and Overview', () => {
       }),
     );
 
-    expect(container.textContent).toContain('This Context Graph is public — anyone can subscribe.');
+    expect(container.textContent).toContain('This context graph is public — anyone can subscribe.');
     expect(container.textContent).not.toContain('Loading participant agents');
     expect(container.textContent).not.toContain('Participant list unavailable.');
 
@@ -977,7 +977,7 @@ describe('Context Graph IA and Overview', () => {
       expect(cell!.title?.trim().length ?? 0).toBeGreaterThan(0);
       expect(cell!.querySelector('.v10-stat-strip-hint')).toBeNull();
     }
-    expect(container.textContent).not.toContain('Topical partitions inside this Context Graph.');
+    expect(container.textContent).not.toContain('Topical partitions inside this context graph.');
     expect(container.textContent).not.toContain('Canonical triple total across all layers.');
     expect(container.textContent).not.toContain('Canonical current-layer entity counts.');
     expect(container.querySelectorAll('.v10-stat-strip-hint')).toHaveLength(0);
@@ -1298,7 +1298,7 @@ describe('Context Graph IA and Overview', () => {
     const footer = container.querySelector('.v10-po-primer-footer');
     expect(footer).toBeTruthy();
     expect(footer!.textContent).toContain('New here?');
-    expect(footer!.textContent).toContain('What is a Context Graph?');
+    expect(footer!.textContent).toContain('What is a context graph?');
     expect(footer!.textContent).toContain('A short primer on context graphs, the WM → SWM → VM pipeline');
 
     const link = container.querySelector<HTMLButtonElement>('.v10-po-primer-footer-link');
@@ -1315,7 +1315,7 @@ describe('Context Graph IA and Overview', () => {
     const { container, root } = await render(React.createElement(ContextGraphPrimerView));
 
     for (const text of [
-      'What is a Context Graph?',
+      'What is a context graph?',
       'Memory layers',
       'Subgraphs',
       'Entities and Knowledge Assets',

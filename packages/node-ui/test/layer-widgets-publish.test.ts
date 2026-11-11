@@ -81,7 +81,7 @@ describe('PublishVmWidget — B8 confirmed discount badge (#1365 r3)', () => {
     expect(apiMocks.publishAssertionsToVm).toHaveBeenCalledWith('cg', assertions);
     await unmount();
   });
-  it('states the whole context graph share scope despite a one-entity preview', async () => {
+  it('states the whole Context Graph share scope despite a one-entity preview', async () => {
     apiMocks.listAssertions.mockResolvedValue(['a', 'b', 'c'].map(name => ({ name, graphUri: name })));
     const { container, unmount } = await render(React.createElement(PromoteWidget, { count: 1, contextGraphId: 'cg' }));
     expect(container.textContent).toContain('all eligible complete Working Memory Knowledge Assets');

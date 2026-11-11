@@ -368,22 +368,15 @@
   .v10-layer-switcher-actions { gap: 2px; padding-right: 2px; }
   .v10-layer-action-btn { width: 28px; }
 }
-
-@media (max-width: 900px) {
-  .v10-po-identity,
-  .v10-po-pipeline-head {
+.v10-center-content[data-narrow] .v10-po-identity,
+.v10-center-content[data-narrow] .v10-po-pipeline-head {
     flex-direction: column;
-    align-items: stretch;
-  }
-  .v10-po-identity-pairs {
-    flex-wrap: wrap;
-  }
-  .v10-po-identity-primer { align-self: flex-start; }
-  .v10-po-pipeline-steps {
-    grid-template-columns: 1fr;
-  }
-  .v10-po-primer-footer {
+    align-items: stretch; }
+.v10-center-content[data-narrow] .v10-po-identity-pairs {
+    flex-wrap: wrap; }
+.v10-center-content[data-narrow] .v10-po-identity-primer { align-self: flex-start; }
+.v10-center-content[data-narrow] .v10-po-pipeline-steps {
+    grid-template-columns: 1fr; }
+.v10-center-content[data-narrow] .v10-po-primer-footer {
     flex-direction: row;
-    flex-wrap: wrap;
-  }
-}
+    flex-wrap: wrap; }

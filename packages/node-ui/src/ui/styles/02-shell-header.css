@@ -24,9 +24,9 @@
   padding: 6px 14px;
   font-size: var(--fs-control);
   line-height: 1.4;
-  color: var(--text-warning, #7c2d12);
-  background: var(--amber-dim, rgba(251, 191, 36, 0.18));
-  border-bottom: 1px solid rgba(251, 191, 36, 0.45);
+  color: var(--text-warning);
+  background: var(--warning-bg);
+  border-bottom: 1px solid var(--warning-border);
   z-index: 30;
 }
 .v10-token-prompt-text {
@@ -36,9 +36,9 @@
   flex: 0 1 280px;
   min-width: 160px;
   padding: 3px 8px;
-  color: var(--text-primary, inherit);
-  background: var(--bg-surface, transparent);
-  border: 1px solid rgba(251, 191, 36, 0.6);
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--warning-border);
 }
 .v10-token-prompt-submit {
   flex: 0 0 auto;
@@ -47,9 +47,9 @@
   padding: 3px 12px;
   border-radius: var(--radius-control);
   cursor: pointer;
-  color: var(--text-warning, #7c2d12);
-  background: rgba(251, 191, 36, 0.35);
-  border: 1px solid rgba(251, 191, 36, 0.6);
+  color: var(--text-warning);
+  background: var(--warning-bg-strong);
+  border: 1px solid var(--warning-border);
 }
 .v10-token-prompt-submit:disabled {
   cursor: default;
@@ -63,9 +63,9 @@
   gap: 10px;
   padding: 5px 12px;
   font-size: var(--fs-label);
-  color: #7c2d12;
-  background: var(--amber-dim, rgba(251, 191, 36, 0.16));
-  border-bottom: 1px solid rgba(251, 191, 36, 0.4);
+  color: var(--text-warning);
+  background: var(--warning-bg);
+  border-bottom: 1px solid var(--warning-border);
 }
 .v10-stale-banner .v10-retry-btn { margin-left: auto; }
 
@@ -88,20 +88,7 @@
   color: var(--text-primary);
   user-select: none;
 }
-.v10-header-logo-ot {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-left: 10px;
-  padding-left: 10px;
-  border-left: 1px solid var(--border-default);
-}
-.v10-header-logo-ot-by {
-  font-size: var(--fs-micro);
-  color: var(--text-tertiary);
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-}
+.v10-header-ot-mark { display: none; flex: none; color: var(--text-primary); line-height: 0; }
 .v10-header-ot-wordmark {
   display: block;
   color: var(--text-secondary);
@@ -112,13 +99,6 @@
   stroke: none;
   fill: currentColor;
 }
-.v10-header-logo-text {
-  font-family: var(--font-mono);
-  font-weight: 600;
-  font-size: var(--fs-body);
-  letter-spacing: 0.5px;
-}
-.v10-header-logo-version { color: var(--text-tertiary); font-weight: 300; }
 .v10-header-sep {
   width: 1px;
   height: 20px;
@@ -155,6 +135,7 @@
 }
 .v10-header-spacer { flex: 1; }
 .v10-header-meta {
+  white-space: nowrap;
   font-family: var(--font-mono);
   font-size: var(--fs-control);
   color: var(--text-secondary);
@@ -163,14 +144,6 @@
   gap: 6px;
   margin-right: 16px;
 }
-.v10-header-status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  display: inline-block;
-}
-.v10-header-status-dot.online { background: var(--accent-green); }
-.v10-header-status-dot.offline { background: var(--accent-amber); }
 .v10-header-meta-sep { color: var(--text-ghost); }
 .v10-header-actions { display: flex; align-items: center; gap: 4px; }
 .v10-header-icon-btn { width: 32px; position: relative; }
@@ -203,7 +176,7 @@
   flex-direction: column;
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-menu);
   z-index: 200;
   overflow: hidden;
 }
@@ -407,8 +380,11 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
     top: 0;
     bottom: 0;
     z-index: 40;
-    box-shadow: 0 0 24px rgba(0, 0, 0, 0.35);
+    box-shadow: var(--shadow-menu);
   }
+  .v10-app-body > .v10-panel-left,
+  .v10-app-body > .v10-panel-right { max-width: calc(100% - var(--h-control-lg)); }
+  .v10-panel-scrim { position: absolute; inset: 0; z-index: 39; border: 0; padding: 0; background: var(--scrim); }
   .v10-app-body > .v10-panel-left { left: 0; }
   .v10-app-body > .v10-panel-right { right: 0; }
   /* The drag-to-resize handles are pointless at this width and, with the
@@ -422,12 +398,25 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
     flex: 1 1 100% !important;
     min-width: 0;
   }
+  /* The OriginTrail mark stands in for the wordmark, so the brand stays in view. */
+  .v10-header-ot-mark { display: inline-flex; }
+  .v10-header-ot-wordmark,
+  .v10-header-agent-addr { display: none; }
+  .v10-header-meta { margin-right: 8px; }
+  .v10-header-actions { flex: none; }
 }
 @media (max-width: 600px) {
-  .v10-header {
-    overflow-x: auto;
-    overflow-y: hidden;
-    scrollbar-width: none;
+  .v10-header { padding: 0 8px; }
+  .v10-header-sep,
+  .v10-header-agent-switcher,
+  .v10-header-meta-sep { display: none; }
+  /* Connected shows as its icon and the peer count; screen readers keep the words. */
+  .v10-header-compact-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
-  .v10-header::-webkit-scrollbar { display: none; }
 }

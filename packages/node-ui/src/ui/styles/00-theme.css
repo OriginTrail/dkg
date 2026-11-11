@@ -18,6 +18,8 @@
      surface (used by the inline-code chip, which can land on user bubbles
      whose bg is identical to a chip fill). */
   --border-prominent: #888888;
+  /* The edge of an outlined control: clears 3:1 on every surface. */
+  --border-control: #646464;
 
   /* Text — dark mode. Round-3 nudge 2026-05-20 (PR8): user feedback on
      the live state was "almost there but still could be a bit better."
@@ -64,7 +66,7 @@
      Canvas code (graph-viz) reads the same values from layer-colors.ts. */
   --layer-working: #94a3b8;
   --layer-working-text: #cbd5e1;
-  --layer-working-bg: #1a1e25;
+  --layer-working-bg: #262c35;
   --layer-working-border: #64748b;
   --layer-shared: #1aded7;
   --layer-shared-text: #1aded7;
@@ -109,33 +111,6 @@
   --header-h: 44px;
   --tab-h: 36px;
   --toolbar-h: 38px;
-
-  /* Legacy aliases (for existing components that use the old tokens) */
-  --bg: var(--bg-root);
-  --surface: var(--bg-surface);
-  --surface-hover: var(--bg-hover);
-  --surface-alt: var(--bg-panel);
-  --border: var(--border-default);
-  --border-light: var(--border-strong);
-  --text: var(--text-primary);
-  --text-muted: var(--text-secondary);
-  --text-dim: var(--text-tertiary);
-  --green: var(--accent-green);
-  --green-dark: #166534;
-  --green-mid: #22c55e;
-  --green-dim: rgba(34, 197, 94, 0.1);
-  --amber: var(--accent-amber);
-  --amber-dim: rgba(251, 191, 36, 0.1);
-  --red: var(--accent-red);
-  --red-dim: rgba(248, 113, 113, 0.1);
-  --blue: var(--accent-blue);
-  --blue-dim: rgba(96, 165, 250, 0.1);
-  --purple: #a78bfa;
-  --purple-dim: rgba(167, 139, 250, 0.1);
-  --cyan: #22d3ee;
-  --cyan-dim: rgba(34, 211, 238, 0.08);
-  --pink: #f472b6;
-  --pink-dim: rgba(244, 114, 182, 0.12);
 }
 
 /* ══════════════════════════════════════════
@@ -158,6 +133,7 @@
   --border-default: #d4d4d4;
   --border-strong: #a3a3a3;
   --border-prominent: #525252;
+  --border-control: #8a8a8a;
   --text-primary: #171717;
   /* Light secondary round-3 nudge: #525252 → #444444. Same rationale
      as the dark-mode bump — single targeted step on the tier that
@@ -189,11 +165,11 @@
   --layer-working: #526173;
   --layer-working-text: #3f4c5c;
   --layer-working-bg: #e6eaef;
-  --layer-working-border: #a9b4c2;
+  --layer-working-border: #8796aa;
   --layer-shared: #0f9c96;
   --layer-shared-text: #0b6e6a;
   --layer-shared-bg: #ddf6f5;
-  --layer-shared-border: #4fb8b2;
+  --layer-shared-border: #2f9d97;
   --layer-verified: #6344df;
   --layer-verified-text: #4a2fb8;
   --layer-verified-bg: #eeebfc;
@@ -201,6 +177,8 @@
   --accent-primary: #171717;
   --text-on-primary: #ffffff;
   --accent-vm-hover: #5236c4;
+  /* Light surfaces need far less shadow to read as raised. */
+  --shadow-modal: 0 20px 60px rgba(0, 0, 0, .15);
   --focus-ring: #4553c9;
   --role: #2f6fc4;
   --role-text: #1d4f9a;
@@ -208,15 +186,6 @@
   --role-border: #8db3ea;
   --data-1: #1f6fd1; --data-2: #8a7a00; --data-3: #a3195b; --data-4: #c28a00;
   --data-5: #b5179e; --data-6: #9a5b1e; --data-7: #0284c7; --data-8: #008300;
-  --bg: var(--bg-root);
-  --surface: var(--bg-surface);
-  --surface-hover: var(--bg-hover);
-  --surface-alt: var(--bg-panel);
-  --border: var(--border-default);
-  --border-light: var(--border-strong);
-  --text: var(--text-primary);
-  --text-muted: var(--text-secondary);
-  --text-dim: var(--text-tertiary);
 }
 
 :root {
@@ -224,13 +193,63 @@
      One radius per job (see DESIGN.md): controls 6, nested 8, cards 10,
      overlays 12, pills full. Control heights 24/32/40, badges 18/22.
      Type scale floor is 11px. */
+  --radius-hair: 2px;
   --radius-xs: 4px;
   --radius-control: 6px;
   --radius-nested: 8px;
   --radius-card: 10px;
   --radius-overlay: 12px;
   --radius-pill: 999px;
+  /* Elevation. One shadow per kind of surface; all are black so they
+     work on both themes. */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, .06);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, .15);
+  --shadow-menu: 0 8px 24px rgba(0, 0, 0, .4);
   --shadow-popover: 0 12px 32px rgba(0, 0, 0, .45);
+  --shadow-lift: 0 18px 36px -20px rgba(0, 0, 0, .85);
+  --shadow-modal: 0 20px 60px rgba(0, 0, 0, .5);
+  --shadow-drawer: -8px 0 30px rgba(0, 0, 0, .3);
+  /* Dims the page behind a modal or drawer. */
+  --scrim: rgba(0, 0, 0, .55);
+  --scrim-strong: rgba(0, 0, 0, .8);
+  /* Darker inset for expanded table rows and log wells. */
+  --shade: rgba(0, 0, 0, .15);
+
+  /* Signal tints: washes of the signal accents for notices, result cards
+     and highlighted rows. Text on them uses --text-success/-warning/-danger.
+     Mixed from the accents, so they follow the theme. */
+  --success-bg: color-mix(in srgb, var(--accent-green) 8%, transparent);
+  --success-bg-strong: color-mix(in srgb, var(--accent-green) 15%, transparent);
+  --success-border: color-mix(in srgb, var(--accent-green) 28%, transparent);
+  --warning-bg: color-mix(in srgb, var(--accent-amber) 8%, transparent);
+  --warning-bg-strong: color-mix(in srgb, var(--accent-amber) 15%, transparent);
+  --warning-border: color-mix(in srgb, var(--accent-amber) 35%, transparent);
+  --danger-bg: color-mix(in srgb, var(--accent-red) 8%, transparent);
+  --danger-bg-strong: color-mix(in srgb, var(--accent-red) 15%, transparent);
+  --danger-border: color-mix(in srgb, var(--accent-red) 28%, transparent);
+  /* Second stripe of the failed-phase bar. */
+  --danger-stripe: #b91c1c;
+
+  /* Neutral tints: washes of the text colour for hover rows, wells and
+     tracks. Unlike white-alpha they also read in light mode. */
+  --tint-faint: color-mix(in srgb, var(--text-primary) 2%, transparent);
+  --tint-subtle: color-mix(in srgb, var(--text-primary) 4%, transparent);
+  --tint-strong: color-mix(in srgb, var(--text-primary) 7%, transparent);
+
+  /* Identity fallback: the colour an agent, cell or sub-graph gets before
+     its own identity colour is known, and text placed on identity fills. */
+  --identity-fallback: #64748b;
+  --text-on-identity: #ffffff;
+
+  /* Log viewer: a terminal well that stays dark in both themes. */
+  --log-bg: #0d1117;
+  --log-text: #c9d1d9;
+  --log-meta: #8b949e;
+  --log-timestamp: #6e7681;
+  --log-module: #79c0ff;
+  --log-error: #f85149;
+  --log-error-bg: rgba(248, 81, 73, .08);
+  --log-warn: #d29922;
   --h-badge-sm: 18px;
   --h-badge-md: 22px;
   --h-control-sm: 24px;
@@ -238,6 +257,7 @@
   --h-control-lg: 40px;
   --fs-micro: 11px;
   --fs-label: 12px;
+  --fs-layer: 12px;
   --fs-control: 13px;
   --fs-body: 14px;
   --fs-title: 16px;

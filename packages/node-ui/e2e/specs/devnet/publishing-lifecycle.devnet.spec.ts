@@ -14,7 +14,7 @@ test.beforeAll(async () => {
 });
 
 test.describe('Publishing lifecycle (devnet)', () => {
-  test('UI loads real context graphs from devnet daemon', async ({ shell, leftPanel, page }) => {
+  test('UI loads real Context Graphs from devnet daemon', async ({ shell, leftPanel, page }) => {
     await shell.goto();
     await page.waitForTimeout(2000);
     const names = await leftPanel.getProjectNames();

@@ -216,7 +216,7 @@ describe('PanelRight UI - connected agent flow', () => {
 
   it('keeps the Agents tab as the persistent OpenClaw chat surface with sub-tabs and add-agent flow', () => {
     expect(panelRight).toContain('Connect OpenClaw');
-    expect(panelRight).toContain('Connect Another Agent');
+    expect(panelRight).toContain('Connect another agent');
     expect(panelRight).toContain('Disconnect');
     expect(panelRight).toContain('Session history');
     expect(panelRight).toContain('OpenClaw');
@@ -372,13 +372,13 @@ describe('Agent hub shell surfaces', () => {
   const panelLeft = readUiFile('components/Shell/PanelLeft.tsx');
   const agentHub = readUiFile('pages/AgentHub.tsx');
 
-  it('keeps Integrations visible while hiding the duplicate Agent Hub shell entry', () => {
-    expect(panelLeft).not.toContain('Agent Hub');
+  it('keeps Integrations visible while hiding the duplicate Agent hub shell entry', () => {
+    expect(panelLeft).not.toContain('Agent hub');
     expect(panelLeft).toContain('Integrations');
   });
 
-  it('restores Agent Hub without reviving the old My Agent product path', () => {
-    expect(agentHub).toContain('Agent Hub');
+  it('restores Agent hub without reviving the old My Agent product path', () => {
+    expect(agentHub).toContain('Agent hub');
     expect(agentHub).toContain('Bring your own agent into the node');
     expect(agentHub).not.toContain('My Agent');
   });
@@ -1014,8 +1014,8 @@ describe('OpenClaw bridge behavioral tests', () => {
       const hermes = result.integrations.find((item) => item.id === 'hermes');
       expect(hermes).toMatchObject({
         status: 'degraded',
-        statusLabel: 'Degraded',
-        bridgeStatusLabel: 'Degraded',
+        statusLabel: 'Partial',
+        bridgeStatusLabel: 'Partial',
         chatAttachments: true,
       });
       expect(hermes?.chatReady).toBe(false);
@@ -1068,8 +1068,8 @@ describe('OpenClaw bridge behavioral tests', () => {
       const hermes = result.integrations.find((item) => item.id === 'hermes');
       expect(hermes).toMatchObject({
         status: 'degraded',
-        statusLabel: 'Degraded',
-        bridgeStatusLabel: 'Degraded',
+        statusLabel: 'Partial',
+        bridgeStatusLabel: 'Partial',
         chatReady: false,
         bridgeOnline: false,
         target: 'bridge',
@@ -1327,7 +1327,7 @@ describe('OpenClaw bridge behavioral tests', () => {
             bridgeOnline: true,
             bridgeStatusLabel: 'Connected',
             status: 'chat_ready',
-            statusLabel: 'Chat ready',
+            statusLabel: 'Ready',
             detail: 'Connected through the bridge.',
             source: 'live',
           },
@@ -1441,7 +1441,7 @@ describe('OpenClaw bridge behavioral tests', () => {
         bridgeOnline: true,
         bridgeStatusLabel: 'Connected',
         status: 'chat_ready',
-        statusLabel: 'Chat ready',
+        statusLabel: 'Ready',
         detail: 'Connected through the bridge.',
         source: 'live',
       };
@@ -1576,7 +1576,7 @@ describe('OpenClaw bridge behavioral tests', () => {
         bridgeOnline: true,
         bridgeStatusLabel: 'Bridge live',
         status: 'chat_ready',
-        statusLabel: 'Chat ready',
+        statusLabel: 'Ready',
         detail: 'Connected through the bridge.',
         source: 'live',
       });
@@ -1618,7 +1618,7 @@ describe('OpenClaw bridge behavioral tests', () => {
           bridgeOnline: true,
           bridgeStatusLabel: 'Bridge live',
           status: 'chat_ready',
-          statusLabel: 'Chat ready',
+          statusLabel: 'Ready',
           detail: 'Connected through the bridge.',
           source: 'live',
         },

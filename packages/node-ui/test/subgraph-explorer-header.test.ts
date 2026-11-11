@@ -46,6 +46,6 @@ describe('SubGraphExplorerHeader — locked intro copy (UX §4.4.1 Issue D)', ()
     act(() => {
       root.render(React.createElement(SubGraphExplorerHeader));
     });
-    expect(container.querySelector('.v10-subgraph-explorer-title')?.textContent).toBe('Subgraph Explorer');
+    expect(container.querySelector('.v10-subgraph-explorer-title')?.textContent).toBe('Subgraph explorer');
   });
 });

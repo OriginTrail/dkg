@@ -74,11 +74,9 @@
   flex: 1 1 auto; min-height: 0;
   overflow-y: auto;
 }
-@media (max-width: 900px) {
-  .v10-layer-widgets-strip { flex-direction: column; }
-  .v10-layer-widgets-strip-stats { grid-template-columns: minmax(0, 1fr); }
-  .v10-layer-widgets-strip-action { flex: 0 0 auto; max-width: none; }
-}
+.v10-center-content[data-narrow] .v10-layer-widgets-strip { flex-direction: column; }
+.v10-center-content[data-narrow] .v10-layer-widgets-strip-stats { grid-template-columns: minmax(0, 1fr); }
+.v10-center-content[data-narrow] .v10-layer-widgets-strip-action { flex: 0 0 auto; max-width: none; }
 
 /* Enhanced entity list — sortable, scrollable, with type pill */
 .v10-entity-list {
@@ -109,8 +107,8 @@
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
   padding: 1px 4px;
-  border-radius: 3px;
-  background: var(--bg-elevated, transparent);
+  border-radius: var(--radius-hair);
+  background: var(--bg-elevated);
 }
 .v10-entity-list-sort {
   display: inline-flex; align-items: center; gap: 6px;
@@ -119,7 +117,7 @@
 .v10-entity-list-sort-label { text-transform: uppercase; letter-spacing: 0.04em; }
 .v10-entity-list-sort-select {
   appearance: none;
-  background: var(--bg-elevated, #1a1a1a);
+  background: var(--bg-elevated);
   color: var(--text-secondary);
   border: 1px solid var(--border-subtle);
   padding: 3px 22px 3px 8px; font-family: var(--font-mono);
@@ -131,7 +129,7 @@
   background-repeat: no-repeat;
 }
 .v10-entity-list-sort-select:hover { border-color: var(--border-strong, var(--text-ghost)); }
-.v10-entity-list-sort-select:focus { outline: 1px solid var(--accent, #8b5cf6); outline-offset: 1px; }
+.v10-entity-list-sort-select:focus { outline: 1px solid var(--focus-ring); outline-offset: 1px; }
 .v10-entity-card {
   display: flex; align-items: center; gap: 12px;
   padding: 10px 16px;
@@ -230,7 +228,7 @@
 .v10-gen-widget-agent { display: flex; align-items: center; gap: 4px; font-size: var(--fs-micro); color: var(--text-tertiary); font-family: var(--font-mono); }
 .v10-gen-widget-agent-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent-blue); }
 .v10-gen-widget-dismiss {
-  font-size: var(--fs-body); color: var(--text-tertiary); padding: 2px 4px; border-radius: 3px;
+  font-size: var(--fs-body); color: var(--text-tertiary); padding: 2px 4px; border-radius: var(--radius-xs);
   transition: all 0.15s; cursor: pointer; border: none; background: none;
 }
 .v10-gen-widget-dismiss:hover { color: var(--text-secondary); background: var(--bg-hover); }

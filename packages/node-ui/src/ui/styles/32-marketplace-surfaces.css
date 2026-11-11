@@ -20,7 +20,7 @@
 .mkt-bar.hit i { background: var(--gauge-over); }
 .mkt-sparkrow { display: flex; align-items: center; gap: var(--sp-3); }
 .mkt-spark { display: flex; align-items: flex-end; gap: 2px; height: var(--sp-5); }
-.mkt-spark i { width: 4px; background: var(--gray-5); border-radius: 1px; display: block; }
+.mkt-spark i { width: 4px; background: var(--gray-5); border-radius: var(--radius-hair); display: block; }
 .mkt-pace { font-size: var(--fs-xs); }
 .mkt-pace.warn { color: var(--gauge-mid); }
 .mkt-pace.quiet { color: var(--text-muted); }

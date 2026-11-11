@@ -28,6 +28,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { authHeaders } from '../api.js';
 import { agentHexForUri } from './useAgents.js';
+import { SIGNAL_HEX } from '../layer-colors.js';
 
 export interface AgentAttribution {
   /** Canonical agent identifier. Peer-id for libp2p (`12D3…`), `did:dkg:agent:`
@@ -362,7 +363,7 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
         // priority over any single agent's palette slot so they're
         // instantly scannable.
         confl.push(uri);
-        nc[uri] = '#f59e0b';
+        nc[uri] = SIGNAL_HEX.warning;
       }
     }
     return { nodeColors: nc, conflicts: confl };

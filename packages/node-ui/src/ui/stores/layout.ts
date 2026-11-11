@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from 'react';
 import { create } from 'zustand';
 
 interface LayoutState {
@@ -13,9 +14,12 @@ interface LayoutState {
   leftWidth: number;
   rightWidth: number;
   bottomHeight: number;
+  /** The one panel open on a narrow screen. Never saved, so desktop panels keep their state. */
+  narrowPanel: 'left' | 'right' | null;
 
   toggleLeft: () => void;
   toggleRight: () => void;
+  closeNarrowPanel: () => void;
   toggleBottom: () => void;
   toggleBottomMaximised: () => void;
   toggleLeftSectionMarketplace: () => void;
@@ -29,6 +33,14 @@ interface LayoutState {
 }
 
 const LAYOUT_STORAGE_KEY = 'dkg-layout';
+
+/** Below this width the side panels float over the page (02-shell-header.css). */
+const NARROW_QUERY = '(max-width: 860px)';
+
+function narrowMedia(): MediaQueryList | null {
+  return typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia(NARROW_QUERY) : null;
+}
+const isNarrowViewport = () => narrowMedia()?.matches ?? false;
 
 interface PersistedLayout {
   leftCollapsed?: boolean;
@@ -189,15 +201,25 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
   leftWidth: initial.leftWidth,
   rightWidth: initial.rightWidth,
   bottomHeight: initial.bottomHeight,
+  narrowPanel: null,
 
   toggleLeft: () => {
+    if (isNarrowViewport()) {
+      set((s) => ({ narrowPanel: s.narrowPanel === 'left' ? null : 'left' }));
+      return;
+    }
     set((s) => ({ leftCollapsed: !s.leftCollapsed }));
     persist(snapshot(get()));
   },
   toggleRight: () => {
+    if (isNarrowViewport()) {
+      set((s) => ({ narrowPanel: s.narrowPanel === 'right' ? null : 'right' }));
+      return;
+    }
     set((s) => ({ rightCollapsed: !s.rightCollapsed }));
     persist(snapshot(get()));
   },
+  closeNarrowPanel: () => set({ narrowPanel: null }),
   toggleBottom: () => {
     set((s) => ({ bottomCollapsed: !s.bottomCollapsed, bottomMaximised: false }));
     persist(snapshot(get()));
@@ -240,3 +262,20 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
     persist(snapshot(get()));
   },
 }));
+
+function subscribeNarrow(listener: () => void): () => void {
+  const media = narrowMedia();
+  media?.addEventListener('change', listener);
+  return () => media?.removeEventListener('change', listener);
+}
+
+/** Which side panels show now: narrow screens start with both closed and open one at a time. */
+export function useShellPanels(): { narrow: boolean; leftOpen: boolean; rightOpen: boolean } {
+  const narrow = useSyncExternalStore(subscribeNarrow, isNarrowViewport, () => false);
+  const leftCollapsed = useLayoutStore((s) => s.leftCollapsed);
+  const rightCollapsed = useLayoutStore((s) => s.rightCollapsed);
+  const narrowPanel = useLayoutStore((s) => s.narrowPanel);
+  return narrow
+    ? { narrow, leftOpen: narrowPanel === 'left', rightOpen: narrowPanel === 'right' }
+    : { narrow, leftOpen: !leftCollapsed, rightOpen: !rightCollapsed };
+}

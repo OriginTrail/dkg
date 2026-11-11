@@ -20,7 +20,7 @@ test.describe('Operations View (rc.12 Observability)', () => {
   });
 
   test('four sub-tabs are rendered', async ({ page }) => {
-    await expect(page.locator('button').filter({ hasText: 'All Operations' })).toBeVisible();
+    await expect(page.locator('button').filter({ hasText: 'All operations' })).toBeVisible();
     await expect(page.locator('button').filter({ hasText: 'Hardware' })).toBeVisible();
     await expect(page.locator('button').filter({ hasText: 'Logs' })).toBeVisible();
     await expect(page.locator('button').filter({ hasText: 'Errors' })).toBeVisible();
@@ -50,8 +50,8 @@ test.describe('Operations View (rc.12 Observability)', () => {
       texts.push((await options.nth(i).textContent())!.trim());
     }
     expect(texts).toContain('All statuses');
-    expect(texts).toContain('success');
-    expect(texts).toContain('error');
+    expect(texts).toContain('Done');
+    expect(texts).toContain('Failed');
   });
 
   test('Operation ID search input accepts text', async ({ page }) => {
@@ -123,12 +123,12 @@ test.describe('Operations View (rc.12 Observability)', () => {
     // A real node may or may not have logged errors in the window, so accept
     // either the no-errors message or a rendered error list — the durable
     // contract is that the Errors surface (Error Hotspots) renders.
-    await expect(page.getByText('Error Hotspots')).toBeVisible();
+    await expect(page.getByText('Error hotspots')).toBeVisible();
   });
 
   test('Errors sub-tab has time range selector', async ({ page }) => {
     await page.locator('button').filter({ hasText: 'Errors' }).click();
-    await expect(page.getByText('Error Hotspots')).toBeVisible();
+    await expect(page.getByText('Error hotspots')).toBeVisible();
   });
 
   test('shows an operations total count', async ({ page }) => {

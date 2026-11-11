@@ -660,7 +660,7 @@ describe('UI API tests', () => {
       expect(partialPublishWarning()).not.toContain('(');
     });
 
-    it('createKnowledgeAsset normalizes context graph URIs before POSTing', async () => {
+    it('createKnowledgeAsset normalizes Context Graph URIs before POSTing', async () => {
       await createKnowledgeAsset('did:dkg:context-graph:cg-1', 'f');
       const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/knowledge-assets'));
       const body = JSON.parse(call?.body ?? '{}');

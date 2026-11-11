@@ -23,7 +23,7 @@ export function localAgentToolbarLabel(
     return `${integration.name} is connecting…`;
   }
   if (integration.status === 'degraded') {
-    return `${integration.name} degraded`;
+    return `${integration.name} partly available`;
   }
   return `${integration.name} is unavailable`;
 }

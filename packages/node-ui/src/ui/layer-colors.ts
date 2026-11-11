@@ -53,3 +53,7 @@ export const VM_ANCHOR_HEX: Record<'dark' | 'light', { fill: string; ring: strin
 };
 export const VM_ANCHOR_RING_WIDTH = 4;
 
+/** Signal accents for canvas marks (same values as --accent-* in both themes),
+ *  e.g. SWM nodes whose attribution conflicts. */
+export const SIGNAL_HEX = { warning: '#f59e0b' } as const;
+

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { assignContextGraphSlots, contextGraphColor, contextGraphIdFromTab, CONTEXT_GRAPH_SLOTS } from '../src/ui/context-graph-colors.js';
 
-describe('context graph identity colour', () => {
+describe('Context Graph identity colour', () => {
   const ids = ['cg:pharma-drug-interactions', 'cg:climate-science', 'cg:supply-chain-eu', 'agent-context'];
 
   it('gives up to 8 graphs distinct slots', () => {
@@ -28,7 +28,7 @@ describe('context graph identity colour', () => {
 });
 
 import { contextGraphInitial } from '../src/ui/context-graph-colors.js';
-describe('context graph monogram', () => {
+describe('Context Graph monogram', () => {
   it('uses the first letter or digit of the name, uppercased', () => {
     expect(contextGraphInitial('agent context')).toBe('A');
     expect(contextGraphInitial('  #2026 audits')).toBe('2');

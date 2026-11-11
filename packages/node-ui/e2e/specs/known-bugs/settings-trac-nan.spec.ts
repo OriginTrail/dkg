@@ -41,7 +41,7 @@ test.describe('KNOWN BUG: Settings TRAC balance renders "NaN" when trac is unava
 
     await page.goto('/ui/settings');
 
-    // Wait for the Blockchain Config balance row to render (our faked address).
+    // Wait for the Blockchain config balance row to render (our faked address).
     await expect(page.getByText(addr).first()).toBeVisible({ timeout: 15_000 });
 
     // ==== THE BUG ====

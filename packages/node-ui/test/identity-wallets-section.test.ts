@@ -205,7 +205,7 @@ describe('IdentityWalletsSection', () => {
     mocks.fetchOperationalWallets.mockResolvedValue({ available: false });
     const { container, unmount } = await renderSection();
     await waitFor(() => mocks.fetchOperationalWallets.mock.calls.length === 1, 'legacy capability response');
-    expect(container.textContent).toContain('Node Identity Wallets');
+    expect(container.textContent).toContain('Node identity wallets');
     expect(container.textContent).toContain('operational-wallet snapshot');
     expect(container.querySelector('[data-testid="operational-wallet-editor"]')).toBeTruthy();
     await unmount();

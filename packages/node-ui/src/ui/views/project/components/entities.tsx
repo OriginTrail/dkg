@@ -10,6 +10,7 @@ import { AgentChip } from '../../../components/AgentChip.js';
 import { useTabsStore } from '../../../stores/tabs.js';
 import type { SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
 import { LAYER_VAR } from '../../../layer-colors.js';
+import { LayerGlyph } from '../../../components/ds/Badge.js';
 import { LAYER_CONFIG, VM_TRIPLE_STAT, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { LayerGraphPanel } from './graph.js';
@@ -22,10 +23,10 @@ export { AssertionsList } from './assertions.js';
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
 
-const TRUST_BADGE_CONFIG: Record<TrustLevel, { layerKey: 'wm' | 'swm' | 'vm'; icon: string; label: string }> = {
-  working:  { layerKey: 'wm',  icon: '◇', label: 'Working'  },
-  shared:   { layerKey: 'swm', icon: '◈', label: 'Shared'   },
-  verified: { layerKey: 'vm',  icon: '◉', label: 'Verifiable' },
+const TRUST_BADGE_CONFIG: Record<TrustLevel, { layerKey: 'wm' | 'swm' | 'vm'; label: string }> = {
+  working:  { layerKey: 'wm',  label: 'Working'  },
+  shared:   { layerKey: 'swm', label: 'Shared'   },
+  verified: { layerKey: 'vm',  label: 'Verifiable' },
 };
 
 const QUERY_CATALOG_CONFIGURATION_TYPES = new Set([
@@ -38,21 +39,27 @@ export function isQueryCatalogConfigurationEntity(entity: MemoryEntity): boolean
   return entity.types.some(type => QUERY_CATALOG_CONFIGURATION_TYPES.has(type));
 }
 
+/**
+ * What an entity list covers. One memory layer (a WM/SWM/VM tab): every row
+ * carries that layer's badge. Several layers (a sub-graph): each row shows
+ * its own entity's layer, and the empty state shows `emptyIcon`.
+ */
+type EntityListScope =
+  | { layerKey: 'wm' | 'swm' | 'vm'; emptyIcon?: never }
+  | { layerKey?: undefined; emptyIcon: ReactNode };
+
 export function EntityList({
   entities,
   layerKey,
-  layerIcon,
+  emptyIcon,
   onSelectEntity,
   onOpenAgent,
   externallySorted = false,
   sortLabel,
   headerExtra,
   timestampPredicate,
-  perEntityTrustBadge = false,
-}: {
+}: EntityListScope & {
   entities: MemoryEntity[];
-  layerKey: 'wm' | 'swm' | 'vm';
-  layerIcon: string;
   onSelectEntity: (uri: string) => void;
   onOpenAgent?: (uri: string) => void;
   /** Skip the internal triple-count sort — caller already ordered `entities`. */
@@ -67,15 +74,12 @@ export function EntityList({
    *  as a relative timestamp on each entity card. Pass `binding.timelinePredicate`
    *  for sub-graphs that have one. */
   timestampPredicate?: string;
-  /** When true, render the trailing trust badge from each entity's own
-   *  `trustLevel` (cross-layer view — e.g. Subgraph Explorer detail).
-   *  When false (default), every row uses `layerKey`/`layerIcon` (the
-   *  WM/SWM/VM layer-tab convention). */
-  perEntityTrustBadge?: boolean;
 }) {
   const profile = useProjectProfileContext();
   const agents = useAgentsContext();
-  const noun = layerNoun(layerKey, entities.length).toLowerCase();
+  // A cross-layer list counts entities: only a Verifiable Memory tab says Knowledge Assets.
+  const nounFor = (count: number) => (layerKey ? layerNoun(layerKey, count) : count === 1 ? 'Entity' : 'Entities').toLowerCase();
+  const noun = nounFor(entities.length);
   const sorted = useMemo(() => {
     if (externallySorted) return entities;
     const copy = [...entities];
@@ -87,17 +91,15 @@ export function EntityList({
     return copy;
   }, [entities, externallySorted]);
 
-  const trustLabel = layerKey === 'vm' ? 'Verifiable' : layerKey === 'swm' ? 'Shared' : 'Working';
-
   if (entities.length === 0) {
     return (
       <div className="v10-entity-list empty">
         <EmptyState
           compact
-          tone={toneForLayer(layerKey)}
-          icon={layerIcon}
-          title={`No ${layerNoun(layerKey, 2).toLowerCase()} yet`}
-          description={`This view will fill when matching ${layerNoun(layerKey, 2).toLowerCase()} are available.`}
+          tone={layerKey ? toneForLayer(layerKey) : 'neutral'}
+          icon={layerKey ? <LayerGlyph layer={layerKey} /> : emptyIcon}
+          title={`No ${nounFor(2)} yet`}
+          description={`This view will fill when matching ${nounFor(2)} are available.`}
         />
       </div>
     );
@@ -150,14 +152,14 @@ export function EntityList({
                 <span className="v10-entity-card-triples">{tripleCount} triples</span>
               </div>
             </div>
-            {perEntityTrustBadge ? (() => {
-              const badge = TRUST_BADGE_CONFIG[e.trustLevel];
+            {(() => {
+              const badge = layerKey
+                ? { layerKey, label: LAYER_CONFIG[layerKey].trustLabel }
+                : TRUST_BADGE_CONFIG[e.trustLevel];
               return (
-                <LayerBadge layer={badge.layerKey} label={badge.label} size="sm" className={`v10-trust-badge ${badge.layerKey}`} title={`${badge.label} Memory`} />
+                <LayerBadge layer={badge.layerKey} label={badge.label} size="sm" className={`v10-trust-badge ${badge.layerKey}`} title={layerKey ? undefined : `${badge.label} Memory`} />
               );
-            })() : (
-              <LayerBadge layer={layerKey} label={trustLabel} size="sm" className={`v10-trust-badge ${layerKey}`} />
-            )}
+            })()}
           </div>
         );
       })}
@@ -204,7 +206,6 @@ export function LayerContent({
   showQueryCatalog?: boolean;
   onShowQueryCatalogChange?: (show: boolean) => void;
 }) {
-  const config = LAYER_CONFIG[layer];
   const itemsLabel = layerNoun(layer, 2);
   // The visibility checkbox is presentation-only. Catalog KAs remain
   // shareable/publishable through their explicit assertion-row action, but
@@ -271,7 +272,7 @@ export function LayerContent({
               <EmptyState
                 compact
                 tone="vm"
-                icon={LAYER_CONFIG.vm.icon}
+                icon={<LayerGlyph layer="vm" />}
                 title="Loading Verifiable Memory..."
                 description="Knowledge Assets are being read from the verified layer."
               />
@@ -281,7 +282,7 @@ export function LayerContent({
               <EmptyState
                 compact
                 tone="vm"
-                icon={LAYER_CONFIG.vm.icon}
+                icon={<LayerGlyph layer="vm" />}
                 title="Verifiable Memory status unavailable."
                 description="This node could not read the verified layer right now."
               />
@@ -300,7 +301,6 @@ export function LayerContent({
               <EntityList
                 entities={entities}
                 layerKey={layer}
-                layerIcon={config.icon}
                 onSelectEntity={onSelectEntity}
               />
             </>
@@ -389,7 +389,7 @@ export function VerifiableMemoryHeroBanner({ entities, vmTriples, contextGraphId
           <div className="v10-vm-hero-heading">
             <span className="v10-vm-hero-headline">Nothing published yet</span>
             <span className="v10-vm-hero-context" title={contextGraphId}>
-              Context Graph: {contextGraphId}
+              Context graph: {contextGraphId}
             </span>
           </div>
         </div>
@@ -397,7 +397,7 @@ export function VerifiableMemoryHeroBanner({ entities, vmTriples, contextGraphId
           compact
           className="v10-vm-empty-state"
           tone="vm"
-          icon={LAYER_CONFIG.vm.icon}
+          icon={<LayerGlyph layer="vm" />}
           title="No Knowledge Assets yet."
           description="Publish complete Knowledge Assets from Shared Working Memory to verify them on-chain."
         />
@@ -412,7 +412,7 @@ export function VerifiableMemoryHeroBanner({ entities, vmTriples, contextGraphId
         <div className="v10-vm-hero-heading">
           <span className="v10-vm-hero-headline">On-chain anchored · cryptographically signed</span>
           <span className="v10-vm-hero-context" title={contextGraphId}>
-            Context Graph: {contextGraphId}
+            Context graph: {contextGraphId}
           </span>
         </div>
       </div>
@@ -422,7 +422,7 @@ export function VerifiableMemoryHeroBanner({ entities, vmTriples, contextGraphId
         items={[
           { id: 'assets', value: totalAssets, label: 'Knowledge Assets' },
           { id: 'triples', value: tripleCount.toLocaleString(), ...VM_TRIPLE_STAT },
-          { id: 'types', value: typeCount, label: 'Entity Types' },
+          { id: 'types', value: typeCount, label: 'Entity types' },
         ]}
       />
       <VmHeroFacts entities={entities} vmTriples={vmTriples} contextGraphId={contextGraphId} />
@@ -469,7 +469,7 @@ export function LayerDetailView({
   return (
     <div className="v10-layer-detail">
       <div className="v10-layer-detail-header">
-        <span className="v10-layer-detail-icon" style={{ color: LAYER_VAR[config.trustLevel] }}>{config.icon}</span>
+        <span className="v10-layer-detail-icon" style={{ color: LAYER_VAR[config.trustLevel] }}><LayerGlyph layer={layer} /></span>
         <div>
           <div className="v10-layer-detail-title">{config.title}</div>
           <div className="v10-layer-detail-desc">{config.desc}</div>

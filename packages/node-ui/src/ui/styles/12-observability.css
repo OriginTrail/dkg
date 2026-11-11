@@ -17,7 +17,7 @@ p { font-size: var(--fs-body); color: var(--text-secondary); line-height: 1.6; }
    previously-undefined .settings-card/.settings-grid/.prov-field-* hooks). */
 .card-body{padding:14px 18px}
 .settings-stack{display:flex;flex-direction:column;gap:16px;max-width:720px}
-.settings-field-label{font-size:var(--fs-micro);font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text-dim);margin-bottom:3px}
+.settings-field-label{font-size:var(--fs-micro);font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text-tertiary);margin-bottom:3px}
 .settings-field-value{font-size:var(--fs-control);color:var(--text-primary);word-break:break-word}
 .settings-field-value.mono{font-family:var(--font-mono)}
 
@@ -42,6 +42,8 @@ p { font-size: var(--fs-body); color: var(--text-secondary); line-height: 1.6; }
   display: flex;
   align-items: stretch;
   height: var(--tab-h);
+  overflow-x: auto;
+  scrollbar-width: none;
   gap: 0;
   border-bottom: 1px solid var(--border-subtle);
   margin-bottom: 0;
@@ -72,6 +74,8 @@ select.input {
 }
 
 /* Filter bar */
+.tab-group > .ds-tab { flex: none; }
+.filters .input { max-width: 100%; min-width: 0; }
 .filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 
 /* Data table */
@@ -135,7 +139,7 @@ select.input {
 
 /* Stat cards */
 .stat-card{background:var(--bg-surface);border:1px solid var(--border-default);padding:16px 18px;flex:1;min-width:0;position:relative;overflow:hidden;transition:border-color .15s,box-shadow .15s}
-.stat-card:hover{border-color:var(--border-strong);box-shadow:0 2px 8px rgba(0,0,0,.15)}
+.stat-card:hover{border-color:var(--border-strong);box-shadow: var(--shadow-sm)}
 .stat-card .accent{position:absolute;top:0;left:0;right:0;height:2px}
 .stat-label{font-size:var(--fs-control);color:var(--text-secondary);font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:6px}
 .stat-value{font-size:var(--fs-display);font-weight:700;color:var(--text-primary);line-height:1}
@@ -147,7 +151,7 @@ select.input {
 .v10-modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--scrim);
   z-index: 1000;
   display: flex;
   align-items: center;
@@ -161,7 +165,7 @@ select.input {
   width: 560px;
   max-height: 85vh;
   overflow-y: auto;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-modal);
 }
 .v10-modal-header {
   padding: 20px 24px 16px;
@@ -193,8 +197,8 @@ select.input {
 
 .v10-modal-error {
   padding: 10px 14px;
-  background: rgba(239, 68, 68, 0.08);
-  border: 1px solid rgba(239, 68, 68, 0.25);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
   margin-bottom: 16px;
   font-size: var(--fs-control);
   color: var(--text-danger);
@@ -203,8 +207,8 @@ select.input {
 
 .v10-modal-warning {
   padding: 10px 14px;
-  background: var(--amber-dim);
-  border: 1px solid rgba(245, 158, 11, 0.25);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
   margin-bottom: 16px;
   font-size: var(--fs-control);
   color: var(--text-warning);
@@ -225,3 +229,4 @@ select.input {
   color: var(--text-primary);
   margin-bottom: 4px;
 }
+.settings-node-status { padding: 10px 14px; }

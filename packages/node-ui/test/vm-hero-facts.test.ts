@@ -17,7 +17,7 @@ const asSubjects = (entities: Array<{ uri: string }>) => vmSubjectsOf(entities.m
 const facts_ = (entities: any[], s: any, state = ok) => buildVmFacts(entities, s, state, asSubjects(entities));
 
 describe('VM receipt summary', () => {
-  it('reads real receipts from the context graph _meta, not share records', () => {
+  it('reads real receipts from the Context Graph _meta, not share records', () => {
     const q = buildVmReceiptQuery('cg');
     expect(q).toContain('GRAPH <did:dkg:context-graph:cg/_meta>');
     expect(q).toContain('dkg:publishedAtTx');
@@ -35,7 +35,7 @@ describe('VM receipt summary', () => {
     expect(s.lastFinalizedAt).toBe(Date.parse('2026-10-31T10:00:00Z'));
   });
 
-  it('refuses context graph ids that would break the IRI', () => {
+  it('refuses Context Graph ids that would break the IRI', () => {
     expect(receiptMetaGraph('agent-context')).toBe('did:dkg:context-graph:agent-context/_meta');
     expect(receiptMetaGraph('x> } DROP')).toBeUndefined();
     expect(receiptMetaGraph(undefined)).toBeUndefined();

@@ -16,6 +16,7 @@
     "test:e2e": "playwright test",
     "test:e2e:devnet-local": "cross-env PW_DEVNET_LOCAL=1 playwright test e2e/specs/devnet-local",
     "test:e2e:hw-mock": "playwright test --config playwright.hw-mock.config.ts",
+    "test:e2e:shell": "playwright test --config playwright.shell.config.ts",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:ui": "playwright test --ui",
     "benchmark:stage5": "tsx scripts/stage5-scale-benchmark.mts",

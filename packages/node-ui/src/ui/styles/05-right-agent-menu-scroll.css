@@ -16,7 +16,7 @@
   color: var(--text-secondary);
   font-size: var(--fs-body);
   line-height: 1;
-  border-radius: 0 4px 4px 0;
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
   cursor: pointer;
 }
 .v10-agent-tab-menu-trigger:hover {
@@ -38,7 +38,7 @@
   min-width: 200px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-menu);
   z-index: 200;
   overflow: hidden;
   padding: 4px;
@@ -84,7 +84,7 @@
   color: var(--text-danger);
 }
 .v10-agent-tab-menu-item.danger:hover:not(:disabled) {
-  background: color-mix(in srgb, #ef4444 12%, var(--bg-hover));
+  background: color-mix(in srgb, var(--accent-red) 12%, var(--bg-hover));
   color: var(--text-danger-hover);
 }
 
@@ -153,7 +153,7 @@
   padding: 4px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-menu);
   z-index: 1000;
 }
 .v10-select-menu:focus { outline: none; }
@@ -227,7 +227,7 @@
   background: var(--bg-elevated);
   color: var(--text-secondary);
   cursor: pointer;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-menu);
   opacity: 0;
   pointer-events: none;
   transition: opacity 150ms ease-out, background 0.15s, color 0.15s;
@@ -290,14 +290,14 @@
   border: 1px solid var(--border-default);
 }
 .v10-local-agent-warning.connecting {
-  color: #bfdbfe;
+  color: var(--text-info);
   background: color-mix(in srgb, var(--accent-blue) 12%, var(--bg-surface));
   border-color: color-mix(in srgb, var(--accent-blue) 28%, var(--border-subtle));
 }
 .v10-local-agent-warning.offline {
-  color: #fcd34d;
-  background: color-mix(in srgb, #f59e0b 10%, var(--bg-surface));
-  border-color: color-mix(in srgb, #f59e0b 28%, var(--border-subtle));
+  color: var(--text-warning);
+  background: color-mix(in srgb, var(--accent-amber) 10%, var(--bg-surface));
+  border-color: color-mix(in srgb, var(--accent-amber) 28%, var(--border-subtle));
 }
 .v10-local-agent-copy {
   font-size: var(--fs-control);

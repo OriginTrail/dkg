@@ -9,7 +9,7 @@ export class OperationsPage {
     this.root = page.locator('.v10-center-content');
   }
 
-  async switchTab(tab: 'All Operations' | 'Performance' | 'Logs' | 'Errors') {
+  async switchTab(tab: 'All operations' | 'Performance' | 'Logs' | 'Errors') {
     await this.root.locator('button').filter({ hasText: tab }).click();
   }
 

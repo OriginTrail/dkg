@@ -31,15 +31,15 @@ import { kindColorForType } from '../entity-kind-colors.js';
 
 import { humanizeStatus, humanizeTypeName } from '../lib/formatLabels.js';
 import { LAYER_VAR } from '../layer-colors.js';
-import { Badge } from './ds/Badge.js';
+import { Badge, LayerGlyph } from './ds/Badge.js';
 import { entityStatusTone } from '../lib/entity-status.js';
 
 const LAYER_COLOR: Record<TrustLevel, string> = LAYER_VAR;
 
-const LAYER_GLYPH: Record<TrustLevel, string> = {
-  working:  '◇',
-  shared:   '◈',
-  verified: '◉',
+const LAYER_TONE: Record<TrustLevel, 'wm' | 'swm' | 'vm'> = {
+  working: 'wm',
+  shared: 'swm',
+  verified: 'vm',
 };
 
 export interface ActivityFeedProps {
@@ -318,7 +318,7 @@ function ActivityRow({
         style={{ color: layerColor }}
         title={`${item.layer} memory`}
       >
-        {LAYER_GLYPH[item.layer]}
+        <LayerGlyph layer={LAYER_TONE[item.layer]} />
       </span>
       <Badge tone="kind" size="sm" kindColor={typeColor} className="v10-activity-feed-type">
         <span className="v10-activity-feed-type-label">{typeLabel}</span>

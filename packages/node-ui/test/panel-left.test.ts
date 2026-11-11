@@ -112,9 +112,13 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
 
   async function renderPanel(options: { graphs?: any[]; stage?: number } = {}) {
     const { PanelLeft } = await import('../src/ui/components/Shell/PanelLeft.js');
+    // The panel opens the create and join dialogs; the shell renders them.
+    const { ContextGraphDialogs } = await import('../src/ui/components/Shell/ContextGraphDialogs.js');
+    const { useContextGraphDialogs } = await import('../src/ui/stores/contextGraphDialogs.js');
     const { useJourneyStore } = await import('../src/ui/stores/journey.js');
     const { useProjectsStore } = await import('../src/ui/stores/projects.js');
     const { useLayoutStore } = await import('../src/ui/stores/layout.js');
+    useContextGraphDialogs.setState({ createOpen: false, joinOpen: false, joinContextGraphId: undefined });
     // Reset stores between tests so prior toggles don't leak.
     act(() => {
       useJourneyStore.setState({ stage: options.stage ?? 2 });
@@ -143,7 +147,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     mountedRoots.push(root);
     mountedContainers.push(container);
     await act(async () => {
-      root.render(React.createElement(PanelLeft));
+      root.render(React.createElement(React.Fragment, null, React.createElement(PanelLeft), React.createElement(ContextGraphDialogs)));
     });
     await flush();
     await flush();
@@ -255,7 +259,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     const headers = container.querySelectorAll('.v10-peer-group-header');
     expect(headers.length).toBe(3);
     const labels = Array.from(container.querySelectorAll('.v10-peer-group-label')).map((el) => el.textContent);
-    expect(labels).toEqual(['My Context Graphs', 'Public graphs', 'Integrations']);
+    expect(labels).toEqual(['My context graphs', 'Public graphs', 'Integrations']);
   });
 
   it('hides Marketplace until the feature flag is set', async () => {
@@ -282,7 +286,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
 
   it('expands "My Context Graphs" by default and keeps secondary groups collapsed', async () => {
     const { container } = await renderPanel();
-    const myCgHeader = sectionHeader(container, 'My Context Graphs');
+    const myCgHeader = sectionHeader(container, 'My context graphs');
     const publicHeader = sectionHeader(container, 'Public graphs');
     const integrationsHeader = sectionHeader(container, 'Integrations');
     expect(myCgHeader.getAttribute('aria-expanded')).toBe('true');
@@ -298,7 +302,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
   it('discloses each section\'s body from its header, mounted only while open, so Integrations polls only then', async () => {
     localStorage.setItem('dkg-marketplace-enabled', '1');
     const { container } = await renderPanel();
-    for (const label of ['Marketplace', 'My Context Graphs', 'Public graphs', 'Integrations']) {
+    for (const label of ['Marketplace', 'My context graphs', 'Public graphs', 'Integrations']) {
       const header = sectionHeader(container, label);
       const wasOpen = header.getAttribute('aria-expanded') === 'true';
       const bodyId = header.getAttribute('aria-controls');
@@ -381,7 +385,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     await flush();
 
     const labels = Array.from(container.querySelectorAll('.v10-peer-group-label')).map((el) => el.textContent);
-    expect(labels).toContain('My Context Graphs');
+    expect(labels).toContain('My context graphs');
     expect(container.textContent).toContain('No context graphs in this section yet.');
     // The catalog-only CG should NOT render as a row in this section.
     expect(container.textContent).not.toContain('Catalog Only CG');
@@ -538,7 +542,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
 
   it('section headers point at their body containers via aria-controls', async () => {
     const { container } = await renderPanel();
-    const myCgHeader = sectionHeader(container, 'My Context Graphs');
+    const myCgHeader = sectionHeader(container, 'My context graphs');
     const publicHeader = sectionHeader(container, 'Public graphs');
     const integrationsHeader = sectionHeader(container, 'Integrations');
     const myCgControls = myCgHeader.getAttribute('aria-controls');

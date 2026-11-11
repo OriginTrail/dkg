@@ -24,7 +24,7 @@ vi.mock('../src/ui/views/ContextGraphPrimerView.js', () => ({ ContextGraphPrimer
 vi.mock('../src/ui/pages/AgentHub.js', async () => {
   loads.agentHub++;
   await agentHubGate.promise;
-  return { AgentHubPage: () => React.createElement('div', { id: 'agent-hub' }, 'Agent Hub ready') };
+  return { AgentHubPage: () => React.createElement('div', { id: 'agent-hub' }, 'Agent hub ready') };
 });
 vi.mock('../src/ui/views/ProjectView.js', async () => {
   loads.project++;
@@ -67,7 +67,7 @@ it('loads views on demand while preserving tab selection and mounted view state'
     expect(container.textContent).toContain('Loading agent hub...');
     await vi.waitFor(() => expect(loads.agentHub).toBe(1));
     await act(async () => agentHubGate.resolve());
-    expect(container.querySelector('#agent-hub')?.textContent).toBe('Agent Hub ready');
+    expect(container.querySelector('#agent-hub')?.textContent).toBe('Agent hub ready');
     await act(async () => container.querySelector<HTMLButtonElement>('.v10-center-tab')!.click());
 
     await open('project:first');

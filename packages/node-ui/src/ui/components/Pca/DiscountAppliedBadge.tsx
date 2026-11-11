@@ -1,4 +1,5 @@
 import React from 'react';
+import { Badge } from '../ds/Badge.js';
 // B8 — the CostCovered wire type now lives at the api boundary (api.ts); re-export it
 // here so existing `components/Pca` importers (the barrel + mocks) keep resolving it.
 import type { ConvictionCostCovered } from '../../api.js';
@@ -53,15 +54,15 @@ export function DiscountAppliedBadge({
     ? `via PCA #${convictionCostCovered.accountId}`
     : 'across multiple PCAs';
   return (
-    <span
-      className={['ds-badge', 'ds-sm', 'ds-tone-success', 'v10-pca-discount-applied', className]
-        .filter(Boolean)
-        .join(' ')}
+    <Badge
+      tone="success"
+      size="sm"
+      icon="◉"
+      className={['v10-pca-discount-applied', className].filter(Boolean).join(' ')}
       data-testid="pca-discount-badge"
       role="status"
     >
-      <span aria-hidden="true">◉ </span>
       Discount applied — −{pct}% {attribution}
-    </span>
+    </Badge>
   );
 }

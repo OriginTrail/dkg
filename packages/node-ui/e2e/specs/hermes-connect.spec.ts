@@ -35,8 +35,8 @@ test.describe('Local-agent connect surface (real node)', () => {
     await addTab.click({ timeout: 15_000 });
   });
 
-  test('the "Connect Another Agent" surface lists the bundled integrations', async ({ page }) => {
-    await expect(page.getByText('Connect Another Agent')).toBeVisible();
+  test('the "Connect another agent" surface lists the bundled integrations', async ({ page }) => {
+    await expect(page.getByText('Connect another agent')).toBeVisible();
     const list = page.locator('.v10-local-agent-list');
     await expect(list).toBeVisible();
     // The daemon ships OpenClaw + Hermes as default integrations.

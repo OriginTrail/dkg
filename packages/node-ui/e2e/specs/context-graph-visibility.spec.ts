@@ -2,12 +2,12 @@ import { test, expect } from '../fixtures/rich.js';
 import { PRIMARY_CG, SECONDARY_CG } from '../helpers/real-node.js';
 import { sel } from '../helpers/selectors.js';
 
-test.describe('Context graph visibility', () => {
+test.describe('Context Graph visibility', () => {
   test.beforeEach(async ({ shell }) => {
     await shell.goto();
   });
 
-  test('left panel lists the seeded context graphs under My Context Graphs', async ({ leftPanel }) => {
+  test('left panel lists the seeded Context Graphs under My Context Graphs', async ({ leftPanel }) => {
     await leftPanel.waitForProjectsLoaded();
     const names = await leftPanel.getProjectNames();
     // scripts/devnet.sh registers these two CGs on every boot.
@@ -18,7 +18,7 @@ test.describe('Context graph visibility', () => {
   test('dashboard My Context Graphs stat reflects the seeded count', async ({ page }) => {
     const card = page
       .locator('.v10-stat-tight')
-      .filter({ has: page.locator('.stat-label', { hasText: 'My Context Graphs' }) });
+      .filter({ has: page.locator('.stat-label', { hasText: 'My context graphs' }) });
     await expect(card).toBeVisible();
     // The value slot shows a "loading…" placeholder until the CG set resolves
     // (can be slow under load), so poll the .stat-value until it's a number.
@@ -35,7 +35,7 @@ test.describe('Context graph visibility', () => {
       .toBeGreaterThanOrEqual(2);
   });
 
-  test('each seeded context graph opens its own center tab', async ({ leftPanel, centerPanel, page }) => {
+  test('each seeded Context Graph opens its own center tab', async ({ leftPanel, centerPanel, page }) => {
     for (const name of [PRIMARY_CG, SECONDARY_CG]) {
       await leftPanel.expandProject(name);
       await expect(page.locator(sel.center.tab).filter({ hasText: name })).toBeVisible();
@@ -58,7 +58,7 @@ test.describe('Context graph visibility', () => {
   });
 });
 
-test.describe('Context graph hide / restore (sidebar visibility toggle)', () => {
+test.describe('Context Graph hide / restore (sidebar visibility toggle)', () => {
   // localStorage is per-browser-context (fresh per test), so hiding here never
   // leaks into other specs. The whole gesture is reversible in-UI, so this is a
   // safe real-node interaction to drive end-to-end.
@@ -116,7 +116,7 @@ test.describe('Context graph hide / restore (sidebar visibility toggle)', () => 
     // was extracted to guarantee. A regression to three private copies fails here.
     const statValue = page
       .locator('.v10-stat-tight')
-      .filter({ has: page.locator('.stat-label', { hasText: 'My Context Graphs' }) })
+      .filter({ has: page.locator('.stat-label', { hasText: 'My context graphs' }) })
       .locator('.stat-value');
 
     const readCount = async () => {
@@ -134,7 +134,7 @@ test.describe('Context graph hide / restore (sidebar visibility toggle)', () => 
   });
 });
 
-test.describe('Context graph overview navigation', () => {
+test.describe('Context Graph overview navigation', () => {
   test.beforeEach(async ({ shell, leftPanel }) => {
     await shell.goto();
     await leftPanel.expandProject(PRIMARY_CG);
@@ -158,12 +158,12 @@ test.describe('Context graph overview navigation', () => {
 
   test('Share action opens Share Context Graph modal', async ({ projectLayer, shareProjectModal }) => {
     await projectLayer.clickShare();
-    await expect(shareProjectModal.title).toHaveText('Share Context Graph');
+    await expect(shareProjectModal.title).toHaveText('Share context graph');
     await shareProjectModal.close();
   });
 
   test('Subgraphs tab opens subgraph explorer', async ({ projectLayer, page }) => {
     await projectLayer.switchLayer('Subgraphs');
-    await expect(page.locator(sel.subgraph.explorerTitle)).toHaveText('Subgraph Explorer');
+    await expect(page.locator(sel.subgraph.explorerTitle)).toHaveText('Subgraph explorer');
   });
 });

@@ -58,7 +58,7 @@ export function MemoryStackView() {
   return (
     <div className="v10-memstack">
       <div className="v10-memstack-head">
-        <h1 className="v10-memstack-title">Memory Stack</h1>
+        <h1 className="v10-memstack-title">Memory stack</h1>
         <p className="v10-memstack-sub">
           Every layer across every context graph, at a glance.
           {(!inventoryLoading && !inventoryError || contextGraphs.length > 0) && <> {visible.length} visible context graph{visible.length === 1 ? '' : 's'} · hidden context graphs are skipped.</>}

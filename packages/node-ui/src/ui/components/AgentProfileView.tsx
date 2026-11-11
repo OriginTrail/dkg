@@ -25,7 +25,7 @@ const PROV_WAS_ATTRIBUTED_TO = 'http://www.w3.org/ns/prov#wasAttributedTo';
 const PRIMARY_TYPES: Array<{ iri: string; label: string }> = [
   { iri: 'http://dkg.io/ontology/decisions/Decision',   label: 'Decisions' },
   { iri: 'http://dkg.io/ontology/tasks/Task',           label: 'Tasks' },
-  { iri: 'http://dkg.io/ontology/github/PullRequest',   label: 'Pull Requests' },
+  { iri: 'http://dkg.io/ontology/github/PullRequest',   label: 'Pull requests' },
   { iri: 'http://dkg.io/ontology/github/Issue',         label: 'Issues' },
   { iri: 'http://dkg.io/ontology/github/Commit',        label: 'Commits' },
 ];

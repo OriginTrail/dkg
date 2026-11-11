@@ -62,7 +62,7 @@ describe('JoinProjectModal invite parsing', () => {
       }]).kind).toBe('publicSubscribe');
     });
 
-    it('still requires a curator invite for a private or unknown bare context graph id', () => {
+    it('still requires a curator invite for a private or unknown bare Context Graph id', () => {
       const parsed = parseInviteCode('private-project');
       expect(resolveJoinIntent('private-project', [{
         id: 'private-project',

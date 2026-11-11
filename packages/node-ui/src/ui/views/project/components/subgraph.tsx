@@ -27,9 +27,9 @@ import { subGraphMiniGraphOptions } from './subgraph-mini-graph.js';
 export function SubGraphExplorerHeader() {
   return (
     <div className="v10-subgraph-explorer-header">
-      <div className="v10-subgraph-explorer-title">Subgraph Explorer</div>
+      <div className="v10-subgraph-explorer-title">Subgraph explorer</div>
       <p className="v10-subgraph-explorer-intro">
-        Subgraphs are optional topical partitions inside this Context Graph.
+        Subgraphs are optional topical partitions inside this context graph.
         An entity belongs to one or more memory layers and, optionally,
         to one or more subgraphs. Entities in no subgraph live in the
         context graph root.
@@ -548,13 +548,13 @@ export function SubGraphOverviewGrid({
     return (
       <EmptyState
         icon="#"
-        title="No subgraphs in this Context Graph yet."
+        title="No subgraphs in this context graph yet."
         description={
           <>
-            A subgraph is a named topical slice of this Context Graph
+            A subgraph is a named topical slice of this context graph
             (e.g. <code>recipes</code>, <code>decisions</code>). Agents
             create one when they scope an assertion to a subgraph. All
-            current entities live in the Context Graph root.
+            current entities live in the context graph root.
           </>
         }
         actions={[
@@ -1420,7 +1420,7 @@ export function SubGraphDetailView({
       if (resultType !== 'bindings') {
         throw new Error(
           `${q.name} returns ${resultType === 'boolean' ? 'an ASK result' : 'graph quads'} `
-          + 'and cannot be used as an entity filter. Open it in Query Catalogue instead.',
+          + 'and cannot be used as an entity filter. Open it in Query catalogue instead.',
         );
       }
       const bindings = result.bindings;
@@ -1620,7 +1620,7 @@ export function SubGraphDetailView({
                     className={`v10-subgraph-savedquery${isActive ? ' active' : ''}`}
                     onClick={() => isActive ? clearQuery() : runQuery(q)}
                     title={requiresParameters
-                      ? `${q.description || q.name} Open Query Catalogue to enter parameters.`
+                      ? `${q.description || q.name} Open Query catalogue to enter parameters.`
                       : q.description || q.name}
                     disabled={queryLoading && !isActive}
                   >
@@ -1711,13 +1711,11 @@ export function SubGraphDetailView({
           <div className="v10-layer-expand-body entities-tab" data-cg-scroll-key={`subgraph:${slug}:items`}>
             <EntityList
               entities={sortedEntities}
-              layerKey="wm"
-              layerIcon={icon}
+              emptyIcon={icon}
               onSelectEntity={onSelectEntity}
               externallySorted
               sortLabel={sortLabel}
               timestampPredicate={timelinePredicate}
-              perEntityTrustBadge
 
               headerExtra={
                 <label className="v10-entity-list-sort">

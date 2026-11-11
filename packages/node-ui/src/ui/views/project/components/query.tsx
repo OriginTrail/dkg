@@ -25,7 +25,7 @@ function contextGraphQueryTemplate(contextGraphId: string): string {
 LIMIT 1000`;
 }
 
-const USER_QUERY_CATALOG_DESCRIPTION = 'User-created SPARQL saved in this node profile for this Context Graph.';
+const USER_QUERY_CATALOG_DESCRIPTION = 'User-created SPARQL saved in this node profile for this context graph.';
 type SavedCatalogQuery = QueryCatalog['queries'][number];
 type QueryEditorSession =
   | { kind: 'ad-hoc'; draft: string }
@@ -75,7 +75,7 @@ function contextGraphBuiltInCatalog(contextGraphId: string): QueryCatalog {
     subGraph,
     catalogSlug,
     catalogName,
-    catalogDescription: 'Ready-made SPARQL included with the Node UI for common Context Graph checks.',
+    catalogDescription: 'Ready-made SPARQL included with the Node UI for common context graph checks.',
     catalogRank,
     resultColumn: '',
     parameters: [],
@@ -86,7 +86,7 @@ function contextGraphBuiltInCatalog(contextGraphId: string): QueryCatalog {
     slug: catalogSlug,
     subGraph,
     name: catalogName,
-    description: 'Ready-made SPARQL included with the Node UI for common Context Graph checks.',
+    description: 'Ready-made SPARQL included with the Node UI for common context graph checks.',
     rank: catalogRank,
     queries: [
       withQueryDefaults({
@@ -266,7 +266,7 @@ function queryCatalogueGroupLabel(catalog: QueryCatalog, scope: 'context' | 'sub
 
 function queryCatalogueGroupDescription(catalog: QueryCatalog): string {
   if (isBuiltInQueryCatalog(catalog)) {
-    return 'UI-provided SPARQL for common Context Graph checks.';
+    return 'UI-provided SPARQL for common context graph checks.';
   }
   if (catalog.subGraph === CONTEXT_GRAPH_QUERY_SUBGRAPH && catalog.slug === USER_QUERY_CATALOG_SLUG) {
     return USER_QUERY_CATALOG_DESCRIPTION;
@@ -532,9 +532,9 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       <div className="v10-mlv-header">
         <span className="v10-mlv-icon">⟐</span>
         <div>
-          <h2 className="v10-mlv-title">Query Catalogue</h2>
+          <h2 className="v10-mlv-title">Query catalogue</h2>
           <p className="v10-mlv-desc">
-            Reusable SPARQL for this Context Graph. Use UI presets or save queries for people and local agents to reuse.
+            Reusable SPARQL for this context graph. Use UI presets or save queries for people and local agents to reuse.
           </p>
         </div>
       </div>
@@ -542,7 +542,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       <section className="v10-cg-query-zone ds-card v10-cg-query-zone-catalog" aria-labelledby="query-catalogue-saved-title">
         <div className="v10-cg-query-zone-header">
           <div>
-            <span className="v10-cg-query-eyebrow">Query Library</span>
+            <span className="v10-cg-query-eyebrow">Query library</span>
             <h3 id="query-catalogue-saved-title">Choose a query</h3>
             <p>Load a preset or saved query into the editor below.</p>
           </div>
@@ -626,7 +626,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
             tone="query"
             icon="?"
             title="No saved queries yet."
-            description="Use Save after editing SPARQL to keep a reusable query for this Context Graph."
+            description="Use Save after editing SPARQL to keep a reusable query for this context graph."
           />
         )}
       </section>
@@ -636,7 +636,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           <div>
             <span className="v10-cg-query-eyebrow">Ad-hoc SPARQL</span>
             <h3 id="query-catalogue-editor-title">Editor and results</h3>
-            <p>Run a one-off query against this Context Graph, or save it when it should become reusable.</p>
+            <p>Run a one-off query against this context graph, or save it when it should become reusable.</p>
           </div>
         </div>
 
@@ -768,7 +768,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
             tone="query"
             icon="?"
             title="No results for this query."
-            description="Adjust the query or run a saved query against this Context Graph."
+            description="Adjust the query or run a saved query against this context graph."
           />
         )}
 
@@ -784,7 +784,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
             <div className="v10-mlv-result-count">
               {rows.length} {resultType === 'quads' ? `quad${rows.length === 1 ? '' : 's'}` : `result${rows.length === 1 ? '' : 's'}`}
             </div>
-            <table className="v10-mlv-table">
+            <div className="ds-table-scroll"><table className="v10-mlv-table">
               <thead>
                 <tr>
                   {columns.map((column) => (
@@ -806,7 +806,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </table></div>
           </div>
         )}
       </div>

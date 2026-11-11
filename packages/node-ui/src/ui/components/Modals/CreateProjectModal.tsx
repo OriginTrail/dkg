@@ -361,7 +361,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           ×
         </button>
         <div className="v10-modal-header">
-          <div id="dkg-create-cg-title" className="v10-modal-title">Create New Context Graph</div>
+          <div id="dkg-create-cg-title" className="v10-modal-title">Create new context graph</div>
           <div id="dkg-create-cg-subtitle" className="v10-modal-subtitle">
             A context graph gives your agent structured memory — a place to draft, share, and publish knowledge.
           </div>
@@ -389,7 +389,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           )}
 
           <div className="v10-form-group">
-            <label className="v10-form-label" htmlFor="dkg-cg-name">Context Graph Name</label>
+            <label className="v10-form-label" htmlFor="dkg-cg-name">Context graph name</label>
             <input
               id="dkg-cg-name"
               name="dkg-cg-name"
@@ -407,7 +407,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             />
             <div
               id="dkg-cg-name-help"
-              style={{ marginTop: 4, fontSize: 'var(--fs-label)', color: nameValidationError ? 'var(--red, #f87171)' : 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}
+              style={{ marginTop: 4, fontSize: 'var(--fs-label)', color: nameValidationError ? 'var(--accent-red)' : 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}
             >
               {nameValidationError
                 ? nameValidationError
@@ -535,7 +535,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           {showAdvanced && (
             <div className="v10-form-advanced-body ds-card-nested" style={{ opacity: 0.5, pointerEvents: 'none' }}>
               <div className="v10-form-group">
-                <label className="v10-form-label">Consensus Quorum <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+                <label className="v10-form-label">Consensus quorum <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
                 <select className="v10-form-select ds-input" value={quorum} disabled>
                   <option value="off">Off — no consensus verification required</option>
                   <option value="2of3">2 of 3 — lightweight consensus</option>
@@ -585,7 +585,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 // fetch) the address is simply not resolved yet, so show a
                 // loading state instead of flashing an error label. (F4)
                 ? (identityError ? 'Agent unavailable' : 'Loading agent…')
-                : 'Create Context Graph'}
+                : 'Create context graph'}
           </button>
         </div>
       </div>

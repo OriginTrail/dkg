@@ -1,9 +1,14 @@
 import React from 'react';
-import { useLayoutStore } from '../../stores/layout.js';
-import { useAgentsStore } from '../../stores/agents.js';
+import { useLayoutStore, useShellPanels } from '../../stores/layout.js';
 import { useCurrentAgent } from '../../hooks/useCurrentAgent.js';
+import { useNodeState } from '../../hooks/useNodeState.js';
 import { NotificationsBell } from './NotificationsBell.js';
+import { Badge } from '../ds/Badge.js';
 import { formatPeerStatusTooltip } from '../../lib/formatPeerStatus.js';
+
+const ORIGINTRAIL_SYMBOL = (
+  <path fillRule="evenodd" clipRule="evenodd" d="M19.781 9.94781C14.2903 9.94781 9.8385 14.4484 9.8385 20.0008C9.8385 25.5525 14.2903 30.0531 19.781 30.0531C22.833 30.0531 25.5632 28.6622 27.3869 26.4736L34.9141 32.8796C31.2855 37.2341 25.8532 40.0016 19.781 40.0016C8.85592 40.0016 0 31.0467 0 20.0008C0 8.95432 8.85592 0 19.781 0V9.94781ZM36.8737 30.0724L28.3719 25.0628C28.662 24.5606 28.9105 24.0308 29.112 23.4781L38.3464 26.9194C37.9453 28.0192 37.4508 29.0732 36.8737 30.0724ZM29.7216 20.0007H39.5609C39.5609 18.8159 39.4583 17.6554 39.2628 16.5272L29.5719 18.2549C29.6701 18.822 29.7216 19.4053 29.7216 20.0007ZM34.988 7.20831L27.425 13.5712C27.0546 13.1215 26.646 12.7054 26.2045 12.3272L32.5596 4.73338C33.4381 5.4858 34.251 6.31374 34.988 7.20831Z" fill="currentColor" />
+);
 
 /** OriginTrail wordmark — same paths as `v9-stable` packages/node-ui App.tsx sidebar. */
 const ORIGINTRAIL_WORDMARK = (
@@ -20,7 +25,16 @@ const ORIGINTRAIL_WORDMARK = (
       <path d="M156.245 27.6511H160.043V13.1605H156.245V15.0206C155.117 13.5505 153.515 12.8005 151.824 12.8005C148.174 12.8005 145.474 15.6806 145.474 20.4208C145.474 25.251 148.204 28.0111 151.824 28.0111C153.545 28.0111 155.117 27.2311 156.245 25.8211V27.6511ZM156.245 22.9709C155.592 23.931 154.257 24.621 152.981 24.621C150.845 24.621 149.361 22.9109 149.361 20.4208C149.361 17.9007 150.845 16.2206 152.981 16.2206C154.257 16.2206 155.592 16.9107 156.245 17.8707V22.9709Z" fill="currentColor" />
       <path d="M165.649 11.0304C166.895 11.0304 167.904 10.0104 167.904 8.75031C167.904 7.49026 166.895 6.47021 165.649 6.47021C164.432 6.47021 163.394 7.49026 163.394 8.75031C163.394 10.0104 164.432 11.0304 165.649 11.0304ZM163.78 27.6511H167.548V13.1605H163.78V27.6511Z" fill="currentColor" />
       <path d="M175.32 28.0111C176.863 28.0111 177.871 27.5911 178.435 27.0811L177.634 24.201C177.456 24.411 176.922 24.621 176.358 24.621C175.527 24.621 175.053 23.931 175.053 23.0309V7.64026H171.284V24.051C171.284 26.6311 172.679 28.0111 175.32 28.0111Z" fill="currentColor" />
-      <path fillRule="evenodd" clipRule="evenodd" d="M19.781 9.94781C14.2903 9.94781 9.8385 14.4484 9.8385 20.0008C9.8385 25.5525 14.2903 30.0531 19.781 30.0531C22.833 30.0531 25.5632 28.6622 27.3869 26.4736L34.9141 32.8796C31.2855 37.2341 25.8532 40.0016 19.781 40.0016C8.85592 40.0016 0 31.0467 0 20.0008C0 8.95432 8.85592 0 19.781 0V9.94781ZM36.8737 30.0724L28.3719 25.0628C28.662 24.5606 28.9105 24.0308 29.112 23.4781L38.3464 26.9194C37.9453 28.0192 37.4508 29.0732 36.8737 30.0724ZM29.7216 20.0007H39.5609C39.5609 18.8159 39.4583 17.6554 39.2628 16.5272L29.5719 18.2549C29.6701 18.822 29.7216 19.4053 29.7216 20.0007ZM34.988 7.20831L27.425 13.5712C27.0546 13.1215 26.646 12.7054 26.2045 12.3272L32.5596 4.73338C33.4381 5.4858 34.251 6.31374 34.988 7.20831Z" fill="currentColor" />
+      {ORIGINTRAIL_SYMBOL}
+    </svg>
+  </span>
+);
+
+/** The wordmark's symbol alone: keeps OriginTrail in the header where the wordmark doesn't fit. */
+const ORIGINTRAIL_MARK = (
+  <span className="v10-header-ot-mark" aria-hidden="true">
+    <svg width="17" height="17" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+      {ORIGINTRAIL_SYMBOL}
     </svg>
   </span>
 );
@@ -53,8 +67,9 @@ const AGENT_PANEL_ICON = (
 );
 
 export function Header() {
-  const { theme, setTheme, leftCollapsed, toggleLeft, rightCollapsed, toggleRight } = useLayoutStore();
-  const nodeStatus = useAgentsStore((s) => s.nodeStatus);
+  const { theme, setTheme, toggleLeft, toggleRight } = useLayoutStore();
+  const { leftOpen, rightOpen } = useShellPanels();
+  const { nodeStatus, peers: connectedPeers, state: nodeState } = useNodeState();
   // Use the deduplicating shared hook (BUG-007): every other consumer
   // (Header, PanelRight, PanelLeft, modals, Dashboard's
   // useMyContextGraphs) used to fire its own `fetchCurrentAgent` on
@@ -64,20 +79,22 @@ export function Header() {
   // second to one.
   const currentAgent = useCurrentAgent().data;
 
-  const connectedPeers = nodeStatus?.connectedPeers ?? nodeStatus?.peerCount ?? 0;
   const directConns = nodeStatus?.connections?.direct ?? 0;
   const relayedConns = nodeStatus?.connections?.relayed ?? 0;
   const uptimeMs = nodeStatus?.uptimeMs ?? 0;
-  const peerStatusLabel = formatPeerStatusTooltip(connectedPeers, directConns, relayedConns, uptimeMs);
+  const peerStatusLabel = nodeState.tooltip
+    ?? formatPeerStatusTooltip(connectedPeers, directConns, relayedConns, uptimeMs);
 
   return (
     <header className="v10-header">
+      {/* The OriginTrail wordmark is the logo; under 860px its mark stands in, so the brand stays in view. */}
       <div className="v10-header-logo" aria-label="OriginTrail">
+        {ORIGINTRAIL_MARK}
         {ORIGINTRAIL_WORDMARK}
       </div>
 
       <button
-        className={`v10-header-icon-btn ds-btn ds-ghost ds-icon${!leftCollapsed ? ' active-toggle' : ''}`}
+        className={`v10-header-icon-btn ds-btn ds-ghost ds-icon${leftOpen ? ' active-toggle' : ''}`}
         onClick={toggleLeft}
         title="Toggle sidebar"
       >
@@ -101,7 +118,15 @@ export function Header() {
       <div className="v10-header-spacer" />
 
       <div className="v10-header-meta" title={peerStatusLabel}>
-        <span>{connectedPeers} peer{connectedPeers !== 1 ? 's' : ''}</span>
+        <Badge tone={nodeState.tone}>
+          <span className={nodeState.showPeers ? 'v10-header-compact-text' : undefined}>{nodeState.word}</span>
+        </Badge>
+        {nodeState.showPeers && (
+          <>
+            <span className="v10-header-meta-sep">·</span>
+            <span>{connectedPeers}<span className="v10-header-compact-text"> peer{connectedPeers !== 1 ? 's' : ''}</span></span>
+          </>
+        )}
       </div>
 
       <div className="v10-header-actions">
@@ -116,7 +141,7 @@ export function Header() {
         </button>
 
         <button
-          className={`v10-header-icon-btn ds-btn ds-ghost ds-icon${!rightCollapsed ? ' active-toggle' : ''}`}
+          className={`v10-header-icon-btn ds-btn ds-ghost ds-icon${rightOpen ? ' active-toggle' : ''}`}
           onClick={toggleRight}
           title="Toggle agent panel"
         >

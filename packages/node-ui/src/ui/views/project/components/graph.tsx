@@ -11,7 +11,7 @@ import { LAYER_CONFIG, buildLayerGraphOptions, agentNodeColors, humanizeLabel, u
 import { EmptyState, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { AgentDot, AgentDotStack } from '../../../components/AgentDot.js';
 import { agentHexForUri } from '../../../hooks/useAgents.js';
-import { Badge } from '../../../components/ds/Badge.js';
+import { Badge, LayerGlyph } from '../../../components/ds/Badge.js';
 
 export const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -562,7 +562,7 @@ export function LayerGraphPanel({
             <EmptyState
               compact
               tone={toneForLayer(layer)}
-              icon={LAYER_CONFIG[layer].icon}
+              icon={<LayerGlyph layer={layer} />}
               title={`No triples in ${title}`}
               description="The graph will appear when this layer has connected triples."
             />
@@ -585,7 +585,7 @@ export function LayerGraphPanel({
             <EmptyState
               compact
               tone="swm"
-              icon={LAYER_CONFIG.swm.icon}
+              icon={<LayerGlyph layer="swm" />}
               title="Loading Shared Working Memory attribution..."
               description="Agent colors are being prepared before the graph renders."
             />
@@ -691,7 +691,7 @@ export function VerifiedGraphLegend({ anchors }: { anchors: readonly VmReceipt[]
         <Badge size="sm" tone="vm" className="v10-vm-legend-count">{anchors.length} anchor{anchors.length === 1 ? '' : 's'}</Badge>
       </div>
       <div className="v10-vm-legend-row">
-        <span className="v10-vm-legend-swatch" style={{ background: palette.anchor.fill, color: '#fff', boxShadow: `0 0 0 2px ${palette.anchor.ring}` }}>◉</span>
+        <span className="v10-vm-legend-swatch" style={{ background: palette.anchor.fill, color: 'var(--text-on-identity)', boxShadow: `0 0 0 2px ${palette.anchor.ring}` }}>◉</span>
         <span className="v10-vm-legend-label">On-chain anchor</span>
       </div>
       <div className="v10-vm-legend-row">
