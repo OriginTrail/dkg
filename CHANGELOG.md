@@ -19,10 +19,11 @@ All notable changes to the DKG V10 node are documented here. The format is based
   the seller's other services, where before they left the seller out of
   every service for ten minutes. No answer, timeouts, and 401, 403, 408,
   409, 429 and 5xx answers are handled as before. When a service's backend
-  refuses a call with tools, the seller checks with a minimal call with
-  tools of its own. If the backend refuses that too, the service stops
-  offering tools until the node restarts, so buyers answer such calls with
-  `tools_unsupported` instead of sending them.
+  refuses a call with tools, the seller checks with minimal calls with tools
+  of its own: one where the model chooses, and one that names the function.
+  If the backend refuses both, the service stops offering tools until the
+  node restarts, so buyers answer such calls with `tools_unsupported`
+  instead of sending them.
 
 ## [10.1.0] - Unreleased
 
