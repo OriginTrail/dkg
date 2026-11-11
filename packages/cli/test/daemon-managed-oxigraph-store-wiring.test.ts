@@ -91,7 +91,8 @@ describe('daemon managed Oxigraph store construction', () => {
   });
 
   it('carries the read-graph settings to every store object over the backend, managed or not', async () => {
-    const readGraphs: ReadGraphStoreConfig = { modes: { default: 'build' }, viewSemantics: { default: 'merged' } };
+    // Modes that keep none: no adapter in this test declares read-graph capabilities.
+    const readGraphs: ReadGraphStoreConfig = { modes: { default: 'off' }, viewSemantics: { default: 'merged' } };
     const endpoint = `http://127.0.0.1:7878/${Math.random().toString(36).slice(2)}`;
     const managedStore = createManagedOxigraphRuntimeStoreConfigV1({
       backend: 'sparql-http',

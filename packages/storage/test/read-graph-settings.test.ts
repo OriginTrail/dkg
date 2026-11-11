@@ -2,12 +2,19 @@ import { describe, expect, it } from 'vitest';
 import { MemoryLayer, readScope, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import {
   OxigraphStore,
+  READ_GRAPH_PLANNED_METHODS,
+  ReadGraphsUnsupportedError,
   keepsAnyReadGraph,
   readGraphModeOf,
   viewSemanticsOf,
   wrapReadGraphLayer,
   type ReadGraphModes,
 } from '../src/index.js';
+
+/** An adapter that declares every planned method, as one that maintains read graphs does. */
+const capableAdapter = () => Object.assign(new OxigraphStore(), {
+  readGraphCapabilities: { methods: READ_GRAPH_PLANNED_METHODS, serialUpdates: true },
+});
 
 const AGENT = '0x' + 'ab'.repeat(20);
 const vm = (contextGraphId: string, subGraphName?: string): ReadGraphKey =>
@@ -76,11 +83,33 @@ describe('read-graph settings on the backend runtime', () => {
     expect(earlier.runtime.viewSemantics).toEqual({});
     const modes: ReadGraphModes = { default: 'build' };
     const viewSemantics = { default: 'merged' as const };
-    wrapReadGraphLayer(new OxigraphStore(), { ...config, readGraphs: { modes, viewSemantics } });
+    wrapReadGraphLayer(capableAdapter(), { ...config, readGraphs: { modes, viewSemantics } });
     expect(earlier.runtime.modes).toBe(modes);
     expect(earlier.runtime.viewSemantics).toBe(viewSemantics);
     // A configuration without settings leaves them as they are.
     wrapReadGraphLayer(new OxigraphStore(), { ...config });
     expect(earlier.runtime.modes).toBe(modes);
+  });
+});
+
+describe('read-graph settings on an adapter that cannot keep read graphs', () => {
+  it('are refused, naming the methods its adapter does not maintain, before they reach the runtime', async () => {
+    const config = { backend: 'oxigraph-worker', options: { path: `/tmp/read-graph-settings-${Math.random()}` } };
+    const adapter = new OxigraphStore();
+    let closed = false;
+    adapter.close = async () => { closed = true; };
+    const attempt = () => wrapReadGraphLayer(adapter, { ...config, readGraphs: { modes: { contextGraphs: { notes: { default: 'build' } } } } });
+    expect(attempt).toThrow(ReadGraphsUnsupportedError);
+    try {
+      attempt();
+    } catch (error) {
+      expect((error as ReadGraphsUnsupportedError).code).toBe('READ_GRAPHS_UNSUPPORTED');
+      expect((error as ReadGraphsUnsupportedError).missingMethods).toContain('delete');
+    }
+    expect(closed).toBe(true);
+    // Settings that keep none are accepted, and the same adapter with every method declared keeps them.
+    const off = wrapReadGraphLayer(new OxigraphStore(), { ...config, readGraphs: { modes: { default: 'off' }, viewSemantics: { default: 'merged' } } });
+    expect(off.runtime.modes).toEqual({ default: 'off' });
+    expect(() => wrapReadGraphLayer(capableAdapter(), { ...config, readGraphs: { modes: { default: 'serve' } } })).not.toThrow();
   });
 });

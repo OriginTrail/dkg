@@ -476,9 +476,11 @@ export {
   type ReadGraphBackendRuntime,
 } from './read-graph/runtime.js';
 export {
+  READ_GRAPHS_UNSUPPORTED_CODE,
   READ_GRAPH_WRITE_REFUSED_CODE,
   ReadGraphStore,
   ReadGraphWriteRefusedError,
+  ReadGraphsUnsupportedError,
   readGraphLayerOf,
   wrapReadGraphLayer,
   type ReadGraphStoreConfig,
