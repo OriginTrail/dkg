@@ -52,6 +52,11 @@ function callerGraphAssignmentsInside(scope: PreparedSparqlQuery): Array<'consta
   return found;
 }
 
+/** Whether one branch per graph of `graphs` for every caller GRAPH ?var block stays within the rewrite's bound. */
+export function callerGraphBranchesFit(scope: PreparedSparqlQuery, graphs: readonly string[]): boolean {
+  return new Set(graphs).size * scope.graphTargets.filter(target => target.kind === 'variable').length <= MAX_CALLER_GRAPH_BRANCHES;
+}
+
 /** Whether caller GRAPH ?var blocks assign ?var inside them, every time to a single IRI. */
 export function hasCallerGraphAssignmentsInside(scope: PreparedSparqlQuery): boolean {
   const found = callerGraphAssignmentsInside(scope);

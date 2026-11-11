@@ -9,6 +9,7 @@ import type { GraphAccessMode } from './sparql-graph-access.js';
 import { hasOuterDefaultGraphPattern, hasTopLevelDefaultGraphPattern } from './sparql-default-graph-pattern.js';
 import {
   bindCallerGraphsBeforeRead,
+  callerGraphBranchesFit,
   hasCallerGraphAssignments,
   hasCallerGraphAssignmentsInside,
   hasCallerGraphExpressionAssignments,
@@ -243,7 +244,11 @@ export function applyGraphDataset<Reason extends string>(
   const result = plan.preservePattern ? sparqlRewriteReady(scope) : rewrite(plan.graphAccess);
   if (result.kind !== 'ready') return result;
   let rewritten = result.value;
-  if (plan.bindCallerGraphs) rewritten = bindCallerGraphsBeforeRead(rewritten, graphs);
+  // On Oxigraph a constant graph assignment over more graphs than the branches allow keeps
+  // the graph list the engine left in place, as the read did before, instead of failing.
+  if (plan.bindCallerGraphs && (engine !== 'oxigraph' || callerGraphBranchesFit(rewritten, graphs))) {
+    rewritten = bindCallerGraphsBeforeRead(rewritten, graphs);
+  }
   if (plan.wrapDescriptionPattern && rewritten.where) {
     const { openEnd, close } = rewritten.where;
     const source = `${rewritten.source.slice(0, openEnd)} { SELECT * WHERE { ${rewritten.source.slice(openEnd, close)} } } ${rewritten.source.slice(close)}`;
