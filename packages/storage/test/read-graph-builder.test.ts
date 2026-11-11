@@ -17,7 +17,7 @@ import {
   useReadGraphMarkJournal,
 } from '../src/read-graph/mark-journal.js';
 import { matchesGraphNameTest, readGraphMembership, type GraphNameTest } from '../src/read-graph/membership.js';
-import { wrapReadGraphLayer, type ReadGraphStore } from '../src/read-graph/read-graph-store.js';
+import { readGraphLayerOf, wrapReadGraphLayer, type ReadGraphStore } from '../src/read-graph/read-graph-store.js';
 import {
   buildReadGraph,
   refreshReadGraphRegistry,
@@ -1110,6 +1110,37 @@ describe('read-graph start-up', () => {
     expect(mayHoldReadGraphPartitions(dataDir)).toBe(true);
     expect(storeMayHoldReadGraphPartitions(failing)).toBe(true);
     expect(logs.some((line) => line.includes('could not be listed'))).toBe(true);
+  });
+
+  it('leaves the mirror of a backend this process already started to the store objects using it, and applies only its own journal', async () => {
+    const adapter = new HookedStore();
+    const fixture = layerFixture(`builder-${sequence += 1}`);
+    await adapter.insert([
+      ...fixture.facts,
+      ...fixture.graphs.flatMap((graph, i) => [q('urn:s:shared', '"both"', graph), q(`urn:s:${i}`, `"v${i}"`, graph)]),
+    ]);
+    const [first, second] = [mkdtempSync(join(tmpdir(), 'read-graph-builder-')), mkdtempSync(join(tmpdir(), 'read-graph-builder-'))];
+    dirs.push(first, second);
+    // Two agents of one process over the same backend share its runtime.
+    const config = { backend: 'oxigraph-persistent' as const, options: { path: join(first, 'store') } };
+    const layer = wrapReadGraphLayer(adapter, config);
+    const store = guardReadGraphPartition(layer);
+    const context: ReadGraphJobContext = { store, dataDir: first, batching: { pauseRatio: 0, graphsPerBatch: 2 } };
+    const [vm] = fixture.keys as [ReadGraphKey];
+    expect(await startReadGraphs(store, { dataDir: first, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    const built = (await buildReadGraph(context, vm)).row!;
+    const other = guardReadGraphPartition(wrapReadGraphLayer(adapter, config));
+    expect(readGraphLayerOf(other)!.runtime).toBe(layer.runtime);
+    expect(await startReadGraphs(other, { dataDir: second, maintains: () => true })).toEqual({ marked: 0, maintained: 1 });
+    // The first agent's writes are still maintained.
+    await store.insert([q('urn:s:after', '"after"', fixture.graphs[1]!)]);
+    await expectUnion(adapter, layer, fixture, vm);
+    // A later start over the same backend applies its own data directory's journal to the running mirror.
+    writeFileSync(readGraphMarkJournalPath(second), `${built.generation} ${fixture.readGraphs.wholeVm}\n`);
+    expect(await startReadGraphs(other, { dataDir: second, maintains: () => true })).toEqual({ marked: 1, maintained: 1 });
+    expect(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)?.state).toBe('dirty');
+    expect((await storedRows(adapter))[fixture.readGraphs.wholeVm]).toBe(`dirty@${built.generation + 1}`);
+    expect(readUnstoredReadGraphMarks(second)).toEqual(new Map());
   });
 
   it('replaces damaged rows and rows whose generation cannot grow, and notes nothing without rows', async () => {
