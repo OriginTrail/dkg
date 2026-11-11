@@ -57,8 +57,9 @@ describe('stored context graph candidates for query admission', () => {
     ]));
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).not.toContain('urn:unrelated:graph');
+    // Admission reads a current catalog.
     expect(listGraphsByPrefix).toHaveBeenCalledWith(PREFIX, {
-      source: 'storage.contextGraphOwnerCandidates', ...CEILING,
+      source: 'storage.contextGraphOwnerCandidates', ...CEILING, currentCatalog: true,
     });
     expect(listGraphs).not.toHaveBeenCalled();
     // Admission cannot depend on metadata existence: ordinary read authority
@@ -150,7 +151,7 @@ describe('stored context graph candidates for query admission', () => {
     release([]);
     await failure;
     expect(listGraphsByPrefix).toHaveBeenCalledWith(PREFIX, {
-      source: 'storage.contextGraphOwnerCandidates', signal: controller.signal, ...CEILING,
+      source: 'storage.contextGraphOwnerCandidates', signal: controller.signal, ...CEILING, currentCatalog: true,
     });
   });
 
