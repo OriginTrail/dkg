@@ -1,11 +1,13 @@
 /**
  * A writer for the kill-at-commit lane, run as its own process with `node --import tsx`.
- * It keeps one context graph's verifiable-memory read graph ready and sends maintained
- * writes until it is killed. Before each write it prints `sending <n> <kind>`, and after it
- * `committed <n>`, so the parent can kill it while a write is in flight.
+ * It keeps one context graph's verifiable-memory read graph ready and sends the maintained
+ * writes of the kill cycle in order, up to and including write DKG_KILL_TARGET. Then it waits
+ * to be killed: no write after the target starts. It prints `sending <n> <kind>` before each
+ * write, `to-store <n>` when the layer hands the write's request to the store below it, and
+ * `returned <n>` once the write has returned (on the embedded store, once it is dumped too).
  *
  * DKG_KILL_BACKEND is `blazegraph` (with DKG_KILL_URL) or `oxigraph` (with DKG_KILL_PATH, a
- * persistent store flushed after every write). DKG_KILL_CG names the context graph.
+ * persistent store dumped after every write). DKG_KILL_CG names the context graph.
  */
 import { MemoryLayer, readGraphIri, readScope } from '@origintrail-official/dkg-core';
 import { BlazegraphStore } from '../../src/adapters/blazegraph.js';
@@ -15,11 +17,13 @@ import { CURRENT_READ_GRAPH_VERSIONS } from '../../src/read-graph/state.js';
 import type { TripleStoreConfig } from '../../src/triple-store-composition.js';
 import type { Quad, TripleStore } from '../../src/triple-store.js';
 import { PlanningOxigraphStore } from './read-graph-planning-store.js';
-import { KILL_AT_COMMIT_CYCLE, killAtCommitBatch, killAtCommitMember } from './read-graph-kill-fixture.js';
+import { killAtCommitBatch, killAtCommitMember, killAtCommitWrite } from './read-graph-kill-fixture.js';
 
 const backend = process.env.DKG_KILL_BACKEND;
 const contextGraphId = process.env.DKG_KILL_CG;
 if (!contextGraphId) throw new Error('DKG_KILL_CG is required');
+const target = Number(process.env.DKG_KILL_TARGET);
+if (!Number.isSafeInteger(target) || target < 0) throw new Error('DKG_KILL_TARGET must name a write by its number');
 const batchSize = Number(process.env.DKG_KILL_BATCH ?? 2_000);
 
 let adapter: TripleStore;
@@ -38,17 +42,28 @@ if (backend === 'blazegraph') {
   throw new Error(`Unknown DKG_KILL_BACKEND: ${backend}`);
 }
 
+// The layer sends each maintained write as one insert or delete to the adapter below it, with
+// the read graph's part in the same request. Announce that request as it goes.
+let current = -1;
+const insert = adapter.insert.bind(adapter);
+const remove = adapter.delete.bind(adapter);
+adapter.insert = (quads, options) => { process.stdout.write(`to-store ${current}\n`); return insert(quads, options); };
+adapter.delete = (quads, options) => { process.stdout.write(`to-store ${current}\n`); return remove(quads, options); };
+
 const layer = wrapReadGraphLayer(adapter, config);
 const store = guardReadGraphPartition(layer);
 const readGraph = readGraphIri({ scope: readScope(contextGraphId), layer: MemoryLayer.VerifiableMemory });
 layer.runtime.mirror.set({ readGraph, state: 'ready', generation: 1, ...CURRENT_READ_GRAPH_VERSIONS });
 
-for (let n = 0; ; n += 1) {
-  const step = KILL_AT_COMMIT_CYCLE[n % KILL_AT_COMMIT_CYCLE.length]!;
-  const quads: Quad[] = killAtCommitBatch(killAtCommitMember(contextGraphId, step.member), batchSize);
-  process.stdout.write(`sending ${n} ${step.kind}\n`);
-  if (step.kind === 'insert') await store.insert(quads);
+for (let n = 0; n <= target; n += 1) {
+  current = n;
+  const write = killAtCommitWrite(n);
+  const quads: Quad[] = killAtCommitBatch(killAtCommitMember(contextGraphId, write.member), batchSize);
+  process.stdout.write(`sending ${n} ${write.kind}\n`);
+  if (write.kind === 'insert') await store.insert(quads);
   else await store.delete(quads);
   if (backend === 'oxigraph') await adapter.flush?.();
-  process.stdout.write(`committed ${n}\n`);
+  process.stdout.write(`returned ${n}\n`);
 }
+// The target write was the last: stay alive, with nothing more to send, until the kill.
+setInterval(() => undefined, 60_000);

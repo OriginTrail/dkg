@@ -24,8 +24,21 @@ export const KILL_AT_COMMIT_CYCLE: ReadonlyArray<{ readonly kind: 'insert' | 'de
   { kind: 'insert', member: 2 }, { kind: 'delete', member: 1 }, { kind: 'delete', member: 2 },
 ];
 
-/** Whether write `n` is a delete while another member keeps the batch, whatever the kill interrupted. */
-export function killAtCommitKeepsBatch(n: number): boolean {
-  const step = n % KILL_AT_COMMIT_CYCLE.length;
-  return step === 2 || step === 4;
+/** The write at position `n` of the writer's sequence. */
+export function killAtCommitWrite(n: number): (typeof KILL_AT_COMMIT_CYCLE)[number] {
+  return KILL_AT_COMMIT_CYCLE[n % KILL_AT_COMMIT_CYCLE.length]!;
+}
+
+/**
+ * The members that hold the batch once the first `writes` writes have run, in order. Every
+ * write changes this set, so the sets before and after a write tell the two apart.
+ */
+export function killAtCommitHolders(writes: number): number[] {
+  const holders = new Set<number>();
+  for (let n = 0; n < writes; n += 1) {
+    const write = killAtCommitWrite(n);
+    if (write.kind === 'insert') holders.add(write.member);
+    else holders.delete(write.member);
+  }
+  return [...holders].sort((left, right) => left - right);
 }
