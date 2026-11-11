@@ -6,18 +6,21 @@
  * out of service until that read, in the backend's mirror only: no query
  * takes a union that the store's new registry may no longer give. Lifting a
  * fence puts back each read graph it still holds. An explicit dirty mark ends
- * a fence, and that read graph stays out of service.
+ * a fence, and that read graph stays out of service. So does a working-memory
+ * read graph whose identity rule changed while it was fenced: it was built
+ * under the rule of its fence.
  */
 
-import { parseReadGraphIri } from '@origintrail-official/dkg-core';
-import { readGraphMembership, type ReadGraphRegistrySnapshot } from './membership.js';
+import { MemoryLayer, parseReadGraphIri } from '@origintrail-official/dkg-core';
+import { readGraphMembership, type ReadGraphRegistrySnapshot, type WorkingMemoryIdentityRule } from './membership.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
 import { nextReadGraphState, type ReadGraphStateRow } from './state.js';
 
-/** A ready row taken out of service in the mirror while a registry write runs, and the row it was. */
+/** A ready row taken out of service in the mirror while a registry write runs, the row it was, and the identity rule then. */
 export interface ReadGraphFence {
   readonly row: ReadGraphStateRow;
   readonly fence: ReadGraphStateRow;
+  readonly identity: WorkingMemoryIdentityRule;
 }
 
 /** The fences registry writes have set on each backend's read graphs and not lifted, by read graph. */
@@ -40,7 +43,7 @@ export function fenceReadGraphs(runtime: ReadGraphBackendRuntime, readGraphs: re
     const fence = nextReadGraphState(row, { kind: 'mark-dirty' })!;
     runtime.mirror.set(fence);
     activeFences(runtime).set(readGraph, fence);
-    return [{ row, fence }];
+    return [{ row, fence, identity: runtime.workingMemoryIdentity }];
   });
 }
 
@@ -57,13 +60,16 @@ export function liftReadGraphFences(
   before: ReadGraphRegistrySnapshot | undefined,
 ): void {
   const identity = runtime.workingMemoryIdentity;
-  for (const { row, fence } of fences) {
+  for (const { row, fence, identity: fencedUnder } of fences) {
     // A mark since the fence was set made the read graph dirty for good.
     if (activeFences(runtime).get(row.readGraph) !== fence) continue;
     activeFences(runtime).delete(row.readGraph);
     const current = runtime.mirror.get(row.readGraph);
     if (!current || current.state !== fence.state || current.generation !== fence.generation) continue;
     const key = parseReadGraphIri(row.readGraph);
+    // A working-memory read graph was built under the identity rule of its fence; one installed meanwhile, by an
+    // installer that did not wait for the write, may give it other drafts.
+    if (key?.layer === MemoryLayer.WorkingMemory && fencedUnder !== identity) continue;
     const after = key ? runtime.registries.get(key.scope.contextGraphId) : undefined;
     const kept = before !== undefined && after !== undefined && key !== undefined
       && JSON.stringify(readGraphMembership(key, before, identity)) === JSON.stringify(readGraphMembership(key, after, identity));
