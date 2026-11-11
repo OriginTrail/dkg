@@ -806,7 +806,8 @@ describe('GraphSetIndexStore', () => {
     let now = 1_000;
     const inner = new OxigraphStore();
     const counting = new CountingStore(inner);
-    const store = new GraphSetIndexStore(counting, { revalidateMs: 100, now: () => now });
+    // The caller that finds the catalog due waits for the refresh: the behaviour kept for one release.
+    const store = new GraphSetIndexStore(counting, { revalidateMs: 100, revalidate: 'blocking', now: () => now });
 
     await expect(store.listGraphs()).resolves.toEqual([]);
     await inner.insert([q('did:dkg:context-graph:external')]);
@@ -829,6 +830,7 @@ describe('GraphSetIndexStore', () => {
     const counting = new CountingStore(inner);
     const store = new GraphSetIndexStore(counting, {
       revalidateMs: 100,
+      revalidate: 'blocking',
       revalidateFailureBackoffMs: 10,
       revalidateFailureMaxBackoffMs: 40,
       now: () => now,
@@ -1150,6 +1152,7 @@ describe('GraphSetIndexStore', () => {
     scheduled.listGraphsResults.normal = [cachedGraph];
     const store = new GraphSetIndexStore(scheduled, {
       revalidateMs: 100,
+      revalidate: 'blocking',
       revalidateFailureBackoffMs: 1_000,
       now: () => now,
     });

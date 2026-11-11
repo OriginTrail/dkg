@@ -71,7 +71,7 @@ describe('graph catalog metrics', () => {
     let now = 1_000;
     const inner = new OxigraphStore();
     await inner.insert([q(`${CG}small/a`)]);
-    const store = new GraphSetIndexStore(new CountingStore(inner), { revalidateMs: 100, now: () => now });
+    const store = new GraphSetIndexStore(new CountingStore(inner), { revalidateMs: 100, revalidate: 'blocking', now: () => now });
     try {
       await store.listGraphsByPrefix(`${CG}small/`);
       vi.stubEnv(STORE_GRAPH_CATALOG_MAX_BYTES_ENV, String(measureGraphCatalogBytes([`${CG}small/a`])));

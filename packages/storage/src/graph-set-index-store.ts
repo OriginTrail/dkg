@@ -42,6 +42,7 @@ import {
 import { isStoreOperationNotStarted } from './store-operation-outcome.js';
 import { raceStoreWorkAgainstAbort } from './abortable-store-work-lifecycle.js';
 import { assertGraphCatalogWithinResponseLimit } from './graph-catalog-response-limit.js';
+import { BackgroundGraphSetRevalidation, graphSetRevalidationDelayMs, readsCurrentGraphCatalog, type GraphSetRevalidation } from './graph-set-refresh.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
@@ -49,11 +50,22 @@ const MIN_GRAPH_SET_REVALIDATE_FAILURE_BACKOFF_MS = 1_000;
 // Max times a bounded hasGraph probe is repeated when a concurrent write bumps
 // the mutation generation, before falling back to one O(store) rebuild.
 const MAINTAIN_INDEX_MAX_PROBE_RETRIES = 4;
+// A warm catalog revalidates on the background lane, carrying no caller's options.
+const BACKGROUND_REVALIDATION: QueryOptions = { priority: 'background', source: 'graph-set-index.revalidate' };
 
 export interface GraphSetIndexStoreOptions {
   enabled?: boolean;
-  /** Revalidate after this interval. Use 0 to revalidate on every read. */
+  /**
+   * Revalidate after this interval, or after twenty times the last refresh
+   * when that is longer. Use 0 to revalidate on every read, blocking.
+   */
   revalidateMs?: number;
+  /**
+   * How a warm catalog revalidates once it is due: `background` (the default)
+   * answers callers from it while one background flight refreshes it;
+   * `blocking` makes the caller that finds it due wait, as before.
+   */
+  revalidate?: GraphSetRevalidation;
   /**
    * Initial retry delay after a failed warm periodic revalidation.
    * Ignored when revalidateMs is 0.
@@ -123,6 +135,8 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   readonly innerStore: TripleStore;
   private readonly enabled: boolean;
   private readonly revalidateMs: number;
+  private readonly revalidate: GraphSetRevalidation;
+  private readonly backgroundRevalidation = new BackgroundGraphSetRevalidation();
   private readonly revalidateFailureBackoffMs: number;
   private readonly revalidateFailureMaxBackoffMs: number;
   private readonly now: () => number;
@@ -131,6 +145,8 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
 
   private readonly catalog = new GraphSetCatalogState();
   private nextRevalidateAt = 0;
+  /** When a current read next revalidates: `revalidateMs` after a refresh, without the cadence. */
+  private nextCurrentRevalidateAt = 0;
   private revalidateFailureCount = 0;
   private mutationGeneration = 0;
   private readonly refreshCoordinator = new RefreshCoordinator<ReadonlySet<string>>();
@@ -148,6 +164,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !isStorageHiddenGraph(graph));
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
+    this.revalidate = options.revalidate ?? 'background';
     this.revalidateFailureBackoffMs = positiveFiniteMs(
       options.revalidateFailureBackoffMs,
       Math.max(MIN_GRAPH_SET_REVALIDATE_FAILURE_BACKOFF_MS, this.revalidateMs),
@@ -547,13 +564,12 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
 
   private async ensureGraphSet(options?: QueryOptions): Promise<ReadonlySet<string>> {
     throwIfAborted(options?.signal);
-    if (
-      this.catalog.initialized &&
-      !this.pendingFullRefresh &&
-      this.revalidateMs > 0 &&
-      this.now() < this.nextRevalidateAt
-    ) {
-      return this.catalog.current!;
+    if (this.catalog.initialized && !this.pendingFullRefresh && this.revalidateMs > 0) {
+      const current = readsCurrentGraphCatalog(options);
+      const due = this.now() >= (current ? this.nextCurrentRevalidateAt : this.nextRevalidateAt);
+      const warm = this.revalidate === 'background' && !current;
+      if (due && warm) this.revalidateInBackground();
+      if (!due || warm) return this.catalog.current!;
     }
     return raceStoreWorkAgainstAbort(
       this.refreshIndex(
@@ -562,6 +578,13 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       ),
       options?.signal,
     );
+  }
+
+  /** One background flight; past the internal limit it drops the catalog unless a newer one was published meanwhile, so the next read seeds cold and fails as a seed does. */
+  private revalidateInBackground(): void {
+    this.backgroundRevalidation.start(() => this.refreshIndex('revalidate', BACKGROUND_REVALIDATION), (error) => {
+      if (isStoreInternalLimitError(error)) this.clearIndex();
+    });
   }
 
   private async refreshIndex(
@@ -626,6 +649,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         ? { ...options, priority: 'background', source: 'graph-set-index.rebuild' }
         : options;
       const scan = this.refreshCoordinator.beginScan(flight);
+      const scanStarted = this.now();
       const discovered = await timeGraphCatalogRefresh(graphCatalogRefreshKind(sourceForScan),
         () => readCompleteGraphInventory(this.inner, scanOptions));
       const next = new Set(
@@ -653,7 +677,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
           graphCount: next.size,
         });
       }
-      this.replaceGraphSet(next, sourceForScan);
+      this.replaceGraphSet(next, sourceForScan, this.now() - scanStarted);
       return this.catalog.current!;
     }
   }
@@ -708,11 +732,13 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     this.resetRevalidationSchedule();
   }
 
-  private replaceGraphSet(next: Set<string>, source: GraphSetRefreshSource): void {
+  private replaceGraphSet(next: Set<string>, source: GraphSetRefreshSource, refreshMs: number): void {
     const { added, removed } = this.catalog.replace(next);
+    this.backgroundRevalidation.notePublished();
     recordGraphCatalogSize(this.catalog.measure());
     this.revalidateFailureCount = 0;
-    this.nextRevalidateAt = this.now() + this.revalidateMs;
+    this.nextRevalidateAt = this.now() + graphSetRevalidationDelayMs(this.revalidateMs, refreshMs);
+    this.nextCurrentRevalidateAt = this.now() + this.revalidateMs;
     if (added.length > 0 || removed.length > 0 || source !== 'seed') {
       this.emit({ type: 'graph-set-revalidated', added, removed, source });
     }
@@ -734,11 +760,13 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     );
     this.revalidateFailureCount++;
     this.nextRevalidateAt = this.now() + delay;
+    this.nextCurrentRevalidateAt = this.nextRevalidateAt;
   }
 
   private resetRevalidationSchedule(): void {
     this.revalidateFailureCount = 0;
     this.nextRevalidateAt = 0;
+    this.nextCurrentRevalidateAt = 0;
   }
 
   private addGraphs(graphs: string[], source: GraphSetMutationSource): void {

@@ -659,3 +659,13 @@ it('keeps bounded v1 HTTP 422 for a real oversized result normalized by the agen
     expect(JSON.parse(read.res.body)).toMatchObject({ code: 'QUERY_RESULT_TOO_LARGE' });
   } finally { await store.close(); }
 });
+
+it('answers a node-side limit with a retryable 503, not the bounded 422 result-size answer', async () => {
+  const internalLimit = Object.assign(new Error('Graph catalog exceeds the node-side limit'), {
+    code: 'STORE_INTERNAL_LIMIT', limitName: 'STORE_GRAPH_CATALOG_MAX_BYTES', limitBytes: 1024, actualBytes: 2048,
+  });
+  const read = context({ query: vi.fn(async () => { throw internalLimit; }) });
+  await handleBoundedQueryRoutes(read.ctx);
+  expect(read.res.statusCode).toBe(503);
+  expect(JSON.parse(read.res.body)).toMatchObject({ code: 'STORE_INTERNAL_LIMIT', retryable: true });
+});

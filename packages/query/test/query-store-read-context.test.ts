@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ChangelogStore, GraphManager, GraphSetIndexStore, SharedMemoryLiteralBlobStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { createQueryStoreReadContext, QueryMaterializationBudget, requireQueryDataset } from '../src/query-store-read-context.js';
+import { createQueryStoreReadContext, requireQueryDataset } from '../src/query-store-read-context.js';
 import { ScopedQueryViolationError } from '../src/scoped-query-error.js';
 
 describe('query store-read materialization budget', () => {
@@ -62,7 +62,11 @@ describe('fallback inventory materialization', () => {
     const lane = kind === 'enumeration' ? context : kind === 'catalog' ? context.catalog : context.withWithheldGraphRoots([]);
     await expect(lane.listGraphsByPrefix('urn:absent:')).resolves.toEqual([]);
     await expect(lane.listGraphsByPrefix(slicePrefix)).resolves.toEqual(slice);
-    await expect(lane.listGraphsByPrefix(slicePrefix)).rejects.toMatchObject({
+    // The request's enumeration reads a prefix once: reading it again is not charged, the next
+    // prefix is. The catalog and withheld lanes read, and charge, every time.
+    if (kind === 'enumeration') await expect(lane.listGraphsByPrefix(slicePrefix)).resolves.toEqual(slice);
+    const next = kind === 'enumeration' ? 'urn:unrelated:998:' : slicePrefix;
+    await expect(lane.listGraphsByPrefix(next)).rejects.toMatchObject({
       code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: 1024, actualBytes: emptyBytes + 2 * sliceBytes,
     });
   });
@@ -118,9 +122,8 @@ describe('decorated inventory materialization', () => {
       const exact = createQueryStoreReadContext(store, { maxMaterializedBytes: emptyBytes + resultBytes });
       await expect(exact.listGraphsByPrefix('did:dkg:context-graph:')).resolves.toEqual([]);
       await expect(exact.query('SELECT * WHERE {}')).resolves.toEqual(result);
-      const budget = new QueryMaterializationBudget(emptyBytes);
-      await expect(new GraphManager(store).listStoredContextGraphOwnerCandidates({}, budget)).resolves.toEqual([]);
-      expect(() => budget.consume(result)).toThrow(expect.objectContaining({ actualBytes: emptyBytes + resultBytes }));
+      // The owner inventory of unscoped admission is node work: it is read, never charged.
+      await expect(new GraphManager(store).listStoredContextGraphOwnerCandidates({})).resolves.toEqual([]);
     });
 });
 

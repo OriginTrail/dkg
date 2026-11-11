@@ -456,7 +456,14 @@ class ReadGraphJob {
     } catch (error) {
       failure = { error };
     }
-    const stored = await this.stored();
+    let stored: Awaited<ReturnType<ReadGraphJob['stored']>>;
+    try {
+      stored = await this.stored();
+    } catch (error) {
+      // Neither the change nor its read landed: the store may still hold the row the change was planned from.
+      if (failure && to?.state !== 'ready' && from !== undefined) noteUnstoredReadGraphMark(this.runtime, this.readGraph, from.generation);
+      throw error;
+    }
     if (stored.damaged) throw new ReadGraphJobError(`The state row of ${this.readGraph} is damaged`);
     if (failure && !sameRow(stored.row, to)) {
       if (to?.state === 'ready' || stored.row?.state !== 'ready') setMirror(this.runtime.mirror, this.readGraph, stored.row);

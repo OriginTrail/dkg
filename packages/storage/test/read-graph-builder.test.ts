@@ -439,6 +439,29 @@ describe('building a read graph', () => {
     await expectCurrentUnion(adapter, layer, fixture, vm);
   });
 
+  it('takes a child registration that completed before its first row existed, and publishes nothing under the registry from before it', async () => {
+    const { adapter, fixture, layer, store, context } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    const { wholeVm } = fixture.readGraphs;
+    const child = `${fixture.root}/code`;
+    let armed = true;
+    adapter.onUpdate = async (sparql) => {
+      // The build has read the registry and records it; no row exists yet. The registration passes the registry by.
+      if (!armed || !sparql.includes('<http://dkg.io/ontology/readGraphRegistry>')) return;
+      armed = false;
+      await store.insert([{ subject: child, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://dkg.network/ontology#ContextGraph', graph: `${child}/_meta` }]);
+    };
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'lost' });
+    expect(armed).toBe(false);
+    expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
+    expect(await triplesOf(adapter, wholeVm)).toEqual([]);
+    adapter.onUpdate = undefined;
+    // The next build follows the registry that holds the child: its data is no member of the parent's read graph.
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    expect((await triplesOf(adapter, wholeVm)).filter((triple) => triple.includes('"v4"'))).toEqual([]);
+    await expectCurrentUnion(adapter, layer, fixture, vm);
+  });
+
   it('keeps the read graph equal to its members across writes during the backfill', async () => {
     const { adapter, fixture, layer, store, context } = await open();
     const [vm] = fixture.keys as [ReadGraphKey];
@@ -771,6 +794,26 @@ describe('marking a read graph dirty', () => {
     expect(await buildReadGraph(context, key)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
     expect(servingReadGraphGeneration(layer.runtime.mirror.get(readGraph))).toBe(layer.runtime.mirror.get(readGraph)!.generation);
     await expectUnion(adapter, layer, fixture, key);
+  });
+
+  it('keeps the mark for a start-up when neither the dirty mark nor its read-back reaches the store', async () => {
+    const { adapter, fixture, layer, context, dataDir } = await open();
+    const [key] = fixture.keys as [ReadGraphKey];
+    const readGraph = readGraphIri(key);
+    useReadGraphMarkJournal(layer.runtime, dataDir);
+    const built = (await buildReadGraph(context, key)).row!;
+    adapter.onUpdate = (sparql) => { if (sparql.includes('"dirty"')) throw new Error('connection reset'); };
+    // The job reads the row, then its mark fails, then the read of what it left fails too.
+    let reads = 0;
+    const query = adapter.query.bind(adapter);
+    adapter.query = async (sparql, options) => {
+      if (sparql === readGraphStateRowQuery(readGraph) && (reads += 1) === 2) throw new Error('read timed out');
+      return query(sparql, options);
+    };
+    await expect(markReadGraphDirty(context, readGraph)).rejects.toThrow('read timed out');
+    expect(layer.runtime.mirror.get(readGraph)?.state).toBe('dirty');
+    expect((await readStoredReadGraphRow(adapter, readGraph)).row).toEqual(built);
+    expect(readUnstoredReadGraphMarks(dataDir)).toEqual(new Map([[readGraph, new Set([built.generation])]]));
   });
 
   it('reads the row back after a request that failed, and keeps a change that landed', async () => {

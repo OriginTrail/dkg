@@ -5,7 +5,7 @@ import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 import { ListContextGraphsBudgetExceeded } from '@origintrail-official/dkg-agent/context-graph-list-budget-error';
 import type { ServerResponse } from 'node:http';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   StoreOperationTimeoutError,
   StoreSchedulerBusyError,
@@ -15,6 +15,7 @@ import {
   respondIfStoreUnavailable,
   respondWithDaemonError,
 } from '../src/daemon/http-utils.js';
+import { createStoreInternalLimitDiagnostics, isStoreInternalLimit } from '../src/daemon/store-internal-limit.js';
 
 function mockResponse(): ServerResponse & {
   headers: Record<string, string>;
@@ -207,6 +208,79 @@ describe('respondIfStoreUnavailable', () => {
       outcome: 'completed',
     })).toBeNull();
     expect(res.writableEnded).toBe(false);
+  });
+});
+
+describe('node-side store limit (STORE_INTERNAL_LIMIT)', () => {
+  const internalLimit = (fields: Record<string, unknown> = {}) => Object.assign(
+    new Error('Graph catalog exceeds the node-side limit'),
+    { code: 'STORE_INTERNAL_LIMIT', limitName: 'STORE_GRAPH_CATALOG_MAX_BYTES', limitBytes: 1024, actualBytes: 2048, ...fields },
+  );
+
+  it('answers a retryable 503 that names the limit, for an error and for its structural copy', () => {
+    for (const error of [internalLimit(), { ...internalLimit() }]) {
+      const res = mockResponse();
+      expect(respondIfStoreUnavailable(res, error)).toBe('indeterminate');
+      expect(res.statusCode).toBe(503);
+      expect(res.headers['Retry-After']).toBe('1');
+      expect(JSON.parse(res.body ?? '{}')).toEqual({
+        error: 'The node reached one of its internal store limits; retry later',
+        code: 'STORE_INTERNAL_LIMIT',
+        retryable: true,
+        outcome: 'indeterminate',
+        limitName: 'STORE_GRAPH_CATALOG_MAX_BYTES',
+        limitBytes: 1024,
+        actualBytes: 2048,
+        hint: 'A node-side condition, not the size of this request. The node operator can see it in the node log.',
+      });
+    }
+  });
+
+  it('drops malformed limit fields instead of echoing them', () => {
+    const throwing = internalLimit({ limitBytes: -1, actualBytes: 1.5 });
+    Object.defineProperty(throwing, 'limitName', { get() { throw new Error('getter failed'); } });
+    for (const error of [internalLimit({ limitName: 'two words; <b>', limitBytes: '1024', actualBytes: Number.NaN }), throwing]) {
+      const classified = classifyStoreUnavailable(error);
+      expect(classified?.body).toMatchObject({ code: 'STORE_INTERNAL_LIMIT', limitName: 'unknown' });
+      expect(classified?.body).not.toHaveProperty('limitBytes');
+      expect(classified?.body).not.toHaveProperty('actualBytes');
+    }
+  });
+
+  it('is a 503 at the top-level route boundary, not a 500', () => {
+    const res = mockResponse();
+    respondWithDaemonError(res, internalLimit());
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body ?? '{}')).toMatchObject({ code: 'STORE_INTERNAL_LIMIT', retryable: true });
+  });
+
+  it('leaves a caller-size error and a bare lookalike message to their own mappings', () => {
+    expect(classifyStoreUnavailable(Object.assign(new Error('too large'), {
+      code: 'STORE_RESPONSE_TOO_LARGE', maxBytes: 1, actualBytes: 2,
+    }))).toBeNull();
+    expect(classifyStoreUnavailable(new Error('STORE_INTERNAL_LIMIT'))).toBeNull();
+    expect(isStoreInternalLimit(null)).toBe(false);
+    expect(isStoreInternalLimit(new Proxy({}, { get() { throw new Error('trap'); } }))).toBe(false);
+  });
+
+  it('logs one warning per limit per window, naming the limit, and counts the repeats in between', () => {
+    let now = 0;
+    const logger = { warn: vi.fn(), info: vi.fn() };
+    const record = createStoreInternalLimitDiagnostics({ logger, now: () => now, intervalMs: 1_000 });
+    const catalog = { limitName: 'STORE_GRAPH_CATALOG_MAX_BYTES', limitBytes: 1024, actualBytes: 2048 };
+    record(catalog);
+    record(catalog);
+    record({ limitName: 'OTHER_LIMIT' });
+    now = 1_000;
+    record(catalog);
+    expect(logger.warn.mock.calls.map(([, message]) => message)).toEqual([
+      'Node-side store limit reached, answered 503 STORE_INTERNAL_LIMIT: limit=STORE_GRAPH_CATALOG_MAX_BYTES limitBytes=1024 actualBytes=2048',
+      'Node-side store limit reached, answered 503 STORE_INTERNAL_LIMIT: limit=OTHER_LIMIT',
+      'Node-side store limit reached, answered 503 STORE_INTERNAL_LIMIT: limit=STORE_GRAPH_CATALOG_MAX_BYTES limitBytes=1024 actualBytes=2048 (1 more since the last warning)',
+    ]);
+    expect(logger.info.mock.calls.map(([, message]) => message)).toEqual([
+      'Node-side store limit reached, answered 503 STORE_INTERNAL_LIMIT (repeat): limit=STORE_GRAPH_CATALOG_MAX_BYTES limitBytes=1024 actualBytes=2048',
+    ]);
   });
 });
 
