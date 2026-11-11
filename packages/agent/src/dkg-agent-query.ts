@@ -12,6 +12,7 @@ import { queryWithPublicSnapshotTrust } from './public-snapshot-evidence.js';
 
 import { sharedMemoryAdmissionError, sharedMemoryAdmissionFailsClosed } from './swm-read-admission.js';
 import { deniedResult } from './query-denied-result.js';
+import { denyUnheldContextGraphRead } from './unheld-context-graph-read.js';
 import { resolveCallerDraftAccess, resolveWorkingMemoryIdentityAliases } from './working-memory-identity.js';
 import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { resolveRfc64PrivateReadRoster } from './rfc64/private-read-roster-v1.js';
@@ -49,7 +50,6 @@ import {
 
 
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
-  validateContextGraphId,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
   isTrustLevelQuad,
@@ -500,7 +500,10 @@ export class QueryMethods extends DKGAgentBase {
     let scopedReadAuthority: ContextGraphReadAuthorityDecision | undefined;
     if (opts.contextGraphId) {
       const scopedContextGraphId = opts.contextGraphId;
-      scopedReadAuthority = await resolveScopedContextGraphQueryReadAuthority({
+      // A context graph this node holds nothing of is refused as a private one
+      // the caller may not read, before the engine or any partition is read.
+      // A replica that has local data or join intent keeps its own answer.
+      scopedReadAuthority = await denyUnheldContextGraphRead(this, scopedContextGraphId, await resolveScopedContextGraphQueryReadAuthority({
         contextGraphId: scopedContextGraphId,
         view: opts.view,
         callerAgentAddress: callerAgentAddressStr,
@@ -509,27 +512,8 @@ export class QueryMethods extends DKGAgentBase {
         resolveAuthority: (id, options) => this.resolveContextGraphReadAuthority(id, options),
         isLocalFirstUnregistered: (id) => this.isLocalFirstUnregisteredContextGraph(id),
         readCurrentBinding: (id) => this.subscribedContextGraphs.get(id),
-      });
+      }), opts);
       if (scopedReadAuthority.outcome === 'unavailable') {
-        // An exact finalized name absence or a transient authority-circuit
-        // failure cannot expose data when this node has no local declaration,
-        // subscription, or graph. Return an empty scoped result without
-        // touching the store's graph partitions. A replica that has local
-        // data or join intent remains on the retryable authority path.
-        // The id comes straight from the caller: a malformed one never gets
-        // this answer, so the reply cannot depend on the existence check.
-        if (
-          opts.accessDenied !== 'error' && (
-            scopedReadAuthority.reason === 'finalized-name-absence-unaccepted'
-            || scopedReadAuthority.reason === 'authority-circuit-open'
-          )
-          && validateContextGraphId(scopedContextGraphId).valid
-          && !isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(scopedContextGraphId))
-          && !this.localContextGraphProvenance.hasLocalCreate(scopedContextGraphId)
-          && !await this.contextGraphExists(scopedContextGraphId, { signal: opts.signal })
-        ) {
-          return deniedResult(sparql, opts.accessDenied);
-        }
         throw new ContextGraphReadAuthorityUnavailableError(
           opts.contextGraphId,
           scopedReadAuthority,
@@ -692,6 +676,12 @@ export class QueryMethods extends DKGAgentBase {
     }));
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
+  }
+
+  /** Whether this node keeps an admitted subscription or a local create for a context graph; neither reads the store. */
+  keepsContextGraphLocally(this: DKGAgent, contextGraphId: string): boolean {
+    return isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(contextGraphId))
+      || this.localContextGraphProvenance.hasLocalCreate(contextGraphId);
   }
 
   isAgentAddressAllowed(this: DKGAgent, agentAddress: string | undefined, agentGateAddresses: readonly string[]): boolean {
