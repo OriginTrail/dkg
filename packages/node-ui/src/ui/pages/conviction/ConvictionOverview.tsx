@@ -94,9 +94,9 @@ export function ConvictionOverview() {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [approve, setApprove] = useState<{ accountId: string; mode: 'self' | 'sponsor'; selfCoverage?: boolean } | null>(null);
-  const [sponsoredOpen, setSponsoredOpen] = useState(false);
-  // Set when "Already have a PCA?" opens Get added with an ID to check right away.
-  const [sponsoredCheckId, setSponsoredCheckId] = useState<string | null>(null);
+  // Get added: null while closed. "Already have a PCA?" opens it with an ID to check right
+  // away; a closed dialog can't keep a stale ID.
+  const [sponsored, setSponsored] = useState<{ initialAccountId?: string } | null>(null);
 
   const enhancedAccounts = useMemo<PcaListAccount[]>(
     () =>
@@ -143,7 +143,7 @@ export function ConvictionOverview() {
           type="button"
           className={`v10-pca-card-btn ds-btn${role === 'core' ? '' : ' primary ds-primary'}`}
           aria-label="Get added to a PCA"
-          onClick={() => setSponsoredOpen(true)}
+          onClick={() => setSponsored({})}
         >
           Get added
         </button>
@@ -224,7 +224,7 @@ export function ConvictionOverview() {
               {showRetry && <RetryButton onClick={() => refresh()} />}
               {hasCoveredWallet && (
                 <>
-                  <button type="button" className="v10-pca-card-btn ds-btn ds-sm" aria-label="Get added to a PCA" onClick={() => setSponsoredOpen(true)}>
+                  <button type="button" className="v10-pca-card-btn ds-btn ds-sm" aria-label="Get added to a PCA" onClick={() => setSponsored({})}>
                     Get added
                   </button>
                   <button type="button" className="v10-pca-card-btn ds-btn ds-sm" data-testid="pca-create-btn" onClick={() => setCreateOpen(true)}>
@@ -267,7 +267,7 @@ export function ConvictionOverview() {
         onRemove={untrackAccount}
         onRetry={() => refresh()}
         onAddFound={trackAccount}
-        onCheckId={(id) => { setSponsoredCheckId(id); setSponsoredOpen(true); }}
+        onCheckId={(id) => setSponsored({ initialAccountId: id })}
         readingWallet={connectedWalletPcas.loading && connectedWallet ? connectedWallet : null}
       />
 
@@ -280,7 +280,7 @@ export function ConvictionOverview() {
           onClose={() => { setCreateOpen(false); refresh(); }}
           onApproveOwnWallets={(id) => { setCreateOpen(false); setApprove({ accountId: id, mode: 'self', selfCoverage: true }); }}
           onManage={(id) => { setCreateOpen(false); onManage(id); }}
-          onGetSponsored={() => { setCreateOpen(false); setSponsoredOpen(true); }}
+          onGetSponsored={() => { setCreateOpen(false); setSponsored({}); }}
         />
       )}
       {approve && (
@@ -291,10 +291,10 @@ export function ConvictionOverview() {
           onClose={() => { setApprove(null); refresh(); }}
         />
       )}
-      {sponsoredOpen && (
+      {sponsored && (
         <GetSponsoredPanel
-          initialAccountId={sponsoredCheckId ?? undefined}
-          onClose={() => { setSponsoredOpen(false); setSponsoredCheckId(null); refresh(); }}
+          initialAccountId={sponsored.initialAccountId}
+          onClose={() => { setSponsored(null); refresh(); }}
         />
       )}
     </div>
