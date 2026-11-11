@@ -30,6 +30,7 @@ import { noteReadGraphPartitions } from '../read-graph-partition-marker.js';
 import { noteStoreMayHoldReadGraphPartitions } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { readGraphMembership, type ReadGraphRegistrySnapshot, type WorkingMemoryIdentityRule } from './membership.js';
+import { RECORDED_REGISTRIES as RECORDED } from './recorded-registries.js';
 import { sameRegistry } from './registry-recognition.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
 
@@ -89,7 +90,11 @@ export function readGraphMembershipDiffers(
   return JSON.stringify(readGraphMembership(key, before, identity)) !== JSON.stringify(readGraphMembership(key, after, identity));
 }
 
-const RECORDED = new WeakMap<ReadGraphBackendRuntime, Map<string, ReadGraphRegistrySnapshot>>();
+
+/** Forget what the stored records hold, so each is written again: the store may hold older ones. */
+export function forgetReadGraphRegistryRecords(runtime: ReadGraphBackendRuntime): void {
+  RECORDED.delete(runtime);
+}
 
 /** Note what a context graph's stored record holds, as start-up read or wrote it. */
 export function noteReadGraphRegistryRecord(runtime: ReadGraphBackendRuntime, snapshot: ReadGraphRegistrySnapshot): void {

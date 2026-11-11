@@ -37,6 +37,7 @@ import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
 import { clearUnstoredReadGraphMarks, readUnstoredReadGraphMarks, useReadGraphMarkJournal } from './mark-journal.js';
+import { syncReadGraphRuntimeWithRecovery } from './recovery.js';
 import { readGraphLayerOf } from './read-graph-store.js';
 import { keepsAnyReadGraph, readGraphModeOf } from './settings.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry, type ReadGraphRegistryFact } from './registry-recognition.js';
@@ -100,6 +101,8 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
   const versions = options.versions ?? CURRENT_READ_GRAPH_VERSIONS;
   const queryOptions: QueryOptions = { priority: 'background', source: 'storage.readGraphStartup', ...(options.signal ? { signal: options.signal } : {}) };
   const { mirror, registries } = layer.runtime;
+  // The backend's recovery generation now is the one later restarts are told by.
+  syncReadGraphRuntimeWithRecovery(store, layer.runtime);
   for (const row of mirror.rows()) mirror.remove(row.readGraph);
 
   const found = await stateRows(target, queryOptions);
