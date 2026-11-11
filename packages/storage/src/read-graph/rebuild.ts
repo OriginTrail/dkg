@@ -46,6 +46,7 @@ import { missingReadGraphMethods } from './adapter-contract.js';
 import { matchesGraphNameTest, readGraphMembership, type GraphNameTest } from './membership.js';
 import { readGraphLayerOf } from './read-graph-store.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry } from './registry-recognition.js';
+import { recordReadGraphRegistry } from './registry-record.js';
 import { ReadGraphLocks, type InMemoryReadGraphStateMirror, type ReadGraphBackendRuntime } from './runtime.js';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
@@ -284,8 +285,9 @@ const SLOTS = new WeakMap<ReadGraphBackendRuntime, ReadGraphLocks>();
 
 /**
  * Run heavy background work on a backend's read graphs one job at a time, in
- * the order asked. Build, repair and removal take this slot themselves;
- * checks take it around each pass.
+ * the order asked. Build, repair and removal take this slot themselves, and
+ * the scheduled checks and the checks run on request take it for each read
+ * graph they check.
  */
 export function withReadGraphBackgroundSlot<T>(runtime: ReadGraphBackendRuntime, work: () => Promise<T>): Promise<T> {
   let slot = SLOTS.get(runtime);
@@ -305,26 +307,34 @@ export function withReadGraphBackgroundSlot<T>(runtime: ReadGraphBackendRuntime,
  * that change, and they are read again. When the cache held another snapshot,
  * every one of those read graphs is marked dirty before the new one is
  * installed: the layer maintained it under the old membership, and nothing
- * may be built or served from the two mixed. Returns whether the cached
- * snapshot changed.
+ * may be built or served from the two mixed. The registry it ends with is
+ * recorded (`./registry-record.ts`) before it returns, so nothing is built
+ * under a registry that a start-up would not find recorded. Returns whether
+ * the cached snapshot changed.
  */
 export async function refreshReadGraphRegistry(context: ReadGraphJobContext, contextGraphId: string): Promise<boolean> {
   const layer = readGraphLayerOf(context.store);
   if (!layer) throw new ReadGraphJobError('This store has no read-graph layer');
   const runtime = layer.runtime;
+  const target = readGraphPartitionMaintenanceStore(context.store);
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const version = runtime.registries.version(contextGraphId);
-    const facts = await readReadGraphRegistryFacts(readGraphPartitionMaintenanceStore(context.store), contextGraphId, jobOptions(context));
+    const facts = await readReadGraphRegistryFacts(target, contextGraphId, jobOptions(context));
     const fresh = registrySnapshotOfFacts(contextGraphId, facts);
     const cached = runtime.registries.get(contextGraphId);
     const changed = cached !== undefined && !sameRegistry(cached, fresh);
-    if (cached !== undefined && !changed && runtime.registries.facts(contextGraphId) !== undefined) return false;
+    if (cached !== undefined && !changed && runtime.registries.facts(contextGraphId) !== undefined) {
+      await recordReadGraphRegistry(target, runtime, fresh, jobOptions(context));
+      return false;
+    }
     const affected = runtime.mirror.rows().map((row) => row.readGraph)
       .filter((readGraph) => parseReadGraphIri(readGraph)?.scope.contextGraphId === contextGraphId);
     const installed = await runtime.locks.withLocks(affected, async () => {
       if (runtime.registries.version(contextGraphId) !== version) return false;
       if (changed) for (const readGraph of affected) await new ReadGraphJob(context, readGraph, 'mark').markDirtyHeld();
       runtime.registries.set(fresh, facts);
+      // After the marks: every ready row of the context graph follows this registry.
+      await recordReadGraphRegistry(target, runtime, fresh, jobOptions(context));
       return true;
     });
     if (installed) return changed;
@@ -420,7 +430,10 @@ class ReadGraphJob {
    * One checked change of the row, under the lock the caller holds, planned
    * from the stored row `from`. Returns the stored row read back afterwards,
    * which the mirror then holds. A request that failed but whose change reads
-   * back counts as done.
+   * back counts as done. One that failed and did not land throws; if it would
+   * have taken the read graph out of service, the mirror stays out of service
+   * even where the stored row still says ready: that row shows only that the
+   * change did not land, not that the contents are fit to serve.
    */
   async transition(from: ReadGraphStateRow | undefined, change: ReadGraphTransition): Promise<ReadGraphStateRow | undefined> {
     const to = nextReadGraphState(from, change);
@@ -433,8 +446,11 @@ class ReadGraphJob {
     }
     const stored = await this.stored();
     if (stored.damaged) throw new ReadGraphJobError(`The state row of ${this.readGraph} is damaged`);
+    if (failure && !sameRow(stored.row, to)) {
+      if (to?.state === 'ready' || stored.row?.state !== 'ready') setMirror(this.runtime.mirror, this.readGraph, stored.row);
+      throw failure.error;
+    }
     setMirror(this.runtime.mirror, this.readGraph, stored.row);
-    if (failure && !sameRow(stored.row, to)) throw failure.error;
     return stored.row;
   }
 

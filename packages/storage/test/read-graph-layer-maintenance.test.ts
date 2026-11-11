@@ -107,6 +107,39 @@ describe('read-graph layer on embedded Oxigraph', () => {
     expect((await stored())[wholeSwm]).toBe('ready@1');
   });
 
+  it('stores a dirty mark that failed at the next unknown outcome, although the mirror already says dirty', async () => {
+    class Unsure extends PlanningOxigraphStore {
+      override readonly readGraphCapabilities = { ...new PlanningOxigraphStore().readGraphCapabilities, serialUpdates: false };
+      refusing = false;
+      override async delete(): Promise<void> {
+        throw new Error('connection reset');
+      }
+      override async update(sparql: string, options?: Parameters<PlanningOxigraphStore['update']>[1]): Promise<void> {
+        if (this.refusing && options?.source === 'storage.readGraphDirtyMark') throw new Error('connection reset');
+        return super.update(sparql, options);
+      }
+    }
+    const unsure = new Unsure();
+    const { adapter, fixture, layer, store } = await layered(unsure);
+    const { wholeVm } = fixture.readGraphs;
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(wholeVm)));
+    const storedState = async () => {
+      const result = await adapter.query(readGraphStateRowsQuery());
+      const row = parseReadGraphStateRows(result.type === 'bindings' ? result.bindings : []).rows.find((found) => found.readGraph === wholeVm);
+      return `${row?.state}@${row?.generation}`;
+    };
+    // The first unknown outcome marks the mirror, and its mark does not reach the store.
+    unsure.refusing = true;
+    await expect(store.delete([q('urn:s:3', '"v3"', fixture.graphs[3]!)])).rejects.toThrow('connection reset');
+    expect(layer.runtime.mirror.get(wholeVm)).toMatchObject({ state: 'dirty', generation: 2 });
+    expect(await storedState()).toBe('ready@1');
+    // The next one sends the mark again from the stored row, and the mirror does not advance a second time.
+    unsure.refusing = false;
+    await expect(store.delete([q('urn:s:3', '"v3"', fixture.graphs[3]!)])).rejects.toThrow('connection reset');
+    expect(layer.runtime.mirror.get(wholeVm)).toMatchObject({ state: 'dirty', generation: 2 });
+    expect(await storedState()).toBe('dirty@2');
+  });
+
   it('hands the adapter one plan, locked in code-point order, and restates inserted quads in the same call', async () => {
     const { adapter, fixture, store } = await layered();
     const { wholeVm, codeVm } = fixture.readGraphs;
