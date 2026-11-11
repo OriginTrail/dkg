@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { BlazegraphStore } from '../src/adapters/blazegraph.js';
+import { nonEmptyNamedGraphEnumerationPattern } from '../src/adapters/graph-enumeration-query.js';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
-import { checkReadGraph } from '../src/read-graph/check.js';
+import { checkReadGraph, memberGraphListingQuery } from '../src/read-graph/check.js';
 import { ReadGraphCheckSchedule, startReadGraphChecks } from '../src/read-graph/check-schedule.js';
 import { readGraphStateCompareAndSet } from '../src/read-graph/state.js';
 import type { QueryOptions, QueryResult } from '../src/triple-store.js';
@@ -42,6 +44,16 @@ const isMissingProbe = (sparql: string) => sparql.startsWith('ASK {') && sparql.
 const isMemberEnumeration = (sparql: string) => sparql.startsWith('SELECT ?g WHERE { GRAPH ?g {}');
 
 describe('read-graph checks under concurrent writes', () => {
+  it('lists member graphs in the form the adapter lists its graphs with, so the store narrows the list', () => {
+    const root = 'did:dkg:context-graph:listing';
+    const under = `FILTER(STRSTARTS(STR(?g), "${root}"))`;
+    expect(memberGraphListingQuery(new PlanningOxigraphStore(), root)).toBe(`SELECT ?g WHERE { ${nonEmptyNamedGraphEnumerationPattern('g')} ${under} }`);
+    const blazegraph = new BlazegraphStore('http://fixture.invalid/sparql');
+    expect(memberGraphListingQuery(blazegraph, root)).toBe(`SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } ${under} }`);
+    // Through a decorator, as below the read-graph layer.
+    expect(memberGraphListingQuery({ innerStore: blazegraph } as unknown as OxigraphStore, root)).toBe(memberGraphListingQuery(blazegraph, root));
+  });
+
   it('lists member graphs from the store itself, past a graph list an adapter cached', async () => {
     const { adapter, fixture, store } = await hooked();
     const { wholeVm } = fixture.readGraphs;
