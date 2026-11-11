@@ -62,7 +62,10 @@ describe('the agent', () => {
 
   it('plans merged view queries from its store\'s read graphs', async () => {
     const store = layered({ modes: { contextGraphs: { served: { default: 'serve' }, built: { default: 'build' } } } });
-    agent = await DKGAgent.create({ name: 'ReadGraphSource', chainAdapter: new MockChainAdapter(), store });
+    agent = await DKGAgent.create({
+      name: 'ReadGraphSource', listenHost: '127.0.0.1', listenPort: 0, chainAdapter: new MockChainAdapter(), nodeRole: 'edge', store,
+    });
+    await agent.start();
     const merged = (contextGraphId: string) => agent!.query('SELECT ?s WHERE { ?s ?p ?o }', {
       contextGraphId, view: 'verifiable-memory', semantics: 'merged',
     });
