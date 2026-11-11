@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { checkReadGraph } from '../src/read-graph/check.js';
 import { ReadGraphCheckSchedule, startReadGraphChecks } from '../src/read-graph/check-schedule.js';
-import type { QueryOptions, QueryResult, TripleStore } from '../src/triple-store.js';
+import type { QueryOptions, QueryResult } from '../src/triple-store.js';
 import { captureMetrics, readGraphCheckConformance } from './helpers/read-graph-check-conformance.js';
 import { layerFixture, layeredStore, q } from './helpers/read-graph-layer-conformance.js';
 import { PlanningOxigraphStore } from './helpers/read-graph-planning-store.js';

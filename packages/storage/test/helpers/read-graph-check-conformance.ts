@@ -82,8 +82,9 @@ export function readGraphCheckConformance(backend: 'oxigraph' | 'blazegraph') {
     }, 120_000);
 
     afterAll(async () => {
-      if (handles) await manager!.release(handles);
-    }, 120_000);
+      await shared?.adapter.close();
+      if (manager && handles) await manager.disposeAll(handles);
+    }, 60_000);
 
     it('finds every read graph of a maintained store consistent, in both modes', async () => {
       const opened = await open();
