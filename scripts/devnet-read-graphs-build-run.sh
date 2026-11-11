@@ -491,6 +491,9 @@ cleanup() {
   trap '' INT TERM
   local n changed w
   for w in $(cat "$RESULTS/gate/watchers" 2>/dev/null); do kill "$w" 2>/dev/null; done
+  # A kill drill interrupted mid-run leaves its writer: stop it and its requests before any node is restored.
+  w="$(cat "$RESULTS/drill-kill.writer" 2>/dev/null)"
+  [ -n "$w" ] && stop_writer "$w"
   changed="$(printf '%s\n' $CHANGED | sort -nu | tr '\n' ' ')"
   if [ -n "${changed// /}" ] && [ "$KEEP" != 1 ]; then
     say "putting back the config.json of nodes ${changed% }, restarting them, and dropping read graphs their settings do not keep"
@@ -663,17 +666,18 @@ gate_verdict() {
   fi
 }
 
-# watch_mismatches <n> <out> <lost> <since>: in the background, append to <out> every read-graph check mismatch line
-# that node <n> logs from now on. The daemon rotates daemon.log by renaming it to daemon.log.1: the watcher keeps each
+# watch_mismatches <n> <out> <lost> <since> <start>: in the background, append to <out> every read-graph check mismatch
+# line that node <n> logs after <start> ("<size> <identity>" of its daemon.log, from log_position, taken before the gate
+# starts, so a line written before this process opens the file is not missed). The daemon rotates daemon.log by renaming it to daemon.log.1: the watcher keeps each
 # file open, reads it once more when it sees the rename, and goes on reading it until it has stayed unchanged for four
 # polls, so a line written just before (or as) the file was renamed is read. When the daemon cannot rename, it trims
 # the live file in place, and lines written since the last read may be gone: that is noted in <lost>, and the trimmed
 # file is read again from its start (lines stamped before <since>, the log's local "YYYY-MM-DD HH:MM:SS", skipped).
 # Prints the PID.
 watch_mismatches() {
-  LOG="$DEVNET_DIR/node$1/daemon.log" OUT="$2" LOST="$3" SINCE="$4" node -e '
+  LOG="$DEVNET_DIR/node$1/daemon.log" OUT="$2" LOST="$3" SINCE="$4" START="$5" node -e '
     const fs = require("fs");
-    const { LOG, OUT, LOST, SINCE } = process.env;
+    const { LOG, OUT, LOST, SINCE, START } = process.env;
     const stamped = /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d/;
     const keep = (line) => line.includes("[read-graph-check] Read graph <") && !(stamped.test(line) && line.slice(0, 19) < SINCE);
     const emit = (lines) => { const hits = lines.filter(keep); if (hits.length > 0) fs.appendFileSync(OUT, hits.join("\n") + "\n"); };
@@ -697,8 +701,19 @@ watch_mismatches() {
       const lines = (file.rest + buffer.toString("utf8")).split("\n"); file.rest = lines.pop(); emit(lines);
       return true;
     };
-    let live = openFile(true);
+    // Start where the log stood when the gate was about to start (START, "<size> <identity>"): what was written since,
+    // also before this process opened the file, is read. If the file was renamed in between, its rest is read too.
+    const [startSize, startId] = (START ?? "0 none").split(" ");
+    let live = openFile(false);
     let rotated = [];
+    if (live && live.id === startId) live.offset = Math.min(Number(startSize) || 0, fs.fstatSync(live.fd).size);
+    else if (startId !== "none") {
+      try {
+        const fd = fs.openSync(`${LOG}.1`, "r"), stat = fs.fstatSync(fd);
+        if (identity(stat) === startId) rotated.push({ fd, id: startId, offset: Math.min(Number(startSize) || 0, stat.size), rest: "", quiet: 0 });
+        else fs.closeSync(fd);
+      } catch { /* no rotated file */ }
+    }
     const tick = () => {
       rotated = rotated.filter((file) => {
         file.quiet = drain(file) ? 0 : file.quiet + 1;
@@ -736,6 +751,12 @@ gate_mismatches() {
   done
 }
 
+# log_position <n>: "<size> <device:inode>" of node <n>'s daemon.log now, or "0 none" when there is none.
+log_position() {
+  node -e 'try { const s = require("fs").statSync(process.argv[1]); console.log(`${s.size} ${s.dev}:${s.ino}`); } catch { console.log("0 none"); }' \
+    "$DEVNET_DIR/node$1/daemon.log"
+}
+
 phase_gate() {
   local n w watchers="" since
   mkdir -p "$RESULTS/gate"
@@ -744,7 +765,7 @@ phase_gate() {
   since="$(date '+%Y-%m-%d %H:%M:%S')"
   for n in $NODES; do
     : > "$RESULTS/gate/mismatches.node$n"; : > "$RESULTS/gate/lost.node$n"
-    w="$(watch_mismatches "$n" "$RESULTS/gate/mismatches.node$n" "$RESULTS/gate/lost.node$n" "$since")"
+    w="$(watch_mismatches "$n" "$RESULTS/gate/mismatches.node$n" "$RESULTS/gate/lost.node$n" "$since" "$(log_position "$n")")"
     echo "$w" > "$RESULTS/gate/watcher.node$n"; watchers="$watchers $w"
   done
   echo "$watchers" > "$RESULTS/gate/watchers"
@@ -851,6 +872,18 @@ drill_restart_during_rebuild() {
   drill_end drill-restart "$n" "$started" "$renewed shared-layer read graphs the restart caught unfinished got a new generation and were rebuilt"
 }
 
+# kill_tree <pid>: stop a process and every process it started, by PID. The tree is listed before anything is stopped,
+# as a stopped parent's children are handed to another parent.
+kill_tree() {
+  local all="$1" next="$1" p
+  while [ -n "$next" ]; do
+    next="$(ps -axo pid=,ppid= | awk -v list=" $next " 'index(list, " " $2 " ") { printf "%s ", $1 }')"
+    all="$all $next"
+  done
+  for p in $all; do kill "$p" 2>/dev/null; done
+}
+# stop_writer <pid>: stop the kill drill's writer and the requests it has in flight, and reap it.
+stop_writer() { kill_tree "$1"; wait "$1" 2>/dev/null; rm -f "$RESULTS/drill-kill.writer"; }
 # acked_count <file>: lines in a file of acknowledged writes.
 acked_count() { wc -l < "$1" | tr -d ' '; }
 # pid_alive <pid>: the process exists and is not a zombie.
@@ -912,6 +945,7 @@ drill_kill_during_write() {
     done
   ) &
   writer=$!
+  echo "$writer" > "$RESULTS/drill-kill.writer"
   # The crash must land on a working-memory write the worker holds: once three were acknowledged, kill the daemon worker
   # while one is in flight, then require evidence that the worker held it. The send and the kill race, so up to three
   # crashes are tried; each one is a full crash with its own recovery. What this proves is that the worker died holding
@@ -935,7 +969,7 @@ drill_kill_during_write() {
       sleep 0.1
     done
     if [ -z "$inflight_write" ]; then
-      kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+      stop_writer "$writer"
       record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "no working-memory write was seen in flight after three were acknowledged ($(acked_count "$acked") acknowledged; crash $attempt), so no kill landed during one"
       return
     fi
@@ -946,7 +980,7 @@ drill_kill_during_write() {
     # The evidence must come after this line, taken before the kill: an outcome the kill caused can be logged at once.
     kill_line="$(wc -l < "$answers" | tr -d ' ')"
     if [ -z "$pid" ] || ! kill -9 "$pid" 2>/dev/null; then
-      kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+      stop_writer "$writer"
       record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "SIGKILL could not be sent to node$n's daemon worker (PID ${pid:-none}), so no crash happened"; return
     fi
     echo "killed during write $inflight_write" >> "$answers"
@@ -963,18 +997,18 @@ drill_kill_during_write() {
     [ -n "$overlap" ] || note "drill-kill: crash $attempt did not overlap write $inflight_write ($(awk -v w="$inflight_write" -v k="$kill_line" 'NR > k && $1 == "write" && $2 == w { $1 = $2 = ""; print; exit }' "$answers" | sed 's/^ *//'))"
     for i in $(seq 1 40); do pid_alive "$pid" || break; sleep 0.5; done
     if pid_alive "$pid"; then
-      kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+      stop_writer "$writer"
       record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "node$n's daemon worker (PID $pid) was still running 20 s after SIGKILL"; return
     fi
     # The supervisor starts a new worker; restart the node if it does not.
-    wait_up "$n" 120 || restart_node "$n" || { kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null; record drill-kill FAIL "$(( $(now) - started ))" "node$n did not come back after the kill"; return; }
+    wait_up "$n" 120 || restart_node "$n" || { stop_writer "$writer"; record drill-kill FAIL "$(( $(now) - started ))" "node$n did not come back after the kill"; return; }
     new_pid="$(daemon_worker_pid "$n")"
     if [ -z "$new_pid" ] || [ "$new_pid" = "$pid" ]; then
-      kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+      stop_writer "$writer"
       record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "node$n answers after the kill, but its daemon.pid names no new daemon worker (PID $pid was killed)"; return
     fi
   done
-  kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+  stop_writer "$writer"
   if [ -z "$overlap" ]; then
     record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "none of $attempt crashes landed on a working-memory write the worker held (drill-kill.answers), so the kill did not overlap a write"; return
   fi
