@@ -1,13 +1,20 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
   GraphSetIndexStore,
   OxigraphStore,
   STORE_GRAPH_CATALOG_MAX_BYTES_ENV,
+  StoreResponseTooLargeError,
   withDefaultStoreWorkPriority,
   type TripleStore,
   type StorePressureSnapshot,
 } from '@origintrail-official/dkg-storage';
-import { QueryMaterializationBudget, DKGQueryEngine } from '@origintrail-official/dkg-query';
+import {
+  DKGQueryEngine,
+  QUERY_CATALOG_LIMIT_NAME,
+  QUERY_CATALOG_MAX_RESPONSE_BYTES,
+  QueryMaterializationBudget,
+} from '@origintrail-official/dkg-query';
 import {
   canReadUnscopedQuery,
   type UnscopedQueryAdmissionDependencies,
@@ -99,30 +106,37 @@ describe('unscoped query admission', () => {
     }
   });
 
-  it('charges policy discovery and passes the same response cap to graph inventory', async () => {
+  it('reads policy discovery and the owner inventory under the node limits, outside any caller budget', async () => {
     const canRead = vi.fn(async () => true);
     const deps = admissionDependencies(canRead, []);
-    deps.store.query.mockResolvedValue({
-      type: 'bindings',
-      bindings: [{ cg: `did:dkg:context-graph:${'private'.repeat(32)}` }],
+    const owner = 'private'.repeat(32);
+    deps.store.query.mockResolvedValue({ type: 'bindings', bindings: [{ cg: `did:dkg:context-graph:${owner}` }] });
+    await expect(canReadUnscopedQuery(deps)).resolves.toBe(true);
+    expect(deps.store.query.mock.calls[0]?.[1]).toMatchObject({ maxResponseBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES });
+    expect(deps.store.listGraphsByPrefix.mock.calls[0]?.[1])
+      .toMatchObject({ maxResponseBytes: DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES });
+    expect(canRead).toHaveBeenCalledWith(owner, expect.any(AbortSignal));
+  });
+
+  it('answers an access-policy read over its node limit with STORE_INTERNAL_LIMIT', async () => {
+    const canRead = vi.fn(async () => true);
+    const deps = admissionDependencies(canRead, []);
+    deps.store.query.mockRejectedValue(
+      new StoreResponseTooLargeError(QUERY_CATALOG_MAX_RESPONSE_BYTES, QUERY_CATALOG_MAX_RESPONSE_BYTES + 1));
+    await expect(canReadUnscopedQuery(deps)).rejects.toMatchObject({
+      code: 'STORE_INTERNAL_LIMIT', limitName: QUERY_CATALOG_LIMIT_NAME, limitBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES,
     });
-    await expect(canReadUnscopedQuery(deps, {
-      maxResponseBytes: 128,
-      materializationBudget: new QueryMaterializationBudget(128),
-    })).rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE' });
-    expect(deps.store.query.mock.calls[0]?.[1]).toMatchObject({ maxResponseBytes: 128 });
-    expect(deps.store.listGraphsByPrefix.mock.calls[0]?.[1]).toMatchObject({ maxResponseBytes: 128 });
     expect(canRead).not.toHaveBeenCalled();
   });
 
-  it.each([true, false])('charges complete inventory once before owner deduplication (prefix API: %s)', async (withPrefix) => {
+  it.each([true, false])('charges the caller for its result only, whatever the owner inventory (prefix API: %s)', async (withPrefix) => {
     const owner = 'c'.repeat(200);
     const inventory = Array.from({ length: 1000 }, (_, i) =>
       `did:dkg:context-graph:${owner}/_verifiable_memory/did:dkg:31337/0x${'1'.repeat(40)}/${i + 1}`);
     const policy = { type: 'bindings' as const, bindings: [] };
     const content = { type: 'bindings' as const, bindings: [{ value: 'x'.repeat(800_000) }] };
     const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
-    const total = bytes(inventory) + bytes(policy) + bytes(content);
+    const total = bytes(content);
     const deps = admissionDependencies(vi.fn(async () => true), []);
     deps.store.listGraphsByPrefix.mockResolvedValue(inventory);
     deps.store.listGraphs.mockResolvedValue(inventory);
@@ -130,14 +144,14 @@ describe('unscoped query admission', () => {
     const run = async (limit: number) => {
       deps.store.query.mockResolvedValueOnce(policy).mockResolvedValueOnce(content);
       const budget = new QueryMaterializationBudget(limit);
-      await expect(canReadUnscopedQuery(deps, { maxResponseBytes: limit, materializationBudget: budget })).resolves.toBe(true);
+      await expect(canReadUnscopedQuery(deps)).resolves.toBe(true);
       return new DKGQueryEngine(deps.store).query('SELECT ?value WHERE { ?s ?p ?value }', {
         maxResponseBytes: limit, materializationBudget: budget,
       });
     };
-    expect(bytes(inventory)).toBeLessThan(1024 * 1024);
-    expect(bytes(content)).toBeLessThan(1024 * 1024);
-    await expect(run(1024 * 1024)).rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', actualBytes: total });
+    // The inventory and the policy read are node work: the budget covers the result alone.
+    expect(bytes(inventory) + bytes(policy)).toBeGreaterThan(100_000);
+    await expect(run(total - 1)).rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', actualBytes: total });
     await expect(run(total)).resolves.toMatchObject({ bindings: content.bindings });
     expect(new Set(deps.canReadContextGraph.mock.calls.map(([id]) => id))).toEqual(new Set([owner]));
   });

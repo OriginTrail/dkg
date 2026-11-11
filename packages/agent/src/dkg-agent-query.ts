@@ -679,11 +679,7 @@ export class QueryMethods extends DKGAgentBase {
               this, ids, { callerAgentAddress: callerAgentAddressStr, signal },
             )
           ),
-        }, {
-          signal: opts.signal,
-          maxResponseBytes: opts.maxResponseBytes,
-          materializationBudget: budget.materializationBudget,
-        }),
+        }, { signal: opts.signal }),
         execute,
         denied: () => {
           this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');

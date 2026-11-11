@@ -5,6 +5,8 @@ import {
   quadsToNQuads,
   type StoreSchedulerBusyErrorLike,
 } from '@origintrail-official/dkg-storage';
+import { isQueryResultTooLargeError } from './query-result-size-error.js';
+import { isQueryMaterializationTooLargeError } from './query-materialization-error.js';
 import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { validateReadOnlySparql } from './sparql-guard.js';
 import type { DKGQueryEngine } from './dkg-query-engine.js';
@@ -24,6 +26,8 @@ const MAX_LIMIT = 1000;
 const DEFAULT_TIMEOUT_MS = 5000;
 const MAX_TIMEOUT_MS = 30000;
 const MAX_RESULT_BYTES = 1_048_576; // 1 MB
+/** What a remote SPARQL lookup may materialize: the HTTP query route's result budget. */
+export const REMOTE_SPARQL_MAX_RESULT_BYTES = 10 * 1024 * 1024;
 const STORE_BUSY_RETRY_AFTER_MS = 1_000;
 // PR #1107 review (🔴): cache isContextGraphPublic verdicts so repeated
 // remote queries against the same CG don't each burn an RPC round-trip on
@@ -477,30 +481,37 @@ export class QueryHandler {
     // bounds the *response* latency but does not cancel the underlying
     // SPARQL execution — the engine has no cancellation hook, so an
     // expensive remote query keeps consuming CPU/memory in the background
-    // until it completes naturally. Likewise `limit` below is applied as a
-    // post-materialization `.slice()`, so a high-cardinality query is fully
-    // materialized before being truncated. Genuinely enforcing either bound
-    // requires threading an `AbortSignal` + result cap through
-    // `QueryEngine.query()` → storage → the oxigraph worker. Injecting a
-    // `LIMIT` into the user query here is NOT a safe shortcut: for scoped
+    // until it completes naturally. The result budget bounds the bytes the
+    // engine materializes; `limit` below still slices the rows after that.
+    // Injecting a `LIMIT` into the user query here is NOT a safe shortcut: for scoped
     // queries it would push the statement into the multi-graph
     // solution-set-modifier rejection path (see #789), so it is
     // deliberately left to the engine-level follow-up.
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const result = await Promise.race([
-      this.queryEngine.query(sparql, { contextGraphId }),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('timeout')), timeout);
-      }),
-    ]).catch(err => {
-      if (err.message === 'timeout') {
-        return { _timeout: true } as any;
+    let result: Awaited<ReturnType<DKGQueryEngine['query']>>;
+    try {
+      result = await Promise.race([
+        this.queryEngine.query(sparql, {
+          contextGraphId,
+          maxResponseBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
+          maxMaterializedBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('timeout')), timeout);
+        }),
+      ]);
+    } catch (err) {
+      if ((err as { message?: unknown } | null)?.message === 'timeout') {
+        return errorResponse(opId, 'GAS_LIMIT_EXCEEDED', `Query exceeded time limit (${timeout}ms)`);
+      }
+      const overBudget = resultOverBudget(err);
+      if (overBudget) {
+        return errorResponse(opId, 'ERROR',
+          `Query result exceeds byte limit (${overBudget.actualBytes} > ${overBudget.maxBytes})`);
       }
       throw err;
-    }).finally(() => clearTimeout(timer!));
-
-    if (result._timeout) {
-      return errorResponse(opId, 'GAS_LIMIT_EXCEEDED', `Query exceeded time limit (${timeout}ms)`);
+    } finally {
+      clearTimeout(timer);
     }
 
     const bindings = result.bindings.slice(0, limit);
@@ -524,6 +535,14 @@ export class QueryHandler {
       bindings: response.bindings?.slice(0, MAX_RESULT_BYTES) ?? response.bindings,
     };
   }
+}
+
+/** A result over the lookup's budget: one store response, or the request's materialized total. */
+function resultOverBudget(error: unknown): { maxBytes: number; actualBytes: number | bigint } | null {
+  if (!isQueryResultTooLargeError(error) && !isQueryMaterializationTooLargeError(error)) return null;
+  const { maxBytes, actualBytes } = error as { maxBytes?: unknown; actualBytes?: unknown };
+  return typeof maxBytes === 'number' && (typeof actualBytes === 'number' || typeof actualBytes === 'bigint')
+    ? { maxBytes, actualBytes } : null;
 }
 
 function errorResponse(

@@ -77,6 +77,7 @@ import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 import {
   createQueryStoreReadContext,
+  requireQueryDataset,
   type QueryStoreReadContext,
   type StoreReadLane,
 } from './query-store-read-context.js';
@@ -390,9 +391,9 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       throw new Error('withheldGraphRoots applies only to queries without a contextGraphId');
     }
     switch (plan.kind) {
-      case 'scoped': return this.queryScoped(initialGraphScope, options, plan, reads);
+      case 'scoped': return this.queryScoped(initialGraphScope, options, plan, this.requireReadDatasets(reads));
       case 'view': return this.queryWithView(initialGraphScope, plan.options.view,
-        plan.options.contextGraphId, plan.options, reads, reads.catalog);
+        plan.options.contextGraphId, plan.options, this.requireReadDatasets(reads), reads.catalog);
       case 'unscoped': {
         // The store answers over its dataset without the withheld graphs. While
         // it may hold read-graph partitions, every unscoped query runs over its
@@ -411,6 +412,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         });
       }
     }
+  }
+
+  /** On Oxigraph a scoped read selects its graphs through its dataset, so a read without one is refused. */
+  private requireReadDatasets(reads: QueryStoreReadContext): QueryStoreReadContext {
+    return this.sparqlEngine === 'oxigraph' ? requireQueryDataset(reads) : reads;
   }
 
   private queryScoped(scope: PreparedGraphScope, options: QueryOptions | undefined,
@@ -447,7 +453,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // Explicit IRIs retain static route authority; only opted-in variables gain
     // classified same-CG content selected for this caller and sub-graph.
     assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
-    const routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(initialGraphScope, variableAllowedGraphs));
+    const routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(initialGraphScope, variableAllowedGraphs,
+      { boundByDataset: this.sparqlEngine === 'oxigraph' }));
     const resolve = (target: { root: string; family: 'data' | 'shared-memory' }) => resolveLegacyRouteScope(
       routedScope, { ...target, discover: prefix => this.discoverGraphsByPrefix(prefix, reads),
         fallbackPolicy: plan.fallbackPolicy, engine: this.sparqlEngine, authorizedDatasetGraphs: variableAllowedGraphs });
@@ -610,7 +617,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
     assertExplicitGraphIrisAllowed(initialScope, allGraphs);
     const constrainedScope = requireGraphScopeRewrite(
-      constrainGraphVariablesToAllowedSet(initialScope, allGraphs),
+      constrainGraphVariablesToAllowedSet(initialScope, allGraphs, { boundByDataset: this.sparqlEngine === 'oxigraph' }),
     );
 
     // Spec §14 trust-gradient filter — only enforced on verifiable-memory
@@ -953,7 +960,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   private async execCallerQuery(scope: PreparedGraphScope, reads: StoreReadLane) {
     const sparql = materializePreparedSparql(scope.prepared);
     try {
-      return await reads.query(sparql);
+      return await reads.query(sparql, scope.hasDatasetClause);
     } catch (err) {
       if (err instanceof StoreResponseTooLargeError) throw new QueryResultTooLargeError(err);
       if (isSparqlHttpResponseError(err) && MALFORMED_CALLER_QUERY_STATUSES.has(err.status)) {
