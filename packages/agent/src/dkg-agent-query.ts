@@ -12,6 +12,7 @@ import { queryWithPublicSnapshotTrust } from './public-snapshot-evidence.js';
 
 import { sharedMemoryAdmissionError, sharedMemoryAdmissionFailsClosed } from './swm-read-admission.js';
 import { deniedResult } from './query-denied-result.js';
+import { holdsContextGraphGraphs } from './context-graph-held-graphs.js';
 import { resolveCallerDraftAccess, resolveWorkingMemoryIdentityAliases } from './working-memory-identity.js';
 import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { resolveRfc64PrivateReadRoster } from './rfc64/private-read-roster-v1.js';
@@ -510,8 +511,7 @@ export class QueryMethods extends DKGAgentBase {
         isLocalFirstUnregistered: (id) => this.isLocalFirstUnregisteredContextGraph(id),
         readCurrentBinding: (id) => this.subscribedContextGraphs.get(id),
       });
-      // No local declaration, subscription, or graph. The id comes straight from the caller: a
-      // malformed one never counts, so a reply built on this cannot depend on the existence check.
+      // No declaration, subscription or well-known graph; a malformed id never counts, so no reply built on this depends on it.
       const holdsNothing = async () => validateContextGraphId(scopedContextGraphId).valid
         && !isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(scopedContextGraphId))
         && !this.localContextGraphProvenance.hasLocalCreate(scopedContextGraphId)
@@ -543,8 +543,9 @@ export class QueryMethods extends DKGAgentBase {
         // instead of a SELECT-shaped `{ bindings: [] }`.
         return deniedResult(sparql, opts.accessDenied);
       }
-      // Semantics other than per asset, for a graph this node holds nothing of: a denied caller's answer, before any read-graph state.
-      if (opts.semantics !== undefined && opts.semantics !== 'per-asset' && opts.accessDenied !== 'error' && await holdsNothing()) return deniedResult(sparql, opts.accessDenied);
+      // Semantics other than per asset, for a graph this node holds no graph of: a denied caller's answer, before any read-graph state.
+      if (opts.semantics !== undefined && opts.semantics !== 'per-asset' && opts.accessDenied !== 'error'
+        && await holdsNothing() && !await holdsContextGraphGraphs(this.store, scopedContextGraphId, opts.signal)) return deniedResult(sparql, opts.accessDenied);
     }
 
     if (opts.contextGraphId && targetsSharedMemory) {
