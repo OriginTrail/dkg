@@ -16,7 +16,10 @@
  * the new rule is installed. It is written again once every dirty mark the
  * change needs is stored and the store has made them durable (`flush`): a
  * stopped process leaves either no record, so start-up keeps no
- * working-memory read graph, or a record with its marks. While a record that
+ * working-memory read graph, or a record with its marks. A mark is durable
+ * once a flush after it ends with no restart of the backend since it was
+ * stored; one that a restart may have undone, as when a worker reloads an
+ * earlier snapshot, is owed again. While a record that
  * names another identity cannot be removed, the backend's working-memory read
  * graphs are held (`./working-memory-hold.ts`): none is built or repaired, so
  * none built under the new identity sits beside that record.
@@ -29,6 +32,7 @@ import type { TripleStore } from '../triple-store.js';
 import { workingMemoryIdentityRule, type WorkingMemoryIdentityRule } from './membership.js';
 import { readGraphRuntimeOf } from './read-graph-store.js';
 import { markReadGraphDirty, type ReadGraphJobContext } from './rebuild.js';
+import { readGraphRecoveryGeneration } from './recovery.js';
 import { holdWorkingMemoryReadGraphs, workingMemoryReadGraphsHeld } from './working-memory-hold.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
 import { nextReadGraphState } from './state.js';
@@ -52,6 +56,11 @@ interface IdentityRecording {
   recorded: boolean;
   /** Working-memory read graphs marked dirty in the mirror for a change of identity, whose stored mark is owed. */
   readonly owed: Set<string>;
+  /**
+   * Marks the store took that no flush has made durable yet, each with the backend's recovery generation from before
+   * it was stored. A restart of the backend since may have undone them.
+   */
+  readonly unflushed: Map<string, number | undefined>;
   /** The stored part of the installations, one at a time. */
   queue: Promise<void>;
 }
@@ -61,7 +70,7 @@ const RECORDINGS = new WeakMap<ReadGraphBackendRuntime, IdentityRecording>();
 function recordingOf(runtime: ReadGraphBackendRuntime): IdentityRecording {
   let recording = RECORDINGS.get(runtime);
   if (!recording) {
-    recording = { node: undefined, recorded: false, owed: new Set(), queue: Promise.resolve() };
+    recording = { node: undefined, recorded: false, owed: new Set(), unflushed: new Map(), queue: Promise.resolve() };
     RECORDINGS.set(runtime, recording);
   }
   return recording;
@@ -92,7 +101,7 @@ export function recordedWorkingMemoryIdentity(dataDir: string): WorkingMemoryNod
  * where identity changes are recorded, and install the recorded identity's
  * rule. Returns that identity, under which start-up may keep working-memory
  * read graphs; `undefined` when there is no readable record, or when a change
- * of identity in this process still owes a stored mark.
+ * of identity in this process still owes a stored or durable mark.
  */
 export function installRecordedWorkingMemoryIdentity(
   runtime: ReadGraphBackendRuntime,
@@ -100,7 +109,7 @@ export function installRecordedWorkingMemoryIdentity(
 ): WorkingMemoryNodeIdentity | undefined {
   DATA_DIRS.set(runtime, dataDir);
   const recording = recordingOf(runtime);
-  const recorded = recording.owed.size > 0 ? undefined : recordedWorkingMemoryIdentity(dataDir);
+  const recorded = recording.owed.size > 0 || recording.unflushed.size > 0 ? undefined : recordedWorkingMemoryIdentity(dataDir);
   recording.node = recorded;
   recording.recorded = recorded !== undefined;
   if (recorded !== undefined) runtime.workingMemoryIdentity = workingMemoryIdentityRule(recorded);
@@ -191,8 +200,9 @@ export interface WorkingMemoryIdentityInstall {
  * lock, one installation at a time. A mark that cannot be stored stays owed:
  * the mirror keeps the read graph out of service, and every later
  * installation stores the owed marks first. Once none is owed, the store is
- * flushed and the identity recorded. A store without a read-graph layer is
- * left as it is.
+ * flushed and the identity recorded. A mark the store took before its backend
+ * restarted, which no flush made durable, is owed again. A store without a
+ * read-graph layer is left as it is.
  */
 export async function installWorkingMemoryIdentity(
   context: Pick<ReadGraphJobContext, 'dataDir' | 'signal' | 'source'> & { readonly store: TripleStore },
@@ -229,11 +239,16 @@ async function storeMarksAndRecord(
   recording: IdentityRecording,
   dataDir: string | undefined,
 ): Promise<boolean> {
+  // A mark the store took before its backend restarted, which no flush made durable, may be undone: it is owed again.
+  const generation = readGraphRecoveryGeneration(context.store, runtime);
+  oweUndoneMarks(recording, generation);
   // A mark owed by an installation that comes meanwhile is stored here too.
   for (const readGraph of recording.owed) {
     try {
       await markReadGraphDirty(context, readGraph);
       recording.owed.delete(readGraph);
+      // Its durability matters only to a record, which needs a data directory.
+      if (dataDir !== undefined) recording.unflushed.set(readGraph, generation);
     } catch {
       // The stored row did not take the mark: this process still does not serve the read graph.
       const current = runtime.mirror.get(readGraph);
@@ -249,6 +264,9 @@ async function storeMarksAndRecord(
   try {
     if (!removeRecordOrHold(runtime, dataDir)) return false;
     await context.store.flush?.();
+    // The flush made durable the marks the backend still holds: those stored since its last restart.
+    if (oweUndoneMarks(recording, readGraphRecoveryGeneration(context.store, runtime))) return false;
+    recording.unflushed.clear();
     // An installation that came meanwhile records its own identity, once its marks are stored.
     if (recording.node !== node || recording.owed.size > 0) return false;
     recordWorkingMemoryIdentity(dataDir, node);
@@ -257,6 +275,18 @@ async function storeMarksAndRecord(
   }
   recording.recorded = true;
   return true;
+}
+
+/** Owe again each mark stored at another recovery generation than `generation`. Returns whether there was one. */
+function oweUndoneMarks(recording: IdentityRecording, generation: number | undefined): boolean {
+  let undone = false;
+  for (const [readGraph, storedAt] of recording.unflushed) {
+    if (storedAt === generation) continue;
+    recording.unflushed.delete(readGraph);
+    recording.owed.add(readGraph);
+    undone = true;
+  }
+  return undone;
 }
 
 /** Whether `agent` owns other addresses under `after` than under `before`. */
