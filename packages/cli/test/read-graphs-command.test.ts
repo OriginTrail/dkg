@@ -37,8 +37,9 @@ afterEach(() => {
   process.exitCode = previousExitCode;
 });
 
-/** A node that answers each action with the given answer, or fails with the given error. */
+/** A node that answers each action with the given answer, or fails with the given error. Output starts empty. */
 function fixture(answers: Partial<Record<string, unknown>>) {
+  vi.mocked(console.log).mockClear();
   const readGraphs = vi.fn(async (action: string, _request?: unknown) => {
     const answer = answers[action];
     if (answer instanceof Error) throw answer;
