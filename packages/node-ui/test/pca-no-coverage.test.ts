@@ -65,6 +65,46 @@ describe('useNoPcaCoverage', () => {
     await h.unmount();
   });
 
+  // Out-of-order guard: a slow check must never be overtaken by a newer one, so an old
+  // "no coverage" answer can't land after a newer "sponsor covers it" one. While check A is
+  // pending, interval ticks start no check B at all; A's answer is applied, then the next
+  // tick's newer answer replaces it.
+  it('a slow check is never overtaken: no overlapping checks, and the newest answer wins', async () => {
+    let releaseA!: (v: { accountId: string | null }) => void;
+    apiMocks.pcaAgentAccount.mockImplementationOnce(() => new Promise((r) => { releaseA = r; }));
+    const h = await render(20);
+    await wait(90); // ~4 ticks while A is still pending
+    expect(apiMocks.pcaAgentAccount).toHaveBeenCalledTimes(1);
+    expect(h.value()).toBe('false');
+
+    apiMocks.pcaAgentAccount.mockResolvedValue({ accountId: '12' }); // the sponsor approves
+    await act(async () => { releaseA({ accountId: null }); });
+    // A (older, uncovered) lands first, as the only check that ran…
+    expect(h.value()).toBe('true');
+    // …and the next tick's newer, covered answer replaces it.
+    await wait(60);
+    expect(apiMocks.pcaAgentAccount.mock.calls.length).toBeGreaterThan(1);
+    expect(h.value()).toBe('false');
+    await h.unmount();
+  });
+
+  it('stops rechecking while the tab is hidden', async () => {
+    const h = await render(20);
+    await wait(5);
+    const hidden = Object.getOwnPropertyDescriptor(document, 'hidden');
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    try {
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+      const calls = apiMocks.fetchWalletsBalances.mock.calls.length;
+      await wait(90);
+      expect(apiMocks.fetchWalletsBalances.mock.calls.length).toBe(calls);
+    } finally {
+      if (hidden) Object.defineProperty(document, 'hidden', hidden);
+      else delete (document as any).hidden;
+    }
+    await h.unmount();
+  });
+
   it('a wallet coming off every PCA later makes it true on the next check', async () => {
     apiMocks.pcaAgentAccount.mockResolvedValue({ accountId: '12' });
     const h = await render(20);
