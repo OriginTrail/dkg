@@ -126,14 +126,15 @@ describe('read-graph layer on embedded Oxigraph', () => {
       const result = await target.query(`SELECT ?o WHERE { GRAPH <${member}> { <urn:s:pointer> <${P}> ?o } }`);
       return (result.type === 'bindings' ? result.bindings : []).map((row) => row.o!).sort();
     };
-    // Each store names one of its own stored blank nodes.
-    const [named] = await pointed(adapter);
-    const [referenceNamed] = await pointed(reference);
+    // Each store names one of its own stored blank nodes; the other is its twin.
+    const [named, twin] = await pointed(adapter);
+    const [referenceNamed, referenceTwin] = await pointed(reference);
     await store.deleteByPattern({ graph: member, subject: 'urn:s:pointer', object: named! });
     await reference.deleteByPattern({ graph: member, subject: 'urn:s:pointer', object: referenceNamed! });
-    const left = await pointed(adapter);
-    expect(left.length).toBe((await pointed(reference)).length);
-    expect(left.length).toBeLessThan(2);
+    // By role, the layered store keeps what the engine alone keeps: the twin, the named node deleted by its identity.
+    const kept = (left: readonly string[], name: string, other: string) => ({ named: left.includes(name), twin: left.includes(other) });
+    expect(kept(await pointed(adapter), named!, twin!)).toEqual(kept(await pointed(reference), referenceNamed!, referenceTwin!));
+    expect(await pointed(adapter)).toEqual([twin]);
     expect(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)?.state).toBe('dirty');
     await reference.close();
   });
