@@ -40,15 +40,20 @@ export function invalidateReadGraphRuntime(runtime: ReadGraphBackendRuntime): vo
  * supervised backend never restarts this way.
  */
 export function syncReadGraphRuntimeWithRecovery(store: TripleStore, runtime: ReadGraphBackendRuntime): void {
+  const generation = readGraphRecoveryGeneration(store, runtime);
+  if (generation === undefined) return;
+  const seen = SEEN.get(runtime);
+  SEEN.set(runtime, generation);
+  if (seen !== undefined && seen !== generation) invalidateReadGraphRuntime(runtime);
+}
+
+/** The backend's recovery generation now, or `undefined` for a backend without one. */
+export function readGraphRecoveryGeneration(store: TripleStore, runtime: ReadGraphBackendRuntime): number | undefined {
   // Only a reader that was found is kept: a backend may register its reader after the layer first looks.
   let read = READERS.get(runtime);
   if (read === undefined) {
     read = asStoreRecoveryGenerationReader(store);
     if (read !== undefined) READERS.set(runtime, read);
   }
-  const generation = read?.()?.generation;
-  if (generation === undefined) return;
-  const seen = SEEN.get(runtime);
-  SEEN.set(runtime, generation);
-  if (seen !== undefined && seen !== generation) invalidateReadGraphRuntime(runtime);
+  return read?.()?.generation;
 }
