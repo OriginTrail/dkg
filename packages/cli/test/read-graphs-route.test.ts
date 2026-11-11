@@ -52,6 +52,17 @@ class InsertOnlyOxigraph extends OxigraphStore {
   }
 }
 
+/** An embedded store that declares no read-graph capabilities, whatever its class declares. */
+function undeclared(store: OxigraphStore): OxigraphStore {
+  return new Proxy(store, {
+    get(target, property) {
+      if (property === 'readGraphCapabilities') return undefined;
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
 const dirs: string[] = [];
 afterEach(() => {
   vi.restoreAllMocks();
@@ -234,7 +245,7 @@ describe('POST /api/store/read-graphs/rebuild', () => {
   });
 
   it('reports a read graph its store cannot maintain', async () => {
-    const store = wrapReadGraphLayer(new OxigraphStore(), { backend: 'oxigraph' });
+    const store = wrapReadGraphLayer(undeclared(new OxigraphStore()), { backend: 'oxigraph' });
     store.runtime.mirror.set({ readGraph: IRI.vm, state: 'ready', generation: 1, ...CURRENT_READ_GRAPH_VERSIONS });
     const rebuilt = await call(store, 'POST', `${READ_GRAPHS_PATH}/rebuild`, { body: {} });
     expect(rebuilt.body).toEqual({ marked: [{ readGraph: IRI.vm, error: expect.stringMatching(/cannot maintain read graphs/) }] });
