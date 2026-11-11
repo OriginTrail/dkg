@@ -103,7 +103,7 @@
 .v10-mlv-status.v10-mlv-status-failed { color: var(--text-danger); }
 
 .v10-layer-action-result { margin-bottom: var(--space-8); }
-.v10-decision-btn-blocked { opacity: var(--opacity-disabled); }
+.v10-decision-btn[aria-disabled="true"] { opacity: var(--opacity-disabled); }
 
 /* Layer colours by class: a layer's colour is known from its name, not from data. */
 .layer-tone-wm { --layer-tone: var(--layer-working); }

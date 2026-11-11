@@ -331,7 +331,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
     >
       <button
         data-testid="widget-publish-vm-btn"
-        className={busy || gate.blocked ? 'v10-decision-btn primary-cta publish-vm ds-btn ds-vm ds-lg v10-decision-btn-blocked' : 'v10-decision-btn primary-cta publish-vm ds-btn ds-vm ds-lg'}
+        className="v10-decision-btn primary-cta publish-vm ds-btn ds-vm ds-lg"
         // Native `disabled` only for the TRANSIENT busy state; the PERSISTENT policy gate uses
         // aria-disabled so SR/keyboard users keep focus + hear the reason (publish no-ops when
         // blocked). aria-describedby references only rendered targets (describedBy, above).
