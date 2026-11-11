@@ -1070,11 +1070,12 @@ jobs:
       # `--with-deps` also apt-installs fonts the runner image lacks. When
       # GitHub's apt mirror is unreachable (it was on 2026-11-11, failing every
       # shard), install the browser alone: the image already ships the system
-      # libraries Chromium needs.
+      # libraries Chromium needs. An unreachable mirror can stall apt for ten
+      # minutes before it fails, so the attempt gets three (it takes ~20 s).
       - name: Install Playwright Chromium
         run: |
-          pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps \
-            || { echo "::warning::Installing Chromium's OS packages failed; installing the browser alone."; pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium; }
+          timeout --kill-after=10 180 pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps \
+            || { echo "::warning::Installing Chromium's OS packages failed or timed out; installing the browser alone."; pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium; }
       - name: Apply resolved execution profile
         env:
           PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
