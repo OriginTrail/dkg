@@ -198,6 +198,9 @@ const CLI_BODY_MS = Object.freeze({
   'test/rollback-node-ui.test.ts': 5,
   'test/rollback.test.ts': 652,
   'test/rpc-usage-log.test.ts': 262,
+  // CI run 43034181573, job 130576820315 (coverage enabled): this completed
+  // suite took almost eight minutes before the surrounding shard timed out.
+  'test/semantic-runtime-configuration-api.test.ts': 479323,
   'test/shared-memory-catchup-durable.test.ts': 10,
   'test/shutdown-timeout.test.ts': 1243,
   'test/skill-endpoint.test.ts': 37,

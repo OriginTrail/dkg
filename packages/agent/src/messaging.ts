@@ -322,6 +322,7 @@ export class MessageHandler {
   async sendSkillRequest(
     recipientPeerId: string,
     request: SkillRequest,
+    options: { messageId?: string; requestOwned?: boolean } = {},
   ): Promise<SkillResponse> {
     const conversationId = bytesToHex(randomBytes(16));
 
@@ -356,21 +357,22 @@ export class MessageHandler {
       senderPublicKey: this.keypair.publicKey,
     };
 
-    // Skill requests are synchronous request/response — we don't
-    // want the outbox to silently queue a skill call (the operator
-    // is waiting on the reply). If `sendReliable` queues instead of
-    // delivering, surface that as an explicit failure so the caller
-    // can retry deliberately rather than blocking on a background
-    // tick.
-    const sendResult = await this.messenger.sendReliable(
-      recipientPeerId,
-      PROTOCOL_MESSAGE,
-      encodeAgentMessage(msg),
-    );
+    // Effectful callers can select request-owned delivery so a failed
+    // request never executes later from the durable outbox. Existing skill
+    // callers retain the historical reliable/queued behavior.
+    const send = options.requestOwned
+      ? this.messenger.sendRequestOwned.bind(this.messenger)
+      : this.messenger.sendReliable.bind(this.messenger);
+    const sendResult = await send(recipientPeerId, PROTOCOL_MESSAGE, encodeAgentMessage(msg), {
+      messageId: options.messageId,
+      timeoutMs: request.timeoutMs,
+    });
     if (!sendResult.delivered) {
       return {
         success: false,
-        error: `Skill request queued (not delivered): ${sendResult.error}`,
+        error: options.requestOwned
+          ? `Skill request not delivered: ${sendResult.error}`
+          : `Skill request queued (not delivered): ${sendResult.error}`,
       };
     }
     const responseBytes = sendResult.response;

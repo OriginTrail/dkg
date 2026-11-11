@@ -1,0 +1,50 @@
+[
+  {
+    "id": "JPB PLCA - Run study pipeline v1.0.0",
+    "label": "JPB PLCA | Run study pipeline",
+    "version": "1.0.0",
+    "node": "JPB",
+    "contextGraphId": "0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-plca-study",
+    "operationIri": "urn:dmaast:operation:jpb:prepare-plca:v1",
+    "bindingDigest": "a3e640ca72c79125992c8009056bff964561834b3eb181e48282a781539e42b0",
+    "program": {
+      "authorAgentAddress": "0xF77258a965ba13Adc77bCa85dA7C6A287272959a",
+      "contextGraphId": "0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-plca-program",
+      "programIri": "urn:dmaast:program:jpb:prepare-plca:e81ed848ffe2406a16c2d692cb3345e0b5fb8c7991c6a25c0ad7d4633d4bf6da",
+      "programLayer": "wm",
+      "sourceHash": "e81ed848ffe2406a16c2d692cb3345e0b5fb8c7991c6a25c0ad7d4633d4bf6da"
+    }
+  },
+  {
+    "id": "JPB PLCA - Prepare inventory v1.0.0",
+    "label": "JPB PLCA | Prepare inventory",
+    "version": "1.0.0",
+    "node": "JPB",
+    "contextGraphId": "0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-plca-study",
+    "operationIri": "urn:dmaast:operation:jpb:prepare-study-inventory-2c0b42cb3fccd68f60c40ed2b2e2e768963eb2f1c205874d92706dfbf7a42182:v1",
+    "bindingDigest": "2b6faeef3ad16ab53776334c94b1ae543b4ef02e31b7e18210330b473fb4ee0f",
+    "program": {
+      "authorAgentAddress": "0xF77258a965ba13Adc77bCa85dA7C6A287272959a",
+      "contextGraphId": "0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-plca-program",
+      "programIri": "urn:dmaast:program:jpb:study-inventory:2c0b42cb3fccd68f60c40ed2b2e2e768963eb2f1c205874d92706dfbf7a42182",
+      "programLayer": "wm",
+      "sourceHash": "2c0b42cb3fccd68f60c40ed2b2e2e768963eb2f1c205874d92706dfbf7a42182"
+    }
+  },
+  {
+    "id": "JPB PLCA - Calculate mapped demo v1.0.0",
+    "label": "JPB PLCA | Calculate mapped demo inputs",
+    "version": "1.0.0",
+    "node": "JPB",
+    "contextGraphId": "0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-plca-study",
+    "operationIri": "urn:nos:jpb:calculate-mapped-demo:v1",
+    "bindingDigest": "6cc10cceae3e5410aae9c1341db12682b543ebf89acea76319bee14523abaf71",
+    "program": {
+      "contextGraphId": "0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-plca-program",
+      "programIri": "urn:nos:jpb:plca-mapped:bf7adbf8f0335104f38c44b58bacd3e8db1a4eb3f76c234678f36c9235b0aac2",
+      "programLayer": "wm",
+      "authorAgentAddress": "0xF77258a965ba13Adc77bCa85dA7C6A287272959a",
+      "sourceHash": "bf7adbf8f0335104f38c44b58bacd3e8db1a4eb3f76c234678f36c9235b0aac2"
+    }
+  }
+]
