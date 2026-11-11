@@ -91,14 +91,14 @@ describe('the agent read-graph workload', () => {
     const vm = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory });
     const ready = (readGraph: string) => ({ readGraph, state: 'ready' as const, generation: 5, ...CURRENT_READ_GRAPH_VERSIONS });
     const below = readGraphLayerOf(store)!.innerStore;
+    await owner.syncIdentity();
+    // The default agent also owns the drafts written under the node's peer ID.
+    expect(runtime.workingMemoryIdentity.addressesOf(AGENT)).toHaveLength(2);
+    // Ready under that rule, as the builder leaves them; the same identity again changes nothing.
     for (const readGraph of [wm, vm]) {
       await below.update!(readGraphStateCompareAndSet(undefined, ready(readGraph)));
       runtime.mirror.set(ready(readGraph));
     }
-    await owner.syncIdentity();
-    // The default agent also owns the drafts written under the node's peer ID.
-    expect(runtime.workingMemoryIdentity.addressesOf(AGENT)).toHaveLength(2);
-    expect(runtime.mirror.get(wm)?.state).toBe('ready');
     await owner.syncIdentity();
     expect(runtime.mirror.get(wm)?.state).toBe('ready');
     setDefaultAgent(OTHER);

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdir } from 'node:fs/promises';
@@ -23,7 +23,6 @@ import { readGraphLayerOf, wrapReadGraphLayer, type ReadGraphStore } from '../sr
 import {
   buildReadGraph,
   refreshReadGraphRegistry,
-  installWorkingMemoryIdentity,
   markReadGraphDirty,
   readGraphEnumerationRoots,
   readStoredReadGraphRow,
@@ -34,6 +33,7 @@ import {
   type ReadGraphJobContext,
 } from '../src/read-graph/rebuild.js';
 import { readReadGraphRegistry } from '../src/read-graph/registry.js';
+import { fenceReadGraphs, liftReadGraphFences } from '../src/read-graph/registry-fences.js';
 import {
   parseReadGraphRegistryRecords,
   readGraphRegistryRecordsQuery,
@@ -54,6 +54,11 @@ import {
 } from '../src/read-graph/state.js';
 import { readGraphBackfillBatch, readGraphFencedDrop, readGraphHoldsTripleAsk } from '../src/read-graph/statements.js';
 import { startReadGraphs, type ReadGraphStartOptions } from '../src/read-graph/startup.js';
+import {
+  READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE,
+  installWorkingMemoryIdentity,
+  recordedWorkingMemoryIdentity,
+} from '../src/read-graph/working-memory-identity.js';
 import { noteReadGraphStoreRestored } from '../src/read-graph/store-restored.js';
 import { registerStoreRecoveryGeneration } from '../src/store-recovery-generation.js';
 import type { Quad, QueryOptions, TripleStore, UpdateOptions } from '../src/triple-store.js';
@@ -68,6 +73,7 @@ import { PlanningOxigraphStore } from './helpers/read-graph-planning-store.js';
 class HookedStore extends PlanningOxigraphStore {
   onUpdate: ((sparql: string, options: UpdateOptions | undefined) => Promise<void> | void) | undefined;
   onInsert: (() => Promise<void>) | undefined;
+  onFlush: (() => Promise<void> | void) | undefined;
   constructor() {
     super();
     for (const method of missingReadGraphMethods(this, this.readGraphCapabilities)) {
@@ -81,6 +87,10 @@ class HookedStore extends PlanningOxigraphStore {
   override async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
     await this.onInsert?.();
     return super.insert(quads, options);
+  }
+  override async flush(): Promise<void> {
+    await this.onFlush?.();
+    return super.flush();
   }
 }
 
@@ -872,24 +882,304 @@ describe('marking a read graph dirty', () => {
 });
 
 describe('installing the working-memory identity rule', () => {
-  it('marks working-memory read graphs dirty when the identity changes, and only then', async () => {
-    const { adapter, fixture, layer, context } = await open();
+  it('marks dirty the working-memory read graphs whose agent owns other addresses under the new rule, and records it', async () => {
+    const { adapter, fixture, layer, context, dataDir } = await open();
     const { wholeVm, agentWm } = fixture.readGraphs;
     for (const readGraph of [wholeVm, agentWm]) {
       await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(readGraph, 4)));
       layer.runtime.mirror.set(readyRow(readGraph, 4));
     }
     const other = `0x${'cd'.repeat(20)}`;
-    await installWorkingMemoryIdentity(context, { defaultAgentAddress: AGENT, peerId: 'peer-1' });
-    await installWorkingMemoryIdentity(context, { defaultAgentAddress: AGENT, peerId: 'peer-1' });
-    expect(layer.runtime.mirror.get(agentWm)).toEqual(readyRow(agentWm, 4));
-    expect(layer.runtime.workingMemoryIdentity.addressesOf(AGENT)).toHaveLength(2);
-    await installWorkingMemoryIdentity(context, { defaultAgentAddress: other, peerId: 'peer-1' });
+    // Under the runtime's own rule AGENT owns only its own drafts; the node's rule gives it the peer ID's too.
+    expect(await installWorkingMemoryIdentity(context, { defaultAgentAddress: AGENT, peerId: 'peer-1' })).toEqual({ marked: [agentWm], recorded: true });
     expect(layer.runtime.mirror.get(agentWm)).toEqual(row(agentWm, 'dirty', 5));
+    expect(layer.runtime.workingMemoryIdentity.addressesOf(AGENT)).toHaveLength(2);
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual({ defaultAgentAddress: AGENT, peerId: 'peer-1' });
+
+    // Rebuilt under that rule, the same identity again changes nothing; another default agent takes the peer ID's drafts.
+    await adapter.update!(readGraphStateCompareAndSet(row(agentWm, 'dirty', 5), readyRow(agentWm, 5)));
+    layer.runtime.mirror.set(readyRow(agentWm, 5));
+    expect(await installWorkingMemoryIdentity(context, { defaultAgentAddress: AGENT, peerId: 'peer-1' })).toEqual({ marked: [], recorded: true });
+    expect(await installWorkingMemoryIdentity(context, { defaultAgentAddress: other, peerId: 'peer-1' })).toEqual({ marked: [agentWm], recorded: true });
+    expect(layer.runtime.mirror.get(agentWm)).toEqual(row(agentWm, 'dirty', 6));
     expect(layer.runtime.mirror.get(wholeVm)).toEqual(readyRow(wholeVm, 4));
-    expect(await storedRows(adapter)).toEqual({ [wholeVm]: 'ready@4', [agentWm]: 'dirty@5' });
+    expect(await storedRows(adapter)).toEqual({ [wholeVm]: 'ready@4', [agentWm]: 'dirty@6' });
     expect(layer.runtime.workingMemoryIdentity.addressesOf(AGENT)).toEqual([AGENT]);
-    await installWorkingMemoryIdentity({ store: new OxigraphStore() }, { defaultAgentAddress: AGENT });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual({ defaultAgentAddress: other, peerId: 'peer-1' });
+    expect(await installWorkingMemoryIdentity({ store: new OxigraphStore() }, { defaultAgentAddress: AGENT })).toEqual({ marked: [], recorded: false });
+  });
+
+  it('keeps the read graph out of service, and records nothing, when a mark cannot be stored', async () => {
+    const { adapter, fixture, layer, context, dataDir } = await open();
+    const { agentWm } = fixture.readGraphs;
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(agentWm, 4)));
+    layer.runtime.mirror.set(readyRow(agentWm, 4));
+    adapter.onUpdate = () => { throw new Error('the store refused the write'); };
+    expect(await installWorkingMemoryIdentity(context, { defaultAgentAddress: AGENT, peerId: 'peer-1' })).toEqual({ marked: [agentWm], recorded: false });
+    adapter.onUpdate = undefined;
+    // The store keeps its ready row; the mirror does not serve it, so the builder marks it again before it plans.
+    expect(await storedRows(adapter)).toEqual({ [agentWm]: 'ready@4' });
+    expect(layer.runtime.mirror.get(agentWm)?.state).toBe('dirty');
+    expect(layer.runtime.workingMemoryIdentity.addressesOf(AGENT)).toHaveLength(2);
+    expect(recordedWorkingMemoryIdentity(dataDir)).toBeUndefined();
+  });
+
+  it('owes a mark it could not store, stores it at the next installation, and records the identity only then', async () => {
+    const { adapter, fixture, layer, context, dataDir } = await open();
+    const { agentWm } = fixture.readGraphs;
+    const first = { defaultAgentAddress: AGENT, peerId: 'peer-1' };
+    const second = { defaultAgentAddress: `0x${'cd'.repeat(20)}`, peerId: 'peer-1' };
+    // Recorded under the first identity, with AGENT's read graph built under it and its registry recorded.
+    expect(await installWorkingMemoryIdentity(context, first)).toEqual({ marked: [], recorded: true });
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(agentWm, 4)));
+    layer.runtime.mirror.set(readyRow(agentWm, 4));
+    await adapter.update!(readGraphRegistryRecordUpdate(fixture.registry));
+    // The second identity takes the peer ID's drafts from AGENT while the store refuses writes: the record goes.
+    adapter.onUpdate = () => { throw new Error('the store refused the write'); };
+    expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [agentWm], recorded: false });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toBeUndefined();
+    // The same identity again has nothing new to mark, and the owed mark still fails: nothing is recorded.
+    expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: false });
+    expect(await storedRows(adapter)).toEqual({ [agentWm]: 'ready@4' });
+    expect(layer.runtime.mirror.get(agentWm)?.state).toBe('dirty');
+    expect(recordedWorkingMemoryIdentity(dataDir)).toBeUndefined();
+    // Once the store takes writes, the same identity stores the owed mark first, then records.
+    adapter.onUpdate = undefined;
+    expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: true });
+    expect(await storedRows(adapter)).toEqual({ [agentWm]: 'dirty@5' });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(second);
+    // A later start under the second identity keeps nothing the first one built.
+    const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    await startReadGraphs(restarted, { dataDir, maintains: (key) => key.scope.contextGraphId === fixture.contextGraphId });
+    expect((await storedRows(adapter))[agentWm]).toMatch(/^dirty@/);
+  });
+
+  it('owes the stored mark of a read graph the mirror already holds dirty, and records the identity only once it is stored', async () => {
+    const { adapter, fixture, layer, context, dataDir } = await open();
+    const { agentWm } = fixture.readGraphs;
+    const first = { defaultAgentAddress: AGENT, peerId: 'peer-1' };
+    const second = { defaultAgentAddress: `0x${'cd'.repeat(20)}`, peerId: 'peer-1' };
+    expect(await installWorkingMemoryIdentity(context, first)).toEqual({ marked: [], recorded: true });
+    // Stored ready under the first identity, and dirty only in the mirror, as when a write's stored mark failed.
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(agentWm, 4)));
+    layer.runtime.mirror.set(row(agentWm, 'dirty', 5));
+    await adapter.update!(readGraphRegistryRecordUpdate(fixture.registry));
+    // The second identity takes the peer ID's drafts from AGENT: the mirror has nothing new to mark, the store does.
+    expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: true });
+    expect(await storedRows(adapter)).toEqual({ [agentWm]: 'dirty@5' });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(second);
+    // A later start under the second identity keeps nothing the first one built.
+    const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    await startReadGraphs(restarted, { dataDir, maintains: (key) => key.scope.contextGraphId === fixture.contextGraphId });
+    expect((await storedRows(adapter))[agentWm]).toMatch(/^dirty@/);
+  });
+
+  it('records the identity only once the store has made its marks durable, and not when it cannot', async () => {
+    const { adapter, fixture, layer, context, dataDir } = await open();
+    const { agentWm } = fixture.readGraphs;
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(agentWm, 4)));
+    layer.runtime.mirror.set(readyRow(agentWm, 4));
+    // The store's flush comes after the stored mark, and until it ends there is no record.
+    const seen: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    adapter.onFlush = async () => {
+      seen.push((await storedRows(adapter))[agentWm]!, String(recordedWorkingMemoryIdentity(dataDir)));
+      await held;
+    };
+    const installing = installWorkingMemoryIdentity(context, { defaultAgentAddress: AGENT, peerId: 'peer-1' });
+    await vi.waitFor(() => expect(seen).toHaveLength(2));
+    expect(seen).toEqual(['dirty@5', 'undefined']);
+    release();
+    expect(await installing).toEqual({ marked: [agentWm], recorded: true });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual({ defaultAgentAddress: AGENT, peerId: 'peer-1' });
+    // A store that cannot flush leaves no record; the same identity again records once it can.
+    await adapter.update!(readGraphStateCompareAndSet(row(agentWm, 'dirty', 5), readyRow(agentWm, 5)));
+    layer.runtime.mirror.set(readyRow(agentWm, 5));
+    adapter.onFlush = () => { throw new Error('no space left on the device'); };
+    expect(await installWorkingMemoryIdentity(context, { peerId: 'peer-1' })).toEqual({ marked: [agentWm], recorded: false });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toBeUndefined();
+    adapter.onFlush = undefined;
+    expect(await installWorkingMemoryIdentity(context, { peerId: 'peer-1' })).toEqual({ marked: [], recorded: true });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual({ peerId: 'peer-1' });
+  });
+
+  it('owes again a mark that a backend restart undid before a flush made it durable, and records the identity only once it is stored again', async () => {
+    const { adapter, fixture, layer, context, dataDir } = await open();
+    const { agentWm } = fixture.readGraphs;
+    let recovery = { generation: 1, ready: true };
+    registerStoreRecoveryGeneration(adapter, () => recovery);
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(agentWm, 4)));
+    layer.runtime.mirror.set(readyRow(agentWm, 4));
+    const identity = { defaultAgentAddress: AGENT, peerId: 'peer-1' };
+    // The worker exits after it took the mark and before the flush, and its replacement reloads a snapshot from before it.
+    adapter.onFlush = async () => {
+      adapter.onFlush = undefined;
+      await adapter.update!(readGraphStateCompareAndSet(row(agentWm, 'dirty', 5), readyRow(agentWm, 4)));
+      recovery = { generation: 2, ready: true };
+      throw new Error('the store worker exited');
+    };
+    expect(await installWorkingMemoryIdentity(context, identity)).toEqual({ marked: [agentWm], recorded: false });
+    expect((await storedRows(adapter))[agentWm]).toBe('ready@4');
+    // The same identity again stores the mark again before it records.
+    expect(await installWorkingMemoryIdentity(context, identity)).toEqual({ marked: [], recorded: true });
+    expect((await storedRows(adapter))[agentWm]).toBe('dirty@5');
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(identity);
+    // A restart that the flush outlives, on the replacement, undoes the mark too.
+    const next = { peerId: 'peer-1' };
+    await adapter.update!(readGraphStateCompareAndSet(row(agentWm, 'dirty', 5), readyRow(agentWm, 5)));
+    layer.runtime.mirror.set(readyRow(agentWm, 5));
+    adapter.onFlush = async () => {
+      adapter.onFlush = undefined;
+      await adapter.update!(readGraphStateCompareAndSet(row(agentWm, 'dirty', 6), readyRow(agentWm, 5)));
+      recovery = { generation: 3, ready: true };
+    };
+    expect(await installWorkingMemoryIdentity(context, next)).toEqual({ marked: [agentWm], recorded: false });
+    expect((await storedRows(adapter))[agentWm]).toBe('ready@5');
+    expect(recordedWorkingMemoryIdentity(dataDir)).toBeUndefined();
+    expect(await installWorkingMemoryIdentity(context, next)).toEqual({ marked: [], recorded: true });
+    expect((await storedRows(adapter))[agentWm]).toBe('dirty@6');
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(next);
+  });
+
+  it('records only the last of two overlapping installations, once its marks are stored and flushed', async () => {
+    const { adapter, fixture, layer, context, dataDir } = await open();
+    const { agentWm } = fixture.readGraphs;
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(agentWm, 4)));
+    layer.runtime.mirror.set(readyRow(agentWm, 4));
+    const gates: Array<() => void> = [];
+    adapter.onFlush = () => new Promise<void>((resolve) => { gates.push(resolve); });
+    // AGENT takes the peer ID's drafts, then, while that installation flushes, another default agent takes them.
+    const first = { defaultAgentAddress: AGENT, peerId: 'peer-1' };
+    const second = { defaultAgentAddress: `0x${'cd'.repeat(20)}`, peerId: 'peer-1' };
+    const installingFirst = installWorkingMemoryIdentity(context, first);
+    await vi.waitFor(() => expect(gates).toHaveLength(1));
+    const installingSecond = installWorkingMemoryIdentity(context, second);
+    gates[0]!();
+    // After its flush the first finds a newer identity installed, and records nothing.
+    expect(await installingFirst).toEqual({ marked: [agentWm], recorded: false });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toBeUndefined();
+    // The second stores its own mark (the read graph moved again), flushes, and records only when the flush ends.
+    await vi.waitFor(() => expect(gates).toHaveLength(2));
+    expect(await storedRows(adapter)).toEqual({ [agentWm]: 'dirty@6' });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toBeUndefined();
+    gates[1]!();
+    expect(await installingSecond).toEqual({ marked: [], recorded: true });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(second);
+  });
+
+  it('holds working-memory read graphs from building while the record of the identity before cannot be removed', async () => {
+    const { adapter, fixture, context, dataDir } = await open();
+    const working = fixture.keys.find((key) => key.layer === MemoryLayer.WorkingMemory)!;
+    const verifiable = fixture.keys.find((key) => key.layer === MemoryLayer.VerifiableMemory && key.scope.kind === 'context-graph')!;
+    const first = { defaultAgentAddress: AGENT, peerId: 'peer-1' };
+    const second = { defaultAgentAddress: `0x${'cd'.repeat(20)}`, peerId: 'peer-1' };
+    expect(await installWorkingMemoryIdentity(context, first)).toEqual({ marked: [], recorded: true });
+    // The record cannot be removed: here its path holds a directory with an entry.
+    const record = join(dataDir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE);
+    rmSync(record);
+    mkdirSync(record);
+    writeFileSync(join(record, 'entry'), '');
+    expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: false });
+    await expect(buildReadGraph(context, working)).rejects.toThrow(/cannot be removed/);
+    // Other layers still build.
+    expect(await buildReadGraph(context, verifiable)).toMatchObject({ outcome: 'done' });
+    // Once the record can be removed, the next installation removes it, records, and releases the hold.
+    rmSync(record, { recursive: true });
+    expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: true });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(second);
+    expect(await buildReadGraph(context, working)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    expect((await storedRows(adapter))[readGraphIri(working)]).toMatch(/^ready@/);
+  });
+
+  it('holds working-memory read graphs while the record of the identity before cannot be reached, as while it cannot be removed', async () => {
+    const { fixture, context, dataDir } = await open();
+    const working = fixture.keys.find((key) => key.layer === MemoryLayer.WorkingMemory)!;
+    const first = { defaultAgentAddress: AGENT, peerId: 'peer-1' };
+    const second = { defaultAgentAddress: `0x${'cd'.repeat(20)}`, peerId: 'peer-1' };
+    expect(await installWorkingMemoryIdentity(context, first)).toEqual({ marked: [], recorded: true });
+    const record = join(dataDir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE);
+    const mode = statSync(dataDir).mode;
+    try {
+      // The data directory loses its search permission: the record is there, and can be neither seen nor removed.
+      chmodSync(dataDir, 0o600);
+      try {
+        statSync(record);
+        return; // Permissions do not apply to this process.
+      } catch {
+        // Good: the record cannot be reached.
+      }
+      expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: false });
+      await expect(buildReadGraph(context, working)).rejects.toThrow(/cannot be removed/);
+    } finally {
+      chmodSync(dataDir, mode);
+    }
+    // Once it can be reached, the next installation removes it, records, and releases the hold.
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(first);
+    expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: true });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(second);
+    expect(await buildReadGraph(context, working)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+  });
+
+  it('keeps a working-memory read graph that a registry fence holds out of service when a change of identity moves it', async () => {
+    const { adapter, fixture, layer, context } = await open();
+    const { agentWm } = fixture.readGraphs;
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(agentWm, 4)));
+    layer.runtime.mirror.set(readyRow(agentWm, 4));
+    // A registry write fences the read graph, and the node's identity changes before the write settles.
+    const fences = fenceReadGraphs(layer.runtime, [agentWm]);
+    const installing = installWorkingMemoryIdentity(context, { defaultAgentAddress: AGENT, peerId: 'peer-1' });
+    // Lifting the fence must not put back the row built under the rule before.
+    liftReadGraphFences(layer.runtime, fences, undefined);
+    expect(layer.runtime.mirror.get(agentWm)?.state).toBe('dirty');
+    expect(await installing).toMatchObject({ recorded: true });
+    expect((await storedRows(adapter))[agentWm]).toMatch(/^dirty@/);
+    expect(layer.runtime.mirror.get(agentWm)?.state).toBe('dirty');
+  });
+
+  it('publishes no working-memory read graph that a change of identity held while its build ran', async () => {
+    const { adapter, fixture, context, dataDir } = await open();
+    const working = fixture.keys.find((key) => key.layer === MemoryLayer.WorkingMemory)!;
+    const readGraph = readGraphIri(working);
+    const first = { defaultAgentAddress: AGENT, peerId: 'peer-1' };
+    const second = { defaultAgentAddress: `0x${'cd'.repeat(20)}`, peerId: 'peer-1' };
+    expect(await installWorkingMemoryIdentity(context, first)).toEqual({ marked: [], recorded: true });
+    // The build pauses in its registry refresh, at the registry record's write, before its row exists.
+    let reached!: () => void;
+    let release!: () => void;
+    const paused = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    adapter.onUpdate = async (sparql) => {
+      if (!sparql.includes('http://dkg.io/ontology/readGraphRegistry')) return;
+      adapter.onUpdate = undefined;
+      reached();
+      await gate;
+    };
+    const building = buildReadGraph(context, working);
+    await paused;
+    // Meanwhile the identity changes, and the record of the one before cannot be removed.
+    const record = join(dataDir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE);
+    rmSync(record);
+    mkdirSync(record);
+    writeFileSync(join(record, 'entry'), '');
+    expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: false });
+    release();
+    // The build ends without publishing: its row is not ready.
+    expect(await building).toMatchObject({ outcome: 'lost' });
+    expect((await storedRows(adapter))[readGraph]).not.toMatch(/^ready@/);
+    rmSync(record, { recursive: true });
+  });
+
+  it('reads no identity from a missing or malformed record', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'read-graph-identity-'));
+    dirs.push(dataDir);
+    expect(recordedWorkingMemoryIdentity(dataDir)).toBeUndefined();
+    for (const body of ['not json', '[]', '{"peerId":7}', 'null']) {
+      writeFileSync(join(dataDir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE), body);
+      expect(recordedWorkingMemoryIdentity(dataDir), body).toBeUndefined();
+    }
+    writeFileSync(join(dataDir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE), '{"peerId":"peer-1"}');
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual({ peerId: 'peer-1' });
   });
 });
 
@@ -1032,6 +1322,23 @@ describe('read-graph start-up', () => {
     expect((await storedRecords(adapter)).get(fixture.contextGraphId)).toEqual({ ...fixture.registry, subGraphNames: ['code', 'docs'] });
   });
 
+  it('keeps working-memory rows ready under a recorded identity, installs it, and marks only what the node changes', async () => {
+    const { adapter, fixture, layer, store, dataDir } = await seeded();
+    const { agentWm } = fixture.readGraphs;
+    writeFileSync(join(dataDir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE), JSON.stringify({ defaultAgentAddress: AGENT, peerId: 'peer-1' }));
+    // The registry the ready rows follow, as the builder records it.
+    await adapter.update!(readGraphRegistryRecordUpdate(fixture.registry));
+    const ours = (key: ReadGraphKey) => key.scope.contextGraphId === fixture.contextGraphId;
+    expect(await startReadGraphs(store, { dataDir, maintains: ours })).toEqual({ marked: 3, maintained: 4 });
+    expect((await storedRows(adapter))[agentWm]).toBe('ready@9');
+    expect(layer.runtime.mirror.get(agentWm)).toEqual(readyRow(agentWm, 9));
+    expect(layer.runtime.workingMemoryIdentity.addressesOf(AGENT)).toEqual([AGENT, 'peer-1']);
+    // The node installs its own identity; the record start-up noted is where it goes, without being named again.
+    expect(await installWorkingMemoryIdentity({ store }, { defaultAgentAddress: AGENT, peerId: 'peer-1' })).toEqual({ marked: [], recorded: true });
+    expect(await installWorkingMemoryIdentity({ store }, { peerId: 'peer-1' })).toEqual({ marked: [agentWm], recorded: true });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual({ peerId: 'peer-1' });
+  });
+
   it('marks a ready row dirty at start when its dirty mark never reached the store, as the data directory keeps it', async () => {
     const { adapter, fixture, layer, store, context, dataDir } = await open();
     const [vm] = fixture.keys as [ReadGraphKey];
@@ -1143,6 +1450,56 @@ describe('read-graph start-up', () => {
     expect(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)?.state).toBe('dirty');
     expect((await storedRows(adapter))[fixture.readGraphs.wholeVm]).toBe(`dirty@${built.generation + 1}`);
     expect(readUnstoredReadGraphMarks(second)).toEqual(new Map());
+  });
+
+  it('leaves the working-memory identity of a backend this process already started to the start-up that loaded it, and records it in every data directory a start-up named', async () => {
+    const adapter = new HookedStore();
+    const [first, second] = [mkdtempSync(join(tmpdir(), 'read-graph-builder-')), mkdtempSync(join(tmpdir(), 'read-graph-builder-'))];
+    dirs.push(first, second);
+    const other = `0x${'cd'.repeat(20)}`;
+    writeFileSync(join(first, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE), JSON.stringify({ defaultAgentAddress: AGENT, peerId: 'peer-1' }));
+    writeFileSync(join(second, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE), JSON.stringify({ defaultAgentAddress: other, peerId: 'peer-1' }));
+    // Two agents of one process over the same backend share its runtime.
+    const config = { backend: 'oxigraph-persistent' as const, options: { path: join(first, 'store') } };
+    const layer = wrapReadGraphLayer(adapter, config);
+    const store = guardReadGraphPartition(layer);
+    expect(await startReadGraphs(store, { dataDir: first, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    expect(layer.runtime.workingMemoryIdentity.addressesOf(AGENT)).toEqual([AGENT, 'peer-1']);
+    const later = guardReadGraphPartition(wrapReadGraphLayer(adapter, config));
+    expect(readGraphLayerOf(later)!.runtime).toBe(layer.runtime);
+    expect(await startReadGraphs(later, { dataDir: second, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    // The running rule stays the one the first start-up installed. The later start-up's agent may be the one a later
+    // process starts alone, so its data directory records the running identity in place of the one it held.
+    expect(layer.runtime.workingMemoryIdentity.addressesOf(AGENT)).toEqual([AGENT, 'peer-1']);
+    expect(recordedWorkingMemoryIdentity(second)).toEqual({ defaultAgentAddress: AGENT, peerId: 'peer-1' });
+    // A change of identity is recorded in both.
+    expect(await installWorkingMemoryIdentity({ store }, { peerId: 'peer-1' })).toEqual({ marked: [], recorded: true });
+    expect(recordedWorkingMemoryIdentity(first)).toEqual({ peerId: 'peer-1' });
+    expect(recordedWorkingMemoryIdentity(second)).toEqual({ peerId: 'peer-1' });
+    // A later start-up while a change is not yet recorded keeps no record of the identity before it.
+    const third = mkdtempSync(join(tmpdir(), 'read-graph-builder-'));
+    dirs.push(third);
+    writeFileSync(join(third, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE), JSON.stringify({ defaultAgentAddress: other, peerId: 'peer-1' }));
+    adapter.onFlush = () => { throw new Error('no space left on the device'); };
+    expect(await installWorkingMemoryIdentity({ store }, { defaultAgentAddress: other, peerId: 'peer-1' })).toEqual({ marked: [], recorded: false });
+    adapter.onFlush = undefined;
+    expect(await startReadGraphs(guardReadGraphPartition(wrapReadGraphLayer(adapter, config)), { dataDir: third, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    expect([first, second, third].map((dir) => recordedWorkingMemoryIdentity(dir))).toEqual([undefined, undefined, undefined]);
+    expect(await installWorkingMemoryIdentity({ store }, { defaultAgentAddress: other, peerId: 'peer-1' })).toEqual({ marked: [], recorded: true });
+    expect([first, second, third].map((dir) => recordedWorkingMemoryIdentity(dir))).toEqual([0, 1, 2].map(() => ({ defaultAgentAddress: other, peerId: 'peer-1' })));
+  });
+
+  it('records a change of identity in the data directory its backend started from, whichever directory the installation names', async () => {
+    const { store, dataDir } = await open();
+    const other = mkdtempSync(join(tmpdir(), 'read-graph-builder-'));
+    dirs.push(other);
+    writeFileSync(join(dataDir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE), JSON.stringify({ defaultAgentAddress: AGENT, peerId: 'peer-1' }));
+    expect(await startReadGraphs(store, { dataDir, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    // A workload over the same backend that names another data directory changes the identity: the record start-up
+    // reads is the one that changes.
+    expect(await installWorkingMemoryIdentity({ store, dataDir: other }, { defaultAgentAddress: AGENT, peerId: 'peer-2' })).toEqual({ marked: [], recorded: true });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual({ defaultAgentAddress: AGENT, peerId: 'peer-2' });
+    expect(recordedWorkingMemoryIdentity(other)).toBeUndefined();
   });
 
   /** Two agents of one process over the same backend: two layers that share its runtime. */

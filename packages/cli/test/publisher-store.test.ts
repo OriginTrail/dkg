@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -5,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { MemoryLayer, readGraphIri, readScope } from '@origintrail-official/dkg-core';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
+  READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE,
   createTripleStore,
   parseReadGraphStateRows,
   readGraphStateCompareAndSet,
@@ -14,6 +16,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 // The same module instance as the CLI's own storage import: the write below the partition guard.
 import { readGraphPartitionMaintenanceStore } from '@origintrail-official/dkg-storage/dist/read-graph-partition-store.js';
+import { readGraphRegistryRecordUpdate } from '@origintrail-official/dkg-storage/dist/read-graph/registry-record.js';
 import type { DkgConfig } from '../src/config.js';
 import { createPublisherStore, publisherStoreConfig } from '../src/publisher-store.js';
 import { QueryConfigError } from '../src/read-graphs-config.js';
@@ -92,6 +95,40 @@ describe('a publisher store opened while the daemon is down', () => {
         const [after] = await stateRows(writer);
         expect(after).toMatchObject({ readGraph: READY.readGraph, state: 'dirty' });
         expect(after!.generation).toBeGreaterThan(READY.generation);
+      } finally {
+        await writer.close();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the read graphs its settings keep under the identity the daemon recorded, and maintains its writes to them', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-publisher-store-'));
+    const contextGraphId = 'publisher-working-memory';
+    const defaultAgent = `0x${'ab'.repeat(20)}`;
+    const peerId = '12D3KooWPublisherStorePeer';
+    const wm = readGraphIri({ scope: readScope(contextGraphId), layer: MemoryLayer.WorkingMemory, agentAddress: defaultAgent });
+    try {
+      // The daemon left the default agent's working-memory read graph ready, with the registry and the identity it was built under.
+      const daemonStore = await createTripleStore({ backend: 'oxigraph-worker', options: { path: join(dir, 'store.nq') } });
+      await readGraphPartitionMaintenanceStore(daemonStore).update!([
+        readGraphStateCompareAndSet(undefined, { readGraph: wm, state: 'ready', generation: 2, ...CURRENT_READ_GRAPH_VERSIONS }),
+        readGraphRegistryRecordUpdate({ contextGraphId, subGraphNames: [], childContextGraphRoots: [] }),
+      ].join(';\n'));
+      await daemonStore.close();
+      writeFileSync(join(dir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE), JSON.stringify({ defaultAgentAddress: defaultAgent, peerId }));
+
+      const writer = await createPublisherStore(dir, config({ query: { readGraphs: { layers: { 'working-memory': 'build' } } } }));
+      try {
+        expect((await stateRows(writer)).map((row) => row.state)).toEqual(['ready']);
+        // A draft written under the node's peer ID is the default agent's: its read graph takes the write, and stays ready.
+        await writer.insert([{
+          subject: 'urn:draft', predicate: 'urn:p', object: '"peer"', graph: `did:dkg:context-graph:${contextGraphId}/_working_memory/${peerId}/1`,
+        }]);
+        expect((await stateRows(writer)).map((row) => row.state)).toEqual(['ready']);
+        const held = await readGraphPartitionMaintenanceStore(writer).query(`SELECT ?o WHERE { GRAPH <${wm}> { ?s ?p ?o } }`);
+        expect(held.type === 'bindings' && held.bindings).toEqual([{ o: '"peer"' }]);
       } finally {
         await writer.close();
       }

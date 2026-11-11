@@ -370,6 +370,7 @@ export default defineConfig({
       "test/read-graph-partition-comparison.test.ts",
       "test/read-graph-runtime.test.ts",
       "test/read-graph-settings-builder.test.ts",
+      "test/read-graph-working-memory.test.ts",
       "test/outbox-shutdown-lifecycle.test.ts",
       // Keyed persist scheduler shared by membership and subscription writes,
       // and the subscription drain / reopen that stop() and start() drive.

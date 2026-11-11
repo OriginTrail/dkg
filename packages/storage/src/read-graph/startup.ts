@@ -15,8 +15,11 @@
  * theirs gets a new generation and the state `dirty`, whatever its state, so
  * nothing an earlier process left in flight passes a fence; a damaged row, or
  * one whose generation cannot grow, is replaced by a dirty row at a new random
- * generation. A working-memory read graph is marked dirty as well, because the
- * identity rule it was built under is not recorded. The rows it does not
+ * generation. A working-memory read graph is kept the same way only when the
+ * node's data directory records the identity it was built under: start-up
+ * installs that rule, and the agent's own installation then marks dirty those
+ * whose agent owns other addresses (`installWorkingMemoryIdentity`). Without
+ * a record it is marked dirty. The rows it does not
  * maintain take the rule of a release that does not maintain read graphs:
  * dirty, unless they already are.
  *
@@ -52,6 +55,7 @@ import {
   recordReadGraphRegistry,
 } from './registry-record.js';
 import type { ReadGraphRegistrySnapshot } from './membership.js';
+import { installRecordedWorkingMemoryIdentity, noteWorkingMemoryIdentityDirectory } from './working-memory-identity.js';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
   MAX_READ_GRAPH_GENERATION,
@@ -112,6 +116,7 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
   const loaded = LOADS.get(layer.runtime);
   if (loaded !== undefined && await loaded) {
     if (options.dataDir !== undefined) useReadGraphMarkJournal(layer.runtime, options.dataDir);
+    if (options.dataDir !== undefined) noteWorkingMemoryIdentityDirectory(layer.runtime, options.dataDir);
     const marked = options.dataDir === undefined ? 0 : await markJournaledRows(target, layer.runtime, options.dataDir, queryOptions);
     return { marked, maintained: layer.runtime.mirror.size };
   }
@@ -132,6 +137,9 @@ async function loadReadGraphs(
   queryOptions: QueryOptions,
 ): Promise<ReadGraphStartResult> {
   const { mirror, registries } = layer.runtime;
+  // Only the start-up that loads the mirror installs the recorded identity. A later one leaves the running rule to the
+  // store objects already using it, and its data directory records that identity from then on.
+  const recorded = options.dataDir === undefined ? undefined : installRecordedWorkingMemoryIdentity(layer.runtime, options.dataDir);
   // The backend's recovery generation now is the one later restarts are told by.
   syncReadGraphRuntimeWithRecovery(store, layer.runtime);
   for (const row of mirror.rows()) mirror.remove(row.readGraph);
@@ -166,7 +174,7 @@ async function loadReadGraphs(
   };
   // A maintained row that may stay ready, if its registry did not move. Without a data directory, no journal kept
   // the dirty marks the store refused, so no ready row can be trusted across a start.
-  const mayKeep = (row: ReadGraphStateRow) => options.dataDir !== undefined && maintained(row.readGraph) && keepsReady(row, versions)
+  const mayKeep = (row: ReadGraphStateRow) => options.dataDir !== undefined && maintained(row.readGraph) && keepsReady(row, versions, recorded !== undefined)
     && journaled.get(row.readGraph)?.has(row.generation) !== true;
   for (const row of found.rows) if (mayKeep(row)) await readRegistry(parseReadGraphIri(row.readGraph)!.scope.contextGraphId);
   const followsRecord = (row: ReadGraphStateRow) => {
@@ -217,10 +225,10 @@ async function loadReadGraphs(
   return { marked: count, maintained: mirror.size };
 }
 
-/** A maintained row that stays `ready`: built under accepted versions, outside working memory. */
-function keepsReady(row: ReadGraphStateRow, versions: ReadGraphVersions): boolean {
+/** A maintained row that stays `ready`: built under accepted versions, and in working memory only under a recorded identity. */
+function keepsReady(row: ReadGraphStateRow, versions: ReadGraphVersions, identityRecorded: boolean): boolean {
   return row.state === 'ready' && isReadGraphRowAccepted(row, versions)
-    && parseReadGraphIri(row.readGraph)?.layer !== MemoryLayer.WorkingMemory;
+    && (identityRecorded || parseReadGraphIri(row.readGraph)?.layer !== MemoryLayer.WorkingMemory);
 }
 
 /**

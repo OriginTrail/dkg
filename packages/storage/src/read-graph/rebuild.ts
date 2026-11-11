@@ -30,7 +30,6 @@
 
 import { setImmediate as nextTurn, setTimeout as sleep } from 'node:timers/promises';
 import {
-  MemoryLayer,
   assertSafeIri,
   compareCodePoint,
   contextGraphDataUri,
@@ -47,10 +46,11 @@ import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
 import { memberGraphListingQuery } from './check.js';
-import { matchesGraphNameTest, readGraphMembership, workingMemoryIdentityRule, type GraphNameTest } from './membership.js';
-import { readGraphLayerOf, readGraphRuntimeOf } from './read-graph-store.js';
+import { matchesGraphNameTest, readGraphMembership, type GraphNameTest } from './membership.js';
+import { readGraphLayerOf } from './read-graph-store.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry, type ReadGraphRegistryFact } from './registry-recognition.js';
 import { noteUnstoredReadGraphMark } from './mark-journal.js';
+import { isHeldReadGraph } from './working-memory-hold.js';
 import { invalidateReadGraphRuntime, readGraphRecoveryGeneration, syncReadGraphRuntimeWithRecovery } from './recovery.js';
 import { recordReadGraphRegistry } from './registry-record.js';
 import { ReadGraphLocks, type InMemoryReadGraphStateMirror, type ReadGraphBackendRuntime } from './runtime.js';
@@ -171,7 +171,15 @@ const MAX_PRESSURE_WAIT_MS = 5_000;
  */
 export async function buildReadGraph(context: ReadGraphJobContext, key: ReadGraphKey): Promise<ReadGraphJobResult> {
   const job = new ReadGraphJob(context, readGraphIri(key), 'build');
+  refuseHeld(job, key);
   return withReadGraphBackgroundSlot(job.runtime, () => build(job, key));
+}
+
+/** A held working-memory read graph (`./working-memory-hold.ts`) is neither built nor repaired. */
+function refuseHeld(job: ReadGraphJob, key: ReadGraphKey): void {
+  if (isHeldReadGraph(job.runtime, key)) {
+    throw new ReadGraphJobError(`${job.readGraph} is not built while the record of the node's previous working-memory identity cannot be removed`);
+  }
 }
 
 async function build(job: ReadGraphJob, key: ReadGraphKey): Promise<ReadGraphJobResult> {
@@ -213,6 +221,7 @@ export async function repairReadGraph(
   input: ReadGraphRepairInput,
 ): Promise<ReadGraphJobResult> {
   const job = new ReadGraphJob(context, readGraphIri(key), 'repair');
+  refuseHeld(job, key);
   for (const graph of input.joined) if (!matchesGraphNameTest(input.membership, graph)) throw new ReadGraphJobError(`A joined graph must be a member: ${graph}`);
   for (const graph of input.leaving) if (matchesGraphNameTest(input.membership, graph)) throw new ReadGraphJobError(`A leaving graph must not be a member: ${graph}`);
   return withReadGraphBackgroundSlot(job.runtime, () => repair(job, input));
@@ -357,35 +366,6 @@ function sameFacts(left: readonly ReadGraphRegistryFact[], right: readonly ReadG
   const keys = (facts: readonly ReadGraphRegistryFact[]) => new Set(facts.map((fact) => JSON.stringify([fact.graph, fact.subject, fact.predicate, fact.object])));
   const [a, b] = [keys(left), keys(right)];
   return a.size === b.size && [...b].every((key) => a.has(key));
-}
-
-const INSTALLED_IDENTITIES = new WeakMap<ReadGraphBackendRuntime, string>();
-
-/**
- * Install the node's working-memory identity rule on the store's read-graph
- * runtime. When the identity differs from the one installed before, every
- * working-memory read graph with a row is marked dirty under its lock first,
- * because it was built and maintained under the old rule. The first install
- * in a process marks nothing: start-up has already marked them dirty.
- */
-export async function installWorkingMemoryIdentity(
-  context: ReadGraphJobContext,
-  node: { readonly defaultAgentAddress?: string; readonly peerId?: string },
-): Promise<void> {
-  const runtime = readGraphRuntimeOf(context.store);
-  if (!runtime) return;
-  const identity = JSON.stringify([node.defaultAgentAddress ?? null, node.peerId ?? null]);
-  const installed = INSTALLED_IDENTITIES.get(runtime);
-  if (identity === installed) return;
-  if (installed !== undefined) {
-    const workingMemory = runtime.mirror.rows().map((row) => row.readGraph)
-      .filter((readGraph) => parseReadGraphIri(readGraph)?.layer === MemoryLayer.WorkingMemory);
-    await runtime.locks.withLocks(workingMemory, async () => {
-      for (const readGraph of workingMemory) await new ReadGraphJob(context, readGraph, 'mark').markDirtyHeld();
-    });
-  }
-  runtime.workingMemoryIdentity = workingMemoryIdentityRule(node);
-  INSTALLED_IDENTITIES.set(runtime, identity);
 }
 
 /**
@@ -703,11 +683,13 @@ class ReadGraphJob {
    * Publish `ready`: the compare-and-set, the read-back and the mirror in one
    * lock hold. A backend restart before it ends the job; one that lands while
    * it runs may have published a row whose contents the restart cut short, so
-   * the journal keeps it for a mark.
+   * the journal keeps it for a mark. A working-memory read graph held since the
+   * job began (`./working-memory-hold.ts`) is not published: the job ends `lost`.
    */
   async publish(row: ReadGraphStateRow, inService: () => boolean): Promise<ReadGraphJobResult> {
+    const key = parseReadGraphIri(this.readGraph);
     const published = await this.locked(async () => {
-      if (this.restarted() || !inService()) return { lost: true as const };
+      if (this.restarted() || !inService() || (key !== undefined && isHeldReadGraph(this.runtime, key))) return { lost: true as const };
       const stored = await this.transition(row, { kind: 'publish-ready' });
       if (!this.restarted()) return { row: stored };
       if (stored?.state === 'ready') noteUnstoredReadGraphMark(this.runtime, this.readGraph, stored.generation);

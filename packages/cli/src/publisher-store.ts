@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { createTripleStore, markReadGraphsDirtyAtStart, type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
+import { createTripleStore, startReadGraphs, type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
 import type { DkgConfig } from './config.js';
 import { readGraphStoreSettings, resolveQueryConfig } from './read-graphs-config.js';
 import { applyGraphCatalogConfig } from './graph-catalog-config.js';
@@ -42,9 +42,10 @@ export function publisherStoreConfig(dataDir: string, config: DkgConfig, readOnl
 }
 
 /**
- * Open the store of a publisher runtime or inspector outside the daemon. It is a second writer that runs while the daemon is down, and nothing
- * maintains read graphs in its process, so before it can write it marks every read graph it finds dirty, as a release that does not maintain them
- * does at start (`markReadGraphsDirtyAtStart`): no row stays `ready` across its writes. A read-only store writes nothing and marks nothing.
+ * Open the store of a publisher runtime or inspector outside the daemon. It is a second writer that runs while the daemon is down, so before it can write
+ * it starts read graphs as the daemon does (`startReadGraphs`). The read graphs its settings keep stay `ready` and its layer maintains its writes to them;
+ * working-memory ones only under the identity the daemon recorded in the data directory, which it then uses. Every other read graph is marked dirty, as a
+ * release that does not maintain them does at start. A read-only store writes nothing and marks nothing.
  */
 export async function createPublisherStore(dataDir: string, config: DkgConfig, readOnly = false): Promise<TripleStore> {
   // A bad `store.graphCatalog` or DKG_STORE_GRAPH_CATALOG_MAX_BYTES stops it here, before the store opens.
@@ -52,7 +53,7 @@ export async function createPublisherStore(dataDir: string, config: DkgConfig, r
   const store = await createTripleStore(publisherStoreConfig(dataDir, config, readOnly));
   if (readOnly) return store;
   try {
-    await markReadGraphsDirtyAtStart(store, { dataDir });
+    await startReadGraphs(store, { dataDir });
   } catch (error) {
     await store.close().catch(() => undefined);
     throw error;

@@ -1,12 +1,17 @@
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import oxigraph from 'oxigraph';
-import { afterAll, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { OxigraphWorkerStore } from '../src/adapters/oxigraph-worker.js';
 import { readGraphCopy, readGraphDeltaDelete, readGraphDeltaDeleteMatching, readGraphInsertQuads } from '../src/read-graph/statements.js';
+import { parseReadGraphStateRows, readGraphStateCompareAndSet, readGraphStateRowsQuery } from '../src/read-graph/state.js';
+import type { TripleStore } from '../src/triple-store.js';
+import { P as LAYER_P, expectLayerUnions, layerFixture, layeredStore, q as layerQuad, readyRow } from './helpers/read-graph-layer-conformance.js';
+import { authorCommitInput, seedOldState } from './rfc64-author-commit-cas-harness.js';
 import {
   P,
   planned,
@@ -211,4 +216,70 @@ readGraphWriteSuite({
   injectedTermsChangeNothing(context);
   multiGraphDeletes(context);
   literalRoundTrips(context);
+});
+
+/**
+ * Through the read-graph layer, both embedded adapters delete a blank node by
+ * its identity: the layer cannot plan that delete, so it marks the read graphs
+ * dirty, in the mirror and then in the stored row, and sends the delete as it is.
+ */
+describe.each([
+  ['OxigraphStore', (): TripleStore => new OxigraphStore()],
+  ['OxigraphWorkerStore', (): TripleStore => new OxigraphWorkerStore()],
+] as const)('a delete naming a blank node through the read-graph layer on %s', (_name, open) => {
+  it('deletes exactly that node, keeps its twin, and leaves the read graph dirty in the mirror and the store', async () => {
+    const adapter = open();
+    try {
+      const fixture = layerFixture(`blank-node-delete-${randomUUID()}`);
+      const { layer, store } = await layeredStore(adapter, { backend: 'oxigraph' }, fixture);
+      const { wholeVm } = fixture.readGraphs;
+      await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(wholeVm)));
+      const member = fixture.graphs[2]!;
+      // Two blank nodes with the same predicate and object.
+      await adapter.insert([layerQuad('_:first', '"twin"', member), layerQuad('_:second', '"twin"', member)]);
+      const twins = async () => {
+        const result = await adapter.query(`SELECT ?b WHERE { GRAPH <${member}> { ?b <${LAYER_P}> "twin" } }`);
+        return (result.type === 'bindings' ? result.bindings : []).map((row) => row['b']!).sort();
+      };
+      const [named, twin] = await twins();
+      expect([named, twin].every((label) => label?.startsWith('_:'))).toBe(true);
+      await store.delete([layerQuad(named!, '"twin"', member)]);
+      expect(await twins()).toEqual([twin]);
+      const stored = await adapter.query(readGraphStateRowsQuery());
+      const row = parseReadGraphStateRows(stored.type === 'bindings' ? stored.bindings : []).rows.find((each) => each.readGraph === wholeVm);
+      expect(row?.state).toBe('dirty');
+      expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it('maintains the read graphs of an RFC-64 author commit that wins, and changes nothing for one that loses its guard', async () => {
+    const adapter = open();
+    try {
+      const fixture = layerFixture(`author-commit-${randomUUID()}`);
+      const { layer, store } = await layeredStore(adapter, { backend: 'oxigraph' }, fixture);
+      // The adapter declares author commits, so the layer plans them.
+      expect(layer.adapterCapabilities?.methods).toContain('rfc64AuthorCommitCasV1');
+      // The commit replaces the context graph's shared-memory graph, a member of its whole-graph SWM read graph.
+      const projection = fixture.graphs[5]!;
+      await seedOldState(adapter);
+      const commit = (value: string) => authorCommitInput({
+        sharedProjectionGraph: projection, sharedProjectionQuads: [layerQuad('urn:s:commit', value, projection)],
+      });
+      const held = async () => {
+        const result = await adapter.query(`SELECT ?s ?o WHERE { GRAPH <${projection}> { ?s <${LAYER_P}> ?o } }`);
+        return (result.type === 'bindings' ? result.bindings : []).map((each) => `${each['s']} ${each['o']}`).sort();
+      };
+      await expect(store.rfc64AuthorCommitCasV1!(commit('"won"'))).resolves.toBe('committed');
+      expect(await held()).toEqual(['urn:s:commit "won"']);
+      await expectLayerUnions(adapter, layer, fixture, 'an author commit that won');
+      // Its guard is now stale: the head has moved on.
+      await expect(store.rfc64AuthorCommitCasV1!(commit('"lost"'))).resolves.toBe('conflict');
+      expect(await held()).toEqual(['urn:s:commit "won"']);
+      await expectLayerUnions(adapter, layer, fixture, 'an author commit that lost its guard');
+    } finally {
+      await adapter.close();
+    }
+  });
 });
