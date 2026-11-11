@@ -40,9 +40,10 @@ export const openStoppedNodeStore: OpenStoppedNodeStore = async (dataDir, log) =
       throw error;
     }
   }
-  const configured = config.store as TripleStoreConfig | undefined;
+  // A store section with only settings (no backend) keeps the default store, with those settings, as the daemon does.
+  const configured = config.store?.backend ? config.store as TripleStoreConfig : undefined;
   const store = await createTripleStore({
-    ...(configured ?? { backend: 'oxigraph-worker', options: { path: join(dataDir, 'store.nq') } }),
+    ...(configured ?? { backend: 'oxigraph-worker', options: { path: join(dataDir, 'store.nq') }, graphCatalog: config.store?.graphCatalog }),
     changelog: false,
   });
   return { store, close: () => store.close() };
