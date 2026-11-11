@@ -437,6 +437,7 @@ export {
   readGraphStateCompareAndSet,
   readGraphStateFencePattern,
   readGraphStateMarkAllDirty,
+  readGraphStateMarkDirty,
   readGraphStateReset,
   readGraphStateRowsQuery,
   servingReadGraphGeneration,
@@ -480,4 +481,23 @@ export {
   type ReadGraphFence,
   type ReadGraphTarget,
 } from './read-graph/statements.js';
+export {
+  InMemoryReadGraphStateMirror,
+  ReadGraphLocks,
+  ReadGraphRegistryCache,
+  ReadGraphWriteTracker,
+  readGraphBackendIdentity,
+  readGraphBackendRuntime,
+  type ReadGraphBackendRuntime,
+} from './read-graph/runtime.js';
+export {
+  READ_GRAPH_WRITE_REFUSED_CODE,
+  ReadGraphStore,
+  ReadGraphWriteRefusedError,
+  readGraphLayerOf,
+  readGraphRuntimeOf,
+  wrapReadGraphLayer,
+  type ReadGraphStoreConfig,
+} from './read-graph/read-graph-store.js';
+export { readReadGraphRegistry } from './read-graph/registry.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';
