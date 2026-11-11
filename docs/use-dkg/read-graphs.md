@@ -225,5 +225,6 @@ Metrics are exported once an OTLP endpoint is set; see [Monitor Store and Queue 
 | The daemon stops at start, with `READ_GRAPHS_UNSUPPORTED` in its log | The store cannot maintain read graphs. Set `off`, or move to a store listed above. |
 | `dkg start` refuses: the rollback target is older than the first release that recognizes read graphs | Update so that the rollback target recognizes read graphs, or set `off`. |
 | A read graph stays `dirty` or `rebuilding` | Merged requests get `503` until it is `ready`; per-asset answers keep working. Look for the check line in the daemon log. If it repeats, set `off` and open an issue with those log lines. |
+| Every read graph is rebuilt after a start | Expected after `dkg publisher cancel`, `retry` or `clear` ran while the daemon was down. Nothing maintains read graphs in that process, so it marks them all dirty before it writes. Wait for `ready`; merged requests get `503` until then. |
 | You suspect a read graph's answers | Run `dkg store read-graphs check`. To start one over, run `dkg store read-graphs rebuild -c <id>`. |
 | Writes are slower | Compare the store's queue waits with the layer on and off ([Monitor Store and Queue Pressure](backpressure-observability.md)). Set `off` for the layer if they rise. |

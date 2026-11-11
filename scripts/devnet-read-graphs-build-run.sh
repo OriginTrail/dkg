@@ -17,8 +17,9 @@
 #             long that took, then run the full check on every node. A node
 #             must also list the read graphs it is expected to keep, worked
 #             out without its status: for each context graph it subscribes
-#             to that can have read graphs, the whole-graph read graph of each
-#             shared layer its setting keeps, by the build's own rules;
+#             to that can have read graphs, and each sub-graph registered in
+#             it, the read graph of each shared layer its setting keeps, by
+#             the build's own rules;
 #   measure   record read graphs by state, triples per read graph and copies
 #             per triple (scripts/read-graph-store-report.mjs), and the size of
 #             each node's directory before and after;
@@ -32,7 +33,11 @@
 #             there after it, and the agent's working-memory read graph ready
 #             and consistent); a CLI write with the daemon down (`dkg publisher clear
 #             finalized` on a node that has such jobs, which must stay
-#             cleared); a rollback and forward again (the earlier release is
+#             cleared; a store opened outside the daemon marks every read
+#             graph it finds dirty before it writes, so each shared-layer read
+#             graph, which a plain restart first keeps at its generation, must
+#             get a new one and be rebuilt); a rollback and forward again (the
+#             earlier release is
 #             built first; `dkg rollback --stores-for <its version>` readies the
 #             stopped node's stores, and after it the node's store must hold
 #             no read-graph partition and every asset graph as before, and
@@ -217,31 +222,62 @@ context_graph_count() {
   '
 }
 # expected_read_graphs <n>: the read graphs node <n> must keep, worked out without its status: for each context
-# graph it subscribes to that can have read graphs, the whole-context-graph read graph of each shared layer whose
-# mode under the node's setting is not off, by the build's own rules. Working-memory and sub-graph read graphs are
-# required as status lists them.
+# graph it subscribes to that can have read graphs, and for each sub-graph registered in it, the read graph of each
+# shared layer whose mode under the node's setting is not off, by the build's own rules. Working-memory read graphs
+# are required as status lists them (the kill drill requires its own).
 expected_read_graphs() {
-  local setting
+  local setting frames cg i=0
   setting="$(read_graphs_setting "$1")"
-  api "$1" GET /api/context-graph/list | SETTING_JSON="${setting:-\"off\"}" LISTING_MODULE="$LISTING_MODULE" CORE_MODULE="$CORE_MODULE" \
+  frames="$RESULTS/rows/expected-input.node$1"
+  # The node's listing, then one sub-graph listing per context graph it subscribes to (frame <i>, named in the index).
+  api "$1" GET /api/context-graph/list > "$frames.listing" || return 1
+  rm -f "$frames".sub.*; : > "$frames.index"
+  for cg in $(LISTING_MODULE="$LISTING_MODULE" CORE_MODULE="$CORE_MODULE" node --input-type=module -e '
+      const { readListing } = await import(process.env.LISTING_MODULE);
+      const core = await import(process.env.CORE_MODULE);
+      const frame = (await import("node:fs")).readFileSync(process.argv[1], "utf8"); const newline = frame.indexOf("\n");
+      const listing = readListing(Number(frame.slice(0, newline)), frame.slice(newline + 1));
+      if (!listing.ok) { console.error(listing.reason); process.exit(1); }
+      for (const graph of listing.graphs) {
+        if (graph.subscribed === true && core.isReadGraphEligibleContextGraphId(graph.id)) console.log(encodeURIComponent(graph.id));
+      }
+    ' "$frames.listing"); do
+    i=$((i + 1))
+    api "$1" GET "/api/sub-graph/list?contextGraphId=$cg" > "$frames.sub.$i" || return 1
+    printf '%s %s\n' "$i" "$cg" >> "$frames.index"
+  done
+  SETTING_JSON="${setting:-\"off\"}" LISTING_MODULE="$LISTING_MODULE" CORE_MODULE="$CORE_MODULE" \
     STORAGE_MODULE="$STORAGE_MODULE" QUERY_CONFIG_MODULE="$QUERY_CONFIG_MODULE" node --input-type=module -e '
+    const fs = await import("node:fs");
     const { readListing } = await import(process.env.LISTING_MODULE);
     const core = await import(process.env.CORE_MODULE);
     const { readGraphModeOf } = await import(process.env.STORAGE_MODULE);
     const { resolveQueryConfig } = await import(process.env.QUERY_CONFIG_MODULE);
-    let frame = ""; for await (const chunk of process.stdin) frame += chunk;
-    const newline = frame.indexOf("\n");
-    const listing = readListing(Number(newline === -1 ? frame : frame.slice(0, newline)), newline === -1 ? "" : frame.slice(newline + 1));
+    const frame = fs.readFileSync(process.argv[1], "utf8"); const newline = frame.indexOf("\n");
+    const listing = readListing(Number(frame.slice(0, newline)), frame.slice(newline + 1));
     if (!listing.ok) { console.error(listing.reason); process.exit(1); }
+    // Registered sub-graphs as the builder takes them: valid names, each once.
+    const subGraphs = new Map();
+    for (const line of fs.readFileSync(`${process.argv[1].slice(0, -".listing".length)}.index`, "utf8").split("\n").filter(Boolean)) {
+      const [index, encoded] = line.split(" "); const id = decodeURIComponent(encoded);
+      const answer = fs.readFileSync(`${process.argv[1].slice(0, -".listing".length)}.sub.${index}`, "utf8"); const at = answer.indexOf("\n");
+      if (answer.slice(0, at) !== "200") { console.error(`the sub-graph list of ${id} answered HTTP ${answer.slice(0, at)}`); process.exit(1); }
+      let body; try { body = JSON.parse(answer.slice(at + 1)); } catch { console.error(`the sub-graph list of ${id} is not JSON`); process.exit(1); }
+      if (!Array.isArray(body.subGraphs)) { console.error(`the sub-graph list of ${id} has no subGraphs`); process.exit(1); }
+      const names = body.subGraphs.map((sub) => sub?.name).filter((name) => typeof name === "string" && core.validateSubGraphName(name).valid);
+      subGraphs.set(id, [...new Set(names)]);
+    }
     const modes = resolveQueryConfig({ readGraphs: JSON.parse(process.env.SETTING_JSON) }).readGraphs;
     for (const graph of listing.graphs) {
       if (graph.subscribed !== true || !core.isReadGraphEligibleContextGraphId(graph.id)) continue;
-      for (const layer of [core.MemoryLayer.VerifiableMemory, core.MemoryLayer.SharedWorkingMemory]) {
-        const key = { scope: core.readScope(graph.id), layer };
-        if (readGraphModeOf(modes, key) !== "off") console.log(core.readGraphIri(key));
+      const scopes = [core.readScope(graph.id), ...(subGraphs.get(graph.id) ?? []).map((name) => core.readScope(graph.id, name))];
+      for (const scope of scopes) for (const layer of [core.MemoryLayer.VerifiableMemory, core.MemoryLayer.SharedWorkingMemory]) {
+        const key = { scope, layer };
+        if (readGraphModeOf(modes, key) === "off") continue;
+        console.log(core.readGraphIri(key));
       }
     }
-  '
+  ' "$frames.listing"
 }
 # wm_read_graph <n> <context graph> <agent address>: the IRI of that agent's working-memory read graph in the context
 # graph, by the build's own rules, when node <n>'s setting keeps it; nothing when the setting does not.
@@ -350,8 +386,13 @@ all_ready() { [ -s "$1" ] && ! grep -qv '^ready ' "$1"; }
 # (expected_read_graphs, written next to the rows) is among them and ready.
 settled() {
   local expected="$2.expected" graph
-  expected_read_graphs "$1" > "$expected" || return 1
   if [ -s "$2" ] && grep -qv '^ready ' "$2"; then return 1; fi
+  # The expected set takes a listing per context graph, and the sub-graph listing counts triples, so each wait works it
+  # out once, after status first lists everything ready (wait_all_ready clears it). A failed attempt keeps its reason.
+  if [ ! -e "$expected.ok" ]; then
+    expected_read_graphs "$1" > "$expected" 2> "$expected.err" || return 1
+    : > "$expected.ok"
+  fi
   while read -r graph; do
     [ -n "$graph" ] || continue
     awk -v g="$graph" '$3 == g && $1 == "ready" { found = 1 } END { exit !found }' "$2" || return 1
@@ -360,7 +401,8 @@ settled() {
 }
 # unsettled <rows file>: what keeps a node from settling, as ": <graph> (<state or missing>), ..." (at most three).
 unsettled() {
-  { awk '$1 != "ready" { print "<" $3 "> (" $1 ")" }' "$1" 2>/dev/null
+  { [ -s "$1.expected.err" ] && [ ! -e "$1.expected.ok" ] && echo "the read graphs it must keep could not be worked out ($(head -1 "$1.expected.err"))"
+    awk '$1 != "ready" { print "<" $3 "> (" $1 ")" }' "$1" 2>/dev/null
     while read -r graph; do
       [ -n "$graph" ] && ! awk -v g="$graph" '$3 == g { found = 1 } END { exit !found }' "$1" 2>/dev/null && echo "<$graph> (missing)"
     done < "$1.expected"; } 2>/dev/null | head -3 | paste -sd ',' - | sed 's/^./: &/; s/,/, /g'
@@ -372,6 +414,7 @@ wait_all_ready() {
   local label="$1" timeout="$2" nodes="${3:-$NODES}" started deadline pending n rows
   started="$(now)"; deadline=$((started + timeout)); pending="$nodes"
   : > "$RESULTS/rows/$label.seconds"
+  for n in $nodes; do rm -f "$RESULTS/rows/$label.node$n.expected" "$RESULTS/rows/$label.node$n.expected.ok" "$RESULTS/rows/$label.node$n.expected.err"; done
   while [ -n "${pending// /}" ]; do
     local still=""
     for n in $pending; do
@@ -746,16 +789,46 @@ finalized_jobs() {
     });'
 }
 
+# generations_compared <before rows> <after rows> <same|new>: the shared-layer read graphs of <before> whose generation
+# in <after> is not as asked (`same`: the one it had; `new`: another one), as " <graph> (generation A, then B)". Working-
+# memory read graphs are left out: every start renews them.
+generations_compared() {
+  local state gen graph gen_after
+  while read -r state gen graph; do
+    case "$graph" in */_working_memory/*) continue ;; esac
+    gen_after="$(generation_of "$2" "$graph")"
+    if [ "$3" = same ] && [ "$gen_after" = "$gen" ]; then continue; fi
+    if [ "$3" = new ] && [ -n "$gen_after" ] && [ "$gen_after" != "$gen" ]; then continue; fi
+    printf ' <%s> (generation %s, then %s)' "$graph" "$gen" "${gen_after:-missing}"
+  done < "$1"
+}
+
 drill_cli_write_daemon_down() {
-  local n="" candidate started before="" after output rc cleared
+  local n="" candidate jobs started before after output rc cleared renewed kept count dir="$RESULTS/rows"
   started="$(now)"
-  # A node with finalized publish jobs, so the offline write has something to change; the drill node first.
+  # A node with finalized publish jobs, so the offline write has something to change, and with read graphs; the drill
+  # node first.
   for candidate in "$CLI_NODE" $NODES; do
-    before="$(finalized_jobs "$candidate")"
-    if [ -n "$before" ] && [ "$before" -gt 0 ]; then n="$candidate"; break; fi
+    jobs="$(finalized_jobs "$candidate")"
+    [ -n "$jobs" ] && [ "$jobs" -gt 0 ] || continue
+    if read_graph_rows "$candidate" 2>/dev/null | grep -q .; then n="$candidate"; break; fi
   done
-  [ -n "$n" ] || { record drill-cli INCONCLUSIVE 0 "no node has a finalized publish job, so an offline clear would change nothing"; return; }
-  stop_node "$n" || { record drill-cli INCONCLUSIVE 0 "could not stop node$n"; return; }
+  [ -n "$n" ] || { record drill-cli INCONCLUSIVE 0 "no node has both a finalized publish job and a read graph"; return; }
+  before="$(finalized_jobs "$n")"
+  # Nothing maintains read graphs in a CLI process, so a store it opens to write with the daemon down marks every read
+  # graph it finds dirty first. Each must then get a new generation at the next start and be rebuilt. A plain restart
+  # comes first, as the control: it keeps every ready shared-layer read graph at its generation, so a new one after the
+  # offline write comes from that write.
+  wait_all_ready drill-cli-before "$READY_TIMEOUT" "$n" \
+    || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "node$n's read graphs were not ready before the drill"; return; }
+  restart_node "$n" || { record drill-cli FAIL "$(( $(now) - started ))" "node$n did not come back from a plain restart"; return; }
+  wait_all_ready drill-cli-control "$READY_TIMEOUT" "$n" \
+    || { record drill-cli FAIL "$(( $(now) - started ))" "node$n's read graphs not ready after a plain restart"; return; }
+  renewed="$(generations_compared "$dir/drill-cli-before.node$n" "$dir/drill-cli-control.node$n" same)"
+  [ -z "$renewed" ] || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "a plain restart already renewed read graphs, so what the offline write marked cannot be told apart:$renewed"; return; }
+  count="$(grep -vc '/_working_memory/' "$dir/drill-cli-control.node$n")"
+  [ "$count" -gt 0 ] || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "node$n has no shared-layer read graph"; return; }
+  stop_node "$n" || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "could not stop node$n"; return; }
   output="$(dkg_cli "$n" publisher clear finalized 2>&1)"; rc=$?
   printf '%s\n' "$output" > "$RESULTS/drill-cli.log"
   start_node "$n" || { record drill-cli FAIL "$(( $(now) - started ))" "node$n did not come back"; return; }
@@ -769,7 +842,10 @@ drill_cli_write_daemon_down() {
   if [ -z "$after" ] || [ "$after" -gt $((before - cleared)) ]; then
     record drill-cli FAIL "$(( $(now) - started ))" "node$n lists ${after:-?} finalized jobs after the restart; $before before, $cleared cleared offline"; return
   fi
-  drill_end drill-cli "$n" "$started" "with node$n's daemon down, \`dkg publisher clear finalized\` cleared $cleared of $before jobs, and they stayed cleared"
+  if ! wait_all_ready drill-cli "$READY_TIMEOUT" "$n"; then record drill-cli FAIL "$(( $(now) - started ))" "node$n's read graphs not ready after the restart"; return; fi
+  kept="$(generations_compared "$dir/drill-cli-control.node$n" "$dir/drill-cli.node$n" new)"
+  [ -z "$kept" ] || { record drill-cli FAIL "$(( $(now) - started ))" "read graphs came through the offline write without a new generation, so nothing marked them dirty:$kept"; return; }
+  drill_end drill-cli "$n" "$started" "with node$n's daemon down, \`dkg publisher clear finalized\` cleared $cleared of $before jobs, which stayed cleared; the $count shared-layer read graphs that a plain restart kept got a new generation and were rebuilt"
 }
 
 # partition_graphs <endpoint> <out>: every graph the store holds in a read-graph partition (read graphs and
