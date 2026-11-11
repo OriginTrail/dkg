@@ -478,8 +478,10 @@ export {
   type ReadGraphBackendRuntime,
 } from './read-graph/runtime.js';
 export {
+  READ_GRAPH_MAINTENANCE_FAILED_CODE,
   READ_GRAPH_WRITE_REFUSED_CODE,
   ReadGraphStore,
+  ReadGraphMaintenanceError,
   ReadGraphWriteRefusedError,
   readGraphLayerOf,
   readGraphRuntimeOf,
