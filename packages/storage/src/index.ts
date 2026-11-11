@@ -476,9 +476,13 @@ export {
   type ReadGraphBackendRuntime,
 } from './read-graph/runtime.js';
 export {
+  READ_GRAPH_WRITE_REFUSED_CODE,
   ReadGraphStore,
+  ReadGraphWriteRefusedError,
   readGraphLayerOf,
   wrapReadGraphLayer,
   type ReadGraphStoreConfig,
+  type ReadGraphUpdateOptions,
 } from './read-graph/read-graph-store.js';
+export { readReadGraphRegistry } from './read-graph/registry.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';

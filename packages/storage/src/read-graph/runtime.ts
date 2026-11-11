@@ -16,7 +16,7 @@
  */
 
 import { resolve } from 'node:path';
-import { compareCodePoint } from '@origintrail-official/dkg-core';
+import { compareCodePoint, parseReadGraphIri } from '@origintrail-official/dkg-core';
 import type { TripleStoreConfig } from '../triple-store-composition.js';
 import { workingMemoryIdentityRule, type ReadGraphRegistrySnapshot, type WorkingMemoryIdentityRule } from './membership.js';
 import type { ReadGraphStateMirror, ReadGraphStateRow } from './state.js';
@@ -68,17 +68,33 @@ export class ReadGraphLocks {
  */
 export class InMemoryReadGraphStateMirror implements ReadGraphStateMirror {
   private readonly byReadGraph = new Map<string, ReadGraphStateRow>();
+  /** How many rows each context graph has. */
+  private readonly perContextGraph = new Map<string, number>();
 
   get(readGraph: string): ReadGraphStateRow | undefined {
     return this.byReadGraph.get(readGraph);
   }
 
   set(row: ReadGraphStateRow): void {
+    if (!this.byReadGraph.has(row.readGraph)) this.count(row.readGraph, 1);
     this.byReadGraph.set(row.readGraph, Object.freeze({ ...row }));
   }
 
   remove(readGraph: string): void {
-    this.byReadGraph.delete(readGraph);
+    if (this.byReadGraph.delete(readGraph)) this.count(readGraph, -1);
+  }
+
+  /** The context graphs that have at least one row. */
+  contextGraphIds(): readonly string[] {
+    return [...this.perContextGraph.keys()];
+  }
+
+  private count(readGraph: string, delta: number): void {
+    const contextGraphId = parseReadGraphIri(readGraph)?.scope.contextGraphId;
+    if (contextGraphId === undefined) return;
+    const next = (this.perContextGraph.get(contextGraphId) ?? 0) + delta;
+    if (next > 0) this.perContextGraph.set(contextGraphId, next);
+    else this.perContextGraph.delete(contextGraphId);
   }
 
   rows(): readonly ReadGraphStateRow[] {
