@@ -3,6 +3,12 @@ export { sparqlEngineOf, type SparqlEngineFamily } from './sparql-engine-capabil
 export { SparqlTsvResultsShapeError } from './sparql-tsv-query-result.js';
 export { SparqlResultsShapeError } from './sparql-results-shape-error.js';
 export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumeration-query.js';
+export { preparedSparqlNamesReadGraphPartition } from './read-graph-partition-reference.js';
+export { isReadGraphPartitionGraph } from './graph-enumeration-visibility.js';
+export { dropReadGraphPartitions, noteStoreMayHoldReadGraphPartitions, storeMayHoldReadGraphPartitions } from './read-graph-partition-store.js';
+export { clearReadGraphPartitionsNote, mayHoldReadGraphPartitions } from './read-graph-partition-marker.js';
+export { markReadGraphsDirtyAtStart } from './read-graph-partition-startup.js';
+export { isQueryDatasetUnrestrictedError } from './withheld-graph-query.js';
 export {
   BlazegraphNamespaceManager,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
@@ -441,4 +447,43 @@ export {
   type ReadGraphWritePlan,
   type TripleStoreMethodName,
 } from './read-graph/adapter-contract.js';
+export {
+  ReadGraphDeltaFormError,
+  readGraphBackfillBatch,
+  readGraphCopy,
+  readGraphDeltaDelete,
+  readGraphDeltaDeleteBySubjectPrefix,
+  readGraphDeltaDeleteMatching,
+  readGraphFencedDrop,
+  readGraphFirstHolderCountQuery,
+  readGraphInsertQuads,
+  readGraphMissingTripleAsk,
+  readGraphReferenceProcedure,
+  readGraphRepairLeave,
+  readGraphRetraction,
+  readGraphSizeQuery,
+  readGraphUnheldSubjectAsk,
+  renderGraphNameTest,
+  type ReadGraphFence,
+  type ReadGraphTarget,
+} from './read-graph/statements.js';
+export {
+  InMemoryReadGraphStateMirror,
+  ReadGraphLocks,
+  ReadGraphRegistryCache,
+  ReadGraphWriteTracker,
+  readGraphBackendIdentity,
+  readGraphBackendRuntime,
+  type ReadGraphBackendRuntime,
+} from './read-graph/runtime.js';
+export {
+  READ_GRAPH_WRITE_REFUSED_CODE,
+  ReadGraphStore,
+  ReadGraphWriteRefusedError,
+  readGraphLayerOf,
+  readGraphRuntimeOf,
+  wrapReadGraphLayer,
+  type ReadGraphStoreConfig,
+} from './read-graph/read-graph-store.js';
+export { readReadGraphRegistry } from './read-graph/registry.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';

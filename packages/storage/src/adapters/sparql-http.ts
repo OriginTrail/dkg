@@ -47,7 +47,7 @@ import {
   type GraphWriteScope,
 } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
-import { isAtomicGraphReplaceStagingGraph } from '../atomic-graph-replace.js';
+import { storeGraphEnumerationVisibility } from '../graph-enumeration-visibility.js';
 import {
   buildRfc64AuthorCommitCasUpdateV1,
   type Rfc64AuthorCommitCasInputV1,
@@ -224,7 +224,7 @@ export interface SparqlHttpStoreOptions {
 export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapability {
   readonly queryResponseLimitMode = 'pre-materialization' as const;
   readonly writeRevisionCoverage = 'process-local' as const;
-  readonly graphEnumerationVisibility = (graph: string): boolean => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph);
+  readonly graphEnumerationVisibility = storeGraphEnumerationVisibility;
   readonly queryCancellation = 'interruptible' as const;
   /**
    * RFC-64 stream capability installed only for a storage-created managed

@@ -1,4 +1,4 @@
-import { oxigraphGraphEnumerationVisibility } from '../graph-enumeration-visibility.js';
+import { storeGraphEnumerationVisibility } from '../graph-enumeration-visibility.js';
 import { serializableQueryOptions } from './serializable-query-options.js';
 import { registerStoreRecoveryGeneration, storeWorkerExecutionFailure } from '../store-recovery-generation.js';
 import { runTrackedStoreWrite } from '../tracked-store-write.js';
@@ -29,6 +29,8 @@ import {
 } from '../worker-error-protocol.js';
 import { raceStoreWorkAgainstAbort } from '../abortable-store-work-lifecycle.js';
 import type { OxigraphStoreOptions } from './oxigraph-read-only.js';
+import { createOxigraphWorkerTimeoutError } from './oxigraph-worker-timeout-error.js';
+export type { OxigraphWorkerTimeoutError } from './oxigraph-worker-timeout-error.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -124,32 +126,6 @@ const READ_ONLY_METHODS = new Set<string>([
   'query', 'hasGraph', 'listGraphs', 'countQuads', 'rfc64ExactBindingsReadV1',
 ]);
 
-/** Rejection raised when a read op exceeds its per-op timeout. */
-export interface OxigraphWorkerTimeoutError extends Error {
-  code: 'OXIGRAPH_WORKER_OP_TIMEOUT';
-  /** Which store method timed out. */
-  method: string;
-  /** The bound that was exceeded. */
-  timeoutMs: number;
-}
-
-function createOxigraphWorkerTimeoutError(
-  method: string,
-  timeoutMs: number,
-): OxigraphWorkerTimeoutError {
-  const error = new Error(
-    `oxigraph-worker: "${method}" timed out after ${timeoutMs}ms. `
-      + 'The embedded store runs on a single worker thread, so a long-running or '
-      + 'stuck operation blocks all reads queued behind it. For heavy workloads '
-      + 'point the node at an external SPARQL server (store.backend "sparql-http" '
-      + '/ "blazegraph"), or raise / disable store.options.operationTimeoutMs.',
-  ) as OxigraphWorkerTimeoutError;
-  error.code = 'OXIGRAPH_WORKER_OP_TIMEOUT';
-  error.method = method;
-  error.timeoutMs = timeoutMs;
-  return error;
-}
-
 /**
  * Explicit worker POLICY state, replacing the old cluster of interdependent
  * booleans/promises that all had to agree. `respawnGaveUp` folds into the
@@ -186,7 +162,7 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 ]);
 
 export class OxigraphWorkerStore implements TripleStore {
-  readonly graphEnumerationVisibility = oxigraphGraphEnumerationVisibility;
+  readonly graphEnumerationVisibility = storeGraphEnumerationVisibility;
   readonly sparqlEngine = 'oxigraph' as const;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'interruptible' as const;

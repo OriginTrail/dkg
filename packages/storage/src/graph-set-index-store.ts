@@ -1,7 +1,7 @@
 import { filterGraphInventory, readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
 import { graphCatalogFlightKey } from './graph-catalog-flight-key.js';
 import { isStoreResponseTooLargeError } from './http-response-limit.js';
-import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
+import { composeGraphEnumerationVisibility, isStorageHiddenGraph } from './graph-enumeration-visibility.js';
 import { namedGraphsFromQuads, endsWithHighSurrogate, normalizeGraphUris, queryOptionsFromUpdateOptions } from "./graph-set-index-utils.js";
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import type { GraphSetMutationSource, TouchedGraphMutationSource, GraphSetRefreshSource, PendingFullRefreshSource, GraphSetMutationEvent, GraphSetDiagnosticEvent } from './graph-set-index-types.js';
@@ -29,7 +29,6 @@ import { RefreshCoordinator, type RefreshFlight } from './graph-set-refresh-coor
 import {
   UnsupportedTripleStoreCapabilityError,
 } from './unsupported-capability-error.js';
-import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 import { GraphSetCatalogState } from './graph-set-catalog-state.js';
 import type {
   Rfc64AuthorCommitCasInputV1,
@@ -142,7 +141,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
     this.innerStore = inner;
-    this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !isAtomicGraphReplaceStagingGraph(graph));
+    this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !isStorageHiddenGraph(graph));
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
     this.revalidateFailureBackoffMs = positiveFiniteMs(
@@ -288,7 +287,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
-    if (isAtomicGraphReplaceStagingGraph(graphUri)) return false;
+    if (isStorageHiddenGraph(graphUri)) return false;
     if (!this.enabled) {
       return this.inner.hasGraph(graphUri, options);
     }
@@ -502,7 +501,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     if (!this.enabled) {
       const inventory = prefix === undefined ? await readGraphInventory(this.inner, options) : await readGraphInventoryByPrefix(this.inner, prefix, options);
       assertGraphCatalogWithinResponseLimit(inventory.graphs, options?.maxResponseBytes);
-      return filterGraphInventory(inventory, graph => !isAtomicGraphReplaceStagingGraph(graph));
+      return filterGraphInventory(inventory, graph => !isStorageHiddenGraph(graph));
     }
     const inventory = await this.loadCurrentSortedGraphs(options);
     if (prefix === undefined) return inventory;
@@ -622,7 +621,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       assertGraphCatalogWithinResponseLimit(discovered.graphs, scanOptions?.maxResponseBytes);
       const next = new Set(
         discovered.graphs.filter(
-          (graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph),
+          (graph) => Boolean(graph) && !isStorageHiddenGraph(graph),
         ),
       );
       if (generation !== this.mutationGeneration) continue;
@@ -746,7 +745,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   ): void {
     if (!this.catalog.initialized) return;
     const eligible = graphPresence.filter(
-      ({ graph, present }) => graph && (!present || !isAtomicGraphReplaceStagingGraph(graph)),
+      ({ graph, present }) => graph && (!present || !isStorageHiddenGraph(graph)),
     );
     const { added, removed } = this.catalog.reconcile(eligible);
     for (const graph of added) {
