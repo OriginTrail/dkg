@@ -103,13 +103,14 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
   // Another start-up of this process loads or loaded the backend's mirror, and its store objects maintain their writes
   // by it: clearing it would let those writes pass unmaintained. This one waits for it, and applies only its own data
   // directory's journal. Its agent may start alone next time, so from now on the marks the store refuses go there too.
-  // A load that failed is tried again by the next start-up.
+  // A failed load is tried again by the first start-up that finds it still the latest; the others wait for that one.
   const loaded = LOADS.get(layer.runtime);
   if (loaded !== undefined && await loaded) {
     if (options.dataDir !== undefined) useReadGraphMarkJournal(layer.runtime, options.dataDir);
     const marked = options.dataDir === undefined ? 0 : await markJournaledRows(target, layer.runtime, options.dataDir, queryOptions);
     return { marked, maintained: layer.runtime.mirror.size };
   }
+  if (loaded !== undefined && LOADS.get(layer.runtime) !== loaded) return startReadGraphs(store, options);
   const loading = loadReadGraphs(store, layer, options, maintains, target, versions, queryOptions);
   LOADS.set(layer.runtime, loading.then(() => true, () => false));
   return loading;
