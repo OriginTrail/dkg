@@ -73,12 +73,13 @@ describe('project discovery', () => {
         contextGraphs: [
           {
             id: 'team',
+            callerInvolved: true,
             name: 'Team',
             role: 'writer',
             layer: 'public',
             description: 'Shared notes',
           },
-          { id: 'other' },
+          { id: 'other', callerInvolved: true },
         ],
       },
       {
@@ -89,7 +90,7 @@ describe('project discovery', () => {
       },
     );
     const list = text(await h.server.call('dkg_list_context_graphs'));
-    for (const expected of ['team** ★', 'Team', 'writer', 'public', 'Shared notes', '(unnamed)'])
+    for (const expected of ['team** ★', 'Team', 'writer', 'public', 'Shared notes', '(name unresolved)'])
       expect(list).toContain(expected);
     const sub = text(await h.server.call('dkg_sub_graph_list', { projectId: 'other team' }));
     expect(sub).toContain('0 entities');

@@ -516,4 +516,89 @@ describe('RFC-64 finalized VM agent precommit', () => {
       noncanonicalKnowledgeAssetsLifecycle(plan(), new AbortController().signal),
     ).rejects.toThrow('knowledge assets lifecycle address must be a lowercase 20-byte');
   });
+
+  it('admits a head from its policy and chain binding alone, with no asset-contract read or VM write', async () => {
+    const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
+    const getEvmChainId = vi.fn(async () => BigInt(RFC64_VM_CHAIN_ID));
+    const getKnowledgeAssetStorageAddress = vi.fn(async () => RFC64_VM_KA_STORAGE);
+    const getKnowledgeAssetsLifecycleAddress = vi.fn(async () => RFC64_VM_KAV10);
+    const materialize = Object.assign(vi.fn(), {
+      commit: vi.fn(),
+      rollback: vi.fn(async () => {}),
+    });
+    const handler = createRfc64FinalizedVmAgentPrecommitV1({
+      ...baseOptions(),
+      acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
+      getOnChainContextGraphId,
+      getEvmChainId,
+      getKnowledgeAssetStorageAddress,
+      getKnowledgeAssetsLifecycleAddress,
+      materialize,
+    });
+    const { catalogScope, policyDigest, catalogHeadDigest } = plan();
+
+    await expect(handler.admit!(
+      { catalogScope, policyDigest, catalogHeadDigest },
+      new AbortController().signal,
+    )).resolves.toBeUndefined();
+    expect(getOnChainContextGraphId).toHaveBeenCalledOnce();
+    expect(getEvmChainId).toHaveBeenCalledOnce();
+    expect(getKnowledgeAssetStorageAddress).not.toHaveBeenCalled();
+    expect(getKnowledgeAssetsLifecycleAddress).not.toHaveBeenCalled();
+    expect(materialize).not.toHaveBeenCalled();
+  });
+
+  it('refuses to admit a private named lane, a missing RPC endpoint, or a policy the chain has not finalized', async () => {
+    const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
+    const signal = new AbortController().signal;
+    const privateNamedLane = createRfc64FinalizedVmAgentPrecommitV1({
+      ...baseOptions(),
+      acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
+      getOnChainContextGraphId,
+    });
+    await expect(privateNamedLane.admit!({
+      ...plan(),
+      catalogScope: { ...plan().catalogScope, subGraphName: 'private-lane' },
+    } as never, signal)).rejects.toMatchObject({
+      name: 'FinalizedVmCompositionErrorV1',
+      code: 'finalized-vm-composition-input',
+    } satisfies Partial<FinalizedVmCompositionErrorV1>);
+
+    const withoutRpc = createRfc64FinalizedVmAgentPrecommitV1({
+      ...baseOptions(),
+      rpcEndpoints: [],
+      getOnChainContextGraphId,
+    });
+    await expect(withoutRpc.admit!(plan(), signal))
+      .rejects.toThrow('requires trusted RPC configuration');
+    expect(getOnChainContextGraphId).not.toHaveBeenCalled();
+
+    const accepted = acceptedRfc64VmPolicySnapshot();
+    const ownerSigned = createRfc64FinalizedVmAgentPrecommitV1({
+      ...baseOptions(),
+      acceptedPolicySnapshotForCatalogScope: () => Object.freeze({
+        ...accepted,
+        policy: Object.freeze({
+          ...accepted.policy,
+          governanceChainId: null,
+          governanceContractAddress: null,
+          source: Object.freeze({
+            kind: 'owner-signed-unregistered' as const,
+            ownerAddress: RFC64_VM_AUTHOR,
+            ownerAuthorityEra: '0' as const,
+          }),
+        }),
+      }),
+      getOnChainContextGraphId,
+    });
+    await expect(ownerSigned.admit!({
+      ...plan(),
+      catalogScope: {
+        ...plan().catalogScope,
+        governanceChainId: null,
+        governanceContractAddress: null,
+      },
+    }, signal)).rejects.toThrow('requires a finalized-chain policy');
+    expect(getOnChainContextGraphId).not.toHaveBeenCalled();
+  });
 });

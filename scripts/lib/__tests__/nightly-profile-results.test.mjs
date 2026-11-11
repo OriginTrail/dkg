@@ -5,6 +5,7 @@ import test from 'node:test';
 import { parse } from 'yaml';
 import { browserExecutions, summarizeNightlyProfile } from '../../ci/nightly-profile-results.mjs';
 import { resolveCiProfile } from '../../ci/resolve-ci-profile.mjs';
+import { TRUSTED_CI_CONTROLLER_SHA } from './ci-plan-fixtures.mjs';
 
 // Independent acceptance contract: do not import the verifier's requirement list.
 const LIFECYCLE_FILE = 'devnet-local/wm-swm-vm-lifecycle.devnet.spec.ts';
@@ -159,7 +160,7 @@ test('profile setup reaches only execution and coverage consumers; checkout iden
       assert.equal(job.env?.[key], undefined, `${name}: duplicated ${key}`);
     }
     for (const step of steps) if (step.uses?.startsWith('actions/checkout@')) {
-      assert.equal(step.with.ref, step.with.path === 'trusted-ci' ? '8af04a376332c17527ce0f7dffaac8432ba1a9b3' : '${{ github.sha }}', name);
+      assert.equal(step.with.ref, step.with.path === 'trusted-ci' ? TRUSTED_CI_CONTROLLER_SHA : '${{ github.sha }}', name);
     }
   }
   const steps = workflow.jobs.changes.steps;
