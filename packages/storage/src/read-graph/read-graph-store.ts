@@ -54,6 +54,7 @@ import {
 } from '../triple-store.js';
 import type { TripleStoreConfig } from '../triple-store-composition.js';
 import {
+  missingReadGraphMethods,
   readGraphCapabilitiesOf,
   type ReadGraphAdapterCapabilities,
   type ReadGraphPlannedMethod,
@@ -63,6 +64,7 @@ import {
 import { readGraphMembership, readGraphsOfMemberGraph, type WorkingMemoryIdentityRule } from './membership.js';
 import { readReadGraphRegistry } from './registry.js';
 import { readGraphBackendIdentity, readGraphBackendRuntime, type ReadGraphBackendRuntime } from './runtime.js';
+import { keepsAnyReadGraph, type ReadGraphModes, type ViewSemanticsSettings } from './settings.js';
 import { nextReadGraphState, readGraphStateCompareAndSet } from './state.js';
 import type { ReadGraphTarget } from './statements.js';
 import {
@@ -80,6 +82,10 @@ export interface ReadGraphStoreConfig {
    * same backend. The agent can also set it later on the runtime.
    */
   readonly workingMemoryIdentity?: WorkingMemoryIdentityRule;
+  /** Where the node keeps read graphs (`query.readGraphs`); all `off` when absent. */
+  readonly modes?: ReadGraphModes;
+  /** What a view query without `semantics` gets (`query.viewSemantics`); `per-asset` when absent. */
+  readonly viewSemantics?: ViewSemanticsSettings;
 }
 
 export const READ_GRAPH_WRITE_REFUSED_CODE = 'READ_GRAPH_WRITE_REFUSED';
@@ -390,14 +396,35 @@ export class ReadGraphStore implements TripleStoreDecorator {
   }
 }
 
+export const READ_GRAPHS_UNSUPPORTED_CODE = 'READ_GRAPHS_UNSUPPORTED';
+
+/** Settings that keep read graphs, for a store whose adapter does not send read-graph operations with every write it implements. */
+export class ReadGraphsUnsupportedError extends Error {
+  readonly code = READ_GRAPHS_UNSUPPORTED_CODE;
+
+  constructor(readonly backend: string, readonly missingMethods: readonly ReadGraphPlannedMethod[]) {
+    super(`Read graphs are on, but the ${backend} adapter does not send read-graph operations with ${missingMethods.join(', ')}`);
+    this.name = 'ReadGraphsUnsupportedError';
+  }
+}
+
 /**
  * Put the read-graph layer directly above an adapter. Store objects whose
- * configurations name the same backend share one runtime.
+ * configurations name the same backend share one runtime. Settings that keep
+ * read graphs are refused, and the adapter closed, unless the adapter sends
+ * read-graph operations with every planned write it implements.
  */
 export function wrapReadGraphLayer(adapter: TripleStore, config: TripleStoreConfig): ReadGraphStore {
+  const { workingMemoryIdentity, modes, viewSemantics } = config.readGraphs ?? {};
+  const missing = keepsAnyReadGraph(modes) ? missingReadGraphMethods(adapter, readGraphCapabilitiesOf(adapter)) : [];
+  if (missing.length > 0) {
+    void adapter.close().catch(() => undefined);
+    throw new ReadGraphsUnsupportedError(config.backend, missing);
+  }
   const runtime = readGraphBackendRuntime(readGraphBackendIdentity(config));
-  const identity = config.readGraphs?.workingMemoryIdentity;
-  if (identity) runtime.workingMemoryIdentity = identity;
+  if (workingMemoryIdentity) runtime.workingMemoryIdentity = workingMemoryIdentity;
+  if (modes) runtime.modes = modes;
+  if (viewSemantics) runtime.viewSemantics = viewSemantics;
   return new ReadGraphStore(adapter, runtime, termSiteOf(config.backend));
 }
 

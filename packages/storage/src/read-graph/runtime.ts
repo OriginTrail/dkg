@@ -19,6 +19,7 @@ import { resolve } from 'node:path';
 import { compareCodePoint, parseReadGraphIri } from '@origintrail-official/dkg-core';
 import type { TripleStoreConfig } from '../triple-store-composition.js';
 import { workingMemoryIdentityRule, type ReadGraphRegistrySnapshot, type WorkingMemoryIdentityRule } from './membership.js';
+import type { ReadGraphModes, ViewSemanticsSettings } from './settings.js';
 import type { ReadGraphStateMirror, ReadGraphStateRow } from './state.js';
 
 /**
@@ -194,6 +195,10 @@ export interface ReadGraphBackendRuntime {
    * written under its own address.
    */
   workingMemoryIdentity: WorkingMemoryIdentityRule;
+  /** Where the node keeps read graphs; all `off` until a store configuration sets them. */
+  modes: ReadGraphModes;
+  /** What a view query without `semantics` gets; `per-asset` until a store configuration sets it. */
+  viewSemantics: ViewSemanticsSettings;
   /**
    * Whether the backend may hold read-graph partitions, as recorded by
    * `noteStoreMayHoldReadGraphPartitions` through any store object over it.
@@ -227,6 +232,8 @@ function newRuntime(backend: string | undefined): ReadGraphBackendRuntime {
     registries: new ReadGraphRegistryCache(),
     writes: new ReadGraphWriteTracker(),
     workingMemoryIdentity: workingMemoryIdentityRule({}),
+    modes: {},
+    viewSemantics: {},
   };
 }
 
