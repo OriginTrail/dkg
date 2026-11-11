@@ -368,15 +368,17 @@ describe('the read-graph partition guard', () => {
     const base = new OxigraphStore();
     opened.push(base);
     await base.insert([...memberQuads, ...plantedQuads]);
+    // Exactly the member graphs: a list that keeps any one partition graph differs.
+    const members = memberQuads.map(member => member.graph).sort();
     const indexed = new GraphSetIndexStore(new ReadGraphPartitionStore(base), { revalidateMs: 0 });
-    expect(await indexed.listGraphs()).toEqual(expect.not.arrayContaining(PARTITION_GRAPHS));
+    expect([...await indexed.listGraphs()].sort()).toEqual(members);
     expect(await indexed.listGraphsByPrefix(`${ROOT}/${READ_GRAPH_SEGMENT}`)).toEqual([]);
     expect((await indexed.listGraphsByPrefix(`${ROOT}/_read/`)).sort()).toEqual([LEGACY_ASSET, LEGACY_SHARED].sort());
     expect(await indexed.hasGraph(VM_READ)).toBe(false);
     expect(indexed.graphEnumerationVisibility?.(VM_READ)).toBe(false);
     expect(indexed.graphEnumerationVisibility?.(ASSET)).toBe(true);
     const passthrough = new GraphSetIndexStore(base, { enabled: false });
-    expect(await passthrough.listGraphsByPrefix(ROOT)).toEqual(expect.not.arrayContaining(PARTITION_GRAPHS));
+    expect([...await passthrough.listGraphsByPrefix(ROOT)].sort()).toEqual(members);
   });
 });
 
