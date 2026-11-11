@@ -16,6 +16,8 @@ import type { QueryOptions } from '../src/query-engine.js';
 
 // Runs on embedded Oxigraph; set BLAZEGRAPH_TEST_URL to run the same cases on a Blazegraph server.
 const endpoint = process.env.BLAZEGRAPH_TEST_URL;
+// A live server answers each request in milliseconds, not microseconds: give the per-caller sweeps room.
+const SWEEP_TIMEOUT = endpoint ? 180_000 : 20_000;
 
 function scope(source: string) {
   const prepared = prepareSparql(source);
@@ -198,14 +200,16 @@ const CALLERS: readonly (readonly [string, Omit<QueryOptions, 'contextGraphId'>]
 interface Verdict { readonly route: string; readonly graph: string; readonly enumerated: boolean; readonly member: boolean }
 
 /** Record both judgements of every compared graph, then let the check count them as usual. */
+// Taken once, so a spy left by an earlier test is never mistaken for the real method.
+const realCompare = ExplicitGraphMembershipCheck.prototype.compare;
+
 function recordVerdicts(verdicts: Verdict[]) {
-  const compare = ExplicitGraphMembershipCheck.prototype.compare;
   return vi.spyOn(ExplicitGraphMembershipCheck.prototype, 'compare').mockImplementation(async function (
     this: ExplicitGraphMembershipCheck, route, graphs, enumerated, members,
   ) {
     const judged = new Set(await members());
     for (const graph of graphs) verdicts.push({ route, graph, enumerated: enumerated.includes(graph), member: judged.has(graph) });
-    return compare.call(this, route, graphs, enumerated, async () => [...judged]);
+    return realCompare.call(this, route, graphs, enumerated, async () => [...judged]);
   });
 }
 
@@ -233,8 +237,9 @@ describe.each([
     engine = new DKGQueryEngine(store);
   });
 
+  afterEach(() => vi.restoreAllMocks());
+
   afterAll(async () => {
-    vi.restoreAllMocks();
     if (endpoint) for (const graph of new Set(data.map(item => item.graph))) await store.dropGraph(graph).catch(() => {});
     await store.close().catch(() => {});
   });
@@ -265,7 +270,7 @@ describe.each([
     }
     expect(answers.get(`${OTHER}/_verifiable_memory/${AGENT}/1`)).not.toBe('rows');
     expect(answers.get(`${ROOT}/child/_verifiable_memory/${AGENT}/4`)).not.toBe('rows');
-  });
+  }, SWEEP_TIMEOUT);
 
   it('judges graphs inside and outside a route, and absent graphs, the same way', async () => {
     const verdicts: Verdict[] = [];
