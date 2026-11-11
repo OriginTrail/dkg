@@ -416,6 +416,21 @@ describe('dropping read-graph partitions', () => {
     expect(await dropReadGraphPartitions(plain)).toBe(0);
   });
 
+  it('drops a read graph emptied by DELETE, which the store keeps registered', async () => {
+    const { plain, planted } = await storePair();
+    opened.push(plain, planted);
+    const adapter = readGraphPartitionMaintenanceStore(planted);
+    const registered = async () => {
+      const result = await adapter.query('SELECT ?g WHERE { GRAPH ?g {} }');
+      return result.type === 'bindings' ? result.bindings.map(row => row.g).filter(isReadGraphPartitionGraph) : [];
+    };
+    await adapter.delete([quad(VM_READ)]);
+    expect(await adapter.countQuads(VM_READ)).toBe(0);
+    expect(await registered()).toContain(VM_READ);
+    expect(await dropReadGraphPartitions(planted)).toBe(PARTITION_GRAPHS.length);
+    expect(await registered()).toEqual([]);
+  });
+
   it('refuses an enumeration that is not a graph list', async () => {
     const store = new OxigraphStore();
     opened.push(store);
