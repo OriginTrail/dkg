@@ -4,13 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { BlazegraphStore } from '../../src/adapters/blazegraph.js';
+import { OxigraphStore } from '../../src/adapters/oxigraph.js';
 import { BlazegraphNamespaceManager, blazegraphNamespaceApiUrlFromSparqlEndpoint } from '../../src/blazegraph-namespace-manager.js';
 import { SharedMemoryLiteralBlobStore } from '../../src/shared-memory-literal-blob-store.js';
 import { workingMemoryIdentityRule } from '../../src/read-graph/membership.js';
 import type { TripleStoreConfig } from '../../src/triple-store-composition.js';
 import type { Quad, TripleStore } from '../../src/triple-store.js';
 import { AGENT, P, expectLayerUnions, layerFixture, layeredStore, q, type LayerFixture } from './read-graph-layer-conformance.js';
-import { PlanningOxigraphStore } from './read-graph-planning-store.js';
 
 /** The copy counts of the qualification matrix's engine-cost row. */
 export const COPY_COUNTS = [100, 1_000, 10_000] as const;
@@ -46,9 +46,12 @@ export function readGraphQualificationSuite(backend: 'oxigraph' | 'blazegraph', 
     const run = `qual${randomUUID().slice(0, 8)}`;
     let sequence = 0;
     const freshFixture = () => layerFixture(`${run}-${sequence += 1}`);
-    /** Embedded Oxigraph gets a new store each time; Blazegraph shares one namespace, with a new context graph each time. */
+    /**
+     * The production adapter of each engine, under the read-graph layer. Embedded Oxigraph gets a new
+     * store each time; Blazegraph shares one namespace, with a new context graph each time.
+     */
     const open = async (fixture: LayerFixture) => {
-      const { adapter, config } = shared ?? { adapter: new PlanningOxigraphStore(), config: { backend: 'oxigraph' } as TripleStoreConfig };
+      const { adapter, config } = shared ?? { adapter: new OxigraphStore(), config: { backend: 'oxigraph' } as TripleStoreConfig };
       const withIdentity: TripleStoreConfig = { ...config, readGraphs: { workingMemoryIdentity: IDENTITY } };
       return { adapter, ...(await layeredStore(adapter, withIdentity, fixture)), close: shared ? async () => {} : () => adapter.close() };
     };

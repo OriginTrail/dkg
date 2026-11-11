@@ -6,17 +6,18 @@
  * write, `to-store <n>` when the layer hands the write's request to the store below it, and
  * `returned <n>` once the write has returned (on the embedded store, once it is dumped too).
  *
+ * The writes go through each engine's production adapter under the read-graph layer.
  * DKG_KILL_BACKEND is `blazegraph` (with DKG_KILL_URL) or `oxigraph` (with DKG_KILL_PATH, a
- * persistent store dumped after every write). DKG_KILL_CG names the context graph.
+ * persistent embedded store dumped after every write). DKG_KILL_CG names the context graph.
  */
 import { MemoryLayer, readGraphIri, readScope } from '@origintrail-official/dkg-core';
 import { BlazegraphStore } from '../../src/adapters/blazegraph.js';
+import { OxigraphStore } from '../../src/adapters/oxigraph.js';
 import { guardReadGraphPartition } from '../../src/read-graph-partition-store.js';
 import { wrapReadGraphLayer } from '../../src/read-graph/read-graph-store.js';
 import { CURRENT_READ_GRAPH_VERSIONS } from '../../src/read-graph/state.js';
 import type { TripleStoreConfig } from '../../src/triple-store-composition.js';
 import type { Quad, TripleStore } from '../../src/triple-store.js';
-import { PlanningOxigraphStore } from './read-graph-planning-store.js';
 import { killAtCommitBatch, killAtCommitMember, killAtCommitWrite } from './read-graph-kill-fixture.js';
 
 const backend = process.env.DKG_KILL_BACKEND;
@@ -36,7 +37,7 @@ if (backend === 'blazegraph') {
 } else if (backend === 'oxigraph') {
   const path = process.env.DKG_KILL_PATH;
   if (!path) throw new Error('DKG_KILL_PATH is required');
-  adapter = new PlanningOxigraphStore(path);
+  adapter = new OxigraphStore(path);
   config = { backend: 'oxigraph-persistent', options: { path } };
 } else {
   throw new Error(`Unknown DKG_KILL_BACKEND: ${backend}`);
