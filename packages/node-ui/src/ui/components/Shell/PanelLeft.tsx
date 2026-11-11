@@ -282,7 +282,7 @@ export function PanelLeft() {
 
         {showMarketplace && (
           <SidebarSection
-            label="Marketplace"
+            label="NS Marketplace"
             active={marketplaceActive}
             open={leftSectionMarketplaceOpen}
             onToggle={toggleLeftSectionMarketplace}

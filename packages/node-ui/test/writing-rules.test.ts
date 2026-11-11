@@ -5,6 +5,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
+import { COPY } from '../src/ui/marketplace/copy.generated';
 
 /** Words DESIGN.md · Writing rules out, with what to use instead. */
 const WORDS: [RegExp, string][] = [
@@ -252,7 +253,20 @@ const sources = walk(uiRoot)
   .filter((path) => /\.tsx?$/.test(path))
   .filter((path) => !/^(mocks|design-system)\b/.test(relative(uiRoot, path).replace(/\\/g, '/')));
 const packageRoot = resolve(__dirname, '..');
-const allLines = sources.flatMap((path) => visibleLines(readFileSync(path, 'utf8'), relative(packageRoot, path).replace(/\\/g, '/')));
+// The Marketplace keeps its text in one table that components read by key, so every value in it is shown.
+// The development-only component gallery is left out, like the reference page above.
+const copyPath = 'src/ui/marketplace/copy.generated.ts';
+const copySource = readFileSync(resolve(packageRoot, copyPath), 'utf8').split('\n');
+const copyLines: Line[] = Object.entries(COPY)
+  .filter(([key]) => !key.startsWith('gallery.'))
+  .map(([key, text]) => ({
+    text: clean(String(text)),
+    where: `${copyPath}:${copySource.findIndex((line) => line.includes(`"${key}":`)) + 1}`,
+  }));
+const allLines = [
+  ...sources.flatMap((path) => visibleLines(readFileSync(path, 'utf8'), relative(packageRoot, path).replace(/\\/g, '/'))),
+  ...copyLines,
+];
 const allText = new Set(allLines.map((line) => line.text));
 
 describe('writing rules', () => {
@@ -362,10 +376,11 @@ describe('writing rules', () => {
   });
 
   it('finds real text in the UI', () => {
-    // Two are kept in constants (walletSurfaceCopy, ownerNote) and one comes from a helper (formatJoinRequestError).
+    // Two are kept in constants (walletSurfaceCopy, ownerNote), one comes from a helper (formatJoinRequestError)
+    // and the last from the Marketplace's text table.
     for (const known of [
       'Retry loading agent', 'Copy UAL', 'Context graph', 'Your connected wallet isn’t needed here', 'Managed by this node',
-      'out-of-date network setting',
+      'out-of-date network setting', 'The NS Marketplace is off on this node',
     ]) {
       expect([...allText].some((line) => line.includes(known)), known).toBe(true);
     }

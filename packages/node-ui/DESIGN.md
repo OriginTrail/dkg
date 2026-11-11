@@ -259,7 +259,7 @@ There are no exceptions. If no token fits, add one (see below). Canvas palettes 
 - `test/layout-tokens.test.ts`: layers, breakpoints, motion and line height.
 - `test/retired-names.test.ts`: stylesheet classes no markup uses, tokens nothing reads, and e2e selectors for classes that are gone.
 
-`test/writing-rules.test.ts` fails when text a person can read uses a word [Writing](#writing) rules out. Lines waiting for a wording decision sit in its `PENDING` list, which only gets shorter: a line that changes has to leave the list. In `src/ui`, an object property named like copy (`label`, `message`, `reason` and the others in the test) counts as visible text. If an object is internal data that never reaches the screen, mark it with `// writing-rules: not shown`, on its line or on a comment line just above.
+`test/writing-rules.test.ts` fails when text a person can read uses a word [Writing](#writing) rules out. Lines waiting for a wording decision sit in its `PENDING` list, which only gets shorter: a line that changes has to leave the list. In `src/ui`, an object property named like copy (`label`, `message`, `reason` and the others in the test) counts as visible text. If an object is internal data that never reaches the screen, mark it with `// writing-rules: not shown`, on its line or on a comment line just above. Every value in the Marketplace text table, `src/ui/marketplace/copy.generated.ts`, counts as visible text too, except the component gallery's.
 
 ## Adding to the system
 

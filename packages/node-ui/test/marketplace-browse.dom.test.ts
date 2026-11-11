@@ -99,7 +99,7 @@ describe('marketplace Browse: catalog, service page, storefront, playground', ()
     await unmountAll();
     useFixtureNode('off');
     const off = await render(browse());
-    await waitForText(off, 'The marketplace is off on this node');
+    await waitForText(off, 'The NS Marketplace is off on this node');
     expect(byTestId(off, 'mkt-marketplace')?.getAttribute('data-state')).toBe('off');
   });
 

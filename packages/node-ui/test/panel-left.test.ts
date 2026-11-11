@@ -277,7 +277,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
   it('renders Marketplace as an expandable icon tree when the feature is enabled', async () => {
     localStorage.setItem('dkg-marketplace-enabled', '1');
     const { container } = await renderPanel();
-    const marketplaceHeader = sectionHeader(container, 'Marketplace');
+    const marketplaceHeader = sectionHeader(container, 'NS Marketplace');
     expect(marketplaceHeader.getAttribute('aria-expanded')).toBe('true');
 
     const items = container.querySelector('.v10-sidebar-marketplace-items');
@@ -309,7 +309,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
   it('discloses each section\'s body from its header, mounted only while open, so Integrations polls only then', async () => {
     localStorage.setItem('dkg-marketplace-enabled', '1');
     const { container } = await renderPanel();
-    for (const label of ['Marketplace', 'My context graphs', 'Public graphs', 'Integrations']) {
+    for (const label of ['NS Marketplace', 'My context graphs', 'Public graphs', 'Integrations']) {
       const header = sectionHeader(container, label);
       const wasOpen = header.getAttribute('aria-expanded') === 'true';
       const bodyId = header.getAttribute('aria-controls');

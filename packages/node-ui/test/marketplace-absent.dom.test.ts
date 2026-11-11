@@ -29,9 +29,9 @@ describe('marketplace on a node without it', () => {
     it(`says so plainly on ${name}, with no error`, async () => {
       const asked = nodeWithoutMarketplace();
       const c = await render(React.createElement(view));
-      await waitForText(c, 'The marketplace isn\'t available on this node');
+      await waitForText(c, 'The NS Marketplace isn\'t available on this node');
       expect(byTestId(c, testId)?.getAttribute('data-state')).toBe('absent');
-      expect(c.textContent).toContain('This node answers no marketplace routes');
+      expect(c.textContent).toContain('This node answers no NS Marketplace routes');
       expect(byTestId(c, 'mkt-error-card')).toBeNull();
       expect(c.querySelector('[role="alert"]')).toBeNull();
       expect(c.textContent).not.toMatch(/Not found|HTTP 404|no such route/);
