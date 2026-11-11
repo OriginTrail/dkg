@@ -58,8 +58,6 @@ export interface ReadGraphNodeIdentity {
   readonly peerId?: string;
 }
 
-const INSTALLED = new WeakMap<ReadGraphBackendRuntime, { readonly node: ReadGraphNodeIdentity; readonly rule: WorkingMemoryIdentityRule }>();
-
 /**
  * Give the backend's read-graph runtime the node's working-memory identity
  * rule: every agent owns the drafts written under its own address, and the
@@ -67,47 +65,49 @@ const INSTALLED = new WeakMap<ReadGraphBackendRuntime, { readonly node: ReadGrap
  * queries and the layer's maintenance both map drafts to agents with it.
  *
  * The agent installs it at start, and again when its default agent changes,
- * right after it changes its own default and before anything is awaited. A
- * new rule that gives the drafts under the peer ID to another agent marks the
- * working-memory read graphs of both agents dirty in the mirror and installs
- * itself in that same synchronous step, so no reader sees the new owner with
- * a read graph built for the old one, nor the old rule beside the new default.
- * The marks then reach the store under each read graph's lock; the builder
- * rebuilds those read graphs. A store without a read-graph layer is left as
- * it is.
+ * right after it changes its own default and before anything is awaited. The
+ * new rule is compared with the rule the runtime holds: one configured for the
+ * layer, the runtime's own (every address owns its drafts), or the one
+ * installed before. Every working-memory read graph whose agent owns other
+ * addresses under the new rule is marked dirty in the mirror, and the rule is
+ * installed, in that same synchronous step. So no reader sees the new owner
+ * with a read graph built for the old one, nor the old rule beside the new
+ * default. The marks then reach the store under each read graph's lock; the
+ * builder rebuilds those read graphs. A store without a read-graph layer is
+ * left as it is.
  */
 export async function installReadGraphWorkingMemoryIdentity(store: unknown, node: ReadGraphNodeIdentity): Promise<void> {
   const layer = readGraphLayerOf(store);
   if (layer === null) return;
   const { runtime } = layer;
   const rule = workingMemoryIdentityRule(node);
-  const previous = INSTALLED.get(runtime);
-  const affected = new Set<string>();
-  if (previous !== undefined) {
-    for (const peerId of [previous.node.peerId, node.peerId]) {
-      if (peerId === undefined) continue;
-      const before = previous.rule.ownerOf(peerId);
-      const after = rule.ownerOf(peerId);
-      if (before === after) continue;
-      for (const owner of [before, after]) if (owner !== undefined) affected.add(owner);
-    }
-  }
   // Nothing is awaited from here until both are visible.
-  const marked = affected.size > 0 ? markWorkingMemoryReadGraphsDirty(runtime, affected) : [];
+  const marked = markWorkingMemoryReadGraphsDirty(runtime, runtime.workingMemoryIdentity, rule);
   runtime.workingMemoryIdentity = rule;
-  INSTALLED.set(runtime, { node, rule });
   for (const { readGraph, before } of marked) await storeDirtyMark(layer, readGraph, before);
 }
 
-/** Mark dirty, in the mirror, the working-memory read graphs of `agents` that have a row; returns each with its row before. */
+/** Whether `agent` owns other addresses under `after` than under `before`. */
+function ownsOtherAddresses(before: WorkingMemoryIdentityRule, after: WorkingMemoryIdentityRule, agent: string): boolean {
+  const was = before.addressesOf(agent);
+  const now = after.addressesOf(agent);
+  return was.length !== now.length || was.some((address) => !now.includes(address));
+}
+
+/**
+ * Mark dirty, in the mirror, the working-memory read graphs that have a row and
+ * whose agent owns other addresses under `after` than under `before`; returns
+ * each with its row before.
+ */
 function markWorkingMemoryReadGraphsDirty(
   runtime: ReadGraphBackendRuntime,
-  agents: ReadonlySet<string>,
+  before: WorkingMemoryIdentityRule,
+  after: WorkingMemoryIdentityRule,
 ): Array<{ readonly readGraph: string; readonly before: ReadGraphStateRow }> {
   const marked: Array<{ readonly readGraph: string; readonly before: ReadGraphStateRow }> = [];
   for (const row of runtime.mirror.rows()) {
     const key = parseReadGraphIri(row.readGraph);
-    if (key?.layer !== MemoryLayer.WorkingMemory || !agents.has(key.agentAddress) || row.state === 'dirty') continue;
+    if (key?.layer !== MemoryLayer.WorkingMemory || row.state === 'dirty' || !ownsOtherAddresses(before, after, key.agentAddress)) continue;
     const dirty = nextReadGraphState(row, { kind: 'mark-dirty' });
     if (dirty === undefined) continue;
     runtime.mirror.set(dirty);

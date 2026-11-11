@@ -90,12 +90,12 @@ describe('the read-graph source of merged view queries', () => {
   it('installs the node\'s working-memory rule, marking dirty the read graphs whose drafts change owner in the same step', async () => {
     const store = layered({});
     const kept = [wm(AGENT), wm(OTHER), wm(THIRD), readGraphIri(vm('notes'))];
-    await seedReady(store, kept);
     const states = () => mirrorStates(store, kept);
 
     await installReadGraphWorkingMemoryIdentity(store, { defaultAgentAddress: AGENT, peerId: PEER });
     expect(viewReadGraphsOf(store)!.identity.ownerOf(PEER)).toBe(AGENT);
-    expect(states()).toEqual(['ready', 'ready', 'ready', 'ready']);
+    // Ready under that rule, as the builder leaves them; the same rule again changes nothing.
+    await seedReady(store, kept);
     await installReadGraphWorkingMemoryIdentity(store, { defaultAgentAddress: AGENT, peerId: PEER });
     expect(states()).toEqual(['ready', 'ready', 'ready', 'ready']);
 
@@ -121,6 +121,27 @@ describe('the read-graph source of merged view queries', () => {
     expect(await storedStates(store, kept)).toEqual(['dirty', 'dirty', 'ready', 'ready']);
     expect(states()).toEqual(['dirty', 'dirty', 'ready', 'ready']);
     await expect(installReadGraphWorkingMemoryIdentity(new OxigraphStore(), { peerId: PEER })).resolves.toBeUndefined();
+  });
+
+  it('compares the first rule it installs with the one the runtime holds, configured or its own', async () => {
+    // Read graphs kept under a rule configured for the layer, which gives the peer ID's drafts to AGENT.
+    const configured = layered({ workingMemoryIdentity: workingMemoryIdentityRule({ defaultAgentAddress: AGENT, peerId: PEER }) });
+    const kept = [wm(AGENT), wm(OTHER), wm(THIRD), readGraphIri(vm('notes'))];
+    await seedReady(configured, kept);
+    const installing = installReadGraphWorkingMemoryIdentity(configured, { defaultAgentAddress: OTHER, peerId: PEER });
+    // In the call's synchronous step, as for a later change of owner.
+    expect(configured.runtime.workingMemoryIdentity.ownerOf(PEER)).toBe(OTHER);
+    expect(mirrorStates(configured, kept)).toEqual(['dirty', 'dirty', 'ready', 'ready']);
+    await installing;
+    expect(await storedStates(configured, kept)).toEqual(['dirty', 'dirty', 'ready', 'ready']);
+
+    // The runtime's own rule gives every address its own drafts: the node's rule moves the peer ID's to the default agent.
+    const own = layered({});
+    const peerAndAgents = [wm(PEER), wm(AGENT), wm(OTHER)];
+    await seedReady(own, peerAndAgents);
+    await installReadGraphWorkingMemoryIdentity(own, { defaultAgentAddress: AGENT, peerId: PEER });
+    expect(mirrorStates(own, peerAndAgents)).toEqual(['dirty', 'dirty', 'ready']);
+    expect(await storedStates(own, peerAndAgents)).toEqual(['dirty', 'dirty', 'ready']);
   });
 
   it('is absent for a store without a read-graph layer, and so is the sampler', () => {
