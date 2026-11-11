@@ -39,7 +39,7 @@ describe('SubGraphExplorerHeader — locked intro copy (UX §4.4.1 Issue D)', ()
     expect(text).toContain('one or more memory layers');
     expect(text).toContain('one or more subgraphs');
     // The third sentence stays as the locked Root introduction.
-    expect(text).toContain('Entities in no subgraph live in the Context Graph root.');
+    expect(text).toContain('Entities in no subgraph live in the context graph root.');
   });
 
   it('renders the locked page title', () => {

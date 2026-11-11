@@ -228,7 +228,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
     <LayerActionShell
       title="Share complete Knowledge Assets"
       footnote="Shares each complete owning Knowledge Asset atomically to Shared Working Memory."
-      context={<>Shares all eligible complete Working Memory Knowledge Assets in this Context Graph, including assets outside the loaded preview.</>}
+      context={<>Shares all eligible complete Working Memory Knowledge Assets in this context graph, including assets outside the loaded preview.</>}
       result={result}
       error={error}
     >
@@ -297,7 +297,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
   return (
     <LayerActionShell
       title="Publish"
-      footnote="Publishes all eligible complete Shared Working Memory Knowledge Assets in this Context Graph on-chain."
+      footnote="Publishes all eligible complete Shared Working Memory Knowledge Assets in this context graph on-chain."
       context={<>Publishes all eligible complete Shared Working Memory Knowledge Assets, including assets outside the loaded preview. On-chain publishing incurs a cost.</>}
       result={result}
       error={error}

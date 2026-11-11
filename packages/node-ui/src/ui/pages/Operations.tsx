@@ -47,7 +47,7 @@ const PHASE_DESCRIPTIONS: Record<string, string> = {
 
 
 const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
-  publish:        'Publish a Knowledge Asset on-chain to a Context Graph',
+  publish:        'Publish a Knowledge Asset on-chain to a context graph',
   publishFromSWM: 'Publish a Knowledge Asset derived from Shared Working Memory',
   update:         'Update an existing Knowledge Asset on-chain',
   'ka-update':    'Incremental Knowledge Asset update (ka-update path)',
@@ -262,7 +262,7 @@ function ReplicationTab() {
           <div className="empty-state empty-state--compact"><div className="empty-state-title">No subscriptions</div></div>
         ) : (
           <div className="ds-table-scroll"><table className="data-table">
-            <thead><tr><th>Context Graph</th><th>On-chain id</th><th>Role</th><th>Watermark</th><th>Chain head</th><th>Lag</th><th>Last event</th></tr></thead>
+            <thead><tr><th>Context graph</th><th>On-chain id</th><th>Role</th><th>Watermark</th><th>Chain head</th><th>Lag</th><th>Last event</th></tr></thead>
             <tbody>
               {cursors.map((c) => {
                 const wm = c.last_reconciled_ordinal ?? 0;
@@ -293,7 +293,7 @@ function ReplicationTab() {
           <div className="empty-state empty-state--compact"><div className="empty-state-title">No activity in this period</div></div>
         ) : (
           <div className="ds-table-scroll"><table className="data-table">
-            <thead><tr><th>Context Graph</th><th>Promotes</th><th>Fetches</th><th>Defers</th><th>Cursor moves</th><th>Watermark</th><th>Last event</th></tr></thead>
+            <thead><tr><th>Context graph</th><th>Promotes</th><th>Fetches</th><th>Defers</th><th>Cursor moves</th><th>Watermark</th><th>Last event</th></tr></thead>
             <tbody>
               {perCg.map((r) => (
                 <tr
@@ -1263,7 +1263,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
         </div>
         <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 'var(--fs-control)', color: 'var(--text-secondary)' }}>
           <span><b style={{ color: 'var(--text-secondary)' }}>Started</b> {new Date(op.started_at).toLocaleString()}</span>
-          {op.contextGraph_id && <span><b style={{ color: 'var(--text-secondary)' }}>Context Graph</b> {op.contextGraph_id}</span>}
+          {op.contextGraph_id && <span><b style={{ color: 'var(--text-secondary)' }}>Context graph</b> {op.contextGraph_id}</span>}
           {op.triple_count != null && <span><b style={{ color: 'var(--text-secondary)' }}>Triples</b> {op.triple_count}</span>}
           {op.peer_id && <span><b style={{ color: 'var(--text-secondary)' }}>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
           {op.gas_cost_eth != null && <span><b style={{ color: 'var(--text-secondary)' }}>Gas</b> {op.gas_cost_eth.toFixed(6)} ETH</span>}

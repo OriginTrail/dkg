@@ -164,7 +164,7 @@ describe('NotificationsPane — interaction + a11y (happy-dom)', () => {
     const approve = vi.fn(
       async (): Promise<ActionResult> => ({
         ok: false,
-        error: 'Only the Context Graph creator can manage invitations',
+        error: 'Only the context graph creator can manage invitations',
         roleError: true,
       }),
     );

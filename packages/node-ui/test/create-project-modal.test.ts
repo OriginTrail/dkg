@@ -134,7 +134,7 @@ describe('CreateProjectModal partial registration flow', () => {
 
     const createButton = Array
       .from(container!.querySelectorAll('button'))
-      .find((button) => button.textContent === 'Create Context Graph') as HTMLButtonElement | undefined;
+      .find((button) => button.textContent === 'Create context graph') as HTMLButtonElement | undefined;
     expect(createButton).toBeTruthy();
     await act(async () => {
       createButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -174,7 +174,7 @@ describe('CreateProjectModal partial registration flow', () => {
   function findCreateButton(): HTMLButtonElement {
     const btn = Array
       .from(container!.querySelectorAll('button'))
-      .find((b) => b.textContent === 'Create Context Graph') as HTMLButtonElement | undefined;
+      .find((b) => b.textContent === 'Create context graph') as HTMLButtonElement | undefined;
     if (!btn) throw new Error('Create button not found');
     return btn;
   }
@@ -428,7 +428,7 @@ describe('CreateProjectModal progress copy honesty', () => {
   function getCreateButton(): HTMLButtonElement {
     const button = Array
       .from(container!.querySelectorAll('button'))
-      .find((b) => b.textContent === 'Create Context Graph' || b.textContent?.includes('locally') || b.textContent?.includes('network'));
+      .find((b) => b.textContent === 'Create context graph' || b.textContent?.includes('locally') || b.textContent?.includes('network'));
     if (!button) throw new Error('Create button not found');
     return button as HTMLButtonElement;
   }
@@ -449,7 +449,7 @@ describe('CreateProjectModal progress copy honesty', () => {
     });
     await flush();
 
-    expect(getCreateButton().textContent).toBe('Creating Context Graph locally…');
+    expect(getCreateButton().textContent).toBe('Creating context graph locally…');
     expect(createContextGraphMock).toHaveBeenCalledWith(
       cgId,
       'Local Only',
@@ -475,7 +475,7 @@ describe('CreateProjectModal progress copy honesty', () => {
     });
     await flush();
 
-    expect(getCreateButton().textContent).toBe('Registering Context Graph on the network…');
+    expect(getCreateButton().textContent).toBe('Registering context graph on the network…');
     expect(createContextGraphMock).toHaveBeenCalledWith(
       cgId,
       'Local Only',

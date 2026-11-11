@@ -17,11 +17,11 @@ test.describe('Project View (rc.12)', () => {
   });
 
   test('Import button is visible in layer switcher', async ({ page }) => {
-    await expect(page.getByRole('button', { name: 'Import into Context Graph' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Import into context graph' })).toBeVisible();
   });
 
   test('refresh button is visible in layer switcher', async ({ page }) => {
-    await expect(page.getByRole('button', { name: 'Refresh Context Graph data' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Refresh context graph data' })).toBeVisible();
   });
 
   test('overview shows project overview card', async ({ page }) => {
@@ -33,7 +33,7 @@ test.describe('Project View (rc.12)', () => {
   });
 
   test('Import button opens import modal', async ({ page, importFilesModal }) => {
-    await page.getByRole('button', { name: 'Import into Context Graph' }).click();
+    await page.getByRole('button', { name: 'Import into context graph' }).click();
     expect(await importFilesModal.isOpen()).toBe(true);
   });
 
@@ -56,7 +56,7 @@ test.describe('Project View (rc.12)', () => {
   });
 
   test('refresh button click does not crash the view', async ({ page }) => {
-    await page.getByRole('button', { name: 'Refresh Context Graph data' }).click();
+    await page.getByRole('button', { name: 'Refresh context graph data' }).click();
     await expect(page.locator('.v10-project-strip').filter({ hasText: PRIMARY_CG })).toBeVisible();
   });
 

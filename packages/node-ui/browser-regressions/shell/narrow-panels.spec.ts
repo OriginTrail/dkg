@@ -115,8 +115,8 @@ test.describe('narrow screen (860px and below)', () => {
   });
 
   for (const [dialog, button] of [
-    ['create', /New Context Graph/],
-    ['join', /Join Context Graph/],
+    ['create', /New context graph/],
+    ['join', /Join context graph/],
   ] as const) {
     test(`the ${dialog} dialog and what's typed in it outlive the sidebar that opened it`, async ({ page }) => {
       await open(page, NARROW);

@@ -850,7 +850,7 @@ export function PanelRight() {
       setLocalInputByConversation((prev) => ({ ...prev, [conversation.stateKey]: '' }));
       setAttachmentDraftsByConversation((prev) => ({ ...prev, [conversation.stateKey]: [] }));
       setLocalHistoryLoadedByConversation((prev) => ({ ...prev, [conversation.stateKey]: true }));
-      setConnectNotice('DKG Local LLM session cleared. You can now select a different Context Graph.');
+      setConnectNotice('DKG Local LLM session cleared. You can now select a different context graph.');
       await refreshLocalIntegrations();
     } catch (err: any) {
       setConnectError(err?.message ?? 'Failed to clear the local LLM session.');
