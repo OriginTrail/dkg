@@ -114,12 +114,20 @@ const UNSCOPED = [
   'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }',
   'SELECT (COUNT(DISTINCT ?s) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
   'SELECT ?c WHERE { { SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } } } }',
-  'SELECT ?s WHERE { VALUES ?s { <urn:a> } FILTER NOT EXISTS { GRAPH ?g { ?s <urn:p> "missing" } } }',
+  'SELECT ?x WHERE { VALUES ?x { "probe" } FILTER NOT EXISTS { GRAPH ?g { ?s <urn:state> "ready" } } }',
   'SELECT ?o WHERE { GRAPH ?g { GRAPH ?h { ?s <urn:p> ?o } } }',
   COMPUTED_READ_VM,
   'SELECT ?o WHERE { ?s <urn:p> ?o }',
   'ASK { GRAPH ?g { <urn:a> <urn:p> "vm" } }',
+  'ASK { GRAPH ?g { ?s <urn:state> "ready" } }',
   'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }',
+  'DESCRIBE ?s WHERE { GRAPH ?g { ?s <urn:p> "code" } }',
+];
+// Of those, the shapes whose answer does not depend on the read graphs, which check that nothing else changes:
+// the pattern outside GRAPH and the description read the default graph, which holds nothing here.
+const CONTROLS = [
+  'SELECT ?o WHERE { ?s <urn:p> ?o }',
+  'ASK { GRAPH ?g { <urn:a> <urn:p> "vm" } }',
   'DESCRIBE ?s WHERE { GRAPH ?g { ?s <urn:p> "code" } }',
 ];
 
@@ -158,6 +166,20 @@ describe('queries and read-graph partitions', () => {
     const raw = await planted.query(COMPUTED_READ_VM);
     expect(raw.type === 'bindings' && raw.bindings.length).toBe(2);
     expect((await new DKGQueryEngine(planted).query(COMPUTED_READ_VM)).bindings).toEqual([]);
+  });
+
+  it('compares only shapes whose answer changes once the read graphs are visible', async () => {
+    // The same contents without the record, so the engine leaves unscoped queries unrestricted.
+    const exposed = new OxigraphStore();
+    try {
+      await exposed.insert([...MEMBERS, ...READ_GRAPHS]);
+      const engine = new DKGQueryEngine(exposed);
+      const reference = new DKGQueryEngine(oracle);
+      for (const sparql of UNSCOPED) {
+        const differs = normalize(await engine.query(sparql)) !== normalize(await reference.query(sparql));
+        expect.soft(differs, sparql).toBe(!CONTROLS.includes(sparql));
+      }
+    } finally { await exposed.close(); }
   });
 
   it('leaves unscoped queries unchanged on a store that cannot hold read graphs', async () => {
