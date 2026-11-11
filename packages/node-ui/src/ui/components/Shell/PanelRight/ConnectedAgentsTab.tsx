@@ -577,11 +577,11 @@ export function ConnectedAgentsTab(props: {
                     )}
                   </div>
                   {message.attachments && message.attachments.length > 0 && (
-                    <div className="v10-local-agent-attachment-row v10-local-agent-attachment-list">
+                    <div className="v10-local-agent-attachment-row">
                       {message.attachments.map((attachment) => (
                         <span
                           key={attachment.id ?? attachment.assertionUri ?? attachment.fileHash}
-                          className="v10-local-agent-attachment-chip v10-local-agent-attachment-pill"
+                          className="v10-local-agent-attachment-chip"
                         >
                           {attachment.fileName}
                         </span>

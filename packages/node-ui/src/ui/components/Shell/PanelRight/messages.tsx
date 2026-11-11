@@ -188,7 +188,7 @@ export function renderMessageContent(
       <span className="v10-chat-thinking" role="status" aria-live="polite">
         <ThinkingOrb
           aria-hidden="true"
-          className="v10-chat-thinking-orb v10-chat-thinking-orb-size"
+          className="v10-chat-thinking-orb"
           state="connecting"
           size={64}
           theme="auto"

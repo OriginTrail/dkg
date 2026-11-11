@@ -311,6 +311,8 @@
 }
 
 .v10-chat-thinking-orb {
+  width: 28px;
+  height: 28px;
   flex: 0 0 28px;
   opacity: 0.86;
 }
