@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
@@ -13,6 +13,14 @@ function run(command, args, cwd, env = {}) {
   assert.equal(r.status, 0, r.stderr + r.stdout);
   return r.stdout.trim();
 }
+function linkFingerprintDependency(dir) {
+  mkdirSync(join(dir, 'packages/cli/node_modules'), { recursive: true });
+  symlinkSync(realpathSync(join(root, 'packages/cli/node_modules/esbuild')),
+    join(dir, 'packages/cli/node_modules/esbuild'), 'junction');
+}
+function generateFingerprints(dir) {
+  run(process.execPath, ['packages/cli/scripts/n8n-implementation-fingerprints.mjs', '--write'], dir);
+}
 function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-build-identity-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -23,7 +31,19 @@ function fixture(t) {
   cpSync(join(root, 'packages/storage/blazegraph-namespace-contract.cjs'), join(dir, 'packages/storage/blazegraph-namespace-contract.cjs'));
   cpSync(join(root, 'scripts'), join(dir, 'scripts'), { recursive: true });
   cpSync(join(root, 'packages/cli/blazegraph-image-metadata.cjs'), join(dir, 'packages/cli/blazegraph-image-metadata.cjs'));
-  writeFileSync(join(dir, '.gitignore'), 'bin/\npackages/cli/build-info.json\npackages/cli/dist/\n');
+  // Exercise the real generation phase with a tiny adapter graph, without
+  // copying the complete runtime or replacing the production build command.
+  mkdirSync(join(dir, 'packages/cli/scripts'), { recursive: true });
+  cpSync(join(root, 'packages/cli/scripts/n8n-implementation-fingerprints.mjs'),
+    join(dir, 'packages/cli/scripts/n8n-implementation-fingerprints.mjs'));
+  mkdirSync(join(dir, 'packages/cli/src'), { recursive: true });
+  for (const name of ['semantic-runtime-n8n-native-adapter.ts', 'semantic-runtime-n8n-adapter.ts']) {
+    writeFileSync(join(dir, 'packages/cli/src', name), 'export const adapter = "fixture";\n');
+  }
+  writeFileSync(join(dir, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
+  linkFingerprintDependency(dir);
+  generateFingerprints(dir);
+  writeFileSync(join(dir, '.gitignore'), 'bin/\nnode_modules/\npackages/cli/build-info.json\npackages/cli/dist/\n');
   writeFileSync(join(dir, 'source.txt'), 'A\n');
   run('git', ['init', '-q'], dir);
   // Keep fixture-owned Git work synchronous so cleanup cannot race a detached
@@ -71,6 +91,25 @@ test('dirty source builds cannot claim a clean exact commit', t => {
   assert.equal(info.commit, `${head}-dirty`);
 });
 
+test('failed fingerprint generation preserves the prior compiled output and build identity', t => {
+  const dir = fixture(t);
+  compile(dir);
+  const stamp = readFileSync(join(dir, 'packages/cli/build-info.json'), 'utf8');
+  const emitted = readFileSync(join(dir, 'packages/cli/dist/source.txt'), 'utf8');
+  const pins = readFileSync(join(dir, 'packages/cli/src/semantic-runtime-n8n-implementation.generated.ts'), 'utf8');
+  writeFileSync(join(dir, 'packages/cli/src/semantic-runtime-n8n-native-adapter.ts'), 'export const adapter = ;\n');
+  writeFileSync(join(dir, 'source.txt'), 'must not compile\n');
+  const result = spawnSync('pnpm', ['run', 'build:compile'], {
+    cwd: join(dir, 'packages/cli'), encoding: 'utf8',
+    env: { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}` },
+  });
+  assert.equal(result.status, 1, result.stderr + result.stdout);
+  assert.match(result.stderr, /semantic-runtime-n8n-native-adapter\.ts/);
+  assert.equal(readFileSync(join(dir, 'packages/cli/build-info.json'), 'utf8'), stamp);
+  assert.equal(readFileSync(join(dir, 'packages/cli/dist/source.txt'), 'utf8'), emitted);
+  assert.equal(readFileSync(join(dir, 'packages/cli/src/semantic-runtime-n8n-implementation.generated.ts'), 'utf8'), pins);
+});
+
 test('devnet preserves an existing compiler identity instead of restamping live HEAD', t => {
   const dir = fixture(t);
   writeFileSync(join(dir, 'packages/cli/build-info.json'), JSON.stringify({ commit: '0'.repeat(40) }));
@@ -89,6 +128,7 @@ test('real Turbo reuses dependencies while recompiling and restamping the CLI', 
   writeFileSync(join(dir, 'packages/cli/package.json'), JSON.stringify({ name: cli.name, version: '1.0.0', dkgBuildIdentity: cli.dkgBuildIdentity, dependencies: { '@fixture/dep': 'workspace:*' }, scripts: { build: 'pnpm run build:compile', 'build:compile': compilation } }));
   writeFileSync(join(dir, '.gitignore'), 'bin/\nnode_modules/\n.turbo/\npackages/*/dist/\npackages/*/.turbo/\npackages/cli/build-info.json\n');
   run('pnpm', ['install', '--lockfile-only', '--ignore-scripts'], dir);
+  generateFingerprints(dir);
   run('git', ['add', '.'], dir);
   run('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'workspace'], dir);
   const turbo = join(root, 'node_modules/.bin/turbo');
@@ -198,7 +238,7 @@ test('source archive nested under a clean parent repository has unknown identity
   run('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'ignore archive'], parent);
   const archive = join(parent, 'archive');
   mkdirSync(archive);
-  for (const entry of ['scripts', 'packages', 'bin', 'source.txt']) cpSync(join(parent, entry), join(archive, entry), { recursive: true });
+  for (const entry of ['scripts', 'packages', 'bin', 'source.txt', 'pnpm-lock.yaml']) cpSync(join(parent, entry), join(archive, entry), { recursive: true });
   const info = compile(archive);
   assert.equal(info.commit, 'unknown');
   assert.equal(info.dirty, null);
@@ -219,6 +259,7 @@ test('linked worktree owns and certifies its clean source identity', t => {
   const linked = join(parent, 'linked');
   run('git', ['worktree', 'add', '--detach', linked, 'HEAD'], parent);
   cpSync(join(parent, 'bin'), join(linked, 'bin'), { recursive: true });
+  linkFingerprintDependency(linked);
   const info = compile(linked);
   assert.equal(info.commit, run('git', ['rev-parse', 'HEAD'], linked));
   assert.equal(info.dirty, false);

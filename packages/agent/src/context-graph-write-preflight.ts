@@ -53,6 +53,7 @@ const DECLARATION_ROW_PREDICATES: Readonly<Partial<Record<string, string>>> = {
 };
 
 interface WritePreflightSubscriptions {
+  readonly locallyCreated?: boolean;
   readonly store?: Pick<ContextGraphSubscriptionStore, 'load'>;
   readonly current: (contextGraphId: string) => Pick<ContextGraphSub, 'subscribed' | 'synced'> | undefined;
 }
@@ -266,6 +267,7 @@ export async function probeContextGraphWritePreflight(
       // The optional `storeUnavailable`/`storeErrorMessage` pair is kept
       // for the 503-diagnostics path (unchanged wire behaviour).
       storeAvailable: !storeUnavailable,
+      locallyCreated: subscriptions.locallyCreated === true,
       ...(exists !== undefined ? { exists } : {}),
       ...(hasLocalContent !== undefined ? { hasLocalContent } : {}),
       ...(inMemorySubscription

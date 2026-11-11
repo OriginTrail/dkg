@@ -291,7 +291,7 @@ function stateOf(agent: object): AgentState {
 function copyProbe(probe: Probe): Probe {
   const {
     storeAvailable, exists, hasLocalContent, inMemorySubscription, persistedSubscription, declarationFound,
-    accessPolicy, curator, callerAuthorized, storeUnavailable, storeErrorMessage, failureAttribution,
+    accessPolicy, curator, callerAuthorized, storeUnavailable, storeErrorMessage, failureAttribution, locallyCreated,
     ...undeclared
   } = probe;
   const allFieldsCopied: keyof typeof undeclared extends never ? true : never = true;
@@ -299,6 +299,7 @@ function copyProbe(probe: Probe): Probe {
   // A field the probe did not set stays unset, as in the probe itself.
   return {
     storeAvailable,
+    ...(locallyCreated !== undefined ? { locallyCreated } : {}),
     ...(exists !== undefined ? { exists } : {}),
     ...(hasLocalContent !== undefined ? { hasLocalContent } : {}),
     ...(inMemorySubscription !== undefined
