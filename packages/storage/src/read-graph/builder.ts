@@ -8,8 +8,9 @@
  * runs at start and then at an interval, and reads the mirror, which is in
  * memory.
  *
- * Heavy background work on read graphs runs one job at a time per backend,
- * through {@link withReadGraphBackgroundSlot}, on the store's background lane.
+ * Each pass first refreshes the registry of every context graph with rows, so
+ * a changed membership marks its read graphs dirty. Jobs run one at a time per
+ * backend (`withReadGraphBackgroundSlot`), on the store's background lane.
  * A job that fails is tried again after a delay that doubles up to ten
  * minutes; one that a newer change of its row overtook is tried again at the
  * next pass. `close()` aborts the job in progress and waits for it.
@@ -20,8 +21,7 @@ import { CoalescingRecurringTask, compareCodePoint, parseReadGraphIri, readGraph
 import { withDefaultStoreWorkPriority } from '../store-priority-scheduler.js';
 import type { TripleStore } from '../triple-store.js';
 import { readGraphRuntimeOf } from './read-graph-store.js';
-import { buildReadGraph, type ReadGraphBatching, type ReadGraphJobResult } from './rebuild.js';
-import { ReadGraphLocks, type ReadGraphBackendRuntime } from './runtime.js';
+import { buildReadGraph, refreshReadGraphRegistry, type ReadGraphBatching, type ReadGraphJobResult } from './rebuild.js';
 import { CURRENT_READ_GRAPH_VERSIONS, servingReadGraphGeneration, type ReadGraphVersions } from './state.js';
 import { readGraphSizeQuery } from './statements.js';
 import { readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
@@ -61,21 +61,6 @@ interface Retry {
   readonly attempts: number;
   readonly retryAt: number;
   readonly error?: string;
-}
-
-const SLOTS = new WeakMap<ReadGraphBackendRuntime, ReadGraphLocks>();
-
-/**
- * Run heavy background work on a backend's read graphs one job at a time, in
- * the order asked: builds, rebuilds, repairs and checks share the slot.
- */
-export function withReadGraphBackgroundSlot<T>(runtime: ReadGraphBackendRuntime, work: () => Promise<T>): Promise<T> {
-  let slot = SLOTS.get(runtime);
-  if (!slot) {
-    slot = new ReadGraphLocks();
-    SLOTS.set(runtime, slot);
-  }
-  return slot.withLocks(['background'], work);
 }
 
 export class ReadGraphBuilder {
@@ -131,6 +116,16 @@ export class ReadGraphBuilder {
     const runtime = readGraphRuntimeOf(this.#options.store);
     if (!runtime) return 'rearm';
     const versions = this.#options.versions ?? CURRENT_READ_GRAPH_VERSIONS;
+    const context = { store: this.#options.store, dataDir: this.#options.dataDir, signal, versions, batching: this.#options.batching };
+    // A registry that changed marks the read graphs built under the old one dirty, ready ones included.
+    for (const contextGraphId of runtime.mirror.contextGraphIds()) {
+      try {
+        await refreshReadGraphRegistry(context, contextGraphId);
+      } catch (error) {
+        if (signal.aborted) throw error;
+        this.#options.warn?.(`The read-graph registry of a context graph could not be read: ${messageOf(error)}`);
+      }
+    }
     const jobs = new Map<string, ReadGraphKey>();
     for (const key of await this.#options.wanted(signal)) {
       const readGraph = readGraphIri(key);
@@ -148,8 +143,7 @@ export class ReadGraphBuilder {
       signal.throwIfAborted();
       this.#building = readGraph;
       try {
-        const result = await withReadGraphBackgroundSlot(runtime, () => withDefaultStoreWorkPriority('background', () =>
-          buildReadGraph({ store: this.#options.store, dataDir: this.#options.dataDir, signal, versions, batching: this.#options.batching }, key)));
+        const result = await withDefaultStoreWorkPriority('background', () => buildReadGraph(context, key));
         this.#lastJob = result;
         if (result.outcome === 'lost') this.#retry(readGraph);
         else this.#retries.delete(readGraph);

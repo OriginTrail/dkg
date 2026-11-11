@@ -44,10 +44,10 @@ import { noteReadGraphPartitions } from '../read-graph-partition-marker.js';
 import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
-import { matchesGraphNameTest, readGraphMembership, workingMemoryIdentityRule, type GraphNameTest, type ReadGraphRegistrySnapshot } from './membership.js';
+import { matchesGraphNameTest, readGraphMembership, workingMemoryIdentityRule, type GraphNameTest } from './membership.js';
 import { readGraphLayerOf, readGraphRuntimeOf } from './read-graph-store.js';
-import { readReadGraphRegistry } from './registry.js';
-import type { InMemoryReadGraphStateMirror, ReadGraphBackendRuntime } from './runtime.js';
+import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry } from './registry-recognition.js';
+import { ReadGraphLocks, type InMemoryReadGraphStateMirror, type ReadGraphBackendRuntime } from './runtime.js';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
   isReadGraphRowAccepted,
@@ -165,6 +165,10 @@ const MAX_PRESSURE_WAIT_MS = 5_000;
  */
 export async function buildReadGraph(context: ReadGraphJobContext, key: ReadGraphKey): Promise<ReadGraphJobResult> {
   const job = new ReadGraphJob(context, readGraphIri(key), 'build');
+  return withReadGraphBackgroundSlot(job.runtime, () => build(job, key));
+}
+
+async function build(job: ReadGraphJob, key: ReadGraphKey): Promise<ReadGraphJobResult> {
   await job.refreshRegistry(key.scope.contextGraphId);
   const begun = await job.locked(async (): Promise<Begun<{ readonly membership: GraphNameTest }>> => {
     const stored = await job.reconcile();
@@ -205,9 +209,14 @@ export async function repairReadGraph(
   const job = new ReadGraphJob(context, readGraphIri(key), 'repair');
   for (const graph of input.joined) if (!matchesGraphNameTest(input.membership, graph)) throw new ReadGraphJobError(`A joined graph must be a member: ${graph}`);
   for (const graph of input.leaving) if (matchesGraphNameTest(input.membership, graph)) throw new ReadGraphJobError(`A leaving graph must not be a member: ${graph}`);
+  return withReadGraphBackgroundSlot(job.runtime, () => repair(job, input));
+}
+
+async function repair(job: ReadGraphJob, input: ReadGraphRepairInput): Promise<ReadGraphJobResult> {
   const begun = await job.locked(async (): Promise<Begun> => {
     const stored = await job.reconcile();
-    if (stored?.state !== 'dirty' || !isReadGraphRowAccepted(stored, job.versions)) return { ended: 'lost', row: stored };
+    // A row that had to be replaced says nothing about the contents: they need a full build.
+    if (job.replacedRow || stored?.state !== 'dirty' || !isReadGraphRowAccepted(stored, job.versions)) return { ended: 'lost', row: stored };
     const started = await job.transition(stored, { kind: 'start-repair', versions: job.versions });
     return started?.state === 'repairing' ? { started } : { ended: 'lost', row: started };
   });
@@ -234,6 +243,11 @@ export async function repairReadGraph(
 export async function removeReadGraph(context: ReadGraphJobContext, readGraph: string): Promise<ReadGraphJobResult> {
   if (!parseReadGraphIri(readGraph)) throw new ReadGraphJobError(`Not a read-graph IRI: ${readGraph}`);
   const job = new ReadGraphJob(context, readGraph, 'remove');
+  return withReadGraphBackgroundSlot(job.runtime, () => remove(job));
+}
+
+async function remove(job: ReadGraphJob): Promise<ReadGraphJobResult> {
+  const readGraph = job.readGraph;
   const begun = await job.locked(async (): Promise<Begun> => {
     let stored = await job.reconcile(false);
     if (stored === undefined) {
@@ -265,6 +279,58 @@ export async function markReadGraphDirty(context: ReadGraphJobContext, readGraph
   if (!parseReadGraphIri(readGraph)) throw new ReadGraphJobError(`Not a read-graph IRI: ${readGraph}`);
   const job = new ReadGraphJob(context, readGraph, 'mark');
   return job.locked(() => job.markDirtyHeld());
+}
+
+const SLOTS = new WeakMap<ReadGraphBackendRuntime, ReadGraphLocks>();
+
+/**
+ * Run heavy background work on a backend's read graphs one job at a time, in
+ * the order asked. Build, repair and removal take this slot themselves;
+ * checks take it around each pass.
+ */
+export function withReadGraphBackgroundSlot<T>(runtime: ReadGraphBackendRuntime, work: () => Promise<T>): Promise<T> {
+  let slot = SLOTS.get(runtime);
+  if (!slot) {
+    slot = new ReadGraphLocks();
+    SLOTS.set(runtime, slot);
+  }
+  return slot.withLocks(['background'], work);
+}
+
+/**
+ * Bring the runtime's registry of a context graph up to what is stored,
+ * holding no lock on entry. The facts are read without locks, then installed,
+ * snapshot and facts, under the locks of every read graph of the context
+ * graph with a row: the locks the layer takes for every write that may change
+ * the registry. If the cache changed meanwhile, the facts read are older than
+ * that change, and they are read again. When the cache held another snapshot,
+ * every one of those read graphs is marked dirty before the new one is
+ * installed: the layer maintained it under the old membership, and nothing
+ * may be built or served from the two mixed. Returns whether the cached
+ * snapshot changed.
+ */
+export async function refreshReadGraphRegistry(context: ReadGraphJobContext, contextGraphId: string): Promise<boolean> {
+  const layer = readGraphLayerOf(context.store);
+  if (!layer) throw new ReadGraphJobError('This store has no read-graph layer');
+  const runtime = layer.runtime;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const version = runtime.registries.version(contextGraphId);
+    const facts = await readReadGraphRegistryFacts(readGraphPartitionMaintenanceStore(context.store), contextGraphId, jobOptions(context));
+    const fresh = registrySnapshotOfFacts(contextGraphId, facts);
+    const cached = runtime.registries.get(contextGraphId);
+    const changed = cached !== undefined && !sameRegistry(cached, fresh);
+    if (cached !== undefined && !changed && runtime.registries.facts(contextGraphId) !== undefined) return false;
+    const affected = runtime.mirror.rows().map((row) => row.readGraph)
+      .filter((readGraph) => parseReadGraphIri(readGraph)?.scope.contextGraphId === contextGraphId);
+    const installed = await runtime.locks.withLocks(affected, async () => {
+      if (runtime.registries.version(contextGraphId) !== version) return false;
+      if (changed) for (const readGraph of affected) await new ReadGraphJob(context, readGraph, 'mark').markDirtyHeld();
+      runtime.registries.set(fresh, facts);
+      return true;
+    });
+    if (installed) return changed;
+  }
+  throw new ReadGraphJobError(`The registry of ${contextGraphId} kept changing while it was read`);
 }
 
 const INSTALLED_IDENTITIES = new WeakMap<ReadGraphBackendRuntime, string>();
@@ -348,6 +414,8 @@ class ReadGraphJob {
   private readonly options: QueryOptions;
   private readonly started = performance.now();
   private batches = 0;
+  /** Whether this job replaced a damaged row. */
+  replacedRow = false;
 
   constructor(private readonly context: ReadGraphJobContext, readonly readGraph: string, private readonly kind: ReadGraphJobKind) {
     const layer = readGraphLayerOf(context.store);
@@ -361,7 +429,7 @@ class ReadGraphJob {
     if (!this.maintenance.update) throw new ReadGraphJobError('This store cannot build read graphs: it has no update()');
     this.versions = context.versions ?? CURRENT_READ_GRAPH_VERSIONS;
     this.batching = { ...DEFAULT_READ_GRAPH_BATCHING, ...context.batching };
-    this.options = { priority: 'background', source: context.source ?? SOURCE, ...(context.signal ? { signal: context.signal } : {}) };
+    this.options = jobOptions(context);
   }
 
   locked<T>(work: () => Promise<T>): Promise<T> {
@@ -426,6 +494,7 @@ class ReadGraphJob {
       builderVersion: this.versions.builderVersion,
     };
     this.noteMayHoldPartitions();
+    this.replacedRow = true;
     this.runtime.mirror.set(row);
     await this.send(readGraphStateReset(row));
     const stored = await this.stored();
@@ -453,17 +522,7 @@ class ReadGraphJob {
    * old membership, and a build must not mix the two.
    */
   async refreshRegistry(contextGraphId: string): Promise<void> {
-    const fresh = await readReadGraphRegistry(this.maintenance, contextGraphId, this.options);
-    const cached = this.runtime.registries.get(contextGraphId);
-    if (cached !== undefined && sameRegistry(cached, fresh)) return;
-    const affected = this.runtime.mirror.rows().map((row) => row.readGraph)
-      .filter((readGraph) => parseReadGraphIri(readGraph)?.scope.contextGraphId === contextGraphId);
-    await this.runtime.locks.withLocks(affected, async () => {
-      if (cached !== undefined) {
-        for (const readGraph of affected) await new ReadGraphJob(this.context, readGraph, 'mark').markDirtyHeld();
-      }
-      this.runtime.registries.set(fresh);
-    });
+    await refreshReadGraphRegistry(this.context, contextGraphId);
   }
 
   noteMayHoldPartitions(): void {
@@ -474,11 +533,8 @@ class ReadGraphJob {
   /** The membership of the read graph under the registry snapshot the layer maintains with, read when there is none. */
   async membership(key: ReadGraphKey): Promise<GraphNameTest> {
     const contextGraphId = key.scope.contextGraphId;
-    let registry = this.runtime.registries.get(contextGraphId);
-    if (!registry) {
-      registry = await readReadGraphRegistry(this.maintenance, contextGraphId, this.options);
-      this.runtime.registries.set(registry);
-    }
+    if (!this.runtime.registries.get(contextGraphId)) await refreshReadGraphRegistry(this.context, contextGraphId);
+    const registry = this.runtime.registries.get(contextGraphId)!;
     return readGraphMembership(key, registry, this.runtime.workingMemoryIdentity);
   }
 
@@ -605,9 +661,8 @@ class ReadGraphJob {
   }
 }
 
-function sameRegistry(left: ReadGraphRegistrySnapshot, right: ReadGraphRegistrySnapshot): boolean {
-  const same = (a: readonly string[], b: readonly string[]) => a.length === b.length && [...a].sort().every((value, i) => value === [...b].sort()[i]);
-  return same(left.subGraphNames, right.subGraphNames) && same(left.childContextGraphRoots, right.childContextGraphRoots);
+function jobOptions(context: ReadGraphJobContext): QueryOptions {
+  return { priority: 'background', source: context.source ?? SOURCE, ...(context.signal ? { signal: context.signal } : {}) };
 }
 
 function fenceOf(row: ReadGraphStateRow): ReadGraphFence {

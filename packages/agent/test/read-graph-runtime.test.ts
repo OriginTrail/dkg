@@ -9,7 +9,7 @@ import {
   readGraphStateCompareAndSet,
   wrapReadGraphLayer,
 } from '@origintrail-official/dkg-storage';
-import { READ_GRAPHS_OFF, ReadGraphWorkloadOwnerV1, createReadGraphWorkloadV1, type ReadGraphModesV1 } from '../src/read-graph-runtime.js';
+import { READ_GRAPHS_OFF, ReadGraphWorkloadOwnerV1, readGraphWorkloadOf, type ReadGraphModesV1 } from '../src/read-graph-runtime.js';
 
 const CG = 'read-graph-runtime';
 const ROOT = `did:dkg:context-graph:${CG}`;
@@ -53,7 +53,7 @@ describe('the agent read-graph workload', () => {
   it('does not start while every read graph is off', async () => {
     const { view } = await agentView();
     expect(READ_GRAPHS_OFF.modeOf({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory })).toBe('off');
-    const owner = createReadGraphWorkloadV1(view, { logger: logger() });
+    const owner = new ReadGraphWorkloadOwnerV1(view, { logger: logger() });
     owner.start(ctx);
     expect(owner.status()).toBeUndefined();
     await owner.whenIdle();
@@ -134,5 +134,23 @@ describe('the agent read-graph workload', () => {
     await owner.close();
     expect(owner.status()).toBeUndefined();
     await owner.close();
+  });
+
+  it('runs the checks beside the builder, checks every ready read graph on request, and reports both in its status', async () => {
+    const { view } = await agentView({ subscribed: [CG] });
+    const owner = new ReadGraphWorkloadOwnerV1(view, {
+      logger: logger(), intervalMs: 60_000, modes: modes((key) => key.layer === MemoryLayer.VerifiableMemory && key.scope.kind === 'context-graph'),
+    });
+    // The agent reaches its workload for requests from outside.
+    expect(readGraphWorkloadOf(view)).toBe(owner);
+    owner.start(ctx);
+    await owner.whenIdle();
+    const vm = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory });
+    expect(owner.readGraphStatus()).toMatchObject({ checking: true, lastCheck: undefined, readGraphs: [{ readGraph: vm, state: 'ready' }] });
+    const report = await owner.checkNow();
+    expect(report).toMatchObject({ mode: 'full', results: [{ readGraph: vm, mode: 'full', outcome: 'consistent' }] });
+    expect(owner.readGraphStatus().lastCheck).toBe(report);
+    await owner.close();
+    expect(owner.readGraphStatus()).toMatchObject({ checking: false, builder: undefined });
   });
 });

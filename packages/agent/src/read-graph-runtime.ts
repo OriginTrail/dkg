@@ -6,6 +6,10 @@
  * workloads, and the node's working-memory identity rule, which it sets on the
  * store's read-graph runtime before it builds.
  *
+ * Beside the builder run the checks of the read graphs it keeps (sampled ones,
+ * and a full pass at a long interval), and on request a check of every ready
+ * read graph, whose results the status keeps.
+ *
  * Which read graphs the node keeps comes from a mode per read graph: `off`,
  * `build` or `serve`. The node's settings carry no modes yet, so every read
  * graph is `off` ({@link READ_GRAPHS_OFF}): the builder does not start, and
@@ -23,10 +27,18 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   ReadGraphBuilder,
+  checkReadGraph,
   installWorkingMemoryIdentity,
+  readGraphLayerOf,
   readReadGraphRegistry,
   registeredSubGraphNames,
+  startReadGraphChecks,
+  withReadGraphBackgroundSlot,
   type ReadGraphBuilderStatus,
+  type ReadGraphCheckMode,
+  type ReadGraphCheckResult,
+  type ReadGraphCheckSchedule,
+  type ReadGraphState,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 
@@ -61,17 +73,47 @@ export interface ReadGraphWorkloadOptionsV1 {
 
 const SHARED_LAYERS = [MemoryLayer.VerifiableMemory, MemoryLayer.SharedWorkingMemory] as const;
 
+/** A check of the node's ready read graphs, run on request. */
+export interface ReadGraphCheckReportV1 {
+  readonly mode: ReadGraphCheckMode;
+  /** When it ended, in milliseconds since the epoch. */
+  readonly at: number;
+  readonly results: readonly ReadGraphCheckResult[];
+}
+
+/** The node's read graphs, for `dkg store read-graphs status`. */
+export interface ReadGraphStatusV1 {
+  readonly readGraphs: ReadonlyArray<{ readonly readGraph: string; readonly state: ReadGraphState; readonly generation: number }>;
+  /** What the builder does; `undefined` while it does not run. */
+  readonly builder: ReadGraphBuilderStatus | undefined;
+  /** Whether the background checks run. */
+  readonly checking: boolean;
+  /** The last check run on request. */
+  readonly lastCheck: ReadGraphCheckReportV1 | undefined;
+}
+
+/** The read-graph workload of each agent, so that requests from outside reach it. */
+const OWNERS = new WeakMap<object, ReadGraphWorkloadOwnerV1>();
+
+/** The read-graph workload an agent created, if any. */
+export function readGraphWorkloadOf(agent: object): ReadGraphWorkloadOwnerV1 | undefined {
+  return OWNERS.get(agent);
+}
+
 /** The agent's read-graph builder, as one of its background workloads. */
 export class ReadGraphWorkloadOwnerV1 {
   readonly #agent: ReadGraphAgentViewV1;
   readonly #options: ReadGraphWorkloadOptionsV1;
   readonly #modes: ReadGraphModesV1;
   #builder: ReadGraphBuilder | undefined;
+  #checks: ReadGraphCheckSchedule | undefined;
+  #lastCheck: ReadGraphCheckReportV1 | undefined;
 
   constructor(agent: ReadGraphAgentViewV1, options: ReadGraphWorkloadOptionsV1) {
     this.#agent = agent;
     this.#options = options;
     this.#modes = options.modes ?? READ_GRAPHS_OFF;
+    OWNERS.set(agent, this);
   }
 
   /** Start the builder, when any read graph may be kept. */
@@ -87,17 +129,60 @@ export class ReadGraphWorkloadOwnerV1 {
       warn: (line) => logger.warn(ctx, line),
     });
     this.#builder.start();
+    this.#checks = startReadGraphChecks(this.#agent.store, {
+      onError: (error, readGraph) => logger.warn(ctx, `A read-graph check${readGraph ? ` of <${readGraph}>` : ''} failed: ${messageOf(error)}`),
+      alert: (message) => logger.warn(ctx, message),
+    });
   }
 
   whenIdle(): Promise<void> {
     return this.#builder?.whenIdle() ?? Promise.resolve();
   }
 
-  /** Stop the builder: no new pass, and the job in progress is aborted and waited for. */
+  /** Stop the builder and the checks: no new pass, and what runs is aborted and waited for. */
   async close(): Promise<void> {
     const builder = this.#builder;
+    const checks = this.#checks;
     this.#builder = undefined;
-    await builder?.close();
+    this.#checks = undefined;
+    await Promise.all([checks?.close(), builder?.close()]);
+  }
+
+  /**
+   * Check every ready read graph now, against its member graphs, and keep the
+   * results for {@link readGraphStatus}: for `dkg store read-graphs check`. A
+   * full check compares every triple; a mismatch marks the read graph dirty.
+   * Each check runs in the backend's background slot, so it never overlaps a
+   * build.
+   */
+  async checkNow(options: { readonly mode?: ReadGraphCheckMode; readonly signal?: AbortSignal } = {}): Promise<ReadGraphCheckReportV1> {
+    const mode = options.mode ?? 'full';
+    const store = this.#agent.store;
+    const layer = readGraphLayerOf(store);
+    const results: ReadGraphCheckResult[] = [];
+    if (layer) {
+      const ready = layer.runtime.mirror.rows().filter((row) => row.state === 'ready').map((row) => row.readGraph).sort();
+      for (const readGraph of ready) {
+        options.signal?.throwIfAborted();
+        results.push(await withReadGraphBackgroundSlot(layer.runtime,
+          () => checkReadGraph(store, readGraph, mode, options.signal ? { signal: options.signal } : {})));
+      }
+    }
+    const report: ReadGraphCheckReportV1 = { mode, at: Date.now(), results };
+    this.#lastCheck = report;
+    return report;
+  }
+
+  /** The node's read graphs, what the builder does, and the last check run on request: for `dkg store read-graphs status`. */
+  readGraphStatus(): ReadGraphStatusV1 {
+    const rows = readGraphLayerOf(this.#agent.store)?.runtime.mirror.rows() ?? [];
+    return {
+      readGraphs: rows.map(({ readGraph, state, generation }) => ({ readGraph, state, generation }))
+        .sort((left, right) => (left.readGraph < right.readGraph ? -1 : left.readGraph > right.readGraph ? 1 : 0)),
+      builder: this.#builder?.status(),
+      checking: this.#checks !== undefined,
+      lastCheck: this.#lastCheck,
+    };
   }
 
   /** What the builder is doing, or `undefined` while it does not run. */
@@ -139,7 +224,6 @@ export class ReadGraphWorkloadOwnerV1 {
   }
 }
 
-/** The agent's read-graph workload. */
-export function createReadGraphWorkloadV1(agent: ReadGraphAgentViewV1, options: ReadGraphWorkloadOptionsV1): ReadGraphWorkloadOwnerV1 {
-  return new ReadGraphWorkloadOwnerV1(agent, options);
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

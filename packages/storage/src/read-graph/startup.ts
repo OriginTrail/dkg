@@ -31,7 +31,7 @@ import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
 import { readGraphLayerOf } from './read-graph-store.js';
-import { readReadGraphRegistry } from './registry.js';
+import { readReadGraphRegistryFacts, registrySnapshotOfFacts } from './registry-recognition.js';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
   MAX_READ_GRAPH_GENERATION,
@@ -119,8 +119,10 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
 
   const after = await stateRows(target, queryOptions);
   for (const row of after.rows) if (maintained(row.readGraph)) mirror.set(row);
+  // Before anything writes: the facts go in with the snapshot, so the layer predicts its first registry write from them.
   for (const contextGraphId of mirror.contextGraphIds()) {
-    registries.set(await readReadGraphRegistry(target, contextGraphId, queryOptions));
+    const facts = await readReadGraphRegistryFacts(target, contextGraphId, queryOptions);
+    registries.set(registrySnapshotOfFacts(contextGraphId, facts), facts);
   }
   const count = marked.length + replaced.length;
   if (count > 0) options.log?.(`Marked ${count} read graph(s) dirty at start; ${mirror.size} are maintained`);

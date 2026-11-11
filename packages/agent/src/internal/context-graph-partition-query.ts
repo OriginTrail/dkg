@@ -6,7 +6,12 @@ import { resolveCallerDraftAccess } from '../working-memory-identity.js';
 import type { DKGAgent } from '../dkg-agent.js';
 import { DKGAgentBase } from '../dkg-agent-base.js';
 import { admitContextGraphReadCaller, ContextGraphReadAuthorityUnavailableError } from '../context-graph-read-authority.js';
-import { createReadGraphWorkloadV1, type ReadGraphWorkloadOwnerV1 } from '../read-graph-runtime.js';
+import {
+  ReadGraphWorkloadOwnerV1,
+  readGraphWorkloadOf,
+  type ReadGraphCheckReportV1,
+  type ReadGraphStatusV1,
+} from '../read-graph-runtime.js';
 
 export interface ContextGraphPartitionInventoryOptions {
   callerAgentAddress?: string;
@@ -21,7 +26,18 @@ export class ContextGraphPartitionQueryMethods extends DKGAgentBase {
    * catalog runtime starts and stops with the agent's other background workloads.
    */
   createReadGraphWorkloadV1(this: DKGAgent): ReadGraphWorkloadOwnerV1 {
-    return createReadGraphWorkloadV1(this, { dataDir: this.config.dataDir, logger: this.log });
+    return new ReadGraphWorkloadOwnerV1(this, { dataDir: this.config.dataDir, logger: this.log });
+  }
+
+  /** Check the node's ready read graphs now, full unless asked otherwise: for `dkg store read-graphs check`. */
+  async checkReadGraphsV1(this: DKGAgent, options: { mode?: 'sampled' | 'full'; signal?: AbortSignal } = {}): Promise<ReadGraphCheckReportV1> {
+    const owner = readGraphWorkloadOf(this);
+    return owner ? owner.checkNow(options) : { mode: options.mode ?? 'full', at: Date.now(), results: [] };
+  }
+
+  /** The node's read graphs and what the builder and the checks do: for `dkg store read-graphs status`. */
+  readGraphStatusV1(this: DKGAgent): ReadGraphStatusV1 | undefined {
+    return readGraphWorkloadOf(this)?.readGraphStatus();
   }
 
   /** Enumerate the authorized partitions with their required admission. */
