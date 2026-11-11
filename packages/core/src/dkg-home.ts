@@ -312,7 +312,7 @@ function readDaemonPidSync(dkgHome: string): number | null {
  * `readDkgApiPort`) because this is per-home-dir disambiguation, not a
  * global override.
  */
-function readDkgApiPortSync(dkgHome: string): number | null {
+export function readDkgApiPortSync(dkgHome: string): number | null {
   try {
     const raw = readFileSync(join(dkgHome, 'api.port'), 'utf-8');
     return parsePort(raw.trim());

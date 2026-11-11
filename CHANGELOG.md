@@ -4,6 +4,55 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Fixed
+
+- An error from one service's backend no longer takes a seller's other
+  services away from buyers. When the backend refuses a call as made (400,
+  404, 413, 415 or 422), the seller refuses it with a code buyers don't
+  retry. Buyers then try other sellers first for ten minutes and still route
+  the seller's other services, where before they left the seller out of
+  every service for ten minutes. No answer, timeouts, and 401, 403, 408,
+  409, 429 and 5xx answers are handled as before. When a service's backend
+  refuses a call with tools, the seller checks with minimal calls with tools
+  of its own: one where the model chooses, and one that names the function.
+  If the backend refuses both, the service stops offering tools until the
+  node restarts, so buyers answer such calls with `tools_unsupported`
+  instead of sending them.
+
+## [10.1.1] - Unreleased
+
+10.1.1 fixes problems found while 10.1.0 ran on testnet, in the
+Marketplace, the MCP server and the public catalog.
+
+### Fixed
+
+- A seller can serve tool calls on an OpenAI reasoning model that takes
+  function tools on chat completions only with no reasoning. Set
+  `marketplace.seller.services[].backend.reasoningEffortWithTools` to
+  `none` for that service. Calls with tools then carry
+  `reasoning_effort: "none"`, and calls without tools keep the model's own
+  reasoning. A model that refuses `none` as well takes function tools only on
+  the Responses API, so it can't serve tool calls: set `tools: false` for its
+  service, and buyers then get `tools_unsupported` instead of refused calls.
+- An MCP server registered by hand, with no `DKG_HOME` or workspace config
+  selected, now loads the default node home's credentials, so its
+  authenticated tools no longer answer `401`. An explicit home or workspace
+  config still comes first.
+- The MCP server's default `mine` listing shows only graphs the user takes
+  part in, by the node UI's membership rule, instead of every graph the node
+  has discovered.
+- A node refuses a public catalog head it cannot apply before it writes
+  anything to shared memory, so shared memory and Verifiable Memory stay
+  untouched.
+- An agent built on a pre-built chain adapter verifies finalized public
+  catalog heads over the RPC endpoints its adapter names, as a node does.
+
+### Documentation
+
+- The MCP guide explains how to configure a client by hand when setup does
+  not detect it, with the supported client locations and formats, and how
+  to recover when authenticated tools answer `401`.
+
 ## [10.1.0] - Unreleased
 
 10.1.0 opens the NeuroSymbolic Marketplace on testnet, where nodes that opt
@@ -19,7 +68,7 @@ candidate; publication and production qualification are still pending.
   Verifiable Memory of the testnet Marketplace Context Graph.
   Subscriptions and receipts settle on the marketplace contracts on Base
   Sepolia. On mainnet the marketplace stays inactive until its contracts
-  are deployed there (#3645, #3720, #3721, #3738, #3742, #3747).
+  are deployed there (#3645, #3720, #3721, #3738, #3742, #3747, #3756).
 - **A new look for the node UI.** A fresh theme and type across the app
   (#3721).
 - **Correct catalog content after draft edits.** The catalog follows an
@@ -28,7 +77,7 @@ candidate; publication and production qualification are still pending.
 - **Less repeated work.** Catalog backlog scans yield, parked placement
   passes reuse validated state, inventory validation encodes each value
   once, and a graph's presence check asks the store directly (#3599,
-  #3631, #3640, #3600, #3694, #3708, #3712, #3722).
+  #3631, #3640, #3600, #3694, #3708, #3712, #3722, #3754).
 - **Publishing that keeps going.** Settled ACK rounds retire unused
   requests, funded wallets get work fairly, retry budgets and job cleanup
   keep their safety bounds, seal checks at admission use the publisher's
@@ -41,6 +90,10 @@ candidate; publication and production qualification are still pending.
 - **Private members can recover.** Approvals repair missing metadata for
   existing participants, and an empty private graph keeps proving
   membership until synchronization completes (#3689, #3630).
+- **No more event-loop stalls from gossip mesh tags.** Gossipsub no longer
+  tags each mesh peer with every topic it shares in the peer store. On
+  nodes with many subscriptions, those tags made each reconnect block the
+  event loop for seconds (#3755).
 - **Useful operational evidence.** Operators can record a running node's
   CPU profile, inspect rolling prover health, see why a daemon worker
   exited, and correlate queue admission with store waits (#3606, #2627,
@@ -59,6 +112,9 @@ candidate; publication and production qualification are still pending.
   the marketplace stays inactive until its contracts are deployed there.
 - Tools that read `GET /api/diagnostics/rpc-usage` and pin its consumer
   labels should accept `consumerVocabularyVersion` 4.
+- A seller with an `openai` backend now takes tool calls for its services
+  by default. Set `marketplace.seller.services[].tools` to `false` for a
+  backend that does not support tools.
 - `dkg rollback` returns a node to 10.0.27. "Updating from 10.0.27" in
   `docs/use-dkg/updates-and-rollback.md` has the details.
 
@@ -108,6 +164,22 @@ The details follow.
   can try again (#3745).
 - Cancel a Knowledge Asset descriptor read's storage queries when its
   caller times out or disconnects (#3746).
+- Answer the buyer's funding and accounts views within a few seconds: the
+  node keeps each buyer's account list and reads only the blocks it has not
+  seen, instead of scanning the event log on every request (#3750).
+- On Windows, accept a healthy managed Oxigraph server whose socket is
+  reported as established rather than listening, so the node API starts
+  (#3701).
+- Wait up to 120 seconds in `dkg start` for a live worker and a successful
+  status answer, with `--timeout` for longer, so a slow store recovery no
+  longer looks like a failed start (#3707).
+- Keep every older daemon log when a rotation cannot list or move the log
+  files completely (#3705).
+- Answer `GET /api/context-graph/list` with 503, `retryable: true` and
+  `Retry-After` instead of 500 when a listing runs out of its time budget
+  (#3702).
+- Find Claude Desktop's relocated Windows configuration in `dkg mcp setup`
+  and `dkg mcp uninstall`, natively and through WSL (#3704).
 
 ### Added
 
@@ -176,6 +248,16 @@ The details follow.
   fresh Edge, with a pinned Java runtime, complete journal verification and
   authenticated catch-up. Automatic/default activation remains disabled;
   existing data directories are not migrated (#3566).
+- **Tool calls through the marketplace gateway.** Calls carry `tools`,
+  `tool_choice` and the tool results, and answers carry the model's tool
+  calls. A seller says in its quote whether a service takes tool calls, the
+  router sends such calls only to sellers that do, and the gateway answers
+  400 `tools_unsupported` before anything is reserved or sent when none
+  does. Answers report prompt and completion tokens separately when the
+  seller provides the split. New access keys get 64-bit ids, and existing
+  keys keep working (#3756).
+- `dkg publisher clear-job <job-id>` and `dkg ka clear-share-job <job-id>`
+  remove one finished job from a running node's queue (#3709).
 
 ### Changed
 
@@ -197,6 +279,9 @@ The details follow.
   testnet chain, add a testnet smoke test, give the Solidity coverage job
   60 minutes, and extend three dated test exceptions (#3691, #3693, #3719,
   #3725).
+- Share one registered-signer fallback between rotated sends, and move the
+  RPC-usage consumer vocabulary into a module of its own, with no change in
+  behaviour (#3739, #3740).
 
 ### Before promotion
 

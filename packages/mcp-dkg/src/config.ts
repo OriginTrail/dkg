@@ -15,7 +15,7 @@
  *                           config that `dkg mcp setup`'s
  *                           writeDkgConfig writes (apiPort /
  *                           contextGraphs / auth shape). Translated
- *                           to DkgConfig via loadConfigFromDkgHome:
+ *                           to DkgConfig via readHomeFileDefaults:
  *                           `api ← http://localhost:<apiPort>`,
  *                           `token ← <DKG_HOME>/auth.token`'s first
  *                           non-comment line, `defaultProject ←
@@ -55,6 +55,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { readDkgApiPortSync, resolveDkgHome } from '@origintrail-official/dkg-core';
+import { MISSING_TOKEN_HELP } from './auth-diagnostics.js';
 
 export interface DkgConfig {
   /** Base URL of the local DKG daemon. */
@@ -81,6 +83,19 @@ export interface DkgConfig {
 }
 
 const DEFAULT_API = 'http://localhost:9200';
+
+/** Discovered defaults and credentials belong only to their own local endpoint. */
+function matchesDiscoveredHomeEndpoint(api: string | null, homeApi: string): boolean {
+  if (!api) return true;
+  try {
+    const target = new URL(api);
+    const home = new URL(homeApi);
+    const loopback = new Set(['localhost', '127.0.0.1', '[::1]']);
+    return target.protocol === home.protocol && target.port === home.port
+      && loopback.has(target.hostname) && loopback.has(home.hostname)
+      && !target.username && !target.password && target.pathname === '/';
+  } catch { return false; }
+}
 
 /**
  * Expand a leading `~/` (or bare `~`) to the user's home directory.
@@ -114,7 +129,7 @@ function readIfExists(filePath: string): string | null {
  * workspace-shape yaml. The setup-home daemon-config path (where
  * `dkg mcp setup` writes `<DKG_HOME>/config.json` with apiPort /
  * contextGraphs / auth, NOT the node.api/node.token/project shape
- * loadConfig parses) is handled by `loadConfigFromDkgHome` in a
+ * loadConfig parses) is handled by `readHomeFileDefaults` in a
  * dedicated translator. Round-19 Fix 25 incorrectly tried to
  * parse the daemon-config JSON with the workspace-yaml extractor
  * — every field name mismatched, so the translation extracted
@@ -138,109 +153,28 @@ function findConfigFile(start: string): string | null {
   }
 }
 
-/**
- * Codex Round-21 Fix 27: translate a setup-home daemon config into
- * the `DkgConfig` shape that `loadConfig` returns.
- *
- * `dkg mcp setup`'s `writeDkgConfig` writes a daemon config to
- * `<DKG_HOME>/config.json` with a different shape than the
- * workspace agent config that `loadConfig` traditionally parses:
- *
- *   daemon config (config.json):
- *     { apiPort, nodeRole, contextGraphs, auth: { enabled }, … }
- *
- *   workspace agent config (config.yaml):
- *     { node: { api, token, tokenFile }, project, agent: { uri }, … }
- *
- * Round-19 Fix 25 tried to read config.json with the yaml-shape
- * extractor — every field name was wrong, so cfg ended up with
- * empty token + localhost:9200 + null project, and every write
- * 401'd despite the FIX 16 → FIX 18 → FIX 25 chain that was
- * meant to make the round-trip work.
- *
- * This translator does the actual mapping:
- *   - `api` ← `http://localhost:<apiPort>` (default 9200)
- *   - `token` ← first non-comment line of `<DKG_HOME>/auth.token`
- *   - `defaultProject` ← `contextGraphs[0]`
- *
- * Returns `null` when `<DKG_HOME>/config.json` doesn't exist (so
- * loadConfig can fall through to the path-B yaml branch).
- *
- * Env vars (DKG_API / DKG_TOKEN / DKG_PROJECT / DKG_AGENT_URI)
- * still override the file values per the operator-precedence
- * contract — operators with custom shell exports get the same
- * behaviour they did before.
- */
-function loadConfigFromDkgHome(dkgHome: string): DkgConfig | null {
-  const jsonPath = path.join(dkgHome, 'config.json');
-  if (!fs.existsSync(jsonPath)) return null;
+type HomeFileDefaults = Pick<DkgConfig, 'api' | 'token' | 'defaultProject' | 'sourcePath'>;
 
+/** A configured daemon home has config.json; a token-only home has just auth.token. */
+const homeConfigPath = (dkgHome: string) => path.join(dkgHome, 'config.json');
+
+/** Decode daemon-home files only; endpoint selection and precedence belong to loadConfig. */
+function readHomeFileDefaults(dkgHome: string): HomeFileDefaults | null {
+  const jsonPath = homeConfigPath(dkgHome);
+  if (!fs.existsSync(jsonPath)) return null;
   let daemonConfig: Record<string, unknown> = {};
   try {
-    const raw = fs.readFileSync(jsonPath, 'utf-8');
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object') {
-      daemonConfig = parsed as Record<string, unknown>;
-    }
+    const parsed: unknown = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+    if (parsed && typeof parsed === 'object') daemonConfig = parsed as Record<string, unknown>;
   } catch (err) {
-    // Malformed JSON is non-fatal; fall through to env-only defaults
-    // below with sourcePath still set so diagnostics can show the
-    // operator which file failed to parse.
-    process.stderr.write(
-      `[mcp-dkg] warning: could not parse ${jsonPath}: ${
-        err instanceof Error ? err.message : String(err)
-      }\n`,
-    );
+    process.stderr.write(`[mcp-dkg] warning: could not parse ${jsonPath}: ${err instanceof Error ? err.message : String(err)}\n`);
   }
-
   const apiPort = typeof daemonConfig.apiPort === 'number' ? daemonConfig.apiPort : 9200;
-  const fileApi = `http://localhost:${apiPort}`;
-  const contextGraphs = Array.isArray(daemonConfig.contextGraphs)
-    ? daemonConfig.contextGraphs
-    : [];
-  const fileDefaultProject =
-    contextGraphs.length > 0 && typeof contextGraphs[0] === 'string'
-      ? (contextGraphs[0] as string)
-      : null;
-
-  // Auth token from the dedicated `<DKG_HOME>/auth.token` file
-  // (one non-comment line, same format as the existing
-  // resolveTokenFromFile helper handles).
-  const tokenPath = path.join(dkgHome, 'auth.token');
-  let fileToken = '';
-  if (fs.existsSync(tokenPath)) {
-    const tokenContent = readIfExists(tokenPath);
-    if (tokenContent) {
-      const line = tokenContent
-        .split('\n')
-        .find((l) => l.trim() && !l.startsWith('#'));
-      if (line) fileToken = line.trim();
-    }
-  }
-
-  // Operator env-var overrides win over file values (matches the
-  // existing loadConfig precedence semantics for operator-set
-  // overrides — env wins for things the file doesn't pin or that
-  // the operator explicitly wants to redirect).
-  const envApi = asString(process.env.DKG_API) ?? asString(process.env.DEVNET_API);
-  const envToken =
-    asString(process.env.DKG_TOKEN) ??
-    asString(process.env.DEVNET_TOKEN) ??
-    asString(process.env.DKG_AUTH);
-  const envProject = asString(process.env.DKG_PROJECT);
-  const envAgent = asString(process.env.DKG_AGENT_URI);
-
+  const contextGraphs = Array.isArray(daemonConfig.contextGraphs) ? daemonConfig.contextGraphs : [];
   return {
-    api: envApi ?? fileApi,
-    token: envToken ?? fileToken,
-    defaultProject: envProject ?? fileDefaultProject,
-    agentUri: envAgent ?? null,
-    capture: {
-      autoShare: true,
-      defaultPrivacy: 'team',
-      subGraph: 'chat',
-      assertion: 'chat-log',
-    },
+    api: `http://localhost:${apiPort}`,
+    token: resolveTokenFromFile(path.join(dkgHome, 'auth.token')) ?? '',
+    defaultProject: typeof contextGraphs[0] === 'string' ? contextGraphs[0] : null,
     sourcePath: jsonPath,
   };
 }
@@ -274,33 +208,80 @@ function asPrivacy(v: unknown): 'private' | 'team' | 'public' {
  * variables. Never throws — a missing/broken config just falls back to env
  * + defaults, which is fine for tools that don't need auth.
  */
-export function loadConfig(cwd: string = process.cwd()): DkgConfig {
-  // Codex Round-21 Fix 27: when DKG_HOME is set AND points at a
-  // setup-home (config.json present), translate the daemon config
-  // shape into DkgConfig. Round-19 Fix 25 incorrectly tried to
-  // parse the daemon JSON with the workspace-yaml extractor —
-  // every field name mismatched and the post-setup path 401'd.
-  // The dedicated translator handles api / token / defaultProject
-  // derivation correctly. Returns null when no config.json exists,
-  // which lets us fall through to the path-B yaml branch below.
-  const dkgHome = process.env.DKG_HOME?.trim() || null;
-  if (dkgHome) {
-    const fromDkgHome = loadConfigFromDkgHome(dkgHome);
-    if (fromDkgHome) return fromDkgHome;
-    // Else fall through: DKG_HOME is set but config.json doesn't
-    // exist there — operator may have hand-written a workspace
-    // shape config.yaml at that path. The findConfigFile()
-    // DKG_HOME branch above will pick that up.
-  }
+export function loadConfig(cwd: string = process.cwd(), overrides: { api?: string } = {}): DkgConfig {
+  return resolveCredential(cwd, overrides).config;
+}
 
+/** Credentials a command selected for itself, on top of normal configuration. */
+export interface CredentialChoice {
+  /** Endpoint the command contacts; automatic credentials stay bound to their own endpoint. */
+  api?: string;
+  /** Token selected for this command (`--token`, `DKG_TOKEN`, `DEVNET_TOKEN`). */
+  token?: string;
+  /** Token file selected for this command (`--token-file`). */
+  tokenFile?: string;
+  /** Legacy token-only home file. It is automatic, so only its own local endpoint may use it. */
+  fallbackTokenFile?: string;
+}
+
+export interface ResolvedCredential {
+  config: DkgConfig;
+  /** File the token was read from; null for a literal, environment or missing token. */
+  tokenFile: string | null;
+}
+
+/**
+ * The single credential resolver. Choices made for this command come first,
+ * then a workspace or DKG_HOME binding, then automatic sources: the active
+ * node home for this endpoint, then the legacy token-only home at its
+ * recorded local port (9200 when unrecorded). A home with config.json is
+ * never reached through the legacy file, so a rejected endpoint stays rejected.
+ */
+export function resolveCredential(cwd: string, choice: CredentialChoice = {}): ResolvedCredential {
+  const configured = loadConfiguredCredential(cwd, asString(choice.api));
+  const { config } = configured;
+  if (choice.token) return { config: { ...config, token: choice.token }, tokenFile: null };
+  if (choice.tokenFile) {
+    return { config: { ...config, token: resolveTokenFromFile(choice.tokenFile) ?? '' }, tokenFile: choice.tokenFile };
+  }
+  const fallback = choice.fallbackTokenFile;
+  if (config.token || !fallback) return configured;
+  const fallbackHome = path.dirname(fallback);
+  const eligible = !fs.existsSync(homeConfigPath(fallbackHome))
+    && matchesDiscoveredHomeEndpoint(config.api, `http://localhost:${readDkgApiPortSync(fallbackHome) ?? 9200}`);
+  const token = eligible ? resolveTokenFromFile(fallback) : null;
+  return token ? { config: { ...config, token }, tokenFile: fallback } : configured;
+}
+
+function loadConfiguredCredential(cwd: string, overrideApi: string | null): ResolvedCredential {
   const envApi = asString(process.env.DKG_API) ?? asString(process.env.DEVNET_API);
+  const requestedApi = overrideApi ?? envApi;
   const envToken = asString(process.env.DKG_TOKEN) ?? asString(process.env.DEVNET_TOKEN) ?? asString(process.env.DKG_AUTH);
   const envProject = asString(process.env.DKG_PROJECT);
   const envAgent = asString(process.env.DKG_AGENT_URI);
+  const dkgHome = process.env.DKG_HOME?.trim() || null;
+  const configPath = findConfigFile(cwd);
+  // Explicit JSON homes precede their YAML fallback. Otherwise a workspace
+  // binding precedes discovery, and discovered defaults stay bound to that node.
+  const home = dkgHome ?? (!configPath ? resolveDkgHome({ daemonUrl: requestedApi ?? undefined }) : null);
+  if (home) {
+    const defaults = readHomeFileDefaults(home);
+    if (defaults) {
+      const runtimePort = dkgHome ? null : readDkgApiPortSync(home);
+      const homeApi = runtimePort === null ? defaults.api : `http://localhost:${runtimePort}`;
+      if (dkgHome || matchesDiscoveredHomeEndpoint(requestedApi, homeApi)) {
+        const config: DkgConfig = {
+          ...defaults, api: requestedApi ?? homeApi, token: envToken ?? defaults.token,
+          defaultProject: envProject ?? defaults.defaultProject, agentUri: envAgent,
+          capture: { autoShare: true, defaultPrivacy: 'team', subGraph: 'chat', assertion: 'chat-log' },
+        };
+        return { config, tokenFile: !envToken && defaults.token ? path.resolve(home, 'auth.token') : null };
+      }
+    }
+  }
 
   let fromFile: Record<string, unknown> = {};
   let sourcePath: string | null = null;
-  const configPath = findConfigFile(cwd);
   if (configPath) {
     sourcePath = configPath;
     const raw = readIfExists(configPath);
@@ -309,7 +290,7 @@ export function loadConfig(cwd: string = process.cwd()): DkgConfig {
         // Workspace-canonical yaml format. Round-21 Fix 27 reverted
         // the Round-19 Fix 25 format-aware dispatch — the daemon
         // config.json path is handled upstream by
-        // loadConfigFromDkgHome, so by the time we get here, the
+        // readHomeFileDefaults, so by the time we get here, the
         // file is always yaml-shape (either a workspace
         // .dkg/config.yaml or a hand-written DKG_HOME/config.yaml).
         const parsed = parseYaml(raw);
@@ -348,6 +329,7 @@ export function loadConfig(cwd: string = process.cwd()): DkgConfig {
   // → every write 401s). The capture-chat hook had the same bug; fixed
   // there too.
   let token: string | null = asString(node.token);
+  let tokenFile: string | null = null;
   if (!token) {
     const tokenFileRaw = asString(node.tokenFile);
     if (tokenFileRaw && sourcePath) {
@@ -356,6 +338,7 @@ export function loadConfig(cwd: string = process.cwd()): DkgConfig {
         ? expanded
         : path.resolve(path.dirname(sourcePath), expanded);
       token = resolveTokenFromFile(abs);
+      if (token) tokenFile = abs;
     }
   }
   if (!token) token = envToken;
@@ -369,8 +352,8 @@ export function loadConfig(cwd: string = process.cwd()): DkgConfig {
     ?? envProject
     ?? null;
 
-  return {
-    api: asString(node.api) ?? envApi ?? DEFAULT_API,
+  const config: DkgConfig = {
+    api: overrideApi ?? asString(node.api) ?? envApi ?? DEFAULT_API,
     token: token ?? '',
     defaultProject: project,
     agentUri: asString(agent.uri) ?? envAgent ?? null,
@@ -382,6 +365,7 @@ export function loadConfig(cwd: string = process.cwd()): DkgConfig {
     },
     sourcePath,
   };
+  return { config, tokenFile };
 }
 
 /**
@@ -394,7 +378,7 @@ export function describeConfig(cfg: DkgConfig): string {
     cfg.sourcePath ? `config=${cfg.sourcePath}` : 'config=<none>',
     cfg.defaultProject ? `project=${cfg.defaultProject}` : 'project=<unset>',
     cfg.agentUri ? `agent=${cfg.agentUri}` : 'agent=<unset>',
-    cfg.token ? 'token=[set]' : 'token=[empty]',
+    cfg.token ? 'token=[set]' : `token=[empty] — ${MISSING_TOKEN_HELP}`,
   ];
   return pieces.join(' · ');
 }

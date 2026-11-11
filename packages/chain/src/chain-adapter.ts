@@ -2272,19 +2272,19 @@ export interface ChainAdapter extends MarketplaceChain {
   getEvmChainId(): Promise<bigint>;
 
   /**
-   * The RESOLVED `chain.finalityConfirmations` this adapter is using — the
-   * node's single definition of finality (see evm-finality-anchor.ts).
-   *
-   * Exposed because callers that hold an adapter must not re-derive the depth
-   * from a raw config they may not have. `DKGAgent` accepts a PRE-BUILT
-   * `chainAdapter`, in which case `chainConfig` is ignored entirely, so an
-   * RFC-64 precommit reading `chainConfig?.finalityConfirmations` would anchor
-   * at the default while the adapter's own authority reads honoured the
-   * operator — two anchors in one process, with no error anywhere. Optional so
-   * out-of-tree and mock adapters need not implement it; absent means "no
-   * opinion", and the caller falls back to its configured value.
+   * The RESOLVED `chain.finalityConfirmations` this adapter is using — the node's single
+   * definition of finality (see evm-finality-anchor.ts). Exposed because callers that hold an
+   * adapter must not re-derive the depth from a raw config they may not have. `DKGAgent` accepts
+   * a PRE-BUILT `chainAdapter`, in which case `chainConfig` is ignored entirely, so an RFC-64
+   * precommit reading `chainConfig?.finalityConfirmations` would anchor at the default while the
+   * adapter's own authority reads honoured the operator — two anchors in one process, with no
+   * error anywhere. Optional so out-of-tree and mock adapters need not implement it; absent
+   * means "no opinion", and the caller falls back to its configured value.
    */
   getFinalityConfirmations?(): number;
+
+  /** The RPC endpoints this adapter reads through, primary first; optional for the same reason. */
+  getRpcUrls?(): readonly string[];
 
   // V8 backward compatibility (used by mock adapter, will be removed)
   createKnowledgeAsset?(params: CreateKCParams): Promise<TxResult>;

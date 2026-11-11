@@ -14,6 +14,9 @@ describe('canonical agent identity', () => {
   it('canonicalizes bare and full EVM identities through one contract', () => {
     expect(canonicalAgentDidSubject(mixedAddress)).toBe(lowerAddress);
     expect(isEvmAgentDidSubject(mixedAddress)).toBe(true);
+    expect(canonicalAgentDidSubject(mixedAddress.toUpperCase())).toBe(lowerAddress);
+    expect(isEvmAgentDidSubject(mixedAddress.toUpperCase())).toBe(true);
+    expect(toAgentDid(mixedAddress.toUpperCase())).toBe(`${AGENT_DID_PREFIX}${lowerAddress}`);
     expect(normalizeAgentDid(`${AGENT_DID_PREFIX}${mixedAddress}`))
       .toBe(`${AGENT_DID_PREFIX}${lowerAddress}`);
     expect(toAgentDid(mixedAddress)).toBe(`${AGENT_DID_PREFIX}${lowerAddress}`);
