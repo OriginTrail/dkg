@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { createTripleStore, type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
+import { createTripleStore, markReadGraphsDirtyAtStart, type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
 import type { DkgConfig } from './config.js';
 import { readGraphStoreSettings, resolveQueryConfig } from './read-graphs-config.js';
 
@@ -39,8 +39,21 @@ export function publisherStoreConfig(dataDir: string, config: DkgConfig, readOnl
   };
 }
 
+/**
+ * Open the store of a publisher runtime or inspector outside the daemon. It is a second writer that runs while the daemon is down, and nothing
+ * maintains read graphs in its process, so before it can write it marks every read graph it finds dirty, as a release that does not maintain them
+ * does at start (`markReadGraphsDirtyAtStart`): no row stays `ready` across its writes. A read-only store writes nothing and marks nothing.
+ */
 export async function createPublisherStore(dataDir: string, config: DkgConfig, readOnly = false): Promise<TripleStore> {
-  return await createTripleStore(publisherStoreConfig(dataDir, config, readOnly));
+  const store = await createTripleStore(publisherStoreConfig(dataDir, config, readOnly));
+  if (readOnly) return store;
+  try {
+    await markReadGraphsDirtyAtStart(store, { dataDir });
+  } catch (error) {
+    await store.close().catch(() => undefined);
+    throw error;
+  }
+  return store;
 }
 
 function defaultLargeLiteralStorage(dataDir: string, config: DkgConfig) {
