@@ -198,9 +198,10 @@ export function registryFactsAfter(
  * Whether {@link registryFactsAfter} gives exactly the facts a write leaves.
  * It does not when the write removes facts it names by a literal (which facts
  * go then depends on how the store compares literals, and the lexical
- * prediction can only over-count them) or by a blank node (whose label in a
- * write is not the store's), nor when it inserts facts on a blank node, which
- * the store makes a fresh node. IRIs compare exactly, and never equal a literal.
+ * prediction can only over-count them), by a blank node (whose label in a
+ * write is not the store's) or by an IRI in angle brackets (which the adapters
+ * do not all delete), nor when it inserts facts on a blank node, which the
+ * store makes a fresh node. IRIs compare exactly, and never equal a literal.
  */
 export function isExactRegistryWrite(contextGraphId: string, write: ReadGraphRegistryWrite): boolean {
   // A literal that does not parse cannot be put in the form the store reports.
@@ -208,16 +209,22 @@ export function isExactRegistryWrite(contextGraphId: string, write: ReadGraphReg
     .some((fact) => fact.object.startsWith('"') && parseRdfLiteralTerm(fact.object, { combineSurrogatePairs: true }) === null);
   // A removal is judged by its predicate alone: a SPARQL adapter deletes a blank-node term as a variable,
   // so a type removal whose object is a blank node can remove a registration type.
+  // So is one that names an IRI in angle brackets, which the adapters do not all delete: the embedded engine skips it.
   const removesLoosely = (quads: readonly Quad[]) => quads.some((quad) => registryOwnersOfGraph(quad.graph).includes(contextGraphId)
-    && REGISTRY_PREDICATES.has(unwrapIri(quad.predicate)) && (isComparedLoosely(unwrapIri(quad.subject)) || isComparedLoosely(storedTerm(quad.object))));
+    && REGISTRY_PREDICATES.has(unwrapIri(quad.predicate)) && (isComparedLoosely(unwrapIri(quad.subject)) || isComparedLoosely(storedTerm(quad.object))
+      || [quad.subject, quad.predicate, quad.object].some(isBracketedIri)));
   // A store makes every inserted blank node a fresh one, whatever its label, so an added fact on a blank node
   // never joins a cached subject with the same label: only reading the facts after the write tells.
   const addsBlankNode = (quads: readonly Quad[]) => ownerFactsAmong(contextGraphId, quads).some((fact) => fact.subject.startsWith('_:'));
   switch (write.kind) {
     case 'quads':
       return !removesLoosely(write.removed) && !unreadable(write.added) && !addsBlankNode(write.added);
-    case 'match': return ![write.subject, write.object].some((term) => term !== undefined && isComparedLoosely(term));
-    case 'subject': return !isComparedLoosely(write.subject) && !unreadable(write.quads);
+    case 'match':
+      return ![write.subject, write.object].some((term) => term !== undefined && isComparedLoosely(term))
+        && ![write.subject, write.predicate, write.object].some((term) => term !== undefined && isBracketedIri(term));
+    case 'subject':
+      return !isComparedLoosely(write.subject) && ![write.subject, write.predicate].some((term) => term !== undefined && isBracketedIri(term))
+        && !unreadable(write.quads);
     case 'graph': return !unreadable(write.quads);
     case 'all': return write.parts.every((part) => isExactRegistryWrite(contextGraphId, part));
     default: return true;
@@ -231,6 +238,11 @@ export function isExactRegistryWrite(contextGraphId: string, write: ReadGraphReg
  */
 function isComparedLoosely(term: string): boolean {
   return term.startsWith('"') || term.startsWith('_:');
+}
+
+/** An IRI written in angle brackets: a SPARQL adapter takes it as the IRI, the embedded engine's own delete skips it. */
+function isBracketedIri(term: string): boolean {
+  return term.startsWith('<') && term.endsWith('>');
 }
 
 /**

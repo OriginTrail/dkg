@@ -333,6 +333,17 @@ describe('registry recognition in the read-graph layer', () => {
     expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['blank', 'code']);
   });
 
+  it('reads the registry again after a removal that names an IRI in angle brackets, which the adapters delete differently', async () => {
+    // The embedded engine's own delete skips a quad written with `<…>`, where a SPARQL adapter deletes it.
+    const adapter = new OxigraphStore();
+    const fixture = layerFixture(`recognition-native-${sequence += 1}`);
+    const { layer, store } = await layeredStore(adapter, { backend: 'oxigraph' }, fixture);
+    const meta = `${fixture.root}/_meta`;
+    await store.delete([fact(meta, `<${fixture.root}/code>`, R.type, R.subGraphClass)]);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames)
+      .toEqual((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames);
+  });
+
   it('marks the read graphs a sub-graph leaves dirty when its name goes', async () => {
     const { store, meta, fixture, states } = await layered();
     await store.delete([fact(meta, `${fixture.root}/code`, R.name, '"code"')]);
