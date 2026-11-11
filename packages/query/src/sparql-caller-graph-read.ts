@@ -3,6 +3,7 @@ import { isSparqlKeyword, type PreparedSparqlQuery } from '@origintrail-official
 import { transitionGraphScope } from './sparql-query-transition.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { createBlankNodeRenamer, createVariableAllocator } from './sparql-rewrite-names.js';
+import { graphBlockNeedsList } from './sparql-graph-block.js';
 
 const MAX_CALLER_GRAPH_BRANCHES = 128;
 
@@ -134,7 +135,9 @@ function enclosingOptionalClosing(scope: PreparedSparqlQuery, opening: number, i
  * Other reads of ?var in the block keep the graph's binding. (`COALESCE` keeps
  * a row whose assignment failed, which `!BOUND(?a)` would not on Oxigraph
  * 0.5.5.) An assignment inside MINUS, EXISTS or a FILTER binds nothing for the
- * block and stays as it is. A block with a subquery is left to the graph branches.
+ * block and stays as it is. A block with a subquery is left to the graph branches,
+ * and one that keeps the graph list, where Oxigraph leaves ?var to that list
+ * (`graphBlockNeedsList`), keeps its assignment as written.
  */
 export function isolateCallerGraphAssignments(scope: PreparedSparqlQuery): PreparedSparqlQuery {
   const { tokens } = scope.prepared;
@@ -142,7 +145,7 @@ export function isolateCallerGraphAssignments(scope: PreparedSparqlQuery): Prepa
     if (target.kind !== 'variable') return [];
     const opening = target.targetTokenIndex + 1;
     const closing = scope.structure.braces.matchingTokenIndexes[opening] ?? -1;
-    if (closing < 0 || holdsSubquery(scope, opening, closing)) return [];
+    if (closing < 0 || holdsSubquery(scope, opening, closing) || graphBlockNeedsList(scope, opening, closing)) return [];
     const bindings = readGraphBlockBindings(scope, opening, closing, target.variable.logicalName);
     return bindings.assignments.length > 0 ? [{ target, opening, closing, ...bindings }] : [];
   }).filter((block, _index, all) => !all.some(other => other.opening < block.opening && block.closing < other.closing));
