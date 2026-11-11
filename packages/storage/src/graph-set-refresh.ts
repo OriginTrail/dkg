@@ -8,6 +8,20 @@
  */
 export type GraphSetRevalidation = 'background' | 'blocking';
 
+/**
+ * Read options for a caller that must read a current catalog: when the catalog
+ * is `revalidateMs` older than its last refresh, the read waits for a
+ * revalidation, whatever the revalidation mode and the cadence. Unscoped-query
+ * admission reads the stored owners this way.
+ */
+export interface CurrentGraphCatalogReadOptions {
+  readonly currentCatalog?: boolean;
+}
+
+export function readsCurrentGraphCatalog(options: unknown): boolean {
+  return (options as CurrentGraphCatalogReadOptions | undefined)?.currentCatalog === true;
+}
+
 /** A revalidation starts no sooner than this many times the duration of the last refresh. */
 const GRAPH_SET_REVALIDATE_DURATION_FACTOR = 20;
 

@@ -1,15 +1,21 @@
 import { readGraphInventoryByPrefix } from './graph-inventory-materialization.js';
+import type { CurrentGraphCatalogReadOptions } from './graph-set-refresh.js';
 // SPDX-License-Identifier: Apache-2.0
 import { contextGraphStorageOwnerCandidates } from '@origintrail-official/dkg-core';
 import { readGraphPartitionOwner } from './graph-enumeration-visibility.js';
 import type { QueryOptions, TripleStore } from './triple-store.js';
 const CG_PREFIX = 'did:dkg:context-graph:';
 
-/** Read and meter the context-graph inventory before projecting possible owners. */
+/**
+ * Read and meter the context-graph inventory before projecting possible owners.
+ * Unscoped-query admission reads them, so this reads a current catalog.
+ */
 export async function listStoredContextGraphOwnerCandidates(store: TripleStore, options: QueryOptions,
   materializationMeter?: { consumeBytes(bytes: number): void }): Promise<string[]> {
     options.signal?.throwIfAborted();
-    const readOptions = { ...options, source: options.source ?? 'storage.contextGraphOwnerCandidates' };
+    const readOptions: QueryOptions & CurrentGraphCatalogReadOptions = {
+      ...options, source: options.source ?? 'storage.contextGraphOwnerCandidates', currentCatalog: true,
+    };
     const graphUris = await readGraphInventoryByPrefix(store, CG_PREFIX, readOptions);
     // Charge the inventory this read returns, before deduplicating owners. A
     // store without a prefix listing reads its complete list as node work.
