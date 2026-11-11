@@ -168,7 +168,12 @@ describe('the agent read-graph workload', () => {
     await vi.waitFor(() => expect(release).toBeDefined());
     const requested = owner.checkNow();
     const closed = owner.close();
+    let closedDone = false;
+    void closed.then(() => { closedDone = true; });
     await expect(owner.checkNow()).rejects.toThrow('The read-graph checks are stopping');
+    // The requested check still waits for the slot, so the workload has not stopped.
+    for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+    expect(closedDone).toBe(false);
     release!();
     await build;
     await expect(requested).rejects.toThrow('The read-graph checks are stopping');

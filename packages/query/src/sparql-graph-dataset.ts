@@ -107,32 +107,6 @@ export function planGraphDataset(
   };
 }
 
-/**
- * The graphs a read scoped to `graphs` reads: all of them, bound as VALUES,
- * UNION branches or a dataset, except for a read that names only explicit
- * GRAPH IRIs and gets no dataset, as on Oxigraph. That read keeps its own
- * pattern, so it reads just the graphs it names that `graphs` allows; a named
- * graph outside them is refused before any read.
- */
-export function graphsReadBy(
-  scope: PreparedSparqlQuery,
-  graphs: readonly string[],
-  engine: SparqlEngineFamily | null,
-): readonly string[] {
-  const named = scope.graphTargets.flatMap(target => (target.kind === 'iri' ? [target.iri] : []));
-  if (graphs.length === 0 || named.length === 0 || named.length !== scope.graphTargets.length) return graphs;
-  let plan: GraphDatasetPlan;
-  try {
-    plan = planGraphDataset(scope, engine);
-  } catch {
-    // The rewrite refuses this read itself.
-    return graphs;
-  }
-  if (plan.datasetClauses.length > 0) return graphs;
-  const allowed = new Set(graphs);
-  return [...new Set(named)].filter(graph => allowed.has(graph));
-}
-
 /** The query's source with its dataset set to these graphs, or null if it has no place for one. */
 export function withDatasetClauses(
   scope: PreparedSparqlQuery,
