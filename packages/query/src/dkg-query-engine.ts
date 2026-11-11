@@ -72,6 +72,7 @@ import {
   type PreparedGraphScope,
 } from './sparql-graph-scope.js';
 import { injectMinTrustFilter } from './sparql-min-trust.js';
+import { guardGraphBlocksWithoutTriples, readsNeedGraphList } from './sparql-graph-dataset.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 import {
@@ -400,6 +401,16 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
   }
 
+  /** On Oxigraph a graph in the dataset counts as present without triples, so blocks that need none get a guard. */
+  private guardHeldGraphs(scope: PreparedGraphScope): PreparedGraphScope {
+    return this.sparqlEngine === 'oxigraph' ? guardGraphBlocksWithoutTriples(scope) : scope;
+  }
+
+  /** On Oxigraph the dataset alone bounds a caller's graph variables, unless the read keeps a graph list. */
+  private boundByDataset(scope: PreparedGraphScope): boolean {
+    return this.sparqlEngine === 'oxigraph' && !readsNeedGraphList(scope);
+  }
+
   /** On Oxigraph a scoped read selects its graphs through its dataset, so a read without one is refused. */
   private requireReadDatasets(reads: QueryStoreReadContext): QueryStoreReadContext {
     return this.sparqlEngine === 'oxigraph' ? requireQueryDataset(reads) : reads;
@@ -439,8 +450,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // Explicit IRIs retain static route authority; only opted-in variables gain
     // classified same-CG content selected for this caller and sub-graph.
     assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
-    const routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(initialGraphScope, variableAllowedGraphs,
-      { boundByDataset: this.sparqlEngine === 'oxigraph' }));
+    const routedScope = this.guardHeldGraphs(requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(initialGraphScope,
+      variableAllowedGraphs, { boundByDataset: this.boundByDataset(initialGraphScope) })));
     const resolve = (target: { root: string; family: 'data' | 'shared-memory' }) => resolveLegacyRouteScope(
       routedScope, { ...target, discover: prefix => this.discoverGraphsByPrefix(prefix, reads),
         fallbackPolicy: plan.fallbackPolicy, engine: this.sparqlEngine, authorizedDatasetGraphs: variableAllowedGraphs });
@@ -602,9 +613,9 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
 
     assertExplicitGraphIrisAllowed(initialScope, allGraphs);
-    const constrainedScope = requireGraphScopeRewrite(
-      constrainGraphVariablesToAllowedSet(initialScope, allGraphs, { boundByDataset: this.sparqlEngine === 'oxigraph' }),
-    );
+    const constrainedScope = this.guardHeldGraphs(requireGraphScopeRewrite(
+      constrainGraphVariablesToAllowedSet(initialScope, allGraphs, { boundByDataset: this.boundByDataset(initialScope) }),
+    ));
 
     // Spec §14 trust-gradient filter — only enforced on verifiable-memory
     // where on-chain-anchored trust metadata is expected to live.
