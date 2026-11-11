@@ -65,9 +65,8 @@ export function sliceClass(graphs: number): string {
  * limit it exceeds. A query rejected before its plan is not counted.
  *
  * The slice is the set the route authorizes the query for and binds it to, as
- * VALUES, UNION branches or a dataset. A read that names only explicit GRAPH
- * IRIs may get no dataset (embedded Oxigraph): its store then reads just the
- * named graphs. The `graph` label keeps those reads apart in every series.
+ * VALUES, UNION branches or a dataset. The `graph` label keeps reads of
+ * explicit graphs apart in every series.
  *
  * The meter lives in the query's async context ({@link meterQueryScope}), the
  * way the default store-work priority does, so the engine's route functions
