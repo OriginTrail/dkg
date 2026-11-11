@@ -35,14 +35,14 @@ afterEach(async () => {
 });
 
 /**
- * A node over embedded Oxigraph in `dataDir`, serving working and shared working memory from read graphs. The KA number
- * allocator is the daemon's, which is durable: a restart shares it.
+ * A node over embedded Oxigraph in `dataDir`, in the worker thread a node runs by default, serving working and shared
+ * working memory from read graphs. The KA number allocator is the daemon's, which is durable: a restart shares it.
  */
 async function startNode(dataDir: string, wallet: ethers.Wallet, kaNumberAllocator: ReturnType<typeof makeTestKaNumberAllocator>): Promise<DKGAgent> {
   const started = await DKGAgent.create({
     name: 'ReadGraphWorkingMemory', dataDir, listenHost: '127.0.0.1', listenPort: 0, nodeRole: 'edge', kaNumberAllocator,
     chainAdapter: new LocallySignedMockChain(wallet) as never,
-    storeConfig: { backend: 'oxigraph', options: { path: join(dataDir, 'store.nq') }, readGraphs: { modes: MODES } },
+    storeConfig: { backend: 'oxigraph-worker', options: { path: join(dataDir, 'store.nq') }, readGraphs: { modes: MODES } },
   });
   await started.start();
   return started;
