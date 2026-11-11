@@ -23,7 +23,8 @@
 // context graph's read-graph partition (its read graphs, its state graph and
 // anything else under it), as { endpoint, graphs: [...] }. With
 // `--member-graphs` it prints every other graph of a context graph with its
-// triple count, as { endpoint, graphs: { "<graph>": <triples> } }.
+// triples, each written as one sorted N-Triples-like line, as
+// { endpoint, graphs: { "<graph>": ["<s> <p> <o>", ...] } }.
 //
 // Exit codes: 0 when the report is complete, 1 when the store could not be read.
 
@@ -81,16 +82,28 @@ async function partitionGraphs() {
   console.log(JSON.stringify({ endpoint, graphs }, null, 2));
 }
 
+/** A SPARQL JSON term as one N-Triples-like token. */
+function term(value) {
+  if (!value) return '?';
+  if (value.type === 'uri') return `<${value.value}>`;
+  if (value.type === 'bnode') return `_:${value.value}`;
+  const text = JSON.stringify(value.value);
+  if (value['xml:lang']) return `${text}@${value['xml:lang']}`;
+  return value.datatype ? `${text}^^<${value.datatype}>` : text;
+}
+
 async function memberGraphs() {
-  const rows = await select(`SELECT ?g (COUNT(*) AS ?n) WHERE {
+  const rows = await select(`SELECT ?g ?s ?p ?o WHERE {
     # sparql-scan-allow: R2 -- a check a drill runs by hand on a devnet store with its daemon down, off any request path
     GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ${literal(CONTEXT_GRAPH_PREFIX)}))
-  } GROUP BY ?g`);
+  }`);
   const graphs = {};
   for (const row of rows) {
     const iri = row.g?.value;
-    if (typeof iri === 'string' && !inPartition(iri)) graphs[iri] = Number(row.n?.value ?? 0);
+    if (typeof iri !== 'string' || inPartition(iri)) continue;
+    (graphs[iri] ??= []).push(`${term(row.s)} ${term(row.p)} ${term(row.o)}`);
   }
+  for (const triples of Object.values(graphs)) triples.sort();
   console.log(JSON.stringify({ endpoint, graphs }, null, 2));
 }
 

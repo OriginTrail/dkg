@@ -119,7 +119,7 @@ CORE_MODULE="$CORE_MODULE" STORAGE_MODULE="$STORAGE_MODULE" QUERY_CONFIG_MODULE=
   const core = await import(process.env.CORE_MODULE);
   const storage = await import(process.env.STORAGE_MODULE);
   const queryConfig = await import(process.env.QUERY_CONFIG_MODULE);
-  const ok = ["isReadGraphEligibleContextGraphId", "readGraphIri", "readScope"].every((name) => typeof core[name] === "function")
+  const ok = ["isReadGraphEligibleContextGraphId", "readGraphIri", "readScope", "parseReadGraphIri"].every((name) => typeof core[name] === "function")
     && typeof core.MemoryLayer === "object" && typeof storage.readGraphModeOf === "function" && typeof queryConfig.resolveQueryConfig === "function";
   process.exit(ok ? 0 : 1);' 2>/dev/null \
   || early_exit "the build lacks the read-graph rules this run uses (core, storage and CLI dist: names, modes, the setting's parser)"
@@ -280,7 +280,34 @@ read_graph_rebuild() {
   if [ -n "${2:-}" ]; then dkg_cli "$1" store read-graphs rebuild --context-graph "$2" --json >> "$RESULTS/cli.log" 2>&1
   else dkg_cli "$1" store read-graphs rebuild --json >> "$RESULTS/cli.log" 2>&1; fi
 }
-read_graph_drop() { dkg_cli "$1" store read-graphs drop --yes --json >> "$RESULTS/cli.log" 2>&1; }
+# drop_unkept <n>: drop the read graphs node <n>'s own setting does not keep, by the build's own rules, one context
+# graph and layer at a time; with no setting, or one that keeps nothing, that is every read graph.
+drop_unkept() {
+  local setting pairs cg layer failed=0
+  setting="$(read_graphs_setting "$1")"
+  read_graph_rows "$1" > "$RESULTS/rows/cleanup.node$1" || return 1
+  pairs="$(SETTING_JSON="${setting:-\"off\"}" CORE_MODULE="$CORE_MODULE" STORAGE_MODULE="$STORAGE_MODULE" \
+    QUERY_CONFIG_MODULE="$QUERY_CONFIG_MODULE" ROWS="$RESULTS/rows/cleanup.node$1" node --input-type=module -e '
+    const fs = await import("node:fs");
+    const core = await import(process.env.CORE_MODULE);
+    const { readGraphModeOf } = await import(process.env.STORAGE_MODULE);
+    const { resolveQueryConfig } = await import(process.env.QUERY_CONFIG_MODULE);
+    const modes = resolveQueryConfig({ readGraphs: JSON.parse(process.env.SETTING_JSON) }).readGraphs;
+    const pairs = new Set();
+    for (const line of fs.readFileSync(process.env.ROWS, "utf8").split("\n").filter(Boolean)) {
+      const key = core.parseReadGraphIri(line.split(" ")[2]);
+      if (key && readGraphModeOf(modes, key) === "off") pairs.add(`${key.scope.contextGraphId} ${key.layer.toLowerCase()}`);
+    }
+    for (const pair of pairs) console.log(pair);
+  ')" || return 1
+  while read -r cg layer; do
+    [ -n "$cg" ] || continue
+    dkg_cli "$1" store read-graphs drop --context-graph "$cg" --layer "$layer" --yes --json >> "$RESULTS/cli.log" 2>&1 || failed=1
+  done <<EOF_PAIRS
+$pairs
+EOF_PAIRS
+  return "$failed"
+}
 
 dkg_cli "${NODES%% *}" store read-graphs --help > /dev/null 2>&1 \
   || early_exit "this build has no \`dkg store read-graphs\` commands"
@@ -376,15 +403,14 @@ cleanup() {
   local status=$?
   trap - EXIT
   trap '' INT TERM
-  local n changed original
+  local n changed
   changed="$(printf '%s\n' $CHANGED | sort -nu | tr '\n' ' ')"
   if [ -n "${changed// /}" ] && [ "$KEEP" != 1 ]; then
     say "putting back the config.json of nodes ${changed% }, restarting them, and dropping read graphs their settings do not keep"
     for n in $changed; do cp "$RESULTS/config/node$n.json" "$DEVNET_DIR/node$n/config.json"; done
     for n in $changed; do
       if ! restart_node "$n"; then note "cleanup: node$n did not come back after the restart"; status=1; continue; fi
-      original="$(read_graphs_setting "$n")"
-      case "$original" in ''|'"off"') read_graph_drop "$n" || note "cleanup: dropping node$n's read graphs failed (see cli.log)" ;; esac
+      drop_unkept "$n" || note "cleanup: dropping the read graphs node$n's setting does not keep failed (see cli.log)"
     done
   fi
   write_report
@@ -703,20 +729,26 @@ partition_graphs() {
     | node -e 'let d = ""; process.stdin.on("data", (c) => d += c); process.stdin.on("end", () => { for (const g of JSON.parse(d).graphs) console.log(g); });' > "$2"
 }
 
-# member_graphs <endpoint> <out>: every other graph of a context graph, with its triple count, read from the store.
+# member_graphs <endpoint> <out>: every other graph of a context graph, with its triples, read from the store.
 member_graphs() {
   node "$REPO_ROOT/scripts/read-graph-store-report.mjs" --endpoint "$1" --member-graphs 2>> "$RESULTS/drill-rollback.log" > "$2"
 }
-# members_lost <before> <after> <exact|kept>: prints the first difference and fails, or prints nothing. `exact`:
-# the same graphs with the same triple counts; `kept`: every graph of <before> still there, with at least as many.
+# members_lost <before> <after> <exact|kept>: prints the first difference and fails, or prints nothing. `exact`: the
+# same graphs with the same triples; `kept`: every graph of <before> still there, holding every triple it held.
 members_lost() {
   node -e '
     const fs = require("fs");
     const [before, after] = process.argv.slice(1, 3).map((file) => JSON.parse(fs.readFileSync(file, "utf8")).graphs);
     const exact = process.argv[3] === "exact";
-    for (const [graph, count] of Object.entries(before)) {
+    for (const [graph, triples] of Object.entries(before)) {
       if (!(graph in after)) { console.log(`<${graph}> is gone`); process.exit(1); }
-      if (exact ? after[graph] !== count : after[graph] < count) { console.log(`<${graph}> holds ${after[graph]} triples, not ${count}`); process.exit(1); }
+      const now = new Set(after[graph]);
+      const lost = triples.find((triple) => !now.has(triple));
+      if (lost) { console.log(`<${graph}> lost ${lost}`); process.exit(1); }
+      if (exact && after[graph].length !== triples.length) {
+        const had = new Set(triples);
+        console.log(`<${graph}> gained ${after[graph].find((triple) => !had.has(triple))}`); process.exit(1);
+      }
     }
     if (exact) for (const graph of Object.keys(after)) if (!(graph in before)) { console.log(`<${graph}> appeared`); process.exit(1); }
   ' "$1" "$2" "$3"
@@ -743,7 +775,7 @@ rollback_steps() {
     console.log(dropped ?? 0);
   ' "$ROLLBACK_MODULE" 2>> "$RESULTS/drill-rollback.log")"
   case "$dropped" in ''|*[!0-9]*|0) printf 'FAIL\037%s\037\037\n' "the rollback step dropped nothing on node$n (drill-rollback.log)"; return ;; esac
-  # Whatever the step reports: the whole partition gone, and every asset graph as it was.
+  # Whatever the step reports: the whole partition gone, and every asset graph holding exactly the triples it held.
   partition_graphs "$endpoint" "$partition_after" && member_graphs "$endpoint" "$members_after" \
     || { printf 'FAIL\037%s\037%s\037\n' "node$n's store could not be read after the rollback step" "$dropped"; return; }
   if [ -s "$partition_after" ]; then
@@ -786,12 +818,12 @@ EOF_RESULT
   start_node "$n" DEVNET_VERSION_LAYOUT="all:current" \
     || { record drill-rollback FAIL "$(( $(now) - started ))" "node$n did not come back on the build under test${detail:+ ($detail)}"; return; }
   [ -z "$outcome" ] || { record drill-rollback "$outcome" "$(( $(now) - started ))" "$detail"; return; }
-  # Forward again: every asset graph from before the rollback still there, then rebuilt read graphs.
+  # Forward again: every asset triple from before the rollback still there, then rebuilt read graphs.
   if ! wait_all_ready drill-rollback "$READY_TIMEOUT" "$n"; then record drill-rollback FAIL "$(( $(now) - started ))" "node$n's read graphs not ready after the forward start"; return; fi
   member_graphs "$endpoint" "$RESULTS/rows/rollback.members-forward.node$n.json" \
     && lost="$(members_lost "$RESULTS/rows/rollback.members-before.node$n.json" "$RESULTS/rows/rollback.members-forward.node$n.json" kept)" \
     || { record drill-rollback FAIL "$(( $(now) - started ))" "node$n's asset data after the forward start: ${lost:-unreadable}"; return; }
-  drill_end drill-rollback "$n" "$started" "dropped $dropped graphs, left no read-graph partition and every asset graph, ran $version, then rebuilt from nothing"
+  drill_end drill-rollback "$n" "$started" "dropped $dropped graphs, left no read-graph partition and every asset triple, ran $version, then rebuilt from nothing"
 }
 
 drill_flag_off_and_back() {
@@ -801,7 +833,11 @@ drill_flag_off_and_back() {
     || { record drill-flag INCONCLUSIVE 0 "node$n had no ready read graph"; return; }
   set_read_graphs "$n" '"off"'
   restart_node "$n" || { set_read_graphs "$n" "${restore:--}"; record drill-flag FAIL "$(( $(now) - started ))" "node$n did not come back with off"; return; }
-  read_graph_rows "$n" > "$RESULTS/rows/flag.off.node$n" || true
+  # The off state counts only as observed: a status that could not be read proves nothing.
+  if ! read_graph_rows "$n" > "$RESULTS/rows/flag.off.node$n"; then
+    set_read_graphs "$n" "${restore:--}"; restart_node "$n"
+    record drill-flag INCONCLUSIVE "$(( $(now) - started ))" "node$n's status could not be read with off, so the off state was not observed"; return
+  fi
   while read -r state gen graph; do [ "$state" = dirty ] || undirty="$undirty <$graph>:$state"; done < "$RESULTS/rows/flag.off.node$n"
   set_read_graphs "$n" "${restore:--}"
   # With off, the node keeps no read graph: status lists none, or lists them dirty.
