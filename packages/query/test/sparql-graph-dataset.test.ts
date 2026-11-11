@@ -124,7 +124,7 @@ describe('planGraphDataset', () => {
     ['SELECT ?s WITH { SELECT ?s { ?s ?p ?o } } AS %x { INCLUDE %x }', expected('named', both, { preservePattern: true }), expected('dataset', both, { preservePattern: true })],
     ['SELECT * WHERE { GRAPH ?g { ?s (<urn:a>|<urn:b>)+ ?o } }', expected('named', named), expected('dataset', both, { bindCallerGraphs: true })],
     ['SELECT * WHERE { GRAPH ?g { ?s <urn:p>+ ?o } }', expected('named', named), expected('dataset', both)],
-    ['SELECT * WHERE { GRAPH ?g { BIND(<urn:g> AS ?g) ?s <urn:p>+ ?o } }', expected('named', named), expected('dataset', both, { bindCallerGraphs: true })],
+    ['SELECT * WHERE { GRAPH ?g { BIND(<urn:g> AS ?g) ?s <urn:p>+ ?o } }', expected('named', named, { bindCallerGraphs: true }), expected('dataset', both, { bindCallerGraphs: true })],
     ['SELECT ?s (EXISTS { ?s <urn:f> ?f } AS ?x) WHERE { ?s ?p ?o }', expected('named', both), expected('values', both)],
     ['SELECT ?s WHERE { GRAPH <urn:g:1> { ?s ?p ?o } ?s <urn:f> ?f }', expected('named', both), expected('values', both)],
     // On Oxigraph a GRAPH block without a triple pattern of its own that holds a subquery,
@@ -136,6 +136,12 @@ describe('planGraphDataset', () => {
     ['SELECT ?g ?k WHERE { GRAPH ?g { VALUES ?k { <urn:k> } ?s ?p ?o } }', expected('named', named), expected('values', both)],
     ['SELECT ?s WHERE { ?s ?p ?o { SELECT ?t WHERE { ?t ?q ?u } } }', expected('named', named), expected('dataset', both)],
     ['SELECT ?g WHERE { GRAPH ?g { BIND(<urn:x> AS ?x) } }', expected('named', named), expected('values', both)],
+    // A subquery that fills the GRAPH block keeps the list too.
+    ['SELECT ?g ?s WHERE { GRAPH ?g { SELECT ?s WHERE { ?s ?p ?o } } }', expected('dataset', named), expected('dataset', both)],
+    // A block that assigns its graph variable reads one constant branch per graph on Oxigraph.
+    ['SELECT ?g ?s WHERE { GRAPH ?g { BIND(<urn:g:1> AS ?g) ?s ?p ?o } }', expected('named', named, { bindCallerGraphs: true }), expected('values', both)],
+    ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o VALUES ?g { <urn:g:1> } } }', expected('named', named), expected('values', both)],
+    ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o FILTER(?g != <urn:g:2>) } }', expected('named', named), expected('values', both)],
   ] as const)('fully plans %s', (query, oxigraph, other) => {
     expect(planGraphDataset(scope(query), 'oxigraph')).toEqual(oxigraph);
     expect(planGraphDataset(scope(query), null)).toEqual(other);
@@ -147,6 +153,20 @@ describe('planGraphDataset', () => {
     expect(guardGraphBlocksWithoutTriples(scope('SELECT ?x WHERE { BIND(1 AS ?x) }')).source).toContain('FILTER EXISTS');
     const triples = scope('SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }');
     expect(guardGraphBlocksWithoutTriples(triples)).toBe(triples);
+    // A FILTER on a function named by an IRI or a prefixed name is no triple; a path in brackets after a subject is one.
+    for (const query of [
+      'ASK { GRAPH <urn:g:1> { FILTER <http://www.w3.org/2001/XMLSchema#boolean>(1) } }',
+      'PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ASK { GRAPH <urn:g:1> { FILTER xsd:boolean(1) } }',
+    ]) expect(guardGraphBlocksWithoutTriples(scope(query)).source, query).toContain('FILTER EXISTS');
+    const path = scope('SELECT * WHERE { GRAPH ?g { <urn:s> (<urn:p>|<urn:q>) ?o } }');
+    expect(guardGraphBlocksWithoutTriples(path)).toBe(path);
+    // A subquery that fills its group moves into a group of its own, which the guard follows.
+    const subquery = guardGraphBlocksWithoutTriples(scope('SELECT ?g ?s WHERE { GRAPH ?g { SELECT ?s WHERE { ?s ?p ?o } } }'));
+    expect(subquery.source).toMatch(/GRAPH \?g \{ \{ SELECT \?s WHERE \{ \?s \?p \?o \}\s+\} FILTER EXISTS \{ [^}]+ \} \}/);
+    expect(() => scope(subquery.source)).not.toThrow();
+    const whole = guardGraphBlocksWithoutTriples(scope('SELECT ?s WHERE { SELECT ?s WHERE { ?s ?p ?o } }'));
+    expect(whole.source).toMatch(/WHERE \{ \{ SELECT \?s WHERE \{ \?s \?p \?o \}\s+\} FILTER EXISTS/);
+    expect(() => scope(whole.source)).not.toThrow();
   });
 
   it('writes the graph list beside the dataset for a read that keeps one', () => {
@@ -587,10 +607,31 @@ describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind,
     expect(once.bindings).toHaveLength(asListed.type === 'bindings' ? asListed.bindings.length : -1);
   });
 
+  it('keeps the graph binding and the rows of a subquery that fills its GRAPH block, and of a block that assigns its graph', async () => {
+    const engine = new DKGQueryEngine(opened.store);
+    const view: QueryOptions = { contextGraphId: ID, view: 'verifiable-memory' };
+    const direct = await engine.query('SELECT ?g ?s WHERE { GRAPH ?g { SELECT ?s WHERE { ?s <urn:label> ?l } } FILTER(BOUND(?g)) }', view);
+    expect(new Set(direct.bindings.map(row => row.g))).toEqual(new Set(DATA));
+    // A block that assigns its graph variable gives one row per match in the graph it names, inside the view only.
+    const shared: QueryOptions = { contextGraphId: ID, view: 'shared-working-memory' };
+    const rows = (bindings: readonly Record<string, string>[]) => bindings.map(row => JSON.stringify(Object.entries(row).sort())).sort();
+    const labelled = quadsOf([SHARED[0]]).filter(quad => quad.predicate === 'urn:label').map(quad => ({ g: SHARED[0], s: quad.subject }));
+    for (const body of [`BIND(<${SHARED[0]}> AS ?g) ?s <urn:label> ?l`, `?s <urn:label> ?l VALUES ?g { <${SHARED[0]}> }`]) {
+      const scoped = await engine.query(`SELECT ?g ?s WHERE { GRAPH ?g { ${body} } }`, shared);
+      expect(rows(scoped.bindings), body).toEqual(rows(labelled));
+    }
+    const outside = await engine.query(`SELECT ?g ?s WHERE { GRAPH ?g { BIND(<${DATA[1]}> AS ?g) ?s <urn:label> ?l } }`, shared);
+    expect(outside.bindings).toEqual([]);
+  });
+
   it('leaves graphs the store does not hold out of patterns that need no triple', async () => {
     const engine = new DKGQueryEngine(opened.store);
     // The data route allows its metadata graphs and the shared-memory view its bucket; this store holds neither.
     expect((await engine.query(`ASK { GRAPH <${ROOT}/_meta> {} }`, { contextGraphId: ID })).bindings).toEqual([{ result: 'false' }]);
+    for (const filter of ['<http://www.w3.org/2001/XMLSchema#boolean>(1)', 'xsd:boolean(1)']) {
+      const ask = `PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ASK { GRAPH <${ROOT}/_meta> { FILTER ${filter} } }`;
+      expect((await engine.query(ask, { contextGraphId: ID })).bindings, filter).toEqual([{ result: 'false' }]);
+    }
     const listed = await engine.query('SELECT ?g WHERE { GRAPH ?g {} }', { contextGraphId: ID });
     expect(listed.bindings.map(row => row.g).sort()).toEqual([...DATA].sort());
     const optional = await engine.query('SELECT ?s WHERE { OPTIONAL { ?s <urn:p> ?o } }', { contextGraphId: ID, view: 'shared-working-memory' });

@@ -70,9 +70,16 @@ function needsConstantCallerGraphs(scope: PreparedSparqlQuery): boolean {
 /** Keywords that start a construct which is not itself a triple pattern. */
 const NON_TRIPLE_WORDS = new Set(['VALUES', 'BIND', 'FILTER', 'OPTIONAL', 'MINUS', 'UNION', 'EXISTS', 'NOT', 'GRAPH', 'SERVICE', 'SILENT', 'AS']);
 
+/** Whether the group between these braces is a subquery: its content is a SELECT. */
+function isSubqueryGroup(scope: PreparedSparqlQuery, opening: number): boolean {
+  return isSparqlKeyword(scope.prepared.tokens, opening + 1, 'SELECT');
+}
+
 /** Whether the group between these braces has a triple pattern of its own, not only in nested groups. */
 function hasOwnTriplePattern(scope: PreparedSparqlQuery, opening: number, closing: number): boolean {
   const { tokens } = scope.prepared;
+  // A group that is a subquery has no pattern of its own; the subquery's are nested.
+  if (isSubqueryGroup(scope, opening)) return false;
   const depth = scope.structure.braces.depthBefore[opening] + 1;
   for (let index = opening + 1; index < closing; index++) {
     if (scope.structure.braces.depthBefore[index] !== depth) continue;
@@ -85,6 +92,9 @@ function hasOwnTriplePattern(scope: PreparedSparqlQuery, opening: number, closin
     if (token.kind === 'word' && NON_TRIPLE_WORDS.has(token.upper)) {
       // The term after GRAPH, SERVICE or VALUES names a graph, an endpoint or a variable.
       if ((token.upper === 'GRAPH' || token.upper === 'SERVICE' || token.upper === 'VALUES') && tokens[index + 1]?.kind !== 'symbol') index++;
+      // A FILTER whose constraint is a function named by an IRI, such as xsd:boolean(...).
+      const after = tokens[index + 1];
+      if (token.upper === 'FILTER' && (after?.kind === 'iri' || after?.kind === 'prefixed-name') && isSymbol(tokens[index + 2], '(')) index++;
       continue;
     }
     // A function call of a FILTER written without brackets, such as regex(...).
@@ -140,10 +150,20 @@ export function guardGraphBlocksWithoutTriples(scope: PreparedSparqlQuery): Prep
   if (closings.size === 0) return scope;
   const allocate = createVariableAllocator(scope);
   const guard = `FILTER EXISTS { ${allocate('__dkgHeldS')} ${allocate('__dkgHeldP')} ${allocate('__dkgHeldO')} }`;
+  // Insertions go from the end of the text, so earlier offsets stay valid.
+  const insertions: Array<readonly [number, string]> = [];
+  for (const closing of closings) {
+    const opening = scope.structure.braces.matchingTokenIndexes[closing] ?? -1;
+    // A subquery fills its group; it moves into a group of its own, which the guard follows.
+    if (opening >= 0 && isSubqueryGroup(scope, opening)) {
+      insertions.push([tokens[opening].end, ' {'], [tokens[closing].start, ` } ${guard} `]);
+    } else {
+      insertions.push([tokens[closing].start, ` ${guard} `]);
+    }
+  }
   let source = scope.source;
-  for (const closing of [...closings].sort((left, right) => right - left)) {
-    const at = tokens[closing].start;
-    source = `${source.slice(0, at)} ${guard} ${source.slice(at)}`;
+  for (const [at, text] of insertions.sort(([left], [right]) => right - left)) {
+    source = `${source.slice(0, at)}${text}${source.slice(at)}`;
   }
   return transitionGraphScope(scope, source);
 }
@@ -175,8 +195,11 @@ export function planGraphDataset(
     datasetClauses: graphlessDescription ? ['FROM']
       : !oxigraph || readsDefaultGraph ? ['FROM', 'FROM NAMED'] : ['FROM NAMED'],
     preservePattern: graphlessDescription || scope.readsOnlyDeclaredNamedSet,
-    bindCallerGraphs: !scopedDescription && graphAccess === 'dataset' && !oxigraph
-      && scope.graphVariables.length > 0 && repeatedPath && needsConstantCallerGraphs(scope),
+    // Oxigraph repeats the rows of a GRAPH ?var block that assigns ?var once per graph
+    // it iterates; a constant branch per graph keeps one row per matching graph.
+    bindCallerGraphs: !scopedDescription && scope.graphVariables.length > 0 && (oxigraph
+      ? hasCallerGraphAssignments(scope)
+      : graphAccess === 'dataset' && repeatedPath && needsConstantCallerGraphs(scope)),
     wrapDescriptionPattern: scopedDescription && scope.where !== null,
   };
 }
