@@ -65,7 +65,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   assertContextGraphAuthorityIndexId,
-  resolveRpcUrls,
   verifyControlEnvelopeIssuerSignatureV1,
   withRpcRequestContext,
   type ContextGraphAuthorityIndexId,
@@ -77,6 +76,7 @@ import {
 import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { resolveChainFinalityConfirmationsV1 } from './chain-finality-confirmations-v1.js';
+import { resolveChainRpcEndpointsV1 } from './chain-rpc-endpoints-v1.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
   answerRfc64CatalogHeadReplayRequestV1,
@@ -5162,9 +5162,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             .acceptedPolicySnapshotForCatalogScope(scope);
         const finalizedPolicyPrecommit = createRfc64FinalizedPolicyAgentPrecommitV1({
           acceptedPolicySnapshotForCatalogScope,
-          rpcEndpoints: chainConfig === undefined
-            ? null
-            : resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
+          rpcEndpoints: resolveChainRpcEndpointsV1(this.chain, chainConfig),
           // The ADAPTER's resolved depth, not the raw config: `DKGAgent`
           // accepts a pre-built `chainAdapter`, and in that mode
           // `chainConfig` is ignored, so reading it here would pin the
@@ -5178,9 +5176,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         });
         const finalizedVmPrecommit = createRfc64FinalizedVmAgentPrecommitV1({
           acceptedPolicySnapshotForCatalogScope,
-          rpcEndpoints: chainConfig === undefined
-            ? null
-            : resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
+          rpcEndpoints: resolveChainRpcEndpointsV1(this.chain, chainConfig),
           // The ADAPTER's resolved depth, not the raw config: `DKGAgent`
           // accepts a pre-built `chainAdapter`, and in that mode
           // `chainConfig` is ignored, so reading it here would pin the

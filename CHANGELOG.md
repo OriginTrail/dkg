@@ -6,12 +6,6 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Fixed
 
-- A seller can serve tool calls on an OpenAI reasoning model that takes
-  function tools on chat completions only with no reasoning. Set
-  `marketplace.seller.services[].backend.reasoningEffortWithTools` to
-  `none` for that service. Calls with tools then carry
-  `reasoning_effort: "none"`, and calls without tools keep the model's own
-  reasoning.
 - An error from one service's backend no longer takes a seller's other
   services away from buyers. When the backend refuses a call as made (400,
   404, 413, 415 or 422), the seller refuses it with a code buyers don't
@@ -24,6 +18,40 @@ All notable changes to the DKG V10 node are documented here. The format is based
   If the backend refuses both, the service stops offering tools until the
   node restarts, so buyers answer such calls with `tools_unsupported`
   instead of sending them.
+
+## [10.1.1] - Unreleased
+
+10.1.1 fixes problems found while 10.1.0 ran on testnet, in the
+Marketplace, the MCP server and the public catalog.
+
+### Fixed
+
+- A seller can serve tool calls on an OpenAI reasoning model that takes
+  function tools on chat completions only with no reasoning. Set
+  `marketplace.seller.services[].backend.reasoningEffortWithTools` to
+  `none` for that service. Calls with tools then carry
+  `reasoning_effort: "none"`, and calls without tools keep the model's own
+  reasoning. A model that refuses `none` as well takes function tools only on
+  the Responses API, so it can't serve tool calls: set `tools: false` for its
+  service, and buyers then get `tools_unsupported` instead of refused calls.
+- An MCP server registered by hand, with no `DKG_HOME` or workspace config
+  selected, now loads the default node home's credentials, so its
+  authenticated tools no longer answer `401`. An explicit home or workspace
+  config still comes first.
+- The MCP server's default `mine` listing shows only graphs the user takes
+  part in, by the node UI's membership rule, instead of every graph the node
+  has discovered.
+- A node refuses a public catalog head it cannot apply before it writes
+  anything to shared memory, so shared memory and Verifiable Memory stay
+  untouched.
+- An agent built on a pre-built chain adapter verifies finalized public
+  catalog heads over the RPC endpoints its adapter names, as a node does.
+
+### Documentation
+
+- The MCP guide explains how to configure a client by hand when setup does
+  not detect it, with the supported client locations and formats, and how
+  to recover when authenticated tools answer `401`.
 
 ## [10.1.0] - Unreleased
 
