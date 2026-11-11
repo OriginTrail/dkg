@@ -29,10 +29,10 @@ export function SubGraphExplorerHeader() {
     <div className="v10-subgraph-explorer-header">
       <div className="v10-subgraph-explorer-title">Subgraph explorer</div>
       <p className="v10-subgraph-explorer-intro">
-        Subgraphs are optional topical partitions inside this Context Graph.
+        Subgraphs are optional topical partitions inside this context graph.
         An entity belongs to one or more memory layers and, optionally,
         to one or more subgraphs. Entities in no subgraph live in the
-        Context Graph root.
+        context graph root.
       </p>
     </div>
   );
@@ -548,13 +548,13 @@ export function SubGraphOverviewGrid({
     return (
       <EmptyState
         icon="#"
-        title="No subgraphs in this Context Graph yet."
+        title="No subgraphs in this context graph yet."
         description={
           <>
-            A subgraph is a named topical slice of this Context Graph
+            A subgraph is a named topical slice of this context graph
             (e.g. <code>recipes</code>, <code>decisions</code>). Agents
             create one when they scope an assertion to a subgraph. All
-            current entities live in the Context Graph root.
+            current entities live in the context graph root.
           </>
         }
         actions={[

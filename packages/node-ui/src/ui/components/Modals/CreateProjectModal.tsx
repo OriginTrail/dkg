@@ -129,8 +129,8 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
     // copy on the actual request shape instead. Same pattern as commit
     // 6b5012fd ("UI label honesty + devnet-test.sh response shape").
     setProgress(registerOnChain
-      ? 'Registering Context Graph on the network…'
-      : 'Creating Context Graph locally…');
+      ? 'Registering context graph on the network…'
+      : 'Creating context graph locally…');
 
     const finalSlug = slugify(trimmedName);
     if (!agentAddress) {
@@ -144,7 +144,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       const slowTimer = setTimeout(
         () => setProgress(registerOnChain
           ? 'On-chain registration in progress — this can take up to 30s…'
-          : 'Setting up local Context Graph…'),
+          : 'Setting up local context graph…'),
         5000,
       );
 
@@ -209,7 +209,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           // Don't roll back the CG — log the warning, surface a hint, and
           // let the operator re-run installation later if they want.
           console.warn('[CreateProjectModal] ontology install failed:', ontoErr);
-          setProgress(`Context Graph created, but ontology install failed: ${ontoErr?.message ?? ontoErr}`);
+          setProgress(`Context graph created, but ontology install failed: ${ontoErr?.message ?? ontoErr}`);
         }
       }
 
@@ -219,15 +219,15 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       // doesn't invalidate the CG; the curator can re-publish later.
       let manifestPublished = true;
       try {
-        setProgress('Publishing Context Graph manifest…');
+        setProgress('Publishing context graph manifest…');
         await publishProjectManifest(result.created, {});
       } catch (manifestErr: any) {
         manifestPublished = false;
         console.warn('[CreateProjectModal] manifest publish failed:', manifestErr);
-        setProgress(`Context Graph created, but manifest publish failed: ${manifestErr?.message ?? manifestErr}`);
+        setProgress(`Context graph created, but manifest publish failed: ${manifestErr?.message ?? manifestErr}`);
       }
 
-      setProgress('Refreshing Context Graph list…');
+      setProgress('Refreshing context graph list…');
       const inventory = await refreshContextGraphInventoryAfterMutation();
       if (!inventory.ok) throw new Error(inventory.error);
 
@@ -260,9 +260,9 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
         }, 2500);
       }
     } catch (err: any) {
-      const msg = err?.message || 'Failed to create Context Graph';
+      const msg = err?.message || 'Failed to create context graph';
       if (msg.includes('already exists') || msg.includes('409')) {
-        setError('A Context Graph with this ID already exists. Try a different name.');
+        setError('A context graph with this ID already exists. Try a different name.');
       } else if (msg.includes('taking longer')) {
         setError(msg);
       } else {
@@ -315,7 +315,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           <div className="v10-modal-header">
             <div id="dkg-wire-modal-title" className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
             <div className="v10-modal-subtitle">
-              Context Graph created. Now wire a local workspace so you can plan it from your own Cursor.
+              Context graph created. Now wire a local workspace so you can plan it from your own Cursor.
             </div>
           </div>
           <div className="v10-modal-body">
@@ -354,16 +354,16 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           type="button"
           className="v10-modal-close ds-btn ds-ghost ds-icon"
           onClick={onClose}
-          aria-label="Close create Context Graph dialog"
+          aria-label="Close create context graph dialog"
           title="Close (Esc)"
           style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4, zIndex: 1 }}
         >
           <X size={14} />
         </button>
         <div className="v10-modal-header">
-          <div id="dkg-create-cg-title" className="v10-modal-title">Create new Context Graph</div>
+          <div id="dkg-create-cg-title" className="v10-modal-title">Create new context graph</div>
           <div id="dkg-create-cg-subtitle" className="v10-modal-subtitle">
-            A Context Graph gives your agent structured memory — a place to draft, share, and publish knowledge.
+            A context graph gives your agent structured memory — a place to draft, share, and publish knowledge.
           </div>
         </div>
 
@@ -382,14 +382,14 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
 
           {isFirstProject && (
             <div className="v10-modal-tip ds-card-nested">
-              <div className="v10-modal-tip-title">First Context Graph tip</div>
+              <div className="v10-modal-tip-title">First context graph tip</div>
               This is your agent's first memory space. Consider importing any existing knowledge
               your agent has — notes, documents, conversation logs — so it can build on what it already knows.
             </div>
           )}
 
           <div className="v10-form-group">
-            <label className="v10-form-label" htmlFor="dkg-cg-name">Context Graph name</label>
+            <label className="v10-form-label" htmlFor="dkg-cg-name">Context graph name</label>
             <input
               id="dkg-cg-name"
               name="dkg-cg-name"
@@ -426,7 +426,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               placeholder="What should your agent remember? Describe the domain, goals, or context..."
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              aria-label="Context Graph description"
+              aria-label="Context graph description"
             />
           </div>
 
@@ -517,7 +517,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 <div className="v10-form-radio-desc" style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
                   v1 installs the <code>{starterSlug}</code> starter as a sensible default. A future
                   release will have the agent draft a context-graph-specific ontology by extending the closest
-                  starter from the Context Graph description.
+                  starter from the context graph description.
                 </div>
               )}
               <label className="v10-form-radio" style={{ opacity: 0.5 }}>
@@ -585,7 +585,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 // fetch) the address is simply not resolved yet, so show a
                 // loading state instead of flashing an error label. (F4)
                 ? (identityError ? 'Agent unavailable' : 'Loading agent…')
-                : 'Create Context Graph'}
+                : 'Create context graph'}
           </button>
         </div>
       </div>
