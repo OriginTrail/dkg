@@ -12,7 +12,7 @@
 }
 .v10-pca-card-summary {
   margin: 10px 0 0;
-  font-size: 12px;
+  font-size: var(--fs-control);
   line-height: 1.45;
   color: var(--text-secondary);
 }
@@ -86,13 +86,13 @@
   gap: 12px;
   flex-wrap: wrap;
   margin: 8px 0;
-  font-size: 11px;
+  font-size: var(--fs-label);
   line-height: 1.5;
   color: var(--text-tertiary);
 }
 .v10-pca-create-success {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--fs-control);
   line-height: 1.55;
   color: var(--text-secondary);
 }
@@ -176,12 +176,12 @@
   border: 1px solid var(--border-strong);
   background: var(--tint-subtle);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--fs-control);
   line-height: 1.4;
 }
 .v10-pca-node-picker-selected strong {
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 800;
 }
 .v10-pca-create-review {

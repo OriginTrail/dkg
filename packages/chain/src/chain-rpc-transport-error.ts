@@ -61,6 +61,8 @@ export interface RpcEndpointsExhaustedErrorLike extends ChainRpcTransportErrorLi
   code: 'RPC_ENDPOINTS_EXHAUSTED';
   exhaustionKind?: RpcEndpointExhaustionKind;
   retryAfterMs?: number;
+  /** Broadcasts only: an endpoint in this pass may have accepted the transaction and lost its answer. */
+  mayHaveBeenAccepted?: boolean;
 }
 
 export class ChainRpcTransportError extends Error {
@@ -96,6 +98,7 @@ export class RpcEndpointsExhaustedError
   declare readonly code: 'RPC_ENDPOINTS_EXHAUSTED';
   readonly exhaustionKind?: RpcEndpointExhaustionKind;
   readonly retryAfterMs?: number;
+  readonly mayHaveBeenAccepted?: boolean;
 
   constructor(
     message: string,
@@ -105,11 +108,13 @@ export class RpcEndpointsExhaustedError
       txHash?: string;
       exhaustionKind?: RpcEndpointExhaustionKind;
       retryAfterMs?: number;
+      mayHaveBeenAccepted?: boolean;
     },
   ) {
     super('RPC_ENDPOINTS_EXHAUSTED', message, opts);
     if (opts?.exhaustionKind) this.exhaustionKind = opts.exhaustionKind;
     if (opts?.retryAfterMs !== undefined) this.retryAfterMs = opts.retryAfterMs;
+    if (opts?.mayHaveBeenAccepted !== undefined) this.mayHaveBeenAccepted = opts.mayHaveBeenAccepted;
   }
 }
 

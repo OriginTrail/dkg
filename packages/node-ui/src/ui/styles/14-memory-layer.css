@@ -12,7 +12,7 @@
 /* ── Result count badge ── */
 .v10-mlv-result-count {
   padding: 6px 12px;
-  font-size: 10px;
+  font-size: var(--fs-micro);
   font-family: var(--font-mono);
   color: var(--text-tertiary);
   border-bottom: 1px solid var(--border-subtle);
@@ -36,7 +36,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 10px;
+  font-size: var(--fs-micro);
   font-family: var(--font-mono);
   color: var(--text-tertiary);
   pointer-events: none;
@@ -57,7 +57,7 @@
   justify-content: center;
   height: 100%;
   color: var(--text-tertiary);
-  font-size: 12px;
+  font-size: var(--fs-control);
 }
 
 /* ── Node detail panel (overlay inside graph) ── */
@@ -73,17 +73,17 @@
   padding: 14px 16px;
   box-shadow: var(--shadow-menu);
   z-index: 20;
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-primary);
 }
 .v10-mlv-node-panel h3 {
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 600;
   margin: 0 0 4px 0;
   word-break: break-word;
 }
 .v10-mlv-node-panel h4 {
-  font-size: 10px;
+  font-size: var(--fs-micro);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;

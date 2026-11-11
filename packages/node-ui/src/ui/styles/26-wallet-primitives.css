@@ -12,12 +12,12 @@
 }
 .v10-wallet-addr {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-primary);
   min-width: 0;
 }
 .v10-wallet-status {
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 600;
   color: var(--text-secondary);
   min-width: 0;
@@ -28,7 +28,7 @@
 .v10-wallet-status[data-tone='danger'] { color: var(--text-danger); }
 .v10-wallet-gas {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--text-tertiary);
   margin-left: auto;
 }
@@ -61,14 +61,14 @@
 }
 .v10-wallet-note {
   margin: 0;
-  font-size: 11px;
+  font-size: var(--fs-label);
   line-height: 1.45;
   color: var(--text-tertiary);
   max-width: 520px;
 }
 .v10-wallet-error {
   margin: 0;
-  font-size: 11px;
+  font-size: var(--fs-label);
   line-height: 1.45;
   color: var(--text-danger);
 }
@@ -91,7 +91,7 @@
   border: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--fs-control);
   font-weight: 600;
   padding: 7px 10px;
   cursor: pointer;
@@ -105,7 +105,7 @@
 }
 .v10-wallet-picker-empty {
   margin: 0;
-  font-size: 11px;
+  font-size: var(--fs-label);
   line-height: 1.45;
   color: var(--text-tertiary);
 }
@@ -130,11 +130,11 @@
 }
 .v10-wallet-pill-main {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-primary);
 }
 .v10-wallet-pill-provider {
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--text-tertiary);
 }
 .v10-wallet-pill-sub {
@@ -142,7 +142,7 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  font-size: 11px;
+  font-size: var(--fs-label);
   line-height: 1.45;
   color: var(--text-warning);
 }
@@ -153,7 +153,7 @@
   border: none;
   background: transparent;
   color: var(--text-link);
-  font-size: 11px;
+  font-size: var(--fs-label);
   padding: 0;
   cursor: pointer;
 }

@@ -41,7 +41,7 @@ function RpcUrlField({ rpcUrl }: { rpcUrl: string }) {
         <button
           type="button"
           onClick={() => setReveal((v) => !v)}
-          style={{ background: 'none', border: '1px solid var(--border-default)', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 'var(--radius-xs)' }}
+          style={{ background: 'none', border: '1px solid var(--border-default)', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-micro)', fontWeight: 600, padding: '1px 6px', borderRadius: 'var(--radius-xs)' }}
           aria-label={reveal ? 'Redact RPC URL' : 'Reveal RPC URL'}
           title={reveal ? 'Hide the path-token (recommended for screen-shares)' : 'Show full URL — careful, may contain a tenant secret'}
         >
@@ -117,14 +117,14 @@ function NetworkTelemetrySection() {
     <section className="card ds-card">
       <div className="card-header"><h2 className="card-title">Network telemetry</h2></div>
       <div className="card-body">
-        <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 1.6 }}>
+        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 1.6 }}>
           Local metrics are stored in SQLite and displayed in the Observability page.
         </div>
 
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '10px 0' }}>
           <div>
-            <div style={{ fontSize: 12, fontWeight: 600 }}>Share telemetry with the network</div>
-            <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 'var(--fs-control)', fontWeight: 600 }}>Share telemetry with the network</div>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', marginTop: 2, lineHeight: 1.5 }}>
               When enabled, metrics and logs are streamed to the OriginTrail network dashboard for network-wide diagnostics.
             </div>
           </div>
@@ -153,7 +153,7 @@ function NetworkTelemetrySection() {
         </div>
         <div aria-live="polite">
           {telemetryError && (
-            <div style={{ fontSize: 11, color: 'var(--accent-red)', marginTop: 4 }}>{telemetryError}</div>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--accent-red)', marginTop: 4 }}>{telemetryError}</div>
           )}
         </div>
       </div>
@@ -175,27 +175,27 @@ function NetworkTelemetrySection() {
               boxShadow: 'var(--shadow-popover)',
             }}
           >
-            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 16 }}>
+            <div style={{ fontSize: 'var(--fs-title)', fontWeight: 700, marginBottom: 16 }}>
               Enable Telemetry Streaming?
             </div>
-            <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7, marginBottom: 12 }}>
+            <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', lineHeight: 1.7, marginBottom: 12 }}>
               When enabled, the following data is streamed to the OriginTrail team:
             </div>
-            <ul style={{ fontSize: 12, color: 'var(--text-primary)', lineHeight: 1.8, margin: '0 0 14px 18px', padding: 0 }}>
+            <ul style={{ fontSize: 'var(--fs-control)', color: 'var(--text-primary)', lineHeight: 1.8, margin: '0 0 14px 18px', padding: 0 }}>
               <li>Operation logs (publish, query, sync, gossip events)</li>
               <li>Performance metrics (durations, throughput, error rates)</li>
               <li>Node identity (peer ID, node name, network)</li>
             </ul>
-            <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7, marginBottom: 12 }}>
+            <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', lineHeight: 1.7, marginBottom: 12 }}>
               The following data is <strong style={{ color: 'var(--text-primary)' }}>NEVER</strong> shared via telemetry:
             </div>
-            <ul style={{ fontSize: 12, color: 'var(--text-primary)', lineHeight: 1.8, margin: '0 0 16px 18px', padding: 0 }}>
+            <ul style={{ fontSize: 'var(--fs-control)', color: 'var(--text-primary)', lineHeight: 1.8, margin: '0 0 16px 18px', padding: 0 }}>
               <li>Private keys or wallet credentials</li>
               <li>Authentication tokens or API keys</li>
               <li>Private triple content or personal data</li>
               <li>File system paths or environment variables</li>
             </ul>
-            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 20, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginBottom: 20, lineHeight: 1.5 }}>
               You can disable streaming at any time from this page.
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
@@ -203,7 +203,7 @@ function NetworkTelemetrySection() {
                 type="button"
                 onClick={() => { setShowConsentModal(false); toggleRef.current?.focus(); }}
                 style={{
-                  padding: '7px 18px', borderRadius: 'var(--radius-control)', fontSize: 12, fontWeight: 600,
+                  padding: '7px 18px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-control)', fontWeight: 600,
                   cursor: 'pointer', border: '1px solid var(--border-default)',
                   background: 'var(--bg-surface)', color: 'var(--text-secondary)',
                 }}
@@ -214,7 +214,7 @@ function NetworkTelemetrySection() {
                 type="button"
                 onClick={confirmTelemetry}
                 style={{
-                  padding: '7px 18px', borderRadius: 'var(--radius-control)', fontSize: 12, fontWeight: 700,
+                  padding: '7px 18px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-control)', fontWeight: 700,
                   cursor: 'pointer', border: '1px solid var(--success-border)',
                   background: 'var(--success-bg)', color: 'var(--accent-green)',
                 }}
@@ -306,11 +306,11 @@ function LocalDataRetentionSection() {
           </select>
           <span aria-live="polite">
             {retentionSaved && (
-              <span style={{ fontSize: 10, color: 'var(--accent-green)', fontWeight: 600 }}>Saved</span>
+              <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--accent-green)', fontWeight: 600 }}>Saved</span>
             )}
           </span>
           {storeBytes != null && (
-            <span className="mono" style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>
+            <span className="mono" style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>
               Store: {formatBytes(storeBytes)}
             </span>
           )}
@@ -324,10 +324,10 @@ function LocalDataRetentionSection() {
               background: 'var(--warning-bg)', border: '1px solid var(--warning-border)',
             }}
           >
-            <div style={{ fontSize: 11, color: 'var(--accent-amber)', fontWeight: 600, marginBottom: 4 }}>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--accent-amber)', fontWeight: 600, marginBottom: 4 }}>
               Reduce retention to {pendingRetention} days?
             </div>
-            <div style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: 8 }}>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: 8 }}>
               Operations, logs, and metrics older than {pendingRetention} days will be permanently deleted.
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
@@ -336,7 +336,7 @@ function LocalDataRetentionSection() {
                 type="button"
                 onClick={confirmRetention}
                 style={{
-                  padding: '5px 14px', borderRadius: 'var(--radius-control)', fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                  padding: '5px 14px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)', fontWeight: 700, cursor: 'pointer',
                   border: '1px solid var(--warning-border)', background: 'var(--warning-bg)', color: 'var(--accent-amber)',
                 }}
               >
@@ -346,7 +346,7 @@ function LocalDataRetentionSection() {
                 type="button"
                 onClick={() => setPendingRetention(null)}
                 style={{
-                  padding: '5px 14px', borderRadius: 'var(--radius-control)', fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                  padding: '5px 14px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)', fontWeight: 600, cursor: 'pointer',
                   border: '1px solid var(--border-default)', background: 'var(--bg-surface)', color: 'var(--text-secondary)',
                 }}
               >
@@ -356,14 +356,14 @@ function LocalDataRetentionSection() {
           </div>
         )}
         {pendingRetention == null && (
-          <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 4 }}>
+          <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 4 }}>
             Operations and metric snapshots older than this are pruned automatically. Warning and error logs
             keep this window; high-volume routine logs also have a size safety cap.
           </div>
         )}
         <div aria-live="polite">
           {retentionError && (
-            <div style={{ fontSize: 11, color: 'var(--accent-red)', marginTop: 4 }}>{retentionError}</div>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--accent-red)', marginTop: 4 }}>{retentionError}</div>
           )}
         </div>
       </div>
@@ -394,7 +394,7 @@ export function SettingsPage() {
     <div className="page-section">
       <div style={{ marginBottom: 20 }}>
         <h1 className="page-title" style={{ marginBottom: 0 }}>Settings</h1>
-        <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }}>Node configuration and preferences</p>
+        <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', marginTop: 4 }}>Node configuration and preferences</p>
       </div>
       <GeneralSettingsTab />
     </div>
@@ -440,7 +440,7 @@ function GeneralSettingsTab() {
           <div className="settings-node-status ds-card-nested">
             <Badge tone={nodeState.tone}>{nodeState.word}</Badge>
             <div
-              style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}
+              style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', marginTop: 4 }}
               title="Peers = unique remote nodes. Direct + Relayed counts are libp2p connections — a single peer can hold both a direct and a relayed link, so they sum to ≥ Peers, not exactly equal to it."
             >
               {nodeState.tooltip ?? `${peerCount} peer${peerCount !== 1 ? 's' : ''} · ${s?.connections?.direct ?? 0} direct, ${s?.connections?.relayed ?? 0} relayed link${(s?.connections?.relayed ?? 0) === 1 ? '' : 's'} · up ${formatUptime(s?.uptimeMs ?? 0)}`}
@@ -464,12 +464,12 @@ function GeneralSettingsTab() {
                 <div style={{ display: 'flex', gap: 16, marginTop: -6 }}>
                   <span
                     className="mono"
-                    style={{ fontSize: 11, color: 'var(--text-secondary)' }}
+                    style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}
                     title={formatEthTooltip(b.eth)}
                   >
                     {formatEth(b.eth)} ETH
                   </span>
-                  <span className="mono" style={{ fontSize: 11, color: 'var(--text-secondary)' }} title={formatTracTooltip(b.trac)}>
+                  <span className="mono" style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }} title={formatTracTooltip(b.trac)}>
                     {formatTrac(b.trac)} {formatTracSymbol(b.symbol, w?.chainId)}
                   </span>
                 </div>
@@ -483,13 +483,13 @@ function GeneralSettingsTab() {
           )}
           {w?.error ? (
             <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)' }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--accent-red)', marginBottom: 2 }}>⚠ Error</div>
-              <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{w.error}</div>
+              <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--accent-red)', marginBottom: 2 }}>⚠ Error</div>
+              <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>{w.error}</div>
             </div>
           ) : w?.chainId?.includes('84532') || w?.chainId?.includes('31337') || w?.chainId?.includes('11155111') ? (
             <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--warning-bg)', border: '1px solid var(--warning-border)' }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--accent-amber)', marginBottom: 2 }}>⚠ Testnet Mode</div>
-              <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>No real TRAC is spent. Perfect for development.</div>
+              <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--accent-amber)', marginBottom: 2 }}>⚠ Testnet Mode</div>
+              <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>No real TRAC is spent. Perfect for development.</div>
             </div>
           ) : null}
         </div>
@@ -517,7 +517,7 @@ function GeneralSettingsTab() {
                 border: `1px solid ${shutdownConfirm ? 'var(--accent-red)' : 'var(--warning-border)'}`,
                 background: shutdownConfirm ? 'var(--danger-bg-strong)' : 'var(--warning-bg)',
                 color: shutdownConfirm ? 'var(--accent-red)' : 'var(--accent-amber)',
-                fontSize: 12, fontWeight: 600,
+                fontSize: 'var(--fs-control)', fontWeight: 600,
                 cursor: shuttingDown ? 'not-allowed' : 'pointer',
                 opacity: shuttingDown ? 0.5 : 1,
               }}
@@ -526,7 +526,7 @@ function GeneralSettingsTab() {
             </button>
             <span aria-live="polite">
               {shutdownConfirm && (
-                <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Click again to confirm. The node process will terminate.</span>
+                <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>Click again to confirm. The node process will terminate.</span>
               )}
             </span>
           </div>

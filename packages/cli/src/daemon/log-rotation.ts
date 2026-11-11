@@ -1,4 +1,4 @@
-import { open, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { link, open, readdir, lstat, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
 /**
@@ -18,9 +18,9 @@ import { basename, dirname, join } from 'node:path';
  * node, which rotates rarely, keeps its live file and the files rotated in the
  * last 72 hours.
  *
- * Renaming keeps every line across rotations and restarts. Trimming the live
+ * Moving files without replacing an existing name keeps every line across rotations and restarts. Trimming the live
  * file in place to its last 35 MB, which reads only a bounded tail, is the
- * fallback when a rename fails, so the size bound holds either way.
+ * fallback when a move safely fails; an incomplete scan or uncertain move is left for the next check.
  */
 export const DEFAULT_DAEMON_LOG_MAX_BYTES = 50 * 1024 * 1024;
 export const DEFAULT_DAEMON_LOG_TOTAL_BYTES = 512 * 1024 * 1024;
@@ -56,9 +56,18 @@ interface RotatedLogFile {
   index: number;
   size: number;
   mtimeMs: number;
+  identity: string | null;
 }
 
 const MIB = 1024 * 1024;
+
+/** Inspect the entry itself; bigint identities keep distinct inode numbers distinct. */
+async function statLogFile(path: string) {
+  const info = await lstat(path, { bigint: true });
+  const identity = typeof info.dev === 'bigint' && typeof info.ino === 'bigint'
+    && info.ino > 0n ? `${info.dev}:${info.ino}` : null;
+  return { size: Number(info.size), mtimeMs: Number(info.mtimeMs), identity, isFile: () => info.isFile(), isSymbolicLink: () => info.isSymbolicLink() };
+}
 
 function rotatedLogPath(logFile: string, index: number): string {
   return `${logFile}.${index}`;
@@ -74,13 +83,17 @@ function positiveSafeInteger(value: number, name: string): number {
 /** The rotated files beside `logFile`, newest (lowest number) first. */
 async function listRotatedLogFiles(logFile: string): Promise<RotatedLogFile[]> {
   const prefix = `${basename(logFile)}.`;
-  const names = await readdir(dirname(logFile)).catch(() => [] as string[]);
+  const names = await readdir(dirname(logFile));
   const files: RotatedLogFile[] = [];
   for (const name of names) {
     const suffix = name.startsWith(prefix) ? name.slice(prefix.length) : '';
     if (!/^[1-9]\d{0,5}$/.test(suffix)) continue;
-    const info = await stat(join(dirname(logFile), name)).catch(() => null);
-    if (info?.isFile()) files.push({ index: Number(suffix), size: info.size, mtimeMs: info.mtimeMs });
+    const info = await statLogFile(join(dirname(logFile), name)).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (info?.isSymbolicLink()) throw new IncompleteLogMoveError('Rotated log is a symbolic link');
+    if (info?.isFile()) files.push({ index: Number(suffix), size: info.size, mtimeMs: info.mtimeMs, identity: info.identity });
   }
   return files.sort((a, b) => a.index - b.index);
 }
@@ -117,12 +130,89 @@ async function keepLogTail(logFile: string, size: number, keepBytes: number): Pr
   return kept.length;
 }
 
-/** Move every rotated file up one number, oldest first, then the live file to `.1`. */
-async function renameIntoRotation(logFile: string, files: readonly RotatedLogFile[]): Promise<void> {
-  for (const file of [...files].reverse()) {
-    await rename(rotatedLogPath(logFile, file.index), rotatedLogPath(logFile, file.index + 1));
+/** Neither trimming nor retention may change a still-linked source after a failed rollback. */
+class IncompleteLogMoveError extends Error {}
+
+/** Pathname checks narrow external races; Node does not provide compare-and-unlink. */
+async function assertLinkedLogEntries(from: string, to: string, identity: string): Promise<void> {
+  const [source, destination] = await Promise.all([statLogFile(from), statLogFile(to)]).catch(error => {
+    throw new IncompleteLogMoveError('Log move identity could not be verified', { cause: error });
+  });
+  if (!source.isFile() || !destination.isFile()
+    || source.identity !== identity || destination.identity !== identity) {
+    throw new IncompleteLogMoveError('Log identity changed during a move');
   }
-  await rename(logFile, rotatedLogPath(logFile, 1));
+}
+
+/** Claim the destination atomically: rename() can overwrite a file omitted by a stale scan. */
+async function moveLogWithoutReplacing(from: string, to: string): Promise<void> {
+  const source = await statLogFile(from).catch(() => null);
+  if (!source?.isFile() || source.identity === null) {
+    throw new IncompleteLogMoveError('Log source identity is unavailable for a move');
+  }
+  const identity = source.identity;
+  try {
+    await link(from, to);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      // A stale scan may have omitted an existing link to the live log itself.
+      const destination = await statLogFile(to).catch(() => null);
+      if (destination === null || destination.isFile() || destination.isSymbolicLink()) {
+        throw new IncompleteLogMoveError('Log destination appeared after its directory scan', { cause: error });
+      }
+    }
+    throw error;
+  }
+  await assertLinkedLogEntries(from, to, identity);
+  try {
+    await unlink(from);
+  } catch (error) {
+    try {
+      // A failed source removal can coincide with either entry being replaced.
+      // Roll back only while the original content still has both regular links.
+      await assertLinkedLogEntries(from, to, identity);
+      await unlink(to);
+    } catch {
+      throw new IncompleteLogMoveError('Log move could not remove its source or roll back its link', { cause: error });
+    }
+    throw error;
+  }
+}
+
+/** Recover an interrupted link/unlink without creating more aliases on each retry. */
+async function removeInterruptedMoveAliases(
+  logFile: string,
+  liveIdentity: string | null,
+  files: readonly RotatedLogFile[],
+): Promise<RotatedLogFile[]> {
+  const seen = new Map(liveIdentity === null ? [] : [[liveIdentity, logFile]]);
+  const unique: RotatedLogFile[] = [];
+  for (const file of files) {
+    if (file.identity !== null && seen.has(file.identity)) {
+      try {
+        const duplicatePath = rotatedLogPath(logFile, file.index);
+        const retainedPath = seen.get(file.identity)!;
+        // Scan identities can be stale after an operator replaces a path. Confirm
+        // both regular entries still name the retained inode before removing one.
+        await assertLinkedLogEntries(retainedPath, duplicatePath, file.identity);
+        await unlink(duplicatePath);
+      } catch (error) {
+        throw new IncompleteLogMoveError('Interrupted log move is still linked', { cause: error });
+      }
+    } else {
+      if (file.identity !== null) seen.set(file.identity, rotatedLogPath(logFile, file.index));
+      unique.push(file);
+    }
+  }
+  return unique;
+}
+
+/** Move every rotated file up one number, oldest first, then the live file to `.1`. */
+async function moveIntoRotation(logFile: string, files: readonly RotatedLogFile[]): Promise<void> {
+  for (const file of [...files].reverse()) {
+    await moveLogWithoutReplacing(rotatedLogPath(logFile, file.index), rotatedLogPath(logFile, file.index + 1));
+  }
+  await moveLogWithoutReplacing(logFile, rotatedLogPath(logFile, 1));
 }
 
 /**
@@ -146,28 +236,45 @@ export async function rotateDaemonLogIfNeeded(
   }
   const now = options.now ?? Date.now;
 
-  const before = await stat(logFile).catch(() => null);
+  const before = await statLogFile(logFile).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
   const previousBytes = before?.size ?? 0;
-  let files = await listRotatedLogFiles(logFile);
+  if (before && !before.isFile()) {
+    return { rotated: false, trimmed: false, previousBytes, removedFiles: 0, newestCutTo: null };
+  }
+  let files = await listRotatedLogFiles(logFile).catch(() => null);
   let rotated = false;
   let trimmed = false;
   if (before && before.size > maxBytes) {
     try {
-      await renameIntoRotation(logFile, files);
+      if (files === null) throw new IncompleteLogMoveError('Incomplete rotated-log scan');
+      if (before.identity === null || files.some(file => file.identity === null)) {
+        throw new IncompleteLogMoveError('Log identity is unavailable for no-replace rotation');
+      }
+      files = await removeInterruptedMoveAliases(logFile, before.identity, files);
+      await moveIntoRotation(logFile, files);
       rotated = true;
-    } catch {
+    } catch (error) {
+      if (error instanceof IncompleteLogMoveError) {
+        return { rotated: false, trimmed: false, previousBytes, removedFiles: 0, newestCutTo: null };
+      }
       await keepLogTail(logFile, before.size, keepBytes);
       trimmed = true;
     }
-    files = await listRotatedLogFiles(logFile);
+    files = await listRotatedLogFiles(logFile).catch(() => null);
   }
+
+  // An incomplete scan cannot prove which files are newest or fit retention.
+  if (files === null) return { rotated, trimmed, previousBytes, removedFiles: 0, newestCutTo: null };
 
   // Newest first: a file is kept only while every newer one is, so what is
   // kept is the most recent log. The newest rotated file can pass the size
   // limit alone (a live file that grew far past `maxBytes`, as an inherited
   // one can); it then keeps its last lines, at most `keepBytes` and what the
   // limit leaves, and the files before it are judged as usual.
-  const live = await stat(logFile).catch(() => null);
+  const live = await statLogFile(logFile).catch(() => null);
   let keptBytes = live?.size ?? 0;
   let keeping = true;
   let removedFiles = 0;

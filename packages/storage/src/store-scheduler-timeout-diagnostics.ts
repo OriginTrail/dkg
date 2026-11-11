@@ -1,11 +1,11 @@
 import type { StoreWorkPriority } from './triple-store.js';
-import type { BackpressureSnapshot } from '@origintrail-official/dkg-core';
+import type { AsyncAdmissionDiagnosticContext, BackpressureSnapshot } from '@origintrail-official/dkg-core';
 
 /** The lane a store scheduler reports: a shared lane, or `control` for a queue's control-path instance. */
 export type StoreSchedulerPriority = StoreWorkPriority | 'control';
 
 export interface StoreSchedulerTimeoutDiagnostic {
-  waiting: { priority: StoreSchedulerPriority; operation: string };
+  waiting: StoreSchedulerTimeoutWaiter;
   /** Possible slot holders, never proof of which operation delayed the waiter. */
   activeAtTimeout: readonly {
     priority: StoreSchedulerPriority;
@@ -13,11 +13,33 @@ export interface StoreSchedulerTimeoutDiagnostic {
     count: number;
     oldestAgeMs: number;
   }[];
+  /** Correlated slot holders, not proof they caused the wait or were using CPU. */
+  activeAdmissions?: readonly StoreSchedulerActiveAdmission[];
+}
+
+export interface StoreSchedulerActiveAdmission extends AsyncAdmissionDiagnosticContext {
+  readonly priority: StoreSchedulerPriority;
+  readonly queueWaitMs: number;
+  readonly activeAgeMs: number;
 }
 
 export interface StoreSchedulerTimeoutWaiter {
   priority: StoreSchedulerPriority;
   operation: string;
+  admission?: AsyncAdmissionDiagnosticContext;
+}
+
+/** Project only bounded correlation metadata; never retain work closures in a diagnostic. */
+export function activeStoreAdmissionsSnapshot(
+  entries: Iterable<readonly [{ admission?: AsyncAdmissionDiagnosticContext; lane: StoreSchedulerPriority; queuedAt: number }, number]>,
+  now: number,
+): readonly StoreSchedulerActiveAdmission[] {
+  return [...entries].flatMap(([entry, startedAt]) => entry.admission ? [{
+    ...entry.admission,
+    priority: entry.lane,
+    queueWaitMs: Math.max(0, Math.round(startedAt - entry.queuedAt)),
+    activeAgeMs: Math.max(0, Math.round(now - startedAt)),
+  }] : []).sort((a, b) => b.activeAgeMs - a.activeAgeMs).slice(0, 3);
 }
 
 /** Admit first, then collect and project only diagnostics that can be emitted. */
@@ -27,7 +49,11 @@ export function createRateLimitedStoreTimeoutDiagnosticReporter(options: {
   intervalMs?: number;
   maxKeys?: number;
   maxEmitsPerWindow?: number;
-}): (waiting: StoreSchedulerTimeoutWaiter, snapshot: () => BackpressureSnapshot) => void {
+}): (
+  waiting: StoreSchedulerTimeoutWaiter,
+  snapshot: () => BackpressureSnapshot,
+  activeAdmissions?: () => readonly StoreSchedulerActiveAdmission[],
+) => void {
   const now = options.now ?? Date.now;
   const intervalMs = options.intervalMs ?? 60_000;
   const maxKeys = options.maxKeys ?? 128;
@@ -37,7 +63,7 @@ export function createRateLimitedStoreTimeoutDiagnosticReporter(options: {
   const emittedAt = new Map<string, number>();
   let windowStart: number | undefined;
   let windowEmitted = 0;
-  return (waiting, snapshot) => {
+  return (waiting, snapshot, collectAdmissions) => {
     try {
       const key = `${waiting.priority}:${waiting.operation}`;
       const timestamp = now();
@@ -66,7 +92,11 @@ export function createRateLimitedStoreTimeoutDiagnosticReporter(options: {
       emittedAt.delete(key);
       if (emittedAt.size >= maxKeys) emittedAt.delete(emittedAt.keys().next().value!);
       emittedAt.set(key, timestamp);
-      const diagnostic: StoreSchedulerTimeoutDiagnostic = { waiting, activeAtTimeout };
+      const activeAdmissions = collectAdmissions?.().slice(0, 3);
+      const diagnostic: StoreSchedulerTimeoutDiagnostic = {
+        waiting, activeAtTimeout,
+        ...(activeAdmissions?.length ? { activeAdmissions } : {}),
+      };
       const delivery = options.emit(diagnostic);
       if (delivery) void delivery.catch(() => undefined);
     } catch {

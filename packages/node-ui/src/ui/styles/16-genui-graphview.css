@@ -2,13 +2,13 @@
 .v10-genui-panel { display: flex; flex-direction: column; gap: 8px; }
 .v10-genui-loading {
   padding: 10px 12px;
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-tertiary);
   font-style: italic;
 }
 .v10-genui-error {
   padding: 10px 12px;
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-danger);
   background: var(--danger-bg);
   border: 1px solid var(--danger-border);
@@ -31,7 +31,7 @@
   gap: 12px;
 }
 .v10-genui-error-icon {
-  font-size: 20px;
+  font-size: var(--fs-heading);
   line-height: 1;
   color: var(--accent-amber);
   flex-shrink: 0;
@@ -40,16 +40,16 @@
 .v10-genui-error-title {
   font-weight: 600;
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: var(--fs-body);
   margin-bottom: 4px;
 }
 .v10-genui-error-desc {
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--text-tertiary);
   line-height: 1.55;
 }
 .v10-genui-error-cta-btn { align-self: flex-start; }
-.v10-me-error { padding: 12px 16px; font-size: 12px; color: var(--accent-red); background: var(--danger-bg); }
+.v10-me-error { padding: 12px 16px; font-size: var(--fs-control); color: var(--accent-red); background: var(--danger-bg); }
 
 /* ── Graph View (full graph tab) ── */
 
@@ -59,7 +59,7 @@
    set per card) only on the icon tile. Status chips use signal colours
    for real states only; layer purple is reserved for the VM panel. */
 .v10-genui-root { display: flex; flex-direction: column; gap: 10px; }
-.v10-genui-root-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-tertiary); }
+.v10-genui-root-title { font-size: var(--fs-label); font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-tertiary); }
 
 .v10-genui-card {
   --kind: var(--text-tertiary);
@@ -73,28 +73,28 @@
 .v10-genui-card-icon {
   flex: none; width: 26px; height: 26px; border-radius: var(--radius-control);
   display: inline-flex; align-items: center; justify-content: center;
-  font-size: 14px; line-height: 1;
+  font-size: var(--fs-body); line-height: 1;
   color: var(--kind);
   background: color-mix(in srgb, var(--kind) 16%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kind) 35%, transparent);
 }
-.v10-genui-card-title { flex: 1 1 200px; min-width: 0; font-size: 14px; font-weight: 600; color: var(--text-primary); line-height: 1.35; overflow-wrap: anywhere; }
+.v10-genui-card-title { flex: 1 1 200px; min-width: 0; font-size: var(--fs-body); font-weight: 600; color: var(--text-primary); line-height: 1.35; overflow-wrap: anywhere; }
 .v10-genui-card-type { font: 500 11px var(--font-mono); color: var(--text-tertiary); }
-.v10-genui-card-subtitle { font-size: 12px; color: var(--text-secondary); line-height: 1.45; overflow-wrap: anywhere; }
+.v10-genui-card-subtitle { font-size: var(--fs-control); color: var(--text-secondary); line-height: 1.45; overflow-wrap: anywhere; }
 .v10-genui-pr-num { font-family: var(--font-mono); color: var(--text-tertiary); font-weight: 500; margin-right: 6px; }
-.v10-genui-pr-body { font-size: 12px; color: var(--text-secondary); line-height: 1.5; white-space: pre-wrap; max-height: 9em; overflow: auto; }
+.v10-genui-pr-body { font-size: var(--fs-control); color: var(--text-secondary); line-height: 1.5; white-space: pre-wrap; max-height: 9em; overflow: auto; }
 
 /* Stats */
 .v10-genui-stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; }
 .v10-genui-stat { padding: 8px 10px; background: var(--bg-elevated); display: flex; flex-direction: column; gap: 2px; }
 .v10-genui-stat-value { font: 600 16px var(--font-mono); color: var(--text-primary); font-variant-numeric: tabular-nums; }
-.v10-genui-stat-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--text-tertiary); }
+.v10-genui-stat-label { font-size: var(--fs-micro); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--text-tertiary); }
 
 /* Label · value chips (neutral; info is neutral per the A2 decision) */
 .v10-genui-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .v10-genui-chip {
   display: inline-flex; align-items: baseline; gap: 5px;
-  padding: 3px 8px; border-radius: var(--radius-pill); font-size: 11px;
+  padding: 3px 8px; border-radius: var(--radius-pill); font-size: var(--fs-label);
   background: var(--bg-elevated); border: 1px solid var(--border-subtle);
   color: var(--text-secondary); text-decoration: none;
 }
@@ -112,26 +112,26 @@ a.v10-genui-chip:hover { border-color: var(--border-strong); }
 
 /* Decision sections */
 .v10-genui-decision-section { display: flex; flex-direction: column; gap: 3px; padding-top: 8px; border-top: 1px solid var(--border-subtle); }
-.v10-genui-decision-section-heading { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-tertiary); }
-.v10-genui-decision-section-body { font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
+.v10-genui-decision-section-heading { font-size: var(--fs-micro); font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-tertiary); }
+.v10-genui-decision-section-body { font-size: var(--fs-body); color: var(--text-secondary); line-height: 1.5; }
 
 /* Generic sections: triple table, type groups, cross-refs */
 .v10-genui-section { display: flex; flex-direction: column; gap: 6px; }
-.v10-genui-section-heading { display: flex; gap: 6px; align-items: baseline; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-tertiary); }
+.v10-genui-section-heading { display: flex; gap: 6px; align-items: baseline; font-size: var(--fs-label); font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-tertiary); }
 .v10-genui-section-sub { font: 500 11px var(--font-mono); text-transform: none; letter-spacing: 0; }
 .v10-genui-triple-table { border: 1px solid var(--border-subtle); overflow: hidden; }
-.v10-genui-triple-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 10px; padding: 6px 10px; font-size: 12px; }
+.v10-genui-triple-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 10px; padding: 6px 10px; font-size: var(--fs-control); }
 .v10-genui-triple-row + .v10-genui-triple-row { border-top: 1px solid var(--border-subtle); }
 .v10-genui-triple-predicate { font-family: var(--font-mono); color: var(--text-tertiary); overflow-wrap: anywhere; }
 .v10-genui-triple-object { color: var(--text-primary); overflow-wrap: anywhere; }
 .v10-genui-type-groups { display: flex; flex-direction: column; gap: 8px; }
 .v10-genui-type-group { border: 1px solid var(--border-subtle); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
-.v10-genui-type-group-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.v10-genui-type-group-head { display: flex; align-items: center; gap: 6px; font-size: var(--fs-control); font-weight: 600; color: var(--text-primary); }
 .v10-genui-type-icon { color: var(--text-tertiary); }
 .v10-genui-type-count { margin-left: auto; font: 500 11px var(--font-mono); color: var(--text-tertiary); }
 .v10-genui-type-items { display: flex; flex-direction: column; gap: 4px; }
-.v10-genui-type-item-label, .v10-genui-crossref-label { font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
-.v10-genui-type-item-sub, .v10-genui-crossref-sub { font-size: 11px; color: var(--text-tertiary); }
+.v10-genui-type-item-label, .v10-genui-crossref-label { font-size: var(--fs-control); color: var(--text-secondary); overflow-wrap: anywhere; }
+.v10-genui-type-item-sub, .v10-genui-crossref-sub { font-size: var(--fs-label); color: var(--text-tertiary); }
 .v10-genui-crossref { display: flex; flex-wrap: wrap; gap: 6px; }
 .v10-genui-crossref-item { display: inline-flex; gap: 6px; align-items: baseline; padding: 3px 8px; border-radius: var(--radius-control); background: var(--bg-elevated); }
 
@@ -141,22 +141,22 @@ a.v10-genui-chip:hover { border-color: var(--border-strong); }
   background: var(--layer-verified-bg); border: 1px solid var(--layer-verified-border);
 }
 .v10-genui-vm-panel-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.v10-genui-vm-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+.v10-genui-vm-title { font-size: var(--fs-body); font-weight: 600; color: var(--text-primary); }
 .v10-genui-vm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
 .v10-genui-vm-block { display: flex; flex-direction: column; gap: 5px; padding: 8px 10px; background: var(--bg-surface); min-width: 0; }
-.v10-genui-vm-block-heading { display: flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-tertiary); }
+.v10-genui-vm-block-heading { display: flex; align-items: center; gap: 6px; font-size: var(--fs-micro); font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-tertiary); }
 .v10-genui-vm-quorum { font: 600 10px var(--font-mono); color: var(--layer-verified-text); text-transform: none; letter-spacing: 0; }
-.v10-genui-prov-row { display: flex; gap: 8px; font-size: 12px; min-width: 0; }
+.v10-genui-prov-row { display: flex; gap: 8px; font-size: var(--fs-control); min-width: 0; }
 .v10-genui-prov-label { flex: none; width: 42px; color: var(--text-tertiary); }
 .v10-genui-prov-value { color: var(--text-primary); overflow-wrap: anywhere; min-width: 0; }
 .v10-genui-prov-value.mono { font-family: var(--font-mono); }
 .v10-genui-vm-signer { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .v10-genui-vm-signer-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--text-tertiary); }
 .v10-genui-vm-signer-body { min-width: 0; }
-.v10-genui-vm-signer-label { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.v10-genui-vm-signer-label { font-size: var(--fs-control); font-weight: 600; color: var(--text-primary); }
 .v10-genui-vm-signer-did { font: 11px var(--font-mono); color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .v10-genui-vm-rep { margin-left: auto; font: 500 11px var(--font-mono); color: var(--text-secondary); }
-.v10-genui-vm-timeline-row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: 12px; }
+.v10-genui-vm-timeline-row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: var(--fs-control); }
 .v10-genui-vm-timeline-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--layer-verified); }
 .v10-genui-vm-timeline-label { color: var(--text-primary); }
 .v10-genui-vm-timeline-at { font: 11px var(--font-mono); color: var(--text-tertiary); }

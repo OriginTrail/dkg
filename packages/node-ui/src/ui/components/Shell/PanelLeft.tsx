@@ -1,5 +1,5 @@
-import React, { useCallback, useId, useState } from 'react';
-import { ChevronRight } from 'lucide-react';
+import React, { useCallback, useState } from 'react';
+import { Activity, ClipboardList, KeyRound, Store } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
@@ -21,6 +21,8 @@ import {
   toSidebarIdentity,
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
+import { MARKETPLACE_TABS, MARKETPLACE_TAB_IDS, marketplaceEnabled } from '../../marketplace/tabs.js';
+import { SidebarSection } from './SidebarSection.js';
 import { DASHBOARD_ICON, placeIcon } from './nav-icons.js';
 import { NODE_PLACE_IDS, PLACES } from '../../lib/tab-target.js';
 
@@ -30,7 +32,6 @@ const NODE_PLACES = NODE_PLACE_IDS.map((id) => ({ id, ...PLACES[id], icon: place
 // Memory-layer expansion was removed by request — layers are surfaced inside
 // the project view rather than as nested sidebar items.
 
-type TreeMode = 'explorer' | 'oracle';
 
 // Hidden-context-graph dismiss is now the shared `useHiddenProjectIds`
 // (aliased import above) so PanelLeft, the Memory Stack and the Dashboard
@@ -128,8 +129,8 @@ function localAgentDotColor(status: LocalAgentIntegrationStatus): string {
     case 'chat_ready':
       return 'var(--accent-green)';
     case 'connecting':
-    case 'degraded':
       return 'var(--accent-amber)';
+    case 'degraded':
     case 'bridge_offline':
       return 'var(--accent-red)';
     case 'available':
@@ -161,16 +162,16 @@ function IntegrationsSectionBody() {
 
   return (
     <div className="v10-tree-items" style={{ display: 'block' }}>
-      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '6px 12px 2px 24px' }}>
+      <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '6px 12px 2px 24px' }}>
         Agents
       </div>
       {localAgentsError && (
-        <div style={{ fontSize: 11, color: 'var(--text-danger)', padding: '4px 12px 4px 24px' }}>
+        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-danger)', padding: '4px 12px 4px 24px' }}>
           {localAgentsError}
         </div>
       )}
       {!localAgentsError && localAgents.length === 0 && (
-        <div style={{ fontSize: 11, color: 'var(--text-tertiary)', padding: '4px 12px 4px 24px', fontStyle: 'italic' }}>
+        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', padding: '4px 12px 4px 24px', fontStyle: 'italic' }}>
           No agents detected.
         </div>
       )}
@@ -192,7 +193,7 @@ function IntegrationsSectionBody() {
             }}
           />
           <span className="v10-tree-item-label">{a.name}</span>
-          <span style={{ fontSize: 11, color: 'var(--text-tertiary)', marginLeft: 4 }}>
+          <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginLeft: 4 }}>
             {a.statusLabel}
           </span>
         </div>
@@ -202,21 +203,19 @@ function IntegrationsSectionBody() {
 }
 
 export function PanelLeft() {
+  const leftSectionMarketplaceOpen = useLayoutStore((s) => s.leftSectionMarketplaceOpen);
+  const toggleLeftSectionMarketplace = useLayoutStore((s) => s.toggleLeftSectionMarketplace);
   const leftSectionMyProjectsOpen = useLayoutStore((s) => s.leftSectionMyProjectsOpen);
+  const leftSectionContextOracleOpen = useLayoutStore((s) => s.leftSectionContextOracleOpen);
   const leftSectionIntegrationsOpen = useLayoutStore((s) => s.leftSectionIntegrationsOpen);
   const toggleLeftSectionMyProjects = useLayoutStore((s) => s.toggleLeftSectionMyProjects);
+  const toggleLeftSectionContextOracle = useLayoutStore((s) => s.toggleLeftSectionContextOracle);
   const toggleLeftSectionIntegrations = useLayoutStore((s) => s.toggleLeftSectionIntegrations);
-  // Stable per-render ids for the section bodies so the chevron buttons
-  // can use `aria-controls` to point at the disclosed region (screen
-  // readers can then programmatically associate trigger ↔ content).
-  const myProjectsBodyId = useId();
-  const integrationsBodyId = useId();
   const { openTab, activeTabId, setActiveTab } = useTabsStore();
   const { activeProjectId, setActiveProject } = useProjectsStore();
   const { contextGraphs, error: listError, identity: sharedAgent,
     inventoryLoading, inventoryError } = useContextGraphInventory();
   const stage = useJourneyStore((s) => s.stage);
-  const [treeMode, setTreeMode] = useState<TreeMode>('explorer');
 
   const { hidden: hiddenIds, hide: hideProject, unhideAll } = useHiddenProjectIds();
   const agentIdentity: AgentSidebarIdentity | null = sharedAgent.data ? toSidebarIdentity(sharedAgent.data) : null;
@@ -228,126 +227,121 @@ export function PanelLeft() {
     belongsInContextOracleSidebar(cg, agentIdentity));
   const hiddenCount = contextGraphs.length - visibleContextGraphs.length;
 
+  // The marketplace section is still flagged: `?marketplace` once turns it on.
+  const showMarketplace = marketplaceEnabled();
+  const marketplaceActive = MARKETPLACE_TAB_IDS.includes(activeTabId);
+  const openMarketplaceTab = (tab: { id: string; label: string }) => {
+    openTab({ id: tab.id, label: tab.label, closable: true });
+    setActiveTab(tab.id);
+    setActiveProject(null);
+  };
+  const marketplaceRows = [
+    { tab: MARKETPLACE_TABS.browse, label: 'Browse', icon: <Store size={14} aria-hidden="true" /> },
+    { tab: MARKETPLACE_TABS.plans, label: 'Plans', icon: <ClipboardList size={14} aria-hidden="true" /> },
+    { tab: MARKETPLACE_TABS.access, label: 'Access', icon: <KeyRound size={14} aria-hidden="true" /> },
+    { tab: MARKETPLACE_TABS.operate, label: 'Operate', icon: <Activity size={14} aria-hidden="true" /> },
+  ];
+
+  // The create and join dialogs belong to the shell (ContextGraphDialogs), so
+  // they outlive this panel closing on navigation or a resize.
   const openCreateModal = useContextGraphDialogs((s) => s.openCreate);
   const openJoinModal = useContextGraphDialogs((s) => s.openJoin);
 
+  const showEmptyCard = contextGraphs.length === 0 && stage <= 1 && !inventoryError && !inventoryLoading;
+  // On first run the empty card carries New and Join; otherwise they close the group.
+  const showCardActions = showEmptyCard && stage === 1;
+
+  const membershipNote = inventoryError
+    ? 'Context Graph membership unavailable.'
+    : inventoryLoading
+      ? 'Loading Context Graphs…'
+      : null;
+
   return (
     <div className="v10-panel-left">
-      <div className="v10-tree-create-actions">
-        <button className="v10-new-project-btn ds-btn" onClick={openCreateModal}>+ New Context Graph</button>
-        <button className="v10-new-project-btn ds-btn" onClick={() => openJoinModal()}>↗ Join Context Graph</button>
-      </div>
-
-      <div className="v10-tree-header">
-        <div className="ds-seg" role="group" aria-label="Sidebar view">
+      <div className="v10-tree-content v10-sidebar-content">
         <button
-          aria-pressed={treeMode === 'explorer'}
-          className={`v10-tree-mode-btn ds-seg-item ${treeMode === 'explorer' ? 'active' : ''}`}
-          onClick={() => setTreeMode('explorer')}
+          type="button"
+          className={`v10-tree-dashboard v10-sidebar-place ${activeTabId === 'dashboard' ? 'active' : ''}`}
+          aria-current={activeTabId === 'dashboard' ? 'page' : undefined}
+          onClick={() => { setActiveTab('dashboard'); setActiveProject(null); }}
         >
-          Context Graphs
+          <span className="v10-sidebar-place-icon">{DASHBOARD_ICON}</span>
+          Dashboard
         </button>
-        <button
-          aria-pressed={treeMode === 'oracle'}
-          className={`v10-tree-mode-btn ds-seg-item ${treeMode === 'oracle' ? 'active' : ''}`}
-          onClick={() => setTreeMode('oracle')}
-        >
-          Context Oracle
-        </button>
-        </div>
-      </div>
 
-      {inventoryError && (
-        <div className="v10-journey-empty-card ds-card" role="alert">
-          <div>{listError ? 'Context Graphs unavailable. ' : ''}{sharedAgent.error ? 'Agent identity unavailable.' : ''}</div>
-          <div>{contextGraphs.length ? 'Showing the last available Context Graphs.' : 'Context Graph membership is unknown.'}</div>
-          <button type="button" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry</button>
-        </div>
-      )}
-      {inventoryLoading && contextGraphs.length === 0 && <div role="status">Loading Context Graphs…</div>}
-
-      {treeMode === 'explorer' && (
-        <div className="v10-tree-content">
-          <button
-            type="button"
-            className={`v10-tree-dashboard ${activeTabId === 'dashboard' ? 'active' : ''}`}
-            aria-current={activeTabId === 'dashboard' ? 'page' : undefined}
-            onClick={() => { setActiveTab('dashboard'); setActiveProject(null); }}
+        {showMarketplace && (
+          <SidebarSection
+            label="Marketplace"
+            active={marketplaceActive}
+            open={leftSectionMarketplaceOpen}
+            onToggle={toggleLeftSectionMarketplace}
+            className="v10-sidebar-marketplace"
+            bodyClassName="v10-sidebar-marketplace-items"
           >
-            <span className="v10-sidebar-place-icon">{DASHBOARD_ICON}</span> Dashboard
-          </button>
+            {marketplaceRows.map(({ tab, label, icon }) => (
+              <button
+                key={tab.id}
+                type="button"
+                className={`v10-tree-dashboard v10-sidebar-place ${activeTabId === tab.id ? 'active' : ''}`}
+                aria-current={activeTabId === tab.id ? 'page' : undefined}
+                onClick={() => openMarketplaceTab(tab)}
+              >
+                <span className="v10-sidebar-place-icon">{icon}</span>
+                {label}
+              </button>
+            ))}
+          </SidebarSection>
+        )}
 
-          {/* Empty-state card hoisted ABOVE the collapsible sections so it
-              stays visible if both sections are collapsed. */}
-          {contextGraphs.length === 0 && stage <= 1 && !inventoryError && !inventoryLoading && (
-            <div className="v10-journey-empty-card ds-card">
-              <div className="v10-jec-title">No Context Graphs yet</div>
-              <div className="v10-jec-hint">
+        {inventoryError && (
+          <div className="v10-journey-empty-card ds-card" role="alert">
+            <div>{listError ? 'Context Graphs unavailable. ' : ''}{sharedAgent.error ? 'Agent identity unavailable.' : ''}</div>
+            <div>{contextGraphs.length ? 'Showing the last available Context Graphs.' : 'Context Graph membership is unknown.'}</div>
+            <button type="button" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry</button>
+          </div>
+        )}
+
+        <SidebarSection
+          label="My Context Graphs"
+          count={myProjects.length}
+          open={leftSectionMyProjectsOpen}
+          onToggle={toggleLeftSectionMyProjects}
+        >
+          {showEmptyCard ? (
+            <div className="v10-sidebar-empty v10-sidebar-first-run">
+              <strong>No Context Graphs yet</strong>
+              <span>
                 {stage === 0
                   ? 'Connect an agent to get started.'
-                  : 'Create your first Context Graph to give your agent structured memory.'}
-              </div>
-              {stage === 1 && (
-                <button className="v10-new-project-btn ds-btn" style={{ margin: 0 }} onClick={openCreateModal}>
-                  + Create First Context Graph
-                </button>
-              )}
-            </div>
-          )}
-
-          {/* Section A: My Context Graphs (default expanded). Uses the
-              .v10-peer-group-* pattern from the right panel — polished
-              focus-visible + prefers-reduced-motion + button semantics.
-              Header renders even when `myProjects` is empty (but at
-              least one CG exists, or the journey is past first-run) —
-              otherwise a sidebar with CGs only in the Context Oracle
-              view would collapse to a lone "Integrations" header
-              (qa-lead). The empty-state journey card above handles the
-              "no CGs at all" first-run case. */}
-          {(contextGraphs.length > 0 || stage >= 2) && (
-            <div className="v10-peer-group">
-              <button
-                type="button"
-                className="v10-peer-group-header"
-                aria-expanded={leftSectionMyProjectsOpen}
-                aria-controls={myProjectsBodyId}
-                onClick={toggleLeftSectionMyProjects}
-              >
-                <ChevronRight
-                  size={14}
-                  className={`v10-peer-group-chevron ${leftSectionMyProjectsOpen ? 'expanded' : ''}`}
-                  aria-hidden="true"
-                />
-                <span className="v10-peer-group-label">My Context Graphs</span>
-              </button>
-              {leftSectionMyProjectsOpen && (
-                <div id={myProjectsBodyId} className="v10-peer-group-body">
-                  {myProjects.length === 0 ? (
-                    <div
-                      className="v10-tree-item"
-                      style={{ cursor: 'default', color: 'var(--text-tertiary)', fontStyle: 'italic' }}
-                    >
-                      <span className="v10-tree-item-label">{inventoryError ? 'Context Graph membership unavailable.' : inventoryLoading ? 'Loading Context Graphs…' : 'No Context Graphs in this view yet.'}</span>
-                    </div>
-                  ) : myProjects.map((cg) => (
-                    <ProjectTreeItem
-                      key={cg.id}
-                      cg={cg}
-                      isActive={activeProjectId === cg.id}
-                      onSelect={() => {
-                        setActiveProject(cg.id);
-                        openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
-                      }}
-                      onHide={() => {
-                        hideProject(cg.id);
-                        if (activeProjectId === cg.id) setActiveProject(null);
-                      }}
-                    />
-                  ))}
+                  : 'Create your first Context Graph to give your agent structured memory, or join one by ID.'}
+              </span>
+              {showCardActions && (
+                <div className="v10-sidebar-inline-actions">
+                  <button type="button" className="ds-btn ds-primary ds-sm" aria-label="New Context Graph" onClick={openCreateModal}>New</button>
+                  <button type="button" className="ds-btn ds-sm" aria-label="Join Context Graph" onClick={() => openJoinModal()}>Join</button>
                 </div>
               )}
             </div>
-          )}
+          ) : myProjects.length === 0 ? (
+            <div className="v10-sidebar-empty" role={membershipNote ? 'status' : undefined}>
+              <span>{membershipNote ?? 'No Context Graphs in this section yet.'}</span>
+            </div>
+          ) : myProjects.map((cg) => (
+            <ProjectTreeItem
+              key={cg.id}
+              cg={cg}
+              isActive={activeProjectId === cg.id}
+              onSelect={() => {
+                setActiveProject(cg.id);
+                openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
+              }}
+              onHide={() => {
+                hideProject(cg.id);
+                if (activeProjectId === cg.id) setActiveProject(null);
+              }}
+            />
+          ))}
 
           {hiddenCount > 0 && (
             <button
@@ -360,97 +354,74 @@ export function PanelLeft() {
             </button>
           )}
 
-          {/* Section B: Integrations (default collapsed — escape-hatch
-              surface). Body is only mounted while open, so the 30s
-              polling effect in IntegrationsSectionBody naturally pauses
-              when collapsed. */}
-          {stage >= 1 && (
-            <div className="v10-peer-group">
-              <button
-                type="button"
-                className="v10-peer-group-header"
-                aria-expanded={leftSectionIntegrationsOpen}
-                aria-controls={integrationsBodyId}
-                onClick={toggleLeftSectionIntegrations}
-              >
-                <ChevronRight
-                  size={14}
-                  className={`v10-peer-group-chevron ${leftSectionIntegrationsOpen ? 'expanded' : ''}`}
-                  aria-hidden="true"
-                />
-                <span className="v10-peer-group-label">Integrations</span>
-              </button>
-              {leftSectionIntegrationsOpen && (
-                <div id={integrationsBodyId} className="v10-peer-group-body">
-                  <IntegrationsSectionBody />
-                </div>
-              )}
+          {!showCardActions && (
+            <div className="v10-sidebar-inline-actions">
+              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="New Context Graph" onClick={openCreateModal}>New</button>
+              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="Join Context Graph" onClick={() => openJoinModal()}>Join</button>
             </div>
           )}
-        </div>
-      )}
+        </SidebarSection>
 
-      {treeMode === 'oracle' && (
-        <div className="v10-tree-content">
-          {contextOracleProjects.length > 0 && (
-            <>
-              <div className="v10-tree-group-label">Context Oracle</div>
-              {contextOracleProjects.map((cg) => {
-                const onHide = () => {
-                  hideProject(cg.id);
-                  if (activeProjectId === cg.id) setActiveProject(null);
-                };
-                if (classifyContextOracleEntry(cg) === 'catalogue') {
-                  return (
-                    <OracleCatalogueItem
-                      key={cg.id}
-                      cg={cg}
-                      isBrowsing={activeTabId === `project:${cg.id}`}
-                      onBrowse={() => {
-                        setActiveProject(null);
-                        openTab({
-                          id: `project:${cg.id}`,
-                          label: cg.name || cg.id.slice(0, 16),
-                          closable: true,
-                        });
-                      }}
-                      onSubscribe={() => openJoinModal(cg.id)}
-                      onHide={onHide}
-                    />
-                  );
-                }
-                return (
-                  <ProjectTreeItem
-                    key={cg.id}
-                    cg={cg}
-                    isActive={activeProjectId === cg.id}
-                    onSelect={() => {
-                      setActiveProject(cg.id);
-                      openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
-                    }}
-                    onHide={onHide}
-                  />
-                );
-              })}
-            </>
+        <SidebarSection
+          label="Public graphs"
+          count={contextOracleProjects.length}
+          open={leftSectionContextOracleOpen}
+          onToggle={toggleLeftSectionContextOracle}
+          bodyClassName="v10-sidebar-public-graphs"
+        >
+          {contextOracleProjects.length > 0 ? contextOracleProjects.map((cg) => {
+            const onHide = () => {
+              hideProject(cg.id);
+              if (activeProjectId === cg.id) setActiveProject(null);
+            };
+            if (classifyContextOracleEntry(cg) === 'catalogue') {
+              return (
+                <OracleCatalogueItem
+                  key={cg.id}
+                  cg={cg}
+                  isBrowsing={activeTabId === `project:${cg.id}`}
+                  onBrowse={() => {
+                    setActiveProject(null);
+                    openTab({
+                      id: `project:${cg.id}`,
+                      label: cg.name || cg.id.slice(0, 16),
+                      closable: true,
+                    });
+                  }}
+                  onSubscribe={() => openJoinModal(cg.id)}
+                  onHide={onHide}
+                />
+              );
+            }
+            return (
+              <ProjectTreeItem
+                key={cg.id}
+                cg={cg}
+                isActive={activeProjectId === cg.id}
+                onSelect={() => {
+                  setActiveProject(cg.id);
+                  openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
+                }}
+                onHide={onHide}
+              />
+            );
+          }) : (
+            <div className="v10-sidebar-empty" role={membershipNote ? 'status' : undefined}>
+              <span>{membershipNote ?? 'Discovered public graphs will appear here. Use Join to subscribe by ID.'}</span>
+            </div>
           )}
-          {contextOracleProjects.length === 0 && !inventoryError && !inventoryLoading && (
-            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '20px 12px', textAlign: 'center', lineHeight: 1.5 }}>
-              No discovered public Context Graphs yet. Public graphs appear here as soon as your node discovers them; use <strong>Join Context Graph</strong> to subscribe by ID.
-            </p>
-          )}
-          {hiddenCount > 0 && (
-            <button
-              type="button"
-              className="v10-tree-show-hidden"
-              onClick={unhideAll}
-              title="Restore all Context Graphs dismissed from the sidebar"
-            >
-              ↺ Show {hiddenCount} hidden Context Graph{hiddenCount !== 1 ? 's' : ''}
-            </button>
-          )}
-        </div>
-      )}
+        </SidebarSection>
+
+        {stage >= 1 && (
+          <SidebarSection
+            label="Integrations"
+            open={leftSectionIntegrationsOpen}
+            onToggle={toggleLeftSectionIntegrations}
+          >
+            <IntegrationsSectionBody />
+          </SidebarSection>
+        )}
+      </div>
 
       {/* Node-level places: every destination lives in the sidebar
           (DESIGN.md · Navigation); the header keeps only status and

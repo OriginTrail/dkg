@@ -6,17 +6,17 @@
 .v10-pca-detail { padding: 24px; max-width: 880px; }
 .v10-pca-overview-head { margin-bottom: 16px; }
 .v10-pca-overview-titlerow { display: flex; align-items: center; gap: 12px; }
-.v10-pca-overview-title { font-size: 18px; font-weight: 700; margin: 0; color: var(--text-primary); }
+.v10-pca-overview-title { font-size: var(--fs-heading); font-weight: 700; margin: 0; color: var(--text-primary); }
 .v10-pca-role-chip { text-transform: capitalize; }
 .v10-pca-overview-explainer {
   margin: 8px 0 0;
-  font-size: 12px;
+  font-size: var(--fs-control);
   line-height: 1.6;
   color: var(--text-secondary);
   max-width: 760px;
 }
 .v10-pca-overview-wallet { margin-left: auto; }
-.v10-pca-overview-caveat { font-size: 11px; color: var(--text-tertiary); line-height: 1.5; margin: 12px 0 0; }
+.v10-pca-overview-caveat { font-size: var(--fs-label); color: var(--text-tertiary); line-height: 1.5; margin: 12px 0 0; }
 .v10-pca-section {
   margin-top: 18px;
 }
@@ -42,7 +42,7 @@
 }
 .v10-pca-section-title {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--fs-body);
   font-weight: 700;
   color: var(--text-primary);
 }
@@ -75,7 +75,7 @@
 }
 .v10-pca-inline-status {
   margin: 12px 0 0;
-  font-size: 12px;
+  font-size: var(--fs-control);
   line-height: 1.5;
   color: var(--text-secondary);
 }
@@ -90,22 +90,22 @@
   .v10-pca-card-grid { grid-template-columns: 1fr; }
 }
 .v10-pca-card-title { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-.v10-pca-card-id { font-size: 14px; font-weight: 700; color: var(--text-primary); }
-.v10-pca-card-sponsor { font-size: 11px; color: var(--text-tertiary); }
+.v10-pca-card-id { font-size: var(--fs-body); font-weight: 700; color: var(--text-primary); }
+.v10-pca-card-sponsor { font-size: var(--fs-label); color: var(--text-tertiary); }
 .v10-pca-card-spacer { flex: 1; }
 .v10-pca-card-owner { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
-.v10-pca-card-owner-lbl { font-size: 11px; color: var(--text-tertiary); min-width: 44px; }
-.v10-pca-card-owner-note { font-size: 11px; color: var(--text-tertiary); margin: 4px 0 0; line-height: 1.45; }
-.v10-pca-card-explorer { color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline); text-underline-offset: 3px; font-size: 13px; }
+.v10-pca-card-owner-lbl { font-size: var(--fs-label); color: var(--text-tertiary); min-width: 44px; }
+.v10-pca-card-owner-note { font-size: var(--fs-label); color: var(--text-tertiary); margin: 4px 0 0; line-height: 1.45; }
+.v10-pca-card-explorer { color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline); text-underline-offset: 3px; font-size: var(--fs-body); }
 .v10-pca-card-warn {
   margin: 10px 0 0;
   padding: 8px 10px;
-  font-size: 11px;
+  font-size: var(--fs-label);
   line-height: 1.5;
   color: var(--text-warning);
   background: var(--warning-bg);
 }
-.v10-pca-card-meta { font-size: 11px; color: var(--text-secondary); margin: 10px 0 0; }
+.v10-pca-card-meta { font-size: var(--fs-label); color: var(--text-secondary); margin: 10px 0 0; }
 .v10-pca-card-meta-sep { color: var(--text-ghost); }
 .v10-pca-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
 .v10-pca-owned-groups,
@@ -122,7 +122,7 @@
 }
 .v10-pca-account-group-title {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 700;
   color: var(--text-primary);
 }
@@ -141,7 +141,7 @@
   text-decoration: underline;
 }
 .v10-pca-inline-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
-.v10-pca-card-error { display: flex; flex-direction: column; gap: 10px; font-size: 12px; color: var(--text-secondary); }
+.v10-pca-card-error { display: flex; flex-direction: column; gap: 10px; font-size: var(--fs-control); color: var(--text-secondary); }
 .v10-pca-card-skeleton { min-height: 180px; opacity: 0.5; }
 
 /* ----- Track-by-id disclosure ----- */
@@ -153,7 +153,7 @@
   border: none;
   background: transparent;
   color: var(--text-link);
-  font-size: 12px;
+  font-size: var(--fs-control);
   cursor: pointer;
   padding: 0;
 }
@@ -162,7 +162,7 @@
 .v10-pca-track-status {
   margin: 8px 0 0;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--fs-control);
   line-height: 1.4;
 }
 

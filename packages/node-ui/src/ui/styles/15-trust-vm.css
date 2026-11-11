@@ -52,7 +52,7 @@
 
 /* ── Loading / Error / Empty ── */
 .v10-me-loading { display: flex; align-items: center; justify-content: center; flex: 1; }
-.v10-me-loading-text { font-size: 12px; color: var(--text-tertiary); }
+.v10-me-loading-text { font-size: var(--fs-control); color: var(--text-tertiary); }
 
 /* ── Sub-graph Bar ── */
 /* PR #793 round 2 (ui-locked option a) — capsule chrome dropped.
@@ -81,17 +81,17 @@
   border-radius: 0;                                 /* was: 10px */
 }
 .v10-subgraph-bar-label {
-  font-size: 11px;
+  font-size: var(--fs-label);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-tertiary);
   padding-right: 4px;
 }
 .v10-subgraph-chip:hover { transform: translateY(-1px); }
-.v10-subgraph-chip-icon { font-size: 13px; line-height: 1; }
+.v10-subgraph-chip-icon { font-size: var(--fs-body); line-height: 1; }
 .v10-subgraph-chip-label { font-weight: 600; }
 .v10-subgraph-chip-count {
-  font-size: 11px;
+  font-size: var(--fs-label);
   opacity: 0.75;
   padding: 1px 6px;
   border-radius: var(--radius-pill);
@@ -135,14 +135,14 @@
 }
 .v10-vm-hero-badge { flex: 0 0 auto; }
 .v10-vm-hero-headline {
-  font-size: 14px;
+  font-size: var(--fs-body);
   line-height: 1.35;
   color: var(--text-primary);
   font-weight: 650;
 }
 .v10-vm-hero-context {
   max-width: 100%;
-  font-size: 12px;
+  font-size: var(--fs-control);
   line-height: 1.35;
   color: var(--text-tertiary);
   overflow-wrap: anywhere;
@@ -157,10 +157,10 @@
   border-color: var(--v10-vm-border);
 }
 .v10-vm-hero-stats .v10-stat-strip-value {
-  font-size: 24px;
+  font-size: var(--fs-display);
 }
 .v10-vm-hero-stats .v10-stat-strip-label {
-  font-size: 11px;
+  font-size: var(--fs-label);
   letter-spacing: 0.07em;
 }
 /* C11: facts about this graph's VM, as label/value readouts (not pills).
@@ -173,7 +173,7 @@
   padding-top: 10px;
   border-top: 1px solid color-mix(in srgb, var(--layer-verified) 22%, transparent);
 }
-.v10-vm-hero-fact { display: flex; gap: 6px; align-items: baseline; font-size: 12px; }
+.v10-vm-hero-fact { display: flex; gap: 6px; align-items: baseline; font-size: var(--fs-control); }
 .v10-vm-hero-fact dt { color: var(--text-tertiary); }
 .v10-vm-hero-fact dd { margin: 0; font-weight: 600; color: var(--text-primary); }
 .v10-vm-hero-fact.tone-muted dd { color: var(--text-tertiary); }
@@ -212,7 +212,7 @@
   width: 100%;
   background: color-mix(in srgb, var(--layer-verified) 5%, transparent);
   border: 1px solid color-mix(in srgb, var(--layer-verified) 30%, transparent);
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--text-secondary);
 }
 .v10-vm-legend-row {
@@ -222,7 +222,7 @@
   line-height: 1.3;
 }
 .v10-vm-legend-head {
-  font-size: 10px;
+  font-size: var(--fs-micro);
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -239,7 +239,7 @@
   height: 18px;
   border-radius: var(--radius-xs);
   color: var(--text-on-accent);
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 700;
   flex-shrink: 0;
   box-shadow: 0 0 10px -2px currentColor;
@@ -247,13 +247,13 @@
 .v10-vm-legend-swatch-agent { border-radius: 50%; }
 .v10-vm-legend-label {
   color: var(--text-primary);
-  font-size: 11px;
+  font-size: var(--fs-label);
 }
 .v10-vm-legend-foot {
   margin-top: 4px;
   padding-top: 6px;
   border-top: 1px dashed var(--tint-strong);
-  font-size: 10px;
+  font-size: var(--fs-micro);
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
 }
@@ -272,7 +272,7 @@
   width: 100%;
   background: color-mix(in srgb, var(--layer-shared) 5%, transparent);
   border: 1px solid color-mix(in srgb, var(--layer-shared) 30%, transparent);
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--text-secondary);
 }
 .v10-swm-legend-row {
@@ -282,7 +282,7 @@
   line-height: 1.3;
 }
 .v10-swm-legend-head {
-  font-size: 10px;
+  font-size: var(--fs-micro);
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -299,14 +299,14 @@
   height: 16px;
   border-radius: var(--radius-xs);
   color: var(--text-on-accent);
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 700;
   flex-shrink: 0;
   box-shadow: 0 0 8px -2px currentColor;
 }
 .v10-swm-legend-label {
   color: var(--text-primary);
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-family: var(--font-mono, ui-monospace, monospace);
   flex: 1;
   min-width: 0;
@@ -317,7 +317,7 @@
 .v10-swm-legend-metric {
   font-variant-numeric: tabular-nums;
   color: var(--text-tertiary);
-  font-size: 10px;
+  font-size: var(--fs-micro);
 }
 .v10-swm-legend-conflict {
   margin-top: 4px;

@@ -6,7 +6,9 @@ interface LayoutState {
   rightCollapsed: boolean;
   bottomCollapsed: boolean;
   bottomMaximised: boolean;
+  leftSectionMarketplaceOpen: boolean;
   leftSectionMyProjectsOpen: boolean;
+  leftSectionContextOracleOpen: boolean;
   leftSectionIntegrationsOpen: boolean;
   theme: 'dark' | 'light';
   leftWidth: number;
@@ -20,7 +22,9 @@ interface LayoutState {
   closeNarrowPanel: () => void;
   toggleBottom: () => void;
   toggleBottomMaximised: () => void;
+  toggleLeftSectionMarketplace: () => void;
   toggleLeftSectionMyProjects: () => void;
+  toggleLeftSectionContextOracle: () => void;
   toggleLeftSectionIntegrations: () => void;
   setTheme: (t: 'dark' | 'light') => void;
   setLeftWidth: (w: number) => void;
@@ -42,7 +46,9 @@ interface PersistedLayout {
   leftCollapsed?: boolean;
   rightCollapsed?: boolean;
   bottomCollapsed?: boolean;
+  leftSectionMarketplaceOpen?: boolean;
   leftSectionMyProjectsOpen?: boolean;
+  leftSectionContextOracleOpen?: boolean;
   leftSectionIntegrationsOpen?: boolean;
   leftWidth?: number;
   rightWidth?: number;
@@ -55,11 +61,12 @@ const DEFAULTS = {
   leftCollapsed: false,
   rightCollapsed: false,
   bottomCollapsed: true,
-  // Sidebar sections: My Context Graphs is the primary navigation surface
-  // so it stays open by default; Integrations is an escape-hatch surface
-  // (status check, no day-to-day click target) so it stays closed and
-  // doesn't run its 30s polling loop until the user opens it.
+  // Sidebar sections: Marketplace and My Context Graphs are primary
+  // navigation surfaces, while Public graphs and Integrations stay
+  // collapsed until the user needs them.
+  leftSectionMarketplaceOpen: true,
   leftSectionMyProjectsOpen: true,
+  leftSectionContextOracleOpen: false,
   leftSectionIntegrationsOpen: false,
   leftWidth: 240,
   rightWidth: 360,
@@ -127,9 +134,15 @@ function loadPersisted(): Required<PersistedLayout> {
       leftCollapsed: typeof parsed.leftCollapsed === 'boolean' ? parsed.leftCollapsed : DEFAULTS.leftCollapsed,
       rightCollapsed: typeof parsed.rightCollapsed === 'boolean' ? parsed.rightCollapsed : DEFAULTS.rightCollapsed,
       bottomCollapsed: typeof parsed.bottomCollapsed === 'boolean' ? parsed.bottomCollapsed : DEFAULTS.bottomCollapsed,
+      leftSectionMarketplaceOpen: typeof parsed.leftSectionMarketplaceOpen === 'boolean'
+        ? parsed.leftSectionMarketplaceOpen
+        : DEFAULTS.leftSectionMarketplaceOpen,
       leftSectionMyProjectsOpen: typeof parsed.leftSectionMyProjectsOpen === 'boolean'
         ? parsed.leftSectionMyProjectsOpen
         : DEFAULTS.leftSectionMyProjectsOpen,
+      leftSectionContextOracleOpen: typeof parsed.leftSectionContextOracleOpen === 'boolean'
+        ? parsed.leftSectionContextOracleOpen
+        : DEFAULTS.leftSectionContextOracleOpen,
       leftSectionIntegrationsOpen: typeof parsed.leftSectionIntegrationsOpen === 'boolean'
         ? parsed.leftSectionIntegrationsOpen
         : DEFAULTS.leftSectionIntegrationsOpen,
@@ -163,7 +176,9 @@ function snapshot(state: LayoutState): PersistedLayout {
     leftCollapsed: state.leftCollapsed,
     rightCollapsed: state.rightCollapsed,
     bottomCollapsed: state.bottomCollapsed,
+    leftSectionMarketplaceOpen: state.leftSectionMarketplaceOpen,
     leftSectionMyProjectsOpen: state.leftSectionMyProjectsOpen,
+    leftSectionContextOracleOpen: state.leftSectionContextOracleOpen,
     leftSectionIntegrationsOpen: state.leftSectionIntegrationsOpen,
     leftWidth: state.leftWidth,
     rightWidth: state.rightWidth,
@@ -178,7 +193,9 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
   rightCollapsed: initial.rightCollapsed,
   bottomCollapsed: initial.bottomCollapsed,
   bottomMaximised: false,
+  leftSectionMarketplaceOpen: initial.leftSectionMarketplaceOpen,
   leftSectionMyProjectsOpen: initial.leftSectionMyProjectsOpen,
+  leftSectionContextOracleOpen: initial.leftSectionContextOracleOpen,
   leftSectionIntegrationsOpen: initial.leftSectionIntegrationsOpen,
   theme: (localStorage.getItem('dkg-theme') as 'dark' | 'light') || 'dark',
   leftWidth: initial.leftWidth,
@@ -211,8 +228,16 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
     set((s) => ({ bottomMaximised: !s.bottomMaximised, bottomCollapsed: false }));
     persist(snapshot(get()));
   },
+  toggleLeftSectionMarketplace: () => {
+    set((s) => ({ leftSectionMarketplaceOpen: !s.leftSectionMarketplaceOpen }));
+    persist(snapshot(get()));
+  },
   toggleLeftSectionMyProjects: () => {
     set((s) => ({ leftSectionMyProjectsOpen: !s.leftSectionMyProjectsOpen }));
+    persist(snapshot(get()));
+  },
+  toggleLeftSectionContextOracle: () => {
+    set((s) => ({ leftSectionContextOracleOpen: !s.leftSectionContextOracleOpen }));
     persist(snapshot(get()));
   },
   toggleLeftSectionIntegrations: () => {

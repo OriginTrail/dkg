@@ -434,6 +434,45 @@ describe('relocating curated and private metadata that earlier builds left in on
     expect(listed?.name).toBe('Held');
   });
 
+  it('does not carry who may access a held graph from ontology into its _meta', async () => {
+    const id = 'legacy-curated-access-rows';
+    const { agent, ownerAddress } = await createAgent('relocate-access-rows');
+    await agent.createContextGraph({
+      id,
+      name: 'Held',
+      accessPolicy: 1,
+      allowedAgents: [ownerAddress],
+      callerAgentAddress: ownerAddress,
+    });
+    const wallet = '0x00000000000000000000000000000000000000aa';
+    const subject = contextGraphDataGraphUri(id);
+    const accessRows = [
+      ontologyQuad(subject, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, `"${wallet}"`),
+      ontologyQuad(subject, DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT, `"${wallet}"`),
+      ontologyQuad(subject, DKG_ONTOLOGY.DKG_ALLOWED_PEER, '"12D3KooWRelocatedPeer"'),
+      ontologyQuad(subject, DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID, '"7"'),
+      ontologyQuad(subject, DKG_ONTOLOGY.DKG_REVOKED_AGENT, `"${ownerAddress}"`),
+    ];
+    await agent.store.insert([
+      ontologyQuad(subject, DKG_ONTOLOGY.SCHEMA_NAME, '"Held"'),
+      ontologyQuad(subject, DKG_ONTOLOGY.SCHEMA_DESCRIPTION, '"Carried"'),
+      ...accessRows,
+    ]);
+
+    const result = await agent.relocatePrivateContextGraphMetadata({ classifyOnChain: false });
+
+    expect(result.movedToMeta).toEqual([id]);
+    expect(await ontologyRowsAbout(agent, id)).toEqual([]);
+    const meta = await agent.store.query(`
+      SELECT ?p ?o WHERE { GRAPH <${contextGraphMetaGraphUri(id)}> { <${subject}> ?p ?o } }
+    `);
+    const rows = meta.type === 'bindings' ? meta.bindings : [];
+    expect(rows.map((row) => row['p'])).toContain(DKG_ONTOLOGY.SCHEMA_DESCRIPTION);
+    for (const { predicate, object } of accessRows) {
+      expect(rows.filter((row) => row['p'] === predicate && row['o'] === object)).toEqual([]);
+    }
+  });
+
   it('moves a legacy private:true definition, with its provenance, into _meta', async () => {
     const id = 'legacy-private-definition';
     const { agent, ownerAddress } = await createAgent('relocate-private');

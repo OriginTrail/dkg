@@ -903,6 +903,71 @@ describe('on-demand agents phonebook fetch duration buckets', () => {
   });
 });
 
+describe('OnDemandAgentsPhonebookFetcher.ensureWallets for a peer to route to', () => {
+  it('fetches for a wallet whose key is known but that has no current peer', async () => {
+    const h = createHarness({ syncAddsWallets: [] });
+    h.recipientKeys.add(OWNER.toLowerCase());
+    expect([...(await h.fetcher.ensureWallets([OWNER]))], 'a key is all a private share asks for').toEqual([OWNER.toLowerCase()]);
+    expect(h.syncCalls).toHaveLength(0);
+
+    h.phonebook.delete(OWNER.toLowerCase());
+    h.syncCalls.length = 0;
+    const known = await h.fetcher.ensureWallets([OWNER], undefined, 'peer');
+    expect([...known]).toEqual([]);
+    expect(h.syncCalls).toHaveLength(1);
+  });
+
+  it('fetches nothing for a wallet with a current peer', async () => {
+    const h = createHarness();
+    h.phonebook.add(OWNER.toLowerCase());
+    expect([...(await h.fetcher.ensureWallets([OWNER], undefined, 'peer'))]).toEqual([OWNER.toLowerCase()]);
+    expect(h.syncCalls).toHaveLength(0);
+  });
+
+  it('resolves the wallet when the fetch brings a current peer', async () => {
+    const h = createHarness({ syncAddsWallets: [OWNER.toLowerCase()] });
+    expect([...(await h.fetcher.ensureWallets([OWNER], undefined, 'peer'))]).toEqual([OWNER.toLowerCase()]);
+    expect(h.syncCalls).toHaveLength(1);
+  });
+
+  it('counts a store that cannot answer as no current peer', async () => {
+    const h = createHarness({ syncAddsWallets: [] });
+    vi.mocked(h.deps.phonebookHasWallet).mockRejectedValue(new Error('store busy'));
+    expect([...(await h.fetcher.ensureWallets([OWNER], undefined, 'peer'))]).toEqual([]);
+  });
+
+  it('stops asking for hours after a complete Core phonebook gave no current peer, as it does for a graph', async () => {
+    const h = createHarness({ syncAddsWallets: [] });
+    await h.fetcher.ensureWallets([OWNER], undefined, 'peer');
+    expect(h.syncCalls).toHaveLength(1);
+
+    h.advance(AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS + 1);
+    await h.fetcher.ensureWallets([OWNER], undefined, 'peer');
+    expect(h.syncCalls, 'the same phonebook has no newer profile; live gossip delivers one').toHaveLength(1);
+
+    h.advance(AGENTS_PHONEBOOK_CURATOR_MISS_SUPPRESSION_MS);
+    await h.fetcher.ensureWallets([OWNER], undefined, 'peer');
+    expect(h.syncCalls).toHaveLength(2);
+  });
+
+  it('does not stop a share that needs a key from asking', async () => {
+    const h = createHarness({ syncAddsWallets: [], syncAddsKeys: [] });
+    await h.fetcher.ensureWallets([OWNER], undefined, 'peer');
+    h.advance(AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS + 1);
+    await h.fetcher.ensureWallets([OWNER]);
+    expect(h.syncCalls).toHaveLength(2);
+  });
+
+  it('keeps asking when no complete Core phonebook answered: the Core may have been overloaded', async () => {
+    const h = createHarness({ syncAddsWallets: [], sync: async () => ({ fetchedTriples: 10, insertedTriples: 10, complete: false }) });
+    await h.fetcher.ensureWallets([OWNER], undefined, 'peer');
+    expect(h.syncCalls).toHaveLength(1);
+    h.advance(AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS + 1);
+    await h.fetcher.ensureWallets([OWNER], undefined, 'peer');
+    expect(h.syncCalls).toHaveLength(2);
+  });
+});
+
 describe('OnDemandAgentsPhonebookFetcher.ensureWallets (#2849)', () => {
   const MEMBER = '0x00000000000000000000000000000000000000B1';
   const MEMBER_2 = '0x00000000000000000000000000000000000000B2';

@@ -13,7 +13,7 @@
   );
 }
 .v10-subgraph-detail-icon {
-  font-size: 20px; line-height: 1;
+  font-size: var(--fs-heading); line-height: 1;
 }
 .v10-subgraph-detail-title-wrap {
   flex: 1;
@@ -28,10 +28,10 @@
   justify-content: center;
 }
 .v10-subgraph-detail-title {
-  font-size: 15px; font-weight: 600; color: var(--text-primary);
+  font-size: var(--fs-title); font-weight: 600; color: var(--text-primary);
 }
 .v10-subgraph-detail-desc {
-  font-size: 11px; color: var(--text-tertiary); margin-top: 2px;
+  font-size: var(--fs-label); color: var(--text-tertiary); margin-top: 2px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   max-width: 520px;
 }
@@ -44,7 +44,7 @@
   background: var(--tint-faint);
 }
 .v10-subgraph-savedqueries-label {
-  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  font-size: var(--fs-micro); font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.08em; color: var(--text-tertiary);
   margin-right: 4px;
 }
@@ -54,7 +54,7 @@
   background: var(--tint-faint);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-overlay);
-  font-size: 11px; color: var(--text-secondary);
+  font-size: var(--fs-label); color: var(--text-secondary);
   font-family: var(--font-sans);
   cursor: pointer;
   transition: all 0.15s;
@@ -67,14 +67,14 @@
 }
 .v10-subgraph-savedquery:disabled { opacity: 0.5; cursor: default; }
 .v10-subgraph-savedquery-glyph {
-  font-size: 10px; color: var(--sg-color, var(--text-tertiary));
+  font-size: var(--fs-micro); color: var(--sg-color, var(--text-tertiary));
 }
 .v10-subgraph-savedquery-error {
-  color: var(--text-danger); font-size: 11px;
+  color: var(--text-danger); font-size: var(--fs-label);
 }
 .v10-subgraph-savedquery-count {
   margin-left: auto;
-  font-size: 11px; color: var(--text-tertiary); font-variant-numeric: tabular-nums;
+  font-size: var(--fs-label); color: var(--text-tertiary); font-variant-numeric: tabular-nums;
 }
 
 /* Filter chips (profile-driven) */
@@ -89,7 +89,7 @@
   flex-wrap: wrap;
 }
 .v10-subgraph-filter-label {
-  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  font-size: var(--fs-micro); font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.08em; color: var(--text-tertiary);
   min-width: 62px;
 }
@@ -100,7 +100,7 @@
   background: none;
   border: 1px solid transparent;
   color: var(--text-tertiary);
-  font-size: 10px; font-family: var(--font-sans);
+  font-size: var(--fs-micro); font-family: var(--font-sans);
   cursor: pointer;
   border-radius: var(--radius-card);
 }
@@ -116,13 +116,13 @@
 }
 .v10-subgraph-timeline-empty {
   padding: 24px 16px;
-  color: var(--text-tertiary); font-size: 12px;
+  color: var(--text-tertiary); font-size: var(--fs-control);
   text-align: center;
 }
 .v10-subgraph-timeline-empty code {
   background: var(--tint-strong);
   padding: 1px 4px; border-radius: var(--radius-hair);
-  font-family: var(--font-mono); font-size: 11px;
+  font-family: var(--font-mono); font-size: var(--fs-label);
 }
 .v10-subgraph-timeline-bucket { display: flex; flex-direction: column; gap: 6px; }
 .v10-subgraph-timeline-bucket-head {
@@ -135,12 +135,12 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 20%, transparent);
 }
 .v10-subgraph-timeline-bucket-label {
-  font-size: 12px; font-weight: 700; letter-spacing: 0.04em;
+  font-size: var(--fs-control); font-weight: 700; letter-spacing: 0.04em;
   color: var(--text-primary);
 }
 .v10-subgraph-timeline-bucket-count {
   margin-left: auto;
-  font-size: 10px; color: var(--text-tertiary);
+  font-size: var(--fs-micro); color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
 }
 .v10-subgraph-timeline-items {
@@ -153,7 +153,7 @@
   border: 1px solid var(--border-subtle);
   border-left: 2px solid color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 60%, transparent);
   border-radius: var(--radius-xs);
-  font-size: 12px; color: var(--text-secondary);
+  font-size: var(--fs-control); color: var(--text-secondary);
   font-family: var(--font-sans);
   text-align: left; cursor: pointer;
   transition: border-color 0.15s, background 0.15s, color 0.15s;
@@ -168,7 +168,7 @@
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .v10-subgraph-timeline-item-date {
-  font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary);
+  font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
 }
 .v10-subgraph-chip-badge { margin-left: 6px; }
@@ -191,5 +191,5 @@
   font-family: var(--font-sans);
   white-space: nowrap;
 }
-.v10-subgraph-badge-icon { font-size: 10px; line-height: 1; }
+.v10-subgraph-badge-icon { font-size: var(--fs-micro); line-height: 1; }
 .v10-subgraph-badge-label { text-transform: capitalize; }

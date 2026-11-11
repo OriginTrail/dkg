@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { createRecoverableLazyView } from './RecoverableLazyView.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
@@ -8,6 +8,7 @@ import { decodeTabId } from '../../lib/tab-target.js';
 import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 import { TabBar } from './TabBar.js';
+import { MARKETPLACE_TABS } from '../../marketplace/tabs.js';
 
 
 const OperationsView = createRecoverableLazyView(() =>
@@ -41,6 +42,22 @@ const ProjectView = createRecoverableLazyView(() =>
 const MemoryLayerView = createRecoverableLazyView(() =>
   import('../../views/MemoryLayerView.js').then((m) => m.MemoryLayerView)
 , ({ layer }) => ({ wm: 'working memory', swm: 'shared memory', vm: 'verifiable memory' })[layer]);
+
+const MarketplaceView = createRecoverableLazyView(() =>
+  import('../../marketplace/views/MarketplaceView.js').then((m) => m.MarketplaceView)
+, 'marketplace');
+
+const MarketplacePlansView = createRecoverableLazyView(() =>
+  import('../../marketplace/views/PlansView.js').then((m) => m.PlansView)
+, 'marketplace plans');
+
+const MarketplaceAccessView = createRecoverableLazyView(() =>
+  import('../../marketplace/views/AccessView.js').then((m) => m.AccessView)
+, 'marketplace access');
+
+const MarketplaceOperateView = createRecoverableLazyView(() =>
+  import('../../marketplace/views/OperateView.js').then((m) => m.OperateView)
+, 'marketplace operate');
 
 const MemoryStackView = createRecoverableLazyView(() =>
   import('../../views/MemoryStackView.js').then((m) => m.MemoryStackView)
@@ -164,13 +181,13 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
           onClick={handleBack}
           style={{
             border: '1px solid var(--border-default)', borderRadius: 'var(--radius-control)', background: 'none',
-            color: 'var(--text-secondary)', fontSize: 11, fontWeight: 600, padding: '4px 10px',
+            color: 'var(--text-secondary)', fontSize: 'var(--fs-label)', fontWeight: 600, padding: '4px 10px',
             cursor: 'pointer', fontFamily: 'var(--font-sans)',
           }}
         >
           ← Back to Project
         </button>
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>📄 {docLabel}</span>
+        <span style={{ fontSize: 'var(--fs-body)', fontWeight: 600, color: 'var(--text-primary)' }}>📄 {docLabel}</span>
         {showToggle && (
           <div
             role="group"
@@ -191,7 +208,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
                   onClick={() => setViewMode(mode)}
                   style={{
                     border: 'none', borderRadius: 'var(--radius-xs)', cursor: 'pointer',
-                    padding: '3px 12px', fontSize: 11, fontWeight: 600,
+                    padding: '3px 12px', fontSize: 'var(--fs-label)', fontWeight: 600,
                     fontFamily: 'var(--font-sans)',
                     color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
                     background: active ? 'var(--bg-elevated)' : 'transparent',
@@ -211,11 +228,11 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
             justifyContent: 'center', gap: 10, height: '100%',
             color: 'var(--text-tertiary)', textAlign: 'center',
           }}>
-            <span style={{ fontSize: 28, opacity: 0.6 }}>📄</span>
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>
+            <span style={{ fontSize: 'var(--fs-display)', opacity: 0.6 }}>📄</span>
+            <span style={{ fontSize: 'var(--fs-body)', fontWeight: 600, color: 'var(--text-secondary)' }}>
               Source file not available for this document
             </span>
-            <span style={{ fontSize: 12, maxWidth: 360, lineHeight: 1.6 }}>
+            <span style={{ fontSize: 'var(--fs-control)', maxWidth: 360, lineHeight: 1.6 }}>
               This document was indexed into the graph without a stored source
               file, so there is nothing to preview here. You can still explore
               its extracted entities and relationships in the graph.
@@ -223,8 +240,8 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
           </div>
         ) : (
           <>
-            {loading && <div style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>Loading document...</div>}
-            {error && <div style={{ color: 'var(--accent-red)', fontSize: 12 }}>Failed to load: {error}</div>}
+            {loading && <div style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-control)' }}>Loading document...</div>}
+            {error && <div style={{ color: 'var(--accent-red)', fontSize: 'var(--fs-control)' }}>Failed to load: {error}</div>}
             {!loading && isImage && blobUrl && (
               <img src={blobUrl} alt={docLabel} style={{ maxWidth: '100%', borderRadius: 'var(--radius-nested)' }} />
             )}
@@ -241,7 +258,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
             )}
             {content !== null && !isImage && !isPdf && !(isMarkdown && viewMode === 'formatted') && (
               <pre style={{
-                fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.7,
+                fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-control)', lineHeight: 1.7,
                 color: 'var(--text-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
                 background: 'var(--bg-surface)', borderRadius: 'var(--radius-nested)', padding: 16,
                 border: '1px solid var(--border-default)', margin: 0,
@@ -260,6 +277,14 @@ function ViewContainer() {
   const activeTabId = useTabsStore((s) => s.activeTabId);
 
   if (activeTabId === 'dashboard') return <DashboardView />;
+
+  if (activeTabId === MARKETPLACE_TABS.browse.id) return <MarketplaceView />;
+
+  if (activeTabId === MARKETPLACE_TABS.plans.id) return <MarketplacePlansView />;
+
+  if (activeTabId === MARKETPLACE_TABS.access.id) return <MarketplaceAccessView />;
+
+  if (activeTabId === MARKETPLACE_TABS.operate.id) return <MarketplaceOperateView />;
 
   if (activeTabId === 'operations') {
     return <OperationsView />;
@@ -295,7 +320,7 @@ function ViewContainer() {
 
   return (
     <div className="v10-view-placeholder">
-      <p style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>
+      <p style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-control)' }}>
         View "{activeTabId}" coming soon.
       </p>
     </div>
@@ -306,7 +331,20 @@ function ViewContainer() {
 const CENTER_NARROW_PX = 560;
 
 export function PanelCenter() {
+  const activeTabId = useTabsStore((s) => s.activeTabId);
   const contentRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+    // Replaying the CSS animation on the existing DOM node keeps view state
+    // intact. Keying this wrapper would remount data-heavy pages and reset
+    // their local controls just to obtain a visual transition.
+    content.classList.remove('v10-center-content-enter');
+    void content.offsetWidth;
+    content.classList.add('v10-center-content-enter');
+  }, [activeTabId]);
+
   // Not a CSS container: that would trap the fixed drawers and dialogs inside this panel.
   useEffect(() => {
     const el = contentRef.current;
@@ -321,7 +359,7 @@ export function PanelCenter() {
   return (
     <div className="v10-panel-center">
       <TabBar />
-      <div className="v10-center-content" ref={contentRef}>
+      <div ref={contentRef} className="v10-center-content v10-center-content-enter">
         <ViewContainer />
       </div>
     </div>

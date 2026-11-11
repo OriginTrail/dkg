@@ -80,15 +80,15 @@
 /* Avatars 20 / 24 / 32 on the shared scale; chip heights match the controls. */
 .v10-agent-chip-sm { height: var(--h-control-sm); box-sizing: border-box; padding: 0 9px 0 2px; font-size: var(--fs-label); }
 .v10-agent-chip-sm .v10-agent-chip-avatar { width: 20px; height: 20px; font-size: var(--fs-micro); }
-.v10-agent-chip-sm .v10-agent-chip-glyph { width: 12px; height: 12px; font-size: var(--fs-micro); bottom: -3px; right: -4px; }
+.v10-agent-chip-sm .v10-agent-chip-glyph { width: 10px; height: 10px; font-size: 7px; bottom: -2px; right: -4px; }
 
 .v10-agent-chip-md { height: 28px; box-sizing: border-box; padding: 0 10px 0 2px; font-size: var(--fs-control); }
-.v10-agent-chip-md .v10-agent-chip-avatar { width: 24px; height: 24px; font-size: 10px; }
-.v10-agent-chip-md .v10-agent-chip-glyph { width: 14px; height: 14px; font-size: var(--fs-micro); bottom: -3px; right: -4px; }
+.v10-agent-chip-md .v10-agent-chip-avatar { width: 24px; height: 24px; font-size: var(--fs-micro); }
+.v10-agent-chip-md .v10-agent-chip-glyph { width: 12px; height: 12px; font-size: 8px; bottom: -2px; right: -4px; }
 
 .v10-agent-chip-lg { min-height: 40px; box-sizing: border-box; padding: 4px 14px 4px 4px; font-size: var(--fs-body); }
-.v10-agent-chip-lg .v10-agent-chip-avatar { width: 32px; height: 32px; font-size: 12px; }
-.v10-agent-chip-lg .v10-agent-chip-glyph { width: 14px; height: 14px; font-size: 10px; bottom: -2px; right: -4px; }
+.v10-agent-chip-lg .v10-agent-chip-avatar { width: 32px; height: 32px; font-size: var(--fs-control); }
+.v10-agent-chip-lg .v10-agent-chip-glyph { width: 14px; height: 14px; font-size: var(--fs-micro); bottom: -2px; right: -4px; }
 
 /* ── Agent dot: the chip's avatar on its own (AgentDot / AgentDotStack).
    Same circle as agent nodes in the graphs. ── */
@@ -120,7 +120,7 @@
 }
 .v10-activity-feed-title {
   display: flex; align-items: baseline; gap: 8px;
-  font-size: 12px; font-weight: 700;
+  font-size: var(--fs-control); font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.06em;
   color: var(--text-tertiary);
 }
@@ -130,7 +130,7 @@
    * Same mono+tertiary treatment as `.v10-activity-feed-bucket-count`
    * so the two read as the same kind of signal at different scopes. */
   font-family: var(--font-mono); font-weight: 400;
-  font-size: 10px; letter-spacing: 0;
+  font-size: var(--fs-micro); letter-spacing: 0;
   text-transform: none;
   color: var(--text-tertiary);
 }
@@ -142,7 +142,7 @@
    * EmptyState primitive; recedes so the rest of the Overview
    * stays the focal area. */
   margin-top: 8px;
-  font-size: 12px; font-weight: 400; line-height: 1.5;
+  font-size: var(--fs-control); font-weight: 400; line-height: 1.5;
   color: var(--text-tertiary);
 }
 .v10-activity-feed-error {
@@ -152,7 +152,7 @@
   margin-top: 8px;
   padding: 6px 8px;
   border-left: 2px solid var(--accent-amber);
-  font-size: 12px; font-weight: 400; line-height: 1.5;
+  font-size: var(--fs-control); font-weight: 400; line-height: 1.5;
   color: var(--text-tertiary);
 }
 .v10-activity-feed-bucket { display: flex; flex-direction: column; gap: 4px; }
@@ -162,13 +162,13 @@
   border-bottom: 1px dashed var(--border-subtle);
 }
 .v10-activity-feed-bucket-label {
-  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  font-size: var(--fs-micro); font-weight: 700; letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-secondary);
 }
 .v10-activity-feed-bucket-count {
   margin-left: auto;
-  font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary);
+  font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--text-tertiary);
 }
 .v10-activity-feed-items { display: flex; flex-direction: column; }
 
@@ -206,7 +206,7 @@
 }
 .v10-activity-feed-row-static:hover { background: none; }
 .v10-activity-feed-layer {
-  font-size: 14px; line-height: 1;
+  font-size: var(--fs-body); line-height: 1;
   justify-self: center;
 }
 .v10-activity-feed-title-text {
@@ -217,14 +217,14 @@
    * body relative to the surrounding chrome (`RECENT ACTIVITY · 7`
    * title, `TODAY` bucket label, agent chips). Dropped one notch
    * to `500` to bring it inline with the chrome's body weight. */
-  font-size: 12px; font-weight: 500;
+  font-size: var(--fs-control); font-weight: 500;
   color: var(--text-primary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   min-width: 0;
 }
 .v10-activity-feed-author { display: inline-flex; }
 .v10-activity-feed-time {
-  font-family: var(--font-mono); font-size: 10px;
+  font-family: var(--font-mono); font-size: var(--fs-micro);
   color: var(--text-tertiary);
   white-space: nowrap;
   min-width: 54px; text-align: right;
@@ -251,7 +251,7 @@
   flex-wrap: wrap;
 }
 .v10-agent-profile-reputation {
-  font-size: 13px; color: var(--text-secondary);
+  font-size: var(--fs-body); color: var(--text-secondary);
   line-height: 1.55;
   max-width: 640px;
   flex: 1 1 260px;
@@ -262,7 +262,7 @@
 }
 .v10-agent-profile-meta-row {
   display: flex; gap: 10px; align-items: center;
-  font-size: 11px;
+  font-size: var(--fs-label);
 }
 .v10-agent-profile-meta-lbl {
   text-transform: uppercase;
@@ -272,7 +272,7 @@
   min-width: 80px;
 }
 .v10-agent-profile-meta-val { color: var(--text-secondary); }
-.v10-agent-profile-meta-val.mono { font-family: var(--font-mono); font-size: 11px; }
+.v10-agent-profile-meta-val.mono { font-family: var(--font-mono); font-size: var(--fs-label); }
 .v10-agent-profile-wallet {
   display: inline-flex; align-items: center; gap: 6px;
   color: var(--text-primary);
@@ -283,7 +283,7 @@
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xs);
   color: var(--text-ghost);
-  font-size: 10px;
+  font-size: var(--fs-micro);
   cursor: pointer;
   font-family: var(--font-sans);
   transition: border-color 0.15s, color 0.15s;
@@ -315,13 +315,13 @@
   color: var(--text-primary);
 }
 .v10-agent-profile-stat-val {
-  font-size: 17px; font-weight: 700;
+  font-size: var(--fs-heading); font-weight: 700;
   font-family: var(--font-mono);
   line-height: 1;
   color: var(--stat-color, var(--text-primary));
 }
 .v10-agent-profile-stat-lbl {
-  font-size: 10px; text-transform: uppercase;
+  font-size: var(--fs-micro); text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-tertiary);
 }

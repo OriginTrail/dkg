@@ -357,7 +357,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       {!loading && results.length === 0 && (
         <div className="v10-mlv-empty">
           <p>No triples found in {meta.label.toLowerCase()}.</p>
-          <p style={{ fontSize: 11, marginTop: 4 }}>
+          <p style={{ fontSize: 'var(--fs-label)', marginTop: 4 }}>
             {layer === 'wm' && 'Import files or chat with your agent to generate working memory.'}
             {layer === 'swm' && 'Promote assertions from working memory to share with collaborators.'}
             {layer === 'vm' && 'Publish shared memory to create verified on-chain knowledge.'}

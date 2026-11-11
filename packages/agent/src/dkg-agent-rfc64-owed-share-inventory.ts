@@ -120,13 +120,13 @@ export class Rfc64OwedShareInventoryMethods extends DKGAgentBase {
         result = await runtime.runInventoryWriteExclusive(asset, () => this.tryCommitRfc64SwmAuthorInventoryV1(params));
       } catch (error) {
         const cause = error instanceof SwmInventoryWriteFailure ? error.cause : error;
-        if (cause instanceof SwmCatalogAuthorityNotReady) return 'waiting';
+        if (cause instanceof SwmCatalogAuthorityNotReady) return 'lane-closed';
         throw error;
       }
       if (result.status === 'superseded') return 'superseded';
       if (result.status === 'dormant') {
-        return result.dormantReason === 'inactive-lane' || result.dormantReason === 'authority-transition'
-          ? 'waiting' : result.dormantReason;
+        if (result.dormantReason === 'inactive-lane') return 'lane-closed';
+        return result.dormantReason === 'authority-transition' ? 'waiting' : result.dormantReason;
       }
       // Retain the durable obligation if authority turnover prevents projection admission.
       return admitDurableSwmInventoryProjectionV1(this, params) ? 'written' : 'waiting';

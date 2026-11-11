@@ -73,6 +73,33 @@ describe('#1837 POST /api/publisher/clear-job', () => {
     expect(responseBody(ctx)).toMatchObject({ outcome: 'rejected', reason: 'nonterminal' });
   });
 
+  // #3573 — a job that failed after its transaction hash was recorded is held for chain proof. A plain
+  // clear refuses it with a reason and a message that name the flag; with the flag, a node-operator
+  // request clears it.
+  it('refuses a held job without allowPendingTransaction → 409 pending_transaction; clears it with the flag', async () => {
+    const control = newControl();
+    const jobId = await control.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await control.claimNext('wallet-1');
+    await control.update(jobId, 'validated', { validation: { canonicalRoots: [], canonicalRootMap: {}, swmQuadCount: 2, authorityProofRef: 'knowledge-asset-lifecycle', transitionType: 'CREATE' } });
+    await control.update(jobId, 'broadcast', { broadcast: { txHash: `0x${'ab'.repeat(32)}`, walletId: 'wallet-1', operationKind: 'create' } });
+    await control.recordPublishFailure(jobId, { error: new Error('RPC endpoint temporarily unavailable'), failedFromState: 'broadcast', errorPayloadRef: 'urn:dkg:test:error:held' });
+
+    for (const body of [{ jobId }, { jobId, allowPendingTransaction: true }]) {
+      const refused = postClearJob(control, body);                                 // an anonymous caller has no override to give, flag or not
+      await handlePublisherRoutes(refused);
+      expect(responseStatus(refused)).toBe(409);
+      expect(responseBody(refused)).toMatchObject({ outcome: 'rejected', reason: 'pending_transaction', jobId });
+      expect(String(responseBody(refused).error)).toContain('"allowPendingTransaction": true');
+      expect((await control.getStatus(jobId))?.status).toBe('failed');
+    }
+
+    const cleared = postClearJob(control, { jobId, allowPendingTransaction: true }, requestAuthentication({ kind: 'nodeOperator' }));
+    await handlePublisherRoutes(cleared);
+    expect(responseStatus(cleared)).toBe(200);
+    expect(responseBody(cleared)).toMatchObject({ outcome: 'cleared', jobId });
+    expect(await control.getStatus(jobId)).toBeNull();
+  });
+
   it('rejects a missing/empty jobId → 400 malformed', async () => {
     const control = newControl();
     const ctx = postClearJob(control, {});
@@ -101,11 +128,19 @@ describe('#1837 POST /api/publisher/clear-job', () => {
     }
   });
 
-  function postClearJob(publisherControl: RequestContext['publisherControl'], body: Record<string, unknown>): RequestContext {
-    return postClearJobRaw(publisherControl, JSON.stringify(body));
+  function postClearJob(
+    publisherControl: RequestContext['publisherControl'],
+    body: Record<string, unknown>,
+    authentication: RequestContext['authentication'] = requestAuthentication({ kind: 'anonymous' }),
+  ): RequestContext {
+    return postClearJobRaw(publisherControl, JSON.stringify(body), authentication);
   }
 
-  function postClearJobRaw(publisherControl: RequestContext['publisherControl'], rawBody: string): RequestContext {
+  function postClearJobRaw(
+    publisherControl: RequestContext['publisherControl'],
+    rawBody: string,
+    authentication: RequestContext['authentication'] = requestAuthentication({ kind: 'anonymous' }),
+  ): RequestContext {
     const path = '/api/publisher/clear-job';
     const url = new URL(`http://127.0.0.1${path}`);
     const req = Readable.from([]);
@@ -143,7 +178,7 @@ describe('#1837 POST /api/publisher/clear-job', () => {
       apiPortRef: { value: 0 },
       url,
       path: url.pathname,
-      authentication: requestAuthentication({ kind: 'anonymous' }),
+      authentication,
       requestAgentAddress: '0x0',
     };
   }

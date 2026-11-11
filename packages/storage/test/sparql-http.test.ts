@@ -209,7 +209,7 @@ describe('SparqlHttpStore (test server)', () => {
       });
       const result = await prefixedStore.query(sparql);
       expect(result.type).toBe('quads');
-      expect(accept).toBe('application/n-quads, text/n-quads');
+      expect(accept).toBe('application/n-quads, text/n-quads, text/x-nquads');
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -76,7 +76,7 @@
   overflow: auto;
   padding: 4px 0;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-label);
   line-height: 1.65;
 }
 .v10-log-line {
@@ -103,7 +103,7 @@
 .v10-chat-bubble {
   /* Chat copy is dense; +1 not +2 — keeps the bubble height-economical
      while tracking the body base bump (PR8). */
-  font-size: 13px;
+  font-size: var(--fs-body);
   line-height: 1.55;
   word-break: break-word;
   overflow-wrap: anywhere;

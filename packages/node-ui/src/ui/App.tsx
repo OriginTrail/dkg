@@ -185,6 +185,10 @@ const NetworkDebugPage = React.lazy(() =>
   import('./pages/Network.js').then((m) => ({ default: m.NetworkPage }))
 );
 
+const MarketplaceGalleryRoute = React.lazy(() =>
+  import('./marketplace/GalleryView.js').then((m) => ({ default: m.MarketplaceGalleryView }))
+);
+
 function ContextGraphPrimerRoute() {
   const openTab = useTabsStore((s) => s.openTab);
 
@@ -219,6 +223,12 @@ export function App() {
           Redirect stale bookmarks for /ui/apps/... back to the dashboard so upgraded
           nodes don't silently render AppShell under a dead URL. */}
       <Route path="/apps/*" element={<Navigate to="/" replace />} />
+      {/* Fixture-fed marketplace component gallery (never live data). */}
+      <Route path="/dev/gallery" element={
+        <React.Suspense fallback={<div className="lazy-spinner">Loading...</div>}>
+          <MarketplaceGalleryRoute />
+        </React.Suspense>
+      } />
       <Route path="*" element={<AppShell />} />
     </Routes>
   );

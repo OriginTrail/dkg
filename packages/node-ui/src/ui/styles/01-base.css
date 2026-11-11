@@ -14,7 +14,7 @@ html, body, #root {
      labels, tooltips) via the cascade. Explicit "keep" overrides below
      prevent the very largest surfaces (stat hero numbers, dashboard
      title) from ballooning. */
-  font-size: 14px;
+  font-size: var(--fs-body);
   line-height: 1.5;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
@@ -34,7 +34,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 input, textarea {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-control);
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   color: var(--text-primary);

@@ -26,7 +26,7 @@
   gap: 8px;
 }
 .v10-po-identity-label {
-  font-size: 10px;
+  font-size: var(--fs-micro);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -107,14 +107,14 @@
 .v10-po-people { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid var(--border-subtle); }
 .v10-po-people > .v10-po-section-title { margin-bottom: 8px; }
 .v10-po-people-empty {
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--text-tertiary);
   font-style: italic;
 }
 .v10-po-participants-list { display: flex; flex-wrap: wrap; gap: 6px; }
 .v10-po-participant {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 3px 10px 3px 3px; border-radius: var(--radius-overlay); font-size: 11px; font-weight: 600;
+  padding: 3px 10px 3px 3px; border-radius: var(--radius-overlay); font-size: var(--fs-label); font-weight: 600;
   background: var(--bg-surface); border: 1px solid var(--border-default); color: var(--text-primary);
 }
 /* Each participant leads with its agent avatar (AgentDot), the same
@@ -125,7 +125,7 @@
 .v10-po-participant.is-curator::before {
   content: "◆";
   order: 2;
-  font-size: 11px;
+  font-size: var(--fs-label);
   line-height: 1;
   color: var(--role-text);
 }
@@ -158,7 +158,7 @@
   margin-bottom: 8px;
 }
 .v10-po-join-empty {
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--text-tertiary);
   font-style: italic;
 }
@@ -173,8 +173,8 @@
   border: 1px solid var(--border-default);
 }
 .v10-po-join-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.v10-po-join-name { font-size: 12px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; }
-.v10-po-join-addr { font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); }
+.v10-po-join-name { font-size: var(--fs-control); font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; }
+.v10-po-join-addr { font-size: var(--fs-micro); font-family: var(--font-mono); color: var(--text-tertiary); }
 .v10-po-join-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .v10-po-join-btn:disabled { opacity: 0.5; }
 .v10-po-pipeline {
@@ -203,14 +203,14 @@
 }
 .v10-po-section-title {
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--fs-control);
   font-weight: 700;
 }
 .v10-po-section-desc {
   max-width: 760px;
   margin-top: 3px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--fs-control);
   line-height: 1.45;
 }
 .v10-po-pipeline-track {
@@ -268,7 +268,7 @@
   background: color-mix(in srgb, var(--po-layer-color) 20%, transparent);
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 700;
 }
 .v10-po-pipeline-step-copy {
@@ -280,13 +280,13 @@
 }
 .v10-po-pipeline-step-label {
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--fs-control);
   font-weight: 700;
   line-height: 1.25;
 }
 .v10-po-pipeline-step-desc {
   color: var(--text-tertiary);
-  font-size: 11px;
+  font-size: var(--fs-label);
   line-height: 1.3;
 }
 .v10-po-pipeline-step-count {
@@ -294,7 +294,7 @@
   max-width: 42%;
   color: var(--text-secondary);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 700;
   overflow-wrap: anywhere;
   text-align: right;
@@ -313,14 +313,14 @@
   color: var(--text-tertiary);
 }
 .v10-po-primer-footer-lede {
-  font-size: 12px;
+  font-size: var(--fs-control);
   font-weight: 600;
   color: var(--text-secondary);
 }
 .v10-po-primer-footer-arrow {
   color: var(--text-tertiary);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-control);
 }
 .v10-po-primer-footer-link {
   text-decoration: underline;
@@ -332,14 +332,14 @@
   cursor: pointer;
   color: var(--text-link);
   font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: var(--fs-control);
   font-weight: 650;
 }
 .v10-po-primer-footer-link:hover { text-decoration: underline; }
 .v10-po-primer-footer-sub {
   flex: 1 0 100%;
   margin-top: 2px;
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 400;
   color: var(--text-tertiary);
 }

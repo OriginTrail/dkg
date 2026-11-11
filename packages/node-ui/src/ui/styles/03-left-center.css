@@ -7,19 +7,6 @@
   flex-direction: column;
   overflow: hidden;
 }
-.v10-tree-header {
-  height: var(--tab-h);
-  min-height: var(--tab-h);
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--border-subtle);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 1.2px;
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-}
 .v10-tree-content {
   flex: 1;
   overflow-y: auto;
@@ -40,7 +27,7 @@
   background: none;
   cursor: pointer;
   font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: var(--fs-control);
   font-weight: 500;
   text-align: left;
   color: var(--text-secondary);
@@ -54,6 +41,16 @@
 .v10-sidebar-node { margin-top: auto; flex-shrink: 0; padding: 6px 0 8px; border-top: 1px solid var(--border-subtle); }
 .v10-sidebar-group-label { padding: 6px 16px 4px; font-size: var(--fs-micro); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-tertiary); }
 .v10-sidebar-node .v10-tree-dashboard { margin-bottom: 0; }
+/* Collapsible sidebar groups (SidebarSection): My Context Graphs, Public
+   graphs, Marketplace, Integrations. Headers use the .v10-peer-group pattern. */
+.v10-sidebar-group-body { gap: 0; padding: 2px 0 8px; }
+.v10-sidebar-empty { display: grid; gap: 4px; margin: 2px 8px 6px; padding: 8px; color: var(--text-tertiary); font-size: var(--fs-label); line-height: 1.5; }
+.v10-sidebar-empty strong { color: var(--text-primary); font-size: var(--fs-control); font-weight: 600; }
+/* First run: the empty group is a card, and carries New and Join. */
+.v10-sidebar-first-run { padding: 12px; gap: 8px; border: 1px solid var(--border-default); border-radius: var(--radius-card); background: var(--bg-surface); }
+.v10-sidebar-inline-actions { display: flex; gap: 8px; padding: 4px 8px 0; }
+.v10-sidebar-inline-actions .ds-btn { flex: 1; }
+.v10-sidebar-first-run .v10-sidebar-inline-actions { padding: 0; }
 
 /* Tree sections (project list) */
 .v10-tree-section { margin-bottom: 2px; }
@@ -71,7 +68,7 @@
 .v10-tree-section-header.catalogue { cursor: default; gap: 6px; }
 .v10-tree-section-label {
   /* CG names — the single biggest sidebar readability win. 12 → 13. */
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 500;
   color: var(--text-secondary);
   flex: 1;
@@ -86,19 +83,6 @@
 .v10-tree-section-header:hover .v10-tree-hide-btn { opacity: 1; }
 .v10-tree-catalogue-btn { flex-shrink: 0; }
 
-/* "My Projects" / "Participating Projects" group dividers. Token
-   moved from --text-ghost → --text-tertiary (PR8) — ghost was never
-   meant for navigational labels; the contrast was below the 3:1 floor
-   even after PR8's ghost bump. */
-.v10-tree-group-label {
-  padding: 10px 14px 3px;
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-tertiary);
-}
-
 /* Move-to-other-group button (⤑), same reveal-on-hover shape as hide */
 
 .v10-tree-show-hidden {
@@ -110,7 +94,7 @@
   border: 1px dashed var(--border-subtle);
   border-radius: var(--radius-control);
   color: var(--text-tertiary);
-  font-size: 12px; font-family: var(--font-sans);
+  font-size: var(--fs-control); font-family: var(--font-sans);
   cursor: pointer;
   text-align: center;
   transition: border-color 0.15s, color 0.15s;
@@ -127,7 +111,7 @@
   gap: 8px;
   cursor: pointer;
   transition: background 0.1s;
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-secondary);
 }
 .v10-tree-item:hover { background: var(--bg-hover); color: var(--text-primary); }
@@ -137,11 +121,8 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 12px;
+  font-size: var(--fs-control);
 }
-
-/* New project button */
-.v10-new-project-btn { width: calc(100% - 16px); margin: 6px 8px; }
 
 /* Journey empty card */
 .v10-journey-empty-card {
@@ -151,8 +132,6 @@
   background: var(--bg-surface);
   text-align: center;
 }
-.v10-jec-title { font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
-.v10-jec-hint { font-size: 11px; color: var(--text-tertiary); line-height: 1.5; margin-bottom: 10px; }
 
 /* Tree items are toggled via React state — no CSS display:none needed */
 
@@ -317,14 +296,9 @@
 .v10-cg-mark{display:inline-grid;place-items:center;flex:none;border-radius:var(--radius-xs);font-family:var(--font-sans);font-weight:700;line-height:1;letter-spacing:0;
   color:var(--cg-color);background:color-mix(in srgb,var(--cg-color) 20%,var(--bg-surface));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--cg-color) 55%,transparent)}
 .v10-cg-mark::before{content:attr(data-initial)}
-.v10-cg-mark-sm{width:16px;height:16px;font-size: var(--fs-micro)}
-.v10-cg-mark-md{width:20px;height:20px;font-size:11px;border-radius: var(--radius-xs)}
+.v10-cg-mark-sm{width:16px;height:16px;font-size:9.5px}
+.v10-cg-mark-md{width:20px;height:20px;font-size:var(--fs-label);border-radius: var(--radius-xs)}
 .v10-cg-name{display:flex;align-items:center;gap:8px;min-width:0}
 .v10-select-option{display:flex;align-items:center;gap:8px}
 .v10-select-mark{display:inline-flex;margin-right:6px}
 
-/* Sidebar create/join: stacked, full width, compact — full labels never truncate. */
-.v10-tree-create-actions { display: flex; flex-direction: column; gap: 4px; padding: 8px 8px 4px; }
-.v10-tree-create-actions .v10-new-project-btn { width: 100%; margin: 0; height: var(--h-control-sm); font-size: var(--fs-label); justify-content: flex-start; padding: 0 10px; }
-/* The explorer / oracle switch fills the header. */
-.v10-tree-header .ds-seg, .v10-tree-header .ds-seg > * { flex: 1; }

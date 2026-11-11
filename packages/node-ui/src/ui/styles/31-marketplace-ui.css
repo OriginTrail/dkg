@@ -1,0 +1,27 @@
+/* The component gallery's page (/dev/gallery): its root, frame, headings and
+   section labels. Every value binds to the Layer 2 tokens in
+   30-marketplace-tokens.css, scoped under .mktx so the gallery coexists with
+   the shell's own styles; the components on it are styled in
+   32-marketplace-surfaces.css, as everywhere else. */
+
+.mktx { background: var(--surface-0); color: var(--text-primary);
+  font-family: var(--font-ui); font-size: var(--fs-md); line-height: var(--lh-normal);
+  min-height: 100%; }
+.mktx h1 { font-size: var(--fs-2xl); font-weight: var(--fw-semibold); line-height: var(--lh-tight); margin: 0; }
+.mktx h2 { font-size: var(--fs-lg); font-weight: var(--fw-semibold); line-height: var(--lh-tight); margin: 0; }
+.mktx p { margin: 0; }
+
+.mktx .frame { max-width: 1180px; margin: 0 auto; padding: var(--sp-6) var(--sp-5); }
+
+/* standalone /dev/gallery route: the shell locks body scroll (01-base);
+   the gallery page carries its own scroll container */
+.mktx--page { height: 100vh; overflow-y: auto; }
+.mktx .state-label { margin: var(--sp-10) 0 var(--sp-3); color: var(--text-muted);
+  font-size: var(--fs-xs); font-weight: var(--fw-semibold);
+  text-transform: uppercase; letter-spacing: 0.08em;
+  display: flex; align-items: center; gap: var(--sp-2); }
+.mktx .state-label::after { content: ""; flex: 1; height: 1px; background: var(--border-subtle); }
+
+@media (max-width: 480px) {
+  .mktx .frame { padding: var(--sp-5) var(--sp-3); }
+}

@@ -10,6 +10,9 @@
   height: 100dvh;
   width: 100vw;
   overflow: hidden;
+  /* `clip`, not only `hidden`: a hidden box can still be scrolled by focus
+     or scrollIntoView, which shifted the whole app up on Settings. */
+  overflow: clip;
 }
 
 /* ── API token entry, shown when the node rejects the page's credentials ── */
@@ -19,7 +22,7 @@
   align-items: center;
   gap: 8px;
   padding: 6px 14px;
-  font-size: 12px;
+  font-size: var(--fs-control);
   line-height: 1.4;
   color: var(--text-warning);
   background: var(--warning-bg);
@@ -39,7 +42,7 @@
 }
 .v10-token-prompt-submit {
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 600;
   padding: 3px 12px;
   border-radius: var(--radius-control);
@@ -59,7 +62,7 @@
   align-items: center;
   gap: 10px;
   padding: 5px 12px;
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--text-warning);
   background: var(--warning-bg);
   border-bottom: 1px solid var(--warning-border);
@@ -113,7 +116,7 @@
 .v10-header-logo-text {
   font-family: var(--font-mono);
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--fs-body);
   letter-spacing: 0.5px;
 }
 .v10-header-logo-version { color: var(--text-tertiary); font-weight: 300; }
@@ -141,13 +144,13 @@
 }
 .v10-header-agent-name {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 500;
   color: var(--text-primary);
 }
 .v10-header-agent-addr {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--text-secondary);
   opacity: 0.85;
 }
@@ -155,7 +158,7 @@
 .v10-header-meta {
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-secondary);
   display: flex;
   align-items: center;
@@ -208,7 +211,7 @@
   flex-shrink: 0;
 }
 .v10-notif-pane-title {
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 600;
   letter-spacing: 0.5px;
   text-transform: uppercase;
@@ -223,18 +226,18 @@
 .v10-notif-pane-error {
   padding: 18px 14px;
   text-align: center;
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-tertiary);
 }
 .v10-notif-pane-error { color: var(--text-secondary); }
 .v10-notif-pane-error-inline {
   padding: 8px 14px;
   text-align: left;
-  font-size: 11px;
+  font-size: var(--fs-label);
 }
 .v10-notif-pane-empty { padding: 24px 16px; text-align: center; }
-.v10-notif-pane-empty-lead { font-size: 13px; color: var(--text-secondary); margin-bottom: 4px; }
-.v10-notif-pane-empty-sub { font-size: 11px; color: var(--text-tertiary); line-height: 1.4; }
+.v10-notif-pane-empty-lead { font-size: var(--fs-body); color: var(--text-secondary); margin-bottom: 4px; }
+.v10-notif-pane-empty-sub { font-size: var(--fs-label); color: var(--text-tertiary); line-height: 1.4; }
 .v10-notif-retry {
   font-family: var(--font-sans);
   font-size: inherit;
@@ -258,14 +261,14 @@
   padding: 6px 14px 4px;
 }
 .v10-notif-section-label {
-  font-size: 10px;
+  font-size: var(--fs-micro);
   font-weight: 700;
   letter-spacing: 0.6px;
   text-transform: uppercase;
   color: var(--text-tertiary);
 }
 .v10-notif-section-rows { display: flex; flex-direction: column; }
-.v10-notif-section-empty { padding: 6px 14px 10px; font-size: 11px; color: var(--text-tertiary); font-style: italic; }
+.v10-notif-section-empty { padding: 6px 14px 10px; font-size: var(--fs-label); color: var(--text-tertiary); font-style: italic; }
 
 /* Rows (shared) */
 .v10-notif-row {
@@ -285,8 +288,8 @@ button.v10-notif-row { cursor: pointer; transition: background 0.1s; }
 button.v10-notif-row:hover { background: var(--bg-hover); }
 .v10-notif-row[aria-disabled="true"] { opacity: 0.78; }
 .v10-notif-row-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
-.v10-notif-row-title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
-.v10-notif-row-detail { font-size: 12px; color: var(--text-secondary); line-height: 1.35; }
+.v10-notif-row-title { font-size: var(--fs-control); font-weight: 600; color: var(--text-primary); }
+.v10-notif-row-detail { font-size: var(--fs-control); color: var(--text-secondary); line-height: 1.35; }
 .v10-notif-row-sub { display: flex; align-items: center; gap: 6px; margin-top: 1px; }
 .v10-notif-actor { font-weight: 600; color: var(--text-primary); }
 .v10-notif-cg-name { font-weight: 600; color: var(--text-primary); }
@@ -302,9 +305,9 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
   text-underline-offset: 2px;
 }
 .v10-notif-cg-link:hover { color: var(--text-secondary); }
-.v10-notif-addr { font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); }
+.v10-notif-addr { font-size: var(--fs-micro); font-family: var(--font-mono); color: var(--text-tertiary); }
 .v10-notif-dot { color: var(--text-tertiary); }
-.v10-notif-time { font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); white-space: nowrap; flex-shrink: 0; }
+.v10-notif-time { font-size: var(--fs-micro); font-family: var(--font-mono); color: var(--text-tertiary); white-space: nowrap; flex-shrink: 0; }
 /* Unread accent rail — colour-not-alone is covered by the row's text + glyph;
    this is a supplementary scan cue. */
 .v10-notif-unread { box-shadow: inset 2px 0 0 var(--text-warning); } /* unread = needs a look: amber, never red */
@@ -319,7 +322,7 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
   flex-shrink: 0;
   width: 18px;
   text-align: center;
-  font-size: 13px;
+  font-size: var(--fs-body);
   line-height: 1.4;
 }
 .v10-notif-glyph-join { color: var(--role-text); }
@@ -334,13 +337,13 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
 .v10-notif-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .v10-notif-btn:disabled { opacity: 0.5; }
 .v10-notif-deny-confirm { display: inline-flex; align-items: center; gap: 6px; }
-.v10-notif-deny-confirm-label { font-size: 11px; color: var(--text-danger); font-weight: 600; }
+.v10-notif-deny-confirm-label { font-size: var(--fs-label); color: var(--text-danger); font-weight: 600; }
 
 /* Terminal confirmation line (post approve/deny) + inline errors */
-.v10-notif-row-terminal { align-items: center; color: var(--text-tertiary); font-size: 12px; }
+.v10-notif-row-terminal { align-items: center; color: var(--text-tertiary); font-size: var(--fs-control); }
 .v10-notif-row-terminal .v10-notif-glyph { color: var(--text-success); }
 .v10-notif-terminal-text { color: var(--text-secondary); }
-.v10-notif-row-error { font-size: 11px; color: var(--text-danger); margin-top: 3px; }
+.v10-notif-row-error { font-size: var(--fs-label); color: var(--text-danger); margin-top: 3px; }
 
 /* ── Body ── */
 .v10-app-body {
@@ -418,6 +421,7 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
   }
   /* The OriginTrail mark stands in for the wordmark, so the brand stays in view. */
   .v10-header-ot-mark { display: inline-flex; }
+  .v10-header-ot-wordmark,
   .v10-header-logo-ot,
   .v10-header-logo-version,
   .v10-header-agent-addr { display: none; }

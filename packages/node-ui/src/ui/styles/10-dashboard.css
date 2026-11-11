@@ -16,8 +16,8 @@
 .v10-dash-header { margin-bottom: 24px; }
 /* Keep hero title pinned (PR8); subtitle gets promoted from tertiary
    muted-mono to a readable secondary line. */
-.v10-dash-title { font-size: 20px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
-.v10-dash-subtitle { font-size: 13px; color: var(--text-secondary); font-family: var(--font-mono); }
+.v10-dash-title { font-size: var(--fs-heading); font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
+.v10-dash-subtitle { font-size: var(--fs-body); color: var(--text-secondary); font-family: var(--font-mono); }
 .v10-dash-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 24px; }
 .v10-dash-stats .stat-card { min-width: 0; }
 .v10-dash-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
@@ -40,7 +40,7 @@
   margin-bottom: 12px;
 }
 .v10-dash-section-header h3 {
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -78,13 +78,13 @@
 .v10-cg-size-metric { display: flex; flex-direction: column; gap: 6px; }
 .v10-cg-size-num { display: flex; align-items: baseline; gap: 6px; }
 .v10-cg-size-big {
-  font-size: 26px;
+  font-size: var(--fs-display);
   font-weight: 700;
   color: var(--text-primary);
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
 }
-.v10-cg-size-num .v10-cg-dim { font-size: 12px; }
+.v10-cg-size-num .v10-cg-dim { font-size: var(--fs-control); }
 /* The Size card is the densest of the three stat cards; trim its
    padding so the two big numbers + bars + legend + sub don't bloat it
    past the other two (ui-lead). */
@@ -99,7 +99,7 @@
    value so the surrounding sub-text doesn't jump on settle. */
 .v10-stat-loading {
   display: inline-block;
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 400;
   color: var(--text-secondary);
   font-style: italic;
@@ -113,7 +113,7 @@
    all three top cards. */
 .v10-stat-empty {
   display: inline-block;
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 400;
   color: var(--text-secondary);
   line-height: 1.4;
@@ -137,7 +137,7 @@
 .v10-layer-legend { display: flex; gap: 12px; margin-top: 4px; }
 .v10-layer-legend-item {
   display: inline-flex; align-items: center; gap: 5px;
-  font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono);
+  font-size: var(--fs-label); color: var(--text-secondary); font-family: var(--font-mono);
 }
 .v10-layer-legend-dot { width: 8px; height: 8px; border-radius: 50%; } /* round = data; squares are context graphs */
 
@@ -155,7 +155,7 @@
 }
 .v10-cg-colhead {
   padding: 5px 8px;
-  font-size: 11px;
+  font-size: var(--fs-label);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-secondary);
@@ -178,7 +178,7 @@
 }
 .v10-cg-row:last-child { border-bottom: 0; }
 .v10-cg-row:hover { background: var(--bg-hover); }
-.v10-cg-cell { font-size: 13px; color: var(--text-secondary); min-width: 0; }
+.v10-cg-cell { font-size: var(--fs-body); color: var(--text-secondary); min-width: 0; }
 .v10-cg-name {
   color: var(--text-primary);
   font-weight: 500;
@@ -221,7 +221,7 @@
 .v10-cg-badge-curator::before { content: "◆"; }
 .v10-cg-badge-joined { background: var(--role-bg); color: var(--role-text); border-color: var(--role-border); }
 .v10-cg-badge-joined::before { content: "✓"; }
-.v10-cg-empty { color: var(--text-secondary); font-size: 12px; padding: 16px 4px; }
+.v10-cg-empty { color: var(--text-secondary); font-size: var(--fs-control); padding: 16px 4px; }
 
 /* Wallets and Spending sidebar card — compact, reuses existing tokens. */
 /* Section titles inside the Wallets card. Stronger than the previous
@@ -229,7 +229,7 @@
    rather than blending with rows, with extra top-spacing + a hairline
    divider to separate them (round-3 feedback). */
 .v10-ws-subhead {
-  font-size: 12px;
+  font-size: var(--fs-control);
   font-weight: 600;
   color: var(--text-primary);
   margin: 18px 0 8px;
@@ -250,11 +250,11 @@
   align-items: baseline;
   gap: 8px;
   margin: 0 0 6px;
-  font-size: 13px;
+  font-size: var(--fs-body);
 }
 .v10-ws-chain-label {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--fs-label);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -270,13 +270,13 @@
   grid-template-columns: minmax(0, 1fr) 5.5em 5em;
   align-items: baseline;
   gap: 10px;
-  font-size: 13px;
+  font-size: var(--fs-body);
 }
 .v10-ws-wrow .v10-ws-bal,
-.v10-ws-wrow .v10-ws-bal-sec { text-align: right; font-size: 13px; }
+.v10-ws-wrow .v10-ws-bal-sec { text-align: right; font-size: var(--fs-body); }
 .v10-ws-wrow .v10-ws-bal-sec { color: var(--text-secondary); }
 .v10-ws-whead {
-  font-size: 11px;
+  font-size: var(--fs-label);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-secondary);
@@ -294,12 +294,12 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--fs-body);
 }
 .v10-ws-addr {
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-control);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -313,7 +313,7 @@
    real balance, must clear AA). */
 .v10-ws-bal-sec {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -329,10 +329,10 @@
   grid-template-columns: minmax(0, 1fr) 7em 5em;
   align-items: baseline;
   gap: 10px;
-  font-size: 13px;
+  font-size: var(--fs-body);
 }
 .v10-ws-spend-head {
-  font-size: 11px;
+  font-size: var(--fs-label);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-secondary);
@@ -343,13 +343,13 @@
 .v10-ws-spend-val { text-align: right; }
 .v10-ws-spend-val {
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--fs-control);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 /* Chain/RPC partial-error caveat under the wallet list. --text-secondary
    (AA on the card surface), small but not micro. */
-.v10-ws-note { color: var(--text-secondary); font-size: 12px; margin-top: 6px; }
+.v10-ws-note { color: var(--text-secondary); font-size: var(--fs-control); margin-top: 6px; }
 
 /* Collaborating agents: the agents themselves as avatars under the count. */
 .v10-stat-agents { margin: 2px 0 6px; }

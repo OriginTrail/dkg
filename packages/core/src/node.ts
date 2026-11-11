@@ -837,6 +837,11 @@ export class DKGNode {
         D: 4,
         Dlo: 2,
         Dhi: 8,
+        // Keep mesh topics out of the peer store: each GRAFT would tag the peer with its topic for good,
+        // records would grow to thousands of tags that libp2p decodes and re-encodes on every peer-store
+        // access, and a reconnect's GRAFTs would block the event loop for seconds. Relays and warm cores
+        // keep their own keep-alive tags.
+        tagMeshPeers: false,
         // NOTE — RFC 07 §5.4 ships the constant `dkgGossipMsgId` for
         // cross-backend dedup, but it is intentionally NOT wired in
         // here yet. Codex review feedback on PR #501 (round 2) flagged

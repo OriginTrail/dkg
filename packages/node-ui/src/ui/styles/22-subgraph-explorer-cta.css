@@ -9,14 +9,14 @@
   gap: 6px;
 }
 .v10-subgraph-explorer-title {
-  font-size: 16px;
+  font-size: var(--fs-title);
   font-weight: 700;
   letter-spacing: 0.01em;
   color: var(--text-primary);
 }
 .v10-subgraph-explorer-intro {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--fs-control);
   line-height: 1.55;
   color: var(--text-secondary);
   max-width: 760px;
@@ -45,7 +45,7 @@
   background: var(--tint-faint);
 }
 .v10-subgraph-cross-layer-lede {
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--text-tertiary);
   letter-spacing: 0.01em;
   /* #11 polish (ui-locked) — +2px below the lede so the count
@@ -63,7 +63,7 @@
   align-items: center;
   gap: 6px;
   border: 1px solid var(--border-subtle);
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-primary);
   background: var(--bg-elevated);
   /* #6 polish — cells become interactive buttons (ui-locked).
@@ -88,12 +88,12 @@
   opacity: 0.5;
 }
 .v10-subgraph-cross-layer-cell-icon {
-  font-size: 13px;
+  font-size: var(--fs-body);
   line-height: 1;
 }
 .v10-subgraph-cross-layer-cell-label {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 600;
   letter-spacing: 0.01em;
 }
@@ -104,7 +104,7 @@
 }
 .v10-subgraph-cross-layer-arrow {
   color: var(--text-tertiary);
-  font-size: 12px;
+  font-size: var(--fs-control);
 }
 /* PR #793 round 2 (ui-locked option c) — demoted from
    clickable pill chrome to inline caption-style metadata. The
@@ -126,7 +126,7 @@
   background: transparent;
   border-radius: 0;
   font-family: var(--font-sans); /* was: --font-mono */
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--text-tertiary);
   cursor: default;               /* not a clickable widget */
   transition: color 0.15s;
@@ -185,13 +185,13 @@
   display: flex; align-items: center; gap: 8px;
 }
 .v10-ka-verify-arrow {
-  font-size: 18px;
+  font-size: var(--fs-heading);
   line-height: 1;
 }
 .v10-ka-verify-promote .v10-ka-verify-arrow { color: var(--layer-shared); }
 .v10-ka-verify-publish .v10-ka-verify-arrow { color: var(--layer-verified); }
 .v10-ka-verify-title {
-  font-size: 13px; font-weight: 700;
+  font-size: var(--fs-body); font-weight: 700;
   color: var(--text-primary);
   letter-spacing: 0.01em;
 }
@@ -199,13 +199,13 @@
 .v10-ka-verify-btn:disabled { opacity: 0.45; }
 .v10-ka-verify-hint {
   margin-top: 8px;
-  font-size: 10px; color: var(--text-tertiary); line-height: 1.5;
+  font-size: var(--fs-micro); color: var(--text-tertiary); line-height: 1.5;
 }
 .v10-ka-verify-err {
   margin-top: 8px; padding: 6px 8px;
   background: var(--danger-bg-strong);
   border-radius: var(--radius-xs);
-  color: var(--text-danger); font-size: 11px;
+  color: var(--text-danger); font-size: var(--fs-label);
   font-family: var(--font-mono);
 }
 .v10-ka-verify-ok {
@@ -223,7 +223,7 @@
   display: flex; justify-content: space-between; align-items: center;
   padding: 4px 0;
   border-bottom: 1px dashed var(--tint-strong);
-  font-size: 11px;
+  font-size: var(--fs-label);
 }
 .v10-ka-verify-ok-row:last-child { border-bottom: none; }
 .v10-ka-verify-ok-lbl { color: var(--text-tertiary); text-transform: uppercase; font-size: var(--fs-micro); letter-spacing: 0.08em; }

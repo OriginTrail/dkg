@@ -3,6 +3,9 @@
  * OT-RFC-73 P9b: `--cursor`, `--page-size` and `--all` of `dkg ka share-jobs` and `dkg publisher jobs`, the client path
  * helpers behind them, and the walk both commands share. Without a paging flag the output is exactly what it was.
  */
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import { ApiClient } from '../src/api-client.js';
@@ -329,7 +332,14 @@ describe('dkg publisher jobs', () => {
       vi.doMock('../src/publisher-runner.js', () => ({ createPublisherInspector: async () => ({ publisher: { list, listPage }, stop }) }));
       return { list, listPage, stop };
     };
-    afterEach(() => { vi.doUnmock('../src/publisher-runner.js'); });
+    // An empty node home: the offline read finds no daemon.pid, so it opens the inspector (#3551).
+    let previousHome: string | undefined;
+    beforeEach(() => { previousHome = process.env.DKG_HOME; process.env.DKG_HOME = mkdtempSync(join(tmpdir(), 'dkg-paging-offline-')); });
+    afterEach(() => {
+      vi.doUnmock('../src/publisher-runner.js');
+      rmSync(process.env.DKG_HOME!, { recursive: true, force: true });
+      if (previousHome === undefined) delete process.env.DKG_HOME; else process.env.DKG_HOME = previousHome;
+    });
 
     it('lists the same way as before without a paging flag', async () => {
       const inspector = inspectorOf(3);

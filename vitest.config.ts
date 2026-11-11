@@ -8,6 +8,7 @@ export default defineConfig({
       'packages/kafka-plugin',
       'packages/local-llm',
       'packages/okf',
+      'packages/marketplace',
       'packages/rdf-utils',
       'packages/core',
       'packages/http-utils',

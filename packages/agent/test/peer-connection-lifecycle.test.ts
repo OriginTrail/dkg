@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { NetworkAdmissionProbeError } from '../src/p2p/network-admission-coordinator.js';
 import { resolveRfc64CatalogExecutionPlanV1, resolveRfc64CatalogResponsibilityAuthorityV1 } from '../src/rfc64/catalog-rollout-authority-v1.js';
-import { isRedundantLimitedConnection, syncOpenedPeerConnection } from '../src/sync/peer-connection.js';
+import { isRedundantLimitedConnection, syncOpenedPeerConnection, type OpenedConnectionView } from '../src/sync/peer-connection.js';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { createPeerEventFixture, deferred, flushMicrotasks } from './_helpers/peer-event-lifecycle.js';
 
@@ -473,22 +473,23 @@ describe('peer connection lifecycle', () => {
 });
 
 describe('a second, limited connection to a connected peer', () => {
-  const circuit = { id: 'circuit-2', status: 'open', limits: { bytes: 1n } };
+  const view = (id: string, status: OpenedConnectionView['status'] = 'open', limits?: OpenedConnectionView['limits']) => (
+    { id, status, limits } satisfies OpenedConnectionView
+  );
+  const circuit = view('circuit-2', 'open', { bytes: 1n });
 
   it('is redundant beside another open connection, limited or not', () => {
-    expect(isRedundantLimitedConnection(circuit, [{ id: 'direct', status: 'open' }, circuit])).toBe(true);
-    expect(isRedundantLimitedConnection(circuit, [{ id: 'circuit-1', status: 'open', limits: {} }, circuit])).toBe(true);
-    expect(isRedundantLimitedConnection(circuit, [{}, circuit])).toBe(true);
+    expect(isRedundantLimitedConnection(circuit, [view('direct'), circuit])).toBe(true);
+    expect(isRedundantLimitedConnection(circuit, [view('circuit-1', 'open', {}), circuit])).toBe(true);
   });
 
   it('is not redundant as the peer\'s only open connection, or when unlimited', () => {
     expect(isRedundantLimitedConnection(circuit, [circuit])).toBe(false);
     expect(isRedundantLimitedConnection(circuit, [])).toBe(false);
     expect(isRedundantLimitedConnection(circuit, [{ ...circuit }])).toBe(false);
-    expect(isRedundantLimitedConnection(circuit, [{ id: 'old', status: 'closing' }, { id: 'older', status: 'closed' }])).toBe(false);
-    const direct = { id: 'direct-2', status: 'open' };
-    expect(isRedundantLimitedConnection(direct, [{ id: 'circuit-1', status: 'open', limits: {} }, direct])).toBe(false);
-    expect(isRedundantLimitedConnection({ ...direct, limits: null }, [{ id: 'other', status: 'open' }])).toBe(false);
+    expect(isRedundantLimitedConnection(circuit, [view('old', 'closing'), view('older', 'closed')])).toBe(false);
+    const direct = view('direct-2');
+    expect(isRedundantLimitedConnection(direct, [view('circuit-1', 'open', {}), direct])).toBe(false);
   });
 
   it('starts no admission, catalog replay or sync-on-connect for an admitted peer, and records its way back', async () => {
@@ -498,18 +499,18 @@ describe('a second, limited connection to a connected peer', () => {
       vi.spyOn(f.agent.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(true);
       const enrich = vi.spyOn(f.agent, 'enrichPeerStoreFromInboundCircuit').mockRejectedValue(new Error('peer store busy'));
       const warn = vi.spyOn(f.state.log, 'warn');
-      const duplicate = { remotePeer: f.peer, direction: 'inbound', limits: { bytes: 1n } };
-      const elsewhere = { remotePeer: { toString: () => '12D3KooWsomeOtherPeer' }, status: 'open' };
+      const duplicate = { ...view('circuit-2', 'open', { bytes: 1n }), remotePeer: f.peer, direction: 'inbound' };
+      const elsewhere = { ...view('elsewhere'), remotePeer: { toString: () => '12D3KooWsomeOtherPeer' } };
       const connections = vi.spyOn(f.agent.node.libp2p, 'getConnections')
-        .mockReturnValue([elsewhere, { remotePeer: f.peer, status: 'open' }, duplicate] as never);
-      f.agent.node.libp2p.dispatchEvent(new CustomEvent('connection:open', { detail: duplicate }));
+        .mockReturnValue([elsewhere, { ...view('direct'), remotePeer: f.peer }, duplicate] as never);
+      f.openConnection(duplicate);
       await vi.waitFor(() => expect(enrich).toHaveBeenCalledExactlyOnceWith(duplicate));
       await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('peer store busy')));
       expect(admission).not.toHaveBeenCalled();
 
       // The peer's first connection runs it, limited or not; so does a peer's only other connection elsewhere.
       connections.mockReturnValue([elsewhere, duplicate] as never);
-      f.agent.node.libp2p.dispatchEvent(new CustomEvent('connection:open', { detail: duplicate }));
+      f.openConnection(duplicate);
       await vi.waitFor(() => expect(admission).toHaveBeenCalledOnce());
     } finally {
       await f.close();
@@ -527,17 +528,18 @@ describe('a second, limited connection to a connected peer', () => {
       vi.spyOn(f.agent, 'enrichPeerStoreFromInboundCircuit').mockResolvedValue();
       vi.spyOn(f.agent, 'drainPendingSenderKeyForPeer').mockResolvedValue(0);
       const queueSync = vi.spyOn(f.agent, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
-      const first = { remotePeer: f.peer, direction: 'inbound', limits: { bytes: 1n } };
+      const circuit = (id: string) => ({ id, status: 'open', limits: { bytes: 1n }, remotePeer: f.peer, direction: 'inbound' });
+      const first = circuit('circuit-1');
       const connections = vi.spyOn(f.agent.node.libp2p, 'getConnections').mockReturnValue([first] as never);
-      f.agent.node.libp2p.dispatchEvent(new CustomEvent('connection:open', { detail: first }));
+      f.openConnection(first);
       await vi.waitFor(() => expect(admission).toHaveBeenCalledTimes(1));
       await flushMicrotasks();
       expect(queueSync).not.toHaveBeenCalled();
 
       // A second circuit beside the open one retries admission and schedules catch-up.
-      const second = { remotePeer: f.peer, direction: 'inbound', limits: { bytes: 1n } };
-      connections.mockReturnValue([{ ...first, status: 'open' }, second] as never);
-      f.agent.node.libp2p.dispatchEvent(new CustomEvent('connection:open', { detail: second }));
+      const second = circuit('circuit-2');
+      connections.mockReturnValue([first, second] as never);
+      f.openConnection(second);
       await vi.waitFor(() => expect(queueSync).toHaveBeenCalledOnce());
       expect(admission).toHaveBeenCalledTimes(2);
     } finally {

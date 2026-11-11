@@ -1,3 +1,4 @@
+import { admitShareWhileConnected } from '../share-admission-lifetime.js';
 import { handleKnowledgeAssetPullFrom } from './knowledge-asset-pull-from.js';
 import { handleShareJobCollection } from './share-job-collection.js';
 import { handlePublishedDescriptorRepair } from './published-descriptor-repair.js';
@@ -53,6 +54,7 @@ import {
   noFundedPublisherWalletBody,
   respondIfPcaFundingUnknown,
   SMALL_BODY_BYTES,
+  type UnavailableResponseRenderer,
 } from "../http-utils.js";
 import { validateWritableQuads } from "../knowledge-asset-quad-validation.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
@@ -97,6 +99,7 @@ import {
   respondAmbiguousAssertionAuthor,
   respondAuthorSelectionError,
   respondPublicationPricingPolicyError,
+  respondRetryablePublishAuthorityError,
 } from './knowledge-assets-error-mapping.js';
 
 import { confirmedCatalogObligationResponse, handleConfirmedCatalogObligationRecovery } from './confirmed-catalog-obligation.js';
@@ -558,6 +561,11 @@ function rejectSelectedAuthorOnCreate(
   });
   return false;
 }
+
+/** Only used by the common preflight before this request can create a publisher job. */
+const renderPublishPreflightUnavailable: UnavailableResponseRenderer = (res, body, headers) => {
+  jsonResponse(res, 503, { ...body, jobCreated: false, retryable: true }, undefined, headers);
+};
 
 export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -1125,7 +1133,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     agent,
     parsed.contextGraphId,
     res,
-    writePreflightContextGraphOpts,
+    {
+      ...writePreflightContextGraphOpts,
+      // This common preflight precedes every mutation and the publish enqueue fence.
+      ...(layer === 'vm' && verb === 'publish-async' ? { renderUnavailable: renderPublishPreflightUnavailable } : {}),
+    },
   );
   if (!contextGraphId) return;
 
@@ -1308,11 +1320,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         }
       }
       try {
-        const result = await admissionStep(res, 'enqueue', () => agent.assertion.promoteAsync(contextGraphId, name, {
+        const result = await admitShareWhileConnected(res, signal => admissionStep(res, 'enqueue', () => agent.assertion.promoteAsync(contextGraphId, name, {
+          signal,
           entities: entities ?? "all",
           subGraphName,
           ...promoteStorageLane,
-        }));
+        })));
+        if (result === undefined) return;
         return jsonResponse(res, 200, { jobId: result.jobId, state: "queued" });
       } catch (err: any) {
         if (err instanceof PromoteJobConflictError) {
@@ -1440,7 +1454,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
               : 'This job\'s record gives chain recovery no automatic exit (no provable absence '
                 + 'and no formable recognition), so retrying will not release it. Check the '
                 + 'transaction yourself, then clear the job with '
-            }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}","allowPendingTransaction":true} — which the agent that ENQUEUED that job must run, since the override is scoped to its admission lane.`,
+            }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}","allowPendingTransaction":true}, as the agent that ENQUEUED that job (an agent's override covers only its own admission lane) or with the node-operator token. Without the flag the clear refuses this job.`,
             retryable: err.retryable,
             existingJobId: err.existingJobId,
             // GH#2942 - WHY this job is held (what its record lacks, or whether this node can act on
@@ -1608,6 +1622,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           return jsonResponse(res, 400, noFundedPublisherWalletBody(msg));
         }
         if (respondIfPcaFundingUnknown(res, e)) return;
+        if (respondRetryablePublishAuthorityError(res, e, { contextGraphId, name, subGraphName })) return;
         // A transient chain-RPC transport failure (all endpoints exhausted /
         // receipt lookup failed / timeout) is retryable -> 503/504, matching
         // /api/context-graph/register. Keyed strictly on err.code, so an

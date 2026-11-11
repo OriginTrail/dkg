@@ -16,6 +16,19 @@ export type AgentChainSignerSource =
   | { signers?: readonly ExternalEvmSigner[]; operationalKeys?: never }
   | { operationalKeys?: never; signers?: never };
 
+/** Where the authors are when the operational wallets sign externally and pay only. */
+export interface NodeHeldAuthorConfig {
+  /**
+   * `chain.signer.nodeHeldAuthor`: the authors are agent keys held on the node (custodial agents),
+   * not keys of the external signer. The first one registered becomes the default agent and authors
+   * what the node publishes without a selected agent, may curate a context graph backed by a
+   * Publishing Conviction Account and sends the sender keys of the curated graphs it is a member of
+   * (node-held-author.ts). Applies only when the wallets sign externally; cannot be combined with
+   * `authorSigners`. Off (`false` or omitted), nothing changes.
+   */
+  nodeHeldAuthor?: boolean;
+}
+
 /**
  * The adapter's operational signer source from the agent's chain
  * configuration, or undefined when it names none. Exclusivity is checked here

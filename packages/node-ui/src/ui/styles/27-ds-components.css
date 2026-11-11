@@ -370,7 +370,7 @@
   white-space: nowrap;
 }
 .ds-entity-chip-name { overflow: hidden; text-overflow: ellipsis; }
-.ds-entity-chip .v10-cg-mark { width: 18px; height: 18px; border-radius: var(--radius-xs); font-size: 10px; }
+.ds-entity-chip .v10-cg-mark { width: 18px; height: 18px; border-radius: var(--radius-xs); font-size: var(--fs-micro); }
 .ds-entity-chip.interactive { cursor: pointer; transition: background-color .12s, border-color .12s; }
 .ds-entity-chip.interactive:hover { background: var(--bg-hover); border-color: var(--border-strong); }
 .ds-entity-chip.interactive:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
