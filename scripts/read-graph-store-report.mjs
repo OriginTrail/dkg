@@ -43,11 +43,15 @@ if (!endpoint || !/^https?:\/\//.test(endpoint) || !Number.isSafeInteger(sample)
   process.exit(2);
 }
 
+// The core package's SPARQL boundary: `sparqlIri` validates and wraps an IRI, `sparqlString` escapes a literal.
+const { sparqlIri, sparqlString: literal } = await import(new URL('../packages/core/dist/index.js', import.meta.url).href);
+
 const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
 const PARTITION = '/_~read';
-// An IRI this report writes into a query: no character that could end the IRI or the query.
-const SAFE_IRI = /^[^\s<>"{}|\\^`]+$/;
-const literal = (value) => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+/** `<iri>` for a query, or undefined for an IRI that cannot be written into one. */
+function iriOrUndefined(value) {
+  try { return sparqlIri(value); } catch { return undefined; }
+}
 
 async function select(query) {
   const response = await fetch(endpoint, {
@@ -119,15 +123,17 @@ async function main() {
   for (const iri of graphs.map((row) => row.g?.value).filter(Boolean).sort()) {
     const root = contextGraphRoot(iri);
     if (!root || iri === `${root}${PARTITION}/state`) continue;
-    if (!SAFE_IRI.test(iri)) { skipped.push({ readGraph: iri, reason: 'an IRI this report does not write into a query' }); continue; }
-    const [count] = await select(`SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${iri}> { ?s ?p ?o } }`);
-    const outside = `?g = <${root}> || (STRSTARTS(STR(?g), ${literal(`${root}/`)}) && STR(?g) != ${literal(`${root}${PARTITION}`)}`
+    const graph = iriOrUndefined(iri);
+    const rootGraph = iriOrUndefined(root);
+    if (!graph || !rootGraph) { skipped.push({ readGraph: iri, reason: 'an IRI this report does not write into a query' }); continue; }
+    const [count] = await select(`SELECT (COUNT(*) AS ?n) WHERE { GRAPH ${graph} { ?s ?p ?o } }`);
+    const outside = `?g = ${rootGraph} || (STRSTARTS(STR(?g), ${literal(`${root}/`)}) && STR(?g) != ${literal(`${root}${PARTITION}`)}`
       + ` && !STRSTARTS(STR(?g), ${literal(`${root}${PARTITION}/`)}))`;
     const histogram = await select(`SELECT ?copies (COUNT(*) AS ?triples) WHERE {
       # sparql-scan-allow: R1 -- the triples come from one exact read graph, at most --sample of them
       # sparql-scan-allow: R2 -- ?s ?p ?o are bound by that sample, so GRAPH ?g looks up one bound triple at a time
       { SELECT ?s ?p ?o (COUNT(DISTINCT ?g) AS ?copies) WHERE {
-          { SELECT ?s ?p ?o WHERE { GRAPH <${iri}> { ?s ?p ?o } } LIMIT ${sample} }
+          { SELECT ?s ?p ?o WHERE { GRAPH ${graph} { ?s ?p ?o } } LIMIT ${sample} }
           GRAPH ?g { ?s ?p ?o }
           FILTER(${outside})
         } GROUP BY ?s ?p ?o }

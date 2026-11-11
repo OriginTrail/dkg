@@ -8,9 +8,11 @@
 #   seed      with read graphs still off, run READ_GRAPHS_SEED_CMD (default
 #             scripts/v10-rc-validation.sh) so the nodes hold data in every
 #             layer before the read graphs are built;
-#   setup     set query.readGraphs to READ_GRAPHS_SETTING (default "build":
-#             every context graph and layer) in every node's config.json and
-#             restart the nodes in ascending order;
+#   setup     check that no node holds a ready read graph yet, so the
+#             backfill is fresh; then set query.readGraphs to
+#             READ_GRAPHS_SETTING (default "build": every context graph and
+#             layer) in every node's config.json and restart the nodes in
+#             ascending order;
 #   backfill  wait until every node's read graphs are `ready` and record how
 #             long that took, then run the full check on every node. A node
 #             must also list the read graphs it is expected to keep, worked
@@ -26,8 +28,8 @@
 #             (completeSuccess in its REPORT.json); a filtered run is
 #             INCONCLUSIVE;
 #   drills    a restart during a rebuild; a kill of the daemon worker during
-#             writes (every write the node acknowledged must be there after
-#             it); a CLI write with the daemon down (`dkg publisher clear
+#             working-memory writes (every write the node acknowledged must be
+#             there after it); a CLI write with the daemon down (`dkg publisher clear
 #             finalized` on a node that has such jobs, which must stay
 #             cleared); a rollback and forward again (the earlier release is
 #             built first; after the rollback step the node's store must hold
@@ -110,6 +112,8 @@ say() { echo "[read-graphs-run $(date -u +%H:%M:%S)] $*"; }
 early_exit() { echo "[read-graphs-run] INCONCLUSIVE: $*"; exit "$SKIP_EXIT"; }
 
 case "$RESULTS" in *" "*) early_exit "READ_GRAPHS_RUN_RESULTS must not contain a space: $RESULTS" ;; esac
+# Evidence from an earlier run must never count for this one.
+[ ! -e "$RESULTS" ] || [ -z "$(ls -A "$RESULTS" 2>/dev/null)" ] || early_exit "READ_GRAPHS_RUN_RESULTS already holds files ($RESULTS): use a fresh directory"
 [ -d "$DEVNET_DIR" ] || early_exit "no devnet at $DEVNET_DIR (start one first: ./scripts/devnet.sh start 6)"
 command -v curl >/dev/null 2>&1 || early_exit "curl not available"
 [ -x "$DEVNET_SH" ] || early_exit "no devnet.sh at $DEVNET_SH"
@@ -144,6 +148,8 @@ NODES="${NODES% }"
 # ── results ───────────────────────────────────────────────────────────────
 FAILS=0
 GAPS=0
+# Set when a step's precondition was not met: the later steps do not run.
+STOPPED=0
 # record <step> <PASS|FAIL|INCONCLUSIVE> <seconds> <detail>
 record() {
   printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$RESULTS/results.tsv"
@@ -458,6 +464,16 @@ phase_seed() {
 phase_setup() {
   local started n
   started="$(now)"
+  # The backfill must build from the asset data alone: a read graph already ready would pass without being built.
+  for n in $NODES; do
+    if ! read_graph_rows "$n" > "$RESULTS/rows/setup.before.node$n"; then
+      record setup INCONCLUSIVE "$(( $(now) - started ))" "node$n's status could not be read before the setup"; STOPPED=1; return
+    fi
+    if grep -q '^ready ' "$RESULTS/rows/setup.before.node$n"; then
+      record setup INCONCLUSIVE "$(( $(now) - started ))" "node$n already holds ready read graphs, so the backfill would not be fresh: drop them first (dkg store read-graphs drop --yes) or start from a devnet without read graphs"
+      STOPPED=1; return
+    fi
+  done
   : > "$RESULTS/measure/size-before.txt"
   for n in $NODES; do
     du -sk "$DEVNET_DIR/node$n" | awk -v n="$n" '{ print "node" n " " $1 }' >> "$RESULTS/measure/size-before.txt"
@@ -522,17 +538,18 @@ phase_measure() {
 }
 
 # gate_verdict <exit code>: PASS, INCONCLUSIVE or FAIL for the gate. The comprehensive run writes REPORT.json
-# into RESULTS_DIR, and only its completeSuccess is a pass: a filtered run exits 0 without being one. A gate
-# command that writes no report is judged by its exit code (0 PASS, 3 INCONCLUSIVE, other FAIL).
+# into RESULTS_DIR, and only its completeSuccess, written by this run's gate command and with that command
+# exiting 0, is a pass: a filtered run exits 0 without being one. A gate command that writes no report is judged
+# by its exit code (0 PASS, 3 INCONCLUSIVE, other FAIL).
 gate_verdict() {
   local report="$RESULTS/gate/REPORT.json"
   if [ -f "$report" ]; then
     node -e '
       const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-      if (r.phase === "complete" && r.completeSuccess === true) console.log("PASS");
-      else if (r.outcome === "FAIL" || r.selectionOutcome === "FAIL") console.log("FAIL");
+      if (r.outcome === "FAIL" || r.selectionOutcome === "FAIL") console.log("FAIL");
+      else if (process.argv[2] === "0" && r.phase === "complete" && r.completeSuccess === true) console.log("PASS");
       else console.log("INCONCLUSIVE");
-    ' "$report" 2>/dev/null || echo INCONCLUSIVE
+    ' "$report" "$1" 2>/dev/null || echo INCONCLUSIVE
   elif [ "$GATE_CMD" = "$REPO_ROOT/scripts/devnet-comprehensive.sh" ]; then
     echo INCONCLUSIVE
   else
@@ -544,6 +561,7 @@ phase_gate() {
   local started rc verdict checked n cg lost="" rebuilt=""
   started="$(now)"
   mkdir -p "$RESULTS/gate"
+  rm -f "$RESULTS/gate/REPORT.json"
   for n in $NODES; do read_graphs_setting "$n" > "$RESULTS/gate/setting.node$n"; done
   RESULTS_DIR="$RESULTS/gate" "$GATE_CMD" > "$RESULTS/gate.log" 2>&1; rc=$?
   verdict="$(gate_verdict "$rc")"
@@ -639,7 +657,7 @@ drill_kill_during_write() {
     200|201|409) ;;
     *) record drill-kill INCONCLUSIVE 0 "could not create context graph $cg on node$n (HTTP $(code_of "$resp"))"; return ;;
   esac
-  # The writer records each working-memory write the node acknowledged (HTTP 2xx), and shares it on.
+  # The writer records each working-memory write the node acknowledged (HTTP 2xx).
   (
     export DKG_API_MAXTIME=15
     for i in $(seq 1 300); do
@@ -647,7 +665,6 @@ drill_kill_during_write() {
       body="{\"contextGraphId\":\"$cg\",\"quads\":[{\"subject\":\"urn:read-graphs-drill:$i\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"drill $i\\\"\"}]}"
       resp="$(api "$n" POST "/api/knowledge-assets/drill-$i/wm/write" "$body")"
       case "$(code_of "$resp")" in 2??) echo "$i" >> "$acked" ;; esac
-      api "$n" POST "/api/knowledge-assets/drill-$i/swm/share" "{\"contextGraphId\":\"$cg\",\"entities\":\"all\"}" > /dev/null 2>&1 || true
     done
   ) &
   writer=$!
@@ -685,7 +702,7 @@ drill_kill_during_write() {
       process.stdout.write(acked.filter((i) => !seen.has(i)).join(" "));
     });' "$acked")"
   [ -z "$missing" ] || { record drill-kill FAIL "$(( $(now) - started ))" "writes acknowledged before the kill are missing after it: $missing"; return; }
-  drill_end drill-kill "$n" "$started" "killed node$n's daemon during writes; all $(acked_count "$acked") acknowledged writes were there after it"
+  drill_end drill-kill "$n" "$started" "killed node$n's daemon during working-memory writes; all $(acked_count "$acked") acknowledged writes were there after it"
 }
 
 # finalized_jobs <n>: the node's count of finalized publish jobs, or "" when it cannot be read.
@@ -872,6 +889,7 @@ for phase in $PHASES; do
     *) record "$phase" INCONCLUSIVE 0 "unknown phase"; continue ;;
   esac
   [ "$FAILS" = 0 ] || { record "$phase" INCONCLUSIVE 0 "not run: an earlier step failed"; continue; }
+  [ "$STOPPED" = 0 ] || { record "$phase" INCONCLUSIVE 0 "not run: a precondition of an earlier step was not met"; continue; }
   "phase_$phase"
 done
 for phase in seed setup backfill measure gate drills; do
