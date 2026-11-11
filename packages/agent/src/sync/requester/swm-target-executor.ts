@@ -253,15 +253,14 @@ export class SwmTargetExecutorV1 {
       createRoundDeadline: () => this.#ports.createContextGraphSyncDeadline(1),
       onRetry: target.onRetry,
       snapshotProgressRetention: () => snapshotLease?.kind ?? 'detached',
-      recover: (_round, workAdmission, deadline) =>
-        recoverContextGraphSwm({ ...options, deadline, workAdmission }),
-    }).catch((error: unknown) => {
-      this.#afterSnapshotRound(snapshots);
-      throw error;
-    });
-    // Private recovery replaces a named sub-graph's snapshot graphs through its own store, not the
-    // materializer: its count of replaced graphs says whether the round wrote any as well.
-    this.#afterSnapshotRound({ wrote: snapshots.wrote || result.replacedGraphs > 0 });
+      recover: async (_round, workAdmission, deadline) => {
+        const round = await recoverContextGraphSwm({ ...options, deadline, workAdmission });
+        // Private recovery replaces a named sub-graph's snapshot graphs through its own store, not
+        // the materializer: each retry's count of replaced graphs says whether it wrote any.
+        if (round.replacedGraphs > 0) snapshots.wrote = true;
+        return round;
+      },
+    }).finally(() => this.#afterSnapshotRound(snapshots));
     if (result.completed) snapshotLease?.release();
     return result;
   }
