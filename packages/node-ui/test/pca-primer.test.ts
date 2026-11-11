@@ -58,7 +58,7 @@ describe('PcaPrimerLink', () => {
     expect(text).toContain('up to 100');
     expect(text).toContain('signed by one of a node’s publishing wallets');
     expect(text).toContain('Topping up doesn’t make the PCA last longer');
-    expect(text).not.toMatch(/lock/i);
+    expect(text).not.toMatch(/\block/i);
     // The tier ladder shows every tier with none highlighted (no amount entered).
     const rows = d.querySelectorAll('.v10-pca-tier-row');
     expect(rows.length).toBe(7);

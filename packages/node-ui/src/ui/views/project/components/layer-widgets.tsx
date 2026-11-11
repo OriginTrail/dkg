@@ -8,7 +8,7 @@ import { EmptyState, StatStrip, toneForLayer } from '../../../components/Context
 import { useVmPublishGate } from '../../../pages/conviction/useVmPublishGate.js';
 import { PublishEligibilityChipView } from '../../../pages/conviction/PublishEligibilityChip.js';
 import { PcaPrimerLink } from '../../../pages/conviction/PcaPrimer.js';
-import { usePcaAvailability } from '../../../hooks/usePcaAvailability.js';
+import { useNoPcaCoverage } from '../../../pages/conviction/useNoPcaCoverage.js';
 import { DiscountAppliedBadge } from '../../../components/Pca/index.js';
 import { X } from 'lucide-react';
 import { StatusGlyph } from '../../../components/ds/Badge.js';
@@ -260,12 +260,13 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
   );
 }
 
-/** No PCA tracked: says this publish pays the full TRAC fee and offers the primer. Its own
- *  component so the availability probe only runs when the line could show; hidden while the
- *  probe runs and on networks without PCAs. */
+/** No PCA tracked: says this publish pays the full TRAC fee and offers the primer. Shown only
+ *  once the chain confirms no publishing wallet is on any PCA (tracked or not), so a sponsor's
+ *  untracked PCA never gets a false full-fee claim. Hidden while checking, on a failed check
+ *  and on networks without PCAs. Its own component so the check only runs when it could show. */
 function PcaFeeNote() {
-  const { status } = usePcaAvailability();
-  if (status !== 'available') return null;
+  const noCoverage = useNoPcaCoverage();
+  if (!noCoverage) return null;
   return (
     <p className="v10-pca-fee-note" data-testid="pca-fee-note">
       <span>This publish pays the full TRAC fee. A PCA can cut it by up to 75%.</span>

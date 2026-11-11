@@ -16,6 +16,10 @@ const apiMocks = vi.hoisted(() => ({
   promoteAssertion: vi.fn(),
   publishAssertionsToVm: vi.fn(),
   partialPublishWarning: vi.fn((d?: string) => (d ? `binding incomplete — ${d}` : 'binding incomplete')),
+  // R2 — the full-fee line's on-chain check (useNoPcaCoverage): this node's wallets, then
+  // which PCA (if any) each one is on.
+  fetchWalletsBalances: vi.fn(),
+  pcaAgentAccount: vi.fn(),
 }));
 
 // #1382 — PublishVmWidget drives the CTA gate + chip from `useVmPublishGate`, which owns the
@@ -30,15 +34,12 @@ vi.mock('../src/ui/api.js', async (orig) => ({
   promoteAssertion: apiMocks.promoteAssertion,
   publishAssertionsToVm: apiMocks.publishAssertionsToVm,
   partialPublishWarning: apiMocks.partialPublishWarning,
+  fetchWalletsBalances: apiMocks.fetchWalletsBalances,
+  pcaAgentAccount: apiMocks.pcaAgentAccount,
 }));
 
 vi.mock('../src/ui/hooks/usePublishEligibility.js', () => ({
   usePublishEligibility: eligMock.usePublishEligibility,
-}));
-// R2 — the full-fee line under the CTA shows only where PCAs exist on the network.
-const availMock = vi.hoisted(() => ({ status: 'loading' as 'loading' | 'available' | 'unavailable', calls: 0 }));
-vi.mock('../src/ui/hooks/usePcaAvailability.js', () => ({
-  usePcaAvailability: () => { availMock.calls += 1; return { status: availMock.status, recheck: () => {} }; },
 }));
 
 const { PromoteWidget, PublishVmWidget, LayerWidgetStrip } = await import('../src/ui/views/project/components/layer-widgets.js');
@@ -70,8 +71,9 @@ beforeEach(() => {
   // Default: an inconclusive verdict never gates (fail-open) — so the B8 badge tests
   // publish freely. Gate tests override per-verdict.
   eligMock.usePublishEligibility.mockReturnValue({ verdict: 'unknown', ownerPublish: false, anyGasFunded: false } as any);
-  availMock.status = 'loading';
-  availMock.calls = 0;
+  // Default for the full-fee line: two wallets, neither on any PCA (confirmed full fee).
+  apiMocks.fetchWalletsBalances.mockResolvedValue({ wallets: ['0xaaa', '0xbbb'], balances: [], chainId: '84532', rpcUrl: null });
+  apiMocks.pcaAgentAccount.mockResolvedValue({ accountId: null });
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
@@ -390,10 +392,12 @@ describe('PublishVmWidget — S5 publish CTA gate (#1382)', () => {
     await unmount();
   });
 
-  it('no PCA tracked on a PCA network → a quiet full-fee line with the primer button', async () => {
+  it('no wallet on any PCA (checked on-chain) → a quiet full-fee line with the primer button', async () => {
     usePcaStore.setState({ trackedIds: [] });
-    availMock.status = 'available';
     const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+    await flush();
+    expect(apiMocks.pcaAgentAccount).toHaveBeenCalledWith('0xaaa');
+    expect(apiMocks.pcaAgentAccount).toHaveBeenCalledWith('0xbbb');
     const note = container.querySelector('[data-testid="pca-fee-note"]')!;
     expect(note.className).toBe('v10-pca-fee-note');
     expect(note.textContent).toContain('This publish pays the full TRAC fee. A PCA can cut it by up to 75%.');
@@ -404,22 +408,43 @@ describe('PublishVmWidget — S5 publish CTA gate (#1382)', () => {
     await unmount();
   });
 
-  it('hides the full-fee line while the probe runs and where PCAs are unavailable', async () => {
+  it('no PCA tracked, but a sponsor’s untracked PCA has a wallet → no full-fee claim', async () => {
     usePcaStore.setState({ trackedIds: [] });
-    for (const status of ['loading', 'unavailable'] as const) {
-      availMock.status = status;
+    apiMocks.pcaAgentAccount.mockImplementation(async (w: string) => ({ accountId: w === '0xbbb' ? '12' : null }));
+    const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+    await flush();
+    expect(apiMocks.pcaAgentAccount).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[data-testid="pca-fee-note"]')).toBeNull();
+    await unmount();
+  });
+
+  it('hides the full-fee line while checking, on a failed check, with no wallets, and where PCAs are unavailable', async () => {
+    usePcaStore.setState({ trackedIds: [] });
+    const cases: Array<[string, () => void]> = [
+      ['checking', () => { apiMocks.pcaAgentAccount.mockReturnValue(new Promise(() => {})); }],
+      ['lookup fails', () => { apiMocks.pcaAgentAccount.mockRejectedValue(new Error('rpc down')); }],
+      ['PCAs unavailable (503)', () => { apiMocks.pcaAgentAccount.mockRejectedValue(Object.assign(new Error('FEATURE_UNAVAILABLE'), { status: 503 })); }],
+      ['wallets unreadable', () => { apiMocks.fetchWalletsBalances.mockRejectedValue(new Error('down')); }],
+      ['no wallets', () => { apiMocks.fetchWalletsBalances.mockResolvedValue({ wallets: [], balances: [], chainId: null, rpcUrl: null }); }],
+    ];
+    for (const [, arrange] of cases) {
+      apiMocks.fetchWalletsBalances.mockResolvedValue({ wallets: ['0xaaa'], balances: [], chainId: '84532', rpcUrl: null });
+      apiMocks.pcaAgentAccount.mockResolvedValue({ accountId: null });
+      arrange();
       const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+      await flush();
       expect(container.querySelector('[data-testid="pca-fee-note"]')).toBeNull();
       await unmount();
     }
   });
 
-  it('a tracked PCA shows the chip instead, and never runs the availability probe', async () => {
-    availMock.status = 'available';
+  it('a tracked PCA shows the chip instead, and never runs the wallet check', async () => {
     setVerdict('eligible');
     const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+    await flush();
     expect(container.querySelector('[data-testid="pca-fee-note"]')).toBeNull();
-    expect(availMock.calls).toBe(0);
+    expect(apiMocks.fetchWalletsBalances).not.toHaveBeenCalled();
+    expect(apiMocks.pcaAgentAccount).not.toHaveBeenCalled();
     await unmount();
   });
 });
