@@ -273,6 +273,7 @@ import {
   type ReconcilePassTimings,
 } from './chain-reconciler.js';
 import {
+  ContextGraphNameAbsentError,
   ContextGraphOnChainIdUnresolvedError,
   VmReconcileUnavailableError,
   VmReconcileQueueClosedError,
@@ -4268,6 +4269,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           maxForegroundBurst: DKGAgentBase.VM_RECONCILE_MAX_FOREGROUND_BURST,
           discoveryBatchSize: DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE,
           periodicBoundBatchSize: DKGAgentBase.VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE,
+          absentTargetBackoff: { baseMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS },
         },
       );
       this.vmReconcileScheduling = scheduling;
@@ -4612,7 +4614,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       );
       if (finalized.kind === 'absent') {
         if (acceptedUnregistered) throw new ContextGraphNotFoundError(localCgId);
-        throw new ContextGraphOnChainIdUnresolvedError(localCgId);
+        throw new ContextGraphNameAbsentError(localCgId);
       }
       if (finalized.kind === 'legacy-current' && acceptedUnregistered) {
         throw new ContextGraphNotFoundError(localCgId);
