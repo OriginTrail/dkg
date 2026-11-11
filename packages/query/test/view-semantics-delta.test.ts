@@ -1,5 +1,7 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, expect, it, vi } from 'vitest';
 import type { ViewQuerySemantics } from '@origintrail-official/dkg-core';
+import { activeDefaultStoreWorkPriority, withDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
 import type { QueryResult } from '../src/query-engine.js';
 import {
   ViewSemanticsDeltaSampler, classifyViewSemanticsDelta, viewQueryShape, type ViewSemanticsDeltaSample,
@@ -58,7 +60,7 @@ describe('the shape of a query', () => {
 });
 
 function sample(answers: { perAsset: QueryResult; merged: QueryResult }, overrides: Partial<ViewSemanticsDeltaSample> = {}) {
-  const run = vi.fn(async (semantics: ViewQuerySemantics) => (semantics === 'merged' ? answers.merged : answers.perAsset));
+  const run = vi.fn(async (semantics: ViewQuerySemantics, _signal: AbortSignal) => (semantics === 'merged' ? answers.merged : answers.perAsset));
   const offered: ViewSemanticsDeltaSample = {
     contextGraphId: 'cg-a', view: 'verifiable-memory', sparql: SELECT, run, isCurrent: () => true, ...overrides,
   };
@@ -78,7 +80,11 @@ describe('the semantic-delta sampler', () => {
     expect(run).not.toHaveBeenCalled();
     await sampler.idle();
     expect(lock).toHaveBeenCalledTimes(1);
-    expect(run.mock.calls).toEqual([['per-asset'], ['merged']]);
+    expect(run.mock.calls.map(([semantics]) => semantics)).toEqual(['per-asset', 'merged']);
+    // Both reads share the sample's deadline, which they finished before.
+    const [[, first], [, second]] = run.mock.calls;
+    expect(second).toBe(first);
+    expect(first!.aborted).toBe(false);
     expect(onDelta).toHaveBeenCalledWith('rows-added');
     expect(sampler.report()).toEqual([{
       contextGraphId: 'cg-a', since: '2026-11-11T02:05:00.000Z', samples: 1, skipped: 0,
@@ -141,6 +147,47 @@ describe('the semantic-delta sampler', () => {
     // A third context graph evicts the least recently sampled one.
     await run('cg-c', 'SELECT ?a WHERE { ?a ?p ?o }', same);
     expect(sampler.report().map(summary => summary.contextGraphId).sort()).toEqual(['cg-b', 'cg-c']);
+  });
+
+  it('aborts and skips a sample that runs past its deadline, waiting for the lock included', async () => {
+    const sampler = new ViewSemanticsDeltaSampler({ sampleRate: 1, maxSampleMs: 5 });
+    const late = <T>(value: T) => new Promise<T>(resolve => setTimeout(() => resolve(value), 20));
+    // A read that stops when its signal aborts.
+    const aborting = vi.fn((_semantics: ViewQuerySemantics, signal: AbortSignal) => new Promise<QueryResult>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }));
+    sampler.offer({ ...sample({ perAsset: rows('1'), merged: rows('1') }).offered, run: aborting });
+    // Reads that answer after the deadline anyway.
+    const slow = vi.fn(() => late(rows('1')));
+    sampler.offer({ ...sample({ perAsset: rows('1'), merged: rows('1') }).offered, run: slow });
+    // A write lock granted after the deadline.
+    const locked = sample({ perAsset: rows('1'), merged: rows('1') }, {
+      withWriteLock: async <T>(work: () => Promise<T>): Promise<T> => {
+        await late(undefined);
+        return work();
+      },
+    });
+    sampler.offer(locked.offered);
+    await sampler.idle();
+    expect(aborting).toHaveBeenCalledTimes(1);
+    expect(aborting.mock.calls[0]![1].reason).toEqual(new Error('The sample ran past its deadline'));
+    expect(slow).toHaveBeenCalledTimes(2);
+    expect(locked.run).not.toHaveBeenCalled();
+    expect(sampler.report()[0]).toMatchObject({ samples: 0, skipped: 3 });
+  });
+
+  it('runs samples outside the async context of the query that offered them, at background priority', async () => {
+    const request = new AsyncLocalStorage<string>();
+    const seen: unknown[] = [];
+    const { offered } = sample({ perAsset: rows('1'), merged: rows('1') });
+    const run = vi.fn(async (semantics: ViewQuerySemantics) => {
+      seen.push([semantics, request.getStore(), activeDefaultStoreWorkPriority()]);
+      return rows('1');
+    });
+    const sampler = new ViewSemanticsDeltaSampler({ sampleRate: 1 });
+    request.run('request-1', () => withDefaultStoreWorkPriority('normal', () => sampler.offer({ ...offered, run })));
+    await sampler.idle();
+    expect(seen).toEqual([['per-asset', undefined, 'background'], ['merged', undefined, 'background']]);
   });
 
   it('stops when closed', async () => {

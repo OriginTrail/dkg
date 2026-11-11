@@ -518,15 +518,15 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     if (!sampler || !readGraphs || options.source === VIEW_SEMANTICS_DELTA_SOURCE) return;
     const plan = mergedViewDatasetPlan(options.view, options.contextGraphId, options, readGraphs);
     if (!plan) return;
-    // The caller's request is over: its signal and budget do not carry over to the sample.
+    // The caller's request is over: its budget does not carry over, and the sampler gives each read its own signal.
     const sampleOptions: QueryOptions = {
-      ...options, signal: undefined, materializationBudget: undefined, source: VIEW_SEMANTICS_DELTA_SOURCE, priority: 'background',
+      ...options, materializationBudget: undefined, source: VIEW_SEMANTICS_DELTA_SOURCE, priority: 'background',
     };
     sampler.offer({
       contextGraphId: options.contextGraphId, view: options.view, sparql: scope.source,
       // The merged read keeps the plan the sample was offered with, also where requests are not answered merged yet.
-      run: semantics => this.query(scope.source, semantics === 'merged'
-        ? { ...sampleOptions, semantics, [SAMPLED_MERGED_PLAN]: plan } as SampleReadOptions : { ...sampleOptions, semantics }),
+      run: (semantics, signal) => this.query(scope.source, semantics === 'merged'
+        ? { ...sampleOptions, semantics, signal, [SAMPLED_MERGED_PLAN]: plan } as SampleReadOptions : { ...sampleOptions, semantics, signal }),
       isCurrent: () => isViewDatasetPlanCurrent(plan, readGraphs),
       withWriteLock: readGraphs.withWriteLock ? work => readGraphs.withWriteLock!(plan.readGraph, work) : undefined,
     });

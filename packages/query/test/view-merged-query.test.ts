@@ -293,7 +293,10 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     const sampler = new ViewSemanticsDeltaSampler({ sampleRate: 1 });
     const sampling = new DKGQueryEngine(store, { readGraphs, viewSemanticsDelta: sampler });
     const unpriced = 'SELECT ?p WHERE { ?p a <urn:Product> FILTER NOT EXISTS { ?p <urn:price> ?x } }';
-    await sampling.query(JOIN, VM);
+    // The caller's signal ends with its answer; the sample reads with its own.
+    const caller = new AbortController();
+    await sampling.query(JOIN, { ...VM, signal: caller.signal });
+    caller.abort();
     await sampling.query(unpriced, MERGED);
     // Merged does not apply here, so there is nothing to compare.
     await sampling.query(JOIN, { ...VM, minTrust: TrustLevel.Endorsed });

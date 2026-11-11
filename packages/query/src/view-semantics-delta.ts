@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { AsyncResource } from 'node:async_hooks';
 import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import type { GetView, ViewQuerySemantics } from '@origintrail-official/dkg-core';
 import { withDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
@@ -74,8 +75,8 @@ export interface ViewSemanticsDeltaSample {
   readonly contextGraphId: string;
   readonly view: GetView;
   readonly sparql: string;
-  /** Answers the query again with these semantics, as background work. */
-  readonly run: (semantics: ViewQuerySemantics) => Promise<QueryResult>;
+  /** Answers the query again with these semantics, as background work, until the signal aborts. */
+  readonly run: (semantics: ViewQuerySemantics, signal: AbortSignal) => Promise<QueryResult>;
   /** Whether the read graph is still ready at the generation it had when the sample was offered. */
   readonly isCurrent: () => boolean;
   /** Runs both reads under the read graph's write lock, when the node has one. */
@@ -113,6 +114,11 @@ export interface ViewSemanticsDeltaSamplerOptions {
   readonly maxShapes?: number;
   /** Context graphs kept; the least recently sampled one goes first. Default 500. */
   readonly maxContextGraphs?: number;
+  /**
+   * Milliseconds a sample may take, from waiting for the write lock to its second answer; a
+   * slower one is aborted and skipped, so it holds the lock no longer. Default 5000.
+   */
+  readonly maxSampleMs?: number;
   /** Counts each classified sample, for example in the node's metrics. A failure here is ignored. */
   readonly onDelta?: (kind: ViewSemanticsDeltaKind) => void;
   readonly random?: () => number;
@@ -140,14 +146,18 @@ export class ViewSemanticsDeltaSampler {
   private readonly maxQueued: number;
   private readonly maxShapes: number;
   private readonly maxContextGraphs: number;
+  private readonly maxSampleMs: number;
   private readonly random: () => number;
   private readonly now: () => Date;
+  /** Samples run in the context the sampler was made in, never in that of the query that offered them. */
+  private readonly scope = new AsyncResource('view-semantics-delta');
 
   constructor(private readonly options: ViewSemanticsDeltaSamplerOptions = {}) {
     this.sampleRate = options.sampleRate ?? 0.05;
     this.maxQueued = options.maxQueued ?? 8;
     this.maxShapes = options.maxShapes ?? 50;
     this.maxContextGraphs = options.maxContextGraphs ?? 500;
+    this.maxSampleMs = options.maxSampleMs ?? 5000;
     this.random = options.random ?? Math.random;
     this.now = options.now ?? (() => new Date());
   }
@@ -157,7 +167,7 @@ export class ViewSemanticsDeltaSampler {
     if (this.closed || this.queue.length >= this.maxQueued || this.random() >= this.sampleRate) return;
     this.queue.push(sample);
     // A sample never fails the drain, so nothing here is left unhandled.
-    this.draining ??= this.drain().catch(() => undefined).finally(() => { this.draining = undefined; });
+    this.draining ??= this.scope.runInAsyncScope(() => this.drain()).catch(() => undefined).finally(() => { this.draining = undefined; });
   }
 
   /** Resolves when every queued sample has been measured. */
@@ -201,14 +211,23 @@ export class ViewSemanticsDeltaSampler {
 
   /** Both answers and their difference, or `undefined` when the read graph changed meanwhile. */
   private async measure(sample: ViewSemanticsDeltaSample): Promise<{ kind: ViewSemanticsDeltaKind; shape: string } | undefined> {
-    const both = async () => {
-      const perAsset = await sample.run('per-asset');
-      const merged = await sample.run('merged');
-      return { perAsset, merged, current: sample.isCurrent() };
-    };
-    const answers = await withDefaultStoreWorkPriority('background', () => (sample.withWriteLock ? sample.withWriteLock(both) : both()));
-    if (!answers.current) return undefined;
-    return { kind: classifyViewSemanticsDelta(sample.sparql, answers.perAsset, answers.merged), shape: viewQueryShape(sample.sparql) };
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(new Error('The sample ran past its deadline')), this.maxSampleMs);
+    try {
+      const both = async () => {
+        // Past the deadline, waiting for the lock included, a sample does not read; one that read past it is skipped.
+        deadline.signal.throwIfAborted();
+        const perAsset = await sample.run('per-asset', deadline.signal);
+        const merged = await sample.run('merged', deadline.signal);
+        deadline.signal.throwIfAborted();
+        return { perAsset, merged, current: sample.isCurrent() };
+      };
+      const answers = await withDefaultStoreWorkPriority('background', () => (sample.withWriteLock ? sample.withWriteLock(both) : both()));
+      if (!answers.current) return undefined;
+      return { kind: classifyViewSemanticsDelta(sample.sparql, answers.perAsset, answers.merged), shape: viewQueryShape(sample.sparql) };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private record(summary: MutableSummary, view: GetView, shapeText: string, kind: ViewSemanticsDeltaKind): void {
