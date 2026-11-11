@@ -17,7 +17,7 @@ import {
   useReadGraphMarkJournal,
 } from '../src/read-graph/mark-journal.js';
 import { matchesGraphNameTest, readGraphMembership, type GraphNameTest } from '../src/read-graph/membership.js';
-import { wrapReadGraphLayer, type ReadGraphStore } from '../src/read-graph/read-graph-store.js';
+import { readGraphLayerOf, wrapReadGraphLayer, type ReadGraphStore } from '../src/read-graph/read-graph-store.js';
 import {
   buildReadGraph,
   refreshReadGraphRegistry,
@@ -1335,6 +1335,37 @@ describe('read-graph start-up', () => {
     expect(logs.some((line) => line.includes('could not be listed'))).toBe(true);
   });
 
+  it('leaves the mirror of a backend this process already started to the store objects using it, and applies only its own journal', async () => {
+    const adapter = new HookedStore();
+    const fixture = layerFixture(`builder-${sequence += 1}`);
+    await adapter.insert([
+      ...fixture.facts,
+      ...fixture.graphs.flatMap((graph, i) => [q('urn:s:shared', '"both"', graph), q(`urn:s:${i}`, `"v${i}"`, graph)]),
+    ]);
+    const [first, second] = [mkdtempSync(join(tmpdir(), 'read-graph-builder-')), mkdtempSync(join(tmpdir(), 'read-graph-builder-'))];
+    dirs.push(first, second);
+    // Two agents of one process over the same backend share its runtime.
+    const config = { backend: 'oxigraph-persistent' as const, options: { path: join(first, 'store') } };
+    const layer = wrapReadGraphLayer(adapter, config);
+    const store = guardReadGraphPartition(layer);
+    const context: ReadGraphJobContext = { store, dataDir: first, batching: { pauseRatio: 0, graphsPerBatch: 2 } };
+    const [vm] = fixture.keys as [ReadGraphKey];
+    expect(await startReadGraphs(store, { dataDir: first, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    const built = (await buildReadGraph(context, vm)).row!;
+    const other = guardReadGraphPartition(wrapReadGraphLayer(adapter, config));
+    expect(readGraphLayerOf(other)!.runtime).toBe(layer.runtime);
+    expect(await startReadGraphs(other, { dataDir: second, maintains: () => true })).toEqual({ marked: 0, maintained: 1 });
+    // The first agent's writes are still maintained.
+    await store.insert([q('urn:s:after', '"after"', fixture.graphs[1]!)]);
+    await expectUnion(adapter, layer, fixture, vm);
+    // A later start over the same backend applies its own data directory's journal to the running mirror.
+    writeFileSync(readGraphMarkJournalPath(second), `${built.generation} ${fixture.readGraphs.wholeVm}\n`);
+    expect(await startReadGraphs(other, { dataDir: second, maintains: () => true })).toEqual({ marked: 1, maintained: 1 });
+    expect(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)?.state).toBe('dirty');
+    expect((await storedRows(adapter))[fixture.readGraphs.wholeVm]).toBe(`dirty@${built.generation + 1}`);
+    expect(readUnstoredReadGraphMarks(second)).toEqual(new Map());
+  });
+
   it('replaces damaged rows and rows whose generation cannot grow, and notes nothing without rows', async () => {
     const empty = await open();
     expect(await startReadGraphs(empty.store, { dataDir: empty.dataDir, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
@@ -1415,17 +1446,20 @@ describe('a store restored to an earlier state', () => {
     await expectUnion(adapter, layer, fixture, vm);
   });
 
-  it('keeps a row published while its backend restarted for a start-up mark, and ends the build', async () => {
-    const { adapter, fixture, layer, context, dataDir } = await open();
+  it('keeps a row published while its backend restarted for a start-up mark, and ends the build out of service', async () => {
+    const { adapter, fixture, layer, store, context, dataDir } = await open();
     useReadGraphMarkJournal(layer.runtime, dataDir);
     let recovery = { generation: 1, ready: true };
     registerStoreRecoveryGeneration(adapter, () => recovery);
     const [vm] = fixture.keys as [ReadGraphKey];
     const { wholeVm } = fixture.readGraphs;
     const publishing = `<${wholeVm}> <${READ_GRAPH_STATE_PREDICATES.state}> "ready"`;
-    adapter.onUpdate = (sparql) => {
-      // The restart lands after the check before the publication, while its request is on its way.
-      if (sparql.split('\n').some((line) => line.startsWith('INSERT {') && line.includes(publishing))) recovery = { generation: 2, ready: true };
+    adapter.onUpdate = async (sparql) => {
+      if (!sparql.split('\n').some((line) => line.startsWith('INSERT {') && line.includes(publishing))) return;
+      // The restart lands after the check before the publication, while its request is on its way, and a query
+      // sees it first: the publication's own check then finds the restart already seen.
+      recovery = { generation: 2, ready: true };
+      await store.query('ASK { ?s ?p ?o }');
     };
     expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'lost' });
     adapter.onUpdate = undefined;

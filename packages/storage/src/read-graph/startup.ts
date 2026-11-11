@@ -41,6 +41,7 @@ import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
 import { clearUnstoredReadGraphMarks, readUnstoredReadGraphMarks, useReadGraphMarkJournal } from './mark-journal.js';
 import { syncReadGraphRuntimeWithRecovery } from './recovery.js';
+import type { ReadGraphBackendRuntime } from './runtime.js';
 import { readGraphLayerOf } from './read-graph-store.js';
 import { keepsAnyReadGraph, readGraphModeOf } from './settings.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry, type ReadGraphRegistryFact } from './registry-recognition.js';
@@ -59,6 +60,8 @@ import {
   isReadGraphRowAccepted,
   newReadGraphGeneration,
   parseReadGraphStateRows,
+  nextReadGraphState,
+  readGraphStateMarkDirty,
   readGraphStateMarkDirtyAtStart,
   readGraphStateReset,
   readGraphStateRowsQuery,
@@ -106,6 +109,13 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
   const versions = options.versions ?? CURRENT_READ_GRAPH_VERSIONS;
   const queryOptions: QueryOptions = { priority: 'background', source: 'storage.readGraphStartup', ...(options.signal ? { signal: options.signal } : {}) };
   const { mirror, registries } = layer.runtime;
+  // Another start-up of this process loaded the backend's mirror, and its store objects maintain their writes by it:
+  // clearing it would let those writes pass unmaintained. Only this data directory's journal is applied.
+  if (STARTED.has(layer.runtime)) {
+    const marked = options.dataDir === undefined ? 0 : await markJournaledRows(target, layer.runtime, options.dataDir, queryOptions);
+    return { marked, maintained: mirror.size };
+  }
+  STARTED.add(layer.runtime);
   // The backend's recovery generation now is the one later restarts are told by.
   syncReadGraphRuntimeWithRecovery(store, layer.runtime);
   for (const row of mirror.rows()) mirror.remove(row.readGraph);
@@ -215,6 +225,29 @@ async function noteRecordOnlyPartitions(store: TripleStore, options: ReadGraphSt
   }
   if (options.dataDir !== undefined) noteReadGraphPartitions(options.dataDir);
   noteStoreMayHoldReadGraphPartitions(target);
+}
+
+/** Runtimes a start-up of this process loaded. */
+const STARTED = new WeakSet<ReadGraphBackendRuntime>();
+
+/**
+ * Mark the journaled rows of a running mirror dirty: those it holds ready at a
+ * journaled generation, in the mirror and then in the store. The journal is
+ * removed once every mark is stored.
+ */
+async function markJournaledRows(target: TripleStore, runtime: ReadGraphBackendRuntime, dataDir: string, options: QueryOptions): Promise<number> {
+  const journaled = readUnstoredReadGraphMarks(dataDir);
+  let marked = 0;
+  for (const [readGraph, generations] of journaled) {
+    const row = runtime.mirror.get(readGraph);
+    if (row?.state !== 'ready' || !generations.has(row.generation)) continue;
+    runtime.mirror.set(nextReadGraphState(row, { kind: 'mark-dirty' })!);
+    if (!target.update) throw new Error('This store cannot mark its read graphs dirty: it has no update()');
+    await target.update(readGraphStateMarkDirty(readGraph), options);
+    marked += 1;
+  }
+  if (journaled.size > 0) clearUnstoredReadGraphMarks(dataDir);
+  return marked;
 }
 
 async function registryRecords(store: TripleStore, options: QueryOptions) {

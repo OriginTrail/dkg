@@ -51,7 +51,7 @@ import { readGraphLayerOf } from './read-graph-store.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry, type ReadGraphRegistryFact } from './registry-recognition.js';
 import { noteUnstoredReadGraphMark } from './mark-journal.js';
 import { isHeldReadGraph } from './working-memory-hold.js';
-import { readGraphRecoveryGeneration, syncReadGraphRuntimeWithRecovery } from './recovery.js';
+import { invalidateReadGraphRuntime, readGraphRecoveryGeneration, syncReadGraphRuntimeWithRecovery } from './recovery.js';
 import { recordReadGraphRegistry } from './registry-record.js';
 import { ReadGraphLocks, type InMemoryReadGraphStateMirror, type ReadGraphBackendRuntime } from './runtime.js';
 import {
@@ -693,6 +693,8 @@ class ReadGraphJob {
       const stored = await this.transition(row, { kind: 'publish-ready' });
       if (!this.restarted()) return { row: stored };
       if (stored?.state === 'ready') noteUnstoredReadGraphMark(this.runtime, this.readGraph, stored.generation);
+      // The read-back put ready in the mirror over any invalidation a request that saw the restart first had made.
+      invalidateReadGraphRuntime(this.runtime);
       return { lost: true as const };
     });
     if ('lost' in published) return this.lost();
