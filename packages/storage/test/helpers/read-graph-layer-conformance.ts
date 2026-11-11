@@ -58,8 +58,10 @@ export type LayerFixture = ReturnType<typeof layerFixture>;
 
 export const q = (subject: string, object: string, graph: string): Quad => ({ subject, predicate: P, object, graph });
 
-export const readyRow = (readGraph: string, generation = 1): ReadGraphStateRow =>
-  ({ readGraph, state: 'ready', generation, ...CURRENT_READ_GRAPH_VERSIONS });
+export const readyRow = (readGraph: string, generation = 1): ReadGraphStateRow => ({
+  readGraph, state: 'ready', generation,
+  ruleVersion: CURRENT_READ_GRAPH_VERSIONS.ruleVersion, builderVersion: CURRENT_READ_GRAPH_VERSIONS.builderVersion,
+});
 
 export function isLayerMember(layer: ReadGraphStore, fixture: LayerFixture, key: ReadGraphKey, graph: string): boolean {
   return matchesGraphNameTest(readGraphMembership(key, fixture.registry, layer.runtime.workingMemoryIdentity), graph);
@@ -203,6 +205,21 @@ export function readGraphLayerConformance(backend: 'oxigraph' | 'blazegraph') {
         await close();
       }), { ...propertyOptions(), numRuns: runs });
     }, 300_000);
+
+    it('marks the read graphs whose members a sub-graph registration changes dirty, and leaves the others', async () => {
+      const fixture = freshFixture();
+      const { layer, store, close } = await open(fixture);
+      const meta = `${fixture.root}/_meta`;
+      await store.insert([
+        { subject: `${fixture.root}/docs`, predicate: RDF_TYPE, object: 'http://dkg.io/ontology/SubGraph', graph: meta },
+        { subject: `${fixture.root}/docs`, predicate: 'http://schema.org/name', object: '"docs"', graph: meta },
+      ]);
+      const state = (readGraph: string) => layer.runtime.mirror.get(readGraph)!.state;
+      expect([state(fixture.readGraphs.wholeVm), state(fixture.readGraphs.wholeSwm), state(fixture.readGraphs.agentWm)]).toEqual(['dirty', 'dirty', 'dirty']);
+      expect(state(fixture.readGraphs.codeVm)).toBe('ready');
+      expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
+      await close();
+    }, 60_000);
 
     it('waits for the locks of the read graphs it maintains, and maintains one whose row appears while it waits', async () => {
       const fixture = freshFixture();

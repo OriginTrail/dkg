@@ -19,6 +19,7 @@ import { resolve } from 'node:path';
 import { compareCodePoint, parseReadGraphIri } from '@origintrail-official/dkg-core';
 import type { TripleStoreConfig } from '../triple-store-composition.js';
 import { workingMemoryIdentityRule, type ReadGraphRegistrySnapshot, type WorkingMemoryIdentityRule } from './membership.js';
+import type { ReadGraphRegistryFact } from './registry-recognition.js';
 import type { ReadGraphStateMirror, ReadGraphStateRow } from './state.js';
 
 /**
@@ -107,29 +108,43 @@ export class InMemoryReadGraphStateMirror implements ReadGraphStateMirror {
   }
 }
 
-/** The registry snapshots of context graphs, as the layer last read or recognized them. */
+/**
+ * The registry snapshots of context graphs, as the layer last read or
+ * recognized them, with the registry facts they come from when the layer
+ * read those.
+ */
 export class ReadGraphRegistryCache {
   private readonly snapshots = new Map<string, ReadGraphRegistrySnapshot>();
+  private readonly factsByContextGraph = new Map<string, readonly ReadGraphRegistryFact[]>();
 
   get(contextGraphId: string): ReadGraphRegistrySnapshot | undefined {
     return this.snapshots.get(contextGraphId);
   }
 
-  set(snapshot: ReadGraphRegistrySnapshot): void {
+  /** The facts behind a snapshot, or `undefined` when the snapshot was set without them. */
+  facts(contextGraphId: string): readonly ReadGraphRegistryFact[] | undefined {
+    return this.factsByContextGraph.get(contextGraphId);
+  }
+
+  set(snapshot: ReadGraphRegistrySnapshot, facts?: readonly ReadGraphRegistryFact[]): void {
     this.snapshots.set(snapshot.contextGraphId, Object.freeze({
       contextGraphId: snapshot.contextGraphId,
       subGraphNames: Object.freeze([...snapshot.subGraphNames]),
       childContextGraphRoots: Object.freeze([...snapshot.childContextGraphRoots]),
     }));
+    if (facts) this.factsByContextGraph.set(snapshot.contextGraphId, Object.freeze([...facts]));
+    else this.factsByContextGraph.delete(snapshot.contextGraphId);
   }
 
   /** Forget a snapshot, so the next use reads the registry again. */
   invalidate(contextGraphId: string): void {
     this.snapshots.delete(contextGraphId);
+    this.factsByContextGraph.delete(contextGraphId);
   }
 
   clear(): void {
     this.snapshots.clear();
+    this.factsByContextGraph.clear();
   }
 }
 
