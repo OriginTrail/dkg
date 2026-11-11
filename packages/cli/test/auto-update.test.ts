@@ -677,6 +677,29 @@ describe('blue-green checkForUpdate', () => {
     expect(logCalls.some(m => m.includes('build failed'))).toBe(true);
   });
 
+  it('logs the end of a failed build step output, each entry on one line', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('eee556');
+    execImpl = async (cmd: string) => {
+      // How promisify(exec) rejects: stderr appended to the message, both streams attached.
+      if (String(cmd).includes('pnpm build')) {
+        throw Object.assign(new Error(`Command failed: ${cmd}\n`), {
+          code: 1,
+          stdout: 'packages/semantic-runtime prebuild: spawnSync rustc ENOENT\n ELIFECYCLE  Command failed with exit code 1.\n',
+          stderr: '',
+        });
+      }
+      return { stdout: '', stderr: '' };
+    };
+
+    const logCalls: string[] = [];
+    expect(await performUpdate(AU, (msg: string) => { logCalls.push(msg); })).toBe(false);
+    expect(swapSlotCalls.length).toBe(0);
+    expect(logCalls).toContain('Auto-update:   packages/semantic-runtime prebuild: spawnSync rustc ENOENT');
+    expect(logCalls).toContain('Auto-update: build failed in slot b — Command failed: pnpm build. Active slot untouched.');
+    expect(logCalls.filter(m => m.startsWith('Auto-update: build') && m.includes('\n'))).toEqual([]);
+  });
+
   it('build failure does not touch active slot', async () => {
     const current = 'aaa111';
     const latest = 'fff666';
