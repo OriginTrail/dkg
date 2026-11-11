@@ -504,6 +504,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     catalogReads: StoreReadLane,
   ): Promise<QueryResult> {
     if (!scope.hasGraphClause) return this.execAndNormalize(withMergedViewDataset(scope, plan.readGraph, []), reads);
+    // As on the per-asset route, a store other than Oxigraph cannot combine DESCRIBE with a GRAPH clause.
+    if (scope.operation === 'DESCRIBE' && this.sparqlEngine !== 'oxigraph') {
+      throw new ScopedQueryViolationError('DESCRIBE cannot be combined with a GRAPH clause on this store');
+    }
     const graphs = await this.resolveViewGraphSet(options.view, options.contextGraphId, options, reads, catalogReads);
     assertExplicitGraphIrisAllowed(scope, graphs);
     const constrained = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(scope, graphs,
