@@ -23,7 +23,7 @@
  * record. The ledger is read once, and keeps the keys in memory.
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { BuyerLedger } from './buyer-ledger.js';
+import { BuyerLedger, type KeyCopy } from './buyer-ledger.js';
 
 const PREFIX = 'dkgmk_';
 /** Hex digits of a key's id after its prefix: 64 bits. 10.1.0 made ids of 8. */
@@ -119,7 +119,7 @@ export class AccessKeys {
   async check(secret: string | undefined, now: number): Promise<KeyCheck> {
     if (!secret) return { ok: false, status: 401, code: 'missing_key' };
     const presented = hashOf(secret);
-    let found: KeptKey | undefined;
+    let found: KeyCopy | undefined;
     for (const { key, hash } of await this.ledger.heldKeys()) {
       if (timingSafeEqual(presented, hash)) found = key;
     }
@@ -156,8 +156,8 @@ export class AccessKeys {
     return this.ledger.reservedOf(keyId);
   }
 
-  /** A key as the node API shows it: a copy, with what its calls not yet settled hold now. */
-  private shown(key: KeptKey): AccessKey {
-    return { ...key, reserved: this.reservedOf(key.keyId).toString() };
+  /** A key as the node API shows it: a copy, its list of services too, with what its calls not yet settled hold now. */
+  private shown(key: KeyCopy): AccessKey {
+    return { ...key, services: key.services && [...key.services], reserved: this.reservedOf(key.keyId).toString() };
   }
 }

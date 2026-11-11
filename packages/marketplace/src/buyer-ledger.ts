@@ -83,10 +83,23 @@ interface HeldKey {
   hash: Buffer;
 }
 
+/** A key as the ledger hands it out: a copy, its fields read-only, its list of services too. */
+export type KeyCopy = Readonly<Omit<KeptKey, 'services'>> & { readonly services: readonly string[] | null };
+
+/** A key and its secret's hash as `heldKeys` hands them out: copies of both, read-only. */
+export interface HeldKeyCopy {
+  readonly key: KeyCopy;
+  readonly hash: Buffer;
+}
+
+/** A key from its record: its list of services a copy, so the record's stays its caller's. */
 const keyOf = (r: KeyRecord): KeptKey => ({
-  keyId: r.keyId, label: r.label, budget: r.budget, spent: r.spent ?? '0', services: r.services, rps: r.rps, expiresAt: r.expiresAt,
-  revoked: false, lastUsedAt: r.lastUsedAt ?? null,
+  keyId: r.keyId, label: r.label, budget: r.budget, spent: r.spent ?? '0', services: r.services && [...r.services], rps: r.rps,
+  expiresAt: r.expiresAt, revoked: false, lastUsedAt: r.lastUsedAt ?? null,
 });
+
+/** A key as it leaves the ledger: a copy, its list of services too, so what is done to it changes nothing the ledger holds. */
+const copyOf = (k: KeptKey): KeptKey => ({ ...k, services: k.services && [...k.services] });
 
 /** `spent` and `lastUsedAt` of a key record, a charge added: a call charged once its epoch is made final may be older than the last. */
 function addCharge(k: { spent?: string; lastUsedAt?: number | null }, value: bigint, at: number): void {
@@ -130,13 +143,13 @@ export class BuyerLedger {
 
   async keyList(): Promise<KeptKey[]> {
     await this.load();
-    return [...this.keys.values()].map((k) => ({ ...k.key }));
+    return [...this.keys.values()].map((k) => copyOf(k.key));
   }
 
-  /** Every key, with its secret's hash: the keys as held, not copies. */
-  async heldKeys(): Promise<ReadonlyArray<Readonly<HeldKey>>> {
+  /** Every key, with its secret's hash: a copy of each, so what is done to one changes nothing the ledger holds. */
+  async heldKeys(): Promise<readonly HeldKeyCopy[]> {
     await this.load();
-    return [...this.keys.values()];
+    return [...this.keys.values()].map((k) => ({ key: copyOf(k.key), hash: Buffer.from(k.hash) }));
   }
 
   /** A key made, on disk then held: `null`, making nothing, when another key has its id, checked under the journal's lock. */
@@ -147,7 +160,7 @@ export class BuyerLedger {
       const entry: KeyEntry = { type: 'key', ...record };
       await this.journal.append(entry);
       this.apply(entry);
-      return { ...this.keys.get(record.keyId)!.key };
+      return copyOf(this.keys.get(record.keyId)!.key);
     });
   }
 
@@ -155,7 +168,7 @@ export class BuyerLedger {
     await this.load();
     if (!this.keys.has(keyId)) return null;
     await this.write({ type: 'revoke', keyId, at });
-    return { ...this.keys.get(keyId)!.key };
+    return copyOf(this.keys.get(keyId)!.key);
   }
 
   /**

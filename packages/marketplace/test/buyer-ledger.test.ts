@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
  * The buyer's ledger (buyer-ledger.ts) on its own: the journals it replaces,
- * read once and left as they are; its one compaction; and what it does with a
- * key it does not hold. The gateway's and the keys' behaviour over it is in
- * gateway-durability, gateway-legacy-journals and gateway-keys.
+ * read once and left as they are; its one compaction; the keys it hands out,
+ * each a copy; and what it does with a key it does not hold. The gateway's and
+ * the keys' behaviour over it is in gateway-durability, gateway-legacy-journals
+ * and gateway-keys.
  */
 import { cp, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BUYER_LEDGER_FILE, BuyerLedger, Journal, type HeldReceipt, type KeptReceipt, type KeyRecord } from '../src/index.js';
+import { AccessKeys, BUYER_LEDGER_FILE, BuyerLedger, Journal, type HeldReceipt, type KeptKey, type KeptReceipt, type KeyRecord } from '../src/index.js';
 
 const FIXTURE = join(__dirname, 'fixtures', 'legacy-buyer-journals');
 const SUB = (n: number) => `0x${n.toString(16).padStart(64, '0')}`;
@@ -265,6 +266,44 @@ describe('an accepted call', () => {
     await ledger.recordAccepted(keptOf(1, SUB(1), 2, 5n), 5);
     expect((await ledger.keyList())[0]).toMatchObject({ spent: '14', lastUsedAt: 5 });
     expect(ledger.reservedOf(KEY.keyId)).toBe(100n);
+  });
+});
+
+describe('the keys the ledger hands out', () => {
+  it('are copies: what is done to them, or to the services a key was made with, changes neither its keys nor the check of a secret', async () => {
+    const ledger = new BuyerLedger(dir);
+    const keys = new AccessKeys(ledger);
+    const services = [SUB(1)];
+    const { secret, key } = await keys.make({ label: 'k', budget: 1_000n, services, rps: 1_000, expiresAt: null }, 1);
+    await ledger.recordAccepted(keptOf(1, SUB(1), 0, 7n, key.keyId), 2);
+    const kept = { keyId: key.keyId, spent: '7', services: [SUB(1)], revoked: false };
+    // The list the key was made with stays its caller's.
+    services.push(SUB(2));
+    // The keys as listed.
+    const listed = await ledger.keyList();
+    listed[0].spent = '0';
+    listed[0].services!.push(SUB(3));
+    // The keys with their secrets' hashes, as a secret is checked against them.
+    for (const held of await ledger.heldKeys()) {
+      const copy = held.key as KeptKey;
+      copy.spent = '0';
+      copy.revoked = true;
+      copy.services!.push(SUB(4));
+      held.hash.fill(0);
+    }
+    expect(await ledger.keyList()).toEqual([expect.objectContaining(kept)]);
+    expect(await keys.check(secret, 3)).toMatchObject({ ok: true, key: kept });
+  });
+
+  it('are copies when a key is made or revoked too', async () => {
+    const ledger = new BuyerLedger(dir);
+    const made = (await ledger.makeKey({ ...KEY, services: [SUB(1)] }))!;
+    made.spent = '9';
+    made.services!.push(SUB(2));
+    const revoked = (await ledger.revokeKey(KEY.keyId, 2))!;
+    revoked.revoked = false;
+    revoked.services!.push(SUB(3));
+    expect(await ledger.keyList()).toEqual([expect.objectContaining({ keyId: KEY.keyId, spent: '0', services: [SUB(1)], revoked: true })]);
   });
 });
 
