@@ -157,6 +157,7 @@ export default defineConfig({
       "test/query-source-labels.test.ts",
       "test/query-private-authority-pending.test.ts",
       "test/view-semantics-authority-order.test.ts",
+      "test/read-graph-qualification-views.test.ts",
       "test/view-semantics-delta-report.test.ts",
       "test/context-graph-held-graphs.test.ts",
       "test/unscoped-query-admission.test.ts",
