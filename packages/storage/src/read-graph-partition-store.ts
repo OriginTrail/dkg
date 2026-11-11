@@ -5,7 +5,7 @@ import { legacyStrippedIriValue } from './adapters/sparql-term-policy.js';
 import { composeGraphEnumerationVisibility, isReadGraphPartitionGraph } from './graph-enumeration-visibility.js';
 import { sparqlUpdateReach } from './read-graph-partition-reference.js';
 import { describeRfc64AuthorCommitCasV1 } from './rfc64-author-commit-mutation.js';
-import { readGraphLayerOf } from './read-graph/read-graph-store.js';
+import { readGraphLayerOf, readGraphRuntimeOf } from './read-graph/read-graph-store.js';
 import {
   STORE_OPERATION_OUTCOME_TAG,
   type StoreOperation,
@@ -253,17 +253,18 @@ function backendOf(store: TripleStore): TripleStore {
  * unscoped queries leave hidden graphs out only then, so a store that cannot
  * hold any pays nothing. Whatever creates or finds read graphs records it.
  * The record belongs to the backend: through the read-graph layer's runtime,
- * every store object over the same backend sees it, and a store without the
- * layer keeps it on its own adapter object.
+ * every store object over the same backend sees it, whether it was recorded
+ * through a store object or through the store below its layer (as start-up
+ * does), and a store without the layer keeps it on its own adapter object.
  */
 export function noteStoreMayHoldReadGraphPartitions(store: TripleStore): void {
   MAY_HOLD_PARTITIONS.add(backendOf(store));
-  const runtime = readGraphLayerOf(store)?.runtime;
+  const runtime = readGraphRuntimeOf(store);
   if (runtime) runtime.mayHoldPartitions = true;
 }
 
 export function storeMayHoldReadGraphPartitions(store: TripleStore): boolean {
-  return MAY_HOLD_PARTITIONS.has(backendOf(store)) || readGraphLayerOf(store)?.runtime.mayHoldPartitions === true;
+  return MAY_HOLD_PARTITIONS.has(backendOf(store)) || readGraphRuntimeOf(store)?.mayHoldPartitions === true;
 }
 
 /**
