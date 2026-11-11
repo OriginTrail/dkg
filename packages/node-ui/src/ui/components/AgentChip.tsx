@@ -32,17 +32,18 @@ export interface AgentChipProps {
   className?: string;
 }
 
-const FRAMEWORK_GLYPH: Record<string, LucideIcon> = {
-  'claude-code': Terminal,
-  'openclaw':    Cpu,
-  'hermes':      Feather,
-  'gemini':      Sparkles,
-  'human':       User,
-};
+// A Map, so a framework name from the graph only finds an icon registered here. An object
+// would hand back inherited properties: "constructor" would find Object, which can't render.
+const FRAMEWORK_GLYPH = new Map<string, LucideIcon>([
+  ['claude-code', Terminal],
+  ['openclaw', Cpu],
+  ['hermes', Feather],
+  ['gemini', Sparkles],
+  ['human', User],
+]);
 
-function framedGlyph(framework: string | undefined, kind: 'human' | 'ai'): LucideIcon {
-  if (framework && FRAMEWORK_GLYPH[framework]) return FRAMEWORK_GLYPH[framework];
-  return kind === 'human' ? User : Bot;
+export function framedGlyph(framework: string | undefined, kind: 'human' | 'ai'): LucideIcon {
+  return (framework && FRAMEWORK_GLYPH.get(framework)) || (kind === 'human' ? User : Bot);
 }
 
 // Compact initials shown inside the avatar disc: the same rule as AgentDot

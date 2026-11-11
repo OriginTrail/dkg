@@ -102,6 +102,24 @@ describe('AgentChip — fallback id truncation', () => {
     expect(nameOf()).toBe('Alice Researcher');
   });
 
+  it('draws a registered framework icon, and the person or bot icon for any other framework name', () => {
+    const glyph = (framework: string | undefined, kind: 'human' | 'ai' = 'ai') => {
+      act(() => {
+        root.render(React.createElement(AgentChip, {
+          agent: { uri: 'did:dkg:agent:x', name: 'X', kind, color: '#888888', framework } as never,
+        }));
+      });
+      return container.querySelector('.v10-agent-chip-glyph svg')?.getAttribute('class') ?? '';
+    };
+    expect(glyph('hermes')).toContain('lucide-feather');
+    // Names from the graph that an object would resolve through its prototype.
+    for (const name of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf', 'unknown-framework']) {
+      expect(glyph(name), name).toContain('lucide-bot');
+      expect(glyph(name, 'human'), name).toContain('lucide-user');
+    }
+    expect(glyph(undefined)).toContain('lucide-bot');
+  });
+
   it('opens the agent from Enter and Space when it can open one, and not from other keys', () => {
     const opened: string[] = [];
     act(() => {
