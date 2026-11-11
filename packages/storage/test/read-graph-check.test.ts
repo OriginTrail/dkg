@@ -46,7 +46,7 @@ const isMemberEnumeration = (sparql: string) => sparql.startsWith('SELECT ?g WHE
 describe('read-graph checks under concurrent writes', () => {
   it('lists member graphs in the form the adapter lists its graphs with, so the store narrows the list', () => {
     const root = 'did:dkg:context-graph:listing';
-    const under = `FILTER(STRSTARTS(STR(?g), "${root}"))`;
+    const under = `FILTER(?g = <${root}> || STRSTARTS(STR(?g), "${root}/"))`;
     expect(memberGraphListingQuery(new PlanningOxigraphStore(), root)).toBe(`SELECT ?g WHERE { ${nonEmptyNamedGraphEnumerationPattern('g')} ${under} }`);
     const blazegraph = new BlazegraphStore('http://fixture.invalid/sparql');
     expect(memberGraphListingQuery(blazegraph, root)).toBe(`SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } ${under} }`);
