@@ -26,8 +26,8 @@ export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url
 // pin; a rotation changes it here and in those four `ref:` lines, nowhere
 // else. It must already be on protected testnet-canary or main history: the
 // test 'the pinned controller is already on protected branch history' checks
-// that against the branches the build job fetches, and the scheduled
-// inspect-ci-policy report flags it after merge.
+// that against the branches the repository checks job fetches, and the
+// scheduled inspect-ci-policy report flags it after merge.
 export const TRUSTED_CI_CONTROLLER_SHA = '38684f46b352019d6ba1e2ec899cf7e2a5fc8848';
 export const NON_SOLIDITY_LANES = CI_LANES.filter((lane) => lane !== 'contracts');
 // The jobs selected lanes run: each lane's own job, and the Windows lifecycle
