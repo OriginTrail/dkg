@@ -8,7 +8,7 @@ import { mayHoldReadGraphPartitions } from '../src/read-graph-partition-marker.j
 import { missingReadGraphMethods } from '../src/read-graph/adapter-contract.js';
 import { guardReadGraphPartition, storeMayHoldReadGraphPartitions } from '../src/read-graph-partition-store.js';
 import { ReadGraphBuilder } from '../src/read-graph/builder.js';
-import { readGraphMembership, type GraphNameTest } from '../src/read-graph/membership.js';
+import { matchesGraphNameTest, readGraphMembership, type GraphNameTest } from '../src/read-graph/membership.js';
 import { wrapReadGraphLayer, type ReadGraphStore } from '../src/read-graph/read-graph-store.js';
 import {
   buildReadGraph,
@@ -23,9 +23,17 @@ import {
   withReadGraphBackgroundSlot,
   type ReadGraphJobContext,
 } from '../src/read-graph/rebuild.js';
+import { readReadGraphRegistry } from '../src/read-graph/registry.js';
+import {
+  parseReadGraphRegistryRecords,
+  readGraphRegistryRecordsQuery,
+  readGraphRegistryRecordUpdate,
+  recordReadGraphRegistry,
+} from '../src/read-graph/registry-record.js';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
   MAX_READ_GRAPH_GENERATION,
+  READ_GRAPH_STATE_PREDICATES,
   parseReadGraphStateRows,
   readGraphStateCompareAndSet,
   readGraphStateMarkDirtyAtStart,
@@ -65,6 +73,20 @@ class HookedStore extends PlanningOxigraphStore {
     await this.onInsert?.();
     return super.insert(quads, options);
   }
+}
+
+/**
+ * An embedded store that declares no read-graph capabilities, whatever its
+ * class declares: only the declaration is hidden, every method is the store's.
+ */
+function undeclared(store: OxigraphStore): OxigraphStore {
+  return new Proxy(store, {
+    get(target, property) {
+      if (property === 'readGraphCapabilities') return undefined;
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
 }
 
 const IDLE = {
@@ -113,6 +135,24 @@ async function expectUnion(adapter: TripleStore, layer: ReadGraphStore, fixture:
 
 const row = (readGraph: string, state: ReadGraphStateRow['state'], generation: number): ReadGraphStateRow => ({ ...readyRow(readGraph, generation), state });
 
+async function storedRecords(adapter: TripleStore) {
+  const result = await adapter.query(readGraphRegistryRecordsQuery());
+  return parseReadGraphRegistryRecords(result.type === 'bindings' ? result.bindings : []);
+}
+
+/** The read graph of `key` holds exactly the union of its member graphs under the registry the store holds now. */
+async function expectCurrentUnion(adapter: TripleStore, layer: ReadGraphStore, fixture: LayerFixture, key: ReadGraphKey): Promise<void> {
+  const membership = readGraphMembership(key, await readReadGraphRegistry(adapter, fixture.contextGraphId), layer.runtime.workingMemoryIdentity);
+  const result = await adapter.query(`SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${fixture.root}")) }`);
+  const quads = result.type === 'bindings' ? result.bindings : [];
+  const triple = (b: Record<string, string>) => `${b.s} ${b.p} ${b.o}`;
+  const expected = [...new Set(quads.filter((b) => matchesGraphNameTest(membership, b.g!)).map(triple))].sort();
+  expect(await triplesOf(adapter, readGraphIri(key))).toEqual(expected);
+}
+
+const SUB_GRAPH_TYPE = (fixture: LayerFixture, name: string) =>
+  `<${fixture.root}/${name}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/SubGraph>`;
+
 describe('read-graph state and statements for builds', () => {
   it('reads one row, and a damaged or misplaced one as damaged', async () => {
     const { adapter, fixture } = await open();
@@ -137,6 +177,46 @@ describe('read-graph state and statements for builds', () => {
     await adapter.update!(readGraphStateMarkDirtyAtStart([wholeVm, wholeSwm, codeVm, wholeVm]));
     expect(await storedRows(adapter)).toEqual({ [wholeVm]: 'dirty@4', [wholeSwm]: 'dirty@6', [codeVm]: 'dirty@10', [agentWm]: 'ready@11' });
     expect(() => readGraphStateMarkDirtyAtStart([])).toThrow(/at least one/);
+  });
+
+  it('records a context graph\'s registry in its state graph, apart from its rows', async () => {
+    const { adapter, fixture } = await open();
+    const { wholeVm } = fixture.readGraphs;
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(wholeVm, 3)));
+    await adapter.update!(readGraphRegistryRecordUpdate(fixture.registry));
+    expect(await storedRecords(adapter)).toEqual(new Map([[fixture.contextGraphId, fixture.registry]]));
+    // A row read takes the record for no row, and a new record replaces the old one.
+    expect(await storedRows(adapter)).toEqual({ [wholeVm]: 'ready@3' });
+    const later = { ...fixture.registry, subGraphNames: ['code', 'docs'] };
+    await adapter.update!(readGraphRegistryRecordUpdate(later));
+    expect(await storedRecords(adapter)).toEqual(new Map([[fixture.contextGraphId, later]]));
+    // Two records, or one that does not parse, give none to trust.
+    const stateGraph = `${fixture.root}/_~read/state`;
+    await adapter.insert([{ subject: stateGraph, predicate: 'http://dkg.io/ontology/readGraphRegistry', object: '"v1"', graph: stateGraph }]);
+    expect(await storedRecords(adapter)).toEqual(new Map([[fixture.contextGraphId, undefined]]));
+    await adapter.update!(readGraphRegistryRecordUpdate(fixture.registry));
+    await adapter.update!(`DELETE WHERE { GRAPH <${stateGraph}> { <${stateGraph}> <http://dkg.io/ontology/readGraphRegistry> ?o } };
+INSERT DATA { GRAPH <${stateGraph}> { <${stateGraph}> <http://dkg.io/ontology/readGraphRegistry> "v2 sub:code" } }`);
+    expect(await storedRecords(adapter)).toEqual(new Map([[fixture.contextGraphId, undefined]]));
+  });
+
+  it('records no registry it cannot carry, and trusts no record it cannot read', async () => {
+    const { fixture, layer } = await open();
+    const stateGraph = `${fixture.root}/_~read/state`;
+    // A name with a space, or a root with one, cannot be carried: the record is only removed.
+    for (const snapshot of [{ ...fixture.registry, subGraphNames: ['two words'] }, { ...fixture.registry, childContextGraphRoots: [`${fixture.root}/a b`] }]) {
+      expect(readGraphRegistryRecordUpdate(snapshot)).not.toContain('INSERT');
+    }
+    const records = parseReadGraphRegistryRecords([
+      { stateGraph, record: '"v1 sub:code"@en' },
+      { stateGraph: 'urn:not:a:state:graph', record: '"v1"' },
+      { stateGraph: 'did:dkg:context-graph:_reserved/_~read/state', record: '"v1"' },
+      { stateGraph: `${fixture.root}-other/_~read/state`, record: '"v1 sub:code other:x"' },
+      { stateGraph: `${fixture.root}-third/_~read/state` },
+    ]);
+    expect(records).toEqual(new Map([[fixture.contextGraphId, undefined], [`${fixture.contextGraphId}-other`, undefined]]));
+    await expect(recordReadGraphRegistry({ query: async () => ({ type: 'bindings', bindings: [] }) } as unknown as TripleStore, layer.runtime, fixture.registry))
+      .rejects.toThrow(/no update\(\)/);
   });
 
   it('asks whether a read graph holds a triple', async () => {
@@ -198,6 +278,58 @@ describe('building a read graph', () => {
     adapter.requests.length = 0;
     expect(await buildReadGraph(context, key)).toMatchObject({ outcome: 'current', batches: 0 });
     expect(adapter.requests).toEqual([]);
+  });
+
+  it('puts ready in the mirror only once the stored row reads back ready, and not when that read fails', async () => {
+    const { adapter, fixture, layer, context } = await open();
+    const [key] = fixture.keys as [ReadGraphKey];
+    const readGraph = readGraphIri(key);
+    // A compare-and-set that writes `ready`: its INSERT line names the state, where a mark's DELETE line names it.
+    const publishing = `<${readGraph}> <${READ_GRAPH_STATE_PREDICATES.state}> "ready"`;
+    const publishes = (sparql: string) => sparql.split('\n').some((line) => line.startsWith('INSERT {') && line.includes(publishing));
+    const seen: string[] = [];
+    let armed = true;
+    let failReadBack = false;
+    adapter.onUpdate = (sparql) => {
+      if (!publishes(sparql)) return;
+      seen.push(layer.runtime.mirror.get(readGraph)?.state ?? 'absent');
+      // Only the first publication's read-back fails.
+      failReadBack = armed;
+      armed = false;
+    };
+    const query = adapter.query.bind(adapter);
+    adapter.query = async (sparql, options) => {
+      if (failReadBack && sparql === readGraphStateRowQuery(readGraph)) {
+        failReadBack = false;
+        throw new Error('connection reset');
+      }
+      return query(sparql, options);
+    };
+    await expect(buildReadGraph(context, key)).rejects.toThrow('connection reset');
+    // The compare-and-set went out while the mirror still said building, and the mirror never took ready.
+    expect(seen).toEqual(['building']);
+    expect((await readStoredReadGraphRow(adapter, readGraph)).row?.state).toBe('ready');
+    expect(layer.runtime.mirror.get(readGraph)?.state).toBe('building');
+    // The next build finds the stored row and the mirror apart, marks the row dirty and builds it again.
+    expect(await buildReadGraph(context, key)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    expect(seen).toEqual(['building', 'rebuilding']);
+    expect(layer.runtime.mirror.get(readGraph)?.state).toBe('ready');
+    await expectUnion(adapter, layer, fixture, key);
+  });
+
+  it('records the registry it builds under, and the one a later refresh takes', async () => {
+    const { adapter, fixture, store, context } = await open();
+    const [key] = fixture.keys as [ReadGraphKey];
+    expect(await buildReadGraph(context, key)).toMatchObject({ outcome: 'done' });
+    expect(await storedRecords(adapter)).toEqual(new Map([[fixture.contextGraphId, fixture.registry]]));
+    // A registration through the layer, which marks what it moves; the next refresh records the registry it leaves.
+    const docs = `${fixture.root}/docs`;
+    await store.insert([
+      { subject: docs, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph', graph: `${fixture.root}/_meta` },
+      { subject: docs, predicate: 'http://schema.org/name', object: '"docs"', graph: `${fixture.root}/_meta` },
+    ]);
+    expect(await refreshReadGraphRegistry(context, fixture.contextGraphId)).toBe(false);
+    expect(await storedRecords(adapter)).toEqual(new Map([[fixture.contextGraphId, { ...fixture.registry, subGraphNames: ['code', 'docs'] }]]));
   });
 
   it('rebuilds a dirty read graph, an abandoned build, and a row under versions this release does not accept', async () => {
@@ -403,7 +535,7 @@ describe('building a read graph', () => {
     const noUpdate = wrapReadGraphLayer(Object.assign(new HookedStore(), { update: undefined }), { backend: 'oxigraph' });
     await expect(buildReadGraph({ store: noUpdate }, vm)).rejects.toThrow(/no update\(\)/);
     // An adapter that cannot send read-graph operations with its writes gets no read graph to maintain.
-    const unable = wrapReadGraphLayer(new OxigraphStore(), { backend: 'oxigraph' });
+    const unable = wrapReadGraphLayer(undeclared(new OxigraphStore()), { backend: 'oxigraph' });
     await expect(buildReadGraph({ store: unable }, vm)).rejects.toThrow(/cannot maintain read graphs/);
     await expect(markReadGraphDirty({ store: unable }, readGraphIri(vm))).rejects.toThrow(/cannot maintain read graphs/);
     expect(unable.runtime.mirror.size).toBe(0);
@@ -614,6 +746,8 @@ describe('read-graph start-up', () => {
       readGraphStateCompareAndSet(undefined, readyRow(other, 11)),
       readGraphStateCompareAndSet(undefined, row(otherDirty, 'dirty', 13)),
     ].join(';\n'));
+    // The registry the ready rows were built under, as a builder records it.
+    await opened.adapter.update!(readGraphRegistryRecordUpdate(opened.fixture.registry));
     return { ...opened, other, otherDirty };
   }
 
@@ -643,6 +777,49 @@ describe('read-graph start-up', () => {
     expect(layer.runtime.registries.get(fixture.contextGraphId)).toMatchObject({ subGraphNames: ['code'] });
     expect(mayHoldReadGraphPartitions(dataDir)).toBe(true);
     expect(logs).toEqual(['Marked 4 read graph(s) dirty at start; 4 are maintained']);
+  });
+
+  it('marks ready rows whose membership moved since their registry was recorded, as when a process stopped before its marks', async () => {
+    const { adapter, fixture, context } = await open();
+    const [vm, swm, code] = fixture.keys as [ReadGraphKey, ReadGraphKey, ReadGraphKey];
+    for (const key of [vm, swm, code]) expect(await buildReadGraph(context, key)).toMatchObject({ outcome: 'done' });
+    // `code` stops being a sub-graph, and no mark of that reaches the store: the process stopped first.
+    await adapter.update(`DELETE DATA { GRAPH <${fixture.root}/_meta> { ${SUB_GRAPH_TYPE(fixture, 'code')} } }`);
+    // The next process over the same store.
+    const layer = wrapReadGraphLayer(adapter, { backend: 'oxigraph' });
+    const store = guardReadGraphPartition(layer);
+    const restarted: ReadGraphJobContext = { ...context, store };
+    expect(await startReadGraphs(store, { maintains: () => true })).toEqual({ marked: 3, maintained: 3 });
+    const { wholeVm, wholeSwm, codeVm } = fixture.readGraphs;
+    expect(Object.values(await storedRows(adapter)).every((stored) => stored.startsWith('dirty@'))).toBe(true);
+    expect(Object.keys(await storedRows(adapter)).sort()).toEqual([codeVm, wholeSwm, wholeVm].sort());
+    // Start-up recorded the registry it found, and the builder builds to it.
+    expect(await storedRecords(adapter)).toEqual(new Map([[fixture.contextGraphId, { ...fixture.registry, subGraphNames: [] }]]));
+    for (const key of [vm, swm]) {
+      expect(await buildReadGraph(restarted, key)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+      await expectCurrentUnion(adapter, layer, fixture, key);
+    }
+  });
+
+  it('keeps a ready row whose membership the change did not move, and marks every ready row without a record', async () => {
+    const { adapter, fixture, context } = await open();
+    const [vm, , code] = fixture.keys as [ReadGraphKey, ReadGraphKey, ReadGraphKey];
+    for (const key of [vm, code]) expect(await buildReadGraph(context, key)).toMatchObject({ outcome: 'done' });
+    const { wholeVm, codeVm } = fixture.readGraphs;
+    const before = await storedRows(adapter);
+    // A new sub-graph moves the whole graph's members, not those of `code`.
+    await adapter.update(`INSERT DATA { GRAPH <${fixture.root}/_meta> { ${SUB_GRAPH_TYPE(fixture, 'docs')} ; <http://schema.org/name> "docs" } }`);
+    const first = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    expect(await startReadGraphs(first, { maintains: () => true })).toEqual({ marked: 1, maintained: 2 });
+    expect((await storedRows(adapter))[codeVm]).toBe(before[codeVm]);
+    expect((await storedRows(adapter))[wholeVm]).toMatch(/^dirty@/);
+    // Without a record, nothing tells which registry a ready row follows.
+    const stateGraph = `${fixture.root}/_~read/state`;
+    await adapter.update(`DELETE WHERE { GRAPH <${stateGraph}> { <${stateGraph}> <http://dkg.io/ontology/readGraphRegistry> ?o } }`);
+    const second = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    expect(await startReadGraphs(second, { maintains: () => true })).toEqual({ marked: 2, maintained: 2 });
+    expect((await storedRows(adapter))[codeVm]).toMatch(/^dirty@/);
+    expect((await storedRecords(adapter)).get(fixture.contextGraphId)).toEqual({ ...fixture.registry, subGraphNames: ['code', 'docs'] });
   });
 
   it('replaces damaged rows and rows whose generation cannot grow, and notes nothing without rows', async () => {
@@ -677,7 +854,7 @@ describe('read-graph start-up', () => {
 
   it('maintains nothing over an adapter that does not declare its read-graph methods', async () => {
     const { adapter, fixture, layer, store } = await (async () => {
-      const opened = await open(new OxigraphStore());
+      const opened = await open(undeclared(new OxigraphStore()));
       await opened.adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(opened.fixture.readGraphs.wholeVm, 3)));
       return opened;
     })();
