@@ -104,7 +104,6 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
     await noteRecordOnlyPartitions(store, options);
     return { marked: await markReadGraphsDirtyAtStart(store, options), maintained: 0 };
   }
-  const recorded = options.dataDir === undefined ? undefined : installRecordedWorkingMemoryIdentity(layer.runtime, options.dataDir);
   const target = readGraphPartitionMaintenanceStore(store);
   const versions = options.versions ?? CURRENT_READ_GRAPH_VERSIONS;
   const queryOptions: QueryOptions = { priority: 'background', source: 'storage.readGraphStartup', ...(options.signal ? { signal: options.signal } : {}) };
@@ -116,6 +115,9 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
     return { marked, maintained: mirror.size };
   }
   STARTED.add(layer.runtime);
+  // Only the start-up that loads the mirror installs the recorded identity: a later one leaves the running rule, and the
+  // data directory its changes are recorded in, to the store objects already using them.
+  const recorded = options.dataDir === undefined ? undefined : installRecordedWorkingMemoryIdentity(layer.runtime, options.dataDir);
   // The backend's recovery generation now is the one later restarts are told by.
   syncReadGraphRuntimeWithRecovery(store, layer.runtime);
   for (const row of mirror.rows()) mirror.remove(row.readGraph);

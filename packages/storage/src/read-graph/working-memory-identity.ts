@@ -87,7 +87,8 @@ export function recordedWorkingMemoryIdentity(dataDir: string): WorkingMemoryNod
 }
 
 /**
- * Start-up's part, before anything writes: note the node's data directory,
+ * Start-up's part, before anything writes, by the start-up that loads the
+ * backend's mirror: note the node's data directory,
  * where identity changes are recorded, and install the recorded identity's
  * rule. Returns that identity, under which start-up may keep working-memory
  * read graphs; `undefined` when there is no readable record, or when a change
