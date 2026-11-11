@@ -56,7 +56,7 @@ Instrument Sans for the interface, JetBrains Mono for identifiers (DIDs, UALs, h
 | `--fs-label` | 12 | Badges, table headers, metadata |
 | `--fs-micro` | 11 | Small badges and counts; the floor, no text is smaller |
 
-Every font size is one of these tokens, in CSS and inline styles alike. The only raw sizes are glyphs drawn to fit a fixed-size mark (agent dots and chips, the small context graph mark).
+Every font size is one of these tokens, in CSS and inline styles alike. Agent dots size their initials from the dot, and never below the 11px floor. Canvas renderers that take a number say so in a comment.
 
 Type sizes are whole pixels, here and in nOS. Sentence case everywhere, including buttons, tabs and badges. Names keep their capitals: Context Graph, Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction. Uppercase is only for small section kickers.
 

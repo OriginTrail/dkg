@@ -29,7 +29,7 @@ export interface AgentDotProps {
 }
 
 /** Initials scale with the avatar but stop at the 10px type floor (DESIGN.md · Type). */
-const initialsSize = (size: number) => Math.max(10, Math.round(size * 0.45));
+const initialsSize = (size: number) => Math.max(11, Math.round(size * 0.45));
 
 export const AgentDot: React.FC<AgentDotProps> = ({ uri, label, color, size = 18, title, className = '' }) => (
   <span
