@@ -482,30 +482,30 @@ export class QueryHandler {
     // solution-set-modifier rejection path (see #789), so it is
     // deliberately left to the engine-level follow-up.
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const result = await Promise.race([
-      this.queryEngine.query(sparql, {
-        contextGraphId,
-        maxResponseBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
-        maxMaterializedBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
-      }),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('timeout')), timeout);
-      }),
-    ]).catch(err => {
-      if (err.message === 'timeout') {
-        return { _timeout: true } as any;
+    let result: Awaited<ReturnType<DKGQueryEngine['query']>>;
+    try {
+      result = await Promise.race([
+        this.queryEngine.query(sparql, {
+          contextGraphId,
+          maxResponseBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
+          maxMaterializedBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('timeout')), timeout);
+        }),
+      ]);
+    } catch (err) {
+      if ((err as { message?: unknown } | null)?.message === 'timeout') {
+        return errorResponse(opId, 'GAS_LIMIT_EXCEEDED', `Query exceeded time limit (${timeout}ms)`);
       }
       const overBudget = resultOverBudget(err);
-      if (overBudget) return { _overBudget: overBudget } as any;
+      if (overBudget) {
+        return errorResponse(opId, 'ERROR',
+          `Query result exceeds byte limit (${overBudget.actualBytes} > ${overBudget.maxBytes})`);
+      }
       throw err;
-    }).finally(() => clearTimeout(timer!));
-
-    if (result._timeout) {
-      return errorResponse(opId, 'GAS_LIMIT_EXCEEDED', `Query exceeded time limit (${timeout}ms)`);
-    }
-    if (result._overBudget) {
-      const { maxBytes, actualBytes } = result._overBudget;
-      return errorResponse(opId, 'ERROR', `Query result exceeds byte limit (${actualBytes} > ${maxBytes})`);
+    } finally {
+      clearTimeout(timer);
     }
 
     const bindings = result.bindings.slice(0, limit);
@@ -533,8 +533,10 @@ export class QueryHandler {
 
 /** A result over the lookup's budget: one store response, or the request's materialized total. */
 function resultOverBudget(error: unknown): { maxBytes: number; actualBytes: number | bigint } | null {
-  return isQueryResultTooLargeError(error) || isQueryMaterializationTooLargeError(error)
-    ? error as unknown as { maxBytes: number; actualBytes: number | bigint } : null;
+  if (!isQueryResultTooLargeError(error) && !isQueryMaterializationTooLargeError(error)) return null;
+  const { maxBytes, actualBytes } = error as { maxBytes?: unknown; actualBytes?: unknown };
+  return typeof maxBytes === 'number' && (typeof actualBytes === 'number' || typeof actualBytes === 'bigint')
+    ? { maxBytes, actualBytes } : null;
 }
 
 function errorResponse(

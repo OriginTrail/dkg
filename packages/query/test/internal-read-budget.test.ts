@@ -42,12 +42,18 @@ function fixture(): Quad[] {
   ];
 }
 
+/** The caller's own pattern: every query without it is a read the node makes for itself. */
+const CALLER_PATTERN = /\?s\s+<http:\/\/schema\.org\/name>\s+\?name/;
+
 /**
- * The store as the engine sees it. A read under the node's catalog bound is internal; one
- * under the caller's limit is the caller's own query. Discoveries record the slice they return.
+ * The store as the engine sees it. A query is the caller's when its text holds the caller's
+ * pattern, whatever options it carries; every other query is internal. Each read records the
+ * limit it was given, and each discovery the slice it returns.
  */
 function recordingStore(inner: TripleStore) {
-  const slices: number[] = [], results: number[] = [], internal: number[] = [];
+  const slices: number[] = [];
+  const results: Array<{ bytes: number; limit?: number }> = [];
+  const internal: Array<{ bytes: number; limit?: number }> = [];
   const store = new Proxy(inner, { get(target, key) {
     if (key === 'listGraphsByPrefix') return async (prefix: string) => {
       const graphs = (await target.listGraphs()).filter(graph => graph.startsWith(prefix));
@@ -56,7 +62,7 @@ function recordingStore(inner: TripleStore) {
     };
     if (key === 'query') return async (sparql: string, options: Parameters<TripleStore['query']>[1]) => {
       const result = await target.query(sparql, options);
-      (options?.maxResponseBytes === QUERY_CATALOG_MAX_RESPONSE_BYTES ? internal : results).push(bytes(result));
+      (CALLER_PATTERN.test(sparql) ? results : internal).push({ bytes: bytes(result), limit: options?.maxResponseBytes });
       return result;
     };
     const value = Reflect.get(target, key, target);
@@ -90,8 +96,13 @@ describe('internal reads leave the caller budget', () => {
         materializationBudget: new RecordingBudget(CALLER_LIMIT),
       });
       expect(answer.bindings.length).toBeGreaterThan(0);
-      expect(sum(internal)).toBeGreaterThan(0);
-      expect(sum(charges)).toBe(sum(slices) + sum(results));
+      // Every internal read keeps the node's bound, and every caller query the caller's limit.
+      expect(internal.length).toBeGreaterThan(0);
+      expect(internal.map(read => read.limit)).toEqual(internal.map(() => QUERY_CATALOG_MAX_RESPONSE_BYTES));
+      expect(results.length).toBeGreaterThan(0);
+      expect(results.map(read => read.limit)).toEqual(results.map(() => CALLER_LIMIT));
+      // The caller pays for its slices and its results; no internal answer is in its charges.
+      expect(sum(charges)).toBe(sum(slices) + sum(results.map(read => read.bytes)));
     } finally { await inner.close(); }
   });
 

@@ -345,6 +345,15 @@ describe('QueryHandler', () => {
       });
       expect(response.bindings).toBeUndefined();
     });
+
+    it('answers an unrelated remote SPARQL failure as an internal error, not as a byte limit', async () => {
+      const engine = { query: async () => { throw new Error('store unavailable'); } } as unknown as DKGQueryEngine;
+      const handler = new QueryHandler(engine, { defaultPolicy: 'public' });
+      const response = await handler.handle(makeRequest({
+        lookupType: 'SPARQL_QUERY', sparql: `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name }`,
+      }), 'peer-1');
+      expect(response).toMatchObject({ status: 'ERROR', error: 'Internal error processing query' });
+    });
   });
 
   describe('with allowList policy', () => {
