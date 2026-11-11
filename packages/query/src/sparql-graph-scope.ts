@@ -17,6 +17,7 @@ import { applyGraphDataset } from './sparql-graph-dataset.js';
 import { graphSubselectLimit } from './sparql-subselect-limit.js';
 import { renderDedupPattern } from './sparql-dedup-pattern-source.js';
 import { analyzeDedupPattern } from './sparql-dedup-pattern.js';
+import { variablesOutsideHeldGraphGuards } from './sparql-held-graph-guard.js';
 import { hasTopLevelDefaultGraphPattern } from './sparql-default-graph-pattern.js';
 import { createGraphAccess, type GraphAccess } from './sparql-graph-access.js';
 import { createBlankNodeRenamer, createVariableAllocator, type VariableAllocator } from './sparql-rewrite-names.js';
@@ -186,7 +187,7 @@ function wrapWithProjectedGraphSubselect(
   if (!built) return unsupported('strategy-rejected');
   const { pattern, distinct } = built;
 
-  const innerVariables = scope.whereVariables;
+  const innerVariables = variablesOutsideHeldGraphGuards(scope);
   if (innerVariables.length === 0) return unsupported('no-projected-variables');
   const variables = innerVariables.map(variable => variable.source).join(' ');
   const replacement = `{ SELECT ${distinct ? 'DISTINCT ' : ''}${variables} WHERE { ${pattern} }${graphSubselectLimit(scope)} }`;
@@ -210,7 +211,7 @@ function buildDeduplicatedGraphPattern(
   // Every retained row evaluates each moved FILTER once. Hidden blank-node
   // variables stay private across graph selection and replay.
   const inner = renderDedupPattern(scope, movedFilters, allocate);
-  const variables = scope.whereVariables.map(variable => variable.source).join(' ');
+  const variables = variablesOutsideHeldGraphGuards(scope).map(variable => variable.source).join(' ');
   const filterVariables = movedFilters.map((_filter, index) => allocate(`__dkgDedupFilter${index}`));
   // BIND evaluates on every retained row on the right of the rejoin. A raw
   // FILTER can be pushed onto the grouped left side by either engine, sampling
