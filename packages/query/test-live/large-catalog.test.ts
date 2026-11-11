@@ -279,9 +279,9 @@ describe(`a graph catalog larger than any caller limit, on ${engine}`, () => {
 // RFC §6.1 assertion 4: a small context graph's reads do not slow down as an
 // unrelated catalog grows tenfold, and no caller waits for a revalidation.
 describe(`a small context graph beside a catalog that grows from 10,000 to 100,000 graphs, on ${engine}`, () => {
-  const SAMPLES = 60;
-  const WARMUP = 5;
-  // Below a few milliseconds, timer and scheduler jitter exceed 20 %.
+  const SAMPLES = 100;
+  const WARMUP = 10;
+  // Timer, scheduler and engine jitter of a few milliseconds is allowed on top of 20 %.
   const JITTER_MS = 5;
   const vm: FixtureRead = { view: 'verifiable-memory' };
   const clock = { now: 0 };
@@ -358,7 +358,7 @@ describe(`a small context graph beside a catalog that grows from 10,000 to 100,0
     const at100k = await p95();
     console.log(`[large-catalog-growth] ${JSON.stringify({ engine, p95At10k: Math.round(at10k * 10) / 10,
       p95At100k: Math.round(at100k * 10) / 10 })}`);
-    expect(at100k).toBeLessThanOrEqual(Math.max(at10k * 1.2, at10k + JITTER_MS));
+    expect(at100k).toBeLessThanOrEqual(at10k * 1.2 + JITTER_MS);
 
     // The catalog was seeded at 0 on the test's clock; at 30 s it is due. Its full read is held open.
     let release!: () => void;
