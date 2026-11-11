@@ -21,9 +21,10 @@ describe('read-graph start-up and the node\'s settings', () => {
       readGraphs: { modes: { contextGraphs: { [KEPT]: { layers: { [MemoryLayer.VerifiableMemory]: 'build' } } } } },
     });
     await adapter.update([readGraphStateCompareAndSet(undefined, ready(vm(KEPT))), readGraphStateCompareAndSet(undefined, ready(vm(OTHER)))].join(';\n'));
-    // The kept read graph stays ready and is maintained; the other takes the rule of a release that does not maintain it.
-    expect(await startReadGraphs(store)).toEqual({ marked: 1, maintained: 1 });
-    expect(store.runtime.mirror.get(vm(KEPT))?.state).toBe('ready');
+    // The kept read graph is maintained: the mirror holds it. With no registry recorded for its ready row, it is marked dirty to be
+    // rebuilt. The other takes the rule of a release that does not maintain it: marked dirty, and out of the mirror.
+    expect(await startReadGraphs(store)).toEqual({ marked: 2, maintained: 1 });
+    expect(store.runtime.mirror.get(vm(KEPT))?.state).toBe('dirty');
     expect(store.runtime.mirror.get(vm(OTHER))).toBeUndefined();
 
     // With every read graph off, start-up is that of a release that does not maintain read graphs.
