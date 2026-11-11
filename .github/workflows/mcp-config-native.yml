@@ -4,8 +4,9 @@ on:
   pull_request:
     paths:
       # Not packages/cli/vitest.unit.config.ts: it lists every CLI unit test, so it
-      # changes whenever one is added, and this job runs named files with it. The
-      # disabled-test audit fails any change that excludes them from discovery.
+      # changes whenever one is added. This job runs named files with it, and
+      # scripts/lib/__tests__/native-workflow-includes.test.mjs fails any change
+      # that drops one of them from the config.
       - 'packages/cli/src/mcp-*.ts'
       - 'packages/cli/test/fixtures/mcp-config-wsl.fixture.ts'
       - 'packages/cli/test/fixtures/mcp-windows-client.fixture.cjs'
