@@ -183,7 +183,7 @@ describe('StorageACK cleanup observation', () => {
       const update = vi.spyOn(raw, 'update');
       await agent.storageAckCopyCleanup(INPUT);
       expect(update).toHaveBeenCalledOnce();
-      expect(update.mock.calls[0]![1]).toEqual({ source: 'publisher.storageAckCopyCleanup', touchedGraphs: [GRAPH] });
+      expect(update.mock.calls[0]![1]).toEqual({ source: 'publisher.storageAckCopyCleanup', touchedGraphs: [GRAPH], writtenGraphs: [GRAPH] });
       expect(await agent.getCgMeta('production-unrelated')).toEqual(unrelated);
       expect(query.mock.calls.filter(([sparql]) => sparql.includes('production-unrelated'))).toHaveLength(0);
       expect(await agent.listContextGraphs()).toEqual(before);

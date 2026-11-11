@@ -156,6 +156,7 @@ export default defineConfig({
       "test/query-refused-aggregate.test.ts",
       "test/query-source-labels.test.ts",
       "test/query-private-authority-pending.test.ts",
+      "test/read-graph-declared-updates.test.ts",
       "test/unscoped-query-admission.test.ts",
       "test/prepare-unscoped-context-graph-read-checks.test.ts",
       "test/unscoped-query-consistency.test.ts",
