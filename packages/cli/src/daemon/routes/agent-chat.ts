@@ -64,6 +64,7 @@ import {
 } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
+import { validateUpdateQuadFields } from "../knowledge-asset-quad-validation.js";
 import {
   DashboardDB,
   MetricsCollector,
@@ -932,12 +933,8 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     const body = await readBody(req);
     const parsed = JSON.parse(body);
     const { kaId } = parsed;
-    if (parsed.quads !== undefined && !Array.isArray(parsed.quads)) {
-      return jsonResponse(res, 400, { error: '"quads" must be an array when provided' });
-    }
-    if (parsed.privateQuads !== undefined && !Array.isArray(parsed.privateQuads)) {
-      return jsonResponse(res, 400, { error: '"privateQuads" must be an array when provided' });
-    }
+    const invalidQuads = validateUpdateQuadFields(parsed);
+    if (invalidQuads) return jsonResponse(res, 400, invalidQuads);
     const quads = Array.isArray(parsed.quads) ? parsed.quads : [];
     const privateQuads = Array.isArray(parsed.privateQuads) ? parsed.privateQuads : [];
     const contextGraphId = parsed.contextGraphId;

@@ -21,6 +21,7 @@ import {
   validateContextGraphId,
   validateSubGraphName,
   isSafeIri,
+  isSparqlTermValidationError,
   PCA_FUNDING_UNKNOWN_CODE,
   PCA_FUNDING_UNKNOWN_MESSAGE,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
@@ -253,7 +254,7 @@ export function respondIfPcaFundingUnknown(res: ServerResponse, err: unknown): b
  * Map a thrown request error to the daemon's top-level HTTP response — the
  * single neutral place that rethrowing lifecycle publish routes
  * and the lifecycle catch agree on status codes: 413 payload-too-large; 400 for
- * SyntaxError / reserved-namespace / NO_FUNDED_PUBLISHER_WALLET; 503 for
+ * SyntaxError / reserved-namespace / refused RDF term / NO_FUNDED_PUBLISHER_WALLET; 503 for
  * inconclusive PCA funding; otherwise a 500
  * with the EVM-decoded message. Unit-testable in isolation.
  */
@@ -270,6 +271,8 @@ export function respondWithDaemonError(res: ServerResponse, err: any): void {
     (typeof err?.message === 'string' && err.message.includes('reserved namespace'))
   ) {
     jsonResponse(res, 400, { error: err.message });
+  } else if (isSparqlTermValidationError(err)) {
+    jsonResponse(res, 400, { error: err.message, code: err.code });
   } else if (isNoFundedPublisherWalletLike(err)) {
     // Funded-wallet selection found no operational wallet with gas + TRAC — a
     // user-actionable funding condition (4xx), not a server bug.

@@ -9,6 +9,7 @@ import {
   externalStorePriorityScheduler,
   getExternalStorePrioritySchedulerSnapshot,
 } from '../src/store-priority-scheduler.js';
+import { SparqlTermValidationError } from '@origintrail-official/dkg-core';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 async function waitForCondition(
@@ -1142,21 +1143,20 @@ describe('BlazegraphStore (mocked HTTP)', () => {
       }
     });
 
-    it('logs and counts a malformed IRI instead of silently stripping it', async () => {
+    it('refuses a malformed IRI before sending anything, and logs and counts it', async () => {
       const observed = observeInvalidSparqlTerms();
       try {
         respondToSparql();
         const s = new BlazegraphStore(baseUrl);
-        await s.dropGraph('http://g{x}');
-        // Observe mode: the pre-validation (stripped) update is still sent.
-        expect(bodies()).toEqual(['DROP SILENT GRAPH <http://gx>']);
+        await expect(s.dropGraph('http://g{x}')).rejects.toThrow(SparqlTermValidationError);
+        expect(bodies()).toEqual([]);
         expect(observed.counted).toEqual([{
           value: 1,
           adapter: 'blazegraph',
           operation: 'dropGraph',
           position: 'graph',
           kind: 'iri',
-          enforcement: 'observe',
+          enforcement: 'reject',
         }]);
         expect(observed.warnings).toEqual([
           expect.stringContaining('blazegraph.dropGraph: invalid iri in SPARQL graph position (11 chars, fingerprint '),
@@ -1167,16 +1167,16 @@ describe('BlazegraphStore (mocked HTTP)', () => {
       }
     });
 
-    it('labels blank-node-safe deletes and counts subject prefixes no IRI can start with', async () => {
+    it('refuses blank-node-safe deletes and subject prefixes no IRI can start with', async () => {
       const observed = observeInvalidSparqlTerms();
       try {
         respondToSparql();
         const s = new BlazegraphStore(baseUrl);
-        await s.delete([{ subject: 'http://s', predicate: 'http://p q', object: '"v"', graph: 'http://g' }]);
-        await s.deleteBySubjectPrefix('http://g', 'http://s/\n"x"');
-        expect(bodies()[0]).toBe('DELETE DATA {\nGRAPH <http://g> { <http://s> <http://p q> "v" . }\n}');
-        // Sent as before: the quote is escaped and the line break stays raw.
-        expect(bodies()[2]).toContain('FILTER(STRSTARTS(STR(?s), "http://s/\n\\"x\\""))');
+        await expect(s.delete([{ subject: 'http://s', predicate: 'http://p q', object: '"v"', graph: 'http://g' }]))
+          .rejects.toThrow(SparqlTermValidationError);
+        await expect(s.deleteBySubjectPrefix('http://g', 'http://s/\n"x"')).rejects.toThrow(SparqlTermValidationError);
+        // Only the prefix delete's count query went out; neither delete was sent.
+        expect(bodies()).toEqual(['SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://g> { ?s ?p ?o } }']);
         expect(observed.counted).toEqual([
           expect.objectContaining({ adapter: 'blazegraph', operation: 'delete', position: 'predicate' }),
           expect.objectContaining({
@@ -1195,20 +1195,20 @@ describe('BlazegraphStore (mocked HTTP)', () => {
         const s = new BlazegraphStore(baseUrl);
         await s.hasGraph('http://g{x}');
         await s.countQuads('http://g{x}');
-        await s.deleteBySubjectPrefix('http://g{x}', 'urn:ok/');
-        await s.deleteByPatternWithoutCount({ graph: 'http://g{x}' });
-        await s.dropGraph('http://g{x}');
-        const graphPoint = (operation: string) => ({
-          value: 1, adapter: 'blazegraph', operation, position: 'graph', kind: 'iri', enforcement: 'observe',
+        await expect(s.deleteBySubjectPrefix('http://g{x}', 'urn:ok/')).rejects.toThrow(SparqlTermValidationError);
+        await expect(s.deleteByPatternWithoutCount({ graph: 'http://g{x}' })).rejects.toThrow(SparqlTermValidationError);
+        await expect(s.dropGraph('http://g{x}')).rejects.toThrow(SparqlTermValidationError);
+        // Queries keep observe mode; every update refuses the term.
+        const graphPoint = (operation: string, enforcement: string) => ({
+          value: 1, adapter: 'blazegraph', operation, position: 'graph', kind: 'iri', enforcement,
         });
         expect(observed.counted).toEqual([
-          graphPoint('hasGraph'),
-          graphPoint('countQuads'),
-          graphPoint('countQuads'),
-          graphPoint('deleteBySubjectPrefix'),
-          graphPoint('countQuads'),
-          graphPoint('deleteByPattern'),
-          graphPoint('dropGraph'),
+          graphPoint('hasGraph', 'observe'),
+          graphPoint('countQuads', 'observe'),
+          graphPoint('countQuads', 'observe'),
+          graphPoint('deleteBySubjectPrefix', 'reject'),
+          graphPoint('deleteByPattern', 'reject'),
+          graphPoint('dropGraph', 'reject'),
         ]);
       } finally {
         observed.restore();

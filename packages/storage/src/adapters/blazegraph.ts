@@ -375,8 +375,8 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     // its quads to the same call, or sends a write that needs operations as one update.
     refuseReadGraphOperations(options, 'BlazegraphStore.insert');
     if (quads.length === 0) return;
-    // The N-Quads body bypasses the SPARQL builders. Blazegraph rejects a
-    // relative IRI here but stores an RFC 3987-invalid one verbatim.
+    // The N-Quads body bypasses the SPARQL builders, and Blazegraph stores an
+    // RFC 3987-invalid IRI verbatim: every term is checked before admission.
     statements.checkIris.insert(quads);
     await this.runStoreWork('insert', {
       ...options,

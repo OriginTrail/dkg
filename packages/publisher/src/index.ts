@@ -114,6 +114,9 @@ export {
 export {
   validatePublishRequest,
   validateCanonicalGraphScopedKnowledgeAssetPayload,
+  assertWritableQuadTerms,
+  findMalformedQuadTerm,
+  type MalformedQuadTerm,
   type ValidationResult,
   type ValidationOptions,
 } from './validation.js';

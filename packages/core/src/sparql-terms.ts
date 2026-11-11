@@ -45,15 +45,32 @@ export type SparqlTermContext =
     readonly blankNodes?: 'allow' | 'reject';
   };
 
+/**
+ * The `code` of every {@link SparqlTermValidationError}. The store worker passes
+ * an error back with only its name, message and code, so callers match on it.
+ */
+export const SPARQL_TERM_VALIDATION_ERROR_CODE = 'SPARQL_TERM_INVALID';
+
 /** A term the SPARQL grammar does not accept in its position. */
 export class SparqlTermValidationError extends Error {
   readonly kind: SparqlTermKind;
+  readonly code = SPARQL_TERM_VALIDATION_ERROR_CODE;
 
   constructor(message: string, kind: SparqlTermKind, options?: ErrorOptions) {
     super(message, options);
     this.name = 'SparqlTermValidationError';
     this.kind = kind;
   }
+}
+
+/**
+ * True for a {@link SparqlTermValidationError}, including one that came back
+ * from the store worker. A refused term is a malformed request, not an outage:
+ * the same write is refused again, so it must not be retried.
+ */
+export function isSparqlTermValidationError(error: unknown): boolean {
+  return error instanceof Error
+    && (error as { code?: unknown }).code === SPARQL_TERM_VALIDATION_ERROR_CODE;
 }
 
 /**

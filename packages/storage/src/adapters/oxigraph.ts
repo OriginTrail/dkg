@@ -302,8 +302,8 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
         label: 'OxigraphStore.insert',
       });
     }
-    // The N-Quads load bypasses the SPARQL builders; it rejects a relative or
-    // RFC 3987-invalid IRI, failing the whole batch.
+    // The N-Quads load bypasses the SPARQL builders: every term is checked
+    // first, so a malformed one fails the whole batch before anything loads.
     statements.checkIris.insert(quads);
     const nquads = `${quadsToNQuads(quads)}\n`;
     this.writable.load(nquads, { format: 'application/n-quads' });

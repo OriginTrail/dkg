@@ -20,7 +20,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
-import { validatePublishRequest } from './validation.js';
+import { assertWritableQuadTerms, validatePublishRequest } from './validation.js';
 import { computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
 import {
   generateTentativeMetadata,
@@ -355,7 +355,7 @@ export class PublishHandler {
       await this.graphManager.ensureContextGraph(contextGraphId);
 
       const nquadsStr = new TextDecoder().decode(request.nquads);
-      const quads = parseSimpleNQuads(nquadsStr);
+      const quads = assertWritableQuadTerms(parseSimpleNQuads(nquadsStr), request.kas.map((ka) => ka.rootEntity));
       assertNoUserAuthoredTrustLevelQuads(quads);
       const graphPublish = resolveGraphScopedPublishRequest(request);
       if (graphPublish) {
