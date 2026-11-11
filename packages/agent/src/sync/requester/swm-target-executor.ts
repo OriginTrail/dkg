@@ -255,7 +255,13 @@ export class SwmTargetExecutorV1 {
       snapshotProgressRetention: () => snapshotLease?.kind ?? 'detached',
       recover: (_round, workAdmission, deadline) =>
         recoverContextGraphSwm({ ...options, deadline, workAdmission }),
-    }).finally(() => this.#afterSnapshotRound(snapshots));
+    }).catch((error: unknown) => {
+      this.#afterSnapshotRound(snapshots);
+      throw error;
+    });
+    // Private recovery replaces a named sub-graph's snapshot graphs through its own store, not the
+    // materializer: its count of replaced graphs says whether the round wrote any as well.
+    this.#afterSnapshotRound({ wrote: snapshots.wrote || result.replacedGraphs > 0 });
     if (result.completed) snapshotLease?.release();
     return result;
   }
