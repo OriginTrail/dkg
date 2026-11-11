@@ -14,7 +14,10 @@ const OUTSIDER = '0x00000000000000000000000000000000000000ff';
 const PEER_ID = 'peer-view-semantics-order';
 const PRIVATE_CG = `${OWNER}/semantics-order-private`;
 const MISSING_CG = `${OWNER}/semantics-order-never-created`;
+// Asset graphs and a read graph, without a declaration, subscription or local create.
+const UNDECLARED_CG = `${OWNER}/semantics-order-undeclared`;
 const READ_GRAPH = readGraphIri({ scope: readScope(PRIVATE_CG), layer: MemoryLayer.VerifiableMemory });
+const UNDECLARED_READ_GRAPH = readGraphIri({ scope: readScope(UNDECLARED_CG), layer: MemoryLayer.VerifiableMemory });
 const MARKER = 'urn:semantics-order:marker';
 const MARKER_CLASS = 'urn:semantics-order:Class';
 const SPARQL = `SELECT ?s WHERE { ?s a <${MARKER_CLASS}> }`;
@@ -61,13 +64,14 @@ describe('view semantics for a caller who may not read the context graph', () =>
     vi.spyOn(chain, 'getContextGraphParticipantAgents').mockResolvedValue([OWNER]);
     await created.createContextGraph({ id: PRIVATE_CG, name: 'Private graph', accessPolicy: 1, callerAgentAddress: OWNER });
     registered = true;
-    await created.store.insert([{ subject: MARKER, predicate: DKG_ONTOLOGY.RDF_TYPE, object: MARKER_CLASS, graph: READ_GRAPH }]);
+    const marker = (graph: string) => ({ subject: MARKER, predicate: DKG_ONTOLOGY.RDF_TYPE, object: MARKER_CLASS, graph });
+    await created.store.insert([READ_GRAPH, UNDECLARED_READ_GRAPH, `did:dkg:context-graph:${UNDECLARED_CG}/_verifiable_memory/${OWNER}/1`].map(marker));
 
     // The node keeps read graphs for every context graph; this one's is in the given state.
     const readGraphs = {
       keeps: vi.fn(() => true),
-      state: vi.fn((readGraph: string) => (readGraph === READ_GRAPH ? {
-        readGraph, state, generation: 3,
+      state: vi.fn((readGraph: string) => (readGraph === READ_GRAPH || readGraph === UNDECLARED_READ_GRAPH ? {
+        readGraph, state: readGraph === READ_GRAPH ? state : 'ready', generation: 3,
         ruleVersion: CURRENT_READ_GRAPH_VERSIONS.ruleVersion, builderVersion: CURRENT_READ_GRAPH_VERSIONS.builderVersion,
       } : undefined)),
       identity: workingMemoryIdentityRule({ defaultAgentAddress: OWNER, peerId: PEER_ID }),
@@ -129,6 +133,14 @@ describe('view semantics for a caller who may not read the context graph', () =>
     }]);
     await expect(readableViewSemanticsDeltaReport(target, { callerAgentAddress: OUTSIDER })).resolves.toEqual([]);
     await expect(readableViewSemanticsDeltaReport(target, { contextGraphId: MISSING_CG, callerAgentAddress: OWNER })).resolves.toEqual([]);
+  });
+
+  it('answers merged from a context graph the node holds only asset graphs of', async () => {
+    const { agent: target } = await fixture('ready', 'per-asset');
+    // Readable without a local policy; its asset graphs count as held, so its read graph is read.
+    await expect(ask(target, UNDECLARED_CG, 'merged')).resolves.toEqual({ bindings: [{ s: MARKER }], semantics: 'merged' });
+    // An id that only begins like it holds nothing.
+    await expect(ask(target, UNDECLARED_CG.slice(0, -1), 'merged')).resolves.toEqual({ bindings: [] });
   });
 
   it('consults the read graph for a caller who may read the context graph (control)', async () => {
