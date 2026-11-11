@@ -191,6 +191,51 @@ describe("the ledger's compaction", () => {
     expect(await third.takeNonce(2, SUB(2), 1n)).toBe(1n);
     expect(third.calls.callsOf(2)).toHaveLength(1);
   });
+
+  it('keeps every write made on the same ledger while it runs: the call, its charge, the nonce counter and the revocation', async () => {
+    const ledger = new BuyerLedger(dir);
+    await ledger.makeKey(KEY);
+    await ledger.takeNonce(1, SUB(1), 1n);
+    await ledger.recordSent(callOf(1, SUB(1), 0));
+    await ledger.recordAccepted(keptOf(1, SUB(1), 0, 7n), 11);
+    await ledger.takeNonce(2, SUB(2), 1n);
+    await ledger.recordSent(callOf(2, SUB(2), 0));
+    // The compaction stops once it has read the journal, before it writes it again.
+    const replace = Journal.prototype.replace;
+    let resume!: () => void;
+    const resumed = new Promise<void>((resolve) => { resume = resolve; });
+    let reached!: () => void;
+    const paused = new Promise<void>((resolve) => { reached = resolve; });
+    vi.spyOn(Journal.prototype, 'replace').mockImplementationOnce(async function (this: Journal<unknown>, entries: readonly unknown[]) {
+      reached();
+      await resumed;
+      return replace.call(this, entries);
+    });
+    const appends = vi.spyOn(Journal.prototype, 'append');
+    const finalizing = ledger.finalize(1, SUB(1), [], []);
+    await paused;
+    // Meanwhile: the current epoch's call accepted, the key revoked, and that epoch's next nonce taken.
+    const writes = [ledger.recordAccepted(keptOf(2, SUB(2), 0, 5n), 12), ledger.revokeKey(KEY.keyId, 13), ledger.takeNonce(2, SUB(2), 1n)];
+    await new Promise((resolve) => setImmediate(resolve));
+    // Each waits for the compaction: nothing is appended while it holds the journal.
+    expect(appends).not.toHaveBeenCalled();
+    resume();
+    await finalizing;
+    await Promise.all(writes);
+    expect(appends).toHaveBeenCalledTimes(3);
+
+    const reopened = new BuyerLedger(dir);
+    await reopened.load();
+    expect(reopened.final(1)).toEqual([]);
+    expect(reopened.calls.callsOf(1)).toEqual([]);
+    expect(reopened.calls.callsOf(2)).toEqual([keptOf(2, SUB(2), 0, 5n)]);
+    // Epoch 1's charge folded in by the compaction, the current epoch's charge from its record, and the revocation.
+    expect(await reopened.keyList()).toEqual([expect.objectContaining({ keyId: KEY.keyId, spent: '12', lastUsedAt: 12, revoked: true })]);
+    expect(await reopened.keyList()).toEqual(await ledger.keyList());
+    // Epoch 2's counter goes on after the nonce taken meanwhile; epoch 1's went with its compaction.
+    expect(await reopened.takeNonce(2, SUB(2), 1n)).toBe(2n);
+    expect(await reopened.takeNonce(1, SUB(1), 1n)).toBe(0n);
+  });
 });
 
 describe('an accepted call', () => {
