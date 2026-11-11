@@ -1,5 +1,5 @@
 import { isStoreResponseTooLargeError, StoreResponseTooLargeError } from './http-response-limit.js';
-import { isStoreInternalLimitError, StoreInternalLimitError } from './graph-catalog-internal-limit.js';
+import { isStoreInternalLimitError, recordStoreInternalLimit, StoreInternalLimitError } from './graph-catalog-internal-limit.js';
 
 export interface GenericWorkerErrorEnvelopeV1 {
   readonly kind: 'generic';
@@ -66,6 +66,8 @@ export function deserializeWorkerErrorV1(
     return new StoreResponseTooLargeError(envelope.maxBytes, envelope.actualBytes);
   }
   if (envelope.kind === 'store-internal-limit') {
+    // A worker thread exports no metrics, so its limit is counted here.
+    recordStoreInternalLimit(envelope.limitName);
     return new StoreInternalLimitError(envelope.limitName, envelope.limitBytes, envelope.actualBytes);
   }
   const error = new Error(envelope.message) as Error & { code?: string };

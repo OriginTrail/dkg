@@ -1,6 +1,7 @@
 import { boundGraphInventory, filterGraphInventory, measureGraphInventory, readCompleteGraphInventory, readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
 import { graphCatalogFlightKey } from './graph-catalog-flight-key.js';
 import { assertGraphCatalogWithinInternalLimit, internalCatalogReadOptions, isStoreInternalLimitError, readCompleteGraphCatalog } from './graph-catalog-internal-limit.js';
+import { graphCatalogRefreshKind, recordGraphCatalogSize, timeGraphCatalogRefresh } from './graph-catalog-metrics.js';
 import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
 import { namedGraphsFromQuads, endsWithHighSurrogate, normalizeGraphUris, queryOptionsFromUpdateOptions } from "./graph-set-index-utils.js";
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
@@ -626,7 +627,8 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         ? { ...options, priority: 'background', source: 'graph-set-index.rebuild' }
         : options;
       const scan = this.refreshCoordinator.beginScan(flight);
-      const discovered = await readCompleteGraphInventory(this.inner, scanOptions);
+      const discovered = await timeGraphCatalogRefresh(graphCatalogRefreshKind(sourceForScan),
+        () => readCompleteGraphInventory(this.inner, scanOptions));
       const next = new Set(
         discovered.graphs.filter(
           (graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph),
@@ -709,6 +711,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
 
   private replaceGraphSet(next: Set<string>, source: GraphSetRefreshSource): void {
     const { added, removed } = this.catalog.replace(next);
+    recordGraphCatalogSize(this.catalog.measure());
     this.revalidateFailureCount = 0;
     this.nextRevalidateAt = this.now() + this.revalidateMs;
     if (added.length > 0 || removed.length > 0 || source !== 'seed') {
