@@ -167,7 +167,7 @@ export function NetworkTab(props: {
               non-zero — so a brief skew between the two endpoints
               doesn't briefly show "disconnected" while data is in flight. */}
           <span className={`v10-agents-stat-dot ${connected.length > 0 || connections.total > 0 ? 'connected' : 'known'}`} />
-          <span title="Unique libp2p peers connected to this node — matches the count in the header.">
+          <span title="Unique peers connected to this node — matches the count in the header.">
             {connected.length} peer{connected.length === 1 ? '' : 's'}
           </span>
         </span>
@@ -177,7 +177,7 @@ export function NetworkTab(props: {
             isn't completely hidden. */}
         <span
           className="v10-agents-stat"
-          title="Preferred transport per peer (peers reachable via direct + relay are bucketed under direct)"
+          title="How each peer connects. A peer connected both ways counts as direct."
         >
           {directCount} direct / {relayedCount} relayed
         </span>

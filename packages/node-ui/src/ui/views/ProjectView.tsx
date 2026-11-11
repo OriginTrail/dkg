@@ -710,7 +710,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             {cgError
               ? cgAuthError
                 ? cgError
-                : 'Failed to load context graph.'
+                : 'Couldn’t load context graph.'
               : 'Context graph not found.'}
           </p>
           {cgAuthError ? (

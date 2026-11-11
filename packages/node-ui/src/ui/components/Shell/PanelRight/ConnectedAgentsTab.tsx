@@ -384,7 +384,7 @@ export function ConnectedAgentsTab(props: {
                         Docs
                       </a>
                       <a className="v10-agent-link-btn ds-btn" href={OPENCLAW_RELEASE_URL} target="_blank" rel="noreferrer">
-                        Release Notes
+                        Release notes
                       </a>
                     </div>
                   </>

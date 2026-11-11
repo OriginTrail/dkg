@@ -160,7 +160,7 @@ export async function installOntology(
     subGraphName: 'meta',
   });
   if (!share.swmShared || !share.sealed || !share.publishReady) {
-    throw new Error('Project ontology atomic share did not reach Shared Working Memory');
+    throw new Error('The project ontology didn’t reach Shared Working Memory.');
   }
 
   return { ontologyUri, guideUri, tripleCount: quads.length };

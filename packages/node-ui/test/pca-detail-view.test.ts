@@ -168,7 +168,7 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     expect(btn(container, '[data-testid="pca-renew-btn"]').disabled).toBe(true);
     expect(byText('Approve publishing wallet')?.disabled).toBe(true);
     // The wallet probe is deliberately ungated — available to everyone.
-    expect(byText('Probe')?.disabled).toBe(false);
+    expect(byText('Check')?.disabled).toBe(false);
     await unmount();
   });
 
@@ -210,8 +210,8 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     // Manual probe tool agrees.
     setInputValue(container.querySelector('.v10-pca-address-crux input.v10-form-input') as HTMLInputElement, '0x' + '1'.repeat(40));
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    await act(async () => { findBtn(container, 'Probe').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    await waitForText(container, 'Couldn’t determine whether');
+    await act(async () => { findBtn(container, 'Check').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'Couldn’t check whether');
     await unmount();
   });
 
@@ -426,7 +426,7 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     expect(btn(container, '[data-testid="pca-renew-btn"]').disabled).toBe(true);
     expect(byText('Approve publishing wallet')?.disabled).toBe(true);
     // ...but the wallet probe stays available to everyone (deliberately ungated).
-    expect(byText('Probe')?.disabled).toBe(false);
+    expect(byText('Check')?.disabled).toBe(false);
     await unmount();
   });
 

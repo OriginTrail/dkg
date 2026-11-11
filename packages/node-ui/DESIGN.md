@@ -6,7 +6,7 @@ The rules behind the node UI's look and behaviour. The values live in code; this
 - **Components:** `src/ui/components/ds/` (`Button`, `RetryButton`, `Toggle`, `Badge`, `Count`, `LayerBadge`, `ContextGraphChip`) plus `AgentChip` and `AgentDot`
 - **Component CSS:** `src/ui/styles/27-ds-components.css`, loaded last
 - **Reference page (development only):** run `pnpm dev:ui` and open <http://127.0.0.1:5173/ui/design-system.html>. It renders every token and component live in both themes. `vite build` only bundles `index.html`, so the page is not part of the released UI.
-- **Checks:** `test/design-tokens.test.ts`, `test/class-has-css.test.ts` and `test/design-docs.test.ts` (see [Checks](#checks))
+- **Checks:** `test/design-tokens.test.ts`, `test/class-has-css.test.ts`, `test/design-docs.test.ts` and `test/writing-rules.test.ts` (see [Checks](#checks))
 
 ## Principles
 
@@ -60,6 +60,36 @@ Instrument Sans for the interface, JetBrains Mono for identifiers (DIDs, UALs, h
 Every font size is one of these tokens, in CSS and inline styles alike. Agent dots size their initials from the dot, and never below the 11px floor. Canvas renderers that take a number say so in a comment.
 
 Type sizes are whole pixels. Every size is one of these tokens; weights are 400, 500, 600 and 700. Uppercase text uses `--ls-caps`, and other text has no tracking. Large numbers use `--fs-display`. Sentence case everywhere, including buttons, tabs and badges. Names keep their capitals: Edge, Core (only the role: Core node, Edge node), Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction. Uppercase is for small section kickers and for card and chart titles.
+
+## Writing
+
+The same rules as nOS, so the two products read alike. Write for someone who runs a node but doesn't know how it works inside. Say what happens, what's affected and what stays. `test/writing-rules.test.ts` checks the word list below.
+
+- Short sentences, active voice, and words people use. Say what the node does for them, not how it's built. Contractions are fine.
+- Full sentences end with a full stop.
+- Sentence case and capitals follow [Type](#type). Edge and Core are names too: write "Edge node" and "runs as Core", never "Core Node".
+- Labels, tags, modes and notes start with a capital. So does a status or a description shown as a value (`Stopped`, `No runs yet`). Raw values stay as they are (`15 min`), and so do names people typed.
+- A status followed by its reason, or an option followed by its description, takes a colon, not a dash (`Not observed: the node is stopped`, `Open: publicly discoverable`).
+- No spec notes on screen. A line that only states a rule for developers is removed.
+- A middle dot sits only between plain values of the same kind (`PDF · 8.4 MB`). A label followed by its name or detail takes a colon (`Step 2 of 4: Commitment`). When the text says something, write a sentence.
+- An error says what failed and what to do next, and includes useful details when there are any.
+- Where nOS and the node UI show the same state, they use the same status word: `Done`, `Failed`, `Partial`, `Pending`, `Ready`, `Blocked`. `In progress` is the one exception: nOS says `Running`, which reads wrong on a task. Words only one product has are free, such as `Proposed`, `Merged` and `Healthy`.
+- Keep a technical word only when people need it to act: SPARQL in the query editor, UAL when copying one, RPC URL in Settings.
+- A security statement says only what the system guarantees. Check it with the owner of that guarantee before it ships.
+
+| Use | Not |
+|---|---|
+| node | daemon |
+| agent | principal, runtime |
+| check | probe |
+| `Connected` | reachable |
+| `In progress` | processing |
+| `Approval needed` | awaiting approval, pending review |
+| `Outcome unknown` | outcome not confirmed |
+| `Done` | carried out |
+| `Refused` | not admitted |
+| saved, stored | vaulted |
+| Say what happens | atomic, bootstrap, canonical, seeded, envelope, triage, nonce |
 
 ## Shape and size
 
@@ -228,6 +258,8 @@ There are no exceptions. If no token fits, add one (see below). Canvas palettes 
 - `test/data-format.test.ts`: shared formats and table scrolling.
 - `test/layout-tokens.test.ts`: layers, breakpoints, motion and line height.
 - `test/retired-names.test.ts`: stylesheet classes no markup uses, tokens nothing reads, and e2e selectors for classes that are gone.
+
+`test/writing-rules.test.ts` fails when text a person can read uses a word [Writing](#writing) rules out. Lines waiting for a wording decision sit in its `PENDING` list, which only gets shorter: a line that changes has to leave the list. In `src/ui`, an object property named like copy (`label`, `message`, `reason` and the others in the test) counts as visible text. If an object is internal data that never reaches the screen, mark it with `// writing-rules: not shown`, on its line or on a comment line just above. Every value in the Marketplace text table, `src/ui/marketplace/copy.generated.ts`, counts as visible text too, except the component gallery's.
 
 ## Adding to the system
 

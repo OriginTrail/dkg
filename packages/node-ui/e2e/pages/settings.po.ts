@@ -30,7 +30,7 @@ export class SettingsPage {
     this.telemetryDialog = page.locator(sel.settings.telemetryDialog);
     this.retentionSelect = page.locator(sel.settings.retentionSelect);
     this.retentionConfirm = page.locator(sel.settings.retentionConfirm);
-    this.shutdownButton = page.locator(`${sel.settings.stack} button`).filter({ hasText: /Shutdown|Confirm Shutdown|Shutting down/ });
+    this.shutdownButton = page.locator(`${sel.settings.stack} button`).filter({ hasText: /Shut down node|Confirm shutdown|Shutting down/ });
   }
 
   async waitForLoaded(timeout = 10_000) {

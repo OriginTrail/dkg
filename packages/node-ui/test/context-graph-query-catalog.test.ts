@@ -151,7 +151,7 @@ describe('ContextGraphQueryView', () => {
     expect(buttonLabels.some(label => label?.startsWith('Graphs'))).toBe(true);
     expect(buttonLabels.some(label => label?.startsWith('Types'))).toBe(true);
     expect(buttonLabels).toEqual(expect.arrayContaining(['Run', 'Save', 'Reset']));
-    expect(container.textContent).toContain('Reusable SPARQL for this context graph');
+    expect(container.textContent).toContain('Reusable SPARQL for searching in this context graph');
     expect(container.textContent).toContain('Load a preset or saved query into the editor below.');
     expect(container.textContent).toContain('Built-in presets');
     expect(container.textContent).not.toContain('Catalogue scope');

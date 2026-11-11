@@ -99,7 +99,7 @@ export function LayerStatsWidget({ entities, entityCount, triples, layer }: {
           { id: 'entities', label: layerNoun(layer, entityCount), value: entityCount },
           { id: 'triples', value: triples, ...(layer === 'vm' ? VM_TRIPLE_STAT : {
             label: 'Stored triples',
-            tooltip: 'Promotion normalizes draft blank nodes and can leave draft residue; publication adds provenance. Raw triple counts are not expected to match across memory layers.',
+            tooltip: 'Sharing and publishing can change how many facts are stored, so counts won’t match between memory layers. This doesn’t mean anything is missing.',
           }) },
           { id: 'connections', label: 'Connections', value: totalConns },
           { id: 'avg', label: 'Avg. connections / entity', value: avgConns },
@@ -243,7 +243,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
   return (
     <LayerActionShell
       title="Share complete Knowledge Assets"
-      footnote="Shares each complete owning Knowledge Asset atomically to Shared Working Memory."
+      footnote="Shares each Knowledge Asset as a whole: all of it reaches Shared Working Memory, or none of it does."
       context={<>Shares all eligible complete Working Memory Knowledge Assets in this context graph, including assets outside the loaded preview.</>}
       outcome={outcome}
     >

@@ -496,8 +496,8 @@ describe('EligibilityVerdictBanner', () => {
     expect(banner.getAttribute('aria-live')).toBe('assertive');
     // P2-interim — the amber copy must HEDGE (attempt + fails-below-fee), not assert
     // the direct-cost publish will go through.
-    expect(banner.textContent).toContain('attempt to pay the direct cost');
-    expect(banner.textContent).toContain('fails if that TRAC is below the fee');
+    expect(banner.textContent).toContain('will pay the full cost in TRAC');
+    expect(banner.textContent).toContain('If it doesn’t have enough TRAC, the publish fails.');
     expect(banner.textContent).not.toContain('it will pay the direct cost');
     expect(banner.textContent).toContain('no approved wallet');
     expect(banner.textContent).toContain('expired');
@@ -537,7 +537,7 @@ describe('EligibilityVerdictBanner', () => {
     expect(banner.classList.contains('v10-pca-verdict-danger')).toBe(true);
     expect(banner.getAttribute('role')).toBe('alert');
     expect(banner.getAttribute('aria-live')).toBe('assertive');
-    expect(banner.textContent).toContain('will FAIL');
+    expect(banner.textContent).toContain('will fail');
     // Q2 — source-agnostic lead (no TRAC OR no gas); the specific cause is in reasonText.
     expect(banner.textContent).toContain('no signing wallet can cover it');
     expect(banner.textContent).toContain('no approved wallet');
@@ -549,7 +549,7 @@ describe('EligibilityVerdictBanner', () => {
     const amber = await render(
       React.createElement(EligibilityVerdictBanner, { verdict: 'fallthrough', accountId: '2', discountBps: 3000 }),
     );
-    expect(amber.container.querySelector('.v10-pca-verdict-banner')?.textContent).toContain('forfeiting PCA #2’s 30% discount');
+    expect(amber.container.querySelector('.v10-pca-verdict-banner')?.textContent).toContain('you’d lose PCA #2’s 30% discount');
     await amber.unmount();
 
     const danger = await render(
@@ -560,7 +560,7 @@ describe('EligibilityVerdictBanner', () => {
 
     // No discount in context → no fabricated forfeit clause.
     const noDisc = await render(React.createElement(EligibilityVerdictBanner, { verdict: 'fallthrough' }));
-    expect(noDisc.container.querySelector('.v10-pca-verdict-banner')?.textContent).not.toContain('forfeiting');
+    expect(noDisc.container.querySelector('.v10-pca-verdict-banner')?.textContent).not.toContain('you’d lose');
     await noDisc.unmount();
   });
 

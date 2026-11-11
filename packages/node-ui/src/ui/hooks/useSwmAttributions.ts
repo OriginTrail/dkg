@@ -320,7 +320,7 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
         setResolvedContextGraphId(contextGraphId);
       } catch (err: any) {
         if (!isCurrent()) return;
-        setError(err?.message ?? 'Failed to load SWM attributions');
+        setError(err?.message ?? 'Couldn’t load Shared Working Memory attributions.');
         setAttributions(new Map());
         setEvents([]);
         setPalette([]);

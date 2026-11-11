@@ -158,7 +158,7 @@ function RoleBar({ curator, joined, refreshing }: { curator: number; joined: num
   return (
     <div
       className={`v10-cg-rolesplit${refreshing ? ' is-refreshing' : ''}`}
-      title={refreshing ? 'Refreshing — agent identity is being re-checked' : undefined}
+      title={refreshing ? 'Refreshing: checking agent identity again' : undefined}
       aria-busy={refreshing || undefined}
     >
       {/* No parent `title` on the bar — each segment already has its
@@ -172,14 +172,14 @@ function RoleBar({ curator, joined, refreshing }: { curator: number; joined: num
             {curator > 0 && (
               <span
                 className="v10-layerbar-seg"
-                title={`Curator (${curator}) — context graphs you created and curate`}
+                title={`Curator (${curator}): context graphs you created and curate`}
                 style={{ width: `${(curator / sum) * 100}%`, background: CUR }}
               />
             )}
             {joined > 0 && (
               <span
                 className="v10-layerbar-seg"
-                title={`Joined (${joined}) — context graphs you joined as a member`}
+                title={`Joined (${joined}): context graphs you joined as a member`}
                 style={{ width: `${(joined / sum) * 100}%`, background: JOIN }}
               />
             )}
@@ -189,13 +189,13 @@ function RoleBar({ curator, joined, refreshing }: { curator: number; joined: num
       <div className="v10-layer-legend">
         <span
           className="v10-layer-legend-item"
-          title="Curator — context graphs you created and curate"
+          title="Curator: context graphs you created and curate"
         >
           <span className="v10-layer-legend-dot" style={{ background: CUR }} />Curator {curator}
         </span>
         <span
           className="v10-layer-legend-item"
-          title="Joined — context graphs you joined as a member"
+          title="Joined: context graphs you joined as a member"
         >
           <span className="v10-layer-legend-dot" style={{ background: JOIN }} />Joined {joined}
         </span>

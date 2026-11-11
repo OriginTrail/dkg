@@ -225,7 +225,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType, contextGraph
         ) : (
           <>
             {loading && <Loading label="Loading document…" />}
-            {error && <div style={{ color: 'var(--text-danger)', fontSize: 'var(--fs-control)' }}>Failed to load: {error}</div>}
+            {error && <div style={{ color: 'var(--text-danger)', fontSize: 'var(--fs-control)' }}>Couldn&apos;t load: {error}</div>}
             {!loading && isImage && blobUrl && (
               <img src={blobUrl} alt={docLabel} style={{ maxWidth: '100%', borderRadius: 'var(--radius-nested)' }} />
             )}

@@ -245,7 +245,7 @@ export function formatJoinRequestError(err: unknown): string {
   if (err instanceof HttpError && err.status === 502) {
     const perPeer = readPerPeerErrors(err.body);
     if (perPeer.length === 0) {
-      return 'Request signed, but we couldn\'t deliver it to any reachable curator. ' +
+      return 'Request signed, but it couldn\'t reach any curator. ' +
         'Try again in a moment once your node has discovered more peers, or ask the curator for an updated invite.';
     }
     const reasons = perPeer.join('; ');
@@ -298,8 +298,8 @@ function hintForJoinRejectReasons(reasons: string, reachedAndRejected: boolean):
     // in practice almost always because the joiner's
     // `network/testnet.json` is still pointing at the pre-redeploy hub.
     if (/scope mismatch/i.test(reasons)) {
-      return 'This usually means your daemon\'s network config has a stale ContextGraphsHub address — ' +
-        'pull the latest release (or `git pull && pnpm install && pnpm run build:runtime`) and try again.';
+      return 'Your node is using an out-of-date network setting. Update to the latest release and try again. ' +
+        'If you installed from source code, pull the latest code and rebuild first.';
     }
     if (/unknown CG/i.test(reasons)) {
       return 'The curator doesn\'t recognise this context graph id — double-check the invite, ' +
@@ -314,7 +314,7 @@ function hintForJoinRejectReasons(reasons: string, reachedAndRejected: boolean):
   // online and the invite carries the right peer id".
   if (/not curator/i.test(reasons)) {
     return 'Your node reached other peers, but none of them curate this context graph. ' +
-      'Make sure the curator\'s daemon is online and the invite carries the right curator peer id.';
+      'Make sure the curator\'s node is online and the invite has the right curator peer ID.';
   }
   return null;
 }
@@ -672,7 +672,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
             {sending
               ? intent.sendingLabel
               : pending
-                ? 'Awaiting approval…'
+                ? 'Approval needed'
                 : approved
                   ? 'Approved'
                   : intent.idleLabel}

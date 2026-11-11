@@ -414,9 +414,9 @@ function GeneralSettingsTab() {
             <Badge tone={nodeState.tone}>{nodeState.word}</Badge>
             <div
               style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', marginTop: 4 }}
-              title="Peers = unique remote nodes. Direct + Relayed counts are libp2p connections — a single peer can hold both a direct and a relayed link, so they sum to ≥ Peers, not exactly equal to it."
+              title="Peers = unique remote nodes. Direct + Relayed counts are connections — a single peer can hold both a direct and a relayed link, so they sum to ≥ Peers, not exactly equal to it."
             >
-              {nodeState.tooltip ?? `${peerCount} peer${peerCount !== 1 ? 's' : ''} · ${s?.connections?.direct ?? 0} direct, ${s?.connections?.relayed ?? 0} relayed link${(s?.connections?.relayed ?? 0) === 1 ? '' : 's'} · up ${formatUptime(s?.uptimeMs ?? 0)}`}
+              {nodeState.tooltip ?? `${peerCount} peer${peerCount !== 1 ? 's' : ''}: ${s?.connections?.direct ?? 0} direct, ${s?.connections?.relayed ?? 0} relayed. Up ${formatUptime(s?.uptimeMs ?? 0)}.`}
             </div>
           </div>
         </div>
@@ -461,7 +461,7 @@ function GeneralSettingsTab() {
             </div>
           ) : w?.chainId?.includes('84532') || w?.chainId?.includes('31337') || w?.chainId?.includes('11155111') ? (
             <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--warning-bg)', border: '1px solid var(--warning-border)' }}>
-              <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-warning)', marginBottom: 2 }}><StatusGlyph tone="warning" /> Testnet Mode</div>
+              <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-warning)', marginBottom: 2 }}><StatusGlyph tone="warning" /> Testnet mode</div>
               <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>No real TRAC is spent. Perfect for development.</div>
             </div>
           ) : null}
@@ -495,7 +495,7 @@ function GeneralSettingsTab() {
                 opacity: shuttingDown ? 0.5 : 1,
               }}
             >
-              {shuttingDown ? 'Shutting down…' : shutdownConfirm ? 'Confirm Shutdown' : 'Shutdown Node'}
+              {shuttingDown ? 'Shutting down…' : shutdownConfirm ? 'Confirm shutdown' : 'Shut down node'}
             </button>
             <span aria-live="polite">
               {shutdownConfirm && (

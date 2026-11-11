@@ -841,7 +841,7 @@ describe('ProjectView entity detail navigation', () => {
   // PARTIAL failure), so the `memoryReady` gate misclassed total
   // failure as "ready" and passed an empty entityList through.
   // ProjectView now opts into `signalErrors: true`, so a total
-  // failure surfaces `error: 'Failed to load memory data'` and
+  // failure surfaces `error: 'Couldn’t load memory data.'` and
   // the gate fires correctly. The mock here uses a non-null
   // `error` to simulate the post-fix behavior — the
   // `signalErrors` opt-in is verified at the hook unit level;
@@ -850,7 +850,7 @@ describe('ProjectView entity detail navigation', () => {
   it('does NOT pass rawMemory.entityList to SubGraphBar when all three layer queries failed (signalErrors)', async () => {
     memory.loading = false;
     memory.partial = false;
-    memory.error = 'Failed to load memory data';
+    memory.error = 'Couldn’t load memory data.';
     memory.entityList = [];
     await act(async () => {
       root.render(React.createElement(ProjectView, { contextGraphId: 'cg-test' }));

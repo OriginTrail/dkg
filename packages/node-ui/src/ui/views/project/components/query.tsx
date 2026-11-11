@@ -534,7 +534,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
         <div>
           <h2 className="v10-mlv-title">Query catalogue</h2>
           <p className="v10-mlv-desc">
-            Reusable SPARQL for this context graph. Use UI presets or save queries for people and local agents to reuse.
+            Reusable SPARQL for searching in this context graph. Use UI presets or save a query here so people and local agents can run it again.
           </p>
         </div>
       </div>

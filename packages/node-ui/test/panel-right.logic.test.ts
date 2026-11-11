@@ -388,7 +388,7 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).toContain('Connect another agent');
     expect(markup).toContain('Connecting...');
     expect(markup).toContain('Docs');
-    expect(markup).toContain('Release Notes');
+    expect(markup).toContain('Release notes');
     expect(markup).toContain('Connect Hermes');
     expect(markup).toContain('local Hermes profile');
     expect(markup).toContain('connected');

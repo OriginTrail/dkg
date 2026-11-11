@@ -412,7 +412,7 @@ export function VerifiableMemoryHeroBanner({ entities, vmTriples, contextGraphId
       <div className="v10-vm-hero-title">
         <LayerBadge layer="vm" label="Verifiable Memory" className="v10-vm-hero-badge" title={VM_BADGE_TIP} />
         <div className="v10-vm-hero-heading">
-          <span className="v10-vm-hero-headline">On-chain anchored · cryptographically signed</span>
+          <span className="v10-vm-hero-headline">Anchored on-chain and cryptographically signed.</span>
           <span className="v10-vm-hero-context" title={contextGraphId}>
             Context graph: {contextGraphId}
           </span>

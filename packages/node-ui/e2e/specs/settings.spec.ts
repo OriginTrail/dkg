@@ -82,7 +82,7 @@ test.describe('Settings page (rc.12 rewrite)', () => {
     // resolves the field reads the "Unknown" fallback. The testnet banner renders
     // from the SAME payload, so waiting for it gates the whole assertion on a
     // loaded chainId (rather than racing the first paint).
-    await expect(settingsPage.root.getByText(/Testnet Mode/i)).toBeVisible({ timeout: 15_000 });
+    await expect(settingsPage.root.getByText(/Testnet mode/i)).toBeVisible({ timeout: 15_000 });
     // At least one 0x… operational wallet address is rendered.
     await expect(settingsPage.root.getByText(/0x[a-fA-F0-9]{40}/).first()).toBeVisible();
     // chainLabel(31337) → "Local (Hardhat)"; once loaded it must never be the bare
@@ -137,11 +137,11 @@ test.describe('Settings page (rc.12 rewrite)', () => {
   });
 
   test('Danger zone Shutdown is a two-click confirm — the first click only arms it and never kills the node', async ({ settingsPage, page }) => {
-    await expect(settingsPage.shutdownButton).toHaveText('Shutdown Node');
+    await expect(settingsPage.shutdownButton).toHaveText('Shut down node');
 
     // First click arms the confirm; it must NOT shut the daemon down.
     await settingsPage.shutdownButton.click();
-    await expect(settingsPage.shutdownButton).toHaveText('Confirm Shutdown');
+    await expect(settingsPage.shutdownButton).toHaveText('Confirm shutdown');
     await expect(settingsPage.root.getByText(/Click again to confirm/i)).toBeVisible();
 
     // Prove the daemon is still alive (the arming click had no side effect).

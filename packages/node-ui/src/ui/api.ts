@@ -897,12 +897,12 @@ export interface AtomicShareResult {
 function normalizeAtomicShareOptions(raw: AtomicShareOptions): AtomicShareOptions {
   const opts = raw as LegacyAtomicShareOptions;
   if (Array.isArray(opts.entities)) {
-    throw Object.assign(new Error('Knowledge Assets are shared atomically; root-entity selection is not supported'), {
+    throw Object.assign(new Error('A Knowledge Asset is shared whole, so you can’t share only some of its entities.'), {
       code: 'KA_ATOMIC_SHARE_REQUIRED',
     });
   }
   if (opts.entities !== undefined && opts.entities !== 'all') {
-    throw Object.assign(new Error('Knowledge Assets are shared atomically; omit entities to share the complete asset'), {
+    throw Object.assign(new Error('A Knowledge Asset is shared whole. Clear the entity selection to share it.'), {
       code: 'KA_ATOMIC_SHARE_REQUIRED',
     });
   }
@@ -1144,12 +1144,12 @@ export const promoteAssertion = (
   legacySubGraphName?: string,
 ) => {
   if (Array.isArray(optionsOrLegacyEntities)) {
-    throw Object.assign(new Error('Knowledge Assets are shared atomically; root-entity selection is not supported'), {
+    throw Object.assign(new Error('A Knowledge Asset is shared whole, so you can’t share only some of its entities.'), {
       code: 'KA_ATOMIC_SHARE_REQUIRED',
     });
   }
   if (typeof optionsOrLegacyEntities === 'string' && optionsOrLegacyEntities !== 'all') {
-    throw Object.assign(new Error('Knowledge Assets are shared atomically; omit entities to share the complete asset'), {
+    throw Object.assign(new Error('A Knowledge Asset is shared whole. Clear the entity selection to share it.'), {
       code: 'KA_ATOMIC_SHARE_REQUIRED',
     });
   }
@@ -1218,7 +1218,7 @@ export function describePromoteError(
         kind: 'payload-too-large',
         actualBytes: typeof body.actualBytes === 'number' ? body.actualBytes : undefined,
         limitBytes: typeof body.limitBytes === 'number' ? body.limitBytes : undefined,
-        message: `${assertionName} is too large to share atomically. Split its content into smaller Knowledge Assets before sharing.`,
+        message: `${assertionName} is too large to share in one go. Split its content into smaller Knowledge Assets before sharing.`,
       };
     }
   }

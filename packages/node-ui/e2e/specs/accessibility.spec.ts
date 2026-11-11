@@ -21,7 +21,7 @@ test.describe('Accessibility', () => {
 
   test('log filter input has placeholder text', async ({ page, bottomPanel }) => {
     await bottomPanel.toggle();
-    await bottomPanel.switchTab('Node Log');
+    await bottomPanel.switchTab('Node log');
     const logFilter = page.locator(sel.bottom.logFilter).first();
     await expect(logFilter).toHaveAttribute('placeholder', 'Filter logs...');
   });

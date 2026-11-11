@@ -278,7 +278,7 @@ export function VerifyOnDkgButton({
             ) : (
               <div className="v10-ka-verify-ok-row">
                 <span className="v10-ka-verify-ok-lbl">TX hash</span>
-                <span className="v10-ka-verify-ok-val">none — on-chain submission skipped</span>
+                <span className="v10-ka-verify-ok-val">None: on-chain submission skipped</span>
               </div>
             )}
             {result.blockNumber != null && (

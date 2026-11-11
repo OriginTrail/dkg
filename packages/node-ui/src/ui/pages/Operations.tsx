@@ -227,7 +227,7 @@ function ReplicationTab() {
       <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
         <PeriodSelect value={period} onChange={setPeriod} />
         <span style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)' }}>
-          Chain-anchored publishes reconciled into Verifiable Memory. Auto-refreshes every 5s.
+          Publishes confirmed on chain and added to Verifiable Memory. Auto-refreshes every 5s.
         </span>
       </div>
 
@@ -242,10 +242,10 @@ function ReplicationTab() {
       {/* Timeline */}
       <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>
-          Reconciliation timeline{selectedCg ? ` — ${selectedCg}` : ' — all context graphs'}
+          Confirmation timeline{selectedCg ? ` — ${selectedCg}` : ' — all context graphs'}
         </div>
         {buckets.length === 0 ? (
-          <EmptyState compact inline title="No reconciliation activity" description="No chain-driven Verifiable Memory promotions recorded in this period." />
+          <EmptyState compact inline title="No confirmation activity" description="No chain-driven Verifiable Memory promotions recorded in this period." />
         ) : (
           <ResponsiveContainer width="100%" height={220}>
             <AreaChart data={buckets}>
@@ -901,10 +901,10 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
                 ({Math.round(((phases[hover].duration_ms ?? 0) / totalMs) * 100)}%)
               </span>
               {phases[hover].status === 'error' && (
-                <span style={{ color: 'var(--text-danger)', marginLeft: 6, fontWeight: 600 }}>FAILED</span>
+                <span style={{ color: 'var(--text-danger)', marginLeft: 6, fontWeight: 600 }}>Failed</span>
               )}
               {phases[hover].status === 'cancelled' && (
-                <span style={{ color: CANCELLED_COLOR, marginLeft: 6, fontWeight: 600 }}>CANCELLED</span>
+                <span style={{ color: CANCELLED_COLOR, marginLeft: 6, fontWeight: 600 }}>Cancelled</span>
               )}
             </div>
             {desc && (
@@ -1183,9 +1183,9 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
                 <div
                   title={`${p.phase}: ${formatDuration(phaseDuration)}${
                     isError
-                      ? ` — FAILED: ${p.details ?? ''}`
+                      ? ` — Failed: ${p.details ?? ''}`
                       : isCancelled
-                        ? ` — CANCELLED: ${p.details ?? ''}`
+                        ? ` — Cancelled: ${p.details ?? ''}`
                         : ''
                   }`}
                   style={{
@@ -1221,7 +1221,7 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
         )}
         {phases.some((p: any) => p.status === 'in_progress') && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--accent-amber)', display: 'inline-block' }} /> In Progress
+            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--accent-amber)', display: 'inline-block' }} /> In progress
           </span>
         )}
       </div>

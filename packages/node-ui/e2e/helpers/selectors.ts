@@ -233,7 +233,7 @@ export const sel = {
     inviteLabel: '.v10-form-label:has-text("Invite code")',
     allowedAgents: '.v10-form-label:has-text("Allowed agents")',
     pendingRequests: '.v10-form-label:has-text("Pending join requests")',
-    copyInviteBtn: 'button:has-text("Copy Invite")',
+    copyInviteBtn: 'button:has-text("Copy invite")',
   },
 
   myContextGraphs: {
