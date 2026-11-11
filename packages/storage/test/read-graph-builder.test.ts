@@ -924,6 +924,26 @@ describe('installing the working-memory identity rule', () => {
     expect((await storedRows(adapter))[agentWm]).toMatch(/^dirty@/);
   });
 
+  it('owes the stored mark of a read graph the mirror already holds dirty, and records the identity only once it is stored', async () => {
+    const { adapter, fixture, layer, context, dataDir } = await open();
+    const { agentWm } = fixture.readGraphs;
+    const first = { defaultAgentAddress: AGENT, peerId: 'peer-1' };
+    const second = { defaultAgentAddress: `0x${'cd'.repeat(20)}`, peerId: 'peer-1' };
+    expect(await installWorkingMemoryIdentity(context, first)).toEqual({ marked: [], recorded: true });
+    // Stored ready under the first identity, and dirty only in the mirror, as when a write's stored mark failed.
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(agentWm, 4)));
+    layer.runtime.mirror.set(row(agentWm, 'dirty', 5));
+    await adapter.update!(readGraphRegistryRecordUpdate(fixture.registry));
+    // The second identity takes the peer ID's drafts from AGENT: the mirror has nothing new to mark, the store does.
+    expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: true });
+    expect(await storedRows(adapter)).toEqual({ [agentWm]: 'dirty@5' });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(second);
+    // A later start under the second identity keeps nothing the first one built.
+    const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    await startReadGraphs(restarted, { dataDir, maintains: (key) => key.scope.contextGraphId === fixture.contextGraphId });
+    expect((await storedRows(adapter))[agentWm]).toMatch(/^dirty@/);
+  });
+
   it('records the identity only once the store has made its marks durable, and not when it cannot', async () => {
     const { adapter, fixture, layer, context, dataDir } = await open();
     const { agentWm } = fixture.readGraphs;

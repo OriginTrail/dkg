@@ -10,7 +10,8 @@ import { OxigraphWorkerStore } from '../src/adapters/oxigraph-worker.js';
 import { readGraphCopy } from '../src/read-graph/statements.js';
 import { parseReadGraphStateRows, readGraphStateCompareAndSet, readGraphStateRowsQuery } from '../src/read-graph/state.js';
 import type { TripleStore } from '../src/triple-store.js';
-import { P as LAYER_P, layerFixture, layeredStore, q as layerQuad, readyRow } from './helpers/read-graph-layer-conformance.js';
+import { P as LAYER_P, expectLayerUnions, layerFixture, layeredStore, q as layerQuad, readyRow } from './helpers/read-graph-layer-conformance.js';
+import { authorCommitInput, seedOldState } from './rfc64-author-commit-cas-harness.js';
 import {
   P,
   planned,
@@ -181,6 +182,35 @@ describe.each([
       const row = parseReadGraphStateRows(stored.type === 'bindings' ? stored.bindings : []).rows.find((each) => each.readGraph === wholeVm);
       expect(row?.state).toBe('dirty');
       expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it('maintains the read graphs of an RFC-64 author commit that wins, and changes nothing for one that loses its guard', async () => {
+    const adapter = open();
+    try {
+      const fixture = layerFixture(`author-commit-${randomUUID()}`);
+      const { layer, store } = await layeredStore(adapter, { backend: 'oxigraph' }, fixture);
+      // The adapter declares author commits, so the layer plans them.
+      expect(layer.adapterCapabilities?.methods).toContain('rfc64AuthorCommitCasV1');
+      // The commit replaces the context graph's shared-memory graph, a member of its whole-graph SWM read graph.
+      const projection = fixture.graphs[5]!;
+      await seedOldState(adapter);
+      const commit = (value: string) => authorCommitInput({
+        sharedProjectionGraph: projection, sharedProjectionQuads: [layerQuad('urn:s:commit', value, projection)],
+      });
+      const held = async () => {
+        const result = await adapter.query(`SELECT ?s ?o WHERE { GRAPH <${projection}> { ?s <${LAYER_P}> ?o } }`);
+        return (result.type === 'bindings' ? result.bindings : []).map((each) => `${each['s']} ${each['o']}`).sort();
+      };
+      await expect(store.rfc64AuthorCommitCasV1!(commit('"won"'))).resolves.toBe('committed');
+      expect(await held()).toEqual(['urn:s:commit "won"']);
+      await expectLayerUnions(adapter, layer, fixture, 'an author commit that won');
+      // Its guard is now stale: the head has moved on.
+      await expect(store.rfc64AuthorCommitCasV1!(commit('"lost"'))).resolves.toBe('conflict');
+      expect(await held()).toEqual(['urn:s:commit "won"']);
+      await expectLayerUnions(adapter, layer, fixture, 'an author commit that lost its guard');
     } finally {
       await adapter.close();
     }
