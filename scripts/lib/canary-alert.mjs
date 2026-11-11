@@ -30,6 +30,7 @@ export const ALERT_ISSUES = Object.freeze({
 });
 // A red CI gate; a skipped or missing one says nothing.
 const RED = new Set(['failure', 'cancelled', 'timed_out']);
+export const isRed = (gateResult) => RED.has(gateResult);
 const STEP_FAILED = new Set(['failure', 'timed_out', 'cancelled']);
 const DETAILS = '### Latest failure';
 const FOOTER = '_Opened, commented on and closed by';
@@ -56,9 +57,12 @@ function keptDetails(body) {
   return text.slice(start, end === -1 ? undefined : end).trimEnd();
 }
 
-// The state in a profile's alert issue body: { version: 1, profile, since,
-// run }, or undefined when there is none to read (a hand edit included).
-export function readAlertState(body, profile) {
+// The versioned state in a profile's alert issue body, or undefined: the red
+// episode's start (`since`) and latest red `run`; `after`, the pass that
+// closed the profile's previous issue, when there was one; and, once closed,
+// `recovered`, the pass that closed this one. Each run record is { id,
+// attempt, createdAt, url, sha, commitUrl }.
+function parseState(body, profile) {
   const { marker } = alertIssue(profile);
   const text = String(body ?? '');
   const start = text.indexOf(marker);
@@ -70,12 +74,38 @@ export function readAlertState(body, profile) {
   } catch {
     return undefined;
   }
-  if (state?.version !== 1 || state.profile !== profile) return undefined;
-  return Number.isFinite(time(state.since)) && Number.isFinite(time(state.run?.createdAt)) ? state : undefined;
+  return state?.version === 1 && state.profile === profile ? state : undefined;
+}
+const dated = (record) => Number.isFinite(time(record?.createdAt));
+
+// An open alert's state, or undefined when there is none to read (a hand edit
+// included). An unreadable `after` is dropped, and an open alert has no
+// recovery.
+export function readAlertState(body, profile) {
+  const state = parseState(body, profile);
+  if (!Number.isFinite(time(state?.since)) || !dated(state.run)) return undefined;
+  return { version: 1, profile, since: state.since, run: state.run, ...(dated(state.after) ? { after: state.after } : {}) };
+}
+
+// The pass that closed a profile's alert issue, as its state records it, or
+// undefined (an issue closed by hand, or a state that cannot be read).
+export function readRecovery(body, profile) {
+  const state = parseState(body, profile);
+  return dated(state?.recovered) ? state.recovered : undefined;
 }
 
 // `>` is escaped so no value can close the comment early.
 const stateMarker = (state) => `${alertIssue(state.profile).marker}${JSON.stringify(state).replace(/>/g, '\\u003e')} -->`;
+
+// The body with its state marker replaced, or added as the first line, and its
+// text untouched: closing records the recovery without rewriting the alert.
+function withState(body, state) {
+  const text = String(body ?? '');
+  const start = text.indexOf(alertIssue(state.profile).marker);
+  const end = start === -1 ? -1 : text.indexOf(' -->', start);
+  if (end === -1) return `${stateMarker(state)}\n${text}`;
+  return `${text.slice(0, start)}${stateMarker(state)}${text.slice(end + ' -->'.length)}`;
+}
 
 // The run as the issue records it.
 const recorded = ({ id, attempt, createdAt, url, sha, commitUrl }) => ({ id, attempt, createdAt, url, sha, commitUrl });
@@ -138,13 +168,18 @@ export function renderAlertBody(state, details) {
 
 // What to do with a profile's alert issue for one finished testnet-canary run
 // of that profile: `open` (with title, labels and body), `comment` (and
-// rewrite the body), `close` (with a comment) or `none`, with the reason.
+// rewrite the body), `close` (with a comment, and the body recording the
+// recovery) or `none`, with the reason.
 // - run: { id, attempt, profile, createdAt, finishedAt, url, sha, commitUrl,
 //   event, actor, triggeringActor, title }
 // - gateResult: the CI gate job's result in this run
 // - jobs: this attempt's jobs, from the jobs API
 // - issue: the open alert issue of run.profile ({ number, body }), or null
-export function planAlert({ issue, run, gateResult, jobs }) {
+// - recovery: with no open issue, the pass that closed the profile's last
+//   alert (readRecovery), if one can be read
+// Runs are ordered by creation: a re-run keeps its run's commit and creation
+// time, so a failing re-run of an old commit is as old as that commit's run.
+export function planAlert({ issue, run, gateResult, jobs, recovery }) {
   const { title } = alertIssue(run.profile);
   const state = issue ? readAlertState(issue.body, run.profile) : undefined;
   if (gateResult === 'success') {
@@ -154,20 +189,36 @@ export function planAlert({ issue, run, gateResult, jobs }) {
     if (state && time(state.run.createdAt) > time(run.createdAt)) {
       return { action: 'none', reason: `CI gate passed, but #${issue.number} records a newer red run (#${state.run.id})` };
     }
+    // The closed issue keeps this pass as the profile's latest recovery, so a
+    // later failure of an older run cannot reopen the alert.
+    const closed = { ...(state ?? { version: 1, profile: run.profile }), recovered: recorded(run) };
     return {
       action: 'close',
       issue,
+      state: closed,
+      body: withState(issue.body, closed),
       comment: `**Green again:** ${runLink(run)} (\`${run.event}\`, ${run.profile} profile) passed at ${commitLink(run)}. Closing.`,
       reason: `CI gate passed; closing #${issue.number}`,
     };
   }
   if (!RED.has(gateResult)) return { action: 'none', reason: `CI gate result is ${gateResult || 'missing'}` };
+  // The pass this red episode follows: the recovery found for a new alert, or
+  // the one an open alert recorded when it opened. A run no newer than that
+  // pass, such as a failing re-run of an older commit, proves nothing now.
+  const after = issue ? state?.after : recovery;
+  if (dated(after) && time(run.createdAt) <= time(after.createdAt)) {
+    return {
+      action: 'none',
+      reason: `CI gate ${gateResult}, but a newer run (#${after.id}) has passed since this one was created; ${issue ? `leaving #${issue.number} as it is` : `not reopening the ${run.profile} alert`}`,
+    };
+  }
   const newer = !state || time(run.createdAt) >= time(state.run.createdAt);
   const next = {
     version: 1,
     profile: run.profile,
     since: state && time(state.since) <= time(run.createdAt) ? state.since : run.createdAt,
     run: newer ? recorded(run) : state.run,
+    ...(dated(after) ? { after } : {}),
   };
   const failure = renderFailure(run, jobs);
   if (!issue) {

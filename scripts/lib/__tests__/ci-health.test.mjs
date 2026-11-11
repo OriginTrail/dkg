@@ -132,13 +132,25 @@ test('root failures skip the aggregates, treat merged coverage as derivative, an
     'Kosava: node-ui e2e [1/7] (Playwright real-node devnet): Install Playwright Chromium',
     'Kosava: node-ui e2e [2/7] (Playwright real-node devnet): Install Playwright Chromium',
   ]);
-  // Coverage failing on its own is the cause.
+  // Coverage failing with no failed or cancelled test lane is the cause.
   assert.deepEqual(names([job('Tornado: core'), failedLane(COVERAGE_JOB, 'Verify changed lines'), failedLane(CI_GATE_JOB, 'Require the coverage verdict')]), [
     `${COVERAGE_JOB}: Verify changed lines`,
   ]);
   // A timed-out job is cancelled, not failed: with nothing failed, it is the cause.
   const timeout = job('Tornado: Solidity coverage (push safety net)', { conclusion: 'cancelled', minutes: 45, steps: [['Compile', 'success'], ['Hardhat tests', 'cancelled']] });
   assert.deepEqual(names([timeout, failedLane(CI_GATE_JOB, 'Verify selected lanes completed')]), ['Tornado: Solidity coverage (push safety net): Hardhat tests']);
+  // A timed-out test shard leaves no coverage receipt, so merged coverage
+  // fails after it: the shard is the cause, not the coverage it emptied.
+  const shard = job('Tornado: agent [4/11]', { conclusion: 'cancelled', minutes: 12, steps: [['Restore build outputs', 'success'], ['Agent tests (shard 4/11)', 'cancelled']] });
+  assert.deepEqual(names([
+    job('Tornado: agent [3/11]'),
+    shard,
+    failedLane(COVERAGE_JOB, 'Verify complete shards, production source, floors and changed lines'),
+    failedLane(PROFILE_JOB, 'Verify actual required execution'),
+    failedLane(CI_GATE_JOB, 'Verify selected lanes completed'),
+  ]), ['Tornado: agent [4/11]: Agent tests (shard 4/11)']);
+  // A failed test lane still outranks a cancelled one (fail-fast cancels its siblings).
+  assert.deepEqual(names([failedLane('Tornado: agent [2/11]', 'Agent tests (shard 2/11)'), shard, failedLane(COVERAGE_JOB, 'Verify')]), ['Tornado: agent [2/11]: Agent tests (shard 2/11)']);
   // With only an aggregate red, the aggregate is all there is to report.
   assert.deepEqual(names([job('Build packages'), failedLane(CI_GATE_JOB, 'Verify selected lanes completed')]), [`${CI_GATE_JOB}: Verify selected lanes completed`]);
   assert.deepEqual(rootFailures([job('Build packages'), gate()]), []);
@@ -185,6 +197,15 @@ test('top root failures count a run once per lane, over attempts and shards, wit
   assert.deepEqual(top.kinds, { pr: 1, 'canary-push': 1 });
   assert.deepEqual([top.step, top.stepCount], ['Install Playwright Chromium', 2]);
   assert.equal(top.last.id, 2);
+
+  // The weekly table names a timed-out shard, not the coverage check it emptied.
+  const [timedOut, ...others] = topRootFailures(classifyRuns([run({ id: 4, conclusion: 'cancelled' })]).map((entry) => ({ ...entry, jobs: [
+    job('Tornado: agent [4/11]', { conclusion: 'cancelled', steps: [['Agent tests (shard 4/11)', 'cancelled']] }),
+    failedLane(COVERAGE_JOB, 'Verify complete shards'),
+    gate({ conclusion: 'failure' }),
+  ] })));
+  assert.deepEqual(others, []);
+  assert.deepEqual([timedOut.lane, timedOut.failed, timedOut.cancelled, timedOut.step], ['Tornado: agent', 1, 1, 'Agent tests (shard 4/11)']);
 });
 
 test('a job that failed and then passed on a retry or on the same commit is flaky; a carried-over pass is not', () => {

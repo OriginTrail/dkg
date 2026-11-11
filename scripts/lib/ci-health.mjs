@@ -134,18 +134,19 @@ export function failedStep(job) {
   return (steps.find((step) => step.conclusion !== 'cancelled') ?? steps[0])?.name;
 }
 
-// What made one attempt red: its failed lane jobs. The aggregate jobs (CI
-// gate, Verify execution profile) only repeat a lane's verdict, and merged
-// coverage fails along with a test lane that left no receipt, so each counts
-// only when nothing more specific failed. With no failure at all, the
-// cancelled jobs (a job timeout) are the cause.
+// What made one attempt red, most specific first: its failed test lanes, else
+// its cancelled ones (a job timeout), else merged coverage, else the
+// aggregates. The aggregate jobs (CI gate, Verify execution profile) only
+// repeat a lane's verdict, and merged coverage fails whenever a test lane
+// left no receipt, a timed-out one included, so coverage is the cause only
+// when no test lane failed or was cancelled.
 export function rootFailures(jobs) {
   const completed = jobs.filter((job) => job.status === 'completed' && job.name !== CANARY_ALERT_JOB);
   const failed = completed.filter((job) => FAILED.has(job.conclusion));
-  const lanes = failed.filter((job) => !AGGREGATE_JOBS.has(job.name));
-  const tests = lanes.filter((job) => job.name !== COVERAGE_JOB);
   const cancelled = completed.filter((job) => job.conclusion === 'cancelled' && !AGGREGATE_JOBS.has(job.name));
-  const roots = [tests, lanes, cancelled, failed].find((set) => set.length > 0) ?? [];
+  const lanes = failed.filter((job) => !AGGREGATE_JOBS.has(job.name));
+  const isTest = (job) => job.name !== COVERAGE_JOB;
+  const roots = [lanes.filter(isTest), cancelled.filter(isTest), lanes, cancelled, failed].find((set) => set.length > 0) ?? [];
   return roots.map((job) => ({ name: job.name, ...laneOf(job.name), conclusion: job.conclusion, step: failedStep(job), job }));
 }
 

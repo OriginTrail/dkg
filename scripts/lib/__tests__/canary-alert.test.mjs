@@ -6,8 +6,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
-import { ALERT_ISSUES, ALERT_LABEL, alertIssue, planAlert, PROFILES, readAlertState, renderFailure } from '../canary-alert.mjs';
-import { CANARY_ALERT_JOB, CI_GATE_JOB, PROFILE_JOB } from '../ci-health.mjs';
+import { ALERT_ISSUES, ALERT_LABEL, alertIssue, planAlert, PROFILES, readAlertState, readRecovery, renderFailure } from '../canary-alert.mjs';
+import { CANARY_ALERT_JOB, CI_GATE_JOB, COVERAGE_JOB, PROFILE_JOB } from '../ci-health.mjs';
 import { createGitHubClient } from '../github-rest.mjs';
 import { runCanaryAlert, runProfile } from '../../ci/canary-alert.mjs';
 import { REPO_ROOT } from './ci-plan-fixtures.mjs';
@@ -89,6 +89,41 @@ test('later runs of a profile comment while it stays red, and its next pass clos
   const closed = planAlert({ issue: issue(again), run: reference(104, { created: 120 }), gateResult: 'success', jobs: greenJobs });
   assert.equal(closed.action, 'close');
   assert.match(closed.comment, /^\*\*Green again:\*\* \[CI #104\]\(.+\) \(`push`, standard profile\) passed at .+ Closing\.$/);
+  // Closing records the pass as the profile's recovery, in the state alone.
+  assert.deepEqual(readRecovery(closed.body, 'standard'), {
+    id: 104, attempt: 1, createdAt: at(120), url: 'https://github.com/OriginTrail/dkg/actions/runs/104',
+    sha: '1040000000000000000000000000000000000000', commitUrl: 'https://github.com/OriginTrail/dkg/commit/1040000000000000000000000000000000000000',
+  });
+  assert.deepEqual(closed.body.split('\n').slice(1), again.body.split('\n').slice(1), 'the alert text is left as it was');
+  assert.equal(readAlertState(closed.body, 'standard').recovered, undefined, 'an open state never carries a recovery');
+});
+
+test('a recovery is final for older runs: their failures neither reopen the alert nor join a newer one', () => {
+  const opened = open(reference(601, { created: 0 }));
+  const closed = planAlert({ issue: { number: 1, body: opened.body }, run: reference(602, { created: 60 }), gateResult: 'success', jobs: greenJobs });
+  const recovery = readRecovery(closed.body, 'standard');
+  assert.equal(recovery.id, 602);
+  // A re-run keeps its run's commit and creation time: run 601 failing again proves nothing now.
+  const rerun = planAlert({ issue: null, recovery, run: reference(601, { created: 0, attempt: 2 }), gateResult: 'failure', jobs: redJobs });
+  assert.equal(rerun.action, 'none');
+  assert.match(rerun.reason, /a newer run \(#602\) has passed since this one was created; not reopening the standard alert/);
+  assert.equal(planAlert({ issue: null, recovery, run: reference(603, { created: 60 }), gateResult: 'cancelled', jobs: redJobs }).action, 'none', 'not newer is not enough');
+  // A genuinely newer failure opens, and its alert remembers the recovery it follows.
+  const reopened = planAlert({ issue: null, recovery, run: reference(604, { created: 90 }), gateResult: 'failure', jobs: redJobs });
+  assert.equal(reopened.action, 'open');
+  assert.deepEqual(readAlertState(reopened.body, 'standard').after, recovery);
+  // While it is open, a failure older than that recovery cannot join it and pull its start back;
+  // one between the recovery and the alert's own run can.
+  const issue = { number: 2, body: reopened.body };
+  assert.equal(planAlert({ issue, run: reference(601, { created: 0, attempt: 3 }), gateResult: 'failure', jobs: redJobs }).action, 'none');
+  const between = planAlert({ issue, run: reference(605, { created: 75 }), gateResult: 'failure', jobs: redJobs });
+  assert.deepEqual([between.action, between.state.since, between.state.run.id, between.state.after.id], ['comment', at(75), 604, 602]);
+  // With no recovery on record, or none that can be read, a red run opens as before.
+  assert.equal(planAlert({ issue: null, run: reference(601, { created: 0, attempt: 2 }), gateResult: 'failure', jobs: redJobs }).action, 'open');
+  assert.equal(readRecovery(`${ALERT_ISSUES.standard.marker}{"version":1,"profile":"standard","recovered":{"id":602}} -->`, 'standard'), undefined);
+  assert.equal(readRecovery(`${ALERT_ISSUES.standard.marker}{broken -->`, 'standard'), undefined);
+  assert.equal(readRecovery(opened.body, 'standard'), undefined, 'an open alert has no recovery');
+  assert.equal(readRecovery(closed.body, 'nightly-equivalent'), undefined, 'nor does another profile\'s issue');
 });
 
 test('within a profile, an older run\'s pass proves nothing about a newer red one, and a late old failure keeps the newer run', () => {
@@ -134,6 +169,14 @@ test('a timed-out lane is reported as cancelled, and a run without failed jobs s
   ]);
   assert.match(timeout, /\*\*Tornado: Solidity coverage \(push safety net\)\*\*, cancelled \(a timeout or a manual cancel\), failed step: `Hardhat tests \+ Solidity coverage \+ ratchet check`/);
   assert.doesNotMatch(timeout, new RegExp(CANARY_ALERT_JOB));
+  // A timed-out test shard, not the merged coverage it left without a receipt.
+  const shard = renderFailure(reference(7), [
+    job('Tornado: agent [4/11]', 'cancelled', [step('Agent tests (shard 4/11)', 'cancelled', 7)]),
+    job(COVERAGE_JOB, 'failure', [step('Verify complete shards, production source, floors and changed lines', 'failure', 8)]),
+    job(CI_GATE_JOB, 'failure', [step('Verify selected lanes completed', 'failure', 5)]),
+  ]);
+  assert.match(shard, /- \*\*Failed jobs:\*\*\n  - \*\*Tornado: agent\*\*, cancelled \(a timeout or a manual cancel\), failed step: `Agent tests \(shard 4\/11\)`\n/);
+  assert.doesNotMatch(shard.split('<details>')[0], new RegExp(COVERAGE_JOB), 'coverage stays in the full list only');
   assert.match(renderFailure(reference(6), []), /No failed job in the jobs API; see the run\./);
 });
 
@@ -155,25 +198,32 @@ const quiet = () => {};
 // A GitHub whose runs, jobs, issues, comments and labels every caller shares.
 // Each caller gets its own client, so each request is attributed to it, and
 // `beforeIssueList` can hold the open-issue listing (to make callers overlap).
-// The listing answers with the issues open when it is answered.
-function sharedGitHub({ runs, issues = [], labels = [], beforeIssueList }) {
+// A listing answers with the issues in its state when it is answered: open
+// ones by number, closed ones most recently updated first, as asked.
+function sharedGitHub({ runs, issues = [], labels = [], beforeIssueList, failClosedListing = false }) {
+  let clock = 0;
   const state = {
-    issues: issues.map((issue) => ({ state: 'open', labels: [{ name: ALERT_LABEL.name }], comments: [], ...issue })),
+    issues: issues.map((issue) => ({ state: 'open', labels: [{ name: ALERT_LABEL.name }], comments: [], updated: ++clock, ...issue })),
     labels: new Set(labels),
     next: 100,
   };
   const requests = [];
   const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
-  const answer = async (caller, method, pathname, body) => {
-    const route = `${method} ${pathname.replace('/repos/OriginTrail/dkg', '')}`;
-    requests.push({ caller, route, body });
+  const answer = async (caller, method, url, body) => {
+    const route = `${method} ${url.pathname.replace('/repos/OriginTrail/dkg', '')}`;
+    const query = Object.fromEntries(url.searchParams);
+    requests.push({ caller, route, query, body });
     let match;
     if ((match = /^GET \/actions\/runs\/(\d+)$/.exec(route))) return json(runs[match[1]].run);
     if ((match = /^GET \/actions\/runs\/(\d+)\/attempts\/(\d+)$/.exec(route))) return json(runs[match[1]].attempts?.[match[2]] ?? runs[match[1]].run);
     if ((match = /^GET \/actions\/runs\/(\d+)\/attempts\/\d+\/jobs$/.exec(route))) return json({ total_count: runs[match[1]].jobs.length, jobs: runs[match[1]].jobs });
     if (route === 'GET /issues') {
-      await beforeIssueList?.(caller);
-      return json(state.issues.filter((issue) => issue.state === 'open').map(({ number, title, body, labels: names }) => ({ number, title, body, labels: names })));
+      const wanted = query.state ?? 'open';
+      if (wanted === 'open') await beforeIssueList?.(caller);
+      if (wanted === 'closed' && failClosedListing) return json({ message: 'Not available' }, 404);
+      const listed = state.issues.filter((issue) => issue.state === wanted);
+      if (query.sort === 'updated' && query.direction === 'desc') listed.sort((a, b) => b.updated - a.updated);
+      return json(listed.map(({ number, title, body: text, labels: names, state: status }) => ({ number, title, body: text, labels: names, state: status })));
     }
     if (route === `GET /labels/${ALERT_LABEL.name}`) return state.labels.has(ALERT_LABEL.name) ? json({ name: ALERT_LABEL.name }) : json({ message: 'Not Found' }, 404);
     if (route === 'POST /labels') {
@@ -182,14 +232,15 @@ function sharedGitHub({ runs, issues = [], labels = [], beforeIssueList }) {
       return json(body, 201);
     }
     if (route === 'POST /issues') {
-      const issue = { number: state.next++, title: body.title, body: body.body, labels: body.labels.map((name) => ({ name })), state: 'open', comments: [], openedBy: caller };
+      const issue = { number: state.next++, title: body.title, body: body.body, labels: body.labels.map((name) => ({ name })), state: 'open', comments: [], openedBy: caller, updated: ++clock };
       state.issues.push(issue);
       return json(issue, 201);
     }
     const issue = state.issues.find(({ number }) => number === Number(/^\w+ \/issues\/(\d+)/.exec(route)?.[1]));
-    if (issue && /^PATCH \/issues\/\d+$/.test(route)) return json(Object.assign(issue, body));
+    if (issue && /^PATCH \/issues\/\d+$/.test(route)) return json(Object.assign(issue, body, { updated: ++clock }));
     if (issue && /^POST \/issues\/\d+\/comments$/.test(route)) {
       issue.comments.push(body.body);
+      issue.updated = ++clock;
       return json({}, 201);
     }
     throw new Error(`unexpected ${route}`);
@@ -197,16 +248,17 @@ function sharedGitHub({ runs, issues = [], labels = [], beforeIssueList }) {
   const clientFor = (caller) => createGitHubClient({
     token: 't',
     sleep: async () => {},
-    fetch: async (url, init) => answer(caller, init.method, new URL(url).pathname, init.body && JSON.parse(init.body)),
+    fetch: async (url, init) => answer(caller, init.method, new URL(url), init.body && JSON.parse(init.body)),
   });
   const writes = (caller) => requests.filter((request) => request.caller === caller && !request.route.startsWith('GET ')).map(({ route }) => route);
-  return { state, requests, clientFor, writes, openIssues: () => state.issues.filter((issue) => issue.state === 'open') };
+  const listings = (wanted, caller) => requests.filter((request) => request.route === 'GET /issues' && (request.query.state ?? 'open') === wanted && (!caller || request.caller === caller)).length;
+  return { state, requests, clientFor, writes, listings, openIssues: () => state.issues.filter((issue) => issue.state === 'open') };
 }
 
 // Both callers listed the open issues before either wrote anything.
 function assertOverlapped(api) {
   const firstWrite = api.requests.findIndex(({ route }) => !route.startsWith('GET '));
-  const listings = api.requests.flatMap(({ route }, index) => (route === 'GET /issues' ? [index] : []));
+  const listings = api.requests.flatMap(({ route, query }, index) => (route === 'GET /issues' && query.state === 'open' ? [index] : []));
   assert.equal(listings.length, 2);
   assert.ok(firstWrite > Math.max(...listings), 'both read before either wrote');
 }
@@ -264,6 +316,58 @@ test('a pass closes only its own profile\'s issue: a green nightly leaves a red 
   };
   assert.deepEqual(await pass(nightlyRun({ id: 303, created_at: at(60) }), 'nightly-equivalent'), ['1 open', '2 closed']);
   assert.deepEqual(await pass(apiRun({ id: 304, created_at: at(90) }), 'standard'), ['1 closed', '2 open']);
+});
+
+test('the alert script records the recovery as it closes, and a failing re-run of an older run does not reopen the alert', async () => {
+  const red = [...redJobs.slice(0, -1), gate('failure')];
+  const runA = apiRun({ id: 701, created_at: at(0) });
+  const runB = apiRun({ id: 702, created_at: at(60) });
+  const runC = apiRun({ id: 703, created_at: at(90) });
+  // GitHub re-runs keep the run's id, commit and creation time.
+  const rerunA = { ...runA, run_attempt: 2 };
+  const runs = { 701: { run: runA, jobs: red }, 702: { run: runB, jobs: greenJobs }, 703: { run: runC, jobs: red } };
+  const api = sharedGitHub({ runs });
+  const alert = (run, gateResult, caller) => runCanaryAlert({ argv: [], env: env(run, { CI_GATE_RESULT: gateResult, CI_PROFILE: 'standard' }), client: api.clientFor(caller), log: quiet });
+
+  assert.equal((await alert(runA, 'failure', 'A')).action, 'open');
+  assert.equal(api.listings('closed', 'A'), 1, 'a red run about to open reads the last recovery, once');
+  assert.equal((await alert(runB, 'success', 'B')).action, 'close');
+  assert.equal(api.listings('closed', 'B'), 0, 'a pass never looks for one');
+  assert.deepEqual(api.writes('B'), ['POST /issues/100/comments', 'PATCH /issues/100'], 'one update records the recovery and closes');
+  const [first] = api.state.issues;
+  assert.equal(first.state, 'closed');
+  assert.deepEqual(readRecovery(first.body, 'standard'), {
+    id: 702, attempt: 1, createdAt: at(60), url: runB.html_url, sha: runB.head_sha, commitUrl: `https://github.com/OriginTrail/dkg/commit/${runB.head_sha}`,
+  });
+
+  runs[701].run = rerunA;
+  assert.equal((await alert(rerunA, 'failure', 'rerun')).action, 'none');
+  assert.deepEqual(api.writes('rerun'), []);
+  assert.equal(api.openIssues().length, 0);
+
+  // A genuinely newer failure opens a new alert, which remembers the recovery.
+  assert.equal((await alert(runC, 'failure', 'C')).action, 'open');
+  const [second] = api.openIssues();
+  assert.equal(readAlertState(second.body, 'standard').after.id, 702);
+  // With that alert open, the old re-run failing again neither comments nor looks anything up.
+  assert.equal((await alert(rerunA, 'failure', 'rerun-again')).action, 'none');
+  assert.deepEqual(api.writes('rerun-again'), []);
+  assert.equal(api.listings('closed', 'rerun-again'), 0);
+});
+
+test('a red run still opens when the last closed alert cannot be read, or the lookup fails', async () => {
+  const red = [...redJobs.slice(0, -1), gate('failure')];
+  const run = apiRun({ id: 801, created_at: at(0) });
+  // The profile's most recently closed alert, closed by a pass whose time is missing.
+  const unreadable = { number: 5, title: 'testnet-canary CI is red', state: 'closed', body: `${ALERT_ISSUES.standard.marker}{"version":1,"profile":"standard","recovered":{"id":9}} -->` };
+  for (const options of [{ issues: [unreadable] }, { failClosedListing: true }]) {
+    const api = sharedGitHub({ runs: { 801: { run, jobs: red } }, labels: [ALERT_LABEL.name], ...options });
+    const logs = [];
+    const plan = await runCanaryAlert({ argv: [], env: env(run, { CI_GATE_RESULT: 'failure', CI_PROFILE: 'standard' }), client: api.clientFor('red'), log: (message) => logs.push(message) });
+    assert.equal(plan.action, 'open', Object.keys(options).join());
+    assert.equal(api.openIssues().length, 1);
+    if (options.failClosedListing) assert.ok(logs.some((message) => /Could not read the closed standard alerts/.test(message)));
+  }
 });
 
 test('overlapping standard and nightly alert jobs, both reading before either writes, each keep to their own issue', async () => {

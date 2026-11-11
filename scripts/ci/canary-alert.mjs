@@ -12,7 +12,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { ALERT_LABEL, alertIssue, planAlert, PROFILES } from '../lib/canary-alert.mjs';
+import { ALERT_LABEL, alertIssue, isRed, planAlert, PROFILES, readRecovery } from '../lib/canary-alert.mjs';
 import { CANARY_ALERT_JOB, CANARY_BRANCH, CI_GATE_JOB, runKind } from '../lib/ci-health.mjs';
 import { createGitHubClient, ensureLabel, findOpenIssue, listRunJobs } from '../lib/github-rest.mjs';
 
@@ -27,6 +27,27 @@ export function runProfile({ option, env, live, run }) {
   const profile = option ?? (env.CI_PROFILE || undefined) ?? guess;
   if (!PROFILES.includes(profile)) throw new Error(`needs --profile or CI_PROFILE set to ${PROFILES.join(' or ')}, not ${profile ?? 'nothing'}`);
   return profile;
+}
+
+// The newest pass that closed one of this profile's alert issues, read from
+// the closed ones GitHub updated last, in one request: it cannot sort by
+// closing time, but closing updates an issue. A state that cannot be read
+// counts for nothing, and so does a failed lookup: the alert then opens as it
+// would with no recovery on record.
+export async function findLastRecovery(client, repo, profile, log = () => {}) {
+  try {
+    const issues = await client.request('GET', `repos/${repo}/issues`, {
+      query: { labels: ALERT_LABEL.name, state: 'closed', sort: 'updated', direction: 'desc', per_page: 100 },
+    });
+    return issues
+      .filter((issue) => !issue.pull_request)
+      .map((issue) => readRecovery(issue.body, profile))
+      .filter(Boolean)
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+  } catch (error) {
+    log(`Could not read the closed ${profile} alerts (${error.message}); deciding as if none recovered.`);
+    return undefined;
+  }
 }
 
 function runReference(run, { attempt, profile, finishedAt, serverUrl, repo }) {
@@ -59,7 +80,8 @@ export async function applyAlertPlan(client, repo, plan) {
       return `commented on #${plan.issue.number}`;
     case 'close':
       await client.request('POST', `repos/${repo}/issues/${plan.issue.number}/comments`, { body: { body: plan.comment } });
-      await client.request('PATCH', `repos/${repo}/issues/${plan.issue.number}`, { body: { state: 'closed', state_reason: 'completed' } });
+      // One update records the recovery in the state and closes the issue.
+      await client.request('PATCH', `repos/${repo}/issues/${plan.issue.number}`, { body: { body: plan.body, state: 'closed', state_reason: 'completed' } });
       return `closed #${plan.issue.number}`;
     default:
       return 'left the alert as it is';
@@ -111,8 +133,11 @@ export async function runCanaryAlert({ argv = process.argv.slice(2), env = proce
   // A dry run reads the gate from the past run, never from this shell.
   const gateResult = options['gate-result'] ?? (live ? env.CI_GATE_RESULT : undefined) ?? gate?.conclusion ?? '';
   const issue = await findOpenIssue(github, repo, { label: ALERT_LABEL.name, marker: alertIssue(profile).marker });
+  // Only a red run about to open an alert needs the profile's last recovery.
+  const recovery = !issue && isRed(gateResult) ? await findLastRecovery(github, repo, profile, log) : undefined;
   const plan = planAlert({
     issue,
+    recovery,
     run: runReference(run, {
       attempt,
       profile,
