@@ -437,11 +437,14 @@ function graphVariablesAreTopLevel(scope: PreparedGraphScope): boolean {
 /**
  * Constrain every caller-supplied GRAPH variable to the authorized graph set.
  * All structural decisions use the same prepared token coordinates as the
- * dataset and explicit-GRAPH authorization checks above.
+ * dataset and explicit-GRAPH authorization checks above. With `boundByDataset`
+ * the read's dataset holds exactly these graphs, so the checks run and no
+ * VALUES list is written.
  */
 export function constrainGraphVariablesToAllowedSet(
   scope: PreparedGraphScope,
   allowedGraphs: readonly string[],
+  { boundByDataset = false }: { boundByDataset?: boolean } = {},
 ): GraphScopeRewriteResult {
   if (nestedSelectContainsGraphVariable(scope)) {
     throw new ScopedQueryViolationError(
@@ -467,7 +470,7 @@ export function constrainGraphVariablesToAllowedSet(
   const variablesNeedingConstraint = scope.graphVariables.filter(
     (variable) => !callerGraphValuesAreAuthorized(scope, variable.logicalName, allowed),
   );
-  if (variablesNeedingConstraint.length === 0) {
+  if (variablesNeedingConstraint.length === 0 || boundByDataset) {
     return ready(transitionGraphScope(scope, scope.source));
   }
 
