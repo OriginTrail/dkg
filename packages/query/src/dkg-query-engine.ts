@@ -78,10 +78,13 @@ import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 import {
   createQueryStoreReadContext,
+  createStoreReadLane,
+  QUERY_CATALOG_MAX_RESPONSE_BYTES,
   requireQueryDataset,
   type QueryStoreReadContext,
   type StoreReadLane,
 } from './query-store-read-context.js';
+import { raceAgainstCallerAbort } from './caller-abort.js';
 
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { assertWithheldGraphQuery } from './withheld-graph-scope.js';
@@ -320,8 +323,6 @@ export function resolveViewGraphs(
 }
 
 type ScopedQueryReadPlan = Extract<QueryReadPlan, { kind: 'scoped' }>;
-/** Store reads measured on their own, never charged to the caller's materialization budget. */
-type UnchargedReads = QueryStoreReadContext['shared']['measure'];
 interface ViewRoutingFacts {
   readonly fanOut: boolean;
   readonly subGraphs: Iterable<string>;
@@ -427,7 +428,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         listGraphsByPrefix: async (prefix: string) => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads;
       const { policy } = plan;
       const variableContentGraphs = discovery ? selectScopedRouteGraphs(policy, discovery.partitions) : [];
-      return this.executeScoped(scope, plan, lane, variableContentGraphs, reads.catalog, reads.shared.measure);
+      return this.executeScoped(scope, plan, lane, variableContentGraphs, reads.catalog, options);
     };
     switch (plan.discovery.catalog.kind) {
       case 'none': return execute(null);
@@ -439,7 +440,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
   private async executeScoped(initialGraphScope: PreparedGraphScope,
     plan: ScopedQueryReadPlan, reads: StoreReadLane, variableContentGraphs: readonly string[], catalogReads: StoreReadLane,
-    uncharged: UnchargedReads): Promise<QueryResult> {
+    options: QueryOptions | undefined): Promise<QueryResult> {
     const { subGraphName, staticPrivateAllowList } = plan.policy;
     const allowedGraphs = await this.discoverLegacyRouteGraphs(plan, reads);
     const privateAllowList = plan.discovery.privatePartitions
@@ -448,7 +449,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const explicitAllowedGraphs = [...allowedGraphs, ...privateAllowList];
     const named = plan.discovery.contentPrefixes.length > 0 ? explicitGraphTargets(initialGraphScope) : null;
     if (named) {
-      await this.compareExplicitGraphMembership('legacy route', named, explicitAllowedGraphs, uncharged,
+      await this.compareExplicitGraphMembership('legacy route', named, explicitAllowedGraphs, options,
         async listing => [...(await this.discoverLegacyRouteGraphs(plan, listing)), ...privateAllowList]);
     }
     const variableAllowedGraphs = [...new Set([...explicitAllowedGraphs, ...variableContentGraphs])];
@@ -483,15 +484,17 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   /**
    * Counting mode: the enumeration decides. Beside it, the route's own graph rule
    * judges the named graphs over a catalog of just those the store holds, which
-   * it finds by looking each one up instead of listing a prefix. Every read of the
-   * check is measured apart from the caller's budget, so the check cannot change
-   * an answer.
+   * it finds by looking each one up instead of listing a prefix. The check's reads
+   * are not charged to the caller's budget, so the check cannot change an answer,
+   * and they carry the caller's signal, so its abort ends them.
    */
   private compareExplicitGraphMembership(route: string, named: readonly string[], enumerated: readonly string[],
-    uncharged: UnchargedReads, collect: (listing: StoreReadLane, catalog: StoreReadLane) => Promise<readonly string[]>): Promise<void> {
+    options: QueryOptions | undefined, collect: (listing: StoreReadLane, catalog: StoreReadLane) => Promise<readonly string[]>): Promise<void> {
     const visible = this.store.graphEnumerationVisibility?.bind(this.store);
-    return this.explicitGraphMembership.compare(route, named, enumerated, async () =>
-      (await uncharged(reads => collect(laneOverNamedGraphs(named, reads, visible), reads))).snapshot);
+    const reads = createStoreReadLane(this.store, { ...storeOptions(options),
+      maxResponseBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES, maxLiteralHydrationBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES });
+    return this.explicitGraphMembership.compare(route, named, enumerated, () => raceAgainstCallerAbort(
+      collect(laneOverNamedGraphs(named, reads, visible), reads), options?.signal), options?.signal);
   }
 
   private async execWithExclusions(scope: PreparedGraphScope, reads: StoreReadLane, excludedGraphPrefixes: readonly string[] = []): Promise<QueryResult> {
@@ -659,7 +662,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const named = explicitGraphTargets(initialScope);
     if (named) {
       // Both sides share the registry facts; each reads the child fence after its own listing.
-      await this.compareExplicitGraphMembership(`${view} view`, named, allGraphs, reads.shared.measure,
+      await this.compareExplicitGraphMembership(`${view} view`, named, allGraphs, options,
         (listing, catalog) => this.collectViewGraphs(view, contextGraphId, options, facts, listing, catalog));
     }
 

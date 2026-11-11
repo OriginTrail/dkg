@@ -371,6 +371,28 @@ describe('the membership check never changes an answer', () => {
     expect(engine.explicitGraphMembershipCounts()).toMatchObject({ checked: 2, disagreed: 0, failed: 0 });
   });
 
+  it('when the caller aborts while the check waits on the store', async () => {
+    let lookups = 0;
+    const engine = new DKGQueryEngine(over({
+      query: (sparql: string, queryOptions?: { signal?: AbortSignal }) => {
+        if (!sparql.includes('VALUES ?graph')) return inner.query(sparql, queryOptions as never);
+        lookups++;
+        // A lookup that never answers on its own: only the caller's abort ends it.
+        return new Promise((_, reject) => queryOptions?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+      },
+    }));
+    const controller = new AbortController();
+    const pending = engine.query(`SELECT ?s WHERE { GRAPH <${GRAPH}> { ?s <urn:p> ?o } }`, { ...options, signal: controller.signal });
+    await vi.waitFor(() => expect(lookups).toBe(1));
+    controller.abort();
+    const outcome = await Promise.race([
+      pending.then(() => 'settled', () => 'settled'),
+      new Promise(resolve => setTimeout(() => resolve('still waiting'), 2_000)),
+    ]);
+    expect(outcome).toBe('settled');
+    expect(engine.explicitGraphMembershipCounts()).toEqual({ checked: 0, disagreed: 0, failed: 0 });
+  });
+
   it('when it disagrees with the enumeration', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const engine = new DKGQueryEngine(over({ graphEnumerationVisibility: (graph: string) => graph !== GRAPH }));

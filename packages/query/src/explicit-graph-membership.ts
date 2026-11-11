@@ -89,12 +89,14 @@ export class ExplicitGraphMembershipCheck {
     return { ...this.counts };
   }
 
+  /** A check the caller's abort ends is neither a disagreement nor a failure. */
   async compare(route: string, graphs: readonly string[], enumerated: readonly string[],
-    members: () => Promise<readonly string[]>): Promise<void> {
+    members: () => Promise<readonly string[]>, signal?: AbortSignal): Promise<void> {
     let judged: ReadonlySet<string>;
     try {
       judged = new Set(await members());
     } catch (error) {
+      if (signal?.aborted) return;
       const failed = ++this.counts.failed;
       if (worthLogging(failed)) {
         console.warn(`[DKGQueryEngine] explicit graph membership check failed on the ${route} (${failed} so far): ${error instanceof Error ? error.message : String(error)}`);
