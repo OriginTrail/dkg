@@ -7,6 +7,7 @@ import {
   OxigraphWorkerStore,
   SparqlHttpStore,
   sparqlEngineOf,
+  storeRestrictsQueryDataset,
 } from '../src/index.js';
 import { createManagedOxigraphSparqlStoreV1 } from '../src/adapters/sparql-http.js';
 
@@ -50,5 +51,29 @@ describe('sparqlEngineOf', () => {
     expect(sparqlEngineOf(undefined)).toBeNull();
     expect(sparqlEngineOf({ sparqlEngine: 'other-engine' })).toBeNull();
     expect(sparqlEngineOf({ sparqlEngine: '' })).toBeNull();
+  });
+});
+
+describe('storeRestrictsQueryDataset', () => {
+  it('is true for the embedded and worker Oxigraph stores, also through decorators', async () => {
+    const embedded = new OxigraphStore();
+    const worker = new OxigraphWorkerStore();
+    try {
+      expect(storeRestrictsQueryDataset(embedded)).toBe(true);
+      expect(storeRestrictsQueryDataset(worker)).toBe(true);
+      expect(storeRestrictsQueryDataset(new ChangelogStore(new GraphSetIndexStore(embedded)))).toBe(true);
+    } finally {
+      await embedded.close();
+      await worker.close();
+    }
+  });
+
+  it('is false for Blazegraph, every SPARQL HTTP store, and anything that does not say', () => {
+    expect(storeRestrictsQueryDataset(new BlazegraphStore(endpoint))).toBe(false);
+    expect(storeRestrictsQueryDataset(new SparqlHttpStore({ queryEndpoint: endpoint }))).toBe(false);
+    expect(storeRestrictsQueryDataset(createManagedOxigraphSparqlStoreV1({ queryEndpoint: endpoint }))).toBe(false);
+    expect(storeRestrictsQueryDataset(new ChangelogStore(new SparqlHttpStore({ queryEndpoint: endpoint })))).toBe(false);
+    expect(storeRestrictsQueryDataset({ restrictsQueryDataset: 'yes' })).toBe(false);
+    expect(storeRestrictsQueryDataset(null)).toBe(false);
   });
 });

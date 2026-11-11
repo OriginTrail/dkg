@@ -13,3 +13,17 @@ export function sparqlEngineOf(store: unknown): SparqlEngineFamily | null {
     typeof candidate === 'object' && candidate !== null
       && (candidate as Partial<SparqlEngineCapability>).sparqlEngine === 'oxigraph')?.sparqlEngine ?? null;
 }
+
+interface QueryDatasetRestrictionCapability {
+  readonly restrictsQueryDataset: true;
+}
+
+/**
+ * Whether the store behind these decorators answers `withheldGraphRoots` by
+ * restricting the query's dataset. A store that does not refuses such a query.
+ */
+export function storeRestrictsQueryDataset(store: unknown): boolean {
+  return findTripleStoreCapability(store, (candidate): candidate is QueryDatasetRestrictionCapability =>
+    typeof candidate === 'object' && candidate !== null
+      && (candidate as Partial<QueryDatasetRestrictionCapability>).restrictsQueryDataset === true) !== null;
+}

@@ -157,13 +157,12 @@ type WorkerLifecycle =
   | 'in_memory_lost';
 
 /** Terminal states: the store will never serve another op and never respawns. */
-const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
-  'closed', 'gave_up', 'in_memory_lost',
-]);
+const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>(['closed', 'gave_up', 'in_memory_lost']);
 
 export class OxigraphWorkerStore implements TripleStore {
   readonly graphEnumerationVisibility = storeGraphEnumerationVisibility;
   readonly sparqlEngine = 'oxigraph' as const;
+  readonly restrictsQueryDataset = true as const;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;

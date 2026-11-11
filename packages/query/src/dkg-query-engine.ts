@@ -12,7 +12,7 @@ import { storeOptions } from './query-store-options.js';
 import {
   asGraphWriteRevisionSource, asQueryReadAdmissionCapability,
   isQueryDatasetUnrestrictedError, isSparqlHttpResponseError, preparedSparqlNamesReadGraphPartition, sparqlEngineOf,
-  StoreResponseTooLargeError, storeMayHoldReadGraphPartitions,
+  StoreResponseTooLargeError, storeMayHoldReadGraphPartitions, storeRestrictsQueryDataset,
 } from '@origintrail-official/dkg-storage';
 import type {
   SparqlEngineFamily,
@@ -84,6 +84,7 @@ import {
 
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { assertWithheldGraphQuery } from './withheld-graph-scope.js';
+import { hideReadGraphPartitions } from './unscoped-read-graph-scope.js';
 export { ScopedQueryViolationError } from './scoped-query-error.js';
 
 /** Upstream statuses that mean the SUBMITTED query was malformed. */
@@ -397,10 +398,14 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       case 'unscoped': {
         // The store answers over its dataset without the withheld graphs. While
         // it may hold read-graph partitions, every unscoped query runs over its
-        // visible dataset, or is refused where the store cannot restrict it.
+        // visible dataset where the store can restrict it. Any other store gets
+        // a query that leaves the partitions out by itself, or none.
         const withheld = options?.withheldGraphRoots ?? [];
         if (withheld.length) assertWithheldGraphQuery(initialGraphScope);
         const hidesReadGraphs = withheld.length === 0 && storeMayHoldReadGraphPartitions(this.store);
+        if (hidesReadGraphs && !storeRestrictsQueryDataset(this.store)) {
+          return this.execWithExclusions(hideReadGraphPartitions(initialGraphScope), reads, options?.excludeGraphPrefixes);
+        }
         const scopeRequired = () => new ScopedQueryViolationError(
           'this store cannot answer that query without a context graph now; give the query a context graph');
         if (hidesReadGraphs && initialGraphScope.hasDatasetClause) throw scopeRequired();
