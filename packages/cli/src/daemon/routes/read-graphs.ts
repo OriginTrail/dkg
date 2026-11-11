@@ -1,13 +1,11 @@
 import { MemoryLayer, compareCodePoint, parseReadGraphIri } from '@origintrail-official/dkg-core';
 import {
   READ_GRAPH_STATES,
-  checkReadGraph,
   markReadGraphDirty,
   readGraphLayerOf,
   removeReadGraph,
   withReadGraphBackgroundSlot,
   type ReadGraphJobContext,
-  type ReadGraphStateRow,
 } from '@origintrail-official/dkg-storage';
 import { dkgDir } from '../../config.js';
 import {
@@ -36,25 +34,30 @@ const DESCRIPTIONS: Readonly<Record<ReadGraphsAction, string>> = {
   drop: 'drop the read graphs of the node',
 };
 
-/** The field of each action's answer that lists one entry per read graph. */
-const ANSWER_FIELDS = { check: 'results', rebuild: 'marked', drop: 'removed' } as const;
+interface ReadGraphRow {
+  readonly readGraph: string;
+  readonly state: string;
+  readonly generation: number;
+}
 
 /**
  * Node-admin read-graph commands (`dkg store read-graphs`):
  *
  * - `GET /api/store/read-graphs`: the read graphs the node holds, with their
- *   state and generation;
- * - `POST …/check`: check each one against its member graphs (`full`, or
- *   `sampled`), one at a time in the node's read-graph background slot;
- * - `POST …/rebuild`: mark each one dirty, which the node's builder rebuilds
- *   at its next pass;
- * - `POST …/drop`: remove each one, its contents and its state row, in the
- *   background slot.
+ *   state and generation, what the builder does, whether the background
+ *   checks run, and the last check run on request;
+ * - `POST …/check`: check every ready read graph now, `full` or `sampled`, in
+ *   the node's read-graph background slot, through the agent's read-graph
+ *   workload, which keeps the result for the status;
+ * - `POST …/rebuild`: mark each read graph dirty, which the node's builder
+ *   rebuilds at its next pass;
+ * - `POST …/drop`: remove each read graph, its contents and its state row, in
+ *   the background slot.
  *
- * Each takes an optional `contextGraphId` and `layer` (wm, swm, vm) that
- * narrow it, as query parameters for `status` and in the JSON body for the
- * others. They work on the read graphs that have a row in the node's state,
- * in IRI order; a read graph that fails is reported and the others go on. A
+ * `status`, `rebuild` and `drop` take an optional `contextGraphId` and `layer`
+ * (wm, swm, vm), as query parameters for `status` and in the JSON body for the
+ * others, and work on the read graphs that have a row in the node's state, in
+ * IRI order; a read graph that fails is reported and the others go on. A
  * caller that goes away ends the work: the running read graph stops at its
  * next store call and no other one starts.
  */
@@ -74,37 +77,40 @@ export async function handleReadGraphRoutes(ctx: RequestContext, options: { data
   const parsed = parseReadGraphsRequest(action, raw);
   if ('error' in parsed) return jsonResponse(res, 400, { error: parsed.error });
 
+  if (action === 'check') {
+    return jsonResponse(res, 200, await ctx.agent.checkReadGraphsV1({ mode: parsed.request.mode ?? 'full', signal: gone.signal }));
+  }
   const store = ctx.agent.store;
   const layer = readGraphLayerOf(store);
-  const rows = (layer?.runtime.mirror.rows() ?? [])
-    .filter((row) => matches(row, parsed.request))
-    .sort((left, right) => compareCodePoint(left.readGraph, right.readGraph));
   if (action === 'status') {
-    const states = Object.fromEntries(READ_GRAPH_STATES.map((state) => [state, rows.filter((row) => row.state === state).length]));
-    return jsonResponse(res, 200, { readGraphs: rows.map(view), states });
+    const status = ctx.agent.readGraphStatusV1();
+    const rows = selected(status?.readGraphs ?? layer?.runtime.mirror.rows() ?? [], parsed.request);
+    return jsonResponse(res, 200, {
+      readGraphs: rows.map(view),
+      states: Object.fromEntries(READ_GRAPH_STATES.map((state) => [state, rows.filter((row) => row.state === state).length])),
+      ...(status?.builder ? { builder: status.builder } : {}),
+      checking: status?.checking ?? false,
+      ...(status?.lastCheck ? { lastCheck: status.lastCheck } : {}),
+    });
   }
 
   const job: ReadGraphJobContext = { store, dataDir: options.dataDir ?? dkgDir(), signal: gone.signal, source: `api.readGraphs.${action}` };
-  const mode = parsed.request.mode ?? 'full';
   const answers: Record<string, unknown>[] = [];
-  for (const { readGraph } of rows) {
+  for (const { readGraph } of selected(layer?.runtime.mirror.rows() ?? [], parsed.request)) {
     if (gone.signal.aborted) break;
     try {
       if (action === 'rebuild') {
         const after = await markReadGraphDirty(job, readGraph);
         answers.push({ readGraph, ...(after ? { state: after.state } : {}) });
-      } else if (action === 'check') {
-        const result = await withReadGraphBackgroundSlot(layer!.runtime, () => checkReadGraph(store, readGraph, mode, { signal: gone.signal }));
-        answers.push({ readGraph, outcome: result.outcome, ...(result.direction ? { direction: result.direction } : {}) });
       } else {
         const result = await withReadGraphBackgroundSlot(layer!.runtime, () => removeReadGraph(job, readGraph));
         answers.push({ readGraph, outcome: result.outcome });
       }
     } catch (error) {
-      answers.push({ readGraph, ...(action === 'rebuild' ? {} : { outcome: 'error' }), error: error instanceof Error ? error.message : String(error) });
+      answers.push({ readGraph, ...(action === 'drop' ? { outcome: 'error' } : {}), error: error instanceof Error ? error.message : String(error) });
     }
   }
-  jsonResponse(res, 200, { [ANSWER_FIELDS[action]]: answers });
+  jsonResponse(res, 200, action === 'rebuild' ? { marked: answers } : { removed: answers });
 }
 
 /** A body that is no JSON at all becomes `undefined`, which the parser refuses as it refuses any non-object. */
@@ -116,14 +122,17 @@ function jsonOf(body: string): unknown {
   }
 }
 
-function matches(row: ReadGraphStateRow, request: ReadGraphsRequest): boolean {
-  const key = parseReadGraphIri(row.readGraph);
-  if (!key) return false;
-  if (request.contextGraphId !== undefined && key.scope.contextGraphId !== request.contextGraphId) return false;
-  return request.layer === undefined || LAYER_LABELS[key.layer] === request.layer;
+/** The rows of the read graphs a request names, in IRI order. */
+function selected<Row extends ReadGraphRow>(rows: readonly Row[], request: ReadGraphsRequest): Row[] {
+  return rows.filter((row) => {
+    const key = parseReadGraphIri(row.readGraph);
+    if (!key) return false;
+    if (request.contextGraphId !== undefined && key.scope.contextGraphId !== request.contextGraphId) return false;
+    return request.layer === undefined || LAYER_LABELS[key.layer] === request.layer;
+  }).sort((left, right) => compareCodePoint(left.readGraph, right.readGraph));
 }
 
-function view(row: ReadGraphStateRow): ReadGraphView {
+function view(row: ReadGraphRow): ReadGraphView {
   const key = parseReadGraphIri(row.readGraph)!;
   return {
     readGraph: row.readGraph,

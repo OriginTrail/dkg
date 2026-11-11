@@ -14,7 +14,11 @@ export type ReadGraphLayerLabel = (typeof READ_GRAPH_LAYER_LABELS)[number];
 export const READ_GRAPH_CHECK_MODES = ['full', 'sampled'] as const;
 export type ReadGraphCheckModeLabel = (typeof READ_GRAPH_CHECK_MODES)[number];
 
-/** The read graphs an action applies to: every one, or those of one context graph, one layer, or both. */
+/**
+ * What an action applies to. `status`, `rebuild` and `drop` take every read
+ * graph, or those of one context graph, one layer, or both; `check` takes
+ * every ready read graph, and a mode.
+ */
 export interface ReadGraphsRequest {
   readonly contextGraphId?: string;
   readonly layer?: ReadGraphLayerLabel;
@@ -33,20 +37,36 @@ export interface ReadGraphView {
   readonly generation: number;
 }
 
+/** A check of every ready read graph, run on request. */
+export interface ReadGraphsCheckAnswer {
+  readonly mode: ReadGraphCheckModeLabel;
+  /** When the check ended, in milliseconds since the epoch. */
+  readonly at: number;
+  /** `outcome` is `consistent`, `mismatch`, `skipped` or `interrupted`; a mismatch has a `direction`, `missing` or `unheld`. */
+  readonly results: readonly { readonly readGraph: string; readonly outcome: string; readonly direction?: string }[];
+}
+
+/** What the node's read-graph builder does. */
+export interface ReadGraphsBuilderView {
+  readonly running: boolean;
+  /** The read graph of the job in progress. */
+  readonly building?: string;
+  /** Read graphs the last pass found to build, the one in progress included. */
+  readonly pending: number;
+  readonly retrying: readonly { readonly readGraph: string; readonly attempts: number; readonly retryAt: number; readonly error?: string }[];
+  readonly lastJob?: { readonly readGraph: string; readonly kind: string; readonly outcome: string; readonly durationMs?: number };
+}
+
 export interface ReadGraphsStatusAnswer {
   readonly readGraphs: readonly ReadGraphView[];
   /** The read graphs listed, by state. */
   readonly states: Readonly<Record<string, number>>;
-}
-
-export interface ReadGraphsCheckAnswer {
-  readonly results: readonly {
-    readonly readGraph: string;
-    /** `consistent`, `mismatch`, `skipped`, `interrupted`, or `error`. */
-    readonly outcome: string;
-    readonly direction?: string;
-    readonly error?: string;
-  }[];
+  /** Absent while the builder does not run. */
+  readonly builder?: ReadGraphsBuilderView;
+  /** Whether the node's background checks run. */
+  readonly checking: boolean;
+  /** The last check run on request. */
+  readonly lastCheck?: ReadGraphsCheckAnswer;
 }
 
 export interface ReadGraphsRebuildAnswer {
@@ -61,18 +81,25 @@ export interface ReadGraphsDropAnswer {
 
 export type ReadGraphsRequestParse = { readonly request: ReadGraphsRequest } | { readonly error: string };
 
+const FIELDS: Readonly<Record<ReadGraphsAction, readonly string[]>> = {
+  status: ['contextGraphId', 'layer'],
+  check: ['mode'],
+  rebuild: ['contextGraphId', 'layer'],
+  drop: ['contextGraphId', 'layer'],
+};
+
 /**
  * Check a request: `contextGraphId` a valid context-graph ID, `layer` one of
- * wm, swm and vm, and, for `check` only, `mode` full or sampled. Anything
- * else is refused.
+ * wm, swm and vm, and `mode` full or sampled, each only where the action
+ * takes it. Anything else is refused.
  */
 export function parseReadGraphsRequest(action: ReadGraphsAction, raw: unknown): ReadGraphsRequestParse {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     return { error: 'The read-graphs request must be a JSON object, for example {"contextGraphId": "my-graph"}.' };
   }
-  const fields = action === 'check' ? ['contextGraphId', 'layer', 'mode'] : ['contextGraphId', 'layer'];
+  const fields = FIELDS[action];
   const unknown = Object.keys(raw).find((key) => !fields.includes(key));
-  if (unknown !== undefined) return { error: `Unknown field "${unknown}"; the fields are ${fields.join(', ')}.` };
+  if (unknown !== undefined) return { error: `Unknown field "${unknown}" for ${action}; it takes ${fields.join(', ')}.` };
   const { contextGraphId, layer, mode } = raw as Record<string, unknown>;
   if (contextGraphId !== undefined) {
     if (typeof contextGraphId !== 'string') return { error: 'contextGraphId must be a string.' };

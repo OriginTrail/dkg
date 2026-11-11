@@ -9,6 +9,7 @@ import {
   parseReadGraphsRequest,
   readGraphsStatusPath,
   type ReadGraphView,
+  type ReadGraphsCheckAnswer,
   type ReadGraphsStatusAnswer,
 } from '../src/read-graphs-wire.js';
 
@@ -23,7 +24,10 @@ const STATUS: ReadGraphsStatusAnswer = {
     { readGraph: WM, contextGraphId: 'research', layer: 'wm', agentAddress: '0xab', state: 'rebuilding', generation: 1 },
   ] satisfies ReadGraphView[],
   states: { building: 0, ready: 1, dirty: 1, repairing: 0, rebuilding: 1 },
+  checking: false,
 };
+const AT = Date.parse('2026-11-11T08:00:00.000Z');
+const check = (results: ReadGraphsCheckAnswer['results'], mode: 'full' | 'sampled' = 'full'): ReadGraphsCheckAnswer => ({ mode, at: AT, results });
 
 let previousExitCode: typeof process.exitCode;
 beforeEach(() => {
@@ -67,8 +71,25 @@ describe('dkg store read-graphs status', () => {
       'dirty      vm  research sub-graph code (generation 7)',
       'rebuilding wm  research agent 0xab (generation 1)',
       '3 read graph(s): 1 ready, 1 dirty, 1 rebuilding.',
+      'Builder: not running.',
+      'Background checks: not running.',
     ]);
     expect(process.exitCode).toBeUndefined();
+  });
+
+  it('says what the builder does, whether the checks run, and how the last check on request ended', async () => {
+    const f = fixture({ status: {
+      readGraphs: [], states: {}, checking: true,
+      builder: { running: true, building: VM, pending: 3, retrying: [{ readGraph: CODE, attempts: 2, retryAt: AT }] },
+      lastCheck: check([{ readGraph: VM, outcome: 'consistent' }, { readGraph: CODE, outcome: 'mismatch', direction: 'missing' }, { readGraph: WM, outcome: 'consistent' }]),
+    } });
+    await f.run('status');
+    expect(f.printed()).toEqual([
+      'No read graphs.',
+      `Builder: running, building ${VM}, 3 to build, 1 waiting to retry.`,
+      'Background checks: running.',
+      'Last check on request: 2026-11-11T08:00:00.000Z, full: 2 consistent, 1 mismatch.',
+    ]);
   });
 
   it('prints the node answer as JSON with --json, and says when there is nothing', async () => {
@@ -76,35 +97,36 @@ describe('dkg store read-graphs status', () => {
     await f.run('status', '--json');
     expect(f.readGraphs).toHaveBeenCalledExactlyOnceWith('status', {});
     expect(JSON.parse(f.printed()[0]!)).toEqual(STATUS);
-    const empty = fixture({ status: { readGraphs: [], states: {} } });
+    const empty = fixture({ status: { readGraphs: [], states: {}, checking: false } });
     await empty.run('status');
-    expect(empty.printed()).toEqual(['No read graphs.']);
+    expect(empty.printed()).toEqual(['No read graphs.', 'Builder: not running.', 'Background checks: not running.']);
   });
 });
 
 describe('dkg store read-graphs check', () => {
-  it('runs a full check by default and a sampled one with --sampled', async () => {
-    const f = fixture({ check: { results: [{ readGraph: VM, outcome: 'consistent' }, { readGraph: WM, outcome: 'skipped' }] } });
-    await f.run('check', '--layer', 'vm');
+  it('checks every ready read graph in full by default, or with --full, and samples with --sampled', async () => {
+    const f = fixture({ check: check([{ readGraph: VM, outcome: 'consistent' }, { readGraph: WM, outcome: 'interrupted' }]) });
+    await f.run('check');
+    await f.run('check', '--full');
     await f.run('check', '--sampled');
-    expect(f.readGraphs.mock.calls).toEqual([['check', { layer: 'vm', mode: 'full' }], ['check', { mode: 'sampled' }]]);
-    expect(f.printed().slice(0, 2)).toEqual([`consistent ${VM}`, `skipped ${WM}`]);
+    expect(f.readGraphs.mock.calls).toEqual([['check', { mode: 'full' }], ['check', { mode: 'full' }], ['check', { mode: 'sampled' }]]);
+    expect(f.printed().slice(0, 3)).toEqual([`consistent ${VM}`, `interrupted ${WM}`, '2026-11-11T08:00:00.000Z, full: 1 consistent, 1 interrupted.']);
     expect(process.exitCode).toBeUndefined();
   });
 
-  it('exits 1 on a mismatch or a check that failed', async () => {
-    const f = fixture({
-      check: { results: [{ readGraph: VM, outcome: 'mismatch', direction: 'unheld' }, { readGraph: CODE, outcome: 'error', error: 'the store went away' }] },
-    });
+  it('exits 1 on a mismatch', async () => {
+    const f = fixture({ check: check([{ readGraph: VM, outcome: 'mismatch', direction: 'unheld' }, { readGraph: CODE, outcome: 'consistent' }]) });
     await f.run('check');
-    expect(f.printed()).toEqual([`mismatch (unheld) ${VM}`, `error: the store went away ${CODE}`]);
+    expect(f.printed()).toEqual([`mismatch (unheld) ${VM}`, `consistent ${CODE}`, '2026-11-11T08:00:00.000Z, full: 1 mismatch, 1 consistent.']);
     expect(process.exitCode).toBe(1);
   });
 
-  it('says when there is nothing to check', async () => {
-    const f = fixture({ check: { results: [] } });
+  it('says when there is nothing to check, and refuses --full with --sampled before contacting the node', async () => {
+    const f = fixture({ check: check([]) });
     await f.run('check');
-    expect(f.printed()).toEqual(['No read graphs to check.']);
+    expect(f.printed()).toEqual(['No ready read graphs to check.']);
+    await expect(f.run('check', '--full', '--sampled')).rejects.toThrow(/cannot be used with/);
+    expect(f.readGraphs).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -160,15 +182,16 @@ describe('dkg store read-graphs drop', () => {
 
 describe('dkg store read-graphs --json', () => {
   it('prints each node answer as JSON, with the same exit codes', async () => {
-    const check = { results: [{ readGraph: VM, outcome: 'mismatch', direction: 'unheld' }] };
+    const checked = check([{ readGraph: VM, outcome: 'mismatch', direction: 'unheld' }]);
     const rebuild = { marked: [{ readGraph: VM, state: 'dirty' }] };
     const drop = { removed: [{ readGraph: VM, outcome: 'done' }] };
-    const f = fixture({ status: STATUS, check, rebuild, drop });
-    await f.run('check', '--json', '-c', 'research');
-    expect(f.readGraphs).toHaveBeenLastCalledWith('check', { contextGraphId: 'research', mode: 'full' });
+    const f = fixture({ status: STATUS, check: checked, rebuild, drop });
+    await f.run('check', '--json');
+    expect(f.readGraphs).toHaveBeenLastCalledWith('check', { mode: 'full' });
     expect(process.exitCode).toBe(1);
     process.exitCode = undefined;
-    await f.run('rebuild', '--json');
+    await f.run('rebuild', '--json', '-c', 'research');
+    expect(f.readGraphs).toHaveBeenLastCalledWith('rebuild', { contextGraphId: 'research' });
     expect(process.exitCode).toBeUndefined();
     // Without --yes: what it would drop, and exit 1.
     await f.run('drop', '--json');
@@ -176,7 +199,7 @@ describe('dkg store read-graphs --json', () => {
     process.exitCode = undefined;
     await f.run('drop', '--json', '--yes');
     expect(process.exitCode).toBeUndefined();
-    expect(f.printed().map((line) => JSON.parse(line) as unknown)).toEqual([check, rebuild, STATUS, drop]);
+    expect(f.printed().map((line) => JSON.parse(line) as unknown)).toEqual([checked, rebuild, STATUS, drop]);
     expect(f.readGraphs.mock.calls.map(([action]) => action)).toEqual(['check', 'rebuild', 'status', 'drop']);
   });
 });
@@ -184,7 +207,7 @@ describe('dkg store read-graphs --json', () => {
 describe('dkg store read-graphs, failing', () => {
   it.each<[string[], RegExp]>([
     [['status', '--layer', 'xx'], /^layer must be one of wm, swm, vm\.$/],
-    [['check', '--context-graph', 'not an id'], /^Invalid contextGraphId: /],
+    [['rebuild', '--context-graph', 'not an id'], /^Invalid contextGraphId: /],
     [['drop', '--yes', '--context-graph', '../up'], /^Invalid contextGraphId: /],
   ])('refuses %j before contacting the node', async (args, message) => {
     const f = fixture({});
@@ -228,13 +251,13 @@ describe('ApiClient.readGraphs', () => {
 
     await expect(client.readGraphs('status', { contextGraphId: 'research', layer: 'swm' })).resolves.toEqual({ answered: true });
     await expect(client.readGraphs('status')).resolves.toEqual({ answered: true });
-    await expect(client.readGraphs('check', { layer: 'vm', mode: 'sampled' })).resolves.toEqual({ answered: true });
+    await expect(client.readGraphs('check', { mode: 'sampled' })).resolves.toEqual({ answered: true });
     await expect(client.readGraphs('drop')).resolves.toEqual({ answered: true });
 
     expect(calls.map(({ url, init }) => [url, init.method ?? 'GET', init.body])).toEqual([
       ['http://127.0.0.1:9200/api/store/read-graphs?contextGraphId=research&layer=swm', 'GET', undefined],
       ['http://127.0.0.1:9200/api/store/read-graphs', 'GET', undefined],
-      ['http://127.0.0.1:9200/api/store/read-graphs/check', 'POST', '{"layer":"vm","mode":"sampled"}'],
+      ['http://127.0.0.1:9200/api/store/read-graphs/check', 'POST', '{"mode":"sampled"}'],
       ['http://127.0.0.1:9200/api/store/read-graphs/drop', 'POST', '{}'],
     ]);
     expect((calls[2]!.init.headers as Record<string, string>).Authorization).toBe('Bearer operator-token');
@@ -243,12 +266,12 @@ describe('ApiClient.readGraphs', () => {
 });
 
 describe('the read-graphs request', () => {
-  it('takes a context graph, a layer and, for check only, a mode', () => {
-    expect(parseReadGraphsRequest('check', { contextGraphId: 'research', layer: 'wm', mode: 'full' })).toEqual({
-      request: { contextGraphId: 'research', layer: 'wm', mode: 'full' },
-    });
+  it('takes a context graph and a layer, except for check, which takes a mode', () => {
+    expect(parseReadGraphsRequest('status', { contextGraphId: 'research', layer: 'wm' })).toEqual({ request: { contextGraphId: 'research', layer: 'wm' } });
+    expect(parseReadGraphsRequest('check', { mode: 'full' })).toEqual({ request: { mode: 'full' } });
     expect(parseReadGraphsRequest('status', {})).toEqual({ request: {} });
-    expect(parseReadGraphsRequest('drop', { mode: 'full' })).toEqual({ error: 'Unknown field "mode"; the fields are contextGraphId, layer.' });
+    expect(parseReadGraphsRequest('drop', { mode: 'full' })).toEqual({ error: 'Unknown field "mode" for drop; it takes contextGraphId, layer.' });
+    expect(parseReadGraphsRequest('check', { layer: 'vm' })).toEqual({ error: 'Unknown field "layer" for check; it takes mode.' });
     expect(parseReadGraphsRequest('status', null)).toHaveProperty('error');
     expect(readGraphsStatusPath({ layer: 'vm' })).toBe('/api/store/read-graphs?layer=vm');
     expect(readGraphsStatusPath()).toBe('/api/store/read-graphs');

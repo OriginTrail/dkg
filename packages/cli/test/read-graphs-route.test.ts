@@ -13,8 +13,13 @@ import {
   OxigraphStore,
   READ_GRAPH_PLANNED_METHODS,
   buildReadGraph,
+  checkReadGraph,
+  readGraphLayerOf,
+  withReadGraphBackgroundSlot,
   wrapReadGraphLayer,
   type Quad,
+  type ReadGraphCheckResult,
+  type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import type { AllowedHttpAuthentication } from '../src/auth.js';
 import { handleRequest, type HandleRequestInput } from '../src/daemon/handle-request.js';
@@ -89,6 +94,46 @@ async function node() {
   return { adapter, store, dataDir, stateOf };
 }
 
+interface CheckReport { readonly mode: 'full' | 'sampled'; readonly at: number; readonly results: readonly ReadGraphCheckResult[] }
+
+/**
+ * The agent methods the routes call, answered as the agent's read-graph
+ * workload answers them while its builder does not run: the status of the
+ * rows in the state mirror, and a check of every ready read graph, one at a
+ * time in the background slot, kept for the status.
+ */
+function workloadAgent(store: TripleStore) {
+  let lastCheck: CheckReport | undefined;
+  return {
+    store,
+    readGraphStatusV1: () => ({
+      readGraphs: (readGraphLayerOf(store)?.runtime.mirror.rows() ?? []).map(({ readGraph, state, generation }) => ({ readGraph, state, generation })),
+      builder: undefined,
+      checking: false,
+      lastCheck,
+    }),
+    checkReadGraphsV1: vi.fn(async (options: { mode?: 'full' | 'sampled'; signal?: AbortSignal } = {}): Promise<CheckReport> => {
+      const layer = readGraphLayerOf(store);
+      const mode = options.mode ?? 'full';
+      const results: ReadGraphCheckResult[] = [];
+      const ready = (layer?.runtime.mirror.rows() ?? []).filter((row) => row.state === 'ready').map((row) => row.readGraph).sort();
+      for (const readGraph of ready) {
+        results.push(await withReadGraphBackgroundSlot(layer!.runtime, () => checkReadGraph(store, readGraph, mode, options.signal ? { signal: options.signal } : {})));
+      }
+      lastCheck = { mode, at: Date.now(), results };
+      return lastCheck;
+    }),
+  };
+}
+
+const agents = new WeakMap<object, ReturnType<typeof workloadAgent>>();
+/** One agent per store, so a check and a later status meet. */
+function agentOf(store: TripleStore): ReturnType<typeof workloadAgent> {
+  let agent = agents.get(store);
+  if (!agent) agents.set(store, agent = workloadAgent(store));
+  return agent;
+}
+
 function fakeReq(method: string, path: string, rawBody = '') {
   const req = Readable.from([]);
   Object.assign(req, { method, url: path, headers: { host: '127.0.0.1' }, __dkgPrebufferedBody: Buffer.from(rawBody, 'utf8') });
@@ -107,10 +152,10 @@ function fakeRes() {
 }
 
 async function call(
-  store: unknown,
+  store: TripleStore,
   method: string,
   target: string,
-  options: { body?: unknown; authentication?: AllowedHttpAuthentication; dataDir?: string; res?: ReturnType<typeof fakeRes> } = {},
+  options: { body?: unknown; authentication?: AllowedHttpAuthentication; dataDir?: string; res?: ReturnType<typeof fakeRes>; agent?: object } = {},
 ) {
   const res = options.res ?? fakeRes();
   const url = new URL(`http://127.0.0.1${target}`);
@@ -121,7 +166,7 @@ async function call(
     url,
     path: url.pathname,
     authentication: options.authentication ?? OPERATOR,
-    agent: { store },
+    agent: options.agent ?? agentOf(store),
   } as unknown as RequestContext;
   await handleReadGraphRoutes(ctx, { dataDir: options.dataDir ?? '/no-such-dir' });
   return { handled: res.writableEnded, status: res.statusCode, body: res.body ? JSON.parse(res.body) as Record<string, unknown> : undefined };
@@ -144,6 +189,20 @@ describe('GET /api/store/read-graphs', () => {
     expect(listed.find((graph) => graph.readGraph === IRI.swm)).not.toHaveProperty('agentAddress');
     expect(listed.find((graph) => graph.readGraph === IRI.swm)).not.toHaveProperty('subGraphName');
     expect(answer.body!.states).toEqual({ ...NO_STATES, ready: 5 });
+    // No builder runs, and no check has run on request.
+    expect(answer.body!.checking).toBe(false);
+    expect(answer.body).not.toHaveProperty('builder');
+    expect(answer.body).not.toHaveProperty('lastCheck');
+  });
+
+  it('shows what the builder does and whether the checks run, and lists the mirror where the agent has no workload', async () => {
+    const { store } = await node();
+    const builder = { running: true, building: IRI.swm, pending: 2, retrying: [], lastJob: { readGraph: IRI.vm, kind: 'build', outcome: 'done', batches: 1, durationMs: 5 } };
+    const busy = { ...agentOf(store), readGraphStatusV1: () => ({ ...agentOf(store).readGraphStatusV1(), builder, checking: true }) };
+    expect((await call(store, 'GET', READ_GRAPHS_PATH, { agent: busy })).body).toMatchObject({ builder, checking: true });
+    const none = { store, readGraphStatusV1: () => undefined };
+    const listed = (await call(store, 'GET', `${READ_GRAPHS_PATH}?layer=swm`, { agent: none })).body!;
+    expect(listed).toEqual({ readGraphs: [expect.objectContaining({ readGraph: IRI.swm, state: 'ready' })], states: { ...NO_STATES, ready: 1 }, checking: false });
   });
 
   it('narrows the list to one context graph, one layer, or both', async () => {
@@ -157,8 +216,9 @@ describe('GET /api/store/read-graphs', () => {
   });
 
   it('lists nothing on a store without the read-graph layer', async () => {
-    expect(await call(new OxigraphStore(), 'GET', READ_GRAPHS_PATH)).toEqual({ handled: true, status: 200, body: { readGraphs: [], states: NO_STATES } });
-    expect(await call(new OxigraphStore(), 'POST', `${READ_GRAPHS_PATH}/check`, { body: {} })).toMatchObject({ status: 200, body: { results: [] } });
+    expect(await call(new OxigraphStore(), 'GET', READ_GRAPHS_PATH))
+      .toEqual({ handled: true, status: 200, body: { readGraphs: [], states: NO_STATES, checking: false } });
+    expect(await call(new OxigraphStore(), 'POST', `${READ_GRAPHS_PATH}/check`, { body: {} })).toMatchObject({ status: 200, body: { mode: 'full', results: [] } });
   });
 });
 
@@ -178,6 +238,7 @@ describe('the read-graph routes refuse', () => {
     ['GET', `${READ_GRAPHS_PATH}?mode=full`, undefined, /Unknown field "mode"/],
     ['GET', `${READ_GRAPHS_PATH}?contextGraphId=`, undefined, /Invalid contextGraphId/],
     ['POST', `${READ_GRAPHS_PATH}/check`, { mode: 'deep' }, /mode must be one of full, sampled/],
+    ['POST', `${READ_GRAPHS_PATH}/check`, { contextGraphId: CG }, /Unknown field "contextGraphId" for check; it takes mode/],
     ['POST', `${READ_GRAPHS_PATH}/rebuild`, { mode: 'full' }, /Unknown field "mode"/],
     ['POST', `${READ_GRAPHS_PATH}/drop`, '{not json', /must be a JSON object/],
     ['POST', `${READ_GRAPHS_PATH}/drop`, [], /must be a JSON object/],
@@ -202,34 +263,34 @@ describe('the read-graph routes refuse', () => {
 });
 
 describe('POST /api/store/read-graphs/check', () => {
-  it('checks each read graph in full by default, and a mismatch marks it dirty', async () => {
+  it('checks every ready read graph through the agent, in full by default, and a mismatch marks it dirty', async () => {
     const { adapter, store, stateOf } = await node();
-    const consistent = await call(store, 'POST', `${READ_GRAPHS_PATH}/check`, { body: { contextGraphId: CG, layer: 'vm' } });
-    expect(consistent).toEqual({
-      handled: true, status: 200,
-      body: { results: [IRI.vm, IRI.codeVm].sort().map((readGraph) => ({ readGraph, outcome: 'consistent' })) },
+    const consistent = await call(store, 'POST', `${READ_GRAPHS_PATH}/check`, { body: {} });
+    expect(agentOf(store).checkReadGraphsV1).toHaveBeenLastCalledWith({ mode: 'full', signal: expect.any(AbortSignal) });
+    expect(consistent.body).toEqual({
+      mode: 'full', at: expect.any(Number),
+      results: Object.values(IRI).sort().map((readGraph) => ({ readGraph, mode: 'full', outcome: 'consistent' })),
     });
     // A triple no member holds, written below the layer.
     await adapter.insert([q('urn:s:stray', IRI.vm)]);
-    const mismatch = await call(store, 'POST', `${READ_GRAPHS_PATH}/check`, { body: { contextGraphId: CG, layer: 'vm' } });
-    expect(mismatch.body!.results).toContainEqual({ readGraph: IRI.vm, outcome: 'mismatch', direction: 'unheld' });
-    expect(mismatch.body!.results).toContainEqual({ readGraph: IRI.codeVm, outcome: 'consistent' });
+    const mismatch = await call(store, 'POST', `${READ_GRAPHS_PATH}/check`, { body: { mode: 'full' } });
+    expect(mismatch.body!.results).toContainEqual({ readGraph: IRI.vm, mode: 'full', outcome: 'mismatch', direction: 'unheld' });
     expect(stateOf(IRI.vm)).toBe('dirty');
     expect(stateOf(IRI.codeVm)).toBe('ready');
-    // A dirty read graph is not checked.
-    const skipped = await call(store, 'POST', `${READ_GRAPHS_PATH}/check`, { body: { contextGraphId: CG, layer: 'vm', mode: 'sampled' } });
-    expect(skipped.body!.results).toContainEqual({ readGraph: IRI.vm, outcome: 'skipped' });
-    expect((await call(store, 'GET', `${READ_GRAPHS_PATH}?layer=vm`)).body!.states).toEqual({ ...NO_STATES, ready: 2, dirty: 1 });
+    // The next check leaves the dirty read graph out, and the status shows the last check.
+    const sampled = await call(store, 'POST', `${READ_GRAPHS_PATH}/check`, { body: { mode: 'sampled' } });
+    expect(agentOf(store).checkReadGraphsV1).toHaveBeenLastCalledWith({ mode: 'sampled', signal: expect.any(AbortSignal) });
+    expect((sampled.body!.results as Array<{ readGraph: string }>).map((result) => result.readGraph))
+      .toEqual(Object.values(IRI).filter((readGraph) => readGraph !== IRI.vm).sort());
+    const status = (await call(store, 'GET', READ_GRAPHS_PATH)).body!;
+    expect(status.lastCheck).toEqual(sampled.body);
+    expect(status.states).toEqual({ ...NO_STATES, ready: 4, dirty: 1 });
   });
 
-  it('reports a check that fails and goes on with the next read graph', async () => {
+  it('passes a failed check on to the daemon, which answers it', async () => {
     const { adapter, store } = await node();
     vi.spyOn(adapter, 'query').mockRejectedValueOnce(new Error('the store went away'));
-    const answer = await call(store, 'POST', `${READ_GRAPHS_PATH}/check`, { body: { layer: 'vm' } });
-    const results = answer.body!.results as Array<Record<string, unknown>>;
-    expect(results).toHaveLength(3);
-    expect(results[0]).toEqual({ readGraph: [IRI.vm, IRI.codeVm, IRI.otherVm].sort()[0], outcome: 'error', error: 'the store went away' });
-    expect(results.slice(1).map((result) => result.outcome)).toEqual(['consistent', 'consistent']);
+    await expect(call(store, 'POST', `${READ_GRAPHS_PATH}/check`, { body: {} })).rejects.toThrow('the store went away');
   });
 });
 
@@ -291,7 +352,7 @@ describe('the daemon dispatch', () => {
       await handleRequest({
         req: fakeReq('GET', `${READ_GRAPHS_PATH}?contextGraphId=${OTHER}`),
         res,
-        agent: { store, resolveAgentAddress: () => AGENT_ADDRESS },
+        agent: { ...agentOf(store), resolveAgentAddress: () => AGENT_ADDRESS },
         authentication,
       } as unknown as HandleRequestInput);
       return { status: res.statusCode, body: JSON.parse(res.body) as Record<string, unknown> };
