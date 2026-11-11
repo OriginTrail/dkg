@@ -593,9 +593,16 @@ describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind,
     const engine = new DKGQueryEngine(opened.store);
     const view: QueryOptions = { contextGraphId: ID, view: 'verifiable-memory' };
     const around = await engine.query('SELECT ?g ?s WHERE { GRAPH ?g { { SELECT ?s WHERE { ?s <urn:label> ?l } } } }', view);
+    // Oxigraph reads a subquery in a GRAPH ?g block over the whole dataset, so each graph's rows are
+    // the subquery's rows over the view's graphs: every row as the read with the graph list gives it.
+    const perGraph = (bindings: readonly Record<string, string>[]) => bindings.map(row => `${row.g} ${row.s}`).sort();
+    const listedRows = async (where: string) => {
+      const named = DATA.map(graph => `FROM NAMED <${graph}>`).join(' ');
+      const listed = await opened.store.query(`SELECT ?g ?s ${named} WHERE { VALUES ?g { ${DATA.map(graph => `<${graph}>`).join(' ')} } ${where} }`);
+      return perGraph(listed.type === 'bindings' ? listed.bindings : []);
+    };
     expect(around.bindings.length).toBeGreaterThan(0);
-    for (const row of around.bindings) expect(DATA).toContain(row.g);
-    expect(new Set(around.bindings.map(row => row.g))).toEqual(new Set(DATA));
+    expect(perGraph(around.bindings)).toEqual(await listedRows('GRAPH ?g { { SELECT ?s WHERE { ?s <urn:label> ?l } } }'));
     // With a triple pattern of its own, the block reads graph by graph.
     const labelled = quadsOf(DATA).filter(quad => quad.predicate === 'urn:label');
     const rows = (result: QueryResult) => result.bindings.map(row => JSON.stringify(Object.entries(row).sort())).sort();
@@ -613,7 +620,12 @@ describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind,
     const engine = new DKGQueryEngine(opened.store);
     const view: QueryOptions = { contextGraphId: ID, view: 'verifiable-memory' };
     const direct = await engine.query('SELECT ?g ?s WHERE { GRAPH ?g { SELECT ?s WHERE { ?s <urn:label> ?l } } FILTER(BOUND(?g)) }', view);
-    expect(new Set(direct.bindings.map(row => row.g))).toEqual(new Set(DATA));
+    // As the read with the graph list gives it, every row and each as often (see the test above).
+    const named = DATA.map(graph => `FROM NAMED <${graph}>`).join(' ');
+    const listed = await opened.store.query(`SELECT ?g ?s ${named} WHERE { VALUES ?g { ${DATA.map(graph => `<${graph}>`).join(' ')} } GRAPH ?g { SELECT ?s WHERE { ?s <urn:label> ?l } } FILTER(BOUND(?g)) }`);
+    const perGraph = (bindings: readonly Record<string, string>[]) => bindings.map(row => `${row.g} ${row.s}`).sort();
+    expect(direct.bindings.length).toBeGreaterThan(0);
+    expect(perGraph(direct.bindings)).toEqual(perGraph(listed.type === 'bindings' ? listed.bindings : []));
     // A block that assigns its graph variable gives one row per match in the graph it names, inside the view only.
     const shared: QueryOptions = { contextGraphId: ID, view: 'shared-working-memory' };
     const rows = (bindings: readonly Record<string, string>[]) => bindings.map(row => JSON.stringify(Object.entries(row).sort())).sort();
