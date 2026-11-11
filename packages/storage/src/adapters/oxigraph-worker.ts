@@ -223,6 +223,8 @@ export class OxigraphWorkerStore implements TripleStore, ReadGraphCapableAdapter
   /** Persistence file handed to every spawned worker (undefined = in-memory), and whether it is opened read-only. */
   private readonly persistPath: string | undefined;
   private readonly readOnly: boolean;
+  /** The worker store's snapshot delay; undefined keeps the store's default. */
+  private readonly flushDelayMs: number | undefined;
   /**
    * Single source of truth for the store's high-level POLICY state (see
    * WorkerLifecycle). It subsumes the former `respawnGaveUp` boolean (⇔ state
@@ -308,6 +310,7 @@ export class OxigraphWorkerStore implements TripleStore, ReadGraphCapableAdapter
     this.workerPath = workerPath;
     this.persistPath = persistPath;
     this.readOnly = opts?.readOnly === true;
+    this.flushDelayMs = opts?.flushDelayMs;
     this.spawnWorker();
     registerStoreRecoveryGeneration(this, () => ({ generation: this.recoveryGeneration,
       ready: this.lifecycle === 'live' && !this.workerExited && !this.replacementRevisionLifecycle }));
@@ -373,7 +376,7 @@ export class OxigraphWorkerStore implements TripleStore, ReadGraphCapableAdapter
    */
   private spawnWorker(): void {
     const worker = new Worker(this.workerPath, {
-      workerData: { persistPath: this.persistPath, readOnly: this.readOnly },
+      workerData: { persistPath: this.persistPath, readOnly: this.readOnly, flushDelayMs: this.flushDelayMs },
     });
     this.worker = worker;
     this.workerExited = false;

@@ -72,6 +72,9 @@ type OxStore = InstanceType<typeof oxigraph.Store>;
 type OxTerm = oxigraph.Term;
 type OxQuad = oxigraph.Quad;
 
+/** How long after a write the store waits before it writes its snapshot, by default. */
+const DEFAULT_FLUSH_DELAY_MS = 50;
+
 export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly graphEnumerationVisibility = oxigraphGraphEnumerationVisibility;
@@ -102,6 +105,8 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
     this.store = new oxigraph.Store();
     this.persistPath = persistPath;
     this.readOnly = options.readOnly === true;
+    this.flushDelayMs = typeof options.flushDelayMs === 'number' && Number.isFinite(options.flushDelayMs) && options.flushDelayMs >= 0
+      ? Math.floor(options.flushDelayMs) : DEFAULT_FLUSH_DELAY_MS;
     if (persistPath) {
       this.hydrateSync(persistPath);
     }
@@ -169,6 +174,7 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
 
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private flushing = false;
+  private readonly flushDelayMs: number;
 
   /** The native store for a write. A read-only store refuses before anything changes. */
   private get writable(): OxStore {
@@ -191,7 +197,7 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
             `Next flush will retry; explicit flush() / close() will surface the error.`,
         );
       });
-    }, 50);
+    }, this.flushDelayMs);
   }
 
   /**
