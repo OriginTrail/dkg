@@ -274,15 +274,29 @@ describe('the read-graph partition guard', () => {
     expect(await stored()).toEqual(before);
   });
 
-  it('refuses a name whose escapes the adapter decodes into the partition, which an insert below the guard reaches', async () => {
+  it('refuses a name whose escapes an adapter decodes into the partition, which an insert below the guard reaches', async () => {
+    const escaped = STATE.replace(READ_GRAPH_SEGMENT, String.raw`_\u007Eread`);
+    // Through the store's public path the name is refused, by a term check the store makes or by the guard.
     const store = await createTripleStore({ backend: 'oxigraph' });
     opened.push(store);
-    const adapter = readGraphPartitionMaintenanceStore(store);
-    const escaped = STATE.replace(READ_GRAPH_SEGMENT, String.raw`_\u007Eread`);
-    // Below the guard, the adapter writes the escaped name into the state graph itself.
+    const refused = await store.insert([quad(escaped, 'urn:public')]).then(() => undefined, (caught: unknown) => caught);
+    expect(refused instanceof ReadGraphPartitionWriteError || (refused as Error | undefined)?.name === 'SparqlTermValidationError', String(refused)).toBe(true);
+    expect(await readGraphPartitionMaintenanceStore(store).countQuads(STATE)).toBe(0);
+    // An adapter that decodes the escapes in a graph name before it writes, as one that reads names from text does,
+    // whatever its own term policy: below the guard, the escaped name reaches the state graph.
+    const decode = (name: string) => name.replace(/\\u([0-9A-Fa-f]{4})|\\U([0-9A-Fa-f]{8})/g,
+      (_escape, short: string | undefined, long: string | undefined) => String.fromCodePoint(Number.parseInt(short ?? long!, 16)));
+    class Decoding extends OxigraphStore {
+      override async insert(quads: Quad[], options?: Parameters<OxigraphStore['insert']>[1]): Promise<void> {
+        return super.insert(quads.map((entry) => ({ ...entry, graph: decode(entry.graph) })), options);
+      }
+    }
+    const adapter = new Decoding();
+    opened.push(adapter);
     await adapter.insert([quad(escaped, 'urn:below')]);
     expect(await adapter.countQuads(STATE)).toBe(1);
-    await expect(store.insert([quad(escaped, 'urn:above')])).rejects.toBeInstanceOf(ReadGraphPartitionWriteError);
+    // The guard over that adapter refuses the name before the adapter sees it.
+    await expect(new ReadGraphPartitionStore(adapter).insert([quad(escaped, 'urn:above')])).rejects.toBeInstanceOf(ReadGraphPartitionWriteError);
     expect(await adapter.countQuads(STATE)).toBe(1);
   });
 
