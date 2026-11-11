@@ -396,8 +396,11 @@ export {
   STORE_GRAPH_CATALOG_MAX_BYTES_ENV,
   STORE_INTERNAL_LIMIT,
   StoreInternalLimitError,
+  configureStoreGraphCatalogMaxBytes,
+  graphCatalogMaxBytesProblem,
   isStoreInternalLimitError,
   storeGraphCatalogMaxBytes,
+  type GraphCatalogStoreConfig,
   type StoreInternalLimitErrorLike,
 } from './graph-catalog-internal-limit.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';

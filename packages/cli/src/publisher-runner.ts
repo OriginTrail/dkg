@@ -69,6 +69,7 @@ import {
 } from './runtime-chain-config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
 import { PublisherStartupAdmission } from './publisher-startup-admission.js';
+import { applyGraphCatalogConfig } from './graph-catalog-config.js';
 // GH#2270 PR-3 r3 — chain-proof POLICY lives in its own module; this file stays the
 // composition root that hands it the adapters and wires the result into the publisher.
 import {
@@ -1279,7 +1280,8 @@ function mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
 
 
 async function createPublisherStore(dataDir: string, config: DkgConfig, readOnly = false): Promise<TripleStore> {
-  if (config.store) {
+  const graphCatalog = applyGraphCatalogConfig(config.store?.graphCatalog);
+  if (config.store?.backend) { // a store section with only settings keeps the default store
     const storeConfig = config.store as any;
     return await createTripleStore({
       ...storeConfig,
@@ -1291,11 +1293,7 @@ async function createPublisherStore(dataDir: string, config: DkgConfig, readOnly
       // processes). Only the single-writer daemon owns the changelog; force it
       // off here regardless of config.store.changelog.
       changelog: false,
-      largeLiteralStorage: config.largeLiteralStorage ?? (
-        isLocalOxigraphStoreConfig(storeConfig)
-          ? defaultLargeLiteralStorage(dataDir, config)
-          : undefined
-      ),
+      largeLiteralStorage: config.largeLiteralStorage ?? (isLocalOxigraphStoreConfig(storeConfig) ? defaultLargeLiteralStorage(dataDir, config) : undefined),
     });
   }
 
@@ -1303,6 +1301,7 @@ async function createPublisherStore(dataDir: string, config: DkgConfig, readOnly
     backend: 'oxigraph-worker',
     options: { path: join(dataDir, 'store.nq'), readOnly },
     largeLiteralStorage: defaultLargeLiteralStorage(dataDir, config),
+    graphCatalog,
   });
 }
 

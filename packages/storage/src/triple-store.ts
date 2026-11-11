@@ -1,4 +1,5 @@
 import type { MeasuredGraphInventory } from './graph-inventory-materialization.js';
+import { configureStoreGraphCatalogMaxBytes, type GraphCatalogStoreConfig } from './graph-catalog-internal-limit.js';
 /**
  * TripleStore — pure SPARQL 1.1 interface for any RDF repository.
  * No vendor-specific methods. Any SPARQL-capable store (Oxigraph, Blazegraph,
@@ -680,6 +681,8 @@ export interface TripleStoreConfig {
    * see the {@link ChangelogStore} single-writer caveat.
    */
   changelog?: boolean | ChangelogStoreOptions;
+  /** The node's graph catalog ceiling; it applies to the whole process (see `configureStoreGraphCatalogMaxBytes`). */
+  graphCatalog?: GraphCatalogStoreConfig;
 }
 
 type AdapterFactory = (
@@ -700,12 +703,9 @@ export async function createTripleStore(
   config: TripleStoreConfig,
 ): Promise<TripleStore> {
   const factory = adapterRegistry.get(config.backend);
-  if (!factory) {
-    throw new Error(
-      `Unknown TripleStore backend: "${config.backend}". ` +
-        `Registered: [${[...adapterRegistry.keys()].join(', ')}]`,
-    );
-  }
+  if (!factory) throw new Error(`Unknown TripleStore backend: "${config.backend}". Registered: [${[...adapterRegistry.keys()].join(', ')}]`);
+  // Before the adapter exists, so its first catalog read is bounded by the configured ceiling.
+  if (config.graphCatalog?.maxBytes !== undefined) configureStoreGraphCatalogMaxBytes(config.graphCatalog.maxBytes);
   const constructionAuthority = getManagedOxigraphRuntimeConstructionAuthorityV1(config);
   const store = await factory(resolveAdapterOptions(config), constructionAuthority);
   const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
