@@ -20,9 +20,10 @@
  *
  * Agents of one process over the same backend share its runtime, and any of
  * them may be the one a later process starts alone. So a mark goes to the
- * journal of each of the runtime's data directories (`./data-directories.ts`).
- * Once one start-up stores a mark, the row moves on to a newer generation, and
- * the same mark in another journal finds nothing to do.
+ * journal of each of the runtime's data directories (`./data-directories.ts`),
+ * and a directory that joins later gets the marks noted before it too. Once
+ * one start-up stores a mark, the row moves on to a newer generation, and the
+ * same mark in another journal finds nothing to do.
  */
 
 import { appendFileSync, readFileSync, rmSync } from 'node:fs';
@@ -33,31 +34,48 @@ import type { ReadGraphBackendRuntime } from './runtime.js';
 
 export const READ_GRAPH_MARK_JOURNAL = 'read-graph-unstored-marks';
 
+/** The marks noted for each runtime in this process, as journal lines. */
+const NOTED = new WeakMap<ReadGraphBackendRuntime, Set<string>>();
+/** The data directories whose journal took the marks noted before they joined. */
+const JOINED = new WeakMap<ReadGraphBackendRuntime, Set<string>>();
+
 export function readGraphMarkJournalPath(dataDir: string): string {
   return join(dataDir, READ_GRAPH_MARK_JOURNAL);
 }
 
 /**
  * Keep the marks a runtime's stores could not store in this data directory's
- * journal too: the directory becomes one of the runtime's.
+ * journal too: the directory becomes one of the runtime's. The marks noted
+ * before it joined go to its journal as it joins.
  */
 export function useReadGraphMarkJournal(runtime: ReadGraphBackendRuntime, dataDir: string): void {
   addReadGraphDataDirectory(runtime, dataDir);
+  const joined = JOINED.get(runtime) ?? new Set<string>();
+  JOINED.set(runtime, joined);
+  if (joined.has(dataDir)) return;
+  joined.add(dataDir);
+  const noted = [...(NOTED.get(runtime) ?? [])];
+  if (noted.length > 0) appendJournal(dataDir, noted.join(''));
 }
 
 /**
  * Note in each of the runtime's journals that the stored row of `readGraph`,
  * at `generation`, may still say ready although the read graph is dirty.
- * Without a journal it notes nothing.
+ * Without a journal it notes nothing until one joins.
  */
 export function noteUnstoredReadGraphMark(runtime: ReadGraphBackendRuntime, readGraph: string, generation: number): void {
   if (!Number.isSafeInteger(generation) || /\s/.test(readGraph)) return;
-  for (const dataDir of readGraphDataDirectories(runtime)) {
-    try {
-      appendFileSync(readGraphMarkJournalPath(dataDir), `${generation} ${readGraph}\n`);
-    } catch {
-      // This data directory cannot be written either; the others still keep the mark.
-    }
+  const line = `${generation} ${readGraph}\n`;
+  const noted = NOTED.get(runtime) ?? new Set<string>();
+  NOTED.set(runtime, noted.add(line));
+  for (const dataDir of readGraphDataDirectories(runtime)) appendJournal(dataDir, line);
+}
+
+function appendJournal(dataDir: string, text: string): void {
+  try {
+    appendFileSync(readGraphMarkJournalPath(dataDir), text);
+  } catch {
+    // This data directory cannot be written either; the others still keep the mark.
   }
 }
 

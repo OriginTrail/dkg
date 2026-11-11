@@ -1255,6 +1255,27 @@ describe('read-graph start-up', () => {
     expect((await storedRows(adapter))[wholeVm]).toBe(`dirty@${built.generation + 1}`);
   });
 
+  it('gives an agent that joins the backend the marks the store refused before it joined', async () => {
+    const { adapter, fixture, store, other, context, first, second } = await sharedBackend();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    const { wholeVm } = fixture.readGraphs;
+    expect(await startReadGraphs(store, { dataDir: first, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    const built = (await buildReadGraph(context, vm)).row!;
+    // A full check through the first agent finds a mismatch, and the store refuses its dirty mark: only its journal has it.
+    await adapter.insert([q('urn:s:stray', '"stray"', wholeVm)]);
+    adapter.onUpdate = (sparql) => { if (sparql.includes('"dirty"')) throw new Error('connection reset'); };
+    expect(await checkReadGraph(store, wholeVm, 'full', { alert: () => undefined })).toMatchObject({ outcome: 'mismatch' });
+    expect(readUnstoredReadGraphMarks(second)).toEqual(new Map());
+    // The second agent joins while the store still refuses the mark: its journal takes the mark as it joins.
+    expect(await startReadGraphs(other, { dataDir: second, maintains: () => true })).toEqual({ marked: 0, maintained: 1 });
+    adapter.onUpdate = undefined;
+    expect(readUnstoredReadGraphMarks(second)).toEqual(new Map([[wholeVm, new Set([built.generation])]]));
+    // The next process starts the second agent alone, with only its own data directory.
+    const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    expect(await startReadGraphs(restarted, { dataDir: second, maintains: () => true })).toEqual({ marked: 1, maintained: 1 });
+    expect((await storedRows(adapter))[wholeVm]).toBe(`dirty@${built.generation + 1}`);
+  });
+
   it('fails a start-up whose data directory holds a journal it cannot read, rather than take it for an empty one', async () => {
     const { store, other, first, second } = await sharedBackend();
     // A directory where the journal's file belongs: reading it fails, as it does without permission.
