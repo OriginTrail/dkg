@@ -254,10 +254,51 @@ export function readGraphStateFencePattern(readGraph: string, state: ReadGraphSt
  * {@link parseReadGraphStateRows}.
  */
 export function readGraphStateRowsQuery(): string {
+  return rowsQuery('');
+}
+
+/**
+ * The row of one read graph, read as {@link readGraphStateRowsQuery} reads
+ * every row: by any of its fields, in any context graph's state graph, so a
+ * damaged or misplaced copy still reads as damaged. Read the answer with
+ * {@link parseReadGraphStateRows}. With the read graph bound, an engine
+ * answers from an index.
+ */
+export function readGraphStateRowQuery(readGraph: string): string {
+  stateGraphOf(readGraph);
+  return rowsQuery(`VALUES ?readGraph { <${assertSafeIri(readGraph)}> }\n  `);
+}
+
+/**
+ * The start-up mark of a release that maintains read graphs: every listed
+ * read graph's row, in whatever state it is stored, gets the next generation
+ * and the state `dirty`. One request of two operations, with no condition on
+ * the stored state or generation, so an operation that an earlier process
+ * left in flight is fenced out even when it lands between the lookup of the
+ * rows and this request. A damaged row, or one at
+ * {@link MAX_READ_GRAPH_GENERATION}, takes {@link readGraphStateReset}
+ * instead. Read the rows back afterwards.
+ */
+export function readGraphStateMarkDirtyAtStart(readGraphs: readonly string[]): string {
+  const p = READ_GRAPH_STATE_PREDICATES;
+  const dirty = sparqlString('dirty');
+  const pairs = [...new Set(readGraphs)].map((readGraph) => `(<${stateGraphOf(readGraph)}> <${assertSafeIri(readGraph)}>)`);
+  if (pairs.length === 0) throw new ReadGraphTransitionError('A start-up mark needs at least one read graph');
+  // sparql-scan-allow: R2 -- ?stateGraph and ?readGraph are VALUES-bound to the exact pairs found at start
+  const listed = `  VALUES (?stateGraph ?readGraph) { ${pairs.join(' ')} }\n`;
+  return `DELETE { GRAPH ?stateGraph { ?readGraph <${p.generation}> ?generation } }\n`
+    + `INSERT { GRAPH ?stateGraph { ?readGraph <${p.generation}> ?nextGeneration } }\n`
+    + `WHERE {\n${listed}  GRAPH ?stateGraph { ?readGraph <${p.generation}> ?generation }\n  BIND(?generation + 1 AS ?nextGeneration)\n};\n`
+    + `DELETE { GRAPH ?stateGraph { ?readGraph <${p.state}> ?state } }\n`
+    + `INSERT { GRAPH ?stateGraph { ?readGraph <${p.state}> ${dirty} } }\n`
+    + `WHERE {\n${listed}  GRAPH ?stateGraph { ?readGraph <${p.state}> ?state }\n  FILTER(!sameTerm(?state, ${dirty}))\n}`;
+}
+
+function rowsQuery(selection: string): string {
   const p = READ_GRAPH_STATE_PREDICATES;
   const anyField = ROW_FIELDS.map((field) => `{ ?readGraph <${p[field]}> ?readGraphRowField }`).join(' UNION ');
   return `SELECT DISTINCT ?stateGraph ?readGraph ?state ?generation ?ruleVersion ?builderVersion WHERE {
-  GRAPH ?stateGraph {
+  ${selection}GRAPH ?stateGraph {
     ${anyField}
     OPTIONAL { ?readGraph <${p.state}> ?state }
     OPTIONAL { ?readGraph <${p.generation}> ?generation }

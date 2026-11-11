@@ -425,7 +425,9 @@ export {
   readGraphStateFencePattern,
   readGraphStateMarkAllDirty,
   readGraphStateMarkDirty,
+  readGraphStateMarkDirtyAtStart,
   readGraphStateReset,
+  readGraphStateRowQuery,
   readGraphStateRowsQuery,
   servingReadGraphGeneration,
   type ReadGraphState,
@@ -457,6 +459,7 @@ export {
   readGraphDeltaDeleteMatching,
   readGraphFencedDrop,
   readGraphFirstHolderCountQuery,
+  readGraphHoldsTripleAsk,
   readGraphInsertQuads,
   readGraphMissingTripleAsk,
   readGraphReferenceProcedure,
@@ -487,4 +490,27 @@ export {
   type ReadGraphStoreConfig,
 } from './read-graph/read-graph-store.js';
 export { readReadGraphRegistry } from './read-graph/registry.js';
+export {
+  DEFAULT_READ_GRAPH_BATCHING,
+  ReadGraphJobError,
+  buildReadGraph,
+  markReadGraphDirty,
+  readGraphEnumerationRoots,
+  readStoredReadGraphRow,
+  removeReadGraph,
+  repairReadGraph,
+  type ReadGraphBatching,
+  type ReadGraphJobContext,
+  type ReadGraphJobKind,
+  type ReadGraphJobResult,
+  type ReadGraphRepairInput,
+} from './read-graph/rebuild.js';
+export { startReadGraphs, type ReadGraphStartOptions, type ReadGraphStartResult } from './read-graph/startup.js';
+export {
+  DEFAULT_READ_GRAPH_BUILD_INTERVAL_MS,
+  ReadGraphBuilder,
+  withReadGraphBackgroundSlot,
+  type ReadGraphBuilderOptions,
+  type ReadGraphBuilderStatus,
+} from './read-graph/builder.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';
