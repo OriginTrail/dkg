@@ -16,6 +16,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 // The same module instance as the CLI's own storage import: the write below the partition guard.
 import { readGraphPartitionMaintenanceStore } from '@origintrail-official/dkg-storage/dist/read-graph-partition-store.js';
+import { readGraphRegistryRecordUpdate } from '@origintrail-official/dkg-storage/dist/read-graph/registry-record.js';
 import type { DkgConfig } from '../src/config.js';
 import { createPublisherStore, publisherStoreConfig } from '../src/publisher-store.js';
 import { QueryConfigError } from '../src/read-graphs-config.js';
@@ -109,11 +110,12 @@ describe('a publisher store opened while the daemon is down', () => {
     const peerId = '12D3KooWPublisherStorePeer';
     const wm = readGraphIri({ scope: readScope(contextGraphId), layer: MemoryLayer.WorkingMemory, agentAddress: defaultAgent });
     try {
-      // The daemon left the default agent's working-memory read graph ready, and recorded the identity it was built under.
+      // The daemon left the default agent's working-memory read graph ready, with the registry and the identity it was built under.
       const daemonStore = await createTripleStore({ backend: 'oxigraph-worker', options: { path: join(dir, 'store.nq') } });
-      await readGraphPartitionMaintenanceStore(daemonStore).update!(readGraphStateCompareAndSet(undefined, {
-        readGraph: wm, state: 'ready', generation: 2, ...CURRENT_READ_GRAPH_VERSIONS,
-      }));
+      await readGraphPartitionMaintenanceStore(daemonStore).update!([
+        readGraphStateCompareAndSet(undefined, { readGraph: wm, state: 'ready', generation: 2, ...CURRENT_READ_GRAPH_VERSIONS }),
+        readGraphRegistryRecordUpdate({ contextGraphId, subGraphNames: [], childContextGraphRoots: [] }),
+      ].join(';\n'));
       await daemonStore.close();
       writeFileSync(join(dir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE), JSON.stringify({ defaultAgentAddress: defaultAgent, peerId }));
 
