@@ -5,7 +5,7 @@ import { listAssertionsPage, fetchAssertionPageCounts } from '../../../assertion
 import {
   invalidateQueryCache, listAssertions, promoteAssertion, describePromoteResult,
   describePromoteError, knowledgeAssetPublish, publishAssertionsToVm,
-  partialPublishWarning, outcomeUnknownPublishNote, type AssertionInfo,
+  partialPublishWarning, type AssertionInfo,
 } from '../../../api.js';
 import { useMemoryGraphEvents } from '../../../hooks/useNodeEvents.js';
 import { truncateMiddle } from '../../../lib/truncate.js';
@@ -13,6 +13,7 @@ import { EmptyState, toneForLayer } from '../../../components/ContextGraphPrimit
 import { FileText, RefreshCw } from 'lucide-react';
 import { StatusGlyph } from '../../../components/ds/Badge.js';
 import { failed, succeeded, succeededWithWarning, type ActionOutcome } from '../../../lib/actionOutcome.js';
+import { publishOutcome } from '../../../lib/publishOutcome.js';
 
 export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = false, onComplete, scrollKey }: {
   contextGraphId: string;
@@ -135,17 +136,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         // shared batch loop (api.ts publishAssertionsToVm) — fail-closed direct publish + 207 partial
         // handling, uniform with the other batch-publish CTAs (carries the partial detail).
         const r = await publishAssertionsToVm(contextGraphId, bulkAssertions);
-        const unknownNote = outcomeUnknownPublishNote(r);
-        const unknownTail = unknownNote ? ` — ${unknownNote}` : '';
-        if (r.published > 0) {
-          const tail = r.failures.length ? ` (${r.failures.length} could not be published)` : '';
-          const partialTail = r.partial > 0 ? ` — ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
-          setOutcome(succeededWithWarning(`Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}${unknownTail}`, r.partial > 0 || Boolean(unknownNote)));
-        } else if (unknownNote && r.failures.length === 0) {
-          setOutcome(succeededWithWarning(unknownNote, true));
-        } else {
-          throw new Error(`${r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed'}${unknownTail}`);
-        }
+        setOutcome(publishOutcome(r));
       }
       refresh();
       onComplete();

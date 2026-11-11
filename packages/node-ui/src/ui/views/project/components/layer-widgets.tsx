@@ -1,7 +1,7 @@
 import React, { useId, useMemo, useState, useCallback } from 'react';
 import type { ReactNode } from 'react';
 import { LayerGlyph } from '../../../components/ds/Badge.js';
-import { listAssertions, promoteAssertion, describePromoteError, publishAssertionsToVm, partialPublishWarning, outcomeUnknownPublishNote, type ConvictionCostCovered } from '../../../api.js';
+import { listAssertions, promoteAssertion, describePromoteError, publishAssertionsToVm, type ConvictionCostCovered } from '../../../api.js';
 import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { entityMeta, layerNoun, VM_TRIPLE_STAT } from '../helpers.js';
@@ -12,7 +12,8 @@ import { PcaPrimerLink } from '../../../pages/conviction/PcaPrimer.js';
 import { DiscountAppliedBadge } from '../../../components/Pca/index.js';
 import { X } from 'lucide-react';
 import { StatusGlyph } from '../../../components/ds/Badge.js';
-import { failed, succeeded, succeededWithWarning, type ActionOutcome } from '../../../lib/actionOutcome.js';
+import { failed, succeeded, type ActionOutcome } from '../../../lib/actionOutcome.js';
+import { publishOutcome } from '../../../lib/publishOutcome.js';
 
 // ─── Generative Widget Components ─────────────────────────────
 
@@ -299,18 +300,10 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
         const assertions = await listAssertions(contextGraphId, 'swm', { includeCounts: false });
         // Shared batch loop (api.ts publishAssertionsToVm) — uniform partial/error accounting.
         const r = await publishAssertionsToVm(contextGraphId, assertions);
-        const unknownNote = outcomeUnknownPublishNote(r);
-        const unknownTail = unknownNote ? ` — ${unknownNote}` : '';
-        if (r.published > 0) {
-          const tail = r.failures.length ? ` (${r.failures.length} assertion${r.failures.length === 1 ? '' : 's'} could not be published)` : '';
-          const partialTail = r.partial > 0 ? ` — ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
-          // B8 (#1365 r3) — the CONFIRMED discount aggregated across the BATCH. Absent → hidden.
-          setCostCovered(r.convictionCostCovered ?? null);
-          return succeededWithWarning(`Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}${unknownTail}`, r.partial > 0 || Boolean(unknownNote));
-        }
-        if (assertions.length === 0) return succeeded('Nothing to publish — promote assertions to Shared Memory first.');
-        if (unknownNote && r.failures.length === 0) return succeededWithWarning(unknownNote, true);
-        throw new Error(`${r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed'}${unknownTail}`);
+        // B8 (#1365 r3) — the CONFIRMED discount aggregated across the BATCH. Absent → hidden.
+        if (r.published > 0) setCostCovered(r.convictionCostCovered ?? null);
+        else if (assertions.length === 0) return succeeded('Nothing to publish — promote assertions to Shared Memory first.');
+        return publishOutcome(r, { failedNoun: 'assertion' });
       },
       // Publish-appropriate: the raw message (matches the old catch, which fell through
       // describePromoteError → null for publish errors). Never says "an assertion".
