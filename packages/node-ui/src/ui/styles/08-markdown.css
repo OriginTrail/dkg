@@ -1,21 +1,21 @@
 /* ── Markdown rendering (PR3) ── */
 .v10-md {
   font-size: var(--fs-control);
-  line-height: 1.5;
+  line-height: var(--lh-body);
   color: inherit;
 }
 .v10-md > *:first-child { margin-top: 0; }
 .v10-md > *:last-child { margin-bottom: 0; }
 .v10-md-h1, .v10-md-h2, .v10-md-h3 {
   font-weight: 600;
-  line-height: 1.3;
-  margin: 12px 0 6px;
+  line-height: var(--lh-snug);
+  margin: var(--space-12) 0 var(--space-6);
   color: var(--text-primary);
 }
 .v10-md-h4, .v10-md-h5, .v10-md-h6 {
   font-weight: 600;
-  line-height: 1.4;
-  margin: 10px 0 6px;
+  line-height: var(--lh-snug);
+  margin: 10px 0 var(--space-6);
   color: var(--text-primary);
 }
 .v10-md-h1 { font-size: var(--fs-heading); }
@@ -23,7 +23,7 @@
 .v10-md-h3 { font-size: var(--fs-body); }
 .v10-md-h4 { font-size: var(--fs-body); }
 .v10-md-h5 { font-size: var(--fs-control); }
-.v10-md-h6 { font-size: var(--fs-label); color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
+.v10-md-h6 { font-size: var(--fs-label); color: var(--text-secondary); text-transform: uppercase; letter-spacing: var(--ls-caps); }
 /* Explicit `--text-primary` on body-text elements. A global
    `p { color: var(--text-secondary) }` (≈styles.css:2682) would
    otherwise win over these (bare-element specificity 0,0,1 beats
@@ -36,17 +36,17 @@
    colors. Blockquote body is re-dimmed below (its inner `<p>` would
    otherwise pick up this `--text-primary` directly, defeating the
    intentional dim-quote affordance). */
-.v10-md-p { margin: 4px 0; color: var(--text-primary); }
-.v10-md-ul, .v10-md-ol { margin: 4px 0; padding-left: 20px; }
+.v10-md-p { margin: var(--space-4) 0; color: var(--text-primary); }
+.v10-md-ul, .v10-md-ol { margin: var(--space-4) 0; padding-left: var(--space-20); }
 .v10-md-ul { list-style: disc; }
 .v10-md-ol { list-style: decimal; }
-.v10-md-li { margin: 2px 0; color: var(--text-primary); }
-.v10-md-li > .v10-md-ul, .v10-md-li > .v10-md-ol { margin: 2px 0; padding-left: 18px; }
+.v10-md-li { margin: var(--space-2) 0; color: var(--text-primary); }
+.v10-md-li > .v10-md-ul, .v10-md-li > .v10-md-ol { margin: var(--space-2) 0; padding-left: var(--space-16); }
 /* Task lists (remark-gfm) */
 .v10-md-ul .v10-md-li input[type="checkbox"] {
-  margin-right: 6px;
+  margin-right: var(--space-6);
   vertical-align: middle;
-  accent-color: var(--accent-blue);
+  accent-color: var(--text-primary);
 }
 .v10-md-link {
   color: var(--text-link);
@@ -76,8 +76,8 @@
      themes. `--border-prominent` clears 5.58:1 dark / 7.17:1 light,
      same swap recipe as `.v10-md-hr` and the inline-code chip
      border. Codex / UI-lead Task #67. */
-  margin: 6px 0;
-  padding: 4px 12px;
+  margin: var(--space-6) 0;
+  padding: var(--space-4) var(--space-12);
   border-left: 3px solid var(--border-prominent);
   color: var(--text-secondary);
   background: color-mix(in srgb, var(--text-tertiary) 5%, transparent);
@@ -101,7 +101,7 @@
      `--border-prominent` is the same chip-outline token already in
      use by inline-code chips on user bubbles and clears 3:1 against
      `--bg-panel` in both themes. */
-  margin: 12px 0;
+  margin: var(--space-12) 0;
   border: 0;
   border-top: 1px solid var(--border-prominent);
 }
@@ -111,7 +111,7 @@
      PR4's bubble removal, the table sits on `--bg-panel` and the old
      `--border-subtle` clears only ~1.15:1 against panel (fails 3:1).
      UI-lead Task #66. */
-  margin: 8px 0;
+  margin: var(--space-8) 0;
   overflow-x: auto;
   border: 1px solid var(--border-prominent);
 }
@@ -124,7 +124,7 @@
   background: var(--bg-elevated);
 }
 .v10-md-th {
-  padding: 6px 10px;
+  padding: var(--space-6) 10px;
   text-align: left;
   font-weight: 600;
   color: var(--text-primary);
@@ -135,7 +135,7 @@
   /* Table data is primary content, not metadata — `--text-secondary`
      read as dim/unreadable on the no-bubble dark panel (same root
      cause as `.v10-md-p`). Match the header (`--text-primary`). */
-  padding: 6px 10px;
+  padding: var(--space-6) 10px;
   border-bottom: 1px solid var(--border-subtle);
   color: var(--text-primary);
   vertical-align: top;
@@ -147,7 +147,7 @@
 .v10-md-image-placeholder {
   display: inline-flex;
   align-items: center;
-  padding: 1px 6px;
+  padding: 1px var(--space-6);
   border-radius: var(--radius-xs);
   background: var(--bg-active);
   color: var(--text-secondary);
@@ -160,7 +160,7 @@
 .v10-md-code {
   font-family: var(--font-mono);
   font-size: var(--fs-label);
-  padding: 2px 5px;
+  padding: var(--space-2) var(--space-4);
   border-radius: var(--radius-xs);
   background: var(--bg-active);
   color: var(--text-primary);
@@ -181,7 +181,7 @@
    `<code>` node, so the common `text <code> text` case missed the rule. */
 .v10-md-p:has(.v10-md-code),
 .v10-md-li:has(.v10-md-code) {
-  line-height: 1.85;
+  line-height: var(--lh-loose);
 }
 .v10-md-pre {
   /* Code-block container outline bumped to `--border-prominent` for
@@ -193,7 +193,7 @@
      panel; `--border-prominent` clears it in both themes. UI-lead
      Task #65. */
   position: relative;
-  margin: 8px 0;
+  margin: var(--space-8) 0;
   border-radius: var(--radius-overlay);
   background: var(--bg-elevated);
   border: 1px solid var(--border-prominent);
@@ -205,10 +205,10 @@
   position: absolute;
   top: 6px;
   left: 10px;
-  padding: 2px 6px;
+  padding: var(--space-2) var(--space-6);
   font-size: var(--fs-micro);
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--text-secondary);
   background: var(--bg-elevated);
@@ -218,7 +218,7 @@
 .v10-md-pre-rendered,
 .v10-md-pre-fallback {
   margin: 0;
-  padding: 28px 12px 10px;
+  padding: 28px var(--space-12) 10px;
   overflow-x: auto;
 }
 .v10-md-pre-rendered pre,
@@ -274,7 +274,7 @@
   width: 5px;
   height: 14px;
   background: var(--text-secondary);
-  margin-left: 2px;
+  margin-left: var(--space-2);
   animation: pulse 1s ease-in-out infinite;
   vertical-align: text-bottom;
 }
@@ -288,7 +288,7 @@
 .v10-chat-thinking {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-8);
   font-size: var(--fs-body);
   line-height: 28px;
   color: var(--text-secondary);
@@ -322,7 +322,7 @@
 @media (prefers-reduced-motion: reduce) {
   /* Static, fully legible — no sweep. */
   .v10-chat-thinking {
-    gap: 6px;
+    gap: var(--space-6);
   }
   .v10-chat-thinking > span {
     animation: none;

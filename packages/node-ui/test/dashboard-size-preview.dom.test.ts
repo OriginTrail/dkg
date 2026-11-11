@@ -31,7 +31,7 @@ vi.mock('../src/ui/hooks.js', () => ({
 vi.mock('../src/ui/api-wrapper.js', () => ({
   api: { listParticipants: async () => ({ allowedAgents: [] }) },
 }));
-vi.mock('../src/ui/stores/tabs.js', () => ({ useTabsStore: () => ({ openTab: () => {} }) }));
+vi.mock('../src/ui/stores/tabs.js', () => ({ useTabsStore: Object.assign(() => ({ openTab: () => {} }), { getState: () => ({ activeTabId: 'dashboard', openTab: () => {} }) }) }));
 vi.mock('../src/ui/stores/projects.js', () => ({
   useProjectsStore: () => ({ setActiveProject: () => {} }),
 }));
@@ -171,10 +171,10 @@ describe('real DashboardView size presentation', () => {
     addGraph('summary', { error: 'query unavailable', assets: 7 });
     const { card, values, labels } = await render();
     expect(values).toEqual(['~9', '~5']);
-    expect(labels.map((element) => element.textContent)).toEqual(['entities / KA · approx.', 'triples']);
+    expect(labels.map((element) => element.textContent)).toEqual(['entities / Knowledge Assets · approx.', 'triples']);
     expect(labels[0].getAttribute('title')).toContain('mixes summary and live counts');
     expect(card.querySelectorAll('.v10-layerbar')).toHaveLength(0);
-    expect(container.querySelectorAll('.v10-cg-row .v10-cg-size')[1].textContent).toContain('7 KA (summary) · — triples');
+    expect(container.querySelectorAll('.v10-cg-row .v10-cg-size')[1].textContent).toContain('7 Knowledge Assets (summary) · — triples');
   });
 
   it('shows unavailable triples as unknown when only a Knowledge-Asset summary is available', async () => {
@@ -183,7 +183,7 @@ describe('real DashboardView size presentation', () => {
     expect(values).toEqual(['7', '—']);
     expect(labels.map((element) => element.textContent)).toEqual(['Knowledge Assets (summary)', 'triples']);
     expect(labels[0].getAttribute('title')).toContain('not the full WM/SWM/VM entity total');
-    expect(row.textContent).toContain('7 KA (summary) · — triples');
+    expect(row.textContent).toContain('7 Knowledge Assets (summary) · — triples');
     expect(card.querySelectorAll('.v10-layerbar')).toHaveLength(0);
   });
 });

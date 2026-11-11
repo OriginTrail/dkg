@@ -11,7 +11,7 @@
  */
 import { DOC_TAB_PREFIX, decodeDocTabId, type DecodedDocTab } from './doc-tab-id.js';
 
-export type PlaceId = 'dashboard' | 'operations' | 'settings' | 'conviction' | 'context-graph-primer' | 'memory-stack' | 'agent-hub';
+export type PlaceId = 'dashboard' | 'operations' | 'settings' | 'conviction' | 'context-graph-primer' | 'memory-stack';
 
 export interface PlaceMeta {
   /** Web address (tab-routes.ts). */
@@ -27,12 +27,11 @@ export interface PlaceMeta {
 
 export const PLACES: Readonly<Record<PlaceId, PlaceMeta>> = {
   dashboard: { path: '/', label: 'Dashboard', title: 'Dashboard' },
-  operations: { path: '/observability', label: 'Observability', title: 'Observability: operations, replication, hardware, logs', node: true },
+  operations: { path: '/observability', label: 'Observability', title: 'Observability: operations, replication, hardware, logs, errors and network', node: true },
   conviction: { path: '/conviction', label: 'Publisher Conviction', title: 'Publisher Conviction: publishing discounts', node: true, testId: 'pca-launch-btn' },
   settings: { path: '/settings', label: 'Settings', title: 'Node settings', node: true },
   'context-graph-primer': { path: '/primer', label: 'What is a context graph?', title: 'What is a context graph?' },
   'memory-stack': { path: '/memory-stack', label: 'Memory stack', title: 'Memory stack' },
-  'agent-hub': { path: '/agent-hub', label: 'Agent hub', title: 'Agent hub' },
 };
 
 export const PLACE_IDS = Object.keys(PLACES) as PlaceId[];

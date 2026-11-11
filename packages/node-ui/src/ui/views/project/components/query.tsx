@@ -17,6 +17,7 @@ import { executeQuery, writeProfileQueryCatalog, type QueryExecutionView } from 
 import { useProjectProfileContext, type QueryCatalog } from '../../../hooks/useProjectProfile.js';
 import { EmptyState } from '../../../components/ContextGraphPrimitives.js';
 import { Badge } from '../../../components/ds/Badge.js';
+import { truncateAddress } from '../../../lib/format.js';
 function contextGraphQueryTemplate(contextGraphId: string): string {
   return `SELECT ?g ?s ?p ?o WHERE {
   GRAPH ?g { ?s ?p ?o }
@@ -243,8 +244,7 @@ function bindingValue(v: unknown): string {
 
 function shortenBindingValue(value: string): string {
   if (!value) return '—';
-  if (value.length <= 140) return value;
-  return `${value.slice(0, 110)}...${value.slice(-24)}`;
+  return value.length <= 140 ? value : truncateAddress(value, 110, 24);
 }
 
 function isBuiltInQueryCatalog(catalog: QueryCatalog): boolean {
@@ -550,11 +550,11 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
 
         {profile?.loading && (
           <EmptyState
+            busy
             compact
             inline
             tone="query"
-            icon="?"
-            title="Loading saved queries..."
+            title="Loading saved queries…"
             description="Built-in presets are available while saved queries load from this node profile."
           />
         )}
@@ -746,10 +746,10 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
         )}
         {executionMatchesSession && loading && (
           <EmptyState
+            busy
             compact
             tone="query"
-            icon="?"
-            title="Loading query results..."
+            title="Loading query results…"
           />
         )}
         {executionMatchesSession && error && (
@@ -788,7 +788,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
               <thead>
                 <tr>
                   {columns.map((column) => (
-                    <th key={column}>{column}</th>
+                    <th key={column} className="ds-table-head">{column}</th>
                   ))}
                 </tr>
               </thead>

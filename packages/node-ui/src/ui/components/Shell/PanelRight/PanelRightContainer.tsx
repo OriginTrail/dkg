@@ -39,6 +39,8 @@ import {
   useAgentConversations,
   useConversation,
 } from '../../../stores/agentConversations.js';
+import { useLayoutStore } from '../../../stores/layout.js';
+import { Maximize2, Minimize2 } from 'lucide-react';
 
 export function PanelRight() {
   const [mode, setMode] = useState<'agents' | 'network' | 'sessions'>('agents');
@@ -95,8 +97,6 @@ export function PanelRight() {
 
   const localSessions = summarizeLocalAgentSessions(memorySessions, integrations);
   const {
-    sortedIntegrations,
-    connectedIntegrations,
     selectedIntegration,
     selectedConversation,
     selectedHasConversation,
@@ -449,6 +449,9 @@ export function PanelRight() {
     conversationActions.removeAttachment(selectedConversationKey, attachmentId);
   }, [selectedConversationKey]);
 
+  const rightExpanded = useLayoutStore((s) => s.rightExpanded);
+  const setRightExpanded = useLayoutStore((s) => s.setRightExpanded);
+
   return (
     <div className="v10-panel-right">
       <div className="v10-agent-mode-tabs">
@@ -459,6 +462,15 @@ export function PanelRight() {
             </button>
           ))}
         </div>
+        <button
+          type="button"
+          className="v10-panel-expand ds-btn ds-ghost ds-sm ds-icon"
+          aria-label={rightExpanded ? 'Collapse agents panel' : 'Expand agents panel'}
+          title={rightExpanded ? 'Collapse panel' : 'Expand panel'}
+          onClick={() => setRightExpanded(!rightExpanded)}
+        >
+          {rightExpanded ? <Minimize2 size={14} aria-hidden="true" /> : <Maximize2 size={14} aria-hidden="true" />}
+        </button>
       </div>
 
       {mode === 'agents' && (

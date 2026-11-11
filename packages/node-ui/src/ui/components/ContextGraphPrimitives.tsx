@@ -1,9 +1,10 @@
 import React from 'react';
 import type { ReactNode } from 'react';
+import { Loader2 } from 'lucide-react';
 
 type ContextGraphLayer = 'wm' | 'swm' | 'vm';
 
-export type EmptyStateTone = 'neutral' | ContextGraphLayer | 'danger' | 'query' | 'warning';
+export type EmptyStateTone = 'neutral' | ContextGraphLayer | 'danger' | 'query' | 'warning' | 'success';
 
 type EmptyStateAction = {
   label: string;
@@ -25,6 +26,7 @@ const EMPTY_STATE_ACCENTS: Record<EmptyStateTone, string> = {
   // theme-aware amber (#fbbf24 dark / #8e4706 light), NOT the SWM
   // `--layer-shared` layer-identity accent used by the `swm` tone.
   warning: 'var(--text-warning)',
+  success: 'var(--text-success)',
 };
 
 export function toneForLayer(layer: ContextGraphLayer): EmptyStateTone {
@@ -39,6 +41,7 @@ export function EmptyState({
   tone = 'neutral',
   compact = false,
   inline = false,
+  busy = false,
   className = '',
 }: {
   icon?: ReactNode;
@@ -48,6 +51,8 @@ export function EmptyState({
   tone?: EmptyStateTone;
   compact?: boolean;
   inline?: boolean;
+  /** Still loading: shows a spinner in place of the icon and tells screen readers. */
+  busy?: boolean;
   className?: string;
 }) {
   const style = {
@@ -63,9 +68,10 @@ export function EmptyState({
         className,
       ].filter(Boolean).join(' ')}
       data-tone={tone}
+      role={busy ? 'status' : undefined}
       style={style}
     >
-      {icon && <div className="v10-empty-state-icon" aria-hidden="true">{icon}</div>}
+      {(icon || busy) && <div className="v10-empty-state-icon" aria-hidden="true">{busy ? <Loader2 size={16} className="ds-spin" /> : icon}</div>}
       <div className="v10-empty-state-copy">
         <div className="v10-empty-state-title">{title}</div>
         {description && <div className="v10-empty-state-desc">{description}</div>}

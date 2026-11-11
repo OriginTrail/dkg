@@ -1,3 +1,4 @@
+import { formatNumber } from '../lib/format.js';
 /** Resolve the dashboard's live, preview and summary units together. */
 export function dashboardSizePresentation(size: {
   entities: { total: number };
@@ -10,7 +11,7 @@ export function dashboardSizePresentation(size: {
   const prefix = size.sizeApprox && !size.triplesUnknown ? '~' : '';
   const suffix = loaded ? '+' : '';
   const entityLabel = size.triplesUnknown ? 'Knowledge Assets (summary)'
-    : size.sizeApprox ? 'entities / KA · approx.'
+    : size.sizeApprox ? 'entities / Knowledge Assets · approx.'
     : loaded ? 'entities loaded' : 'entities / Knowledge Assets';
   const entityTitle = size.triplesUnknown
     ? 'Live entity count unavailable — showing the published Knowledge-Asset summary (not the full WM/SWM/VM entity total)'
@@ -18,11 +19,11 @@ export function dashboardSizePresentation(size: {
       ? 'Some context graphs reported only their Knowledge-Asset summary — this total mixes summary and live counts and is approximate'
       : undefined;
   return {
-    entityValue: `${prefix}${size.entities.total.toLocaleString()}${suffix}`,
+    entityValue: `${prefix}${formatNumber(size.entities.total)}${suffix}`,
     entityLabel,
     entityTitle,
     tripleValue: size.triplesUnknown ? '—'
-      : `${size.sizePartial || size.sizeApprox ? '~' : ''}${size.triples.total.toLocaleString()}`,
+      : `${size.sizePartial || size.sizeApprox ? '~' : ''}${formatNumber(size.triples.total)}`,
     tripleLabel: loaded ? 'triples preview' : 'triples',
     showLayerBars: !size.triplesUnknown && !size.sizeApprox,
   };

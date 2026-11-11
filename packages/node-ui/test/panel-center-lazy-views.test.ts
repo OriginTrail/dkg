@@ -6,8 +6,8 @@ import { useTabsStore } from '../src/ui/stores/tabs.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-const loads = vi.hoisted(() => ({ agentHub: 0, project: 0, layer: 0, stack: 0 }));
-const agentHubGate = vi.hoisted(() => {
+const loads = vi.hoisted(() => ({ settings: 0, project: 0, layer: 0, stack: 0 }));
+const settingsGate = vi.hoisted(() => {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => { resolve = done; });
   return { promise, resolve };
@@ -21,10 +21,10 @@ vi.mock('../src/ui/api.js', () => ({ authHeaders: () => ({}), fileUrl: () => '' 
 vi.mock('../src/ui/components/chat/MarkdownMessage.js', () => ({ MarkdownMessage: () => null }));
 vi.mock('../src/ui/views/DashboardView.js', () => ({ DashboardView: () => React.createElement('div', null, 'Dashboard ready') }));
 vi.mock('../src/ui/views/ContextGraphPrimerView.js', () => ({ ContextGraphPrimerView: () => null }));
-vi.mock('../src/ui/pages/AgentHub.js', async () => {
-  loads.agentHub++;
-  await agentHubGate.promise;
-  return { AgentHubPage: () => React.createElement('div', { id: 'agent-hub' }, 'Agent hub ready') };
+vi.mock('../src/ui/pages/Settings.js', async () => {
+  loads.settings++;
+  await settingsGate.promise;
+  return { SettingsPage: () => React.createElement('div', { id: 'settings' }, 'Settings ready') };
 });
 vi.mock('../src/ui/views/ProjectView.js', async () => {
   loads.project++;
@@ -61,17 +61,17 @@ it('loads views on demand while preserving tab selection and mounted view state'
     expect(container.textContent).toContain('Dashboard ready');
     expect(container.querySelector('.v10-center-content')?.classList)
       .toContain('v10-center-content-enter');
-    expect(loads).toEqual({ agentHub: 0, project: 0, layer: 0, stack: 0 });
+    expect(loads).toEqual({ settings: 0, project: 0, layer: 0, stack: 0 });
 
-    await open('agent-hub');
-    expect(container.textContent).toContain('Loading agent hub...');
-    await vi.waitFor(() => expect(loads.agentHub).toBe(1));
-    await act(async () => agentHubGate.resolve());
-    expect(container.querySelector('#agent-hub')?.textContent).toBe('Agent hub ready');
+    await open('settings');
+    expect(container.textContent).toContain('Loading settings…');
+    await vi.waitFor(() => expect(loads.settings).toBe(1));
+    await act(async () => settingsGate.resolve());
+    expect(container.querySelector('#settings')?.textContent).toBe('Settings ready');
     await act(async () => container.querySelector<HTMLButtonElement>('.v10-center-tab')!.click());
 
     await open('project:first');
-    expect(container.textContent).toContain('Loading project...');
+    expect(container.textContent).toContain('Loading project…');
     await vi.waitFor(() => expect(loads.project).toBe(1));
     // The shell stays interactive during the first chunk load. Resolving it
     // after navigating away must not restore the old selected tab.

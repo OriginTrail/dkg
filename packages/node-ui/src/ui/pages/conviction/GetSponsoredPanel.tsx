@@ -11,6 +11,10 @@ import {
   nativeGasSymbol,
   isTestnetChain,
 } from '../../components/Pca/index.js';
+import { Check, RefreshCw } from 'lucide-react';
+import { StatusGlyph } from '../../components/ds/Badge.js';
+import { Loading } from '../../components/ds/Loading.js';
+import { ExternalMark } from '../../components/ds/ExternalMark.js';
 
 // Testnet faucets for the native gas token (testnet-only CTA — §6.2). Only
 // chains we have a known faucet for render a button; others show the copy alone.
@@ -170,11 +174,11 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
                 reads, on the edge's ONLY path to a discount, as "I can't get
                 sponsored". Empty copy shows ONLY when loaded AND truly zero. */}
             {walletsLoading && !wb ? (
-              <p className="v10-pca-handshake-empty" role="status">Loading your wallets…</p>
+              <Loading label="Loading your wallets…" />
             ) : walletsReadError && wallets.length === 0 ? (
               <p className="v10-modal-error ds-card-nested" role="alert">
                 Couldn’t load your wallets.{' '}
-                <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refreshWallets()}>Retry</button>
+                <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refreshWallets()}><RefreshCw size={12} />Retry</button>
               </p>
             ) : wallets.length === 0 ? (
               <p className="v10-pca-handshake-empty">No operational wallets detected on this node.</p>
@@ -189,7 +193,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
                     gas={
                       eth != null ? (
                         <span title={formatEthTooltip(eth)}>
-                          gas {formatEth(eth)} {gasSymbol} {funded ? '✓' : '⚠ fund to publish'}
+                          gas {formatEth(eth)} {gasSymbol} {funded ? <Check size={12} /> : <><StatusGlyph tone="warning" /> fund to publish</>}
                         </span>
                       ) : undefined
                     }
@@ -216,10 +220,10 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
 
         {/* Gas nudge */}
         <div className="v10-modal-warning ds-card-nested">
-          ⚠ Gas is always on you. The PCA covers the TRAC publishing fee — never your gas. Fund each
+          <StatusGlyph tone="warning" /> Gas is always on you. The PCA covers the TRAC publishing fee — never your gas. Fund each
           wallet with native {gasSymbol}.
           {faucet ? (
-            <>{' '}<a href={faucet} target="_blank" rel="noreferrer">Open faucet ↗</a> (testnet only)</>
+            <>{' '}<a href={faucet} target="_blank" rel="noreferrer">Open faucet <ExternalMark /></a> (testnet only)</>
           ) : (
             <>{' '}Fund with native {gasSymbol} from your wallet.</>
           )}
@@ -235,7 +239,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
           </p>
           {discovered && discovered.length > 0 && (
             <div className="v10-pca-discovered-check" role="status" data-testid="pca-sponsor-discovered">
-              ◉ We found your wallet(s) already approved on {discovered.map((id) => `PCA #${id}`).join(', ')}.{' '}
+              <StatusGlyph tone="success" /> We found your wallet(s) already approved on {discovered.map((id) => `PCA #${id}`).join(', ')}.{' '}
               <button type="button" className="v10-pca-card-btn compact ds-btn ds-sm" onClick={() => setSponsorId(discovered[0])}>
                 Check PCA #{discovered[0]}
               </button>
@@ -258,7 +262,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
           {probed && (
             <div className="v10-pca-approve-results" role="status" aria-live="polite">
               <p className="v10-pca-approve-summary">
-                Approved on PCA #{probed.accountId}: {approvedCount} of {probed.rows.length} wallets ✓
+                Approved on PCA #{probed.accountId}: {approvedCount} of {probed.rows.length} wallets <Check size={12} />
               </p>
               {probed.rows.map((r) => {
                 const s = sponsorRowStatus(r.coverage);

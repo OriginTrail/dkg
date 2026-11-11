@@ -53,8 +53,9 @@ test.describe('Settings page (rc.12 rewrite)', () => {
     // boots the first NUM_CORE_NODES nodes as `core` and the rest as `edge`, so
     // assert against the role derived for the UI's target node rather than a
     // hard-coded `core` (which would falsely fail when repointed at an edge node
-    // via UI_NODE_ID). Default CI run targets node1 → core.
-    expect((await settingsPage.fieldValue('Role').first().textContent())?.trim()).toBe(EXPECTED_NODE_ROLE);
+    // via UI_NODE_ID). Default CI run targets node1 → core. The page shows the role
+    // as a name: Core or Edge.
+    expect((await settingsPage.fieldValue('Role').first().textContent())?.trim()).toBe(EXPECTED_NODE_ROLE === 'core' ? 'Core' : 'Edge');
     // libp2p peer ids are base58 starting 12D3Koo… — catches a truncated/garbled id.
     expect((await settingsPage.fieldValue('Peer ID').first().textContent())?.trim()).toMatch(/^12D3Koo\w{20,}$/);
   });

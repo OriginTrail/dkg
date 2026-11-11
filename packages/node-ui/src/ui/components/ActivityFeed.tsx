@@ -33,6 +33,7 @@ import { humanizeStatus, humanizeTypeName } from '../lib/formatLabels.js';
 import { LAYER_VAR } from '../layer-colors.js';
 import { Badge, LayerGlyph } from './ds/Badge.js';
 import { entityStatusTone } from '../lib/entity-status.js';
+import { formatDateTime } from '../lib/format.js';
 
 const LAYER_COLOR: Record<TrustLevel, string> = LAYER_VAR;
 
@@ -268,10 +269,10 @@ function ActivityRow({
       // separate rows. Hidden when missing (legacy WorkspaceOperation
       // fallback rows) or zero.
       return item.entityCount != null && item.entityCount > 0
-        ? `Promoted to SWM · ${item.entityCount} ${item.entityCount === 1 ? 'entity' : 'entities'}`
-        : 'Promoted to SWM';
+        ? `Promoted to Shared Working Memory · ${item.entityCount} ${item.entityCount === 1 ? 'entity' : 'entities'}`
+        : 'Promoted to Shared Working Memory';
     }
-    if (item.event === 'published') return 'Published to VM';
+    if (item.event === 'published') return 'Published to Verifiable Memory';
     // A profile label wins as written; a raw type name ("PullRequest") is
     // spaced out for reading ("Pull request").
     if (typeBinding?.label && !typeBinding.isFallback) return typeBinding.label;
@@ -339,7 +340,7 @@ function ActivityRow({
           />
         </span>
       )}
-      <span className="v10-activity-feed-time" title={item.at ? item.at.toLocaleString() : 'no timestamp'}>
+      <span className="v10-activity-feed-time" title={item.at ? formatDateTime(item.at) : 'no timestamp'}>
         {relativeTime(item.at)}
       </span>
     </>

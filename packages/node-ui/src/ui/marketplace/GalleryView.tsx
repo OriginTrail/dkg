@@ -2,6 +2,7 @@
 // fixture node's answers (api/fixtures.ts), never by a live node, and
 // labeled as such. Nothing on this page sends a request.
 import React, { useState } from 'react';
+import { PageHeader } from '../components/ds/PageHeader.js';
 import { copy } from './copy.generated.js';
 import { errorOf } from './api/client.js';
 import { FIXTURE_IDS, FIXTURE_SECRET, fixtureWorld } from './api/fixtures.js';
@@ -64,7 +65,7 @@ export function MarketplaceGalleryView(): React.ReactElement {
         {copy('gallery.banner')}
       </div>
       <div className="frame mkt-frame">
-        <h1>{copy('gallery.title')}</h1>
+        <PageHeader title={copy('gallery.title')} />
 
         <Sect title={copy('gallery.sect.calls')}>
           <div className="mkt-fchips mkt-wrap" data-testid="mkt-gallery-calls">

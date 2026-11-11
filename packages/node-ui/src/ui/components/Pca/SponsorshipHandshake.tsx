@@ -31,7 +31,7 @@ export function SponsorshipHandshake({
         <header className="v10-pca-handshake-head">
           <span className="v10-pca-handshake-title">Operational wallets</span>
           <span className="v10-pca-handshake-sub">
-            The edge node shares these; the PCA owner approves them.
+            The Edge node shares these; the PCA owner approves them.
           </span>
         </header>
         {wallets.length === 0 ? (

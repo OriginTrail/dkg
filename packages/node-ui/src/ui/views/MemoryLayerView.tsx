@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, lazy, Suspense } from 'react';
-import { LayerGlyph } from '../components/ds/Badge.js';
+import { LayerGlyph, StatusGlyph } from '../components/ds/Badge.js';
 import { useFetch } from '../hooks.js';
 import { executeQuery, fetchStatus, listAssertions, promoteAssertion, publishAssertionsToVm, partialPublishWarning, outcomeUnknownPublishNote, describePromoteResult, describePromoteError, type AssertionInfo, type BatchPublishResult } from '../api.js';
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
@@ -11,6 +11,9 @@ import { useGraphPalette } from '../hooks/useGraphPalette.js';
 import { dataSlotHex } from '../graph-palette.js';
 import { graphOptions } from './memory-layer-graph-options.js';
 import { schemaTypeColors } from './schema-type-colors.js';
+import { RefreshCw } from 'lucide-react';
+import { Loading } from '../components/ds/Loading.js';
+import { PageHeader } from '../components/ds/PageHeader.js';
 
 const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -222,10 +225,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
     <div className="v10-memory-layer-view">
       <div className="v10-mlv-header">
         <span className="v10-mlv-icon" style={{ color: meta.color }}><LayerGlyph layer={layer} /></span>
-        <div>
-          <h2 className="v10-mlv-title">{meta.label}</h2>
-          <p className="v10-mlv-desc">{meta.description}</p>
-        </div>
+        <PageHeader title={meta.label} description={meta.description} />
       </div>
 
       {layer === 'wm' && (
@@ -255,7 +255,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
           </div>
 
           <div className="v10-vm-search-controls">
-            <input
+            <input aria-label="Search Verifiable Memory"
               type="text"
               className="v10-mlv-query-input ds-input"
               placeholder="Search verifiable memory..."
@@ -263,7 +263,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
               onChange={(e) => setDraftSearch(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') runVerifiedSearch(); }}
             />
-            <select
+            <select aria-label="Search field"
               className="v10-vm-search-select ds-input"
               value={draftField}
               onChange={(e) => setDraftField(e.target.value as 'any' | 'subject' | 'predicate' | 'object')}
@@ -273,7 +273,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
               <option value="predicate">Predicate</option>
               <option value="object">Object</option>
             </select>
-            <select
+            <select aria-label="Row limit"
               className="v10-vm-search-select ds-input"
               value={String(draftLimit)}
               onChange={(e) => setDraftLimit(Number.parseInt(e.target.value, 10) || 50)}
@@ -293,7 +293,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       {(layer !== 'vm' || showAdvancedQuery) && (
         <div className="v10-mlv-query-bar">
           {queryPresetOptions?.length ? (
-            <select
+            <select aria-label="Query preset"
               className="v10-vm-search-select ds-input"
               value={selectedPresetLabel}
               onChange={(e) => {
@@ -311,7 +311,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
               ))}
             </select>
           ) : (
-            <input
+            <input aria-label="Custom SPARQL query"
               type="text"
               className="v10-mlv-query-input ds-input"
               placeholder="Custom SPARQL query..."
@@ -351,8 +351,8 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
         </div>
       )}
 
-      {loading && <p className="v10-mlv-status">Loading...</p>}
-      {error && <p className="v10-mlv-status" style={{ color: 'var(--accent-red)' }}>Error: {error}</p>}
+      {loading && <Loading label="Loading…" />}
+      {error && <p className="v10-mlv-status" style={{ color: 'var(--text-danger)' }}>Error: {error}</p>}
 
       {!loading && results.length === 0 && (
         <div className="v10-mlv-empty">
@@ -371,9 +371,9 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
           <div className="ds-table-scroll"><table className="v10-mlv-table">
             <thead>
               <tr>
-                <th>Subject</th>
-                <th>Predicate</th>
-                <th>Object</th>
+                <th className="ds-table-head">Subject</th>
+                <th className="ds-table-head">Predicate</th>
+                <th className="ds-table-head">Object</th>
               </tr>
             </thead>
             <tbody>
@@ -395,7 +395,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
             <span>{triples.length} triples</span>
             {activeQuery && <span className="v10-mlv-graph-info-custom">filtered</span>}
           </div>
-          <Suspense fallback={<div className="v10-mlv-graph-loading">Loading graph renderer...</div>}>
+          <Suspense fallback={<Loading label="Loading graph renderer…" block className="v10-mlv-graph-loading" />}>
             <RdfGraph
               data={triples}
               format="triples"
@@ -542,7 +542,7 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
     }
   }, [assertions, contextGraphId, refresh, onPromoted]);
 
-  if (loading) return <div className="v10-assertion-list-loading">Loading assertions...</div>;
+  if (loading) return <Loading label="Loading assertions…" block />;
   if (!assertions?.length) return null;
 
   return (
@@ -554,7 +554,7 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
           disabled={promoting !== null}
           onClick={handlePromoteAll}
         >
-          {promoting === '__all__' ? 'Sharing...' : 'Share Complete KAs → SWM'}
+          {promoting === '__all__' ? 'Sharing...' : 'Share complete Knowledge Assets'}
         </button>
       </div>
       <div className="v10-assertion-items">
@@ -707,7 +707,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
   const selectedTriples = assertions?.filter(a => selected.has(a.graphUri)).reduce((sum, a) => sum + (a.tripleCount ?? 0), 0) ?? 0;
   const isEmpty = !loading && (!assertions || assertions.length === 0);
 
-  if (loading) return <div className="v10-assertion-list-loading">Loading SWM contents...</div>;
+  if (loading) return <Loading label="Loading Shared Working Memory…" block />;
   if (isEmpty) {
     return (
       <div className="v10-publish-panel ds-card">
@@ -728,13 +728,13 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
           Knowledge assets in Shared Working Memory ({assertions!.length} asset{assertions!.length === 1 ? '' : 's'} · {totalTriples} triples)
         </span>
         <div className="v10-publish-panel-header-actions">
-          <button className="v10-publish-panel-refresh ds-btn ds-ghost ds-sm ds-icon" onClick={refresh} title="Refresh">↻</button>
+          <button className="v10-publish-panel-refresh ds-btn ds-ghost ds-sm ds-icon" onClick={refresh} title="Refresh" aria-label="Refresh"><RefreshCw size={12} /></button>
           <button
             className="v10-btn-promote-all ds-btn ds-swm"
             disabled={publishing}
             onClick={handlePublishAll}
           >
-            {publishing && selected.size === 0 ? 'Publishing...' : 'Publish All → VM'}
+            {publishing && selected.size === 0 ? 'Publishing...' : 'Publish all to Verifiable Memory'}
           </button>
         </div>
       </div>
@@ -750,7 +750,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
             disabled={publishing}
             onClick={handlePublishSelected}
           >
-            {publishing ? 'Publishing...' : `Publish ${selected.size} selected (${selectedTriples} triples) → VM`}
+            {publishing ? 'Publishing...' : `Publish ${selected.size} selected (${selectedTriples} triples)`}
           </button>
         )}
       </div>
@@ -801,7 +801,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
             </div>
             {partial > 0 && (
               <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
-                ⚠ {partial} asset{partial === 1 ? '' : 's'}: {partialPublishWarning(partialError)}
+                <StatusGlyph tone="warning" /> {partial} asset{partial === 1 ? '' : 's'}: {partialPublishWarning(partialError)}
               </div>
             )}
             {failures.length > 0 && (
@@ -812,7 +812,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
             )}
             {unknownNote && (
               <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
-                ⚠ {unknownNote}
+                <StatusGlyph tone="warning" /> {unknownNote}
               </div>
             )}
             <div className="v10-publish-result-details">

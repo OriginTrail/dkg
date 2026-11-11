@@ -3,21 +3,21 @@
    SubGraphBar both in the All / overview state and inside every
    detail body so the explanatory text never disappears. */
 .v10-subgraph-explorer-header {
-  padding: 12px 16px 4px;
+  padding: var(--space-12) var(--space-16) var(--space-4);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-6);
 }
 .v10-subgraph-explorer-title {
   font-size: var(--fs-title);
   font-weight: 700;
-  letter-spacing: 0.01em;
+  letter-spacing: 0;
   color: var(--text-primary);
 }
 .v10-subgraph-explorer-intro {
   margin: 0;
   font-size: var(--fs-control);
-  line-height: 1.55;
+  line-height: var(--lh-body);
   color: var(--text-secondary);
   max-width: 760px;
 }
@@ -37,17 +37,17 @@
      so the cluster reads as a single layered breathing band (lede
      +2px / count strip / pill +14px) instead of stacked rows with
      bottom container padding. */
-  padding: 16px 16px 0;
+  padding: var(--space-16) var(--space-16) 0;
   border-bottom: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-6);
   background: var(--tint-faint);
 }
 .v10-subgraph-cross-layer-lede {
   font-size: var(--fs-label);
   color: var(--text-tertiary);
-  letter-spacing: 0.01em;
+  letter-spacing: 0;
   /* #11 polish (ui-locked) — +2px below the lede so the count
      strip sits cleanly beneath. */
   margin-bottom: 10px;
@@ -61,7 +61,7 @@
 .v10-subgraph-cross-layer-cell {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-6);
   border: 1px solid var(--border-subtle);
   font-size: var(--fs-control);
   color: var(--text-primary);
@@ -73,9 +73,9 @@
      don't shift). */
   cursor: pointer;
   border-radius: var(--radius-control);
-  padding: 4px 8px;
+  padding: var(--space-4) var(--space-8);
   margin: -4px -8px;
-  transition: background 0.15s, color 0.15s, opacity 0.15s;
+  transition: background var(--motion-base), color var(--motion-base), opacity var(--motion-base);
   /* Native button reset so the cell inherits the rest of the
      strip's typography rather than the UA <button> defaults. */
   font-family: inherit;
@@ -95,7 +95,7 @@
   color: var(--text-secondary);
   font-size: var(--fs-label);
   font-weight: 600;
-  letter-spacing: 0.01em;
+  letter-spacing: 0;
 }
 .v10-subgraph-cross-layer-cell-count {
   font-variant-numeric: tabular-nums;
@@ -115,12 +115,12 @@
 .v10-subgraph-active-layer-pill {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-6);
   /* 8/12 asymmetry (ui-lead, round 3): caption reads as
      "grouped with the strip above (tight 8px), terminated
      from the chrome below (looser 12px)". */
-  margin-top: 8px;              /* was: 14px */
-  margin-bottom: 12px;          /* round 3: terminate before entity-tab strip */
+  margin-top: var(--space-8);              /* was: 14px */
+  margin-bottom: var(--space-12);          /* round 3: terminate before entity-tab strip */
   padding: 0;
   border: 0;
   background: transparent;
@@ -129,7 +129,7 @@
   font-size: var(--fs-label);
   color: var(--text-tertiary);
   cursor: default;               /* not a clickable widget */
-  transition: color 0.15s;
+  transition: color var(--motion-base);
 }
 .v10-subgraph-active-layer-pill:hover:not(:disabled) {
   color: var(--text-secondary);
@@ -138,13 +138,13 @@
 .v10-subgraph-active-layer-pill:disabled,
 .v10-subgraph-active-layer-pill.all-layers {
   color: var(--text-tertiary);
-  opacity: 1;
+  opacity: var(--opacity-disabled);
 }
 .v10-subgraph-active-layer-pill-label {
   text-transform: uppercase;
   font-size: var(--fs-micro);
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--ls-caps);
   color: var(--text-tertiary);
 }
 .v10-subgraph-active-layer-pill-value {
@@ -166,12 +166,12 @@
    The layer-transition icon (◈ / ◉) matches LAYER_CONFIG so the CTA
    visually anticipates the destination layer. */
 .v10-ka-verify {
-  margin-top: 16px;
+  margin-top: var(--space-16);
   padding: 14px;
   border-radius: var(--radius-nested);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-8);
 }
 .v10-ka-verify-promote {
   background: var(--layer-shared-bg);
@@ -182,7 +182,7 @@
   border: 1px solid var(--layer-verified-border);
 }
 .v10-ka-verify-head {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: var(--space-8);
 }
 .v10-ka-verify-arrow {
   font-size: var(--fs-heading);
@@ -193,40 +193,40 @@
 .v10-ka-verify-title {
   font-size: var(--fs-body); font-weight: 700;
   color: var(--text-primary);
-  letter-spacing: 0.01em;
+  letter-spacing: 0;
 }
 .v10-ka-verify-btn { width: 100%; }
-.v10-ka-verify-btn:disabled { opacity: 0.45; }
+.v10-ka-verify-btn:disabled { opacity: var(--opacity-disabled); }
 .v10-ka-verify-hint {
-  margin-top: 8px;
-  font-size: var(--fs-micro); color: var(--text-tertiary); line-height: 1.5;
+  margin-top: var(--space-8);
+  font-size: var(--fs-micro); color: var(--text-tertiary); line-height: var(--lh-body);
 }
 .v10-ka-verify-err {
-  margin-top: 8px; padding: 6px 8px;
+  margin-top: var(--space-8); padding: var(--space-6) var(--space-8);
   background: var(--danger-bg-strong);
   border-radius: var(--radius-xs);
   color: var(--text-danger); font-size: var(--fs-label);
   font-family: var(--font-mono);
 }
 .v10-ka-verify-ok {
-  display: flex; flex-direction: column; gap: 4px;
+  display: flex; flex-direction: column; gap: var(--space-4);
 }
 /* Partial publish (HTTP 207): minted on-chain but the context-graph binding
    failed. Same layout as the OK state, amber-tinted to read as a warning. */
 .v10-ka-verify-warn {
-  display: flex; flex-direction: column; gap: 4px;
-  padding: 6px 8px;
+  display: flex; flex-direction: column; gap: var(--space-4);
+  padding: var(--space-6) var(--space-8);
   background: var(--warning-bg-strong);
   border-radius: var(--radius-xs);
 }
 .v10-ka-verify-ok-row {
   display: flex; justify-content: space-between; align-items: center;
-  padding: 4px 0;
+  padding: var(--space-4) 0;
   border-bottom: 1px dashed var(--tint-strong);
   font-size: var(--fs-label);
 }
 .v10-ka-verify-ok-row:last-child { border-bottom: none; }
-.v10-ka-verify-ok-lbl { color: var(--text-tertiary); text-transform: uppercase; font-size: var(--fs-micro); letter-spacing: 0.08em; }
+.v10-ka-verify-ok-lbl { color: var(--text-tertiary); text-transform: uppercase; font-size: var(--fs-micro); letter-spacing: var(--ls-caps); }
 .v10-ka-verify-ok-val { color: var(--text-primary); font-weight: 600; }
 .v10-ka-verify-ok-val.mono {
   font-family: var(--font-mono); font-variant-numeric: tabular-nums;

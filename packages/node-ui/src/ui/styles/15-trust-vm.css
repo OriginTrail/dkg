@@ -4,7 +4,7 @@
 @media (max-height: 700px) {
   .v10-mlv-graph-container { height: 350px; min-height: 300px; }
 }
-@media (max-width: 700px) {
+@media (max-width: 720px) {
   .v10-mlv-node-panel { width: 200px; max-height: 200px; }
 }
 
@@ -14,7 +14,7 @@
 
 .v10-memory-explorer {
   display: flex; flex-direction: column; height: 100%; min-height: 0;
-  max-width: none; margin: -24px -28px; overflow: hidden;
+  max-width: none; margin: calc(var(--page-gutter) * -1); overflow: hidden;
 }
 .v10-memory-explorer-page {
   flex: 1 1 auto;
@@ -41,7 +41,7 @@
 .v10-memory-explorer-page > .v10-sgov-state {
   flex: 1 1 auto;
   min-height: 220px;
-  margin: 0 12px 12px;
+  margin: 0 var(--space-12) var(--space-12);
 }
 .v10-memory-explorer-page[data-view="entity"] > .v10-ka-detail,
 .v10-memory-explorer-page[data-view="subgraph"] > .v10-layer-detail {
@@ -51,8 +51,6 @@
 /* ── Trust Summary ── */
 
 /* ── Loading / Error / Empty ── */
-.v10-me-loading { display: flex; align-items: center; justify-content: center; flex: 1; }
-.v10-me-loading-text { font-size: var(--fs-control); color: var(--text-tertiary); }
 
 /* ── Sub-graph Bar ── */
 /* PR #793 round 2 (ui-locked option a) — capsule chrome dropped.
@@ -71,10 +69,10 @@
   display: flex;
   align-items: center;
   flex-shrink: 0;
-  gap: 8px;
+  gap: var(--space-8);
   flex-wrap: wrap;
-  padding: 8px 12px;
-  margin-bottom: 8px;
+  padding: var(--space-8) var(--space-12);
+  margin-bottom: var(--space-8);
   background: transparent;                          /* was: var(--surface-1, rgba(255,255,255,0.02)) */
   border: 0;                                        /* was: 1px solid var(--border-subtle, ...) */
   border-bottom: 1px solid var(--border-subtle);    /* single-edge termination */
@@ -82,10 +80,10 @@
 }
 .v10-subgraph-bar-label {
   font-size: var(--fs-label);
-  letter-spacing: 0.06em;
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--text-tertiary);
-  padding-right: 4px;
+  padding-right: var(--space-4);
 }
 .v10-subgraph-chip:hover { transform: translateY(-1px); }
 .v10-subgraph-chip-icon { font-size: var(--fs-body); line-height: 1; }
@@ -93,7 +91,7 @@
 .v10-subgraph-chip-count {
   font-size: var(--fs-label);
   opacity: 0.75;
-  padding: 1px 6px;
+  padding: 1px var(--space-6);
   border-radius: var(--radius-pill);
   background: var(--tint-strong);
 }
@@ -109,7 +107,7 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
-  padding: 16px;
+  padding: var(--space-16);
   margin-bottom: 10px;
   /* Banner sits above the scrollable EntityList inside a fixed-height
      (70vh) flex-column. Without flex-shrink:0 it competes with the list
@@ -124,33 +122,33 @@
   display: flex;
   align-items: flex-start;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: var(--space-12);
 }
 .v10-vm-hero-heading {
   display: flex;
   flex: 1 1 220px;
   min-width: 0;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-4);
 }
 .v10-vm-hero-badge { flex: 0 0 auto; }
 .v10-vm-hero-headline {
   font-size: var(--fs-body);
-  line-height: 1.35;
+  line-height: var(--lh-snug);
   color: var(--text-primary);
-  font-weight: 650;
+  font-weight: 600;
 }
 .v10-vm-hero-context {
   max-width: 100%;
   font-size: var(--fs-control);
-  line-height: 1.35;
+  line-height: var(--lh-snug);
   color: var(--text-tertiary);
   overflow-wrap: anywhere;
 }
 .v10-vm-hero-stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 12px;
+  gap: var(--space-12);
 }
 .v10-vm-hero-stats .v10-stat-strip-cell {
   background: var(--v10-vm-surface);
@@ -161,37 +159,37 @@
 }
 .v10-vm-hero-stats .v10-stat-strip-label {
   font-size: var(--fs-label);
-  letter-spacing: 0.07em;
+  letter-spacing: 0;
 }
 /* C11: facts about this graph's VM, as label/value readouts (not pills).
    Neutral by default; only a fact that needs attention turns amber. */
 .v10-vm-hero-facts {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 22px;
+  gap: var(--space-6) var(--space-24);
   margin: 0;
   padding-top: 10px;
   border-top: 1px solid color-mix(in srgb, var(--layer-verified) 22%, transparent);
 }
-.v10-vm-hero-fact { display: flex; gap: 6px; align-items: baseline; font-size: var(--fs-control); }
+.v10-vm-hero-fact { display: flex; gap: var(--space-6); align-items: baseline; font-size: var(--fs-control); }
 .v10-vm-hero-fact dt { color: var(--text-tertiary); }
 .v10-vm-hero-fact dd { margin: 0; font-weight: 600; color: var(--text-primary); }
 .v10-vm-hero-fact.tone-muted dd { color: var(--text-tertiary); }
 .v10-vm-hero-fact.tone-warn dd { color: var(--text-warning); }
-.v10-vm-hero-fact-icon { margin-left: 4px; }
+.v10-vm-hero-fact-icon { margin-left: var(--space-4); }
 /* Light values come from the --layer-verified-* light tokens. */
 .v10-layer-expand-body.entities-tab > .v10-vm-hero {
-  margin: 16px 16px 10px;
+  margin: var(--space-16) var(--space-16) 10px;
 }
 .v10-vm-hero-empty {
-  gap: 16px;
+  gap: var(--space-16);
 }
 .v10-empty-state.v10-vm-empty-state {
   display: flex;
   align-items: flex-start;
   justify-content: flex-start;
-  gap: 12px;
-  padding: 16px;
+  gap: var(--space-12);
+  padding: var(--space-16);
   background: var(--v10-vm-surface);
   border: 1px solid var(--v10-vm-border);
   border-radius: var(--radius-nested);
@@ -207,7 +205,7 @@
 .v10-vm-legend {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-6);
   padding: 10px;
   width: 100%;
   background: color-mix(in srgb, var(--layer-verified) 5%, transparent);
@@ -218,17 +216,17 @@
 .v10-vm-legend-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  line-height: 1.3;
+  gap: var(--space-8);
+  line-height: var(--lh-snug);
 }
 .v10-vm-legend-head {
   font-size: var(--fs-micro);
   font-weight: 700;
-  letter-spacing: 0.05em;
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--layer-verified-text);
   justify-content: space-between;
-  padding-bottom: 4px;
+  padding-bottom: var(--space-4);
   border-bottom: 1px solid color-mix(in srgb, var(--layer-verified) 18%, transparent);
 }
 .v10-vm-legend-swatch {
@@ -250,8 +248,8 @@
   font-size: var(--fs-label);
 }
 .v10-vm-legend-foot {
-  margin-top: 4px;
-  padding-top: 6px;
+  margin-top: var(--space-4);
+  padding-top: var(--space-6);
   border-top: 1px dashed var(--tint-strong);
   font-size: var(--fs-micro);
   color: var(--text-tertiary);
@@ -267,7 +265,7 @@
 .v10-swm-legend {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-6);
   padding: 10px;
   width: 100%;
   background: color-mix(in srgb, var(--layer-shared) 5%, transparent);
@@ -278,17 +276,17 @@
 .v10-swm-legend-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  line-height: 1.3;
+  gap: var(--space-8);
+  line-height: var(--lh-snug);
 }
 .v10-swm-legend-head {
   font-size: var(--fs-micro);
   font-weight: 700;
-  letter-spacing: 0.05em;
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--layer-shared-text);
   justify-content: space-between;
-  padding-bottom: 4px;
+  padding-bottom: var(--space-4);
   border-bottom: 1px solid color-mix(in srgb, var(--layer-shared) 18%, transparent);
 }
 .v10-swm-legend-swatch {
@@ -320,8 +318,8 @@
   font-size: var(--fs-micro);
 }
 .v10-swm-legend-conflict {
-  margin-top: 4px;
-  padding-top: 6px;
+  margin-top: var(--space-4);
+  padding-top: var(--space-6);
   border-top: 1px dashed color-mix(in srgb, var(--accent-amber) 22%, transparent);
   color: var(--text-warning);
 }

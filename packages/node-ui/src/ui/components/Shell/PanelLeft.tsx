@@ -1,7 +1,8 @@
 import React, { useCallback, useState } from 'react';
-import { Activity, ClipboardList, KeyRound, Store } from 'lucide-react';
+import { Activity, ClipboardList, Eye, KeyRound, RefreshCw, Store, X } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
+import { chooseOpenTab, chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
 import { useJourneyStore } from '../../stores/journey.js';
 import { useContextGraphDialogs } from '../../stores/contextGraphDialogs.js';
@@ -15,9 +16,9 @@ import {
 } from '../../api.js';
 import { ContextGraphMark } from '../../context-graph-colors.js';
 import {
-  belongsInContextOracleSidebar,
+  belongsInPublicSidebar,
   belongsInMyProjectsSidebar,
-  classifyContextOracleEntry,
+  classifyPublicEntry,
   toSidebarIdentity,
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
@@ -57,21 +58,21 @@ function ProjectTreeItem({
         onClick={onSelect}
       >
         <ContextGraphMark id={cg.id} name={cg.name} />
-        <span className="v10-tree-section-label">{cg.name || cg.id.slice(0, 16)}</span>
+        <button type="button" className="v10-tree-section-label ds-row-open">{cg.name || cg.id.slice(0, 16)}</button>
         <button
           type="button"
           className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
-          title="Hide this context graph from the sidebar (reversible)"
+          aria-label={`Hide ${cg.name || cg.id.slice(0, 16)} from the sidebar`} title="Hide this context graph from the sidebar (reversible)"
           onClick={(e) => { e.stopPropagation(); onHide(); }}
         >
-          ×
+          <X size={14} />
         </button>
       </div>
     </div>
   );
 }
 
-interface OracleCatalogueItemProps {
+interface PublicCatalogueItemProps {
   cg: ContextGraph;
   isBrowsing: boolean;
   onBrowse: () => void;
@@ -79,13 +80,13 @@ interface OracleCatalogueItemProps {
   onHide: () => void;
 }
 
-function OracleCatalogueItem({
+function PublicCatalogueItem({
   cg,
   isBrowsing,
   onBrowse,
   onSubscribe,
   onHide,
-}: OracleCatalogueItemProps) {
+}: PublicCatalogueItemProps) {
   const label = cg.name || cg.id.slice(0, 16);
   return (
     <div className="v10-tree-section">
@@ -111,10 +112,10 @@ function OracleCatalogueItem({
         <button
           type="button"
           className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
-          title="Hide this context graph from the sidebar (reversible)"
+          aria-label={`Hide ${label} from the sidebar`} title="Hide this context graph from the sidebar (reversible)"
           onClick={onHide}
         >
-          ×
+          <X size={14} />
         </button>
       </div>
     </div>
@@ -211,7 +212,7 @@ export function PanelLeft() {
   const toggleLeftSectionMyProjects = useLayoutStore((s) => s.toggleLeftSectionMyProjects);
   const toggleLeftSectionContextOracle = useLayoutStore((s) => s.toggleLeftSectionContextOracle);
   const toggleLeftSectionIntegrations = useLayoutStore((s) => s.toggleLeftSectionIntegrations);
-  const { openTab, activeTabId, setActiveTab } = useTabsStore();
+  const activeTabId = useTabsStore((s) => s.activeTabId);
   const { activeProjectId, setActiveProject } = useProjectsStore();
   const { contextGraphs, error: listError, identity: sharedAgent,
     inventoryLoading, inventoryError } = useContextGraphInventory();
@@ -223,8 +224,8 @@ export function PanelLeft() {
   const visibleContextGraphs = contextGraphs.filter((cg) => !hiddenIds.has(cg.id));
   const myProjects = visibleContextGraphs.filter((cg) =>
     belongsInMyProjectsSidebar(cg, agentIdentity));
-  const contextOracleProjects = visibleContextGraphs.filter((cg) =>
-    belongsInContextOracleSidebar(cg, agentIdentity));
+  const publicContextGraphs = visibleContextGraphs.filter((cg) =>
+    belongsInPublicSidebar(cg, agentIdentity));
   const hiddenCount = contextGraphs.length - visibleContextGraphs.length;
 
   // The marketplace section is still flagged: `?marketplace` once turns it on.
@@ -232,7 +233,6 @@ export function PanelLeft() {
   const marketplaceActive = MARKETPLACE_TAB_IDS.includes(activeTabId);
   const openMarketplaceTab = (tab: { id: string; label: string }) => {
     openTab({ id: tab.id, label: tab.label, closable: true });
-    setActiveTab(tab.id);
     setActiveProject(null);
   };
   const marketplaceRows = [
@@ -264,10 +264,20 @@ export function PanelLeft() {
           type="button"
           className={`v10-tree-dashboard v10-sidebar-place ${activeTabId === 'dashboard' ? 'active' : ''}`}
           aria-current={activeTabId === 'dashboard' ? 'page' : undefined}
-          onClick={() => { setActiveTab('dashboard'); setActiveProject(null); }}
+          onClick={() => { chooseOpenTab('dashboard'); setActiveProject(null); }}
         >
           <span className="v10-sidebar-place-icon">{DASHBOARD_ICON}</span>
           Dashboard
+        </button>
+        <button
+          type="button"
+          className={`v10-tree-dashboard v10-sidebar-place ${activeTabId === 'memory-stack' ? 'active' : ''}`}
+          aria-current={activeTabId === 'memory-stack' ? 'page' : undefined}
+          title={PLACES['memory-stack'].title}
+          onClick={() => openTab({ id: 'memory-stack', label: PLACES['memory-stack'].label, closable: true })}
+        >
+          <span className="v10-sidebar-place-icon">{placeIcon('memory-stack')}</span>
+          {PLACES['memory-stack'].label}
         </button>
 
         {showMarketplace && (
@@ -298,7 +308,7 @@ export function PanelLeft() {
           <div className="v10-journey-empty-card ds-card" role="alert">
             <div>{listError ? 'Context graphs unavailable. ' : ''}{sharedAgent.error ? 'Agent identity unavailable.' : ''}</div>
             <div>{contextGraphs.length ? 'Showing the last available context graphs.' : 'Context graph membership is unknown.'}</div>
-            <button type="button" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry</button>
+            <button type="button" className="ds-btn ds-sm" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}><RefreshCw size={12} />Retry</button>
           </div>
         )}
 
@@ -350,7 +360,7 @@ export function PanelLeft() {
               onClick={unhideAll}
               title="Restore all context graphs dismissed from the sidebar"
             >
-              ↺ Show {hiddenCount} hidden context graph{hiddenCount !== 1 ? 's' : ''}
+              <Eye size={12} /> Show {hiddenCount} hidden context graph{hiddenCount !== 1 ? 's' : ''}
             </button>
           )}
 
@@ -364,19 +374,19 @@ export function PanelLeft() {
 
         <SidebarSection
           label="Public graphs"
-          count={contextOracleProjects.length}
+          count={publicContextGraphs.length}
           open={leftSectionContextOracleOpen}
           onToggle={toggleLeftSectionContextOracle}
           bodyClassName="v10-sidebar-public-graphs"
         >
-          {contextOracleProjects.length > 0 ? contextOracleProjects.map((cg) => {
+          {publicContextGraphs.length > 0 ? publicContextGraphs.map((cg) => {
             const onHide = () => {
               hideProject(cg.id);
               if (activeProjectId === cg.id) setActiveProject(null);
             };
-            if (classifyContextOracleEntry(cg) === 'catalogue') {
+            if (classifyPublicEntry(cg) === 'catalogue') {
               return (
-                <OracleCatalogueItem
+                <PublicCatalogueItem
                   key={cg.id}
                   cg={cg}
                   isBrowsing={activeTabId === `project:${cg.id}`}

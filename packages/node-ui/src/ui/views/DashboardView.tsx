@@ -1,8 +1,8 @@
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react';
-import { Lock, Globe, Share2, TrendingUp, UsersRound, Wallet } from 'lucide-react';
+import { Lock, Globe, Share2, TrendingUp, UsersRound, Wallet, Check, Diamond, RefreshCw } from 'lucide-react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
-import { useTabsStore } from '../stores/tabs.js';
+import { chooseTab as openTab } from '../lib/shellNavigation.js';
 import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
 import { useMyContextGraphs } from '../hooks/useMyContextGraphs.js';
 import { useMemoryEntities } from '../hooks/useMemoryEntities.js';
@@ -20,6 +20,10 @@ import { dashboardSizePresentation } from './dashboard-size-presentation.js';
 import { ContextGraphMark } from '../context-graph-colors.js';
 import { AgentDotStack } from '../components/AgentDot.js';
 import { Count } from '../components/ds/Badge.js';
+import { Loading } from '../components/ds/Loading.js';
+import { formatNumber, truncateAddress } from '../lib/format.js';
+import { PageHeader } from '../components/ds/PageHeader.js';
+import { StatTile } from '../components/ds/StatTile.js';
 
 // Single user-facing description shown inside the My Context Graphs
 // card (one line, no separate footnote — round-2 feedback: the split
@@ -96,28 +100,6 @@ function abbrev(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`.replace('.0', '');
   return `${(n / 1_000_000).toFixed(1)}M`.replace('.0', '');
-}
-
-function StatCard({
-  label, value, sub, accentColor, children, icon, className,
-}: {
-  label: string;
-  value?: React.ReactNode;
-  sub?: React.ReactNode;
-  accentColor?: string;
-  children?: React.ReactNode;
-  icon?: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <div className={`stat-card ds-card v10-anim-mount${className ? ` ${className}` : ''}`}>
-      {accentColor && <div className="accent" style={{ background: accentColor }} />}
-      <div className="stat-label">{icon}{label}</div>
-      {value != null && value !== '' && <div className="stat-value">{value}</div>}
-      {children}
-      {sub != null && sub !== '' && <div className="stat-sub">{sub}</div>}
-    </div>
-  );
 }
 
 // 3-segment proportion bar (WM/SWM/VM). A 1px inter-segment + track
@@ -413,16 +395,16 @@ function CgRow({
 
   return (
     <button className="v10-cg-row" onClick={() => onOpen(cg)}>
-      <span className="v10-cg-cell v10-cg-name"><ContextGraphMark id={cg.id} name={cg.name} />{cg.name || cg.id.slice(0, 16)}</span>
+      <span className="v10-cg-cell v10-cg-name"><ContextGraphMark id={cg.id} name={cg.name} /><span className="v10-cg-name-text" title={cg.name || cg.id}>{cg.name || cg.id.slice(0, 16)}</span></span>
       <span
         className="v10-cg-cell v10-cg-type"
         title={`${typeLabel} context graph`}
         aria-label={`${typeLabel} context graph`}
       >
         {policy === 'private'
-          ? <Lock size={13} aria-hidden="true" />
+          ? <Lock size={14} aria-hidden="true" />
           : policy === 'public'
-            ? <Globe size={13} aria-hidden="true" />
+            ? <Globe size={14} aria-hidden="true" />
             : <span className="v10-cg-dim">—</span>}
       </span>
       <span className="v10-cg-cell v10-cg-size">
@@ -435,14 +417,14 @@ function CgRow({
               // bare — so the row isn't empty while the card is
               // populated; triples have no summary fallback (Codex).
               <span title="Live entity count unavailable — showing the published Knowledge-Asset summary, not the full WM/SWM/VM entity total">
-                {abbrev(entities.total)} <span className="v10-cg-dim">KA (summary)</span> · <span className="v10-cg-dim">— triples</span>
+                {abbrev(entities.total)} <span className="v10-cg-dim">Knowledge Assets (summary)</span> · <span className="v10-cg-dim">— triples</span>
               </span>
             )
             : mem.partial
               ? (
                 // More layers can reveal residue and reduce canonical triple totals.
                 <span title="Loaded preview only — some memory layers are capped or unavailable; total triples may increase or decrease as layers load">
-                  {entities.total.toLocaleString()}+ <span className="v10-cg-dim">entities</span> · ~{triples.total.toLocaleString()} <span className="v10-cg-dim">triples · loaded preview</span>
+                  {formatNumber(entities.total)}+ <span className="v10-cg-dim">entities</span> · ~{formatNumber(triples.total)} <span className="v10-cg-dim">triples · loaded preview</span>
                 </span>
               )
               : <>{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · {abbrev(triples.total)} <span className="v10-cg-dim">triples</span></>}
@@ -459,6 +441,7 @@ function CgRow({
       </span>
       <span className="v10-cg-cell v10-cg-role">
         <span className={`v10-cg-badge v10-cg-badge-${isCurator ? 'curator' : 'joined'}`}>
+          {isCurator ? <Diamond size={12} fill="currentColor" /> : <Check size={12} />}
           {isCurator ? 'Curator' : 'Joined'}
         </span>
       </span>
@@ -472,7 +455,6 @@ export function DashboardView() {
   const { data: status } = useFetch(api.fetchStatus, [], 10_000);
   const { data: econ } = useFetch(api.fetchEconomics, [], 60_000);
   const { data: wb, loading: wbLoading, error: wbError } = useFetch(api.fetchWalletsBalances, [], 30_000);
-  const { openTab } = useTabsStore();
   const { setActiveProject } = useProjectsStore();
   const { myCgs, identity, identityLoading, cgsError, identityError, inventoryLoading, inventoryError, retry } = useMyContextGraphs();
   const inventoryFailed = Boolean(inventoryError);
@@ -603,34 +585,33 @@ export function DashboardView() {
     };
   });
 
-  const walletSym = wb?.symbol || 'TRAC';
   const walletRows = wb?.balances ?? [];
-  const shortAddr = (a: string) => (a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a);
+  const shortAddr = truncateAddress;
 
 
   return (
-    <div className="v10-dashboard">
-      <div className="v10-dash-header">
-        <h1 className="v10-dash-title">Dashboard</h1>
-        <p className="v10-dash-subtitle">
+    <div className="ds-page v10-dashboard">
+      <PageHeader
+        title="Dashboard"
+        description={<>
           {status?.name || 'DKG Node'} · {status?.networkName || 'network'}
           {wb?.chainId != null ? ` · ${chainInfo(wb.chainId).name}` : ''}
-        </p>
-      </div>
+        </>}
+      />
 
       {inventoryFailed ? (
         <div role="alert" className="v10-cg-empty">
           {cgsError ? 'Context graph list could not be loaded. ' : ''}
           {identityError ? 'Agent identity could not be loaded. ' : ''}
           {myCgs.length ? 'Showing the last available graphs; counts may be incomplete. ' : 'Graph availability is unknown. '}
-          <button type="button" disabled={inventoryLoading} onClick={() => { void retry(); }}>Retry</button>
+          <button type="button" disabled={inventoryLoading} onClick={() => { void retry(); }}><RefreshCw size={12} />Retry</button>
         </div>
       ) : null}
       <div className="v10-dash-stats v10-dash-stats-3">
-        <StatCard
+        <StatTile
+          className="v10-anim-mount"
           label="My context graphs"
-          className="v10-stat-tight"
-          icon={<Share2 size={13} aria-hidden />}
+          icon={<Share2 size={14} aria-hidden />}
           value={cgsResolving ? <span className="v10-stat-loading">loading…</span> : graphCount}
           sub={CG_DEFINITION}
         >
@@ -641,11 +622,11 @@ export function DashboardView() {
               refreshing={identityLoading || Boolean(identityError)}
             />
           ) : null}
-        </StatCard>
-        <StatCard
+        </StatTile>
+        <StatTile
+          className="v10-anim-mount"
           label="Context graph size"
-          icon={<TrendingUp size={13} aria-hidden />}
-          className="v10-stat-tight"
+          icon={<TrendingUp size={14} aria-hidden />}
         >
           {!agg.hasCgs ? (
             <div className="v10-stat-empty">—</div>
@@ -683,10 +664,11 @@ export function DashboardView() {
                   : 'Totals across all your context graphs, summed over Working, Shared Working & Verifiable Memory. Knowledge Assets are entities that have been published to Verifiable Memory.')
               : emptyInventoryMessage}
           </div>
-        </StatCard>
-        <StatCard
+        </StatTile>
+        <StatTile
+          className="v10-anim-mount"
           label="Collaborating agents"
-          icon={<UsersRound size={13} aria-hidden />}
+          icon={<UsersRound size={14} aria-hidden />}
           value={!agg.hasCgs
             ? <span className="v10-stat-empty">—</span>
             : agg.agentsLoading
@@ -706,20 +688,20 @@ export function DashboardView() {
               <AgentDotStack agents={agg.agentList.map(uri => ({ uri }))} max={8} size={22} />
             </div>
           )}
-        </StatCard>
+        </StatTile>
       </div>
 
       <div className="v10-dash-grid v10-dash-grid-2">
         <div className="v10-dash-section ds-card v10-dash-section-wide v10-anim-mount">
           <div className="v10-dash-section-header">
             <div className="v10-dash-section-title">
-              <Share2 size={13} aria-hidden />
-              <h3>My context graphs</h3>
+              <Share2 size={14} aria-hidden />
+              <h2>My context graphs</h2>
             </div>
             <Count value={cgsResolving ? '…' : graphCount} className="v10-dash-section-badge" />
           </div>
           {cgsResolving ? (
-            <p className="v10-cg-empty">Loading context graphs…</p>
+            <Loading label="Loading context graphs…" className="v10-cg-empty" />
           ) : inventoryFailed && myCgs.length === 0 ? (
             <p className="v10-cg-empty">Context graphs could not be confirmed. Retry the failed request above.</p>
           ) : myCgs.length === 0 ? (
@@ -727,8 +709,8 @@ export function DashboardView() {
               No context graphs yet — create or join one from the sidebar.
             </p>
           ) : (
-            <>
-              <div className="v10-cg-colhead">
+            <div className="v10-cg-table">
+              <div className="v10-cg-colhead ds-table-head">
                 <span className="v10-cg-cell v10-cg-name">Name</span>
                 <span className="v10-cg-cell v10-cg-type">Type</span>
                 <span className="v10-cg-cell v10-cg-size">Size</span>
@@ -754,15 +736,15 @@ export function DashboardView() {
                   />
                 ))}
               </div>
-            </>
+            </div>
           )}
         </div>
 
         <div className="v10-dash-section ds-card v10-anim-mount">
           <div className="v10-dash-section-header">
             <div className="v10-dash-section-title">
-              <Wallet size={13} aria-hidden />
-              <h3>Wallets and Spending</h3>
+              <Wallet size={14} aria-hidden />
+              <h2>Wallets and Spending</h2>
             </div>
           </div>
 
@@ -775,7 +757,7 @@ export function DashboardView() {
 
           <div className="v10-ws-subhead">Node wallets</div>
           {wbLoading && !wb ? (
-            <p className="v10-cg-empty">Loading wallets…</p>
+            <Loading label="Loading wallets…" className="v10-cg-empty" />
           ) : walletRows.length > 0 ? (
             <div className="v10-ws-wtable">
               <div className="v10-ws-wrow v10-ws-whead">
@@ -827,7 +809,7 @@ export function DashboardView() {
           <div className="v10-ws-spend">
             <div className="v10-ws-spend-head">
               <span>Period</span>
-              <span title="Publishes to Verifiable Memory that spent TRAC on-chain. Free SWM/local/testnet publishes are not counted (they don't burn TRAC).">Publishes to VM</span>
+              <span title="Publishes to Verifiable Memory that spent TRAC on-chain. Free Shared Working Memory/local/testnet publishes are not counted (they don't burn TRAC).">Publishes</span>
               {/* economics totalTrac is always TRAC-denominated, independent
                   of the node wallet token symbol — label it literally. */}
               <span>TRAC</span>

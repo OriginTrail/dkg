@@ -18,7 +18,9 @@ import type { MemoryEntity } from '../hooks/useMemoryEntities.js';
 import { useAgentsContext, type AgentSummary } from '../hooks/useAgents.js';
 import { useProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { ActivityFeed } from './ActivityFeed.js';
-import { AgentChip } from './AgentChip.js';
+import { AgentChip, AgentTitle } from './AgentChip.js';
+import { Copy } from 'lucide-react';
+import { Breadcrumbs } from './ds/Breadcrumbs.js';
 
 const PROV_WAS_ATTRIBUTED_TO = 'http://www.w3.org/ns/prov#wasAttributedTo';
 
@@ -37,6 +39,7 @@ export interface AgentProfileViewProps {
   onSelectEntity: (uri: string) => void;
   onOpenAgent?: (uri: string) => void;
   onBack: () => void;
+  contextGraphName?: string;
 }
 
 export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
@@ -46,6 +49,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
   onSelectEntity,
   onOpenAgent,
   onBack,
+  contextGraphName = 'Context graph',
 }) => {
   const agents = useAgentsContext();
   const profile = useProjectProfileContext();
@@ -84,9 +88,9 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
   return (
     <div className="v10-agent-profile">
       <div className="v10-agent-profile-header">
-        <button type="button" className="v10-ka-back" onClick={onBack}>← Back</button>
+        <Breadcrumbs items={[{ label: contextGraphName, onClick: onBack }, { label: 'Agent' }]} />
         <div className="v10-agent-profile-head">
-          <AgentChip agent={agent ?? undefined} fallbackUri={agentUri} size="lg" showOperator />
+          <AgentTitle agent={agent} fallbackUri={agentUri} />
           {agent?.reputation && (
             <div className="v10-agent-profile-reputation">
               {agent.reputation}
@@ -106,9 +110,9 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                     e.stopPropagation();
                     navigator.clipboard?.writeText(agent.walletAddress!).catch(() => {});
                   }}
-                  title="Copy wallet address"
+                  aria-label="Copy wallet address" title="Copy wallet address"
                 >
-                  ⎘
+                  <Copy size={12} />
                 </button>
               </span>
             </div>

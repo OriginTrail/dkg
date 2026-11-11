@@ -51,9 +51,6 @@ export const sel = {
     treeItems: '.v10-tree-items',
     treeItem: '.v10-tree-item',
     itemLabel: '.v10-tree-item-label',
-    layerHeader: '.v10-tree-layer-header',
-    oraclePlaceholder: '.v10-oracle-placeholder',
-    integrationDot: '.v10-tree-integration-dot',
     // PR8 sibling-section pattern (My Context Graphs + Integrations):
     peerGroup: '.v10-peer-group',
     peerGroupHeader: '.v10-peer-group-header',
@@ -144,22 +141,13 @@ export const sel = {
 
   dashboard: {
     root: '.v10-dashboard',
-    title: '.v10-dash-title',
-    subtitle: '.v10-dash-subtitle',
+    title: '.ds-page-title',
+    subtitle: '.ds-page-desc',
     stats: '.v10-dash-stats',
     statCard: '.stat-card',
     statLabel: '.stat-label',
     statValue: '.stat-value',
-    quickAction: '.v10-quick-action',
-    quickActionIcon: '.v10-quick-action-icon',
     sectionHeader: '.v10-dash-section-header',
-    sectionLink: '.v10-dash-section-link',
-    recentOp: '.v10-recent-op',
-    recentOpType: '.v10-recent-op-type',
-    recentOpStatus: '.v10-recent-op-status',
-    projectCard: '.v10-dash-project-card',
-    projectName: '.v10-dash-project-name',
-    projectCount: '.v10-dash-project-count',
   },
 
   modal: {
@@ -183,7 +171,6 @@ export const sel = {
     advancedToggle: '.v10-form-advanced-toggle',
     advancedBody: '.v10-form-advanced-body',
     advChevron: '.v10-form-adv-chevron',
-    layerPreview: '.v10-layer-preview',
   },
 
   importModal: {
@@ -259,7 +246,7 @@ export const sel = {
   // rewritten page uses the shared `.card`/`.settings-*` design-system classes.
   // Opens as a closable center tab from the header gear button.
   settings: {
-    pageTitle: '.page-title',
+    pageTitle: '.ds-page-title',
     stack: '.settings-stack',
     card: '.settings-stack .card',
     cardTitle: '.settings-stack .card-title',

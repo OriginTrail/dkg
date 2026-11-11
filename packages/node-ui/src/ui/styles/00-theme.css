@@ -40,13 +40,11 @@
   --accent-red: #ef4444;
   --accent-amber: #f59e0b;
   --accent-green: #22c55e;
-  --accent-blue: #3b82f6;
 
   /* Semantic foregrounds (theme-aware) */
   --text-success: #86efac;
   --text-warning: #fbbf24;
   /* Info is neutral (icon + text); sky blue sat next to SWM cyan. */
-  --text-info: var(--text-secondary);
   --text-danger: #fca5a5;
   --text-danger-hover: #fecaca;
   /* Links: text colour + underline. Blue is no longer a UI role. */
@@ -54,7 +52,7 @@
   --link-underline: #6b6b6b;
   --text-on-accent: #111111;
 
-  /* Layer identity — one hue, one job (nOS ↔ node UI shared vocabulary).
+  /* Layer identity — one hue, one job. The only colours shared with nOS.
      WM slate, SWM OriginTrail cyan (--color-blue #1ADED7), VM OriginTrail
      purple (--color-primary #6344DF / --color-lavender #8B85F4). These hues
      are reserved for the three memory layers; amber, green and red are
@@ -85,6 +83,8 @@
   --accent-vm: #6344df;
   --accent-vm-hover: #7458e6;
   --text-on-vm: #ffffff;
+  --notify: #a78bfa;
+  --text-on-notify: #111111;
 
   /* Keyboard focus — indigo, ring only. Not a link colour, not a layer. */
   --focus-ring: #8b94ec;
@@ -110,7 +110,6 @@
   /* Sizing */
   --header-h: 44px;
   --tab-h: 36px;
-  --toolbar-h: 38px;
 }
 
 /* ══════════════════════════════════════════
@@ -153,14 +152,13 @@
      surface: 13% badge, 16% count; worst case the count on --bg-elevated
      (4.76:1). context-graph-contrast.test.ts checks. */
   --text-warning: #8e4706;
-  --text-info: var(--text-secondary);
   --text-danger: #b91c1c;
   --text-danger-hover: #991b1b;
   --text-link: var(--text-primary);
   --link-underline: #a3a3a3;
   --text-on-accent: #111111;
   /* Layer identity, light. Same hues as dark, stepped for white
-     surfaces; identical to the nOS light set. Text roles clear 4.5:1
+     surfaces; identical to the nOS light layer colours. Text roles clear 4.5:1
      on their own bg; the non-text role clears 3:1 on --bg-surface. */
   --layer-working: #526173;
   --layer-working-text: #3f4c5c;
@@ -177,6 +175,8 @@
   --accent-primary: #171717;
   --text-on-primary: #ffffff;
   --accent-vm-hover: #5236c4;
+  --notify: #6d3fd9;
+  --text-on-notify: #ffffff;
   /* Light surfaces need far less shadow to read as raised. */
   --shadow-modal: 0 20px 60px rgba(0, 0, 0, .15);
   --focus-ring: #4553c9;
@@ -199,6 +199,11 @@
   --radius-nested: 8px;
   --radius-card: 10px;
   --radius-overlay: 12px;
+  /* Card padding (see DESIGN.md): surfaces, compact surfaces, nested surfaces. */
+  --pad-card: 16px;
+  --pad-compact: 12px;
+  --pad-nested: 10px 14px;
+  --pad-nested-sm: 8px 10px;
   --radius-pill: 999px;
   /* Elevation. One shadow per kind of surface; all are black so they
      work on both themes. */
@@ -255,6 +260,36 @@
   --h-control-sm: 24px;
   --h-control-md: 32px;
   --h-control-lg: 40px;
+  --h-row: 28px;
+  --opacity-disabled: .5;
+  --z-raised: 20;
+  --z-banner: 30;
+  --z-panel: 40;
+  --z-header: 100;
+  --z-popover: 200;
+  --z-modal: 1000;
+  --z-floating: 1100;
+  --z-skip: 10000;
+  --motion-fast: .12s;
+  --motion-base: .15s;
+  --motion-slow: .3s;
+  --space-2: 2px;
+  --space-4: 4px;
+  --space-6: 6px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-20: 20px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --page-gutter: var(--space-24);
+  --page-max: 1440px;
+  --page-max-narrow: 980px;
+  --ls-caps: 0.05em;
+  --lh-tight: 1.2;
+  --lh-snug: 1.35;
+  --lh-body: 1.5;
+  --lh-loose: 1.6;
   --fs-micro: 11px;
   --fs-label: 12px;
   --fs-layer: 12px;

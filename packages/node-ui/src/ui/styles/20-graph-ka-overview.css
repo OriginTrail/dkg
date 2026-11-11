@@ -38,7 +38,7 @@
   width: 100%;
   height: 100%;
   text-align: center;
-  padding: 24px;
+  padding: var(--space-24);
 }
 .v10-graph-singleton-shelf {
   position: absolute;
@@ -49,7 +49,7 @@
      force-graph layer composited on top of it in the inline view —
      only zooming the graph (which redraws the canvas) revealed the
      shelf underneath. */
-  z-index: 20;
+  z-index: var(--z-raised);
   width: min(280px, calc(100% - 24px));
   max-height: 28%;
   display: flex;
@@ -63,7 +63,7 @@
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  padding: 7px 9px;
+  padding: var(--space-8) var(--space-8);
   border-bottom: 1px solid var(--border-subtle);
   font-size: var(--fs-micro);
   font-weight: 700;
@@ -73,14 +73,14 @@
 .v10-graph-singleton-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--space-6);
   overflow: auto;
-  padding: 8px;
+  padding: var(--space-8);
 }
 .v10-graph-singleton-item {
   max-width: 120px;
   min-height: 22px;
-  padding: 3px 7px;
+  padding: var(--space-4) var(--space-8);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-pill);
   background: var(--bg-elevated);
@@ -99,9 +99,9 @@
 .v10-graph-expanded-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: var(--z-modal);
   display: flex;
-  padding: 24px;
+  padding: var(--space-24);
   background: var(--scrim-strong);
 }
 .v10-graph-expanded-panel {
@@ -120,8 +120,8 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
-  padding: 12px 14px;
+  gap: var(--space-16);
+  padding: var(--space-12) 14px;
   border-bottom: 1px solid var(--border-subtle);
 }
 .v10-graph-expanded-title {
@@ -130,7 +130,7 @@
   color: var(--text-primary);
 }
 .v10-graph-expanded-subtitle {
-  margin-top: 2px;
+  margin-top: var(--space-2);
   font-size: var(--fs-label);
   color: var(--text-secondary);
 }
@@ -148,7 +148,7 @@
   flex: 1 1 auto;
 }
 .v10-ka-graph-shell {
-  margin-top: 8px;
+  margin-top: var(--space-8);
   min-height: clamp(380px, 55vh, 660px);
   border-radius: var(--radius-control);
 }
@@ -169,39 +169,33 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 /* ── KA Detail View ── */
 .v10-ka-detail { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .v10-ka-header {
-  padding: 12px 20px; border-bottom: 1px solid var(--border-subtle);
-  display: flex; flex-direction: column; gap: 8px; flex-shrink: 0;
+  padding: var(--space-12) var(--space-20); border-bottom: 1px solid var(--border-subtle);
+  display: flex; flex-direction: column; gap: var(--space-8); flex-shrink: 0;
 }
-.v10-ka-back {
-  align-self: flex-start; border: 1px solid var(--border-default); border-radius: var(--radius-xs);
-  background: none; color: var(--text-secondary); font-size: var(--fs-label); font-weight: 600;
-  padding: 4px 10px; cursor: pointer; font-family: var(--font-sans); transition: all 0.15s;
-}
-.v10-ka-back:hover { color: var(--text-primary); border-color: var(--border-strong); }
-.v10-ka-header-left { display: flex; flex-direction: column; gap: 2px; }
-.v10-ka-label { font-size: var(--fs-micro); color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; }
-.v10-ka-name { font-size: var(--fs-title); font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 8px; }
-.v10-ka-ual { font-size: var(--fs-micro); color: var(--text-tertiary); font-family: var(--font-mono); margin-top: 2px; }
+.v10-ka-header-left { display: flex; flex-direction: column; gap: var(--space-2); }
+.v10-ka-label { font-size: var(--fs-micro); color: var(--text-tertiary); text-transform: uppercase; letter-spacing: var(--ls-caps); }
+.v10-ka-name { font-size: var(--fs-title); font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: var(--space-8); }
+.v10-ka-ual { font-size: var(--fs-micro); color: var(--text-tertiary); font-family: var(--font-mono); margin-top: var(--space-2); }
 .v10-ka-split { display: flex; flex: 1; min-height: 0; overflow: hidden; }
-.v10-ka-left { flex: 1; min-width: 0; overflow-y: auto; padding: 16px 20px; border-right: 1px solid var(--border-subtle); }
-.v10-ka-right { width: 300px; flex-shrink: 0; overflow-y: auto; padding: 16px; }
-.v10-ka-section { margin-bottom: 16px; }
+.v10-ka-left { flex: 1; min-width: 0; overflow-y: auto; padding: var(--space-16) var(--space-20); border-right: 1px solid var(--border-subtle); }
+.v10-ka-right { width: 300px; flex-shrink: 0; overflow-y: auto; padding: var(--space-16); }
+.v10-ka-section { margin-bottom: var(--space-16); }
 .v10-ka-section-title {
-  font-size: var(--fs-micro); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
-  color: var(--text-tertiary); margin-bottom: 8px;
+  font-size: var(--fs-micro); font-weight: 600; text-transform: uppercase; letter-spacing: var(--ls-caps);
+  color: var(--text-tertiary); margin-bottom: var(--space-8);
 }
-.v10-ka-desc { font-size: var(--fs-control); color: var(--text-secondary); line-height: 1.7; }
-.v10-ka-desc p { margin-bottom: 8px; }
-.v10-ka-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; font-size: var(--fs-micro); font-family: var(--font-mono); color: var(--text-tertiary); }
-.v10-ka-meta-item { display: flex; align-items: center; gap: 4px; }
-.v10-ka-prop { display: flex; gap: 8px; padding: 4px 0; font-size: var(--fs-label); border-bottom: 1px solid var(--border-subtle); }
+.v10-ka-desc { font-size: var(--fs-control); color: var(--text-secondary); line-height: var(--lh-loose); }
+.v10-ka-desc p { margin-bottom: var(--space-8); }
+.v10-ka-meta { display: flex; flex-wrap: wrap; gap: var(--space-8); margin-top: var(--space-8); font-size: var(--fs-micro); font-family: var(--font-mono); color: var(--text-tertiary); }
+.v10-ka-meta-item { display: flex; align-items: center; gap: var(--space-4); }
+.v10-ka-prop { display: flex; gap: var(--space-8); padding: var(--space-4) 0; font-size: var(--fs-label); border-bottom: 1px solid var(--border-subtle); }
 .v10-ka-prop:last-child { border-bottom: none; }
 .v10-ka-prop-key { color: var(--text-tertiary); font-weight: 600; min-width: 120px; flex-shrink: 0; font-family: var(--font-mono); font-size: var(--fs-micro); }
 .v10-ka-prop-val { color: var(--text-secondary); word-break: break-all; }
 .v10-ka-conn {
-  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; padding: 5px 8px;
+  display: flex; align-items: center; gap: var(--space-6); width: 100%; text-align: left; padding: var(--space-4) var(--space-8);
   border-radius: var(--radius-xs); cursor: pointer; border: none; background: none; color: inherit;
-  font-family: var(--font-sans); font-size: var(--fs-label); transition: background 0.1s;
+  font-family: var(--font-sans); font-size: var(--fs-label); transition: background var(--motion-fast);
 }
 .v10-ka-conn:hover { background: var(--bg-hover); }
 .v10-ka-conn-pred { color: var(--text-tertiary); font-family: var(--font-mono); font-size: var(--fs-micro); min-width: 80px; }
@@ -209,17 +203,16 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-ka-conn-target { color: var(--text-secondary); font-weight: 500; }
 .v10-ka-triples-table { width: 100%; border-collapse: collapse; font-size: var(--fs-micro); font-family: var(--font-mono); }
 .v10-ka-triples-table th {
-  padding: 6px 8px; text-align: left; font-size: var(--fs-micro); font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-tertiary);
+  padding: var(--space-6) var(--space-8); text-align: left;
   border-bottom: 1px solid var(--border-default); background: var(--bg-elevated);
 }
 .v10-ka-triples-table td {
-  padding: 5px 8px; border-bottom: 1px solid var(--border-subtle); color: var(--text-secondary);
+  padding: var(--space-4) var(--space-8); border-bottom: 1px solid var(--border-subtle); color: var(--text-secondary);
   max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.v10-ka-timeline { position: relative; padding-left: 24px; }
+.v10-ka-timeline { position: relative; padding-left: var(--space-24); }
 .v10-ka-timeline::before { content: ''; position: absolute; left: 7px; top: 0; bottom: 0; width: 1px; background: var(--border-default); }
-.v10-ka-event { position: relative; padding: 0 0 16px 0; }
+.v10-ka-event { position: relative; padding: 0 0 var(--space-16) 0; }
 .v10-ka-event:last-child { padding-bottom: 0; }
 .v10-ka-event-dot {
   position: absolute; left: -21px; top: 2px; width: 10px; height: 10px;
@@ -228,7 +221,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-ka-event-dot.created { border-color: var(--layer-working); background: color-mix(in srgb, var(--layer-working) 15%, transparent); }
 .v10-ka-event-dot.shared { border-color: var(--layer-shared); background: color-mix(in srgb, var(--layer-shared) 15%, transparent); }
 .v10-ka-event-dot.verified { border-color: var(--layer-verified); background: color-mix(in srgb, var(--layer-verified) 15%, transparent); }
-.v10-ka-event-header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 2px; }
+.v10-ka-event-header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: var(--space-2); }
 .v10-ka-event-title { font-size: var(--fs-label); font-weight: 600; color: var(--text-primary); }
 .v10-ka-event-time { font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--text-tertiary); white-space: nowrap; margin-left: auto; }
 
@@ -236,16 +229,16 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
    One "wall of graphs": a responsive grid of mini RdfGraph cards, one per
    registered sub-graph. Each card is self-contained (title, stats, graph)
    and styled by its profile color through the --sg-color custom prop. */
-.v10-sgov { display: flex; flex: 1; flex-direction: column; gap: 12px; min-height: 0; padding: 0 12px 12px; }
+.v10-sgov { display: flex; flex: 1; flex-direction: column; gap: var(--space-12); min-height: 0; padding: 0 var(--space-12) var(--space-12); }
 .v10-sgov-header {
   display: flex; align-items: baseline; justify-content: space-between;
-  padding: 4px 2px;
+  padding: var(--space-4) var(--space-2);
 }
-.v10-sgov-title { font-size: var(--fs-body); font-weight: 600; color: var(--text-primary); letter-spacing: 0.02em; }
+.v10-sgov-title { font-size: var(--fs-body); font-weight: 600; color: var(--text-primary); letter-spacing: 0; }
 .v10-sgov-sub { font-size: var(--fs-label); color: var(--text-tertiary); font-family: var(--font-mono); }
 .v10-empty-state.v10-sgov-state {
   min-height: 220px;
-  margin: 0 12px 12px;
+  margin: 0 var(--space-12) var(--space-12);
 }
 /* The grid auto-fills: 3-up on wide screens, 2-up around 1100px, single column
    under 720px. Each cell has a stable minimum height so the mini graphs get
@@ -253,10 +246,10 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-sgov-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: 12px;
+  gap: var(--space-12);
   align-content: start;
   overflow: auto;
-  padding-bottom: 12px;
+  padding-bottom: var(--space-12);
 }
 .v10-sgov-card {
   display: flex; flex-direction: column;
@@ -264,7 +257,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   background: var(--tint-faint);
   border: 1px solid var(--border-subtle);
   overflow: hidden;
-  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color var(--motion-base) ease, transform var(--motion-base) ease, box-shadow var(--motion-base) ease;
 }
 .v10-sgov-card:hover {
   transform: translateY(-1px);
@@ -298,7 +291,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 }
 .v10-sgov-card-head {
   display: flex; align-items: flex-start; gap: 10px;
-  padding: 10px 12px 8px 12px;
+  padding: 10px var(--space-12) var(--space-8) var(--space-12);
   border-bottom: 1px solid var(--border-subtle);
 }
 .v10-sgov-card-icon { font-size: var(--fs-heading); line-height: 1; margin-top: 1px; }
@@ -308,16 +301,16 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .v10-sgov-card-desc {
-  font-size: var(--fs-micro); color: var(--text-tertiary); line-height: 1.4;
-  margin-top: 2px;
+  font-size: var(--fs-micro); color: var(--text-tertiary); line-height: var(--lh-snug);
+  margin-top: var(--space-2);
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   overflow: hidden;
 }
 .v10-sgov-card-open {
   appearance: none; background: transparent; color: var(--text-tertiary);
   border: 1px solid var(--border-subtle); border-radius: var(--radius-control);
-  padding: 2px 6px; cursor: pointer; font-size: var(--fs-control); line-height: 1;
-  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+  padding: var(--space-2) var(--space-6); cursor: pointer; font-size: var(--fs-control); line-height: 1;
+  transition: color var(--motion-fast) ease, border-color var(--motion-fast) ease, background var(--motion-fast) ease;
 }
 .v10-sgov-card-open:hover {
   color: var(--sg-color, var(--text-primary));
@@ -325,12 +318,12 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   background: color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 10%, transparent);
 }
 .v10-sgov-card-stats {
-  display: flex; gap: 12px; padding: 6px 12px;
+  display: flex; gap: var(--space-12); padding: var(--space-6) var(--space-12);
   font-size: var(--fs-label); color: var(--text-tertiary);
   border-bottom: 1px solid var(--border-subtle);
 }
 .v10-sgov-card-stat b {
-  color: var(--text-primary); font-weight: 600; margin-right: 3px;
+  color: var(--text-primary); font-weight: 600; margin-right: var(--space-4);
   font-variant-numeric: tabular-nums;
 }
 .v10-sgov-card-graph {
@@ -347,15 +340,15 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   font-size: var(--fs-label); color: var(--text-tertiary);
 }
 .v10-sgov-card-pyramid {
-  padding: 0 10px 6px;
+  padding: 0 10px var(--space-6);
 }
 
 /* ── Mini layer pyramid (WM/SWM/VM segmented bar + legend) ── */
 .v10-minibar {
-  display: flex; flex-direction: column; gap: 4px;
+  display: flex; flex-direction: column; gap: var(--space-4);
   min-width: 0;
 }
-.v10-minibar.compact { flex-direction: row; align-items: center; gap: 6px; }
+.v10-minibar.compact { flex-direction: row; align-items: center; gap: var(--space-6); }
 .v10-minibar-empty {
   font-size: var(--fs-micro); color: var(--text-tertiary); font-style: italic;
 }
@@ -366,16 +359,16 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 }
 .v10-minibar-seg {
   height: 100%;
-  transition: opacity 0.15s ease, filter 0.15s ease;
+  transition: opacity var(--motion-base) ease, filter var(--motion-base) ease;
 }
 .v10-minibar-seg.dim { opacity: 0.3; filter: grayscale(0.6); }
 .v10-minibar-legend {
-  display: flex; gap: 4px; flex-wrap: wrap;
+  display: flex; gap: var(--space-4); flex-wrap: wrap;
   align-items: center;
 }
 .v10-minibar-chip {
-  display: inline-flex; align-items: center; gap: 4px;
-  height: var(--h-badge-sm); padding: 0 6px;
+  display: inline-flex; align-items: center; gap: var(--space-4);
+  height: var(--h-badge-sm); padding: 0 var(--space-6);
   border-radius: var(--radius-pill);
   box-shadow: inset 0 0 0 1px var(--border-default);
   color: var(--text-secondary);
@@ -387,5 +380,5 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-minibar-dot {
   display: inline-block; width: 6px; height: 6px; border-radius: 50%;
 }
-.v10-minibar-short { letter-spacing: 0.04em; }
+.v10-minibar-short { letter-spacing: 0; }
 .v10-minibar-count { font-variant-numeric: tabular-nums; color: var(--text-tertiary); }

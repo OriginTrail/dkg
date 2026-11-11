@@ -2,19 +2,6 @@
 .v10-memstack {
   display: flex; flex-direction: column;
   height: 100%; overflow: auto;
-  padding: 18px 22px 28px;
-}
-.v10-memstack-head {
-  margin-bottom: 18px;
-}
-.v10-memstack-title {
-  font-size: var(--fs-heading); font-weight: 600;
-  color: var(--text-primary);
-  margin: 0 0 4px 0;
-}
-.v10-memstack-sub {
-  font-size: var(--fs-control); color: var(--text-tertiary);
-  margin: 0;
 }
 .v10-memstack-empty {
   font-size: var(--fs-control); color: var(--text-tertiary);
@@ -23,6 +10,8 @@
   border: 1px dashed var(--border-subtle);
 }
 .v10-memstack-table {
+  /* Wider than a phone: the page scrolls sideways, so no layer column is cut off. */
+  min-width: 720px;
   display: flex; flex-direction: column;
   gap: 10px;
 }
@@ -30,13 +19,13 @@
   display: grid;
   grid-template-columns: 220px repeat(3, 1fr);
   gap: 10px;
-  padding: 0 2px 4px;
+  padding: 0 var(--space-2) var(--space-4);
 }
 .v10-memstack-colhead {
-  display: flex; align-items: center; gap: 6px;
+  display: flex; align-items: center; gap: var(--space-6);
   font-size: var(--fs-label); font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.06em;
-  padding: 4px 0;
+  text-transform: uppercase; letter-spacing: var(--ls-caps);
+  padding: var(--space-4) 0;
   border-bottom: 1px solid var(--border-subtle);
 }
 .v10-memstack-colhead.project { border-bottom: none; }
@@ -58,17 +47,17 @@
 }
 .v10-memstack-project {
   display: flex; flex-direction: column;
-  padding: 12px 10px;
+  padding: var(--space-12) 10px;
   border-right: 1px solid var(--border-subtle);
 }
 .v10-memstack-project-btn {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: var(--space-8);
   padding: 0; background: none; border: none;
   color: var(--text-primary);
   font-size: var(--fs-body); font-weight: 600;
   cursor: pointer; text-align: left;
   font-family: var(--font-sans);
-  transition: color 0.15s;
+  transition: color var(--motion-base);
 }
 .v10-memstack-project-btn:hover { color: var(--text-primary); }
 .v10-memstack-project-name {
@@ -76,21 +65,21 @@
 }
 .v10-memstack-project-desc {
   font-size: var(--fs-label); color: var(--text-tertiary);
-  margin-top: 4px;
-  line-height: 1.45;
+  margin-top: var(--space-4);
+  line-height: var(--lh-body);
   max-height: 3em;
   overflow: hidden;
 }
 .v10-memstack-project-status {
-  margin-top: 6px;
+  margin-top: var(--space-6);
   font-size: var(--fs-micro); color: var(--text-ghost);
   font-style: italic;
 }
-.v10-memstack-project-status.error { color: var(--accent-red); }
+.v10-memstack-project-status.error { color: var(--text-danger); }
 
 .v10-memstack-cell {
-  display: flex; flex-direction: column; gap: 6px;
-  padding: 10px 12px;
+  display: flex; flex-direction: column; gap: var(--space-6);
+  padding: 10px var(--space-12);
   border: 1px solid color-mix(in srgb, var(--cell-color, var(--identity-fallback)) 20%, var(--border-subtle));
   background: color-mix(in srgb, var(--cell-color, var(--identity-fallback)) 3%, transparent);
   min-height: 130px;
@@ -100,7 +89,7 @@
   background: transparent;
 }
 .v10-memstack-cell-stats {
-  display: flex; align-items: baseline; gap: 4px;
+  display: flex; align-items: baseline; gap: var(--space-4);
   flex-wrap: wrap;
 }
 .v10-memstack-cell-n {
@@ -113,9 +102,9 @@
   font-size: var(--fs-micro);
   color: var(--text-tertiary);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--ls-caps);
 }
-.v10-memstack-cell-sep { color: var(--text-ghost); margin: 0 2px; }
+.v10-memstack-cell-sep { color: var(--text-ghost); margin: 0 var(--space-2); }
 .v10-memstack-cell-t {
   font-family: var(--font-mono);
   font-size: var(--fs-control);
@@ -125,17 +114,17 @@
   font-size: var(--fs-micro);
   color: var(--text-ghost);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--ls-caps);
 }
 .v10-memstack-cell-recent {
   list-style: none; margin: 0; padding: 0;
-  display: flex; flex-direction: column; gap: 2px;
+  display: flex; flex-direction: column; gap: var(--space-2);
   flex: 1;
 }
 .v10-memstack-cell-recent-item {
-  display: flex; align-items: center; gap: 6px;
+  display: flex; align-items: center; gap: var(--space-6);
   font-size: var(--fs-label); color: var(--text-secondary);
-  padding: 2px 0;
+  padding: var(--space-2) 0;
 }
 .v10-memstack-cell-recent-bullet {
   width: 4px; height: 4px; border-radius: 50%;
@@ -155,22 +144,22 @@
 .v10-memstack-cell-empty-hint {
   font-size: var(--fs-micro); color: var(--text-ghost);
   font-style: italic;
-  padding: 4px 0;
+  padding: var(--space-4) 0;
   flex: 1;
 }
 .v10-memstack-cell-open {
   align-self: flex-start;
-  padding: 3px 10px;
+  padding: var(--space-4) 10px;
   background: none;
   border: 1px solid color-mix(in srgb, var(--cell-color, var(--identity-fallback)) 30%, var(--border-subtle));
   border-radius: var(--radius-control);
   color: var(--cell-color, var(--text-secondary));
   font-size: var(--fs-micro); font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
   cursor: pointer;
   font-family: var(--font-sans);
   margin-top: auto;
-  transition: background 0.15s, color 0.15s;
+  transition: background var(--motion-base), color var(--motion-base);
 }
 .v10-memstack-cell-open:hover {
   background: color-mix(in srgb, var(--cell-color, var(--identity-fallback)) 16%, transparent);
@@ -179,38 +168,38 @@
 
 /* ── Verifiable Memory on-chain identity banner (KA detail, right pane) ── */
 .v10-vm-identity {
-  margin-bottom: 16px;
-  padding: 12px 14px;
+  margin-bottom: var(--space-16);
+  padding: var(--space-12) 14px;
   background: var(--layer-verified-bg);
   border: 1px solid var(--layer-verified-border);
-  display: flex; flex-direction: column; gap: 8px;
+  display: flex; flex-direction: column; gap: var(--space-8);
 }
 .v10-vm-identity-head {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: var(--space-8);
 }
 .v10-vm-identity-glyph {
   font-size: var(--fs-body); color: var(--layer-verified); line-height: 1;
 }
 .v10-vm-identity-title {
   font-size: var(--fs-control); font-weight: 700; color: var(--text-primary);
-  letter-spacing: 0.01em;
+  letter-spacing: 0;
 }
 .v10-vm-identity-badge { margin-left: auto; }
 .v10-vm-identity-row {
-  display: flex; align-items: center; gap: 6px;
+  display: flex; align-items: center; gap: var(--space-6);
   flex-wrap: wrap;
   font-size: var(--fs-label);
   color: var(--text-secondary);
-  padding: 2px 0;
+  padding: var(--space-2) 0;
 }
 .v10-vm-identity-lbl {
   font-size: var(--fs-micro); font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.08em;
+  text-transform: uppercase; letter-spacing: var(--ls-caps);
   color: var(--text-tertiary);
   min-width: 56px;
 }
 .v10-vm-identity-val {
-  display: inline-flex; align-items: center; gap: 6px;
+  display: inline-flex; align-items: center; gap: var(--space-6);
   color: var(--text-primary);
   min-width: 0;
   overflow: hidden; text-overflow: ellipsis;
@@ -229,7 +218,7 @@
   font-size: var(--fs-micro);
 }
 .v10-vm-identity-copy {
-  padding: 1px 6px;
+  padding: 1px var(--space-6);
   background: none;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xs);
@@ -237,7 +226,7 @@
   font-size: var(--fs-micro);
   cursor: pointer;
   font-family: var(--font-sans);
-  transition: border-color 0.15s, color 0.15s;
+  transition: border-color var(--motion-base), color var(--motion-base);
 }
 .v10-vm-identity-copy:hover {
   border-color: var(--border-strong); color: var(--text-primary);
@@ -247,16 +236,16 @@
    ("Created by <agent>", "Promoted by <agent>", "Published by <agent>") */
 .v10-ka-event-attribution {
   display: flex; align-items: center; flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 6px;
-  padding-left: 18px;  /* line up under the title, past the dot */
+  gap: var(--space-6);
+  margin-top: var(--space-6);
+  padding-left: var(--space-16);  /* line up under the title, past the dot */
   font-size: var(--fs-label);
   color: var(--text-tertiary);
 }
 .v10-ka-event-attribution-prefix {
   font-size: var(--fs-micro);
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: var(--ls-caps);
   font-weight: 700;
   color: var(--text-tertiary);
 }
@@ -264,13 +253,13 @@
 /* Author block in the KA detail header (prominent "Proposed by …" card) */
 .v10-ka-header-author {
   display: flex; flex-direction: column; align-items: flex-end;
-  gap: 4px; margin-left: auto;
-  padding-left: 16px;
+  gap: var(--space-4); margin-left: auto;
+  padding-left: var(--space-16);
   flex-shrink: 0;
 }
 .v10-ka-header-author-label {
   font-size: var(--fs-micro); font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.08em;
+  text-transform: uppercase; letter-spacing: var(--ls-caps);
   color: var(--text-tertiary);
 }
 
@@ -278,7 +267,7 @@
 .v10-project-strip {
   display: flex; align-items: center; gap: 10px;
   flex-shrink: 0;
-  padding: 8px 16px;
+  padding: var(--space-8) var(--space-16);
   border-bottom: 1px solid var(--border-subtle);
   background: linear-gradient(
     90deg,
@@ -295,16 +284,17 @@
      expanded height at all times eliminates the layout shift. */
   min-height: 44px;
 }
+.v10-project-strip-heading { min-width: 0; margin: 0; font: inherit; }
 .v10-project-strip-name {
   font-size: var(--fs-body); font-weight: 600;
   color: var(--text-primary);
   background: none; border: none; padding: 0;
   cursor: pointer;
   font-family: var(--font-sans);
-  transition: color 0.15s;
+  transition: color var(--motion-base);
 }
 .v10-project-strip-name:disabled {
-  cursor: default; opacity: 1;
+  cursor: default; opacity: var(--opacity-disabled);
 }
 .v10-project-strip-name:not(:disabled):hover {
   color: var(--sg-color, var(--text-tertiary));
@@ -315,7 +305,7 @@
   font-weight: 400;
 }
 .v10-project-strip-sg {
-  display: inline-flex; align-items: center; gap: 5px;
+  display: inline-flex; align-items: center; gap: var(--space-4);
   font-size: var(--fs-control); font-weight: 600;
   color: var(--text-secondary);
 }
@@ -333,48 +323,35 @@
 .v10-primer-view {
   height: 100%;
   overflow: auto;
-  padding: 28px 32px;
+  padding: 28px var(--space-32);
   background: var(--bg-panel);
   color: var(--text-primary);
 }
 .v10-primer-header {
   max-width: 860px;
-  padding-bottom: 22px;
+  padding-bottom: var(--space-24);
   border-bottom: 1px solid var(--border-subtle);
 }
-.v10-primer-back { margin: 0 0 16px; }
+.v10-primer-back { margin: 0 0 var(--space-16); }
 .v10-primer-kicker {
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-8);
   color: var(--text-tertiary);
   font-size: var(--fs-label);
   font-weight: 700;
   text-transform: uppercase;
 }
-.v10-primer-header h1 {
-  margin: 0;
-  color: var(--text-primary);
-  font-size: var(--fs-display);
-  font-weight: 750;
-  line-height: 1.2;
-}
-.v10-primer-header p {
-  max-width: 720px;
-  margin: 10px 0 0;
-  color: var(--text-secondary);
-  font-size: var(--fs-body);
-  line-height: 1.6;
-}
+.v10-primer-header .ds-page-header { margin-bottom: 0; }
 .v10-primer-pipeline {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 32px minmax(0, 1fr) 32px minmax(0, 1fr);
   align-items: center;
   max-width: 980px;
   gap: 10px;
-  padding: 22px 0;
+  padding: var(--space-24) 0;
 }
 .v10-primer-pipeline span:not(.connector) {
   min-width: 0;
-  padding: 12px 14px;
+  padding: var(--space-12) 14px;
   border-radius: var(--radius-nested);
   border: 1px solid var(--border-default);
   color: var(--text-primary);
@@ -404,23 +381,23 @@
   flex-direction: column;
 }
 .v10-primer-section {
-  padding: 18px 0;
+  padding: var(--space-16) 0;
   border-top: 1px solid var(--border-subtle);
 }
 .v10-primer-section:first-child {
   border-top: 0;
 }
 .v10-primer-section h2 {
-  margin: 0 0 6px;
+  margin: 0 0 var(--space-6);
   color: var(--text-primary);
   font-size: var(--fs-title);
-  font-weight: 750;
+  font-weight: 700;
 }
 .v10-primer-section p {
   margin: 0;
   color: var(--text-secondary);
   font-size: var(--fs-body);
-  line-height: 1.55;
+  line-height: var(--lh-body);
 }
 .v10-center-content[data-narrow] .v10-graph-shell {
     min-height: clamp(360px, 68vh, 620px); }
@@ -436,7 +413,7 @@
     padding: 10px; }
 .v10-center-content[data-narrow] .v10-graph-singleton-shelf {
     max-height: 26%; }
-.v10-center-content[data-narrow] .v10-primer-view { padding: 22px 18px; }
+.v10-center-content[data-narrow] .v10-primer-view { padding: var(--space-24) var(--space-16); }
 .v10-center-content[data-narrow] .v10-primer-pipeline {
     grid-template-columns: 1fr; }
 .v10-center-content[data-narrow] .v10-primer-pipeline .connector {

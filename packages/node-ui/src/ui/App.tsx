@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useCallback, useState, useSyncExternalStore } from 'react';
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import { Header } from './components/Shell/Header.js';
 import { PanelLeft } from './components/Shell/PanelLeft.js';
 import { PanelCenter } from './components/Shell/PanelCenter.js';
@@ -8,6 +8,7 @@ import { PanelRight } from './components/Shell/PanelRight.js';
 import { ContextGraphDialogs } from './components/Shell/ContextGraphDialogs.js';
 import { useLayoutStore, useShellPanels, maxBottomHeight } from './stores/layout.js';
 import { useTabsStore } from './stores/tabs.js';
+import { chooseTab as openTab } from './lib/shellNavigation.js';
 import { detectMockMode, isUsingMocks, subscribeMockMode } from './api-wrapper.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from './lib/contextGraphPrimer.js';
 import { applyTheme } from './lib/applyTheme.js';
@@ -16,6 +17,8 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
 import { useShellRouting } from './hooks/useShellRouting.js';
 import { NodeUnavailableView } from './components/NodeUnavailableView.js';
 import { ApiTokenPrompt } from './components/ApiTokenPrompt.js';
+import { observabilityHref } from './lib/observabilityTab.js';
+import { tabIdToPath } from './lib/tab-routes.js';
 
 /**
  * Drag a resize handle along one axis. Every handle can mount after the
@@ -76,10 +79,16 @@ function AppShell() {
   const { bottomCollapsed, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
   const { narrow, leftOpen, rightOpen } = useShellPanels();
   const closeNarrowPanel = useLayoutStore((s) => s.closeNarrowPanel);
-  const { pathname } = useLocation();
-  // Going somewhere, or resizing past the breakpoint, shows the page, not a floating panel.
-  // The create and join dialogs belong to the shell (ContextGraphDialogs), so closing the panel keeps them.
-  useEffect(() => { closeNarrowPanel(); }, [pathname, narrow, closeNarrowPanel]);
+  // Resizing past the breakpoint shows the page, not a floating panel. Navigation does the
+  // same in useShellRouting. The create and join dialogs belong to the shell
+  // (ContextGraphDialogs), so closing the panel keeps them.
+  const lastNarrow = useRef(narrow);
+  useEffect(() => {
+    if (lastNarrow.current === narrow) return; // only a crossing, not the first render
+    lastNarrow.current = narrow;
+    // Shows the page: closes a floating panel, and an expanded one does not carry over.
+    useLayoutStore.getState().revealCentre();
+  }, [narrow, closeNarrowPanel]);
   const [, setVpTick] = useState(0);
 
   // Re-render on viewport resize so the render-time clamp in PanelBottom
@@ -128,6 +137,9 @@ function AppShell() {
     setBottomHeight(Math.min(eff - delta, maxBottomHeight()));
   }, [setBottomHeight]);
 
+  const rightExpanded = useLayoutStore((s) => s.rightExpanded);
+  const expanded = rightExpanded && rightOpen && !narrow;
+
   const leftHandle = useDragResize(onDragLeft, 'x');
   const rightHandle = useDragResize(onDragRight, 'x');
   const bottomHandle = useDragResize(onDragBottom, 'y');
@@ -135,6 +147,7 @@ function AppShell() {
   return (
     <div className="v10-app">
       <ApiTokenPrompt />
+      <nav aria-label="Skip link"><button type="button" className="ds-skip-link" onClick={() => document.getElementById(expanded ? 'agents-panel' : 'main-content')?.focus()}>Skip to content</button></nav>
       <Header />
       <ContextGraphDialogs />
       <div className="v10-app-body">
@@ -142,18 +155,18 @@ function AppShell() {
           <button type="button" className="v10-panel-scrim" aria-label="Close panel" onClick={closeNarrowPanel} />
         )}
         {/* A closed side panel unmounts, so its polling and listeners stop. What
-            must outlive it lives in the shell: the Context Graph dialogs
+            must outlive it lives in the shell: the context graph dialogs
             (ContextGraphDialogs) and agent conversations (stores/agentConversations). */}
         {leftOpen && (
           <>
-            <div className="v10-panel-left" style={{ width: leftWidth }}>
+            <div className="v10-panel-left" role="complementary" aria-label="Context graphs and node" style={{ width: leftWidth }}>
               <PanelLeft />
             </div>
             <div className="v10-resize-handle-h" ref={leftHandle} />
           </>
         )}
 
-        <div className="v10-center-region" style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div className="v10-center-region" style={{ flex: 1, minWidth: 0, display: expanded ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
             <PanelCenter />
           </div>
@@ -163,8 +176,8 @@ function AppShell() {
 
         {rightOpen && (
           <>
-            <div className="v10-resize-handle-h" ref={rightHandle} />
-            <div className="v10-panel-right" style={{ width: rightWidth }}>
+            {!expanded && <div className="v10-resize-handle-h" ref={rightHandle} />}
+            <div id="agents-panel" tabIndex={-1} className="v10-panel-right" role="complementary" aria-label="Agents" style={expanded ? { flex: 1, minWidth: 0 } : { width: rightWidth }}>
               <PanelRight />
             </div>
           </>
@@ -174,16 +187,21 @@ function AppShell() {
   );
 }
 
-const NetworkDebugPage = React.lazy(() =>
-  import('./pages/Network.js').then((m) => ({ default: m.NetworkPage }))
-);
+/** Old address: Network is a tab in Observability now. The address opens the tab. */
+function NetworkRoute() {
+  return <Navigate to={observabilityHref('network')} replace />;
+}
+
+/** Old address: Agent hub is the right panel. AppShell opens it once it has mounted. */
+function AgentHubRoute() {
+  return <Navigate to={tabIdToPath(useTabsStore.getState().activeTabId)} replace state={{ openAgents: true }} />;
+}
 
 const MarketplaceGalleryRoute = React.lazy(() =>
   import('./marketplace/GalleryView.js').then((m) => ({ default: m.MarketplaceGalleryView }))
 );
 
 function ContextGraphPrimerRoute() {
-  const openTab = useTabsStore((s) => s.openTab);
 
   useLayoutEffect(() => {
     openTab(CONTEXT_GRAPH_PRIMER_TAB);
@@ -205,14 +223,8 @@ export function App() {
 
   return (
     <Routes>
-      <Route path="/network" element={
-        <>
-          <ApiTokenPrompt />
-          <React.Suspense fallback={<div className="lazy-spinner">Loading...</div>}>
-            <NetworkDebugPage />
-          </React.Suspense>
-        </>
-      } />
+      <Route path="/network" element={<NetworkRoute />} />
+      <Route path="/agent-hub" element={<AgentHubRoute />} />
       <Route path="/context-graph-primer" element={<ContextGraphPrimerRoute />} />
       <Route path="/agent" element={<Navigate to="/" replace />} />
       <Route path="/explorer" element={<Navigate to="/" replace />} />

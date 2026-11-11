@@ -9,6 +9,9 @@ import { EmptyState, StatStrip, toneForLayer } from '../../../components/Context
 import { useVmPublishGate } from '../../../pages/conviction/useVmPublishGate.js';
 import { PublishEligibilityChipView } from '../../../pages/conviction/PublishEligibilityChip.js';
 import { DiscountAppliedBadge } from '../../../components/Pca/index.js';
+import { X } from 'lucide-react';
+import { StatusGlyph } from '../../../components/ds/Badge.js';
+import { failed, outcomeColor, succeeded, succeededWithWarning, type ActionOutcome } from '../../../lib/actionOutcome.js';
 
 // ─── Generative Widget Components ─────────────────────────────
 
@@ -32,7 +35,7 @@ export function GenWidget({ title, agent, footnote, dismissed, onDismiss, childr
             </span>
           )}
           {onDismiss && (
-            <button className="v10-gen-widget-dismiss" onClick={onDismiss}>✕</button>
+            <button className="v10-gen-widget-dismiss" onClick={onDismiss} aria-label="Dismiss"><X size={12} /></button>
           )}
         </div>
       </div>
@@ -45,7 +48,7 @@ export function GenWidget({ title, agent, footnote, dismissed, onDismiss, childr
 export function TypeBreakdownWidget({ entities }: { entities: MemoryEntity[] }) {
   const profile = useProjectProfileContext();
   const breakdown = useMemo(() => {
-    const counts = new Map<string, { icon: string; count: number }>();
+    const counts = new Map<string, { icon: ReactNode; count: number }>();
     for (const e of entities) {
       const { icon, type } = entityMeta(e, profile);
       const existing = counts.get(type);
@@ -63,7 +66,7 @@ export function TypeBreakdownWidget({ entities }: { entities: MemoryEntity[] }) 
         compact
         items={breakdown.map(([type, { icon, count }]) => ({
           id: type,
-          label: `${icon} ${type}`,
+          label: <>{icon} {type}</>,
           value: count,
         }))}
       />
@@ -110,64 +113,76 @@ export function LayerStatsWidget({ entities, entityCount, triples, layer }: {
 // ─── Shared layer-action scaffolding (promote + publish) ─────────────────────
 
 /**
- * The busy/result/error lifecycle shared by the promote and publish CTAs — STATE only.
- * `run(body, formatError)` clears state, executes the body (which returns the success text,
- * or throws), and — in ONE place — sets result/error AND mirrors the outcome to `onResult`
+ * The busy/outcome lifecycle shared by the promote and publish CTAs — STATE only.
+ * `run(body, formatError)` clears state, executes the body (which returns its outcome,
+ * or throws), and — in ONE place — sets the outcome AND mirrors it to `onResult`
  * (which the strip lifts into its own state so the "✓ Promoted N" feedback survives this
  * widget unmounting when the layer empties). `onComplete` fires on success. Error COPY is
  * owned by each caller via `formatError` (promote and publish word failures differently —
  * the runner stays generic and never leaks promote wording onto publish).
  */
 function useLayerAction(
-  onResult?: (r: { ok: boolean; text: string } | null) => void,
+  onResult?: (outcome: ActionOutcome | null) => void,
   onComplete?: () => void,
 ) {
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [outcome, setOutcome] = useState<ActionOutcome | null>(null);
 
   const run = useCallback(
-    async (body: () => Promise<string>, formatError: (err: unknown) => string) => {
+    async (body: () => Promise<ActionOutcome>, formatError: (err: unknown) => string) => {
       setBusy(true);
-      setError(null);
-      setResult(null);
+      setOutcome(null);
+      // Completion follows the execution path: a body that resolves completed (with a
+      // warning or not), one that throws did not. The tone only decides how it looks.
+      let next: ActionOutcome;
+      let completed = false;
       try {
-        const text = await body();
-        setResult(text);
-        onResult?.({ ok: true, text });
-        onComplete?.();
+        next = await body();
+        completed = true;
       } catch (err) {
-        const text = formatError(err);
-        setError(text);
-        onResult?.({ ok: false, text });
+        next = failed(formatError(err));
       } finally {
         setBusy(false);
       }
+      setOutcome(next);
+      onResult?.(next);
+      if (completed) onComplete?.();
     },
     [onResult, onComplete],
   );
 
-  return { busy, result, error, run };
+  return { busy, outcome, run };
+}
+
+/** One promote/publish outcome line. #1464 — a failure renders under a DISTINCT testid so it
+ *  can't be mistaken for a successful result by a testid-agnostic reader (the mask that hid the
+ *  promote failure). */
+function LayerActionFeedback({ outcome }: { outcome: ActionOutcome }) {
+  return (
+    <div
+      data-testid={outcome.tone === 'danger' ? 'layer-action-error' : 'layer-action-result'}
+      data-tone={outcome.tone}
+      style={{ fontSize: 'var(--fs-label)', color: outcomeColor(outcome.tone), marginBottom: 8 }}
+    >
+      <StatusGlyph tone={outcome.tone} /> {outcome.text}
+    </div>
+  );
 }
 
 /** The GenWidget shell shared by the two CTAs: context line + result/error + optional
  *  extras (badge/chip/gate) + the action button(s). */
-function LayerActionShell({ title, footnote, context, result, error, extras, children }: {
+function LayerActionShell({ title, footnote, context, outcome, extras, children }: {
   title: string;
   footnote: string;
   context: ReactNode;
-  result: string | null;
-  error: string | null;
+  outcome: ActionOutcome | null;
   extras?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <GenWidget title={title} footnote={footnote}>
       <div className="v10-decision-context" style={{ marginBottom: 10 }}>{context}</div>
-      {result && <div data-testid="layer-action-result" style={{ fontSize: 'var(--fs-label)', color: 'var(--text-success)', marginBottom: 8 }}>✓ {result}</div>}
-      {/* #1464 — errors render under a DISTINCT testid so a failed action can't be mistaken for a
-          successful result by a testid-agnostic reader (the mask that hid the promote failure). */}
-      {error && <div data-testid="layer-action-error" style={{ fontSize: 'var(--fs-label)', color: 'var(--text-danger)', marginBottom: 8 }}>✕ {error}</div>}
+      {outcome && <LayerActionFeedback outcome={outcome} />}
       {extras}
       <div className="v10-decision-actions">{children}</div>
     </GenWidget>
@@ -180,12 +195,12 @@ interface LayerActionProps {
   onComplete?: () => void;
   /** Lift the latest outcome to the parent strip so it survives this widget
    * unmounting when the promoted/published layer empties (entityCount → 0). */
-  onResult?: (r: { ok: boolean; text: string } | null) => void;
+  onResult?: (outcome: ActionOutcome | null) => void;
 }
 
 /** WM → SWM bulk-promote CTA. Off-chain; never touches the PCA eligibility probe. */
 export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: LayerActionProps) {
-  const { busy, result, error, run } = useLayerAction(onResult, onComplete);
+  const { busy, outcome, run } = useLayerAction(onResult, onComplete);
   const promote = useCallback(() => {
     // Issue #864 — track the in-flight assertion so a mid-loop failure surfaces "<name>: …"
     // via describePromoteError; shared between the body and the promote error formatter.
@@ -212,9 +227,9 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
         const sharedCount = assertions.length - noopCount;
         if (sharedCount > 0) {
           const tail = noopCount > 0 ? ` (${noopCount} already shared or still committing)` : '';
-          return `Shared ${sharedCount} complete Knowledge Asset${sharedCount !== 1 ? 's' : ''} to Shared Memory${tail}`;
+          return succeeded(`Shared ${sharedCount} complete Knowledge Asset${sharedCount !== 1 ? 's' : ''} to Shared Memory${tail}`);
         }
-        return 'No Knowledge Assets were newly shared — all were already in Shared Memory or still committing.';
+        return succeeded('No Knowledge Assets were newly shared — all were already in Shared Memory or still committing.');
       },
       (err: any) => {
         const typed = describePromoteError(currentAssertion ?? 'an assertion', err);
@@ -229,8 +244,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
       title="Share complete Knowledge Assets"
       footnote="Shares each complete owning Knowledge Asset atomically to Shared Working Memory."
       context={<>Shares all eligible complete Working Memory Knowledge Assets in this context graph, including assets outside the loaded preview.</>}
-      result={result}
-      error={error}
+      outcome={outcome}
     >
       <button
         data-testid="widget-promote-all-btn"
@@ -239,7 +253,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
         disabled={busy}
         onClick={promote}
       >
-        {busy ? '...' : '✓ Share Complete KAs → Shared'}
+        {busy ? '...' : 'Share complete Knowledge Assets'}
       </button>
     </LayerActionShell>
   );
@@ -249,7 +263,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
  *  gate + the eligibility chip, and owns the confirmed post-publish discount badge (B8). */
 export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }: LayerActionProps) {
   const [costCovered, setCostCovered] = useState<ConvictionCostCovered | null>(null);
-  const { busy, result, error, run } = useLayerAction(onResult, onComplete);
+  const { busy, outcome, run } = useLayerAction(onResult, onComplete);
   // Pure-policy hook: gate decision + resolved eligibility. ALL presentation lives here.
   const gate = useVmPublishGate(contextGraphId);
   const verdictId = useId();
@@ -274,16 +288,16 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
         // Shared batch loop (api.ts publishAssertionsToVm) — uniform partial/error accounting.
         const r = await publishAssertionsToVm(contextGraphId, assertions);
         const unknownNote = outcomeUnknownPublishNote(r);
-        const unknownTail = unknownNote ? ` — ⚠ ${unknownNote}` : '';
+        const unknownTail = unknownNote ? ` — ${unknownNote}` : '';
         if (r.published > 0) {
           const tail = r.failures.length ? ` (${r.failures.length} assertion${r.failures.length === 1 ? '' : 's'} could not be published)` : '';
-          const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
+          const partialTail = r.partial > 0 ? ` — ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
           // B8 (#1365 r3) — the CONFIRMED discount aggregated across the BATCH. Absent → hidden.
           setCostCovered(r.convictionCostCovered ?? null);
-          return `Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}${unknownTail}`;
+          return succeededWithWarning(`Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}${unknownTail}`, r.partial > 0 || Boolean(unknownNote));
         }
-        if (assertions.length === 0) return 'Nothing to publish — promote assertions to Shared Memory first.';
-        if (unknownNote && r.failures.length === 0) return `⚠ ${unknownNote}`;
+        if (assertions.length === 0) return succeeded('Nothing to publish — promote assertions to Shared Memory first.');
+        if (unknownNote && r.failures.length === 0) return succeededWithWarning(unknownNote, true);
         throw new Error(`${r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed'}${unknownTail}`);
       },
       // Publish-appropriate: the raw message (matches the old catch, which fell through
@@ -299,8 +313,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
       title="Publish"
       footnote="Publishes all eligible complete Shared Working Memory Knowledge Assets in this context graph on-chain."
       context={<>Publishes all eligible complete Shared Working Memory Knowledge Assets, including assets outside the loaded preview. On-chain publishing incurs a cost.</>}
-      result={result}
-      error={error}
+      outcome={outcome}
       extras={
         <>
           {/* B8 — the CONFIRMED post-publish discount (from the on-chain CostCovered event);
@@ -330,7 +343,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
         aria-describedby={describedBy}
         onClick={publish}
       >
-        {busy ? '...' : '◉ Publish to Verifiable Memory'}
+        {busy ? '...' : 'Publish to Verifiable Memory'}
       </button>
     </LayerActionShell>
   );
@@ -351,16 +364,8 @@ export function LayerWidgetStrip({ layer, entities, entityCount, actionEntityCou
   // Latest promote/publish outcome, lifted from the action widget so the "✓ Promoted
   // N triples" feedback survives that widget unmounting the instant the acted-on layer
   // empties (entityCount → 0) and the strip swaps to the empty state.
-  const [lastAction, setLastAction] = useState<{ ok: boolean; text: string } | null>(null);
-  const actionResult = lastAction && (
-    <div
-      // #1464 — success vs failure must not collide on one testid (see LayerActionShell).
-      data-testid={lastAction.ok ? 'layer-action-result' : 'layer-action-error'}
-      style={{ fontSize: 'var(--fs-label)', color: lastAction.ok ? 'var(--text-success)' : 'var(--text-danger)', marginBottom: 8 }}
-    >
-      {lastAction.ok ? '✓' : '✕'} {lastAction.text}
-    </div>
-  );
+  const [lastAction, setLastAction] = useState<ActionOutcome | null>(null);
+  const actionResult = lastAction && <LayerActionFeedback outcome={lastAction} />;
   if (entityCount === 0) {
     return (
       <div className="v10-layer-widgets-strip empty">

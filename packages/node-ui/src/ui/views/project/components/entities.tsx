@@ -7,10 +7,10 @@ import { buildVmFacts, vmSubjectsOf } from '../vm-facts.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
-import { useTabsStore } from '../../../stores/tabs.js';
+import { chooseTab as openTab } from '../../../lib/shellNavigation.js';
 import type { SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
 import { LAYER_VAR } from '../../../layer-colors.js';
-import { LayerGlyph } from '../../../components/ds/Badge.js';
+import { LayerGlyph, StatusGlyph } from '../../../components/ds/Badge.js';
 import { LAYER_CONFIG, VM_TRIPLE_STAT, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { LayerGraphPanel } from './graph.js';
@@ -19,6 +19,8 @@ import { AssertionsList } from './assertions.js';
 import { Badge, LayerBadge } from '../../../components/ds/Badge.js';
 import { kindColorForType } from '../../../entity-kind-colors.js';
 import { humanizeTypeName } from '../../../lib/formatLabels.js';
+import { FileText } from 'lucide-react';
+import { formatDateTime, formatNumber } from '../../../lib/format.js';
 export { AssertionsList } from './assertions.js';
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
@@ -128,7 +130,7 @@ export function EntityList({
           >
             <span className="v10-entity-card-icon">{icon}</span>
             <div className="v10-entity-card-main">
-              <div className="v10-entity-card-title">{e.label}</div>
+              <button type="button" className="v10-entity-card-title ds-row-open">{e.label}</button>
               <div className="v10-entity-card-meta">
                 {(author || authorUri) && (
                   <AgentChip
@@ -144,7 +146,7 @@ export function EntityList({
                 {ts != null && (
                   <span
                     className="v10-entity-card-timestamp"
-                    title={new Date(ts).toLocaleString()}
+                    title={formatDateTime(ts)}
                   >
                     {formatRelativeTime(ts)}
                   </span>
@@ -270,10 +272,10 @@ export function LayerContent({
           {isInitialVerifiableMemoryLoad ? (
             <div className="v10-layer-widgets-strip empty">
               <EmptyState
+                busy
                 compact
                 tone="vm"
-                icon={<LayerGlyph layer="vm" />}
-                title="Loading Verifiable Memory..."
+                title="Loading Verifiable Memory…"
                 description="Knowledge Assets are being read from the verified layer."
               />
             </div>
@@ -362,7 +364,7 @@ function VmHeroFacts({ entities, vmTriples, contextGraphId }: { entities: Memory
       {facts.map(f => (
         <div key={f.id} className={`v10-vm-hero-fact tone-${f.tone}`} title={f.tooltip} data-fact={f.id}>
           <dt>{f.label}</dt>
-          <dd>{f.value}{f.tone === 'warn' ? <span aria-label="needs attention" className="v10-vm-hero-fact-icon">⚠</span> : null}</dd>
+          <dd>{f.value}{f.tone === 'warn' ? <span role="img" aria-label="needs attention" className="v10-vm-hero-fact-icon"><StatusGlyph tone="warning" /></span> : null}</dd>
         </div>
       ))}
     </dl>
@@ -421,7 +423,7 @@ export function VerifiableMemoryHeroBanner({ entities, vmTriples, contextGraphId
         layer="vm"
         items={[
           { id: 'assets', value: totalAssets, label: 'Knowledge Assets' },
-          { id: 'triples', value: tripleCount.toLocaleString(), ...VM_TRIPLE_STAT },
+          { id: 'triples', value: formatNumber(tripleCount), ...VM_TRIPLE_STAT },
           { id: 'types', value: typeCount, label: 'Entity types' },
         ]}
       />
@@ -509,7 +511,6 @@ export function DocumentsList({
   contextGraphId?: string;
   scrollKey?: string;
 }) {
-  const openTab = useTabsStore(s => s.openTab);
 
   const docs = useMemo(() => {
     return entities.filter(e => e.properties.has(SOURCE_CONTENT_TYPE));
@@ -538,7 +539,6 @@ export function DocumentsList({
       id: encodeDocTabId(contextGraphId ?? '', ref ?? e.uri, contentType),
       label: e.label,
       closable: true,
-      icon: '📄',
     });
   };
 
@@ -564,9 +564,9 @@ export function DocumentsList({
           const size = fileEntity?.properties.get(DKG_SIZE)?.[0] ?? e.properties.get(DKG_SIZE)?.[0];
           return (
             <div key={e.uri} className="v10-item-row" onClick={() => handleOpenDoc(e)}>
-              <span className="v10-item-icon">📄</span>
+              <span className="v10-item-icon"><FileText size={14} /></span>
               <div className="v10-item-info">
-                <div className="v10-item-name">{e.label}</div>
+                <button type="button" className="v10-item-name ds-row-open">{e.label}</button>
                 <div className="v10-item-meta-row">
                   {contentType && <span className="v10-item-type">{contentType}</span>}
                   {size && <span className="v10-item-count">· {Math.round(parseInt(size) / 1024)}KB</span>}

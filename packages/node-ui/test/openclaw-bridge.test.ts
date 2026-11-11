@@ -372,19 +372,12 @@ describe('PanelRight UI - connected agent flow', () => {
   });
 });
 
-describe('Agent hub shell surfaces', () => {
+describe('Agent shell surfaces', () => {
   const panelLeft = readUiFile('components/Shell/PanelLeft.tsx');
-  const agentHub = readUiFile('pages/AgentHub.tsx');
 
-  it('keeps Integrations visible while hiding the duplicate Agent hub shell entry', () => {
+  it('keeps Integrations visible, with no separate Agent hub entry', () => {
     expect(panelLeft).not.toContain('Agent hub');
     expect(panelLeft).toContain('Integrations');
-  });
-
-  it('restores Agent hub without reviving the old My Agent product path', () => {
-    expect(agentHub).toContain('Agent hub');
-    expect(agentHub).toContain('Bring your own agent into the node');
-    expect(agentHub).not.toContain('My Agent');
   });
 });
 

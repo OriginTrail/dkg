@@ -8,7 +8,7 @@
  * use this where only the mark fits or the name is already on the row.
  */
 import React from 'react';
-import { agentInitials } from '@origintrail-official/dkg-graph-viz/agent-initials';
+import { agentInitials, agentInitialsColor } from '@origintrail-official/dkg-graph-viz/agent-initials';
 import { agentColorForUri } from '../hooks/useAgents.js';
 
 // One initials rule for avatars and graph agent nodes, so a legend dot
@@ -31,17 +31,20 @@ export interface AgentDotProps {
 /** Initials scale with the avatar but stop at the 10px type floor (DESIGN.md · Type). */
 const initialsSize = (size: number) => Math.max(11, Math.round(size * 0.45));
 
-export const AgentDot: React.FC<AgentDotProps> = ({ uri, label, color, size = 18, title, className = '' }) => (
-  <span
-    className={`v10-agent-dot ${className}`}
-    style={{ background: color ?? agentColorForUri(uri), width: size, height: size, fontSize: initialsSize(size) }}
-    title={title ?? (label ? `${label}\n${uri}` : uri)}
-    aria-hidden="true"
-    data-agent={uri}
-  >
-    {agentInitials(label || uri)}
-  </span>
-);
+export const AgentDot: React.FC<AgentDotProps> = ({ uri, label, color, size = 18, title, className = '' }) => {
+  const fill = color ?? agentColorForUri(uri);
+  return (
+    <span
+      className={`v10-agent-dot ${className}`}
+      style={{ background: fill, color: agentInitialsColor(fill), width: size, height: size, fontSize: initialsSize(size) }}
+      title={title ?? (label ? `${label}\n${uri}` : uri)}
+      aria-hidden="true"
+      data-agent={uri}
+    >
+      {agentInitials(label || uri)}
+    </span>
+  );
+};
 
 /** Overlapping avatars for a set of agents, with "+N" for the rest. */
 export const AgentDotStack: React.FC<{

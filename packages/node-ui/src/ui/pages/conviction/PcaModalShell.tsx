@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef } from 'react';
 import { useModalDismiss } from '../../components/Modals/useModalDismiss.js';
+import { X } from 'lucide-react';
 
 /**
  * Shared modal chrome for the PCA dialogs (S2 Create, S4 Approve) — mirrors
@@ -56,7 +57,7 @@ export function PcaModalShell({
           disabled={dismissDisabled}
           style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: dismissDisabled ? 'not-allowed' : 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4, zIndex: 1, opacity: dismissDisabled ? 0.45 : 1 }}
         >
-          ×
+          <X size={14} />
         </button>
         <div className="v10-modal-header">
           <h2 id="pca-modal-title" className="v10-modal-title" tabIndex={-1} ref={headingRef}>

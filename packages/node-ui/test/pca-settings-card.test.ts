@@ -22,7 +22,9 @@ const state = vi.hoisted(() => ({
 vi.mock('../src/ui/hooks/usePcaOverview.js', () => ({ usePcaOverview: () => state.overview }));
 vi.mock('../src/ui/hooks/usePcaScopeBootstrap.js', () => ({ usePcaScopeBootstrap: () => state.bootstrapScope() }));
 vi.mock('../src/ui/stores/tabs.js', () => ({
-  useTabsStore: (sel: (s: unknown) => unknown) => sel({ openTab: state.openTab }),
+  useTabsStore: Object.assign((sel: (s: unknown) => unknown) => sel({ openTab: state.openTab }), {
+    getState: () => ({ activeTabId: 'dashboard', openTab: (...a: unknown[]) => state.openTab(...a) }),
+  }),
 }));
 
 const { PcaSettingsCard } = await import('../src/ui/pages/conviction/PcaSettingsCard.js');

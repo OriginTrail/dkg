@@ -14,6 +14,7 @@ import type { OwnerActionSubmitter } from '../../pca/ownerActions.js';
 import type { WalletTxProgress } from '../../pca/useWalletTxProgress.js';
 import type { DetailDeviceAction } from '../../pca/detailWalletTx.js';
 import type { PcaOwnerAccess } from '../../pca/ownerAccess.js';
+import { ExternalMark } from '../../components/ds/ExternalMark.js';
 
 /** Funding — top-up + the W2 ambiguous-broadcast / pending-receipt honesty. */
 export function FundingSection({
@@ -187,7 +188,7 @@ function ActionFeedback({
         {state.warning.message}{' '}
         {state.warning.txHash &&
           (txUrl ? (
-            <a href={txUrl} target="_blank" rel="noreferrer">{state.warning.txHash} ↗</a>
+            <a href={txUrl} target="_blank" rel="noreferrer">{state.warning.txHash} <ExternalMark /></a>
           ) : (
             <code>{state.warning.txHash}</code>
           ))}{' '}
@@ -203,7 +204,7 @@ function ActionFeedback({
   return (
     <p className="v10-pca-detail-result" data-testid="pca-action-result" role="status">
       {state.result.message}{' '}
-      {txUrl && <a href={txUrl} target="_blank" rel="noreferrer">tx ↗</a>}{' '}
+      {txUrl && <a href={txUrl} target="_blank" rel="noreferrer">tx <ExternalMark /></a>}{' '}
       Still pending? You can close this and verify here.
     </p>
   );

@@ -38,6 +38,7 @@ export function ConfirmGate({ catalog, funding, confirming, busy, err, onConfirm
           {funding && <span className="mkt-muted mkt-xs" data-copy="gate.wallet">{copy('gate.wallet', { eth: funding.buyerWallet.ethEther })}</span>}
         </div>
       )}
+      <div className="ds-table-scroll">
       <table className="mkt-act" data-testid="mkt-gate-lines">
         <tbody>
           {plan.services.map((s) => (
@@ -52,6 +53,7 @@ export function ConfirmGate({ catalog, funding, confirming, busy, err, onConfirm
           ))}
         </tbody>
       </table>
+      </div>
       {preview && (
         <div className="mkt-sec" data-testid="mkt-gate-total" data-copy="gate.total">
           {copy('gate.total', { value: fmtTrac(preview.value), cost: fmtTrac(preview.cost), usd: usdOf(preview.cost, catalog.fx.tracUsd) ?? '' })}

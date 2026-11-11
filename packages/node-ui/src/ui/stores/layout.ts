@@ -4,6 +4,8 @@ import { create } from 'zustand';
 interface LayoutState {
   leftCollapsed: boolean;
   rightCollapsed: boolean;
+  /** The right panel fills the centre area. Never saved. */
+  rightExpanded: boolean;
   bottomCollapsed: boolean;
   bottomMaximised: boolean;
   leftSectionMarketplaceOpen: boolean;
@@ -19,7 +21,16 @@ interface LayoutState {
 
   toggleLeft: () => void;
   toggleRight: () => void;
+  setRightExpanded: (expanded: boolean) => void;
   closeNarrowPanel: () => void;
+  /** Show the centre: collapse the expanded right panel and close a floating one. */
+  revealCentre: () => void;
+  /**
+   * Open the right panel: floating on a narrow screen, docked otherwise, and with
+   * `expandOnDesktop` expanded over the centre on a wide one, in one update. Already open
+   * stays open, so calling it twice changes nothing.
+   */
+  openRight: (options?: { expandOnDesktop?: boolean }) => void;
   toggleBottom: () => void;
   toggleBottomMaximised: () => void;
   toggleLeftSectionMarketplace: () => void;
@@ -191,13 +202,14 @@ const initial = loadPersisted();
 export const useLayoutStore = create<LayoutState>((set, get) => ({
   leftCollapsed: initial.leftCollapsed,
   rightCollapsed: initial.rightCollapsed,
+  rightExpanded: false,
   bottomCollapsed: initial.bottomCollapsed,
   bottomMaximised: false,
   leftSectionMarketplaceOpen: initial.leftSectionMarketplaceOpen,
   leftSectionMyProjectsOpen: initial.leftSectionMyProjectsOpen,
   leftSectionContextOracleOpen: initial.leftSectionContextOracleOpen,
   leftSectionIntegrationsOpen: initial.leftSectionIntegrationsOpen,
-  theme: (localStorage.getItem('dkg-theme') as 'dark' | 'light') || 'dark',
+  theme: (typeof localStorage === 'undefined' ? null : localStorage.getItem('dkg-theme') as 'dark' | 'light' | null) || 'dark',
   leftWidth: initial.leftWidth,
   rightWidth: initial.rightWidth,
   bottomHeight: initial.bottomHeight,
@@ -211,15 +223,27 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
     set((s) => ({ leftCollapsed: !s.leftCollapsed }));
     persist(snapshot(get()));
   },
+  setRightExpanded: (expanded) => set({ rightExpanded: expanded }),
   toggleRight: () => {
     if (isNarrowViewport()) {
       set((s) => ({ narrowPanel: s.narrowPanel === 'right' ? null : 'right' }));
       return;
     }
-    set((s) => ({ rightCollapsed: !s.rightCollapsed }));
+    set((s) => ({ rightCollapsed: !s.rightCollapsed, rightExpanded: false }));
     persist(snapshot(get()));
   },
   closeNarrowPanel: () => set({ narrowPanel: null }),
+  revealCentre: () => set({ rightExpanded: false, narrowPanel: null }),
+  openRight: ({ expandOnDesktop = false } = {}) => {
+    if (isNarrowViewport()) {
+      set({ narrowPanel: 'right' });
+      return;
+    }
+    const { rightCollapsed, rightExpanded } = get();
+    if (!rightCollapsed && (!expandOnDesktop || rightExpanded)) return;
+    set(expandOnDesktop ? { rightCollapsed: false, rightExpanded: true } : { rightCollapsed: false });
+    persist(snapshot(get()));
+  },
   toggleBottom: () => {
     set((s) => ({ bottomCollapsed: !s.bottomCollapsed, bottomMaximised: false }));
     persist(snapshot(get()));

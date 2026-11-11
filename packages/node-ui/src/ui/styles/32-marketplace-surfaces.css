@@ -46,12 +46,14 @@
 .mkt-warnonce { color: var(--state-pending); font-size: var(--fs-sm); }
 .mkt-wallet { border: 1px solid var(--border-strong); border-radius: var(--radius-nested); padding: var(--sp-3) var(--sp-4); }
 /* ── purchase flow · degraded catalog · access form · operate ── */
-.mkt-h1 { font-size: var(--fs-xl); font-weight: var(--fw-semibold); margin: 0; }
 .mkt-card h2, .mkt-card h3 { margin: 0; }
 .mkt-card h2 { font-size: var(--fs-lg); }
 .mkt-card h3 { font-size: var(--fs-md); }
 .mkt-flow { display: grid; gap: var(--sp-4); }
 .mkt-wrap { flex-wrap: wrap; }
+/* A Core node line: separate requirements, each with its check; the gaps separate them. */
+.mkt-corenode { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-4); }
+.mkt-corenode-item { display: inline-flex; align-items: center; gap: var(--sp-1); }
 .mkt-linkbtn:disabled { opacity: .55; cursor: not-allowed; }
 .mkt-linkbtn { background: none; border: 0; padding: 0; color: var(--interactive-text); cursor: pointer; font-size: inherit; text-decoration: underline; text-underline-offset: 2px; }
 .mkt-errline { color: var(--state-blocked); }

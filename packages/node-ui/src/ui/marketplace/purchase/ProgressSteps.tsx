@@ -2,6 +2,7 @@
 // account, compose a plan, mint a key), with the compose step's one
 // confirmation named under it while it is open.
 import React from 'react';
+import { Check } from 'lucide-react';
 import { copy, type CopyKey } from '../copy.generated.js';
 
 export type StepSub = 'confirm' | 'sending' | null;
@@ -23,7 +24,7 @@ export function ProgressSteps({ step, sub = null }: { step: 1 | 2 | 3; sub?: Ste
         const state = s.n < step ? 'done' : s.n === step ? 'now' : 'todo';
         return (
           <li key={s.n} className={`mkt-step ${state}`} aria-current={state === 'now' ? 'step' : undefined}>
-            <span className="mkt-step-n" aria-hidden>{state === 'done' ? '✓' : s.n}</span>
+            <span className="mkt-step-n" aria-hidden>{state === 'done' ? <Check size={12} /> : s.n}</span>
             <span data-copy={s.key}>{copy(s.key)}</span>
             {s.n === 2 && state === 'now' && sub && (
               <span className="mkt-step-sub mkt-muted mkt-xs" data-copy={SUB_KEY[sub]}>{copy(SUB_KEY[sub])}</span>

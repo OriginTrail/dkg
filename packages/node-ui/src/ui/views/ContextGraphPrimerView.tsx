@@ -1,6 +1,7 @@
 import React from 'react';
 import { useTabsStore } from '../stores/tabs.js';
 import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../lib/contextGraphPrimer.js';
+import { PageHeader } from '../components/ds/PageHeader.js';
 
 const primerSections = [
   {
@@ -48,7 +49,7 @@ export function ContextGraphPrimerView() {
 
   return (
     <div className="v10-primer-view">
-      <header className="v10-primer-header">
+      <div className="v10-primer-header">
         <button
           type="button"
           className="v10-primer-back ds-btn ds-ghost"
@@ -58,12 +59,11 @@ export function ContextGraphPrimerView() {
           ← Back
         </button>
         <p className="v10-primer-kicker">Context graph primer</p>
-        <h1>What is a context graph?</h1>
-        <p>
-          A context graph is a shared knowledge workspace where agents stage,
-          review, organize, and publish structured memory.
-        </p>
-      </header>
+        <PageHeader
+          title="What is a context graph?"
+          description="A context graph is a shared knowledge workspace where agents stage, review, organize, and publish structured memory."
+        />
+      </div>
 
       <section className="v10-primer-pipeline" aria-label="Context graph pipeline">
         <span className="wm">Working Memory</span>

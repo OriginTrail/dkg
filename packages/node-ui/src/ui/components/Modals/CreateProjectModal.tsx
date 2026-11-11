@@ -2,13 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { createContextGraph, fetchCurrentAgent } from '../../api.js';
 import { refreshContextGraphInventoryAfterMutation } from '../../hooks/useContextGraphInventory.js';
 import { useProjectsStore } from '../../stores/projects.js';
-import { useTabsStore } from '../../stores/tabs.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { useJourneyStore } from '../../stores/journey.js';
 import { installOntology, listStarters } from '../../lib/ontologyInstall.js';
 import { publishProjectManifest } from '../../lib/projectManifest.js';
 import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
 import { useModalDismiss } from './useModalDismiss.js';
 import { CG_NAME_MAX_LENGTH, sanitiseCgName, validateCgName } from './cgNameValidation.js';
+import { ChevronRight, X, RefreshCw } from 'lucide-react';
 
 function slugify(str: string): string {
   return str
@@ -39,9 +40,9 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const starters = listStarters();
   const [starterSlug, setStarterSlug] = useState<string>(starters[0]?.slug ?? 'coding-project');
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [quorum, setQuorum] = useState('off');
-  const [swmTtl, setSwmTtl] = useState('7d');
-  const [swmCap, setSwmCap] = useState('100k');
+  const [quorum] = useState('off');
+  const [swmTtl] = useState('7d');
+  const [swmCap] = useState('100k');
   const [creating, setCreating] = useState(false);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -67,7 +68,6 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const [identityError, setIdentityError] = useState(false);
 
   const { contextGraphs, setActiveProject } = useProjectsStore();
-  const { openTab } = useTabsStore();
   const { setStage, stage } = useJourneyStore();
 
   const loadAgentIdentity = () => {
@@ -310,7 +310,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             title="Close (Esc)"
             style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4 }}
           >
-            ×
+            <X size={14} />
           </button>
           <div className="v10-modal-header">
             <div id="dkg-wire-modal-title" className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
@@ -358,7 +358,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           title="Close (Esc)"
           style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4, zIndex: 1 }}
         >
-          ×
+          <X size={14} />
         </button>
         <div className="v10-modal-header">
           <div id="dkg-create-cg-title" className="v10-modal-title">Create new context graph</div>
@@ -369,7 +369,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
 
         <div className="v10-modal-body">
           {error && (
-            <div className="v10-modal-error ds-card-nested">
+            <div role="alert" className="v10-modal-error ds-card-nested">
               {error}
             </div>
           )}
@@ -495,7 +495,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               </label>
               {ontology === 'community' && (
                 <div style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
-                  <select
+                  <select aria-label="Community ontology"
                     className="v10-form-select ds-input"
                     value={starterSlug}
                     onChange={(e) => setStarterSlug(e.target.value)}
@@ -527,16 +527,16 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             </div>
           </div>
 
-          <div className="v10-form-advanced-toggle" onClick={() => setShowAdvanced(!showAdvanced)}>
-            <span className={`v10-form-adv-chevron ${showAdvanced ? 'open' : ''}`}>▸</span>
+          <button type="button" className="v10-form-advanced-toggle" aria-expanded={showAdvanced} onClick={() => setShowAdvanced(!showAdvanced)}>
+            <span className={`v10-form-adv-chevron ${showAdvanced ? 'open' : ''}`}><ChevronRight size={12} /></span>
             <span>Advanced settings</span>
-          </div>
+          </button>
 
           {showAdvanced && (
             <div className="v10-form-advanced-body ds-card-nested" style={{ opacity: 0.5, pointerEvents: 'none' }}>
               <div className="v10-form-group">
                 <label className="v10-form-label">Consensus quorum <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
-                <select className="v10-form-select ds-input" value={quorum} disabled>
+                <select aria-label="Consensus quorum" className="v10-form-select ds-input" value={quorum} disabled>
                   <option value="off">Off — no consensus verification required</option>
                   <option value="2of3">2 of 3 — lightweight consensus</option>
                   <option value="3of5">3 of 5 — standard consensus (recommended for teams)</option>
@@ -544,8 +544,8 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 </select>
               </div>
               <div className="v10-form-group">
-                <label className="v10-form-label">SWM TTL <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
-                <select className="v10-form-select ds-input" value={swmTtl} disabled>
+                <label className="v10-form-label">Shared Working Memory lifetime <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+                <select aria-label="SWM TTL" className="v10-form-select ds-input" value={swmTtl} disabled>
                   <option value="7d">7 days (default)</option>
                   <option value="1h">1 hour</option>
                   <option value="1d">1 day</option>
@@ -553,8 +553,8 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 </select>
               </div>
               <div className="v10-form-group" style={{ marginBottom: 0 }}>
-                <label className="v10-form-label">SWM Size Cap <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
-                <select className="v10-form-select ds-input" value={swmCap} disabled>
+                <label className="v10-form-label">Shared Working Memory size limit <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+                <select aria-label="SWM size cap" className="v10-form-select ds-input" value={swmCap} disabled>
                   <option value="100k">100K triples (default)</option>
                   <option value="10k">10K triples</option>
                   <option value="1m">1M triples</option>
@@ -569,7 +569,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           <button className="v10-modal-btn ds-btn" onClick={onClose}>Cancel</button>
           {identityError && (
             <button className="v10-modal-btn ds-btn" onClick={loadAgentIdentity} disabled={identityLoading}>
-              {identityLoading ? 'Retrying…' : 'Retry Loading Agent'}
+              {identityLoading ? 'Retrying…' : <><RefreshCw size={12} />Retry Loading Agent</>}
             </button>
           )}
           <button

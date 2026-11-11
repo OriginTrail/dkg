@@ -52,12 +52,12 @@ function readPanelRightSources(): string {
 }
 
 describe('backward-compatible route redirects', () => {
-  it('App.tsx routes /network as a lazy page and catch-all to AppShell', () => {
+  it('App.tsx forwards /network to Observability and catch-all to AppShell', () => {
     const app = readFile('App.tsx');
     expect(app).toContain('path="/network"');
     expect(app).toContain('path="*"');
     expect(app).toContain('AppShell');
-    expect(app).toContain('NetworkDebugPage');
+    expect(app).toContain('NetworkRoute');
   });
 });
 
@@ -260,10 +260,10 @@ describe('right-rail agent shell replaces Agent hub', () => {
     expect(app).toContain('[leftOpen, rightOpen]');
   });
 
-  it('hides the duplicate left-nav Agent hub entry while keeping the internal route alive', () => {
+  it('has no Agent hub page (app-agent-hub-route.test.ts covers what the old address opens)', () => {
     expect(panelLeft).not.toContain("id: 'agent-hub'");
     expect(panelLeft).not.toContain('Agent hub');
-    expect(panelCenter).toContain("activeTabId === 'agent-hub'");
+    expect(panelCenter).not.toContain("activeTabId === 'agent-hub'");
   });
 
   it('moves connected-agent chat into the right rail with Agents, Network, and Sessions tabs', () => {
@@ -467,14 +467,6 @@ describe('useMemoryEntities hook', () => {
   });
 
 
-});
-
-describe('AgentHub page renders PanelRight', () => {
-  const agentHub = readFile('pages/AgentHub.tsx');
-
-  it('wraps PanelRight for agent chat', () => {
-    expect(agentHub).toContain('<PanelRight');
-  });
 });
 
 describe('mock detection request fan-out guard', () => {
@@ -786,7 +778,7 @@ describe('Graph visualization CSS', () => {
 
   it('has responsive rules for graph containers', () => {
     expect(css).toContain('@media (max-height: 700px)');
-    expect(css).toContain('@media (max-width: 700px)');
+    expect(css).toContain('@media (max-width: 720px)');
   });
 });
 
@@ -858,7 +850,7 @@ describe.skip('Memory Explorer CSS', () => {
   });
 
   it('has responsive breakpoints', () => {
-    expect(css).toContain('@media (max-width: 700px)');
+    expect(css).toContain('@media (max-width: 720px)');
   });
 
   it('has project home styles', () => {

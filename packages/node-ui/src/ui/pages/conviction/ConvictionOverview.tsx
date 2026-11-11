@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import { useAgentsStore } from '../../stores/agents.js';
-import { useTabsStore } from '../../stores/tabs.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { pcaStorageScopeForContracts, usePcaStore } from '../../stores/pca.js';
 import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
 import { usePcaOverview, type ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
@@ -16,6 +16,9 @@ import { GetSponsoredPanel } from './GetSponsoredPanel.js';
 import { eqAddress as eq } from '../../web3/address.js';
 import { resolvePcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { Badge, Count } from '../../components/ds/Badge.js';
+import { RefreshCw, Plus } from 'lucide-react';
+import { formatBps, formatNodeRole } from '../../lib/format.js';
+import { PageHeader } from '../../components/ds/PageHeader.js';
 
 type WalletBootstrapStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -46,13 +49,11 @@ export function ConvictionOverview() {
     : undefined;
   const blockExplorerUrl = nodeStatus?.blockExplorerUrl ?? null;
 
-  const openTab = useTabsStore((s) => s.openTab);
   const trackAccount = usePcaStore((s) => s.trackAccount);
   const untrackAccount = usePcaStore((s) => s.untrackAccount);
   const setPcaScope = usePcaStore((s) => s.setScope);
   const setWalletBootstrap = useWalletStore((s) => s.setBootstrap);
   const initWallet = useWalletStore((s) => s.initWallet);
-  const walletBootstrap = useWalletStore((s) => s.bootstrap);
   const connectedWallet = useWalletStore((s) => s.address);
   const wrongNetwork = useWalletStore((s) => isWrongNetwork(s));
   const switchToExpectedChain = useWalletStore((s) => s.switchToExpectedChain);
@@ -218,18 +219,14 @@ export function ConvictionOverview() {
   );
 
   return (
-    <div className="v10-pca-overview" data-testid="pca-landing">
-      <header className="v10-pca-overview-head">
-        <div className="v10-pca-overview-titlerow">
-          <h2 className="v10-pca-overview-title">Publisher Conviction</h2>
-          {role && <Badge tone="role" size="sm" className="v10-pca-role-chip">Node role: {role}</Badge>}
-        </div>
-        <p className="v10-pca-overview-explainer">
-          {role === 'edge'
+    <div className="ds-page ds-page-narrow" data-testid="pca-landing">
+      <PageHeader
+        title="Publisher Conviction"
+        badge={role && <Badge tone="role" size="sm" className="v10-pca-role-chip">Node role: {formatNodeRole(role)}</Badge>}
+        description={role === 'edge'
             ? "Publisher Conviction Accounts let publishers dedicate TRAC spend in advance and receive a publishing discount by tier: 0%, 10%, 20%, 30%, 40%, 50%, or 75%, based on the committed amount. Nodes can create their own PCA or get added to an existing PCA by sharing operational publishing wallets with the PCA owner. You still pay gas; the PCA covers only the TRAC publishing fee for approved wallets."
             : "A Publisher Conviction Account (PCA) lets you lock TRAC up front and approve publishing wallets to publish at a discount. The discount applies to the wallet that signs the publish (on-chain msg.sender), not a peerId, admin wallet, or author identity."}
-        </p>
-      </header>
+      />
 
       <section className="v10-pca-section v10-pca-coverage-summary" data-testid="pca-coverage-summary">
         <div className="v10-pca-section-head">
@@ -244,7 +241,7 @@ export function ConvictionOverview() {
               Get added to a PCA
             </button>
             <button type="button" className="v10-pca-card-btn ds-btn" data-testid="pca-create-btn" onClick={() => setCreateOpen(true)}>
-              + Create PCA
+              <Plus size={14} aria-hidden="true" />Create PCA
             </button>
           </div>
         </div>
@@ -257,7 +254,7 @@ export function ConvictionOverview() {
         ) : walletsInconclusive ? (
           <p className="v10-pca-overview-caveat" role="status">
             Couldn't read this node's wallets, so coverage can't be confirmed.{' '}
-            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refresh()}>Retry</button>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refresh()}><RefreshCw size={12} />Retry</button>
           </p>
         ) : (
           <p className="v10-pca-overview-caveat">No operational publishing wallets were reported by this node.</p>
@@ -313,7 +310,7 @@ export function ConvictionOverview() {
               </div>
               <div className="v10-pca-overview-cta-group">
                 <button type="button" className="v10-pca-card-btn ds-btn" data-testid="pca-create-owned-btn" onClick={() => setCreateOpen(true)}>
-                  + Create PCA
+                  <Plus size={14} aria-hidden="true" />Create PCA
                 </button>
               </div>
             </div>
@@ -394,7 +391,7 @@ export function ConvictionOverview() {
         <section className="v10-pca-discovered" data-testid="pca-discovered-error" role="status">
           <p className="v10-pca-overview-caveat">
             Couldn&apos;t verify this node&apos;s Publisher Conviction Accounts; approved PCA coverage may still exist.{' '}
-            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refreshDiscovered()}>Retry</button>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refreshDiscovered()}><RefreshCw size={12} />Retry</button>
           </p>
         </section>
       )}
@@ -403,7 +400,7 @@ export function ConvictionOverview() {
         <section className="v10-pca-discovered" data-testid="pca-wallet-bootstrap-error" role="status">
           <p className="v10-pca-overview-caveat">
             Note: Couldn&apos;t load wallet contract bootstrap, so connected-wallet PCA discovery is paused.{' '}
-            <button type="button" className="v10-pca-card-btn ds-btn" onClick={retryWalletBootstrap}>Retry</button>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={retryWalletBootstrap}><RefreshCw size={12} />Retry</button>
           </p>
         </section>
       )}
@@ -412,7 +409,7 @@ export function ConvictionOverview() {
         <section className="v10-pca-discovered" data-testid="pca-wallet-discovery-error" role="status">
           <p className="v10-pca-overview-caveat">
             Note: Couldn&apos;t read PCAs owned by the connected wallet. Existing tracked PCAs are still shown.{' '}
-            <button type="button" className="v10-pca-card-btn ds-btn" onClick={connectedWalletPcas.refresh}>Retry</button>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={connectedWalletPcas.refresh}><RefreshCw size={12} />Retry</button>
           </p>
         </section>
       )}
@@ -487,7 +484,7 @@ function DiscoveredStrip({
                   approved, so the account's tier isn't a discount this node realizes -
                   showing a percentage there reads as a false "you'd get this %". */}
               {(d.relation === 'agent' || d.relation === 'both') && typeof bps === 'number' && bps > 0 && (
-                <Badge size="sm">{(bps / 100).toFixed(bps % 100 === 0 ? 0 : 1)}%</Badge>
+                <Badge size="sm">{formatBps(bps)}</Badge>
               )}
             </span>
             <button

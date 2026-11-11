@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { apiTokenSurvivesReload, currentApiToken } from './lib/apiToken.js';
+import { truncateAddress } from './lib/format.js';
 
 const RELOADED_FOR_401_KEY = '__dkg_401_reloaded';
 
@@ -179,5 +180,5 @@ export function formatTime(ts: number | string | Date | null | undefined, now: D
 export function shortId(id: string | null | undefined, len = 8): string {
   if (!id) return '—';
   if (id.length <= len * 2) return id;
-  return id.slice(0, len) + '...' + id.slice(-4);
+  return truncateAddress(id, len, 4);
 }

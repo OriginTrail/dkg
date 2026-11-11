@@ -10,7 +10,7 @@
 .v10-tree-content {
   flex: 1;
   overflow-y: auto;
-  padding: 8px 0;
+  padding: var(--space-8) 0;
 }
 /* Sidebar places: Dashboard at the top, the node's places pinned to the
    bottom in a labelled group — every destination lives in the sidebar. */
@@ -18,10 +18,10 @@
   display: flex;
   align-items: center;
   width: calc(100% - 16px);
-  height: 28px;
-  margin: 0 8px 4px;
-  padding: 0 8px;
-  gap: 8px;
+  height: var(--h-row);
+  margin: 0 var(--space-8) var(--space-4);
+  padding: 0 var(--space-8);
+  gap: var(--space-8);
   border: 0;
   border-radius: var(--radius-control);
   background: none;
@@ -31,20 +31,20 @@
   font-weight: 500;
   text-align: left;
   color: var(--text-secondary);
-  transition: background 0.1s;
+  transition: background var(--motion-fast);
 }
 .v10-tree-dashboard:hover { background: var(--bg-hover); color: var(--text-primary); }
 .v10-tree-dashboard.active { background: var(--bg-active); color: var(--text-primary); }
 .v10-tree-dashboard:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .v10-sidebar-place-icon { display: inline-grid; place-items: center; width: 16px; color: var(--text-tertiary); flex: none; }
 .v10-tree-dashboard.active .v10-sidebar-place-icon, .v10-tree-dashboard:hover .v10-sidebar-place-icon { color: var(--text-primary); }
-.v10-sidebar-node { margin-top: auto; flex-shrink: 0; padding: 6px 0 8px; border-top: 1px solid var(--border-subtle); }
-.v10-sidebar-group-label { padding: 6px 16px 4px; font-size: var(--fs-micro); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-tertiary); }
+.v10-sidebar-node { margin-top: auto; flex-shrink: 0; padding: var(--space-6) 0 var(--space-8); border-top: 1px solid var(--border-subtle); }
+.v10-sidebar-group-label { padding: var(--space-6) var(--space-16) var(--space-4); font-size: var(--fs-micro); font-weight: 600; letter-spacing: var(--ls-caps); text-transform: uppercase; color: var(--text-tertiary); }
 .v10-sidebar-node .v10-tree-dashboard { margin-bottom: 0; }
 /* Collapsible sidebar groups (SidebarSection): My Context Graphs, Public
    graphs, Marketplace, Integrations. Headers use the .v10-peer-group pattern. */
 .v10-sidebar-group-body { gap: 0; padding: 2px 0 8px; }
-.v10-sidebar-empty { display: grid; gap: 4px; margin: 2px 8px 6px; padding: 8px; color: var(--text-tertiary); font-size: var(--fs-label); line-height: 1.5; }
+.v10-sidebar-empty { display: grid; gap: var(--space-4); margin: var(--space-2) var(--space-8) var(--space-6); padding: var(--space-8); color: var(--text-tertiary); font-size: var(--fs-label); line-height: var(--lh-body); }
 .v10-sidebar-empty strong { color: var(--text-primary); font-size: var(--fs-control); font-weight: 600; }
 /* First run: the empty group is a card, and carries New and Join. */
 .v10-sidebar-first-run { padding: 12px; gap: 8px; border: 1px solid var(--border-default); border-radius: var(--radius-card); background: var(--bg-surface); }
@@ -53,19 +53,19 @@
 .v10-sidebar-first-run .v10-sidebar-inline-actions { padding: 0; }
 
 /* Tree sections (project list) */
-.v10-tree-section { margin-bottom: 2px; }
+.v10-tree-section { margin-bottom: var(--space-2); }
 .v10-tree-section-header {
   display: flex;
   align-items: center;
-  padding: 4px 12px;
-  gap: 8px;
+  padding: var(--space-4) var(--space-12);
+  gap: var(--space-8);
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--motion-fast);
   user-select: none;
 }
 .v10-tree-section-header:hover { background: var(--bg-hover); }
 .v10-tree-section-header.active { background: var(--bg-active); }
-.v10-tree-section-header.catalogue { cursor: default; gap: 6px; }
+.v10-tree-section-header.catalogue { cursor: default; gap: var(--space-6); }
 .v10-tree-section-label {
   /* CG names — the single biggest sidebar readability win. 12 → 13. */
   font-size: var(--fs-body);
@@ -79,17 +79,23 @@
 /* Hover-revealed "hide" affordance on each project row. Keeps the tree
    quiet by default and lets the user dismiss any leftover project from
    their sidebar without a daemon-side delete. */
-.v10-tree-hide-btn { flex-shrink: 0; margin-left: 6px; width: 18px; opacity: 0; }
-.v10-tree-section-header:hover .v10-tree-hide-btn { opacity: 1; }
+.v10-tree-hide-btn { flex-shrink: 0; margin-left: var(--space-6); width: 18px; opacity: 0; }
+.v10-tree-section-header:hover .v10-tree-hide-btn,
+.v10-tree-section-header:focus-within .v10-tree-hide-btn { opacity: 1; }
 .v10-tree-catalogue-btn { flex-shrink: 0; }
+
+/* "My Projects" / "Participating Projects" group dividers. Token
+   moved from --text-ghost → --text-tertiary (PR8) — ghost was never
+   meant for navigational labels; the contrast was below the 3:1 floor
+   even after PR8's ghost bump. */
 
 /* Move-to-other-group button (⤑), same reveal-on-hover shape as hide */
 
 .v10-tree-show-hidden {
   display: block;
   width: calc(100% - 16px);
-  margin: 10px 8px 4px;
-  padding: 6px 10px;
+  margin: 10px var(--space-8) var(--space-4);
+  padding: var(--space-6) 10px;
   background: none;
   border: 1px dashed var(--border-subtle);
   border-radius: var(--radius-control);
@@ -97,7 +103,7 @@
   font-size: var(--fs-control); font-family: var(--font-sans);
   cursor: pointer;
   text-align: center;
-  transition: border-color 0.15s, color 0.15s;
+  transition: border-color var(--motion-base), color var(--motion-base);
 }
 .v10-tree-show-hidden:hover {
   border-color: var(--border-strong);
@@ -107,10 +113,10 @@
 .v10-tree-item {
   display: flex;
   align-items: center;
-  padding: 3px 12px 3px 38px;
-  gap: 8px;
+  padding: var(--space-4) var(--space-12) var(--space-4) 38px;
+  gap: var(--space-8);
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--motion-fast);
   font-size: var(--fs-control);
   color: var(--text-secondary);
 }
@@ -126,12 +132,13 @@
 
 /* Journey empty card */
 .v10-journey-empty-card {
-  margin: 16px 10px;
-  padding: 16px;
+  margin: var(--space-16) 10px;
+  padding: var(--space-16);
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
   text-align: center;
 }
+.v10-journey-empty-card > button { margin-top: var(--space-8); }
 
 /* Tree items are toggled via React state — no CSS display:none needed */
 
@@ -179,10 +186,10 @@
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-6);
   max-width: 220px;
   height: 100%;
-  padding: 0 6px 0 12px;
+  padding: 0 var(--space-6) 0 var(--space-12);
   border-right: 1px solid var(--border-subtle);
   border-bottom: 2px solid transparent;
   background: none;
@@ -192,11 +199,11 @@
   white-space: nowrap;
   flex-shrink: 0;
   cursor: pointer;
-  transition: color .12s, background-color .12s;
+  transition: color var(--motion-fast), background-color var(--motion-fast);
 }
 .v10-center-tab:hover { color: var(--text-secondary); background: var(--bg-surface); }
 .v10-center-tab.active { color: var(--text-primary); background: var(--bg-root); border-bottom-color: var(--text-primary); }
-.v10-center-tab.pinned { padding: 0 12px; }
+.v10-center-tab.pinned { padding: 0 var(--space-12); }
 .v10-center-tab:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .v10-center-tab-label { overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
 .v10-tab-mark-icon { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; color: currentColor; }
@@ -214,19 +221,19 @@
   opacity: 1;
   visibility: hidden;
   cursor: pointer;
-  transition: opacity 0.15s;
+  transition: opacity var(--motion-base);
 }
 .v10-center-tab:hover .v10-center-tab-close,
 .v10-center-tab.active .v10-center-tab-close,
 .v10-center-tab:focus-within .v10-center-tab-close { visibility: visible; opacity: 1; }
 .v10-center-tab-close:hover { background: var(--bg-active); color: var(--text-primary); }
 .v10-center-tab.dragging { opacity: .35; }
-.v10-center-tab.drop-before { box-shadow: inset 2px 0 0 var(--focus-ring); }
-.v10-center-tab.drop-after { box-shadow: inset -2px 0 0 var(--focus-ring); }
+.v10-center-tab.drop-before { box-shadow: inset 2px 0 0 var(--border-prominent); }
+.v10-center-tab.drop-after { box-shadow: inset -2px 0 0 var(--border-prominent); }
 .v10-center-tabs-all {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-4);
   padding: 0 10px;
   border: 0;
   border-left: 1px solid var(--border-subtle);
@@ -240,25 +247,25 @@
 .v10-center-tabs-count { font-size: var(--fs-micro); font-weight: 600; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 .v10-tab-menu {
   position: fixed;
-  z-index: 1000;
+  z-index: var(--z-floating);
   min-width: 240px;
   max-width: 340px;
   max-height: min(70vh, 520px);
   overflow-y: auto;
-  padding: 4px;
+  padding: var(--space-4);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-nested);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-popover);
 }
-.v10-tab-menu-label { padding: 8px 8px 4px; font-size: var(--fs-micro); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-tertiary); }
+.v10-tab-menu-label { padding: var(--space-8) var(--space-8) var(--space-4); font-size: var(--fs-micro); font-weight: 600; letter-spacing: var(--ls-caps); text-transform: uppercase; color: var(--text-tertiary); }
 .v10-tab-menu-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-8);
   width: 100%;
   height: 28px;
-  padding: 0 8px;
+  padding: 0 var(--space-8);
   border: 0;
   border-radius: var(--radius-xs);
   background: none;
@@ -268,19 +275,20 @@
   text-align: left;
   cursor: pointer;
 }
-.v10-tab-menu-item:hover:not(:disabled), .v10-tab-menu-item:focus-visible { background: var(--bg-hover); color: var(--text-primary); outline: none; }
+.v10-tab-menu-item:hover:not(:disabled), .v10-tab-menu-item:focus-visible { background: var(--bg-hover); color: var(--text-primary); }
+.v10-tab-menu-item:focus-visible { outline-offset: -2px; }
 .v10-tab-menu-item.active { color: var(--text-primary); }
-.v10-tab-menu-item:disabled { opacity: .4; cursor: default; }
+.v10-tab-menu-item:disabled { opacity: var(--opacity-disabled); cursor: default; }
 .v10-tab-menu-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.v10-tab-menu-hint { margin-left: auto; padding-left: 12px; font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--text-tertiary); }
-.v10-tab-menu-sep { height: 1px; margin: 4px 0; background: var(--border-subtle); }
-.v10-tab-menu-empty { padding: 4px 8px 8px; color: var(--text-tertiary); font-size: var(--fs-label); }
+.v10-tab-menu-hint { margin-left: auto; padding-left: var(--space-12); font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--text-tertiary); }
+.v10-tab-menu-sep { height: 1px; margin: var(--space-4) 0; background: var(--border-subtle); }
+.v10-tab-menu-empty { padding: var(--space-4) var(--space-8) var(--space-8); color: var(--text-tertiary); font-size: var(--fs-label); }
 .v10-center-content {
   flex: 1;
   min-height: 0;
   min-width: 0;
   overflow: auto;
-  padding: 24px 28px;
+  padding: var(--page-gutter);
 }
 .v10-view-placeholder {
   display: flex;
@@ -297,8 +305,8 @@
   color:var(--cg-color);background:color-mix(in srgb,var(--cg-color) 20%,var(--bg-surface));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--cg-color) 55%,transparent)}
 .v10-cg-mark::before{content:attr(data-initial)}
 .v10-cg-mark-sm{width:16px;height:16px;font-size: var(--fs-micro)}
-.v10-cg-mark-md{width:20px;height:20px;font-size:var(--fs-label);border-radius: var(--radius-xs)}
-.v10-cg-name{display:flex;align-items:center;gap:8px;min-width:0}
-.v10-select-option{display:flex;align-items:center;gap:8px}
-.v10-select-mark{display:inline-flex;margin-right:6px}
+.v10-cg-mark-md{width:20px;height:20px;font-size: var(--fs-label);border-radius: var(--radius-xs)}
+.v10-cg-name{display:flex;align-items:center;gap:var(--space-8);min-width:0}
+.v10-select-option{display:flex;align-items:center;gap:var(--space-8)}
+.v10-select-mark{display:inline-flex;margin-right:var(--space-6)}
 

@@ -1,17 +1,21 @@
-import { useMemo, useState, useEffect, lazy, Suspense } from 'react';
+import { useCallback, useMemo, useState, lazy, Suspense } from 'react';
 import type { ReactNode } from 'react';
-import { useMemoryEntities, canonicalEntityUri, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
+import { canonicalEntityUri, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
 import { MEMORY_LABEL_PREDICATES } from '../../../lib/memoryLabels.js';
 import { useVerifiableMemoryAnchors } from '../../../hooks/useVerifiableMemoryAnchors.js';
 import type { VmReceipt } from '../../../hooks/useVmReceipts.js';
 import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
 import { useSwmAttributions, type AgentPaletteEntry, type SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
-import { LAYER_CONFIG, buildLayerGraphOptions, agentNodeColors, humanizeLabel, useLayerTriples, filterTriplesToEntities } from '../helpers.js';
+import { LAYER_CONFIG, buildLayerGraphOptions, agentNodeColors, humanizeLabel, filterTriplesToEntities } from '../helpers.js';
 import { EmptyState, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { AgentDot, AgentDotStack } from '../../../components/AgentDot.js';
 import { agentHexForUri } from '../../../hooks/useAgents.js';
 import { Badge, LayerGlyph } from '../../../components/ds/Badge.js';
+import { Anchor, X } from 'lucide-react';
+import { useModalDismiss } from '../../../components/Modals/useModalDismiss.js';
+import { Loading } from '../../../components/ds/Loading.js';
+import { formatNumber } from '../../../lib/format.js';
 
 export const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -218,15 +222,8 @@ export function GraphSurface({
   renderGraph: (expanded: boolean) => ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
-
-  useEffect(() => {
-    if (!expanded) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setExpanded(false);
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [expanded]);
+  const closeExpanded = useCallback(() => setExpanded(false), []);
+  const { dialogRef, onBackdropClick } = useModalDismiss(expanded, closeExpanded);
 
   const expandButton = (
     <button
@@ -243,7 +240,7 @@ export function GraphSurface({
   const body = (expandedView: boolean) => (
     <>
       {/* Don't render the scope-bar + expand-button inside the expanded
-          modal — the modal has its own × close affordance and a dedicated
+          modal — the modal has its own close affordance and a dedicated
           subtitle. The previous CSS-only hide (display:none) left the
           duplicate expand button in the a11y tree. */}
       {showScopeLabel && !expandedView && (
@@ -277,11 +274,9 @@ export function GraphSurface({
           role="dialog"
           aria-modal="true"
           aria-label={`${title} expanded`}
-          onClick={(event) => {
-            if (event.target === event.currentTarget) setExpanded(false);
-          }}
+          onClick={onBackdropClick}
         >
-          <div className={`v10-graph-expanded-panel ds-card v10-graph-shell-${tone}`}>
+          <div ref={dialogRef} className={`v10-graph-expanded-panel ds-card v10-graph-shell-${tone}`}>
             <div className="v10-graph-expanded-head">
               <div>
                 <div className="v10-graph-expanded-title">{title}</div>
@@ -293,7 +288,7 @@ export function GraphSurface({
                 onClick={() => setExpanded(false)}
                 aria-label={`Close expanded ${title}`}
               >
-                ×
+                <X size={14} />
               </button>
             </div>
             <div className="v10-graph-expanded-body">
@@ -530,10 +525,10 @@ export function LayerGraphPanel({
   const overlay = hasOverlay || loadedNodeCount > 3000 ? (
     <>
       {loadedNodeCount > 3000 && <div className="v10-graph-legend" role="status">
-        <span>{showAllLoadedNodes ? `Showing all ${loadedNodeCount.toLocaleString()} loaded nodes.`
+        <span>{showAllLoadedNodes ? `Showing all ${formatNumber(loadedNodeCount)} loaded nodes.`
           : 'This large graph shows one connected view of up to 3,000 nodes.'}</span>
         <button onClick={() => setExpandedNodes(showAllLoadedNodes ? null : expansionScope)}>
-          {showAllLoadedNodes ? 'Use smaller graph view' : `Show all loaded nodes (${loadedNodeCount.toLocaleString()})`}
+          {showAllLoadedNodes ? 'Use smaller graph view' : `Show all loaded nodes (${formatNumber(loadedNodeCount)})`}
         </button>
       </div>}
       {layer === 'vm' && anchors.length > 0 && (
@@ -583,10 +578,10 @@ export function LayerGraphPanel({
         renderGraph={() => (
           <div className="v10-layer-empty-shell">
             <EmptyState
+              busy
               compact
               tone="swm"
-              icon={<LayerGlyph layer="swm" />}
-              title="Loading Shared Working Memory attribution..."
+              title="Loading Shared Working Memory attribution…"
               description="Agent colors are being prepared before the graph renders."
             />
           </div>
@@ -607,7 +602,7 @@ export function LayerGraphPanel({
       onSingletonClick={(uri) => onNodeClick?.(nodeLayerContext ? { id: uri, trustLayer: nodeLayerContext } : { id: uri })}
       renderGraph={(expanded) => (
         canvasTriples.length > 0 ? (
-          <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
+          <Suspense fallback={<Loading label="Loading graph…" block className="v10-graph-placeholder" />}>
             <RdfGraph
               // A theme switch restyles the canvas in place (RdfGraph applies a
               // changed options.style); the key only covers mount-only options.
@@ -641,7 +636,7 @@ export function SwmAttributionLegend({ palette, conflicts }: { palette: AgentPal
   return (
     <div className="v10-swm-legend ds-card-nested" aria-label="SWM attribution legend">
       <div className="v10-swm-legend-row v10-swm-legend-head">
-        <span>SWM attribution</span>
+        <span>Shared Working Memory attribution</span>
         <Badge size="sm" tone="swm" className="v10-swm-legend-count">{palette.length} agent{palette.length === 1 ? '' : 's'}</Badge>
       </div>
       {palette.slice(0, 8).map(p => (
@@ -687,11 +682,11 @@ export function VerifiedGraphLegend({ anchors }: { anchors: readonly VmReceipt[]
   return (
     <div className="v10-vm-legend ds-card-nested" aria-label="Verifiable Memory legend">
       <div className="v10-vm-legend-row v10-vm-legend-head">
-        <span>VM provenance layer</span>
+        <span>Verifiable Memory provenance layer</span>
         <Badge size="sm" tone="vm" className="v10-vm-legend-count">{anchors.length} anchor{anchors.length === 1 ? '' : 's'}</Badge>
       </div>
       <div className="v10-vm-legend-row">
-        <span className="v10-vm-legend-swatch" style={{ background: palette.anchor.fill, color: 'var(--text-on-identity)', boxShadow: `0 0 0 2px ${palette.anchor.ring}` }}>◉</span>
+        <span className="v10-vm-legend-swatch" style={{ background: palette.anchor.fill, color: 'var(--text-on-identity)', boxShadow: `0 0 0 2px ${palette.anchor.ring}` }}><Anchor size={12} /></span>
         <span className="v10-vm-legend-label">On-chain anchor</span>
       </div>
       <div className="v10-vm-legend-row">

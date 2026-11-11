@@ -3,9 +3,9 @@
   border-top: 3px solid color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 40%, transparent);
 }
 .v10-subgraph-detail-header {
-  padding: 12px 16px;
+  padding: var(--space-12) var(--space-16);
   border-bottom: 1px solid var(--border-subtle);
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: var(--space-12);
   background: linear-gradient(
     180deg,
     color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 8%, transparent) 0%,
@@ -31,33 +31,33 @@
   font-size: var(--fs-title); font-weight: 600; color: var(--text-primary);
 }
 .v10-subgraph-detail-desc {
-  font-size: var(--fs-label); color: var(--text-tertiary); margin-top: 2px;
+  font-size: var(--fs-label); color: var(--text-tertiary); margin-top: var(--space-2);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   max-width: 520px;
 }
 
 /* Saved queries pills row */
 .v10-subgraph-savedqueries {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  padding: 8px 16px;
+  display: flex; align-items: center; gap: var(--space-6); flex-wrap: wrap;
+  padding: var(--space-8) var(--space-16);
   border-bottom: 1px solid var(--border-subtle);
   background: var(--tint-faint);
 }
 .v10-subgraph-savedqueries-label {
   font-size: var(--fs-micro); font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.08em; color: var(--text-tertiary);
-  margin-right: 4px;
+  letter-spacing: var(--ls-caps); color: var(--text-tertiary);
+  margin-right: var(--space-4);
 }
 .v10-subgraph-savedquery {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 4px 10px;
+  display: inline-flex; align-items: center; gap: var(--space-4);
+  padding: var(--space-4) 10px;
   background: var(--tint-faint);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-overlay);
   font-size: var(--fs-label); color: var(--text-secondary);
   font-family: var(--font-sans);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all var(--motion-base);
 }
 .v10-subgraph-savedquery:hover { border-color: var(--border-strong); color: var(--text-primary); }
 .v10-subgraph-savedquery.active {
@@ -65,7 +65,7 @@
   border-color: var(--sg-color, var(--text-tertiary));
   color: var(--text-primary);
 }
-.v10-subgraph-savedquery:disabled { opacity: 0.5; cursor: default; }
+.v10-subgraph-savedquery:disabled { opacity: var(--opacity-disabled); cursor: default; }
 .v10-subgraph-savedquery-glyph {
   font-size: var(--fs-micro); color: var(--sg-color, var(--text-tertiary));
 }
@@ -79,8 +79,8 @@
 
 /* Filter chips (profile-driven) */
 .v10-subgraph-filters {
-  display: flex; flex-direction: column; gap: 6px;
-  padding: 8px 16px;
+  display: flex; flex-direction: column; gap: var(--space-6);
+  padding: var(--space-8) var(--space-16);
   border-bottom: 1px solid var(--border-subtle);
   background: var(--tint-faint);
 }
@@ -90,13 +90,13 @@
 }
 .v10-subgraph-filter-label {
   font-size: var(--fs-micro); font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.08em; color: var(--text-tertiary);
+  letter-spacing: var(--ls-caps); color: var(--text-tertiary);
   min-width: 62px;
 }
-.v10-subgraph-filter-chips { display: flex; gap: 5px; flex-wrap: wrap; }
+.v10-subgraph-filter-chips { display: flex; gap: var(--space-4); flex-wrap: wrap; }
 .v10-subgraph-filter-reset {
   align-self: flex-start;
-  padding: 2px 8px;
+  padding: var(--space-2) var(--space-8);
   background: none;
   border: 1px solid transparent;
   color: var(--text-tertiary);
@@ -110,24 +110,24 @@
 
 /* Timeline ribbon */
 .v10-subgraph-timeline {
-  padding: 12px 16px;
-  display: flex; flex-direction: column; gap: 16px;
+  padding: var(--space-12) var(--space-16);
+  display: flex; flex-direction: column; gap: var(--space-16);
   overflow: auto;
 }
 .v10-subgraph-timeline-empty {
-  padding: 24px 16px;
+  padding: var(--space-24) var(--space-16);
   color: var(--text-tertiary); font-size: var(--fs-control);
   text-align: center;
 }
 .v10-subgraph-timeline-empty code {
   background: var(--tint-strong);
-  padding: 1px 4px; border-radius: var(--radius-hair);
+  padding: 1px var(--space-4); border-radius: var(--radius-hair);
   font-family: var(--font-mono); font-size: var(--fs-label);
 }
-.v10-subgraph-timeline-bucket { display: flex; flex-direction: column; gap: 6px; }
+.v10-subgraph-timeline-bucket { display: flex; flex-direction: column; gap: var(--space-6); }
 .v10-subgraph-timeline-bucket-head {
-  display: flex; align-items: center; gap: 8px;
-  padding-bottom: 4px;
+  display: flex; align-items: center; gap: var(--space-8);
+  padding-bottom: var(--space-4);
   border-bottom: 1px dashed var(--border-subtle);
 }
 .v10-subgraph-timeline-bucket-dot {
@@ -135,7 +135,7 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 20%, transparent);
 }
 .v10-subgraph-timeline-bucket-label {
-  font-size: var(--fs-control); font-weight: 700; letter-spacing: 0.04em;
+  font-size: var(--fs-control); font-weight: 700; letter-spacing: 0;
   color: var(--text-primary);
 }
 .v10-subgraph-timeline-bucket-count {
@@ -144,11 +144,11 @@
   font-variant-numeric: tabular-nums;
 }
 .v10-subgraph-timeline-items {
-  display: flex; flex-direction: column; gap: 3px;
+  display: flex; flex-direction: column; gap: var(--space-4);
 }
 .v10-subgraph-timeline-item {
   display: flex; align-items: center; gap: 10px;
-  padding: 6px 10px;
+  padding: var(--space-6) 10px;
   background: var(--tint-faint);
   border: 1px solid var(--border-subtle);
   border-left: 2px solid color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 60%, transparent);
@@ -156,7 +156,7 @@
   font-size: var(--fs-control); color: var(--text-secondary);
   font-family: var(--font-sans);
   text-align: left; cursor: pointer;
-  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  transition: border-color var(--motion-base), background var(--motion-base), color var(--motion-base);
 }
 .v10-subgraph-timeline-item:hover {
   border-color: var(--border-strong);
@@ -171,7 +171,7 @@
   font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
 }
-.v10-subgraph-chip-badge { margin-left: 6px; }
+.v10-subgraph-chip-badge { margin-left: var(--space-6); }
 @keyframes v10-pulse-red {
   0%, 100% { box-shadow: 0 0 4px color-mix(in srgb, var(--accent-red) 60%, transparent); }
   50%      { box-shadow: 0 0 8px color-mix(in srgb, var(--accent-red) 90%, transparent); }
@@ -179,12 +179,12 @@
 
 /* ── Cross-reference sub-graph badge (inside KA detail links) ── */
 .v10-subgraph-badge {
-  display: inline-flex; align-items: center; gap: 3px;
-  margin-left: 6px;
-  padding: 1px 6px;
+  display: inline-flex; align-items: center; gap: var(--space-4);
+  margin-left: var(--space-6);
+  padding: 1px var(--space-6);
   border-radius: var(--radius-nested);
   font-size: var(--fs-micro); font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
   background: color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 35%, transparent);
   color: var(--text-secondary);

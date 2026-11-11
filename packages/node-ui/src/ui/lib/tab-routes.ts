@@ -36,7 +36,7 @@ export function tabIdToPath(id: string): string {
   return `/open/${enc(id)}`;
 }
 
-/** The tab a path stands for, or null when the path isn't a tab (e.g. /network). */
+/** The tab a path stands for, or null when the path isn't a tab. */
 export function pathToTab(pathname: string): TabRoute | null {
   const path = pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname;
   const place = PLACE_BY_PATH.get(path) ?? ALIASES[path];

@@ -7,11 +7,12 @@ import {
 } from '../../api.js';
 import { refreshContextGraphInventoryAfterMutation } from '../../hooks/useContextGraphInventory.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
-import { useTabsStore } from '../../stores/tabs.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { useNodeEvents } from '../../hooks/useNodeEvents.js';
 import { normalizeAccessPolicy } from '../../lib/contextGraphSidebar.js';
 import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
 import { useModalDismiss } from './useModalDismiss.js';
+import { X } from 'lucide-react';
 
 interface JoinProjectModalProps {
   open: boolean;
@@ -334,7 +335,6 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   const [wiredProjectName, setWiredProjectName] = useState<string>('');
 
   const { contextGraphs, setActiveProject } = useProjectsStore();
-  const { openTab } = useTabsStore();
 
   useEffect(() => {
     if (initialContextGraphId) setInviteCode(initialContextGraphId);
@@ -530,7 +530,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
             title="Close (Esc)"
             style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4, zIndex: 1 }}
           >
-            ×
+            <X size={14} />
           </button>
           <div className="v10-modal-header">
             <div id="dkg-join-wire-title" className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
@@ -579,7 +579,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           title="Close (Esc)"
           style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4, zIndex: 1 }}
         >
-          ×
+          <X size={14} />
         </button>
         <div className="v10-modal-header">
           <div id="dkg-join-cg-title" className="v10-modal-title">Join a context graph</div>
@@ -589,7 +589,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         </div>
 
         <div className="v10-modal-body">
-          {error && <div className="v10-modal-error ds-card-nested">{error}</div>}
+          {error && <div role="alert" className="v10-modal-error ds-card-nested">{error}</div>}
 
           {pending && (
             <div style={{
@@ -605,7 +605,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
             <div style={{
               padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 'var(--fs-control)',
               background: 'var(--success-bg)', border: '1px solid var(--success-border)',
-              color: 'var(--accent-green)',
+              color: 'var(--text-success)',
             }}>
               Approved! Loading context graph…
             </div>

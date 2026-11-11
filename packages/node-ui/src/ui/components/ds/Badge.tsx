@@ -1,7 +1,7 @@
 /**
  * Badge and Count — the read-only pills of the node UI (see DESIGN.md).
  *
- * Shapes follow nOS: a layer is a pill, a value or role is a 6px tag, and a
+ * The shape says what it is: a layer is a pill, a value or role is a 6px tag, and a
  * status (success, warning, danger, pending) is an icon and text with no box,
  * so a status never reads as a layer. Badge owns that icon: it draws the tone's
  * glyph unless `icon` replaces it, and `icon={null}` leaves it out.
@@ -52,7 +52,7 @@ export const LayerGlyph: React.FC<{ layer: LayerTone; className?: string }> = ({
   </svg>
 );
 
-/** The status glyphs, the same shapes nOS draws: check in a circle, warning triangle, stop octagon, clock. */
+/** The status glyphs: check in a circle, warning triangle, stop octagon, clock. */
 const STATUS_GLYPHS = {
   success: <><circle cx="12" cy="12" r="9" /><path d="m8 12.5 2.5 2.5 5-5.5" /></>,
   warning: <><path d="M12 3 2.5 20h19Z" /><path d="M12 10v4M12 17v.5" /></>,
@@ -62,7 +62,7 @@ const STATUS_GLYPHS = {
 type StatusTone = keyof typeof STATUS_GLYPHS;
 const isStatusTone = (tone: BadgeTone): tone is StatusTone => tone in STATUS_GLYPHS;
 
-const StatusGlyph: React.FC<{ tone: StatusTone }> = ({ tone }) => (
+export const StatusGlyph: React.FC<{ tone: StatusTone }> = ({ tone }) => (
   <svg className="ds-status-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     {STATUS_GLYPHS[tone]}
   </svg>

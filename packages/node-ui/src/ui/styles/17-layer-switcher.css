@@ -17,7 +17,7 @@
    ══════════════════════════════════════════ */
 
 /* Lazy route spinner */
-.lazy-spinner{display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-tertiary);font-size:var(--fs-body)}
+.lazy-spinner{display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-tertiary);font-size: var(--fs-body)}
 
 /* ══════════════════════════════════════════
    PROJECT OVERVIEW REDESIGN — Layer-centric UI
@@ -27,7 +27,7 @@
 .v10-layer-switcher {
   flex-shrink: 0; display: flex; align-items: center;
   border-bottom: 1px solid var(--border-subtle); background: var(--bg-panel);
-  padding: 0 4px; height: 36px; min-height: 36px; gap: 0;
+  padding: 0 var(--space-4); height: 36px; min-height: 36px; gap: 0;
   flex-wrap: nowrap;
 }
 .v10-layer-switch-label { display: inline; }
@@ -37,11 +37,11 @@
   flex: 0 0 auto;
   width: 1px;
   height: 18px;
-  margin: 0 6px;
+  margin: 0 var(--space-6);
   background: var(--border-subtle);
 }
 .v10-layer-switcher-spacer { flex: 1; min-width: 6px; }
-.v10-layer-switcher-actions { display: flex; align-items: center; gap: 4px; padding-right: 4px; flex: 0 0 auto; }
+.v10-layer-switcher-actions { display: flex; align-items: center; gap: var(--space-4); padding-right: var(--space-4); flex: 0 0 auto; }
 .v10-layer-more {
   position: relative;
   display: flex;
@@ -53,9 +53,9 @@
   position: absolute;
   top: calc(100% + 4px);
   right: 0;
-  z-index: 40;
+  z-index: var(--z-popover);
   min-width: 178px;
-  padding: 4px;
+  padding: var(--space-4);
   border: 1px solid var(--border-default);
   background: var(--bg-panel);
   box-shadow: var(--shadow-menu);
@@ -65,7 +65,7 @@
   min-height: 30px;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: var(--space-8);
   padding: 0 10px;
   border: 0;
   border-radius: var(--radius-xs);
@@ -99,7 +99,7 @@
   align-items: center;
   justify-content: center;
   gap: 14px;
-  padding: 24px;
+  padding: var(--space-24);
   border: 1px solid color-mix(in srgb, var(--v10-empty-accent) 28%, var(--border-default));
   background: color-mix(in srgb, var(--v10-empty-accent) 7%, var(--bg-surface));
   color: var(--text-secondary);
@@ -111,7 +111,7 @@
 .v10-empty-state[data-tone="vm"]:not(.inline)  { border-color: var(--layer-verified-border); background: var(--layer-verified-bg); }
 .v10-empty-state.compact {
   min-height: 118px;
-  padding: 18px;
+  padding: var(--space-16);
 }
 .v10-empty-state.inline {
   flex: 0 0 auto;
@@ -120,8 +120,10 @@
   border: 0;
   background: transparent;
   justify-content: flex-start;
-  gap: 6px;
+  gap: var(--space-6);
 }
+.card .v10-empty-state.inline { padding: var(--pad-card); }
+.card .v10-empty-state.inline .v10-empty-state-title { font-size: var(--fs-body); font-weight: 600; color: var(--text-primary); }
 .v10-empty-state-icon {
   display: inline-flex;
   align-items: center;
@@ -148,14 +150,14 @@
   min-width: 0;
   max-width: 560px;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-4);
 }
 .v10-empty-state.inline .v10-empty-state-copy { max-width: none; }
 .v10-empty-state-title {
   color: var(--text-primary);
   font-size: var(--fs-body);
-  font-weight: 650;
-  line-height: 1.35;
+  font-weight: 600;
+  line-height: var(--lh-snug);
 }
 .v10-empty-state.inline .v10-empty-state-title {
   color: var(--text-tertiary);
@@ -165,13 +167,13 @@
 .v10-empty-state-desc {
   color: var(--text-secondary);
   font-size: var(--fs-control);
-  line-height: 1.45;
+  line-height: var(--lh-body);
 }
 .v10-empty-state-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 6px;
+  gap: var(--space-8);
+  margin-top: var(--space-6);
 }
 .v10-stat-strip {
   --v10-stat-accent: var(--border-strong);
@@ -184,7 +186,7 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
-  padding: 10px 12px;
+  padding: var(--pad-nested);
   border: 1px solid color-mix(in srgb, var(--v10-stat-accent) 18%, var(--border-default));
   background: color-mix(in srgb, var(--v10-stat-accent) 5%, var(--bg-surface));
   /* ui-lead item 7 — Dashboard-style hover: border tints toward
@@ -192,7 +194,7 @@
      cells) and a soft shadow rises. The M4 VM-hero gate still
      binds — DO NOT modify cell padding, border radius, or value
      size; only the hover-state border-color and box-shadow. */
-  transition: border-color 0.15s, box-shadow 0.15s;
+  transition: border-color var(--motion-base), box-shadow var(--motion-base);
 }
 .v10-stat-strip-cell:hover {
   border-color: color-mix(in srgb, var(--v10-stat-accent) 35%, var(--border-strong));
@@ -205,27 +207,27 @@
   font-family: var(--font-mono);
   font-size: var(--fs-heading);
   font-weight: 700;
-  line-height: 1.15;
+  line-height: var(--lh-tight);
   overflow-wrap: anywhere;
 }
 .v10-stat-strip-label {
   display: block;
   order: 2;
-  margin-top: 5px;
+  margin-top: var(--space-4);
   color: var(--text-tertiary);
   font-size: var(--fs-micro);
-  font-weight: 650;
-  letter-spacing: 0.04em;
-  line-height: 1.3;
+  font-weight: 600;
+  letter-spacing: var(--ls-caps);
+  line-height: var(--lh-snug);
   text-transform: uppercase;
 }
 .v10-stat-strip-hint {
   display: block;
   order: 3;
-  margin-top: 4px;
+  margin-top: var(--space-4);
   color: var(--text-secondary);
   font-size: var(--fs-label);
-  line-height: 1.35;
+  line-height: var(--lh-snug);
 }
 .v10-stat-strip.compact {
   display: flex;
@@ -260,9 +262,11 @@
 }
 
 /* Layer tabs keep their layer colour on the underline. */
+/* No room for counts beside the side panels; the Overview shows them. */
+.v10-center-content[data-narrow] .v10-layer-switch-count { display: none; }
 .v10-layer-switch-btn.active[data-layer="wm"]  { border-bottom-color: var(--layer-working); }
 .v10-layer-switch-btn.active[data-layer="swm"] { border-bottom-color: var(--layer-shared); }
 .v10-layer-switch-btn.active[data-layer="vm"]  { border-bottom-color: var(--layer-verified); }
 @media (max-width: 920px) {
-  .v10-layer-switcher .v10-layer-switch-btn { min-width: 30px; padding: 0; justify-content: center; gap: 0; }
+  .v10-layer-switcher .v10-layer-switch-btn { flex-shrink: 0; min-width: 30px; padding: 0 var(--space-6); justify-content: center; gap: var(--space-4); }
 }

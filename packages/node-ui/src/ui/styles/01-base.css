@@ -15,7 +15,7 @@ html, body, #root {
      prevent the very largest surfaces (stat hero numbers, dashboard
      title) from ballooning. */
   font-size: var(--fs-body);
-  line-height: 1.5;
+  line-height: var(--lh-body);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
 }
@@ -30,7 +30,8 @@ button {
   cursor: pointer;
   outline: none;
 }
-button:disabled { opacity: 0.4; cursor: not-allowed; }
+button, input, select, textarea { line-height: var(--lh-tight); }
+button:disabled, input:disabled, textarea:disabled, select:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
 
 input, textarea {
   font-family: var(--font-mono);
@@ -39,10 +40,11 @@ input, textarea {
   border: 1px solid var(--border-default);
   color: var(--text-primary);
   border-radius: var(--radius-control);
-  padding: 6px 10px;
+  padding: var(--space-6) 10px;
   outline: none;
 }
-input:focus, textarea:focus { border-color: var(--border-strong); }
+/* .dsp-focus: the reference page previews this look (design-system-states.tsx). */
+input:is(:focus, .dsp-focus), textarea:is(:focus, .dsp-focus) { border-color: var(--border-strong); }
 input::placeholder { color: var(--text-tertiary); }
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -52,6 +54,14 @@ input::placeholder { color: var(--text-tertiary); }
 * { scrollbar-width: thin; scrollbar-color: var(--border-default) transparent; }
 :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 button:focus:not(:focus-visible) { outline: none; }
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
 
 @keyframes fadeSlideIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }

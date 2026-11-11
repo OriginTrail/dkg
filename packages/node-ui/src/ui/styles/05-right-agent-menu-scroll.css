@@ -10,7 +10,7 @@
   justify-content: center;
   width: 24px;
   min-height: 32px;
-  padding: 0 4px;
+  padding: 0 var(--space-4);
   border: 0;
   background: transparent;
   color: var(--text-secondary);
@@ -39,9 +39,9 @@
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
   box-shadow: var(--shadow-menu);
-  z-index: 200;
+  z-index: var(--z-popover);
   overflow: hidden;
-  padding: 4px;
+  padding: var(--space-4);
 }
 .v10-agent-tab-menu-popover.align-right {
   /* Right-anchored fallback when the left-anchored popover would
@@ -53,17 +53,17 @@
 .v10-agent-tab-menu-status {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: var(--space-8);
+  padding: var(--space-8) 10px;
   font-size: var(--fs-label);
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-subtle);
-  margin-bottom: 4px;
+  margin-bottom: var(--space-4);
 }
 .v10-agent-tab-menu-item {
   display: block;
   width: 100%;
-  padding: 8px 10px;
+  padding: var(--space-8) 10px;
   background: transparent;
   border: 0;
   text-align: left;
@@ -71,7 +71,7 @@
   color: var(--text-primary);
   border-radius: var(--radius-xs);
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--motion-fast);
 }
 .v10-agent-tab-menu-item:hover:not(:disabled) {
   background: var(--bg-hover);
@@ -99,15 +99,15 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-8);
   width: 100%;
-  padding: 0 12px;
+  padding: 0 var(--space-12);
   border: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
   color: var(--text-primary);
   font-family: inherit;
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
+  transition: border-color var(--motion-base), background var(--motion-base);
   text-align: left;
 }
 .v10-select-trigger:hover:not(:disabled) {
@@ -115,15 +115,14 @@
   background: var(--bg-hover);
 }
 .v10-select-trigger:focus-visible {
-  outline: none;
-  border-color: var(--accent-blue);
-  box-shadow: 0 0 0 1px var(--accent-blue);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 .v10-select.open .v10-select-trigger {
   border-color: var(--border-strong);
 }
 .v10-select-trigger:disabled {
-  opacity: 0.6;
+  opacity: var(--opacity-disabled);
   cursor: not-allowed;
 }
 .v10-select-value {
@@ -140,7 +139,7 @@
   flex-shrink: 0;
   font-size: var(--fs-micro);
   color: var(--text-tertiary);
-  transition: transform 0.15s;
+  transition: transform var(--motion-base);
 }
 .v10-select.open .v10-select-caret {
   transform: rotate(180deg);
@@ -150,21 +149,21 @@
   overflow-y: auto;
   list-style: none;
   margin: 0;
-  padding: 4px;
+  padding: var(--space-4);
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
   box-shadow: var(--shadow-menu);
-  z-index: 1000;
+  z-index: var(--z-floating);
 }
 .v10-select-menu:focus { outline: none; }
 .v10-select-menu-above {
   margin-top: -4px;
 }
 .v10-select-menu-below {
-  margin-top: 4px;
+  margin-top: var(--space-4);
 }
 .v10-select-option {
-  padding: 8px 10px;
+  padding: var(--space-8) 10px;
   font-size: var(--fs-control);
   color: var(--text-primary);
   border-radius: var(--radius-xs);
@@ -193,7 +192,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px 14px;
+  padding: var(--space-12) 14px;
 }
 
 /* Floating "scroll to latest" pill — sticks to the bottom-center of the
@@ -230,7 +229,7 @@
   box-shadow: var(--shadow-menu);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 150ms ease-out, background 0.15s, color 0.15s;
+  transition: opacity var(--motion-base) ease-out, background var(--motion-base), color var(--motion-base);
   z-index: 5;
   /* Negative top margin so the pill overlays the previous message instead
      of forcing extra vertical space when invisible. */
@@ -254,7 +253,7 @@
      visible (full date + time vs. previous time-only). Pre-existing
      AA fail surfaced by PR4: tertiary clears only 2.31-2.66:1 against
      bg-panel; secondary clears 5.58/7.17. UI-lead Task #68. */
-  margin-top: 4px;
+  margin-top: var(--space-4);
   font-size: var(--fs-micro);
   color: var(--text-secondary);
   font-family: var(--font-mono);
@@ -263,7 +262,7 @@
      assistant turns full-width with no bubble. Colour/contrast (AA per
      Task #68) is unchanged; only visibility toggles. */
   opacity: 0;
-  transition: opacity 120ms ease-out;
+  transition: opacity var(--motion-fast) ease-out;
 }
 .v10-chat-msg:hover .v10-local-agent-msg-time,
 .v10-chat-msg:focus-within .v10-local-agent-msg-time {
@@ -284,15 +283,15 @@
   .v10-local-agent-msg-time { opacity: 1; transition: none; }
 }
 .v10-local-agent-warning {
-  padding: 10px 12px;
+  padding: var(--pad-nested);
   font-size: var(--fs-label);
-  line-height: 1.55;
+  line-height: var(--lh-body);
   border: 1px solid var(--border-default);
 }
 .v10-local-agent-warning.connecting {
-  color: var(--text-info);
-  background: color-mix(in srgb, var(--accent-blue) 12%, var(--bg-surface));
-  border-color: color-mix(in srgb, var(--accent-blue) 28%, var(--border-subtle));
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border-color: var(--border-default);
 }
 .v10-local-agent-warning.offline {
   color: var(--text-warning);
@@ -302,11 +301,11 @@
 .v10-local-agent-copy {
   font-size: var(--fs-control);
   color: var(--text-secondary);
-  line-height: 1.55;
+  line-height: var(--lh-body);
 }
 .v10-local-agent-target-label {
   font-size: var(--fs-label);
-  letter-spacing: 0.08em;
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--text-tertiary);
   flex-shrink: 0;
@@ -319,5 +318,5 @@
 .v10-local-agent-composer-row {
   display: flex;
   align-items: stretch;
-  gap: 8px;
+  gap: var(--space-8);
 }

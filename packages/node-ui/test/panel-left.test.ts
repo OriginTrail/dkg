@@ -254,6 +254,13 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(container.textContent).toContain('My First CG');
   });
 
+  it('offers one restore button when Context Graphs are hidden', async () => {
+    localStorage.setItem('v10:hiddenProjectIds', JSON.stringify(['cg-1']));
+    const { container } = await renderPanel();
+    expect(container.querySelectorAll('.v10-tree-show-hidden').length).toBe(1);
+    localStorage.removeItem('v10:hiddenProjectIds');
+  });
+
   it('renders the graph and integration section headers with the v10-peer-group pattern', async () => {
     const { container } = await renderPanel();
     const headers = container.querySelectorAll('.v10-peer-group-header');

@@ -12,7 +12,7 @@ export class FilePreviewModal {
     this.page = page;
     this.overlay = page.locator(sel.modal.overlay);
     this.box = page.locator(sel.modal.box);
-    this.closeBtn = this.box.locator('button').filter({ hasText: '×' });
+    this.closeBtn = this.box.getByRole('button', { name: 'Close file preview' });
     this.downloadBtn = page.locator(sel.modal.btn).filter({ hasText: /[Dd]ownload/ });
   }
 

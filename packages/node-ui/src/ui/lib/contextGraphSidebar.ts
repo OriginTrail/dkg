@@ -69,7 +69,7 @@ export function computeSelectableProjects(
  * Browse/join catalogue. Two strict invariants:
  *
  *  1. ONLY graphs with `accessPolicy === 'public'`. Curated/private graphs and
- *     graphs with unknown policy never enter the Oracle, regardless of how
+ *     graphs with unknown policy never appear there, regardless of how
  *     they ended up in the local list (chain auto-subscribe, manual subscribe,
  *     dev script).
  *
@@ -77,16 +77,16 @@ export function computeSelectableProjects(
  *     graph belongs here before subscription or catch-up so users can browse
  *     it and opt in without asking a curator for an unnecessary invitation.
  */
-export function belongsInContextOracleSidebar(cg: ContextGraph, identity: AgentSidebarIdentity | null): boolean {
+export function belongsInPublicSidebar(cg: ContextGraph, identity: AgentSidebarIdentity | null): boolean {
   if (belongsInMyProjectsSidebar(cg, identity)) return false;
   if (normalizeAccessPolicy(cg.accessPolicy) !== 'public') return false;
   return true;
 }
 
-export type ContextOracleEntryKind = 'catalogue' | 'project';
+export type PublicEntryKind = 'catalogue' | 'project';
 
 /** Passive discoveries need explicit Browse/Subscribe actions, not project-row semantics. */
-export function classifyContextOracleEntry(cg: ContextGraph): ContextOracleEntryKind {
+export function classifyPublicEntry(cg: ContextGraph): PublicEntryKind {
   return cg.subscribed === true || cg.synced === true ? 'project' : 'catalogue';
 }
 
@@ -95,5 +95,5 @@ export function classifyContextOracleEntry(cg: ContextGraph): ContextOracleEntry
  *  attachment target (sidebar Browse clears the target). Daemons that don't
  *  report `callerInvolved` aren't classified, so their graphs stay working. */
 export function isPassiveCatalogueGraph(cg: ContextGraph): boolean {
-  return cg.callerInvolved === false && classifyContextOracleEntry(cg) === 'catalogue';
+  return cg.callerInvolved === false && classifyPublicEntry(cg) === 'catalogue';
 }

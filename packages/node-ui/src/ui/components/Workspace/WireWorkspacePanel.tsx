@@ -32,6 +32,7 @@ import {
   type PlanInstallResult,
   type InstallResult,
 } from '../../lib/projectManifest.js';
+import { formatNumber } from '../../lib/format.js';
 
 interface WireWorkspacePanelProps {
   /** Context graph ID — used to call /api/context-graph/{id}/manifest/* . */
@@ -235,7 +236,7 @@ export function WireWorkspacePanel({
         <div style={{
           padding: '12px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 14, fontSize: 'var(--fs-control)',
           background: 'var(--success-bg)', border: '1px solid var(--success-border)',
-          color: 'var(--accent-green)',
+          color: 'var(--text-success)',
         }}>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Workspace wired.</div>
           Open <code style={{ fontFamily: 'var(--font-mono)' }}>{workspaceRoot}</code> in {toolSelection === 'claude-code' ? 'Claude Code' : (toolSelection === 'both' ? 'Cursor or Claude Code' : 'Cursor')}.
@@ -248,10 +249,10 @@ export function WireWorkspacePanel({
         </div>
         <pre style={{
           fontSize: 'var(--fs-micro)', fontFamily: 'var(--font-mono)', maxHeight: 200, overflow: 'auto',
-          padding: 10, borderRadius: 'var(--radius-control)', background: 'var(--bg-secondary)',
-          border: '1px solid var(--border-primary)', margin: 0,
+          padding: 10, borderRadius: 'var(--radius-control)', background: 'var(--bg-elevated)',
+          border: '1px solid var(--border-default)', margin: 0,
         }}>
-          {installResult.written.map((w) => `${w.action.padEnd(9)} ${w.absPath} (${w.bytesWritten.toLocaleString()} bytes)`).join('\n')}
+          {installResult.written.map((w) => `${w.action.padEnd(9)} ${w.absPath} (${formatNumber(w.bytesWritten)} bytes)`).join('\n')}
           {installResult.skipped.length ? '\n\nSkipped:\n' + installResult.skipped.map((s) => `  - ${s}`).join('\n') : ''}
           {installResult.warnings.length ? '\n\nWarnings:\n' + installResult.warnings.map((w) => `  - ${w}`).join('\n') : ''}
         </pre>
@@ -267,7 +268,7 @@ export function WireWorkspacePanel({
   if (planResult) {
     return (
       <div>
-        {error && <div className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
+        {error && <div role="alert" className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
 
         <div style={{ marginBottom: 10, fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>
           Review the install plan. Files are only written when you click Install.
@@ -275,8 +276,8 @@ export function WireWorkspacePanel({
 
         <pre style={{
           fontSize: 'var(--fs-micro)', fontFamily: 'var(--font-mono)', maxHeight: 320, overflow: 'auto',
-          padding: 12, borderRadius: 'var(--radius-control)', background: 'var(--bg-secondary)',
-          border: '1px solid var(--border-primary)', margin: 0, whiteSpace: 'pre-wrap',
+          padding: 12, borderRadius: 'var(--radius-control)', background: 'var(--bg-elevated)',
+          border: '1px solid var(--border-default)', margin: 0, whiteSpace: 'pre-wrap',
         }}>
           {planResult.markdown}
         </pre>
@@ -323,11 +324,11 @@ export function WireWorkspacePanel({
           : 'Choose a local directory for this project and which coding tool you want it wired for. The daemon will populate the workspace with the right config files so your agent can collaborate on this project.'}
       </div>
 
-      {error && <div className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
+      {error && <div role="alert" className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
 
       <div className="v10-form-group">
         <label className="v10-form-label">Workspace path</label>
-        <input
+        <input aria-label="Workspace path"
           className="v10-form-input ds-input"
           type="text"
           value={workspaceRoot}
@@ -345,7 +346,7 @@ export function WireWorkspacePanel({
 
       <div className="v10-form-group">
         <label className="v10-form-label">Coding tool to wire</label>
-        <select
+        <select aria-label="Coding tool to wire"
           className="v10-form-select ds-input"
           value={toolSelection}
           onChange={(e) => setToolSelection(e.target.value as ToolSelection)}
@@ -367,7 +368,7 @@ export function WireWorkspacePanel({
 
       <div className="v10-form-group">
         <label className="v10-form-label">Your agent identity</label>
-        <input
+        <input aria-label="Your agent identity"
           className="v10-form-input ds-input"
           type="text"
           value={agent ? `urn:dkg:agent:${agent.agentAddress.toLowerCase()}` : 'fetching…'}
@@ -383,7 +384,7 @@ export function WireWorkspacePanel({
 
       <div className="v10-form-group">
         <label className="v10-form-label">Nickname for this agent</label>
-        <input
+        <input aria-label="Nickname for this agent"
           className="v10-form-input ds-input"
           type="text"
           value={nickname}

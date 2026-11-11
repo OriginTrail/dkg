@@ -9,6 +9,7 @@ import type { OwnerActionSubmitter } from '../../pca/ownerActions.js';
 import type { WalletTxProgress } from '../../pca/useWalletTxProgress.js';
 import type { DetailDeviceAction } from '../../pca/detailWalletTx.js';
 import type { PcaOwnerAccess } from '../../pca/ownerAccess.js';
+import { Loading } from '../../components/ds/Loading.js';
 
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 
@@ -54,12 +55,12 @@ export function PublishingWalletsSection({
       const snap = await fetchPca(accountId, addr);
       const reg = snap.probedKey?.registered;
       // M8: a 200 that omits probedKey (or registered:null) means the adapter
-      // couldn't answer — render "couldn't determine", NOT a false "✗ NOT approved".
+      // couldn't answer — render "couldn't determine", NOT a false "NOT approved".
       setProbeResult(
         reg === true
-          ? `✓ ${addr} is an approved publishing wallet here.`
+          ? `${addr} is an approved publishing wallet here.`
           : reg === false
-            ? `✗ ${addr} is NOT approved here.`
+            ? `${addr} is NOT approved here.`
             : `Couldn’t determine whether ${addr} is approved here — retry.`,
       );
     } catch (err) {
@@ -101,7 +102,7 @@ export function PublishingWalletsSection({
         {probeResult && <p className="v10-pca-detail-hint" role="status">{probeResult}</p>}
 
         {agentsLoading && !agentsForThis ? (
-          <p className="v10-pca-detail-hint" role="status">Loading approved wallets…</p>
+          <Loading label="Loading approved wallets…" />
         ) : agentsForThis ? (
           // B3 — the FULL approved set (chain enumerator); the count-only caveat is retired.
           <>

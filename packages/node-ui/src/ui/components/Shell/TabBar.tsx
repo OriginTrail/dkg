@@ -9,6 +9,7 @@ import { useTabsStore, type CenterTab } from '../../stores/tabs.js';
 import { ContextGraphMark } from '../../context-graph-colors.js';
 import { useProjectsStore } from '../../stores/projects.js';
 import { decodeTabId } from '../../lib/tab-target.js';
+import { chooseOpenTab } from '../../lib/shellNavigation.js';
 import { AgentDot } from '../AgentDot.js';
 import { CHEVRON_DOWN, CLOSE_ICON, FILE_ICON, placeIcon } from './nav-icons.js';
 
@@ -78,7 +79,7 @@ export function TabBar() {
       focusActive();
     } else if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      setActiveTab(tab.id);
+      chooseOpenTab(tab.id);
     }
   };
 
@@ -97,11 +98,12 @@ export function TabBar() {
               key={tab.id}
               role="tab"
               aria-selected={active}
+              aria-keyshortcuts={tab.closable ? 'Delete' : undefined}
               tabIndex={active ? 0 : -1}
               className={`v10-center-tab${active ? ' active' : ''}${pinned ? ' pinned' : ''}${drag?.id === tab.id ? ' dragging' : ''}${dropClass}`}
               title={labelOf(tab)}
               draggable={!pinned}
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => chooseOpenTab(tab.id)}
               onKeyDown={(e) => onKeyDown(e, tab, index)}
               onMouseDown={(e) => { if (e.button === 1) e.preventDefault(); }}
               onAuxClick={(e) => { if (e.button === 1 && tab.closable) { e.preventDefault(); closeTab(tab.id); } }}
@@ -129,15 +131,15 @@ export function TabBar() {
               {!pinned && <span className="v10-center-tab-label">{labelOf(tab)}</span>}
               {pinned && <span className="v10-sr-only">{labelOf(tab)}</span>}
               {tab.closable && (
-                <button
-                  type="button"
+                // A mouse shortcut only: a control can't sit inside a tab. Keyboard
+                // and screen reader users close with Delete (aria-keyshortcuts).
+                <span
                   className="v10-center-tab-close"
-                  aria-label={`Close ${labelOf(tab)}`}
-                  tabIndex={-1}
+                  aria-hidden="true"
                   onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
                 >
                   {CLOSE_ICON}
-                </button>
+                </span>
               )}
             </div>
           );
@@ -183,7 +185,7 @@ export function TabBar() {
             <>
               <div className="v10-tab-menu-label">Open tabs</div>
               {tabs.map((tab) => (
-                <button key={tab.id} role="menuitem" className={`v10-tab-menu-item${tab.id === activeTabId ? ' active' : ''}`} onClick={() => { setActiveTab(tab.id); setMenu(null); }}>
+                <button key={tab.id} role="menuitem" className={`v10-tab-menu-item${tab.id === activeTabId ? ' active' : ''}`} onClick={() => { chooseOpenTab(tab.id); setMenu(null); }}>
                   <TabMark tab={tab} label={labelOf(tab)} /><span className="v10-tab-menu-text">{labelOf(tab)}</span>
                   {tab.id === activeTabId && <span className="v10-tab-menu-hint">active</span>}
                 </button>

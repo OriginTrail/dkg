@@ -15,7 +15,7 @@ test.describe('Dashboard (rc.12)', () => {
     // The subtitle is built from the live node status (name + network). Exact
     // values are environment-specific (devnet node name / chain), so assert the
     // subtitle renders real, non-empty content rather than the old mock strings.
-    await page.locator('.v10-dash-subtitle').waitFor({ state: 'visible', timeout: 10_000 });
+    await page.locator('.ds-page-desc').waitFor({ state: 'visible', timeout: 10_000 });
     const text = (await dashboard.subtitle.textContent())?.trim() ?? '';
     expect(text.length).toBeGreaterThan(0);
     // The subtitle separates node name and network with a separator — both halves present.

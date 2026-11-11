@@ -252,7 +252,7 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     expect(updateTelemetrySettingsMock).not.toHaveBeenCalled();
     // Confirming streams telemetry on.
     const enableBtn = Array.from(dialog!.querySelectorAll('button')).find(
-      (b) => /Enable Streaming/.test(b.textContent ?? ''),
+      (b) => /Enable streaming/.test(b.textContent ?? ''),
     )!;
     await act(async () => { enableBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     await flush();
@@ -274,7 +274,7 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     await act(async () => { sw.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     await flush();
     const enableBtn = Array.from(document.querySelectorAll('[role="dialog"] button')).find(
-      (b) => /Enable Streaming/.test(b.textContent ?? ''),
+      (b) => /Enable streaming/.test(b.textContent ?? ''),
     ) as HTMLButtonElement;
     await act(async () => { enableBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     await flush();

@@ -13,12 +13,14 @@
   min-height: var(--tab-h);
   display: flex;
   align-items: center;
-  padding: 0 8px;
+  padding: 0 var(--space-8);
   border-bottom: 1px solid var(--border-subtle);
-  gap: 2px;
+  gap: var(--space-2);
 }
 /* Agents / Network / Sessions fills the bar. */
 .v10-agent-mode-tabs .ds-seg, .v10-agent-mode-tabs .ds-seg > * { flex: 1; }
+.v10-panel-expand { flex: none; margin-left: var(--space-6); }
+@media (max-width: 860px) { .v10-panel-expand { display: none; } }
 /* Agent tab */
 .v10-agents-tab {
   display: flex;
@@ -31,7 +33,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px;
+  padding: var(--space-12);
 }
 /* Network / Sessions tabs: simple padded scroll container (PR1 restored
    the padding that was removed when .v10-agents-tab became a flex column). */
@@ -39,10 +41,10 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px;
+  padding: var(--space-12);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-8);
 }
 
 /* Network tab collapsible peer groups (Connected / Disconnected). */
@@ -51,10 +53,11 @@
   flex-direction: column;
 }
 .v10-peer-group-header {
+  min-height: var(--h-row);
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 4px;
+  gap: var(--space-6);
+  padding: var(--space-6) var(--space-4);
   background: transparent;
   border: 0;
   width: 100%;
@@ -63,20 +66,19 @@
   color: var(--text-secondary);
   font-size: var(--fs-label);
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
-  transition: color 0.15s;
+  transition: color var(--motion-base);
 }
 .v10-peer-group-header:hover {
   color: var(--text-primary);
 }
 .v10-peer-group-header:focus-visible {
-  outline: none;
   color: var(--text-primary);
 }
 .v10-peer-group-chevron {
   flex-shrink: 0;
-  transition: transform 0.15s;
+  transition: transform var(--motion-base);
 }
 .v10-peer-group-chevron.expanded {
   transform: rotate(90deg);
@@ -93,18 +95,19 @@
 .v10-peer-group-body {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 4px 0 8px;
+  gap: var(--space-6);
+  padding: var(--space-4) 0 var(--space-8);
 }
 @media (prefers-reduced-motion: reduce) {
   .v10-peer-group-chevron { transition: none; }
 }
 .v10-agents-summary {
-  display: flex; align-items: center; gap: 12px;
-  padding: 8px 0; margin-bottom: 8px;
+  display: flex; align-items: center; gap: var(--space-12);
+  padding: var(--space-8) 0; margin-bottom: var(--space-8);
   font-size: var(--fs-control); color: var(--text-secondary);
 }
-.v10-agents-stat { display: flex; align-items: center; gap: 4px; }
+.v10-agents-details { margin-left: auto; flex: none; white-space: nowrap; font-size: var(--fs-control); color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline); background: none; }
+.v10-agents-stat { display: flex; align-items: center; gap: var(--space-4); }
 .v10-agents-stat-dot { width: 6px; height: 6px; border-radius: 50%; }
 .v10-agents-stat-dot.connected { background: var(--accent-green); }
 .v10-agents-stat-dot.known { background: var(--text-tertiary); }
@@ -116,8 +119,8 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
-  padding: 10px 12px;
+  gap: var(--space-6);
+  padding: 10px var(--space-12);
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-panel);
   flex-shrink: 0;
@@ -136,12 +139,12 @@
   background: transparent;
   border-right-color: transparent;
   border-radius: var(--radius-xs) 0 0 var(--radius-xs);
-  padding-right: 8px;
+  padding-right: var(--space-8);
 }
 .v10-agent-subtab {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-8);
   min-height: 32px;
   padding: 0 14px;
   border-radius: var(--radius-xs);
@@ -151,7 +154,7 @@
   font-size: var(--fs-control);
   font-weight: 500;
   white-space: nowrap;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  transition: background var(--motion-base), color var(--motion-base), border-color var(--motion-base);
 }
 .v10-agent-subtab:hover {
   background: var(--bg-hover);
@@ -165,28 +168,27 @@
 .v10-agent-subtab.add {
   min-width: 32px;
   justify-content: center;
-  padding: 0 12px;
+  padding: 0 var(--space-12);
   font-size: var(--fs-title);
   line-height: 1;
 }
-.v10-agents-loading { padding: 16px; color: var(--text-tertiary); font-size: var(--fs-control); text-align: center; }
 .v10-agents-section-label {
-  font-size: var(--fs-micro); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
-  color: var(--text-tertiary); margin: 12px 0 6px; padding: 0 2px;
+  font-size: var(--fs-micro); font-weight: 600; text-transform: uppercase; letter-spacing: var(--ls-caps);
+  color: var(--text-tertiary); margin: var(--space-12) 0 var(--space-6); padding: 0 var(--space-2);
 }
-.v10-agent-add-surface { padding-top: 8px; }
+.v10-agent-add-surface { padding-top: var(--space-8); }
 .v10-agent-card {
-  padding: 10px 12px; margin-bottom: 4px;
+  padding: var(--pad-nested); margin-bottom: var(--space-4);
   border: 1px solid var(--border-subtle); background: var(--bg-surface);
-  transition: background 0.15s;
+  transition: background var(--motion-base);
 }
 .v10-agent-card:hover { background: var(--bg-elevated); }
-.v10-agent-card.self { border-color: var(--accent-blue); border-left: 3px solid var(--accent-blue); }
-.v10-agent-card-header { display: flex; align-items: center; gap: 6px; }
+.v10-agent-card.self { border-color: var(--role); border-left: 3px solid var(--role); }
+.v10-agent-card-header { display: flex; align-items: center; gap: var(--space-6); }
 .v10-agent-card-dot {
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
 }
-.v10-agent-card-dot.self { background: var(--accent-blue); }
+.v10-agent-card-dot.self { background: var(--role); }
 .v10-agent-card-dot.connected { background: var(--accent-green); }
 .v10-agent-card-dot.known { background: var(--text-tertiary); }
 .v10-agent-card-dot.degraded { background: var(--accent-amber); }
@@ -203,7 +205,7 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .v10-peer-card-meta {
-  display: flex; gap: 8px; margin-top: 4px;
+  display: flex; gap: var(--space-8); margin-top: var(--space-4);
   font-size: var(--fs-micro); color: var(--text-secondary); font-family: var(--font-mono);
   flex-wrap: wrap;
 }
@@ -213,21 +215,21 @@
    latter is the attribution-pill component (~styles.css:5451) and the
    namespaces would collide. */
 .v10-peer-card-chips {
-  list-style: none; padding: 0; margin: 6px 0 0;
-  display: flex; flex-wrap: wrap; gap: 4px;
+  list-style: none; padding: 0; margin: var(--space-6) 0 0;
+  display: flex; flex-wrap: wrap; gap: var(--space-4);
 }
 .v10-peer-chip {
-  display: inline-flex; align-items: center; gap: 4px;
+  display: inline-flex; align-items: center; gap: var(--space-4);
   max-width: 140px;
   min-width: 0;
-  padding: 2px 7px;
+  padding: var(--space-2) var(--space-8);
   border-radius: var(--radius-pill);
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
-  line-height: 1.4;
+  line-height: var(--lh-snug);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .v10-peer-chip-label {
@@ -237,16 +239,16 @@
 .v10-local-agent-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-8);
 }
 .v10-local-agent-detail {
-  margin-top: 12px;
-  padding: 14px;
+  margin-top: var(--space-12);
+  padding: var(--pad-compact);
   border: 1px solid var(--border-default);
   background: color-mix(in srgb, var(--bg-surface) 86%, var(--bg-elevated));
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-12);
 }
 .v10-local-agent-choice {
   margin-top: 0;
@@ -263,12 +265,12 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-12);
 }
 .v10-local-agent-title {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: var(--space-8);
   font-size: var(--fs-body);
   font-weight: 700;
   color: var(--text-primary);
@@ -299,13 +301,15 @@
   margin-left: -2px;
 }
 .v10-local-agent-subtitle {
-  margin-top: 4px;
+  margin-top: var(--space-4);
   font-size: var(--fs-label);
   color: var(--text-tertiary);
-  line-height: 1.5;
+  line-height: var(--lh-body);
 }
 .v10-local-agent-chat-shell > .v10-local-agent-notice,
 .v10-local-agent-chat-shell > .v10-local-agent-error,
 .v10-local-agent-chat-shell > .v10-local-agent-warning {
-  margin: 8px 12px 0;
+  margin: var(--space-8) var(--space-12) 0;
 }
+
+.v10-agents-details + .v10-agents-refresh { margin-left: 0; }

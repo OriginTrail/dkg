@@ -13,6 +13,9 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot } from 'react-dom/client';
+import { MemoryRouter } from 'react-router-dom';
+// The app always renders the panel inside a router (its Details link navigates).
+const inRouter = (el: React.ReactElement) => React.createElement(MemoryRouter, null, el);
 
 const fetchAgentsMock = vi.fn();
 const fetchConnectionsMock = vi.fn();
@@ -161,9 +164,9 @@ describe('PanelRight component', () => {
     const container = document.createElement('div'); document.body.append(container);
     const root = createRoot(container);
     try {
-      await act(async () => root.render(React.createElement(React.Fragment, {},
-        React.createElement(SidebarInventory, { key: 'sidebar' }), React.createElement(PanelRight, { key: 'chat' }))));
-      await act(async () => root.render(React.createElement(React.Fragment, {}, React.createElement(PanelRight, { key: 'chat' }))));
+      await act(async () => root.render(inRouter(React.createElement(React.Fragment, {},
+        React.createElement(SidebarInventory, { key: 'sidebar' }), React.createElement(PanelRight, { key: 'chat' })))));
+      await act(async () => root.render(inRouter(React.createElement(React.Fragment, {}, React.createElement(PanelRight, { key: 'chat' })))));
       await act(async () => reply({ contextGraphs: [{ id: 'loaded', name: 'Loaded graph', callerInvolved: true }] }));
       const picker = container.querySelector('.v10-local-agent-target-select .v10-select-trigger') as HTMLButtonElement;
       expect(picker).not.toBeNull();
@@ -220,7 +223,7 @@ describe('PanelRight component', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
-    await act(async () => root.render(React.createElement(PanelRight)));
+    await act(async () => root.render(inRouter(React.createElement(PanelRight))));
     await waitForAssertion(() => expect(container.textContent).toContain('DKG Local LLM'));
 
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
@@ -336,7 +339,7 @@ describe('PanelRight component', () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
     await waitForAssertion(() => expect(container.textContent).toContain('Prime Agent'));
 
@@ -385,7 +388,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
 
     await act(async () => {
@@ -539,7 +542,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
     await act(async () => {
       await Promise.resolve();
@@ -722,7 +725,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
     await act(async () => {
       await Promise.resolve();
@@ -799,7 +802,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
     await act(async () => {
       await Promise.resolve();
@@ -872,7 +875,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
     await act(async () => {
       await Promise.resolve();
@@ -939,7 +942,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
     await act(async () => {
       await Promise.resolve();
@@ -1003,7 +1006,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
     await act(async () => {
       await Promise.resolve();
@@ -1124,7 +1127,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
     await act(async () => {
       await Promise.resolve();
@@ -1314,7 +1317,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
     await act(async () => {
       await Promise.resolve();

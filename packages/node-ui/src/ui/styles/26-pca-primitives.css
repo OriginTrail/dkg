@@ -26,16 +26,16 @@
 
 /* ----- HealthChip ----- */
 .v10-pca-health-chip {
-  gap: 4px;
+  gap: var(--space-4);
 }
 .v10-pca-health-glyph { font-size: var(--fs-micro); line-height: 1; }
 
 /* ----- AddressCrux ----- */
-.v10-pca-address-crux { display: flex; flex-direction: column; gap: 6px; }
+.v10-pca-address-crux { display: flex; flex-direction: column; gap: var(--space-6); }
 .v10-pca-crux-note {
   margin: 0;
   font-size: var(--fs-control);
-  line-height: 1.55;
+  line-height: var(--lh-body);
   color: var(--text-secondary);
 }
 .v10-pca-crux-note strong { color: var(--text-primary); }
@@ -43,14 +43,14 @@
 .v10-pca-crux-help code {
   font-family: var(--font-mono);
   font-size: var(--fs-label);
-  padding: 1px 4px;
+  padding: 1px var(--space-4);
   border-radius: var(--radius-xs);
   background: var(--bg-elevated);
 }
 .v10-pca-crux-help {
   margin: 0;
   font-size: var(--fs-label);
-  line-height: 1.5;
+  line-height: var(--lh-body);
   color: var(--text-tertiary);
 }
 .v10-pca-crux-help abbr { cursor: help; text-decoration-style: dotted; }
@@ -61,7 +61,7 @@
 }
 
 /* ----- DiscountTierLadder ----- */
-.v10-pca-tier-ladder { display: flex; flex-direction: column; gap: 6px; }
+.v10-pca-tier-ladder { display: flex; flex-direction: column; gap: var(--space-6); }
 .v10-pca-tier-list {
   list-style: none;
   margin: 0;
@@ -75,7 +75,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 12px;
+  padding: var(--space-6) var(--space-12);
   font-size: var(--fs-control);
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-subtle);
@@ -92,7 +92,7 @@
 .v10-pca-tier-caption { margin: 0; font-size: var(--fs-label); color: var(--text-tertiary); }
 
 /* ----- DiscountAppliedBadge ----- */
-.v10-pca-discount-applied { gap: 3px; }
+.v10-pca-discount-applied { gap: var(--space-4); }
 
 /* ----- EligibilityVerdictBanner ----- */
 .v10-pca-verdict-banner {
@@ -103,11 +103,11 @@
 .v10-pca-verdict-message {
   margin: 0;
   font-size: var(--fs-control);
-  line-height: 1.55;
+  line-height: var(--lh-body);
   color: var(--text-primary);
 }
-.v10-pca-verdict-glyph { margin-right: 6px; }
-.v10-pca-verdict-actions { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; }
+.v10-pca-verdict-glyph { margin-right: var(--space-6); }
+.v10-pca-verdict-actions { margin-top: var(--space-8); display: flex; flex-wrap: wrap; gap: var(--space-8); }
 
 .v10-pca-verdict-green {
   background: var(--success-bg);
@@ -132,7 +132,7 @@
 
 /* ----- Device confirm progress (H-C placeholder for H-D flows) ----- */
 .v10-pca-device-progress {
-  padding: 10px 12px;
+  padding: var(--pad-compact);
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
   max-width: 100%;
@@ -146,29 +146,29 @@
   color: var(--text-primary);
 }
 .v10-pca-device-progress-note {
-  margin: 4px 0 0;
+  margin: var(--space-4) 0 0;
   font-size: var(--fs-label);
-  line-height: 1.45;
+  line-height: var(--lh-body);
   color: var(--text-tertiary);
 }
 .v10-pca-device-progress-list {
   list-style: none;
-  margin: 8px 0 0;
+  margin: var(--space-8) 0 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-4);
 }
 .v10-pca-device-progress-row {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr);
   align-items: start;
-  gap: 8px;
+  gap: var(--space-8);
   font-size: var(--fs-label);
   color: var(--text-secondary);
   min-width: 0;
 }
-.v10-pca-device-progress-row > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; line-height: 1.45; }
+.v10-pca-device-progress-row > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; line-height: var(--lh-body); }
 .v10-pca-device-progress-row[data-state='active'] { color: var(--text-primary); }
 .v10-pca-device-progress-row[data-state='submitted'] { color: var(--text-warning); }
 .v10-pca-device-progress-row[data-state='confirmed'] { color: var(--text-success); }
@@ -179,7 +179,7 @@
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
   color: inherit;
-  line-height: 1.45;
+  line-height: var(--lh-body);
 }
 .v10-pca-device-progress-tx {
   text-decoration: underline;
@@ -192,7 +192,7 @@
   font-size: var(--fs-micro);
   min-width: 0;
   overflow-wrap: anywhere;
-  line-height: 1.45;
+  line-height: var(--lh-body);
 }
 .v10-pca-device-progress-error {
   grid-column: 2 / -1;
@@ -201,7 +201,7 @@
   max-width: 100%;
   width: 100%;
   overflow-wrap: anywhere;
-  line-height: 1.45;
+  line-height: var(--lh-body);
 }
 .v10-pca-device-progress-row[data-state='submitted'] .v10-pca-device-progress-error {
   color: var(--text-warning);
@@ -212,13 +212,13 @@
 .v10-pca-handshake {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
-  gap: 12px;
+  gap: var(--space-12);
 }
 .v10-pca-handshake-half {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px;
+  gap: var(--space-8);
+  padding: var(--pad-nested);
   border: 1px solid var(--border-subtle);
   background: var(--bg-surface);
 }
@@ -226,22 +226,22 @@
   border-color: var(--border-strong);
   background: var(--bg-elevated);
 }
-.v10-pca-handshake-head { display: flex; flex-direction: column; gap: 2px; }
+.v10-pca-handshake-head { display: flex; flex-direction: column; gap: var(--space-2); }
 .v10-pca-handshake-title { font-size: var(--fs-control); font-weight: 700; color: var(--text-primary); }
-.v10-pca-handshake-sub { font-size: var(--fs-label); color: var(--text-tertiary); line-height: 1.45; }
-.v10-pca-handshake-wallets { display: flex; flex-direction: column; gap: 6px; }
+.v10-pca-handshake-sub { font-size: var(--fs-label); color: var(--text-tertiary); line-height: var(--lh-body); }
+.v10-pca-handshake-wallets { display: flex; flex-direction: column; gap: var(--space-6); }
 .v10-pca-handshake-copyall {
   align-self: flex-start;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
   color: var(--text-secondary);
   font-size: var(--fs-label);
-  padding: 4px 10px;
+  padding: var(--space-4) 10px;
   border-radius: var(--radius-control);
   cursor: pointer;
 }
 .v10-pca-handshake-copyall:hover { background: var(--bg-hover); color: var(--text-primary); }
-.v10-pca-handshake-account { display: flex; align-items: center; gap: 8px; }
+.v10-pca-handshake-account { display: flex; align-items: center; gap: var(--space-8); }
 .v10-pca-handshake-account-id {
   font-family: var(--font-mono);
   font-size: var(--fs-body);

@@ -26,6 +26,12 @@ import { eqAddress } from '../../web3/address.js';
 import { resolvePrimaryWalletState, type PcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
 import { Badge } from '../../components/ds/Badge.js';
+import { BadgePercent, RefreshCw } from 'lucide-react';
+import { Loading } from '../../components/ds/Loading.js';
+import { bpsToPercent } from '../../lib/format.js';
+import { ExternalMark } from '../../components/ds/ExternalMark.js';
+import { Breadcrumbs } from '../../components/ds/Breadcrumbs.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
   return formatRelativeExpiry(expiresAtTimestamp).replace(/^Expires in /, '');
@@ -60,14 +66,14 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
 
   useWalletBootstrap();
 
-  if (loading && !snapshot) return <div className="lazy-spinner">Loading PCA #{accountId}…</div>;
+  if (loading && !snapshot) return <Loading block label={`Loading PCA #${accountId}…`} />;
   if (error || !snapshot) {
     return (
       <div className="v10-pca-detail">
         <div className="card ds-card">
           <div className="card-body v10-pca-card-error">
             <p>Couldn’t load PCA #{accountId}.</p>
-            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refresh()}>Retry</button>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refresh()}><RefreshCw size={12} />Retry</button>
           </div>
         </div>
       </div>
@@ -171,7 +177,7 @@ function DetailBody({
   const health = healthForSnapshot(snapshot);
   const ownerTitle = access.writesEnabled ? undefined : ownerOnlyReason;
 
-  const pct = (snapshot.discountBps / 100).toFixed(snapshot.discountBps % 100 === 0 ? 0 : 1);
+  const pct = bpsToPercent(snapshot.discountBps);
   const walletSurfaceCopy = connectedWallet
     ? access.mode === 'wallet'
       ? access.wrongNetwork
@@ -186,9 +192,12 @@ function DetailBody({
 
   return (
     <div className="v10-pca-detail" data-testid="pca-detail">
+      <div className="ds-crumbs-bar">
+        <Breadcrumbs items={[{ label: 'Publisher Conviction', onClick: () => openTab({ id: 'conviction', label: 'Publisher Conviction', closable: true }) }, { label: `PCA #${accountId}` }]} />
+      </div>
       <div className="v10-pca-detail-band">
-        <span className="v10-pca-detail-id">PCA #{accountId}</span>
-        <Badge size="sm" icon="◉">{pct}% discount</Badge>
+        <h1 className="ds-page-title">PCA #{accountId}</h1>
+        <Badge size="sm" icon={<BadgePercent size={12} />}>{pct}% discount</Badge>
         <span className="v10-pca-detail-committed">{formatPcaTrac(snapshot.committedTRACTrac)} TRAC committed</span>
         <span className="v10-pca-card-spacer" />
         <HealthChip state={health} />
@@ -217,7 +226,7 @@ function DetailBody({
           <div className="v10-modal-warning ds-card-nested" role="status">
             ⓘ {ownerOnlyReason}{' '}
             {walletsUnreadable ? (
-              <button type="button" className="v10-pca-card-btn ds-btn" onClick={onRetryWallets}>Retry</button>
+              <button type="button" className="v10-pca-card-btn ds-btn" onClick={onRetryWallets}><RefreshCw size={12} />Retry</button>
             ) : (
               'Wallet probe stays available.'
             )}
@@ -258,7 +267,7 @@ function DetailBody({
         <span className="v10-pca-card-owner-lbl">Owner</span>
         <WalletRow
           address={snapshot.owner}
-          trailing={explorer ? <a className="v10-pca-card-explorer" href={`${explorer}/address/${snapshot.owner}`} target="_blank" rel="noreferrer" aria-label="View owner on explorer">↗</a> : undefined}
+          trailing={explorer ? <a className="v10-pca-card-explorer" href={`${explorer}/address/${snapshot.owner}`} target="_blank" rel="noreferrer" aria-label="View owner on explorer"><ExternalMark /></a> : undefined}
         />
       </div>
 

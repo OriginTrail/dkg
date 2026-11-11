@@ -4,10 +4,14 @@ import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
 import { ContextGraphPrimerView } from '../../views/ContextGraphPrimerView.js';
 import { authHeaders, fileUrl } from '../../api.js';
-import { decodeTabId } from '../../lib/tab-target.js';
+import { decodeTabId, type LayerKey } from '../../lib/tab-target.js';
 import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 import { TabBar } from './TabBar.js';
+import { FileText } from 'lucide-react';
+import { Breadcrumbs } from '../ds/Breadcrumbs.js';
+import { useContextGraphCrumb } from '../../hooks/useContextGraphCrumb.js';
+import { Loading } from '../ds/Loading.js';
 import { MARKETPLACE_TABS } from '../../marketplace/tabs.js';
 
 
@@ -15,9 +19,6 @@ const OperationsView = createRecoverableLazyView(() =>
   import('../../pages/Operations.js').then((m) => m.OperationsPage)
 , 'operations');
 
-const AgentHubView = createRecoverableLazyView(() =>
-  import('../../pages/AgentHub.js').then((m) => m.AgentHubPage)
-, 'agent hub');
 
 const SettingsView = createRecoverableLazyView(() =>
   import('../../pages/Settings.js').then((m) => m.SettingsPage)
@@ -74,9 +75,8 @@ function isTextContentType(ct: string) { return TEXT_CONTENT_TYPES.some(t => ct.
 // headers. `docRef` is the full `urn:dkg:file:keccak256:<hex>` urn, or — when
 // the document has no source file — the entity uri, which does not start with
 // `urn:dkg:file:` and drives the "source not available" empty state.
-function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: string; contentType: string }) {
-  const { tabs, activeTabId, closeTab } = useTabsStore();
-  const setActiveTab = useTabsStore(s => s.setActiveTab);
+function DocumentViewer({ docRef, contentType: expectedContentType, contextGraphId }: { docRef: string; contentType: string; contextGraphId?: string }) {
+  const { tabs, activeTabId } = useTabsStore();
   const [content, setContent] = useState<string | null>(null);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [contentType, setContentType] = useState<string>('');
@@ -88,13 +88,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
   const currentTab = tabs.find(t => t.id === activeTabId);
   const docLabel = currentTab?.label ?? 'Document';
 
-  const handleBack = () => {
-    const projectTab = tabs.find(t => decodeTabId(t.id).kind === 'graph');
-    if (projectTab) {
-      setActiveTab(projectTab.id);
-    }
-    closeTab(activeTabId);
-  };
+  const graph = useContextGraphCrumb(contextGraphId ?? '');
 
   useEffect(() => {
     let cancelled = false;
@@ -177,17 +171,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
         flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10,
         padding: '8px 16px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-panel)',
       }}>
-        <button
-          onClick={handleBack}
-          style={{
-            border: '1px solid var(--border-default)', borderRadius: 'var(--radius-control)', background: 'none',
-            color: 'var(--text-secondary)', fontSize: 'var(--fs-label)', fontWeight: 600, padding: '4px 10px',
-            cursor: 'pointer', fontFamily: 'var(--font-sans)',
-          }}
-        >
-          ← Back to Project
-        </button>
-        <span style={{ fontSize: 'var(--fs-body)', fontWeight: 600, color: 'var(--text-primary)' }}>📄 {docLabel}</span>
+        <Breadcrumbs items={[contextGraphId ? graph : { label: 'Context graph' }, { label: docLabel }]} />
         {showToggle && (
           <div
             role="group"
@@ -228,11 +212,11 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
             justifyContent: 'center', gap: 10, height: '100%',
             color: 'var(--text-tertiary)', textAlign: 'center',
           }}>
-            <span style={{ fontSize: 'var(--fs-display)', opacity: 0.6 }}>📄</span>
+            <FileText size={28} style={{ opacity: 0.6 }} />
             <span style={{ fontSize: 'var(--fs-body)', fontWeight: 600, color: 'var(--text-secondary)' }}>
               Source file not available for this document
             </span>
-            <span style={{ fontSize: 'var(--fs-control)', maxWidth: 360, lineHeight: 1.6 }}>
+            <span style={{ fontSize: 'var(--fs-control)', maxWidth: 360, lineHeight: 'var(--lh-loose)' }}>
               This document was indexed into the graph without a stored source
               file, so there is nothing to preview here. You can still explore
               its extracted entities and relationships in the graph.
@@ -240,8 +224,8 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
           </div>
         ) : (
           <>
-            {loading && <div style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-control)' }}>Loading document...</div>}
-            {error && <div style={{ color: 'var(--accent-red)', fontSize: 'var(--fs-control)' }}>Failed to load: {error}</div>}
+            {loading && <Loading label="Loading document…" />}
+            {error && <div style={{ color: 'var(--text-danger)', fontSize: 'var(--fs-control)' }}>Failed to load: {error}</div>}
             {!loading && isImage && blobUrl && (
               <img src={blobUrl} alt={docLabel} style={{ maxWidth: '100%', borderRadius: 'var(--radius-nested)' }} />
             )}
@@ -258,7 +242,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
             )}
             {content !== null && !isImage && !isPdf && !(isMarkdown && viewMode === 'formatted') && (
               <pre style={{
-                fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-control)', lineHeight: 1.7,
+                fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-control)', lineHeight: 'var(--lh-loose)',
                 color: 'var(--text-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
                 background: 'var(--bg-surface)', borderRadius: 'var(--radius-nested)', padding: 16,
                 border: '1px solid var(--border-default)', margin: 0,
@@ -290,10 +274,6 @@ function ViewContainer() {
     return <OperationsView />;
   }
 
-  if (activeTabId === 'agent-hub') {
-    return <AgentHubView />;
-  }
-
   if (activeTabId === 'settings') {
     return <SettingsView />;
   }
@@ -313,8 +293,8 @@ function ViewContainer() {
     // The graph part of an agent tab scopes the profile to one context graph's
     // data; a future "global agent profile" view could drop it.
     case 'agent': return <AgentProfilePage contextGraphId={target.contextGraphId} agentUri={target.agentUri} />;
-    case 'document': return <DocumentViewer docRef={target.docRef} contentType={target.contentType} />;
-    case 'layer': return <MemoryLayerView layer={target.layer} contextGraphId={target.contextGraphId} />;
+    case 'document': return <DocumentViewer docRef={target.docRef} contentType={target.contentType} contextGraphId={target.contextGraphId} />;
+    case 'layer': return <LayerPage layer={target.layer} contextGraphId={target.contextGraphId} />;
     default: break;
   }
 
@@ -357,11 +337,23 @@ export function PanelCenter() {
   }, []);
 
   return (
-    <div className="v10-panel-center">
+    <main className="v10-panel-center">
       <TabBar />
-      <div ref={contentRef} className="v10-center-content v10-center-content-enter">
+      <div id="main-content" tabIndex={-1} ref={contentRef} className="v10-center-content v10-center-content-enter">
         <ViewContainer />
       </div>
-    </div>
+    </main>
+  );
+}
+
+const LAYER_NAMES: Record<LayerKey, string> = { wm: 'Working Memory', swm: 'Shared Working Memory', vm: 'Verifiable Memory' };
+
+function LayerPage({ layer, contextGraphId }: { layer: LayerKey; contextGraphId: string }) {
+  const graph = useContextGraphCrumb(contextGraphId);
+  return (
+    <>
+      <div className="ds-crumbs-bar"><Breadcrumbs items={[graph, { label: LAYER_NAMES[layer] }]} /></div>
+      <MemoryLayerView layer={layer} contextGraphId={contextGraphId} />
+    </>
   );
 }

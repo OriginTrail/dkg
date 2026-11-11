@@ -3,6 +3,7 @@ import { useLayoutStore, maxBottomHeight } from '../../stores/layout.js';
 import { api } from '../../api-wrapper.js';
 import { formatTime, formatDuration, shortId } from '../../hooks.js';
 import { opTypeText } from '../../op-type-colors.js';
+import { pressable } from '../../lib/pressable.js';
 import { OperationStatusBadge } from '../OperationStatusBadge.js';
 
 const BOTTOM_TABS = ['Node Log', 'Transactions'] as const;
@@ -50,8 +51,8 @@ function classifyLine(line: string): 'error' | 'warn' | 'info' | 'debug' {
 }
 
 const LEVEL_COLORS: Record<string, string> = {
-  error: 'var(--accent-red)',
-  warn:  'var(--accent-amber)',
+  error: 'var(--text-danger)',
+  warn:  'var(--text-warning)',
   info:  'var(--text-primary)',
   debug: 'var(--text-tertiary)',
 };
@@ -180,13 +181,13 @@ function TransactionsContent() {
     <div className="v10-log-output" style={{ overflowY: 'auto', flex: 1 }}>
       <div className="ds-table-scroll"><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--fs-label)' }}>
         <thead>
-          <tr style={{ borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', textAlign: 'left' }}>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Type</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>ID</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Status</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Duration</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Time</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Tx hash</th>
+          <tr style={{ borderBottom: '1px solid var(--border-subtle)', textAlign: 'left' }}>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Type</th>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>ID</th>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Status</th>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Duration</th>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Time</th>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Tx hash</th>
           </tr>
         </thead>
         <tbody>
@@ -197,7 +198,7 @@ function TransactionsContent() {
             return (
               <React.Fragment key={op.operation_id}>
                 <tr
-                  onClick={() => setExpanded(id => id === op.operation_id ? null : op.operation_id)}
+                  aria-expanded={isExp} {...pressable(() => setExpanded(id => id === op.operation_id ? null : op.operation_id))}
                   style={{ borderBottom: '1px solid var(--border-subtle)', cursor: 'pointer', background: isExp ? 'var(--tint-subtle)' : undefined }}
                 >
                   <td style={{ padding: '7px 12px', color: opTypeText(op.operation_name), fontWeight: 600 }}>
@@ -235,7 +236,7 @@ function TransactionsContent() {
                         <span><b>ID:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{op.operation_id}</span></span>
                         {txHash && <span><b>Tx:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{txHash}</span></span>}
                         {op.peer_id && <span><b>Peer:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{shortId(op.peer_id)}</span></span>}
-                        {op.error_message && <span style={{ color: 'var(--accent-red)' }}><b>Error:</b> {op.error_message}</span>}
+                        {op.error_message && <span style={{ color: 'var(--text-danger)' }}><b>Error:</b> {op.error_message}</span>}
                       </div>
                       {(op.phases ?? []).length > 0 && (
                         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -318,7 +319,7 @@ export function PanelBottom() {
 
   return (
     <div
-      className={`v10-panel-bottom ${bottomCollapsed ? 'collapsed' : ''} ${bottomMaximised ? 'maximised' : ''}`}
+      role="region" aria-label="Node log and transactions" className={`v10-panel-bottom ${bottomCollapsed ? 'collapsed' : ''} ${bottomMaximised ? 'maximised' : ''}`}
       style={!bottomCollapsed ? { height: panelHeight } : undefined}
     >
       {/* Resize handle — only visible when expanded and not maximised */}
@@ -346,7 +347,7 @@ export function PanelBottom() {
           {bottomMaximised ? RESTORE_ICON : MAXIMIZE_ICON}
         </button>
         <button className="v10-bottom-toggle ds-btn ds-ghost ds-sm ds-icon" onClick={toggleBottom} title={bottomCollapsed ? 'Expand' : 'Collapse'}>
-          <span style={{ transform: bottomCollapsed ? 'rotate(180deg)' : 'none', display: 'flex', transition: 'transform 0.15s' }}>
+          <span style={{ transform: bottomCollapsed ? 'rotate(180deg)' : 'none', display: 'flex', transition: 'transform var(--motion-base)' }}>
             {CHEVRON_DOWN}
           </span>
         </button>

@@ -9,7 +9,7 @@ import { copy, type CopyKey } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi } from '../api/client.js';
 import type { LandNowAnswer, LandingReport, LandingStop, Listing, ListingProblem, Offering } from '../api/types.js';
 import { fmtAt, fmtHex, fmtMicro, fmtTrac, modelName, weiOfMicro } from '../amounts.js';
-import { ErrorCard, OffCard, relAt, useLoad } from '../shared.js';
+import { CoreNodeChecks, ErrorCard, MarketplacePage, OffCard, coreNodeBasics, relAt, useLoad } from '../shared.js';
 
 /** Why an offer is not listed, in plain words. */
 const LISTING_PROBLEM: Record<ListingProblem, CopyKey> = {
@@ -83,20 +83,20 @@ export function OperateView(): React.ReactElement {
 
   if (isMarketplaceOff(st.err)) {
     return (
-      <div className="mkt-frame" data-testid="mkt-operate" data-state="inactive">
+      <MarketplacePage page="operate" state="inactive">
         <OffCard selling testId="mkt-operate-inactive" />
-      </div>
+      </MarketplacePage>
     );
   }
-  if (isMarketplaceAbsent(st.err)) return <div className="mkt-frame" data-testid="mkt-operate" data-state="absent"><OffCard absent /></div>;
+  if (isMarketplaceAbsent(st.err)) return <MarketplacePage page="operate" state="absent"><OffCard absent /></MarketplacePage>;
   if (st.err && !st.data) {
     return (
-      <div className="mkt-frame" data-testid="mkt-operate" data-state="error">
+      <MarketplacePage page="operate" state="error">
         <div className="ds-card mkt-card"><div data-copy="operate.error">{copy('operate.error')}</div><ErrorCard err={st.err} onRetry={st.reload} /></div>
-      </div>
+      </MarketplacePage>
     );
   }
-  if (!st.data) return <div className="mkt-frame" data-testid="mkt-operate" data-state="loading"><div className="ds-card mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></div>;
+  if (!st.data) return <MarketplacePage page="operate" state="loading"><div className="ds-card mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></MarketplacePage>;
   const s = st.data;
   const epoch = s.epoch;
   const g = s.gate;
@@ -105,7 +105,7 @@ export function OperateView(): React.ReactElement {
   const line = report ? landedLine(report) : null;
 
   return (
-    <div className="mkt-frame" data-testid="mkt-operate" data-state="active">
+    <MarketplacePage page="operate" state="active">
       {st.err ? <ErrorCard err={st.err} onRetry={st.reload} /> : null}
       <div className="ds-card mkt-card">
         <h2 data-copy="operate.price.title">{copy('operate.price.title')}</h2>
@@ -146,11 +146,10 @@ export function OperateView(): React.ReactElement {
 
       <div className="ds-card mkt-card" data-testid="mkt-ledger">
         <h2 data-copy="operate.epoch.title">{copy('operate.epoch.title')}</h2>
-        <div className="mkt-muted mkt-xs" data-copy="operate.gate">
-          {copy('operate.gate', {
-            profile: g.profile ? '✓' : '✗', table: g.shardingTable ? '✓' : '✗', stake: fmtTrac(g.stake), min: fmtTrac(g.minimumStake),
-            proved: copy(s.scoredThisEpoch ? 'operate.proved' : 'operate.proved.not'),
-          })}
+        <div className="mkt-muted mkt-xs" data-copy="gate.core" data-testid="mkt-operate-gate">
+          {/* Not proved yet is pending while the epoch runs, not a failed check, so it has no mark. */}
+          <CoreNodeChecks items={[...coreNodeBasics(g),
+            s.scoredThisEpoch ? { ok: true, label: copy('operate.proved') } : { label: copy('operate.proved.not') }]} />
         </div>
         <div className="mkt-sec mkt-sm" data-testid="mkt-ledger-counts" data-copy="operate.ledger">{copy('operate.ledger', { served: l.served, sent: l.sent, landed: l.landed, refused: l.refused, missed: l.missed })}</div>
         <div className="mkt-muted mkt-xs" data-copy="operate.ledger.value">{copy('operate.ledger.value', { held: fmtTrac(l.heldValue), landed: fmtTrac(l.landedValue), counted: fmtTrac(l.counted) })}</div>
@@ -166,6 +165,7 @@ export function OperateView(): React.ReactElement {
       <div className="ds-card mkt-card" data-testid="mkt-batches">
         <h2 data-copy="operate.batches">{copy('operate.batches')}</h2>
         {s.batches.length === 0 && <div className="mkt-muted mkt-xs" data-copy="operate.batches.none">{copy('operate.batches.none')}</div>}
+        <div className="ds-table-scroll">
         <table className="mkt-act">
           <tbody>
             {s.batches.slice(0, 10).map((b) => (
@@ -179,8 +179,10 @@ export function OperateView(): React.ReactElement {
             ))}
           </tbody>
         </table>
+        </div>
         <h3 data-copy="operate.ended">{copy('operate.ended')}</h3>
         {s.ended.length === 0 && <div className="mkt-muted mkt-xs" data-copy="operate.ended.none">{copy('operate.ended.none')}</div>}
+        <div className="ds-table-scroll">
         <table className="mkt-act" data-testid="mkt-ended">
           <tbody>
             {s.ended.map((e) => (
@@ -192,6 +194,7 @@ export function OperateView(): React.ReactElement {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       <div className="ds-card mkt-card">
@@ -206,6 +209,6 @@ export function OperateView(): React.ReactElement {
         ))}
         <div className="mkt-muted mkt-xs" data-copy="operate.identity">{copy('operate.identity', { id: s.identityId })}</div>
       </div>
-    </div>
+    </MarketplacePage>
   );
 }

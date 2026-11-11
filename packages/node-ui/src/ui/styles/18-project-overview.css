@@ -1,5 +1,5 @@
 /* ── Project Overview Card ── */
-.v10-po { flex-shrink: 0; padding: 16px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-surface); }
+.v10-po { flex-shrink: 0; padding: var(--space-16); border-bottom: 1px solid var(--border-subtle); background: var(--bg-surface); }
 /* Identity row (S2 finalize §4.2.1) — label-pill pairs left, primer
    link right. Name + description live in the persistent
    ProjectHeaderStrip. The role glyph (◆) is applied here in CSS via
@@ -10,7 +10,7 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 18px;
+  gap: var(--space-16);
   margin: 0 0 14px;
   padding: 0 0 14px;
   border-bottom: 1px solid var(--border-subtle);
@@ -18,26 +18,26 @@
 .v10-po-identity-pairs {
   display: inline-flex;
   flex-wrap: wrap;
-  gap: 18px;
+  gap: var(--space-16);
 }
 .v10-po-identity-pair {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-8);
 }
 .v10-po-identity-label {
   font-size: var(--fs-micro);
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--text-tertiary);
 }
 .v10-po-badge {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-4);
   height: var(--h-badge-md);
-  padding: 0 9px;
+  padding: 0 var(--space-8);
   border-radius: var(--radius-pill);
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
@@ -47,33 +47,28 @@
 }
 /* Role ladder: one blue, stronger with the role. Weight (solid → tint →
    outline → grey → dashed) says how much you can do; the glyph says which
-   role it is, so the pill reads without colour. ◆ stays the canonical
-   curator glyph (also used on participant rows). */
-.v10-po-badge[data-rank]::before { font-weight: 700; margin-right: 2px; }
+   role it is, so the pill reads without colour. The diamond stays the
+   curator mark (also used on participant rows). */
 .v10-po-badge[data-rank="curator"] {
   border-color: var(--role);
   background: var(--role);
   color: var(--bg-surface);
 }
-.v10-po-badge[data-rank="curator"]::before { content: "◆"; }
 .v10-po-badge[data-rank="joined"] {
   border-color: var(--role-border);
   background: var(--role-bg);
   color: var(--role-text);
 }
-.v10-po-badge[data-rank="joined"]::before { content: "✓"; }
 .v10-po-badge[data-rank="subscriber"] {
   border-color: var(--role-border);
   background: transparent;
   color: var(--role-text);
 }
-.v10-po-badge[data-rank="subscriber"]::before { content: "◉"; }
 .v10-po-badge[data-rank="viewer"] {
   border-color: color-mix(in srgb, var(--text-tertiary) 70%, transparent);
   background: transparent;
   color: var(--text-secondary);
 }
-.v10-po-badge[data-rank="viewer"]::before { content: "○"; }
 .v10-po-badge[data-rank="not-joined"] {
   border: 1px dashed color-mix(in srgb, var(--text-tertiary) 70%, transparent);
   background: transparent;
@@ -84,7 +79,6 @@
   background: var(--bg-elevated);
   color: var(--text-tertiary);
 }
-.v10-po-badge[data-rank="unknown"]::before { content: "?"; }
 /* Graph access: blue outline (same hue as role, lighter weight). */
 .v10-po-badge[data-cg-type="public"],
 .v10-po-badge[data-cg-type="curated"],
@@ -97,38 +91,31 @@
   color: var(--text-secondary);
 }
 .v10-po-identity-primer { flex: 0 0 auto; }
-.v10-po-stat-strip { margin-bottom: 12px; }
+.v10-po-stat-strip { margin-bottom: var(--space-12); }
 /* ui-lead item 3 — section title above the At-a-glance grid so it
    matches the structure of the other peer regions (Knowledge
    Pipeline, Participant agents, Pending join requests). */
-.v10-po-stat-block { margin-bottom: 12px; }
-.v10-po-stat-block > .v10-po-section-title { margin-bottom: 8px; }
+.v10-po-stat-block { margin-bottom: var(--space-12); }
+.v10-po-stat-block > .v10-po-section-title { margin-bottom: var(--space-8); }
 /* Participant agents list */
-.v10-po-people { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid var(--border-subtle); }
-.v10-po-people > .v10-po-section-title { margin-bottom: 8px; }
+.v10-po-people { margin: var(--space-12) 0 0; padding-top: var(--space-12); border-top: 1px solid var(--border-subtle); }
+.v10-po-people > .v10-po-section-title { margin-bottom: var(--space-8); }
 .v10-po-people-empty {
   font-size: var(--fs-label);
   color: var(--text-tertiary);
   font-style: italic;
 }
-.v10-po-participants-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.v10-po-participants-list { display: flex; flex-wrap: wrap; gap: var(--space-6); }
 .v10-po-participant {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 3px 10px 3px 3px; border-radius: var(--radius-overlay); font-size: var(--fs-label); font-weight: 600;
+  display: inline-flex; align-items: center; gap: var(--space-6);
+  padding: var(--space-4) 10px var(--space-4) var(--space-4); border-radius: var(--radius-overlay); font-size: var(--fs-label); font-weight: 600;
   background: var(--bg-surface); border: 1px solid var(--border-default); color: var(--text-primary);
 }
 /* Each participant leads with its agent avatar (AgentDot), the same
    circle agents have in the graphs. "You" is bold (plus the ` · you`
-   tag); a curator also carries the canonical ◆ role glyph, rendered in
-   CSS so the data string the tests read stays just the suffix. */
+   tag); a curator also carries the diamond role mark. */
 .v10-po-participant.is-self { font-weight: 700; }
-.v10-po-participant.is-curator::before {
-  content: "◆";
-  order: 2;
-  font-size: var(--fs-label);
-  line-height: 1;
-  color: var(--role-text);
-}
+.v10-po-participant-role { order: 2; color: var(--role-text); }
 .v10-po-participant.is-curator .v10-po-participant-name { order: 3; }
 .v10-po-participant.is-curator .v10-po-participant-tag { order: 4; }
 .v10-po-participant-name {
@@ -144,45 +131,45 @@
 }
 .v10-po-participant-tag::before {
   content: "·";
-  margin: 0 6px;
+  margin: 0 var(--space-6);
   color: var(--text-ghost);
   font-weight: 400;
 }
 /* Pending join requests — peer section under Participant agents,
    curator-only. */
-.v10-po-join { margin: 12px 0 0; padding: 12px 16px 0; border-top: 1px solid var(--border-subtle); }
+.v10-po-join { margin: var(--space-12) 0 0; padding: var(--space-12) var(--space-16) 0; border-top: 1px solid var(--border-subtle); }
 .v10-po-join-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: var(--space-8);
+  margin-bottom: var(--space-8);
 }
 .v10-po-join-empty {
   font-size: var(--fs-label);
   color: var(--text-tertiary);
   font-style: italic;
 }
-.v10-po-join-list { display: flex; flex-direction: column; gap: 6px; }
+.v10-po-join-list { display: flex; flex-direction: column; gap: var(--space-6); }
 .v10-po-join-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 8px 10px;
+  gap: var(--space-12);
+  padding: var(--pad-nested-sm);
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
 }
 .v10-po-join-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .v10-po-join-name { font-size: var(--fs-control); font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; }
 .v10-po-join-addr { font-size: var(--fs-micro); font-family: var(--font-mono); color: var(--text-tertiary); }
-.v10-po-join-actions { display: flex; gap: 6px; flex-shrink: 0; }
-.v10-po-join-btn:disabled { opacity: 0.5; }
+.v10-po-join-actions { display: flex; gap: var(--space-6); flex-shrink: 0; }
+.v10-po-join-btn:disabled { opacity: var(--opacity-disabled); }
 .v10-po-pipeline {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin: 12px 0 12px;
-  padding-top: 12px;
+  margin: var(--space-12) 0 var(--space-12);
+  padding-top: var(--space-12);
   border-top: 1px solid var(--border-subtle);
 }
 /* §4.2.1 ui-lead review finding #1 — even divider rhythm across all
@@ -191,27 +178,28 @@
    below) get them via `[data-section]` attribute selectors, which
    are the stable hook regardless of inner wrapper class. */
 [data-section="activity"] {
-  margin-top: 12px;
-  padding-top: 12px;
+  margin-top: var(--space-12);
+  padding-top: var(--space-12);
   border-top: 1px solid var(--border-subtle);
 }
 .v10-po-pipeline-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-16);
 }
 .v10-po-section-title {
+  margin: 0;
   color: var(--text-primary);
   font-size: var(--fs-control);
   font-weight: 700;
 }
 .v10-po-section-desc {
   max-width: 760px;
-  margin-top: 3px;
+  margin-top: var(--space-4);
   color: var(--text-secondary);
   font-size: var(--fs-control);
-  line-height: 1.45;
+  line-height: var(--lh-body);
 }
 .v10-po-pipeline-track {
   display: flex;
@@ -231,7 +219,7 @@
 .v10-po-pipeline-steps {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  gap: var(--space-8);
 }
 .v10-po-pipeline-step {
   --po-layer-color: var(--border-strong);
@@ -240,7 +228,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
+  padding: var(--pad-nested);
   border: 1px solid var(--po-layer-border, color-mix(in srgb, var(--po-layer-color) 28%, var(--border-default)));
   background: var(--po-layer-bg, color-mix(in srgb, var(--po-layer-color) 6%, var(--bg-surface)));
   color: var(--text-secondary);
@@ -276,22 +264,22 @@
   flex: 1 1 auto;
   min-width: 0;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-2);
 }
 .v10-po-pipeline-step-label {
   color: var(--text-primary);
   font-size: var(--fs-control);
   font-weight: 700;
-  line-height: 1.25;
+  line-height: var(--lh-tight);
 }
 .v10-po-pipeline-step-desc {
   color: var(--text-tertiary);
   font-size: var(--fs-label);
-  line-height: 1.3;
+  line-height: var(--lh-snug);
 }
 .v10-po-pipeline-step-count {
   flex: 0 0 auto;
-  max-width: 42%;
+  white-space: nowrap;
   color: var(--text-secondary);
   font-family: var(--font-mono);
   font-size: var(--fs-label);
@@ -306,9 +294,9 @@
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 8px;
-  padding: 14px 16px;
-  margin-top: 12px;
+  gap: var(--space-8);
+  padding: 14px var(--space-16);
+  margin-top: var(--space-12);
   border-top: 1px solid var(--border-subtle);
   color: var(--text-tertiary);
 }
@@ -333,12 +321,12 @@
   color: var(--text-link);
   font-family: var(--font-sans);
   font-size: var(--fs-control);
-  font-weight: 650;
+  font-weight: 600;
 }
 .v10-po-primer-footer-link:hover { text-decoration: underline; }
 .v10-po-primer-footer-sub {
   flex: 1 0 100%;
-  margin-top: 2px;
+  margin-top: var(--space-2);
   font-size: var(--fs-label);
   font-weight: 400;
   color: var(--text-tertiary);
@@ -356,16 +344,16 @@
 }
 
 @media (max-width: 1180px) {
-  .v10-layer-switch-separator { margin: 0 4px; }
+  .v10-layer-switch-separator { margin: 0 var(--space-4); }
 }
 
 @media (max-width: 920px) {
-  .v10-layer-switcher { padding: 0 2px; }
-  .v10-layer-switch-btn { width: 30px; }
+  .v10-layer-switcher { padding: 0 var(--space-2); }
+  .v10-layer-switch-btn { min-width: 30px; }
   .v10-layer-switch-label { display: none; }
-  .v10-layer-switch-separator { margin: 0 2px; }
+  .v10-layer-switch-separator { margin: 0 var(--space-2); }
   .v10-layer-switcher-spacer { flex: 0 0 2px; min-width: 2px; }
-  .v10-layer-switcher-actions { gap: 2px; padding-right: 2px; }
+  .v10-layer-switcher-actions { gap: var(--space-2); padding-right: var(--space-2); }
   .v10-layer-action-btn { width: 28px; }
 }
 .v10-center-content[data-narrow] .v10-po-identity,

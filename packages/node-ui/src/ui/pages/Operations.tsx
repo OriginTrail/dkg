@@ -1,17 +1,35 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import {
-  ResponsiveContainer, LineChart, Line, BarChart, Bar, AreaChart, Area,
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceLine,
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ReferenceLine,
 } from 'recharts';
-import { useFetch, formatTime, formatDuration, shortId } from '../hooks.js';
+import { useFetch, formatBytes, formatTime, formatDuration, shortId } from '../hooks.js';
 import { opTypeText, opTypeBg, opTypeRule, opChartColor } from '../op-type-colors.js';
-import { Badge } from '../components/ds/Badge.js';
+import { Badge, StatusGlyph } from '../components/ds/Badge.js';
 import {
-  fetchOperationsWithPhases, fetchOperation, fetchNodeLog,
-  fetchOperationStats, fetchStatus, fetchErrorHotspots, fetchFailedOperations,
-  fetchSuccessRates, fetchPerTypeStats, fetchMetricsHistory,
-  fetchReplicationSummary, fetchReplicationPerCg, fetchReplicationTimeline,
-  fetchReplicationCursors, fetchReplicationEvents,
+  fetchOperationsWithPhases,
+  fetchOperation,
+  fetchNodeLog,
+  fetchStatus,
+  fetchErrorHotspots,
+  fetchFailedOperations,
+  fetchSuccessRates,
+  fetchPerTypeStats,
+  fetchMetricsHistory,
+  fetchReplicationSummary,
+  fetchReplicationPerCg,
+  fetchReplicationTimeline,
+  fetchReplicationCursors,
+  fetchReplicationEvents,
   type ReplicationPerCgRow,
 } from '../api.js';
 // P-1 review: shared phase palette — single source of truth for
@@ -25,6 +43,16 @@ import {
 import { humanizeStatus } from '../lib/formatLabels.js';
 import { OperationStatusBadge, operationStatusLabel } from '../components/OperationStatusBadge.js';
 import { HW_THRESHOLDS, hardwareChartRow, hardwareLevels, latestHardwareReading, type MetricLevel, type MetricsSnapshot } from './hardware-metrics.js';
+import { ChevronDown, ChevronRight, RefreshCw, Activity, ChartColumn, Check, FileText, Search } from 'lucide-react';
+import { useModalDismiss } from '../components/Modals/useModalDismiss.js';
+import { pressable } from '../lib/pressable.js';
+import { Loading } from '../components/ds/Loading.js';
+import { EmptyState } from '../components/ContextGraphPrimitives.js';
+import { formatDateTime } from '../lib/format.js';
+import { PageHeader } from '../components/ds/PageHeader.js';
+import { StatTile } from '../components/ds/StatTile.js';
+import { NetworkConnections } from './Network.js';
+import { useObservabilityTab } from '../hooks/useObservabilityTab.js';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
 
@@ -56,7 +84,7 @@ const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
   workspace:      'Manage shared memory for staging changes',
   connect:        'Establish a connection with a network peer',
   sync:           'Synchronize knowledge data with remote peers',
-  share:          'Share a SWM delta with subscribed peers',
+  share:          'Share Shared Working Memory changes with subscribed peers',
   gossip:         'Propagate updates across the peer-to-peer network via GossipSub',
   reconstruct:    'Reconstruct a Knowledge Asset from distributed shares',
   verify:         'Verify Merkle proofs and assert data integrity',
@@ -108,7 +136,7 @@ function PeriodSelect({ value, onChange }: { value: string; onChange: (v: string
 
   return (
     <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-      <select
+      <select aria-label="Period"
         className="input"
         value={isCustom ? '__custom__' : value}
         onChange={e => {
@@ -121,7 +149,7 @@ function PeriodSelect({ value, onChange }: { value: string; onChange: (v: string
         <option value="__custom__">Custom...</option>
       </select>
       {(showCustom || isCustom) && (
-        <input
+        <input aria-label="Custom period"
           className="input mono"
           placeholder="e.g. 2d, 45m, 3h"
           value={customInput || (isCustom ? value : '')}
@@ -140,18 +168,19 @@ function PeriodSelect({ value, onChange }: { value: string; onChange: (v: string
 }
 
 export function ObservabilitySection() {
-  const [tab, setTab] = useState<'operations' | 'replication' | 'hardware' | 'logs' | 'errors'>('operations');
+  const [tab, setTab] = useObservabilityTab();
 
   return (
     <div>
       <div className="tab-group" style={{ marginBottom: 16 }}>
-        <button className={`ds-tab ${tab === 'operations' ? 'active' : ''}`} onClick={() => setTab('operations')}>All operations</button>
-        <button className={`ds-tab ${tab === 'replication' ? 'active' : ''}`} onClick={() => setTab('replication')}>Replication</button>
-        <button className={`ds-tab ${tab === 'hardware' ? 'active' : ''}`} onClick={() => setTab('hardware')}>Hardware</button>
-        <button className={`ds-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab('logs')}>Logs</button>
-        <button className={`ds-tab ${tab === 'errors' ? 'active' : ''}`} onClick={() => setTab('errors')}>Errors</button>
+        <button aria-pressed={tab === 'operations'} className={`ds-tab ${tab === 'operations' ? 'active' : ''}`} onClick={() => setTab('operations')}>All operations</button>
+        <button aria-pressed={tab === 'replication'} className={`ds-tab ${tab === 'replication' ? 'active' : ''}`} onClick={() => setTab('replication')}>Replication</button>
+        <button aria-pressed={tab === 'hardware'} className={`ds-tab ${tab === 'hardware' ? 'active' : ''}`} onClick={() => setTab('hardware')}>Hardware</button>
+        <button aria-pressed={tab === 'logs'} className={`ds-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab('logs')}>Logs</button>
+        <button aria-pressed={tab === 'errors'} className={`ds-tab ${tab === 'errors' ? 'active' : ''}`} onClick={() => setTab('errors')}>Errors</button>
+        <button aria-pressed={tab === 'network'} className={`ds-tab ${tab === 'network' ? 'active' : ''}`} onClick={() => setTab('network')}>Network</button>
       </div>
-      {tab === 'operations' ? <OperationsTabWithStats /> : tab === 'replication' ? <ReplicationTab /> : tab === 'hardware' ? <HardwareTab /> : tab === 'errors' ? <HealthTab /> : <LogsTab />}
+      {tab === 'network' ? <NetworkConnections /> : tab === 'operations' ? <OperationsTabWithStats /> : tab === 'replication' ? <ReplicationTab /> : tab === 'hardware' ? <HardwareTab /> : tab === 'errors' ? <HealthTab /> : <LogsTab />}
     </div>
   );
 }
@@ -204,38 +233,19 @@ function ReplicationTab() {
 
       {/* KPI cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
-        <div className="card ds-card" style={{ padding: 16 }}>
-          <div className="card-title">Promotions</div>
-          <div style={{ fontSize: 'var(--fs-display)', fontWeight: 600 }}>{summary?.promotes ?? '—'}</div>
-          <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)' }}>landed in VM this period</div>
-        </div>
-        <div className="card ds-card" style={{ padding: 16 }}>
-          <div className="card-title">Success rate</div>
-          <div style={{ fontSize: 'var(--fs-display)', fontWeight: 600 }}>{successPct}</div>
-          <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)' }}>promote / (promote + defer)</div>
-        </div>
-        <div className="card ds-card" style={{ padding: 16 }}>
-          <div className="card-title">Promotion latency</div>
-          <div style={{ fontSize: 'var(--fs-display)', fontWeight: 600 }}>{fmtMs(summary?.latencyP50Ms)}</div>
-          <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)' }}>P50 · P95 {fmtMs(summary?.latencyP95Ms)}</div>
-        </div>
-        <div className="card ds-card" style={{ padding: 16 }}>
-          <div className="card-title">Active fetches</div>
-          <div style={{ fontSize: 'var(--fs-display)', fontWeight: 600 }}>{summary?.fetches ?? '—'}</div>
-          <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)' }}>core-first catch-up pulls</div>
-        </div>
+        <StatTile label="Promotions" value={summary?.promotes ?? '—'} sub="Landed in Verifiable Memory this period" />
+        <StatTile label="Success rate" value={successPct} sub="Promoted out of all attempts" />
+        <StatTile label="Promotion latency" value={fmtMs(summary?.latencyP50Ms)} sub={<>Median · 95th percentile {fmtMs(summary?.latencyP95Ms)}</>} />
+        <StatTile label="Active fetches" value={summary?.fetches ?? '—'} sub="Missing Knowledge Assets pulled from Core nodes first" />
       </div>
 
       {/* Timeline */}
-      <div className="card ds-card" style={{ padding: 16, marginBottom: 16 }}>
+      <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>
-          Reconciliation timeline{selectedCg ? ` — ${selectedCg}` : ' — all CGs'}
+          Reconciliation timeline{selectedCg ? ` — ${selectedCg}` : ' — all context graphs'}
         </div>
         {buckets.length === 0 ? (
-          <div className="empty-state empty-state--compact">
-            <div className="empty-state-title">No reconciliation activity</div>
-            <div className="empty-state-desc">No chain-driven VM promotions recorded in this period.</div>
-          </div>
+          <EmptyState compact inline title="No reconciliation activity" description="No chain-driven Verifiable Memory promotions recorded in this period." />
         ) : (
           <ResponsiveContainer width="100%" height={220}>
             <AreaChart data={buckets}>
@@ -253,16 +263,16 @@ function ReplicationTab() {
       </div>
 
       {/* Cursor inspector */}
-      <div className="card ds-card" style={{ padding: 16, marginBottom: 16 }}>
+      <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>Cursor inspector</div>
         <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', marginBottom: 12 }}>
-          Per-CG persisted watermark (contiguous registration ordinal promoted to VM) vs. last observed chain head.
+          How far each context graph has been promoted to Verifiable Memory, compared with the latest chain head.
         </p>
         {cursors.length === 0 ? (
-          <div className="empty-state empty-state--compact"><div className="empty-state-title">No subscriptions</div></div>
+          <EmptyState compact inline title="No subscriptions" />
         ) : (
           <div className="ds-table-scroll"><table className="data-table">
-            <thead><tr><th>Context graph</th><th>On-chain id</th><th>Role</th><th>Watermark</th><th>Chain head</th><th>Lag</th><th>Last event</th></tr></thead>
+            <thead><tr><th>Context graph</th><th>On-chain id</th><th>Role</th><th className="ds-num">Watermark</th><th className="ds-num">Chain head</th><th className="ds-num">Lag</th><th>Last event</th></tr></thead>
             <tbody>
               {cursors.map((c) => {
                 const wm = c.last_reconciled_ordinal ?? 0;
@@ -272,10 +282,10 @@ function ReplicationTab() {
                   <tr key={c.context_graph_id}>
                     <td className="mono">{c.context_graph_id}</td>
                     <td className="mono">{c.on_chain_id ?? '—'}</td>
-                    <td>{c.core_hosted ? <Badge size="sm" title="Core hosts this public CG; fills its own gaps from chain (Phase D)">Host</Badge> : <Badge size="sm">Member</Badge>}</td>
-                    <td>{wm}</td>
-                    <td>{head ?? '—'}</td>
-                    <td>{lag == null ? '—' : <Badge tone={lag === 0 ? 'success' : 'warning'} size="sm">{lag}</Badge>}</td>
+                    <td>{c.core_hosted ? <Badge size="sm" title="Core hosts this public context graph and fills its own gaps from the chain">Host</Badge> : <Badge size="sm">Member</Badge>}</td>
+                    <td className="ds-num">{wm}</td>
+                    <td className="ds-num">{head ?? '—'}</td>
+                    <td className="ds-num">{lag == null ? '—' : <Badge tone={lag === 0 ? 'success' : 'warning'} size="sm">{lag}</Badge>}</td>
                     <td>{c.last_event_ts ? formatTime(c.last_event_ts) : '—'}</td>
                   </tr>
                 );
@@ -286,27 +296,27 @@ function ReplicationTab() {
       </div>
 
       {/* Per-CG activity */}
-      <div className="card ds-card" style={{ padding: 16, marginBottom: 16 }}>
-        <div className="card-title" style={{ marginBottom: 8 }}>Per-CG activity</div>
+      <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
+        <div className="card-title" style={{ marginBottom: 8 }}>Activity by context graph</div>
         <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', marginBottom: 12 }}>Click a row to scope the timeline + open its event stream.</p>
         {perCg.length === 0 ? (
-          <div className="empty-state empty-state--compact"><div className="empty-state-title">No activity in this period</div></div>
+          <EmptyState compact inline title="No activity in this period" />
         ) : (
           <div className="ds-table-scroll"><table className="data-table">
-            <thead><tr><th>Context graph</th><th>Promotes</th><th>Fetches</th><th>Defers</th><th>Cursor moves</th><th>Watermark</th><th>Last event</th></tr></thead>
+            <thead><tr><th>Context graph</th><th className="ds-num">Promotes</th><th className="ds-num">Fetches</th><th className="ds-num">Defers</th><th className="ds-num">Cursor moves</th><th className="ds-num">Watermark</th><th>Last event</th></tr></thead>
             <tbody>
               {perCg.map((r) => (
                 <tr
                   key={r.context_graph_id}
-                  onClick={() => setSelectedCg(selectedCg === r.context_graph_id ? null : r.context_graph_id)}
+                  {...pressable(() => setSelectedCg(selectedCg === r.context_graph_id ? null : r.context_graph_id))}
                   style={{ cursor: 'pointer', background: selectedCg === r.context_graph_id ? 'var(--bg-hover)' : undefined }}
                 >
                   <td className="mono">{r.context_graph_id}</td>
-                  <td>{r.promotes}</td>
-                  <td>{r.fetches}</td>
-                  <td>{r.defers}</td>
-                  <td>{r.cursor_advances}</td>
-                  <td>{r.last_watermark ?? '—'}</td>
+                  <td className="ds-num">{r.promotes}</td>
+                  <td className="ds-num">{r.fetches}</td>
+                  <td className="ds-num">{r.defers}</td>
+                  <td className="ds-num">{r.cursor_advances}</td>
+                  <td className="ds-num">{r.last_watermark ?? '—'}</td>
                   <td>{r.last_event_ts ? formatTime(r.last_event_ts) : '—'}</td>
                 </tr>
               ))}
@@ -317,13 +327,13 @@ function ReplicationTab() {
 
       {/* Event stream drawer */}
       {selectedCg && (
-        <div className="card ds-card" style={{ padding: 16 }}>
+        <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
           <div className="card-title" style={{ marginBottom: 8 }}>Event stream — {selectedCg}</div>
           {events.length === 0 ? (
-            <div className="empty-state empty-state--compact"><div className="empty-state-title">No events</div></div>
+            <EmptyState compact inline title="No events" />
           ) : (
             <div className="ds-table-scroll"><table className="data-table">
-              <thead><tr><th>Time</th><th>Action</th><th>Ordinal</th><th>Cursor</th><th>UAL</th><th>Detail</th></tr></thead>
+              <thead><tr><th>Time</th><th>Action</th><th className="ds-num">Ordinal</th><th className="ds-num">Cursor</th><th>UAL</th><th>Detail</th></tr></thead>
               <tbody>
                 {events.map((e, i) => (
                   <tr key={i}>
@@ -346,9 +356,8 @@ function ReplicationTab() {
 
 export function OperationsPage() {
   return (
-    <div className="page-section">
-      <h1 className="page-title" style={{ marginBottom: 4 }}>Observability</h1>
-      <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', marginBottom: 20 }}>Track operation performance, phases, and errors</p>
+    <div className="ds-page">
+      <PageHeader title="Observability" description="Track operation performance, phases, and errors" />
       <ObservabilitySection />
     </div>
   );
@@ -380,7 +389,7 @@ function HealthTab() {
     <div>
       <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
         <PeriodSelect value={period} onChange={setPeriod} />
-        <input
+        <input aria-label="Search errors and operation IDs"
           className="input mono"
           placeholder="Search errors, operation IDs..."
           value={search}
@@ -389,23 +398,17 @@ function HealthTab() {
         />
       </div>
 
-      <div className="card ds-card" style={{ padding: 16 }}>
+      <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
         <div className="card-title" style={{ marginBottom: 4 }}>Error hotspots</div>
-        <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 1.5 }}>
+        <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 'var(--lh-body)' }}>
           Click a phase to see all failed operations. Click an operation to expand its logs.
         </p>
         {hotspots.length === 0 ? (
-          <div className="empty-state empty-state--compact">
-            <div className="empty-state-icon" style={{ background: 'var(--success-bg)', borderColor: 'var(--success-border)' }}>
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            </div>
-            <div className="empty-state-title" style={{ color: 'var(--accent-green)' }}>No errors in this period</div>
-            <div className="empty-state-desc">All operations completed successfully. Nice work.</div>
-          </div>
+          <EmptyState compact inline tone="success" icon={<Check size={16} />} title="No errors in this period" description="All operations completed successfully. Nice work." />
         ) : (
           <div className="ds-table-scroll"><table className="data-table">
             <thead>
-              <tr><th>Operation</th><th>Phase</th><th>Errors</th><th>Last error</th><th>Last occurred</th></tr>
+              <tr><th>Operation</th><th>Phase</th><th className="ds-num">Errors</th><th>Last error</th><th>Last occurred</th></tr>
             </thead>
             <tbody>
               {hotspots.map((h: any) => {
@@ -413,11 +416,11 @@ function HealthTab() {
                 return (
                 <React.Fragment key={rowKey}>
                   <tr
-                    onClick={() => { setExpandedPhase(p => p === rowKey ? null : rowKey); setExpandedOp(null); }}
+                    aria-expanded={expandedPhase === rowKey} {...pressable(() => { setExpandedPhase(p => p === rowKey ? null : rowKey); setExpandedOp(null); })}
                     style={{ cursor: 'pointer', background: expandedPhase === rowKey ? 'var(--danger-bg)' : undefined }}
                   >
                     <td style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', padding: '10px 14px' }}>
-                      <span style={{ marginRight: 6, fontSize: 'var(--fs-micro)' }}>{expandedPhase === rowKey ? '▼' : '▸'}</span>
+                      <span style={{ marginRight: 6, fontSize: 'var(--fs-micro)' }}>{expandedPhase === rowKey ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
                       {h.operation_name}
                     </td>
                     <td style={{ color: 'var(--text-primary)', fontWeight: 600, padding: '10px 14px' }}>
@@ -465,8 +468,8 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
               background: expandedOp === op.operation_id ? 'var(--danger-bg)' : undefined,
             }}
           >
-            <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>{expandedOp === op.operation_id ? '▼' : '▸'}</span>
-            <span style={{ fontWeight: 600, fontSize: 'var(--fs-control)', color: opTypeText(op.operation_name) }}>{op.operation_name}</span>
+            <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>{expandedOp === op.operation_id ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
+            <button type="button" className="ds-row-open" aria-expanded={expandedOp === op.operation_id} style={{ fontWeight: 600, fontSize: 'var(--fs-control)', color: opTypeText(op.operation_name) }}>{op.operation_name}</button>
             <OperationStatusBadge status={op.status} />
             <span className="mono" style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
             <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginLeft: 'auto' }}>{formatTime(op.phase_started_at)}</span>
@@ -476,12 +479,12 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
           {expandedOp === op.operation_id && (
             <div style={{ padding: '4px 20px 16px' }}>
               {op.phase_error && (
-                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-border)', fontSize: 'var(--fs-label)', color: 'var(--accent-red)' }}>
+                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-border)', fontSize: 'var(--fs-label)', color: 'var(--text-danger)' }}>
                   {op.phase_error}
                 </div>
               )}
               {op.error_message && op.error_message !== op.phase_error && (
-                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-bg-strong)', fontSize: 'var(--fs-label)', color: 'var(--accent-red)' }}>
+                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-bg-strong)', fontSize: 'var(--fs-label)', color: 'var(--text-danger)' }}>
                   {op.error_message}
                 </div>
               )}
@@ -583,7 +586,7 @@ function OperationStatsSection() {
         <PeriodSelect value={period} onChange={setPeriod} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}>per</span>
-          <select className="input" value={granularity} onChange={e => setGranularity(e.target.value)} style={{ width: 'auto' }}>
+          <select aria-label="Granularity" className="input" value={granularity} onChange={e => setGranularity(e.target.value)} style={{ width: 'auto' }}>
             {GRANULARITY_OPTIONS.map(g => <option key={g.value} value={g.value}>{g.label}</option>)}
           </select>
         </div>
@@ -631,7 +634,7 @@ function OperationStatsSection() {
           {/* Operation charts */}
           {hasCharts ? (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
-              <div className="card ds-card" style={{ padding: '12px 14px' }}>
+              <div className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
                 <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Operations over time</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
@@ -647,7 +650,7 @@ function OperationStatsSection() {
                 </ResponsiveContainer>
               </div>
 
-              <div className="card ds-card" style={{ padding: '12px 14px' }}>
+              <div className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
                 <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Avg duration by Operation Type (s)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
@@ -663,7 +666,7 @@ function OperationStatsSection() {
                 </ResponsiveContainer>
               </div>
 
-              <div className="card ds-card" style={{ padding: '12px 14px' }}>
+              <div className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
                 <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Success Rate by Operation Type (%)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
@@ -679,7 +682,7 @@ function OperationStatsSection() {
                 </ResponsiveContainer>
               </div>
 
-              <div className="card ds-card" style={{ padding: '12px 14px' }}>
+              <div className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
                 <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Gas Cost by Operation Type (ETH)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
@@ -697,13 +700,7 @@ function OperationStatsSection() {
             </div>
           ) : (
             <div className="card ds-card" style={{ marginBottom: 14 }}>
-              <div className="empty-state empty-state--compact">
-                <div className="empty-state-icon">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-                </div>
-                <div className="empty-state-title">Not enough data for charts</div>
-                <div className="empty-state-desc">Charts will render once enough operations have been processed.</div>
-              </div>
+              <EmptyState compact inline icon={<ChartColumn size={16} />} title="Not enough data for charts" description="Charts will render once enough operations have been processed." />
             </div>
           )}
         </>
@@ -742,7 +739,7 @@ export function HardwareTab() {
   ];
   const peersLv = levels.peers;
   const rpcLv = levels.rpc;
-  const warnIcon = (lv: Level) => lv === 'ok' ? null : <span aria-label={lv === 'crit' ? 'critical' : 'warning'} style={{ marginLeft: 6, fontSize: 'var(--fs-body)' }}>⚠</span>;
+  const warnIcon = (lv: Level) => lv === 'ok' ? null : <span role="img" aria-label={lv === 'crit' ? 'critical' : 'warning'} style={{ marginLeft: 6 }}><StatusGlyph tone={lv === 'crit' ? 'danger' : 'warning'} /></span>;
   const s1 = 'var(--data-1)';
   const grid = 'var(--border-subtle)', tick = 'var(--text-tertiary)';
   const warnLine = 'var(--text-warning)', critLine = 'var(--text-danger)';
@@ -763,7 +760,7 @@ export function HardwareTab() {
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 12 }}>
         {statCards.map(stat => (
-          <div key={stat.label} className="card ds-card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+          <div key={stat.label} className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
             <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
             <div style={{ fontSize: 'var(--fs-heading)', fontWeight: 700, color: hw ? LEVEL_TEXT[stat.lv] : IDLE, lineHeight: 1, marginBottom: 3 }}>{stat.value}{warnIcon(stat.lv)}</div>
             {stat.pct !== null ? (
@@ -777,12 +774,12 @@ export function HardwareTab() {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 12 }}>
-        <div className="card ds-card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+        <div className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
           <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>Peers</div>
           <div style={{ fontSize: 'var(--fs-heading)', fontWeight: 700, color: hw ? LEVEL_TEXT[peersLv] : IDLE, lineHeight: 1 }}>{hw ? hw.peers : '—'}{warnIcon(peersLv)}</div>
           <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 3 }}>{hw ? 'connected' : 'waiting…'}</div>
         </div>
-        <div className="card ds-card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+        <div className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
           <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>RPC Latency</div>
           <div style={{ fontSize: 'var(--fs-heading)', fontWeight: 700, color: hw ? LEVEL_TEXT[rpcLv] : IDLE, lineHeight: 1 }}>
             {hw ? (hw.rpcMs !== null ? `${hw.rpcMs} ms` : '—') : '—'}{warnIcon(rpcLv)}
@@ -796,7 +793,7 @@ export function HardwareTab() {
         // percentages on the same 0–100 scale, with their warning thresholds.
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
           {hwCharts.map(c => (
-            <div key={c.key} className="card ds-card" style={{ padding: '12px 14px' }}>
+            <div key={c.key} className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
               <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>{c.title}</div>
               <ResponsiveContainer width="100%" height={140}>
                 <AreaChart data={hwChartData}>
@@ -837,7 +834,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
       <div style={{ display: 'flex', gap: 4, marginBottom: 3, flexWrap: 'wrap' }}>
         {phases.map((p: any, i: number) => {
           const color = p.status === 'error'
-            ? 'var(--accent-red)'
+            ? 'var(--text-danger)'
             : p.status === 'cancelled'
               ? CANCELLED_COLOR
               : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
@@ -872,7 +869,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
               style={{
                 width: `${pct}%`, background: color, minWidth: 3,
                 opacity: 1,
-                transition: 'opacity .15s, width .2s',
+                transition: 'opacity var(--motion-base), width var(--motion-slow)',
                 cursor: 'default',
               }}
             />
@@ -904,14 +901,14 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
                 ({Math.round(((phases[hover].duration_ms ?? 0) / totalMs) * 100)}%)
               </span>
               {phases[hover].status === 'error' && (
-                <span style={{ color: 'var(--accent-red)', marginLeft: 6, fontWeight: 600 }}>FAILED</span>
+                <span style={{ color: 'var(--text-danger)', marginLeft: 6, fontWeight: 600 }}>FAILED</span>
               )}
               {phases[hover].status === 'cancelled' && (
                 <span style={{ color: CANCELLED_COLOR, marginLeft: 6, fontWeight: 600 }}>CANCELLED</span>
               )}
             </div>
             {desc && (
-              <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-secondary)', marginTop: 3, whiteSpace: 'normal', lineHeight: 1.4 }}>
+              <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-secondary)', marginTop: 3, whiteSpace: 'normal', lineHeight: 'var(--lh-snug)' }}>
                 {desc}
               </div>
             )}
@@ -929,6 +926,7 @@ function OperationsTab() {
   const [statusFilter, setStatusFilter] = useState('');
   const [opIdFilter, setOpIdFilter] = useState('');
   const [selectedOp, setSelectedOp] = useState<string | null>(null);
+  const drawer = useModalDismiss(Boolean(selectedOp), () => setSelectedOp(null));
   const [page, setPage] = useState(0);
 
   useEffect(() => { setPage(0); }, [nameFilter, statusFilter, opIdFilter]);
@@ -953,20 +951,20 @@ function OperationsTab() {
   return (
     <div>
       <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
-        <select className="input" value={nameFilter} onChange={(e) => setNameFilter(e.target.value)} title="Filter by operation type">
+        <select aria-label="Operation type" className="input" value={nameFilter} onChange={(e) => setNameFilter(e.target.value)} title="Filter by operation type">
           <option value="">All types</option>
           {Object.entries(OP_TYPE_DESCRIPTIONS).map(([type, desc]) => (
             <option key={type} value={type} title={desc}>{type} — {desc}</option>
           ))}
         </select>
-        <select className="input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+        <select aria-label="Status" className="input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
           <option value="">All statuses</option>
           <option value="success">{operationStatusLabel('success')}</option>
           <option value="error">{operationStatusLabel('error')}</option>
           <option value="cancelled">{operationStatusLabel('cancelled')}</option>
           <option value="in_progress">{operationStatusLabel('in_progress')}</option>
         </select>
-        <input
+        <input aria-label="Filter by operation ID"
           className="input mono"
           placeholder="Filter by Operation ID..."
           value={opIdFilter}
@@ -998,13 +996,7 @@ function OperationsTab() {
 
       <div className="card ds-card" style={{ padding: 0, overflow: 'hidden' }}>
         {operations.length === 0 ? (
-          <div className="empty-state empty-state--rich" style={{ margin: 16 }}>
-            <div className="empty-state-icon">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-            </div>
-            <div className="empty-state-title">No operations recorded</div>
-            <div className="empty-state-desc">Operations will appear here as your node processes publish, query, and other DKG requests.</div>
-          </div>
+          <EmptyState compact inline icon={<Activity size={16} />} title="No operations recorded" description="Operations will appear here as your node processes publish, query, and other DKG requests." />
         ) : (
           <div className="ds-table-scroll ds-table-pin"><table className="data-table">
             <thead>
@@ -1013,8 +1005,8 @@ function OperationsTab() {
                 <th>Type</th>
                 <th>Status</th>
                 <th>Phases</th>
-                <th>Duration</th>
-                <th>Cost (ETH)</th>
+                <th className="ds-num">Duration</th>
+                <th className="ds-num">Cost (ETH)</th>
                 <th>TX</th>
                 <th>Operation ID</th>
               </tr>
@@ -1023,15 +1015,15 @@ function OperationsTab() {
               {operations.map((op: any) => (
                 <tr
                   key={op.operation_id}
-                  onClick={() => setSelectedOp(op.operation_id)}
+                  {...pressable(() => setSelectedOp(op.operation_id))}
                   style={{ cursor: 'pointer', background: selectedOp === op.operation_id ? 'var(--tint-strong)' : undefined }}
                 >
-                  <td title={op.started_at ? new Date(op.started_at).toLocaleString() : undefined}>{formatTime(op.started_at)}</td>
+                  <td title={op.started_at ? formatDateTime(op.started_at, { seconds: true }) : undefined}>{formatTime(op.started_at)}</td>
                   <td><Badge size="sm" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} style={{ background: opTypeBg(op.operation_name), color: opTypeText(op.operation_name), boxShadow: 'none' }}>{op.operation_name}</Badge></td>
                   <td><OperationStatusBadge status={op.status} /></td>
                   <td><MiniGantt phases={op.phases} totalMs={op.duration_ms} /></td>
-                  <td>{formatDuration(op.duration_ms)}</td>
-                  <td>{op.gas_cost_eth != null ? op.gas_cost_eth.toFixed(6) : '—'}</td>
+                  <td className="ds-num">{formatDuration(op.duration_ms)}</td>
+                  <td className="ds-num">{op.gas_cost_eth != null ? op.gas_cost_eth.toFixed(6) : '—'}</td>
                   <td>
                     {op.tx_hash ? (
                       <a href={explorerUrl ? `${explorerUrl}/tx/${op.tx_hash}` : '#'} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} title={op.tx_hash} className="tx-link-icon">
@@ -1112,15 +1104,15 @@ function OperationsTab() {
       {selectedOp && (
         <>
           <div
-            onClick={() => setSelectedOp(null)}
+            onClick={drawer.onBackdropClick}
             style={{
-              position: 'fixed', inset: 0, background: 'var(--scrim)', zIndex: 900,
+              position: 'fixed', inset: 0, background: 'var(--scrim)', zIndex: 'var(--z-modal)',
               animation: 'fadeIn .15s ease-out',
             }}
           />
-          <div style={{
+          <div ref={drawer.dialogRef} role="dialog" aria-modal="true" aria-label="Operation detail" style={{
             position: 'fixed', top: 0, right: 0, bottom: 0, width: '55%', minWidth: 480, maxWidth: 800,
-            background: 'var(--bg-root)', borderLeft: '1px solid var(--border-default)', zIndex: 901,
+            background: 'var(--bg-root)', borderLeft: '1px solid var(--border-default)', zIndex: 'var(--z-modal)',
             overflowY: 'auto', padding: '20px 24px',
             boxShadow: 'var(--shadow-drawer)',
             animation: 'slideInRight .2s ease-out',
@@ -1128,7 +1120,7 @@ function OperationsTab() {
             {detail?.operation ? (
               <OperationDetail op={detail.operation} logs={detail.logs} phases={detail.phases ?? []} explorerUrl={explorerUrl} onBack={() => setSelectedOp(null)} />
             ) : (
-              <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-tertiary)' }}>Loading...</div>
+              <Loading block label="Loading operation…" />
             )}
           </div>
           <style>{`
@@ -1198,7 +1190,7 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
                   }`}
                   style={{
                     position: 'absolute', left: `${left}%`, width: `${Math.min(width, 100 - left)}%`,
-                    height: '100%', borderRadius: 'var(--radius-hair)', opacity: isInProgress ? 0.7 : 1, transition: 'width .3s ease',
+                    height: '100%', borderRadius: 'var(--radius-hair)', opacity: isInProgress ? 0.7 : 1, transition: 'width var(--motion-slow) ease',
                     background: isError ? 'repeating-linear-gradient(45deg, var(--accent-red), var(--accent-red) 3px, var(--danger-stripe) 3px, var(--danger-stripe) 6px)' : color,
                   }}
                 />
@@ -1247,14 +1239,14 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
         <button
           onClick={onBack}
           style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', padding: 4, display: 'flex' }}
-          title="Close"
+          aria-label="Close" title="Close"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
 
       {/* Header: Operation metadata as compact inline badges */}
-      <div className="card ds-card" style={{ padding: 16, marginBottom: 12 }}>
+      <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
           <span style={{ fontSize: 'var(--fs-title)', fontWeight: 700 }}>{op.operation_name}</span>
           <OperationStatusBadge status={op.status} />
@@ -1262,7 +1254,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
           <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', fontFamily: "'JetBrains Mono', monospace" }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
         </div>
         <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 'var(--fs-control)', color: 'var(--text-secondary)' }}>
-          <span><b style={{ color: 'var(--text-secondary)' }}>Started</b> {new Date(op.started_at).toLocaleString()}</span>
+          <span><b style={{ color: 'var(--text-secondary)' }}>Started</b> {formatDateTime(op.started_at, { seconds: true })}</span>
           {op.contextGraph_id && <span><b style={{ color: 'var(--text-secondary)' }}>Context graph</b> {op.contextGraph_id}</span>}
           {op.triple_count != null && <span><b style={{ color: 'var(--text-secondary)' }}>Triples</b> {op.triple_count}</span>}
           {op.peer_id && <span><b style={{ color: 'var(--text-secondary)' }}>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
@@ -1278,7 +1270,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
           )}
         </div>
         {op.error_message && (
-          <div style={{ marginTop: 8, padding: '8px 12px', background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-border)', fontSize: 'var(--fs-control)', color: 'var(--accent-red)' }}>
+          <div style={{ marginTop: 8, padding: '8px 12px', background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-border)', fontSize: 'var(--fs-control)', color: 'var(--text-danger)' }}>
             {op.error_message}
           </div>
         )}
@@ -1287,12 +1279,12 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
       {/* Phase timeline + Phase details */}
       {phases.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 12 }}>
-          <div className="card ds-card" style={{ padding: 16 }}>
+          <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
             <div className="card-title" style={{ marginBottom: 10 }}>Phase timeline</div>
             <PhaseTimeline phases={phases} op={op} />
           </div>
 
-          <div className="card ds-card" style={{ padding: 16 }}>
+          <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
             <div className="card-title" style={{ marginBottom: 10 }}>Phase details</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {phases.map((p: any, i: number) => {
@@ -1317,7 +1309,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
                     {desc && <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', fontStyle: 'italic', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desc}</span>}
                     <span
                       style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginLeft: 'auto', flexShrink: 0 }}
-                      title={p.started_at ? new Date(p.started_at).toLocaleString() : undefined}
+                      title={p.started_at ? formatDateTime(p.started_at, { seconds: true }) : undefined}
                     >
                       {p.started_at ? formatTime(p.started_at) : ''}
                     </span>
@@ -1340,13 +1332,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
           <span className="card-title" style={{ margin: 0 }}>Logs ({logs.length})</span>
         </div>
         {logs.length === 0 ? (
-          <div className="empty-state empty-state--compact">
-            <div className="empty-state-icon">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-            </div>
-            <div className="empty-state-title">No logs available</div>
-            <div className="empty-state-desc">This operation has no log entries recorded.</div>
-          </div>
+          <EmptyState compact inline icon={<FileText size={16} />} title="No logs available" description="This operation has no log entries recorded." />
         ) : (
           <LogContainer maxHeight={350}>
             {logs.map((l: any) => (
@@ -1412,11 +1398,6 @@ function LogsTab() {
     setAutoScroll(atBottom);
   }, []);
 
-  const formatSize = (bytes: number) => {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  };
 
   const highlightSearch = (line: string) => {
     if (!debouncedSearch) return line;
@@ -1436,26 +1417,26 @@ function LogsTab() {
   return (
     <div>
       <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
-        <input
+        <input aria-label="Search node log"
           className="input"
           placeholder="Search node log..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           style={{ flex: 1, minWidth: 200 }}
         />
-        <select className="input" value={showLevel} onChange={(e) => setShowLevel(e.target.value as any)}>
+        <select aria-label="Log level" className="input" value={showLevel} onChange={(e) => setShowLevel(e.target.value as any)}>
           <option value="all">All levels</option>
           <option value="warn">Warnings + Errors</option>
           <option value="error">Errors only</option>
         </select>
-        <select className="input" value={lineCount} onChange={(e) => setLineCount(Number(e.target.value))}>
+        <select aria-label="Line count" className="input" value={lineCount} onChange={(e) => setLineCount(Number(e.target.value))}>
           <option value={200}>200 lines</option>
           <option value={500}>500 lines</option>
           <option value={1000}>1,000 lines</option>
           <option value={3000}>3,000 lines</option>
           <option value={5000}>5,000 lines</option>
         </select>
-        <select className="input" value={refreshInterval} onChange={(e) => setRefreshInterval(Number(e.target.value))}>
+        <select aria-label="Refresh interval" className="input" value={refreshInterval} onChange={(e) => setRefreshInterval(Number(e.target.value))}>
           <option value={1000}>1s refresh</option>
           <option value={3000}>3s refresh</option>
           <option value={5000}>5s refresh</option>
@@ -1469,14 +1450,12 @@ function LogsTab() {
             display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 10px',
             borderRadius: 'var(--radius-control)', border: '1px solid var(--border-default)', background: 'var(--bg-surface)',
             color: 'var(--text-secondary)', fontSize: 'var(--fs-label)', fontWeight: 600, cursor: 'pointer',
-            transition: 'all .15s',
+            transition: 'all var(--motion-base)',
           }}
           onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent-green)'; e.currentTarget.style.color = 'var(--accent-green)'; }}
           onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border-default)'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
         >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-          </svg>
+          <RefreshCw size={12} />
           Refresh
         </button>
         <button
@@ -1487,7 +1466,7 @@ function LogsTab() {
             borderRadius: 'var(--radius-control)', border: `1px solid ${autoScroll ? 'var(--success-border)' : 'var(--border-default)'}`,
             background: autoScroll ? 'var(--success-bg)' : 'var(--bg-surface)',
             color: autoScroll ? 'var(--accent-green)' : 'var(--text-secondary)',
-            fontSize: 'var(--fs-label)', fontWeight: 600, cursor: 'pointer', transition: 'all .15s',
+            fontSize: 'var(--fs-label)', fontWeight: 600, cursor: 'pointer', transition: 'all var(--motion-base)',
           }}
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -1508,7 +1487,7 @@ function LogsTab() {
             {lines.length} lines{debouncedSearch ? ` matching "${debouncedSearch}"` : ''}
             {loading ? <span style={{ marginLeft: 6, color: 'var(--text-tertiary)', fontSize: 'var(--fs-micro)' }}>refreshing...</span> : ''}
           </span>
-          <span className="mono" style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>daemon.log {data?.totalSize ? `(${formatSize(data.totalSize)})` : ''}</span>
+          <span className="mono" style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>daemon.log {data?.totalSize ? `(${formatBytes(data.totalSize)})` : ''}</span>
         </div>
         <div
           ref={containerRef}
@@ -1521,23 +1500,13 @@ function LogsTab() {
             background: 'var(--log-bg)',
             fontFamily: LOG_FONT,
             fontSize: 'var(--fs-micro)',
-            lineHeight: 1.5,
+            lineHeight: 'var(--lh-body)',
           }}
         >
           {lines.length === 0 ? (
-            <div className="empty-state empty-state--compact">
-              {loading ? (
-                <div className="empty-state-desc">Loading...</div>
-              ) : (
-                <>
-                  <div className="empty-state-icon">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                  </div>
-                  <div className="empty-state-title">No log lines found</div>
-                  <div className="empty-state-desc">Try adjusting the search filters or check back later.</div>
-                </>
-              )}
-            </div>
+            loading
+              ? <Loading block label="Loading log lines…" />
+              : <EmptyState compact inline icon={<Search size={16} />} title="No log lines found" description="Try adjusting the search filters or check back later." />
           ) : (
             lines.map((line, i) => (
               <StyledDaemonLine key={i} line={line} lineNum={i + 1} highlight={debouncedSearch ? highlightSearch : undefined} />
@@ -1583,7 +1552,7 @@ function LogContainer({ children, maxHeight = 300 }: { children: React.ReactNode
   return (
     <div style={{
       maxHeight, overflowY: 'auto', background: LOG_COLORS.bg, borderRadius: 'var(--radius-control)', padding: '6px 0',
-      fontFamily: LOG_FONT, fontSize: 'var(--fs-micro)', lineHeight: 1.5,
+      fontFamily: LOG_FONT, fontSize: 'var(--fs-micro)', lineHeight: 'var(--lh-body)',
     }}>
       {children}
     </div>
@@ -1638,12 +1607,12 @@ function CopyButton({ text }: { text: string }) {
   return (
     <button
       onClick={copy}
-      title="Copy to clipboard"
+      title="Copy to clipboard" aria-label="Copy to clipboard"
       style={{
-        background: 'none', border: 'none', cursor: 'pointer', padding: '1px 3px',
+        background: 'none', border: 'none', cursor: 'pointer', padding: '1px 3px', minWidth: 24, minHeight: 24, justifyContent: 'center',
         color: copied ? 'var(--accent-green)' : 'var(--text-tertiary)', fontSize: 'var(--fs-label)',
         display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle',
-        transition: 'color .15s',
+        transition: 'color var(--motion-base)',
       }}
     >
       {copied ? (

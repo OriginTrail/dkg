@@ -22,7 +22,9 @@ vi.mock('../src/ui/stores/agents.js', () => ({
   useAgentsStore: (sel: (s: unknown) => unknown) => sel({ nodeStatus: { nodeRole: state.nodeRole } }),
 }));
 vi.mock('../src/ui/stores/tabs.js', () => ({
-  useTabsStore: (sel: (s: unknown) => unknown) => sel({ openTab: state.openTab }),
+  useTabsStore: Object.assign((sel: (s: unknown) => unknown) => sel({ openTab: state.openTab }), {
+    getState: () => ({ activeTabId: 'dashboard', openTab: (...a: unknown[]) => state.openTab(...a) }),
+  }),
 }));
 
 const { PcaDashboardRow } = await import('../src/ui/pages/conviction/PcaDashboardRow.js');

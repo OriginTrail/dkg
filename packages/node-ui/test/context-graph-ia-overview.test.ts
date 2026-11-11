@@ -3,7 +3,7 @@
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { belongsInMyProjectsSidebar, belongsInContextOracleSidebar, classifyContextOracleEntry } from '../src/ui/lib/contextGraphSidebar.js';
+import { belongsInMyProjectsSidebar, belongsInPublicSidebar, classifyPublicEntry } from '../src/ui/lib/contextGraphSidebar.js';
 
 // Codex bug L — the `'unknown'` branch of PendingJoinRequestsSection
 // now optimistically fires `listJoinRequests`. Mock the API module so
@@ -112,8 +112,8 @@ describe('Context Graph IA and Overview', () => {
         expect(container.textContent).not.toContain('Not joined');
         const cg = { id: 'public-readable', name: 'Readable graph', callerInvolved: false, ...state };
         expect(belongsInMyProjectsSidebar(cg, null)).toBe(false);
-        expect(belongsInContextOracleSidebar(cg, null)).toBe(true);
-        expect(classifyContextOracleEntry(cg)).toBe(state.subscribed || state.synced ? 'project' : 'catalogue');
+        expect(belongsInPublicSidebar(cg, null)).toBe(true);
+        expect(classifyPublicEntry(cg)).toBe(state.subscribed || state.synced ? 'project' : 'catalogue');
       }
     } finally { await act(async () => root.unmount()); }
   });

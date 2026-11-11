@@ -14,8 +14,6 @@ import { executeQuery } from '../api.js';
 import { metaGraphPrefixFilter } from '../lib/sparql.js';
 
 const AGENT_NS = 'http://dkg.io/ontology/agent/';
-const SCHEMA_NAME = 'http://schema.org/name';
-const RDFS_LABEL = 'http://www.w3.org/2000/01/rdf-schema#label';
 
 export type AgentKind = 'human' | 'ai';
 

@@ -79,7 +79,7 @@ describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
 
   describe('tab-routes is the one route registry', () => {
     it('round-trips every place and typed tab: path → tab id → the same path', () => {
-      for (const path of ['/', '/observability', '/settings', '/conviction', '/primer', '/memory-stack', '/agent-hub', '/graph/foo', '/pca/12', '/agent/cg/slug', '/open/doc:abc']) {
+      for (const path of ['/', '/observability', '/settings', '/conviction', '/primer', '/memory-stack', '/graph/foo', '/pca/12', '/agent/cg/slug', '/open/doc:abc']) {
         const tab = pathToTab(path);
         expect(tab, path).not.toBeNull();
         expect(tabIdToPath(tab!.id), path).toBe(path);

@@ -79,6 +79,7 @@ describe('PublishVmWidget — B8 confirmed discount badge (#1365 r3)', () => {
     expect(container.textContent).toContain('incurs a cost');
     await clickPublish(container); await flush();
     expect(apiMocks.publishAssertionsToVm).toHaveBeenCalledWith('cg', assertions);
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.getAttribute('data-tone')).toBe('success');
     await unmount();
   });
   it('states the whole Context Graph share scope despite a one-entity preview', async () => {
@@ -135,6 +136,7 @@ describe('PublishVmWidget — B8 confirmed discount badge (#1365 r3)', () => {
     const res = container.querySelector('[data-testid="layer-action-error"]');
     expect(res?.textContent).toContain('VM publish tx reverted');
     expect(res?.textContent).not.toContain('an assertion');
+    expect(res?.getAttribute('data-tone')).toBe('danger');
     await unmount();
   });
 });
@@ -154,6 +156,7 @@ describe('PublishVmWidget — publish outcome unknown', () => {
     expect(container.querySelector('[data-testid="layer-action-error"]')).toBeNull();
     expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent)
       .toContain('1 knowledge asset: publish outcome unknown');
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.getAttribute('data-tone')).toBe('warning');
     await unmount();
   });
 
@@ -170,6 +173,7 @@ describe('PublishVmWidget — publish outcome unknown', () => {
     const text = container.querySelector('[data-testid="layer-action-result"]')?.textContent;
     expect(text).toContain('Published 1 knowledge asset to Verifiable Memory');
     expect(text).toContain('publish outcome unknown');
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.getAttribute('data-tone')).toBe('warning');
     await unmount();
   });
 
@@ -189,6 +193,45 @@ describe('PublishVmWidget — publish outcome unknown', () => {
     const text = container.querySelector('[data-testid="layer-action-error"]')?.textContent;
     expect(text).toContain('b: VM publish tx reverted');
     expect(text).toContain('publish outcome unknown');
+    expect(container.querySelector('[data-testid="layer-action-error"]')?.getAttribute('data-tone')).toBe('danger');
+    await unmount();
+  });
+});
+
+describe('PublishVmWidget — completion follows the execution path', () => {
+  const run = async (onComplete: () => void) => {
+    const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg', onComplete }));
+    await clickPublish(container); await flush();
+    const btn = container.querySelector('[data-testid="widget-publish-vm-btn"]') as HTMLButtonElement;
+    return { container, unmount, btn };
+  };
+
+  it('completes a resolved publish that carries a warning', async () => {
+    apiMocks.publishAssertionsToVm.mockResolvedValue({ published: 1, total: 2, partial: 1, partialError: 'x', failures: [] });
+    const onComplete = vi.fn();
+    const { container, unmount, btn } = await run(onComplete);
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.getAttribute('data-tone')).toBe('warning');
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(btn.disabled).toBe(false);
+    await unmount();
+  });
+
+  it('completes a resolved no-op', async () => {
+    apiMocks.listAssertions.mockResolvedValue([]);
+    apiMocks.publishAssertionsToVm.mockResolvedValue({ published: 0, total: 0, partial: 0, failures: [] });
+    const onComplete = vi.fn();
+    const { unmount } = await run(onComplete);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    await unmount();
+  });
+
+  it('does not complete a rejected publish, and leaves the button usable', async () => {
+    apiMocks.publishAssertionsToVm.mockRejectedValue(new Error('VM publish tx reverted'));
+    const onComplete = vi.fn();
+    const { container, unmount, btn } = await run(onComplete);
+    expect(container.querySelector('[data-testid="layer-action-error"]')).toBeTruthy();
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(btn.disabled).toBe(false);
     await unmount();
   });
 });
@@ -461,6 +504,47 @@ describe('LayerWidgetStrip — action-result survives the widget unmount (OVzK3)
     for (let i = 0; i < 40 && !container.querySelector('[data-testid="layer-action-result"]'); i++) await flush();
     expect(container.querySelector('[data-testid="widget-publish-vm-btn"]')).toBeNull();
     expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Published 2 knowledge assets to Verifiable Memory');
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.getAttribute('data-tone')).toBe('success');
+    await unmount();
+  });
+
+  it('marks a partial publish as a warning, and keeps the warning after the widget unmounts', async () => {
+    apiMocks.listAssertions.mockResolvedValue([{ name: 'a', graphUri: 'g' }, { name: 'b', graphUri: 'g2' }]);
+    apiMocks.publishAssertionsToVm.mockResolvedValue({ published: 1, total: 2, partial: 1, partialError: 'registry write pending', failures: [] });
+    const { container, unmount } = await render(React.createElement(StripHarness, { layer: 'swm' }));
+    await clickBtn(container, 'widget-publish-vm-btn');
+    for (let i = 0; i < 40 && !container.querySelector('[data-testid="layer-action-result"]'); i++) await flush();
+    expect(container.querySelector('[data-testid="widget-publish-vm-btn"]')).toBeNull();
+    const result = container.querySelector('[data-testid="layer-action-result"]');
+    expect(result?.textContent).toContain('binding incomplete — registry write pending');
+    expect(result?.getAttribute('data-tone')).toBe('warning');
+    await unmount();
+  });
+
+  it('keeps an all-unknown batch a warning after the widget unmounts', async () => {
+    apiMocks.publishAssertionsToVm.mockResolvedValue({
+      published: 0, total: 1, partial: 0, failures: [],
+      outcomeUnknown: [{ name: 'a', error: 'Publishing "a" got no response within 5 minutes.' }], sample: null,
+    });
+    const { container, unmount } = await render(React.createElement(StripHarness, { layer: 'swm' }));
+    await clickBtn(container, 'widget-publish-vm-btn');
+    for (let i = 0; i < 40 && !container.querySelector('[data-testid="layer-action-result"]'); i++) await flush();
+    expect(container.querySelector('[data-testid="widget-publish-vm-btn"]')).toBeNull();
+    expect(container.querySelector('[data-testid="layer-action-error"]')).toBeNull();
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.getAttribute('data-tone')).toBe('warning');
+    await unmount();
+  });
+
+  it('keeps a failure as danger in the strip, and leaves the widget in place', async () => {
+    apiMocks.publishAssertionsToVm.mockRejectedValue(new Error('VM publish tx reverted'));
+    const { container, unmount } = await render(React.createElement(StripHarness, { layer: 'swm' }));
+    await clickBtn(container, 'widget-publish-vm-btn');
+    for (let i = 0; i < 40 && !container.querySelector('[data-testid="layer-action-error"]'); i++) await flush();
+    // A failure doesn't complete, so the layer keeps its widget and the strip shows one line.
+    expect(container.querySelector('[data-testid="widget-publish-vm-btn"]')).toBeTruthy();
+    const errors = container.querySelectorAll('[data-testid="layer-action-error"]');
+    expect(errors.length).toBeGreaterThan(0);
+    for (const e of errors) expect(e.getAttribute('data-tone')).toBe('danger');
     await unmount();
   });
 });

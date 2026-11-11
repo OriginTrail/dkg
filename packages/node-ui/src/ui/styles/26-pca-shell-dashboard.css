@@ -5,7 +5,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 12px;
+  margin-top: var(--space-12);
   padding-top: 10px;
   border-top: 1px solid var(--border-subtle);
   flex-wrap: wrap;
@@ -16,5 +16,5 @@
 .v10-ws-pca-cta { margin-left: auto; }
 
 /* ----- Settings card line (B3) ----- */
-.v10-pca-settings-line { font-size: var(--fs-control); color: var(--text-secondary); line-height: 1.5; margin: 0 0 12px; }
+.v10-pca-settings-line { font-size: var(--fs-control); color: var(--text-secondary); line-height: var(--lh-body); margin: 0 0 var(--space-12); }
 

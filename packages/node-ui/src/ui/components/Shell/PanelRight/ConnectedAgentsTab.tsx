@@ -282,7 +282,7 @@ export function ConnectedAgentsTab(props: {
 
   return (
     <div className="v10-agents-tab">
-      <div className="v10-agent-subtabs" role="tablist" aria-label="Integrated agents">
+      <div className="v10-agent-subtabs" role="group" aria-label="Integrated agents">
         {visibleAgentTabs.map((integration) => {
           const isActive = selected?.id === integration.id && !showAddFlow;
           return (
@@ -300,8 +300,7 @@ export function ConnectedAgentsTab(props: {
                   }),
                   sessionId: integration.defaultSessionId,
                 })}
-                role="tab"
-                aria-selected={isActive}
+                aria-pressed={isActive}
               >
                 <span className={`v10-agents-stat-dot ${bridgeStatusDotClass(integration)}`} />
                 <AgentLogo integrationId={integration.id} />
@@ -327,8 +326,7 @@ export function ConnectedAgentsTab(props: {
         <button
           className={`v10-agent-subtab add ${showAddFlow ? 'active' : ''}`}
           onClick={() => onSelectIntegration(ADD_AGENT_TAB_ID)}
-          role="tab"
-          aria-selected={showAddFlow}
+          aria-pressed={showAddFlow}
           aria-label="Add another integrated agent"
           title="Add another integrated agent"
         >
@@ -451,7 +449,7 @@ export function ConnectedAgentsTab(props: {
       ) : (
         selected && (
           <div {...dropzone.getRootProps({ className: 'v10-local-agent-chat-shell' })}>
-            <input {...dropzone.getInputProps()} />
+            <input aria-label="Attach files" {...dropzone.getInputProps()} />
             {connectNotice && <div className="v10-local-agent-notice ds-card-nested">{connectNotice}</div>}
             {connectError && <div className="v10-local-agent-error ds-card-nested">{connectError}</div>}
 
@@ -537,7 +535,7 @@ export function ConnectedAgentsTab(props: {
             >
               {shouldShowConversationLoader && (
                 <div className="v10-agent-empty-state">
-                  Loading the latest conversation from DKG memory...
+                  Loading the latest conversation from DKG memory…
                 </div>
               )}
               {(!shouldShowConversationLoader && localMessages.length === 0) && (() => {
@@ -726,7 +724,7 @@ export function ConnectedAgentsTab(props: {
                             ? `${selected.name} is still connecting...`
                             : `${selected.name} bridge offline...`
                       }
-                      className="v10-agent-input"
+                      aria-label={`Message ${selected.name}`} className="v10-agent-input"
                       value={localInput}
                       onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => onLocalInputChange(e.target.value)}
                       onKeyDown={(e: React.KeyboardEvent<HTMLTextAreaElement>) => {

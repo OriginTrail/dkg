@@ -17,7 +17,7 @@ test.describe('Context Graph visibility', () => {
 
   test('dashboard My Context Graphs stat reflects the seeded count', async ({ page }) => {
     const card = page
-      .locator('.v10-stat-tight')
+      .locator('.stat-card')
       .filter({ has: page.locator('.stat-label', { hasText: 'My context graphs' }) });
     await expect(card).toBeVisible();
     // The value slot shows a "loading…" placeholder until the CG set resolves
@@ -115,7 +115,7 @@ test.describe('Context Graph hide / restore (sidebar visibility toggle)', () => 
     // and the dashboard stat MUST move together — this is the invariant the hook
     // was extracted to guarantee. A regression to three private copies fails here.
     const statValue = page
-      .locator('.v10-stat-tight')
+      .locator('.stat-card')
       .filter({ has: page.locator('.stat-label', { hasText: 'My context graphs' }) })
       .locator('.stat-value');
 

@@ -8,7 +8,7 @@
   flex-shrink: 0;
   /* Height is driven by inline style (store-persisted) when expanded.
      Transition only applies when collapsing/expanding, not during drag. */
-  transition: height 0.15s ease;
+  transition: height var(--motion-base) ease;
 }
 .v10-panel-bottom.collapsed { height: var(--tab-h); }
 .v10-panel-bottom.maximised { height: 80vh !important; }
@@ -19,16 +19,16 @@
   flex-shrink: 0;
   cursor: row-resize;
   background: transparent;
-  transition: background 0.15s;
+  transition: background var(--motion-base);
 }
 .v10-resize-handle-v:hover,
-.v10-resize-handle-v.active { background: var(--accent-blue); }
+.v10-resize-handle-v.active { background: var(--border-prominent); }
 .v10-bottom-tabs {
   height: var(--tab-h);
   min-height: var(--tab-h);
   display: flex;
   align-items: center;
-  padding: 0 8px;
+  padding: 0 var(--space-8);
   gap: 0;
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -40,47 +40,43 @@
 .v10-log-toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 10px;
+  gap: var(--space-6);
+  padding: var(--space-4) 10px;
   border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
 .v10-log-filter {
   flex: 1;
   min-width: 0;
-  padding: 3px 8px;
+  padding: var(--space-4) var(--space-8);
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   color: var(--text-primary);
   font-family: var(--font-mono);
-  outline: none;
 }
-.v10-log-filter:focus { border-color: var(--focus-ring); }
 .v10-log-level-select {
   appearance: none;
   -webkit-appearance: none;
-  padding: 3px 22px 3px 8px;
+  padding: 0 var(--space-24) 0 var(--space-12);
   background: var(--bg-surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236b7280'/%3E%3C/svg%3E") no-repeat right 6px center;
   border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
   font-family: var(--font-sans);
-  outline: none;
   flex-shrink: 0;
   cursor: pointer;
-  transition: border-color 0.15s;
+  transition: border-color var(--motion-base);
 }
 .v10-log-level-select:hover { border-color: var(--border-default); color: var(--text-primary); }
-.v10-log-level-select:focus { outline: none; border-color: var(--focus-ring); }
 .v10-log-output {
   flex: 1;
   overflow: auto;
-  padding: 4px 0;
+  padding: var(--space-4) 0;
   font-family: var(--font-mono);
   font-size: var(--fs-label);
-  line-height: 1.65;
+  line-height: var(--lh-loose);
 }
 .v10-log-line {
-  padding: 1px 12px;
+  padding: 1px var(--space-12);
   color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-all;
@@ -90,7 +86,7 @@
 /* ══════════════════════════════════════════
    AGENT CHAT (V10)
    ══════════════════════════════════════════ */
-.v10-chat-messages { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.v10-chat-messages { padding: var(--space-12) 14px; display: flex; flex-direction: column; gap: 10px; }
 .v10-chat-msg { display: flex; flex-direction: column; }
 .v10-chat-msg.user { align-items: flex-end; }
 .v10-chat-msg.assistant {
@@ -104,7 +100,7 @@
   /* Chat copy is dense; +1 not +2 — keeps the bubble height-economical
      while tracking the body base bump (PR8). */
   font-size: var(--fs-body);
-  line-height: 1.55;
+  line-height: var(--lh-body);
   word-break: break-word;
   overflow-wrap: anywhere;
   color: var(--text-primary);
@@ -119,7 +115,7 @@
 }
 .v10-chat-failure-notice {
   display: block;
-  margin-top: 8px;
+  margin-top: var(--space-8);
 }
 .v10-chat-bubble.user {
   /* User pill — right-aligned, capped width, distinct surface. */
@@ -137,5 +133,5 @@
      tables that live inside `.v10-md`. No background, no border, no
      `max-width` — those previously created the "two cramped chat boxes"
      look. */
-  padding: 4px 0;
+  padding: var(--space-4) 0;
 }

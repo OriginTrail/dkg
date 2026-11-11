@@ -10,7 +10,7 @@ import { copy } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi } from '../api/client.js';
 import type { CatalogAnswer, Plan, Subscription } from '../api/types.js';
 import { fmtMicro, fmtTrac, microOfWei, modelName, sumWei } from '../amounts.js';
-import { ErrorCard, OffCard, refusalKey, relAt, sellerName, useLoad } from '../shared.js';
+import { ErrorCard, MarketplacePage, OffCard, refusalKey, relAt, sellerName, useLoad } from '../shared.js';
 import { useMarketplaceDraftStore } from '../draftStore.js';
 import { FundFlow, WaitingConfirmation } from '../purchase/FundFlow.js';
 import { fundings } from '../purchase/fundings.js';
@@ -196,17 +196,17 @@ export function PlansView(): React.ReactElement {
   }, [ask, catalog, subs.data, current, takeAsk, mayEditPlan, planned.loading]);
 
   const loadErr = cat.err ?? subs.err ?? planned.err;
-  if ([cat.err, subs.err, planned.err, funding.err].some(isMarketplaceOff)) return <div className="mkt-frame" data-testid="mkt-plans" data-state="off"><OffCard /></div>;
-  if ([cat.err, subs.err, planned.err, funding.err].some(isMarketplaceAbsent)) return <div className="mkt-frame" data-testid="mkt-plans" data-state="absent"><OffCard absent /></div>;
+  if ([cat.err, subs.err, planned.err, funding.err].some(isMarketplaceOff)) return <MarketplacePage page="plans" state="off"><OffCard /></MarketplacePage>;
+  if ([cat.err, subs.err, planned.err, funding.err].some(isMarketplaceAbsent)) return <MarketplacePage page="plans" state="absent"><OffCard absent /></MarketplacePage>;
   if (loadErr && !(catalog && subs.data)) {
     return (
-      <div className="mkt-frame" data-testid="mkt-plans" data-state="error">
+      <MarketplacePage page="plans" state="error">
         <div className="ds-card mkt-card"><div data-copy="empty.error">{copy('empty.error')}</div><ErrorCard err={loadErr} onRetry={reloadAll} /></div>
-      </div>
+      </MarketplacePage>
     );
   }
   if (!catalog || !subs.data || planPending) {
-    return <div className="mkt-frame" data-testid="mkt-plans" data-state="loading"><div className="ds-card mkt-card mkt-muted" data-copy="plans.loading">{copy('plans.loading')}</div></div>;
+    return <MarketplacePage page="plans" state="loading"><div className="ds-card mkt-card mkt-muted" data-copy="plans.loading">{copy('plans.loading')}</div></MarketplacePage>;
   }
 
   const endsAt = funding.data?.epochEndsAt ?? current?.endsAt ?? null;
@@ -223,9 +223,9 @@ export function PlansView(): React.ReactElement {
     // Whether to onboard or to fund the plan's next epoch turns on the plan: unknown, neither is offered.
     if (!mayEditPlan) {
       return (
-        <div className="mkt-frame" data-testid="mkt-plans" data-state="plan-unread">
+        <MarketplacePage page="plans" state="plan-unread">
           <div className="ds-card mkt-card"><div data-copy="empty.error">{copy('empty.error')}</div>{planErr}</div>
-        </div>
+        </MarketplacePage>
       );
     }
     if (!plan) {
@@ -233,17 +233,17 @@ export function PlansView(): React.ReactElement {
       const funded = !!w && BigInt(w.trac) > 0n || (funding.data?.accounts ?? []).some((a) => a.serviceCapable && a.grant?.live);
       const f = shown?.kind === 'fund' ? shown : { kind: 'fund' as const, epoch: 'current' as const };
       return (
-        <div className="mkt-frame" data-testid="mkt-plans" data-state="never-subscribed">
+        <MarketplacePage page="plans" state="never-subscribed">
           {notices}
-          <h1 className="mkt-h1" data-copy="onboard.p5.title">{copy('onboard.p5.title')}</h1>
+          <h2 data-copy="onboard.p5.title">{copy('onboard.p5.title')}</h2>
           {!funded && <ProgressSteps step={1} />}
           {treasury}
           {funded && fundFlow(f, true)}
-        </div>
+        </MarketplacePage>
       );
     }
     return (
-      <div className="mkt-frame" data-testid="mkt-plans" data-state="period-ended">
+      <MarketplacePage page="plans" state="period-ended">
         {notices}
         {shown?.kind === 'fund' ? fundFlow(shown, false) : (
           <div className="ds-card mkt-card">
@@ -259,7 +259,7 @@ export function PlansView(): React.ReactElement {
         )}
         <Reconciliation catalog={catalog} epoch={catalog.epoch - 1} />
         {treasury}
-      </div>
+      </MarketplacePage>
     );
   }
 
@@ -278,7 +278,7 @@ export function PlansView(): React.ReactElement {
     .filter((id) => !(shown?.kind === 'top-up' && shown.serviceId === id))
     .map((id) => <WaitingTopUp key={id} catalog={catalog} subscription={current} serviceId={id} onOpen={() => setFlow({ kind: 'top-up', serviceId: id })} />);
   return (
-    <div className="mkt-frame" data-testid="mkt-plans" data-state="active">
+    <MarketplacePage page="plans" state="active">
       {notices}
       {waitingTopUps}
       {flowNode}
@@ -291,6 +291,6 @@ export function PlansView(): React.ReactElement {
       <Reconciliation catalog={catalog} epoch={catalog.epoch} />
       <Activity catalog={catalog} calls={activity.data?.calls ?? null} err={activity.err} />
       {treasury}
-    </div>
+    </MarketplacePage>
   );
 }

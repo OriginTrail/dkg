@@ -1,7 +1,6 @@
 import React, { useMemo, useState, Suspense } from 'react';
-import { api } from '../../../api-wrapper.js';
 import { promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublish, partialPublishWarning, PARTIAL_PUBLISH_STATUS_SUFFIX, type PromoteOutcome, type PublishResult } from '../../../api.js';
-import { useMemoryEntities, canonicalEntityUri, isFirstClassEntity, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
+import { canonicalEntityUri, isFirstClassEntity, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext, type AgentSummary } from '../../../hooks/useAgents.js';
@@ -12,7 +11,10 @@ import { memoryGraphLabels } from '../../../lib/memoryLabels.js';
 import { trustColors, entityAuthorUri, transitionAgentUri, transitionAtISO, shortPred, entityMeta, getDescription, neighborhoodTriples, neutraliseBuiltinNamespaces, layerNoun, filterTriplesToEntities, formatTrailTimestamp, type KAPane } from '../helpers.js';
 import { GraphSurface, RdfGraph } from './graph.js';
 import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
-import { LayerBadge } from '../../../components/ds/Badge.js';
+import { LayerBadge, LayerGlyph, StatusGlyph } from '../../../components/ds/Badge.js';
+import { Loading } from '../../../components/ds/Loading.js';
+import { Breadcrumbs } from '../../../components/ds/Breadcrumbs.js';
+import { useContextGraphCrumb } from '../../../hooks/useContextGraphCrumb.js';
 
 // ─── KA Detail View (split-pane: content+triples+graph | provenance) ─────
 
@@ -205,7 +207,7 @@ export function VerifyOnDkgButton({
     <div className={`v10-ka-verify v10-ka-verify-${action.kind}`}>
       <div className="v10-ka-verify-head">
         <span className="v10-ka-verify-arrow">
-          {action.kind === 'promote' ? '◈' : '◉'}
+          <LayerGlyph layer={action.kind === 'promote' ? 'swm' : 'vm'} />
         </span>
         <span className="v10-ka-verify-title">{action.label}</span>
       </div>
@@ -222,13 +224,13 @@ export function VerifyOnDkgButton({
           {busy ? action.busyCopy : action.label}
         </button>
       )}
-      {error && <div className="v10-ka-verify-err">✕ {error}</div>}
+      {error && <div className="v10-ka-verify-err"><StatusGlyph tone="danger" /> {error}</div>}
       {result && resultKind === 'promote' && isPromoteOutcome(result) && result.kind === 'success' && (
         <div className="v10-ka-verify-ok">
           <div className="v10-ka-verify-ok-row">
             <span className="v10-ka-verify-ok-lbl">Promoted</span>
             <span className="v10-ka-verify-ok-val">
-              ✓ {result.promotedCount} triple{result.promotedCount === 1 ? '' : 's'} now in Shared Memory
+              <StatusGlyph tone="success" /> {result.promotedCount} triple{result.promotedCount === 1 ? '' : 's'} now in Shared Memory
             </span>
           </div>
           <div className="v10-ka-verify-hint" style={{ marginTop: 6 }}>
@@ -258,7 +260,7 @@ export function VerifyOnDkgButton({
             <div className="v10-ka-verify-ok-row">
               <span className="v10-ka-verify-ok-lbl">Status</span>
               <span className="v10-ka-verify-ok-val">
-                {!confirmed ? '✕' : partial ? '⚠' : '✓'} {result.status}{!confirmed ? ' (NOT on-chain)' : partial ? ` (${PARTIAL_PUBLISH_STATUS_SUFFIX})` : ''}
+                <StatusGlyph tone={!confirmed ? 'danger' : partial ? 'warning' : 'success'} /> {result.status}{!confirmed ? ' (NOT on-chain)' : partial ? ` (${PARTIAL_PUBLISH_STATUS_SUFFIX})` : ''}
               </span>
             </div>
             {partial && (
@@ -424,11 +426,12 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   // disagree with the tab on overview-scoped opens. `entityTriples`
   // is already the filtered set the Triples tab counts rows from.
   const tripleCount = entityTriples.length;
+  const graphName = useContextGraphCrumb(contextGraphId).label;
 
   return (
     <div className="v10-ka-detail">
       <div className="v10-ka-header">
-        <button className="v10-ka-back" onClick={onClose}>← Back to context graph</button>
+        <Breadcrumbs items={[{ label: graphName, onClick: onClose }, { label: 'Knowledge Asset' }]} />
         <div className="v10-ka-header-left">
           <div className="v10-ka-label">{detailNoun}</div>
           <div className="v10-ka-name">
@@ -539,7 +542,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
             <div style={{ marginTop: 8, overflowX: 'auto', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-control)' }}>
               <div className="ds-table-scroll"><table className="v10-ka-triples-table">
                 <thead>
-                  <tr><th>Subject</th><th>Predicate</th><th>Object</th></tr>
+                  <tr><th className="ds-table-head">Subject</th><th className="ds-table-head">Predicate</th><th className="ds-table-head">Object</th></tr>
                 </thead>
                 <tbody>
                   {entityTriples.slice(0, 50).map((t, i) => (
@@ -565,7 +568,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
               className="v10-ka-graph-shell"
               renderGraph={(expanded) => (
                 renderHoodTriples.length > 0 ? (
-                  <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
+                  <Suspense fallback={<Loading label="Loading graph…" block className="v10-graph-placeholder" />}>
                     <RdfGraph
                       key={`${entity.uri}:${expanded ? 'expanded' : 'inline'}`}
                       data={renderHoodTriples}

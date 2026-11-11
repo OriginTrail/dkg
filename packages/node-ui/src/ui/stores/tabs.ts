@@ -41,6 +41,9 @@ const RECENT_LIMIT = 10;
 
 interface Persisted { tabs: CenterTab[]; activeTabId: string; recentlyClosed: CenterTab[] }
 
+/** Saved tabs for places that no longer exist. */
+const RETIRED_TAB_IDS = new Set(['agent-hub']);
+
 /**
  * The one decoder for a saved tab record (open and recently closed alike).
  * Builds a complete `CenterTab` from what was stored: a non-empty string id
@@ -51,7 +54,7 @@ interface Persisted { tabs: CenterTab[]; activeTabId: string; recentlyClosed: Ce
 export function decodePersistedTab(value: unknown): CenterTab | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const { id, label, icon } = value as Record<string, unknown>;
-  if (typeof id !== 'string' || id === '' || id === DASHBOARD_TAB.id || typeof label !== 'string') return null;
+  if (typeof id !== 'string' || id === '' || id === DASHBOARD_TAB.id || RETIRED_TAB_IDS.has(id) || typeof label !== 'string') return null;
   return { id, label, closable: true, ...(typeof icon === 'string' && icon !== '' ? { icon } : {}) };
 }
 

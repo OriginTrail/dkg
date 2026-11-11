@@ -11,7 +11,8 @@ import React from 'react';
 import { Renderer } from '@openuidev/react-lang';
 import { genuiLibrary, getGenuiLibraryPrompt } from './registry.js';
 import { streamGenUI } from './streamGenUI.js';
-import { useTabsStore } from '../stores/tabs.js';
+import { chooseTab as openTab } from '../lib/shellNavigation.js';
+import { Settings, ArrowRight } from 'lucide-react';
 
 export interface GenUIEntityPanelProps {
   contextGraphId: string;
@@ -102,7 +103,6 @@ export const GenUIEntityPanel: React.FC<GenUIEntityPanelProps> = ({
 const LLM_NOT_CONFIGURED_HINT = 'LLM not configured';
 
 const GenUIErrorBlock: React.FC<{ error: string }> = ({ error }) => {
-  const openTab = useTabsStore((s) => s.openTab);
   const isLlmMissing = error.includes(LLM_NOT_CONFIGURED_HINT);
 
   if (!isLlmMissing) {
@@ -112,7 +112,7 @@ const GenUIErrorBlock: React.FC<{ error: string }> = ({ error }) => {
   return (
     <div className="v10-genui-error ds-card-nested v10-genui-error-cta">
       <div className="v10-genui-error-head">
-        <span className="v10-genui-error-icon">⚙</span>
+        <span className="v10-genui-error-icon"><Settings size={16} /></span>
         <div>
           <div className="v10-genui-error-title">Set up your LLM to enable GenUI</div>
           <div className="v10-genui-error-desc">
@@ -125,7 +125,7 @@ const GenUIErrorBlock: React.FC<{ error: string }> = ({ error }) => {
         className="v10-genui-error-cta-btn ds-btn ds-sm"
         onClick={() => openTab({ id: 'settings', label: 'Settings', closable: true })}
       >
-        Open Settings →
+        Open Settings<ArrowRight size={14} aria-hidden="true" />
       </button>
     </div>
   );

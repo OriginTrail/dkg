@@ -25,7 +25,7 @@ test.describe('Project View (rc.12)', () => {
   });
 
   test('overview shows project overview card', async ({ page }) => {
-    await expect(page.locator('.v10-project-overview, .v10-po-card, .v10-memory-explorer-page[data-view="overview"]').first()).toBeVisible();
+    await expect(page.locator('.v10-memory-explorer-page[data-view="overview"]').first()).toBeVisible();
   });
 
   test('layer switcher includes Working Memory', async ({ page }) => {

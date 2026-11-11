@@ -5,6 +5,7 @@ import { useNodeState } from '../../hooks/useNodeState.js';
 import { NotificationsBell } from './NotificationsBell.js';
 import { Badge } from '../ds/Badge.js';
 import { formatPeerStatusTooltip } from '../../lib/formatPeerStatus.js';
+import { truncateAddress } from '../../lib/format.js';
 
 const ORIGINTRAIL_SYMBOL = (
   <path fillRule="evenodd" clipRule="evenodd" d="M19.781 9.94781C14.2903 9.94781 9.8385 14.4484 9.8385 20.0008C9.8385 25.5525 14.2903 30.0531 19.781 30.0531C22.833 30.0531 25.5632 28.6622 27.3869 26.4736L34.9141 32.8796C31.2855 37.2341 25.8532 40.0016 19.781 40.0016C8.85592 40.0016 0 31.0467 0 20.0008C0 8.95432 8.85592 0 19.781 0V9.94781ZM36.8737 30.0724L28.3719 25.0628C28.662 24.5606 28.9105 24.0308 29.112 23.4781L38.3464 26.9194C37.9453 28.0192 37.4508 29.0732 36.8737 30.0724ZM29.7216 20.0007H39.5609C39.5609 18.8159 39.4583 17.6554 39.2628 16.5272L29.5719 18.2549C29.6701 18.822 29.7216 19.4053 29.7216 20.0007ZM34.988 7.20831L27.425 13.5712C27.0546 13.1215 26.646 12.7054 26.2045 12.3272L32.5596 4.73338C33.4381 5.4858 34.251 6.31374 34.988 7.20831Z" fill="currentColor" />
@@ -110,7 +111,7 @@ export function Header() {
         </span>
         {currentAgent?.agentAddress && (
           <span className="v10-header-agent-addr">
-            {currentAgent.agentAddress.slice(0, 6)}…{currentAgent.agentAddress.slice(-4)}
+            {truncateAddress(currentAgent.agentAddress)}
           </span>
         )}
       </div>

@@ -105,7 +105,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
     expect(container.textContent).toContain('Showing all 3,004 loaded nodes');
   });
 
-  it('waits for SWM attribution colors before first graph paint', async () => {
+  it('waits for Shared Working Memory attribution colors before first graph paint', async () => {
     let resolveFetch!: (response: any) => void;
     vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => {
       resolveFetch = resolve;
@@ -121,7 +121,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
       }));
     });
 
-    expect(container.textContent).toContain('Loading Shared Working Memory attribution...');
+    expect(container.textContent).toContain('Loading Shared Working Memory attribution…');
     expect(container.querySelector('[data-testid="rdf-graph"]')).toBeNull();
     expect(fetch).toHaveBeenCalledTimes(1);
 
@@ -149,7 +149,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
     const graph = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement;
     const nodeColors = JSON.parse(graph.getAttribute('data-node-colors') ?? '{}');
     expect(nodeColors['urn:test:root']).toBeTruthy();
-    expect(container.textContent).not.toContain('Loading Shared Working Memory attribution...');
+    expect(container.textContent).not.toContain('Loading Shared Working Memory attribution…');
   });
 
   it('releases the SWM graph after attribution lookup fails', async () => {
@@ -202,7 +202,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
       }));
     });
 
-    expect(container.textContent).toContain('Loading Shared Working Memory attribution...');
+    expect(container.textContent).toContain('Loading Shared Working Memory attribution…');
     expect(container.querySelector('[data-testid="rdf-graph"]')).toBeNull();
     expect(requestSignal?.aborted).toBe(false);
 
@@ -281,7 +281,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
     });
 
     expect(fetch).toHaveBeenCalledTimes(2);
-    expect(container.textContent).toContain('Loading Shared Working Memory attribution...');
+    expect(container.textContent).toContain('Loading Shared Working Memory attribution…');
     expect(container.querySelector('[data-testid="rdf-graph"]')).toBeNull();
     expect(graphState.mounts).toEqual([]);
 

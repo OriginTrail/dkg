@@ -1,6 +1,8 @@
 import React from 'react';
 import type { ReactNode } from 'react';
-import { Badge } from '../ds/Badge.js';
+import { Badge, StatusGlyph } from '../ds/Badge.js';
+import { CircleHelp } from 'lucide-react';
+import { formatBps } from '../../lib/format.js';
 
 /**
  * The publish-eligibility verdict (UX §5.5, expanded by invariant #6). FOUR
@@ -25,8 +27,7 @@ export type PcaVerdict = 'eligible' | 'fallthrough' | 'fallthrough-no-funds' | '
 
 function pctLabel(bps?: number): string | null {
   if (typeof bps !== 'number' || !Number.isFinite(bps) || bps <= 0) return null;
-  const p = bps / 100;
-  return `${p.toFixed(p % 1 === 0 ? 0 : 1)}%`;
+  return formatBps(bps);
 }
 
 /** Compact chip is a Badge; its label carries any glyph, so the badge adds none. */
@@ -37,11 +38,11 @@ const CHIP_TONE: Record<PcaVerdict, 'success' | 'warning' | 'danger' | 'neutral'
   unknown: 'neutral',
 };
 
-const VERDICT_META: Record<PcaVerdict, { glyph: string; toneClass: string }> = {
-  eligible: { glyph: '◉', toneClass: 'v10-pca-verdict-green' },
-  fallthrough: { glyph: '⚠', toneClass: 'v10-pca-verdict-amber' },
-  'fallthrough-no-funds': { glyph: '⚠', toneClass: 'v10-pca-verdict-danger' },
-  unknown: { glyph: '◌', toneClass: 'v10-pca-verdict-neutral' },
+const VERDICT_META: Record<PcaVerdict, { glyph: ReactNode; toneClass: string }> = {
+  eligible: { glyph: <StatusGlyph tone="success" />, toneClass: 'v10-pca-verdict-green' },
+  fallthrough: { glyph: <StatusGlyph tone="warning" />, toneClass: 'v10-pca-verdict-amber' },
+  'fallthrough-no-funds': { glyph: <StatusGlyph tone="danger" />, toneClass: 'v10-pca-verdict-danger' },
+  unknown: { glyph: <CircleHelp size={14} />, toneClass: 'v10-pca-verdict-neutral' },
 };
 
 /**
@@ -106,14 +107,14 @@ export function EligibilityVerdictBanner({
       verdict === 'eligible'
         ? `Funded by ${pcaLabel}${trackedNote}${disc ? ` (${disc} discount)` : ''}`
         : verdict === 'fallthrough'
-          ? '⚠ No PCA discount'
+          ? 'No PCA discount'
           : verdict === 'fallthrough-no-funds'
-            ? '⚠ Publish will fail'
+            ? 'Publish will fail'
             : 'PCA status unknown';
     return (
       <Badge
         tone={CHIP_TONE[verdict]}
-        icon={null}
+        icon={verdict === 'fallthrough' || verdict === 'fallthrough-no-funds' ? undefined : null}
         className={['v10-pca-verdict-chip', meta.toneClass, className].filter(Boolean).join(' ')}
         data-testid="pca-eligibility-chip"
         data-verdict={verdict}

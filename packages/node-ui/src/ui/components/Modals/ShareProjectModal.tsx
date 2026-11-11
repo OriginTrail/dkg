@@ -5,6 +5,9 @@ import {
   type PendingJoinRequest,
 } from '../../api.js';
 import { useModalDismiss } from './useModalDismiss.js';
+import { Count } from '../ds/Badge.js';
+import { X } from 'lucide-react';
+import { formatDateTime, truncateAddress } from '../../lib/format.js';
 
 interface NetworkAgent {
   agentUri: string;
@@ -19,11 +22,6 @@ interface ShareProjectModalProps {
   onClose: () => void;
   contextGraphId: string;
   contextGraphName: string;
-}
-
-function truncAddr(addr: string): string {
-  if (addr.length <= 12) return addr;
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
 /**
@@ -252,45 +250,33 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
             title="Close (Esc)"
             style={{ flexShrink: 0, cursor: 'pointer' }}
           >
-            ×
+            <X size={14} />
           </button>
         </div>
 
         <div className="v10-modal-body">
           {/* Tabs */}
-          <div style={{ display: 'flex', gap: 0, marginBottom: 16, borderBottom: '1px solid var(--border-default)' }}>
+          <div role="tablist" aria-label="Share options" style={{ display: 'flex', gap: 16, marginBottom: 16, borderBottom: '1px solid var(--border-default)' }}>
             <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === 'allowlist'}
+              className="ds-tab"
+              style={{ height: 'var(--h-control-md)' }}
               onClick={() => setActiveTab('allowlist')}
-              style={{
-                padding: '8px 16px', fontSize: 'var(--fs-control)', fontWeight: activeTab === 'allowlist' ? 600 : 400,
-                background: 'none', border: 'none', cursor: 'pointer',
-                color: activeTab === 'allowlist' ? 'var(--text-primary)' : 'var(--text-tertiary)',
-                borderBottom: activeTab === 'allowlist' ? '2px solid var(--accent-primary)' : '2px solid transparent',
-              }}
             >
               Allowlist
             </button>
             <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === 'requests'}
+              className="ds-tab"
+              style={{ height: 'var(--h-control-md)' }}
               onClick={() => setActiveTab('requests')}
-              style={{
-                padding: '8px 16px', fontSize: 'var(--fs-control)', fontWeight: activeTab === 'requests' ? 600 : 400,
-                background: 'none', border: 'none', cursor: 'pointer',
-                color: activeTab === 'requests' ? 'var(--text-primary)' : 'var(--text-tertiary)',
-                borderBottom: activeTab === 'requests' ? '2px solid var(--accent-primary)' : '2px solid transparent',
-                position: 'relative',
-              }}
             >
               Join requests
-              {pendingRequests.length > 0 && (
-                <span style={{
-                  position: 'absolute', top: 4, right: 4,
-                  background: 'var(--accent-red)', color: 'var(--text-on-accent)',
-                  borderRadius: 'var(--radius-pill)', fontSize: 'var(--fs-micro)', fontWeight: 700,
-                  padding: '1px 5px', minWidth: 16, textAlign: 'center',
-                }}>
-                  {pendingRequests.length}
-                </span>
-              )}
+              {pendingRequests.length > 0 && <Count value={pendingRequests.length} tone="attention" />}
             </button>
           </div>
 
@@ -298,7 +284,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
             <>
               {/* Allowed Agents — read-only audit list. Agents are added
                   exclusively via the text-invite + signed-join-request flow
-                  (see Invite code below + the Join requests tab). The ✕
+                  (see Invite code below + the Join requests tab). The remove
                   button revokes access for an existing participant. */}
               <div className="v10-form-group">
                 <label className="v10-form-label">Allowed agents</label>
@@ -321,7 +307,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                         }}>
                           <span style={{ color: 'var(--text-primary)' }}>
                             {peer ? (
-                              <><span style={{ fontFamily: 'var(--font-body)', fontWeight: 500 }}>{peer.name}</span>{' '}<span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-micro)' }}>{truncAddr(addr)}</span></>
+                              <><span style={{ fontFamily: 'var(--font-sans)', fontWeight: 500 }}>{peer.name}</span>{' '}<span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-micro)' }}>{truncateAddress(addr)}</span></>
                             ) : addr}
                           </span>
                           <button
@@ -330,9 +316,9 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                               background: 'none', border: 'none', cursor: 'pointer',
                               color: 'var(--text-tertiary)', fontSize: 'var(--fs-control)', padding: '0 4px',
                             }}
-                            title="Remove agent"
+                            aria-label="Remove agent" title="Remove agent"
                           >
-                            ×
+                            <X size={14} />
                           </button>
                         </div>
                       );
@@ -368,7 +354,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                   <div style={{ position: 'relative' }}>
                     <pre style={{
                       background: 'var(--bg-surface)', border: '1px solid var(--border-default)',
-                      borderRadius: 'var(--radius-control)', padding: '10px 12px', fontSize: 'var(--fs-label)', lineHeight: 1.6,
+                      borderRadius: 'var(--radius-control)', padding: '10px 12px', fontSize: 'var(--fs-label)', lineHeight: 'var(--lh-loose)',
                       fontFamily: 'var(--font-mono)', color: 'var(--text-primary)',
                       overflow: 'auto', margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all',
                     }}>
@@ -424,7 +410,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                       {req.agentAddress}
                     </span>
                     <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>
-                      Requested {new Date(req.timestamp).toLocaleString()}
+                      Requested {formatDateTime(req.timestamp)}
                     </span>
                   </div>
                   <div style={{ display: 'flex', gap: 6 }}>
