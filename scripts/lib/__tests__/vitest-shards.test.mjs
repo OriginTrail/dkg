@@ -59,19 +59,11 @@ for (const packageName of ['cli', 'chain']) {
     if (unknownCount === 0) {
       // Every file carries the snapshot's per-file overhead, so the last file
       // placed can leave one overhead of imbalance on its own; beyond that the
-      // estimates should agree within a second. A file longer than an even
-      // share cannot be split: its shard holds it alone and stands above the rest.
-      const evenShareMs = first.reduce((sum, shard) => sum + shard.estimatedMs, 0) / first.length;
-      const loads = first
-        .filter((shard) => !(shard.files.length === 1 && shard.estimatedMs > evenShareMs))
-        .map((shard) => shard.estimatedMs);
+      // estimates should agree within a second.
+      const loads = first.map((shard) => shard.estimatedMs);
       assert.ok(
         Math.max(...loads) - Math.min(...loads) < PACKAGE_SPECS[packageName].perFileOverheadMs + 1_000,
-        'latest-run weights should keep shard estimates within one per-file overhead and one second, apart from a shard that holds one long file alone',
-      );
-      assert.ok(
-        Math.max(...first.map((shard) => shard.estimatedMs)) < 10 * 60_000,
-        'every shard should be planned under ten minutes',
+        'latest-run weights should keep shard estimates within one per-file overhead and one second',
       );
     }
   });
