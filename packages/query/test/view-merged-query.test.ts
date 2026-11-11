@@ -257,6 +257,15 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     expect((await engine.query(JOIN, VM)).semantics).toBe('merged');
   });
 
+  it('refuses a malformed minTrust before it reads the store', async () => {
+    fresh();
+    const sent = vi.spyOn(store, 'query');
+    await expect(engine.query(JOIN, { ...MERGED, minTrust: 'Endorsed' as never })).rejects.toThrow(/^Invalid minTrust/);
+    readGraphs.defaultSemantics = () => 'merged';
+    await expect(engine.query(JOIN, { ...VM, minTrust: Number.NaN })).rejects.toThrow(/^Invalid minTrust/);
+    expect(sent).not.toHaveBeenCalled();
+  });
+
   it('keeps queries without a view per asset or unscoped, and refuses merged there', async () => {
     fresh();
     await expect(engine.query(JOIN, { contextGraphId: id, semantics: 'merged' })).rejects.toBeInstanceOf(SemanticsUnsupportedError);

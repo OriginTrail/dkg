@@ -83,8 +83,8 @@ import {
   type StoreReadLane,
 } from './query-store-read-context.js';
 import {
-  assertNoMergedSemanticsWithoutView, isViewDatasetPlanCurrent, planViewDataset, ViewNotReadyError, withMergedViewDataset,
-  type MergedViewDatasetPlan, type ViewReadGraphs,
+  assertNoMergedSemanticsWithoutView, assertValidViewMinTrust, isViewDatasetPlanCurrent, planViewDataset, ViewNotReadyError,
+  withMergedViewDataset, type MergedViewDatasetPlan, type ViewReadGraphs,
 } from './view-dataset-plan.js';
 
 import { ScopedQueryViolationError } from './scoped-query-error.js';
@@ -249,25 +249,7 @@ export function resolveViewGraphs(
       // a 400 on `working-memory`/`shared-working-memory` too,
       // where the option is documented as ignored. Keep the
       // validation here so only verifiable-memory consumers see it.
-      if (opts?.minTrust !== undefined) {
-        const mt: unknown = opts.minTrust;
-        const validLevels = [
-          TrustLevel.SelfAttested,
-          TrustLevel.Endorsed,
-          TrustLevel.PartiallyVerified,
-          TrustLevel.ConsensusVerified,
-        ];
-        if (typeof mt !== 'number' || !Number.isInteger(mt) || !validLevels.includes(mt as TrustLevel)) {
-          // "minTrust" + "must be one of" mirrors the daemon's 400
-          // classifier wording so the HTTP path maps to a client error.
-          throw new Error(
-            `Invalid minTrust ${JSON.stringify(mt)}: must be one of TrustLevel.SelfAttested (0), ` +
-            `Endorsed (1), PartiallyVerified (2), ConsensusVerified (3). The HTTP /api/query route ` +
-            `accepts the string forms "SelfAttested" | "Endorsed" | "PartiallyVerified" | ` +
-            `"ConsensusVerified" and normalises them; in-process callers must pass the numeric enum.`,
-          );
-        }
-      }
+      assertValidViewMinTrust(opts?.minTrust);
 
       if (opts?.verifiedGraph) {
         return {

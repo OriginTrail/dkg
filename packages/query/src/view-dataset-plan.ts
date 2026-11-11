@@ -65,6 +65,24 @@ export class SemanticsUnsupportedError extends Error {
   }
 }
 
+const TRUST_LEVELS: readonly unknown[] = [
+  TrustLevel.SelfAttested, TrustLevel.Endorsed, TrustLevel.PartiallyVerified, TrustLevel.ConsensusVerified,
+];
+
+/**
+ * A verifiable-memory `minTrust` must be one of the TrustLevel values. "minTrust" and "must be
+ * one of" match the daemon's 400 wording, so the HTTP path maps the refusal to a client error.
+ */
+export function assertValidViewMinTrust(minTrust: unknown): void {
+  if (minTrust === undefined || (typeof minTrust === 'number' && Number.isInteger(minTrust) && TRUST_LEVELS.includes(minTrust))) return;
+  throw new Error(
+    `Invalid minTrust ${JSON.stringify(minTrust)}: must be one of TrustLevel.SelfAttested (0), ` +
+    `Endorsed (1), PartiallyVerified (2), ConsensusVerified (3). The HTTP /api/query route ` +
+    `accepts the string forms "SelfAttested" | "Endorsed" | "PartiallyVerified" | ` +
+    `"ConsensusVerified" and normalises them; in-process callers must pass the numeric enum.`,
+  );
+}
+
 /** The semantics a request asked for, checked; `undefined` when it asked for none. */
 export function requestedViewSemantics(options: QueryOptions | undefined): ViewQuerySemantics | undefined {
   const requested: unknown = options?.semantics;
@@ -151,6 +169,7 @@ function mergedReadGraph(
   if (view === 'working-memory' && options.assertionName) return unsupported('a working-memory read by assertion name');
   if (options.verifiedGraph) return unsupported('a read of one verified graph');
   const minTrust = options.minTrust ?? options._minTrust;
+  if (view === 'verifiable-memory') assertValidViewMinTrust(minTrust);
   if (view === 'verifiable-memory' && minTrust !== undefined && minTrust > TrustLevel.SelfAttested) {
     return unsupported('minTrust above SelfAttested');
   }

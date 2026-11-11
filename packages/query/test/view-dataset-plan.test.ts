@@ -120,6 +120,17 @@ describe('planning a view query', () => {
     expect(planViewDataset(view, CG, { ...extra }, defaulted)).toEqual({ kind: 'per-asset' });
   });
 
+  it('refuses a malformed minTrust on verifiable memory, as the per-asset route does', () => {
+    for (const minTrust of ['Endorsed', Number.NaN, 1.5, 7]) {
+      for (const source of [readGraphs([row(VM)]), readGraphs([row(VM)], { defaultSemantics: () => 'merged' })]) {
+        for (const options of [{ semantics: 'merged' as const, minTrust }, { _minTrust: minTrust }]) {
+          if (source.defaultSemantics === undefined && !('semantics' in options)) continue;
+          expect(() => planViewDataset('verifiable-memory', CG, options as never, source)).toThrow(/^Invalid minTrust .* must be one of/);
+        }
+      }
+    }
+  });
+
   it('applies merged where minTrust is the floor, or belongs to another view', () => {
     const swm = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.SharedWorkingMemory });
     const source = readGraphs([row(VM), row(swm)]);

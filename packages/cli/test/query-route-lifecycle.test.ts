@@ -851,6 +851,15 @@ describe('/api/query view semantics', () => {
     expect(JSON.parse(res.body)).toMatchObject({ result: { type: 'bindings', bindings: [] }, semantics: 'merged' });
   });
 
+  it('reports the semantics the engine answered with over the request\'s fallback', async () => {
+    const res = new ResponseStub();
+    // A node whose default for the context graph is merged answers a request that did not ask.
+    const agent = { query: vi.fn(async () => ({ bindings: [], semantics: 'merged' })) };
+    await handleQueryRoutes(queryRouteContext(new RequestStub(scoped), res, agent, routeTracker()));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).semantics).toBe('merged');
+  });
+
   it('reports a scoped answer without its own semantics as asked, or per asset, and none for an unscoped query', async () => {
     for (const [body, expected] of [
       [{ ...scoped, semantics: 'merged' }, 'merged'],
