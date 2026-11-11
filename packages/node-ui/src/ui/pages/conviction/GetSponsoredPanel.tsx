@@ -33,14 +33,30 @@ function faucetUrl(chainId: string | null | undefined): string | undefined {
   return FAUCETS[numeric];
 }
 
-/** The outcome of one check, set once when the check finishes. */
+/**
+ * Everything the panel shows for one check. Each variant carries only what it can show:
+ * approval and Ready exist only once approval was checked, and the Add offer only once
+ * the PCA itself was read.
+ */
 type CheckResult =
   /** The ID isn't a number, or the PCA itself couldn't be read: nothing to show or add. */
   | { kind: 'failed'; message: string; retry: boolean }
-  /** The PCA was read, but approval couldn't be checked: no wallets, unreadable wallets, or no probe answered. */
-  | { kind: 'unverifiable'; accountId: string; message: string; retry: boolean }
+  /**
+   * The PCA was read, but approval couldn't be checked: no wallets, unreadable wallets, or
+   * no probe answered. It can still go in the list read-only; `addNote` shows once it's there.
+   */
+  | { kind: 'unverifiable'; accountId: string; message: string; retry: boolean; addNote: string }
   /** Approval was checked wallet by wallet. */
-  | { kind: 'checked'; accountId: string; rows: ProbeRow[] };
+  | {
+    kind: 'checked';
+    accountId: string;
+    rows: ProbeRow[];
+    approvedCount: number;
+    /** N1: a wallet is covered (a spendable PCA, not bare registration) and has gas. */
+    ready: boolean;
+    /** Offered for the list when no wallet is approved here; null when one is (it's tracked then). */
+    addNote: string | null;
+  };
 
 /**
  * Put a PCA that was read but covers nothing here (or can't be checked) in the list,
@@ -102,42 +118,29 @@ interface CheckRead {
   read: PcaAccountRead | null;
 }
 
-/** Everything the panel shows for one check, derived together from the raw read. */
-interface CheckView {
-  result: CheckResult;
-  approvedCount: number;
-  /** N1: a wallet is covered (a spendable PCA, not bare registration) and has gas. */
-  ready: boolean;
-  /** A PCA that was read but covers nothing here, or couldn't be checked, can still go in the list. */
-  addable: { accountId: string; note: string } | null;
-}
-
-/** The message, Retry, approval count, Ready and Add offer for one check. Pure. */
+/** What the panel shows for one check, derived from the raw read. Pure. */
 function presentCheck(
   { id, read }: CheckRead,
   ctx: { walletsReadError: boolean; isFunded: (wallet: string) => boolean },
-): CheckView {
-  const view = (result: CheckResult, more: Partial<Omit<CheckView, 'result'>> = {}): CheckView =>
-    ({ result, approvedCount: 0, ready: false, addable: null, ...more });
-
-  if (read === null) return view({ kind: 'failed', message: 'Enter the PCA ID as a number.', retry: false });
+): CheckResult {
+  if (read === null) return { kind: 'failed', message: 'Enter the PCA ID as a number.', retry: false };
   if (!read.ok) {
     const temporary: CheckResult = { kind: 'failed', message: `Couldn’t check PCA #${id} right now.`, retry: true };
     // A 503 PCA_LOOKUP_READ_FAILED is a chain read that failed, not a network without
     // PCAs, so it's temporary (Retry) before any capability reading of the 503.
-    if (isPcaReadFailed(read.error)) return view(temporary);
+    if (isPcaReadFailed(read.error)) return temporary;
     // A known daemon error says what happened (a missing PCA among them); anything else is a transient read failure.
     const described = describePcaError(read.error, { accountId: id });
-    return view(described
+    return described
       ? { kind: 'failed', message: described.message, retry: described.code === 'ServerError' }
-      : temporary);
+      : temporary;
   }
 
   // From here the PCA exists, so it can always be added read-only, whatever approval shows.
-  const unverifiable = (message: string, retry: boolean) => view(
-    { kind: 'unverifiable', accountId: id, message, retry },
-    { addable: { accountId: id, note: `PCA #${id} is in your list. This node can’t check whether it covers your wallets.` } },
-  );
+  const unverifiable = (message: string, retry: boolean): CheckResult => ({
+    kind: 'unverifiable', accountId: id, message, retry,
+    addNote: `PCA #${id} is in your list. This node can’t check whether it covers your wallets.`,
+  });
   const rows: ProbeRow[] = read.probes;
   // No wallets were probed. Approval needs only the addresses, so a balance-read error
   // with known addresses still probes them (and Ready stays off until gas is known).
@@ -161,18 +164,18 @@ function presentCheck(
   // "Needs approval" only when every wallet is confirmed unregistered; a wallet whose probe
   // failed might already be approved, so then coverage stays unknown.
   const allUnregistered = rows.every((r) => r.coverage.outcome === 'unregistered');
-  return view({ kind: 'checked', accountId: id, rows }, {
+  return {
+    kind: 'checked',
+    accountId: id,
+    rows,
     approvedCount,
     ready: rows.some((r) => r.coverage.outcome === 'covers' && ctx.isFunded(r.wallet)),
-    addable: approvedCount === 0
-      ? {
-        accountId: id,
-        note: allUnregistered
-          ? `PCA #${id} is in your list. It gives no discount until the owner approves these wallets.`
-          : `PCA #${id} is in your list. This node couldn’t check every wallet, so it may already cover some.`,
-      }
-      : null,
-  });
+    addNote: approvedCount > 0
+      ? null
+      : allUnregistered
+        ? `PCA #${id} is in your list. It gives no discount until the owner approves these wallets.`
+        : `PCA #${id} is in your list. This node couldn’t check every wallet, so it may already cover some.`,
+  };
 }
 
 /**
@@ -249,20 +252,16 @@ export function GetSponsoredPanel({
     0,
     { enabled: submitted != null && walletsSettled, scope: submitted, retention: 'scope' },
   );
-  const view = useMemo<CheckView | null>(() => {
+  const result = useMemo<CheckResult | null>(() => {
     if (checkData) return presentCheck(checkData, { walletsReadError: walletsReadError != null, isFunded });
-    if (checkError && submitted) {
-      return { result: { kind: 'failed', message: `Couldn’t check PCA #${submitted.id.trim()} right now.`, retry: true }, approvedCount: 0, ready: false, addable: null };
-    }
+    if (checkError && submitted) return { kind: 'failed', message: `Couldn’t check PCA #${submitted.id.trim()} right now.`, retry: true };
     return null;
     // isFunded reads the balances in wb.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [checkData, checkError, submitted, walletsReadError, wb]);
-  const result = view?.result ?? null;
   const checked = result?.kind === 'checked' ? result : null;
-  const approvedCount = view?.approvedCount ?? 0;
-  const ready = view?.ready ?? false;
-  const addable = view?.addable ?? null;
+  // The PCA was read but nothing here is approved on it (or it couldn't be checked): offer Add.
+  const addNote = result && result.kind !== 'failed' ? result.addNote : null;
 
   // N2: once a wallet is approved, put the PCA in the list so the Overview and chip pick it
   // up. Downstream re-probes the chain independently, so nothing trusts this result (#9).
@@ -391,7 +390,7 @@ export function GetSponsoredPanel({
           {checked && (
             <div className="v10-pca-approve-results" role="status" aria-live="polite">
               <p className="v10-pca-approve-summary">
-                <Badge tone={summaryTone(checked.rows)}>Approved on PCA #{checked.accountId}: {approvedCount} of {checked.rows.length} wallets</Badge>
+                <Badge tone={summaryTone(checked.rows)}>Approved on PCA #{checked.accountId}: {checked.approvedCount} of {checked.rows.length} wallets</Badge>
               </p>
               {inactiveReason(checked.accountId, checked.rows) && (
                 <p className="v10-modal-warning ds-card-nested">{inactiveReason(checked.accountId, checked.rows)}</p>
@@ -403,12 +402,12 @@ export function GetSponsoredPanel({
             </div>
           )}
           {/* Read-only: funding, expiry and owner stay reachable. It claims no coverage. */}
-          {addable && <AddToListAction accountId={addable.accountId} trackedNote={addable.note} />}
+          {result && result.kind !== 'failed' && addNote && <AddToListAction accountId={result.accountId} trackedNote={addNote} />}
         </section>
 
-        {ready && (
+        {checked?.ready && (
           <div className="v10-pca-create-success" role="status">
-            Ready. At least 1 wallet is approved and has gas, so this node can publish with PCA #{checked!.accountId}.{' '}
+            Ready. At least 1 wallet is approved and has gas, so this node can publish with PCA #{checked.accountId}.{' '}
             {/* L9: no global publish target — the discount applies at any per-CG
                 publish. Guidance hint, not an inert "Go to publish →" button. */}
             Publish from any context graph. The discount applies automatically to approved wallets.
