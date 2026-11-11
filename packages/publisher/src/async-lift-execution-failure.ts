@@ -6,7 +6,7 @@ import {
   getChainWriteAheadHookCause,
   isTransientRpcTransportFailureWithoutTransaction,
 } from '@origintrail-official/dkg-chain';
-import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintrail-official/dkg-core';
+import { PCA_FUNDING_UNKNOWN_CODE, RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintrail-official/dkg-core';
 import { isRpcPreconditionError } from './ack-errors.js';
 import type { ExecutionFailureEvidence } from './async-lift-publisher-types.js';
 import { isPermanentAuthorCapabilityFailure, mapPublishExceptionToLiftJobFailure, readPublishErrorFacts } from './async-lift-publish-result.js';
@@ -45,6 +45,19 @@ function isTransientRpcFailure(error: unknown): boolean {
   if (!isRpcPreconditionError(error)) return false;
   try {
     return isTransientRpcTransportFailureWithoutTransaction(error.cause);
+  } catch {
+    return false;
+  }
+}
+
+/** A typed funding-read outage is a cause, never proof that no publication was sent. */
+function isPcaFundingReadUnavailable(error: unknown): boolean {
+  try {
+    const candidate = error as {
+      code?: unknown; txHash?: unknown; transactionHash?: unknown; receipt?: unknown;
+    } | null | undefined;
+    return candidate?.code === PCA_FUNDING_UNKNOWN_CODE
+      && candidate.txHash == null && candidate.transactionHash == null && candidate.receipt == null;
   } catch {
     return false;
   }
@@ -159,8 +172,10 @@ function classifyValidationFailure(error: unknown): {
       ? { code: 'workspace_unavailable', cause: 'rpc_transport', gate: 'pre_dispatch' } as const
       : isProvenStoreRejection(error)
         ? { code: 'workspace_unavailable', cause: 'store_not_started', gate: 'pre_dispatch' } as const
-        : isCatalogFloorAuthorityUnavailable(error)
-          ? { code: 'authority_unavailable', cause: 'precondition', gate: 'validated_only' } as const : undefined;
+        : isPcaFundingReadUnavailable(error)
+          ? { code: 'workspace_unavailable', cause: 'precondition', gate: 'validated_only' } as const
+          : isCatalogFloorAuthorityUnavailable(error)
+            ? { code: 'authority_unavailable', cause: 'precondition', gate: 'validated_only' } as const : undefined;
   const structured = classifyKnowledgeAssetVmPublishPreconditionCode(error);
   if (structured) return { code: structured, cause: 'precondition', gate: dependency?.gate };
   if (dependency) return { ...dependency, requiresProof: true };

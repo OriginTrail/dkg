@@ -16,7 +16,7 @@ import { createRoot, type Root } from 'react-dom/client';
 // approve/deny, the read model — incl. that opening the bell no longer
 // auto-marks-read) now lives in NotificationsBell/NotificationsPane and is
 // covered by `notifications-pane.dom.test.ts`. This file keeps only the
-// Header-LEVEL wiring: the bell badge/aria-label and the status-pill tooltip
+// Header-LEVEL wiring: the bell badge/aria-label and the peer-count tooltip
 // (BUG-020).
 // ─────────────────────────────────────────────────────────────────────
 
@@ -83,7 +83,7 @@ function findBellButton(container: HTMLElement): HTMLButtonElement {
   return btn;
 }
 
-describe('Header — notifications bell + status wiring', () => {
+describe('Header — notifications bell + peer status wiring', () => {
   beforeEach(() => {
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     document.body.innerHTML = '';
@@ -143,14 +143,14 @@ describe('Header — notifications bell + status wiring', () => {
     expect(container.querySelector('.v10-header-notif-badge')?.textContent).toBe('2');
   });
 
-  it('status pill exposes the multiline tooltip with synced + peer breakdown (BUG-020 wiring)', async () => {
+  it('peer count exposes the multiline connection tooltip without a global sync claim', async () => {
     fetchNotificationsFeedMock.mockResolvedValue({ notifications: [], badgeCount: 0 });
     const container = await renderHeader();
     const meta = container.querySelector('.v10-header-meta') as HTMLElement | null;
     expect(meta).toBeTruthy();
     const tooltip = meta!.getAttribute('title') ?? '';
-    expect(tooltip).toContain('Synced with the network');
     expect(tooltip).toContain('3 peers (2 direct, 1 relayed)');
     expect(tooltip).toContain('Uptime');
+    expect(tooltip).not.toMatch(/sync(?:ed|ing)/i);
   });
 });

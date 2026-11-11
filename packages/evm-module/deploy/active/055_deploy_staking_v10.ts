@@ -46,4 +46,13 @@ func.dependencies = [
   'IdentityStorage',
   'Token',
   'EpochStorage',
+  // 10.0.6 — `StakingV10.initialize()` resolves `StakingV10Ledger`, which
+  // runs the operator-fee withdrawal and the V8 drains.
+  'StakingV10Ledger',
+  // 10.1.0 — a claim reads `QueryInferenceSettlement` (OT-RFC-27) from the
+  // Hub, and the activation epoch from the storage it uses, where the Hub
+  // holds a settlement, and skips the pool where it does not. They are not
+  // dependencies here: a staking-only deploy runs without the pool, as on
+  // mainnet, where 052c to 052f are skipped. `998b` activates the pool once
+  // this contract reads it.
 ];

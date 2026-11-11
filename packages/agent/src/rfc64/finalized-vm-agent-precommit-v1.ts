@@ -8,6 +8,8 @@ import type { TripleStore } from '@origintrail-official/dkg-storage';
 
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
 import type {
+  Rfc64PublicCatalogNativeAdmissionHandlerV1,
+  Rfc64PublicCatalogNativeAdmissionPlanV1,
   Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1,
   Rfc64PublicCatalogNativePrecommitTransactionV1,
 } from './public-catalog-native-receiver-v1.js';
@@ -65,6 +67,8 @@ export interface Rfc64FinalizedVmAgentPrecommitHandlerV1 {
     plan: Parameters<Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1>[0],
     signal: AbortSignal,
   ): Promise<Rfc64FinalizedVmAgentPrecommitTransactionV1>;
+  /** The resolution below without materialization, asked before activation. */
+  readonly admit?: Rfc64PublicCatalogNativeAdmissionHandlerV1;
 }
 
 /**
@@ -75,31 +79,11 @@ export interface Rfc64FinalizedVmAgentPrecommitHandlerV1 {
 export function createRfc64FinalizedVmAgentPrecommitV1(
   options: Rfc64FinalizedVmAgentPrecommitOptionsV1,
 ): Rfc64FinalizedVmAgentPrecommitHandlerV1 {
-  return Object.freeze(async (
-    plan,
-    signal,
+  return Object.freeze(Object.assign(async (
+    plan: Parameters<Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1>[0],
+    signal: AbortSignal,
   ): Promise<Rfc64FinalizedVmAgentPrecommitTransactionV1> => {
-    const resolved = await resolveRfc64FinalizedPolicyAgentPrecommitV1(
-      options,
-      plan,
-      signal,
-      (acceptedPolicy) => {
-        if (
-          acceptedPolicy.policy.accessPolicy === 1
-          && plan.catalogScope.subGraphName !== null
-        ) {
-          throw new FinalizedVmCompositionErrorV1(
-            'finalized-vm-composition-input',
-            'Release 2 private finalized VM recovery supports the root catalog only',
-          );
-        }
-      },
-    );
-    if (resolved === null) {
-      throw new Error(
-        'RFC-64 finalized VM precommit requires a finalized-chain policy',
-      );
-    }
+    const resolved = await resolveRfc64FinalizedVmAgentPrecommitV1(options, plan, signal);
     const [knowledgeAssetStorageAddress, knowledgeAssetsLifecycleAddress] = await Promise.all([
       options.getKnowledgeAssetStorageAddress(),
       options.getKnowledgeAssetsLifecycleAddress(),
@@ -195,5 +179,42 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
       commit: () => materializer.commit(),
       rollback: (cause?: unknown) => materializer.rollback(cause),
     }) satisfies Rfc64FinalizedVmAgentPrecommitTransactionV1;
-  });
+  }, {
+    admit: async (
+      plan: Readonly<Rfc64PublicCatalogNativeAdmissionPlanV1>,
+      signal: AbortSignal,
+    ): Promise<void> => {
+      await resolveRfc64FinalizedVmAgentPrecommitV1(options, plan, signal);
+    },
+  }));
+}
+
+/** The policy, RPC and chain resolution of a finalized VM precommit; it reads no row. */
+async function resolveRfc64FinalizedVmAgentPrecommitV1(
+  options: Rfc64FinalizedVmAgentPrecommitOptionsV1,
+  plan: Readonly<Rfc64PublicCatalogNativeAdmissionPlanV1>,
+  signal: AbortSignal,
+) {
+  const resolved = await resolveRfc64FinalizedPolicyAgentPrecommitV1(
+    options,
+    plan,
+    signal,
+    (acceptedPolicy) => {
+      if (
+        acceptedPolicy.policy.accessPolicy === 1
+        && plan.catalogScope.subGraphName !== null
+      ) {
+        throw new FinalizedVmCompositionErrorV1(
+          'finalized-vm-composition-input',
+          'Release 2 private finalized VM recovery supports the root catalog only',
+        );
+      }
+    },
+  );
+  if (resolved === null) {
+    throw new Error(
+      'RFC-64 finalized VM precommit requires a finalized-chain policy',
+    );
+  }
+  return resolved;
 }

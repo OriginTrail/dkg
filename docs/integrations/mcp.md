@@ -18,11 +18,15 @@ dkg mcp setup --network testnet
 
 Setup initializes a fresh node, starts it, and offers to register DKG in detected clients. Restart the chosen client. Existing nodes keep their network. Use `dkg mcp setup --dry-run` to inspect changes first.
 
+On Windows, Claude Desktop may keep its config in `%APPDATA%\Claude` or `%LOCALAPPDATA%\Claude-Data\claude_<id>`. Setup detects both, choosing the most recently modified existing config when multiple profiles remain. Uninstall checks all supported profiles for older DKG registrations. Check the displayed destination with `--dry-run`; the existing app preferences and other MCP entries are preserved. If detection misses your installation, open **Settings → Developer → Edit Config** in Claude Desktop and paste the entry from `dkg mcp setup --print-only`, then fully quit and restart the client.
+
 ## Verify
 
 1. Run `dkg status` in the terminal.
 2. Inspect the client's DKG tool list. Ask it to call the discovered status and Context Graph listing tools.
 3. Complete the [quickstart](../getting-started/quickstart.md), including retrieval in a new conversation.
+
+The Context Graph listing defaults to `scope: "mine"`, matching **My Context Graphs** in the Node UI: explicit caller membership, or a matching curator identity for older list responses. Discovery and subscription alone do not establish membership. Use `scope: "all"` to inspect every known graph, including discovered and system graphs; unresolved names are labelled rather than repeated as names. Query-catalog discovery uses the same membership rule.
 
 If the client cannot find tools, confirm that setup detected the intended installation, restart it, and inspect its MCP logs. A source checkout and a globally installed CLI use different setup modes and homes; see the [package reference](https://github.com/OriginTrail/dkg/blob/main/packages/mcp-dkg/README.md).
 

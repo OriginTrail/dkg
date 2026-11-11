@@ -153,6 +153,9 @@ export const DEFAULT_FINALITY_CONFIRMATIONS = 1;
  */
 export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
 
+/** Blocks per `eth_getLogs` page of the marketplace's buyer scans; the reader fits a page to each RPC's span cap. */
+export const BUYER_SCAN_PAGE_BLOCKS = 10_000;
+
 /**
  * Normalize the operator-selected finality depth — the node's SINGLE definition
  * of chain finality, not a write-side knob.

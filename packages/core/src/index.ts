@@ -467,10 +467,12 @@ export {
   readDaemonPid,
   isProcessAlive,
   readDkgApiPort,
+  readDkgApiPortSync,
   loadAuthTokenSync,
   loadAuthToken,
   toEip55Checksum,
 } from './dkg-home.js';
+export * from './node-key-store.js';
 export {
   type Quad as ExtractionQuad,
   type ExtractionInput,
@@ -547,3 +549,5 @@ export { ProtocolReadLimitError } from './bounded-stream-read.js';
 
 export * from './async-admission-usage.js';
 export * from './async-admission-diagnostic-context.js';
+
+export { canonicalContextGraphAgentDid, contextGraphBelongsToAgent, type ContextGraphMembership } from './context-graph-membership.js';

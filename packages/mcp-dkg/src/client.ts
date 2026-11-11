@@ -1,3 +1,5 @@
+import { normalizeProjectRows, type ProjectRow } from './project-row.js';
+export type { ProjectRow } from './project-row.js';
 import type { QueryArgs } from './query-args.js';
 /**
  * Thin HTTP client for the DKG daemon. Mirrors the shape of
@@ -7,6 +9,9 @@ import type { QueryArgs } from './query-args.js';
  * `/api/context-graph/*`).
  */
 import type { DkgConfig } from './config.js';
+import { missingTokenHttpHint } from './auth-diagnostics.js';
+import { DkgHttpError } from './http-error.js';
+export { DkgHttpError } from './http-error.js';
 import {
   classifySparqlOperation,
   serializeAgentListOptions,
@@ -104,15 +109,6 @@ function normalizeDaemonQueryResult(result: unknown, sparql: string): SparqlResu
     };
   }
   return { type: 'bindings', bindings };
-}
-
-export interface ProjectRow {
-  id: string;
-  name?: string;
-  description?: string;
-  role?: string;
-  layer?: string;
-  [k: string]: unknown;
 }
 
 export interface SubGraphRow {
@@ -407,16 +403,6 @@ export interface PeerInfo {
   remoteAddrs: Array<string | null>;
 }
 
-export class DkgHttpError extends Error {
-  readonly status: number;
-  readonly body: unknown;
-  constructor(status: number, body: unknown, message: string) {
-    super(message);
-    this.name = 'DkgHttpError';
-    this.status = status;
-    this.body = body;
-  }
-}
 
 /**
  * A long Knowledge Asset mutation reached the daemon but no response arrived
@@ -501,7 +487,7 @@ export class DkgClient {
         throw new DkgHttpError(
           res.status,
           parsed,
-          `${method} ${route} → ${res.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`,
+          `${method} ${route} → ${res.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}${missingTokenHttpHint(res.status, this.token)}`,
         );
       }
       return parsed as T;
@@ -534,11 +520,11 @@ export class DkgClient {
 
   // ── Listing endpoints ──────────────────────────────────────────
   async listProjects(): Promise<ProjectRow[]> {
-    const response = await this.request<{ contextGraphs?: ProjectRow[] }>(
+    const response = await this.request<{ contextGraphs?: unknown }>(
       'GET',
       '/api/context-graph/list',
     );
-    return response.contextGraphs ?? [];
+    return normalizeProjectRows(response.contextGraphs);
   }
 
   async listSubGraphs(contextGraphId: string): Promise<SubGraphRow[]> {

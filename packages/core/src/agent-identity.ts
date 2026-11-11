@@ -1,7 +1,7 @@
 /** Canonical prefix shared by every DKG agent-DID producer and consumer. */
 export const AGENT_DID_PREFIX = 'did:dkg:agent:';
 
-const EVM_AGENT_SUBJECT = /^0x[0-9a-fA-F]{40}$/;
+const EVM_AGENT_SUBJECT = /^0x[0-9a-f]{40}$/i;
 
 export function isEvmAgentDidSubject(subject: string): boolean {
   return EVM_AGENT_SUBJECT.test(subject);

@@ -13,7 +13,8 @@ import {
   computeSwmAuthorInventoryScopeDigestV1,
   deriveSwmAuthorInventoryScopeFromHeadV1,
   parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1,
-  parseCanonicalSwmAuthorInventoryRowsV1,
+  snapshotSwmAuthorInventoryRowV1,
+  snapshotSwmAuthorInventoryRowsV1,
   parseCanonicalDecimalU64,
   parseDeterministicKnowledgeAssetUal,
   type DecimalU64V1,
@@ -191,9 +192,7 @@ export async function mergeRfc64SwmAuthorInventoryRowsV1(
         prepared.rows,
       );
       // Revalidate cross-row uniqueness after incoming rows replace target rows.
-      rows = parseCanonicalSwmAuthorInventoryRowsV1(
-        canonicalizeSwmAuthorInventoryRowsBytesV1(rows),
-      );
+      rows = snapshotSwmAuthorInventoryRowsV1(rows);
     } catch (cause) {
       throw new Rfc64SwmAuthorInventoryProducerErrorV1(
         'swm-inventory-producer-input',
@@ -431,9 +430,7 @@ function prepareInput(input: MaintainRfc64SwmAuthorInventoryInputV1): Readonly<{
   try {
     assertSwmAuthorInventoryScopeV1(input.scope);
     const scope = Object.freeze({ ...input.scope });
-    const row = parseCanonicalSwmAuthorInventoryRowsV1(
-      canonicalizeSwmAuthorInventoryRowsBytesV1([input.row]),
-    )[0]!;
+    const row = snapshotSwmAuthorInventoryRowV1(input.row);
     const signer = Object.freeze({
       issuer: input.signer.issuer,
       signDigest: input.signer.signDigest,
@@ -470,9 +467,7 @@ function prepareMergeInput(input: MergeRfc64SwmAuthorInventoryRowsInputV1): Read
   try {
     assertSwmAuthorInventoryScopeV1(input.scope);
     const scope = Object.freeze({ ...input.scope });
-    const rows = parseCanonicalSwmAuthorInventoryRowsV1(
-      canonicalizeSwmAuthorInventoryRowsBytesV1(input.rows),
-    );
+    const rows = snapshotSwmAuthorInventoryRowsV1(input.rows);
     if (rows.length === 0) throw new Error('exact merge rows must not be empty');
     for (const row of rows) {
       const identity = assertCanonicalDeterministicUalV1(row.kaUal);

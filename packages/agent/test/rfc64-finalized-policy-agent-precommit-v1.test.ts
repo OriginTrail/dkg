@@ -195,6 +195,58 @@ describe('RFC-64 finalized policy agent precommit', () => {
     expect(getEvmChainId).not.toHaveBeenCalled();
   });
 
+  it('admits a chain-bound head from its policy and chain ids alone, with no RPC request', async () => {
+    const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
+    const getEvmChainId = vi.fn(async () => BigInt(RFC64_VM_CHAIN_ID));
+    const live = await liveOptions();
+    const handler = createRfc64FinalizedPolicyAgentPrecommitV1({
+      ...live.options,
+      getOnChainContextGraphId,
+      getEvmChainId,
+    });
+    const { catalogScope, policyDigest, catalogHeadDigest } = rfc64FinalizedVmPrecommitPlan();
+
+    await expect(handler.admit!(
+      { catalogScope, policyDigest, catalogHeadDigest },
+      new AbortController().signal,
+    )).resolves.toBeUndefined();
+    expect(getOnChainContextGraphId).toHaveBeenCalledOnce();
+    expect(getEvmChainId).toHaveBeenCalledOnce();
+    expect(live.rpc.calls).toEqual([]);
+  });
+
+  it('refuses to admit a head without trusted RPC endpoints or under a changed policy, before chain reads', async () => {
+    const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
+    const getEvmChainId = vi.fn(async () => BigInt(RFC64_VM_CHAIN_ID));
+    const withoutRpc = createRfc64FinalizedPolicyAgentPrecommitV1({
+      ...options(),
+      rpcEndpoints: [],
+      getOnChainContextGraphId,
+      getEvmChainId,
+    });
+    await expect(withoutRpc.admit!(
+      rfc64FinalizedVmPrecommitPlan(),
+      new AbortController().signal,
+    )).rejects.toThrow('requires trusted RPC configuration');
+
+    const changedPolicy = createRfc64FinalizedPolicyAgentPrecommitV1({
+      ...options(),
+      acceptedPolicySnapshotForCatalogScope: () => privateOwnerSnapshot(),
+      getOnChainContextGraphId,
+      getEvmChainId,
+    });
+    await expect(changedPolicy.admit!(
+      privateOwnerPlan(`0x${'a7'.repeat(32)}` as Digest32V1),
+      new AbortController().signal,
+    )).rejects.toThrow(/differs from the transfer plan/u);
+    await expect(changedPolicy.admit!(
+      privateOwnerPlan(),
+      new AbortController().signal,
+    )).resolves.toBeUndefined();
+    expect(getOnChainContextGraphId).not.toHaveBeenCalled();
+    expect(getEvmChainId).not.toHaveBeenCalled();
+  });
+
   it('leaves non-finalized owner policy outside the EVM precommit lane', async () => {
     const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
     const getEvmChainId = vi.fn(async () => BigInt(RFC64_VM_CHAIN_ID));
