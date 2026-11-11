@@ -40,6 +40,11 @@ export interface ReadGraphModes extends ReadGraphModeRule {
  * node's mode for the layer, then the node's default, then `off`. The read
  * graphs of a sub-graph follow their context graph, and the working-memory
  * mode covers every agent.
+ *
+ * `off` stops building and serving, not maintenance: the layer maintains every
+ * read graph that has a state row. When a read graph's mode goes to `off`, the
+ * builder drops it (a fenced drop) and removes its row, or every write that
+ * touches its members keeps paying for it.
  */
 export function readGraphModeOf(modes: ReadGraphModes | undefined, key: ReadGraphKey): ReadGraphMode {
   const contextGraph = ownValue(modes?.contextGraphs, key.scope.contextGraphId);
