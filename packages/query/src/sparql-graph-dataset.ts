@@ -66,6 +66,24 @@ function needsConstantCallerGraphs(scope: PreparedSparqlQuery): boolean {
   });
 }
 
+/**
+ * Oxigraph does not evaluate a `GRAPH ?var` block per graph when the block holds
+ * a subquery, a nested GRAPH or a VALUES: it leaves ?var unbound, or reads every
+ * graph of the dataset inside the block. Such blocks are read per graph instead.
+ */
+function hasGraphVariableBlockReadPerGraph(scope: PreparedSparqlQuery): boolean {
+  const { tokens } = scope.prepared;
+  return scope.graphTargets.some(target => {
+    if (target.kind !== 'variable') return false;
+    const opening = target.targetTokenIndex + 1;
+    const closing = scope.structure.braces.matchingTokenIndexes[opening] ?? tokens.length;
+    for (let index = opening + 1; index < closing; index++) {
+      if (['SELECT', 'GRAPH', 'VALUES'].some(keyword => isSparqlKeyword(tokens, index, keyword))) return true;
+    }
+    return false;
+  });
+}
+
 export function planGraphDataset(
   scope: PreparedSparqlQuery,
   engine: SparqlEngineFamily | null,
@@ -91,8 +109,9 @@ export function planGraphDataset(
     datasetClauses: graphlessDescription ? ['FROM']
       : !oxigraph || readsDefaultGraph ? ['FROM', 'FROM NAMED'] : ['FROM NAMED'],
     preservePattern: graphlessDescription || scope.readsOnlyDeclaredNamedSet,
-    bindCallerGraphs: !scopedDescription && graphAccess === 'dataset' && !oxigraph
-      && scope.graphVariables.length > 0 && repeatedPath && needsConstantCallerGraphs(scope),
+    bindCallerGraphs: !scopedDescription && scope.graphVariables.length > 0 && (oxigraph
+      ? hasGraphVariableBlockReadPerGraph(scope)
+      : graphAccess === 'dataset' && repeatedPath && needsConstantCallerGraphs(scope)),
     wrapDescriptionPattern: scopedDescription && scope.where !== null,
   };
 }

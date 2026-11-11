@@ -125,9 +125,21 @@ describe('planGraphDataset', () => {
     ['SELECT * WHERE { GRAPH ?g { BIND(<urn:g> AS ?g) ?s <urn:p>+ ?o } }', expected('named', named), expected('dataset', both, { bindCallerGraphs: true })],
     ['SELECT ?s (EXISTS { ?s <urn:f> ?f } AS ?x) WHERE { ?s ?p ?o }', expected('named', both), expected('values', both)],
     ['SELECT ?s WHERE { GRAPH <urn:g:1> { ?s ?p ?o } ?s <urn:f> ?f }', expected('named', both), expected('values', both)],
+    // Oxigraph reads these GRAPH ?g blocks per graph: a subquery, a nested GRAPH or a VALUES inside one.
+    ['SELECT ?g ?s WHERE { GRAPH ?g { { SELECT ?s WHERE { ?s ?p ?o } } } }', expected('named', named, { bindCallerGraphs: true }), expected('dataset', both)],
+    ['SELECT ?g ?k WHERE { GRAPH ?g { VALUES ?k { <urn:k> } ?s ?p ?o } }', expected('named', named, { bindCallerGraphs: true }), expected('values', both)],
+    ['SELECT ?g ?s WHERE { GRAPH ?g { GRAPH <urn:g:1> { ?s ?p ?o } } }', expected('named', named, { bindCallerGraphs: true }), expected('values', both)],
   ] as const)('fully plans %s', (query, oxigraph, other) => {
     expect(planGraphDataset(scope(query), 'oxigraph')).toEqual(oxigraph);
     expect(planGraphDataset(scope(query), null)).toEqual(other);
+  });
+
+  it('refuses a GRAPH ?g block it would read per graph once that takes more than 128 reads', () => {
+    const many = Array.from({ length: 129 }, (_, index) => `urn:g:${index}`);
+    const read = scope('SELECT ?g ?s WHERE { GRAPH ?g { { SELECT ?s WHERE { ?s ?p ?o } } } }');
+    expect(() => rewriteGraphSet(read, many, 'union-only', 'oxigraph')).toThrow('at most 128 graph branches');
+    expect(ready(rewriteGraphSet(read, many.slice(0, 2), 'union-only', 'oxigraph')))
+      .toContain('GRAPH <urn:g:0> { VALUES ?g { <urn:g:0> }');
   });
 });
 
@@ -538,6 +550,18 @@ describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind,
     } finally {
       await only.close();
     }
+  });
+
+  it('reads a GRAPH ?g block around a subquery or a VALUES graph by graph', async () => {
+    const engine = new DKGQueryEngine(opened.store);
+    const options: QueryOptions = { contextGraphId: ID, view: 'verifiable-memory' };
+    const rows = (result: QueryResult) => result.bindings.map(row => JSON.stringify(Object.entries(row).sort())).sort();
+    const expected = (extra: Record<string, string> = {}) => quadsOf(DATA).filter(quad => quad.predicate === 'urn:label')
+      .map(quad => JSON.stringify(Object.entries({ g: quad.graph, s: quad.subject, ...extra }).sort())).sort();
+    expect(rows(await engine.query('SELECT ?g ?s WHERE { GRAPH ?g { { SELECT ?s WHERE { ?s <urn:label> ?l } } } }', options)))
+      .toEqual(expected());
+    expect(rows(await engine.query('SELECT ?g ?s ?k WHERE { GRAPH ?g { VALUES ?k { <urn:k> } ?s <urn:label> ?l } }', options)))
+      .toEqual(expected({ k: 'urn:k' }));
   });
 });
 
