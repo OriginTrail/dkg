@@ -315,7 +315,7 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
           </div>
         )}
       </div>
-      <div className="ds-input mkt-inputrow">
+      <div className="mkt-inputrow">
         <input className="ds-input mkt-input" value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void send(); }} data-testid="mkt-play-input"
           aria-label={copy('play.composer')} placeholder={copy('play.composer')} />
         <button type="button" className="ds-btn ds-primary" data-testid="mkt-play-send" data-copy="ctl.send" disabled={busy || !!sendDisabledKey}
