@@ -16,7 +16,16 @@ const state = vi.hoisted(() => ({
   openTab: vi.fn(),
 }));
 
-vi.mock('../src/ui/hooks/usePcaOverview.js', () => ({ usePcaOverview: () => state.overview }));
+// The components read the coverage state; derive it from the test's flags unless a test sets it.
+vi.mock('../src/ui/hooks/usePcaOverview.js', () => ({
+  usePcaOverview: () => ({
+    ...state.overview,
+    coverage: (state.overview as { coverage?: unknown }).coverage ?? {
+      status: state.overview.covered ? 'covered' : state.overview.walletsInconclusive ? 'uncertain' : 'not-covered',
+      uncertainty: state.overview.walletsInconclusive ? 'wallets-unreadable' : null,
+    },
+  }),
+}));
 vi.mock('../src/ui/hooks/usePcaScopeBootstrap.js', () => ({ usePcaScopeBootstrap: () => {} }));
 vi.mock('../src/ui/stores/agents.js', () => ({
   useAgentsStore: (sel: (s: unknown) => unknown) => sel({ nodeStatus: { nodeRole: state.nodeRole } }),
@@ -77,6 +86,15 @@ describe('PcaDashboardRow', () => {
     expect(value.textContent).not.toContain('None.');
     expect(container.querySelector('.v10-ws-pca-cta')!.textContent).toBe('Retry');
     expect(container.querySelector('.v10-ws-pca-cta svg')).toBeTruthy();
+    await unmount();
+  });
+
+  // #9 — the wallets read fine, but a tracked PCA or a wallet's approval on it couldn't be checked.
+  it('a failed approval check → "Couldn’t check your wallets" with Retry, not "None" or a way in', async () => {
+    state.overview = { covered: false, bestCoveringDiscountBps: null, walletsInconclusive: false, coverage: { status: 'uncertain', uncertainty: 'probe-inconclusive', recovery: 'retry-read' } } as typeof state.overview;
+    const { container, unmount } = await render(React.createElement(PcaDashboardRow));
+    expect(container.querySelector('.v10-ws-pca-value')!.textContent).toBe('Couldn’t check your wallets');
+    expect(container.querySelector('.v10-ws-pca-cta')!.textContent).toBe('Retry');
     await unmount();
   });
 

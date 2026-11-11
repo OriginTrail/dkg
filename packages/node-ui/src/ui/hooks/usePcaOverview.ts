@@ -252,7 +252,7 @@ export function usePcaOverview(intervalMs = 30_000, extraIds: string[] = []): Pc
   const walletsInconclusive = walletsError && wallets.length === 0;
   // U2 (#1344) — coverage and the best discount come from ONE aggregate over the probes'
   // canonical classifyCoverage outcomes, so no surface advertises a discount S5 treats as not-covering.
-  const coverage = useMemo(() => nodeCoverage(wallets, accounts, walletsInconclusive), [wallets, accounts, walletsInconclusive]);
+  const coverage = useMemo(() => nodeCoverage(wallets, accounts, { walletsUnreadable: walletsInconclusive }), [wallets, accounts, walletsInconclusive]);
   return {
     accounts,
     wallets,

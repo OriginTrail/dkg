@@ -22,10 +22,13 @@ function pct(bps: number | null): string {
 export function PcaSettingsCard() {
   usePcaScopeBootstrap();
   const role = useAgentsStore((s) => (s.nodeStatus as { nodeRole?: string } | null)?.nodeRole);
-  const { accounts, covered, bestCoveringDiscountBps, walletsInconclusive, refresh } = usePcaOverview();
+  const { accounts, covered, bestCoveringDiscountBps, coverage, refresh } = usePcaOverview();
+  // Nothing confirmed covers this node and something couldn't be read (the wallets, a
+  // tracked PCA, or a wallet's approval on it): never "None" then (T2/#9), offer Retry.
+  const uncertain = coverage.status === 'uncertain';
   const tracked = accounts.length;
   // With no PCA there's nothing to manage, so the button matches the dashboard's.
-  const action = tracked === 0 && !covered && !walletsInconclusive
+  const action = tracked === 0 && !covered && !uncertain
     ? role === 'edge' ? 'Get added to a PCA' : 'Set up PCA'
     : 'Manage PCA';
 
@@ -40,8 +43,8 @@ export function PcaSettingsCard() {
             This node’s approved publishing wallets get a <strong>{pct(bestCoveringDiscountBps)}</strong> discount
             from a Publisher Conviction Account (PCA).
           </p>
-        ) : walletsInconclusive ? (
-          // T2/#9 — don't assert "none covers" off unreadable wallets.
+        ) : uncertain ? (
+          // T2/#9 — don't assert "none covers" off coverage that couldn't be checked.
           <p className="v10-pca-settings-line" role="status">
             Couldn’t check this node’s wallets, so we can’t confirm a Publisher Conviction Account (PCA) discount.
           </p>
@@ -55,7 +58,7 @@ export function PcaSettingsCard() {
           </p>
         )}
         <div className="v10-pca-settings-actions">
-          {walletsInconclusive && <RetryButton size="md" onClick={() => refresh()} />}
+          {uncertain && <RetryButton size="md" onClick={() => refresh()} />}
           <button
             type="button"
             className="v10-pca-card-btn ds-btn"

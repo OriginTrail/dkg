@@ -19,7 +19,16 @@ const state = vi.hoisted(() => ({
   bootstrapScope: vi.fn(),
 }));
 
-vi.mock('../src/ui/hooks/usePcaOverview.js', () => ({ usePcaOverview: () => state.overview }));
+// The components read the coverage state; derive it from the test's flags unless a test sets it.
+vi.mock('../src/ui/hooks/usePcaOverview.js', () => ({
+  usePcaOverview: () => ({
+    ...state.overview,
+    coverage: (state.overview as { coverage?: unknown }).coverage ?? {
+      status: state.overview.covered ? 'covered' : state.overview.walletsInconclusive ? 'uncertain' : 'not-covered',
+      uncertainty: state.overview.walletsInconclusive ? 'wallets-unreadable' : null,
+    },
+  }),
+}));
 vi.mock('../src/ui/hooks/usePcaScopeBootstrap.js', () => ({ usePcaScopeBootstrap: () => state.bootstrapScope() }));
 vi.mock('../src/ui/stores/tabs.js', () => ({
   useTabsStore: Object.assign((sel: (s: unknown) => unknown) => sel({ openTab: state.openTab }), {
@@ -72,6 +81,16 @@ describe('PcaSettingsCard', () => {
     expect(container.textContent).toContain('Couldn’t check this node’s wallets');
     expect(container.textContent).not.toContain('covers this node');
     expect(Array.from(container.querySelectorAll('button')).map((b) => b.textContent)).toEqual(['Retry', 'Manage PCA', 'What is a PCA?']);
+    await unmount();
+  });
+
+  // #9 — the wallets read fine, but a tracked PCA or a wallet's approval on it couldn't be checked.
+  it('a failed approval check → "couldn’t check" with Retry, not "none covers"', async () => {
+    state.overview = { accounts: [{}], covered: false, bestCoveringDiscountBps: null, walletsInconclusive: false, coverage: { status: 'uncertain', uncertainty: 'probe-inconclusive', recovery: 'retry-read' } } as typeof state.overview;
+    const { container, unmount } = await render(React.createElement(PcaSettingsCard));
+    expect(container.textContent).toContain('Couldn’t check this node’s wallets');
+    expect(container.textContent).not.toContain('covers this node');
+    expect(Array.from(container.querySelectorAll('button')).map((b) => b.textContent)).toEqual(['Retry', 'Manage PCA']);
     await unmount();
   });
 
