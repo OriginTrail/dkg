@@ -33,9 +33,11 @@
 #             the context graphs a suite writes into the store directly). Only a complete pass of the comprehensive run counts
 #             (completeSuccess in its REPORT.json); a filtered run is
 #             INCONCLUSIVE;
-#   drills    a restart during a rebuild; a kill of the daemon worker while a
-#             working-memory write is in flight, with that agent's read graph
-#             built first (the write must be answered after the kill, the
+#   drills    a restart during a rebuild; a kill of the daemon worker while it
+#             holds a working-memory write, with that agent's read graph
+#             built first (a kill counts only when the write's whole request
+#             was uploaded and dropped unanswered, and its data is there after
+#             the restart, so the worker had begun to store it; the
 #             worker gone and a new one in its place; every write the node acknowledged must be there after
 #             it, and the agent's working-memory read graph ready and
 #             consistent); a CLI write with the daemon down (`dkg publisher clear
@@ -47,7 +49,10 @@
 #             earlier release is
 #             built first; `dkg rollback --stores-for <its version>` readies the
 #             stopped node's stores, and after it the node's store must hold
-#             no read-graph partition and every asset graph as before, and
+#             no read-graph partition and every asset graph as before; the
+#             earlier daemon must answer the node's seeded working-memory
+#             draft and a verifiable-memory asset through /api/query as the
+#             build under test did; and
 #             after the forward start every asset graph again, so the drill
 #             node needs a store that stays up with its daemon down:
 #             Blazegraph or an external SPARQL endpoint); and the setting to
@@ -317,6 +322,29 @@ wait_read_graph_ready() {
   return 1
 }
 node_commit() { field "$(body_of "$(api "$1" GET /api/status)")" version; printf ' '; field "$(body_of "$(api "$1" GET /api/status)")" commitShort; }
+# query_rows <out> <n> <context graph> <view> <sparql> <var>...: writes node <n>'s answer to a view query into <out>,
+# one JSON array per row with the values of <var>... in order: an IRI bare, a literal by its lexical form, however
+# the release renders it ("lexical"^^<datatype>, "lexical"@lang, bare, or as an object). Prints why, and fails,
+# unless the node answers 200 with bindings.
+query_rows() {
+  local out="$1" n="$2" body resp
+  body="$(node -e 'const [contextGraphId, view, sparql] = process.argv.slice(1); console.log(JSON.stringify({ contextGraphId, view, sparql }));' "$3" "$4" "$5")"
+  shift 5
+  resp="$(api "$n" POST /api/query "$body")"
+  [ "$(code_of "$resp")" = 200 ] || { echo "HTTP $(code_of "$resp")"; return 1; }
+  body_of "$resp" | node -e '
+    let d = ""; process.stdin.on("data", (c) => d += c); process.stdin.on("end", () => {
+      let bindings;
+      try { bindings = JSON.parse(d).result?.bindings; } catch { bindings = undefined; }
+      if (!Array.isArray(bindings)) process.exit(1);
+      const value = (v) => {
+        const text = String(v && typeof v === "object" ? v.value ?? "" : v ?? "");
+        const literal = /^"((?:[^"\\]|\\.)*)"(?:\^\^<[^>]*>|@[A-Za-z0-9-]+)?$/.exec(text);
+        return literal ? literal[1].replace(/\\(.)/g, "$1") : text.replace(/^<(.*)>$/, "$1");
+      };
+      for (const b of bindings) console.log(JSON.stringify(process.argv.slice(1).map((name) => value(b[name]))));
+    });' "$@" > "$out" || { echo "an answer without bindings"; return 1; }
+}
 # store_endpoint <n>: the node's store query URL, from the devnet's own resolver; "" for a store that only
 # the daemon can read (embedded), or one that is not this checkout's local devnet.
 store_endpoint() { node "$ENDPOINT_RESOLVER" "$DEVNET_DIR" "http://127.0.0.1:$(node_port "$1")" 2>/dev/null || true; }
@@ -886,6 +914,24 @@ kill_tree() {
 stop_writer() { kill_tree "$1"; wait "$1" 2>/dev/null; rm -f "$RESULTS/drill-kill.writer"; }
 # acked_count <file>: lines in a file of acknowledged writes.
 acked_count() { wc -l < "$1" | tr -d ' '; }
+# drill_writes_missing <acked> <rows>: the drill writes listed in <acked> that the readback <rows> (query_rows of
+# ?s ?name) lacks, or holds with another value, comma-separated; nothing when every one is there as written.
+drill_writes_missing() {
+  node -e '
+    const fs = require("fs");
+    const values = new Map();
+    for (const line of fs.readFileSync(process.argv[2], "utf8").split("\n").filter(Boolean)) {
+      const [s, name] = JSON.parse(line);
+      (values.get(s) ?? values.set(s, []).get(s)).push(name);
+    }
+    const problems = [];
+    for (const i of fs.readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean)) {
+      const found = values.get(`urn:read-graphs-drill:${i}`);
+      if (!found) problems.push(`${i} missing`);
+      else if (!found.includes(`drill ${i}`)) problems.push(`${i} holds ${JSON.stringify(found[0])}, not "drill ${i}"`);
+    }
+    process.stdout.write(problems.join(", "));' "$1" "$2"
+}
 # pid_alive <pid>: the process exists and is not a zombie.
 pid_alive() { local s; s="$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')"; [ -n "$s" ] && [ "${s#Z}" = "$s" ]; }
 # daemon_worker_pid <n>: the PID node <n>'s daemon.pid names, when that process is a live daemon worker; else nothing.
@@ -898,8 +944,9 @@ daemon_worker_pid() {
 
 drill_kill_during_write() {
   local n="$KILL_NODE" started cg pid new_pid writer acked i resp missing body agent wm_graph inflight answers inflight_write overlap
-  local attempt last_write kill_line
+  local attempt last_write kill_line why readback
   started="$(now)"; cg="read-graphs-drill-$(echo "$RUN_ID" | tr 'A-Z' 'a-z')"
+  readback="SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }"
   acked="$RESULTS/drill-kill.acked"; : > "$acked"
   # The writes go to the node's own agent; the read graph they maintain is that agent's working-memory read graph.
   agent="$(field "$(body_of "$(api "$n" GET /api/agent/identity)")" agentAddress)"
@@ -928,10 +975,11 @@ drill_kill_during_write() {
   # records each acknowledged (HTTP 2xx) write in $acked. It sends the write with curl itself, so the outcome says
   # what the daemon had: exit 52 or 56 with the whole body uploaded means the worker took the request and its
   # connection was dropped unanswered; exit 7 means the request never reached it; exit 0 means it was answered.
+  # After a write that was not acknowledged it waits a moment, so a restarting node does not use up its writes.
   inflight="$RESULTS/drill-kill.inflight"; answers="$RESULTS/drill-kill.answers"; : > "$inflight"; : > "$answers"
   (
     export DKG_API_MAXTIME=15
-    for i in $(seq 1 300); do
+    for i in $(seq 1 1000); do
       api "$n" POST /api/knowledge-assets "{\"contextGraphId\":\"$cg\",\"name\":\"drill-$i\"}" > /dev/null 2>&1 || true
       body="{\"contextGraphId\":\"$cg\",\"quads\":[{\"subject\":\"urn:read-graphs-drill:$i\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"drill $i\\\"\"}]}"
       echo "$i" > "$inflight"
@@ -941,18 +989,23 @@ drill_kill_during_write() {
       code="${out%% *}"
       echo "write $i rc=$rc code=${code:-000} sent=${out##* } of ${#body}" >> "$answers"
       : > "$inflight"
-      case "$code" in 2??) echo "$i" >> "$acked" ;; esac
+      case "$code" in 2??) echo "$i" >> "$acked" ;; *) sleep 0.5 ;; esac
     done
   ) &
   writer=$!
   echo "$writer" > "$RESULTS/drill-kill.writer"
-  # The crash must land on a working-memory write the worker holds: once three were acknowledged, kill the daemon worker
-  # while one is in flight, then require evidence that the worker held it. The send and the kill race, so up to three
-  # crashes are tried; each one is a full crash with its own recovery. What this proves is that the worker died holding
-  # an uploaded write request. Whether its store change had begun cannot be seen from outside the daemon; a kill in the
-  # middle of an engine write is covered by the storage tests (oxigraph-worker-respawn.test.ts).
+  # The crash must land on a working-memory write the worker has begun to process: once three were acknowledged, kill
+  # the daemon worker while one is in flight. A crash counts only with evidence from both sides of the request:
+  # - the transport: its whole request was uploaded, and its connection was dropped unanswered;
+  # - the write path: its data is there after the restart. No other worker can have written it, as its connection was
+  #   dropped and curl does not send it again, so the killed worker had begun to store it.
+  # A request that was uploaded but not yet processed leaves no data, so that crash does not count. The send and the
+  # kill race, so up to five crashes are tried; each one is a full crash with its own recovery. Whether a crash fell
+  # inside the read-graph update itself, rather than after it, cannot be seen from outside the daemon; a pause hook at
+  # the store-write boundary is a follow-up, and a kill in the middle of an engine write is covered by the storage
+  # tests (oxigraph-worker-respawn.test.ts).
   overlap=""; attempt=0; last_write=0
-  while [ -z "$overlap" ] && [ "$attempt" -lt 3 ]; do
+  while [ -z "$overlap" ] && [ "$attempt" -lt 5 ]; do
     attempt=$((attempt + 1))
     inflight_write=""
     for i in $(seq 1 600); do
@@ -978,7 +1031,8 @@ drill_kill_during_write() {
     # before anything is checked. A daemon that answered throughout would prove nothing.
     pid="$(daemon_worker_pid "$n")"
     # The evidence must come after this line, taken before the kill: an outcome the kill caused can be logged at once.
-    kill_line="$(wc -l < "$answers" | tr -d ' ')"
+    # The writes acknowledged so far must all be there after this crash.
+    kill_line="$(wc -l < "$answers" | tr -d ' ')"; cp "$acked" "$RESULTS/drill-kill.acked-crash$attempt"
     if [ -z "$pid" ] || ! kill -9 "$pid" 2>/dev/null; then
       stop_writer "$writer"
       record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "SIGKILL could not be sent to node$n's daemon worker (PID ${pid:-none}), so no crash happened"; return
@@ -1007,45 +1061,34 @@ drill_kill_during_write() {
       stop_writer "$writer"
       record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "node$n answers after the kill, but its daemon.pid names no new daemon worker (PID $pid was killed)"; return
     fi
+    # After every crash, read through the new worker (for up to a minute while it warms up): each write acknowledged
+    # before the crash must be there as written, and the write-path side of the evidence is the held write's data.
+    for i in $(seq 1 30); do
+      why="$(query_rows "$RESULTS/rows/drill-kill.crash$attempt" "$n" "$cg" working-memory "$readback" s name)" && break
+      sleep 2
+    done
+    [ -z "$why" ] || { stop_writer "$writer"; record drill-kill FAIL "$(( $(now) - started ))" "node$n's working memory could not be read after crash $attempt ($why)"; return; }
+    missing="$(drill_writes_missing "$RESULTS/drill-kill.acked-crash$attempt" "$RESULTS/rows/drill-kill.crash$attempt")"
+    [ -z "$missing" ] || { stop_writer "$writer"; record drill-kill FAIL "$(( $(now) - started ))" "writes acknowledged before crash $attempt are not there as written after it: $missing"; return; }
+    [ -n "$overlap" ] || continue
+    if ! grep -Fxq "[\"urn:read-graphs-drill:$inflight_write\",\"drill $inflight_write\"]" "$RESULTS/rows/drill-kill.crash$attempt"; then
+      note "drill-kill: crash $attempt dropped write $inflight_write unanswered ($overlap), but its data is not there after the restart, so nothing shows the worker had begun to store it"
+      overlap=""
+    fi
   done
   stop_writer "$writer"
   if [ -z "$overlap" ]; then
-    record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "none of $attempt crashes landed on a working-memory write the worker held (drill-kill.answers), so the kill did not overlap a write"; return
+    record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "none of $attempt crashes landed on a working-memory write the worker had begun to store (drill-kill.answers, notes.md), so no kill is known to have interrupted a write"; return
   fi
-  # Every write the node acknowledged before the kill must be there after it, with the value it wrote.
-  body="{\"contextGraphId\":\"$cg\",\"view\":\"working-memory\",\"sparql\":\"SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }\"}"
-  resp="$(api "$n" POST /api/query "$body")"
-  if [ "$(code_of "$resp")" != 200 ]; then
-    record drill-kill FAIL "$(( $(now) - started ))" "the acknowledged writes could not be read back after the kill (HTTP $(code_of "$resp"))"; return
-  fi
-  missing="$(body_of "$resp" | node -e '
-    let d = ""; process.stdin.on("data", (c) => d += c); process.stdin.on("end", () => {
-      const fs = require("fs");
-      let bindings;
-      try { bindings = JSON.parse(d).result?.bindings; } catch { bindings = undefined; }
-      if (!Array.isArray(bindings)) { process.stdout.write("the answer has no bindings"); return; }
-      const text = (v) => String(v && typeof v === "object" ? v.value ?? "" : v ?? "");
-      const iri = (v) => text(v).replace(/^<(.*)>$/, "$1");
-      // A literal as the query route renders it, "lexical"^^<datatype> or "lexical"@lang, or bare.
-      const lexical = (v) => { const m = /^"((?:[^"\\]|\\.)*)"(?:\^\^<[^>]*>|@[A-Za-z0-9-]+)?$/.exec(text(v)); return m ? m[1].replace(/\\(.)/g, "$1") : text(v); };
-      const values = new Map();
-      for (const b of bindings) {
-        const s = iri(b.s); if (!s.startsWith("urn:read-graphs-drill:")) continue;
-        (values.get(s) ?? values.set(s, []).get(s)).push(lexical(b.name));
-      }
-      const problems = [];
-      for (const i of fs.readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean)) {
-        const found = values.get(`urn:read-graphs-drill:${i}`);
-        if (!found) problems.push(`${i} missing`);
-        else if (!found.includes(`drill ${i}`)) problems.push(`${i} holds ${JSON.stringify(found[0])}, not "drill ${i}"`);
-      }
-      process.stdout.write(problems.join(", "));
-    });' "$acked")"
-  [ -z "$missing" ] || { record drill-kill FAIL "$(( $(now) - started ))" "writes acknowledged before the kill are not there as written after it: $missing"; return; }
+  # Every write the node acknowledged, before the crashes and after them, must be there with the value it wrote.
+  why="$(query_rows "$RESULTS/rows/drill-kill.after" "$n" "$cg" working-memory "$readback" s name)" \
+    || { record drill-kill FAIL "$(( $(now) - started ))" "the acknowledged writes could not be read back after the kill ($why)"; return; }
+  missing="$(drill_writes_missing "$acked" "$RESULTS/rows/drill-kill.after")"
+  [ -z "$missing" ] || { record drill-kill FAIL "$(( $(now) - started ))" "acknowledged writes are not there as written after the kill: $missing"; return; }
   # The read graph those writes maintain must be there and ready; drill_end then checks it with the rest.
   wait_read_graph_ready "$n" "$wm_graph" "$READY_TIMEOUT" "$RESULTS/rows/drill-kill.wm.node$n" \
     || { record drill-kill FAIL "$(( $(now) - started ))" "the working-memory read graph <$wm_graph> was not listed ready after the kill"; return; }
-  drill_end drill-kill "$n" "$started" "killed node$n's daemon worker while it held working-memory write $inflight_write ($overlap, its connection dropped unanswered; crash $attempt of at most 3), and a new worker took over; all $(acked_count "$acked") acknowledged writes were there after it with the values written, and their read graph was rebuilt and consistent"
+  drill_end drill-kill "$n" "$started" "killed node$n's daemon worker while it held working-memory write $inflight_write: its whole request was uploaded and its connection dropped unanswered ($overlap), and its data was there after the restart, so the worker had begun to store it (crash $attempt of at most 5); a new worker took over; all $(acked_count "$acked") acknowledged writes were there after it with the values written, and their read graph was rebuilt and consistent"
 }
 
 # finalized_jobs <n>: the node's count of finalized publish jobs, or "" when it cannot be read.
@@ -1151,8 +1194,61 @@ members_lost() {
 # <endpoint>, and <version> the earlier release.
 # It prints one line of four fields, outcome, detail, dropped and version, separated by the ASCII unit separator
 # (a field may be empty): an empty outcome means every step held. The caller restores the node whatever it prints.
+# asset_probe_record <n> <probe>: known assets to read through the earlier release, with what the build under test
+# answers for them now: node <n>'s seeded working-memory draft, which must hold the value written, and one triple
+# pattern of a verifiable-memory asset. Each probe is a line of <probe> (what, context graph, view, query and variable,
+# \037 between), and its answer is <probe>.<line number>. Fails when no probe could be recorded.
+asset_probe_record() {
+  local n="$1" probe="$2" k=0 cg agent graph sp sparql
+  : > "$probe"
+  if [ -s "$RESULTS/rows/seed-wm.node$n" ]; then
+    read -r cg agent < "$RESULTS/rows/seed-wm.node$n"
+    sparql="SELECT ?name WHERE { <urn:read-graphs-seed:$n> <http://schema.org/name> ?name }"
+    if query_rows "$probe.1" "$n" "$cg" working-memory "$sparql" name > /dev/null && grep -Fxq "[\"seed $n\"]" "$probe.1"; then
+      k=1; printf 'the seeded working-memory draft\037%s\037working-memory\037%s\037name\n' "$cg" "$sparql" >> "$probe"
+    else
+      note "drill-rollback: the build under test did not answer node$n's seeded working-memory draft with the value written, so the draft is not read through the earlier release"
+    fi
+  fi
+  # A verifiable-memory triple of one of the node's context graphs, by subject and predicate (IRIs that a query can
+  # name as they are), and every object the build under test answers for that pair.
+  for graph in $(awk '{ print $3 }' "$RESULTS/rows/rollback.before.node$n" | grep '/_~read/cg/_verifiable_memory$' | head -5); do
+    cg="${graph#did:dkg:context-graph:}"; cg="${cg%/_~read/cg/_verifiable_memory}"
+    query_rows "$probe.sample" "$n" "$cg" verifiable-memory "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20" s p o > /dev/null || continue
+    sp="$(node -e '
+      const named = (v) => /^[A-Za-z][A-Za-z0-9+.-]*:[^\s<>"{}|^`\\]+$/.test(v);
+      const rows = require("fs").readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+      const row = rows.find(([s, p]) => named(s) && named(p));
+      if (row) console.log(`${row[0]} ${row[1]}`);' "$probe.sample")"
+    [ -n "$sp" ] || continue
+    sparql="SELECT ?o WHERE { <${sp% *}> <${sp#* }> ?o }"
+    query_rows "$probe.$((k + 1))" "$n" "$cg" verifiable-memory "$sparql" o > /dev/null && [ -s "$probe.$((k + 1))" ] || continue
+    k=$((k + 1)); printf 'verifiable memory <%s> <%s> of %s\037%s\037verifiable-memory\037%s\037o\n' "${sp% *}" "${sp#* }" "$cg" "$cg" "$sparql" >> "$probe"
+    break
+  done
+  rm -f "$probe.sample"
+  [ "$k" -gt 0 ]
+}
+# asset_probe_check <n> <probe>: within a minute, node <n> answers every probe of <probe> as the build under test did
+# (the same distinct rows). Prints the first difference and fails.
+asset_probe_check() {
+  local n="$1" probe="$2" k=0 what cg view sparql var why deadline
+  while IFS="$(printf '\037')" read -r what cg view sparql var; do
+    k=$((k + 1)); deadline=$(( $(now) + 60 ))
+    while :; do
+      if why="$(query_rows "$probe.$k.now" "$n" "$cg" "$view" "$sparql" "$var" < /dev/null)"; then
+        [ "$(sort -u "$probe.$k.now")" = "$(sort -u "$probe.$k")" ] && break
+        why="$(sort -u "$probe.$k.now" | head -3 | tr '\n' ' ' | sed 's/ $//')"
+        why="answered ${why:-nothing}, where the build under test answered $(sort -u "$probe.$k" | head -3 | tr '\n' ' ' | sed 's/ $//')"
+      fi
+      [ "$(now)" -lt "$deadline" ] || { echo "did not answer for $what as the build under test did: $why"; return 1; }
+      sleep 2
+    done
+  done < "$probe"
+}
+
 rollback_steps() {
-  local n="$1" endpoint="$2" target_version="$3" before partition_before partition_after members_before members_after members_earlier dropped version lost
+  local n="$1" endpoint="$2" target_version="$3" probe="$4" before partition_before partition_after members_before members_after members_earlier dropped version lost
   partition_before="$RESULTS/rows/rollback.partition-before.node$n"; partition_after="$RESULTS/rows/rollback.partition-after.node$n"
   before="$partition_before"
   members_before="$RESULTS/rows/rollback.members-before.node$n.json"; members_after="$RESULTS/rows/rollback.members-after.node$n.json"
@@ -1186,17 +1282,24 @@ rollback_steps() {
   [ "$version" != "$UNDER_TEST" ] || { printf 'FAIL\037%s\037%s\037%s\n' "node$n still ran the build under test, not $ROLLBACK_FROM" "$dropped" "$version"; return; }
   member_graphs "$endpoint" "$members_earlier" && lost="$(members_lost "$members_before" "$members_earlier" kept)" \
     || { printf 'FAIL\037%s\037%s\037%s\n' "node$n's asset data on $ROLLBACK_FROM: ${lost:-unreadable}" "$dropped" "$version"; return; }
+  # Kept triples are not enough: the earlier daemon must also find and read the assets through its own query route.
+  lost="$(asset_probe_check "$n" "$probe")" \
+    || { printf 'FAIL\037%s\037%s\037%s\n' "on $ROLLBACK_FROM, node$n $lost" "$dropped" "$version"; return; }
   printf '\037\037%s\037%s\n' "$dropped" "$version"
 }
 
 drill_rollback_and_forward() {
-  local n="$ROLLBACK_NODE" started endpoint restore result outcome detail dropped version lost rc version_dir target_version
-  started="$(now)"
+  local n="$ROLLBACK_NODE" started endpoint restore result outcome detail dropped version lost rc version_dir target_version probe read_through
+  started="$(now)"; probe="$RESULTS/rows/rollback.probe.node$n"
   [ "$ROLLBACK_FROM" != none ] || { record drill-rollback INCONCLUSIVE 0 "not run (READ_GRAPHS_ROLLBACK_FROM=none)"; return; }
   endpoint="$(store_endpoint "$n")"
   [ -n "$endpoint" ] || { record drill-rollback INCONCLUSIVE 0 "node$n's store cannot be read from outside its daemon, so the rollback cannot be checked: use a node on Blazegraph or an external SPARQL endpoint"; return; }
   read_graph_rows "$n" > "$RESULTS/rows/rollback.before.node$n" && [ -s "$RESULTS/rows/rollback.before.node$n" ] \
     || { record drill-rollback INCONCLUSIVE 0 "node$n has no read graph to drop"; return; }
+  # Known assets to read through the earlier release, as the build under test answers them now.
+  asset_probe_record "$n" "$probe" \
+    || { record drill-rollback INCONCLUSIVE "$(( $(now) - started ))" "the build under test answered no known asset of node$n (no seeded working-memory draft, no verifiable-memory triple), so reading assets through $ROLLBACK_FROM cannot be checked"; return; }
+  read_through="$(cut -d "$(printf '\037')" -f1 "$probe" | awk '{ printf "%s%s", (NR > 1 ? " and " : ""), $0 }')"
   # Build the earlier release first, while nothing has changed yet. Its node needs only the ABIs the repository holds,
   # not compiled contracts (the devnet's chain runs from this checkout), so the contract compile is skipped.
   DKG_SKIP_EVM_BUILD=1 "$DEVNET_SH" prepare-version "$ROLLBACK_FROM" > "$RESULTS/prepare-version.log" 2>&1; rc=$?
@@ -1207,7 +1310,7 @@ drill_rollback_and_forward() {
   [ -n "$target_version" ] || { record drill-rollback INCONCLUSIVE "$(( $(now) - started ))" "the version of $ROLLBACK_FROM could not be read (prepare-version.log)"; return; }
   restore="$(read_graphs_setting "$n")"
   stop_node "$n" || { record drill-rollback INCONCLUSIVE 0 "could not stop node$n"; return; }
-  result="$(rollback_steps "$n" "$endpoint" "$target_version")"
+  result="$(rollback_steps "$n" "$endpoint" "$target_version" "$probe")"
   IFS="$(printf '\037')" read -r outcome detail dropped version <<EOF_RESULT
 $result
 EOF_RESULT
@@ -1222,7 +1325,7 @@ EOF_RESULT
   member_graphs "$endpoint" "$RESULTS/rows/rollback.members-forward.node$n.json" \
     && lost="$(members_lost "$RESULTS/rows/rollback.members-before.node$n.json" "$RESULTS/rows/rollback.members-forward.node$n.json" kept)" \
     || { record drill-rollback FAIL "$(( $(now) - started ))" "node$n's asset data after the forward start: ${lost:-unreadable}"; return; }
-  drill_end drill-rollback "$n" "$started" "\`dkg rollback --stores-for $target_version\` removed all $dropped read-graph partition graphs and kept every asset triple; ran $version, then rebuilt from nothing"
+  drill_end drill-rollback "$n" "$started" "\`dkg rollback --stores-for $target_version\` removed all $dropped read-graph partition graphs and kept every asset triple; ran $version, which answered $read_through as the build under test did; then rebuilt from nothing"
 }
 
 drill_flag_off_and_back() {
