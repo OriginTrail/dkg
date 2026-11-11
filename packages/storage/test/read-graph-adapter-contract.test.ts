@@ -27,8 +27,12 @@ describe('read-graph adapter contract', () => {
 
   it('lists the planned methods an adapter implements but has not declared', () => {
     const store = new OxigraphStore();
-    expect(readGraphCapabilitiesOf(store)).toBeUndefined();
-    const missing = missingReadGraphMethods(store as never, undefined);
+    // A store with the write methods and no declaration of its own.
+    const undeclared = Object.fromEntries(
+      ['insert', ...READ_GRAPH_PLANNED_METHODS].map((method) => [method, (store as unknown as Record<string, unknown>)[method]]),
+    );
+    expect(readGraphCapabilitiesOf(undeclared)).toBeUndefined();
+    const missing = missingReadGraphMethods(undeclared as never, undefined);
     expect(missing).toContain('delete');
     expect(missing).toContain('replaceGraph');
     expect(missing.every((method) => READ_GRAPH_PLANNED_METHODS.includes(method))).toBe(true);

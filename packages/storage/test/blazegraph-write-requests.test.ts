@@ -103,16 +103,21 @@ describe('BlazegraphStore write requests with read-graph operations', () => {
     ['a separator only inside a string', 'INSERT DATA { <urn:test:s> <urn:test:p> "a ;" }', 'INSERT DATA { <urn:test:s> <urn:test:p> "a ;" }'],
     ['a separator only inside an IRI', 'DROP SILENT GRAPH <urn:test:g;>', 'DROP SILENT GRAPH <urn:test:g;>'],
     ['a separator only inside a comment', 'DROP SILENT GRAPH <urn:test:g> # done;', 'DROP SILENT GRAPH <urn:test:g> # done;'],
-    ['an escaped semicolon ending a prefixed name',
-      'PREFIX ex: <urn:test:> DROP SILENT GRAPH ex:member\\;', 'PREFIX ex: <urn:test:> DROP SILENT GRAPH ex:member\\;'],
-    ['a final separator after an escaped semicolon',
-      'PREFIX ex: <urn:test:> DROP SILENT GRAPH ex:member\\; ;', 'PREFIX ex: <urn:test:> DROP SILENT GRAPH ex:member\\; '],
   ])('a caller update with %s stays one valid request', async (_case, sparql, own) => {
     const { requests } = await recordBlazegraphWrite((store) => store.update(sparql, planned(PLAN)));
     expect(requests).toEqual([carrying(`application/sparql-update\n${own}`)]);
     // Without operations the caller's text goes out exactly as it is.
     expect((await recordBlazegraphWrite((store) => store.update(sparql))).requests)
       .toEqual([`application/sparql-update\n${sparql}`]);
+  });
+
+  it.each([
+    ['an escaped semicolon ending a prefixed name', ' DROP SILENT GRAPH ex:member\\;', ' DROP SILENT GRAPH ex:member\\;'],
+    ['a final separator after an escaped semicolon', ' DROP SILENT GRAPH ex:member\\; ;', ' DROP SILENT GRAPH ex:member\\; '],
+  ])('a caller update with %s keeps its prologue first and stays one valid request', async (_case, operations, own) => {
+    const prologue = 'PREFIX ex: <urn:test:>';
+    const { requests } = await recordBlazegraphWrite((store) => store.update(`${prologue}${operations}`, planned(PLAN)));
+    expect(requests).toEqual([`application/sparql-update\n${prologue}\n${[...PLAN.before, own, ...PLAN.after].join('\n;\n')}`]);
   });
 
   it('declares every write it sends with operations, and that the engine runs one update at a time', () => {
