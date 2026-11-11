@@ -265,6 +265,33 @@ describe('registry recognition in the read-graph layer', () => {
     expect(states()).toEqual({ wholeVm: 'dirty@3', wholeSwm: 'dirty@3', codeVm: 'ready@1', agentWm: 'dirty@3' });
   });
 
+  it('takes a literal in the form the store reports, with its escapes decoded', async () => {
+    const { adapter, store, meta, fixture, layer, states } = await layered();
+    const seen: string[] = [];
+    const insert = adapter.insert.bind(adapter);
+    adapter.insert = async (quads, options) => {
+      seen.push(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)!.state);
+      return insert(quads, options);
+    };
+    // `c` is `c`: the store keeps the name `docs`.
+    await store.insert([fact(meta, 'urn:asset:e', R.authenticatedSubGraphName, '"do\\u0063s"')]);
+    expect(seen).toEqual(['dirty']);
+    expect((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames).toEqual(['code', 'docs']);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
+    expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
+  });
+
+  it('predicts a graph-and-subject replace of one graph as the adapters run it, with the graph last', async () => {
+    const { adapter, store, meta, fixture, layer, states } = await layered();
+    const docs = `${fixture.root}/docs`;
+    // The whole `_meta` graph is replaced: `code` stays registered because the new graph holds it.
+    const graphQuads = [...fixture.facts.filter((quad) => quad.graph === meta), fact(meta, docs, R.type, R.subGraphClass), fact(meta, docs, R.name, '"docs"')];
+    await store.replaceGraphAndSubject!(meta, graphQuads, meta, docs, []);
+    expect((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames).toEqual(['code', 'docs']);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
+    expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
+  });
+
   it('marks the read graphs a sub-graph leaves dirty when its name goes', async () => {
     const { store, meta, fixture, states } = await layered();
     await store.delete([fact(meta, `${fixture.root}/code`, R.name, '"code"')]);

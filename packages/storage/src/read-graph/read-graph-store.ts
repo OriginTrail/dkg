@@ -180,7 +180,8 @@ export class ReadGraphStore implements TripleStoreDecorator {
       this.maintain('replaceGraphAndSubject', replaceOf([graphUri, metaGraphUri], [...graphQuads, ...metadataQuads]), options,
         (sent) => inner.replaceGraphAndSubject!(graphUri, graphQuads, metaGraphUri, subject, metadataQuads, sent), {
           kind: 'all',
-          parts: [{ kind: 'graph', graph: graphUri, quads: graphQuads }, { kind: 'subject', graph: metaGraphUri, subject, quads: metadataQuads }],
+          // The adapters replace the subject first and the graph last, which wins when both are one graph.
+          parts: [{ kind: 'subject', graph: metaGraphUri, subject, quads: metadataQuads }, { kind: 'graph', graph: graphUri, quads: graphQuads }],
         });
     if (inner.replaceSubject) this.replaceSubject = (graphUri, subject, quads, options) =>
       this.maintain('replaceSubject', { kind: 'replace-subject', graph: graphUri, subject }, options,

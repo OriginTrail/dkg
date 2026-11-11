@@ -28,10 +28,12 @@
  *   after a removal that names a blank node, whose label in a write is not
  *   the one the store reports; the read graphs are then marked after it.
  * Terms are compared as the stores take them: an IRI with or without angle
- * brackets is one IRI, and a literal never equals an IRI.
+ * brackets is one IRI, a literal is taken in its canonical form (escapes
+ * decoded), and a literal never equals an IRI.
  */
 
 import { contextGraphDataUri, contextGraphMetaUri, escapeSparqlLiteral, assertSafeIri } from '@origintrail-official/dkg-core';
+import { formatCanonicalRdfLiteralTerm, parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { Quad, QueryOptions, TripleStore } from '../triple-store.js';
 import type { ReadGraphRegistrySnapshot } from './membership.js';
 import { READ_GRAPH_REGISTRY_PREDICATES as P, registeredSubGraphName } from './registry.js';
@@ -166,7 +168,7 @@ export function registryFactsAfter(
       case 'match':
         next = next.filter((fact) => !(fact.graph === part.graph && (part.subject === undefined || fact.subject === iriTerm(part.subject))
           && (part.predicate === undefined || fact.predicate === iriTerm(part.predicate))
-          && (part.object === undefined || sameObject(fact.object, iriTerm(part.object)))));
+          && (part.object === undefined || sameObject(fact.object, storedTerm(part.object)))));
         return;
       case 'prefix':
         next = next.filter((fact) => !(fact.graph === part.graph && fact.subject.startsWith(part.prefix)));
@@ -199,10 +201,16 @@ export function registryFactsAfter(
  * write is not the store's). IRIs compare exactly, and never equal a literal.
  */
 export function isExactRegistryWrite(contextGraphId: string, write: ReadGraphRegistryWrite): boolean {
+  // A literal that does not parse cannot be put in the form the store reports.
+  const unreadable = (quads: readonly Quad[]) => ownerFactsAmong(contextGraphId, quads)
+    .some((fact) => fact.object.startsWith('"') && parseRdfLiteralTerm(fact.object) === null);
   switch (write.kind) {
-    case 'quads': return !ownerFactsAmong(contextGraphId, write.removed).some((fact) => isComparedLoosely(fact.subject) || isComparedLoosely(fact.object));
+    case 'quads':
+      return !ownerFactsAmong(contextGraphId, write.removed).some((fact) => isComparedLoosely(fact.subject) || isComparedLoosely(fact.object))
+        && !unreadable(write.added);
     case 'match': return ![write.subject, write.object].some((term) => term !== undefined && isComparedLoosely(term));
-    case 'subject': return !isComparedLoosely(write.subject);
+    case 'subject': return !isComparedLoosely(write.subject) && !unreadable(write.quads);
+    case 'graph': return !unreadable(write.quads);
     case 'all': return write.parts.every((part) => isExactRegistryWrite(contextGraphId, part));
     default: return true;
   }
@@ -262,7 +270,7 @@ export function sameRegistry(left: ReadGraphRegistrySnapshot, right: ReadGraphRe
 /** The quads that are registry facts: any of the registry predicates, with a class object for `rdf:type`. */
 function registryFactsAmong(quads: readonly Quad[]): ReadGraphRegistryFact[] {
   return quads.flatMap((quad) => {
-    const fact = { graph: quad.graph, subject: iriTerm(quad.subject), predicate: iriTerm(quad.predicate), object: iriTerm(quad.object) };
+    const fact = { graph: quad.graph, subject: iriTerm(quad.subject), predicate: iriTerm(quad.predicate), object: storedTerm(quad.object) };
     return isRegistryPredicate(fact.predicate, fact.object) && registryOwnersOfGraph(fact.graph).length > 0 ? [fact] : [];
   });
 }
@@ -301,7 +309,7 @@ function isChildFact(fact: ReadGraphRegistryFact): boolean {
 /** A cached fact and a quad name the same triple. */
 function sameFact(fact: ReadGraphRegistryFact, quad: Quad): boolean {
   return fact.graph === quad.graph && fact.subject === iriTerm(quad.subject) && fact.predicate === iriTerm(quad.predicate)
-    && sameObject(fact.object, iriTerm(quad.object));
+    && sameObject(fact.object, storedTerm(quad.object));
 }
 
 /**
@@ -319,6 +327,17 @@ function sameObject(left: string, right: string): boolean {
 /** An IRI as the stores and the registry query give it: without angle brackets, which the adapters accept too. */
 function iriTerm(term: string): string {
   return term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term;
+}
+
+/**
+ * A term as the stores report it: an IRI without angle brackets, and a
+ * literal in canonical form, its escapes decoded (`"\u0064ocs"` is `"docs"`).
+ * A literal that does not parse stays as written.
+ */
+function storedTerm(term: string): string {
+  if (!term.startsWith('"')) return iriTerm(term);
+  const literal = parseRdfLiteralTerm(term);
+  return literal ? formatCanonicalRdfLiteralTerm(literal) : term;
 }
 
 function lexical(term: string): string {
