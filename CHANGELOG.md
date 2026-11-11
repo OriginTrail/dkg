@@ -4,8 +4,44 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+## [10.1.1] - Unreleased
+
+10.1.1 is the first 10.1 release for mainnet: nodes moving from 10.0.27
+also get everything in 10.1.0 below. It fixes problems found while 10.1.0
+ran on testnet, in the Marketplace, the MCP server and the public catalog,
+and gives the node UI a new design system.
+
+### Node UI
+
+- The node UI has one design system, in dark and light themes: colour,
+  type, spacing and corner sizes all come from shared tokens. Each colour
+  means one thing. The memory layers are slate (Working Memory), cyan
+  (Shared Working Memory) and purple (Verifiable Memory), and everything
+  else is neutral.
+- Tabs behave like browser tabs, and pages share one header, breadcrumbs
+  and navigation.
+- Every view reads a Verifiable Memory receipt's on-chain evidence through
+  one shared model, so they all show the same receipt.
+- The wording is plainer: it says what the node does for its user rather
+  than how it is built.
+- Publisher Conviction Accounts are easier to follow on the Dashboard,
+  Settings and PCA screens, and a "What is a PCA?" dialog explains them in
+  the app.
+- A reply in the agent panel finishes even when the panel is closed while
+  it streams.
+- The Marketplace section follows the light and dark themes like the rest
+  of the app.
+
 ### Fixed
 
+- A seller can serve tool calls on an OpenAI reasoning model that takes
+  function tools on chat completions only with no reasoning. Set
+  `marketplace.seller.services[].backend.reasoningEffortWithTools` to
+  `none` for that service. Calls with tools then carry
+  `reasoning_effort: "none"`, and calls without tools keep the model's own
+  reasoning. A model that refuses `none` as well takes function tools only on
+  the Responses API, so it can't serve tool calls: set `tools: false` for its
+  service, and buyers then get `tools_unsupported` instead of refused calls.
 - An error from one service's backend no longer takes a seller's other
   services away from buyers. When the backend refuses a call as made (400,
   404, 413, 415 or 422), the seller refuses it with a code buyers don't
@@ -18,22 +54,6 @@ All notable changes to the DKG V10 node are documented here. The format is based
   If the backend refuses both, the service stops offering tools until the
   node restarts, so buyers answer such calls with `tools_unsupported`
   instead of sending them.
-
-## [10.1.1] - Unreleased
-
-10.1.1 fixes problems found while 10.1.0 ran on testnet, in the
-Marketplace, the MCP server and the public catalog.
-
-### Fixed
-
-- A seller can serve tool calls on an OpenAI reasoning model that takes
-  function tools on chat completions only with no reasoning. Set
-  `marketplace.seller.services[].backend.reasoningEffortWithTools` to
-  `none` for that service. Calls with tools then carry
-  `reasoning_effort: "none"`, and calls without tools keep the model's own
-  reasoning. A model that refuses `none` as well takes function tools only on
-  the Responses API, so it can't serve tool calls: set `tools: false` for its
-  service, and buyers then get `tools_unsupported` instead of refused calls.
 - An MCP server registered by hand, with no `DKG_HOME` or workspace config
   selected, now loads the default node home's credentials, so its
   authenticated tools no longer answer `401`. An explicit home or workspace
@@ -53,12 +73,12 @@ Marketplace, the MCP server and the public catalog.
   not detect it, with the supported client locations and formats, and how
   to recover when authenticated tools answer `401`.
 
-## [10.1.0] - Unreleased
+## [10.1.0] - 2026-11-10 (testnet only)
 
 10.1.0 opens the NeuroSymbolic Marketplace on testnet, where nodes that opt
 in buy and sell inference. It also keeps publishing and recovery steady
-under load and gives the node UI a new look. This entry describes a release
-candidate; publication and production qualification are still pending.
+under load and gives the node UI a new look. It was published for testnet
+only; mainnet moves from 10.0.27 straight to 10.1.1.
 
 ### Highlights
 
