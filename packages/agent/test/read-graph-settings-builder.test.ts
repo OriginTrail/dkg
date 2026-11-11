@@ -5,11 +5,12 @@
  * `build` run checks.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { ethers } from 'ethers';
 import { MemoryLayer, createOperationContext, readGraphIri, readScope } from '@origintrail-official/dkg-core';
 import { OxigraphStore, READ_GRAPH_PLANNED_METHODS, wrapReadGraphLayer } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import { readGraphWorkloadOf } from '../src/read-graph-runtime.js';
+import { LocallySignedMockChain } from './_helpers/external-signers.js';
 
 const CG = 'read-graph-settings-build';
 const VM = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory });
@@ -28,8 +29,10 @@ describe('a node whose settings build one context graph\'s verifiable memory', (
       backend: 'oxigraph',
       readGraphs: { modes: { contextGraphs: { [CG]: { layers: { [MemoryLayer.VerifiableMemory]: 'build' } } } } },
     });
+    // A chain whose operational key the node holds, so the node has a default agent to curate and register with.
+    const wallet = new ethers.Wallet(ethers.Wallet.createRandom().privateKey);
     agent = await DKGAgent.create({
-      name: 'ReadGraphSettingsBuild', listenHost: '127.0.0.1', listenPort: 0, chainAdapter: new MockChainAdapter(), nodeRole: 'edge', store,
+      name: 'ReadGraphSettingsBuild', listenHost: '127.0.0.1', listenPort: 0, chainAdapter: new LocallySignedMockChain(wallet) as never, nodeRole: 'edge', store,
     });
     await agent.start();
     const workload = readGraphWorkloadOf(agent);
