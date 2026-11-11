@@ -152,10 +152,10 @@ describe('writing rules', () => {
   });
 
   it('finds real text in the UI', () => {
-    // Two are kept in constants (walletSurfaceCopy, ownerNote), one comes from a helper (formatJoinRequestError)
+    // One comes from a helper (formatJoinRequestError)
     // and the last from the Marketplace's text table.
     for (const known of [
-      'Retry loading agent', 'Copy UAL', 'Context graph', 'Your connected wallet isn’t needed here', 'Managed by this node',
+      'Retry loading agent', 'Copy UAL', 'Context graph', 'You don’t need to connect a wallet',
       'out-of-date network setting', 'The NS Marketplace is off on this node',
     ]) {
       expect([...allText].some((line) => line.includes(known)), known).toBe(true);

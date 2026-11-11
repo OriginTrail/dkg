@@ -72,7 +72,7 @@ export function ConvictionOverview() {
         if (cancelled) return;
         setBootstrapState({
           status: 'error',
-          error: (err as Error)?.message ?? 'Could not bootstrap wallet contract reads.',
+          error: (err as Error)?.message ?? 'Couldn’t load wallet contract details.',
         });
         initWallet();
       }
