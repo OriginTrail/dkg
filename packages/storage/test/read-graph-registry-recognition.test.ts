@@ -56,7 +56,11 @@ describe('registry facts', () => {
       { graph: meta, subject: 'urn:sg:1', predicate: R.type, object: R.subGraphClass },
       { graph: meta, subject: 'urn:sg:1', predicate: R.name, object: '"code"' },
     ];
-    const names = (facts: ReadGraphRegistryFact[] | undefined) => registrySnapshotOfFacts('w', facts ?? []).subGraphNames;
+    // A predictable write must give facts: undefined would mean the layer could not mark before it.
+    const names = (facts: ReadGraphRegistryFact[] | undefined) => {
+      expect(facts).toBeDefined();
+      return registrySnapshotOfFacts('w', facts!).subGraphNames;
+    };
     expect(names(registryFactsAfter('w', [], { kind: 'quads', added: code.map(({ graph, subject, predicate, object }) => fact(graph, subject, predicate, object)), removed: [] })))
       .toEqual(['code']);
     // A literal matches whichever form the store gave it in, and never an IRI with the same text.
@@ -392,6 +396,26 @@ describe('registry recognition in the read-graph layer', () => {
     expect(states).toEqual({ wholeVm: 'dirty', wholeSwm: 'dirty', codeVm: 'dirty', agentWm: 'dirty' });
     expect(layer.runtime.registries.facts(fixture.contextGraphId)).toBeUndefined();
     await late;
+  });
+
+  it('marks a registry deletion in the store before the delete reaches the adapter', async () => {
+    const { adapter, fixture, store, meta } = await layered();
+    const codeVm = fixture.readGraphs.codeVm;
+    await adapter.update(readGraphStateCompareAndSet(undefined, readyRow(codeVm)));
+    const storedState = async () => {
+      const result = await adapter.query(readGraphStateRowsQuery());
+      const row = parseReadGraphStateRows(result.type === 'bindings' ? result.bindings : []).rows.find((found) => found.readGraph === codeVm);
+      return `${row?.state}@${row?.generation}`;
+    };
+    const seen: string[] = [];
+    const remove = adapter.delete.bind(adapter);
+    adapter.delete = async (quads, options) => {
+      seen.push(await storedState());
+      return remove(quads, options);
+    };
+    // Without its type, `code` is no longer registered, so its read graph has no members.
+    await store.delete([fact(meta, `${fixture.root}/code`, R.type, R.subGraphClass)]);
+    expect(seen).toEqual(['dirty@2']);
   });
 
   it('marks the read graphs a sub-graph leaves dirty when its name goes', async () => {
