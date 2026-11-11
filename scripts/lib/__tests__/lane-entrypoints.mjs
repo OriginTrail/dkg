@@ -27,7 +27,8 @@ export function jobLane(job, condition) {
 // parseRequirement reads one back:
 // - lane(<lane>): that lane runs the file;
 // - evmScope(<scope>): that EVM integration scope's suites run it;
-// - build: the shared build job's own checks run it;
+// - build: the shared build job's own checks, or the repository checks job
+//   on its condition, run it;
 // - install: every job's install runs it (an install lifecycle hook): full
 //   CI, and the routing test checks the reads it cannot resolve;
 // - full: a job outside the lanes runs it: full CI;
@@ -123,8 +124,9 @@ export function requirementCoveredByPlan(text, plan, file) {
 const CONTROLLER_JOB = 'changes';
 
 // What a change to a file a job runs must select, by job: a ci.yml lane
-// job's lane; `build` for the shared build job's own checks; nothing for
-// the changes job, which runs on every pull request; `full` for every other
+// job's lane; `build` for the jobs on the shared build's run_node condition
+// (its own checks and the repository checks); nothing for the changes job,
+// which runs on every pull request; `full` for every other
 // job (the Solidity, artifact and gate jobs, push-only jobs, the EVM
 // workflow's jobs, whose runner every scope uses, and any job without a
 // condition, which may still be skipped through what it needs).
