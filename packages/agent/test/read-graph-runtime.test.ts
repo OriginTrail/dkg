@@ -4,6 +4,7 @@ import {
   CURRENT_READ_GRAPH_VERSIONS,
   OxigraphStore,
   READ_GRAPH_PLANNED_METHODS,
+  ReadGraphBuilder,
   readGraphRuntimeOf,
   readGraphLayerOf,
   readGraphStateCompareAndSet,
@@ -135,6 +136,27 @@ describe('the agent read-graph workload', () => {
     await owner.close();
     expect(owner.status()).toBeUndefined();
     await owner.close();
+  });
+
+  it('asks its builder for a pass on request once started, and nothing before start or after close', async () => {
+    const { view } = await agentView({ subscribed: [CG] });
+    const requested = vi.spyOn(ReadGraphBuilder.prototype, 'request');
+    try {
+      const owner = new ReadGraphWorkloadOwnerV1(view, {
+        logger: logger(), intervalMs: 60_000, modes: modes((key) => key.layer === MemoryLayer.VerifiableMemory),
+      });
+      owner.request();
+      expect(requested).not.toHaveBeenCalled();
+      owner.start(ctx);
+      owner.request();
+      expect(requested).toHaveBeenCalledTimes(1);
+      await owner.whenIdle();
+      await owner.close();
+      owner.request();
+      expect(requested).toHaveBeenCalledTimes(1);
+    } finally {
+      requested.mockRestore();
+    }
   });
 
   it('runs the checks beside the builder, checks every ready read graph on request, and reports both in its status', async () => {

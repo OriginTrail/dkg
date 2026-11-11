@@ -142,6 +142,11 @@ export class ReadGraphWorkloadOwnerV1 {
     return this.#builder?.whenIdle() ?? Promise.resolve();
   }
 
+  /** Run a build pass as soon as the one in progress ends, rather than at the interval. Nothing before start or after close. */
+  request(): void {
+    this.#builder?.request();
+  }
+
   /**
    * Stop the builder and the checks: no new pass, and what runs, a check run
    * on request included, is aborted and waited for. A check asked for while
