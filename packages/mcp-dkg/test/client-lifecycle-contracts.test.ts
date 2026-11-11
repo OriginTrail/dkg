@@ -368,6 +368,7 @@ describe('query compatibility and explicit lifecycle options', () => {
       verifiedGraph: '',
       assertionName: name,
       minTrust: 0 as const,
+      semantics: 'per-asset' as const,
     };
     await client.query(args);
     expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toEqual(args);

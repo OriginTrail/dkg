@@ -57,7 +57,7 @@ import {
   resolveDaemonRequestDeadlines,
   type DaemonRequestDeadlines,
 } from '@origintrail-official/dkg-core/daemon-request-deadlines';
-import type { PublicQueryResult } from '@origintrail-official/dkg-core';
+import type { PublicQueryResult, ViewQuerySemantics } from '@origintrail-official/dkg-core';
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 export type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contract.js';
 /**
@@ -1710,7 +1710,7 @@ export class ApiClient {
     sparql: string,
     contextGraphId?: string,
     opts?: QueryOptions,
-  ): Promise<{ result: QueryResult }> {
+  ): Promise<{ result: QueryResult; semantics?: ViewQuerySemantics }> {
     return this.post('/api/query', {
       sparql,
       contextGraphId,
@@ -1718,7 +1718,7 @@ export class ApiClient {
       includeSharedMemory: opts?.includeSharedMemory,
       includeContextGraphPartitions: opts?.includeContextGraphPartitions,
       includeSharedMemoryMeta: opts?.includeSharedMemoryMeta,
-      view: opts?.view,
+      view: opts?.view, semantics: opts?.semantics,
       agentAddress: opts?.agentAddress,
       assertionName: opts?.assertionName,
       subGraphName: opts?.subGraphName,
