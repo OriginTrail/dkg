@@ -7,9 +7,11 @@
 //   ENGINE=blazegraph BLAZEGRAPH_TEST_URL=http://127.0.0.1:<port>/bigdata/namespace/kb/sparql \
 //     node scripts/read-graph-statements-benchmark.mjs
 //
-// `oxigraph` runs in process. `oxigraph-server` and Blazegraph must be owned,
-// empty loopback test servers; for Blazegraph the script creates a scratch
-// namespace and removes it. SIZES, COPIES and RUNS override the defaults.
+// `oxigraph` runs in process. `oxigraph-server` and Blazegraph must be owned
+// loopback test servers. The script refuses an oxigraph-server that holds any
+// data before it writes, and empties it again at the end; for Blazegraph it
+// creates a scratch namespace and removes it. SIZES, COPIES and RUNS override
+// the defaults.
 // Prints one line per measurement, then JSON.
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
@@ -91,6 +93,12 @@ async function openOxigraphServer() {
     return text;
   };
   const query = async (sparql) => JSON.parse(await post('/query', sparql, 'application/sparql-query', 'application/sparql-results+json'));
+  // The cleanup empties the whole server, so refuse one that holds data before writing anything.
+  // sparql-scan-allow: R2 -- ASK stops at the first quad: it only checks that the scratch server is empty
+  const holdsData = (await query('ASK { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }')).boolean;
+  if (holdsData !== false) {
+    throw new Error('This benchmark needs an empty oxigraph-server: this one holds data, and the cleanup would remove it.');
+  }
   const version = (await (await fetch(new URL('/', base))).text()).match(/oxigraph[^<\s]*\s*v?([0-9.]+)/i)?.[1];
   return {
     name: `oxigraph-server${version ? ` ${version}` : ''} (local server)`,
@@ -197,11 +205,33 @@ async function measureSize(engine, size, row) {
   await time(engine, 'merged read: two-pattern join, LIMIT 10', size, () => engine.select(`SELECT ?s ?o FROM <${R}> WHERE { ?s <urn:p:3> ?o . ?s <urn:p:4> ?o2 } LIMIT 10`));
   await time(engine, 'size of the read graph (grows with the view)', size, () => engine.select(statements.readGraphSizeQuery(R)), 3);
   // Every measurement above went through maintenance: the read graph must still equal the union of its members.
+  const result = await compareWithUnion(engine);
+  if (!result.equal) throw new Error(`read graph differs from the union of its members: ${JSON.stringify(result)}`);
+  // The comparison must catch a swapped triple, which leaves both counts equal.
+  const removed = tripleOf(0, 1);
+  const stale = '<urn:bench:stale> <urn:bench:stale> <urn:bench:stale>';
+  await engine.update(`DELETE DATA { GRAPH <${R}> { ${removed} } } ;\nINSERT DATA { GRAPH <${R}> { ${stale} } }`);
+  const swapped = await compareWithUnion(engine);
+  await engine.update(`DELETE DATA { GRAPH <${R}> { ${stale} } } ;\nINSERT DATA { GRAPH <${R}> { ${removed} } }`);
+  if (swapped.equal || !swapped.missing || !swapped.extra || swapped.union !== swapped.held) {
+    throw new Error(`the comparison missed a swapped triple: ${JSON.stringify(swapped)}`);
+  }
+  if (!(await compareWithUnion(engine)).equal) throw new Error('the read graph did not return to the union of its members');
+  console.log(`${String(size).padStart(6)}  read graph equals the union of its members: ${result.held} triples; a swapped triple is caught`);
+}
+
+// Whether the read graph equals the union of its members: no member triple missing from it, no triple in it
+// that no member holds, and the same number of distinct triples.
+async function compareWithUnion(engine) {
+  const isMember = statements.renderGraphNameTest(target.membership, '?g');
   // sparql-scan-allow: R2 -- benchmark verification over its own scratch store, once per size
-  const union = await count(engine, `SELECT (COUNT(*) AS ?n) WHERE { SELECT DISTINCT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(${statements.renderGraphNameTest(target.membership, '?g')}) } }`);
+  const union = await count(engine, `SELECT (COUNT(*) AS ?n) WHERE { SELECT DISTINCT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(${isMember}) } }`);
   const held = await count(engine, statements.readGraphSizeQuery(R));
-  if (union !== held) throw new Error(`read graph holds ${held} triples, its members ${union}`);
-  console.log(`${String(size).padStart(6)}  read graph equals the union of its members: ${held} triples`);
+  // sparql-scan-allow: R2 -- benchmark verification over its own scratch store, once per size
+  const missing = await engine.ask(`ASK { GRAPH ?g { ?s ?p ?o } FILTER(${isMember}) FILTER NOT EXISTS { GRAPH <${R}> { ?s ?p ?o } } }`);
+  // sparql-scan-allow: R2 -- benchmark verification over its own scratch store, once per size
+  const extra = await engine.ask(`ASK { GRAPH <${R}> { ?s ?p ?o } FILTER NOT EXISTS { GRAPH ?g { ?s ?p ?o } FILTER(${isMember}) } }`);
+  return { union, held, missing, extra, equal: union === held && !missing && !extra };
 }
 
 async function measureCopies(engine, copies) {
