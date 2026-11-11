@@ -172,6 +172,13 @@ export interface UpdateOptions extends QueryOptions {
    * back to a lazy full rebuild).
    */
   touchedGraphs?: readonly string[];
+  /**
+   * Every named graph whose triples this UPDATE may change. A store that holds
+   * read graphs refuses an update without it, and an empty list declares that
+   * the update changes no graph's triples. Unlike `touchedGraphs`, which names
+   * only the graphs whose existence changes, this names every graph written.
+   */
+  writtenGraphs?: readonly string[];
 }
 
 export interface TripleStore {

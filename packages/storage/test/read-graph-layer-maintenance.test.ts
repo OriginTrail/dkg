@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { ReadGraphWriteRefusedError } from '../src/read-graph/read-graph-store.js';
+import { parseReadGraphStateRows, readGraphStateCompareAndSet, readGraphStateRowsQuery } from '../src/read-graph/state.js';
 import type { TripleStore } from '../src/triple-store.js';
 import {
   expectLayerUnions,
@@ -8,6 +9,7 @@ import {
   layeredStore,
   q,
   readGraphLayerConformance,
+  readyRow,
   P,
 } from './helpers/read-graph-layer-conformance.js';
 import { PlanningOxigraphStore } from './helpers/read-graph-planning-store.js';
@@ -29,6 +31,11 @@ describe('read-graph layer on embedded Oxigraph', () => {
     await expect(store.update!(text, { touchedGraphs: [member] })).rejects.toThrow(/writtenGraphs/);
     await expect(store.query(text)).rejects.toBeInstanceOf(ReadGraphWriteRefusedError);
     await expect(store.deleteByPattern({ subject: 'urn:s:1' })).rejects.toThrow(/must name its graph/);
+    // A graph name in angle brackets is read by an adapter as the graph inside them.
+    await expect(store.insert([q('urn:s:x', '"x"', `<${member}>`)])).rejects.toThrow(/bare IRI/);
+    await expect(store.dropGraph(`<${member}>`)).rejects.toThrow(/bare IRI/);
+    await expect(store.dropGraph(`<${fixture.readGraphs.wholeVm}>`)).rejects.toThrow(/bare IRI/);
+    await expect(store.update!(text, { writtenGraphs: [`<${member}>`] })).rejects.toThrow(/bare IRI/);
     const refused = await store.update!(text).catch((error: unknown) => error);
     expect(refused).toMatchObject({ code: 'READ_GRAPH_WRITE_REFUSED', outcome: 'not_started', storeOperation: 'update' });
 
@@ -51,15 +58,24 @@ describe('read-graph layer on embedded Oxigraph', () => {
         throw new Error('connection reset');
       }
     }
-    const { fixture, layer, store } = await layered(new Unsure());
-    const { wholeVm, codeVm, wholeSwm } = fixture.readGraphs;
+    const { adapter, fixture, layer, store } = await layered(new Unsure());
+    const { wholeVm, codeVm, wholeSwm, agentWm } = fixture.readGraphs;
+    // The stored rows match the mirror's, so a stored transition shows.
+    for (const readGraph of Object.values(fixture.readGraphs)) await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(readGraph)));
+    const stored = async () => {
+      const result = await adapter.query(readGraphStateRowsQuery());
+      const rows = parseReadGraphStateRows(result.type === 'bindings' ? result.bindings : []).rows;
+      return Object.fromEntries(rows.map((row) => [row.readGraph, `${row.state}@${row.generation}`]));
+    };
     await expect(store.delete([q('urn:s:3', '"v3"', fixture.graphs[3]!)])).rejects.toThrow('connection reset');
     expect(layer.runtime.mirror.get(wholeVm)).toMatchObject({ state: 'dirty', generation: 2 });
     expect(layer.runtime.mirror.get(codeVm)).toMatchObject({ state: 'dirty', generation: 2 });
     expect(layer.runtime.mirror.get(wholeSwm)).toMatchObject({ state: 'ready', generation: 1 });
+    expect(await stored()).toEqual({ [wholeVm]: 'dirty@2', [codeVm]: 'dirty@2', [wholeSwm]: 'ready@1', [agentWm]: 'ready@1' });
     // A write refused before it was sent changes no row.
     await expect(store.update!('INSERT DATA { <urn:a> <urn:b> <urn:c> }')).rejects.toBeInstanceOf(ReadGraphWriteRefusedError);
     expect(layer.runtime.mirror.get(wholeSwm)?.state).toBe('ready');
+    expect((await stored())[wholeSwm]).toBe('ready@1');
   });
 
   it('hands the adapter one plan, locked in code-point order, and restates inserted quads in the same call', async () => {

@@ -6,7 +6,7 @@ import { BlazegraphStore } from '../../src/adapters/blazegraph.js';
 import { BlazegraphNamespaceManager, blazegraphNamespaceApiUrlFromSparqlEndpoint } from '../../src/blazegraph-namespace-manager.js';
 import { guardReadGraphPartition } from '../../src/read-graph-partition-store.js';
 import { matchesGraphNameTest, readGraphMembership, type ReadGraphRegistrySnapshot } from '../../src/read-graph/membership.js';
-import { wrapReadGraphLayer, type ReadGraphStore, type ReadGraphUpdateOptions } from '../../src/read-graph/read-graph-store.js';
+import { wrapReadGraphLayer, type ReadGraphStore } from '../../src/read-graph/read-graph-store.js';
 import { CURRENT_READ_GRAPH_VERSIONS, type ReadGraphStateRow } from '../../src/read-graph/state.js';
 import { readGraphCopy } from '../../src/read-graph/statements.js';
 import type { TripleStoreConfig } from '../../src/triple-store-composition.js';
@@ -143,9 +143,9 @@ export function readGraphLayerConformance(backend: 'oxigraph' | 'blazegraph') {
         ['replaceSubjectAndInsert', () => store.replaceSubjectAndInsert!(code, 'urn:s:shared', [q('urn:s:shared', '"x"', code)],
           [q('urn:s:companion', '"c"', code)])],
         ['update', () => store.update!(`INSERT DATA { GRAPH <${vm1}> { <urn:s:u> <${P}> "u" } }`,
-          { writtenGraphs: [vm1] } as ReadGraphUpdateOptions)],
+          { writtenGraphs: [vm1] })],
         ['an update that writes no member graph', () => store.update!(`INSERT DATA { GRAPH <${child}> { <urn:s:u> <${P}> "u" } }`,
-          { writtenGraphs: [child] } as ReadGraphUpdateOptions)],
+          { writtenGraphs: [child] })],
         ...(declares('replaceAssetGroup') ? [['replaceAssetGroup', () => store.replaceAssetGroup!([{
           graphUri: vm2, graphQuads: [q('urn:s:ag', '"ag"', vm2)], metaGraphUri: meta, metadataSubject: 'urn:asset:ag', metadataQuads: [q('urn:asset:ag', '"m"', meta)],
         }])] as [string, () => Promise<unknown>]] : []),
@@ -190,7 +190,7 @@ export function readGraphLayerConformance(backend: 'oxigraph' | 'blazegraph') {
             run: (store, f) => store.update!(
               `DELETE { GRAPH <${at(f)}> { ?s ?p ?o } } WHERE { GRAPH <${at(f)}> { ?s ?p ?o FILTER(?o = "both") } } ;\n`
                 + `INSERT DATA { GRAPH <${at(f)}> { ${quads.map((quad) => `<${quad.subject}> <${P}> ${quad.object.startsWith('"') ? quad.object : `<${quad.object}>`} .`).join(' ')} } }`,
-              { writtenGraphs: [at(f)] } as ReadGraphUpdateOptions),
+              { writtenGraphs: [at(f)] }),
           })),
         );
       });

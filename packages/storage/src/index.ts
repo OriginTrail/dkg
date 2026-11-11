@@ -482,7 +482,6 @@ export {
   readGraphLayerOf,
   wrapReadGraphLayer,
   type ReadGraphStoreConfig,
-  type ReadGraphUpdateOptions,
 } from './read-graph/read-graph-store.js';
 export { readReadGraphRegistry } from './read-graph/registry.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';
