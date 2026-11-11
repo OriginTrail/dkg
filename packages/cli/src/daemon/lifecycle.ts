@@ -1794,7 +1794,9 @@ async function runDaemonInnerWithStartupOwnership(
     managedStore: managed?.storeConfig,
     changelogEnabled: Boolean(config.store?.changelog),
     changelogEraGuard: protocolStores.changelogEraGuard,
-    readGraphs: readGraphStoreSettings(queryConfig),
+    // Only a written `query` section is carried, so a node without one builds its stores exactly as before.
+    readGraphs: config.query === undefined ? undefined : readGraphStoreSettings(queryConfig),
+    dataDir: dkgDir(),
   });
 
   const agentConfig: DKGAgentConfig = {

@@ -5,10 +5,11 @@ import { readGraphStoreSettings, resolveQueryConfig } from './read-graphs-config
 
 /**
  * The store configuration of a publisher runtime or inspector built outside the daemon (`dkg publisher run`). Like every store object the node builds over
- * its backend, it carries the node's read-graph settings. `readOnly`: an embedded Oxigraph store is opened read-only and its file is never written (#3551).
+ * its backend, it carries the node's read-graph settings when config.json has a `query` section. `readOnly`: an embedded Oxigraph store is opened
+ * read-only and its file is never written (#3551).
  */
 export function publisherStoreConfig(dataDir: string, config: DkgConfig, readOnly = false): TripleStoreConfig {
-  const readGraphs = readGraphStoreSettings(resolveQueryConfig(config.query));
+  const readGraphs = config.query === undefined ? undefined : readGraphStoreSettings(resolveQueryConfig(config.query));
   const storeConfig = config.store;
   if (storeConfig) {
     return {

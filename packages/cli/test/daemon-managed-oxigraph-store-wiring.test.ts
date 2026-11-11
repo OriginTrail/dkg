@@ -116,4 +116,15 @@ describe('daemon managed Oxigraph store construction', () => {
       await store.close();
     }
   });
+
+  it('gives the default embedded store the settings of a written query section, and nothing else changes without one', () => {
+    const readGraphs: ReadGraphStoreConfig = { modes: { default: 'build' } };
+    const base = { runtimeStore: undefined, managedStore: undefined, changelogEnabled: false, changelogEraGuard: undefined };
+    expect(buildAgentRuntimeStoreConfig({ ...base, readGraphs, dataDir: '/tmp/dkg-home' })).toEqual({
+      backend: 'oxigraph-worker',
+      options: { path: '/tmp/dkg-home/store.nq' },
+      readGraphs,
+    });
+    expect(buildAgentRuntimeStoreConfig({ ...base, dataDir: '/tmp/dkg-home' })).toBeUndefined();
+  });
 });

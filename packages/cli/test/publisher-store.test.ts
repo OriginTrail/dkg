@@ -26,12 +26,17 @@ describe('the store of a publisher runtime outside the daemon', () => {
   });
 
   it('carries them for the default embedded store too, read-only when asked', () => {
-    const built = publisherStoreConfig(DATA_DIR, config({}), true);
+    const built = publisherStoreConfig(DATA_DIR, config({ query: { viewSemantics: 'merged' } }), true);
     expect(built).toMatchObject({
       backend: 'oxigraph-worker',
       options: { path: join(DATA_DIR, 'store.nq'), readOnly: true },
-      readGraphs: { modes: { default: 'off' }, viewSemantics: { default: 'per-asset' } },
+      readGraphs: { modes: { default: 'off' }, viewSemantics: { default: 'merged' } },
     });
+  });
+
+  it('carries no settings without a query section, so it never resets those of the backend', () => {
+    expect(publisherStoreConfig(DATA_DIR, config({})).readGraphs).toBeUndefined();
+    expect(publisherStoreConfig(DATA_DIR, config({ store: { backend: 'sparql-http' } })).readGraphs).toBeUndefined();
   });
 
   it('refuses a query section with an offending key', () => {
