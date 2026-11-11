@@ -1,3 +1,5 @@
+import { normalizeProjectRows, type ProjectRow } from './project-row.js';
+export type { ProjectRow } from './project-row.js';
 import type { QueryArgs } from './query-args.js';
 /**
  * Thin HTTP client for the DKG daemon. Mirrors the shape of
@@ -104,15 +106,6 @@ function normalizeDaemonQueryResult(result: unknown, sparql: string): SparqlResu
     };
   }
   return { type: 'bindings', bindings };
-}
-
-export interface ProjectRow {
-  id: string;
-  name?: string;
-  description?: string;
-  role?: string;
-  layer?: string;
-  [k: string]: unknown;
 }
 
 export interface SubGraphRow {
@@ -534,11 +527,11 @@ export class DkgClient {
 
   // ── Listing endpoints ──────────────────────────────────────────
   async listProjects(): Promise<ProjectRow[]> {
-    const response = await this.request<{ contextGraphs?: ProjectRow[] }>(
+    const response = await this.request<{ contextGraphs?: unknown }>(
       'GET',
       '/api/context-graph/list',
     );
-    return response.contextGraphs ?? [];
+    return normalizeProjectRows(response.contextGraphs);
   }
 
   async listSubGraphs(contextGraphId: string): Promise<SubGraphRow[]> {
