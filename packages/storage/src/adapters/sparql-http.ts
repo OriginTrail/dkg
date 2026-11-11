@@ -7,6 +7,7 @@ import { refuseWithheldGraphQuery } from '../withheld-graph-query.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import { prepareAtomicGraphReplace, prepareAtomicGraphAndSubjectReplace, prepareAtomicSubjectReplace, prepareAtomicSubjectAndInsert } from './atomic-write-plans.js';
 import { SparqlHttpResponseError, isDefinitiveSparqlUpdateRejectionV1 } from './sparql-http-response-error.js';
+import { sparqlHttpReadGraphCapabilities, sparqlHttpUpdateRequest, type ReadGraphCapableAdapter } from './sparql-http-read-graphs.js';
 /**
  * SparqlHttpStore — TripleStore adapter for any SPARQL 1.1 Protocol endpoint.
  *
@@ -221,11 +222,12 @@ export interface SparqlHttpStoreOptions {
   now?: () => number;
 }
 
-export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapability {
+export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapability, ReadGraphCapableAdapter {
   readonly queryResponseLimitMode = 'pre-materialization' as const;
   readonly writeRevisionCoverage = 'process-local' as const;
   readonly graphEnumerationVisibility = (graph: string): boolean => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph);
   readonly queryCancellation = 'interruptible' as const;
+  get readGraphCapabilities() { return sparqlHttpReadGraphCapabilities(this.supportsConsistency('atomic-update')); }
   /**
    * RFC-64 stream capability installed only for a storage-created managed
    * Oxigraph runtime configuration, never for an arbitrary SPARQL URL.
@@ -1031,9 +1033,10 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       operation: StoreOperation;
     };
   }): Promise<void> {
+    const update = sparqlHttpUpdateRequest(opts.update, opts.options, opts.operation, this.readGraphCapabilities);
     let lifecycle: GraphWriteLifecycle | undefined;
     try {
-      await this.postUpdate(opts.update, opts.options, opts.operation, () => {
+      await this.postUpdate(update, opts.options, opts.operation, () => {
         // Begin the semantic write only after all pre-dispatch refusals.
         lifecycle = this.writeGen.beginWrite(opts.scope);
         this.invalidateListGraphsCache();
