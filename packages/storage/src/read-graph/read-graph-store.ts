@@ -91,7 +91,7 @@ import {
 import { readGraphBackendIdentity, readGraphBackendRuntime, type ReadGraphBackendRuntime } from './runtime.js';
 import { noteUnstoredReadGraphMark } from './mark-journal.js';
 import { syncReadGraphRuntimeWithRecovery } from './recovery.js';
-import { nextReadGraphState, readGraphStateMarkDirty } from './state.js';
+import { nextReadGraphState, readGraphStateMarkDirty, type ReadGraphStateRow } from './state.js';
 import type { ReadGraphTarget } from './statements.js';
 import {
   joinReadGraphWriteChanges,
@@ -155,6 +155,16 @@ export class ReadGraphMaintenanceError extends Error implements StoreOperationOu
 interface MaintainedReadGraph {
   readonly target: ReadGraphTarget;
   readonly members: ReadonlySet<string>;
+}
+
+/**
+ * Journal a dirty mark the store did not take, from the mirror's row before
+ * the mark. A row the mirror already held dirty can be one mark ahead of a
+ * stored row that still says ready, after a registry fence or a mark the
+ * store refused earlier, so the generation before it is journaled.
+ */
+function noteUnstoredDirtyMark(runtime: ReadGraphBackendRuntime, row: ReadGraphStateRow): void {
+  noteUnstoredReadGraphMark(runtime, row.readGraph, row.state === 'dirty' ? row.generation - 1 : row.generation);
 }
 
 /** The read-graph layer over one adapter. See the module documentation. */
@@ -566,19 +576,24 @@ export class ReadGraphStore implements TripleStoreDecorator {
    * Mark read graphs dirty: in the mirror first, then in the store from
    * whatever row it holds, so a mark an earlier attempt could not store is
    * sent again. A mark the store does not take throws; before a write
-   * (`unsent`, its operation) the write is refused instead.
+   * (`unsent`, its operation) the write is refused instead, and otherwise the
+   * journal keeps the mark for a start-up.
    */
   private async markDirtyStrict(readGraphs: readonly string[], unsent?: StoreOperation): Promise<void> {
     // An explicit mark ends any fence a registry write set on these read graphs: they stay out of service.
     endReadGraphFences(this.runtime, readGraphs);
     const rows = readGraphs.flatMap((readGraph) => this.runtime.mirror.get(readGraph) ?? []);
     for (const row of rows) if (row.state !== 'dirty') this.runtime.mirror.set(nextReadGraphState(row, { kind: 'mark-dirty' })!);
-    for (const { readGraph } of rows) {
+    for (const row of rows) {
       try {
         if (!this.innerStore.update) throw new Error('its adapter has no update()');
-        await this.innerStore.update(readGraphStateMarkDirty(readGraph), { source: 'storage.readGraphDirtyMark' });
+        await this.innerStore.update(readGraphStateMarkDirty(row.readGraph), { source: 'storage.readGraphDirtyMark' });
       } catch (error) {
-        if (unsent === undefined) throw error;
+        // The registry changed already, by a write or apart from one: a start-up must not keep the stored row ready.
+        if (unsent === undefined) {
+          noteUnstoredDirtyMark(this.runtime, row);
+          throw error;
+        }
         const reason = error instanceof Error ? error.message : String(error);
         throw new ReadGraphWriteRefusedError(unsent, `a read graph it changes could not be marked dirty: ${reason}`);
       }
@@ -630,10 +645,10 @@ export class ReadGraphStore implements TripleStoreDecorator {
       if (!row) continue;
       if (row.state !== 'dirty') this.runtime.mirror.set(nextReadGraphState(row, { kind: 'mark-dirty' })!);
       // From whatever row is stored, and even when the mirror already says dirty: an earlier mark may not have
-      // reached the store. If this request fails as well, a rebuild starts from the stored row, and the journal
-      // keeps the mark for a start-up (an earlier failure kept it already).
+      // reached the store, and a fence never does. If this request fails as well, a rebuild starts from the
+      // stored row, and the journal keeps the mark for a start-up.
       await this.innerStore.update?.(readGraphStateMarkDirty(readGraph), { source: 'storage.readGraphDirtyMark' })
-        .catch(() => { if (row.state !== 'dirty') noteUnstoredReadGraphMark(this.runtime, readGraph, row.generation); });
+        .catch(() => noteUnstoredDirtyMark(this.runtime, row));
     }
   }
 
