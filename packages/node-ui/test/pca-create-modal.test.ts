@@ -361,7 +361,12 @@ describe('CreatePcaModal', () => {
       React.createElement(CreatePcaModal, createModalProps()),
     );
     await waitForText(container, 'is on another PCA you own');
-    expect(container.querySelector('[data-testid="pca-b1-own-bound"]')).toBeTruthy();
+    const ownBound = container.querySelector('[data-testid="pca-b1-own-bound"]')!;
+    expect(ownBound).toBeTruthy();
+    // Creating doesn't move wallets: only approving them on the new PCA afterwards does.
+    expect(ownBound.textContent).toContain('approving it on the new PCA in the next step moves it off the other one');
+    expect(ownBound.textContent).toContain('Creating the PCA on its own doesn’t move anything');
+    expect(ownBound.textContent).not.toMatch(/creating this one moves/i);
     // Not the zero-coverage alarm (the wallet IS self-coverable via migration).
     expect(container.querySelector('[data-testid="pca-b1-zero-coverage"]')).toBeNull();
     await unmount();

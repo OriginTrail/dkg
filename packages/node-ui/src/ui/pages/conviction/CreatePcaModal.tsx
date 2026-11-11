@@ -571,8 +571,8 @@ export function CreatePcaModal({
           <div className="v10-modal-tip ds-card-nested" role="status" data-testid="pca-b1-preview">
             {b1.sponsorBound.length} of this node’s wallets
             {b1.sponsorBound.length === 1 ? ' is' : ' are'} on someone else’s PCA, which already discounts
-            {b1.sponsorBound.length === 1 ? ' it, so it stays' : ' them, so they stay'} there. This node’s other
-            publishing wallets go on the new PCA.
+            {b1.sponsorBound.length === 1 ? ' it, so it stays' : ' them, so they stay'} there. You can approve this
+            node’s other publishing wallets on the new PCA in the next step.
           </div>
         )}
         {/* Own-bound migration must be disclosed: these wallets are MOVED off a PCA this node
@@ -581,9 +581,10 @@ export function CreatePcaModal({
           <div className="v10-modal-warning ds-card-nested" role="status" data-testid="pca-b1-own-bound">
             <StatusGlyph tone="warning" /> {b1.ownBound.length} of this node’s wallets
             {b1.ownBound.length === 1 ? ' is' : ' are'} on another PCA you own. A wallet can only be on one PCA,
-            so creating this one <strong>moves</strong> {b1.ownBound.length === 1 ? 'it' : 'them'} to the new PCA.
-            Your other PCA then stops discounting {b1.ownBound.length === 1 ? 'that wallet' : 'those wallets'}, but
-            its committed TRAC is still used up until it ends. Only go ahead if you’re replacing the other PCA.
+            so approving {b1.ownBound.length === 1 ? 'it' : 'them'} on the new PCA in the next step <strong>moves</strong>{' '}
+            {b1.ownBound.length === 1 ? 'it' : 'them'} off the other one. Creating the PCA on its own doesn’t move
+            anything. Your other PCA then stops discounting {b1.ownBound.length === 1 ? 'that wallet' : 'those wallets'},
+            but its committed TRAC is still used up until it ends. Only go ahead if you’re replacing the other PCA.
           </div>
         )}
 
