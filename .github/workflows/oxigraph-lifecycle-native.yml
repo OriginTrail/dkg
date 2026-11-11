@@ -53,6 +53,8 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Set up semantic runtime build tools
+        uses: ./.github/actions/setup-semantic-runtime
       - name: Build runtime packages
         run: node scripts/build-runtime-packages.mjs
       - name: Run the real-process Oxigraph lifecycle tests

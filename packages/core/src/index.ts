@@ -543,8 +543,8 @@ export {
 } from './node-timer.js';
 export * from './query-catalog-parameters.js';
 export * from './query-catalog.js';
-
 export { checkFdLimit, type FdLimitLogLevel } from './fd-limit.js';
+export { canonicalizeJson, type CanonicalJsonValue } from './canonical-json.js';
 
 export * from './bulk-graph-wire.js';
 export * from './bulk-graph-transport.js';
@@ -554,4 +554,6 @@ export { ProtocolReadLimitError } from './bounded-stream-read.js';
 export * from './async-admission-usage.js';
 export * from './async-admission-diagnostic-context.js';
 
+// Exact store readback form; unlike the hash canonicalizer, rejects precision loss.
+export { canonicalizeAuthorSealStoreXsdDateTimeValue as canonicalizeExactStoreDateTime } from './xsd-date-time.js';
 export { canonicalContextGraphAgentDid, contextGraphBelongsToAgent, type ContextGraphMembership } from './context-graph-membership.js';
