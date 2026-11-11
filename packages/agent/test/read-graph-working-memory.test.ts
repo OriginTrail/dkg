@@ -18,6 +18,7 @@ import { readGraphRuntimeOf, recordedWorkingMemoryIdentity, type ReadGraphModes 
 import { DKGAgent } from '../src/index.js';
 import { ReadGraphWorkloadOwnerV1 } from '../src/read-graph-runtime.js';
 import { LocallySignedMockChain, silentLog } from './_helpers/external-signers.js';
+import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 
 const CG = 'working-memory-read-graphs';
 const NOTE = 'urn:wm:note';
@@ -33,10 +34,13 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
-/** A node over embedded Oxigraph in `dataDir`, serving working and shared working memory from read graphs. */
-async function startNode(dataDir: string, wallet: ethers.Wallet): Promise<DKGAgent> {
+/**
+ * A node over embedded Oxigraph in `dataDir`, serving working and shared working memory from read graphs. The KA number
+ * allocator is the daemon's, which is durable: a restart shares it.
+ */
+async function startNode(dataDir: string, wallet: ethers.Wallet, kaNumberAllocator: ReturnType<typeof makeTestKaNumberAllocator>): Promise<DKGAgent> {
   const started = await DKGAgent.create({
-    name: 'ReadGraphWorkingMemory', dataDir, listenHost: '127.0.0.1', listenPort: 0, nodeRole: 'edge',
+    name: 'ReadGraphWorkingMemory', dataDir, listenHost: '127.0.0.1', listenPort: 0, nodeRole: 'edge', kaNumberAllocator,
     chainAdapter: new LocallySignedMockChain(wallet) as never,
     storeConfig: { backend: 'oxigraph', options: { path: join(dataDir, 'store.nq') }, readGraphs: { modes: MODES } },
   });
@@ -68,7 +72,8 @@ describe('working-memory read graphs on embedded Oxigraph', () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-read-graph-wm-'));
     dirs.push(dataDir);
     const wallet = new ethers.Wallet(ethers.Wallet.createRandom().privateKey);
-    node = await startNode(dataDir, wallet);
+    const allocator = makeTestKaNumberAllocator();
+    node = await startNode(dataDir, wallet, allocator);
     const a = node.getDefaultAgentAddress()!;
     const b = (await node.registerAgent('second-agent')).agentAddress;
     await node.createContextGraph({ id: CG, name: CG, description: 'working-memory read graphs' });
@@ -98,7 +103,7 @@ describe('working-memory read graphs on embedded Oxigraph', () => {
 
     // Restarted under the same identity, the read graphs stay ready and answer at once.
     await node.stop();
-    node = await startNode(dataDir, wallet);
+    node = await startNode(dataDir, wallet, allocator);
     expect([stateOf(node, wm(a)), stateOf(node, wm(b)), stateOf(node, SWM)]).toEqual(['ready', 'ready', 'ready']);
     expect(await notes(node, a, 'merged')).toEqual(['"peer"']);
     expect(await notes(node, b, 'merged')).toEqual(['"b"']);
