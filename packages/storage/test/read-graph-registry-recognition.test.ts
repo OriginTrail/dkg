@@ -313,7 +313,19 @@ describe('registry recognition in the read-graph layer', () => {
 
   it('registers a sub-graph named by a blank node, marking before the insert and reading the registry after it', async () => {
     const { adapter, store, meta, fixture, layer, states } = await layered();
+    const wholeVm = fixture.readGraphs.wholeVm;
+    await adapter.update(readGraphStateCompareAndSet(undefined, readyRow(wholeVm)));
+    const seen: string[] = [];
+    const insert = adapter.insert.bind(adapter);
+    adapter.insert = async (quads, options) => {
+      const result = await adapter.query(readGraphStateRowsQuery());
+      const row = parseReadGraphStateRows(result.type === 'bindings' ? result.bindings : []).rows.find((found) => found.readGraph === wholeVm);
+      seen.push(`${row?.state}@${row?.generation}`);
+      return insert(quads, options);
+    };
     await store.insert([fact(meta, '_:sg', R.type, R.subGraphClass), fact(meta, '_:sg', R.name, '"docs"')]);
+    // Stored dirty before the registration reached the adapter, not only after the registry was read again.
+    expect(seen).toEqual(['dirty@2']);
     expect((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames).toEqual(['code', 'docs']);
     expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
     expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
@@ -416,6 +428,14 @@ describe('registry recognition in the read-graph layer', () => {
     // Without its type, `code` is no longer registered, so its read graph has no members.
     await store.delete([fact(meta, `${fixture.root}/code`, R.type, R.subGraphClass)]);
     expect(seen).toEqual(['dirty@2']);
+  });
+
+  it('reads the registry again after a name with a datatype the store may write in another form', async () => {
+    const { adapter, store, meta, fixture, layer } = await layered();
+    // The store keeps an integer in its canonical form: this registers `1`, not `01`.
+    await store.insert([fact(meta, 'urn:asset:n', R.authenticatedSubGraphName, '"01"^^<http://www.w3.org/2001/XMLSchema#integer>')]);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames)
+      .toEqual((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames);
   });
 
   it('marks the read graphs a sub-graph leaves dirty when its name goes', async () => {

@@ -204,9 +204,11 @@ export function registryFactsAfter(
  * store makes a fresh node. IRIs compare exactly, and never equal a literal.
  */
 export function isExactRegistryWrite(contextGraphId: string, write: ReadGraphRegistryWrite): boolean {
-  // A literal that does not parse cannot be put in the form the store reports.
+  // A literal that does not parse cannot be put in the form the store reports, and a store may give one with a
+  // datatype other than a string another lexical form (`"01"^^xsd:integer` is kept as `"1"`).
   const unreadable = (quads: readonly Quad[]) => ownerFactsAmong(contextGraphId, quads)
-    .some((fact) => fact.object.startsWith('"') && parseRdfLiteralTerm(fact.object, { combineSurrogatePairs: true }) === null);
+    .some((fact) => fact.object.startsWith('"')
+      && (parseRdfLiteralTerm(fact.object, { combineSurrogatePairs: true }) === null || /"\^\^<[^>]*>$/.test(fact.object)));
   // A removal is judged by its predicate alone: a SPARQL adapter deletes a blank-node term as a variable,
   // so a type removal whose object is a blank node can remove a registration type.
   // So is one that names an IRI in angle brackets, which the adapters do not all delete: the embedded engine skips it.
