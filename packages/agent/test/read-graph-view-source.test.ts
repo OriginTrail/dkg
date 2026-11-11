@@ -5,6 +5,9 @@ import {
   CURRENT_READ_GRAPH_VERSIONS,
   OxigraphStore,
   READ_GRAPH_PLANNED_METHODS,
+  parseReadGraphStateRows,
+  readGraphStateCompareAndSet,
+  readGraphStateRowsQuery,
   workingMemoryIdentityRule,
   wrapReadGraphLayer,
   type ReadGraphStoreConfig,
@@ -66,9 +69,21 @@ describe('the read-graph source of merged view queries', () => {
     const store = layered({});
     const wm = (agentAddress: string, contextGraphId = 'notes') =>
       readGraphIri({ scope: readScope(contextGraphId), layer: MemoryLayer.WorkingMemory, agentAddress });
-    const ready = (readGraph: string) => ({ readGraph, state: 'ready' as const, generation: 1, ruleVersion: 1, builderVersion: 1 });
+    const ready = (readGraph: string) => ({
+      readGraph, state: 'ready' as const, generation: 1,
+      ruleVersion: CURRENT_READ_GRAPH_VERSIONS.ruleVersion, builderVersion: CURRENT_READ_GRAPH_VERSIONS.builderVersion,
+    });
     const kept = [wm(AGENT), wm(OTHER), wm(THIRD), readGraphIri(vm('notes'))];
-    for (const readGraph of kept) store.runtime.mirror.set(ready(readGraph));
+    // Each row is in the mirror and stored, as the builder leaves a ready read graph.
+    for (const readGraph of kept) {
+      store.runtime.mirror.set(ready(readGraph));
+      await store.innerStore.update!(readGraphStateCompareAndSet(undefined, ready(readGraph)));
+    }
+    const storedStates = async () => {
+      const result = await store.innerStore.query(readGraphStateRowsQuery());
+      const { rows } = parseReadGraphStateRows(result.type === 'bindings' ? result.bindings : []);
+      return kept.map((readGraph) => rows.find((row) => row.readGraph === readGraph)?.state);
+    };
     const states = () => kept.map((readGraph) => store.runtime.mirror.get(readGraph)?.state);
 
     await installReadGraphWorkingMemoryIdentity(store, { defaultAgentAddress: AGENT, peerId: PEER });
@@ -90,11 +105,13 @@ describe('the read-graph source of merged view queries', () => {
     expect(store.runtime.workingMemoryIdentity.ownerOf(PEER)).toBe(OTHER);
     expect(states()).toEqual(['dirty', 'dirty', 'ready', 'ready']);
     expect(update).not.toHaveBeenCalled();
+    expect(await storedStates()).toEqual(['ready', 'ready', 'ready', 'ready']);
     release();
     await held;
     await installing;
     // The marks reach the store under each read graph's lock.
     expect(update).toHaveBeenCalledTimes(2);
+    expect(await storedStates()).toEqual(['dirty', 'dirty', 'ready', 'ready']);
     expect(states()).toEqual(['dirty', 'dirty', 'ready', 'ready']);
     await expect(installReadGraphWorkingMemoryIdentity(new OxigraphStore(), { peerId: PEER })).resolves.toBeUndefined();
   });
@@ -160,7 +177,9 @@ describe('the agent', () => {
       await vi.waitFor(async () => {
         const report = await readableViewSemanticsDeltaReport(agent!);
         expect(report).toMatchObject([{ contextGraphId: 'sampled' }]);
-        expect(report[0]!.samples + report[0]!.skipped).toBeGreaterThan(0);
+        // A measured sample: both answers read and classified, none skipped.
+        expect(report[0]!.samples).toBeGreaterThan(0);
+        expect(report[0]!.skipped).toBe(0);
       });
     } finally {
       random.mockRestore();
