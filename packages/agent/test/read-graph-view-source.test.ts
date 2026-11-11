@@ -66,6 +66,8 @@ describe('the agent', () => {
       name: 'ReadGraphSource', listenHost: '127.0.0.1', listenPort: 0, chainAdapter: new MockChainAdapter(), nodeRole: 'edge', store,
     });
     await agent.start();
+    // Context graphs the node holds: on one it holds nothing of, merged gets an empty answer before any read-graph state.
+    for (const id of ['served', 'built']) await agent.createContextGraph({ id, name: id, description: 'read-graph source test' });
     const merged = (contextGraphId: string) => agent!.query('SELECT ?s WHERE { ?s ?p ?o }', {
       contextGraphId, view: 'verifiable-memory', semantics: 'merged',
     });
