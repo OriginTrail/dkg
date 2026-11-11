@@ -9,7 +9,6 @@ import { EmptyState, StatStrip, toneForLayer } from '../../../components/Context
 import { useVmPublishGate } from '../../../pages/conviction/useVmPublishGate.js';
 import { PublishEligibilityChipView } from '../../../pages/conviction/PublishEligibilityChip.js';
 import { PcaPrimerLink } from '../../../pages/conviction/PcaPrimer.js';
-import { useNoPcaCoverage } from '../../../pages/conviction/useNoPcaCoverage.js';
 import { DiscountAppliedBadge } from '../../../components/Pca/index.js';
 import { X } from 'lucide-react';
 import { StatusGlyph } from '../../../components/ds/Badge.js';
@@ -261,13 +260,10 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
   );
 }
 
-/** No PCA tracked: says this publish pays the full TRAC fee and offers the primer. Shown only
- *  once the chain confirms no publishing wallet is on any PCA (tracked or not), so a sponsor's
- *  untracked PCA never gets a false full-fee claim. Hidden while checking, on a failed check
- *  and on networks without PCAs. Its own component so the check only runs when it could show. */
+/** Says this publish pays the full TRAC fee and offers the primer. Presentation only: the
+ *  CTA renders it when `useVmPublishGate`'s `fullFeeConfirmed` is true (nothing tracked and
+ *  the shared eligibility read confirmed no signing wallet is on any PCA). */
 function PcaFeeNote() {
-  const noCoverage = useNoPcaCoverage();
-  if (!noCoverage) return null;
   return (
     <p className="v10-pca-fee-note" data-testid="pca-fee-note">
       <span>This publish pays the full TRAC fee. A PCA can cut it by up to 75%.</span>
@@ -340,7 +336,9 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
           {/* S5 — the PCA fall-through chip, fed STRAIGHT from the gate's single eligibility
               read (no prop re-listing). id=verdictId so the button can reference it. Shown
               only when a PCA is tracked. */}
-          {gate.chipVisible ? <PublishEligibilityChipView {...gate.eligibility} id={verdictId} /> : <PcaFeeNote />}
+          {gate.chipVisible
+            ? <PublishEligibilityChipView {...gate.eligibility} id={verdictId} />
+            : gate.fullFeeConfirmed && <PcaFeeNote />}
           {/* SR-only cause for the policy gate — referenced by aria-describedby so the
               announced reason matches the visual state. */}
           {gate.blocked && <span id={reasonId} className="v10-sr-only">{gate.reason}</span>}
