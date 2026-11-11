@@ -13,6 +13,7 @@ export {
   isQueryResultTooLargeError,
   type QueryResultTooLargeErrorLike,
 } from './query-result-too-large-error.js';
+export { encryptionKeyEnrollmentPayload, type EncryptionKeyEnrollment } from './encryption-key-enrollment.js';
 export {
   authorityIndexTrustDomain,
   planAuthorityIndexBootstrap,

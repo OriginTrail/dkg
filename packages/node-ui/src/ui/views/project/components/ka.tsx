@@ -1,10 +1,12 @@
-import React, { useMemo, useState, Suspense } from 'react';
-import { promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublish, partialPublishWarning, PARTIAL_PUBLISH_STATUS_SUFFIX, type PromoteOutcome, type PublishResult } from '../../../api.js';
+import React, { lazy, useEffect, useMemo, useState, Suspense } from 'react';
+import { promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublish, partialPublishWarning, PARTIAL_PUBLISH_STATUS_SUFFIX, type SemanticMemoryLayer, type PromoteOutcome, type PublishResult } from '../../../api.js';
 import { canonicalEntityUri, isFirstClassEntity, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext, type AgentSummary } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
+import { JsonViewer, parseJsonContainer } from '../../../components/common/JsonViewer.js';
+import { CodeBlock } from '../../../components/chat/CodeBlock.js';
 import { VerifiedIdentityBanner } from '../../../components/VerifiedIdentityBanner.js';
 import { GenUIEntityPanel } from '../../../genui/index.js';
 import { memoryGraphLabels } from '../../../lib/memoryLabels.js';
@@ -15,8 +17,9 @@ import { LayerBadge, LayerGlyph, StatusGlyph } from '../../../components/ds/Badg
 import { Loading } from '../../../components/ds/Loading.js';
 import { Breadcrumbs } from '../../../components/ds/Breadcrumbs.js';
 import { useContextGraphCrumb } from '../../../hooks/useContextGraphCrumb.js';
+import { SR_PROGRAM, SemanticProgramPanel } from './semantic-program-panel.js';
 
-// ─── KA Detail View (split-pane: content+triples+graph | provenance) ─────
+export const ProgramEditor = lazy(() => import('../../../components/Programs/ProgramEditor.js'));
 
 
 // Small sub-graph badge rendered next to cross-references so the user
@@ -304,7 +307,11 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   entity: MemoryEntity;
   allEntities: Map<string, MemoryEntity>;
   allTriples: Triple[];
-  onNavigate: (uri: string) => void;
+  onNavigate: (
+    uri: string,
+    originScrollKey?: string,
+    layerContext?: SemanticMemoryLayer,
+  ) => void;
   onClose: () => void;
   contextGraphId: string;
   onRefresh: () => void;
@@ -313,6 +320,10 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   const [pane, setPane] = useState<KAPane>('content');
   const palette = useGraphPalette();
   const theme = palette.theme;
+  const [showProgramEditor, setShowProgramEditor] = useState(false);
+  const isTypeScriptProgram = entity.properties.get('https://origintrail.io/semantic-runtime/v1#language')
+    ?.some(value => decodeRdfStringLiteral(value) === 'typescript-v1');
+  useEffect(() => { setShowProgramEditor(false); }, [entity.uri]);
   const profile = useProjectProfileContext();
   const agents = useAgentsContext();
   const { icon, type } = entityMeta(entity, profile);
@@ -487,15 +498,45 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
                 </div>
               )}
 
+              {entity.types.includes(SR_PROGRAM) && (
+                isTypeScriptProgram ? <div className="v10-ka-section">
+                  <div className="v10-ka-section-title">TypeScript Program</div>
+                  <button className="v10-ka-back" onClick={() => setShowProgramEditor(true)}>Edit TypeScript Program</button>
+                  {showProgramEditor && <Suspense fallback={<p>Loading Program editor…</p>}>
+                    <ProgramEditor contextGraphId={contextGraphId}
+                      existing={{ label: entity.label, programIri: entity.uri, programLayer: entity.trustLevel === 'verified' ? 'vm' : entity.trustLevel === 'shared' ? 'swm' : 'wm' }}
+                      onClose={() => setShowProgramEditor(false)} onSaved={onRefresh}
+                      onExecution={(iri, layer) => { setShowProgramEditor(false); onNavigate(iri, undefined, layer); }} />
+                  </Suspense>}
+                </div> : <SemanticProgramPanel
+                  contextGraphId={contextGraphId}
+                  programIri={entity.uri}
+                  programLayer={entity.trustLevel === 'verified'
+                    ? 'vm'
+                    : entity.trustLevel === 'shared' ? 'swm' : 'wm'}
+                  onRefresh={onRefresh}
+                  onNavigate={onNavigate}
+                />
+              )}
+
               {entity.properties.size > 0 && (
                 <div className="v10-ka-section">
                   <div className="v10-ka-section-title">Properties</div>
-                  {[...entity.properties].map(([pred, vals]) => (
-                    <div key={pred} className="v10-ka-prop">
+                  {[...entity.properties].map(([pred, vals]) => {
+                    const programSource = entity.types.includes(SR_PROGRAM) && pred === 'https://origintrail.io/semantic-runtime/v1#source';
+                    const parsed = vals.map(parseJsonContainer);
+                    const structured = programSource || parsed.some(value => value !== undefined);
+                    return <div key={pred} className={`v10-ka-prop${structured ? ' v10-ka-prop-structured' : ''}`}>
                       <span className="v10-ka-prop-key">{shortPred(pred)}</span>
-                      <span className="v10-ka-prop-val">{vals.join(', ')}</span>
-                    </div>
-                  ))}
+                      <div className="v10-ka-prop-val">{programSource
+                        ? vals.map((code, index) => <div className="v10-ka-program-source" key={index} aria-label="Program source"><CodeBlock code={code} lang={isTypeScriptProgram ? 'typescript' : undefined} /></div>)
+                        : structured
+                        ? vals.map((text, index) => parsed[index] === undefined
+                          ? <div key={index}>{text}</div>
+                          : <JsonViewer key={index} value={parsed[index]!} label={`${shortPred(pred)} JSON`} />)
+                        : vals.join(', ')}</div>
+                    </div>;
+                  })}
                 </div>
               )}
 

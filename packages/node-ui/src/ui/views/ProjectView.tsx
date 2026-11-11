@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
+import { lazy, Suspense, useMemo, useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { useFetch } from '../hooks.js';
 import { useMemoryEntityDetails } from '../hooks/useMemoryEntityDetails.js';
 import { api } from '../api-wrapper.js';
@@ -43,6 +43,8 @@ import { Loading } from '../components/ds/Loading.js';
 interface ProjectViewProps {
   contextGraphId: string;
 }
+
+const ProgramEditor = lazy(() => import('../components/Programs/ProgramEditor.js'));
 
 type MemoryLayerView = Extract<LayerView, 'wm' | 'swm' | 'vm'>;
 type ParticipantsStatus = 'loading' | 'ok' | 'error';
@@ -109,12 +111,14 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // One receipt load per graph, shared by the VM header facts and graph anchors.
   const vmReceipts = useVmReceiptsResource(contextGraphId);
   const [showImport, setShowImport] = useState(false);
+  const [showProgramEditor, setShowProgramEditor] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [activeLayer, setActiveLayer] = useState<LayerView>('overview');
   const [showQueryCatalog, setShowQueryCatalog] = useState(false);
   const [selectedUri, setSelectedUri] = useState<string | null>(null);
   useEffect(() => {
     setShowQueryCatalog(false);
+    setShowProgramEditor(false);
   }, [contextGraphId]);
   const [participantsState, setParticipantsState] = useState<ParticipantsState>({
     contextGraphId: null,
@@ -810,6 +814,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         onSwitch={handleLayerSwitch}
         onShare={() => setShowShare(true)}
         onImport={() => setShowImport(true)}
+        onNewProgram={() => setShowProgramEditor(true)}
         onRefresh={() => { rawMemory.refresh(); vmReceipts.refresh(); }}
       />
 
@@ -989,6 +994,10 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         contextGraphId={cg.id}
         contextGraphName={cg.name}
       />
+      {showProgramEditor && <Suspense fallback={<div role="status">Loading Program editor…</div>}>
+        <ProgramEditor contextGraphId={contextGraphId} onClose={() => setShowProgramEditor(false)} onSaved={rawMemory.refresh}
+          onExecution={(iri, layer) => { setShowProgramEditor(false); handleNavigate(iri, undefined, layer); }} />
+      </Suspense>}
       <ShareProjectModal
         open={showShare}
         onClose={() => setShowShare(false)}

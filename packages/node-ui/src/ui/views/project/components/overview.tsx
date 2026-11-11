@@ -9,151 +9,11 @@ import { useNodeEvents } from '../../../hooks/useNodeEvents.js';
 import { AgentDot } from '../../../components/AgentDot.js';
 import { overviewRoleState, type OverviewAgentIdentity, type OverviewAgentStatus, type OverviewParticipantsStatus } from './overview-role.js';
 import { useContextGraphColor, ContextGraphMark } from '../../../context-graph-colors.js';
-import { Count, LayerGlyph } from '../../../components/ds/Badge.js';
-import { Check, Diamond, LayoutDashboard, MoreHorizontal, Network, RefreshCw, Share2, Upload, X } from 'lucide-react';
+import { Count } from '../../../components/ds/Badge.js';
+import { Check, Diamond, X } from 'lucide-react';
 import { RANK_ICON } from './rank-icon.js';
 import { Loading } from '../../../components/ds/Loading.js';
 import { formatNumber, truncateAddress } from '../../../lib/format.js';
-
-export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onRefresh }: {
-  active: LayerView;
-  counts: { wm: number; swm: number; vm: number; total: number };
-  onSwitch: (v: LayerView) => void;
-  onShare: () => void;
-  onImport: () => void;
-  onRefresh: () => void;
-}) {
-  const [moreOpen, setMoreOpen] = useState(false);
-  const moreRef = useRef<HTMLDivElement | null>(null);
-  const switchTo = (layer: LayerView) => {
-    setMoreOpen(false);
-    onSwitch(layer);
-  };
-
-  useEffect(() => {
-    if (!moreOpen) return;
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target as Node | null;
-      if (target && moreRef.current?.contains(target)) return;
-      setMoreOpen(false);
-    };
-    document.addEventListener('pointerdown', onPointerDown);
-    return () => document.removeEventListener('pointerdown', onPointerDown);
-  }, [moreOpen]);
-
-  return (
-    <div className="v10-layer-switcher">
-      <button
-        className={`v10-layer-switch-btn ds-tab ${active === 'overview' ? 'active' : ''}`}
-        data-layer="overview"
-        aria-label="Overview"
-        title="Overview"
-        onClick={() => switchTo('overview')}
-      >
-        <span className="v10-layer-switch-icon"><LayoutDashboard size={14} /></span>
-        <span className="v10-layer-switch-label">Overview</span>
-      </button>
-      <span className="v10-layer-switch-separator" aria-hidden="true" />
-      <button
-        className={`v10-layer-switch-btn ds-tab ${active === 'wm' ? 'active' : ''}`}
-        data-layer="wm"
-        aria-label="Working Memory"
-        title="Working Memory"
-        onClick={() => switchTo('wm')}
-      >
-        <span className="v10-layer-switch-icon"><LayerGlyph layer="wm" /></span>
-        <span className="v10-layer-switch-label v10-layer-switch-label-full">Working Memory</span>
-        <span className="v10-layer-switch-label v10-layer-switch-label-compact">WM</span>
-        {counts.wm > 0 && <Count value={counts.wm} className="v10-layer-switch-count" />}
-      </button>
-      <button
-        className={`v10-layer-switch-btn ds-tab ${active === 'swm' ? 'active' : ''}`}
-        data-layer="swm"
-        aria-label="Shared Working Memory"
-        title="Shared Working Memory"
-        onClick={() => switchTo('swm')}
-      >
-        <span className="v10-layer-switch-icon"><LayerGlyph layer="swm" /></span>
-        <span className="v10-layer-switch-label v10-layer-switch-label-full">Shared Working Memory</span>
-        <span className="v10-layer-switch-label v10-layer-switch-label-compact">SWM</span>
-        {counts.swm > 0 && <Count value={counts.swm} className="v10-layer-switch-count" />}
-      </button>
-      <button
-        className={`v10-layer-switch-btn ds-tab ${active === 'vm' ? 'active' : ''}`}
-        data-layer="vm"
-        aria-label="Verifiable Memory"
-        title="Verifiable Memory"
-        onClick={() => switchTo('vm')}
-      >
-        <span className="v10-layer-switch-icon"><LayerGlyph layer="vm" /></span>
-        <span className="v10-layer-switch-label v10-layer-switch-label-full">Verifiable Memory</span>
-        <span className="v10-layer-switch-label v10-layer-switch-label-compact">VM</span>
-        {counts.vm > 0 && <Count value={counts.vm} className="v10-layer-switch-count" />}
-      </button>
-      <span className="v10-layer-switch-separator" aria-hidden="true" />
-      <button
-        className={`v10-layer-switch-btn ds-tab ${active === 'graph-overview' ? 'active' : ''}`}
-        data-layer="graph-overview"
-        aria-label="Subgraphs"
-        title="Subgraphs"
-        onClick={() => switchTo('graph-overview')}
-      >
-        <span className="v10-layer-switch-icon"><Network size={14} /></span>
-        <span className="v10-layer-switch-label">Subgraphs</span>
-      </button>
-      <div
-        ref={moreRef}
-        className="v10-layer-more"
-        onBlur={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-            setMoreOpen(false);
-          }
-        }}
-      >
-        <button
-          type="button"
-          className={`v10-layer-switch-btn ds-tab v10-layer-more-btn ${active === 'query' ? 'active' : ''}`}
-          data-layer="query"
-          aria-haspopup="menu"
-          aria-expanded={moreOpen}
-          aria-label="More context graph views"
-          title="More context graph views"
-          onClick={() => setMoreOpen(open => !open)}
-        >
-          <span className="v10-layer-switch-icon"><MoreHorizontal size={14} /></span>
-          <span className="v10-layer-switch-label">More</span>
-        </button>
-        {moreOpen && (
-          <div className="v10-layer-more-menu ds-card-nested" role="menu">
-            <button
-              type="button"
-              role="menuitem"
-              className={`v10-layer-more-item ${active === 'query' ? 'active' : ''}`}
-              onClick={() => switchTo('query')}
-            >
-              <span className="v10-layer-switch-icon">⟐</span>
-              Query catalogue
-            </button>
-          </div>
-        )}
-      </div>
-      <div className="v10-layer-switcher-spacer" />
-      <div className="v10-layer-switcher-actions">
-        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onShare} aria-label="Share context graph">
-          <span className="v10-layer-action-icon"><Share2 size={12} /></span>
-          <span className="v10-layer-action-label">Share</span>
-        </button>
-        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onImport} aria-label="Import into context graph">
-          <span className="v10-layer-action-icon"><Upload size={12} /></span>
-          <span className="v10-layer-action-label">Import</span>
-        </button>
-        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onRefresh} aria-label="Refresh context graph data">
-          <span className="v10-layer-action-icon"><RefreshCw size={12} /></span>
-        </button>
-      </div>
-    </div>
-  );
-}
 
 // ─── Project Header Strip ────────────────────────────────────
 // Persistent project chrome that stays visible across every route
@@ -220,7 +80,7 @@ export function ProjectHeaderStrip({
 
 // ─── Project Overview Card ───────────────────────────────────
 
-function overviewAccessAgentStat(
+export function overviewAccessAgentStat(
   cg: any,
   participants: string[],
   participantsStatus: OverviewParticipantsStatus,
@@ -268,7 +128,7 @@ function overviewAccessAgentStat(
   };
 }
 
-function overviewAccessState(raw?: string): { label: string; title: string; tone: 'public' | 'curated' | 'unknown' } {
+export function overviewAccessState(raw?: string): { label: string; title: string; tone: 'public' | 'curated' | 'unknown' } {
   const policy = normalizeAccessPolicy(raw);
   if (policy === 'public') {
     return {
@@ -344,7 +204,7 @@ export function curatorStatusForOverview({
     : 'not-curator';
 }
 
-function overviewIdentitySet(currentAgent: OverviewAgentIdentity | null): Set<string> {
+export function overviewIdentitySet(currentAgent: OverviewAgentIdentity | null): Set<string> {
   return new Set(
     [currentAgent?.agentDid, currentAgent?.agentAddress]
       .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
@@ -870,3 +730,4 @@ export function OverviewPrimerEntry({ onOpenPrimer }: { onOpenPrimer: () => void
   );
 }
 
+export { LayerSwitcher } from './layer-switcher.js';
