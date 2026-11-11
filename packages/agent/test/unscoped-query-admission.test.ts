@@ -62,12 +62,46 @@ describe('unscoped query admission', () => {
       vi.stubEnv(STORE_GRAPH_CATALOG_MAX_BYTES_ENV, String(Buffer.byteLength(JSON.stringify([readable]))));
       await inner.insert([{ graph: 'did:dkg:context-graph:other', subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
       now += 100;
-      // The read that finds the catalog due is answered from it; the background revalidation then
-      // fails at the ceiling, and admission fails closed.
-      await expect(canReadUnscopedQuery(deps)).resolves.toBe(true);
-      await vi.waitFor(() => expect(canReadUnscopedQuery(deps)).rejects.toMatchObject({ code: 'STORE_INTERNAL_LIMIT' }));
+      // Admission reads a current catalog: the due read waits for the revalidation, which fails at the ceiling.
+      await expect(canReadUnscopedQuery(deps)).rejects.toMatchObject({ code: 'STORE_INTERNAL_LIMIT' });
     } finally {
       vi.unstubAllEnvs();
+      await store.close();
+    }
+  });
+
+  it('reads a current catalog: a due catalog makes admission wait, while a scoped read is answered warm', async () => {
+    let now = 1_000;
+    const readable = 'did:dkg:context-graph:readable';
+    class HeldListing extends OxigraphStore {
+      hold: Promise<void> | null = null;
+      override async listGraphs(options?: Parameters<OxigraphStore['listGraphs']>[0]): Promise<string[]> {
+        await this.hold;
+        return super.listGraphs(options);
+      }
+    }
+    const inner = new HeldListing();
+    await inner.insert([{ graph: readable, subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
+    const store = new GraphSetIndexStore(inner, { revalidateMs: 100, now: () => now });
+    const canRead = vi.fn(async (id: string) => id === 'readable');
+    const deps = { store, knownContextGraphIds: [], canReadContextGraph: canRead } satisfies UnscopedQueryAdmissionDependencies;
+    try {
+      await expect(canReadUnscopedQuery(deps)).resolves.toBe(true);
+      await inner.insert([{ graph: 'did:dkg:context-graph:added', subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
+      now += 100;
+      const scan = deferred<void>();
+      inner.hold = scan.promise;
+
+      await expect(store.listGraphsByPrefix(readable)).resolves.toEqual([readable]);
+      let decided = false;
+      const admission = canReadUnscopedQuery(deps).finally(() => { decided = true; });
+      for (let turn = 0; turn < 4; turn++) await new Promise((resolve) => setImmediate(resolve));
+      expect(decided).toBe(false);
+      scan.resolve();
+      await expect(admission).resolves.toBe(false);
+      expect(canRead.mock.calls.map(([id]) => id)).toContain('added');
+    } finally {
+      inner.hold = null;
       await store.close();
     }
   });

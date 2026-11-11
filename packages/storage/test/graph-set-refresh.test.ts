@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { GraphSetIndexStore, OxigraphStore, type QueryOptions } from '../src/index.js';
 import { STORE_GRAPH_CATALOG_MAX_BYTES_ENV, isStoreInternalLimitError } from '../src/graph-catalog-internal-limit.js';
-import { BackgroundGraphSetRevalidation, graphSetRevalidationDelayMs } from '../src/graph-set-refresh.js';
+import { BackgroundGraphSetRevalidation, graphSetRevalidationDelayMs, type CurrentGraphCatalogReadOptions } from '../src/graph-set-refresh.js';
+import { listStoredContextGraphOwnerCandidates } from '../src/stored-context-graph-owners.js';
 import { CountingStore, q } from './graph-set-index-store-harness.js';
 
 const CACHED = 'did:dkg:context-graph:cached';
@@ -102,6 +103,21 @@ describe('a warm graph catalog that is due', () => {
     expect(counting.listGraphsCalls).toBe(3);
   });
 
+  it('makes a current read wait for the revalidation, while every other read is answered warm', async () => {
+    const { clock, counting, store } = await warmIndex();
+    const scan = gate();
+    counting.listGraphsGate = scan.promise;
+    clock.now += 100;
+
+    await expect(store.listGraphsByPrefix('did:dkg:context-graph:')).resolves.toEqual([CACHED]);
+    // Unscoped-query admission reads the stored owners as a current read.
+    const owners = listStoredContextGraphOwnerCandidates(store, {});
+    expect(await stillWaiting(owners)).toBe(true);
+    await expect(store.listGraphs()).resolves.toEqual([CACHED]);
+    scan.open();
+    await expect(owners).resolves.toEqual(['cached', 'external']);
+  });
+
   it('makes the caller wait with revalidate: blocking, as before', async () => {
     const { clock, counting, store } = await warmIndex({ revalidate: 'blocking' });
     const scan = gate();
@@ -142,6 +158,30 @@ describe('the revalidation cadence', () => {
     expect(graphSetRevalidationDelayMs(30_000, 100)).toBe(30_000);
     expect(graphSetRevalidationDelayMs(30_000, 2_000)).toBe(40_000);
     expect(graphSetRevalidationDelayMs(100, -5)).toBe(100);
+  });
+
+  it('revalidates a current read on the interval, before a stretched cadence is due', async () => {
+    const clock = { now: 1_000 };
+    class SlowListing extends CountingStore {
+      override async listGraphs(options?: QueryOptions): Promise<string[]> {
+        clock.now += 50;
+        return super.listGraphs(options);
+      }
+    }
+    const counting = new SlowListing(new OxigraphStore());
+    const store = new GraphSetIndexStore(counting, { revalidateMs: 100, now: () => clock.now });
+    const current: QueryOptions & CurrentGraphCatalogReadOptions = { currentCatalog: true };
+    await store.listGraphs();
+    // The seed published at 1,050: the cadence is due at 2,050, the interval at 1,150.
+    clock.now = 1_149;
+    await store.readGraphInventory(undefined, current);
+    expect(counting.listGraphsCalls).toBe(1);
+    clock.now = 1_150;
+    await store.listGraphs();
+    await settle();
+    expect(counting.listGraphsCalls).toBe(1);
+    await store.readGraphInventory(undefined, current);
+    expect(counting.listGraphsCalls).toBe(2);
   });
 
   it('starts the next revalidation no sooner than twenty times the last one took', async () => {
