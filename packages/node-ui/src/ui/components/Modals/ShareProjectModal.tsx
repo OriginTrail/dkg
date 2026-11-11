@@ -293,7 +293,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
               <div className="v10-form-group">
                 <label className="v10-form-label">Allowed agents</label>
                 <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginBottom: 8 }}>
-                  Only agents on this list can read and write to the context graph. To add someone, share the Invite code below — they'll send a signed join request you can approve in the <strong>Join requests</strong> tab.
+                  Only agents on this list can read and write to the context graph. To add someone, share the invite code below — they'll send a signed join request you can approve in the <strong>Join requests</strong> tab.
                 </div>
 
                 {allowedAgents.length > 0 && (
