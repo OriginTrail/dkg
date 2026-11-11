@@ -54,7 +54,7 @@ export function Meters({ subscription: s, catalog, plan, calls, onTopUp, nowMs =
   }, [s, calls]);
 
   return (
-    <div className="mkt-card" data-testid="mkt-subscription" data-epoch={s.epoch}>
+    <div className="ds-card mkt-card" data-testid="mkt-subscription" data-epoch={s.epoch}>
       <div className="mkt-planhead">
         <h1 data-copy="meter.summary">{copy('meter.summary', { n: s.epoch, pct: Math.round(landed), held: Math.round(held) })}</h1>
         <span className="mkt-sec" data-copy="meter.resets">{copy('meter.resets', { t: relAt(s.endsAt, nowMs) })}</span>
@@ -90,7 +90,7 @@ export function Meters({ subscription: s, catalog, plan, calls, onTopUp, nowMs =
             {hit ? (
               <div className="mkt-fork">
                 <div className="mkt-xs" data-copy="meter.hit.title">{copy('meter.hit.title')}</div>
-                <button type="button" className="mkt-btn mkt-btn--primary" data-testid={`mkt-topup-${b.serviceId}`} data-copy="fork.topup" onClick={() => onTopUp(b.serviceId)}>{copy('fork.topup')}</button>
+                <button type="button" className="ds-btn ds-primary" data-testid={`mkt-topup-${b.serviceId}`} data-copy="fork.topup" onClick={() => onTopUp(b.serviceId)}>{copy('fork.topup')}</button>
                 <span className="mkt-sec mkt-sm" data-copy="meter.hit.wait">
                   {copy('meter.hit.wait', { t: relAt(s.endsAt, nowMs) })}{others.length ? ` ${copy('meter.hit.switch', { alt: label(others[0].serviceId), pct: Math.round(100 - pctOf(BigInt(others[0].used) + BigInt(others[0].held), others[0].value)) })}` : ''}
                 </span>

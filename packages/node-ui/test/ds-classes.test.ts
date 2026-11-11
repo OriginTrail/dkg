@@ -16,9 +16,9 @@ const PRIMITIVES: Record<string, string[]> = {
   'ds-seg-item': ['v10-agent-mode-tab', 'v10-mlv-toggle-btn'],
   'ds-filter': ['v10-subgraph-chip', 'v10-subgraph-filter-chip'],
   'ds-overlay': ['v10-modal-box', 'v10-drop-overlay-card'],
-  'ds-card': ['stat-card', 'v10-dash-section', 'v10-vm-hero', 'v10-genui-card', 'v10-sgov-card', 'v10-empty-state', 'v10-cg-query-zone', 'v10-publish-panel', 'v10-import-dropzone'],
+  'ds-card': ['stat-card', 'v10-dash-section', 'v10-vm-hero', 'v10-genui-card', 'v10-sgov-card', 'v10-empty-state', 'v10-cg-query-zone', 'v10-publish-panel', 'v10-import-dropzone', 'mkt-card'],
   'ds-card-nested': ['v10-modal-error', 'v10-modal-tip', 'v10-modal-warning', 'v10-genui-stat', 'v10-pca-create-warn', 'v10-wallet-row', 'v10-notif-pane', 'v10-select-menu', 'v10-mlv-table-wrap'],
-  'ds-input': ['v10-form-input', 'v10-form-select', 'v10-form-textarea', 'v10-select-trigger', 'v10-cg-query-textarea', 'v10-log-filter', 'v10-entity-list-sort-select'],
+  'ds-input': ['v10-form-input', 'v10-form-select', 'v10-form-textarea', 'v10-select-trigger', 'v10-cg-query-textarea', 'v10-log-filter', 'v10-entity-list-sort-select', 'mkt-input'],
 };
 const SCREEN = Object.values(PRIMITIVES).flat();
 const has = (text: string, cls: string) => new RegExp(`(?<![\\w-])${cls}(?![\\w-])`).test(text);

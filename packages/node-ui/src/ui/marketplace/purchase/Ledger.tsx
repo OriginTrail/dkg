@@ -12,12 +12,12 @@ import { ErrorCard, sellerName, useLoad } from '../shared.js';
 export function Reconciliation({ catalog, epoch }: { catalog: CatalogAnswer; epoch: number }): React.ReactElement {
   const [asked, setAsked] = useState(epoch);
   return (
-    <div className="mkt-card" data-testid="mkt-reconciliation" data-epoch={asked}>
+    <div className="ds-card mkt-card" data-testid="mkt-reconciliation" data-epoch={asked}>
       <div className="mkt-mhead">
         <h2 data-copy="recon.title">{copy('recon.title', { n: asked })}</h2>
         <span className="mkt-fchips">
           {[epoch, epoch - 1].map((e) => (
-            <button key={e} type="button" className={asked === e ? 'on' : ''} data-testid={`mkt-recon-${e}`} data-copy={e === epoch ? 'recon.this' : 'recon.last'} onClick={() => setAsked(e)}>
+            <button key={e} type="button" className={asked === e ? 'ds-filter active' : 'ds-filter'} data-testid={`mkt-recon-${e}`} data-copy={e === epoch ? 'recon.this' : 'recon.last'} onClick={() => setAsked(e)}>
               {copy(e === epoch ? 'recon.this' : 'recon.last')}
             </button>
           ))}
@@ -72,12 +72,12 @@ export function Activity({ catalog, calls, err }: { catalog: CatalogAnswer; call
   const keys = [...new Set(all.map((c) => c.keyId))];
   const shown = all.filter((c) => !keyFilter || c.keyId === keyFilter);
   return (
-    <div className="mkt-card" data-testid="mkt-activity">
+    <div className="ds-card mkt-card" data-testid="mkt-activity">
       <div className="mkt-mhead">
         <h2 data-copy="activity.title">{copy('activity.title')}</h2>
         <span className="mkt-fchips">
-          <button type="button" className={keyFilter === null ? 'on' : ''} data-copy="activity.filter.all" onClick={() => setKeyFilter(null)}>{copy('activity.filter.all')}</button>
-          {keys.map((k) => <button type="button" key={k} className={keyFilter === k ? 'on' : ''} data-copy="_data" onClick={() => setKeyFilter(k)}>{k}</button>)}
+          <button type="button" className={keyFilter === null ? 'ds-filter active' : 'ds-filter'} data-copy="activity.filter.all" onClick={() => setKeyFilter(null)}>{copy('activity.filter.all')}</button>
+          {keys.map((k) => <button type="button" key={k} className={keyFilter === k ? 'ds-filter active' : 'ds-filter'} data-copy="_data" onClick={() => setKeyFilter(k)}>{k}</button>)}
         </span>
       </div>
       {needsNodeAdmin(err) ? <div className="mkt-muted mkt-xs" data-copy="activity.admin">{copy('activity.admin')}</div> : err ? <ErrorCard err={err} /> : null}
@@ -89,7 +89,7 @@ export function Activity({ catalog, calls, err }: { catalog: CatalogAnswer; call
               <td data-copy="_data">{label(c.serviceId)}</td>
               <td className="mkt-muted" data-copy="_data">{sellerName(c.seller)}</td>
               <td data-copy="activity.units">{copy('activity.units', { n: c.units.toLocaleString('en-US'), trac: fmtTrac(c.value) })}</td>
-              <td data-copy={`activity.state.${c.state}`}><span className={c.state === 'missed' ? 'mkt-chipblock' : c.state === 'held' ? 'mkt-chipwarn' : 'mkt-chipleft'}>{copy(`activity.state.${c.state}`)}</span></td>
+              <td data-copy={`activity.state.${c.state}`}><span className={c.state === 'missed' ? 'ds-badge ds-tone-danger' : c.state === 'held' ? 'ds-badge ds-tone-warning' : 'ds-badge ds-tone-success'}>{copy(`activity.state.${c.state}`)}</span></td>
               <td className="mkt-muted mkt-mono" data-copy="_data">{c.keyId}</td>
             </tr>
           ))}

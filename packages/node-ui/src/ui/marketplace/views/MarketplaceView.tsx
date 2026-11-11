@@ -28,9 +28,9 @@ export function PriceLine({ min, max, fx }: { min: string; max?: string; fx: Fx 
 
 /** A seller's availability as this node last saw it. */
 export function SellerChip({ available }: { available: boolean | null }): React.ReactElement {
-  if (available === true) return <span className="mkt-chipleft" data-copy="catalog.online">{copy('catalog.online')}</span>;
-  if (available === false) return <span className="mkt-chipblock" data-copy="catalog.unavailable.seller">{copy('catalog.unavailable.seller')}</span>;
-  return <span className="mkt-chipwarn" data-copy="catalog.unquoted">{copy('catalog.unquoted')}</span>;
+  if (available === true) return <span className="ds-badge ds-tone-success" data-copy="catalog.online">{copy('catalog.online')}</span>;
+  if (available === false) return <span className="ds-badge ds-tone-danger" data-copy="catalog.unavailable.seller">{copy('catalog.unavailable.seller')}</span>;
+  return <span className="ds-badge ds-tone-warning" data-copy="catalog.unquoted">{copy('catalog.unquoted')}</span>;
 }
 
 export function ProvBadge({ offers }: { offers: Offer[] }): React.ReactElement {
@@ -64,7 +64,7 @@ function StorefrontPage({ identityId, catalog, onBack }: { identityId: number; c
   const label = (serviceId: string) => modelName(catalog.services.find((x) => x.serviceId === serviceId)?.label ?? serviceId);
   return (
     <div className="mkt-frame" data-testid="mkt-storefront" data-seller={identityId}>
-      <div className="mkt-card">
+      <div className="ds-card mkt-card">
         <button type="button" className="mkt-linkbtn mkt-xs" data-copy="catalog.back" onClick={onBack}>{copy('catalog.back')}</button>
         {s.err && !s.data ? <ErrorCard err={s.err} onRetry={s.reload} /> : null}
         {!s.data && !s.err && <div className="mkt-muted" data-copy="state.loading">{copy('state.loading')}</div>}
@@ -125,10 +125,10 @@ function ServicePage({ service, catalog, onBack, onSeller }: { service: Service;
   const fx = detail?.fx ?? catalog.fx;
   return (
     <div className="mkt-frame" data-testid="mkt-model-page" data-service={service.serviceId}>
-      <div className="mkt-card">
+      <div className="ds-card mkt-card">
         <button type="button" className="mkt-linkbtn mkt-xs" data-copy="catalog.back" onClick={onBack}>{copy('catalog.back')}</button>
         <h1 className="mkt-h1" data-copy="_data">{modelName(service.label)}{' '}
-          {covered && <span className="mkt-chipleft" data-copy="catalog.covered">{copy('catalog.covered', { trac: fmtTrac(covered.left) })}</span>}</h1>
+          {covered && <span className="ds-badge ds-tone-success" data-copy="catalog.covered">{copy('catalog.covered', { trac: fmtTrac(covered.left) })}</span>}</h1>
         <p className="mkt-muted mkt-xs mkt-mono" data-copy="_data">{service.label}</p>
         {d.err && !detail ? <ErrorCard err={d.err} onRetry={d.reload} /> : null}
         {!detail && !d.err && <div className="mkt-muted" data-copy="state.loading">{copy('state.loading')}</div>}
@@ -155,7 +155,7 @@ function ServicePage({ service, catalog, onBack, onSeller }: { service: Service;
               </span>
               {covered
                 ? <span className="mkt-yours" data-copy="model.covered">{copy('model.covered')}</span>
-                : <button type="button" className="mkt-chipadd" data-testid={`mkt-add-${store.identityId}`} data-copy="catalog.add" onClick={() => addToPlan(service.serviceId)}>{copy('catalog.add')}</button>}
+                : <button type="button" className="ds-btn ds-sm" data-testid={`mkt-add-${store.identityId}`} data-copy="catalog.add" onClick={() => addToPlan(service.serviceId)}>{copy('catalog.add')}</button>}
             </div>
           );
         })}
@@ -189,21 +189,21 @@ export function MarketplaceView(): React.ReactElement {
   if (cat.err && !catalog) {
     return (
       <div className="mkt-frame" data-testid="mkt-marketplace" data-state="error">
-        <div className="mkt-card">
+        <div className="ds-card mkt-card">
           <div data-copy="catalog.error">{copy('catalog.error')}</div>
           <ErrorCard err={cat.err} onRetry={cat.reload} retryKey="catalog.retry" />
         </div>
       </div>
     );
   }
-  if (!catalog) return <div className="mkt-frame" data-testid="mkt-marketplace" data-state="loading"><div className="mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></div>;
+  if (!catalog) return <div className="mkt-frame" data-testid="mkt-marketplace" data-state="loading"><div className="ds-card mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></div>;
 
   if (seller !== null) return <StorefrontPage identityId={seller} catalog={catalog} onBack={() => setSeller(null)} />;
   const service = selected ? catalog.services.find((s) => s.serviceId === selected) : undefined;
   if (service) return <ServicePage service={service} catalog={catalog} onBack={() => setSelected(null)} onSeller={setSeller} />;
 
   const sellerStrip = (
-    <div className="mkt-card mkt-sellerstrip" data-testid="mkt-seller-strip">
+    <div className="ds-card mkt-card mkt-sellerstrip" data-testid="mkt-seller-strip">
       <div className="mkt-mhead">
         <span className="mkt-fchips mkt-wrap">
           {sellers.length === 0 && <span className="mkt-muted mkt-xs" data-copy="catalog.empty.sellers">{copy('catalog.empty.sellers')}</span>}
@@ -214,7 +214,7 @@ export function MarketplaceView(): React.ReactElement {
           ))}
         </span>
         <span className="mkt-fork">
-          <button type="button" className="mkt-btn" data-testid="mkt-catalog-retry" data-copy="catalog.retry" onClick={cat.reload} disabled={cat.loading} title={cat.loading ? copy('catalog.refreshing') : undefined}>
+          <button type="button" className="ds-btn" data-testid="mkt-catalog-retry" data-copy="catalog.retry" onClick={cat.reload} disabled={cat.loading} title={cat.loading ? copy('catalog.refreshing') : undefined}>
             {cat.loading ? copy('catalog.refreshing') : copy('catalog.retry')}
           </button>
         </span>
@@ -227,23 +227,23 @@ export function MarketplaceView(): React.ReactElement {
 
   return (
     <div className="mkt-frame" data-testid="mkt-marketplace" data-state="ok">
-      <div className="mkt-fchips mkt-tabs" role="tablist">
-        <button type="button" role="tab" aria-selected={tab === 'models'} className={tab === 'models' ? 'on' : ''} data-copy="nav.models" onClick={() => setTab('models')}>{copy('nav.models')}</button>
-        <button type="button" role="tab" aria-selected={tab === 'playground'} className={tab === 'playground' ? 'on' : ''} data-copy="nav.playground" onClick={() => setTab('playground')}>{copy('nav.playground')}</button>
+      <div className="mkt-tabs" role="tablist">
+        <button type="button" role="tab" aria-selected={tab === 'models'} className={tab === 'models' ? 'ds-tab active' : 'ds-tab'} data-copy="nav.models" onClick={() => setTab('models')}>{copy('nav.models')}</button>
+        <button type="button" role="tab" aria-selected={tab === 'playground'} className={tab === 'playground' ? 'ds-tab active' : 'ds-tab'} data-copy="nav.playground" onClick={() => setTab('playground')}>{copy('nav.playground')}</button>
       </div>
       {tab === 'playground' ? <Playground catalog={catalog} /> : (
         <>
           {sellerStrip}
           {cat.err ? <ErrorCard err={cat.err} onRetry={cat.reload} retryKey="catalog.retry" /> : null}
           {catalog.services.length === 0 && (
-            <div className="mkt-card mkt-muted" data-testid="mkt-catalog-empty"><span data-copy="catalog.empty.offers">{copy('catalog.empty.offers')}</span></div>
+            <div className="ds-card mkt-card mkt-muted" data-testid="mkt-catalog-empty"><span data-copy="catalog.empty.offers">{copy('catalog.empty.offers')}</span></div>
           )}
           <div className="mkt-grid">
             {catalog.services.map((s) => {
               const off = s.offers.length > 0 && s.offers.every((o) => o.available === false);
               const open = () => setSelected(s.serviceId);
               return (
-                <div key={s.serviceId} className={`mkt-card mkt-mcard${off ? ' off' : ''}`} role="button" tabIndex={0} data-testid={`mkt-card-${s.serviceId}`} data-available={!off}
+                <div key={s.serviceId} className={`ds-card mkt-card mkt-mcard${off ? ' off' : ''}`} role="button" tabIndex={0} data-testid={`mkt-card-${s.serviceId}`} data-available={!off}
                   onClick={open} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } }}>
                   <h3 title={s.label} data-copy="_data">{modelName(s.label)}</h3>
                   <div className="mkt-mhead">
@@ -255,8 +255,8 @@ export function MarketplaceView(): React.ReactElement {
                   <div className="mkt-mhead">
                     <span><PriceLine min={s.priceMin} max={s.priceMax} fx={catalog.fx} /></span>
                     {s.covered
-                      ? <span className="mkt-chipleft" data-testid={`mkt-covered-${s.serviceId}`} data-copy="catalog.covered">{copy('catalog.covered', { trac: fmtTrac(s.covered.left) })}</span>
-                      : <button type="button" className="mkt-chipadd" data-testid={`mkt-add-${s.serviceId}`} data-copy="catalog.add" disabled={off} title={off ? copy('catalog.unavailable.all') : undefined}
+                      ? <span className="ds-badge ds-tone-success" data-testid={`mkt-covered-${s.serviceId}`} data-copy="catalog.covered">{copy('catalog.covered', { trac: fmtTrac(s.covered.left) })}</span>
+                      : <button type="button" className="ds-btn ds-sm" data-testid={`mkt-add-${s.serviceId}`} data-copy="catalog.add" disabled={off} title={off ? copy('catalog.unavailable.all') : undefined}
                           onClick={(e) => { e.stopPropagation(); addToPlan(s.serviceId); }}>{copy('catalog.add')}</button>}
                   </div>
                   {off && <div className="mkt-muted mkt-xs" data-copy="catalog.unavailable.all">{copy('catalog.unavailable.all')}</div>}

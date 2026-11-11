@@ -69,7 +69,7 @@ export function MarketplaceGalleryView(): React.ReactElement {
         <Sect title={copy('gallery.sect.calls')}>
           <div className="mkt-fchips mkt-wrap" data-testid="mkt-gallery-calls">
             {(['held', 'landed', 'missed'] as const).map((s) => (
-              <span key={s} className={s === 'missed' ? 'mkt-chipblock' : s === 'held' ? 'mkt-chipwarn' : 'mkt-chipleft'}>{copy(`activity.state.${s}`)}</span>
+              <span key={s} className={s === 'missed' ? 'ds-badge ds-tone-danger' : s === 'held' ? 'ds-badge ds-tone-warning' : 'ds-badge ds-tone-success'}>{copy(`activity.state.${s}`)}</span>
             ))}
           </div>
         </Sect>
@@ -82,10 +82,10 @@ export function MarketplaceGalleryView(): React.ReactElement {
         </Sect>
 
         <Sect title={copy('gallery.sect.prices')}>
-          <div className="mkt-card">
+          <div className="ds-card mkt-card">
             <div><strong>{modelName(qwen.label)}</strong>{' '}<PriceLine min={qwen.priceMin} max={qwen.priceMax} fx={catalog.fx} /></div>
             <div><strong>{modelName(qwen.label)}</strong>{' '}<PriceLine min={qwen.priceMin} max={qwen.priceMax} fx={noFx} /></div>
-            <span className="mkt-chipleft">{copy('catalog.covered', { trac: fmtTrac(qwen.covered!.left) })}</span>
+            <span className="ds-badge ds-tone-success">{copy('catalog.covered', { trac: fmtTrac(qwen.covered!.left) })}</span>
           </div>
         </Sect>
 
@@ -94,7 +94,7 @@ export function MarketplaceGalleryView(): React.ReactElement {
         </Sect>
 
         <Sect title={copy('gallery.sect.served')}>
-          <div className="mkt-card mkt-chat">
+          <div className="ds-card mkt-card mkt-chat">
             <div className="mkt-bubble assistant">{world.chat('', FIXTURE_IDS.qwen14b).choices[0].message.content}</div>
             <div className="mkt-muted mkt-xs">{copy('play.servedby', { seller: sellerName(served.seller), units: fmtCount(served.units), trac: fmtTrac(served.value), left: fmtTrac(served.budgetLeft) })}</div>
             <div className="mkt-bubble assistant error" role="alert">{copy('play.error.bubble', { reason: copy(refusalKey('soft_ceiling')) })}</div>
@@ -124,7 +124,7 @@ export function MarketplaceGalleryView(): React.ReactElement {
         <Sect title={copy('gallery.sect.states')}>
           <OffCard /><OffCard selling /><OffCard absent /><AdminCard what="admin.access" />
           {(['empty.activity', 'empty.keys', 'recon.none', 'catalog.empty.offers'] as const).map((k) => (
-            <div key={k} className="mkt-card mkt-muted" style={{ textAlign: 'center' }}>{copy(k)}</div>
+            <div key={k} className="ds-card mkt-card mkt-muted" style={{ textAlign: 'center' }}>{copy(k)}</div>
           ))}
         </Sect>
       </div>

@@ -105,7 +105,7 @@ export function ErrorCard({ err, onRetry, retryKey = 'ctl.retry', children }: {
       <div className="mkt-errcard-line" data-copy={d.copyKey}>{d.message}</div>
       {d.retryAfter != null && <div className="mkt-muted mkt-xs" data-copy="err.retry.after">{copy('err.retry.after', { n: d.retryAfter })}</div>}
       <div className="mkt-fork">
-        {onRetry && d.retryable && <button type="button" className="mkt-btn" data-copy={retryKey} onClick={onRetry}>{copy(retryKey)}</button>}
+        {onRetry && d.retryable && <button type="button" className="ds-btn" data-copy={retryKey} onClick={onRetry}>{copy(retryKey)}</button>}
         {children}
         {(d.code || d.detail) && (
           <button type="button" className="mkt-linkbtn mkt-xs" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
@@ -125,7 +125,7 @@ export function ErrorCard({ err, onRetry, retryKey = 'ctl.retry', children }: {
 export function OffCard({ selling = false, absent = false, testId }: { selling?: boolean; absent?: boolean; testId?: string }): React.ReactElement {
   const k = absent ? 'off.absent' : selling ? 'off.seller' : 'off.buyer';
   return (
-    <div className="mkt-card mkt-seatcard" data-testid={testId ?? 'mkt-off'}>
+    <div className="ds-card mkt-card mkt-seatcard" data-testid={testId ?? 'mkt-off'}>
       <h2 data-copy={`${k}.title`}>{copy(`${k}.title`)}</h2>
       <p className="mkt-sec mkt-sm" data-copy={`${k}.body`}>{copy(`${k}.body`)}</p>
     </div>
@@ -135,7 +135,7 @@ export function OffCard({ selling = false, absent = false, testId }: { selling?:
 /** A surface that needs the node-admin token, opened with another one. */
 export function AdminCard({ what }: { what: CopyKey }): React.ReactElement {
   return (
-    <div className="mkt-card mkt-seatcard" data-testid="mkt-admin-needed">
+    <div className="ds-card mkt-card mkt-seatcard" data-testid="mkt-admin-needed">
       <h2 data-copy="admin.title">{copy('admin.title')}</h2>
       <p className="mkt-sec mkt-sm" data-copy={what}>{copy(what)}</p>
     </div>
