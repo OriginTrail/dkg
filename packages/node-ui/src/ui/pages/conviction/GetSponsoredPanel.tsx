@@ -205,11 +205,13 @@ export function GetSponsoredPanel({
 
   // A submitted check runs once this node's wallets are known, either way: runCheck reports
   // no or unreadable wallets itself. The result is scoped to its submission, so a new check
-  // never shows the previous one's result while it runs.
+  // never shows the previous one's result while it runs. It runs again when the wallet
+  // addresses or the wallet read's outcome change (a wallet Retry that recovers), with the
+  // recovered wallets; useFetch drops a superseded run's result.
   const walletsSettled = !walletsLoading && (wb != null || walletsReadError != null);
   const { data: checkData, error: checkError, loading: checking } = useFetch(
     () => runCheck(submitted!.id),
-    [submitted],
+    [submitted, walletsKey, walletsReadError],
     0,
     { enabled: submitted != null && walletsSettled, scope: submitted, retention: 'scope' },
   );
