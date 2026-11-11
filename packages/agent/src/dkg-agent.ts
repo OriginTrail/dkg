@@ -117,7 +117,7 @@ import {
   ENTITY_PRED_ALT,
   LegacyKnowledgeAssetReadOnlyError,
   isAllocatableKaAuthorV1,
-  applyMixins, recordViewSemanticsDelta,
+  applyMixins,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
@@ -171,7 +171,7 @@ import {
 import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
-  DKGQueryEngine, QueryHandler, ViewSemanticsDeltaSampler,
+  DKGQueryEngine, QueryHandler,
   emptyQueryResultForKind,
   validateReadOnlySparql,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
@@ -1614,7 +1614,7 @@ export class DKGAgent extends DKGAgentBase {
       log.warn(createOperationContext('init'), `Failed to migrate SWM attribution to agent DID, continuing without: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    const queryEngine = new DKGQueryEngine(agentStore, { viewSemanticsDelta: new ViewSemanticsDeltaSampler({ onDelta: recordViewSemanticsDelta }) });
+    const queryEngine = new DKGQueryEngine(agentStore);
 
     const agent = new DKGAgent(
       resolvedConfig, wallet, node, agentStore, publishedLifecycleWriter, ledgerTimestampWriter, storageAckCopyCleanupWriter, publisher, queryEngine, eventBus, chain,

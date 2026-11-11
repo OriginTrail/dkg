@@ -117,7 +117,8 @@ describe('view semantics for a caller who may not read the context graph', () =>
     expect(execution).not.toHaveBeenCalled();
   });
 
-  it('reports sampled merged answers through the agent, only to a caller who may read the context graph', async () => {
+  it('reports merged answers sampled on the agent query path, only to a caller who may read the context graph', async () => {
+    // The engine gets a read-graph source and a sampler here; the node wires both together with its read-graph settings.
     const sampler = new ViewSemanticsDeltaSampler({ sampleRate: 1 });
     const { agent: target } = await fixture('ready', 'per-asset', sampler);
     // Per asset the marker is in no asset; merged, the read graph holds it.
