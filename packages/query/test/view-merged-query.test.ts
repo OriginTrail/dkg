@@ -139,6 +139,24 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     expect(described.semantics).toBe('merged');
   });
 
+  it('combines DESCRIBE with GRAPH where the per-asset route does, and refuses it where that route does', async () => {
+    fresh();
+    for (const target of [`<${G1}>`, '?g']) {
+      const describe = `DESCRIBE ?s WHERE { GRAPH ${target} { ?s a <urn:Product> } }`;
+      if (endpoint) {
+        for (const options of [MERGED, VM]) {
+          await expect(engine.query(describe, options)).rejects.toThrow('DESCRIBE cannot be combined with a GRAPH clause on this store');
+        }
+        continue;
+      }
+      const merged = await engine.query(describe, MERGED);
+      // The description comes from the read graph, and never from another context graph.
+      expect(merged.quads?.map(q => [q.subject, q.predicate, q.object]).sort())
+        .toEqual([['urn:p1', RDF_TYPE, 'urn:Product'], ['urn:p1', 'urn:price', '"5"']].sort());
+      expect(merged.semantics).toBe('merged');
+    }
+  });
+
   it('reads only the read graph for a query without GRAPH', async () => {
     fresh();
     const sent = vi.spyOn(store, 'query');

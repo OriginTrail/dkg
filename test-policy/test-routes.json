@@ -176,6 +176,20 @@
     "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
   },
   {
+    "pattern": "packages/storage/test-live/read-graph-qualification.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "The read-graph qualification rows through the Blazegraph adapter (a shared large literal, concurrent removals of the last copies, triples held by many graphs), run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/storage/test-live/read-graph-kill-at-commit.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "A writer process killed while a write that maintains a read graph is in flight leaves the read graph equal to its members on Blazegraph, run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
     "pattern": "packages/publisher/test-live/**/*.blazegraph.test.ts",
     "lane": "tornado-blazegraph",
     "reason": "Live Blazegraph differential of the bounded share conflict lookup (OT-RFC-73 AC4), required in the existing Tornado Blazegraph CI lane: on its service container and again on the blazegraph-image.json image with the U+001F reproduction required",
