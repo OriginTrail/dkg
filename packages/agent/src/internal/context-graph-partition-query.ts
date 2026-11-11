@@ -6,6 +6,7 @@ import { resolveCallerDraftAccess } from '../working-memory-identity.js';
 import type { DKGAgent } from '../dkg-agent.js';
 import { DKGAgentBase } from '../dkg-agent-base.js';
 import { admitContextGraphReadCaller, ContextGraphReadAuthorityUnavailableError } from '../context-graph-read-authority.js';
+import { createReadGraphWorkloadV1, type ReadGraphWorkloadOwnerV1 } from '../read-graph-runtime.js';
 
 export interface ContextGraphPartitionInventoryOptions {
   callerAgentAddress?: string;
@@ -15,6 +16,14 @@ export interface ContextGraphPartitionInventoryOptions {
   chainEvidenceMode?: import('../public-snapshot-evidence.js').PublicSnapshotMode;
 }
 export class ContextGraphPartitionQueryMethods extends DKGAgentBase {
+  /**
+   * The builder of the read-graph partitions that reads are served from, which the
+   * catalog runtime starts and stops with the agent's other background workloads.
+   */
+  createReadGraphWorkloadV1(this: DKGAgent): ReadGraphWorkloadOwnerV1 {
+    return createReadGraphWorkloadV1(this, { dataDir: this.config.dataDir, logger: this.log });
+  }
+
   /** Enumerate the authorized partitions with their required admission. */
   async listContextGraphQueryPartitionReads(this: DKGAgent, contextGraphId: string,
     options: ContextGraphPartitionInventoryOptions = {},
