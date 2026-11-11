@@ -18,6 +18,14 @@ All notable changes to the DKG V10 node are documented here. The format is based
   If the backend refuses both, the service stops offering tools until the
   node restarts, so buyers answer such calls with `tools_unsupported`
   instead of sending them.
+- Core nodes send fewer RPC requests for Knowledge Assets that wait to reach
+  Verifiable Memory. The VM reconcile pass and the StorageACK promotion lanes
+  read an asset's latest Merkle root and then its publisher, a request each,
+  and an asset that stays pending is read again on every sweep. The two
+  reads now go out together, so the node's read batching sends them as one
+  request. On the mainnet Core nodes measured, that is up to about 14,000
+  fewer requests a day on Gnosis and 24,000 on Base, depending on how many
+  assets are pending.
 
 ## [10.1.1] - Unreleased
 
