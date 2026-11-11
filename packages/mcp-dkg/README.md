@@ -113,7 +113,7 @@ The MCP server resolves config from two places, in priority order:
 1. **`.dkg/config.yaml`** — walked upwards from the working directory (the spec-canonical workspace config; see `dkgv10-spec / 22_AGENT_ONBOARDING §2.1`)
 2. **environment variables** — `DKG_API`, `DKG_TOKEN`, `DKG_PROJECT`, `DKG_AGENT_URI`
 
-Env values win over the file; tool-call arguments (`projectId`, `view`, …) win over both.
+Values in the file win over the environment variables, which only fill what the file leaves unset; tool-call arguments (`projectId`, `view`, …) win over both. A node home's `config.json` (from `DKG_HOME`, or the local node home when there is no workspace file) works the other way: non-empty environment variables win over it. [Connection settings and precedence](../../docs/integrations/mcp.md#connection-settings-and-precedence) is the full reference for these rules.
 
 #### Minimal `.dkg/config.yaml`
 
