@@ -4,15 +4,14 @@
  * is stated once and tested directly; presentation (text, tone) maps from the state.
  */
 import type { PcaSnapshot } from '../api.js';
-import { isPcaSpendable } from './coverage.js';
-import { isPcaDead, pcaBudgetState } from './pca-primitives.js';
+import type { PcaCoverageResult } from './coverage.js';
 import { eqAddress } from '../web3/address.js';
 import { formatBps } from '../lib/format.js';
 
-/** One wallet's registration on one PCA. `registered: null` = couldn't determine. */
+/** One wallet probed on one PCA, keeping the canonical `classifyCoverage` result. */
 export interface CoverageProbe {
   wallet: string;
-  registered: boolean | null;
+  coverage: PcaCoverageResult;
 }
 
 /** What the coverage model needs from a PCA. The overview hook's resolved account extends it. */
@@ -23,7 +22,12 @@ export interface CoverageAccount {
   walletProbes: CoverageProbe[];
 }
 
-/** One publishing wallet, in precedence order: covered, unknown budget, inactive, then unknown probe. */
+/**
+ * One publishing wallet, aggregated from its probes' canonical outcomes across PCAs.
+ * Precedence: `covers` anywhere → covered; else any `inconclusive` (a probe or a budget
+ * couldn't be read) → unknown, because it might still cover (#9); else `uncovered` →
+ * inactive; else uncovered.
+ */
 export type WalletCoverage =
   | { kind: 'covered'; wallet: string; accountId: string }
   /** Approved on a PCA that definitely can't pay: expired or swept, or this billing period's budget is confirmed empty. */
@@ -32,34 +36,12 @@ export type WalletCoverage =
   | { kind: 'unknown'; wallet: string }
   | { kind: 'uncovered'; wallet: string };
 
-export function walletCoverage(
-  wallets: readonly string[],
-  accounts: readonly CoverageAccount[],
-  walletsInconclusive: boolean,
-  nowSec?: number,
-): WalletCoverage[] {
-  return wallets.map((wallet): WalletCoverage => {
-    const approving = accounts.filter((account) =>
-      account.snapshot && account.walletProbes.some((probe) => eqAddress(probe.wallet, wallet) && probe.registered === true));
-    const covering = approving.find((account) => isPcaSpendable(account.snapshot!, nowSec));
-    if (covering) return { kind: 'covered', wallet, accountId: covering.accountId };
-    // A live PCA whose budget couldn't be read might still cover: never call that empty.
-    const budgetUnknown = approving.some((account) => !isPcaDead(account.snapshot!, nowSec) && pcaBudgetState(account.snapshot!) === null);
-    if (budgetUnknown) return { kind: 'unknown', wallet };
-    const inactive = approving[0];
-    if (inactive) return { kind: 'inactive', wallet, accountId: inactive.accountId, expired: isPcaDead(inactive.snapshot!, nowSec) };
-    const unknown = walletsInconclusive || accounts.some((account) =>
-      account.walletProbes.some((probe) => eqAddress(probe.wallet, wallet) && probe.registered == null),
-    );
-    return unknown ? { kind: 'unknown', wallet } : { kind: 'uncovered', wallet };
-  });
-}
-
 /** This node's coverage: one state per publishing wallet, plus the best discount among the
- *  PCAs that cover it. The single aggregate the Overview, Dashboard and Settings all read. */
+ *  PCAs that cover it, both from the same classified probes. The single aggregate the
+ *  Overview, Dashboard and Settings all read. */
 export interface NodeCoverage {
   wallets: WalletCoverage[];
-  /** Best discount among spendable PCAs that approve at least one of this node's wallets. */
+  /** Best discount among PCAs whose probe `covers` at least one of this node's wallets. */
   bestCoveringDiscountBps: number | null;
   /** At least one publishing wallet is covered right now. */
   covered: boolean;
@@ -69,16 +51,25 @@ export function nodeCoverage(
   wallets: readonly string[],
   accounts: readonly CoverageAccount[],
   walletsInconclusive: boolean,
-  nowSec?: number,
 ): NodeCoverage {
-  const states = walletCoverage(wallets, accounts, walletsInconclusive, nowSec);
   let best: number | null = null;
-  for (const account of accounts) {
-    if (!account.snapshot || !isPcaSpendable(account.snapshot, nowSec)) continue;
-    const approvesHere = account.walletProbes.some((probe) => probe.registered === true && wallets.some((w) => eqAddress(w, probe.wallet)));
-    const bps = account.snapshot.discountBps;
-    if (approvesHere && typeof bps === 'number' && (best == null || bps > best)) best = bps;
-  }
+  const states = wallets.map((wallet): WalletCoverage => {
+    const results = accounts.flatMap((account) => account.walletProbes
+      .filter((probe) => eqAddress(probe.wallet, wallet))
+      .map((probe) => ({ account, coverage: probe.coverage })));
+    for (const { account, coverage } of results) {
+      const bps = account.snapshot?.discountBps;
+      if (coverage.outcome === 'covers' && typeof bps === 'number' && (best == null || bps > best)) best = bps;
+    }
+    const covering = results.find((r) => r.coverage.outcome === 'covers');
+    if (covering) return { kind: 'covered', wallet, accountId: covering.account.accountId };
+    if (walletsInconclusive || results.some((r) => r.coverage.outcome === 'inconclusive')) return { kind: 'unknown', wallet };
+    const inactive = results.find((r) => r.coverage.outcome === 'uncovered');
+    if (inactive && inactive.coverage.outcome === 'uncovered') {
+      return { kind: 'inactive', wallet, accountId: inactive.account.accountId, expired: inactive.coverage.dead };
+    }
+    return { kind: 'uncovered', wallet };
+  });
   return { wallets: states, bestCoveringDiscountBps: best, covered: states.some((c) => c.kind === 'covered') };
 }
 

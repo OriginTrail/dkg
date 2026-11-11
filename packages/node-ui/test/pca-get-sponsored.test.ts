@@ -230,9 +230,9 @@ describe('GetSponsoredPanel', () => {
     await unmount();
   });
 
-  // L4 — when the approval check fails wholesale (every probe throws → all null),
-  // surface the error, never a false "0 of N approved".
-  it('surfaces an error (not a false "0 approved") when the approval check fails wholesale (L4)', async () => {
+  // L4 — the PCA itself reads fine but every per-wallet probe throws (all null):
+  // surface the error with Retry, never a false "0 of N approved".
+  it('surfaces an error (not a false "0 approved") when every approval probe fails (L4), and Retry recovers', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue({
       wallets: [W0, W1],
       balances: [
@@ -242,7 +242,11 @@ describe('GetSponsoredPanel', () => {
       chainId: '84532',
       rpcUrl: null,
     });
-    mocks.fetchPca.mockRejectedValue(new Error('rpc down')); // every per-wallet probe → null
+    let probesFail = true;
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => {
+      if (key && probesFail) throw new Error('rpc down'); // every per-wallet probe -> null
+      return { ...makePcaSnapshot({ accountId: '7' }), probedKey: key ? { key, registered: key.toLowerCase() === W0.toLowerCase(), adapterSupported: true } : undefined };
+    });
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
     await waitForText(container, "Have a PCA ID?");
     setInputValue(container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement, '7');
@@ -250,10 +254,23 @@ describe('GetSponsoredPanel', () => {
     const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
     await act(async () => { checkBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 
-    await waitForText(container, 'Couldn’t check PCA #7 right now.');
+    await waitForText(container, 'Couldn’t check approval on PCA #7 right now.');
+    // The PCA was read once, then both wallet probes ran (and failed).
+    const keyed = mocks.fetchPca.mock.calls.filter(([id, key]) => id === '7' && key);
+    expect(keyed.map(([, key]) => key)).toEqual([W0, W1]);
+    expect(mocks.fetchPca).toHaveBeenCalledWith('7');
     expect(container.textContent).not.toContain('Approved on PCA #7: 0 of');
-    // N2 — a wholesale-failed lookup must NOT auto-track the id.
+    // N2 — a wholesale-failed check must NOT auto-track the id. The PCA itself was read,
+    // so Add is offered (read-only, coverage unknown), but nothing is tracked by itself.
     expect(usePcaStore.getState().trackedIds).not.toContain('7');
+    expect(container.querySelector('[data-testid="pca-sponsor-track"]')).toBeTruthy();
+    // Retry, with the probes answering this time: the real result replaces the error.
+    probesFail = false;
+    const retry = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Retry')!;
+    await act(async () => { retry.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'Approved on PCA #7: 1 of 2 wallets');
+    expect(container.textContent).not.toContain('right now.');
+    expect(usePcaStore.getState().trackedIds).toContain('7');
     await unmount();
   });
 
@@ -325,10 +342,12 @@ describe('GetSponsoredPanel', () => {
     const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
     await act(async () => { checkBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 
-    await waitForText(container, 'Couldn’t check PCA #7 right now.');
-    // A transient failure proves nothing about the PCA, so there's nothing to add.
-    expect(container.querySelector('[data-testid="pca-sponsor-track"]')).toBeNull();
+    await waitForText(container, 'Couldn’t check approval on PCA #7 right now.');
     expect(container.textContent).not.toContain('This node can’t check PCA approval');
+    expect(Array.from(container.querySelectorAll('button')).some((b) => b.textContent === 'Retry')).toBe(true);
+    // The PCA itself was read, so it can still be added; coverage stays unknown and Ready stays hidden.
+    expect(container.querySelector('[data-testid="pca-sponsor-track"]')?.textContent).toBe('Add PCA #7 to your list');
+    expect(container.textContent).not.toContain('Ready.');
     await unmount();
   });
 
