@@ -12,6 +12,7 @@
     "test:broker": "node --experimental-strip-types test/broker.integration.mjs"
   },
   "dependencies": {
+    "@origintrail-official/kafka-plugin": "workspace:*",
     "kafkajs": "2.2.4",
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-rdf-utils": "workspace:*"
@@ -24,8 +25,10 @@
   "license": "Apache-2.0",
   "main": "src/handler.mjs",
   "exports": {
-    ".": "./src/handler.mjs"
+    ".": "./src/handler.mjs",
+    "./registry": "./src/registry.mjs"
   },
+  "bin": { "dkg-kafka-enroll": "./src/enroll-cli.mjs" },
   "files": [
     "src",
     "README.md",

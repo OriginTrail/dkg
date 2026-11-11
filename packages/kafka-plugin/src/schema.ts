@@ -1,16 +1,7 @@
-import { z } from 'zod';
+import type { z } from 'zod';
+import { streamRegistrationSchema } from './registry.js';
 
-export const coreSchema = z
-  .object({
-    name: z.string().min(1),
-    kafkaBootstrapUrl: z.string().min(1),
-    kafkaTopicName: z.string().min(1),
-    description: z.string().optional(),
-    kafkaAuthMethod: z.string().optional(),
-    kafkaSaslMechanism: z.string().optional(),
-    dataFormat: z.string().default('JSON'),
-  })
-  .strict();
+export const coreSchema = streamRegistrationSchema;
 
 export type CoreFields = z.infer<typeof coreSchema>;
 
@@ -24,4 +15,8 @@ export const CORE_FIELDS: readonly (keyof CoreFields)[] = [
   'kafkaAuthMethod',
   'kafkaSaslMechanism',
   'dataFormat',
+  'clusterId',
+  'providerIri',
+  'schemaIri',
+  'about',
 ];

@@ -4,6 +4,7 @@ import { Journal } from './journal.mjs';
 import { buildAsset, assetIdentity, hash } from './asset.mjs';
 import { readKafka } from './kafka.mjs';
 import { createDkgSink } from './dkg-sink.mjs';
+import { validateRegisteredSource } from './registry.mjs';
 
 /** DKG SourceWorkerHandlerModule; loaded by the native `dkg source-worker` CLI.
  * It deliberately does NOT use createAndShare/publishAsync: this PoC seals only
@@ -11,11 +12,11 @@ import { createDkgSink } from './dkg-sink.mjs';
 export function createHandler({ read = readKafka, sinkFactory = createDkgSink } = {}) {
   return {
     async createSourceWorkerDeps({ config }) {
-      const sink = sinkFactory(config);
       const deliveries = new Map();
       if (new Set(config.sources.map(source => source.id)).size !== config.sources.length)
         throw new Error('KAFKA_SOURCE_ID_REUSED');
       for (const source of config.sources) {
+        validateRegisteredSource(source);
         if (source.kind !== 'kafka') throw new Error('KAFKA_SOURCE_KIND_REQUIRED');
         if (!source.clusterId || !source.groupId || !source.topic || !source.brokers?.length)
           throw new Error('KAFKA_SOURCE_CONFIG_REQUIRED');
@@ -25,6 +26,7 @@ export function createHandler({ read = readKafka, sinkFactory = createDkgSink } 
         if ((source.maxMessages ?? 10) < 1 || (source.maxMessages ?? 10) > 100 ||
             (source.maxBatchBytes ?? 24000) > 24000) throw new Error('KAFKA_BATCH_LIMIT');
       }
+      const sink = sinkFactory(config);
       const sourceFor = ref => config.sources.find(source => source.id === ref.id);
       return {
         async getFingerprint(ref) {

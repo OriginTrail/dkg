@@ -11,6 +11,11 @@ import { tmpdir } from 'node:os';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { HARDHAT_KEYS } from '../../chain/test/hardhat-harness.js';
 import { PROTOCOL_STORAGE_ACK_V2 } from '../../core/src/constants.js';
+import { Kafka, logLevel } from 'kafkajs';
+import { resolveKafkaRegistryEntry, enrollKafkaSource } from '../../kafka-source/src/registry.mjs';
+import { createHandler as createSourceHandler } from '../../kafka-source/src/handler.mjs';
+import { createDkgSink } from '../../kafka-source/src/dkg-sink.mjs';
+import { runSourceWorkerOnce } from '../../agent/src/source-worker.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = resolvePath(__dirname, '..', '..', 'cli', 'dist', 'cli.js');
 const BARE_FIXTURE_DIR = resolvePath(
@@ -428,8 +433,13 @@ const BARE_CG = 'kafka-e2e-bare';
 const EXT_CG = 'kafka-e2e-ext';
 const BARE_BODY = {
   name: 'demo-stream',
-  kafkaBootstrapUrl: 'kafka://broker:9092',
-  kafkaTopicName: 'demo-topic',
+  kafkaBootstrapUrl: `kafka://${process.env.DKG_KAFKA_REGISTRY_BROKER ?? 'broker:9092'}`,
+  kafkaTopicName: process.env.DKG_KAFKA_REGISTRY_BROKER ? `registry-e2e-${process.pid}` : 'demo-topic',
+  kafkaAuthMethod: 'PLAINTEXT',
+  clusterId: 'generic-registry-e2e',
+  providerIri: 'urn:provider:application-events',
+  schemaIri: 'urn:schema:application-events:v1',
+  about: ['urn:application:one', 'urn:application:two'],
 };
 const EXT_BODY = {
   ...BARE_BODY,
@@ -762,6 +772,91 @@ describe('kafka-plugin live daemon E2E — bare baseline', () => {
     expect(ka['schema:name']).toBe(BARE_BODY.name);
     expect(ka).not.toHaveProperty('dkg:privateDataAnchor');
   });
+  it('discovers generic entity links and returns a pinned registration through the authenticated API', async () => {
+    const params = new URLSearchParams({ provider: BARE_BODY.providerIri, about: BARE_BODY.about[0], includeRegistry: 'true' });
+    const response = await authed(daemon!, 'GET', '/api/kafka/streams?' + params);
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result.total).toBe(1);
+    const entry = result.items[0].registry;
+    expect(entry.ual).toBe(bareUal);
+    expect(entry.descriptor.about).toEqual(BARE_BODY.about);
+    expect(entry.descriptor.providerIri).toBe(BARE_BODY.providerIri);
+    expect(entry.descriptor.schemaIri).toBe(BARE_BODY.schemaIri);
+    expect(entry.descriptor.registeredByAgentAddress).toMatch(/^0x[0-9a-f]{40}$/);
+    expect(entry.publisherIri).toMatch(/^did:dkg:agent:/);
+    const byActor = await authed(daemon!, 'GET', '/api/kafka/streams?' + new URLSearchParams({
+      registeredBy: entry.descriptor.registeredByAgentAddress, publisher: entry.publisherIri }));
+    expect((await byActor.json()).total).toBe(1);
+    const denied = await fetch(`http://127.0.0.1:${daemon!.apiPort}/api/kafka/streams?includeRegistry=true`);
+    expect(denied.status).toBe(401);
+    expect(await denied.text()).not.toContain(BARE_BODY.kafkaBootstrapUrl);
+  });
+  it('enrolls the registry snapshot and seals/replays a native Source Worker record with provenance', async () => {
+    const registryUrl = `http://127.0.0.1:${daemon!.apiPort}/api/kafka/streams`;
+    const entry = await resolveKafkaRegistryEntry({ registryUrl, ual: bareUal!, contextGraphId: BARE_CG, registryToken: daemon!.token });
+    const agentAddress = entry.descriptor.registeredByAgentAddress!;
+    const contextGraphId = agentAddress + '/registry-ingestion';
+    const created = await authed(daemon!, 'POST', '/api/context-graph/create', {
+      id: contextGraphId, name: 'Generic registry ingestion', accessPolicy: 1, register: false,
+    });
+    expect([200, 201]).toContain(created.status);
+    const source = enrollKafkaSource(entry, { id: 'registry-events', groupId: `registry-worker-${process.pid}`,
+      agentAddress, contextGraphId, fromBeginning: true, allowPlaintext: true,
+      maxMessages: 1, readTimeoutMs: 5000 });
+    const config = { daemonUrl: `http://127.0.0.1:${daemon!.apiPort}`, daemonToken: daemon!.token,
+      stateFile: join(daemon!.home, 'registry-source-state.json'), sources: [source] };
+    // Default CI proves the real daemon lifecycle using a labelled delivery
+    // double. Setting DKG_KAFKA_REGISTRY_BROKER runs the SAME assertions with
+    // KafkaJS and a real disposable broker, including broker offset readback.
+    const broker = process.env.DKG_KAFKA_REGISTRY_BROKER;
+    const kafka = broker ? new Kafka({ brokers: [broker], logLevel: logLevel.NOTHING }) : undefined;
+    const admin = kafka?.admin(); const producer = kafka?.producer();
+    let acknowledged = 0;
+    const httpTrace: Array<Record<string, unknown>> = [];
+    const tracedFetch = async (url: URL, init: RequestInit) => {
+      const response = await fetch(url, init);
+      const body = await response.clone().json().catch(() => ({}));
+      httpTrace.push({ path: url.pathname, method: init.method, httpStatus: response.status,
+        status: body.status, agentAddress: body.agentAddress,
+        error: typeof body.error === 'string' ? body.error.replaceAll(daemon!.token, '[redacted]') : body.error?.code });
+      return response;
+    };
+    const syntheticRead = async () => ({ records: [{ topic: source.topic, partition: 0, offset: '0',
+      timestamp: '1700000000000', keyBase64: null, valueBase64: Buffer.from('generic-event').toString('base64'),
+      headers: {}, fetchedAt: new Date().toISOString() }],
+      async commit() { acknowledged++; }, async close() {} });
+    const run = async () => {
+      const deps = await createSourceHandler({ ...(broker ? {} : { read: syntheticRead }),
+        sinkFactory: settings => createDkgSink(settings, tracedFetch) }).createSourceWorkerDeps({ config });
+      const state = await runSourceWorkerOnce([source], config.stateFile, { ...deps,
+        now: () => new Date().toISOString(), getJobStatus() { throw new Error('No VM publication'); } });
+      return state.sources[source.id];
+    };
+    try {
+      if (admin && producer) {
+        await admin.connect();
+        await admin.createTopics({ topics: [{ topic: source.topic, numPartitions: 1, replicationFactor: 1 }], waitForLeaders: true });
+        await producer.connect();
+        await producer.send({ topic: source.topic, messages: [{ partition: 0, value: 'generic-event' }] });
+      }
+      const first = await run();
+      if (first.lastError) throw new Error(JSON.stringify({ failure: first.lastError, agentAddress, httpTrace }));
+      expect(first.lastError).toBeUndefined();
+      expect(first.kafka?.created).toBe(1);
+      if (admin) {
+        expect((await admin.fetchOffsets({ groupId: source.groupId, topics: [source.topic] }))[0].partitions[0].offset).toBe('1');
+        await admin.setOffsets({ groupId: source.groupId, topic: source.topic, partitions: [{ partition: 0, offset: '0' }] });
+      }
+      const replay = await run();
+      expect(replay.kafka?.created).toBe(0); expect(replay.kafka?.reused).toBe(1);
+      expect(replay.kafka?.receipts[0].name).toBe(first.kafka?.receipts[0].name);
+      if (!broker) expect(acknowledged).toBe(2);
+    } finally {
+      await producer?.disconnect();
+      if (admin) { await admin.deleteTopics({ topics: [source.topic] }); await admin.disconnect(); }
+    }
+  }, 120_000);
   it('POST with missing required field returns 400 InvalidContent', async () => {
     const res = await authed(daemon!, 'POST', '/api/kafka/streams/register', {
       kafkaBootstrapUrl: 'kafka://broker:9092',

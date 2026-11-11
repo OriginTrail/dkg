@@ -42,6 +42,7 @@ export function validateExtensionAgainstCore<TParsed>(
     throw new ExtensionSchemaUnsupportedFieldError(['*']);
   }
   const coreKeys = new Set(Object.keys(coreSchema.shape));
+  coreKeys.add('registeredByAgentAddress');
   const colliding = Object.keys(extShape).filter((k) => coreKeys.has(k));
   if (colliding.length > 0) {
     throw new ExtensionSchemaCollisionError(colliding);
