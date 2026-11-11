@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,7 +20,8 @@ vi.mock('../src/daemon/oxigraph-managed.js', async (importOriginal) => ({
   startManagedOxigraph: async () => wiring.managed,
 }));
 
-import { openStoppedNodeStore } from '../src/update/rollback-read-graphs.js';
+import { dropReadGraphsForRollback, openStoppedNodeStore } from '../src/update/rollback-read-graphs.js';
+import { mayHoldReadGraphPartitions } from '@origintrail-official/dkg-storage';
 
 const QUAD = { graph: 'did:dkg:context-graph:opened/_verifiable_memory/0xab/1', subject: 'urn:s', predicate: 'urn:p', object: '"v"' };
 
@@ -78,6 +79,29 @@ describe('opening a stopped node store for the rollback', () => {
       await opened.store.insert([QUAD]);
       expect(await opened.store.listGraphs()).toEqual([QUAD.graph]);
     } finally { await opened.close(); }
+  });
+
+  it('refuses a configured embedded store whose location it cannot match to the node\'s, and keeps the note', async () => {
+    // The note a release that maintains read graphs leaves in the data directory.
+    writeFileSync(join(dataDir, 'read-graph-partitions'), '');
+    for (const backend of ['oxigraph', 'oxigraph-worker', 'oxigraph-persistent']) {
+      // Relative: the rollback's working directory need not be the daemon's.
+      wiring.config = { store: { backend, options: { path: 'store.nq' } } };
+      await expect(openStoppedNodeStore(dataDir, () => undefined), backend).rejects.toThrow(/relative/);
+      // Absolute, with nothing there: opening it would make a new, empty store.
+      wiring.config = { store: { backend, options: { path: join(dataDir, 'moved', 'store.nq') } } };
+      await expect(dropReadGraphsForRollback(dataDir, () => undefined), backend).rejects.toThrow(/does not exist/);
+      expect(existsSync(join(dataDir, 'moved')), backend).toBe(false);
+    }
+    expect(existsSync(join(process.cwd(), 'store.nq'))).toBe(false);
+    expect(mayHoldReadGraphPartitions(dataDir)).toBe(true);
+
+    // The store at the configured absolute path is opened, dropped and the note removed.
+    const path = join(dataDir, 'configured.nq');
+    writeFileSync(path, '');
+    wiring.config = { store: { backend: 'oxigraph', options: { path } } };
+    await expect(dropReadGraphsForRollback(dataDir, () => undefined)).resolves.toBe(0);
+    expect(mayHoldReadGraphPartitions(dataDir)).toBe(false);
   });
 
   it('opens the default embedded store in the data directory when none is configured', async () => {
