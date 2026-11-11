@@ -522,6 +522,33 @@ describe('building a read graph', () => {
     expect(await triplesOf(adapter, fixture.readGraphs.wholeVm)).toContain(`urn:s:docs ${P} "d"`);
   });
 
+  it('takes every read graph a registry change moves out of service before it sends a mark, so one the store refuses leaves none serving', async () => {
+    const { adapter, fixture, layer, context } = await open();
+    const [vm, swm] = fixture.keys as [ReadGraphKey, ReadGraphKey];
+    for (const key of [vm, swm]) expect(await buildReadGraph(context, key)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    const { wholeVm, wholeSwm } = fixture.readGraphs;
+    // A sub-graph registered past the layer moves the membership of both.
+    const docs = `${fixture.root}/docs`;
+    await adapter.insert([
+      { subject: docs, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph', graph: `${fixture.root}/_meta` },
+      { subject: docs, predicate: 'http://schema.org/name', object: '"docs"', graph: `${fixture.root}/_meta` },
+    ]);
+    let refused = 0;
+    adapter.onUpdate = (sparql) => {
+      if (refused === 0 && sparql.includes('"dirty"')) {
+        refused += 1;
+        throw new Error('connection reset');
+      }
+    };
+    await expect(refreshReadGraphRegistry(context, fixture.contextGraphId)).rejects.toThrow('connection reset');
+    adapter.onUpdate = undefined;
+    for (const readGraph of [wholeVm, wholeSwm]) expect(servingReadGraphGeneration(layer.runtime.mirror.get(readGraph))).toBeUndefined();
+    // The cache keeps the registry the marks were measured against: the next refresh marks again, and takes the new one.
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code']);
+    expect(await refreshReadGraphRegistry(context, fixture.contextGraphId)).toBe(true);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
+  });
+
   it('takes the facts a refresh reads when the membership stays the same, so a later exact delete is predicted from them', async () => {
     const { adapter, fixture, layer, store, context } = await open();
     const [vm] = fixture.keys as [ReadGraphKey];

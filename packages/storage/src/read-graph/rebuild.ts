@@ -341,7 +341,7 @@ export async function refreshReadGraphRegistry(context: ReadGraphJobContext, con
       .filter((readGraph) => parseReadGraphIri(readGraph)?.scope.contextGraphId === contextGraphId);
     const installed = await runtime.locks.withLocks(affected, async () => {
       if (runtime.registries.version(contextGraphId) !== version) return false;
-      if (changed) for (const readGraph of affected) await new ReadGraphJob(context, readGraph, 'mark').markDirtyHeld();
+      if (changed) await markAllDirtyHeld(context, runtime.mirror, affected);
       runtime.registries.set(fresh, facts);
       // After the marks: every ready row of the context graph follows this registry.
       await recordReadGraphRegistry(target, runtime, fresh, jobOptions(context), context.dataDir);
@@ -350,6 +350,23 @@ export async function refreshReadGraphRegistry(context: ReadGraphJobContext, con
     if (installed) return changed;
   }
   throw new ReadGraphJobError(`The registry of ${contextGraphId} kept changing while it was read`);
+}
+
+/**
+ * Mark read graphs dirty under the locks the caller holds. Every ready one leaves service in the mirror before any
+ * mark is sent, so one the store refuses leaves none serving. The first failure is thrown once all were tried.
+ */
+async function markAllDirtyHeld(context: ReadGraphJobContext, mirror: InMemoryReadGraphStateMirror, readGraphs: readonly string[]): Promise<void> {
+  for (const row of readGraphs.map((readGraph) => mirror.get(readGraph))) if (row?.state === 'ready') mirror.set(nextReadGraphState(row, { kind: 'mark-dirty' })!);
+  let failure: { readonly error: unknown } | undefined;
+  for (const readGraph of readGraphs) {
+    try {
+      await new ReadGraphJob(context, readGraph, 'mark').markDirtyHeld();
+    } catch (error) {
+      failure ??= { error };
+    }
+  }
+  if (failure) throw failure.error;
 }
 
 /** Two lists of registry facts hold the same facts, in any order. */
