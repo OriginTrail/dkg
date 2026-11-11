@@ -1,12 +1,16 @@
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import oxigraph from 'oxigraph';
-import { afterAll, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { OxigraphWorkerStore } from '../src/adapters/oxigraph-worker.js';
 import { readGraphCopy } from '../src/read-graph/statements.js';
+import { parseReadGraphStateRows, readGraphStateCompareAndSet, readGraphStateRowsQuery } from '../src/read-graph/state.js';
+import type { TripleStore } from '../src/triple-store.js';
+import { P as LAYER_P, layerFixture, layeredStore, q as layerQuad, readyRow } from './helpers/read-graph-layer-conformance.js';
 import {
   P,
   planned,
@@ -144,4 +148,41 @@ readGraphWriteSuite({
 }, (context) => {
   blankNodeDeletes(context);
   injectedTermsChangeNothing(context);
+});
+
+/**
+ * Through the read-graph layer, both embedded adapters delete a blank node by
+ * its identity: the layer cannot plan that delete, so it marks the read graphs
+ * dirty, in the mirror and then in the stored row, and sends the delete as it is.
+ */
+describe.each([
+  ['OxigraphStore', (): TripleStore => new OxigraphStore()],
+  ['OxigraphWorkerStore', (): TripleStore => new OxigraphWorkerStore()],
+] as const)('a delete naming a blank node through the read-graph layer on %s', (_name, open) => {
+  it('deletes exactly that node, keeps its twin, and leaves the read graph dirty in the mirror and the store', async () => {
+    const adapter = open();
+    try {
+      const fixture = layerFixture(`blank-node-delete-${randomUUID()}`);
+      const { layer, store } = await layeredStore(adapter, { backend: 'oxigraph' }, fixture);
+      const { wholeVm } = fixture.readGraphs;
+      await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(wholeVm)));
+      const member = fixture.graphs[2]!;
+      // Two blank nodes with the same predicate and object.
+      await adapter.insert([layerQuad('_:first', '"twin"', member), layerQuad('_:second', '"twin"', member)]);
+      const twins = async () => {
+        const result = await adapter.query(`SELECT ?b WHERE { GRAPH <${member}> { ?b <${LAYER_P}> "twin" } }`);
+        return (result.type === 'bindings' ? result.bindings : []).map((row) => row['b']!).sort();
+      };
+      const [named, twin] = await twins();
+      expect([named, twin].every((label) => label?.startsWith('_:'))).toBe(true);
+      await store.delete([layerQuad(named!, '"twin"', member)]);
+      expect(await twins()).toEqual([twin]);
+      const stored = await adapter.query(readGraphStateRowsQuery());
+      const row = parseReadGraphStateRows(stored.type === 'bindings' ? stored.bindings : []).rows.find((each) => each.readGraph === wholeVm);
+      expect(row?.state).toBe('dirty');
+      expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
+    } finally {
+      await adapter.close();
+    }
+  });
 });
