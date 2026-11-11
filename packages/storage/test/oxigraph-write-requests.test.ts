@@ -104,6 +104,12 @@ describe('OxigraphStore engine calls with read-graph operations', () => {
     expect(requests).toEqual([]);
   });
 
+  it('a pattern delete with a blank node in its pattern refuses operations before it changes anything', async () => {
+    const { requests, error } = await recordOxigraphWrite((store) => store.deleteByPattern({ graph: G, object: '_:b1' }, planned(PLAN)));
+    expect(String(error)).toMatch(/OxigraphStore\.deleteByPattern cannot send read-graph operations with a blank node in its pattern/);
+    expect(requests).toEqual([]);
+  });
+
   it('insert refuses operations before it changes anything', async () => {
     const insert = OXIGRAPH_WRITE_CASES.find((c) => c.name === 'insert')!;
     const { requests, error } = await recordOxigraphWrite((store) => insert.run(store, planned(PLAN)));
