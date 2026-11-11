@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { isSparqlUpdateOperation, parseReadGraphIri } from '@origintrail-official/dkg-core';
-import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './adapters/graph-enumeration-query.js';
+import { decodeNTriplesIriEscapesPreservingLegacy } from '@origintrail-official/dkg-rdf-utils';
+import { REGISTERED_NAMED_GRAPH_ENUMERATION_QUERY } from './adapters/graph-enumeration-query.js';
 import { legacyStrippedIriValue } from './adapters/sparql-term-policy.js';
 import { composeGraphEnumerationVisibility, isReadGraphPartitionGraph } from './graph-enumeration-visibility.js';
 import { sparqlUpdateReach } from './read-graph-partition-reference.js';
@@ -37,14 +38,27 @@ export class ReadGraphPartitionWriteError extends Error implements StoreOperatio
   }
 }
 
+/** How many times an escape decoded into another escape is followed. */
+const ESCAPE_DECODING_ROUNDS = 4;
+
 /**
- * Whether a caller's graph name targets a read-graph partition: as given, or
- * as an adapter writes a name that fails validation, with its IRI-breaking
- * characters deleted (`legacyStrippedIriValue`, the renderer's own rule).
- * Every check of a caller's graph name against the partition goes through it.
+ * Whether a caller's graph name targets a read-graph partition: as given; as
+ * an adapter writes a name that fails validation, with its IRI-breaking
+ * characters deleted (`legacyStrippedIriValue`, the renderer's own rule); or
+ * as an N-Quads or SPARQL parser reads it, with its `\u` and `\U` escapes
+ * decoded, again and again while that changes the name. Every check of a
+ * caller's graph name against the partition goes through it.
  */
 export function isReadGraphPartitionWriteTarget(graph: string): boolean {
-  return isReadGraphPartitionGraph(graph) || isReadGraphPartitionGraph(legacyStrippedIriValue(graph));
+  let name = graph;
+  for (let round = 0; round <= ESCAPE_DECODING_ROUNDS; round += 1) {
+    if (isReadGraphPartitionGraph(name) || isReadGraphPartitionGraph(legacyStrippedIriValue(name))) return true;
+    const decoded = decodeNTriplesIriEscapesPreservingLegacy(name);
+    if (decoded === name) return false;
+    name = decoded;
+  }
+  // A name still decoding after that many rounds is refused rather than followed further.
+  return true;
 }
 
 function refuseGraph(graph: string | undefined, operation: StoreOperation): void {
@@ -269,14 +283,15 @@ export function storeMayHoldReadGraphPartitions(store: TripleStore): boolean {
 
 /**
  * Drop every graph of every read-graph partition, with their state. The
- * partition is hidden from enumeration, so this reads the store's own graph
- * list once. State graphs and other graphs that are not read graphs go first,
- * so a drop that stops part way never leaves a state row without its data.
- * Returns the number of graphs dropped.
+ * partition is hidden from enumeration, so this reads the store's own list of
+ * registered graphs once; a read graph emptied by DELETE, which Oxigraph keeps
+ * registered, is dropped too. State graphs and other graphs that are not read
+ * graphs go first, so a drop that stops part way never leaves a state row
+ * without its data. Returns the number of graphs dropped.
  */
 export async function dropReadGraphPartitions(store: TripleStore, options: QueryOptions = {}): Promise<number> {
   const target = readGraphPartitionMaintenanceStore(store);
-  const result = await target.query(NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY,
+  const result = await target.query(REGISTERED_NAMED_GRAPH_ENUMERATION_QUERY,
     { ...options, source: options.source ?? 'storage.readGraphPartitionDrop' });
   if (result.type !== 'bindings') throw new Error('Read-graph partition drop expected graph bindings');
   const graphs = [...new Set(result.bindings.map(row => row.g).filter((graph): graph is string =>

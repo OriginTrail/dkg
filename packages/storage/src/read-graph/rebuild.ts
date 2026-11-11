@@ -40,6 +40,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { isReadGraphStateGraph } from '../graph-enumeration-visibility.js';
 import { readGraphInventoryByPrefix } from '../graph-inventory-materialization.js';
+import { assertGraphCatalogWithinInternalLimit, readCompleteGraphCatalog } from '../graph-catalog-internal-limit.js';
 import { noteReadGraphPartitions } from '../read-graph-partition-marker.js';
 import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
@@ -341,7 +342,7 @@ export async function refreshReadGraphRegistry(context: ReadGraphJobContext, con
     // The same membership can come from other facts, and the layer predicts later writes from the facts.
     const cachedFacts = runtime.registries.facts(contextGraphId);
     if (cached !== undefined && !changed && cachedFacts !== undefined && sameFacts(cachedFacts, facts)) {
-      await recordReadGraphRegistry(target, runtime, fresh, jobOptions(context));
+      await recordReadGraphRegistry(target, runtime, fresh, jobOptions(context), context.dataDir);
       return false;
     }
     const affected = runtime.mirror.rows().map((row) => row.readGraph)
@@ -351,7 +352,7 @@ export async function refreshReadGraphRegistry(context: ReadGraphJobContext, con
       if (changed) for (const readGraph of affected) await new ReadGraphJob(context, readGraph, 'mark').markDirtyHeld();
       runtime.registries.set(fresh, facts);
       // After the marks: every ready row of the context graph follows this registry.
-      await recordReadGraphRegistry(target, runtime, fresh, jobOptions(context));
+      await recordReadGraphRegistry(target, runtime, fresh, jobOptions(context), context.dataDir);
       return true;
     });
     if (installed) return changed;
@@ -620,9 +621,12 @@ class ReadGraphJob {
     if (roots.prefixes.length > 0 && !this.maintenance.readGraphInventory && !this.maintenance.listGraphsByPrefix) {
       // Without a prefix listing, one listing of the context graph's own graphs, as a full check lists them: the whole
       // store's list can exceed its internal limit, and must not stop a build of a small context graph.
+      // Under the catalog's internal ceiling, as any complete list is read.
       const root = contextGraphDataUri(parseReadGraphIri(this.readGraph)!.scope.contextGraphId);
-      const result = await this.maintenance.query(memberGraphListingQuery(this.maintenance, root), this.options);
+      const listing = memberGraphListingQuery(this.maintenance, root);
+      const result = await readCompleteGraphCatalog(this.options, (internal) => this.maintenance.query(listing, internal));
       const graphs = result.type === 'bindings' ? result.bindings.flatMap((binding) => (binding.g === undefined ? [] : [binding.g])) : [];
+      assertGraphCatalogWithinInternalLimit(graphs);
       for (const prefix of roots.prefixes) add(graphs, prefix);
     } else {
       for (const prefix of roots.prefixes) add((await readGraphInventoryByPrefix(this.maintenance, prefix, this.options)).graphs, prefix);

@@ -20,14 +20,11 @@ describe('whether the store holds any graph of a context graph', () => {
     await expect(holdsContextGraphGraphs(store([]), '0xab/products')).resolves.toBe(false);
   });
 
-  it('counts its per-context-ID graphs and its working-memory assertion graphs', async () => {
-    await expect(holdsContextGraphGraphs(store([`${ROOT}/context/7`]), '0xab/products')).resolves.toBe(true);
-    await expect(holdsContextGraphGraphs(store([`${ROOT}/context/7/_meta`]), '0xab/products')).resolves.toBe(true);
-    await expect(holdsContextGraphGraphs(store([`${ROOT}/assertion/0xaa/notes`]), '0xab/products')).resolves.toBe(true);
-    const plain = store([`${ROOT}/assertion/0xaa/notes`], { byPrefix: false });
-    await expect(holdsContextGraphGraphs(plain, '0xab/products')).resolves.toBe(true);
-    // A graph whose segment only begins like one of these partitions is not one of them.
-    await expect(holdsContextGraphGraphs(store([`${ROOT}/contexts/7`, `${ROOT}/assertions/x`]), '0xab/products')).resolves.toBe(false);
+  it('does not count graphs under context/ or assertion/, which a child context graph may own under the same names', async () => {
+    // A child context graph `<id>/context/7` with its _meta: one IRI with a per-context-ID graph and its _meta.
+    const child = store([`${ROOT}/context/7`, `${ROOT}/context/7/_meta`, `${ROOT}/assertion/0xaa/notes`]);
+    await expect(holdsContextGraphGraphs(child, '0xab/products')).resolves.toBe(false);
+    await expect(holdsContextGraphGraphs(store([`${ROOT}/context/7`], { byPrefix: false }), '0xab/products')).resolves.toBe(false);
   });
 
   it('does not count another context graph whose id extends this one, a child included', async () => {
