@@ -292,6 +292,23 @@ describe('registry recognition in the read-graph layer', () => {
     expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
   });
 
+  it('reads the registry again after a removal named by a blank node, which the adapter matches by shape', async () => {
+    const { adapter, store, meta, fixture, layer, states } = await layered();
+    // `_:t` becomes a variable in the adapter's delete, so this removes the registration type of `code`.
+    await store.delete([fact(meta, `${fixture.root}/code`, R.type, '_:t')]);
+    expect((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames).toEqual([]);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual([]);
+    expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'dirty@2', agentWm: 'dirty@2' });
+  });
+
+  it('registers a sub-graph named by a blank node, marking before the insert and reading the registry after it', async () => {
+    const { adapter, store, meta, fixture, layer, states } = await layered();
+    await store.insert([fact(meta, '_:sg', R.type, R.subGraphClass), fact(meta, '_:sg', R.name, '"docs"')]);
+    expect((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames).toEqual(['code', 'docs']);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
+    expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
+  });
+
   it('marks the read graphs a sub-graph leaves dirty when its name goes', async () => {
     const { store, meta, fixture, states } = await layered();
     await store.delete([fact(meta, `${fixture.root}/code`, R.name, '"code"')]);

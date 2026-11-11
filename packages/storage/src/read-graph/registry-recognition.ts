@@ -32,8 +32,8 @@
  * decoded), and a literal never equals an IRI.
  */
 
-import { contextGraphDataUri, contextGraphMetaUri, escapeSparqlLiteral, assertSafeIri } from '@origintrail-official/dkg-core';
-import { formatCanonicalRdfLiteralTerm, parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
+import { contextGraphDataUri, contextGraphMetaUri, escapeSparqlLiteral, assertSafeIri, unwrapIri } from '@origintrail-official/dkg-core';
+import { canonicalizeRdfObjectTerm, parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { Quad, QueryOptions, TripleStore } from '../triple-store.js';
 import type { ReadGraphRegistrySnapshot } from './membership.js';
 import { READ_GRAPH_REGISTRY_PREDICATES as P, registeredSubGraphName } from './registry.js';
@@ -166,8 +166,8 @@ export function registryFactsAfter(
         next.push(...registryFactsOf(part.added));
         return;
       case 'match':
-        next = next.filter((fact) => !(fact.graph === part.graph && (part.subject === undefined || fact.subject === iriTerm(part.subject))
-          && (part.predicate === undefined || fact.predicate === iriTerm(part.predicate))
+        next = next.filter((fact) => !(fact.graph === part.graph && (part.subject === undefined || fact.subject === unwrapIri(part.subject))
+          && (part.predicate === undefined || fact.predicate === unwrapIri(part.predicate))
           && (part.object === undefined || sameObject(fact.object, storedTerm(part.object)))));
         return;
       case 'prefix':
@@ -178,8 +178,8 @@ export function registryFactsAfter(
         next.push(...registryFactsOf(part.quads));
         return;
       case 'subject':
-        next = next.filter((fact) => !(fact.graph === part.graph && fact.subject === iriTerm(part.subject)
-          && (part.predicate === undefined || fact.predicate === iriTerm(part.predicate))));
+        next = next.filter((fact) => !(fact.graph === part.graph && fact.subject === unwrapIri(part.subject)
+          && (part.predicate === undefined || fact.predicate === unwrapIri(part.predicate))));
         next.push(...registryFactsOf(part.quads));
         return;
       case 'all':
@@ -203,11 +203,14 @@ export function registryFactsAfter(
 export function isExactRegistryWrite(contextGraphId: string, write: ReadGraphRegistryWrite): boolean {
   // A literal that does not parse cannot be put in the form the store reports.
   const unreadable = (quads: readonly Quad[]) => ownerFactsAmong(contextGraphId, quads)
-    .some((fact) => fact.object.startsWith('"') && parseRdfLiteralTerm(fact.object) === null);
+    .some((fact) => fact.object.startsWith('"') && parseRdfLiteralTerm(fact.object, { combineSurrogatePairs: true }) === null);
+  // A removal is judged by its predicate alone: a SPARQL adapter deletes a blank-node term as a variable,
+  // so a type removal whose object is a blank node can remove a registration type.
+  const removesLoosely = (quads: readonly Quad[]) => quads.some((quad) => registryOwnersOfGraph(quad.graph).includes(contextGraphId)
+    && REGISTRY_PREDICATES.has(unwrapIri(quad.predicate)) && (isComparedLoosely(unwrapIri(quad.subject)) || isComparedLoosely(storedTerm(quad.object))));
   switch (write.kind) {
     case 'quads':
-      return !ownerFactsAmong(contextGraphId, write.removed).some((fact) => isComparedLoosely(fact.subject) || isComparedLoosely(fact.object))
-        && !unreadable(write.added);
+      return !removesLoosely(write.removed) && !unreadable(write.added);
     case 'match': return ![write.subject, write.object].some((term) => term !== undefined && isComparedLoosely(term));
     case 'subject': return !isComparedLoosely(write.subject) && !unreadable(write.quads);
     case 'graph': return !unreadable(write.quads);
@@ -244,6 +247,8 @@ export async function readNamesOfNewSubGraphs(
   const subjects = [...new Set(registryFactsAmong(addedQuadsOf(write))
     .filter((fact) => fact.graph === meta && isSubGraphType(fact) && !typed.has(fact.subject)).map((fact) => fact.subject))];
   if (subjects.length === 0) return [];
+  // A blank node has no name a query can use: only reading the facts after the write tells.
+  if (subjects.some((subject) => subject.startsWith('_:'))) return undefined;
   let values: string;
   try {
     values = subjects.map((subject) => `<${assertSafeIri(subject)}>`).join(' ');
@@ -270,10 +275,12 @@ export function sameRegistry(left: ReadGraphRegistrySnapshot, right: ReadGraphRe
 /** The quads that are registry facts: any of the registry predicates, with a class object for `rdf:type`. */
 function registryFactsAmong(quads: readonly Quad[]): ReadGraphRegistryFact[] {
   return quads.flatMap((quad) => {
-    const fact = { graph: quad.graph, subject: iriTerm(quad.subject), predicate: iriTerm(quad.predicate), object: storedTerm(quad.object) };
+    const fact = { graph: quad.graph, subject: unwrapIri(quad.subject), predicate: unwrapIri(quad.predicate), object: storedTerm(quad.object) };
     return isRegistryPredicate(fact.predicate, fact.object) && registryOwnersOfGraph(fact.graph).length > 0 ? [fact] : [];
   });
 }
+
+const REGISTRY_PREDICATES: ReadonlySet<string> = new Set([P.type, P.name, P.authenticatedSubGraphName, P.registrationStatus]);
 
 function isRegistryPredicate(predicate: string, object: string): boolean {
   if (predicate === P.type) return object === P.subGraphClass || object === P.contextGraphClass;
@@ -308,7 +315,7 @@ function isChildFact(fact: ReadGraphRegistryFact): boolean {
 
 /** A cached fact and a quad name the same triple. */
 function sameFact(fact: ReadGraphRegistryFact, quad: Quad): boolean {
-  return fact.graph === quad.graph && fact.subject === iriTerm(quad.subject) && fact.predicate === iriTerm(quad.predicate)
+  return fact.graph === quad.graph && fact.subject === unwrapIri(quad.subject) && fact.predicate === unwrapIri(quad.predicate)
     && sameObject(fact.object, storedTerm(quad.object));
 }
 
@@ -324,20 +331,14 @@ function sameObject(left: string, right: string): boolean {
   return literal ? lexical(left) === lexical(right) : left === right;
 }
 
-/** An IRI as the stores and the registry query give it: without angle brackets, which the adapters accept too. */
-function iriTerm(term: string): string {
-  return term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term;
-}
-
 /**
- * A term as the stores report it: an IRI without angle brackets, and a
- * literal in canonical form, its escapes decoded (`"\u0064ocs"` is `"docs"`).
- * A literal that does not parse stays as written.
+ * A term as the stores report it: an IRI without the angle brackets the
+ * adapters also accept, and a literal in the canonical form of the adapters'
+ * query results, its escapes decoded (`"\u0064ocs"` is `"docs"`). A literal
+ * that does not parse stays as written.
  */
 function storedTerm(term: string): string {
-  if (!term.startsWith('"')) return iriTerm(term);
-  const literal = parseRdfLiteralTerm(term);
-  return literal ? formatCanonicalRdfLiteralTerm(literal) : term;
+  return term.startsWith('"') ? canonicalizeRdfObjectTerm(term) : unwrapIri(term);
 }
 
 function lexical(term: string): string {
