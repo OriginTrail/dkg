@@ -6,7 +6,7 @@ import oxigraph from 'oxigraph';
 import { afterAll, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { OxigraphWorkerStore } from '../src/adapters/oxigraph-worker.js';
-import { readGraphCopy } from '../src/read-graph/statements.js';
+import { readGraphCopy, readGraphDeltaDelete, readGraphDeltaDeleteMatching, readGraphInsertQuads } from '../src/read-graph/statements.js';
 import {
   P,
   planned,
@@ -102,6 +102,69 @@ function injectedTermsChangeNothing({ store, inScenario, graph }: ReadGraphWrite
     }));
 }
 
+/**
+ * A planned delete of quads in several graphs goes as one DELETE DATA, grouped by graph. Every quad must leave its own
+ * graph, a sibling graph keeps its triples, and the read graph equals the union of what the members still hold.
+ */
+function multiGraphDeletes({ store, inScenario, graph, render }: ReadGraphWriteContext<ReadGraphTestStore>): void {
+  it('deletes quads of several graphs in one planned request, each from its own graph', () => inScenario(async (s) => {
+    const sibling = [q('c', 'three', s.G3)];
+    await store().insert([...sibling, ...readGraphInsertQuads(s.R, sibling)]);
+    // The graphs interleave, so a quad grouped under the wrong graph, or dropped after the first, would stay.
+    const targets = [q('a', 'one', s.G1), q('b', 'two', s.G2), q('a', 'shared', s.G1), q('a', 'shared', s.G2)];
+    await s.maintained(s.plan([], [readGraphDeltaDelete(s.target, targets, render)!]), (o) => store().delete(targets, o));
+    expect(await graph(s.G1)).toEqual([]);
+    expect(await graph(s.G2)).toEqual([]);
+    expect(await graph(s.G3)).toEqual([`urn:rg-int:c ${P} "three"`]);
+    expect(await s.readGraph()).toEqual([`urn:rg-int:c ${P} "three"`]);
+    expect(await graph(s.OUTSIDE)).toHaveLength(2);
+  }));
+}
+
+/** Literals whose text, language or datatype a planned delete must carry exactly, each with a sibling that must stay. */
+const LITERALS = [
+  { name: 'escaped', target: '"line1\\nline2 \\"quoted\\" \\\\ tab\\tend"', sibling: '"line1"' },
+  { name: 'language-tagged', target: '"bonjour"@fr', sibling: '"bonjour"@en' },
+  { name: 'typed', target: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>', sibling: '"42"' },
+  { name: 'custom-datatype', target: '"x"^^<urn:test:datatype>', sibling: '"x"^^<urn:test:other>' },
+];
+
+/**
+ * A planned delete writes the literal the engine printed back into SPARQL. For each kind of literal: the term read back
+ * from the store is deleted, by a planned delete and then by an object-bound planned pattern delete; the target goes,
+ * its sibling stays, and the read graph equals what the members still hold. The stored data is checked, not the
+ * count the pattern delete returns, which comes from the matches it found first.
+ */
+function literalRoundTrips({ store, inScenario, graph, render }: ReadGraphWriteContext<ReadGraphTestStore>): void {
+  for (const literal of LITERALS) {
+    it(`deletes a read-back ${literal.name} literal with a planned delete and a planned pattern delete`, () => inScenario(async (s) => {
+      const subject = 'urn:rg-int:lit';
+      const add = (object: string) => {
+        const quads = [{ subject, predicate: P, object, graph: s.G3 }];
+        return store().insert([...quads, ...readGraphInsertQuads(s.R, quads)]);
+      };
+      await add(literal.target);
+      const read = await store().query(`SELECT ?o WHERE { GRAPH <${s.G3}> { <${subject}> <${P}> ?o } }`);
+      if (read.type !== 'bindings' || read.bindings.length !== 1) throw new Error('Expected the stored target literal');
+      const stored = read.bindings[0]!['o']!;
+      await add(literal.sibling);
+      expect(await graph(s.G3)).toHaveLength(2);
+      const target = { subject, predicate: P, object: stored, graph: s.G3 };
+
+      await s.maintained(s.plan([], [readGraphDeltaDelete(s.target, [target], render)!]), (o) => store().delete([target], o));
+      const left = await graph(s.G3);
+      expect(left).toHaveLength(1);
+      expect(left[0]).not.toBe(`${subject} ${P} ${stored}`);
+
+      await add(literal.target);
+      const pattern = { subject, predicate: P, object: stored };
+      await s.maintained(s.plan([readGraphDeltaDeleteMatching(s.target, s.G3, pattern, render)], []),
+        (o) => store().deleteByPattern({ graph: s.G3, ...pattern }, o));
+      expect(await graph(s.G3)).toEqual(left);
+    }));
+  }
+}
+
 const dir = mkdtempSync(join(tmpdir(), 'dkg-read-graph-writes-'));
 const persistPath = join(dir, 'store.nq');
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -115,6 +178,8 @@ readGraphWriteSuite({
   const { store, inScenario } = context;
   blankNodeDeletes(context);
   injectedTermsChangeNothing(context);
+  multiGraphDeletes(context);
+  literalRoundTrips(context);
   it('a store reopened from what it flushed holds the same read graph', () => inScenario(async (s) => {
     await s.maintained(s.reference(s.G1), (o) => store().replaceGraph(s.G1, [q('r', 'reopened', s.G1)], o));
     await store().flush();
@@ -144,4 +209,6 @@ readGraphWriteSuite({
 }, (context) => {
   blankNodeDeletes(context);
   injectedTermsChangeNothing(context);
+  multiGraphDeletes(context);
+  literalRoundTrips(context);
 });
