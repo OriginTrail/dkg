@@ -525,6 +525,7 @@ import {
   type ChainAuthorityReadBudgets,
 } from './chain-authority-read-budgets.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { readGraphWorkloadOf } from './read-graph-runtime.js';
 
 /**
  * Same-instance restart contract.
@@ -2136,7 +2137,7 @@ export class DKGAgentBase {
     if (this.swmTargetExecutorSessionFactoryV1 !== undefined) {
       throw new Error('SWM target executor sessions are already configured');
     }
-    this.swmTargetExecutorSessionFactoryV1 = new SwmTargetExecutorSessionFactoryV1(ports);
+    this.swmTargetExecutorSessionFactoryV1 = new SwmTargetExecutorSessionFactoryV1({ requestReadGraphBuild: () => readGraphWorkloadOf(this)?.request(), ...ports });
   }
 
   /** Create one synchronization-scoped executor with isolated mutable state. */
