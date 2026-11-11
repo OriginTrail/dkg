@@ -74,7 +74,7 @@ export interface ReadGraphBatching {
   /** Member graphs in the first copy batch; later batches grow or shrink toward {@link targetBatchMs}. */
   readonly graphsPerBatch: number;
   readonly maxGraphsPerBatch: number;
-  /** The most triples one drop batch removes. */
+  /** The most triples one drop batch removes; later batches shrink toward {@link targetBatchMs}. */
   readonly triplesPerDrop: number;
   /** The time one copy batch should take. */
   readonly targetBatchMs: number;
@@ -152,6 +152,8 @@ export class ReadGraphJobError extends Error {
 const SOURCE = 'storage.readGraphBuild';
 /** Drop batches between two reads of the stored row, which a drop under a stale fence would never end without. */
 const DROPS_PER_ROW_CHECK = 32;
+/** The fewest triples a drop batch removes once its size follows its time. */
+const MIN_TRIPLES_PER_DROP = 500;
 const MAX_PAUSE_MS = 2_000;
 const PRESSURE_POLL_MS = 50;
 const MAX_PRESSURE_WAIT_MS = 5_000;
@@ -495,13 +497,20 @@ class ReadGraphJob {
     return result.value;
   }
 
-  /** Empty the read graph in fenced batches. `false` when its row moved on. */
+  /** Empty the read graph in fenced batches, sized by time like the copies. `false` when its row moved on. */
   async drop(row: ReadGraphStateRow, inService: () => boolean): Promise<boolean> {
     const fence = fenceOf(row);
+    const most = this.batching.triplesPerDrop;
+    const least = Math.min(MIN_TRIPLES_PER_DROP, most);
+    let limit = most;
     for (let drops = 0; await this.holdsTriple(); drops += 1) {
       if (drops > 0 && drops % DROPS_PER_ROW_CHECK === 0 && !sameRow((await this.stored()).row, row)) return false;
-      const drop = readGraphFencedDrop(this.readGraph, fence, { limit: this.batching.triplesPerDrop });
-      if (!(await this.batch(inService, () => this.send(drop)))) return false;
+      const drop = readGraphFencedDrop(this.readGraph, fence, { limit });
+      const began = performance.now();
+      if (!(await this.batch(inService, () => this.send(drop), false))) return false;
+      const elapsed = performance.now() - began;
+      limit = Math.max(least, Math.min(most, nextBatchSize(limit, elapsed, { ...this.batching, maxGraphsPerBatch: most })));
+      await this.pause(elapsed);
     }
     return true;
   }
