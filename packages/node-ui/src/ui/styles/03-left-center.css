@@ -44,7 +44,7 @@
 /* Collapsible sidebar groups (SidebarSection): My Context Graphs, Public
    graphs, Marketplace, Integrations. Headers use the .v10-peer-group pattern. */
 .v10-sidebar-group-body { gap: 0; padding: 2px 0 8px; }
-.v10-sidebar-empty { display: grid; gap: 4px; margin: 2px 8px 6px; padding: 8px; color: var(--text-tertiary); font-size: var(--fs-label); line-height: 1.5; }
+.v10-sidebar-empty { display: grid; gap: var(--space-4); margin: var(--space-2) var(--space-8) var(--space-6); padding: var(--space-8); color: var(--text-tertiary); font-size: var(--fs-label); line-height: var(--lh-body); }
 .v10-sidebar-empty strong { color: var(--text-primary); font-size: var(--fs-control); font-weight: 600; }
 /* First run: the empty group is a card, and carries New and Join. */
 .v10-sidebar-first-run { padding: 12px; gap: 8px; border: 1px solid var(--border-default); border-radius: var(--radius-card); background: var(--bg-surface); }
