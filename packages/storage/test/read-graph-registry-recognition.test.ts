@@ -7,6 +7,7 @@ import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { guardReadGraphPartition } from '../src/read-graph-partition-store.js';
 import { missingReadGraphMethods } from '../src/read-graph/adapter-contract.js';
 import { readUnstoredReadGraphMarks, useReadGraphMarkJournal } from '../src/read-graph/mark-journal.js';
+import { workingMemoryIdentityRule } from '../src/read-graph/membership.js';
 import { readStoredReadGraphRow } from '../src/read-graph/rebuild.js';
 import { READ_GRAPH_REGISTRY_PREDICATES as R, readReadGraphRegistry } from '../src/read-graph/registry.js';
 import { readGraphRegistryRecordUpdate } from '../src/read-graph/registry-record.js';
@@ -694,6 +695,19 @@ describe('registry recognition in the read-graph layer', () => {
     await store.update!(`INSERT DATA { GRAPH <${meta}> { <urn:asset:1> <urn:test:p> "m" } }`, { writtenGraphs: [meta] });
     // The write changed no registry fact, but the restore ended the fences: nothing comes back before a rebuild.
     expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'dirty@2', agentWm: 'dirty@2' });
+  });
+
+  it('leaves a fenced working-memory read graph out of service when another identity rule is installed while the write runs', async () => {
+    const { adapter, store, layer, meta, states } = await layered();
+    const update = adapter.update.bind(adapter);
+    adapter.update = async (sparql, options) => {
+      // An installer that does not wait for the write's locks sets another rule meanwhile.
+      if (sparql.includes('urn:test:p')) layer.runtime.workingMemoryIdentity = workingMemoryIdentityRule({ defaultAgentAddress: `0x${'cd'.repeat(20)}` });
+      return update(sparql, options);
+    };
+    await store.update!(`INSERT DATA { GRAPH <${meta}> { <urn:asset:1> <urn:test:p> "m" } }`, { writtenGraphs: [meta] });
+    // The other read graphs are back in service; the working-memory one was built under the rule of its fence.
+    expect(states()).toEqual({ wholeVm: 'ready@1', wholeSwm: 'ready@1', codeVm: 'ready@1', agentWm: 'dirty@2' });
   });
 
   it('follows an authenticated sub-graph name in a metadata subject replace, in and out', async () => {
