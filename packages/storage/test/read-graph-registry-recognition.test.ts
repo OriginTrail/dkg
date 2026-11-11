@@ -75,6 +75,12 @@ describe('registry facts', () => {
     expect(names(registryFactsAfter('w', code, { kind: 'match', graph: meta, predicate: R.name }))).toEqual([]);
     expect(names(registryFactsAfter('w', code, { kind: 'match', graph: meta, subject: 'urn:other' }))).toEqual(['code']);
     expect(names(registryFactsAfter('w', code, { kind: 'prefix', graph: meta, prefix: 'urn:sg' }))).toEqual([]);
+    // No blank node passes a subject-prefix delete, not even an empty prefix.
+    const blank: ReadGraphRegistryFact[] = [
+      { graph: meta, subject: '_:sg', predicate: R.type, object: R.subGraphClass },
+      { graph: meta, subject: '_:sg', predicate: R.name, object: '"docs"' },
+    ];
+    expect(names(registryFactsAfter('w', [...code, ...blank], { kind: 'prefix', graph: meta, prefix: '' }))).toEqual(['docs']);
     expect(names(registryFactsAfter('w', code, { kind: 'graph', graph: meta, quads: [] }))).toEqual([]);
     expect(names(registryFactsAfter('w', code, {
       kind: 'subject', graph: meta, subject: 'urn:sg:1', quads: [fact(meta, 'urn:sg:1', R.type, R.subGraphClass), fact(meta, 'urn:sg:1', R.name, '"code2"')],
@@ -307,6 +313,14 @@ describe('registry recognition in the read-graph layer', () => {
     expect((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames).toEqual(['code', 'docs']);
     expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
     expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
+  });
+
+  it('keeps a sub-graph registered on a blank node through a subject-prefix delete, as the store does', async () => {
+    const { adapter, store, meta, fixture, layer } = await layered();
+    await store.insert([fact(meta, '_:sg', R.type, R.subGraphClass), fact(meta, '_:sg', R.name, '"docs"')]);
+    await store.deleteBySubjectPrefix(meta, '_:');
+    expect((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames).toEqual(['code', 'docs']);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
   });
 
   it('marks the read graphs a sub-graph leaves dirty when its name goes', async () => {

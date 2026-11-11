@@ -171,7 +171,8 @@ export function registryFactsAfter(
           && (part.object === undefined || sameObject(fact.object, storedTerm(part.object)))));
         return;
       case 'prefix':
-        next = next.filter((fact) => !(fact.graph === part.graph && fact.subject.startsWith(part.prefix)));
+        // The adapters match `STRSTARTS(STR(?s), prefix)`, which no blank node passes.
+        next = next.filter((fact) => !(fact.graph === part.graph && !fact.subject.startsWith('_:') && fact.subject.startsWith(part.prefix)));
         return;
       case 'graph':
         next = next.filter((fact) => fact.graph !== part.graph);
