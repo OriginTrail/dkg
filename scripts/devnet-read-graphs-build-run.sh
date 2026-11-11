@@ -727,18 +727,19 @@ drill_restart_during_rebuild() {
   [ -n "$caught" ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "no shared-layer read graph on node$n was seen being rebuilt, so no restart could land during one"; return; }
   restart_node "$n" || { record drill-restart FAIL "$(( $(now) - started ))" "node$n did not come back"; return; }
   if ! wait_all_ready drill-restart "$READY_TIMEOUT" "$n"; then record drill-restart FAIL "$(( $(now) - started ))" "node$n's read graphs not ready after the restart"; return; fi
-  # A read graph the restart caught unfinished gets a new generation at start. One whose rebuild ended in
-  # the moment before the daemon stopped keeps its generation; that is fine, but proves nothing.
+  # A read graph the restart caught being built gets a new generation at start. One whose rebuild ended in the
+  # moment before the daemon stopped keeps its generation; that is fine, but proves nothing. Neither does a read
+  # graph caught `dirty`, still queued: its normal rebuild after the start renews it too.
   while read -r state gen_before graph; do
     [ "$state" = ready ] && continue
     case "$graph" in */_working_memory/*) continue ;; esac
     gen_after="$(generation_of "$RESULTS/rows/drill-restart.node$n" "$graph")"
-    if [ -z "$gen_after" ]; then gone="$gone <$graph>"
-    elif [ "$gen_after" != "$gen_before" ]; then renewed=$((renewed + 1))
-    else finished="$finished <$graph>"; fi
+    if [ -z "$gen_after" ]; then gone="$gone <$graph>"; continue; fi
+    case "$state" in building|rebuilding) ;; *) continue ;; esac
+    if [ "$gen_after" != "$gen_before" ]; then renewed=$((renewed + 1)); else finished="$finished <$graph>"; fi
   done < "$RESULTS/rows/restart.caught.node$n"
   [ -z "$gone" ] || { record drill-restart FAIL "$(( $(now) - started ))" "read graphs gone after the restart:$gone"; return; }
-  [ "$renewed" -gt 0 ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "every rebuild seen on node$n ended before the restart stopped the daemon"; return; }
+  [ "$renewed" -gt 0 ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "every rebuild seen on node$n ended before the restart stopped the daemon (a read graph still queued dirty proves nothing)"; return; }
   [ -z "$finished" ] || note "drill-restart: rebuilt before the daemon stopped, so they kept their generation:$finished"
   drill_end drill-restart "$n" "$started" "$renewed shared-layer read graphs the restart caught unfinished got a new generation and were rebuilt"
 }
@@ -817,19 +818,36 @@ drill_kill_during_write() {
   if [ -z "$new_pid" ] || [ "$new_pid" = "$pid" ]; then
     record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "node$n answers after the kill, but its daemon.pid names no new daemon worker (PID $pid was killed)"; return
   fi
-  # Every write the node acknowledged before the kill must be there after it.
-  body="{\"contextGraphId\":\"$cg\",\"view\":\"working-memory\",\"sparql\":\"SELECT ?s WHERE { ?s <http://schema.org/name> ?name }\"}"
+  # Every write the node acknowledged before the kill must be there after it, with the value it wrote.
+  body="{\"contextGraphId\":\"$cg\",\"view\":\"working-memory\",\"sparql\":\"SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }\"}"
   resp="$(api "$n" POST /api/query "$body")"
   if [ "$(code_of "$resp")" != 200 ]; then
     record drill-kill FAIL "$(( $(now) - started ))" "the acknowledged writes could not be read back after the kill (HTTP $(code_of "$resp"))"; return
   fi
   missing="$(body_of "$resp" | node -e '
     let d = ""; process.stdin.on("data", (c) => d += c); process.stdin.on("end", () => {
-      const seen = new Set([...d.matchAll(/urn:read-graphs-drill:(\d+)/g)].map((m) => m[1]));
-      const acked = require("fs").readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
-      process.stdout.write(acked.filter((i) => !seen.has(i)).join(" "));
+      const fs = require("fs");
+      let bindings;
+      try { bindings = JSON.parse(d).result?.bindings; } catch { bindings = undefined; }
+      if (!Array.isArray(bindings)) { process.stdout.write("the answer has no bindings"); return; }
+      const text = (v) => String(v && typeof v === "object" ? v.value ?? "" : v ?? "");
+      const iri = (v) => text(v).replace(/^<(.*)>$/, "$1");
+      // A literal as the query route renders it, "lexical"^^<datatype> or "lexical"@lang, or bare.
+      const lexical = (v) => { const m = /^"((?:[^"\\]|\\.)*)"(?:\^\^<[^>]*>|@[A-Za-z0-9-]+)?$/.exec(text(v)); return m ? m[1].replace(/\\(.)/g, "$1") : text(v); };
+      const values = new Map();
+      for (const b of bindings) {
+        const s = iri(b.s); if (!s.startsWith("urn:read-graphs-drill:")) continue;
+        (values.get(s) ?? values.set(s, []).get(s)).push(lexical(b.name));
+      }
+      const problems = [];
+      for (const i of fs.readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean)) {
+        const found = values.get(`urn:read-graphs-drill:${i}`);
+        if (!found) problems.push(`${i} missing`);
+        else if (!found.includes(`drill ${i}`)) problems.push(`${i} holds ${JSON.stringify(found[0])}, not "drill ${i}"`);
+      }
+      process.stdout.write(problems.join(", "));
     });' "$acked")"
-  [ -z "$missing" ] || { record drill-kill FAIL "$(( $(now) - started ))" "writes acknowledged before the kill are missing after it: $missing"; return; }
+  [ -z "$missing" ] || { record drill-kill FAIL "$(( $(now) - started ))" "writes acknowledged before the kill are not there as written after it: $missing"; return; }
   # The read graph those writes maintain must be there and ready; drill_end then checks it with the rest.
   wait_read_graph_ready "$n" "$wm_graph" "$READY_TIMEOUT" "$RESULTS/rows/drill-kill.wm.node$n" \
     || { record drill-kill FAIL "$(( $(now) - started ))" "the working-memory read graph <$wm_graph> was not listed ready after the kill"; return; }
