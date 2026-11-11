@@ -1,0 +1,12 @@
+{
+  "lockVersion": 1,
+  "rustToolchain": "nightly-2026-08-18",
+  "rustVersion": "1.100.0-nightly",
+  "jcoVersion": "1.32.1",
+  "wasiVersion": "0.3.0",
+  "targetCarrier": "wasm32-wasip2",
+  "witPackage": "origintrail:semantic-runtime@0.1.0",
+  "integritySha256": "2c83f80e1e092162c7434c4bbbc8a72814d872dc7b2521c44bcb2f9f0783441a",
+  "componentSha256": "0bae419255a0326d09d595c70db283270dc145389b9d92d1aed696bf66240a77",
+  "witSha256": "6088e48817533febc37f00d738002417769ce904bef319deabe6a1df8d538155"
+}

@@ -13,6 +13,7 @@ import {
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import {
+  mergeDefaultGraphDataset,
   prepareGraphScope,
   rewriteGraphSet,
   wrapWithGraph,
@@ -37,6 +38,31 @@ function quad(subject: string, predicate: string, object: string, graph: string)
 }
 
 describe('prepared SPARQL graph scope', () => {
+  it('limits a graphless DESCRIBE default dataset to authorized graphs', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([
+        quad('urn:s', 'urn:p', '"First"', 'urn:allowed-1'),
+        quad('urn:s', 'urn:p', '"Second"', 'urn:allowed-2'),
+        quad('urn:s', 'urn:p', '"Private"', 'urn:forbidden'),
+      ]);
+      const scoped = mergeDefaultGraphDataset(graphScope('DESCRIBE <urn:s> LIMIT 10'), ['urn:allowed-1', 'urn:allowed-2']);
+      expect(scoped.kind).toBe('ready');
+      if (scoped.kind !== 'ready') throw new Error('Expected an authorized DESCRIBE dataset');
+      const result = await store.query(scoped.value.source);
+      expect(result.quads?.map(row => row.object).sort()).toEqual(['"First"', '"Second"']);
+    } finally { await store.close(); }
+  });
+
+  it('refuses caller-selected datasets and empty host authorization', () => {
+    for (const source of ['SELECT * WHERE { GRAPH <urn:forbidden> { ?s ?p ?o } }', 'SELECT * FROM <urn:forbidden> WHERE { ?s ?p ?o }']) {
+      expect(mergeDefaultGraphDataset(graphScope(source), ['urn:allowed']))
+        .toEqual({ kind: 'unsupported', reason: 'strategy-rejected' });
+    }
+    expect(mergeDefaultGraphDataset(graphScope('SELECT * WHERE { ?s ?p ?o }'), []))
+      .toEqual({ kind: 'unsupported', reason: 'strategy-rejected' });
+  });
+
   it('accepts the canonical lexical artifact as its sole source owner', () => {
     const prepared = validPrepared('SELECT * WHERE { GRAPH <urn:g> { ?s ?p ?o } }');
     const scope = prepareGraphScope(prepared);

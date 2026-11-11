@@ -3,6 +3,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, type AgentPeerDiscovery, type AgentPeerPage } from '../src/index.js';
 import { readAgentPeerPage, validateAgentPeerPage } from '../src/agent-peer-discovery.js';
 import { traverseBoundedCuratorRoster } from '../src/bounded-curator-roster-traversal.js';
+import { buildAgentProfile } from '../src/profile.js';
 import {
   authoritativeSyncPeerId,
   resolveBoundedCuratorSyncPeer,
@@ -28,6 +29,25 @@ describe('bounded curator discovery contract', () => {
     agents.push(agent);
     return agent;
   }
+
+  it('public address lookup limits real registry matches and preserves lookup validation', async () => {
+    const agent = await createAgent();
+    for (const peerId of ['peer-003', 'peer-001', 'peer-002']) {
+      await agent.store.insert(buildAgentProfile({ peerId, name: peerId, agentAddress: WALLET, skills: [] }).quads);
+    }
+    await agent.store.insert(buildAgentProfile({
+      peerId: 'peer-unrelated', name: 'Other wallet',
+      agentAddress: '0x00000000000000000000000000000000000000cd', skills: [],
+    }).quads);
+
+    await expect(agent.findAgentPeerIdsByAddress(WALLET)).resolves.toEqual(['peer-001', 'peer-002']);
+    await expect(agent.findAgentPeerIdsByAddress(WALLET, 1)).resolves.toEqual(['peer-001']);
+    await expect(agent.findAgentPeerIdsByAddress(WALLET, 3)).resolves.toEqual(['peer-001', 'peer-002', 'peer-003']);
+    await expect(agent.findAgentPeerIdsByAddress('0x00000000000000000000000000000000000000ef')).resolves.toEqual([]);
+    const page = vi.spyOn(agent.discovery, 'findAgentPeerPageByAddress');
+    await expect(agent.findAgentPeerIdsByAddress(WALLET, Number.NaN)).rejects.toThrow('Peer lookup limit must be finite');
+    expect(page).not.toHaveBeenCalled();
+  });
 
   it('never falls back to rich profiles when an older provider lacks pagination', async () => {
     const agent = await createAgent();

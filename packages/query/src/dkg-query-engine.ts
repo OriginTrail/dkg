@@ -66,6 +66,7 @@ import {
   assertExplicitGraphIrisAllowed,
   assertNoCallerDatasetClauses,
   constrainGraphVariablesToAllowedSet,
+  mergeDefaultGraphDataset,
   prepareGraphScope,
   requireGraphScopeRewrite,
   rewriteGraphSet,
@@ -774,6 +775,20 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         return emptyResultForSparql(constrainedScope.source);
       }
       effectiveScope = transitionGraphScope(constrainedScope, rewritten.value);
+    }
+
+    // A catalog can opt into a single WM dataset so joins may span KAs.
+    // Resolution above still selects only this Context Graph and agent's WM.
+    // Explicit GRAPH queries retain their existing allow-set enforcement.
+    if (
+      view === 'working-memory' &&
+      options.includeContextGraphPartitions === true &&
+      !effectiveScope.hasGraphClause
+    ) {
+      return this.execAndNormalize(
+        requireGraphScopeRewrite(mergeDefaultGraphDataset(effectiveScope, allGraphs)),
+        reads,
+      );
     }
 
     if (allGraphs.length === 1) {
