@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdir } from 'node:fs/promises';
+import { chmod, mkdir } from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, readGraphIri, readScope, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
@@ -1082,6 +1082,26 @@ describe('read-graph start-up', () => {
     writeFileSync(readGraphMarkJournalPath(dataDir), `${built.generation} ${wholeVm}\n`);
     const third = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
     expect(await startReadGraphs(third, { dataDir, maintains: () => true })).toEqual({ marked: 0, maintained: 1 });
+  });
+
+  it('keeps no ready row at start when a refused mark could not be written to the journal either', async () => {
+    const { adapter, fixture, store, context, dataDir } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    const { wholeVm } = fixture.readGraphs;
+    expect(await startReadGraphs(store, { dataDir, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    const built = (await buildReadGraph(context, vm)).row!;
+    // The journal can be read but not written. A full check finds a triple no member holds, and the store refuses its mark.
+    writeFileSync(readGraphMarkJournalPath(dataDir), '');
+    await chmod(readGraphMarkJournalPath(dataDir), 0o444);
+    await adapter.insert([q('urn:s:stray', '"stray"', wholeVm)]);
+    adapter.onUpdate = (sparql) => { if (sparql.includes('"dirty"')) throw new Error('connection reset'); };
+    expect(await checkReadGraph(store, wholeVm, 'full', { alert: () => undefined })).toMatchObject({ outcome: 'mismatch' });
+    adapter.onUpdate = undefined;
+    expect(readUnstoredReadGraphMarks(dataDir)).toEqual(new Map());
+    // The next process keeps no ready row, so the one the journal missed is marked too.
+    const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    expect(await startReadGraphs(restarted, { dataDir, maintains: () => true })).toEqual({ marked: 1, maintained: 1 });
+    expect((await storedRows(adapter))[wholeVm]).toBe(`dirty@${built.generation + 1}`);
   });
 
   it('keeps no ready row across a start without a data directory, where no journal kept a refused mark', async () => {

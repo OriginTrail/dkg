@@ -16,7 +16,9 @@
  *
  * The file is a line per mark, `{generation} {read graph}`. Start-up removes it
  * once its own marks are stored. A journal that exists but cannot be read
- * fails the start-up: it is never taken for an empty one.
+ * fails the start-up: it is never taken for an empty one. A mark the journal
+ * itself cannot take leaves a note beside it, and a start-up that finds the
+ * note keeps no row ready.
  *
  * Agents of one process over the same backend share its runtime, and any of
  * them may be the one a later process starts alone. So a mark goes to the
@@ -26,21 +28,30 @@
  * same mark in another journal finds nothing to do.
  */
 
-import { appendFileSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseReadGraphIri } from '@origintrail-official/dkg-core';
 import { addReadGraphDataDirectory, readGraphDataDirectories } from './data-directories.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
+import type { ReadGraphStateRow } from './state.js';
 
 export const READ_GRAPH_MARK_JOURNAL = 'read-graph-unstored-marks';
+/** A note, beside the journal, that a mark could not be written to it: a start-up then keeps no row ready. */
+export const READ_GRAPH_MARK_JOURNAL_INCOMPLETE = 'read-graph-unstored-marks-incomplete';
 
 /** The marks noted for each runtime in this process, as journal lines. */
 const NOTED = new WeakMap<ReadGraphBackendRuntime, Set<string>>();
 /** The data directories whose journal took the marks noted before they joined. */
 const JOINED = new WeakMap<ReadGraphBackendRuntime, Set<string>>();
+/** The data directories whose journal could not take a mark in this process. */
+const UNJOURNALED = new Set<string>();
 
 export function readGraphMarkJournalPath(dataDir: string): string {
   return join(dataDir, READ_GRAPH_MARK_JOURNAL);
+}
+
+function incompleteNotePath(dataDir: string): string {
+  return join(dataDir, READ_GRAPH_MARK_JOURNAL_INCOMPLETE);
 }
 
 /**
@@ -75,8 +86,26 @@ function appendJournal(dataDir: string, text: string): void {
   try {
     appendFileSync(readGraphMarkJournalPath(dataDir), text);
   } catch {
-    // This data directory cannot be written either; the others still keep the mark.
+    // The journal cannot take the mark: a note that it is incomplete makes the next start-up keep no row ready.
+    UNJOURNALED.add(dataDir);
+    try {
+      writeFileSync(incompleteNotePath(dataDir), 'A dirty mark could not be journaled here: start-up keeps no read graph ready.\n');
+    } catch {
+      // Nothing in this data directory can be written; the others still keep the mark.
+    }
   }
+}
+
+/**
+ * The marks a start-up must not keep a row ready at: the journal's, and every
+ * one of `rows` at its generation when a mark could not be written to the
+ * journal.
+ */
+export function readGraphMarksAtStart(dataDir: string, rows: Iterable<ReadGraphStateRow>): Map<string, Set<number>> {
+  const marks = readUnstoredReadGraphMarks(dataDir);
+  if (!existsSync(incompleteNotePath(dataDir))) return marks;
+  for (const row of rows) marks.set(row.readGraph, (marks.get(row.readGraph) ?? new Set()).add(row.generation));
+  return marks;
 }
 
 /** The journal's marks: for each read graph, the generations at which it must not be kept ready. */
@@ -103,10 +132,12 @@ export function unstoredReadGraphMarksText(dataDir: string): string | undefined 
 }
 
 /**
- * Remove the journal, once every mark it held is stored. With `ifText`, only
- * while it still reads so: a mark noted meanwhile keeps it.
+ * Remove the journal, and its note that it is incomplete, once every mark it
+ * held is stored. With `ifText`, only while it still reads so: a mark noted
+ * meanwhile keeps it. A mark this process could not journal keeps the note.
  */
 export function clearUnstoredReadGraphMarks(dataDir: string, ifText?: string): void {
   if (ifText !== undefined && unstoredReadGraphMarksText(dataDir) !== ifText) return;
   rmSync(readGraphMarkJournalPath(dataDir), { force: true });
+  if (!UNJOURNALED.has(dataDir)) rmSync(incompleteNotePath(dataDir), { force: true });
 }

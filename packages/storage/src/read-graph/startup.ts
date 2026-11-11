@@ -37,7 +37,7 @@ import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
 import { noteReadGraphPartitionsOfRuntime } from './data-directories.js';
-import { clearUnstoredReadGraphMarks, readUnstoredReadGraphMarks, unstoredReadGraphMarksText, useReadGraphMarkJournal } from './mark-journal.js';
+import { clearUnstoredReadGraphMarks, readGraphMarksAtStart, unstoredReadGraphMarksText, useReadGraphMarkJournal } from './mark-journal.js';
 import { syncReadGraphRuntimeWithRecovery } from './recovery.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
 import { readGraphLayerOf, type ReadGraphStore } from './read-graph-store.js';
@@ -141,7 +141,7 @@ async function loadReadGraphs(
     noteStoreMayHoldReadGraphPartitions(target);
   }
   // The marks a process could not store from here on go to the data directory's journal.
-  const journaled = options.dataDir !== undefined ? readUnstoredReadGraphMarks(options.dataDir) : new Map<string, Set<number>>();
+  const journaled = options.dataDir !== undefined ? readGraphMarksAtStart(options.dataDir, found.rows) : new Map<string, Set<number>>();
   if (options.dataDir !== undefined) useReadGraphMarkJournal(layer.runtime, options.dataDir);
   if (found.count === 0) return { marked: 0, maintained: 0 };
 
@@ -246,14 +246,15 @@ const LOADS = new WeakMap<ReadGraphBackendRuntime, Promise<boolean>>();
  * Apply a data directory's journal to a running mirror. Under each journaled
  * read graph's lock, a row stored ready at a journaled generation is marked
  * dirty, in the mirror and then in the store; one the store moved on from
- * needs nothing. The journal is removed once every such mark is stored, and
- * only if nothing was added to it meanwhile.
+ * needs nothing. A journal noted incomplete counts every read graph of the
+ * mirror as journaled at its generation. The journal is removed once every
+ * such mark is stored, and only if nothing was added to it meanwhile.
  */
 async function markJournaledRows(target: TripleStore, runtime: ReadGraphBackendRuntime, dataDir: string, options: QueryOptions): Promise<number> {
   const journal = unstoredReadGraphMarksText(dataDir);
   let marked = 0;
   let unstored = false;
-  for (const [readGraph, generations] of readUnstoredReadGraphMarks(dataDir)) {
+  for (const [readGraph, generations] of readGraphMarksAtStart(dataDir, runtime.mirror.rows())) {
     await runtime.locks.withLocks([readGraph], async () => {
       const stored = await readStoredReadGraphRow(target, readGraph, options);
       if (stored.row?.state !== 'ready' || !generations.has(stored.row.generation)) return;
