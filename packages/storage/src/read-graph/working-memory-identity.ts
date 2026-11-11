@@ -25,7 +25,7 @@
  * none built under the new identity sits beside that record.
  */
 
-import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { MemoryLayer, parseReadGraphIri } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '../triple-store.js';
@@ -182,11 +182,16 @@ function removeRecordsOrHold(runtime: ReadGraphBackendRuntime, dirs: Iterable<st
   return stale.size === 0;
 }
 
-/** Remove the record, if there is one, and sync the directory. */
+/** Remove the record, if there is one, and sync the directory. Only a confirmed absence counts as no record. */
 function removeWorkingMemoryIdentityRecord(dataDir: string): void {
   const path = join(dataDir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE);
-  if (!existsSync(path)) return;
-  rmSync(path, { force: true });
+  try {
+    unlinkSync(path);
+  } catch (error) {
+    // A record that cannot be reached, as in a directory without search permission, is not gone.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
   syncDirectory(dataDir);
 }
 
