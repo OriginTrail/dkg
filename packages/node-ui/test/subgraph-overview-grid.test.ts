@@ -54,7 +54,11 @@ vi.mock('@origintrail-official/dkg-graph-viz/react', async () => {
 });
 
 import { SubGraphOverviewGrid } from '../src/ui/views/project/components.js';
-import { TRUST_COLORS } from '../src/ui/views/project/helpers.js';
+import { trustColors } from '../src/ui/views/project/helpers.js';
+import { graphPalette } from '../src/ui/graph-palette.js';
+
+// Tests render in the default (dark) theme.
+const TRUST_COLORS = trustColors(graphPalette('dark'));
 
 const profile: ProjectProfile = {
   contextGraphId: 'cg-test',

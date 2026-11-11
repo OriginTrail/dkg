@@ -882,24 +882,13 @@ export function PanelRight() {
   return (
     <div className="v10-panel-right">
       <div className="v10-agent-mode-tabs">
-        <button
-          className={`v10-agent-mode-tab ${mode === 'agents' ? 'active' : ''}`}
-          onClick={() => setMode('agents')}
-        >
-          Agents
-        </button>
-        <button
-          className={`v10-agent-mode-tab ${mode === 'network' ? 'active' : ''}`}
-          onClick={() => setMode('network')}
-        >
-          Network
-        </button>
-        <button
-          className={`v10-agent-mode-tab ${mode === 'sessions' ? 'active' : ''}`}
-          onClick={() => setMode('sessions')}
-        >
-          Sessions
-        </button>
+        <div className="ds-seg" role="group" aria-label="Panel view">
+          {(['agents', 'network', 'sessions'] as const).map((m) => (
+            <button key={m} aria-pressed={mode === m} className={`v10-agent-mode-tab ds-seg-item ${mode === m ? 'active' : ''}`} onClick={() => setMode(m)}>
+              {m[0].toUpperCase() + m.slice(1)}
+            </button>
+          ))}
+        </div>
       </div>
 
       {mode === 'agents' && (

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLayoutStore, maxBottomHeight } from '../../stores/layout.js';
 import { api } from '../../api-wrapper.js';
 import { formatTime, formatDuration, shortId } from '../../hooks.js';
+import { opTypeText } from '../../op-type-colors.js';
 
 const BOTTOM_TABS = ['Node Log', 'Transactions'] as const;
 type BottomTab = typeof BOTTOM_TABS[number];
@@ -100,7 +101,7 @@ function NodeLogContent() {
           name="dkg-node-log-filter"
           type="text"
           placeholder="Filter logs..."
-          className="v10-log-filter"
+          className="v10-log-filter ds-input ds-sm"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           aria-label="Filter node log lines"
@@ -108,7 +109,7 @@ function NodeLogContent() {
         <select
           id="dkg-node-log-level"
           name="dkg-node-log-level"
-          className="v10-log-level-select"
+          className="v10-log-level-select ds-input ds-sm"
           value={level}
           onChange={e => setLevel(e.target.value as typeof level)}
           aria-label="Filter node log level"
@@ -142,14 +143,6 @@ function NodeLogContent() {
 
 const TX_OP_TYPES = new Set(['publish', 'publishFromSWM', 'update', 'ka-update', 'verify', 'reconstruct']);
 
-const TX_TYPE_COLORS: Record<string, string> = {
-  publish:        '#22c55e',
-  publishFromSWM: '#16a34a',
-  update:         '#14b8a6',
-  'ka-update':    '#0d9488',
-  verify:         '#8b5cf6',
-  reconstruct:    '#fb923c',
-};
 
 function TransactionsContent() {
   const [ops, setOps] = useState<any[]>([]);
@@ -176,7 +169,7 @@ function TransactionsContent() {
 
   if (ops.length === 0) {
     return (
-      <div style={{ padding: '20px 16px', color: 'var(--text-tertiary)', fontSize: 'var(--font-size-label)' }}>
+      <div style={{ padding: '20px 16px', color: 'var(--text-tertiary)', fontSize: 'var(--fs-control)' }}>
         No publish, update, or verify activity in the last 6 hours.
       </div>
     );
@@ -184,7 +177,7 @@ function TransactionsContent() {
 
   return (
     <div className="v10-log-output" style={{ overflowY: 'auto', flex: 1 }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--font-size-caption)' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--fs-label)' }}>
         <thead>
           <tr style={{ borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', textAlign: 'left' }}>
             <th style={{ padding: '6px 12px', fontWeight: 600 }}>Type</th>
@@ -206,7 +199,7 @@ function TransactionsContent() {
                   onClick={() => setExpanded(id => id === op.operation_id ? null : op.operation_id)}
                   style={{ borderBottom: '1px solid var(--border-subtle)', cursor: 'pointer', background: isExp ? 'rgba(255,255,255,.03)' : undefined }}
                 >
-                  <td style={{ padding: '7px 12px', color: TX_TYPE_COLORS[op.operation_name] ?? 'var(--text-secondary)', fontWeight: 600 }}>
+                  <td style={{ padding: '7px 12px', color: opTypeText(op.operation_name), fontWeight: 600 }}>
                     {op.operation_name}
                   </td>
                   <td style={{ padding: '7px 12px', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
@@ -214,7 +207,7 @@ function TransactionsContent() {
                   </td>
                   <td style={{ padding: '7px 12px' }}>
                     <span style={{
-                      padding: '2px 6px', borderRadius: 4, fontSize: 'var(--font-size-meta)', fontWeight: 600,
+                      padding: '2px 6px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-micro)', fontWeight: 600,
                       background: op.status === 'success' ? 'rgba(34,197,94,.15)' : op.status === 'error' ? 'rgba(239,68,68,.15)' : 'rgba(245,158,11,.15)',
                       color: op.status === 'success' ? '#22c55e' : op.status === 'error' ? '#ef4444' : '#f59e0b',
                     }}>{op.status}</span>
@@ -241,7 +234,7 @@ function TransactionsContent() {
                 {isExp && (
                   <tr style={{ background: 'rgba(0,0,0,.2)' }}>
                     <td colSpan={6} style={{ padding: '8px 16px' }}>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 'var(--font-size-caption)', color: 'var(--text-secondary)' }}>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>
                         <span><b>ID:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{op.operation_id}</span></span>
                         {txHash && <span><b>Tx:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{txHash}</span></span>}
                         {op.peer_id && <span><b>Peer:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{shortId(op.peer_id)}</span></span>}
@@ -251,7 +244,7 @@ function TransactionsContent() {
                         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                           {op.phases.map((p: any) => (
                             <span key={p.phase} style={{
-                              padding: '2px 8px', borderRadius: 4, fontSize: 'var(--font-size-meta)', fontWeight: 600,
+                              padding: '2px 8px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-micro)', fontWeight: 600,
                               background: 'rgba(255,255,255,.06)', color: 'var(--text-secondary)',
                             }}>
                               {p.phase} {p.duration_ms != null ? formatDuration(p.duration_ms) : ''}
@@ -340,7 +333,7 @@ export function PanelBottom() {
         {BOTTOM_TABS.map((tab) => (
           <button
             key={tab}
-            className={`v10-bottom-tab ${tab === activeTab ? 'active' : ''}`}
+            className={`v10-bottom-tab ds-tab ${tab === activeTab ? 'active' : ''}`}
             onClick={() => { setActiveTab(tab); if (bottomCollapsed) toggleBottom(); }}
           >
             {tab}
@@ -348,14 +341,14 @@ export function PanelBottom() {
         ))}
         <div style={{ flex: 1 }} />
         <button
-          className="v10-bottom-toggle"
+          className="v10-bottom-toggle ds-btn ds-ghost ds-sm ds-icon"
           onClick={toggleBottomMaximised}
           title={bottomMaximised ? 'Restore' : 'Maximise'}
           style={{ display: bottomCollapsed ? 'none' : undefined }}
         >
           {bottomMaximised ? RESTORE_ICON : MAXIMIZE_ICON}
         </button>
-        <button className="v10-bottom-toggle" onClick={toggleBottom} title={bottomCollapsed ? 'Expand' : 'Collapse'}>
+        <button className="v10-bottom-toggle ds-btn ds-ghost ds-sm ds-icon" onClick={toggleBottom} title={bottomCollapsed ? 'Expand' : 'Collapse'}>
           <span style={{ transform: bottomCollapsed ? 'rotate(180deg)' : 'none', display: 'flex', transition: 'transform 0.15s' }}>
             {CHEVRON_DOWN}
           </span>

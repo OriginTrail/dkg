@@ -1,17 +1,6 @@
 import React, { useCallback, useState } from 'react';
 import { createPortal } from 'react-dom';
-import {
-  Activity,
-  ClipboardList,
-  Compass,
-  KeyRound,
-  LayoutDashboard,
-  LogIn,
-  Plus,
-  ServerCog,
-  ShoppingBag,
-  Store,
-} from 'lucide-react';
+import { Activity, ClipboardList, KeyRound, Store } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
@@ -26,6 +15,7 @@ import {
   type LocalAgentIntegration,
   type LocalAgentIntegrationStatus,
 } from '../../api.js';
+import { ContextGraphMark } from '../../context-graph-colors.js';
 import {
   belongsInContextOracleSidebar,
   belongsInMyProjectsSidebar,
@@ -35,10 +25,15 @@ import {
 } from '../../lib/contextGraphSidebar.js';
 import { MARKETPLACE_TABS, MARKETPLACE_TAB_IDS, marketplaceEnabled } from '../../marketplace/tabs.js';
 import { SidebarSection } from './SidebarSection.js';
+import { DASHBOARD_ICON, placeIcon } from './nav-icons.js';
+import { NODE_PLACE_IDS, PLACES } from '../../lib/tab-target.js';
+
+const NODE_PLACES = NODE_PLACE_IDS.map((id) => ({ id, ...PLACES[id], icon: placeIcon(id) }));
 
 // Project tree row: a flat, clickable header that opens the project tab.
 // Memory-layer expansion was removed by request — layers are surfaced inside
 // the project view rather than as nested sidebar items.
+
 
 // Hidden-context-graph dismiss is now the shared `useHiddenProjectIds`
 // (aliased import above) so PanelLeft, the Memory Stack and the Dashboard
@@ -63,11 +58,11 @@ function ProjectTreeItem({
         className={`v10-tree-section-header ${isActive ? 'active' : ''}`}
         onClick={onSelect}
       >
-        <span className="v10-tree-project-dot" />
+        <ContextGraphMark id={cg.id} name={cg.name} />
         <span className="v10-tree-section-label">{cg.name || cg.id.slice(0, 16)}</span>
         <button
           type="button"
-          className="v10-tree-hide-btn"
+          className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
           title="Hide this context graph from the sidebar (reversible)"
           onClick={(e) => { e.stopPropagation(); onHide(); }}
         >
@@ -97,11 +92,11 @@ function OracleCatalogueItem({
   return (
     <div className="v10-tree-section">
       <div className={`v10-tree-section-header catalogue ${isBrowsing ? 'active' : ''}`}>
-        <span className="v10-tree-project-dot" />
+        <ContextGraphMark id={cg.id} name={cg.name} />
         <span className="v10-tree-section-label">{label}</span>
         <button
           type="button"
-          className="v10-tree-catalogue-btn"
+          className="v10-tree-catalogue-btn ds-btn ds-sm"
           aria-label={`Browse ${label}`}
           onClick={onBrowse}
         >
@@ -109,7 +104,7 @@ function OracleCatalogueItem({
         </button>
         <button
           type="button"
-          className="v10-tree-catalogue-btn primary"
+          className="v10-tree-catalogue-btn primary ds-btn ds-primary ds-sm"
           aria-label={`Subscribe to ${label}`}
           onClick={onSubscribe}
         >
@@ -117,7 +112,7 @@ function OracleCatalogueItem({
         </button>
         <button
           type="button"
-          className="v10-tree-hide-btn"
+          className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
           title="Hide this context graph from the sidebar (reversible)"
           onClick={onHide}
         >
@@ -169,16 +164,16 @@ function IntegrationsSectionBody() {
 
   return (
     <div className="v10-tree-items" style={{ display: 'block' }}>
-      <div style={{ fontSize: 'var(--font-size-caption)', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '6px 12px 2px 24px' }}>
+      <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '6px 12px 2px 24px' }}>
         Agents
       </div>
       {localAgentsError && (
-        <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--accent-orange, #f97316)', padding: '4px 12px 4px 24px' }}>
+        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--accent-orange, #f97316)', padding: '4px 12px 4px 24px' }}>
           {localAgentsError}
         </div>
       )}
       {!localAgentsError && localAgents.length === 0 && (
-        <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-tertiary)', padding: '4px 12px 4px 24px', fontStyle: 'italic' }}>
+        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', padding: '4px 12px 4px 24px', fontStyle: 'italic' }}>
           No agents detected.
         </div>
       )}
@@ -200,7 +195,7 @@ function IntegrationsSectionBody() {
             }}
           />
           <span className="v10-tree-item-label">{a.name}</span>
-          <span style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-tertiary)', marginLeft: 4 }}>
+          <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginLeft: 4 }}>
             {a.statusLabel}
           </span>
         </div>
@@ -243,10 +238,10 @@ export function PanelLeft() {
     setActiveProject(null);
   };
   const marketplaceRows = [
-    { tab: MARKETPLACE_TABS.browse, label: 'Browse', icon: <Store size={15} aria-hidden="true" /> },
-    { tab: MARKETPLACE_TABS.plans, label: 'Plans', icon: <ClipboardList size={15} aria-hidden="true" /> },
-    { tab: MARKETPLACE_TABS.access, label: 'Access', icon: <KeyRound size={15} aria-hidden="true" /> },
-    { tab: MARKETPLACE_TABS.operate, label: 'Operate', icon: <Activity size={15} aria-hidden="true" /> },
+    { tab: MARKETPLACE_TABS.browse, label: 'Browse', icon: <Store size={14} aria-hidden="true" /> },
+    { tab: MARKETPLACE_TABS.plans, label: 'Plans', icon: <ClipboardList size={14} aria-hidden="true" /> },
+    { tab: MARKETPLACE_TABS.access, label: 'Access', icon: <KeyRound size={14} aria-hidden="true" /> },
+    { tab: MARKETPLACE_TABS.operate, label: 'Operate', icon: <Activity size={14} aria-hidden="true" /> },
   ];
 
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -263,6 +258,10 @@ export function PanelLeft() {
     setJoinContextGraphId(undefined);
   }, []);
 
+  const showEmptyCard = contextGraphs.length === 0 && stage <= 1 && !inventoryError && !inventoryLoading;
+  // On first run the empty card carries New and Join; otherwise they close the group.
+  const showCardActions = showEmptyCard && stage === 1;
+
   const membershipNote = inventoryError
     ? 'Context graph membership unavailable.'
     : inventoryLoading
@@ -274,18 +273,17 @@ export function PanelLeft() {
       <div className="v10-tree-content v10-sidebar-content">
         <button
           type="button"
-          className={`v10-sidebar-nav-row ${activeTabId === 'dashboard' ? 'active' : ''}`}
+          className={`v10-tree-dashboard v10-sidebar-place ${activeTabId === 'dashboard' ? 'active' : ''}`}
           aria-current={activeTabId === 'dashboard' ? 'page' : undefined}
           onClick={() => { setActiveTab('dashboard'); setActiveProject(null); }}
         >
-          <LayoutDashboard size={18} aria-hidden="true" />
-          <span>Dashboard</span>
+          <span className="v10-sidebar-place-icon">{DASHBOARD_ICON}</span>
+          Dashboard
         </button>
 
         {showMarketplace && (
           <SidebarSection
             label="Marketplace"
-            icon={<ShoppingBag size={18} aria-hidden="true" />}
             active={marketplaceActive}
             open={leftSectionMarketplaceOpen}
             onToggle={toggleLeftSectionMarketplace}
@@ -296,26 +294,24 @@ export function PanelLeft() {
               <button
                 key={tab.id}
                 type="button"
-                className={`v10-sidebar-nav-row v10-sidebar-sub-row ${activeTabId === tab.id ? 'active' : ''}`}
+                className={`v10-tree-dashboard v10-sidebar-place ${activeTabId === tab.id ? 'active' : ''}`}
                 aria-current={activeTabId === tab.id ? 'page' : undefined}
                 onClick={() => openMarketplaceTab(tab)}
               >
-                {icon}
-                <span>{label}</span>
+                <span className="v10-sidebar-place-icon">{icon}</span>
+                {label}
               </button>
             ))}
           </SidebarSection>
         )}
 
         {inventoryError && (
-          <div className="v10-journey-empty-card" role="alert">
+          <div className="v10-journey-empty-card ds-card" role="alert">
             <div>{listError ? 'Context graphs unavailable. ' : ''}{sharedAgent.error ? 'Agent identity unavailable.' : ''}</div>
             <div>{contextGraphs.length ? 'Showing the last available context graphs.' : 'Context graph membership is unknown.'}</div>
             <button type="button" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry</button>
           </div>
         )}
-
-        <div className="v10-sidebar-divider" />
 
         <SidebarSection
           label="My Context Graphs"
@@ -323,14 +319,20 @@ export function PanelLeft() {
           open={leftSectionMyProjectsOpen}
           onToggle={toggleLeftSectionMyProjects}
         >
-          {contextGraphs.length === 0 && stage <= 1 && !inventoryError && !inventoryLoading ? (
-            <div className="v10-sidebar-empty">
+          {showEmptyCard ? (
+            <div className="v10-sidebar-empty v10-sidebar-first-run">
               <strong>No context graphs yet</strong>
               <span>
                 {stage === 0
                   ? 'Connect an agent to get started.'
-                  : 'Create your first graph to give your agent structured memory.'}
+                  : 'Create your first context graph to give your agent structured memory, or join one by ID.'}
               </span>
+              {showCardActions && (
+                <div className="v10-sidebar-inline-actions">
+                  <button type="button" className="ds-btn ds-primary ds-sm" aria-label="New Context Graph" onClick={() => setShowCreateModal(true)}>New</button>
+                  <button type="button" className="ds-btn ds-sm" aria-label="Join Context Graph" onClick={() => openJoinModal()}>Join</button>
+                </div>
+              )}
             </div>
           ) : myProjects.length === 0 ? (
             <div className="v10-sidebar-empty" role={membershipNote ? 'status' : undefined}>
@@ -363,29 +365,16 @@ export function PanelLeft() {
             </button>
           )}
 
-          <div className="v10-sidebar-inline-actions">
-            <button
-              type="button"
-              aria-label="New Context Graph"
-              onClick={() => setShowCreateModal(true)}
-            >
-              <Plus size={15} aria-hidden="true" />
-              New
-            </button>
-            <button
-              type="button"
-              aria-label="Join Context Graph"
-              onClick={() => openJoinModal()}
-            >
-              <LogIn size={15} aria-hidden="true" />
-              Join
-            </button>
-          </div>
+          {!showCardActions && (
+            <div className="v10-sidebar-inline-actions">
+              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="New Context Graph" onClick={() => setShowCreateModal(true)}>New</button>
+              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="Join Context Graph" onClick={() => openJoinModal()}>Join</button>
+            </div>
+          )}
         </SidebarSection>
 
         <SidebarSection
-          label="Public Graphs"
-          icon={<Compass size={17} aria-hidden="true" />}
+          label="Public graphs"
           count={contextOracleProjects.length}
           open={leftSectionContextOracleOpen}
           onToggle={toggleLeftSectionContextOracle}
@@ -433,23 +422,41 @@ export function PanelLeft() {
             </div>
           )}
         </SidebarSection>
-      </div>
 
-      {stage >= 1 && (
-        <div className="v10-sidebar-footer">
+        {stage >= 1 && (
           <SidebarSection
             label="Integrations"
-            icon={<ServerCog size={18} aria-hidden="true" />}
             open={leftSectionIntegrationsOpen}
             onToggle={toggleLeftSectionIntegrations}
           >
             <IntegrationsSectionBody />
           </SidebarSection>
-        </div>
-      )}
+        )}
+      </div>
 
-      {/* The panel's glass chrome (backdrop-filter) would make it the containing
-          block for the modals' fixed overlay, so they render on document.body. */}
+      {/* Node-level places: every destination lives in the sidebar
+          (DESIGN.md · Navigation); the header keeps only status and
+          global controls. */}
+      <nav className="v10-sidebar-node" aria-label="Node">
+        <div className="v10-sidebar-group-label">Node</div>
+        {NODE_PLACES.map((place) => (
+          <button
+            key={place.id}
+            type="button"
+            className={`v10-tree-dashboard v10-sidebar-place ${activeTabId === place.id ? 'active' : ''}`}
+            aria-current={activeTabId === place.id ? 'page' : undefined}
+            data-testid={place.testId}
+            title={place.title}
+            onClick={() => openTab({ id: place.id, label: place.label, closable: true })}
+          >
+            <span className="v10-sidebar-place-icon">{place.icon}</span>
+            {place.label}
+          </button>
+        ))}
+      </nav>
+
+      {/* Modals render on document.body so no panel style (a transform,
+          filter or backdrop-filter) becomes their containing block. */}
       {createPortal(
         <>
           <CreateProjectModal open={showCreateModal} onClose={() => setShowCreateModal(false)} />

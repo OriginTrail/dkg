@@ -7,32 +7,38 @@
  * the user happened to be looking at. Co-locate the palette here so
  * a new phase only needs to be declared once.
  */
+/*
+ * Phase colours follow the node UI palette rule (one hue, one job):
+ * steps are neutral greys, alternating light/dark so neighbouring segments
+ * stay apart (the bars also have a 2px gap). Only `chain*` is coloured: it
+ * is the step that writes to the blockchain, i.e. where knowledge becomes
+ * Verifiable Memory, so it takes the VM layer colour. Status overrides
+ * (error red, cancelled neutral) are applied by the views, not here.
+ */
 export const PHASE_COLORS: Record<string, string> = {
-  prepare: '#3b82f6',
-  'prepare:ensureContextGraph': '#60a5fa',
-  'prepare:partition': '#2563eb',
-  'prepare:manifest': '#93c5fd',
-  'prepare:validate': '#1d4ed8',
-  'prepare:merkle': '#7dd3fc',
-  store: '#8b5cf6',
-  chain: '#f59e0b',
-  'chain:sign': '#fbbf24',
-  'chain:submit': '#d97706',
-  // P-1: boundary around the adapter send/wait call — see
-  // packages/publisher/src/dkg-publisher.ts for emission rules.
-  'chain:writeahead': '#ea580c',
-  'chain:metadata': '#f97316',
-  broadcast: '#22c55e',
-  decode: '#14b8a6',
-  validate: '#2dd4bf',
-  'read-shared-memory': '#06b6d4',
-  parse: '#3b82f6',
-  execute: '#8b5cf6',
-  transfer: '#60a5fa',
-  verify: '#22c55e',
+  'prepare': 'var(--text-secondary)',
+  'prepare:ensureContextGraph': 'var(--text-secondary)',
+  'prepare:partition': 'var(--text-secondary)',
+  'prepare:manifest': 'var(--text-secondary)',
+  'prepare:validate': 'var(--text-secondary)',
+  'prepare:merkle': 'var(--text-secondary)',
+  'parse': 'var(--text-secondary)',
+  'transfer': 'var(--text-secondary)',
+  'read-shared-memory': 'var(--text-secondary)',
+  'store': 'var(--text-tertiary)',
+  'execute': 'var(--text-tertiary)',
+  'decode': 'var(--text-tertiary)',
+  'chain': 'var(--layer-verified)',
+  'chain:sign': 'var(--layer-verified)',
+  'chain:submit': 'var(--layer-verified)',
+  'chain:writeahead': 'var(--layer-verified)',
+  'chain:metadata': 'var(--layer-verified)',
+  'validate': 'var(--text-tertiary)',
+  'broadcast': 'var(--text-secondary)',
+  'verify': 'var(--text-secondary)',
 };
 
-export const PHASE_FALLBACK_COLOR = '#a78bfa';
+export const PHASE_FALLBACK_COLOR = 'var(--text-tertiary)';
 
 /**
  * Legend entries surfaced on the Operations view.

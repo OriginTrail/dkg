@@ -2,15 +2,7 @@
 .v10-panel-left {
   height: 100%;
   flex-shrink: 0;
-  background-color: var(--app-canvas);
-  background-image:
-    linear-gradient(var(--app-chrome), var(--app-chrome)),
-    var(--app-ambient-gradient);
-  background-attachment: fixed;
-  background-position: 0 0;
-  background-size: 100vw 100vh;
-  -webkit-backdrop-filter: blur(28px) saturate(120%);
-  backdrop-filter: blur(28px) saturate(120%);
+  background: var(--bg-panel);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -20,176 +12,45 @@
   overflow-y: auto;
   padding: 8px 0;
 }
-
-/* Structured sidebar: a shallow, scannable information hierarchy. */
-.v10-sidebar-content {
-  min-height: 0;
-  padding: 10px 8px 16px;
-}
-.v10-sidebar-nav-row {
-  width: 100%;
-  min-height: 40px;
-  padding: 0 10px;
+/* Sidebar places: Dashboard at the top, the node's places pinned to the
+   bottom in a labelled group — every destination lives in the sidebar. */
+.v10-tree-dashboard {
   display: flex;
   align-items: center;
-  gap: 10px;
+  width: calc(100% - 16px);
+  height: 28px;
+  margin: 0 8px 4px;
+  padding: 0 8px;
+  gap: 8px;
   border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text-secondary);
+  border-radius: var(--radius-control);
+  background: none;
+  cursor: pointer;
   font-family: var(--font-sans);
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   font-weight: 500;
   text-align: left;
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s;
-}
-.v10-sidebar-nav-row:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-.v10-sidebar-nav-row.active {
-  background: var(--bg-active);
-  color: var(--text-primary);
-}
-.v10-sidebar-nav-row.active svg {
-  color: var(--accent-primary);
-}
-.v10-sidebar-nav-row:focus-visible,
-.v10-sidebar-inline-actions button:focus-visible {
-  outline: 2px solid var(--accent-primary);
-  outline-offset: -2px;
-}
-.v10-sidebar-nav-row svg,
-.v10-sidebar-group-header > svg:first-child {
-  flex: 0 0 auto;
-}
-.v10-sidebar-divider {
-  height: 1px;
-  margin: 9px 4px;
-  background: var(--border-subtle);
-}
-.v10-sidebar-group {
-  margin: 3px 0;
-}
-.v10-sidebar-group-header {
-  min-height: 36px;
-  padding: 0 8px;
-  border-radius: 7px;
-}
-.v10-sidebar-product-header {
-  min-height: 40px;
-  gap: 10px;
   color: var(--text-secondary);
-  font-size: var(--font-size-label);
-  font-weight: 500;
-  letter-spacing: 0;
-  text-transform: none;
+  transition: background 0.1s;
 }
-.v10-sidebar-product-header:hover,
-.v10-sidebar-product-header.active {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-.v10-sidebar-product-header.active > svg:first-child {
-  color: var(--accent-primary);
-}
-.v10-sidebar-product-header .v10-peer-group-chevron {
-  margin-left: 2px;
-}
-.v10-sidebar-group-body {
-  gap: 2px;
-  padding: 2px 0 8px;
-}
-.v10-sidebar-marketplace-items {
-  position: relative;
-  margin: 0 0 4px 18px;
-  padding: 1px 0 4px 13px;
-  border-left: 1px solid var(--border-primary);
-}
-.v10-sidebar-sub-row {
-  min-height: 34px;
-  padding: 0 8px;
-  color: var(--text-tertiary);
-  font-weight: 450;
-}
-.v10-sidebar-sub-row svg {
-  color: var(--text-tertiary);
-}
-.v10-sidebar-empty {
-  margin: 2px 6px 6px;
-  padding: 9px 10px;
-  display: grid;
-  gap: 4px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 7px;
-  color: var(--text-tertiary);
-  background: var(--bg-surface);
-  font-size: var(--font-size-caption);
-  line-height: 1.45;
-}
-.v10-sidebar-empty strong {
-  color: var(--text-secondary);
-  font-size: var(--font-size-label);
-  font-weight: 600;
-}
-.v10-sidebar-inline-actions {
-  padding: 7px 6px 1px;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-}
-.v10-sidebar-inline-actions button {
-  min-height: 32px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border: 1px solid var(--border-primary);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-secondary);
-  font-family: var(--font-sans);
-  font-size: var(--font-size-caption);
-  cursor: pointer;
-}
-.v10-sidebar-inline-actions button:hover {
-  border-color: var(--border-strong);
-  color: var(--text-primary);
-  background: var(--bg-hover);
-}
-.v10-sidebar-group-body .v10-tree-section-header {
-  min-height: 38px;
-  padding: 4px 8px;
-  border-radius: 7px;
-}
-.v10-sidebar-public-graphs .v10-tree-section-header.catalogue {
-  padding: 7px 8px;
-  flex-wrap: wrap;
-}
-.v10-sidebar-public-graphs .v10-tree-section-header.catalogue .v10-tree-section-label {
-  min-width: calc(100% - 22px);
-}
-.v10-sidebar-footer {
-  max-height: 45%;
-  flex: 0 0 auto;
-  overflow-y: auto;
-  padding: 6px 8px;
-  border-top: 1px solid var(--border-subtle);
-  background: transparent;
-}
-.v10-sidebar-footer .v10-sidebar-group {
-  margin: 0;
-}
-
-.v10-tree-empty-state {
-  padding: 24px 16px;
-  text-align: center;
-}
-.v10-tree-empty-state p {
-  font-size: var(--font-size-label);
-  color: var(--text-tertiary);
-}
+.v10-tree-dashboard:hover { background: var(--bg-hover); color: var(--text-primary); }
+.v10-tree-dashboard.active { background: var(--bg-active); color: var(--text-primary); }
+.v10-tree-dashboard:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.v10-sidebar-place-icon { display: inline-grid; place-items: center; width: 16px; color: var(--text-tertiary); flex: none; }
+.v10-tree-dashboard.active .v10-sidebar-place-icon, .v10-tree-dashboard:hover .v10-sidebar-place-icon { color: var(--text-primary); }
+.v10-sidebar-node { margin-top: auto; flex-shrink: 0; padding: 6px 0 8px; border-top: 1px solid var(--border-subtle); }
+.v10-sidebar-group-label { padding: 6px 16px 4px; font-size: var(--fs-micro); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-tertiary); }
+.v10-sidebar-node .v10-tree-dashboard { margin-bottom: 0; }
+/* Collapsible sidebar groups (SidebarSection): My Context Graphs, Public
+   graphs, Marketplace, Integrations. Headers use the .v10-peer-group pattern. */
+.v10-sidebar-group-body { gap: 0; padding: 2px 0 8px; }
+.v10-sidebar-empty { display: grid; gap: 4px; margin: 2px 8px 6px; padding: 8px; color: var(--text-tertiary); font-size: var(--fs-label); line-height: 1.5; }
+.v10-sidebar-empty strong { color: var(--text-primary); font-size: var(--fs-control); font-weight: 600; }
+/* First run: the empty group is a card, and carries New and Join. */
+.v10-sidebar-first-run { padding: 12px; gap: 8px; border: 1px solid var(--border-default); border-radius: var(--radius-card); background: var(--bg-surface); }
+.v10-sidebar-inline-actions { display: flex; gap: 8px; padding: 4px 8px 0; }
+.v10-sidebar-inline-actions .ds-btn { flex: 1; }
+.v10-sidebar-first-run .v10-sidebar-inline-actions { padding: 0; }
 
 /* Tree sections (project list) */
 .v10-tree-section { margin-bottom: 2px; }
@@ -205,16 +66,9 @@
 .v10-tree-section-header:hover { background: var(--bg-hover); }
 .v10-tree-section-header.active { background: var(--bg-active); }
 .v10-tree-section-header.catalogue { cursor: default; gap: 6px; }
-.v10-tree-chevron {
-  color: var(--text-tertiary);
-  transition: transform 0.15s;
-  display: flex;
-  align-items: center;
-}
-.v10-tree-chevron.open { transform: rotate(90deg); }
 .v10-tree-section-label {
   /* CG names — the single biggest sidebar readability win. 12 → 13. */
-  font-size: var(--font-size-ui);
+  font-size: var(--fs-body);
   font-weight: 500;
   color: var(--text-secondary);
   flex: 1;
@@ -225,76 +79,11 @@
 /* Hover-revealed "hide" affordance on each project row. Keeps the tree
    quiet by default and lets the user dismiss any leftover project from
    their sidebar without a daemon-side delete. */
-.v10-tree-hide-btn {
-  flex-shrink: 0;
-  margin-left: 6px;
-  width: 18px; height: 18px;
-  padding: 0;
-  display: inline-flex; align-items: center; justify-content: center;
-  border: none; background: none;
-  color: var(--text-ghost);
-  font-size: var(--font-size-body); line-height: 1;
-  cursor: pointer; border-radius: 4px;
-  opacity: 0;
-  transition: opacity 0.15s, background 0.15s, color 0.15s;
-}
+.v10-tree-hide-btn { flex-shrink: 0; margin-left: 6px; width: 18px; opacity: 0; }
 .v10-tree-section-header:hover .v10-tree-hide-btn { opacity: 1; }
-.v10-tree-hide-btn:hover {
-  background: rgba(239, 68, 68, 0.12);
-  color: var(--accent-red, #ef4444);
-}
-.v10-tree-catalogue-btn {
-  flex-shrink: 0;
-  border: 1px solid var(--border-primary);
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-tertiary);
-  padding: 2px 5px;
-  font-size: var(--font-size-meta);
-  line-height: 1.3;
-  cursor: pointer;
-}
-.v10-tree-catalogue-btn:hover {
-  border-color: var(--text-tertiary);
-  color: var(--text-primary);
-}
-.v10-tree-catalogue-btn.primary {
-  border-color: color-mix(in srgb, var(--accent-primary) 55%, transparent);
-  color: var(--accent-primary);
-}
-
-/* "My Projects" / "Participating Projects" group dividers. Token
-   moved from --text-ghost → --text-tertiary (PR8) — ghost was never
-   meant for navigational labels; the contrast was below the 3:1 floor
-   even after PR8's ghost bump. */
-.v10-tree-group-label {
-  padding: 10px 14px 3px;
-  font-size: var(--font-size-caption);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-tertiary);
-}
+.v10-tree-catalogue-btn { flex-shrink: 0; }
 
 /* Move-to-other-group button (⤑), same reveal-on-hover shape as hide */
-.v10-tree-move-btn {
-  flex-shrink: 0;
-  margin-left: 4px;
-  width: 18px; height: 18px;
-  padding: 0;
-  display: inline-flex; align-items: center; justify-content: center;
-  border: none; background: none;
-  color: var(--text-ghost);
-  font-size: var(--font-size-label); line-height: 1;
-  cursor: pointer; border-radius: 4px;
-  opacity: 0;
-  transition: opacity 0.15s, background 0.15s, color 0.15s;
-}
-.v10-tree-section-header:hover .v10-tree-move-btn { opacity: 1; }
-.v10-tree-move-btn:hover {
-  background: rgba(59, 130, 246, 0.12);
-  color: var(--accent-blue, #3b82f6);
-}
 
 .v10-tree-show-hidden {
   display: block;
@@ -303,9 +92,9 @@
   padding: 6px 10px;
   background: none;
   border: 1px dashed var(--border-subtle);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   color: var(--text-tertiary);
-  font-size: var(--font-size-label); font-family: var(--font-sans);
+  font-size: var(--fs-control); font-family: var(--font-sans);
   cursor: pointer;
   text-align: center;
   transition: border-color 0.15s, color 0.15s;
@@ -322,111 +111,33 @@
   gap: 8px;
   cursor: pointer;
   transition: background 0.1s;
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   color: var(--text-secondary);
 }
 .v10-tree-item:hover { background: var(--bg-hover); color: var(--text-primary); }
 .v10-tree-item.active { background: var(--bg-active); color: var(--text-primary); }
-.v10-tree-layer-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
 .v10-tree-item-label {
   flex: 1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
 }
-/* Project dot */
-.v10-tree-project-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text-primary);
-  flex-shrink: 0;
-}
-.v10-tree-integration-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: transparent;
-  border: 1px solid var(--text-tertiary);
-  flex-shrink: 0;
-}
-
-/* Layer headers inside project tree. Same token + size fix as
-   .v10-tree-group-label — was unreadable on --text-ghost. */
-.v10-tree-layer-header {
-  padding: 3px 12px 3px 32px;
-  font-size: var(--font-size-caption);
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-  margin-top: 4px;
-  cursor: default;
-}
-
-/* New project button */
-.v10-new-project-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: calc(100% - 16px);
-  margin: 6px 8px;
-  padding: 6px 12px;
-  border-radius: 6px;
-  border: 1px dashed var(--border-strong);
-  font-size: var(--font-size-label);
-  font-weight: 500;
-  color: var(--text-secondary);
-  transition: all 0.15s;
-}
-.v10-new-project-btn:hover { color: var(--text-primary); border-color: var(--text-secondary); }
 
 /* Journey empty card */
 .v10-journey-empty-card {
   margin: 16px 10px;
   padding: 16px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
   background: var(--bg-surface);
   text-align: center;
 }
-.v10-jec-title { font-size: var(--font-size-ui); font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
-.v10-jec-hint { font-size: var(--font-size-caption); color: var(--text-tertiary); line-height: 1.5; margin-bottom: 10px; }
-
-/* Tree divider */
-.v10-tree-divider { height: 1px; background: var(--border-subtle); margin: 8px 12px; }
 
 /* Tree items are toggled via React state — no CSS display:none needed */
 
 /* ── Center ── */
-.v10-center-empty {
-  flex: 1;
-  min-width: 0;
-  height: 100%;
-  background-color: var(--app-canvas);
-  background-image:
-    linear-gradient(var(--app-workspace), var(--app-workspace)),
-    var(--app-ambient-gradient);
-  background-attachment: fixed;
-  background-position: 0 0;
-  background-size: 100vw 100vh;
-}
 
 /* ── Center stack (center + bottom) ── */
-.v10-center-stack {
-  height: 100%;
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.v10-center-stack-main { flex: 1; min-height: 0; overflow: hidden; }
 
 /* ── Center panel ── */
 .v10-panel-center {
@@ -435,80 +146,142 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background-color: var(--app-canvas);
-  background-image:
-    linear-gradient(var(--app-workspace), var(--app-workspace)),
-    var(--app-ambient-gradient);
-  background-attachment: fixed;
-  background-position: 0 0;
-  background-size: 100vw 100vh;
+  background: var(--bg-root);
 }
-.v10-center-tabs {
+/* ── Centre tab bar (browser-like tabs) ──
+   Each tab: its mark + label; the active one sits on the page colour with
+   a primary underline. × always on the active tab, on hover for others.
+   Dashboard is a pinned, icon-only tab. */
+.v10-center-tabbar {
+  position: relative;
+  display: flex;
+  align-items: stretch;
   height: var(--tab-h);
   min-height: var(--tab-h);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+}
+.v10-center-tabs {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
   display: flex;
-  align-items: center;
-  padding: 0 4px;
-  border-bottom: 1px solid var(--app-chrome-border);
-  background-color: var(--app-canvas);
-  background-image:
-    linear-gradient(var(--app-chrome), var(--app-chrome)),
-    var(--app-ambient-gradient);
-  background-attachment: fixed;
-  background-position: 0 0;
-  background-size: 100vw 100vh;
-  -webkit-backdrop-filter: blur(24px) saturate(120%);
-  backdrop-filter: blur(24px) saturate(120%);
+  align-items: stretch;
+  padding: 0;
+  background: var(--bg-panel);
   overflow-x: auto;
+  scrollbar-width: none;
   gap: 0;
 }
+.v10-center-tabs::-webkit-scrollbar { display: none; }
 .v10-center-tab {
-  height: 100%;
-  padding: 0 14px;
-  display: flex;
+  position: relative;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: var(--font-size-label);
-  font-weight: 500;
-  color: var(--text-tertiary);
+  max-width: 220px;
+  height: 100%;
+  padding: 0 6px 0 12px;
+  border-right: 1px solid var(--border-subtle);
   border-bottom: 2px solid transparent;
-  transition: all 0.15s;
+  background: none;
+  color: var(--text-tertiary);
+  font-size: var(--fs-control);
+  font-weight: 500;
   white-space: nowrap;
   flex-shrink: 0;
+  cursor: pointer;
+  transition: color .12s, background-color .12s;
 }
-.v10-center-tab:hover { color: var(--text-secondary); background: var(--bg-hover); }
-.v10-center-tab.active { color: var(--text-primary); border-bottom-color: var(--text-secondary); }
-.v10-center-tab-label { pointer-events: none; }
+.v10-center-tab:hover { color: var(--text-secondary); background: var(--bg-surface); }
+.v10-center-tab.active { color: var(--text-primary); background: var(--bg-root); border-bottom-color: var(--text-primary); }
+.v10-center-tab.pinned { padding: 0 12px; }
+.v10-center-tab:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.v10-center-tab-label { overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.v10-tab-mark-icon { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; color: currentColor; }
+.v10-center-tab .v10-agent-dot { font-size: 7px; }
 .v10-center-tab-close {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--text-tertiary);
+  opacity: 1;
+  visibility: hidden;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.v10-center-tab:hover .v10-center-tab-close,
+.v10-center-tab.active .v10-center-tab-close,
+.v10-center-tab:focus-within .v10-center-tab-close { visibility: visible; opacity: 1; }
+.v10-center-tab-close:hover { background: var(--bg-active); color: var(--text-primary); }
+.v10-center-tab.dragging { opacity: .35; }
+.v10-center-tab.drop-before { box-shadow: inset 2px 0 0 var(--focus-ring); }
+.v10-center-tab.drop-after { box-shadow: inset -2px 0 0 var(--focus-ring); }
+.v10-center-tabs-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 10px;
+  border: 0;
+  border-left: 1px solid var(--border-subtle);
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex: none;
+}
+.v10-center-tabs-all:hover, .v10-center-tabs-all[aria-expanded="true"] { background: var(--bg-hover); color: var(--text-primary); }
+.v10-center-tabs-all:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.v10-center-tabs-count { font-size: var(--fs-micro); font-weight: 600; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.v10-tab-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 240px;
+  max-width: 340px;
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-nested);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-popover);
+}
+.v10-tab-menu-label { padding: 8px 8px 4px; font-size: var(--fs-micro); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-tertiary); }
+.v10-tab-menu-item {
   display: flex;
   align-items: center;
-  opacity: 0;
-  transition: opacity 0.15s;
-  padding: 2px;
-  border-radius: 2px;
+  gap: 8px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-control);
+  text-align: left;
+  cursor: pointer;
 }
-.v10-center-tab:hover .v10-center-tab-close { opacity: 0.6; }
-.v10-center-tab-close:hover { opacity: 1 !important; background: var(--bg-active); }
+.v10-tab-menu-item:hover:not(:disabled), .v10-tab-menu-item:focus-visible { background: var(--bg-hover); color: var(--text-primary); outline: none; }
+.v10-tab-menu-item.active { color: var(--text-primary); }
+.v10-tab-menu-item:disabled { opacity: .4; cursor: default; }
+.v10-tab-menu-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v10-tab-menu-hint { margin-left: auto; padding-left: 12px; font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--text-tertiary); }
+.v10-tab-menu-sep { height: 1px; margin: 4px 0; background: var(--border-subtle); }
+.v10-tab-menu-empty { padding: 4px 8px 8px; color: var(--text-tertiary); font-size: var(--fs-label); }
 .v10-center-content {
   flex: 1;
   min-height: 0;
   min-width: 0;
   overflow: auto;
   padding: 24px 28px;
-}
-@keyframes v10CenterContentEnter {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-/* `backwards`, not `both`: a kept last frame leaves a transform on this scroll
-   box, and a transformed box becomes the containing block of every fixed
-   overlay inside it (modals, drawers, tooltips), which then cover only the
-   centre panel instead of the window. */
-.v10-center-content-enter {
-  animation: v10CenterContentEnter 180ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
-}
-@media (prefers-reduced-motion: reduce) {
-  .v10-center-content-enter { animation: none; }
 }
 .v10-view-placeholder {
   display: flex;
@@ -518,3 +291,15 @@
   height: 100%;
   text-align: center;
 }
+
+/* Context graph identity mark: rounded square + initial (squares = graphs,
+   round = data). Tint fill, colour outline and letter, from --cg-color. */
+.v10-cg-mark{display:inline-grid;place-items:center;flex:none;border-radius:var(--radius-xs);font-family:var(--font-sans);font-weight:700;line-height:1;letter-spacing:0;
+  color:var(--cg-color);background:color-mix(in srgb,var(--cg-color) 20%,var(--bg-surface));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--cg-color) 55%,transparent)}
+.v10-cg-mark::before{content:attr(data-initial)}
+.v10-cg-mark-sm{width:16px;height:16px;font-size:9.5px}
+.v10-cg-mark-md{width:20px;height:20px;font-size:var(--fs-label);border-radius:5px}
+.v10-cg-name{display:flex;align-items:center;gap:8px;min-width:0}
+.v10-select-option{display:flex;align-items:center;gap:8px}
+.v10-select-mark{display:inline-flex;margin-right:6px}
+

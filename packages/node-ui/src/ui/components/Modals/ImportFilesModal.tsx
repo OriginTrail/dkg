@@ -155,7 +155,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
   return (
     <div className="v10-modal-overlay" onClick={onBackdropClick} role="presentation">
       <div
-        className="v10-modal-box"
+        className="v10-modal-box ds-overlay"
         style={{ maxWidth: 560 }}
         ref={dialogRef}
         role="dialog"
@@ -181,7 +181,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
           </div>
           <button
             type="button"
-            className="v10-modal-close"
+            className="v10-modal-close ds-btn ds-ghost ds-icon"
             onClick={handleClose}
             disabled={status === 'uploading'}
             aria-label="Close import dialog"
@@ -193,12 +193,12 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
         </div>
 
         <div className="v10-modal-body">
-          {error && <div className="v10-modal-error">{error}</div>}
+          {error && <div className="v10-modal-error ds-card-nested">{error}</div>}
 
           {status === 'idle' && (
             <>
               <div
-                className={`v10-import-dropzone ${dragOver ? 'drag-over' : ''}`}
+                className={`v10-import-dropzone ds-card ${dragOver ? 'drag-over' : ''}`}
                 onClick={() => inputRef.current?.click()}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
@@ -224,7 +224,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
 
               {files.length > 0 && (
                 <>
-                  <div className="v10-import-file-list">
+                  <div className="v10-import-file-list ds-card-nested">
                     {files.map((f) => (
                       <div key={f.id} className="v10-import-file-item">
                         <span className="v10-import-file-icon">{fileIcon(f.file.name)}</span>
@@ -234,14 +234,14 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                       </div>
                     ))}
                   </div>
-                  <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-tertiary)', marginBottom: 12 }}>
+                  <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginBottom: 12 }}>
                     {files.length} file{files.length !== 1 ? 's' : ''} selected · {formatSize(files.reduce((s, f) => s + f.file.size, 0))} total
                   </div>
                 </>
               )}
 
               <div className="v10-form-divider" />
-              <div className="v10-form-label" style={{ marginBottom: 8 }}>Ingestion Options <span style={{ fontSize: 'var(--font-size-meta)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></div>
+              <div className="v10-form-label" style={{ marginBottom: 8 }}>Ingestion Options <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></div>
               <label className="v10-import-option" style={{ opacity: 0.5, pointerEvents: 'none' }}>
                 <input type="checkbox" checked={storeOriginals} disabled readOnly />
                 Store original files as Knowledge Assets
@@ -254,11 +254,11 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
           )}
 
           {status === 'uploading' && (
-            <div className="v10-import-progress">
-              <div style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-secondary)', fontWeight: 500 }}>
+            <div className="v10-import-progress ds-card-nested">
+              <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', fontWeight: 500 }}>
                 Importing files… ({currentFile + 1} of {files.length})
               </div>
-              <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-tertiary)', marginTop: 4 }}>
+              <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginTop: 4 }}>
                 {files[currentFile]?.file.name ?? '…'}
               </div>
               <div className="v10-import-progress-bar">
@@ -307,7 +307,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
               </div>
 
               {results.length > 0 && (
-                <div className="v10-import-file-list" style={{ marginTop: 12 }}>
+                <div className="v10-import-file-list ds-card-nested" style={{ marginTop: 12 }}>
                   {results.map((r, i) => (
                     <div key={i} className="v10-import-file-item">
                       <span className="v10-import-file-icon">
@@ -330,9 +330,9 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
         <div className="v10-modal-footer">
           {status === 'idle' && (
             <>
-              <button className="v10-modal-btn" onClick={handleClose}>Cancel</button>
+              <button className="v10-modal-btn ds-btn" onClick={handleClose}>Cancel</button>
               <button
-                className="v10-modal-btn primary"
+                className="v10-modal-btn primary ds-btn ds-primary"
                 onClick={handleImport}
                 disabled={files.length === 0}
               >
@@ -341,10 +341,10 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
             </>
           )}
           {status === 'uploading' && (
-            <button className="v10-modal-btn" disabled>Importing…</button>
+            <button className="v10-modal-btn ds-btn" disabled>Importing…</button>
           )}
           {(status === 'done' || status === 'error') && (
-            <button className="v10-modal-btn primary" onClick={handleClose}>Done</button>
+            <button className="v10-modal-btn primary ds-btn ds-primary" onClick={handleClose}>Done</button>
           )}
         </div>
       </div>

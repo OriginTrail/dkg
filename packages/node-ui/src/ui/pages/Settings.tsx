@@ -39,7 +39,7 @@ function RpcUrlField({ rpcUrl }: { rpcUrl: string }) {
         <button
           type="button"
           onClick={() => setReveal((v) => !v)}
-          style={{ background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 'var(--font-size-micro)', fontWeight: 600, padding: '1px 6px', borderRadius: 4 }}
+          style={{ background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 'var(--fs-micro)', fontWeight: 600, padding: '1px 6px', borderRadius: 'var(--radius-xs)' }}
           aria-label={reveal ? 'Redact RPC URL' : 'Reveal RPC URL'}
           title={reveal ? 'Hide the path-token (recommended for screen-shares)' : 'Show full URL — careful, may contain a tenant secret'}
         >
@@ -112,17 +112,17 @@ function NetworkTelemetrySection() {
   }, [showConsentModal]);
 
   return (
-    <section className="card">
+    <section className="card ds-card">
       <div className="card-header"><h2 className="card-title">Network Telemetry</h2></div>
       <div className="card-body">
-        <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.6 }}>
+        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.6 }}>
           Local metrics are stored in SQLite and displayed in the Observability page.
         </div>
 
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '10px 0' }}>
           <div>
-            <div style={{ fontSize: 'var(--font-size-label)', fontWeight: 600 }}>Share telemetry with the network</div>
-            <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 'var(--fs-control)', fontWeight: 600 }}>Share telemetry with the network</div>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.5 }}>
               When enabled, metrics and logs are streamed to the OriginTrail network dashboard for network-wide diagnostics.
             </div>
           </div>
@@ -151,7 +151,7 @@ function NetworkTelemetrySection() {
         </div>
         <div aria-live="polite">
           {telemetryError && (
-            <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--red)', marginTop: 4 }}>{telemetryError}</div>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--red)', marginTop: 4 }}>{telemetryError}</div>
           )}
         </div>
       </div>
@@ -169,31 +169,31 @@ function NetworkTelemetrySection() {
             aria-label="Enable Telemetry Streaming?"
             style={{
               background: 'var(--surface)', border: '1px solid var(--border)',
-              borderRadius: 12, padding: '24px 28px', maxWidth: 440, width: '90%',
+              borderRadius: 'var(--radius-overlay)', padding: '24px 28px', maxWidth: 440, width: '90%',
               boxShadow: '0 8px 32px rgba(0,0,0,.3)',
             }}
           >
-            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 16 }}>
+            <div style={{ fontSize: 'var(--fs-title)', fontWeight: 700, marginBottom: 16 }}>
               Enable Telemetry Streaming?
             </div>
-            <div style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: 12 }}>
+            <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: 12 }}>
               When enabled, the following data is streamed to the OriginTrail team:
             </div>
-            <ul style={{ fontSize: 'var(--font-size-label)', color: 'var(--text)', lineHeight: 1.8, margin: '0 0 14px 18px', padding: 0 }}>
+            <ul style={{ fontSize: 'var(--fs-control)', color: 'var(--text)', lineHeight: 1.8, margin: '0 0 14px 18px', padding: 0 }}>
               <li>Operation logs (publish, query, sync, gossip events)</li>
               <li>Performance metrics (durations, throughput, error rates)</li>
               <li>Node identity (peer ID, node name, network)</li>
             </ul>
-            <div style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: 12 }}>
+            <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: 12 }}>
               The following data is <strong style={{ color: 'var(--text)' }}>NEVER</strong> shared via telemetry:
             </div>
-            <ul style={{ fontSize: 'var(--font-size-label)', color: 'var(--text)', lineHeight: 1.8, margin: '0 0 16px 18px', padding: 0 }}>
+            <ul style={{ fontSize: 'var(--fs-control)', color: 'var(--text)', lineHeight: 1.8, margin: '0 0 16px 18px', padding: 0 }}>
               <li>Private keys or wallet credentials</li>
               <li>Authentication tokens or API keys</li>
               <li>Private triple content or personal data</li>
               <li>File system paths or environment variables</li>
             </ul>
-            <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-dim)', marginBottom: 20, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-dim)', marginBottom: 20, lineHeight: 1.5 }}>
               You can disable streaming at any time from this page.
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
@@ -201,7 +201,7 @@ function NetworkTelemetrySection() {
                 type="button"
                 onClick={() => { setShowConsentModal(false); toggleRef.current?.focus(); }}
                 style={{
-                  padding: '7px 18px', borderRadius: 7, fontSize: 'var(--font-size-label)', fontWeight: 600,
+                  padding: '7px 18px', borderRadius: 7, fontSize: 'var(--fs-control)', fontWeight: 600,
                   cursor: 'pointer', border: '1px solid var(--border)',
                   background: 'var(--surface)', color: 'var(--text-muted)',
                 }}
@@ -212,7 +212,7 @@ function NetworkTelemetrySection() {
                 type="button"
                 onClick={confirmTelemetry}
                 style={{
-                  padding: '7px 18px', borderRadius: 7, fontSize: 'var(--font-size-label)', fontWeight: 700,
+                  padding: '7px 18px', borderRadius: 7, fontSize: 'var(--fs-control)', fontWeight: 700,
                   cursor: 'pointer', border: '1px solid rgba(74,222,128,.4)',
                   background: 'rgba(74,222,128,.1)', color: 'var(--green)',
                 }}
@@ -282,7 +282,7 @@ function LocalDataRetentionSection() {
   const storeBytes = (metrics as any)?.store_bytes ?? null;
 
   return (
-    <section className="card">
+    <section className="card ds-card">
       <div className="card-header"><h2 className="card-title">Local Data Retention</h2></div>
       <div className="card-body">
         <label htmlFor="retention-select" className="settings-field-label" style={{ display: 'block', marginBottom: 5 }}>
@@ -304,11 +304,11 @@ function LocalDataRetentionSection() {
           </select>
           <span aria-live="polite">
             {retentionSaved && (
-              <span style={{ fontSize: 'var(--font-size-meta)', color: 'var(--green)', fontWeight: 600 }}>Saved</span>
+              <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--green)', fontWeight: 600 }}>Saved</span>
             )}
           </span>
           {storeBytes != null && (
-            <span className="mono" style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-dim)' }}>
+            <span className="mono" style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)' }}>
               Store: {formatBytes(storeBytes)}
             </span>
           )}
@@ -318,14 +318,14 @@ function LocalDataRetentionSection() {
             role="group"
             aria-label="Confirm retention reduction"
             style={{
-              marginTop: 8, padding: '10px 14px', borderRadius: 8,
+              marginTop: 8, padding: '10px 14px', borderRadius: 'var(--radius-nested)',
               background: 'rgba(251,191,36,.06)', border: '1px solid rgba(251,191,36,.2)',
             }}
           >
-            <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--amber)', fontWeight: 600, marginBottom: 4 }}>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--amber)', fontWeight: 600, marginBottom: 4 }}>
               Reduce retention to {pendingRetention} days?
             </div>
-            <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 8 }}>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 8 }}>
               Operations, logs, and metrics older than {pendingRetention} days will be permanently deleted.
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
@@ -334,7 +334,7 @@ function LocalDataRetentionSection() {
                 type="button"
                 onClick={confirmRetention}
                 style={{
-                  padding: '5px 14px', borderRadius: 6, fontSize: 'var(--font-size-caption)', fontWeight: 700, cursor: 'pointer',
+                  padding: '5px 14px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)', fontWeight: 700, cursor: 'pointer',
                   border: '1px solid rgba(251,191,36,.4)', background: 'rgba(251,191,36,.1)', color: 'var(--amber)',
                 }}
               >
@@ -344,7 +344,7 @@ function LocalDataRetentionSection() {
                 type="button"
                 onClick={() => setPendingRetention(null)}
                 style={{
-                  padding: '5px 14px', borderRadius: 6, fontSize: 'var(--font-size-caption)', fontWeight: 600, cursor: 'pointer',
+                  padding: '5px 14px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)', fontWeight: 600, cursor: 'pointer',
                   border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text-muted)',
                 }}
               >
@@ -354,14 +354,14 @@ function LocalDataRetentionSection() {
           </div>
         )}
         {pendingRetention == null && (
-          <div style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-dim)', marginTop: 4 }}>
+          <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)', marginTop: 4 }}>
             Operations and metric snapshots older than this are pruned automatically. Warning and error logs
             keep this window; high-volume routine logs also have a size safety cap.
           </div>
         )}
         <div aria-live="polite">
           {retentionError && (
-            <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--red)', marginTop: 4 }}>{retentionError}</div>
+            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--red)', marginTop: 4 }}>{retentionError}</div>
           )}
         </div>
       </div>
@@ -403,7 +403,7 @@ export function SettingsPage() {
     <div className="page-section">
       <div style={{ marginBottom: 20 }}>
         <h1 className="page-title" style={{ marginBottom: 0 }}>Settings</h1>
-        <p style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', marginTop: 4 }}>Node configuration and preferences</p>
+        <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)', marginTop: 4 }}>Node configuration and preferences</p>
       </div>
       <GeneralSettingsTab />
     </div>
@@ -440,7 +440,7 @@ function GeneralSettingsTab() {
   return (
     <div className="settings-stack">
       {/* Node Identity */}
-      <section className="card">
+      <section className="card ds-card">
         <div className="card-header"><h2 className="card-title">Node Identity</h2></div>
         <div className="card-body">
           <Field label="Name" value={s?.name ?? '—'} />
@@ -448,12 +448,12 @@ function GeneralSettingsTab() {
           <Field label="Role" value={s?.nodeRole ?? '—'} />
           <Field label="Network" value={s?.networkName ?? (s?.networkId ? `Network ${s.networkId}` : '—')} />
           <Field label="Store" value={s?.storeBackend ?? '—'} mono />
-          <div style={{ padding: '10px 14px', borderRadius: 8, background: isOnline ? 'var(--green-dim)' : 'rgba(248,113,113,.05)', border: `1px solid ${isOnline ? 'rgba(74,222,128,.2)' : 'rgba(248,113,113,.2)'}` }}>
-            <div className="mono" style={{ fontSize: 'var(--font-size-meta)', color: isOnline ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>
+          <div style={{ padding: '10px 14px', borderRadius: 'var(--radius-nested)', background: isOnline ? 'var(--green-dim)' : 'rgba(248,113,113,.05)', border: `1px solid ${isOnline ? 'rgba(74,222,128,.2)' : 'rgba(248,113,113,.2)'}` }}>
+            <div className="mono" style={{ fontSize: 'var(--fs-micro)', color: isOnline ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>
               {isOnline ? '● ONLINE' : '● OFFLINE'}
             </div>
             <div
-              style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-muted)', marginTop: 4 }}
+              style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)', marginTop: 4 }}
               title="Peers = unique remote nodes. Direct + Relayed counts are libp2p connections — a single peer can hold both a direct and a relayed link, so they sum to ≥ Peers, not exactly equal to it."
             >
               {isOnline
@@ -468,7 +468,7 @@ function GeneralSettingsTab() {
       <IdentityWalletsSection blockExplorerUrl={s?.blockExplorerUrl ?? null} />
 
       {/* Blockchain Config */}
-      <section className="card">
+      <section className="card ds-card">
         <div className="card-header"><h2 className="card-title">Blockchain Config</h2></div>
         <div className="card-body">
           <Field label="Chain" value={chainLabel(w?.chainId)} />
@@ -479,12 +479,12 @@ function GeneralSettingsTab() {
                 <div style={{ display: 'flex', gap: 16, marginTop: -6 }}>
                   <span
                     className="mono"
-                    style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-muted)' }}
+                    style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)' }}
                     title={formatEthTooltip(b.eth)}
                   >
                     {formatEth(b.eth)} ETH
                   </span>
-                  <span className="mono" style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-muted)' }} title={formatTracTooltip(b.trac)}>
+                  <span className="mono" style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)' }} title={formatTracTooltip(b.trac)}>
                     {formatTrac(b.trac)} {formatTracSymbol(b.symbol, w?.chainId)}
                   </span>
                 </div>
@@ -497,14 +497,14 @@ function GeneralSettingsTab() {
             <RpcUrlField rpcUrl={w.rpcUrl} />
           )}
           {w?.error ? (
-            <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(248,113,113,.05)', border: '1px solid rgba(248,113,113,.2)' }}>
-              <div style={{ fontSize: 'var(--font-size-meta)', fontWeight: 700, color: 'var(--red)', marginBottom: 2 }}>⚠ Error</div>
-              <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-muted)' }}>{w.error}</div>
+            <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'rgba(248,113,113,.05)', border: '1px solid rgba(248,113,113,.2)' }}>
+              <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--red)', marginBottom: 2 }}>⚠ Error</div>
+              <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)' }}>{w.error}</div>
             </div>
           ) : w?.chainId?.includes('84532') || w?.chainId?.includes('31337') || w?.chainId?.includes('11155111') ? (
-            <div style={{ padding: '8px 12px', borderRadius: 8, background: 'var(--amber-dim)', border: '1px solid rgba(251,191,36,.2)' }}>
-              <div style={{ fontSize: 'var(--font-size-meta)', fontWeight: 700, color: 'var(--amber)', marginBottom: 2 }}>⚠ Testnet Mode</div>
-              <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-muted)' }}>No real TRAC is spent. Perfect for development.</div>
+            <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--amber-dim)', border: '1px solid rgba(251,191,36,.2)' }}>
+              <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--amber)', marginBottom: 2 }}>⚠ Testnet Mode</div>
+              <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)' }}>No real TRAC is spent. Perfect for development.</div>
             </div>
           ) : null}
         </div>
@@ -520,7 +520,7 @@ function GeneralSettingsTab() {
       <LocalDataRetentionSection />
 
       {/* Danger Zone (full-width footer; last in the stack) */}
-      <section className="card" style={{ borderColor: 'rgba(248,113,113,.2)', background: 'rgba(248,113,113,.03)' }}>
+      <section className="card ds-card" style={{ borderColor: 'rgba(248,113,113,.2)', background: 'rgba(248,113,113,.03)' }}>
         <div className="card-header"><h2 className="card-title" style={{ color: 'var(--red)' }}>Danger Zone</h2></div>
         <div className="card-body">
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -528,11 +528,11 @@ function GeneralSettingsTab() {
               onClick={handleShutdown}
               disabled={shuttingDown}
               style={{
-                padding: '8px 16px', borderRadius: 8,
+                padding: '8px 16px', borderRadius: 'var(--radius-nested)',
                 border: `1px solid ${shutdownConfirm ? 'var(--red)' : 'rgba(251,191,36,.3)'}`,
                 background: shutdownConfirm ? 'rgba(248,113,113,.15)' : 'rgba(251,191,36,.07)',
                 color: shutdownConfirm ? 'var(--red)' : 'var(--amber)',
-                fontSize: 'var(--font-size-label)', fontWeight: 600,
+                fontSize: 'var(--fs-control)', fontWeight: 600,
                 cursor: shuttingDown ? 'not-allowed' : 'pointer',
                 opacity: shuttingDown ? 0.5 : 1,
               }}
@@ -541,7 +541,7 @@ function GeneralSettingsTab() {
             </button>
             <span aria-live="polite">
               {shutdownConfirm && (
-                <span style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-muted)' }}>Click again to confirm. The node process will terminate.</span>
+                <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-muted)' }}>Click again to confirm. The node process will terminate.</span>
               )}
             </span>
           </div>

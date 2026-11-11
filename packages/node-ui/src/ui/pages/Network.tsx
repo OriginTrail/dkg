@@ -2,24 +2,27 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { useFetch, shortId, formatDuration } from '../hooks.js';
 import { fetchConnections, fetchAgents } from '../api.js';
+import { Badge } from '../components/ds/Badge.js';
+import { humanizeStatus } from '../lib/formatLabels.js';
 
 function ConnectionBadge({ agent: a }: { agent: any }) {
   if (a.connectionStatus === 'self') {
-    return <span className="badge" style={{ background: 'var(--text-muted)' }}>Self</span>;
+    return <Badge size="sm">Self</Badge>;
   }
   if (a.connectionStatus === 'connected') {
     const label = a.connectionTransport === 'relayed' ? 'Relayed' : 'Direct';
     const duration = a.connectedSinceMs ? ` · ${formatDuration(a.connectedSinceMs)}` : '';
     return (
-      <span
-        className="badge badge-success"
+      <Badge
+        tone="success"
+        size="sm"
         title={`${a.connectionDirection ?? ''} ${label.toLowerCase()} connection${duration}`}
       >
         {label}{duration}
-      </span>
+      </Badge>
     );
   }
-  return <span className="badge" style={{ background: 'var(--error)' }}>Disconnected</span>;
+  return <Badge tone="danger" size="sm">Disconnected</Badge>;
 }
 
 export function NetworkPage() {
@@ -30,23 +33,11 @@ export function NetworkPage() {
   const agents = agentData?.agents ?? [];
 
   return (
-    <div>
+    <div className="network-page">
       {/* This page renders standalone (outside the app shell), so without an
           explicit affordance the operator has no way back to the dashboard
           once they land here. Keep a back link at the top. */}
-      <Link
-        to="/"
-        className="page-back-link"
-        style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 6,
-          marginBottom: 12,
-          fontSize: 13,
-          color: 'var(--text-secondary)',
-          textDecoration: 'none',
-        }}
-      >
+      <Link to="/" className="network-page-back">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
         Back to dashboard
       </Link>
@@ -54,26 +45,26 @@ export function NetworkPage() {
       <h1 className="page-title">Network</h1>
 
       <div className="stats-grid">
-        <div className="stat-card">
-          <div className="stat-label">Total Connections</div>
+        <div className="stat-card ds-card">
+          <div className="stat-label">Total connections</div>
           <div className="stat-value">{connData?.total ?? '—'}</div>
         </div>
-        <div className="stat-card">
+        <div className="stat-card ds-card">
           <div className="stat-label">Direct</div>
           <div className="stat-value">{connData?.direct ?? '—'}</div>
         </div>
-        <div className="stat-card">
+        <div className="stat-card ds-card">
           <div className="stat-label">Relayed</div>
           <div className="stat-value">{connData?.relayed ?? '—'}</div>
         </div>
-        <div className="stat-card">
-          <div className="stat-label">Known Agents</div>
+        <div className="stat-card ds-card">
+          <div className="stat-label">Known agents</div>
           <div className="stat-value">{agents.length}</div>
         </div>
       </div>
 
-      <div className="card">
-        <div className="card-title">Active Connections</div>
+      <div className="card ds-card">
+        <div className="card-header"><div className="card-title">Active connections</div></div>
         {connections.length === 0 ? (
           <div className="empty-state empty-state--compact">
             <div className="empty-state-icon">
@@ -89,7 +80,7 @@ export function NetworkPage() {
                 <th>Peer</th>
                 <th>Transport</th>
                 <th>Direction</th>
-                <th>Remote Address</th>
+                <th>Remote address</th>
                 <th>Duration</th>
               </tr>
             </thead>
@@ -97,9 +88,9 @@ export function NetworkPage() {
               {connections.map((c: any, i: number) => (
                 <tr key={i}>
                   <td className="mono">{shortId(c.peerId, 12)}</td>
-                  <td><span className={`badge ${c.transport === 'direct' ? 'badge-success' : 'badge-info'}`}>{c.transport}</span></td>
+                  <td><Badge tone={c.transport === 'direct' ? 'success' : 'neutral'} size="sm">{humanizeStatus(String(c.transport))}</Badge></td>
                   <td>{c.direction}</td>
-                  <td className="mono" style={{ fontSize: 'var(--font-size-caption)' }}>{c.remoteAddr}</td>
+                  <td className="mono" style={{ fontSize: 'var(--fs-label)' }}>{c.remoteAddr}</td>
                   <td>{formatDuration(c.durationMs)}</td>
                 </tr>
               ))}
@@ -108,8 +99,8 @@ export function NetworkPage() {
         )}
       </div>
 
-      <div className="card">
-        <div className="card-title">Discovered Agents</div>
+      <div className="card ds-card">
+        <div className="card-header"><div className="card-title">Discovered agents</div></div>
         {agents.length === 0 ? (
           <div className="empty-state empty-state--compact">
             <div className="empty-state-icon">
@@ -123,7 +114,7 @@ export function NetworkPage() {
             <thead>
               <tr>
                 <th>Name</th>
-                <th>PeerId</th>
+                <th>Peer ID</th>
                 <th>Framework</th>
                 <th>Role</th>
                 <th>Connection</th>

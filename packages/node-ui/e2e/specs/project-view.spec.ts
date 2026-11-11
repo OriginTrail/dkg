@@ -51,8 +51,8 @@ test.describe('Project View (rc.12)', () => {
     expect(active?.trim()).toBe('Dashboard');
   });
 
-  test('project strip has colored project dot', async ({ page }) => {
-    await expect(page.locator('.v10-project-strip-dot')).toBeVisible();
+  test('project strip shows the context graph mark (its identity colour and initial)', async ({ page }) => {
+    await expect(page.locator('.v10-project-strip .v10-cg-mark')).toBeVisible();
   });
 
   test('refresh button click does not crash the view', async ({ page }) => {

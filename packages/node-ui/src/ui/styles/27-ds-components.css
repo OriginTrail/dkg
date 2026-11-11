@@ -1,0 +1,398 @@
+/* ══════════════════════════════════════════
+   Design-system components (components/ds). Loaded last so these win over
+   the legacy per-screen classes they replace. Shapes follow DESIGN.md:
+   a pill is a read-only fact (status, role, type, layer, count).
+   ══════════════════════════════════════════ */
+
+/* ── Badge ── */
+.ds-badge {
+  --badge-fg: var(--text-secondary);
+  --badge-bg: var(--bg-elevated);
+  --badge-ring: var(--border-default);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  height: var(--h-badge-md);
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
+  background: var(--badge-bg);
+  color: var(--badge-fg);
+  box-shadow: inset 0 0 0 1px var(--badge-ring);
+  font-family: var(--font-sans);
+  font-size: var(--fs-label);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.ds-badge.ds-sm { height: var(--h-badge-sm); padding: 0 6px; gap: 4px; font-size: var(--fs-micro); }
+.ds-badge-icon { font-size: 1em; line-height: 1; }
+.ds-badge-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.ds-badge.ds-sm .ds-badge-dot { width: 5px; height: 5px; }
+.ds-badge-kind-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--badge-kind); flex-shrink: 0; }
+
+/* Tones. Neutral is the default. Signals have no ring: the tint carries it. */
+.ds-badge.ds-tone-muted   { --badge-fg: var(--text-tertiary); --badge-bg: transparent; --badge-ring: var(--border-default); }
+.ds-badge.ds-tone-success { --badge-fg: var(--text-success); --badge-bg: color-mix(in srgb, var(--text-success) 13%, transparent); --badge-ring: transparent; }
+.ds-badge.ds-tone-warning { --badge-fg: var(--text-warning); --badge-bg: color-mix(in srgb, var(--text-warning) 13%, transparent); --badge-ring: transparent; }
+.ds-badge.ds-tone-danger  { --badge-fg: var(--text-danger);  --badge-bg: color-mix(in srgb, var(--text-danger) 13%, transparent);  --badge-ring: transparent; }
+.ds-badge.ds-tone-wm  { --badge-fg: var(--layer-working-text);  --badge-bg: var(--layer-working-bg);  --badge-ring: color-mix(in srgb, var(--layer-working-border) 55%, transparent); }
+.ds-badge.ds-tone-swm { --badge-fg: var(--layer-shared-text);   --badge-bg: var(--layer-shared-bg);   --badge-ring: color-mix(in srgb, var(--layer-shared-border) 55%, transparent); }
+.ds-badge.ds-tone-vm  { --badge-fg: var(--layer-verified-text); --badge-bg: var(--layer-verified-bg); --badge-ring: color-mix(in srgb, var(--layer-verified-border) 55%, transparent); }
+.ds-badge.ds-tone-role { --badge-fg: var(--role-text); --badge-bg: var(--role-bg); --badge-ring: var(--role-border); }
+/* Kind: neutral pill with the kind's colour as a dot, so long type names stay readable. */
+.ds-badge.ds-tone-kind { --badge-fg: var(--text-secondary); }
+
+/* ── Count ── */
+.ds-count {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  min-width: var(--h-badge-sm);
+  height: var(--h-badge-sm);
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  font-family: var(--font-sans);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  vertical-align: middle;
+}
+/* Needs your action (pending requests, unread). Amber, never red: red is errors. */
+.ds-count.ds-tone-attention {
+  background: color-mix(in srgb, var(--text-warning) 16%, transparent);
+  color: var(--text-warning);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-warning) 40%, transparent);
+}
+.ds-count.ds-tone-quiet { background: transparent; box-shadow: none; color: var(--text-tertiary); }
+
+/* ══ Button ════════════════════════════════════════════════════════════
+   One button, five variants, three sizes (DESIGN.md):
+     primary   — the one main action in a view (white on black in dark)
+     secondary — default; outlined
+     ghost     — low emphasis, toolbars and icon buttons
+     danger    — destructive (red outline; never a red fill)
+     layer     — actions that move knowledge into a layer wear its colour:
+                 swm (Share to SWM, cyan tint), vm (Publish to VM, purple fill)
+   Sizes 24 / 32 / 40; icon buttons are square. Every target is ≥ 24×24.
+   Elements declare their look with these classes (`ds-btn` plus a variant
+   and size), or use <Button> (components/ds/Button), which renders them.
+   Screen classes on the same element only add layout. */
+
+.ds-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  box-sizing: border-box;
+  height: var(--h-control-md);
+  min-width: var(--h-control-sm);
+  padding: 0 14px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-control);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: none;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color .12s, border-color .12s, color .12s;
+}
+.ds-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+.ds-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.ds-btn:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+/* Sizes */
+.ds-btn.ds-sm {
+  height: var(--h-control-sm);
+  padding: 0 10px;
+  gap: 4px;
+  font-size: var(--fs-label);
+}
+.ds-btn.ds-lg {
+  height: var(--h-control-lg);
+  padding: 0 18px;
+  font-size: var(--fs-body);
+}
+
+
+/* Square icon buttons */
+.ds-btn.ds-icon {
+  width: var(--h-control-md);
+  padding: 0;
+}
+.ds-btn.ds-sm.ds-icon {
+  width: var(--h-control-sm);
+  padding: 0;
+  font-size: var(--fs-body);
+}
+.v10-modal-close { font-size: var(--fs-heading); font-weight: 400; }
+
+/* Primary — one per view */
+.ds-btn.ds-primary {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: var(--text-on-primary);
+}
+.ds-btn.ds-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-primary) 86%, var(--bg-root));
+  border-color: color-mix(in srgb, var(--accent-primary) 86%, var(--bg-root));
+}
+
+/* Ghost — no chrome until hover */
+.ds-btn.ds-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+.ds-btn.ds-ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: transparent;
+  color: var(--text-primary);
+}
+.v10-header-icon-btn.active-toggle,
+.v10-header-icon-btn.active-toggle:hover:not(:disabled) { background: var(--bg-active); color: var(--text-primary); }
+
+/* Danger — red outline, red tint on hover */
+.ds-btn.ds-danger {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--text-danger) 45%, transparent);
+  color: var(--text-danger);
+}
+.ds-btn.ds-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-danger) 12%, transparent);
+  border-color: color-mix(in srgb, var(--text-danger) 65%, transparent);
+}
+
+/* Layer actions */
+.ds-btn.ds-swm {
+  background: var(--layer-shared-bg);
+  border-color: color-mix(in srgb, var(--layer-shared-border) 70%, transparent);
+  color: var(--layer-shared-text);
+}
+.ds-btn.ds-swm:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--layer-shared) 22%, var(--layer-shared-bg));
+  border-color: var(--layer-shared-border);
+}
+.ds-btn.ds-vm {
+  background: var(--accent-vm);
+  border-color: var(--accent-vm);
+  color: var(--text-on-vm);
+}
+.ds-btn.ds-vm:hover:not(:disabled) {
+  background: var(--accent-vm-hover);
+  border-color: var(--accent-vm-hover);
+}
+
+/* ══ Tabs ══════════════════════════════════════════════════════════════
+   Underline tabs = where you are (navigation). One look everywhere:
+   12px medium, tertiary text, the active tab in primary text with a 2px
+   underline. Main bars are 36px tall, sub-bars inside a view 32px.
+   Layer tabs keep their layer colour on the underline. */
+.ds-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: var(--text-tertiary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-control);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color .12s, border-color .12s;
+}
+.ds-tab:hover {
+  color: var(--text-secondary);
+}
+.ds-tab.active, .ds-tab[aria-selected="true"] {
+  color: var(--text-primary);
+  border-bottom-color: var(--text-primary);
+}
+.ds-tab:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* ══ Segmented control ═════════════════════════════════════════════════
+   Switches what a panel or view shows (Agents / Network / Sessions,
+   Context graphs / Context oracle, table / graph). A 6px track with
+   4px segments; the selected one is lifted onto the surface. */
+.ds-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: var(--bg-elevated);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  overflow: visible;
+}
+.ds-seg-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 24px;
+  min-width: 24px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-control);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color .12s, background-color .12s;
+}
+.ds-seg-item:hover { color: var(--text-primary); }
+.ds-seg-item.active, .ds-seg-item[aria-pressed="true"] {
+  background: var(--bg-active);
+  color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+.ds-seg-item:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* ══ Filter chip ═══════════════════════════════════════════════════════
+   Something you set: a 6px rectangle (never a pill — pills are read-only).
+   On = lifted with a stronger border; a sub-graph chip uses its own
+   colour for the "on" ring. */
+.ds-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-control);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color .12s, border-color .12s, color .12s;
+}
+.ds-filter.ds-sm { height: var(--h-control-sm); padding: 0 8px; font-size: var(--fs-label); }
+.ds-filter:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.ds-filter.active, .ds-filter[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--sg-color, var(--text-primary)) 12%, var(--bg-elevated));
+  border-color: var(--sg-color, var(--border-strong));
+  color: var(--text-primary);
+}
+.ds-filter:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* ══ Entity chip ═══════════════════════════════════════════════════════
+   A thing you can open: leading mark (context graph tile; agents use
+   AgentChip's circle) + name, in a pill. 24px, like a small button. */
+.ds-entity-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  height: var(--h-control-sm);
+  padding: 0 9px 0 3px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-label);
+  font-weight: 600;
+  line-height: 1;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.ds-entity-chip-name { overflow: hidden; text-overflow: ellipsis; }
+.ds-entity-chip .v10-cg-mark { width: 18px; height: 18px; border-radius: 5px; font-size: var(--fs-micro); }
+.ds-entity-chip.interactive { cursor: pointer; transition: background-color .12s, border-color .12s; }
+.ds-entity-chip.interactive:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.ds-entity-chip.interactive:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
+/* Light: the selected segment is the white surface lifted off a grey track. */
+body.light .ds-seg-item.active {
+  background: var(--bg-surface);
+  box-shadow: 0 0 0 1px var(--border-default), 0 1px 2px rgba(0, 0, 0, .06);
+}
+
+/* ══ Cards and surfaces ════════════════════════════════════════════════
+   Three corners (DESIGN.md): 12 overlays and dialogs, 10 cards and panels,
+   8 anything nested inside a card (cells, notes, legends) and menus or
+   popovers. Menu rows use 4. Put the class on the element; the screen's own
+   class keeps only layout. */
+.ds-overlay { border-radius: var(--radius-overlay); }
+.ds-card { border-radius: var(--radius-card); }
+.ds-card-nested { border-radius: var(--radius-nested); }
+
+/* ══ Inputs ════════════════════════════════════════════════════════════
+   Text fields, selects and textareas: 6px corners like buttons, the same
+   heights as the buttons beside them (32 default, 24 compact), 12px text,
+   one focus ring. The chat composer is a card (10px), not an input. */
+.ds-input {
+  border-radius: var(--radius-control);
+  font-size: var(--fs-control);
+}
+.ds-input:not(textarea) {
+  box-sizing: border-box;
+  height: var(--h-control-md);
+  min-height: var(--h-control-md);
+}
+.ds-input.ds-sm {
+  box-sizing: border-box;
+  height: var(--h-control-sm);
+  min-height: var(--h-control-sm);
+  padding-top: 0;
+  padding-bottom: 0;
+  font-size: var(--fs-label);
+}
+.ds-input:focus-visible,
+:where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, select):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 0;
+}

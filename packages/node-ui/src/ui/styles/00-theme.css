@@ -1,45 +1,38 @@
 /* ══════════════════════════════════════════
-   DKG V10 — DESIGN TOKENS
+   DKG V10 — DESIGN TOKENS (from prototype v5.1)
    ══════════════════════════════════════════ */
 :root {
-  /* App canvas — a restrained OriginTrail-purple ambient field behind the
-     neutral UI surfaces. Multiple oversized radial gradients keep the result
-     soft and dimensional rather than reading as a conventional colour ramp. */
-  --app-canvas: #020104;
-  --app-ambient-gradient:
-    radial-gradient(72% 68% at -4% -6%, rgba(139, 92, 246, 0.68) 0%, rgba(91, 33, 182, 0.36) 36%, transparent 70%),
-    radial-gradient(60% 76% at 106% 38%, rgba(109, 40, 217, 0.52) 0%, rgba(76, 29, 149, 0.24) 42%, transparent 70%),
-    radial-gradient(72% 60% at 18% 108%, rgba(126, 34, 206, 0.38) 0%, transparent 72%),
-    linear-gradient(145deg, #0c0315 0%, #020104 64%);
-  --app-chrome: rgba(4, 3, 6, 0.38);
-  --app-chrome-strong: rgba(4, 3, 6, 0.48);
-  --app-workspace: rgba(2, 1, 4, 0.20);
-  --app-chrome-border: rgba(221, 214, 254, 0.10);
-
-  /* Surface hierarchy — translucent ink-plum instead of neutral gray. The
-     canvas now supplies the atmosphere; surfaces only separate content. */
-  --bg-root: #030205;
-  --bg-panel: rgba(8, 6, 10, 0.84);
-  --bg-surface: rgba(15, 12, 18, 0.92);
-  --bg-elevated: rgba(24, 19, 29, 0.94);
-  --bg-hover: rgba(47, 34, 58, 0.70);
-  --bg-active: rgba(61, 41, 78, 0.72);
+  /* Surface hierarchy — true black base */
+  --bg-root: #000000;
+  --bg-panel: #0a0a0a;
+  --bg-surface: #111111;
+  --bg-elevated: #181818;
+  --bg-hover: #1f1f1f;
+  --bg-active: #262626;
 
   /* Borders */
-  --border-subtle: rgba(221, 214, 254, 0.10);
-  --border-default: rgba(221, 214, 254, 0.16);
-  --border-strong: rgba(221, 214, 254, 0.26);
+  --border-subtle: #1a1a1a;
+  --border-default: #222222;
+  --border-strong: #333333;
   /* Higher-contrast border for chips that need to clear 3:1 non-text on any
      surface (used by the inline-code chip, which can land on user bubbles
      whose bg is identical to a chip fill). */
   --border-prominent: #888888;
 
-  /* Text — a warmer near-white ramp offsets the purple canvas. Metadata
-     stays quieter, but primary and secondary copy no longer look gray. */
-  --text-primary: #fbfaff;
-  --text-secondary: #d8d3df;
-  --text-tertiary: #aaa3b2;
-  --text-ghost: #44394f;
+  /* Text — dark mode. Round-3 nudge 2026-05-20 (PR8): user feedback on
+     the live state was "almost there but still could be a bit better."
+     Single targeted bump on secondary (the tier that touches the most
+     body text): #a8a8a8 → #b8b8b8 — opens the secondary↔primary gap to
+     ~5pt luminance and pushes secondary to AAA on both bg-panel and
+     bg-surface. Tertiary, primary, and ghost stay. Future cleanup:
+     tertiary tier could be rebalanced (#9a9a9a is perceptually very
+     close to the new secondary), but that's its own pass. Ratios on
+     --bg-panel #0a0a0a: primary 15.9:1, secondary 9.98:1, tertiary
+     ~7.1:1. */
+  --text-primary: #f0f0f0;
+  --text-secondary: #b8b8b8;
+  --text-tertiary: #9a9a9a;
+  --text-ghost: #333333;
 
   /* Accent — reserved for signals */
   --accent-red: #ef4444;
@@ -50,34 +43,72 @@
   /* Semantic foregrounds (theme-aware) */
   --text-success: #86efac;
   --text-warning: #fbbf24;
-  --text-info: #7dd3fc;
+  /* Info is neutral (icon + text); sky blue sat next to SWM cyan. */
+  --text-info: var(--text-secondary);
   --text-danger: #fca5a5;
   --text-danger-hover: #fecaca;
-  --text-link: #60a5fa;
+  /* Links: text colour + underline. Blue is no longer a UI role. */
+  --text-link: var(--text-primary);
+  --link-underline: #6b6b6b;
   --text-on-accent: #111111;
 
-  /* Layer identity */
-  --layer-working: #64748b;
-  --layer-shared: #f59e0b;
-  --layer-verified: #22c55e;
+  /* Layer identity — one hue, one job (nOS ↔ node UI shared vocabulary).
+     WM slate, SWM OriginTrail cyan (--color-blue #1ADED7), VM OriginTrail
+     purple (--color-primary #6344DF / --color-lavender #8B85F4). These hues
+     are reserved for the three memory layers; amber, green and red are
+     signals only. Each layer has four roles:
+       --layer-X          icon, dot, bar, underline (non-text)
+       --layer-X-text     text on --layer-X-bg or on page surfaces
+       --layer-X-bg       chip / card tint
+       --layer-X-border   chip / card outline
+     Canvas code (graph-viz) reads the same values from layer-colors.ts. */
+  --layer-working: #94a3b8;
+  --layer-working-text: #cbd5e1;
+  --layer-working-bg: #1a1e25;
+  --layer-working-border: #64748b;
+  --layer-shared: #1aded7;
+  --layer-shared-text: #1aded7;
+  --layer-shared-bg: #0f2a2c;
+  --layer-shared-border: #1e7a77;
+  --layer-verified: #8b85f4;
+  --layer-verified-text: #c9b8fa;
+  --layer-verified-bg: #1f1a38;
+  --layer-verified-border: #7e6be8;
+
+  /* Actions. Primary = white on black, as origintrail.io's dark buttons.
+     --accent-vm fills exactly one kind of button: the action that commits
+     data to Verifiable Memory, so purple means VM in chips and actions. */
+  --accent-primary: #f0f0f0;
+  --text-on-primary: #111111;
+  --accent-vm: #6344df;
+  --accent-vm-hover: #7458e6;
+  --text-on-vm: #ffffff;
+
+  /* Keyboard focus — indigo, ring only. Not a link colour, not a layer. */
+  --focus-ring: #8b94ec;
+
+  /* Role & access (curator, participant; public, curated, private).
+     Facts about you and the graph, not states: blue, which links and
+     navigation no longer use. Role you hold = tinted chip, access = outline. */
+  --role: #6aa5ee;
+  --role-text: #9cc3f5;
+  --role-bg: #14233b;
+  --role-border: #2f5f9f;
+
+  /* Data palette, 8 slots, fixed order (never cycled within a chart).
+     Validated adjacent-pair separation in both themes; clear of layer and
+     signal hues. Also the context-graph identity colours. */
+  --data-1: #1a81ff; --data-2: #a69300; --data-3: #ec2890; --data-4: #c98500;
+  --data-5: #e200d0; --data-6: #ac6800; --data-7: #00a1df; --data-8: #00a309;
 
   /* Typography */
-  --font-sans: 'Geist Variable', -apple-system, sans-serif;
-  /* SF Mono (with system fallbacks) for addresses, hashes and figures. */
-  --font-mono: 'SF Mono', ui-monospace, Menlo, monospace;
-  --font-size-micro: 11px;
-  --font-size-meta: 12px;
-  --font-size-caption: 13px;
-  --font-size-label: 14px;
-  --font-size-ui: 15px;
-  --font-size-body: 16px;
-  --font-size-body-lg: 17px;
-  --font-size-heading-sm: 18px;
+  --font-sans: 'Instrument Sans', -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
 
   /* Sizing */
-  --header-h: 48px;
-  --tab-h: 40px;
-  --toolbar-h: 42px;
+  --header-h: 44px;
+  --tab-h: 36px;
+  --toolbar-h: 38px;
 
   /* Legacy aliases (for existing components that use the old tokens) */
   --bg: var(--bg-root);
@@ -87,7 +118,7 @@
   --border: var(--border-default);
   --border-light: var(--border-strong);
   --text: var(--text-primary);
-  --text-muted: #bdb6c6;
+  --text-muted: var(--text-secondary);
   --text-dim: var(--text-tertiary);
   --green: var(--accent-green);
   --green-dark: #166534;
@@ -111,23 +142,12 @@
    LIGHT THEME
    ══════════════════════════════════════════ */
 /* BUG-004: the variable overrides have to apply at the html element
-   level too, otherwise the root canvas keeps reading the dark `:root`
-   definition and macOS rubber-band overscroll flashes the dark colour
-   in light mode. The matching
+   level too, otherwise the `html { background: var(--bg-root) }` rule
+   keeps reading the dark `:root` definition and macOS rubber-band
+   overscroll flashes the dark colour in light mode. The matching
    class is set on both html and body in App.tsx so existing
    `body.light .foo` selectors below still work unchanged. */
 :root.light, body.light {
-  --app-canvas: #f7f4fb;
-  --app-ambient-gradient:
-    radial-gradient(110% 95% at -8% -18%, rgba(168, 85, 247, 0.22) 0%, rgba(196, 181, 253, 0.14) 40%, transparent 68%),
-    radial-gradient(82% 78% at 108% 4%, rgba(139, 92, 246, 0.18) 0%, transparent 72%),
-    radial-gradient(72% 82% at -10% 92%, rgba(196, 181, 253, 0.24) 0%, transparent 70%),
-    radial-gradient(78% 68% at 72% 116%, rgba(221, 214, 254, 0.32) 0%, transparent 68%),
-    linear-gradient(145deg, #fbf9fe 0%, #f7f4fb 50%, #f1edf7 100%);
-  --app-chrome: rgba(250, 249, 252, 0.46);
-  --app-chrome-strong: rgba(252, 251, 253, 0.62);
-  --app-workspace: rgba(250, 248, 252, 0.42);
-  --app-chrome-border: rgba(91, 33, 182, 0.12);
   --bg-root: #fafafa;
   --bg-panel: #f5f5f5;
   --bg-surface: #ffffff;
@@ -152,21 +172,42 @@
   --text-ghost: #d4d4d4;
   /* Light-theme danger foreground (~7.4:1 on --bg-elevated #f0f0f0) */
   --text-success: #166534;
-  --text-warning: #92400e;
-  --text-info: #1d4ed8;
+  /* Amber, between #92400e (read as brown) and #a35207 (failed AA on its
+     own tint). Clears 4.5:1 with its tint composited over every light
+     surface: 13% badge, 16% count; worst case the count on --bg-elevated
+     (4.76:1). context-graph-contrast.test.ts checks. */
+  --text-warning: #8e4706;
+  --text-info: var(--text-secondary);
   --text-danger: #b91c1c;
   --text-danger-hover: #991b1b;
-  --text-link: #1d4ed8;
+  --text-link: var(--text-primary);
+  --link-underline: #a3a3a3;
   --text-on-accent: #111111;
-  /* Layer accents are NOT overridden in light mode — the slate/amber/
-     green from :root carry through, matching the Context Graph and
-     project pages (which already use the unified palette in both
-     themes). The earlier PR6 desaturation to greys (#8a8a8a / #737373
-     / #404040) read as "weird variations of gray" against the white
-     dashboard card vs the colored CG pages; reverting per user
-     directive (PR8 round-4). Non-text contrast at small decoration
-     sizes is acceptable below AA's 3:1 floor — the bars/dots aren't
-     text. */
+  /* Layer identity, light. Same hues as dark, stepped for white
+     surfaces; identical to the nOS light set. Text roles clear 4.5:1
+     on their own bg; the non-text role clears 3:1 on --bg-surface. */
+  --layer-working: #526173;
+  --layer-working-text: #3f4c5c;
+  --layer-working-bg: #e6eaef;
+  --layer-working-border: #a9b4c2;
+  --layer-shared: #0f9c96;
+  --layer-shared-text: #0b6e6a;
+  --layer-shared-bg: #ddf6f5;
+  --layer-shared-border: #4fb8b2;
+  --layer-verified: #6344df;
+  --layer-verified-text: #4a2fb8;
+  --layer-verified-bg: #eeebfc;
+  --layer-verified-border: #6344df;
+  --accent-primary: #171717;
+  --text-on-primary: #ffffff;
+  --accent-vm-hover: #5236c4;
+  --focus-ring: #4553c9;
+  --role: #2f6fc4;
+  --role-text: #1d4f9a;
+  --role-bg: #e6effc;
+  --role-border: #8db3ea;
+  --data-1: #1f6fd1; --data-2: #8a7a00; --data-3: #a3195b; --data-4: #c28a00;
+  --data-5: #b5179e; --data-6: #9a5b1e; --data-7: #0284c7; --data-8: #008300;
   --bg: var(--bg-root);
   --surface: var(--bg-surface);
   --surface-hover: var(--bg-hover);
@@ -176,4 +217,30 @@
   --text: var(--text-primary);
   --text-muted: var(--text-secondary);
   --text-dim: var(--text-tertiary);
+}
+
+:root {
+  /* ── Shape and size scale (theme-independent) ──────────────────────
+     One radius per job (see DESIGN.md): controls 6, nested 8, cards 10,
+     overlays 12, pills full. Control heights 24/32/40, badges 18/22.
+     Type scale floor is 11px. */
+  --radius-xs: 4px;
+  --radius-control: 6px;
+  --radius-nested: 8px;
+  --radius-card: 10px;
+  --radius-overlay: 12px;
+  --radius-pill: 999px;
+  --shadow-popover: 0 12px 32px rgba(0, 0, 0, .45);
+  --h-badge-sm: 18px;
+  --h-badge-md: 22px;
+  --h-control-sm: 24px;
+  --h-control-md: 32px;
+  --h-control-lg: 40px;
+  --fs-micro: 11px;
+  --fs-label: 12px;
+  --fs-control: 13px;
+  --fs-body: 14px;
+  --fs-title: 16px;
+  --fs-heading: 18px;
+  --fs-display: 24px;
 }

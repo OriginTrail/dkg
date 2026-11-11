@@ -110,3 +110,5 @@ button.mkt-sellerlink:hover, button.mkt-sellerchip:hover .mkt-mono { text-decora
 .mkt-krow.revoked { opacity: .6; }
 .mkt-seatcard { border-color: var(--state-pending); }
 .mkt-askedit { display: inline-flex; gap: var(--sp-2); align-items: center; }
+/* One line of an error card: long node messages wrap instead of widening the card. */
+.mkt-errcard-line { overflow-wrap: anywhere; }

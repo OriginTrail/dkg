@@ -22,6 +22,7 @@ import { useMemoryCounts } from './project/helpers.js';
 import { relativeTime } from '../hooks/useProjectActivity.js';
 import { useHiddenContextGraphIds } from '../hooks/useHiddenContextGraphIds.js';
 import { MemoryReadStatus } from '../components/MemoryReadStatus.js';
+import { ContextGraphMark } from '../context-graph-colors.js';
 
 const LAYERS: Array<{
   key: 'working' | 'shared' | 'verified';
@@ -32,9 +33,9 @@ const LAYERS: Array<{
   desc: string;
   tabPrefix: 'wm' | 'swm' | 'vm';
 }> = [
-  { key: 'working',  title: 'Working Memory',        short: 'WM',  icon: '◇', color: '#64748b', desc: 'Private agent drafts', tabPrefix: 'wm' },
-  { key: 'shared',   title: 'Shared Working Memory', short: 'SWM', icon: '◈', color: '#f59e0b', desc: 'Team proposals',       tabPrefix: 'swm' },
-  { key: 'verified', title: 'Verifiable Memory',     short: 'VM',  icon: '◉', color: '#22c55e', desc: 'On-chain knowledge',   tabPrefix: 'vm' },
+  { key: 'working',  title: 'Working Memory',        short: 'WM',  icon: '◇', color: 'var(--layer-working)', desc: 'Private agent drafts', tabPrefix: 'wm' },
+  { key: 'shared',   title: 'Shared Working Memory', short: 'SWM', icon: '◈', color: 'var(--layer-shared)', desc: 'Team proposals',       tabPrefix: 'swm' },
+  { key: 'verified', title: 'Verifiable Memory',     short: 'VM',  icon: '◉', color: 'var(--layer-verified)', desc: 'On-chain knowledge',   tabPrefix: 'vm' },
 ];
 
 const TS_PREDS = [
@@ -67,11 +68,11 @@ export function MemoryStackView() {
       {inventoryError && <div className="v10-stale-banner" role="alert">
         <span>{listError ? 'Context graphs unavailable. ' : ''}{identity.error ? 'Agent identity unavailable. ' : ''}
           {contextGraphs.length > 0 ? 'Showing the last available context graphs.' : 'Context graph inventory is unknown.'}</span>
-        <button type="button" className="v10-retry-btn" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry context graphs</button>
+        <button type="button" className="v10-retry-btn ds-btn ds-sm" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry context graphs</button>
       </div>}
       {inventoryLoading && contextGraphs.length === 0 && <div role="status">Loading context graphs…</div>}
       {visible.length === 0 ? (!inventoryError && !inventoryLoading && (
-        <div className="v10-memstack-empty">
+        <div className="v10-memstack-empty ds-card-nested">
           No visible context graphs. Create one from the sidebar or un-hide dismissed ones.
         </div>
       )) : (
@@ -147,7 +148,7 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
     <div className="v10-memstack-row">
       <div className="v10-memstack-project">
         <button type="button" className="v10-memstack-project-btn" onClick={openProject}>
-          <span className="v10-memstack-project-dot" />
+          <ContextGraphMark id={cg.id} name={cg.name} />
           <span className="v10-memstack-project-name">{cg.name || cg.id}</span>
         </button>
         {cg.description && (
@@ -214,7 +215,7 @@ function LayerCell({
   const isEmpty = entityCount === 0;
   return (
     <div
-      className={`v10-memstack-cell${isEmpty ? ' empty' : ''}`}
+      className={`v10-memstack-cell ds-card-nested${isEmpty ? ' empty' : ''}`}
       style={{ '--cell-color': color } as React.CSSProperties}
     >
       <div className="v10-memstack-cell-stats">

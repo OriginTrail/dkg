@@ -4,16 +4,12 @@ import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
 import { ContextGraphPrimerView } from '../../views/ContextGraphPrimerView.js';
 import { authHeaders, fileUrl } from '../../api.js';
-import { DOC_TAB_PREFIX, decodeDocTabId } from '../../lib/doc-tab-id.js';
+import { decodeTabId } from '../../lib/tab-target.js';
 import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
+import { TabBar } from './TabBar.js';
 import { MARKETPLACE_TABS } from '../../marketplace/tabs.js';
 
-const CLOSE_ICON = (
-  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-  </svg>
-);
 
 const OperationsView = createRecoverableLazyView(() =>
   import('../../pages/Operations.js').then((m) => m.OperationsPage)
@@ -67,31 +63,6 @@ const MemoryStackView = createRecoverableLazyView(() =>
   import('../../views/MemoryStackView.js').then((m) => m.MemoryStackView)
 , 'memory stack');
 
-function TabBar() {
-  const { tabs, activeTabId, setActiveTab, closeTab } = useTabsStore();
-
-  return (
-    <div className="v10-center-tabs">
-      {tabs.map((tab) => (
-        <button
-          key={tab.id}
-          className={`v10-center-tab ${tab.id === activeTabId ? 'active' : ''}`}
-          onClick={() => setActiveTab(tab.id)}
-        >
-          <span className="v10-center-tab-label">{tab.label}</span>
-          {tab.closable && (
-            <span
-              className="v10-center-tab-close"
-              onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
-            >
-              {CLOSE_ICON}
-            </span>
-          )}
-        </button>
-      ))}
-    </div>
-  );
-}
 
 const TEXT_CONTENT_TYPES = ['text/', 'application/json', 'application/xml', 'application/javascript', 'application/x-yaml'];
 function isTextContentType(ct: string) { return TEXT_CONTENT_TYPES.some(t => ct.startsWith(t)); }
@@ -118,7 +89,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
   const docLabel = currentTab?.label ?? 'Document';
 
   const handleBack = () => {
-    const projectTab = tabs.find(t => t.id.startsWith('project:'));
+    const projectTab = tabs.find(t => decodeTabId(t.id).kind === 'graph');
     if (projectTab) {
       setActiveTab(projectTab.id);
     }
@@ -210,20 +181,20 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
           onClick={handleBack}
           style={{
             border: '1px solid var(--border-default)', borderRadius: 5, background: 'none',
-            color: 'var(--text-secondary)', fontSize: 'var(--font-size-caption)', fontWeight: 600, padding: '4px 10px',
+            color: 'var(--text-secondary)', fontSize: 'var(--fs-label)', fontWeight: 600, padding: '4px 10px',
             cursor: 'pointer', fontFamily: 'var(--font-sans)',
           }}
         >
           ← Back to Project
         </button>
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>📄 {docLabel}</span>
+        <span style={{ fontSize: 'var(--fs-body)', fontWeight: 600, color: 'var(--text-primary)' }}>📄 {docLabel}</span>
         {showToggle && (
           <div
             role="group"
             aria-label="Document view mode"
             style={{
               marginLeft: 'auto', display: 'flex', gap: 2, padding: 2,
-              border: '1px solid var(--border-default)', borderRadius: 6,
+              border: '1px solid var(--border-default)', borderRadius: 'var(--radius-control)',
               background: 'var(--bg-surface)',
             }}
           >
@@ -236,8 +207,8 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
                   aria-pressed={active}
                   onClick={() => setViewMode(mode)}
                   style={{
-                    border: 'none', borderRadius: 4, cursor: 'pointer',
-                    padding: '3px 12px', fontSize: 'var(--font-size-caption)', fontWeight: 600,
+                    border: 'none', borderRadius: 'var(--radius-xs)', cursor: 'pointer',
+                    padding: '3px 12px', fontSize: 'var(--fs-label)', fontWeight: 600,
                     fontFamily: 'var(--font-sans)',
                     color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
                     background: active ? 'var(--bg-elevated)' : 'transparent',
@@ -257,11 +228,11 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
             justifyContent: 'center', gap: 10, height: '100%',
             color: 'var(--text-tertiary)', textAlign: 'center',
           }}>
-            <span style={{ fontSize: 28, opacity: 0.6 }}>📄</span>
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>
+            <span style={{ fontSize: 'var(--fs-display)', opacity: 0.6 }}>📄</span>
+            <span style={{ fontSize: 'var(--fs-body)', fontWeight: 600, color: 'var(--text-secondary)' }}>
               Source file not available for this document
             </span>
-            <span style={{ fontSize: 'var(--font-size-label)', maxWidth: 360, lineHeight: 1.6 }}>
+            <span style={{ fontSize: 'var(--fs-control)', maxWidth: 360, lineHeight: 1.6 }}>
               This document was indexed into the graph without a stored source
               file, so there is nothing to preview here. You can still explore
               its extracted entities and relationships in the graph.
@@ -269,17 +240,17 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
           </div>
         ) : (
           <>
-            {loading && <div style={{ color: 'var(--text-tertiary)', fontSize: 'var(--font-size-label)' }}>Loading document...</div>}
-            {error && <div style={{ color: 'var(--accent-red)', fontSize: 'var(--font-size-label)' }}>Failed to load: {error}</div>}
+            {loading && <div style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-control)' }}>Loading document...</div>}
+            {error && <div style={{ color: 'var(--accent-red)', fontSize: 'var(--fs-control)' }}>Failed to load: {error}</div>}
             {!loading && isImage && blobUrl && (
-              <img src={blobUrl} alt={docLabel} style={{ maxWidth: '100%', borderRadius: 8 }} />
+              <img src={blobUrl} alt={docLabel} style={{ maxWidth: '100%', borderRadius: 'var(--radius-nested)' }} />
             )}
             {!loading && isPdf && blobUrl && (
-              <iframe src={blobUrl} title={docLabel} style={{ width: '100%', height: '100%', border: 'none', borderRadius: 8 }} />
+              <iframe src={blobUrl} title={docLabel} style={{ width: '100%', height: '100%', border: 'none', borderRadius: 'var(--radius-nested)' }} />
             )}
             {content !== null && !isImage && !isPdf && isMarkdown && viewMode === 'formatted' && (
               <div style={{
-                background: 'var(--bg-surface)', borderRadius: 8, padding: '16px 20px',
+                background: 'var(--bg-surface)', borderRadius: 'var(--radius-nested)', padding: '16px 20px',
                 border: '1px solid var(--border-default)', color: 'var(--text-primary)',
               }}>
                 <MarkdownMessage content={content} />
@@ -287,9 +258,9 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
             )}
             {content !== null && !isImage && !isPdf && !(isMarkdown && viewMode === 'formatted') && (
               <pre style={{
-                fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-label)', lineHeight: 1.7,
+                fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-control)', lineHeight: 1.7,
                 color: 'var(--text-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                background: 'var(--bg-surface)', borderRadius: 8, padding: 16,
+                background: 'var(--bg-surface)', borderRadius: 'var(--radius-nested)', padding: 16,
                 border: '1px solid var(--border-default)', margin: 0,
               }}>
                 {content}
@@ -335,51 +306,21 @@ function ViewContainer() {
 
   if (activeTabId === CONTEXT_GRAPH_PRIMER_TAB_ID) return <ContextGraphPrimerView />;
 
-  if (activeTabId.startsWith('project:')) {
-    const cgId = activeTabId.slice('project:'.length);
-    return <ProjectView contextGraphId={cgId} />;
-  }
-
-  if (activeTabId.startsWith('conviction:')) {
-    const accountId = activeTabId.slice('conviction:'.length);
-    return <ConvictionDetailView accountId={accountId} />;
-  }
-
-  if (activeTabId.startsWith('agent:')) {
-    // Tab id shape: `agent:<projectId>|<agentSlug>`. The project part
-    // scopes the profile to a single context graph's data; a future
-    // "global agent profile" view could drop the prefix.
-    const raw = activeTabId.slice('agent:'.length);
-    const pipeIdx = raw.indexOf('|');
-    if (pipeIdx > 0) {
-      const cgId = raw.slice(0, pipeIdx);
-      const agentSlug = raw.slice(pipeIdx + 1);
-      const agentUri = agentSlug.includes(':') ? agentSlug : `urn:dkg:agent:${agentSlug}`;
-      return <AgentProfilePage contextGraphId={cgId} agentUri={agentUri} />;
-    }
-  }
-
-  if (activeTabId.startsWith(DOC_TAB_PREFIX)) {
-    // Tab id shape: `doc:<contextGraphId>|<docRef>|<contentType>`. The
-    // encode/decode contract lives in doc-tab-id.ts (kept pure so it is
-    // unit-testable without mounting React).
-    const { docRef, contentType } = decodeDocTabId(activeTabId);
-    return <DocumentViewer docRef={docRef} contentType={contentType} />;
-  }
-
-  if (activeTabId.startsWith('wm:')) {
-    return <MemoryLayerView layer="wm" contextGraphId={activeTabId.slice(3)} />;
-  }
-  if (activeTabId.startsWith('swm:')) {
-    return <MemoryLayerView layer="swm" contextGraphId={activeTabId.slice(4)} />;
-  }
-  if (activeTabId.startsWith('vm:')) {
-    return <MemoryLayerView layer="vm" contextGraphId={activeTabId.slice(3)} />;
+  const target = decodeTabId(activeTabId);
+  switch (target.kind) {
+    case 'graph': return <ProjectView contextGraphId={target.contextGraphId} />;
+    case 'conviction': return <ConvictionDetailView accountId={target.accountId} />;
+    // The graph part of an agent tab scopes the profile to one context graph's
+    // data; a future "global agent profile" view could drop it.
+    case 'agent': return <AgentProfilePage contextGraphId={target.contextGraphId} agentUri={target.agentUri} />;
+    case 'document': return <DocumentViewer docRef={target.docRef} contentType={target.contentType} />;
+    case 'layer': return <MemoryLayerView layer={target.layer} contextGraphId={target.contextGraphId} />;
+    default: break;
   }
 
   return (
     <div className="v10-view-placeholder">
-      <p style={{ color: 'var(--text-tertiary)', fontSize: 'var(--font-size-label)' }}>
+      <p style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-control)' }}>
         View "{activeTabId}" coming soon.
       </p>
     </div>

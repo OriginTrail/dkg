@@ -1,4 +1,4 @@
-@import '@fontsource-variable/geist/wght.css';
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Instrument+Sans:wght@400;500;600;700&display=swap');
 @import './styles/00-theme.css';
 @import './styles/01-base.css';
 @import './styles/02-shell-header.css';
@@ -33,6 +33,7 @@
 @import './styles/26-pca-publish-eligibility.css';
 @import './styles/26-identity-wallets.css';
 @import './styles/26-pca-followup-overrides.css';
+@import './styles/27-ds-components.css';
 @import './styles/30-marketplace-tokens.css';
 @import './styles/31-marketplace-ui.css';
 @import './styles/32-marketplace-surfaces.css';

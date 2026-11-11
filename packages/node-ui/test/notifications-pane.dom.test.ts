@@ -118,6 +118,12 @@ describe('NotificationsPane — interaction + a11y (happy-dom)', () => {
     expect(deny).toHaveBeenCalledTimes(1);
   });
 
+  it('a join request from a separator-only agent name renders a "?" avatar instead of crashing', () => {
+    render(makeFeed({ joinRequests: [joinItem({ agentName: '_' })] }));
+    expect(container.querySelector('.v10-notif-agent')?.textContent).toBe('?');
+    expect(container.textContent).toContain('wants to join');
+  });
+
   it('Escape inside the Deny-confirm cancels the confirm (does not reject)', () => {
     const deny = vi.fn(async (): Promise<ActionResult> => ({ ok: true }));
     render(makeFeed({ joinRequests: [joinItem()], deny }));

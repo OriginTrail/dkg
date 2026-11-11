@@ -20,7 +20,7 @@ export function GenWidget({ title, agent, footnote, dismissed, onDismiss, childr
   children: React.ReactNode;
 }) {
   return (
-    <div className={`v10-gen-widget ${dismissed ? 'dissolved' : ''}`}>
+    <div className={`v10-gen-widget ds-card ${dismissed ? 'dissolved' : ''}`}>
       <div className="v10-gen-widget-header">
         <span className="v10-gen-widget-title">{title}</span>
         <div className="v10-gen-widget-right">
@@ -163,10 +163,10 @@ function LayerActionShell({ title, footnote, context, result, error, extras, chi
   return (
     <GenWidget title={title} footnote={footnote}>
       <div className="v10-decision-context" style={{ marginBottom: 10 }}>{context}</div>
-      {result && <div data-testid="layer-action-result" style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-success)', marginBottom: 8 }}>✓ {result}</div>}
+      {result && <div data-testid="layer-action-result" style={{ fontSize: 'var(--fs-label)', color: 'var(--text-success)', marginBottom: 8 }}>✓ {result}</div>}
       {/* #1464 — errors render under a DISTINCT testid so a failed action can't be mistaken for a
           successful result by a testid-agnostic reader (the mask that hid the promote failure). */}
-      {error && <div data-testid="layer-action-error" style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-danger)', marginBottom: 8 }}>✕ {error}</div>}
+      {error && <div data-testid="layer-action-error" style={{ fontSize: 'var(--fs-label)', color: 'var(--text-danger)', marginBottom: 8 }}>✕ {error}</div>}
       {extras}
       <div className="v10-decision-actions">{children}</div>
     </GenWidget>
@@ -223,8 +223,6 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
   }, [contextGraphId, run]);
 
   if (count === 0) return null;
-  const color = '#f59e0b';
-
   return (
     <LayerActionShell
       title="Share complete Knowledge Assets"
@@ -235,8 +233,8 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
     >
       <button
         data-testid="widget-promote-all-btn"
-        className="v10-decision-btn approve"
-        style={{ borderColor: `${color}50`, color: 'var(--text-warning)', background: `${color}15`, opacity: busy ? 0.5 : 1 }}
+        className="v10-decision-btn ds-btn ds-primary"
+        style={{ borderColor: 'var(--layer-shared-border)', color: 'var(--layer-shared-text)', background: 'var(--layer-shared-bg)', opacity: busy ? 0.5 : 1 }}
         disabled={busy}
         onClick={promote}
       >
@@ -320,7 +318,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
     >
       <button
         data-testid="widget-publish-vm-btn"
-        className="v10-decision-btn primary-cta publish-vm"
+        className="v10-decision-btn primary-cta publish-vm ds-btn ds-vm ds-lg"
         style={{ opacity: busy || gate.blocked ? 0.5 : 1 }}
         // Native `disabled` only for the TRANSIENT busy state; the PERSISTENT policy gate uses
         // aria-disabled so SR/keyboard users keep focus + hear the reason (publish no-ops when
@@ -357,7 +355,7 @@ export function LayerWidgetStrip({ layer, entities, entityCount, actionEntityCou
     <div
       // #1464 — success vs failure must not collide on one testid (see LayerActionShell).
       data-testid={lastAction.ok ? 'layer-action-result' : 'layer-action-error'}
-      style={{ fontSize: 'var(--font-size-caption)', color: lastAction.ok ? 'var(--text-success)' : 'var(--text-danger)', marginBottom: 8 }}
+      style={{ fontSize: 'var(--fs-label)', color: lastAction.ok ? 'var(--text-success)' : 'var(--text-danger)', marginBottom: 8 }}
     >
       {lastAction.ok ? '✓' : '✕'} {lastAction.text}
     </div>

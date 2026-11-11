@@ -223,7 +223,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
   return (
     <div className="v10-modal-overlay" onClick={onBackdropClick} role="presentation">
       <div
-        className="v10-modal-box"
+        className="v10-modal-box ds-overlay"
         style={{ maxWidth: 560 }}
         ref={dialogRef}
         role="dialog"
@@ -246,7 +246,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
           </div>
           <button
             type="button"
-            className="v10-modal-close"
+            className="v10-modal-close ds-btn ds-ghost ds-icon"
             onClick={onClose}
             aria-label="Close share dialog"
             title="Close (Esc)"
@@ -262,7 +262,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
             <button
               onClick={() => setActiveTab('allowlist')}
               style={{
-                padding: '8px 16px', fontSize: 'var(--font-size-label)', fontWeight: activeTab === 'allowlist' ? 600 : 400,
+                padding: '8px 16px', fontSize: 'var(--fs-control)', fontWeight: activeTab === 'allowlist' ? 600 : 400,
                 background: 'none', border: 'none', cursor: 'pointer',
                 color: activeTab === 'allowlist' ? 'var(--text-primary)' : 'var(--text-tertiary)',
                 borderBottom: activeTab === 'allowlist' ? '2px solid var(--accent-primary)' : '2px solid transparent',
@@ -273,7 +273,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
             <button
               onClick={() => setActiveTab('requests')}
               style={{
-                padding: '8px 16px', fontSize: 'var(--font-size-label)', fontWeight: activeTab === 'requests' ? 600 : 400,
+                padding: '8px 16px', fontSize: 'var(--fs-control)', fontWeight: activeTab === 'requests' ? 600 : 400,
                 background: 'none', border: 'none', cursor: 'pointer',
                 color: activeTab === 'requests' ? 'var(--text-primary)' : 'var(--text-tertiary)',
                 borderBottom: activeTab === 'requests' ? '2px solid var(--accent-primary)' : '2px solid transparent',
@@ -285,7 +285,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                 <span style={{
                   position: 'absolute', top: 4, right: 4,
                   background: 'var(--accent-red, #ef4444)', color: 'var(--text-on-accent)',
-                  borderRadius: 999, fontSize: 'var(--font-size-micro)', fontWeight: 700,
+                  borderRadius: 'var(--radius-pill)', fontSize: 'var(--fs-micro)', fontWeight: 700,
                   padding: '1px 5px', minWidth: 16, textAlign: 'center',
                 }}>
                   {pendingRequests.length}
@@ -302,7 +302,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                   button revokes access for an existing participant. */}
               <div className="v10-form-group">
                 <label className="v10-form-label">Allowed Agents</label>
-                <div style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-tertiary)', marginBottom: 8 }}>
+                <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginBottom: 8 }}>
                   Only agents on this list can read and write to the context graph. To add someone, share the Invite Code below — they'll send a signed join request you can approve in the <strong>Join Requests</strong> tab.
                 </div>
 
@@ -315,20 +315,20 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                       return (
                         <div key={addr} style={{
                           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                          padding: '6px 10px', borderRadius: 6, fontSize: 'var(--font-size-caption)',
+                          padding: '6px 10px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)',
                           fontFamily: 'var(--font-mono)', background: 'var(--bg-surface)',
                           border: '1px solid var(--border-default)',
                         }}>
                           <span style={{ color: 'var(--text-primary)' }}>
                             {peer ? (
-                              <><span style={{ fontFamily: 'var(--font-body)', fontWeight: 500 }}>{peer.name}</span>{' '}<span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--font-size-meta)' }}>{truncAddr(addr)}</span></>
+                              <><span style={{ fontFamily: 'var(--font-body)', fontWeight: 500 }}>{peer.name}</span>{' '}<span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-micro)' }}>{truncAddr(addr)}</span></>
                             ) : addr}
                           </span>
                           <button
                             onClick={() => handleRemoveAgent(addr)}
                             style={{
                               background: 'none', border: 'none', cursor: 'pointer',
-                              color: 'var(--text-tertiary)', fontSize: 'var(--font-size-label)', padding: '0 4px',
+                              color: 'var(--text-tertiary)', fontSize: 'var(--fs-control)', padding: '0 4px',
                             }}
                             title="Remove agent"
                           >
@@ -342,7 +342,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
 
                 {allowedAgents.length === 0 && (
                   <div style={{
-                    padding: '8px 12px', borderRadius: 6, fontSize: 'var(--font-size-caption)',
+                    padding: '8px 12px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)',
                     color: 'var(--text-tertiary)', background: 'var(--bg-surface)',
                     border: '1px dashed var(--border-default)', marginBottom: 8,
                   }}>
@@ -358,7 +358,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                 <label className="v10-form-label">Invite Code</label>
                 {invitePayload === null ? (
                   <div style={{
-                    padding: '8px 12px', borderRadius: 6, fontSize: 'var(--font-size-caption)',
+                    padding: '8px 12px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)',
                     color: 'var(--text-tertiary)', background: 'var(--bg-surface)',
                     border: '1px dashed var(--border-default)',
                   }}>
@@ -368,17 +368,17 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                   <div style={{ position: 'relative' }}>
                     <pre style={{
                       background: 'var(--bg-surface)', border: '1px solid var(--border-default)',
-                      borderRadius: 6, padding: '10px 12px', fontSize: 'var(--font-size-caption)', lineHeight: 1.6,
+                      borderRadius: 'var(--radius-control)', padding: '10px 12px', fontSize: 'var(--fs-label)', lineHeight: 1.6,
                       fontFamily: 'var(--font-mono)', color: 'var(--text-primary)',
                       overflow: 'auto', margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all',
                     }}>
                       {invitePayload}
                     </pre>
                     <button
-                      className="v10-modal-btn primary"
+                      className="v10-modal-btn primary ds-btn ds-primary"
                       onClick={() => copyToClipboard(invitePayload, 'invite')}
                       style={{
-                        position: 'absolute', top: 6, right: 6, fontSize: 'var(--font-size-meta)', padding: '4px 10px', height: 26,
+                        position: 'absolute', top: 6, right: 6, fontSize: 'var(--fs-micro)', padding: '4px 10px', height: 26,
                         cursor: 'pointer',
                       }}
                     >
@@ -393,13 +393,13 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
           {activeTab === 'requests' && (
             <div className="v10-form-group">
               <label className="v10-form-label">Pending Join Requests</label>
-              <div style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-tertiary)', marginBottom: 8 }}>
+              <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginBottom: 8 }}>
                 Agents who submitted a signed request to join this context graph. Approve to add them to the allowlist.
               </div>
 
               {pendingRequests.length === 0 && (
                 <div style={{
-                  padding: '16px 12px', borderRadius: 6, fontSize: 'var(--font-size-caption)', textAlign: 'center',
+                  padding: '16px 12px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)', textAlign: 'center',
                   color: 'var(--text-tertiary)', background: 'var(--bg-surface)',
                   border: '1px dashed var(--border-default)',
                 }}>
@@ -410,7 +410,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
               {pendingRequests.map((req) => (
                 <div key={req.agentAddress} style={{
                   display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                  padding: '8px 10px', borderRadius: 6, fontSize: 'var(--font-size-caption)',
+                  padding: '8px 10px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)',
                   background: 'var(--bg-surface)', border: '1px solid var(--border-default)',
                   marginBottom: 4,
                 }}>
@@ -419,11 +419,11 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                       <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{req.name}</span>
                     )}
                     <span style={{
-                      color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-meta)',
+                      color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-micro)',
                     }}>
                       {req.agentAddress}
                     </span>
-                    <span style={{ fontSize: 'var(--font-size-micro)', color: 'var(--text-tertiary)' }}>
+                    <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>
                       Requested {new Date(req.timestamp).toLocaleString()}
                     </span>
                   </div>
@@ -434,7 +434,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                       style={{
                         background: 'rgba(34, 197, 94, 0.15)', color: 'var(--text-success)',
                         border: '1px solid rgba(34, 197, 94, 0.3)', cursor: 'pointer',
-                        borderRadius: 4, fontSize: 'var(--font-size-meta)', padding: '4px 10px', fontWeight: 600,
+                        borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-micro)', padding: '4px 10px', fontWeight: 600,
                       }}
                     >
                       {processingRequest === req.agentAddress ? '…' : 'Approve'}
@@ -445,7 +445,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                       style={{
                         background: 'rgba(239, 68, 68, 0.1)', color: 'var(--text-danger)',
                         border: '1px solid rgba(239, 68, 68, 0.2)', cursor: 'pointer',
-                        borderRadius: 4, fontSize: 'var(--font-size-meta)', padding: '4px 10px', fontWeight: 600,
+                        borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-micro)', padding: '4px 10px', fontWeight: 600,
                       }}
                     >
                       Reject
@@ -455,14 +455,14 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
               ))}
 
               {agentError && (
-                <div style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-danger)', marginTop: 4 }}>{agentError}</div>
+                <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-danger)', marginTop: 4 }}>{agentError}</div>
               )}
             </div>
           )}
         </div>
 
         <div className="v10-modal-footer">
-          <button className="v10-modal-btn" onClick={onClose}>Done</button>
+          <button className="v10-modal-btn ds-btn" onClick={onClose}>Done</button>
         </div>
       </div>
     </div>

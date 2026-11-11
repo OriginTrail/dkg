@@ -10,6 +10,8 @@ export class LeftPanelPage {
   readonly newProjectBtn: Locator;
   readonly joinProjectBtn: Locator;
   readonly oraclePlaceholder: Locator;
+  /** The sidebar's "Node" group: Observability, Publisher Conviction, Settings. */
+  readonly nodePlaces: Locator;
 
   constructor(page: Page) {
     this.page = page;
@@ -17,6 +19,34 @@ export class LeftPanelPage {
     this.newProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /^New$/i });
     this.joinProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /^Join$/i });
     this.oraclePlaceholder = page.locator(sel.leftPanel.oraclePlaceholder);
+    this.nodePlaces = page.getByRole('navigation', { name: 'Node' });
+  }
+
+  /** A node-level place in the sidebar, by its visible name. */
+  place(name: 'Observability' | 'Publisher Conviction' | 'Settings') {
+    return this.nodePlaces.getByRole('button', { name, exact: true });
+  }
+
+  async openObservability() {
+    await this.place('Observability').click();
+    // The Observability view is a lazy-loaded centre tab: its <h1> only paints
+    // once the dynamic chunk + initial render settle. Under heavy parallel load
+    // (shared Vite dev server + shared node) that can exceed the default 5s
+    // `expect` budget callers assert with, and a click fired right after
+    // `shell.goto()` can also be missed while the shell is still hydrating.
+    // Confirm the view actually opened, retrying the click once — same missed-
+    // click guard used in clickNewProject — so every caller starts loaded.
+    const heading = this.page.getByRole('heading', { name: 'Observability', level: 1 });
+    try {
+      await heading.waitFor({ state: 'visible', timeout: 8_000 });
+    } catch {
+      await this.place('Observability').click();
+      await heading.waitFor({ state: 'visible', timeout: 20_000 });
+    }
+  }
+
+  async openSettings() {
+    await this.place('Settings').click();
   }
 
   private myCgSections() {
@@ -27,7 +57,7 @@ export class LeftPanelPage {
 
   /**
    * A collapsible sidebar section by its label (Marketplace, My Context
-   * Graphs, Public Graphs, Integrations): its header, with the count where it
+   * Graphs, Public graphs, Integrations): its header, with the count where it
    * has one, and, while expanded, its body.
    */
   section(label: string) {
@@ -53,9 +83,9 @@ export class LeftPanelPage {
     await expect(header).toHaveAttribute('aria-expanded', 'true');
   }
 
-  /** The Public Graphs section alone: its header (with the count) and, while expanded, its body. */
+  /** The Public graphs section alone: its header (with the count) and, while expanded, its body. */
   publicGraphsSection() {
-    return this.section('Public Graphs');
+    return this.section('Public graphs');
   }
 
   private memoryStackControl() {

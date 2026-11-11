@@ -35,7 +35,7 @@ export function DeviceConfirmProgress({
   const hasFailure = steps.some((s) => s.state === 'failed' || s.state === 'aborted');
   return (
     <div
-      className="v10-pca-device-progress"
+      className="v10-pca-device-progress ds-card-nested"
       role={hasFailure ? 'alert' : 'status'}
       aria-live={hasFailure ? 'assertive' : 'polite'}
     >

@@ -208,9 +208,9 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('unavailable');
     expect(container.textContent).not.toContain('No context graphs yet');
     expect(container.textContent).not.toContain('No context graphs in this section yet.');
-    await act(async () => { sectionHeader(container, 'Public Graphs').click(); });
+    await act(async () => { sectionHeader(container, 'Public graphs').click(); });
     expect(container.textContent).not.toContain('Discovered public graphs will appear here');
-    await act(async () => { sectionHeader(container, 'Public Graphs').click(); });
+    await act(async () => { sectionHeader(container, 'Public graphs').click(); });
     const retry = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Retry');
     expect(retry).toBeTruthy();
     await act(async () => { retry!.click(); });
@@ -255,7 +255,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     const headers = container.querySelectorAll('.v10-peer-group-header');
     expect(headers.length).toBe(3);
     const labels = Array.from(container.querySelectorAll('.v10-peer-group-label')).map((el) => el.textContent);
-    expect(labels).toEqual(['My Context Graphs', 'Public Graphs', 'Integrations']);
+    expect(labels).toEqual(['My Context Graphs', 'Public graphs', 'Integrations']);
   });
 
   it('hides Marketplace until the feature flag is set', async () => {
@@ -283,7 +283,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
   it('expands "My Context Graphs" by default and keeps secondary groups collapsed', async () => {
     const { container } = await renderPanel();
     const myCgHeader = sectionHeader(container, 'My Context Graphs');
-    const publicHeader = sectionHeader(container, 'Public Graphs');
+    const publicHeader = sectionHeader(container, 'Public graphs');
     const integrationsHeader = sectionHeader(container, 'Integrations');
     expect(myCgHeader.getAttribute('aria-expanded')).toBe('true');
     expect(publicHeader.getAttribute('aria-expanded')).toBe('false');
@@ -298,7 +298,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
   it('discloses each section\'s body from its header, mounted only while open, so Integrations polls only then', async () => {
     localStorage.setItem('dkg-marketplace-enabled', '1');
     const { container } = await renderPanel();
-    for (const label of ['Marketplace', 'My Context Graphs', 'Public Graphs', 'Integrations']) {
+    for (const label of ['Marketplace', 'My Context Graphs', 'Public graphs', 'Integrations']) {
       const header = sectionHeader(container, label);
       const wasOpen = header.getAttribute('aria-expanded') === 'true';
       const bodyId = header.getAttribute('aria-controls');
@@ -343,7 +343,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
 
   it('still renders the "My Context Graphs" header when the membership filter yields zero (with empty-body hint)', async () => {
     // qa-lead Pass 1 #2: at stage>=2 with CGs that all live in the
-    // Context Oracle view (no callerInvolved match), the sidebar must
+    // Public graphs group (no callerInvolved match), the sidebar must
     // still surface the My CG header so the user has a visible anchor —
     // otherwise it shrinks to a lone collapsed "Integrations" toggle.
     const { PanelLeft } = await import('../src/ui/components/Shell/PanelLeft.js');
@@ -391,14 +391,14 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     const { container } = await renderPanel();
 
     await act(async () => {
-      sectionHeader(container, 'Public Graphs').click();
+      sectionHeader(container, 'Public graphs').click();
     });
 
     expect(container.textContent).toContain('Discovered public graphs will appear here');
     expect(container.textContent).toContain('subscribe by ID');
   });
 
-  it('renders a successfully synchronized public graph in the Context Oracle', async () => {
+  it('renders a successfully synchronized public graph in Public graphs', async () => {
     const { container } = await renderPanel();
     const { useProjectsStore } = await import('../src/ui/stores/projects.js');
     act(() => {
@@ -417,7 +417,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     });
 
     await act(async () => {
-      sectionHeader(container, 'Public Graphs').click();
+      sectionHeader(container, 'Public graphs').click();
     });
 
     expect(container.textContent).toContain('Public Ready Graph');
@@ -456,7 +456,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     });
 
     await act(async () => {
-      sectionHeader(container, 'Public Graphs').click();
+      sectionHeader(container, 'Public graphs').click();
     });
 
     const browseButton = container.querySelector(
@@ -482,10 +482,64 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(document.body.querySelector('.v10-modal-btn.primary')?.textContent).toBe('Subscribe');
   });
 
+  it('keeps Browse passive with the routing hook mounted, while picking a working graph still targets it', async () => {
+    const { PanelLeft } = await import('../src/ui/components/Shell/PanelLeft.js');
+    const { useShellRouting } = await import('../src/ui/hooks/useShellRouting.js');
+    const { MemoryRouter } = await import('react-router-dom');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    const { useTabsStore } = await import('../src/ui/stores/tabs.js');
+    const { useLayoutStore } = await import('../src/ui/stores/layout.js');
+    act(() => {
+      useProjectsStore.setState({ loading: false, inventoryError: null, inventoryLoaded: false, activeProjectId: null });
+      useTabsStore.setState({ tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }], activeTabId: 'dashboard' });
+      useLayoutStore.setState({ leftSectionMyProjectsOpen: true, leftSectionContextOracleOpen: true, leftSectionIntegrationsOpen: false });
+    });
+    function Routing() { useShellRouting(); return null; }
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mountedRoots.push(root);
+    mountedContainers.push(container);
+    await act(async () => {
+      root.render(React.createElement(MemoryRouter, { initialEntries: ['/'] },
+        React.createElement(PanelLeft), React.createElement(Routing)));
+    });
+    await flush();
+    await flush();
+    // The sidebar's mount-time load has settled: now the graphs this case is about.
+    act(() => {
+      useProjectsStore.setState({
+        contextGraphs: [
+          { id: 'mine', name: 'My Working Graph', accessPolicy: 'private', callerInvolved: true, subscribed: true, synced: true } as any,
+          { id: 'public-passive', name: 'Passive Public Graph', accessPolicy: 'public', callerInvolved: false, subscribed: false, synced: false } as any,
+        ],
+        activeProjectId: 'mine',
+      });
+    });
+    await flush();
+
+    // Browse a catalogue graph in Public graphs: its tab opens, and the chat target stays empty.
+    await act(async () => { (container.querySelector('button[aria-label="Browse Passive Public Graph"]') as HTMLButtonElement).click(); });
+    await flush();
+    expect(useTabsStore.getState().activeTabId).toBe('project:public-passive');
+    expect(useProjectsStore.getState().activeProjectId).toBeNull();
+
+    // Pick a working graph in My Context Graphs: it becomes the target.
+    const mine = [...container.querySelectorAll<HTMLElement>('.v10-tree-section-header')].find(el => el.textContent?.includes('My Working Graph'))!;
+    await act(async () => { mine.click(); });
+    await flush();
+    expect(useProjectsStore.getState().activeProjectId).toBe('mine');
+
+    // Back to the catalogue graph's tab through history: still passive.
+    await act(async () => { useTabsStore.getState().setActiveTab('project:public-passive'); });
+    await flush();
+    expect(useProjectsStore.getState().activeProjectId).toBeNull();
+  });
+
   it('section headers point at their body containers via aria-controls', async () => {
     const { container } = await renderPanel();
     const myCgHeader = sectionHeader(container, 'My Context Graphs');
-    const publicHeader = sectionHeader(container, 'Public Graphs');
+    const publicHeader = sectionHeader(container, 'Public graphs');
     const integrationsHeader = sectionHeader(container, 'Integrations');
     const myCgControls = myCgHeader.getAttribute('aria-controls');
     const publicControls = publicHeader.getAttribute('aria-controls');
@@ -498,7 +552,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     // which aren't valid CSS selectors — use getElementById, not
     // querySelector (Codex).
     expect(document.getElementById(myCgControls!)).toBeTruthy();
-    // Public Graphs and Integrations are collapsed by default, so their
+    // Public graphs and Integrations are collapsed by default, so their
     // bodies are unmounted. aria-controls may still reference them.
     expect(document.getElementById(publicControls!)).toBeNull();
     expect(document.getElementById(integrationsControls!)).toBeNull();

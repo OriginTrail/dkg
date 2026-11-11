@@ -28,6 +28,14 @@ function pctLabel(bps?: number): string | null {
   return `${p.toFixed(p % 1 === 0 ? 0 : 1)}%`;
 }
 
+/** Compact chip uses the shared Badge look (components/ds/Badge). */
+const CHIP_TONE: Record<PcaVerdict, 'success' | 'warning' | 'danger' | 'neutral'> = {
+  eligible: 'success',
+  fallthrough: 'warning',
+  'fallthrough-no-funds': 'danger',
+  unknown: 'neutral',
+};
+
 const VERDICT_META: Record<PcaVerdict, { glyph: string; toneClass: string }> = {
   eligible: { glyph: '◉', toneClass: 'v10-pca-verdict-green' },
   fallthrough: { glyph: '⚠', toneClass: 'v10-pca-verdict-amber' },
@@ -103,7 +111,7 @@ export function EligibilityVerdictBanner({
             : 'PCA status unknown';
     return (
       <span
-        className={['v10-pca-verdict-chip', meta.toneClass, className].filter(Boolean).join(' ')}
+        className={['ds-badge', `ds-tone-${CHIP_TONE[verdict]}`, 'v10-pca-verdict-chip', meta.toneClass, className].filter(Boolean).join(' ')}
         data-testid="pca-eligibility-chip"
         data-verdict={verdict}
       >
@@ -152,7 +160,7 @@ export function EligibilityVerdictBanner({
 
   return (
     <div
-      className={['v10-pca-verdict-banner', meta.toneClass, className].filter(Boolean).join(' ')}
+      className={['v10-pca-verdict-banner ds-card-nested', meta.toneClass, className].filter(Boolean).join(' ')}
       data-testid="pca-eligibility-verdict"
       data-verdict={verdict}
       role={role}

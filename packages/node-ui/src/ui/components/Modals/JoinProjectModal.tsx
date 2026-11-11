@@ -516,7 +516,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         role="presentation"
       >
         <div
-          className="v10-modal-box"
+          className="v10-modal-box ds-overlay"
           ref={wireDismiss.dialogRef}
           role="dialog"
           aria-modal="true"
@@ -524,11 +524,11 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         >
           <button
             type="button"
-            className="v10-modal-close"
+            className="v10-modal-close ds-btn ds-ghost ds-icon"
             onClick={handleWireDone}
             aria-label="Close wire workspace dialog"
             title="Close (Esc)"
-            style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
+            style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4, zIndex: 1 }}
           >
             ×
           </button>
@@ -564,7 +564,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       role="presentation"
     >
       <div
-        className="v10-modal-box"
+        className="v10-modal-box ds-overlay"
         ref={inviteDismiss.dialogRef}
         role="dialog"
         aria-modal="true"
@@ -573,11 +573,11 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       >
         <button
           type="button"
-          className="v10-modal-close"
+          className="v10-modal-close ds-btn ds-ghost ds-icon"
           onClick={onClose}
           aria-label="Close join context graph dialog"
           title="Close (Esc)"
-          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
+          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4, zIndex: 1 }}
         >
           ×
         </button>
@@ -589,11 +589,11 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         </div>
 
         <div className="v10-modal-body">
-          {error && <div className="v10-modal-error">{error}</div>}
+          {error && <div className="v10-modal-error ds-card-nested">{error}</div>}
 
           {pending && (
             <div style={{
-              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 'var(--font-size-label)',
+              padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 'var(--fs-control)',
               background: 'rgba(59, 130, 246, 0.08)', border: '1px solid rgba(59, 130, 246, 0.25)',
               color: 'var(--accent-primary, #3b82f6)',
             }}>
@@ -603,7 +603,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
           {approved && (
             <div style={{
-              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 'var(--font-size-label)',
+              padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 'var(--fs-control)',
               background: 'rgba(34, 197, 94, 0.08)', border: '1px solid rgba(34, 197, 94, 0.25)',
               color: 'var(--accent-green)',
             }}>
@@ -613,7 +613,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
           {rejected && (
             <div style={{
-              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 'var(--font-size-label)',
+              padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 'var(--fs-control)',
               background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.25)',
               color: 'var(--accent-warning, #f59e0b)',
             }}>
@@ -626,14 +626,14 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
             <textarea
               id="dkg-cg-invite"
               name="dkg-cg-invite"
-              className="v10-form-textarea"
+              className="v10-form-textarea ds-input"
               placeholder={"Public: paste a Context Graph ID\n\nPrivate: paste the curator invite\nmy-context-graph-abc123\n12D3KooW..."}
               value={inviteCode}
               onChange={(e) => setInviteCode(e.target.value)}
               autoFocus
               rows={3}
               disabled={sending || pending || approved}
-              style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-caption)' }}
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-label)' }}
               aria-label="Context graph invite code"
               autoComplete="off"
               spellCheck={false}
@@ -642,7 +642,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
           {intent.kind === 'publicSubscribe' && (
             <label style={{
-              display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 'var(--font-size-label)',
+              display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 'var(--fs-control)',
               color: 'var(--text-secondary)', cursor: sending ? 'default' : 'pointer',
             }}>
               <input
@@ -663,9 +663,9 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         </div>
 
         <div className="v10-modal-footer">
-          <button className="v10-modal-btn" onClick={onClose}>{pending || approved ? 'Close' : 'Cancel'}</button>
+          <button className="v10-modal-btn ds-btn" onClick={onClose}>{pending || approved ? 'Close' : 'Cancel'}</button>
           <button
-            className="v10-modal-btn primary"
+            className="v10-modal-btn primary ds-btn ds-primary"
             onClick={handleRequestJoin}
             disabled={!inviteCode.trim() || sending || pending || approved}
           >

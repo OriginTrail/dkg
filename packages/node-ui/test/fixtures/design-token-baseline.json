@@ -1,0 +1,132 @@
+{
+  "components/AgentChip.tsx": {
+    "colour": 1
+  },
+  "components/Modals/JoinProjectModal.tsx": {
+    "colour": 3
+  },
+  "components/Modals/ShareProjectModal.tsx": {
+    "colour": 2
+  },
+  "components/Shell/PanelBottom.tsx": {
+    "colour": 10
+  },
+  "components/Shell/PanelCenter.tsx": {
+    "radius": 1
+  },
+  "components/Workspace/WireWorkspacePanel.tsx": {
+    "colour": 2
+  },
+  "hooks/useSwmAttributions.ts": {
+    "colour": 1
+  },
+  "pages/Operations.tsx": {
+    "colour": 43,
+    "radius": 11
+  },
+  "pages/Settings.tsx": {
+    "colour": 14,
+    "radius": 3
+  },
+  "styles/01-base.css": {
+    "radius": 1
+  },
+  "styles/02-shell-header.css": {
+    "colour": 12
+  },
+  "styles/03-left-center.css": {
+    "radius": 1
+  },
+  "styles/04-right-core.css": {
+    "colour": 2,
+    "radius": 1
+  },
+  "styles/05-right-agent-menu-scroll.css": {
+    "colour": 8,
+    "radius": 1
+  },
+  "styles/06-right-composer.css": {
+    "colour": 5
+  },
+  "styles/07-bottom-panel.css": {
+    "colour": 2
+  },
+  "styles/08-markdown.css": {
+    "radius": 1
+  },
+  "styles/10-dashboard.css": {
+    "colour": 1,
+    "radius": 1
+  },
+  "styles/11-explorer-assertions.css": {
+    "colour": 11
+  },
+  "styles/12-observability.css": {
+    "colour": 6
+  },
+  "styles/13-modals-import.css": {
+    "colour": 12,
+    "radius": 2
+  },
+  "styles/14-memory-layer.css": {
+    "colour": 1,
+    "radius": 1
+  },
+  "styles/15-trust-vm.css": {
+    "colour": 13,
+    "radius": 1
+  },
+  "styles/16-genui-graphview.css": {
+    "colour": 8,
+    "radius": 1
+  },
+  "styles/17-layer-switcher.css": {
+    "colour": 2
+  },
+  "styles/19-entities-layer-detail.css": {
+    "colour": 2,
+    "radius": 2
+  },
+  "styles/20-graph-ka-overview.css": {
+    "colour": 14,
+    "radius": 2
+  },
+  "styles/21-subgraph-detail.css": {
+    "colour": 14,
+    "radius": 2
+  },
+  "styles/22-subgraph-explorer-cta.css": {
+    "colour": 4
+  },
+  "styles/23-agent-activity-profile.css": {
+    "colour": 16
+  },
+  "styles/24-memory-stack-identity-primer.css": {
+    "colour": 6
+  },
+  "styles/25-graph-provenance-card.css": {
+    "colour": 2
+  },
+  "styles/26-pca-followup-overrides.css": {
+    "colour": 2
+  },
+  "styles/26-pca-primitives.css": {
+    "colour": 3
+  },
+  "styles/26-wallet-primitives.css": {
+    "colour": 2
+  },
+  "styles/27-ds-components.css": {
+    "colour": 1,
+    "radius": 1
+  },
+  "styles/30-marketplace-tokens.css": {
+    "colour": 16
+  },
+  "styles/32-marketplace-surfaces.css": {
+    "radius": 1
+  },
+  "views/project/components/graph.tsx": {
+    "colour": 1
+  }
+}

@@ -15,15 +15,15 @@ type EmptyStateAction = {
 
 const EMPTY_STATE_ACCENTS: Record<EmptyStateTone, string> = {
   neutral: 'var(--border-strong)',
-  wm: 'var(--layer-working, #64748b)',
-  swm: 'var(--layer-shared, #f59e0b)',
-  vm: 'var(--layer-verified, #22c55e)',
+  wm: 'var(--layer-working)',
+  swm: 'var(--layer-shared)',
+  vm: 'var(--layer-verified)',
   danger: 'var(--text-danger)',
-  query: '#38bdf8',
+  query: 'var(--text-secondary)', // navigation, not a layer: neutral
   // Warning tone (PCA edge/fall-through empty states). Resolves to the same
-  // `--text-warning` token as `.badge-warn` / `.v10-modal-warning` — the
-  // theme-aware amber (#fbbf24 dark / #92400e light), NOT the SWM
-  // `--layer-shared` #f59e0b layer-identity accent used by the `swm` tone.
+  // `--text-warning` token as the warning Badge / `.v10-modal-warning` — the
+  // theme-aware amber (#fbbf24 dark / #8e4706 light), NOT the SWM
+  // `--layer-shared` layer-identity accent used by the `swm` tone.
   warning: 'var(--text-warning)',
 };
 
@@ -57,7 +57,7 @@ export function EmptyState({
   return (
     <div
       className={[
-        'v10-empty-state',
+        'v10-empty-state ds-card',
         compact ? 'compact' : '',
         inline ? 'inline' : '',
         className,
@@ -75,7 +75,7 @@ export function EmptyState({
               <button
                 key={action.label}
                 type="button"
-                className={`v10-empty-state-action ${action.variant ?? 'secondary'}`}
+                className={`v10-empty-state-action ${action.variant ?? 'secondary'} ds-btn ds-sm${action.variant === 'primary' ? ' ds-primary' : ''}`}
                 onClick={action.onClick}
                 data-testid={action.testId}
               >
@@ -127,7 +127,7 @@ export function StatStrip({
       {items.map((item, index) => (
         <div
           key={item.id ?? index}
-          className="v10-stat-strip-cell"
+          className="v10-stat-strip-cell ds-card-nested"
           data-stat-id={item.id}
           title={item.tooltip}
         >

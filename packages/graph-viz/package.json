@@ -21,6 +21,11 @@
       "types": "./dist/parsers/index.d.ts",
       "import": "./dist/parsers/index.js",
       "require": "./dist/parsers/index.cjs"
+    },
+    "./agent-initials": {
+      "types": "./dist/agent-initials/agent-initials.d.ts",
+      "import": "./dist/agent-initials/agent-initials.js",
+      "require": "./dist/agent-initials/agent-initials.cjs"
     }
   },
   "files": [

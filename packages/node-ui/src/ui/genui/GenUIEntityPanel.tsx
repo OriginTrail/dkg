@@ -106,11 +106,11 @@ const GenUIErrorBlock: React.FC<{ error: string }> = ({ error }) => {
   const isLlmMissing = error.includes(LLM_NOT_CONFIGURED_HINT);
 
   if (!isLlmMissing) {
-    return <div className="v10-genui-error">GenUI unavailable: {error}</div>;
+    return <div className="v10-genui-error ds-card-nested">GenUI unavailable: {error}</div>;
   }
 
   return (
-    <div className="v10-genui-error v10-genui-error-cta">
+    <div className="v10-genui-error ds-card-nested v10-genui-error-cta">
       <div className="v10-genui-error-head">
         <span className="v10-genui-error-icon">⚙</span>
         <div>
@@ -122,7 +122,7 @@ const GenUIErrorBlock: React.FC<{ error: string }> = ({ error }) => {
         </div>
       </div>
       <button
-        className="v10-genui-error-cta-btn"
+        className="v10-genui-error-cta-btn ds-btn ds-sm"
         onClick={() => openTab({ id: 'settings', label: 'Settings', closable: true })}
       >
         Open Settings →

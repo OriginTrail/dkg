@@ -16,15 +16,14 @@
 .v10-dash-header { margin-bottom: 24px; }
 /* Keep hero title pinned (PR8); subtitle gets promoted from tertiary
    muted-mono to a readable secondary line. */
-.v10-dash-title { font-size: 20px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
-.v10-dash-subtitle { font-size: var(--font-size-ui); color: var(--text-secondary); font-family: var(--font-mono); }
+.v10-dash-title { font-size: var(--fs-heading); font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
+.v10-dash-subtitle { font-size: var(--fs-body); color: var(--text-secondary); font-family: var(--font-mono); }
 .v10-dash-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 24px; }
 .v10-dash-stats .stat-card { min-width: 0; }
 .v10-dash-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
 .v10-dash-section {
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: 10px;
   padding: 16px 18px;
   /* Same hover lift/glow as the stat cards so the lower panels feel
      part of the same surface family (round-2 feedback). */
@@ -41,7 +40,7 @@
   margin-bottom: 12px;
 }
 .v10-dash-section-header h3 {
-  font-size: var(--font-size-ui);
+  font-size: var(--fs-body);
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -49,20 +48,6 @@
    --text-secondary so it reads as a quiet affordance, not a control. */
 .v10-dash-section-title { display: flex; align-items: center; gap: 6px; }
 .v10-dash-section-title svg { color: var(--text-secondary); flex-shrink: 0; }
-.v10-dash-section-badge {
-  font-family: var(--font-mono);
-  font-size: var(--font-size-caption);
-  color: var(--text-secondary);
-  background: var(--bg-elevated);
-  padding: 2px 8px;
-  border-radius: 4px;
-}
-.v10-dash-section-link {
-  font-size: var(--font-size-label);
-  color: var(--text-secondary);
-  transition: color 0.15s;
-}
-.v10-dash-section-link:hover { color: var(--text-primary); }
 
 /* ── PR6 dashboard: 3 stat panels + My Context Graphs list ── */
 .v10-dash-stats-3 { grid-template-columns: repeat(3, 1fr); }
@@ -93,14 +78,13 @@
 .v10-cg-size-metric { display: flex; flex-direction: column; gap: 6px; }
 .v10-cg-size-num { display: flex; align-items: baseline; gap: 6px; }
 .v10-cg-size-big {
-  font-size: 26px;
+  font-size: var(--fs-display);
   font-weight: 700;
   color: var(--text-primary);
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
 }
-.v10-cg-size-num .v10-cg-dim { font-size: var(--font-size-label); }
-.v10-cg-size-empty { font-size: 20px; font-weight: 600; padding: 6px 0; }
+.v10-cg-size-num .v10-cg-dim { font-size: var(--fs-control); }
 /* The Size card is the densest of the three stat cards; trim its
    padding so the two big numbers + bars + legend + sub don't bloat it
    past the other two (ui-lead). */
@@ -115,7 +99,7 @@
    value so the surrounding sub-text doesn't jump on settle. */
 .v10-stat-loading {
   display: inline-block;
-  font-size: var(--font-size-ui);
+  font-size: var(--fs-body);
   font-weight: 400;
   color: var(--text-secondary);
   font-style: italic;
@@ -129,7 +113,7 @@
    all three top cards. */
 .v10-stat-empty {
   display: inline-block;
-  font-size: var(--font-size-ui);
+  font-size: var(--fs-body);
   font-weight: 400;
   color: var(--text-secondary);
   line-height: 1.4;
@@ -153,9 +137,9 @@
 .v10-layer-legend { display: flex; gap: 12px; margin-top: 4px; }
 .v10-layer-legend-item {
   display: inline-flex; align-items: center; gap: 5px;
-  font-size: var(--font-size-caption); color: var(--text-secondary); font-family: var(--font-mono);
+  font-size: var(--fs-label); color: var(--text-secondary); font-family: var(--font-mono);
 }
-.v10-layer-legend-dot { width: 8px; height: 8px; border-radius: 2px; }
+.v10-layer-legend-dot { width: 8px; height: 8px; border-radius: 50%; } /* round = data; squares are context graphs */
 
 /* My Context Graphs list — column grid shared by header + rows. */
 .v10-cg-colhead, .v10-cg-row {
@@ -171,7 +155,7 @@
 }
 .v10-cg-colhead {
   padding: 5px 8px;
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-secondary);
@@ -194,7 +178,7 @@
 }
 .v10-cg-row:last-child { border-bottom: 0; }
 .v10-cg-row:hover { background: var(--bg-hover); }
-.v10-cg-cell { font-size: var(--font-size-ui); color: var(--text-secondary); min-width: 0; }
+.v10-cg-cell { font-size: var(--fs-body); color: var(--text-secondary); min-width: 0; }
 .v10-cg-name {
   color: var(--text-primary);
   font-weight: 500;
@@ -214,25 +198,30 @@
    in the screenshot review. */
 .v10-cg-colhead .v10-cg-type { justify-content: center; text-align: center; }
 .v10-cg-colhead .v10-cg-agents { text-align: right; }
-/* Role badge — same small-status-badge family as `.v10-agent-card-badge`. */
+/* Role badge in the graph table — the Badge "sm" size with the role ladder. */
 .v10-cg-badge {
-  display: inline-block;
-  font-size: var(--font-size-meta);
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  gap: 4px;
+  font-size: var(--fs-micro);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  padding: 2px 7px;
-  border-radius: 999px;
+  line-height: 1;
+  white-space: nowrap;
+  height: var(--h-badge-sm);
+  padding: 0 7px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
 }
-/* Filled chip: `--accent-green` text on `--bg-elevated` fails AA in
-   light theme (~1.9:1 — accent-green is theme-invariant, bg-elevated is
-   not). Invert to a solid green chip with fixed near-black text — AA in
-   BOTH themes (~10:1, accent-green is constant) and rightly emphasises
-   the consequential "curator" role vs the quiet outlined "joined". #86 */
-.v10-cg-badge-curator { background: var(--accent-green); color: #0a0a0a; border-color: var(--accent-green); }
-.v10-cg-badge-joined { color: var(--text-secondary); }
-.v10-cg-empty { color: var(--text-secondary); font-size: var(--font-size-label); padding: 16px 4px; }
+/* Role ladder (same as the overview pill): curator solid role blue with
+   the ◆ glyph, joined a blue tint with ✓. Text on the solid chip is the
+   surface colour, AA in both themes. */
+.v10-cg-badge-curator { background: var(--role); color: var(--bg-surface); border-color: var(--role); }
+.v10-cg-badge-curator::before { content: "◆"; }
+.v10-cg-badge-joined { background: var(--role-bg); color: var(--role-text); border-color: var(--role-border); }
+.v10-cg-badge-joined::before { content: "✓"; }
+.v10-cg-empty { color: var(--text-secondary); font-size: var(--fs-control); padding: 16px 4px; }
 
 /* Wallets and Spending sidebar card — compact, reuses existing tokens. */
 /* Section titles inside the Wallets card. Stronger than the previous
@@ -240,7 +229,7 @@
    rather than blending with rows, with extra top-spacing + a hairline
    divider to separate them (round-3 feedback). */
 .v10-ws-subhead {
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   font-weight: 600;
   color: var(--text-primary);
   margin: 18px 0 8px;
@@ -261,11 +250,11 @@
   align-items: baseline;
   gap: 8px;
   margin: 0 0 6px;
-  font-size: var(--font-size-ui);
+  font-size: var(--fs-body);
 }
 .v10-ws-chain-label {
   color: var(--text-secondary);
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -281,13 +270,13 @@
   grid-template-columns: minmax(0, 1fr) 5.5em 5em;
   align-items: baseline;
   gap: 10px;
-  font-size: var(--font-size-ui);
+  font-size: var(--fs-body);
 }
 .v10-ws-wrow .v10-ws-bal,
-.v10-ws-wrow .v10-ws-bal-sec { text-align: right; font-size: var(--font-size-ui); }
+.v10-ws-wrow .v10-ws-bal-sec { text-align: right; font-size: var(--fs-body); }
 .v10-ws-wrow .v10-ws-bal-sec { color: var(--text-secondary); }
 .v10-ws-whead {
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-secondary);
@@ -305,17 +294,16 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  font-size: var(--font-size-ui);
+  font-size: var(--fs-body);
 }
 .v10-ws-addr {
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.v10-ws-balcol { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
 .v10-ws-bal {
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
@@ -325,7 +313,7 @@
    real balance, must clear AA). */
 .v10-ws-bal-sec {
   color: var(--text-secondary);
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -341,10 +329,10 @@
   grid-template-columns: minmax(0, 1fr) 7em 5em;
   align-items: baseline;
   gap: 10px;
-  font-size: var(--font-size-ui);
+  font-size: var(--fs-body);
 }
 .v10-ws-spend-head {
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-secondary);
@@ -355,60 +343,13 @@
 .v10-ws-spend-val { text-align: right; }
 .v10-ws-spend-val {
   color: var(--text-primary);
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 /* Chain/RPC partial-error caveat under the wallet list. --text-secondary
    (AA on the card surface), small but not micro. */
-.v10-ws-note { color: var(--text-secondary); font-size: var(--font-size-label); margin-top: 6px; }
+.v10-ws-note { color: var(--text-secondary); font-size: var(--fs-control); margin-top: 6px; }
 
-/* Quick actions */
-.v10-quick-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }
-.v10-quick-action {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--border-default);
-  background: var(--bg-elevated);
-  font-size: var(--font-size-label);
-  font-weight: 500;
-  color: var(--text-secondary);
-  transition: all 0.15s;
-}
-.v10-quick-action:hover { border-color: var(--border-strong); color: var(--text-primary); }
-.v10-quick-action-icon { font-size: var(--font-size-body); width: 20px; text-align: center; }
-
-/* Recent ops */
-.v10-recent-ops { display: flex; flex-direction: column; gap: 0; }
-.v10-recent-op {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border-subtle);
-  font-size: var(--font-size-label);
-}
-.v10-recent-op:last-child { border-bottom: none; }
-.v10-recent-op-type { font-weight: 500; color: var(--text-primary); }
-.v10-recent-op-status { font-family: var(--font-mono); font-size: var(--font-size-caption); }
-.v10-recent-op-time { font-family: var(--font-mono); font-size: var(--font-size-meta); color: var(--text-tertiary); margin-left: auto; }
-
-/* Project cards in dashboard */
-.v10-dash-projects { display: flex; flex-direction: column; gap: 6px; }
-.v10-dash-project-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 12px;
-  border-radius: 6px;
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-elevated);
-  transition: all 0.15s;
-  text-align: left;
-}
-.v10-dash-project-card:hover { border-color: var(--border-default); }
-.v10-dash-project-name { font-size: var(--font-size-label); font-weight: 500; color: var(--text-primary); }
-.v10-dash-project-count { font-size: var(--font-size-meta); color: var(--text-tertiary); font-family: var(--font-mono); }
+/* Collaborating agents: the agents themselves as avatars under the count. */
+.v10-stat-agents { margin: 2px 0 6px; }

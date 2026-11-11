@@ -200,10 +200,10 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
   return (
     <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
       <div style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-subtle)' }}>
-        <span style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-tertiary)' }}>Page {pageIndex + 1} · {assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
+        <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)' }}>Page {pageIndex + 1} · {assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
         {bulkVisibleAssertionCount > 0 && (
           <button
-            className={`v10-layer-expand-footer-btn ${layer === 'wm' ? 'promote' : 'publish'}`}
+            className={`v10-layer-expand-footer-btn ds-btn ds-sm ${layer === 'wm' ? 'promote ds-swm' : 'publish ds-vm'}`}
             title="Applies to all assertions in this layer across every page. Query catalog assertions are excluded."
             disabled={busy !== null}
             onClick={handlePromoteAll}
@@ -216,7 +216,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
       {result && (
         <div
           data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
-          style={{ padding: '6px 16px', fontSize: 'var(--font-size-caption)', color: 'var(--text-success)' }}
+          style={{ padding: '6px 16px', fontSize: 'var(--fs-label)', color: 'var(--text-success)' }}
         >
           ✓ {result}
         </div>
@@ -224,7 +224,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
       {error && (
         <div
           data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
-          style={{ padding: '6px 16px', fontSize: 'var(--font-size-caption)', color: 'var(--text-danger)' }}
+          style={{ padding: '6px 16px', fontSize: 'var(--fs-label)', color: 'var(--text-danger)' }}
         >
           ✕ {error}
         </div>
@@ -233,11 +233,11 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         <div key={a.graphUri} className="v10-item-row" data-testid="assertion-list-row">
           <span className="v10-item-icon">▤</span>
           <div className="v10-item-info">
-            <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-caption)' }}>{a.name}</div>
+            <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-label)' }}>{a.name}</div>
             {a.reservedUal && (
               <div
                 className="v10-item-ual"
-                style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-meta)', color: 'var(--text-tertiary)', opacity: 0.7, wordBreak: 'break-all', marginTop: 1 }}
+                style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', opacity: 0.7, wordBreak: 'break-all', marginTop: 1 }}
                 title={a.reservedUal}
               >
                 {a.reservedUal}
@@ -257,7 +257,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
           </div>
           <button
             data-testid="assertion-row-action"
-            className={`v10-layer-expand-footer-btn ${layer === 'wm' ? 'promote' : 'publish'}`}
+            className={`v10-layer-expand-footer-btn ds-btn ds-sm ${layer === 'wm' ? 'promote ds-swm' : 'publish ds-vm'}`}
             disabled={busy !== null}
             onClick={ev => { ev.stopPropagation(); handlePromote(a); }}
             style={{ opacity: busy === a.graphUri ? 0.5 : 1, flexShrink: 0 }}

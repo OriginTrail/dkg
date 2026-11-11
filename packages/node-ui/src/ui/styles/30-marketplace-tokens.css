@@ -50,14 +50,11 @@
   --gauge-mid:var(--amber-500);           /* nearing the soft ceiling */
   --gauge-over:var(--red-500);            /* at the soft ceiling */
 
-  /* type — Geist for product UI; sizes preserve hierarchy with a readable floor.
-     --font-mono (digests, keys, µ values) is the app's, unchanged here. The
-     section's own stack keeps 'Segoe UI' before the generic fallback. */
-  --font-ui:'Geist Variable',-apple-system,'Segoe UI',sans-serif;
-  --fs-xs:var(--font-size-caption); --fs-sm:var(--font-size-label);
-  --fs-md:var(--font-size-body); --fs-lg:var(--font-size-heading-sm);
-  /* headings above the app's scale */
-  --fs-xl:22px; --fs-2xl:26px;
+  /* type — the app's own faces and size scale (00-theme.css). */
+  --font-ui:var(--font-sans);
+  --fs-xs:var(--fs-label); --fs-sm:var(--fs-control);
+  --fs-md:var(--fs-body); --fs-lg:var(--fs-title);
+  --fs-xl:var(--fs-heading); --fs-2xl:var(--fs-display);
   --lh-tight:1.25; --lh-normal:1.55;
   --fw-regular:400; --fw-semibold:600;
 
