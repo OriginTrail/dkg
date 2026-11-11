@@ -149,6 +149,18 @@ export class ReadGraphMaintenanceError extends Error implements StoreOperationOu
   }
 }
 
+/** The fences registry writes have set on each backend's read graphs and not lifted, by read graph. */
+const ACTIVE_FENCES = new WeakMap<ReadGraphBackendRuntime, Map<string, ReadGraphStateRow>>();
+
+function activeFences(runtime: ReadGraphBackendRuntime): Map<string, ReadGraphStateRow> {
+  let fences = ACTIVE_FENCES.get(runtime);
+  if (!fences) {
+    fences = new Map();
+    ACTIVE_FENCES.set(runtime, fences);
+  }
+  return fences;
+}
+
 /** A ready row taken out of service in the mirror while a registry write runs, and the row it was. */
 interface ReadGraphFence {
   readonly row: ReadGraphStateRow;
@@ -447,6 +459,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
       if (row?.state !== 'ready') return [];
       const fence = nextReadGraphState(row, { kind: 'mark-dirty' })!;
       this.runtime.mirror.set(fence);
+      activeFences(this.runtime).set(readGraph, fence);
       return [{ row, fence }];
     });
   }
@@ -461,6 +474,9 @@ export class ReadGraphStore implements TripleStoreDecorator {
   private liftFence(fences: readonly ReadGraphFence[], before: ReadGraphRegistrySnapshot | undefined): void {
     const identity = this.runtime.workingMemoryIdentity;
     for (const { row, fence } of fences) {
+      // A mark since the fence was set made the read graph dirty for good.
+      if (activeFences(this.runtime).get(row.readGraph) !== fence) continue;
+      activeFences(this.runtime).delete(row.readGraph);
       const current = this.runtime.mirror.get(row.readGraph);
       if (!current || current.state !== fence.state || current.generation !== fence.generation) continue;
       const key = parseReadGraphIri(row.readGraph);
@@ -588,6 +604,8 @@ export class ReadGraphStore implements TripleStoreDecorator {
    * (`unsent`, its operation) the write is refused instead.
    */
   private async markDirtyStrict(readGraphs: readonly string[], unsent?: StoreOperation): Promise<void> {
+    // An explicit mark ends any fence a registry write set on these read graphs: they stay out of service.
+    for (const readGraph of readGraphs) activeFences(this.runtime).delete(readGraph);
     const rows = readGraphs.flatMap((readGraph) => this.runtime.mirror.get(readGraph) ?? []);
     for (const row of rows) if (row.state !== 'dirty') this.runtime.mirror.set(nextReadGraphState(row, { kind: 'mark-dirty' })!);
     for (const { readGraph } of rows) {
@@ -642,6 +660,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
   /** Mark read graphs dirty: in the mirror first, then in the store. */
   private async markDirty(readGraphs: readonly string[]): Promise<void> {
     for (const readGraph of readGraphs) {
+      activeFences(this.runtime).delete(readGraph);
       const row = this.runtime.mirror.get(readGraph);
       if (!row) continue;
       if (row.state !== 'dirty') this.runtime.mirror.set(nextReadGraphState(row, { kind: 'mark-dirty' })!);
