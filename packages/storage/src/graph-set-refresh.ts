@@ -32,23 +32,32 @@ export function graphSetRevalidationDelayMs(revalidateMs: number, lastRefreshMs:
 
 /**
  * At most one background revalidation at a time. Its failure never reaches a
- * caller: it goes to `onFailure`, which decides what the catalog keeps.
+ * caller: it goes to `onFailure`, which decides what the catalog keeps, and
+ * only while no refresh has published a catalog since the flight began. A
+ * newer catalog is not dropped for an older flight's failure.
  */
 export class BackgroundGraphSetRevalidation {
   private running: Promise<void> | null = null;
+  private published = 0;
 
   get active(): boolean {
     return this.running !== null;
   }
 
+  /** Notes that a refresh published a catalog. */
+  notePublished(): void {
+    this.published++;
+  }
+
   /** Start `refresh` unless a background revalidation is already running. */
   start(refresh: () => Promise<unknown>, onFailure: (error: unknown) => void): void {
     if (this.running) return;
+    const publishedBefore = this.published;
     this.running = (async () => {
       try {
         await refresh();
       } catch (error: unknown) {
-        onFailure(error);
+        if (this.published === publishedBefore) onFailure(error);
       } finally {
         this.running = null;
       }

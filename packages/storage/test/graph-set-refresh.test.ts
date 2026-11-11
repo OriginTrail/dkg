@@ -83,6 +83,60 @@ describe('a warm graph catalog that is due', () => {
     }
   });
 
+  it('keeps a catalog published after a background flight began when that flight then passes the internal limit', async () => {
+    const previous = process.env[STORE_GRAPH_CATALOG_MAX_BYTES_ENV];
+    // The full read after `held` is set reports that it arrived and waits, then lists the store as it is; every other read lists at once.
+    class HeldListing extends CountingStore {
+      held: { readonly arrived: () => void; readonly release: Promise<void> } | null = null;
+      override async listGraphs(options?: QueryOptions): Promise<string[]> {
+        this.listGraphsCalls++;
+        this.listGraphsOptions.push(options);
+        const held = this.held;
+        this.held = null;
+        if (held) {
+          held.arrived();
+          await held.release;
+        }
+        return this.inner.listGraphs(options);
+      }
+    }
+    try {
+      const clock = { now: 1_000 };
+      const inner = new OxigraphStore();
+      await inner.insert([q(CACHED)]);
+      const listing = new HeldListing(inner);
+      const store = new GraphSetIndexStore(listing, { revalidateMs: 100, now: () => clock.now });
+      await expect(store.listGraphs()).resolves.toEqual([CACHED]);
+
+      // The catalog is due; the background flight it starts is held before it lists.
+      const grown = Array.from({ length: 20 }, (_, n) => q(`did:dkg:context-graph:grown/${'x'.repeat(40)}/${n}`));
+      process.env[STORE_GRAPH_CATALOG_MAX_BYTES_ENV] = '512';
+      const arrived = gate();
+      const release = gate();
+      listing.held = { arrived: arrived.open, release: release.promise };
+      clock.now += 100;
+      await expect(store.listGraphs()).resolves.toEqual([CACHED]);
+      await arrived.promise;
+
+      // Meanwhile a current read, at a higher priority, publishes a catalog that fits.
+      await inner.insert([q(EXTERNAL)]);
+      const current: CurrentGraphCatalogReadOptions = { currentCatalog: true };
+      await expect(store.listGraphs(current as QueryOptions)).resolves.toEqual([CACHED, EXTERNAL]);
+      const reads = listing.listGraphsCalls;
+
+      // The store then grows past the internal limit, so the held flight fails there once released. Its failure
+      // must not drop the newer catalog: the next read is answered from it, with no full read, which would fail.
+      await inner.insert(grown);
+      release.open();
+      await settle();
+      await expect(store.listGraphs()).resolves.toEqual([CACHED, EXTERNAL]);
+      expect(listing.listGraphsCalls).toBe(reads);
+    } finally {
+      if (previous === undefined) delete process.env[STORE_GRAPH_CATALOG_MAX_BYTES_ENV];
+      else process.env[STORE_GRAPH_CATALOG_MAX_BYTES_ENV] = previous;
+    }
+  });
+
   it('keeps serving the last catalog, and backs off, when a background flight fails otherwise', async () => {
     const { clock, counting, store } = await warmIndex({ revalidateFailureBackoffMs: 50 });
     counting.failListGraphs = true;
@@ -219,6 +273,14 @@ describe('the revalidation cadence', () => {
     await runner.idle();
     expect(started).toBe(1);
     expect(runner.active).toBe(false);
+    expect(failures).toEqual([new Error('scan failed')]);
+
+    // A catalog published while a flight runs makes that flight's failure stale: it is not reported.
+    const later = gate();
+    runner.start(async () => { await later.promise; throw new Error('stale scan failed'); }, (error) => failures.push(error));
+    runner.notePublished();
+    later.open();
+    await runner.idle();
     expect(failures).toEqual([new Error('scan failed')]);
   });
 });
