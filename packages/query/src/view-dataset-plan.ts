@@ -111,7 +111,8 @@ const SHARED_LAYERS = {
  *   `includeSharedMemory`, nor to a scope this node keeps no read graph for. Asked for there,
  *   it is refused with {@link SemanticsUnsupportedError}; by default, the query is per asset;
  * - a merged plan names the scope's read graph and the generation it is ready at. A read
- *   graph that is not ready is answered with {@link ViewNotReadyError}.
+ *   graph that is not ready is answered with {@link ViewNotReadyError}; by default, one
+ *   without a state row is answered per asset.
  */
 export function planViewDataset(
   view: GetView,
@@ -127,7 +128,11 @@ export function planViewDataset(
     if (requested === 'merged') throw new SemanticsUnsupportedError(target.what);
     return { kind: 'per-asset' };
   }
-  const generation = servingGeneration(target.readGraphs, target.readGraph);
+  const row = target.readGraphs.state(target.readGraph);
+  // A default does not send a query to a read graph the node holds no state for, as for a
+  // context graph it holds nothing of: that query is answered per asset.
+  if (row === undefined && requested === undefined) return { kind: 'per-asset' };
+  const generation = servingReadGraphGeneration(row, target.readGraphs.versions ?? CURRENT_READ_GRAPH_VERSIONS);
   if (generation === undefined) throw new ViewNotReadyError();
   return { kind: 'merged', readGraph: target.readGraph, generation };
 }
