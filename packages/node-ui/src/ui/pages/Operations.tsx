@@ -13,8 +13,9 @@ import {
   ReferenceLine,
 } from 'recharts';
 import { useFetch, formatBytes, formatTime, formatDuration, shortId } from '../hooks.js';
-import { opTypeText, opTypeBg, opTypeRule, opChartColor } from '../op-type-colors.js';
+import { opTone, opChartColor } from '../op-type-colors.js';
 import { Badge, StatusGlyph } from '../components/ds/Badge.js';
+import { Button } from '../components/ds/Button.js';
 import {
   fetchOperationsWithPhases,
   fetchOperation,
@@ -43,7 +44,7 @@ import {
 import { humanizeStatus } from '../lib/formatLabels.js';
 import { OperationStatusBadge, operationStatusLabel } from '../components/OperationStatusBadge.js';
 import { HW_THRESHOLDS, hardwareChartRow, hardwareLevels, latestHardwareReading, type MetricLevel, type MetricsSnapshot } from './hardware-metrics.js';
-import { ChevronDown, ChevronRight, RefreshCw, Activity, ChartColumn, Check, FileText, Search } from 'lucide-react';
+import { ArrowDown, ChevronDown, ChevronRight, Check as CheckIcon, Copy, RefreshCw, Activity, ChartColumn, Check, FileText, Search, X } from 'lucide-react';
 import { useModalDismiss } from '../components/Modals/useModalDismiss.js';
 import { pressable } from '../lib/pressable.js';
 import { Loading } from '../components/ds/Loading.js';
@@ -135,7 +136,7 @@ function PeriodSelect({ value, onChange }: { value: string; onChange: (v: string
   };
 
   return (
-    <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+    <div className="obs-period">
       <select aria-label="Period"
         className="input"
         value={isCustom ? '__custom__' : value}
@@ -150,18 +151,17 @@ function PeriodSelect({ value, onChange }: { value: string; onChange: (v: string
       </select>
       {(showCustom || isCustom) && (
         <input aria-label="Custom period"
-          className="input mono"
+          className="input mono obs-period-custom"
           placeholder="e.g. 2d, 45m, 3h"
           value={customInput || (isCustom ? value : '')}
           onChange={e => setCustomInput(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && applyCustom()}
           onBlur={applyCustom}
-          style={{ width: 90 }}
           autoFocus
         />
       )}
       {isCustom && (
-        <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>{value}</span>
+        <span className="obs-meta">{value}</span>
       )}
     </div>
   );
@@ -172,7 +172,7 @@ export function ObservabilitySection() {
 
   return (
     <div>
-      <div className="tab-group" style={{ marginBottom: 16 }}>
+      <div className="tab-group obs-tabs">
         <button aria-pressed={tab === 'operations'} className={`ds-tab ${tab === 'operations' ? 'active' : ''}`} onClick={() => setTab('operations')}>All operations</button>
         <button aria-pressed={tab === 'replication'} className={`ds-tab ${tab === 'replication' ? 'active' : ''}`} onClick={() => setTab('replication')}>Replication</button>
         <button aria-pressed={tab === 'hardware'} className={`ds-tab ${tab === 'hardware' ? 'active' : ''}`} onClick={() => setTab('hardware')}>Hardware</button>
@@ -224,15 +224,15 @@ function ReplicationTab() {
 
   return (
     <div>
-      <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
+      <div className="filters obs-filters-lg">
         <PeriodSelect value={period} onChange={setPeriod} />
-        <span style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)' }}>
+        <span className="obs-note">
           Publishes confirmed on chain and added to Verifiable Memory. Auto-refreshes every 5s.
         </span>
       </div>
 
       {/* KPI cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
+      <div className="obs-kpi-grid">
         <StatTile label="Promotions" value={summary?.promotes ?? '—'} sub="Landed in Verifiable Memory this period" />
         <StatTile label="Success rate" value={successPct} sub="Promoted out of all attempts" />
         <StatTile label="Promotion latency" value={fmtMs(summary?.latencyP50Ms)} sub={<>Median · 95th percentile {fmtMs(summary?.latencyP95Ms)}</>} />
@@ -240,8 +240,8 @@ function ReplicationTab() {
       </div>
 
       {/* Timeline */}
-      <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
-        <div className="card-title" style={{ marginBottom: 8 }}>
+      <div className="card ds-card obs-card obs-section">
+        <div className="card-title obs-card-title">
           Confirmation timeline{selectedCg ? ` — ${selectedCg}` : ' — all context graphs'}
         </div>
         {buckets.length === 0 ? (
@@ -263,9 +263,9 @@ function ReplicationTab() {
       </div>
 
       {/* Cursor inspector */}
-      <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
-        <div className="card-title" style={{ marginBottom: 8 }}>Cursor inspector</div>
-        <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', marginBottom: 12 }}>
+      <div className="card ds-card obs-card obs-section">
+        <div className="card-title obs-card-title">Cursor inspector</div>
+        <p className="obs-lead">
           How far each context graph has been promoted to Verifiable Memory, compared with the latest chain head.
         </p>
         {cursors.length === 0 ? (
@@ -296,9 +296,9 @@ function ReplicationTab() {
       </div>
 
       {/* Per-CG activity */}
-      <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
-        <div className="card-title" style={{ marginBottom: 8 }}>Activity by context graph</div>
-        <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', marginBottom: 12 }}>Click a row to scope the timeline + open its event stream.</p>
+      <div className="card ds-card obs-card obs-section">
+        <div className="card-title obs-card-title">Activity by context graph</div>
+        <p className="obs-lead">Click a row to scope the timeline + open its event stream.</p>
         {perCg.length === 0 ? (
           <EmptyState compact inline title="No activity in this period" />
         ) : (
@@ -309,7 +309,7 @@ function ReplicationTab() {
                 <tr
                   key={r.context_graph_id}
                   {...pressable(() => setSelectedCg(selectedCg === r.context_graph_id ? null : r.context_graph_id))}
-                  style={{ cursor: 'pointer', background: selectedCg === r.context_graph_id ? 'var(--bg-hover)' : undefined }}
+                  className={selectedCg === r.context_graph_id ? 'obs-row-press obs-row-selected' : 'obs-row-press'}
                 >
                   <td className="mono">{r.context_graph_id}</td>
                   <td className="ds-num">{r.promotes}</td>
@@ -327,8 +327,8 @@ function ReplicationTab() {
 
       {/* Event stream drawer */}
       {selectedCg && (
-        <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
-          <div className="card-title" style={{ marginBottom: 8 }}>Event stream — {selectedCg}</div>
+        <div className="card ds-card obs-card">
+          <div className="card-title obs-card-title">Event stream — {selectedCg}</div>
           {events.length === 0 ? (
             <EmptyState compact inline title="No events" />
           ) : (
@@ -338,10 +338,10 @@ function ReplicationTab() {
                 {events.map((e, i) => (
                   <tr key={i}>
                     <td>{formatTime(e.ts)}</td>
-                    <td><Badge tone={e.action === 'defer' ? 'warning' : 'neutral'} size="sm" style={e.action === 'promote' ? { background: 'var(--layer-verified-bg)', color: 'var(--layer-verified-text)', boxShadow: 'none' } : undefined}>{humanizeStatus(String(e.action))}</Badge></td>
+                    <td><Badge tone={e.action === 'defer' ? 'warning' : 'neutral'} size="sm" className={e.action === 'promote' ? 'obs-promote-badge' : undefined}>{humanizeStatus(String(e.action))}</Badge></td>
                     <td>{e.ordinal ?? '—'}</td>
                     <td className="mono">{e.from_watermark != null && e.to_watermark != null ? `${e.from_watermark}->${e.to_watermark}` : '—'}</td>
-                    <td className="mono" style={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.ual ?? ''}>{e.ual ?? '—'}</td>
+                    <td className="mono obs-clip obs-ual" title={e.ual ?? ''}>{e.ual ?? '—'}</td>
                     <td className="mono">{e.detail ?? '—'}</td>
                   </tr>
                 ))}
@@ -387,26 +387,25 @@ function HealthTab() {
 
   return (
     <div>
-      <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
+      <div className="filters obs-filters-lg">
         <PeriodSelect value={period} onChange={setPeriod} />
         <input aria-label="Search errors and operation IDs"
-          className="input mono"
+          className="input mono obs-search"
           placeholder="Search errors, operation IDs..."
           value={search}
           onChange={e => setSearch(e.target.value)}
-          style={{ flex: 1, minWidth: 200 }}
         />
       </div>
 
-      <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
-        <div className="card-title" style={{ marginBottom: 4 }}>Error hotspots</div>
-        <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 'var(--lh-body)' }}>
+      <div className="card ds-card obs-card">
+        <div className="card-title obs-card-title-tight">Error hotspots</div>
+        <p className="obs-lead obs-lead-lg">
           Click a phase to see all failed operations. Click an operation to expand its logs.
         </p>
         {hotspots.length === 0 ? (
           <EmptyState compact inline tone="success" icon={<Check size={16} />} title="No errors in this period" description="All operations completed successfully. Nice work." />
         ) : (
-          <div className="ds-table-scroll"><table className="data-table">
+          <div className="ds-table-scroll"><table className="data-table obs-hot-table">
             <thead>
               <tr><th>Operation</th><th>Phase</th><th className="ds-num">Errors</th><th>Last error</th><th>Last occurred</th></tr>
             </thead>
@@ -417,21 +416,21 @@ function HealthTab() {
                 <React.Fragment key={rowKey}>
                   <tr
                     aria-expanded={expandedPhase === rowKey} {...pressable(() => { setExpandedPhase(p => p === rowKey ? null : rowKey); setExpandedOp(null); })}
-                    style={{ cursor: 'pointer', background: expandedPhase === rowKey ? 'var(--danger-bg)' : undefined }}
+                    className={expandedPhase === rowKey ? 'obs-row-press obs-row-failed' : 'obs-row-press'}
                   >
-                    <td style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', padding: '10px 14px' }}>
-                      <span style={{ marginRight: 6, fontSize: 'var(--fs-micro)' }}>{expandedPhase === rowKey ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
+                    <td className="obs-hot-op">
+                      <span className="obs-hot-chevron">{expandedPhase === rowKey ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
                       {h.operation_name}
                     </td>
-                    <td style={{ color: 'var(--text-primary)', fontWeight: 600, padding: '10px 14px' }}>
+                    <td className="obs-hot-phase">
                       {h.phase}
                     </td>
-                    <td style={{ padding: '10px 14px' }}><Badge tone="danger" size="sm">{h.error_count}</Badge></td>
-                    <td style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', padding: '10px 14px' }} title={h.last_error ?? ''}>{h.last_error ?? '—'}</td>
-                    <td style={{ padding: '10px 14px' }}>{h.last_occurred ? formatTime(h.last_occurred) : '—'}</td>
+                    <td><Badge tone="danger" size="sm">{h.error_count}</Badge></td>
+                    <td className="obs-hot-op obs-hot-error obs-clip" title={h.last_error ?? ''}>{h.last_error ?? '—'}</td>
+                    <td>{h.last_occurred ? formatTime(h.last_occurred) : '—'}</td>
                   </tr>
                   {expandedPhase === rowKey && (
-                    <tr><td colSpan={5} style={{ padding: 0, background: 'var(--shade)' }}>
+                    <tr><td colSpan={5} className="obs-hot-expand">
                       <FailedOperationsList
                         operations={failedOps}
                         expandedOp={expandedOp}
@@ -454,48 +453,45 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
   operations: any[]; expandedOp: string | null; onToggleOp: (id: string) => void;
 }) {
   if (operations.length === 0) {
-    return <div style={{ padding: '12px 16px', fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>No matching failed operations</div>;
+    return <div className="obs-failed-empty">No matching failed operations</div>;
   }
 
   return (
-    <div style={{ padding: '8px 0' }}>
+    <div className="obs-failed-list">
       {operations.map((op: any) => (
-        <div key={`${op.operation_id}-${op.phase_started_at}`} style={{ borderBottom: '1px solid var(--border-default)' }}>
+        <div key={`${op.operation_id}-${op.phase_started_at}`} className="obs-failed-item">
           <div
             onClick={() => onToggleOp(op.operation_id)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 10, padding: '10px 20px', cursor: 'pointer',
-              background: expandedOp === op.operation_id ? 'var(--danger-bg)' : undefined,
-            }}
+            className={expandedOp === op.operation_id ? 'obs-failed-head obs-failed-head-open' : 'obs-failed-head'}
           >
-            <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>{expandedOp === op.operation_id ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
-            <button type="button" className="ds-row-open" aria-expanded={expandedOp === op.operation_id} style={{ fontWeight: 600, fontSize: 'var(--fs-control)', color: opTypeText(op.operation_name) }}>{op.operation_name}</button>
+            <span className="obs-meta">{expandedOp === op.operation_id ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
+            <button type="button" className={`ds-row-open obs-failed-name op-tone-${opTone(op.operation_name)}`} aria-expanded={expandedOp === op.operation_id}>{op.operation_name}</button>
             <OperationStatusBadge status={op.status} />
-            <span className="mono" style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
-            <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginLeft: 'auto' }}>{formatTime(op.phase_started_at)}</span>
-            {op.duration_ms != null && <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>{formatDuration(op.duration_ms)}</span>}
+            <span className="mono obs-meta">{op.operation_id} <CopyButton text={op.operation_id} /></span>
+            <span className="obs-meta obs-push-end">{formatTime(op.phase_started_at)}</span>
+            {op.duration_ms != null && <span className="obs-meta">{formatDuration(op.duration_ms)}</span>}
           </div>
 
           {expandedOp === op.operation_id && (
-            <div style={{ padding: '4px 20px 16px' }}>
+            <div className="obs-failed-detail">
               {op.phase_error && (
-                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-border)', fontSize: 'var(--fs-label)', color: 'var(--text-danger)' }}>
+                <div className="obs-error-note">
                   {op.phase_error}
                 </div>
               )}
               {op.error_message && op.error_message !== op.phase_error && (
-                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-bg-strong)', fontSize: 'var(--fs-label)', color: 'var(--text-danger)' }}>
+                <div className="obs-error-note obs-error-note-soft">
                   {op.error_message}
                 </div>
               )}
               {op.logs && op.logs.length > 0 ? (
-                <LogContainer maxHeight={200}>
+                <LogContainer size="sm">
                   {op.logs.map((l: any) => (
                     <StyledLogEntry key={l.id} ts={l.ts} level={l.level} module={l.module} message={l.message} />
                   ))}
                 </LogContainer>
               ) : (
-                <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', padding: '4px 0' }}>No logs for this operation</div>
+                <div className="obs-failed-nologs">No logs for this operation</div>
               )}
             </div>
           )}
@@ -577,16 +573,16 @@ function OperationStatsSection() {
 
   const legendFormatter = useCallback((value: string) => {
     const dimmed = hiddenSeries.has(value);
-    return <span style={{ color: dimmed ? 'var(--text-tertiary)' : undefined, textDecoration: dimmed ? 'line-through' : undefined, cursor: 'pointer' }}>{value}</span>;
+    return <span className={dimmed ? 'obs-legend-item obs-legend-dimmed' : 'obs-legend-item'}>{value}</span>;
   }, [hiddenSeries]);
 
   return (
-    <div style={{ marginBottom: 16 }}>
-      <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 16, flexWrap: 'wrap' }}>
+    <div className="obs-section">
+      <div className="filters obs-filters-lg">
         <PeriodSelect value={period} onChange={setPeriod} />
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}>per</span>
-          <select aria-label="Granularity" className="input" value={granularity} onChange={e => setGranularity(e.target.value)} style={{ width: 'auto' }}>
+        <div className="obs-period">
+          <span className="obs-kicker">per</span>
+          <select aria-label="Granularity" className="input" value={granularity} onChange={e => setGranularity(e.target.value)}>
             {GRANULARITY_OPTIONS.map(g => <option key={g.value} value={g.value}>{g.label}</option>)}
           </select>
         </div>
@@ -595,35 +591,32 @@ function OperationStatsSection() {
         <>
           {/* Per-operation-type cards */}
           {rates.length > 0 && (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10, marginBottom: 16 }}>
+            <div className="obs-type-grid">
               {rates.map((r: any) => {
-                const color = opTypeText(r.type);
-                const rateColor = r.rate >= 0.9 ? 'var(--accent-green)' : r.rate >= 0.7 ? 'var(--accent-amber)' : 'var(--accent-red)';
+                const rateTier = r.rate >= 0.9 ? 'obs-rate-good' : r.rate >= 0.7 ? 'obs-rate-fair' : 'obs-rate-poor';
                 return (
-                  <div key={r.type} style={{ background: 'var(--tint-subtle)', borderRadius: 'var(--radius-nested)', padding: '12px 14px', border: '1px solid var(--border-default)', borderLeft: `3px solid ${opTypeRule(r.type)}` }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                      <span style={{ fontSize: 'var(--fs-body)', fontWeight: 700, color }}>{r.type}</span>
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 12px', fontSize: 'var(--fs-label)' }}>
+                  <div key={r.type} className={`obs-type-card op-tone-${opTone(r.type)} ${rateTier}`}>
+                    <div className="obs-type-name">{r.type}</div>
+                    <div className="obs-type-stats">
                       <div>
-                        <div style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-micro)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Operations</div>
-                        <div style={{ fontWeight: 700, fontSize: 'var(--fs-title)' }}>{r.total}</div>
+                        <div className="obs-kicker obs-type-label">Operations</div>
+                        <div className="obs-type-big">{r.total}</div>
                       </div>
                       <div>
-                        <div style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-micro)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Success</div>
-                        <div style={{ fontWeight: 700, fontSize: 'var(--fs-title)', color: rateColor }}>{(r.rate * 100).toFixed(0)}%</div>
+                        <div className="obs-kicker obs-type-label">Success</div>
+                        <div className="obs-type-big obs-type-rate">{(r.rate * 100).toFixed(0)}%</div>
                       </div>
                       <div>
-                        <div style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-micro)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Avg duration</div>
-                        <div style={{ fontWeight: 600, fontSize: 'var(--fs-body)' }}>{formatDuration(r.avgMs)}</div>
+                        <div className="obs-kicker obs-type-label">Avg duration</div>
+                        <div className="obs-type-mid">{formatDuration(r.avgMs)}</div>
                       </div>
                       <div>
-                        <div style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-micro)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Errors</div>
-                        <div style={{ fontWeight: 600, fontSize: 'var(--fs-body)', color: r.error > 0 ? 'var(--accent-red)' : 'var(--text-tertiary)' }}>{r.error}</div>
+                        <div className="obs-kicker obs-type-label">Errors</div>
+                        <div className={r.error > 0 ? 'obs-type-mid obs-type-errors' : 'obs-type-mid obs-type-no-errors'}>{r.error}</div>
                       </div>
                     </div>
-                    <div style={{ height: 3, background: 'var(--tint-strong)', borderRadius: 'var(--radius-hair)', overflow: 'hidden', marginTop: 10 }}>
-                      <div style={{ height: '100%', width: `${r.rate * 100}%`, background: rateColor, borderRadius: 'var(--radius-hair)' }} />
+                    <div className="obs-type-track">
+                      <div className="obs-type-fill" style={{ width: `${r.rate * 100}%` }} />
                     </div>
                   </div>
                 );
@@ -633,9 +626,9 @@ function OperationStatsSection() {
 
           {/* Operation charts */}
           {hasCharts ? (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
-              <div className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
-                <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Operations over time</div>
+            <div className="obs-chart-grid">
+              <div className="card ds-card obs-card-compact">
+                <div className="obs-chart-title">Operations over time</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
@@ -650,8 +643,8 @@ function OperationStatsSection() {
                 </ResponsiveContainer>
               </div>
 
-              <div className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
-                <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Avg duration by Operation Type (s)</div>
+              <div className="card ds-card obs-card-compact">
+                <div className="obs-chart-title">Avg duration by Operation Type (s)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
@@ -666,8 +659,8 @@ function OperationStatsSection() {
                 </ResponsiveContainer>
               </div>
 
-              <div className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
-                <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Success Rate by Operation Type (%)</div>
+              <div className="card ds-card obs-card-compact">
+                <div className="obs-chart-title">Success Rate by Operation Type (%)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
@@ -682,8 +675,8 @@ function OperationStatsSection() {
                 </ResponsiveContainer>
               </div>
 
-              <div className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
-                <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Gas Cost by Operation Type (ETH)</div>
+              <div className="card ds-card obs-card-compact">
+                <div className="obs-chart-title">Gas Cost by Operation Type (ETH)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
@@ -699,7 +692,7 @@ function OperationStatsSection() {
               </div>
             </div>
           ) : (
-            <div className="card ds-card" style={{ marginBottom: 14 }}>
+            <div className="card ds-card obs-section">
               <EmptyState compact inline icon={<ChartColumn size={16} />} title="Not enough data for charts" description="Charts will render once enough operations have been processed." />
             </div>
           )}
@@ -726,9 +719,8 @@ export function HardwareTab() {
 
   const loading = !hw;
   type Level = MetricLevel;
-  const LEVEL_COLOR: Record<Level, string> = { ok: 'var(--data-1)', warn: 'var(--text-warning)', crit: 'var(--text-danger)' };
-  const LEVEL_TEXT: Record<Level, string> = { ok: 'var(--text-primary)', warn: 'var(--text-warning)', crit: 'var(--text-danger)' };
-  const IDLE = 'var(--text-tertiary)';
+  const LEVEL_CLASS: Record<Level, string> = { ok: 'obs-level-ok', warn: 'obs-level-warn', crit: 'obs-level-crit' };
+  const hwCard = loading ? 'card ds-card obs-card-compact obs-hw-card obs-hw-waiting' : 'card ds-card obs-card-compact obs-hw-card';
   const TH = HW_THRESHOLDS;
   const levels = hardwareLevels(hw);
   const statCards = [
@@ -739,7 +731,7 @@ export function HardwareTab() {
   ];
   const peersLv = levels.peers;
   const rpcLv = levels.rpc;
-  const warnIcon = (lv: Level) => lv === 'ok' ? null : <span role="img" aria-label={lv === 'crit' ? 'critical' : 'warning'} style={{ marginLeft: 6 }}><StatusGlyph tone={lv === 'crit' ? 'danger' : 'warning'} /></span>;
+  const warnIcon = (lv: Level) => lv === 'ok' ? null : <span role="img" aria-label={lv === 'crit' ? 'critical' : 'warning'} className="obs-hw-warn"><StatusGlyph tone={lv === 'crit' ? 'danger' : 'warning'} /></span>;
   const s1 = 'var(--data-1)';
   const grid = 'var(--border-subtle)', tick = 'var(--text-tertiary)';
   const warnLine = 'var(--text-warning)', critLine = 'var(--text-danger)';
@@ -754,47 +746,47 @@ export function HardwareTab() {
 
   return (
     <div>
-      <div className="filters" style={{ marginBottom: 16 }}>
+      <div className="filters obs-filters-lg">
         <PeriodSelect value={period} onChange={setPeriod} />
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 12 }}>
+      <div className="obs-hw-grid obs-hw-grid-4">
         {statCards.map(stat => (
-          <div key={stat.label} className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
-            <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
-            <div style={{ fontSize: 'var(--fs-heading)', fontWeight: 700, color: hw ? LEVEL_TEXT[stat.lv] : IDLE, lineHeight: 1, marginBottom: 3 }}>{stat.value}{warnIcon(stat.lv)}</div>
+          <div key={stat.label} className={`${hwCard} ${LEVEL_CLASS[stat.lv]}`}>
+            <div className="obs-hw-label">{stat.label}</div>
+            <div className="obs-hw-value obs-hw-value-gap">{stat.value}{warnIcon(stat.lv)}</div>
             {stat.pct !== null ? (
-              <div style={{ height: 3, background: 'var(--bg-elevated)', borderRadius: 'var(--radius-hair)', margin: '5px 0 3px' }}>
-                <div style={{ height: 3, width: `${Math.min(stat.pct, 100)}%`, background: LEVEL_COLOR[stat.lv], borderRadius: 'var(--radius-hair)', transition: 'width .4s ease' }} />
+              <div className="obs-hw-meter">
+                <div className="obs-hw-meter-fill" style={{ width: `${Math.min(stat.pct, 100)}%` }} />
               </div>
-            ) : <div style={{ height: 3, margin: '5px 0 3px' }} />}
-            <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>{stat.sub}</div>
+            ) : <div className="obs-hw-meter obs-hw-meter-empty" />}
+            <div className="obs-meta">{stat.sub}</div>
           </div>
         ))}
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 12 }}>
-        <div className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
-          <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>Peers</div>
-          <div style={{ fontSize: 'var(--fs-heading)', fontWeight: 700, color: hw ? LEVEL_TEXT[peersLv] : IDLE, lineHeight: 1 }}>{hw ? hw.peers : '—'}{warnIcon(peersLv)}</div>
-          <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 3 }}>{hw ? 'connected' : 'waiting…'}</div>
+      <div className="obs-hw-grid obs-hw-grid-2">
+        <div className={`${hwCard} ${LEVEL_CLASS[peersLv]}`}>
+          <div className="obs-hw-label">Peers</div>
+          <div className="obs-hw-value">{hw ? hw.peers : '—'}{warnIcon(peersLv)}</div>
+          <div className="obs-meta obs-hw-sub">{hw ? 'connected' : 'waiting…'}</div>
         </div>
-        <div className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
-          <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>RPC Latency</div>
-          <div style={{ fontSize: 'var(--fs-heading)', fontWeight: 700, color: hw ? LEVEL_TEXT[rpcLv] : IDLE, lineHeight: 1 }}>
+        <div className={`${hwCard} ${LEVEL_CLASS[rpcLv]}`}>
+          <div className="obs-hw-label">RPC Latency</div>
+          <div className="obs-hw-value">
             {hw ? (hw.rpcMs !== null ? `${hw.rpcMs} ms` : '—') : '—'}{warnIcon(rpcLv)}
           </div>
-          <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 3 }}>{hw ? 'last measurement' : 'waiting…'}</div>
+          <div className="obs-meta obs-hw-sub">{hw ? 'last measurement' : 'waiting…'}</div>
         </div>
       </div>
 
       {hwChartData.length > 1 ? (
         // One unit per chart (no shared or dual axes). Top row: the three
         // percentages on the same 0–100 scale, with their warning thresholds.
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
+        <div className="obs-hw-charts">
           {hwCharts.map(c => (
-            <div key={c.key} className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
-              <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>{c.title}</div>
+            <div key={c.key} className="card ds-card obs-card-compact">
+              <div className="obs-chart-title">{c.title}</div>
               <ResponsiveContainer width="100%" height={140}>
                 <AreaChart data={hwChartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke={grid} />
@@ -810,7 +802,7 @@ export function HardwareTab() {
           ))}
         </div>
       ) : (
-        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', textAlign: 'center', padding: '8px 0' }}>
+        <div className="obs-hw-empty">
           History charts appear after a second snapshot (~30 s)
         </div>
       )}
@@ -825,13 +817,13 @@ export function HardwareTab() {
 function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
   const [hover, setHover] = useState<number | null>(null);
 
-  if (!phases?.length) return <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', fontStyle: 'italic' }}>event-based</span>;
-  if (totalMs <= 0) return <span style={{ color: 'var(--text-tertiary)' }}>—</span>;
+  if (!phases?.length) return <span className="obs-meta obs-italic">event-based</span>;
+  if (totalMs <= 0) return <span className="obs-faint">—</span>;
   const phaseTotal = phases.reduce((s: number, p: any) => s + (p.duration_ms ?? 0), 0) || totalMs;
   return (
-    <div style={{ position: 'relative', minWidth: 120, maxWidth: 260 }}>
+    <div className="obs-gantt">
       {/* Phase label pills */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 3, flexWrap: 'wrap' }}>
+      <div className="obs-gantt-labels">
         {phases.map((p: any, i: number) => {
           const color = p.status === 'error'
             ? 'var(--text-danger)'
@@ -839,13 +831,10 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
               ? CANCELLED_COLOR
               : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
           return (
-            <span key={`label-${p.phase}-${i}`} style={{
-              fontSize: 'var(--fs-micro)', fontWeight: 600, color, letterSpacing: '.02em',
-              display: 'inline-flex', alignItems: 'center', gap: 3,
-            }}>
-              <span style={{ width: 5, height: 5, borderRadius: '50%', background: color, display: 'inline-block', flexShrink: 0 }} />
+            <span key={`label-${p.phase}-${i}`} className="obs-gantt-label" style={{ color }}>
+              <span className="obs-gantt-dot" />
               {p.phase}
-              <span style={{ fontWeight: 400, color: 'var(--text-tertiary)', fontFamily: "'JetBrains Mono', monospace" }}>
+              <span className="obs-gantt-time mono">
                 {formatDuration(p.duration_ms)}
               </span>
             </span>
@@ -853,7 +842,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
         })}
       </div>
       {/* Gantt bar */}
-      <div style={{ display: 'flex', gap: 2, height: 10, borderRadius: 'var(--radius-hair)', overflow: 'hidden', background: 'transparent' }}>
+      <div className="obs-gantt-bar">
         {phases.map((p: any, i: number) => {
           const pct = Math.max(((p.duration_ms ?? 0) / phaseTotal) * 100, 3);
           const color = p.status === 'error'
@@ -866,12 +855,8 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
               key={`${p.phase}-${i}`}
               onMouseEnter={() => setHover(i)}
               onMouseLeave={() => setHover(null)}
-              style={{
-                width: `${pct}%`, background: color, minWidth: 3,
-                opacity: 1,
-                transition: 'opacity var(--motion-base), width var(--motion-slow)',
-                cursor: 'default',
-              }}
+              className="obs-gantt-seg"
+              style={{ width: `${pct}%`, background: color }}
             />
           );
         })}
@@ -881,34 +866,27 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
         const topLevel = hoveredPhase.includes(':') ? hoveredPhase.split(':')[0] : hoveredPhase;
         const desc = PHASE_DESCRIPTIONS[hoveredPhase] ?? PHASE_DESCRIPTIONS[topLevel];
         return (
-          <div style={{
-            position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
-            marginBottom: 6, padding: '5px 10px', borderRadius: 'var(--radius-control)',
-            background: 'var(--bg-surface)', border: '1px solid var(--border-default)',
-            boxShadow: 'var(--shadow-menu)',
-            fontSize: 'var(--fs-label)', zIndex: 10, pointerEvents: 'none',
-            maxWidth: 260,
-          }}>
-            <div style={{ whiteSpace: 'nowrap' }}>
-              <span style={{ fontWeight: 700, color: PHASE_COLORS[hoveredPhase] ?? PHASE_FALLBACK_COLOR }}>
+          <div className="obs-gantt-tip">
+            <div className="obs-gantt-tip-line">
+              <span className="obs-gantt-tip-name" style={{ color: PHASE_COLORS[hoveredPhase] ?? PHASE_FALLBACK_COLOR }}>
                 {hoveredPhase}
               </span>
-              <span style={{ color: 'var(--text-secondary)', margin: '0 6px' }}>·</span>
-              <span style={{ fontFamily: "'JetBrains Mono', monospace", color: 'var(--text-primary)' }}>
+              <span className="obs-gantt-tip-sep">·</span>
+              <span className="mono obs-gantt-tip-time">
                 {formatDuration(phases[hover].duration_ms)}
               </span>
-              <span style={{ color: 'var(--text-tertiary)', marginLeft: 6 }}>
+              <span className="obs-faint obs-gantt-tip-after">
                 ({Math.round(((phases[hover].duration_ms ?? 0) / totalMs) * 100)}%)
               </span>
               {phases[hover].status === 'error' && (
-                <span style={{ color: 'var(--text-danger)', marginLeft: 6, fontWeight: 600 }}>Failed</span>
+                <span className="obs-gantt-tip-after obs-gantt-tip-failed">Failed</span>
               )}
               {phases[hover].status === 'cancelled' && (
-                <span style={{ color: CANCELLED_COLOR, marginLeft: 6, fontWeight: 600 }}>Cancelled</span>
+                <span className="obs-gantt-tip-after obs-gantt-tip-cancelled">Cancelled</span>
               )}
             </div>
             {desc && (
-              <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-secondary)', marginTop: 3, whiteSpace: 'normal', lineHeight: 'var(--lh-snug)' }}>
+              <div className="obs-gantt-tip-desc">
                 {desc}
               </div>
             )}
@@ -950,7 +928,7 @@ function OperationsTab() {
 
   return (
     <div>
-      <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+      <div className="filters">
         <select aria-label="Operation type" className="input" value={nameFilter} onChange={(e) => setNameFilter(e.target.value)} title="Filter by operation type">
           <option value="">All types</option>
           {Object.entries(OP_TYPE_DESCRIPTIONS).map(([type, desc]) => (
@@ -965,36 +943,30 @@ function OperationsTab() {
           <option value="in_progress">{operationStatusLabel('in_progress')}</option>
         </select>
         <input aria-label="Filter by operation ID"
-          className="input mono"
+          className="input mono obs-op-id-filter"
           placeholder="Filter by Operation ID..."
           value={opIdFilter}
           onChange={e => setOpIdFilter(e.target.value)}
-          style={{ flex: '1 1 200px', minWidth: 0 }}
         />
-        <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)' }}>{total} total</span>
+        <span className="obs-total">{total} total</span>
       </div>
 
       {/* Phase color legend */}
-      <div style={{
-        display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 10,
-        padding: '6px 12px', borderRadius: 'var(--radius-control)',
-        background: 'var(--tint-faint)', border: '1px solid var(--border-default)',
-        fontSize: 'var(--fs-micro)', color: 'var(--text-secondary)', alignItems: 'center',
-      }}>
-        <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--text-tertiary)', marginRight: 2 }}>Phases</span>
+      <div className="obs-legend">
+        <span className="obs-legend-title">Phases</span>
         {PHASE_LEGEND_ENTRIES.map(({ phase, label, color }) => (
           <span
             key={phase}
             title={PHASE_DESCRIPTIONS[phase] ?? ''}
-            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'default' }}
+            className="obs-legend-phase"
           >
-            <span style={{ width: 7, height: 7, borderRadius: '50%', background: color, display: 'inline-block', flexShrink: 0 }} />
+            <span className="obs-legend-dot" style={{ background: color }} />
             {label}
           </span>
         ))}
       </div>
 
-      <div className="card ds-card" style={{ padding: 0, overflow: 'hidden' }}>
+      <div className="card ds-card">
         {operations.length === 0 ? (
           <EmptyState compact inline icon={<Activity size={16} />} title="No operations recorded" description="Operations will appear here as your node processes publish, query, and other DKG requests." />
         ) : (
@@ -1016,10 +988,10 @@ function OperationsTab() {
                 <tr
                   key={op.operation_id}
                   {...pressable(() => setSelectedOp(op.operation_id))}
-                  style={{ cursor: 'pointer', background: selectedOp === op.operation_id ? 'var(--tint-strong)' : undefined }}
+                  className={selectedOp === op.operation_id ? 'obs-row-press obs-row-open' : 'obs-row-press'}
                 >
                   <td title={op.started_at ? formatDateTime(op.started_at, { seconds: true }) : undefined}>{formatTime(op.started_at)}</td>
-                  <td><Badge size="sm" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} style={{ background: opTypeBg(op.operation_name), color: opTypeText(op.operation_name), boxShadow: 'none' }}>{op.operation_name}</Badge></td>
+                  <td><Badge size="sm" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} className={`obs-op-badge op-tone-${opTone(op.operation_name)}`}>{op.operation_name}</Badge></td>
                   <td><OperationStatusBadge status={op.status} /></td>
                   <td><MiniGantt phases={op.phases} totalMs={op.duration_ms} /></td>
                   <td className="ds-num">{formatDuration(op.duration_ms)}</td>
@@ -1041,61 +1013,18 @@ function OperationsTab() {
 
       {/* Pagination */}
       {totalPages > 1 && (
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '10px 0', fontSize: 'var(--fs-label)', color: 'var(--text-secondary)',
-        }}>
+        <div className="obs-pager">
           <span>
             Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of {total}
           </span>
-          <div style={{ display: 'flex', gap: 4 }}>
-            <button
-              disabled={page === 0}
-              onClick={() => setPage(0)}
-              style={{
-                padding: '4px 8px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-label)', fontWeight: 600, cursor: page === 0 ? 'default' : 'pointer',
-                border: '1px solid var(--border-default)', background: 'var(--bg-surface)', color: page === 0 ? 'var(--text-tertiary)' : 'var(--text-secondary)',
-                opacity: page === 0 ? 0.4 : 1,
-              }}
-            >
-              ««
-            </button>
-            <button
-              disabled={page === 0}
-              onClick={() => setPage(p => Math.max(0, p - 1))}
-              style={{
-                padding: '4px 10px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-label)', fontWeight: 600, cursor: page === 0 ? 'default' : 'pointer',
-                border: '1px solid var(--border-default)', background: 'var(--bg-surface)', color: page === 0 ? 'var(--text-tertiary)' : 'var(--text-secondary)',
-                opacity: page === 0 ? 0.4 : 1,
-              }}
-            >
-              ‹ Prev
-            </button>
-            <span style={{ padding: '4px 10px', fontSize: 'var(--fs-label)', fontWeight: 600 }}>
+          <div className="obs-pager-buttons">
+            <Button size="sm" disabled={page === 0} onClick={() => setPage(0)}>««</Button>
+            <Button size="sm" disabled={page === 0} onClick={() => setPage(p => Math.max(0, p - 1))}>‹ Prev</Button>
+            <span className="obs-pager-page">
               Page {page + 1} / {totalPages}
             </span>
-            <button
-              disabled={page >= totalPages - 1}
-              onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
-              style={{
-                padding: '4px 10px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-label)', fontWeight: 600, cursor: page >= totalPages - 1 ? 'default' : 'pointer',
-                border: '1px solid var(--border-default)', background: 'var(--bg-surface)', color: page >= totalPages - 1 ? 'var(--text-tertiary)' : 'var(--text-secondary)',
-                opacity: page >= totalPages - 1 ? 0.4 : 1,
-              }}
-            >
-              Next ›
-            </button>
-            <button
-              disabled={page >= totalPages - 1}
-              onClick={() => setPage(totalPages - 1)}
-              style={{
-                padding: '4px 8px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-label)', fontWeight: 600, cursor: page >= totalPages - 1 ? 'default' : 'pointer',
-                border: '1px solid var(--border-default)', background: 'var(--bg-surface)', color: page >= totalPages - 1 ? 'var(--text-tertiary)' : 'var(--text-secondary)',
-                opacity: page >= totalPages - 1 ? 0.4 : 1,
-              }}
-            >
-              »»
-            </button>
+            <Button size="sm" disabled={page >= totalPages - 1} onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}>Next ›</Button>
+            <Button size="sm" disabled={page >= totalPages - 1} onClick={() => setPage(totalPages - 1)}>»»</Button>
           </div>
         </div>
       )}
@@ -1103,30 +1032,14 @@ function OperationsTab() {
       {/* Slide-in drawer for operation detail */}
       {selectedOp && (
         <>
-          <div
-            onClick={drawer.onBackdropClick}
-            style={{
-              position: 'fixed', inset: 0, background: 'var(--scrim)', zIndex: 'var(--z-modal)',
-              animation: 'fadeIn .15s ease-out',
-            }}
-          />
-          <div ref={drawer.dialogRef} role="dialog" aria-modal="true" aria-label="Operation detail" style={{
-            position: 'fixed', top: 0, right: 0, bottom: 0, width: '55%', minWidth: 480, maxWidth: 800,
-            background: 'var(--bg-root)', borderLeft: '1px solid var(--border-default)', zIndex: 'var(--z-modal)',
-            overflowY: 'auto', padding: '20px 24px',
-            boxShadow: 'var(--shadow-drawer)',
-            animation: 'slideInRight .2s ease-out',
-          }}>
+          <div onClick={drawer.onBackdropClick} className="obs-drawer-scrim" />
+          <div ref={drawer.dialogRef} role="dialog" aria-modal="true" aria-label="Operation detail" className="obs-drawer">
             {detail?.operation ? (
               <OperationDetail op={detail.operation} logs={detail.logs} phases={detail.phases ?? []} explorerUrl={explorerUrl} onBack={() => setSelectedOp(null)} />
             ) : (
               <Loading block label="Loading operation…" />
             )}
           </div>
-          <style>{`
-            @keyframes slideInRight { from { transform: translateX(100%); } to { transform: translateX(0); } }
-            @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-          `}</style>
         </>
       )}
     </div>
@@ -1152,13 +1065,13 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginBottom: 4, fontFamily: "'JetBrains Mono', monospace" }}>
+      <div className="obs-tl-range mono">
         <span>{formatAbsTime(opStart)}</span>
         <span>{formatDuration(opDuration)}</span>
         <span>{formatAbsTime(opEnd)}</span>
       </div>
 
-      <div style={{ position: 'relative', background: 'var(--tint-subtle)', borderRadius: 'var(--radius-control)', border: '1px solid var(--border-default)', padding: '6px 0' }}>
+      <div className="obs-tl">
         {phases.map((p: any, i: number) => {
           const phaseStart = p.started_at ?? opStart;
           const phaseDuration = p.duration_ms ?? 0;
@@ -1176,10 +1089,9 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
                 : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
 
           return (
-            <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', height: 22, padding: '0 8px', position: 'relative' }}>
-              <div style={{ width: 140, minWidth: 140, fontSize: 'var(--fs-micro)', fontWeight: 600, color, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                title={p.phase}>{p.phase}</div>
-              <div style={{ flex: 1, position: 'relative', height: 12 }}>
+            <div key={`${p.phase}-${i}`} className="obs-tl-row">
+              <div className="obs-tl-name obs-clip" style={{ color }} title={p.phase}>{p.phase}</div>
+              <div className="obs-tl-track">
                 <div
                   title={`${p.phase}: ${formatDuration(phaseDuration)}${
                     isError
@@ -1188,14 +1100,11 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
                         ? ` — Cancelled: ${p.details ?? ''}`
                         : ''
                   }`}
-                  style={{
-                    position: 'absolute', left: `${left}%`, width: `${Math.min(width, 100 - left)}%`,
-                    height: '100%', borderRadius: 'var(--radius-hair)', opacity: isInProgress ? 0.7 : 1, transition: 'width var(--motion-slow) ease',
-                    background: isError ? 'repeating-linear-gradient(45deg, var(--accent-red), var(--accent-red) 3px, var(--danger-stripe) 3px, var(--danger-stripe) 6px)' : color,
-                  }}
+                  className={isError ? 'obs-tl-bar obs-tl-bar-failed' : isInProgress ? 'obs-tl-bar obs-tl-bar-active' : 'obs-tl-bar'}
+                  style={{ left: `${left}%`, width: `${Math.min(width, 100 - left)}%`, background: isError ? undefined : color }}
                 />
               </div>
-              <div style={{ width: 55, textAlign: 'right', fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', fontFamily: "'JetBrains Mono', monospace", flexShrink: 0, marginLeft: 8 }}>
+              <div className="obs-tl-time mono">
                 {formatDuration(phaseDuration)}
               </div>
             </div>
@@ -1203,25 +1112,25 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
         })}
       </div>
 
-      <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>
+      <div className="obs-tl-key">
         {phases.some((p: any) => p.status === 'success') && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--accent-green)', display: 'inline-block' }} /> Success
+          <span className="obs-tl-key-item">
+            <span className="obs-tl-swatch obs-tl-swatch-done" /> Success
           </span>
         )}
         {phases.some((p: any) => p.status === 'error') && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--accent-red)', display: 'inline-block' }} /> Failed
+          <span className="obs-tl-key-item">
+            <span className="obs-tl-swatch obs-tl-swatch-failed" /> Failed
           </span>
         )}
         {phases.some((p: any) => p.status === 'cancelled') && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: CANCELLED_COLOR, display: 'inline-block' }} /> Cancelled
+          <span className="obs-tl-key-item">
+            <span className="obs-tl-swatch obs-tl-swatch-cancelled" /> Cancelled
           </span>
         )}
         {phases.some((p: any) => p.status === 'in_progress') && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--accent-amber)', display: 'inline-block' }} /> In progress
+          <span className="obs-tl-key-item">
+            <span className="obs-tl-swatch obs-tl-swatch-active" /> In progress
           </span>
         )}
       </div>
@@ -1234,35 +1143,29 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
 }) {
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <span style={{ fontSize: 'var(--fs-body)', fontWeight: 600, color: 'var(--text-secondary)' }}>Operation detail</span>
-        <button
-          onClick={onBack}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', padding: 4, display: 'flex' }}
-          aria-label="Close" title="Close"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>
+      <div className="obs-detail-bar">
+        <span className="obs-detail-heading">Operation detail</span>
+        <Button variant="ghost" size="sm" icon onClick={onBack} aria-label="Close" title="Close"><X size={14} /></Button>
       </div>
 
       {/* Header: Operation metadata as compact inline badges */}
-      <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 12 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
-          <span style={{ fontSize: 'var(--fs-title)', fontWeight: 700 }}>{op.operation_name}</span>
+      <div className="card ds-card obs-card obs-detail-gap">
+        <div className="obs-detail-head">
+          <span className="obs-detail-name">{op.operation_name}</span>
           <OperationStatusBadge status={op.status} />
-          <span style={{ fontSize: 'var(--fs-control)', color: 'var(--text-tertiary)' }}>{formatDuration(op.duration_ms)}</span>
-          <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', fontFamily: "'JetBrains Mono', monospace" }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
+          <span className="obs-detail-duration">{formatDuration(op.duration_ms)}</span>
+          <span className="obs-detail-id mono">{op.operation_id} <CopyButton text={op.operation_id} /></span>
         </div>
-        <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 'var(--fs-control)', color: 'var(--text-secondary)' }}>
-          <span><b style={{ color: 'var(--text-secondary)' }}>Started</b> {formatDateTime(op.started_at, { seconds: true })}</span>
-          {op.contextGraph_id && <span><b style={{ color: 'var(--text-secondary)' }}>Context graph</b> {op.contextGraph_id}</span>}
-          {op.triple_count != null && <span><b style={{ color: 'var(--text-secondary)' }}>Triples</b> {op.triple_count}</span>}
-          {op.peer_id && <span><b style={{ color: 'var(--text-secondary)' }}>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
-          {op.gas_cost_eth != null && <span><b style={{ color: 'var(--text-secondary)' }}>Gas</b> {op.gas_cost_eth.toFixed(6)} ETH</span>}
-          {op.trac_cost != null && <span><b style={{ color: 'var(--text-secondary)' }}>TRAC</b> {op.trac_cost.toFixed(4)}</span>}
+        <div className="obs-detail-facts">
+          <span><b>Started</b> {formatDateTime(op.started_at, { seconds: true })}</span>
+          {op.contextGraph_id && <span><b>Context graph</b> {op.contextGraph_id}</span>}
+          {op.triple_count != null && <span><b>Triples</b> {op.triple_count}</span>}
+          {op.peer_id && <span><b>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
+          {op.gas_cost_eth != null && <span><b>Gas</b> {op.gas_cost_eth.toFixed(6)} ETH</span>}
+          {op.trac_cost != null && <span><b>TRAC</b> {op.trac_cost.toFixed(4)}</span>}
           {op.tx_hash && (
             <span>
-              <b style={{ color: 'var(--text-secondary)' }}>TX</b>{' '}
+              <b>TX</b>{' '}
               {explorerUrl ? (
                 <a href={`${explorerUrl}/tx/${op.tx_hash}`} target="_blank" rel="noopener noreferrer" className="mono">{shortId(op.tx_hash)}</a>
               ) : <span className="mono">{shortId(op.tx_hash)}</span>}
@@ -1270,7 +1173,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
           )}
         </div>
         {op.error_message && (
-          <div style={{ marginTop: 8, padding: '8px 12px', background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-border)', fontSize: 'var(--fs-control)', color: 'var(--text-danger)' }}>
+          <div className="obs-detail-error">
             {op.error_message}
           </div>
         )}
@@ -1278,15 +1181,15 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
 
       {/* Phase timeline + Phase details */}
       {phases.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 12 }}>
-          <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
-            <div className="card-title" style={{ marginBottom: 10 }}>Phase timeline</div>
+        <div className="obs-detail-stack obs-detail-gap">
+          <div className="card ds-card obs-card">
+            <div className="card-title obs-card-title">Phase timeline</div>
             <PhaseTimeline phases={phases} op={op} />
           </div>
 
-          <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
-            <div className="card-title" style={{ marginBottom: 10 }}>Phase details</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div className="card ds-card obs-card">
+            <div className="card-title obs-card-title">Phase details</div>
+            <div className="obs-phase-list">
               {phases.map((p: any, i: number) => {
                 const color = PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
                 const terminalColor = p.status === 'error'
@@ -1302,19 +1205,19 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
                 // to the umbrella `chain` entry.
                 const desc = PHASE_DESCRIPTIONS[p.phase] ?? PHASE_DESCRIPTIONS[topLevel];
                 return (
-                  <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--tint-faint)', borderRadius: 'var(--radius-control)', borderLeft: `3px solid ${terminalColor}` }}>
-                    <span style={{ fontWeight: 600, fontSize: 'var(--fs-control)', color, minWidth: 65 }} title={desc ?? ''}>{p.phase}</span>
+                  <div key={`${p.phase}-${i}`} className="obs-phase-row" style={{ borderLeftColor: terminalColor }}>
+                    <span className="obs-phase-name" style={{ color }} title={desc ?? ''}>{p.phase}</span>
                     <OperationStatusBadge status={p.status} />
-                    <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', fontFamily: "'JetBrains Mono', monospace" }}>{formatDuration(p.duration_ms)}</span>
-                    {desc && <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', fontStyle: 'italic', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desc}</span>}
+                    <span className="obs-detail-id mono">{formatDuration(p.duration_ms)}</span>
+                    {desc && <span className="obs-meta obs-italic obs-phase-desc obs-clip">{desc}</span>}
                     <span
-                      style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginLeft: 'auto', flexShrink: 0 }}
+                      className="obs-meta obs-push-end obs-phase-time"
                       title={p.started_at ? formatDateTime(p.started_at, { seconds: true }) : undefined}
                     >
                       {p.started_at ? formatTime(p.started_at) : ''}
                     </span>
                     {(p.status === 'error' || p.status === 'cancelled') && p.details && (
-                      <span style={{ fontSize: 'var(--fs-micro)', color: terminalColor, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.details}>
+                      <span className="obs-phase-details obs-clip" style={{ color: terminalColor }} title={p.details}>
                         {p.details}
                       </span>
                     )}
@@ -1327,14 +1230,14 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
       )}
 
       {/* Logs below — full width */}
-      <div className="card ds-card" style={{ padding: 0, overflow: 'hidden' }}>
-        <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border-default)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span className="card-title" style={{ margin: 0 }}>Logs ({logs.length})</span>
+      <div className="card ds-card">
+        <div className="obs-detail-logs-head">
+          <span className="card-title">Logs ({logs.length})</span>
         </div>
         {logs.length === 0 ? (
           <EmptyState compact inline icon={<FileText size={16} />} title="No logs available" description="This operation has no log entries recorded." />
         ) : (
-          <LogContainer maxHeight={350}>
+          <LogContainer size="lg">
             {logs.map((l: any) => (
               <StyledLogEntry key={l.id} ts={l.ts} level={l.level} module={l.module} message={l.message} />
             ))}
@@ -1406,7 +1309,7 @@ function LogsTab() {
     return (
       <>
         {line.slice(0, idx)}
-        <mark style={{ background: 'var(--accent-amber)', color: 'var(--bg-root)', borderRadius: 'var(--radius-hair)', padding: '0 1px' }}>
+        <mark className="obs-log-match">
           {line.slice(idx, idx + debouncedSearch.length)}
         </mark>
         {line.slice(idx + debouncedSearch.length)}
@@ -1416,13 +1319,12 @@ function LogsTab() {
 
   return (
     <div>
-      <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+      <div className="filters">
         <input aria-label="Search node log"
-          className="input"
+          className="input obs-search"
           placeholder="Search node log..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          style={{ flex: 1, minWidth: 200 }}
         />
         <select aria-label="Log level" className="input" value={showLevel} onChange={(e) => setShowLevel(e.target.value as any)}>
           <option value="all">All levels</option>
@@ -1443,65 +1345,34 @@ function LogsTab() {
           <option value={10000}>10s refresh</option>
           <option value={0}>Paused</option>
         </select>
-        <button
-          onClick={refresh}
-          title="Refresh now"
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 10px',
-            borderRadius: 'var(--radius-control)', border: '1px solid var(--border-default)', background: 'var(--bg-surface)',
-            color: 'var(--text-secondary)', fontSize: 'var(--fs-label)', fontWeight: 600, cursor: 'pointer',
-            transition: 'all var(--motion-base)',
-          }}
-          onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent-green)'; e.currentTarget.style.color = 'var(--accent-green)'; }}
-          onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border-default)'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
-        >
+        <Button onClick={refresh} title="Refresh now">
           <RefreshCw size={12} />
           Refresh
-        </button>
+        </Button>
         <button
+          type="button"
+          className="ds-filter obs-autoscroll"
+          aria-pressed={autoScroll}
           onClick={() => setAutoScroll(a => !a)}
           title={autoScroll ? 'Auto-scroll enabled' : 'Auto-scroll disabled'}
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 10px',
-            borderRadius: 'var(--radius-control)', border: `1px solid ${autoScroll ? 'var(--success-border)' : 'var(--border-default)'}`,
-            background: autoScroll ? 'var(--success-bg)' : 'var(--bg-surface)',
-            color: autoScroll ? 'var(--accent-green)' : 'var(--text-secondary)',
-            fontSize: 'var(--fs-label)', fontWeight: 600, cursor: 'pointer', transition: 'all var(--motion-base)',
-          }}
         >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/>
-          </svg>
+          <ArrowDown size={12} />
           Auto-scroll
         </button>
       </div>
 
-      <div style={{ borderRadius: 'var(--radius-card)', overflow: 'hidden', border: '1px solid var(--border-default)' }}>
-        <div style={{
-          padding: '8px 16px',
-          background: 'var(--tint-faint)',
-          borderBottom: '1px solid var(--border-subtle)',
-          fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        }}>
+      <div className="obs-log-panel">
+        <div className="obs-log-head">
           <span>
             {lines.length} lines{debouncedSearch ? ` matching "${debouncedSearch}"` : ''}
-            {loading ? <span style={{ marginLeft: 6, color: 'var(--text-tertiary)', fontSize: 'var(--fs-micro)' }}>refreshing...</span> : ''}
+            {loading ? <span className="obs-meta obs-log-refreshing">refreshing...</span> : ''}
           </span>
-          <span className="mono" style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>daemon.log {data?.totalSize ? `(${formatBytes(data.totalSize)})` : ''}</span>
+          <span className="mono obs-meta">daemon.log {data?.totalSize ? `(${formatBytes(data.totalSize)})` : ''}</span>
         </div>
         <div
           ref={containerRef}
           onScroll={handleScroll}
-          style={{
-            height: 'calc(100vh - 240px)',
-            minHeight: 500,
-            overflowY: 'auto',
-            padding: '8px 0',
-            background: 'var(--log-bg)',
-            fontFamily: LOG_FONT,
-            fontSize: 'var(--fs-micro)',
-            lineHeight: 'var(--lh-body)',
-          }}
+          className="obs-log obs-log-full"
         >
           {lines.length === 0 ? (
             loading
@@ -1522,41 +1393,21 @@ function LogsTab() {
    Shared components
    ================================================================ */
 
-const LOG_FONT = '"SF Mono", "Consolas", "Liberation Mono", "Menlo", monospace';
-const LOG_COLORS = {
-  timestamp: 'var(--log-timestamp)',
-  module: 'var(--log-module)',
-  levelError: 'var(--log-error)',
-  levelWarn: 'var(--log-warn)',
-  levelInfo: 'var(--log-meta)',
-  message: 'var(--log-text)',
-  bg: 'var(--log-bg)',
-};
+const LOG_LEVEL_CLASS: Record<string, string> = { error: 'obs-log-error', warn: 'obs-log-warn' };
 
 function StyledLogEntry({ ts, level, module, message }: { ts: number; level: string; module: string; message: string }) {
-  const levelColor = level === 'error' ? LOG_COLORS.levelError : level === 'warn' ? LOG_COLORS.levelWarn : LOG_COLORS.levelInfo;
   return (
-    <div style={{
-      padding: '1px 12px', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-      background: level === 'error' ? 'var(--log-error-bg)' : undefined,
-    }}>
-      <span style={{ color: LOG_COLORS.timestamp, marginRight: 6 }}>{formatTime(ts)}</span>
-      <span style={{ color: levelColor, fontWeight: 600, marginRight: 6 }}>{level.toUpperCase().padEnd(5)}</span>
-      <span style={{ color: LOG_COLORS.module, marginRight: 6 }}>[{module}]</span>
-      <span style={{ color: LOG_COLORS.message }}>{message}</span>
+    <div className={level === 'error' ? 'obs-log-entry obs-log-entry-error' : 'obs-log-entry'}>
+      <span className="obs-log-ts obs-log-gap">{formatTime(ts)}</span>
+      <span className={`obs-log-level obs-log-gap ${LOG_LEVEL_CLASS[level] ?? 'obs-log-info'}`}>{level.toUpperCase().padEnd(5)}</span>
+      <span className="obs-log-module obs-log-gap">[{module}]</span>
+      <span className="obs-log-text">{message}</span>
     </div>
   );
 }
 
-function LogContainer({ children, maxHeight = 300 }: { children: React.ReactNode; maxHeight?: number }) {
-  return (
-    <div style={{
-      maxHeight, overflowY: 'auto', background: LOG_COLORS.bg, borderRadius: 'var(--radius-control)', padding: '6px 0',
-      fontFamily: LOG_FONT, fontSize: 'var(--fs-micro)', lineHeight: 'var(--lh-body)',
-    }}>
-      {children}
-    </div>
-  );
+function LogContainer({ children, size }: { children: React.ReactNode; size: 'sm' | 'lg' }) {
+  return <div className={size === 'sm' ? 'obs-log obs-log-sm' : 'obs-log obs-log-lg'}>{children}</div>;
 }
 
 const DAEMON_LOG_RE = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (\S+) (\S+) \[([^\]]+)\] (.*)$/;
@@ -1570,27 +1421,25 @@ function parseDaemonLogLine(line: string): { ts: string; opName: string; opId: s
 function StyledDaemonLine({ line, lineNum, highlight }: { line: string; lineNum: number; highlight?: (s: string) => React.ReactNode }) {
   const parsed = parseDaemonLogLine(line);
   const cls = classifyLine(line);
-  const bg = cls === 'error' ? 'var(--log-error-bg)' : undefined;
+  const lineClass = cls === 'error' ? 'obs-log-line obs-log-line-error' : 'obs-log-line';
 
   if (!parsed) {
-    const color = cls === 'error' ? LOG_COLORS.levelError : cls === 'warn' ? LOG_COLORS.levelWarn : LOG_COLORS.message;
     return (
-      <div style={{ padding: '0 16px', color, whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: bg }}>
-        <span style={{ color: 'var(--text-tertiary)', userSelect: 'none', marginRight: 8, display: 'inline-block', width: 40, textAlign: 'right' }}>{lineNum}</span>
+      <div className={`${lineClass} ${LOG_LEVEL_CLASS[cls] ?? 'obs-log-text'}`}>
+        <span className="obs-log-num">{lineNum}</span>
         {highlight ? highlight(line) : line}
       </div>
     );
   }
 
-  const opColor = opTypeText(parsed.opName);
   return (
-    <div style={{ padding: '0 16px', whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: bg }}>
-      <span style={{ color: 'var(--text-tertiary)', userSelect: 'none', marginRight: 8, display: 'inline-block', width: 40, textAlign: 'right' }}>{lineNum}</span>
-      <span style={{ color: LOG_COLORS.timestamp }}>{parsed.ts}</span>{' '}
-      <span style={{ color: opColor, fontWeight: 600 }}>{parsed.opName}</span>{' '}
-      <span style={{ color: 'var(--text-tertiary)' }}>{parsed.opId.slice(0, 8)}</span>{' '}
-      <span style={{ color: LOG_COLORS.module }}>[{parsed.module}]</span>{' '}
-      <span style={{ color: LOG_COLORS.message }}>{highlight ? highlight(parsed.message) : parsed.message}</span>
+    <div className={lineClass}>
+      <span className="obs-log-num">{lineNum}</span>
+      <span className="obs-log-ts">{parsed.ts}</span>{' '}
+      <span className={`obs-log-op op-tone-${opTone(parsed.opName)}`}>{parsed.opName}</span>{' '}
+      <span className="obs-faint">{parsed.opId.slice(0, 8)}</span>{' '}
+      <span className="obs-log-module">[{parsed.module}]</span>{' '}
+      <span className="obs-log-text">{highlight ? highlight(parsed.message) : parsed.message}</span>
     </div>
   );
 }
@@ -1605,22 +1454,9 @@ function CopyButton({ text }: { text: string }) {
     }).catch(() => {});
   }, [text]);
   return (
-    <button
-      onClick={copy}
-      title="Copy to clipboard" aria-label="Copy to clipboard"
-      style={{
-        background: 'none', border: 'none', cursor: 'pointer', padding: '1px 3px', minWidth: 24, minHeight: 24, justifyContent: 'center',
-        color: copied ? 'var(--accent-green)' : 'var(--text-tertiary)', fontSize: 'var(--fs-label)',
-        display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle',
-        transition: 'color var(--motion-base)',
-      }}
-    >
-      {copied ? (
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-      ) : (
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-      )}
-    </button>
+    <Button variant="ghost" size="sm" icon onClick={copy} className={copied ? 'obs-copy obs-copy-done' : 'obs-copy'} title="Copy to clipboard" aria-label="Copy to clipboard">
+      {copied ? <CheckIcon size={12} /> : <Copy size={12} />}
+    </Button>
   );
 }
 

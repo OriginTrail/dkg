@@ -513,3 +513,10 @@ button.ds-crumb:hover { color: var(--text-primary); text-decoration: underline; 
 button:not(.ds-btn) > .lucide-refresh-cw { margin-right: var(--space-6); }
 .ds-spin { animation: ds-spin 1s linear infinite; }
 @keyframes ds-spin { to { transform: rotate(360deg); } }
+
+/* Operation tone: the layer an operation writes to (op-type-colors.ts picks
+   the tone). The one place these colours are set; Observability and the
+   Transactions panel read --op-text, --op-bg and --op-rule. */
+.op-tone-vm { --op-text: var(--layer-verified-text); --op-bg: var(--layer-verified-bg); --op-rule: var(--layer-verified); }
+.op-tone-swm { --op-text: var(--layer-shared-text); --op-bg: var(--layer-shared-bg); --op-rule: var(--layer-shared); }
+.op-tone-neutral { --op-text: var(--text-secondary); --op-bg: var(--bg-elevated); --op-rule: var(--border-strong); }

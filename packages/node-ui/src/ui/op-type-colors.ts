@@ -8,6 +8,9 @@
  * The name is always spelled out, so colour doesn't have to tell the
  * 15 types apart.
  *
+ * opTone() picks the tone; the colours live once, in the op-tone-* classes
+ * (styles/27-ds-components.css), which set --op-text, --op-bg and --op-rule.
+ *
  * Charts are different: series need telling apart, so they take the
  * data palette (--data-1 … --data-8) in the order the types appear,
  * the same order in every chart on the page.
@@ -26,29 +29,6 @@ const OP_TONE: Record<string, OpTone> = {
 export function opTone(name: string | undefined): OpTone {
   return (name && OP_TONE[name]) || 'neutral';
 }
-
-const TEXT: Record<OpTone, string> = {
-  vm: 'var(--layer-verified-text)',
-  swm: 'var(--layer-shared-text)',
-  neutral: 'var(--text-secondary)',
-};
-const BG: Record<OpTone, string> = {
-  vm: 'var(--layer-verified-bg)',
-  swm: 'var(--layer-shared-bg)',
-  neutral: 'var(--bg-elevated)',
-};
-const RULE: Record<OpTone, string> = {
-  vm: 'var(--layer-verified)',
-  swm: 'var(--layer-shared)',
-  neutral: 'var(--border-strong)',
-};
-
-/** Text colour for an operation name. */
-export const opTypeText = (name: string | undefined) => TEXT[opTone(name)];
-/** Badge fill behind an operation name. */
-export const opTypeBg = (name: string | undefined) => BG[opTone(name)];
-/** Accent rule (e.g. the left edge of a per-type card). */
-export const opTypeRule = (name: string | undefined) => RULE[opTone(name)];
 
 /** --data-1 … --data-8 per theme; matches 00-theme.css (graph-palette.test.ts
  *  checks). Canvas code reads these through graph-palette; DOM and SVG use

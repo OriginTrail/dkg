@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLayoutStore, maxBottomHeight } from '../../stores/layout.js';
 import { api } from '../../api-wrapper.js';
 import { formatTime, formatDuration, shortId } from '../../hooks.js';
-import { opTypeText } from '../../op-type-colors.js';
+import { opTone } from '../../op-type-colors.js';
 import { pressable } from '../../lib/pressable.js';
 import { OperationStatusBadge } from '../OperationStatusBadge.js';
 
@@ -201,7 +201,7 @@ function TransactionsContent() {
                   aria-expanded={isExp} {...pressable(() => setExpanded(id => id === op.operation_id ? null : op.operation_id))}
                   style={{ borderBottom: '1px solid var(--border-subtle)', cursor: 'pointer', background: isExp ? 'var(--tint-subtle)' : undefined }}
                 >
-                  <td style={{ padding: '7px 12px', color: opTypeText(op.operation_name), fontWeight: 600 }}>
+                  <td className={`op-tone-${opTone(op.operation_name)}`} style={{ padding: '7px 12px', color: 'var(--op-text)', fontWeight: 600 }}>
                     {op.operation_name}
                   </td>
                   <td style={{ padding: '7px 12px', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
