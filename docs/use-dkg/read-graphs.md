@@ -159,6 +159,22 @@ When the context graph's callers are ready, make `merged` the default for reques
 - **Pinning:** a caller can still pin `"semantics": "per-asset"`.
 - **Other layers:** a request that takes the default on a layer the node does not serve is answered per asset.
 
+## Shared working memory
+
+The same steps work for `shared-working-memory`, but keeping its read graph costs more on one path. A snapshot import, such as a catch-up from peers, updates the read graph for every asset graph it replaces.
+
+Measured on a local Blazegraph, importing 1,000 asset graphs of 20 triples each (medians of three runs):
+
+| Import | Read graphs off | Shared-memory read graph kept | Extra |
+| --- | --- | --- | --- |
+| Fresh | 39.6 s | 72.4 s | +83 %, about 33 ms per asset graph |
+| Replacing existing graphs | 38.3 s | 75.2 s | +97 %, about 37 ms per asset graph |
+
+Rebuilding the same read graph in one pass took 0.17 s. In every run the read graph equalled the union of its asset graphs.
+
+- **What it means:** keeping the shared-memory read graph roughly doubles a snapshot import. A catch-up of 100,000 asset graphs takes about an hour longer.
+- **Until imports skip per-graph maintenance and rebuild once (#3831):** keep `shared-working-memory` at `off` on nodes that catch up many asset graphs. A rule per layer does that, for example `"layers": { "verifiable-memory": "serve", "shared-working-memory": "off" }`.
+
 ## Back out
 
 At any step, set the layer back to `off` and restart.
