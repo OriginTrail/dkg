@@ -514,4 +514,18 @@ export {
   type ViewSemantics,
   type ViewSemanticsSettings,
 } from './read-graph/settings.js';
+export {
+  checkReadGraph,
+  type ReadGraphCheckDirection,
+  type ReadGraphCheckMode,
+  type ReadGraphCheckOptions,
+  type ReadGraphCheckOutcome,
+  type ReadGraphCheckResult,
+} from './read-graph/check.js';
+export {
+  READ_GRAPH_CHECK_DEFAULTS,
+  ReadGraphCheckSchedule,
+  startReadGraphChecks,
+  type ReadGraphCheckScheduleOptions,
+} from './read-graph/check-schedule.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';
