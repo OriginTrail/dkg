@@ -44,7 +44,7 @@ const chain = {
 async function start(): Promise<{ keys: AccessKeys; gateway: Gateway }> {
   const keys = new AccessKeys(dir);
   const gateway = new Gateway({
-    chain, buyerWallet: BUYER, store: new BuyerStore(dir), router: {} as never, keys, dir,
+    chain, buyerWallet: BUYER, store: new BuyerStore(dir), router: {} as never, keys,
     send: async () => { throw new Error('no seller in this test'); },
   });
   await gateway.load();
@@ -110,5 +110,9 @@ describe('buyer journals written before the ledger', () => {
     expect(await restarted.gateway.reconciliation(1)).toEqual({ epoch: 1, final: true, rows: await finalRowsOf(1) });
     await restarted.gateway.tick();
     expect((await restarted.keys.list())[0]).toMatchObject({ spent: String(860n + MOST) });
+    // The journals the ledger replaced are left as they were, through its compaction and the restart.
+    for (const file of ['buyer-receipts.jsonl', 'buyer-nonces.jsonl', 'access-keys.jsonl']) {
+      expect(await readFile(join(dir, file), 'utf8'), file).toBe(await readFile(join(FIXTURE, file), 'utf8'));
+    }
   });
 });

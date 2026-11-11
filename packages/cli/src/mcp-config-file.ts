@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fsyncSync, ftruncateSync, lstatSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, ftruncateSync, futimesSync, lstatSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { McpConfigPersistenceStrategy } from './mcp-config-metadata.js';
@@ -56,12 +56,18 @@ export function snapshotMcpConfigSource(
   });
 }
 
+export interface McpConfigWriteOptions {
+  /** Cleanup must not promote an obsolete client profile in recency-based discovery. */
+  preserveTimestamps?: boolean;
+}
+
 /** Replace a complete client config without exposing a truncated file to readers. */
 export function writeMcpConfigAtomic(
   configPath: string,
   content: string,
   persistence: McpConfigPersistenceStrategy,
   expectedSource: McpConfigSourceSnapshot,
+  options: McpConfigWriteOptions = {},
 ): void {
   expectedSource.assertCurrent();
   const destination = expectedSource.destination;
@@ -80,6 +86,8 @@ export function writeMcpConfigAtomic(
       persistence.prepare({ ...replacement, fd });
       ftruncateSync(fd, 0);
       writeFileSync(fd, content, 'utf8');
+      // Apply to the private replacement inode, never to a subsequently replaced path.
+      if (options.preserveTimestamps && original) futimesSync(fd, original.atimeMs / 1000, original.mtimeMs / 1000);
       persistence.secure({ ...replacement, fd });
       fsyncSync(fd);
     } finally {

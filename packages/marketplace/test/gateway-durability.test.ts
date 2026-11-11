@@ -85,7 +85,7 @@ async function setUp(): Promise<void> {
   routerOf = () => new Router({ chain, offers: async () => offers, quote: async (_peer, services) => seller.quote({ services }) as Promise<QuoteResponse> });
   keys = new AccessKeys(join(dir, 'buyer'));
   deps = {
-    chain, buyerWallet: NODE.address, store: buyer.store, router: routerOf(), keys, dir: join(dir, 'buyer'),
+    chain, buyerWallet: NODE.address, store: buyer.store, router: routerOf(), keys,
     send: async (_peer, payload) => {
       const message = decodeMessage(payload) as { request: { nonce: string } };
       nonces.push(message.request.nonce);

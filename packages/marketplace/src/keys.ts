@@ -7,6 +7,9 @@
  * node or agent token is not a key.
  *   - The secret is shown once, when the key is made; the node keeps only its
  *     sha256, and compares hashes in constant time.
+ *   - Its id is the secret's first `KEY_ID_HEX` hex digits after the prefix,
+ *     64 bits; a new key whose id another key has is made again. Keys made
+ *     with 10.1.0's 8-digit ids keep them.
  *   - Each key has a label, a budget in wei, the services it may call (or all),
  *     a rate in calls per second, and an expiry.
  *   - A revocation takes effect at the next call.
@@ -23,6 +26,10 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { BuyerLedger } from './buyer-ledger.js';
 
 const PREFIX = 'dkgmk_';
+/** Hex digits of a key's id after its prefix: 64 bits. 10.1.0 made ids of 8. */
+export const KEY_ID_HEX = 16;
+/** How many secrets a key's making draws before it gives up on an id of its own. */
+const MAKE_ATTEMPTS = 8;
 
 export interface AccessKeyScopes {
   label: string;
@@ -69,20 +76,30 @@ export class AccessKeys {
   private readonly recent = new Map<string, number[]>();
 
   /** @param dirOrLedger the buyer's directory, whose ledger it opens, or the ledger itself */
-  constructor(dirOrLedger: string | BuyerLedger) {
+  constructor(
+    dirOrLedger: string | BuyerLedger,
+    /** The secrets' randomness; node's `randomBytes` but in tests. */
+    private readonly random: (size: number) => Buffer = randomBytes,
+  ) {
     this.ledger = typeof dirOrLedger === 'string' ? new BuyerLedger(dirOrLedger) : dirOrLedger;
   }
 
-  /** Make a key. Its secret is returned this once and never kept. */
+  /**
+   * Make a key. Its secret is returned this once and never kept. Its id is checked against every key's under the
+   * ledger's lock (`BuyerLedger.makeKey`), so two makes at once never share one.
+   */
   async make(scopes: AccessKeyScopes, now: number): Promise<{ secret: string; key: AccessKey }> {
     if (!Number.isSafeInteger(scopes.rps) || scopes.rps < 1) throw new Error('rps must be a positive integer');
-    const secret = `${PREFIX}${randomBytes(24).toString('hex')}`;
-    const keyId = secret.slice(0, PREFIX.length + 8);
-    const key = await this.ledger.makeKey({
-      keyId, hash: hashOf(secret).toString('hex'), label: scopes.label, budget: scopes.budget.toString(),
-      services: scopes.services, rps: scopes.rps, expiresAt: scopes.expiresAt, at: now,
-    });
-    return { secret, key: this.shown(key) };
+    for (let attempt = 0; attempt < MAKE_ATTEMPTS; attempt++) {
+      const secret = `${PREFIX}${this.random(24).toString('hex')}`;
+      const keyId = secret.slice(0, PREFIX.length + KEY_ID_HEX);
+      const key = await this.ledger.makeKey({
+        keyId, hash: hashOf(secret).toString('hex'), label: scopes.label, budget: scopes.budget.toString(),
+        services: scopes.services, rps: scopes.rps, expiresAt: scopes.expiresAt, at: now,
+      });
+      if (key) return { secret, key: this.shown(key) };
+    }
+    throw new Error(`no key id of its own after ${MAKE_ATTEMPTS} secrets`);
   }
 
   async revoke(keyId: string, now: number): Promise<AccessKey | null> {

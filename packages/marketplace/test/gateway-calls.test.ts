@@ -219,8 +219,8 @@ describe('calls waiting for their turn', () => {
   it('stop a call whose client goes away while its seller is picked, before a nonce is taken', async () => {
     await setUp();
     const client = new AbortController();
-    const pick = deps.router.pick.bind(deps.router);
-    vi.spyOn(deps.router, 'pick').mockImplementationOnce(async (...args) => {
+    const pick = deps.router.pickFor.bind(deps.router);
+    vi.spyOn(deps.router, 'pickFor').mockImplementationOnce(async (...args) => {
       const route = await pick(...args);
       client.abort();
       return route;

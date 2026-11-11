@@ -130,10 +130,16 @@ export class BuyerLedger {
     return [...this.keys.values()];
   }
 
-  async makeKey(record: KeyRecord): Promise<KeptKey> {
+  /** A key made, on disk then held: `null`, making nothing, when another key has its id, checked under the journal's lock. */
+  async makeKey(record: KeyRecord): Promise<KeptKey | null> {
     await this.load();
-    await this.write({ type: 'key', ...record });
-    return { ...this.keys.get(record.keyId)!.key };
+    return this.lock.run('journal', async () => {
+      if (this.keys.has(record.keyId)) return null;
+      const entry = { type: 'key' as const, ...record };
+      await this.journal.append(entry);
+      this.apply(entry);
+      return { ...this.keys.get(record.keyId)!.key };
+    });
   }
 
   async revokeKey(keyId: string, at: number): Promise<KeptKey | null> {

@@ -38,6 +38,7 @@ import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import type { DkgConfig } from '../config.js';
 import { subscribeWhenAdmitted } from './marketplace-context-graph.js';
 import { startMarketplaceSeller, type MarketplaceSellerRuntime } from './marketplace-seller.js';
+import { withNetworkMarketplaceContextGraph } from './marketplace-network-default.js';
 
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
@@ -172,6 +173,8 @@ export async function startMarketplaceGateway(options: MarketplaceGatewayOptions
 
 export interface MarketplaceStartOptions {
   config: Pick<DkgConfig, 'marketplace'>;
+  /** The node's network config: its `marketplace.contextGraphId`, when it names one, is the node's default graph. */
+  network?: object | null;
   agent: DKGAgent;
   /** The node's operational wallets; the first signs the seller's receipts and offers. */
   wallets: readonly string[];
@@ -191,10 +194,12 @@ export interface MarketplaceParts {
  * The marketplace at boot, when enabled: the buyer with its gateway, and the
  * seller. A part that fails to start is logged and stays off, and never stops
  * the boot: a buyer whose gateway fails stops with it, since nothing could
- * spend what it funds.
+ * spend what it funds. Both use the network's Marketplace Context Graph unless
+ * the node's config names its own.
  */
 export async function startMarketplace(options: MarketplaceStartOptions): Promise<MarketplaceParts> {
-  const { config, agent, wallets, dataDir, dashDb, log } = options;
+  const { agent, wallets, dataDir, dashDb, log } = options;
+  const config = withNetworkMarketplaceContextGraph(options.config, options.network);
   let marketplace: Buyer | undefined;
   let marketplaceGateway: Gateway | undefined;
   try {

@@ -361,6 +361,7 @@ const blockedRfc64Modules = [
   'public-catalog-inventory-completeness-v1.js',
   'public-catalog-native-reconciler-v1.js',
   'public-catalog-native-committed-head-token-v1.js',
+  'public-catalog-native-precommit-v1.js',
   'public-catalog-native-receiver-v1.js',
   'public-catalog-native-transport-v1.js',
   'public-open-catalog-scope-v1.js',

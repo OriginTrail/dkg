@@ -16,6 +16,7 @@ import {
   computeSwmAuthorInventoryScopeDigestV1,
   parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1,
   parseCanonicalSwmAuthorInventoryRowsV1,
+  snapshotSwmAuthorInventoryRowsV1,
   type SignedSwmAuthorInventoryHeadEnvelopeV1,
   type SwmAuthorInventoryHeadV1,
   type SwmAuthorInventoryRowV1,
@@ -101,6 +102,24 @@ function signedHead(
 }
 
 describe('SWM author inventory v1', () => {
+  it('rechecks every head binding when reusing owned rows', () => {
+    const rows = snapshotSwmAuthorInventoryRowsV1([ROW_A, ROW_B]);
+    expect(() => assertSwmAuthorInventorySnapshotBindingV1({ head: signedHead(rows), rows }))
+      .not.toThrow();
+    for (const change of [
+      { totalRows: '1' }, { rowsDigest: `0x${'00'.repeat(32)}` },
+      { networkId: 'otp:20431' }, { issuedAt: '1699999999999' },
+      { issuedAt: ROW_A.expiresAt! },
+    ]) {
+      expect(() => assertSwmAuthorInventorySnapshotBindingV1({
+        head: signedHead(rows, change as Partial<SwmAuthorInventoryHeadV1>), rows,
+      })).toThrow();
+    }
+    expect(() => assertSwmAuthorInventorySnapshotBindingV1({
+      head: signedHead(rows, { authorAddress: OTHER_AUTHOR } as Partial<SwmAuthorInventoryHeadV1>, OTHER_AUTHOR), rows,
+    })).toThrow();
+  });
+
   it('validates one complete encodable row with the exact singleton codec error contract', () => {
     const outcome = (operation: () => unknown) => {
       try { operation(); return { accepted: true }; }
@@ -222,12 +241,15 @@ describe('SWM author inventory v1', () => {
 
       // Keep every weak key live, and cross the byte budget with one more entry.
       snapshots.push(codec.parseCanonicalSwmAuthorInventoryRowsV1(text));
+      expect(codec.snapshotSwmAuthorInventoryRowsV1(snapshots[0]!)).toBe(snapshots[0]);
+      expect(rowSetEncodings()).toBe(0);
       expect(Buffer.compare(encode(snapshots.at(-1)!), expected)).toBe(0);
       expect(Buffer.compare(encode(snapshots[0]!), expected)).toBe(0);
-      expect(rowSetEncodings()).toBe(1);
+      // The full-set bytes were evicted; rebuild them from individually owned rows.
+      expect(rowSetEncodings()).toBe(rows.length);
       expect(codec.computeSwmAuthorInventoryRowsDigestV1(snapshots[0]!)).toBe(expectedDigest);
-      // Evicted identities use the original uncached path until parsed again.
-      expect(rowSetEncodings()).toBe(2);
+      // Reusing scalar encodings must retain byte/digest equality after set eviction.
+      expect(rowSetEncodings()).toBe(rows.length);
       expect(snapshots).toHaveLength(entriesWithinBudget + 1);
     } finally {
       serializer.mockRestore();

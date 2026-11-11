@@ -164,7 +164,98 @@ describe('accounts and funding', () => {
       walletContractAllowance: String(42n * TRAC), walletContractAllowanceTrac: '42.0',
     });
     expect(funding.accounts).toHaveLength(2);
+    expect(funding.accountsPending).toBe(false);
     expect(funding.epochEndsAt).toBe((await chain.getEpochTimes()).endsAt);
+  });
+
+  it('answers without waiting for an account list that takes long to read, and from the last list read', async () => {
+    const owned = await mock.createPublishingConvictionAccount(120_000n * TRAC);
+    const listBuyerAccounts = chain.listBuyerAccounts.bind(chain);
+    const listNodeAccounts = chain.listNodePublishingConvictionAccounts.bind(chain);
+    let granted = 0;
+    let owners = 0;
+    const releases: Array<(ids: bigint[]) => void> = [];
+    chain.listBuyerAccounts = () => { granted += 1; return new Promise<bigint[]>((resolve) => { releases.push(resolve); }); };
+    chain.listNodePublishingConvictionAccounts = () => { owners += 1; return listNodeAccounts(); };
+    const settled = () => new Promise((resolve) => setTimeout(resolve, 0));
+    try {
+      // No list read yet: both views answer with the balances and no accounts, from one shared read.
+      const [first, overlapping] = await Promise.all([fundingView(buyer, 10), accountsView(buyer, 10)]);
+      expect(first.accountsPending).toBe(true);
+      expect(first.accounts).toEqual([]);
+      expect(first.buyerWallet.address).toBe(SIGNER.address);
+      expect(overlapping).toEqual({ accounts: [], accountsPending: true });
+      expect([granted, owners]).toEqual([1, 1]);
+
+      // The read finishes after the views answered. A later view starts the next read and, while it runs,
+      // answers from the list the first one read.
+      releases[0]!([]);
+      await settled();
+      const second = await fundingView(buyer, 10);
+      expect([granted, owners]).toEqual([2, 2]);
+      expect(second.accountsPending).toBe(true);
+      expect(second.accounts.map((a) => a.accountId)).toEqual([String(owned.accountId)]);
+      releases[1]!([]);
+      await settled();
+    } finally {
+      chain.listBuyerAccounts = listBuyerAccounts;
+      chain.listNodePublishingConvictionAccounts = listNodeAccounts;
+    }
+    const third = await fundingView(buyer);
+    expect(third.accountsPending).toBe(false);
+    expect(third.accounts.map((a) => a.accountId)).toEqual([String(owned.accountId)]);
+  });
+
+  it('fails a view whose account list fails before the wait is over, and reads again for the next view', async () => {
+    const listBuyerAccounts = chain.listBuyerAccounts.bind(chain);
+    chain.listBuyerAccounts = () => Promise.reject(new Error('no backend'));
+    try {
+      await expect(fundingView(buyer, 1_000)).rejects.toThrow('no backend');
+    } finally {
+      chain.listBuyerAccounts = listBuyerAccounts;
+    }
+    expect((await fundingView(buyer)).accountsPending).toBe(false);
+  });
+
+  it('tells the next view that a list read failed after the views stopped waiting, until a read succeeds', async () => {
+    const listBuyerAccounts = chain.listBuyerAccounts.bind(chain);
+    const fails: Array<(err: Error) => void> = [];
+    chain.listBuyerAccounts = () => new Promise<bigint[]>((_resolve, reject) => { fails.push(reject); });
+    const settled = () => new Promise((resolve) => setTimeout(resolve, 0));
+    try {
+      const first = await fundingView(buyer, 10);
+      expect(first.accountsPending).toBe(true);
+      expect(first).not.toHaveProperty('accountsError');
+
+      // The read fails after the view answered; the next view, which cannot wait either, says so.
+      fails[0]!(new Error('upstream timeout'));
+      await settled();
+      const second = await fundingView(buyer, 10);
+      expect(second.accountsPending).toBe(true);
+      expect(second.accountsError).toBe('upstream timeout');
+      expect((await accountsView(buyer, 10)).accountsError).toBe('upstream timeout');
+      fails[1]!(new Error('upstream timeout'));
+      await settled();
+    } finally {
+      chain.listBuyerAccounts = listBuyerAccounts;
+    }
+    // A read that succeeds clears it.
+    const third = await fundingView(buyer);
+    expect(third.accountsPending).toBe(false);
+    expect(third).not.toHaveProperty('accountsError');
+
+    // Seen where it shows: a later read that cannot finish in time answers pending, without the old failure.
+    chain.listBuyerAccounts = () => new Promise<bigint[]>(() => undefined);
+    try {
+      const fourth = await fundingView(buyer, 10);
+      expect(fourth.accountsPending).toBe(true);
+      expect(fourth).not.toHaveProperty('accountsError');
+      const accounts = await accountsView(buyer, 10);
+      expect(accounts.accountsPending).toBe(true);
+      expect(accounts).not.toHaveProperty('accountsError');
+    } finally {
+      chain.listBuyerAccounts = listBuyerAccounts;
+    }
   });
 
   it('gives a browser wallet the contracts, the grant domain and its types', async () => {

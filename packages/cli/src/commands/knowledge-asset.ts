@@ -19,7 +19,7 @@ import {
 import { parseOptionalPositiveInteger } from '../cli-option-parsers.js';
 import { parseJobListPagingOptions, readJobList } from '../job-list-paging.js';
 import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-command-options.js';
-import { printAsyncJobFailure } from './async-job-failure.js';
+import { printAsyncJobFailure, printClearJobFailure } from './async-job-failure.js';
 
 const SHARE_JOB_STATES: readonly KnowledgeAssetShareJobState[] = [
   'queued',
@@ -477,6 +477,15 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       const result = await client.knowledgeAssetCancelShareJob(jobId);
       console.log(`Cancelled share job ${result.jobId}; state=${result.state}`);
     }));
+
+  kaCmd
+    .command('clear-share-job <job-id>')
+    .description('Remove one finished SWM share job through the running daemon')
+    .action(async (jobId: string) => runAction(async () => {
+      const client = await ApiClient.connect();
+      const result = await client.knowledgeAssetClearShareJob(jobId);
+      console.log(`Share job ${result.jobId}: ${result.outcome}`);
+    }, printClearJobFailure));
 
   kaCmd
     .command('recover-share-job <job-id>')

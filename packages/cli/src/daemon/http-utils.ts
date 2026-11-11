@@ -29,7 +29,8 @@ import {
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
-import { type DKGAgent } from '@origintrail-official/dkg-agent';
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { isListContextGraphsBudgetExceeded } from '@origintrail-official/dkg-agent/context-graph-list-budget-error';
 import {
   STORE_OPERATION_TIMEOUT_CODE,
   isStoreSchedulerBusyError,
@@ -273,6 +274,12 @@ export function respondWithDaemonError(res: ServerResponse, err: any): void {
     jsonResponse(res, 400, noFundedPublisherWalletBody(typeof err?.message === 'string' ? err.message : String(err)));
   } else if (respondIfPcaFundingUnknown(res, err)) {
     // A rethrowing publish path has the same retryable verdict as /vm/publish.
+  } else if (isListContextGraphsBudgetExceeded(err)) {
+    res.setHeader('Retry-After', '1');
+    jsonResponse(res, 503, {
+      error: 'Context graph listing is temporarily busy; retry the request',
+      code: err.code, retryable: true,
+    });
   } else if (respondIfStoreUnavailable(res, err)) {
     // Store admission pressure and adapter deadlines are transient. The typed
     // response preserves whether work never started or may have completed.

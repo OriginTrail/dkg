@@ -28,6 +28,10 @@ export default defineConfig({
           'test/snapshot-job-isolation.test.ts',
           'test/sync-checkpoint-command.test.ts',
           'test/core-chain-cache-config.test.ts',
+          'test/mcp-claude-relocated.test.ts',
+          'test/mcp-uninstall-command.test.ts',
+          'test/mcp-uninstall.test.ts',
+          'test/mcp-setup.test.ts',
           'test/mcp-config-document.test.ts',
           'test/mcp-launch-command.test.ts',
           'test/mcp-physical-config.test.ts',
@@ -58,6 +62,7 @@ export default defineConfig({
           'test/publisher-job-by-intent-route.test.ts',
           'test/publisher-journal-route.test.ts',
           'test/publisher-clear-job-route.test.ts',
+          'test/clear-job-cli.test.ts',
           // GH#2270 follow-up — who may force-clear a job whose transaction may still land.
           // A pure route-handler test, no hardhat, so it belongs in this lane.
           'test/publisher-clear-job-override-authz.test.ts',
@@ -75,6 +80,8 @@ export default defineConfig({
           'test/reconcile-503-mapping.test.ts',
           'test/sealed-create-retry-route.test.ts',
           'test/config.test.ts',
+          'test/daemon-log-rotation.test.ts',
+          'test/daemon-log-rotation-io.test.ts',
           'test/status-route-rpc.test.ts',
           // Pure: in-process status route and a chain adapter over scripted endpoints.
           'test/status-chain-rpc.test.ts',
@@ -363,6 +370,7 @@ export default defineConfig({
           // + injected fetch/spawn/fs; no network, no real binary.
           'test/oxigraph-binary.test.ts',
           'test/oxigraph-listen-port.test.ts',
+          'test/daemon-startup-wait.test.ts',
           'test/oxigraph-server.test.ts',
           'test/oxigraph-server-native.test.ts',
           'test/oxigraph-server-wal.test.ts',

@@ -467,6 +467,7 @@ export {
   readDaemonPid,
   isProcessAlive,
   readDkgApiPort,
+  readDkgApiPortSync,
   loadAuthTokenSync,
   loadAuthToken,
   toEip55Checksum,
@@ -548,3 +549,5 @@ export { ProtocolReadLimitError } from './bounded-stream-read.js';
 
 export * from './async-admission-usage.js';
 export * from './async-admission-diagnostic-context.js';
+
+export { canonicalContextGraphAgentDid, contextGraphBelongsToAgent, type ContextGraphMembership } from './context-graph-membership.js';

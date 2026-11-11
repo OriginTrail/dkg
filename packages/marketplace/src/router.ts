@@ -9,6 +9,17 @@
  *      epoch, each from the peer its offer names, which must answer as the
  *      offer's seller. A quote that does not read as one
  *      (`quoteResponseFromWire`) counts as no answer.
+ *   A call with tools goes only to a seller whose quote says it takes tool
+ *   calls for the service. A pick knows of each seller whether it can serve
+ *   now and whether it takes tools, each yes, no or not known (`Outcome`):
+ *   a seller whose kept quote says it takes none is known so and not searched;
+ *   one that answers that it serves but takes none uses up no place of the
+ *   three; and the pick asks at most `QUOTES_PER_PICK` new quotes. With no
+ *   route, it says none takes tools (`tools_unsupported`) only when a seller
+ *   serves but takes none and every seller is known to take none; a seller it
+ *   did not read, or one that cannot serve now but may take them (unreachable,
+ *   now or in the ten minutes after, or saying it takes them), makes it a pick
+ *   with no route for now (`no_seller`).
  *   4. It stays with the seller that answered, so each seller gets one run of
  *      nonces, and moves on when a seller is unreachable, for ten minutes, or
  *      returns a receipt that fails the buyer's checks, for the rest of the epoch.
@@ -35,12 +46,40 @@ export const UNREACHABLE_MS = 10 * 60_000;
 /** How long the chain's answer of which identity a wallet signs for is kept. */
 export const SIGNER_TTL_MS = 5 * 60_000;
 const QUOTED_CANDIDATES = 3;
+/**
+ * The most new quotes one pick asks for; kept quotes it reads for nothing. A call with tools reads on past sellers that
+ * serve but take none, which use up none of the `QUOTED_CANDIDATES` places, up to this many.
+ */
+export const QUOTES_PER_PICK = 12;
+
+/** Whether something is so of a seller, as far as a pick knows. */
+type Known = 'yes' | 'no' | 'unknown';
+
+/** What a pick knows of one seller: whether it can serve the call now (at its quoted price), and whether it takes tools. */
+interface Outcome {
+  serves: Known;
+  tools: Known;
+  pricePerUnit?: bigint;
+}
+
+/** A seller the pick did not read: nothing is known of it. */
+const UNREAD: Outcome = { serves: 'unknown', tools: 'unknown' };
+/** A seller held out for ten minutes after it did not answer: it cannot serve now, and may take tools. */
+const COOLING: Outcome = { serves: 'no', tools: 'unknown' };
 
 export interface Route {
   seller: bigint;
   peerId: string;
   pricePerUnit: bigint;
 }
+
+/** What a call needs of its seller beyond the service: that it take tool calls. */
+export interface RouteNeeds {
+  tools?: boolean;
+}
+
+/** A pick: a route, or why there is none: no seller serves now, or none of those that do takes tool calls. */
+export type RoutePick = { route: Route } | { route: null; reason: 'no_seller' | 'tools_unsupported' };
 
 export interface RouterDeps {
   chain: Pick<MarketplaceChainAdapter, 'getMarketplaceContracts' | 'getIdentityIdForAddress' | 'isShardingTableMember'>;
@@ -71,34 +110,65 @@ export class Router {
   }
 
   /** The seller for a call to `serviceId` in `epoch`, under `maxPricePerUnit`; `null` when none can serve it. */
-  async pick(serviceId: string, epoch: number, maxPricePerUnit: bigint): Promise<Route | null> {
+  async pick(serviceId: string, epoch: number, maxPricePerUnit: bigint, needs: RouteNeeds = {}): Promise<Route | null> {
+    return (await this.pickFor(serviceId, epoch, maxPricePerUnit, needs)).route;
+  }
+
+  /**
+   * As `pick`, with why there is no route when there is none. Each seller's `Outcome` is what the pick learned of
+   * it: from a kept quote, a new one, or nothing; the route is the first, in order, that serves and takes the call,
+   * and the reason for none comes from all of them.
+   */
+  async pickFor(serviceId: string, epoch: number, maxPricePerUnit: bigint, needs: RouteNeeds = {}): Promise<RoutePick> {
     const now = this.clock();
     const pinned = (await this.deps.pinned?.(serviceId)) ?? [];
+    const outcomes: Outcome[] = [];
+    const searched: Offer[] = [];
     const offers = (await this.offersOf([epoch])).filter((o) =>
-      o.serviceId === serviceId && o.epoch === epoch && o.pricePerUnit <= maxPricePerUnit
-      && this.failedIn.get(o.seller.toString()) !== epoch
-      && (this.unreachableUntil.get(o.seller.toString()) ?? 0) <= now);
-    const candidates: Offer[] = [];
-    for (const o of offers) if (await this.deps.chain.isShardingTableMember(o.seller)) candidates.push(o);
+      o.serviceId === serviceId && o.epoch === epoch && o.pricePerUnit <= maxPricePerUnit && this.failedIn.get(o.seller.toString()) !== epoch);
+    for (const o of offers) {
+      if ((this.unreachableUntil.get(o.seller.toString()) ?? 0) > now) {
+        outcomes.push(COOLING);
+        continue;
+      }
+      if (!(await this.deps.chain.isShardingTableMember(o.seller))) continue;
+      // A call with tools does not search a seller whose kept quote says it takes none: that quote is what it knows.
+      const kept = needs.tools ? this.keptQuote(o.seller, serviceId, epoch, now) : undefined;
+      const known = kept && outcomeOf(kept, serviceId, epoch, maxPricePerUnit);
+      if (known && known.tools !== 'yes') outcomes.push(known);
+      else searched.push(o);
+    }
     const rank = (o: Offer) => [
       (this.demotedUntil.get(o.seller.toString()) ?? 0) > now ? 1 : 0,
       o.seller === this.sticky.get(serviceId) ? 0 : 1,
       pinned.includes(o.seller) ? 0 : 1,
     ];
-    candidates.sort((a, b) => {
+    searched.sort((a, b) => {
       const [ra, rb] = [rank(a), rank(b)];
       for (let i = 0; i < ra.length; i++) if (ra[i] !== rb[i]) return ra[i]! - rb[i]!;
       if (a.pricePerUnit !== b.pricePerUnit) return a.pricePerUnit < b.pricePerUnit ? -1 : 1;
       return (this.latency.get(a.seller.toString()) ?? Infinity) - (this.latency.get(b.seller.toString()) ?? Infinity);
     });
-    for (const offer of candidates.slice(0, QUOTED_CANDIDATES)) {
-      const quote = await this.quoteOf(offer.seller, offer.peerId, serviceId, epoch, now);
-      const quoted = quote?.offers.find((q) => q.serviceId === serviceId);
-      if (!quote || quote.epoch !== epoch || !quoted?.available || BigInt(quoted.pricePerUnit) > maxPricePerUnit) continue;
-      this.sticky.set(serviceId, offer.seller);
-      return { seller: offer.seller, peerId: offer.peerId, pricePerUnit: BigInt(quoted.pricePerUnit) };
+    // `places`: sellers read that could not serve, of the three; `asked`: new quotes, of `QUOTES_PER_PICK`.
+    let places = 0;
+    let asked = 0;
+    for (const offer of searched) {
+      const kept = this.keptQuote(offer.seller, serviceId, epoch, now);
+      if (places >= QUOTED_CANDIDATES || (!kept && asked >= QUOTES_PER_PICK)) {
+        outcomes.push(UNREAD);
+        continue;
+      }
+      if (!kept) asked += 1;
+      const outcome = outcomeOf(kept ?? await this.quoteOf(offer.seller, offer.peerId, serviceId, epoch, now), serviceId, epoch, maxPricePerUnit);
+      outcomes.push(outcome);
+      if (outcome.serves === 'yes' && (!needs.tools || outcome.tools === 'yes')) {
+        this.sticky.set(serviceId, offer.seller);
+        return { route: { seller: offer.seller, peerId: offer.peerId, pricePerUnit: outcome.pricePerUnit! } };
+      }
+      // One that serves but takes no tools uses up no place: a call with tools reads on for one that does.
+      if (outcome.serves !== 'yes') places += 1;
     }
-    return null;
+    return { route: null, reason: needs.tools && toolsUnsupported(outcomes) ? 'tools_unsupported' : 'no_seller' };
   }
 
   /** A seller that did not answer: left out for ten minutes. */
@@ -165,8 +235,8 @@ export class Router {
   /** The seller's quote for `serviceId` in `epoch`: the one kept, while it is for that epoch and within its five minutes, or a new one. */
   private async quoteOf(seller: bigint, peerId: string, serviceId: string, epoch: number, now: number): Promise<QuoteResponse | null> {
     const key = `${seller}:${serviceId}`;
-    const kept = this.quotes.get(key);
-    if (kept && kept.quote.epoch === epoch && now - kept.at < QUOTE_TTL_MS) return kept.quote;
+    const kept = this.keptQuote(seller, serviceId, epoch, now);
+    if (kept) return kept;
     try {
       // A quote that does not read as one counts as no answer.
       const quote = quoteResponseFromWire(await this.deps.quote(peerId, [serviceId]));
@@ -177,6 +247,12 @@ export class Router {
       this.unreachable(seller);
       return null;
     }
+  }
+
+  /** The quote kept from `seller` for `serviceId`, while it is for `epoch` and within its five minutes. */
+  private keptQuote(seller: bigint, serviceId: string, epoch: number, now: number): QuoteResponse | undefined {
+    const kept = this.quotes.get(`${seller}:${serviceId}`);
+    return kept && kept.quote.epoch === epoch && now - kept.at < QUOTE_TTL_MS ? kept.quote : undefined;
   }
 
   private forget(seller: bigint): void {
@@ -196,4 +272,22 @@ export class Router {
       return undefined;
     }
   }
+}
+
+/**
+ * What a quote says of a seller for a call: it serves when it is for the epoch and offers the service, available, at
+ * or under the price cap; it takes tools when its offer says so. No quote, or one for another epoch, says nothing of
+ * its tools.
+ */
+function outcomeOf(quote: QuoteResponse | null, serviceId: string, epoch: number, maxPricePerUnit: bigint): Outcome {
+  if (!quote || quote.epoch !== epoch) return { serves: 'no', tools: 'unknown' };
+  const quoted = quote.offers.find((q) => q.serviceId === serviceId);
+  const tools: Known = quoted?.tools === true ? 'yes' : 'no';
+  if (!quoted?.available || BigInt(quoted.pricePerUnit) > maxPricePerUnit) return { serves: 'no', tools };
+  return { serves: 'yes', tools, pricePerUnit: BigInt(quoted.pricePerUnit) };
+}
+
+/** Whether no seller takes tools, for certain: one serves without them, and every seller is known to take none. */
+function toolsUnsupported(outcomes: readonly Outcome[]): boolean {
+  return outcomes.some((o) => o.serves === 'yes') && outcomes.every((o) => o.tools === 'no');
 }

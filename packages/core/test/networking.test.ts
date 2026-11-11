@@ -298,6 +298,35 @@ describe('GossipSubManager', () => {
     }, { timeout: 10_000, interval: 250 });
   }, 20_000);
 
+  it('leaves the topics it meshes on out of the mesh peer\'s peer-store record', async () => {
+    const node1 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'] });
+    const node2 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'] });
+    nodes.push(node1, node2);
+    await node1.start();
+    await node2.start();
+    const gossip1 = new GossipSubManager(node1, new TypedEventBus());
+    const gossip2 = new GossipSubManager(node2, new TypedEventBus());
+    const topics = Array.from({ length: 6 }, (_, i) => `dkg/context-graph/mesh-tags-${i}/finalization`);
+    for (const topic of topics) {
+      gossip1.subscribe(topic);
+      gossip2.subscribe(topic);
+    }
+    await connectNodes(node1, node2);
+    const data = new TextEncoder().encode('profile');
+    await vi.waitFor(async () => {
+      for (const topic of topics) {
+        expect(node1.libp2p.services.pubsub.getMeshPeers(topic)).toContain(node2.peerId);
+        // A message that reaches the peer also carries any GRAFT still waiting to go out.
+        await expect(gossip1.publish(topic, data)).resolves.toEqual([node2.peerId]);
+      }
+    }, { timeout: 10_000, interval: 250 });
+
+    // The read waits for writes to the record that are still pending.
+    const record = await node1.libp2p.peerStore.get(peerIdFromString(node2.peerId));
+    expect(record.protocols.length, 'the record of a connected peer').toBeGreaterThan(0);
+    expect([...record.tags.keys()].filter((tag) => topics.includes(tag))).toEqual([]);
+  }, 20_000);
+
   it('does not say who got a message when the pubsub implementation does not', async () => {
     const pubsub = {
       addEventListener: () => {},

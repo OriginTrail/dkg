@@ -58,6 +58,15 @@ describe('access keys in memory', () => {
     expect(await new AccessKeys(dir).list()).toEqual(await keys.list());
   });
 
+  it('give two keys made at once ids of their own, each checked under the ledger lock', async () => {
+    // Both makes draw the same first secret; the one that writes second draws again.
+    const draws = [Buffer.alloc(24, 1), Buffer.alloc(24, 1), Buffer.alloc(24, 2)];
+    const keys = new AccessKeys(dir, () => draws.shift()!);
+    const made = await Promise.all([keys.make(scopes(1n), 1), keys.make(scopes(1n), 1)]);
+    expect(made.map((m) => m.key.keyId)).toEqual([`dkgmk_${'01'.repeat(8)}`, `dkgmk_${'02'.repeat(8)}`]);
+    expect((await lines()).map((l) => l.keyId)).toEqual(made.map((m) => m.key.keyId));
+  });
+
   it('fold what the calls of an epoch made final charged into each key', async () => {
     const keys = new AccessKeys(dir);
     const { key } = await keys.make(scopes(1_000n), 1);

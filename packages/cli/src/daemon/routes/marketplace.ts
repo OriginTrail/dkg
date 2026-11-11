@@ -65,6 +65,14 @@ import { isMarketplaceGatewayRoute } from './marketplace-gateway-paths.js';
 
 const PREFIX = '/api/marketplace';
 
+/**
+ * A view's `accountsError` is a chain read's error message. Like an error body, it must not carry RPC URLs, which
+ * can hold an API key: they are stripped here, as `sanitizeRpcMessage` strips them from error bodies.
+ */
+function withRedactedAccountsError<V extends { accountsError?: string }>(view: V): V {
+  return view.accountsError === undefined ? view : { ...view, accountsError: sanitizeRpcMessage(view.accountsError) };
+}
+
 // The status of a refusal by its kind. Any other refusal, the contracts' and
 // the seller's `EpochStarted` among them, is a conflict with the chain's state
 // as it is now: 409.
@@ -246,8 +254,8 @@ async function answer(buyer: Buyer, method: string, route: string, ctx: RequestC
     const asked = url.searchParams.get('epoch');
     return gatewayOf(ctx).reconciliation(asked === null ? epoch : parseEpoch(asked, epoch));
   }
-  if (method === 'GET' && route === '/funding') return fundingView(buyer);
-  if (method === 'GET' && route === '/accounts') return accountsView(buyer);
+  if (method === 'GET' && route === '/funding') return withRedactedAccountsError(await fundingView(buyer));
+  if (method === 'GET' && route === '/accounts') return withRedactedAccountsError(await accountsView(buyer));
   if (method === 'GET' && route === '/accounts/contracts') return contractsView(buyer);
 
   // GET, POST /keys and POST /keys/{keyId}/revoke: the gateway's access keys, the node admin's alone.

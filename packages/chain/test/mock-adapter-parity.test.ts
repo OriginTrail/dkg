@@ -166,6 +166,9 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'isWalletFundable',
   'nextRandomSamplingSigner',
   'sendRandomSamplingTx',
+  // The stale-eligibility self-heal shared by the RS send and the marketplace
+  // receipt batch: TS-protected, the same category as the two above.
+  'sendFromRegisteredSigner',
   // Funding-aware publish wallet selection internals (native+TRAC balance
   // reads, the fundability gate, the cache, and the insufficient-funds error
   // enrichment). EVM-only — the mock has no provider/ERC-20 balance surface
