@@ -613,7 +613,7 @@ describe('PanelRight component', () => {
     }
   }, 20_000);
 
-  it('a reply that streams and finishes while the panel is closed is there, once, when it reopens', async () => {
+  it('a reply that streams while the panel is closed keeps its text, and later deltas and the finish add to it once', async () => {
     let options: any;
     let finish: (value: unknown) => void = () => {};
     streamLocalAgentChatMock.mockImplementation((_id: string, _text: string, opts: any) => {
@@ -637,22 +637,51 @@ describe('PanelRight component', () => {
     });
     await waitForAssertion(() => expect(options).toBeTruthy());
 
-    // Close the panel, then the reply streams in and finishes.
+    // Close the panel; part of the reply streams in while it is closed.
     await act(async () => { root.unmount(); });
-    const reply = 'Streamed and finished while the panel was closed';
+    const partial = 'Streamed while the panel was closed';
     await act(async () => {
-      options.onEvent?.({ type: 'text_delta', delta: 'Streamed and finished ' });
-      options.onEvent?.({ type: 'text_delta', delta: 'while the panel was closed' });
-      finish({ text: reply, correlationId: 'corr-closed' });
+      options.onEvent?.({ type: 'text_delta', delta: partial });
       await Promise.resolve();
     });
 
+    // Reopen while the request is still pending. History on reopen already
+    // holds an earlier snapshot of this turn, stored under its own URI: it must
+    // not replace the row the stream is still writing to.
+    const snapshot = 'Persisted snapshot';
+    fetchLocalAgentHistoryMock.mockResolvedValue([
+      { uri: 'urn:dkg:chat:user-closed', author: 'user', text: 'Answer while I look away', ts: new Date().toISOString(), turnId: options.correlationId, persistStatus: 'stored' },
+      { uri: 'urn:dkg:chat:reply-closed', author: 'assistant', text: snapshot, ts: new Date().toISOString(), turnId: options.correlationId, persistStatus: 'pending' },
+    ]);
+    const historyCalls = fetchLocalAgentHistoryMock.mock.calls.length;
     root = createRoot(container);
     await act(async () => { root.render(React.createElement(PanelRight)); });
+    const count = (s: string) => container.textContent!.split(s).length - 1;
     try {
+      await waitForAssertion(() => expect(fetchLocalAgentHistoryMock.mock.calls.length).toBeGreaterThan(historyCalls));
+      await act(async () => { await Promise.resolve(); });
+      await waitForAssertion(() => expect(container.textContent).toContain(partial));
+      expect(container.textContent).not.toContain(snapshot);
+      expect(container.querySelector('button[aria-label="Stop reply"]')).toBeTruthy();
+
+      // A later delta reaches the reopened panel and appears once.
+      const rest = ', and kept streaming once it reopened';
+      await act(async () => {
+        options.onEvent?.({ type: 'text_delta', delta: rest });
+        await Promise.resolve();
+      });
+      const reply = partial + rest;
       await waitForAssertion(() => expect(container.textContent).toContain(reply));
-      expect(container.textContent!.split(reply).length - 1).toBe(1);
-      expect(container.querySelector('button[aria-label="Send message"]')).toBeTruthy();
+      expect(count(reply)).toBe(1);
+
+      // Finishing keeps the transcript: the reply once, and the panel ready to send.
+      await act(async () => {
+        finish({ text: reply, correlationId: 'corr-closed' });
+        await Promise.resolve();
+      });
+      await waitForAssertion(() => expect(container.querySelector('button[aria-label="Send message"]')).toBeTruthy());
+      expect(count(reply)).toBe(1);
+      expect(count('Answer while I look away')).toBe(1);
       expect(container.querySelector('button[aria-label="Stop reply"]')).toBeNull();
     } finally {
       await act(async () => { root.unmount(); });
@@ -1178,6 +1207,94 @@ describe('PanelRight component', () => {
     });
     container.remove();
   });
+
+  it('a queued file survives closing the panel, and its upload can finish while the panel is closed', async () => {
+    let finishImport: (value: unknown) => void = () => {};
+    importFileMock.mockImplementation(() => new Promise((resolve) => { finishImport = resolve; }));
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    act(() => {
+      useProjectsStore.setState({
+        contextGraphs: [{ id: 'testing', name: 'Testing' }],
+        loading: false,
+        activeProjectId: 'testing',
+      });
+    });
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let root = createRoot(container);
+    const open = async () => {
+      root = createRoot(container);
+      await act(async () => { root.render(React.createElement(PanelRight)); });
+      await act(async () => { await Promise.resolve(); });
+    };
+    const close = async () => { await act(async () => { root.unmount(); }); };
+    const chipNames = () => Array.from(container.querySelectorAll('.v10-attachment-chip'))
+      .map((chip) => chip.textContent ?? '');
+
+    try {
+      await act(async () => { root.render(React.createElement(PanelRight)); });
+      await act(async () => { await Promise.resolve(); });
+
+      // Pick the context graph, then queue a file through the attach button's input.
+      const projectTrigger = container.querySelector('.v10-local-agent-target-select .v10-select-trigger') as HTMLButtonElement | null;
+      await act(async () => { projectTrigger!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+      const testingOption = Array.from(document.body.querySelectorAll('.v10-select-option'))
+        .find((opt) => opt.textContent?.trim() === 'Testing') as HTMLElement | undefined;
+      await act(async () => { testingOption!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+      const attachInput = Array.from(container.querySelectorAll('input[type="file"]'))
+        .find((el) => !el.hasAttribute('tabindex')) as HTMLInputElement | null;
+      const file = new File(['# Draft'], 'draft.md', { type: 'text/markdown', lastModified: 789 });
+      await act(async () => {
+        Object.defineProperty(attachInput, 'files', { configurable: true, value: [file] });
+        attachInput!.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      await waitForAssertion(() => expect(chipNames().some((name) => name.includes('draft.md'))).toBe(true));
+
+      // Close and reopen, as switching panels on a narrow screen does: the file is still queued.
+      await close();
+      await open();
+      await waitForAssertion(() => expect(chipNames().some((name) => name.includes('draft.md'))).toBe(true));
+      expect(importFileMock).not.toHaveBeenCalled();
+
+      // Send from the reopened panel, then close it while the upload is still running.
+      await act(async () => {
+        (container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement).click();
+      });
+      await waitForAssertion(() => expect(importFileMock).toHaveBeenCalledTimes(1));
+      expect(importFileMock).toHaveBeenCalledWith(expect.any(String), 'testing', file);
+      await close();
+
+      await act(async () => {
+        finishImport({
+          assertionUri: 'urn:dkg:assertion:draft',
+          fileHash: 'sha256:draft',
+          detectedContentType: 'text/markdown',
+          rootEntity: 'urn:dkg:assertion:draft#root',
+          extraction: { status: 'completed', tripleCount: 2, pipelineUsed: 'markdown' },
+        });
+        await Promise.resolve();
+      });
+
+      // The send carries on while the panel is closed, with the original file and context graph.
+      await waitForAssertion(() => expect(streamLocalAgentChatMock).toHaveBeenCalled());
+      const [, , options] = streamLocalAgentChatMock.mock.calls.at(-1) ?? [];
+      expect(options.attachments).toEqual([
+        expect.objectContaining({ fileName: 'draft.md', contextGraphId: 'testing', assertionUri: 'urn:dkg:assertion:draft' }),
+      ]);
+      expect(importFileMock).toHaveBeenCalledTimes(1);
+
+      // Reopened, the sent file is no longer queued and was imported once.
+      await open();
+      await waitForAssertion(() => expect(chipNames().some((name) => name.includes('draft.md'))).toBe(false));
+      expect(importFileMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await close();
+      container.remove();
+    }
+  }, 20_000);
 
   it('keeps skipped-import-only transport text blank while showing the import summary locally', async () => {
     importFileMock.mockResolvedValue({

@@ -80,11 +80,11 @@
 /* Avatars 20 / 24 / 32 on the shared scale; chip heights match the controls. */
 .v10-agent-chip-sm { height: var(--h-control-sm); box-sizing: border-box; padding: 0 9px 0 2px; font-size: var(--fs-label); }
 .v10-agent-chip-sm .v10-agent-chip-avatar { width: 20px; height: 20px; font-size: var(--fs-micro); }
-.v10-agent-chip-sm .v10-agent-chip-glyph { width: 10px; height: 10px; font-size: 7px; bottom: -2px; right: -4px; }
+.v10-agent-chip-sm .v10-agent-chip-glyph { width: 12px; height: 12px; font-size: var(--fs-micro); bottom: -3px; right: -4px; }
 
 .v10-agent-chip-md { height: 28px; box-sizing: border-box; padding: 0 10px 0 2px; font-size: var(--fs-control); }
 .v10-agent-chip-md .v10-agent-chip-avatar { width: 24px; height: 24px; font-size: var(--fs-micro); }
-.v10-agent-chip-md .v10-agent-chip-glyph { width: 12px; height: 12px; font-size: 8px; bottom: -2px; right: -4px; }
+.v10-agent-chip-md .v10-agent-chip-glyph { width: 14px; height: 14px; font-size: var(--fs-micro); bottom: -3px; right: -4px; }
 
 .v10-agent-chip-lg { min-height: 40px; box-sizing: border-box; padding: 4px 14px 4px 4px; font-size: var(--fs-body); }
 .v10-agent-chip-lg .v10-agent-chip-avatar { width: 32px; height: 32px; font-size: var(--fs-control); }

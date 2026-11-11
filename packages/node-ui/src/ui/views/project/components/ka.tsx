@@ -428,7 +428,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   return (
     <div className="v10-ka-detail">
       <div className="v10-ka-header">
-        <button className="v10-ka-back" onClick={onClose}>← Back to Context Graph</button>
+        <button className="v10-ka-back" onClick={onClose}>← Back to context graph</button>
         <div className="v10-ka-header-left">
           <div className="v10-ka-label">{detailNoun}</div>
           <div className="v10-ka-name">

@@ -421,7 +421,7 @@ export function PanelRight() {
         sessionId: getDefaultLocalAgentSessionId(integrationId),
       });
       conversationActions.clear(conversation.stateKey);
-      setConnectNotice('DKG Local LLM session cleared. You can now select a different Context Graph.');
+      setConnectNotice('DKG Local LLM session cleared. You can now select a different context graph.');
       await refreshLocalIntegrations();
     } catch (err: any) {
       setConnectError(err?.message ?? 'Failed to clear the local LLM session.');

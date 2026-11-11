@@ -96,20 +96,12 @@ function collect(): Record<string, Hit[]> {
   return hits;
 }
 
-/**
- * Glyphs drawn to fit a fixed-size mark keep a raw size: the agent chip glyph
- * and the small Context Graph mark (DESIGN.md · Type). Nothing else does.
- */
-const GLYPH_RULE = /\.v10-agent-chip-glyph|\.v10-cg-mark-sm\b/;
-
-/** Every match of a pattern in the UI source, as "file  match", skipping glyph rules. */
+/** Every match of a pattern in the UI source, as "file  match". */
 function findInUi(pattern: RegExp): string[] {
   return walk(UI).flatMap((full) => {
     const file = relative(UI, full).split('\\').join('/');
     if (isIgnored(file)) return [];
-    return readFileSync(full, 'utf8').split('\n')
-      .filter((line) => !GLYPH_RULE.test(line))
-      .flatMap((line) => [...line.matchAll(pattern)].map((m) => `  ${file}  ${m[0]}`));
+    return [...readFileSync(full, 'utf8').matchAll(pattern)].map((m) => `  ${file}  ${m[0]}`);
   });
 }
 

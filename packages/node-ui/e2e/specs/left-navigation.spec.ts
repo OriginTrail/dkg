@@ -9,7 +9,7 @@ test.describe('Left Panel Navigation (rc.12)', () => {
   });
 
   test('My Context Graphs is expanded by default, and Public graphs collapsed', async ({ leftPanel }) => {
-    await expect(leftPanel.sectionHeader('My Context Graphs')).toHaveAttribute('aria-expanded', 'true');
+    await expect(leftPanel.sectionHeader('My context graphs')).toHaveAttribute('aria-expanded', 'true');
     await expect(leftPanel.sectionHeader('Public graphs')).toHaveAttribute('aria-expanded', 'false');
   });
 
@@ -67,14 +67,14 @@ test.describe('Left Panel Navigation (rc.12)', () => {
   });
 
   test('expanding Public graphs leaves My Context Graphs expanded, with both lists on show', async ({ leftPanel }) => {
-    const mine = leftPanel.section('My Context Graphs');
+    const mine = leftPanel.section('My context graphs');
     const discovered = leftPanel.section('Public graphs');
-    await expect(leftPanel.sectionHeader('My Context Graphs')).toHaveAttribute('aria-expanded', 'true');
+    await expect(leftPanel.sectionHeader('My context graphs')).toHaveAttribute('aria-expanded', 'true');
     await expect(leftPanel.sectionHeader('Public graphs')).toHaveAttribute('aria-expanded', 'false');
     await leftPanel.expandSection('Public graphs');
     // Nothing is opened again: both sections stay as that one click left them.
     await expect(leftPanel.sectionHeader('Public graphs')).toHaveAttribute('aria-expanded', 'true');
-    await expect(leftPanel.sectionHeader('My Context Graphs')).toHaveAttribute('aria-expanded', 'true');
+    await expect(leftPanel.sectionHeader('My context graphs')).toHaveAttribute('aria-expanded', 'true');
     const myRows = mine.locator(sel.leftPanel.peerGroupBody).locator(sel.leftPanel.section);
     for (const name of [PRIMARY_CG, SECONDARY_CG]) await expect(myRows.filter({ hasText: name }).first()).toBeVisible();
     // Public graphs lists the graphs the node discovered, or says there are none yet.

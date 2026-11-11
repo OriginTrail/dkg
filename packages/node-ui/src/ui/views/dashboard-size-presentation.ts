@@ -15,7 +15,7 @@ export function dashboardSizePresentation(size: {
   const entityTitle = size.triplesUnknown
     ? 'Live entity count unavailable — showing the published Knowledge-Asset summary (not the full WM/SWM/VM entity total)'
     : size.sizeApprox
-      ? 'Some Context Graphs reported only their Knowledge-Asset summary — this total mixes summary and live counts and is approximate'
+      ? 'Some context graphs reported only their Knowledge-Asset summary — this total mixes summary and live counts and is approximate'
       : undefined;
   return {
     entityValue: `${prefix}${size.entities.total.toLocaleString()}${suffix}`,

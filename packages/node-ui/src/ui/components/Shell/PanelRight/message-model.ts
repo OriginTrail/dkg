@@ -126,13 +126,19 @@ function localMessageKey(message: LocalAgentMessage): string {
 }
 
 export function mergeLocalAgentMessages(existing: LocalAgentMessage[], incoming: LocalAgentMessage[]): LocalAgentMessage[] {
+  // A reply that is still streaming keeps its own row: its request updates
+  // that row by id, so a history snapshot of the same turn must not replace it.
+  const streaming = new Map<string, LocalAgentMessage>();
+  for (const message of existing) {
+    if (message.streaming) streaming.set(localMessageKey(message), message);
+  }
   const seen = new Set<string>();
   const merged: LocalAgentMessage[] = [];
   for (const message of [...incoming, ...existing]) {
     const key = localMessageKey(message);
     if (seen.has(key)) continue;
     seen.add(key);
-    merged.push(message);
+    merged.push(streaming.get(key) ?? message);
   }
   return merged;
 }

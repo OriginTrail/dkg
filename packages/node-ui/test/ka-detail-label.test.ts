@@ -25,7 +25,7 @@ describe('layerNoun', () => {
 
 const profile: ProjectProfile = {
   contextGraphId: 'cg-test',
-  displayName: 'Context Graph Test',
+  displayName: 'Context graph Test',
   primaryColor: '#64748b',
   accentColor: '#22c55e',
   subGraphs: [],
@@ -108,7 +108,7 @@ describe('KADetailView navigation label', () => {
     });
 
     const back = query('.v10-ka-back');
-    expect(back.textContent).toContain('Back to Context Graph');
+    expect(back.textContent).toContain('Back to context graph');
     expect(back.textContent).not.toContain('Back to Project');
 
     await act(async () => {

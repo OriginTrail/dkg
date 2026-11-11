@@ -121,7 +121,7 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
           <div className="v10-notif-pane-empty" role="status">
             <div className="v10-notif-pane-empty-lead">You’re all caught up.</div>
             <div className="v10-notif-pane-empty-sub">
-              Join requests, approvals, and new activity in your Context Graphs will show up here.
+              Join requests, approvals, and new activity in your context graphs will show up here.
             </div>
           </div>
         ) : (

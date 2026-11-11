@@ -114,8 +114,8 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
           data-layer="query"
           aria-haspopup="menu"
           aria-expanded={moreOpen}
-          aria-label="More Context Graph views"
-          title="More Context Graph views"
+          aria-label="More context graph views"
+          title="More context graph views"
           onClick={() => setMoreOpen(open => !open)}
         >
           <span className="v10-layer-switch-icon">⋯</span>
@@ -137,15 +137,15 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
       </div>
       <div className="v10-layer-switcher-spacer" />
       <div className="v10-layer-switcher-actions">
-        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onShare} aria-label="Share Context Graph">
+        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onShare} aria-label="Share context graph">
           <span className="v10-layer-action-icon">⤴</span>
           <span className="v10-layer-action-label">Share</span>
         </button>
-        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onImport} aria-label="Import into Context Graph">
+        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onImport} aria-label="Import into context graph">
           <span className="v10-layer-action-icon">↑</span>
           <span className="v10-layer-action-label">Import</span>
         </button>
-        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onRefresh} aria-label="Refresh Context Graph data">
+        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onRefresh} aria-label="Refresh context graph data">
           <span className="v10-layer-action-icon">↻</span>
         </button>
       </div>
@@ -181,7 +181,7 @@ export function ProjectHeaderStrip({
         className="v10-project-strip-name"
         onClick={activeSubGraph ? onClearSubGraph : undefined}
         disabled={!activeSubGraph}
-        title={activeSubGraph ? 'Back to Context Graph overview' : cg.id}
+        title={activeSubGraph ? 'Back to context graph overview' : cg.id}
       >
         {name}
       </button>
@@ -227,7 +227,7 @@ function overviewAccessAgentStat(
       id: 'participants',
       value: 'Open',
       label: 'Public access',
-      tooltip: 'Public Context Graphs do not have an authoritative allowlist count.',
+      tooltip: 'Public context graphs do not have an authoritative allowlist count.',
     };
   }
   if (participantsStatus === 'loading') {
@@ -269,20 +269,20 @@ function overviewAccessState(raw?: string): { label: string; title: string; tone
   if (policy === 'public') {
     return {
       label: 'Public',
-      title: 'Public Context Graph.',
+      title: 'Public context graph.',
       tone: 'public',
     };
   }
   if (policy === 'private') {
     return {
       label: 'Curated',
-      title: 'Curated Context Graph with access controlled by the curator.',
+      title: 'Curated context graph with access controlled by the curator.',
       tone: 'curated',
     };
   }
   return {
     label: 'Access unknown',
-    title: 'The node did not provide an access policy for this Context Graph.',
+    title: 'The node did not provide an access policy for this context graph.',
     tone: 'unknown',
   };
 }
@@ -443,7 +443,7 @@ export function ProjectOverviewCard({
     ? subGraphFetchFailed
       ? 'Sub-graph list is currently unavailable.'
       : 'Sub-graph count is loading.'
-    : 'Topical partitions inside this Context Graph.';
+    : 'Topical partitions inside this context graph.';
   const pipeline = [
     {
       key: 'wm' as const,
@@ -493,7 +493,7 @@ export function ProjectOverviewCard({
             </span>
           </div>
           <div className="v10-po-identity-pair">
-            <span className="v10-po-identity-label">Context Graph:</span>
+            <span className="v10-po-identity-label">Context graph:</span>
             <span
               className="v10-po-badge"
               data-cg-type={access.tone}
@@ -508,9 +508,9 @@ export function ProjectOverviewCard({
             type="button"
             className="v10-po-identity-primer ds-btn ds-sm"
             onClick={onOpenPrimer}
-            title="Open the Context Graph primer"
+            title="Open the context graph primer"
           >
-            What is a Context Graph?
+            What is a context graph?
           </button>
         )}
       </div>
@@ -636,7 +636,7 @@ export function ProjectOverviewCard({
             // copy. Only curated CGs fall through to the loading /
             // error / "no participants" sequence.
             const emptyCopy = isPublicAccess
-              ? 'This Context Graph is public — anyone can subscribe.'
+              ? 'This context graph is public — anyone can subscribe.'
               : participantsStatus === 'loading'
                 ? 'Loading participant agents...'
                 : participantsStatus === 'error'
@@ -861,10 +861,10 @@ export function OverviewPrimerEntry({ onOpenPrimer }: { onOpenPrimer: () => void
         className="v10-po-primer-footer-link"
         onClick={onOpenPrimer}
       >
-        What is a Context Graph?
+        What is a context graph?
       </button>
       <div className="v10-po-primer-footer-sub">
-        A short primer on Context Graphs, the WM → SWM → VM pipeline, and how participant agents collaborate.
+        A short primer on context graphs, the WM → SWM → VM pipeline, and how participant agents collaborate.
       </div>
     </div>
   );
