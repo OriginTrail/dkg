@@ -1431,6 +1431,31 @@ describe('a store restored to an earlier state', () => {
     expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
     await expectUnion(adapter, layer, fixture, vm);
   });
+
+  it('keeps a read graph out of service from a restart seen before the backend is ready until a build after it', async () => {
+    const { adapter, fixture, layer, store, context } = await open();
+    let recovery = { generation: 1, ready: true };
+    registerStoreRecoveryGeneration(adapter, () => recovery);
+    const [vm] = fixture.keys as [ReadGraphKey];
+    const { wholeVm } = fixture.readGraphs;
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    const late = q('urn:s:late', '"late"', fixture.graphs[1]!);
+    await store.insert([late]);
+    // The worker exits, and its replacement reloads a snapshot from before that write: the member graph lacks it,
+    // the read graph still holds it. A query sees the new generation while the replacement is not ready yet.
+    recovery = { generation: 2, ready: false };
+    await adapter.delete([late]);
+    await store.query('ASK { ?s ?p ?o }');
+    expect(servingReadGraphGeneration(layer.runtime.mirror.get(wholeVm))).toBeUndefined();
+    // Ready at the generation already seen is no new restart, and puts nothing back into service.
+    recovery = { generation: 2, ready: true };
+    await store.query('ASK { ?s ?p ?o }');
+    expect(servingReadGraphGeneration(layer.runtime.mirror.get(wholeVm))).toBeUndefined();
+    // A build after it takes what the store holds, and serves.
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    expect(servingReadGraphGeneration(layer.runtime.mirror.get(wholeVm))).toBeDefined();
+    await expectUnion(adapter, layer, fixture, vm);
+  });
 });
 
 describe('the read-graph builder', () => {
