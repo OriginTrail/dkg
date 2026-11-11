@@ -307,6 +307,21 @@ describe("a service's tools", () => {
     expect(checks()).toBe(3);
   });
 
+  it('stay on when the backend refuses functions with no parameters: the check names one, and a call with one still reaches it', async () => {
+    await setUp();
+    const empty = (t: ToolSpec) => Object.keys((t.function.parameters?.properties ?? {}) as Record<string, unknown>).length === 0;
+    replies[A.backend]!.tools = (sent) => ((sent.tools as ToolSpec[]).some(empty) ? { status: 400, body: { error: { message: 'synthetic: properties must not be empty' } } } : { status: 200 });
+    // The buyer's function takes no parameters, so the backend refuses it; the check's has one, and is served.
+    expect(TOOLS[0].function.parameters.properties).toEqual({});
+    expect(body(await call(withTools(A.model)))).toMatchObject({ sellerCode: 'BadRequest', retry: false });
+    expect(checks()).toBe(1);
+    expect(await quoted(seller, A.model)).toMatchObject({ tools: true });
+    const withParameter = [{ type: 'function', function: { name: 'get_status', parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } } }];
+    const before = requests.length;
+    expect((await call(chat(A.model, { tools: withParameter }))).status).toBe(200);
+    expect(requests).toHaveLength(before + 1);
+  });
+
   it("stay on when the backend takes the function named but not its own choice: a named call still reaches it", async () => {
     await setUp();
     // As a server whose automatic choice of tools is not turned on: it refuses calls that leave the choice to the model.

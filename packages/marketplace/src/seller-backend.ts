@@ -31,15 +31,26 @@ const CALL_INVALID: ReadonlySet<number> = new Set([400, 422]);
 /** The longest a refused call with tools waits for the check of its backend's tools. */
 export const TOOLS_CHECK_WAIT_MS = 5_000;
 
-const NOOP: ToolSpec = { type: 'function', function: { name: 'noop', description: 'Does nothing.', parameters: { type: 'object', properties: {} } } };
+/**
+ * The checks' function, in the shape tool-taking backends take most widely: one required string parameter, no strict
+ * schema. Some backends refuse a function whose parameters have no properties.
+ */
+const ECHO: ToolSpec = {
+  type: 'function',
+  function: {
+    name: 'echo',
+    description: 'Echoes a word.',
+    parameters: { type: 'object', properties: { word: { type: 'string', description: 'The word to echo.' } }, required: ['word'] },
+  },
+};
 
 /**
  * The seller's own calls with tools, a few tokens long and with no buyer's content in them, in the order they are
  * asked: the model's own choice of tools, then the function named.
  */
 export const TOOLS_CHECKS: readonly CompletionCall[] = [
-  { messages: [{ role: 'user', content: 'Reply with OK.' }], maxTokens: 16, tools: [NOOP] },
-  { messages: [{ role: 'user', content: 'Call noop.' }], maxTokens: 16, tools: [NOOP], toolChoice: { type: 'function', function: { name: 'noop' } } },
+  { messages: [{ role: 'user', content: 'Reply with OK.' }], maxTokens: 16, tools: [ECHO] },
+  { messages: [{ role: 'user', content: 'Echo the word OK.' }], maxTokens: 16, tools: [ECHO], toolChoice: { type: 'function', function: { name: 'echo' } } },
 ];
 
 export interface ServiceBackendSettings {
