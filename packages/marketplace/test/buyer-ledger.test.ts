@@ -43,7 +43,7 @@ const REVOKED = 'dkgmk_03953501';
 /** What a ledger holds: its keys, what each reserves, and how many calls of epoch 3 it keeps. */
 async function stateOf(ledger: BuyerLedger) {
   const keys = await ledger.keyList();
-  return { keys, reserved: Object.fromEntries(keys.map((k) => [k.keyId, ledger.reservedOf(k.keyId)])), calls: ledger.calls.callsOf(3).length };
+  return { keys, reserved: Object.fromEntries(keys.map((k) => [k.keyId, ledger.reservedOf(k.keyId)])), calls: ledger.callsOf(3).length };
 }
 
 beforeEach(async () => {
@@ -87,8 +87,8 @@ describe('the journals the ledger replaces', () => {
     expect(await ledger.keyList()).toEqual([expect.objectContaining({ keyId: KEY.keyId, spent: '4', lastUsedAt: 3, revoked: false })]);
     expect(await ledger.takeNonce(2, SUB(2), 1n)).toBe(4n);
     // The call's last record is its receipt, whose cost the key's total holds already.
-    expect(ledger.calls.callsOf(2)).toEqual([callOf(2, SUB(2), 0, 4n)]);
-    expect(ledger.calls.heldValue(`${SUB(2)}:0`)).toBe(4n);
+    expect(ledger.callsOf(2)).toEqual([callOf(2, SUB(2), 0, 4n)]);
+    expect(ledger.heldValue(`${SUB(2)}:0`)).toBe(4n);
     expect(ledger.final(1)).toEqual([]);
     expect((await ledgerLines()).filter((l) => l.type === 'revoke')).toEqual([]);
   });
@@ -135,7 +135,7 @@ describe('the journals the ledger replaces', () => {
     await expect(ledger.recordAccepted(keptOf(3, SUB3, 9, 5n, MAIN), 7)).rejects.toBe(full);
     await expect(ledger.recordUnresolved({ ...callOf(3, SUB3, 9, undefined, MAIN), problem: 'unanswered' })).rejects.toBe(full);
     await expect(ledger.finalize(3, SUB3, [], [])).rejects.toBe(full);
-    expect(ledger.calls.callsOf(3)).toEqual([]);
+    expect(ledger.callsOf(3)).toEqual([]);
     expect(ledger.reservedOf(MAIN)).toBe(0n);
     // No ledger journal, nothing set aside, and the old journals as they were.
     expect((await readdir(dir)).sort()).toEqual((await readdir(FIXTURE)).sort());
@@ -188,7 +188,7 @@ describe("the ledger's compaction", () => {
     expect((await ledgerLines()).filter((l) => l.type === 'final')).toEqual([{ type: 'final', epoch: 1, rows: [{ subscriptionId: SUB(1) }] }]);
     const restarted = new BuyerLedger(dir);
     expect(await restarted.keyList()).toEqual(await ledger.keyList());
-    expect(restarted.calls.callsOf(2)).toEqual([callOf(2, SUB(2), 0, 7n)]);
+    expect(restarted.callsOf(2)).toEqual([callOf(2, SUB(2), 0, 7n)]);
   });
 
   it('keeps one revocation of each key, its last, however often the key was revoked', async () => {
@@ -225,7 +225,7 @@ describe("the ledger's compaction", () => {
     await one.finalize(1, SUB(1), [], []);
     const third = new BuyerLedger(dir);
     expect(await third.takeNonce(2, SUB(2), 1n)).toBe(1n);
-    expect(third.calls.callsOf(2)).toHaveLength(1);
+    expect(third.callsOf(2)).toHaveLength(1);
   });
 
   it('keeps every write made on the same ledger while it runs: the call, its charge, the nonce counter and the revocation', async () => {
@@ -263,8 +263,8 @@ describe("the ledger's compaction", () => {
     const reopened = new BuyerLedger(dir);
     await reopened.load();
     expect(reopened.final(1)).toEqual([]);
-    expect(reopened.calls.callsOf(1)).toEqual([]);
-    expect(reopened.calls.callsOf(2)).toEqual([keptOf(2, SUB(2), 0, 5n)]);
+    expect(reopened.callsOf(1)).toEqual([]);
+    expect(reopened.callsOf(2)).toEqual([keptOf(2, SUB(2), 0, 5n)]);
     // Epoch 1's charge folded in by the compaction, the current epoch's charge from its record, and the revocation.
     expect(await reopened.keyList()).toEqual([expect.objectContaining({ keyId: KEY.keyId, spent: '12', lastUsedAt: 12, revoked: true })]);
     expect(await reopened.keyList()).toEqual(await ledger.keyList());
@@ -286,7 +286,7 @@ describe('an accepted call', () => {
     await send(0);
     vi.spyOn(Journal.prototype, 'append').mockRejectedValueOnce(new Error('disk full'));
     await expect(ledger.recordAccepted(keptOf(1, SUB(1), 0, 7n), 3)).rejects.toThrow('disk full');
-    expect(ledger.calls.heldValue(`${SUB(1)}:0`)).toBe(7n);
+    expect(ledger.heldValue(`${SUB(1)}:0`)).toBe(7n);
     expect((await ledger.keyList())[0]).toMatchObject({ spent: '0', lastUsedAt: null });
     expect(ledger.reservedOf(KEY.keyId)).toBe(100n);
     // Written: charged the receipt's value at the time given, and its own reservation given back.
@@ -297,9 +297,28 @@ describe('an accepted call', () => {
     expect((await ledgerLines()).at(-1)).toEqual({ type: 'call', ...keptOf(1, SUB(1), 1, 9n), charge: { value: '9', at: 4 } });
     // A call whose reservation the gateway's job gave back already gives back nothing more.
     await send(2);
-    ledger.calls.release(callOf(1, SUB(1), 2));
+    ledger.releaseCall(callOf(1, SUB(1), 2));
     await ledger.recordAccepted(keptOf(1, SUB(1), 2, 5n), 5);
     expect((await ledger.keyList())[0]).toMatchObject({ spent: '14', lastUsedAt: 5 });
+    expect(ledger.reservedOf(KEY.keyId)).toBe(100n);
+  });
+});
+
+describe('a call whose cost is not known', () => {
+  it("gives back its key's reservation once, at the key and most value of the call as the ledger kept it", async () => {
+    const ledger = new BuyerLedger(dir);
+    await ledger.makeKey(KEY);
+    const call = callOf(1, SUB(1), 0);
+    expect(await ledger.reserve(KEY.keyId, 100n)).toBe(true);
+    await ledger.recordSent(call);
+    expect(ledger.keyHeldBefore(2)).toEqual([call]);
+    // Given back for a record of the call that names another key and less value: the call's own reservation goes.
+    ledger.releaseCall({ ...call, keyId: 'dkgmk_none', request: { ...call.request, maxValueWei: '1' } });
+    expect(ledger.reservedOf(KEY.keyId)).toBe(0n);
+    expect(ledger.keyHeldBefore(2)).toEqual([]);
+    // Once: the key's next reservation stays.
+    expect(await ledger.reserve(KEY.keyId, 100n)).toBe(true);
+    ledger.releaseCall(call);
     expect(ledger.reservedOf(KEY.keyId)).toBe(100n);
   });
 });

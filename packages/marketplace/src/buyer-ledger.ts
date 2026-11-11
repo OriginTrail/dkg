@@ -22,7 +22,10 @@
  *
  * In memory it keeps the keys with what their calls in flight may still cost
  * (reservations, never written down), the calls not made final
- * (gateway-book.ts), the nonce counters and the epochs made final.
+ * (gateway-book.ts), the nonce counters and the epochs made final. The book of
+ * calls is the ledger's alone: the gateway reads it, marks a call landed and
+ * gives back a call's key reservation through the ledger's methods, and the
+ * book never touches a key.
  *
  * A node that kept these in the gateway's and the access keys' own journals
  * (`buyer-receipts.jsonl`, `buyer-nonces.jsonl`, `access-keys.jsonl`) has
@@ -34,7 +37,7 @@
  */
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CallBook, type HeldReceipt, type KeptReceipt } from './gateway-book.js';
+import { CallBook, exposureOf, type HeldReceipt, type KeptReceipt } from './gateway-book.js';
 import { Journal, KeyedLock } from './journal.js';
 import type { KeptKey } from './keys.js';
 import type { ReconciledRow } from './reconcile.js';
@@ -108,8 +111,8 @@ function addCharge(k: { spent?: string; lastUsedAt?: number | null }, value: big
 }
 
 export class BuyerLedger {
-  /** The calls not made final, and what each may still cost. */
-  readonly calls: CallBook;
+  /** The calls not made final, and what each may still cost: read and changed through the ledger alone. */
+  private readonly calls = new CallBook();
   private readonly journal: Journal<Entry>;
   private readonly lock = new KeyedLock();
   private readonly keys = new Map<string, HeldKey>();
@@ -124,7 +127,6 @@ export class BuyerLedger {
 
   constructor(readonly dir: string) {
     this.journal = new Journal(join(dir, BUYER_LEDGER_FILE));
-    this.calls = new CallBook(this);
   }
 
   /** The journal, read once, on first use; a read that fails is tried again at the next use. */
@@ -263,6 +265,45 @@ export class BuyerLedger {
     return [...this.epochs].sort((a, b) => a - b).flatMap((e) => this.calls.callsOf(e)).filter((r) => r.state === 'open');
   }
 
+  /** The calls of an epoch not made final, in the order sent. */
+  callsOf(epoch: number): HeldReceipt[] {
+    return this.calls.callsOf(epoch);
+  }
+
+  /** The calls of `epoch` not seen landed. */
+  unlandedOf(epoch: number): HeldReceipt[] {
+    return this.calls.unlandedOf(epoch);
+  }
+
+  /** The refused and open calls of epochs before `epoch` whose key still reserves their most value. */
+  keyHeldBefore(epoch: number): HeldReceipt[] {
+    return this.calls.keyHeldBefore(epoch);
+  }
+
+  /** What a budget's calls not seen landed may still cost; `budget` is its subscription id and index. */
+  heldValue(budget: string): bigint {
+    return this.calls.heldValue(budget);
+  }
+
+  /** A call seen landed: out of the value its budget's calls may still cost, in memory. */
+  landed(r: HeldReceipt): void {
+    this.calls.landed(r);
+  }
+
+  /**
+   * A refused or open call of an ended epoch that did not land: the reservation it held of its key's budget given
+   * back, at the key and most value of the call as kept. A call that holds none gives back nothing.
+   */
+  releaseCall(r: HeldReceipt): void {
+    const kept = this.calls.release(r);
+    if (kept) this.release(kept.keyId, exposureOf(kept));
+  }
+
+  /** One more call its seller refused or never answered in its epoch: how many so far, until the epoch is made final. */
+  unsettledBy(r: HeldReceipt): number {
+    return this.calls.unsettledBy(r);
+  }
+
   // ------------------------------------------------------------- epochs
 
   /** The epochs before `epoch` with calls or nonce counters not made final. */
@@ -281,7 +322,9 @@ export class BuyerLedger {
    * was not known charge their keys now that they landed. The journal is
    * rewritten from what it holds: the epoch's calls and nonce counters dropped,
    * what they and `charges` cost folded into each key's total. On disk, then
-   * here; a rewrite that fails leaves both as they were.
+   * here, where the epoch's calls leave the book and those that still held
+   * their keys' reservations give them back; a rewrite that fails leaves both
+   * as they were.
    */
   async finalize(epoch: number, subscriptionId: string, rows: ReconciledRow[], charges: readonly KeyCharge[]): Promise<void> {
     await this.load();
@@ -290,7 +333,7 @@ export class BuyerLedger {
     });
     for (const c of charges) this.charged(c.keyId, c.value, c.at);
     this.finals.set(epoch, rows);
-    this.calls.drop(epoch, subscriptionId);
+    for (const r of this.calls.drop(epoch, subscriptionId)) this.release(r.keyId, exposureOf(r));
     this.epochs.delete(epoch);
     for (const key of this.nonces.keys()) if (key.startsWith(subscriptionId)) this.nonces.delete(key);
   }
@@ -321,7 +364,8 @@ export class BuyerLedger {
   /**
    * The journal read back, as `fold` reads it: each key, then each key's
    * revocation, each epoch made final, each nonce counter, and each call from
-   * its last record, oldest epoch first, its charge counted once.
+   * its last record, oldest epoch first, its charge counted once and, while its
+   * cost is not known, its key's reservation held again.
    */
   private replay(entries: readonly Entry[]): void {
     const held = fold(entries);
@@ -333,7 +377,8 @@ export class BuyerLedger {
       this.epochs.add(n.epoch);
     }
     for (const { type: _call, charge, ...call } of [...held.calls.values()].sort((a, b) => a.epoch - b.epoch)) {
-      this.calls.restore(call);
+      this.calls.record(call);
+      if (this.calls.isKeyHeld(call.callId)) this.hold(call.keyId, exposureOf(call));
       this.epochs.add(call.epoch);
       if (charge) this.charged(call.keyId, BigInt(charge.value), charge.at);
     }

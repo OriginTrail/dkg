@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * The gateway's book of calls (OT-RFC-27): every call it sends, from the record
+ * The gateway's book of calls (OT-RFC-27), kept by the buyer's ledger
+ * (buyer-ledger.ts) alone: every call the gateway sends, from the record
  * written before it goes to its epoch made final, and what each may still cost.
  *   - A call's first record, written before it is sent, is `open`: a call the
  *     node stops waiting for still counts after a restart. What came back
@@ -12,10 +13,12 @@
  *     the most its request allows, since its seller may land a receipt for any
  *     request the session key signed.
  *   - A refused or open call keeps its key's reservation of that most value
- *     until the gateway knows whether it landed (`release`).
+ *     until the gateway knows whether it landed. The book only marks the calls
+ *     that hold one and never touches a key: the calls `release` and `drop`
+ *     let go are returned as kept, and the ledger gives back their keys'
+ *     reservations.
  *   - It counts the calls each seller refused or never answered in an epoch.
  */
-import type { AccessKeys } from './keys.js';
 import type { ReceiptWire, ServiceRequestWire } from './wire.js';
 
 /**
@@ -60,8 +63,6 @@ export class CallBook {
   private readonly keyHolds = new Map<string, HeldReceipt>();
   /** Epoch and seller => the calls that seller refused or never answered in it. */
   private readonly unsettled = new Map<string, number>();
-
-  constructor(private readonly keys: Pick<AccessKeys, 'hold' | 'release'>) {}
 
   /** What a budget's calls not seen landed may still cost; `budget` is its subscription id and index. */
   heldValue(budget: string): bigint {
@@ -109,12 +110,6 @@ export class CallBook {
     else if (!before || this.keyHolds.has(r.callId)) this.keyHolds.set(r.callId, r);
   }
 
-  /** A call's last record, read back at load: counted, and its key's reservation held again while its cost is not known. */
-  restore(r: HeldReceipt): void {
-    this.record(r);
-    if (this.keyHolds.has(r.callId)) this.keys.hold(r.keyId, exposureOf(r));
-  }
-
   /** A call seen landed: out of the value its budget's calls may still cost. */
   landed(r: HeldReceipt): void {
     const kept = this.unlanded.get(r.callId);
@@ -124,12 +119,14 @@ export class CallBook {
     this.held.set(budget, (this.held.get(budget) ?? 0n) - exposureOf(kept));
   }
 
-  /** A refused or open call's reservation of its key's budget, released. */
-  release(r: HeldReceipt): void {
+  /**
+   * A refused or open call's reservation of its key's budget, let go: the call as the book kept it, whose key and
+   * most value the caller releases, or `undefined` when it held none.
+   */
+  release(r: HeldReceipt): HeldReceipt | undefined {
     const kept = this.keyHolds.get(r.callId);
-    if (!kept) return;
     this.keyHolds.delete(r.callId);
-    this.keys.release(kept.keyId, exposureOf(kept));
+    return kept;
   }
 
   /** One more call its seller refused or never answered in its epoch: how many so far. */
@@ -140,14 +137,20 @@ export class CallBook {
     return count;
   }
 
-  /** An epoch made final: its calls leave the book, landed or not, their keys released, and the budgets of `subscriptionId` with them. */
-  drop(epoch: number, subscriptionId: string): void {
+  /**
+   * An epoch made final: its calls leave the book, landed or not, and the budgets of `subscriptionId` with them. The
+   * calls whose key reservations it let go are returned as kept, for the caller to release.
+   */
+  drop(epoch: number, subscriptionId: string): HeldReceipt[] {
+    const released: HeldReceipt[] = [];
     for (const r of this.callsOf(epoch)) {
       this.landed(r);
-      this.release(r);
+      const kept = this.release(r);
+      if (kept) released.push(kept);
     }
     this.byEpoch.delete(epoch);
     for (const key of this.held.keys()) if (key.startsWith(subscriptionId)) this.held.delete(key);
     for (const key of this.unsettled.keys()) if (key.startsWith(`${epoch}:`)) this.unsettled.delete(key);
+    return released;
   }
 }

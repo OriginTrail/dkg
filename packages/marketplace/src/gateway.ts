@@ -77,7 +77,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { NO_FX, type Fx } from './config.js';
 import type { BuyerLedger } from './buyer-ledger.js';
-import { exposureOf, isKept, type CallBook, type HeldReceipt } from './gateway-book.js';
+import { exposureOf, isKept, type HeldReceipt } from './gateway-book.js';
 import { CallerGone, Turns, TurnsFull, type TurnLimits } from './gateway-turns.js';
 import type { AccessKey, AccessKeys } from './keys.js';
 import { serviceIdOf } from './offers.js';
@@ -216,12 +216,13 @@ const epochEnding = (endsAt: number, now: number): GatewayAnswer =>
 const gone = (): GatewayAnswer => fail(499, 'client_gone', 'the client went away before its call was sent');
 
 export class Gateway {
-  /** The nonce counters, the calls and the epochs made final: the keys' ledger. */
+  /**
+   * The keys' ledger: the nonce counters, the calls sent and not made final with what each may still cost, and the
+   * epochs made final. The gateway reads and marks its calls through it alone.
+   */
   private readonly ledger: BuyerLedger;
   private readonly turns: Turns;
   private readonly clock: () => number;
-  /** The calls sent and not made final, and what each may still cost: the ledger's. */
-  private readonly book: CallBook;
   /** subscription id => the groups landed for it, read up to `toBlock`. */
   private readonly scans = new Map<string, { toBlock: number; groups: LandedGroup[] }>();
   private readonly sessionKeys = new Map<string, ethers.Wallet>();
@@ -231,7 +232,6 @@ export class Gateway {
 
   constructor(private readonly deps: GatewayDeps) {
     this.ledger = deps.keys.ledger;
-    this.book = this.ledger.calls;
     this.turns = new Turns(deps.turns);
     this.clock = deps.clock ?? Date.now;
   }
@@ -259,7 +259,7 @@ export class Gateway {
 
   /** What this node's calls on a budget not seen landed may still cost. */
   heldValue(subscriptionId: string, budgetIndex: number): bigint {
-    return this.book.heldValue(`${subscriptionId.toLowerCase()}:${budgetIndex}`);
+    return this.ledger.heldValue(`${subscriptionId.toLowerCase()}:${budgetIndex}`);
   }
 
   /**
@@ -273,7 +273,7 @@ export class Gateway {
   async activity(epoch?: number, keyId?: string): Promise<{ calls: CallView[] }> {
     const times = await this.deps.chain.getEpochTimes();
     const asked = epoch ?? times.epoch;
-    const kept = this.book.callsOf(asked).filter((r) => keyId === undefined || r.keyId === keyId);
+    const kept = this.ledger.callsOf(asked).filter((r) => keyId === undefined || r.keyId === keyId);
     const used = await this.usedOf(kept);
     const calls: CallView[] = kept.map((r) => {
       const state = used.has(r.callId) ? 'landed' : asked < times.epoch ? 'missed' : 'held';
@@ -319,13 +319,13 @@ export class Gateway {
    */
   async tick(): Promise<void> {
     const { epoch } = await this.deps.chain.getEpochTimes();
-    const open = this.book.unlandedOf(epoch);
+    const open = this.ledger.unlandedOf(epoch);
     const used = await this.usedOf(open);
-    for (const r of open) if (used.has(r.callId)) this.book.landed(r);
+    for (const r of open) if (used.has(r.callId)) this.ledger.landed(r);
     // An ended epoch takes no more receipts: what did not land by then never will.
-    const ended = this.book.keyHeldBefore(epoch);
+    const ended = this.ledger.keyHeldBefore(epoch);
     const landed = await this.usedOf(ended);
-    for (const r of ended) if (!landed.has(r.callId)) this.book.release(r);
+    for (const r of ended) if (!landed.has(r.callId)) this.ledger.releaseCall(r);
     for (const e of this.ledger.epochsBefore(epoch - 1)) await this.finalize(e);
   }
 
@@ -438,7 +438,7 @@ export class Gateway {
     const maxUnits = unitsBound(c.body);
     const maxValueWei = maxUnits * route.pricePerUnit;
     const used = c.budget.value - await chain.budgetLeft(c.subscriptionId, c.budgetIndex);
-    const held = this.book.heldValue(c.budgetKey);
+    const held = this.ledger.heldValue(c.budgetKey);
     const ceiling = (c.budget.value * SOFT_CEILING_PERCENT) / 100n;
     if (used + held + maxValueWei > ceiling) {
       const left = ceiling > used + held ? ceiling - used - held : 0n;
@@ -534,7 +534,7 @@ export class Gateway {
     const receipt = checked.receipt!;
     // Kept as decoded, its key charged the receipt's value in the same record; the ledger gives back the call's reservation.
     await this.ledger.recordAccepted({ ...kept, receipt: receiptToWire(receipt), receiptSignature: answer.receiptSignature, state: 'held' }, c.times.now);
-    const left = c.budget.value - used - this.book.heldValue(c.budgetKey);
+    const left = c.budget.value - used - this.ledger.heldValue(c.budgetKey);
     const { content, tool_calls: toolCalls, finish_reason: finish } = answer.result;
     const split = usageOf(answer.usage, receipt.units);
     return {
@@ -607,7 +607,7 @@ export class Gateway {
   }
 
   private unsettled(r: HeldReceipt): void {
-    if (this.book.unsettledBy(r) >= MAX_UNSETTLED_PER_SELLER) this.deps.router.failed(BigInt(r.seller), r.epoch);
+    if (this.ledger.unsettledBy(r) >= MAX_UNSETTLED_PER_SELLER) this.deps.router.failed(BigInt(r.seller), r.epoch);
   }
 
   /** The call ids of `receipts` whose nonces the chain shows used. */
@@ -626,7 +626,7 @@ export class Gateway {
   private async rowsOf(epoch: number): Promise<ReconciledRow[]> {
     const chain = this.deps.chain;
     const subscriptionId = subscriptionIdOf(this.deps.buyerWallet, epoch);
-    const receipts = this.book.callsOf(epoch).filter(isKept);
+    const receipts = this.ledger.callsOf(epoch).filter(isKept);
     if (!(await chain.subscriptionExists(subscriptionId))) return [];
     const budgets = await chain.getBudgets(subscriptionId);
     const used = await this.usedOf(receipts);
@@ -652,7 +652,7 @@ export class Gateway {
    */
   private async finalize(epoch: number): Promise<void> {
     const rows = await this.rowsOf(epoch);
-    const unknown = this.book.callsOf(epoch).filter((r) => !isKept(r));
+    const unknown = this.ledger.callsOf(epoch).filter((r) => !isKept(r));
     const landed = await this.usedOf(unknown);
     const charges = unknown.filter((r) => landed.has(r.callId)).map((r) => ({ keyId: r.keyId, value: exposureOf(r), at: r.request.issuedAt }));
     const subscriptionId = subscriptionIdOf(this.deps.buyerWallet, epoch);
