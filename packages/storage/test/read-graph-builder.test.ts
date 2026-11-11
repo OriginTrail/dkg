@@ -8,7 +8,7 @@ import { mayHoldReadGraphPartitions } from '../src/read-graph-partition-marker.j
 import { missingReadGraphMethods } from '../src/read-graph/adapter-contract.js';
 import { guardReadGraphPartition, storeMayHoldReadGraphPartitions } from '../src/read-graph-partition-store.js';
 import { ReadGraphBuilder } from '../src/read-graph/builder.js';
-import { checkReadGraph } from '../src/read-graph/check.js';
+import { checkReadGraph, memberGraphListingQuery } from '../src/read-graph/check.js';
 import {
   clearUnstoredReadGraphMarks,
   noteUnstoredReadGraphMark,
@@ -59,20 +59,16 @@ import { PlanningOxigraphStore } from './helpers/read-graph-planning-store.js';
 /**
  * An adapter that offers only the methods it plans, as an adapter with
  * read-graph support does, and lets a test act on each update before it is
- * sent and list graph names the engine itself would refuse.
+ * sent.
  */
 class HookedStore extends PlanningOxigraphStore {
   onUpdate: ((sparql: string, options: UpdateOptions | undefined) => Promise<void> | void) | undefined;
   onInsert: (() => Promise<void>) | undefined;
-  readonly extraGraphs: string[] = [];
   constructor() {
     super();
     for (const method of missingReadGraphMethods(this, this.readGraphCapabilities)) {
       Object.defineProperty(this, method, { value: undefined, configurable: true, writable: true });
     }
-  }
-  override async listGraphs(options?: QueryOptions): Promise<string[]> {
-    return [...(await super.listGraphs(options)), ...this.extraGraphs];
   }
   override async update(sparql: string, options?: UpdateOptions): Promise<void> {
     await this.onUpdate?.(sparql, options);
@@ -616,9 +612,34 @@ describe('building a read graph', () => {
   it('reports a member graph whose name no operation can carry, and leaves the read graph out of service', async () => {
     const { adapter, fixture, layer, context } = await open();
     const [vm] = fixture.keys as [ReadGraphKey];
-    adapter.extraGraphs.push(`${fixture.root}/_verifiable_memory/${AGENT}/a{b`);
+    // The context graph's listing names a graph the engine itself would refuse.
+    const listing = memberGraphListingQuery(adapter, fixture.root);
+    const query = adapter.query.bind(adapter);
+    adapter.query = async (sparql, options) => {
+      const result = await query(sparql, options);
+      return result.type === 'bindings' && sparql === listing
+        ? { ...result, bindings: [...result.bindings, { g: `${fixture.root}/_verifiable_memory/${AGENT}/a{b` }] }
+        : result;
+    };
     await expect(buildReadGraph(context, vm)).rejects.toBeInstanceOf(ReadGraphJobError);
     expect(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)?.state).toBe('building');
+  });
+
+  it('lists the context graph\'s own graphs on a store without a prefix listing, never the whole store\'s', async () => {
+    const { adapter, fixture, layer, context } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    // A store whose complete list is past its internal limit.
+    adapter.listGraphs = async () => { throw new Error('the whole graph list was read'); };
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    await expectUnion(adapter, layer, fixture, vm);
+    // The context graph's own list stays under the catalog's internal ceiling.
+    vi.stubEnv('DKG_STORE_GRAPH_CATALOG_MAX_BYTES', '64');
+    try {
+      layer.runtime.mirror.set({ ...layer.runtime.mirror.get(fixture.readGraphs.wholeVm)!, state: 'dirty' });
+      await expect(buildReadGraph(context, vm)).rejects.toMatchObject({ code: 'STORE_INTERNAL_LIMIT' });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('lists members by prefix where the backend can, pauses between batches, and lets queued foreground work go first', async () => {

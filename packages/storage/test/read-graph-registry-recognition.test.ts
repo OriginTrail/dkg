@@ -528,6 +528,26 @@ describe('registry recognition in the read-graph layer', () => {
     expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
   });
 
+  it('keeps the read graphs out of service while an update of a _meta graph runs, and puts back those it left alone', async () => {
+    const { adapter, store, meta, fixture, states } = await layered();
+    const during: Array<Record<string, string>> = [];
+    const update = adapter.update.bind(adapter);
+    adapter.update = async (sparql, options) => {
+      if (sparql.includes('urn:test:p') || sparql.includes('/notes>')) during.push(states());
+      return update(sparql, options);
+    };
+    const written = { writtenGraphs: [meta] };
+    const fencedAll = { wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'dirty@2', agentWm: 'dirty@2' };
+    // No registry fact: every read graph is out of service while the update runs, and back in service after it.
+    await store.update!(`INSERT DATA { GRAPH <${meta}> { <urn:asset:1> <urn:test:p> "m" } }`, written);
+    expect(during[0]).toEqual(fencedAll);
+    expect(states()).toEqual({ wholeVm: 'ready@1', wholeSwm: 'ready@1', codeVm: 'ready@1', agentWm: 'ready@1' });
+    // A new sub-graph: those whose members it changes stay dirty, and `code`'s read graph is back.
+    await store.update!(`INSERT DATA { GRAPH <${meta}> { <${fixture.root}/notes> <${R.type}> <${R.subGraphClass}> ; <${R.name}> "notes" } }`, written);
+    expect(during[1]).toEqual(fencedAll);
+    expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
+  });
+
   it('follows an authenticated sub-graph name in a metadata subject replace, in and out', async () => {
     const { store, meta, states, layer, fixture } = await layered();
     await store.replaceSubject!(meta, 'urn:asset:x', [fact(meta, 'urn:asset:x', R.authenticatedSubGraphName, '"notes"')]);

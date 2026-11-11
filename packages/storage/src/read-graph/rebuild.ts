@@ -33,17 +33,20 @@ import {
   MemoryLayer,
   assertSafeIri,
   compareCodePoint,
+  contextGraphDataUri,
   isReadGraphPartitionIri,
   parseReadGraphIri,
   readGraphIri,
   type ReadGraphKey,
 } from '@origintrail-official/dkg-core';
 import { isReadGraphStateGraph } from '../graph-enumeration-visibility.js';
-import { readGraphInventory, readGraphInventoryByPrefix } from '../graph-inventory-materialization.js';
+import { readGraphInventoryByPrefix } from '../graph-inventory-materialization.js';
+import { assertGraphCatalogWithinInternalLimit, readCompleteGraphCatalog } from '../graph-catalog-internal-limit.js';
 import { noteReadGraphPartitions } from '../read-graph-partition-marker.js';
 import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
+import { memberGraphListingQuery } from './check.js';
 import { matchesGraphNameTest, readGraphMembership, workingMemoryIdentityRule, type GraphNameTest } from './membership.js';
 import { readGraphLayerOf, readGraphRuntimeOf } from './read-graph-store.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry, type ReadGraphRegistryFact } from './registry-recognition.js';
@@ -636,8 +639,14 @@ class ReadGraphJob {
       }
     };
     if (roots.prefixes.length > 0 && !this.maintenance.readGraphInventory && !this.maintenance.listGraphsByPrefix) {
-      // One read of the whole list rather than one per prefix.
-      const { graphs } = await readGraphInventory(this.maintenance, this.options);
+      // Without a prefix listing, one listing of the context graph's own graphs, as a full check lists them: the whole
+      // store's list can exceed its internal limit, and must not stop a build of a small context graph.
+      // Under the catalog's internal ceiling, as any complete list is read.
+      const root = contextGraphDataUri(parseReadGraphIri(this.readGraph)!.scope.contextGraphId);
+      const listing = memberGraphListingQuery(this.maintenance, root);
+      const result = await readCompleteGraphCatalog(this.options, (internal) => this.maintenance.query(listing, internal));
+      const graphs = result.type === 'bindings' ? result.bindings.flatMap((binding) => (binding.g === undefined ? [] : [binding.g])) : [];
+      assertGraphCatalogWithinInternalLimit(graphs);
       for (const prefix of roots.prefixes) add(graphs, prefix);
     } else {
       for (const prefix of roots.prefixes) add((await readGraphInventoryByPrefix(this.maintenance, prefix, this.options)).graphs, prefix);
