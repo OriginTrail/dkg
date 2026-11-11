@@ -49,6 +49,7 @@ import { matchesGraphNameTest, readGraphMembership, type GraphNameTest } from '.
 import { readGraphLayerOf } from './read-graph-store.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry, type ReadGraphRegistryFact } from './registry-recognition.js';
 import { noteUnstoredReadGraphMark } from './mark-journal.js';
+import { isHeldReadGraph } from './working-memory-hold.js';
 import { recordReadGraphRegistry } from './registry-record.js';
 import { ReadGraphLocks, type InMemoryReadGraphStateMirror, type ReadGraphBackendRuntime } from './runtime.js';
 import {
@@ -168,7 +169,15 @@ const MAX_PRESSURE_WAIT_MS = 5_000;
  */
 export async function buildReadGraph(context: ReadGraphJobContext, key: ReadGraphKey): Promise<ReadGraphJobResult> {
   const job = new ReadGraphJob(context, readGraphIri(key), 'build');
+  refuseHeld(job, key);
   return withReadGraphBackgroundSlot(job.runtime, () => build(job, key));
+}
+
+/** A held working-memory read graph (`./working-memory-hold.ts`) is neither built nor repaired. */
+function refuseHeld(job: ReadGraphJob, key: ReadGraphKey): void {
+  if (isHeldReadGraph(job.runtime, key)) {
+    throw new ReadGraphJobError(`${job.readGraph} is not built while the record of the node's previous working-memory identity cannot be removed`);
+  }
 }
 
 async function build(job: ReadGraphJob, key: ReadGraphKey): Promise<ReadGraphJobResult> {
@@ -210,6 +219,7 @@ export async function repairReadGraph(
   input: ReadGraphRepairInput,
 ): Promise<ReadGraphJobResult> {
   const job = new ReadGraphJob(context, readGraphIri(key), 'repair');
+  refuseHeld(job, key);
   for (const graph of input.joined) if (!matchesGraphNameTest(input.membership, graph)) throw new ReadGraphJobError(`A joined graph must be a member: ${graph}`);
   for (const graph of input.leaving) if (matchesGraphNameTest(input.membership, graph)) throw new ReadGraphJobError(`A leaving graph must not be a member: ${graph}`);
   return withReadGraphBackgroundSlot(job.runtime, () => repair(job, input));

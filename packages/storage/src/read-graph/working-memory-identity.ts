@@ -16,7 +16,10 @@
  * the new rule is installed. It is written again once every dirty mark the
  * change needs is stored and the store has made them durable (`flush`): a
  * stopped process leaves either no record, so start-up keeps no
- * working-memory read graph, or a record with its marks.
+ * working-memory read graph, or a record with its marks. While a record that
+ * names another identity cannot be removed, the backend's working-memory read
+ * graphs are held (`./working-memory-hold.ts`): none is built or repaired, so
+ * none built under the new identity sits beside that record.
  */
 
 import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -26,6 +29,7 @@ import type { TripleStore } from '../triple-store.js';
 import { workingMemoryIdentityRule, type WorkingMemoryIdentityRule } from './membership.js';
 import { readGraphRuntimeOf } from './read-graph-store.js';
 import { markReadGraphDirty, type ReadGraphJobContext } from './rebuild.js';
+import { holdWorkingMemoryReadGraphs, workingMemoryReadGraphsHeld } from './working-memory-hold.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
 import { nextReadGraphState } from './state.js';
 
@@ -117,6 +121,21 @@ function recordWorkingMemoryIdentity(dataDir: string, node: WorkingMemoryNodeIde
   syncDirectory(dataDir);
 }
 
+/**
+ * Remove the record, holding the backend's working-memory read graphs while it
+ * cannot be removed and releasing them once it is. Returns whether it is gone.
+ */
+function removeRecordOrHold(runtime: ReadGraphBackendRuntime, dataDir: string): boolean {
+  try {
+    removeWorkingMemoryIdentityRecord(dataDir);
+  } catch {
+    holdWorkingMemoryReadGraphs(runtime, true);
+    return false;
+  }
+  holdWorkingMemoryReadGraphs(runtime, false);
+  return true;
+}
+
 /** Remove the record, if there is one, and sync the directory. */
 function removeWorkingMemoryIdentityRecord(dataDir: string): void {
   const path = join(dataDir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE);
@@ -187,12 +206,8 @@ export async function installWorkingMemoryIdentity(
   const { marked, moved } = markWorkingMemoryReadGraphsDirty(runtime, runtime.workingMemoryIdentity, rule);
   if (moved.length > 0 || recording.node === undefined || !sameIdentity(recording.node, node)) {
     recording.recorded = false;
-    // A record that cannot be removed here is removed before the identity is recorded, or the installation reports it unrecorded.
-    try {
-      if (dataDir !== undefined) removeWorkingMemoryIdentityRecord(dataDir);
-    } catch {
-      // Below.
-    }
+    // A record that cannot be removed holds the working-memory read graphs until a later turn removes it.
+    if (dataDir !== undefined) removeRecordOrHold(runtime, dataDir);
   }
   runtime.workingMemoryIdentity = rule;
   recording.node = node;
@@ -225,11 +240,13 @@ async function storeMarksAndRecord(
       if (dirty !== undefined) runtime.mirror.set(dirty);
     }
   }
+  // A record that could not be removed: try again, and keep the working-memory read graphs held while it stays.
+  if (dataDir !== undefined && workingMemoryReadGraphsHeld(runtime) && !removeRecordOrHold(runtime, dataDir)) return false;
   if (recording.owed.size > 0 || dataDir === undefined || recording.node === undefined) return false;
   if (recording.recorded) return true;
   const node = recording.node;
   try {
-    removeWorkingMemoryIdentityRecord(dataDir);
+    if (!removeRecordOrHold(runtime, dataDir)) return false;
     await context.store.flush?.();
     // An installation that came meanwhile records its own identity, once its marks are stored.
     if (recording.node !== node || recording.owed.size > 0) return false;
