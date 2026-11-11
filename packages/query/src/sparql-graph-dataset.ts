@@ -94,11 +94,30 @@ function isSubqueryGroup(scope: PreparedSparqlQuery, opening: number): boolean {
   return isSparqlKeyword(scope.prepared.tokens, opening + 1, 'SELECT');
 }
 
-/** Whether the group between these braces has a triple pattern of its own, not only in nested groups. */
+/** Whether the group between these braces has a path with `*` or `?` of its own, which matches without a triple. */
+function hasOwnZeroLengthPath(scope: PreparedSparqlQuery, opening: number, closing: number): boolean {
+  const { tokens } = scope.prepared;
+  const depth = scope.structure.braces.depthBefore[opening] + 1;
+  for (let index = opening + 1; index < closing; index++) {
+    if (scope.structure.braces.depthBefore[index] !== depth) continue;
+    if (!isSymbol(tokens[index], '*') && !isSymbol(tokens[index], '?')) continue;
+    const before = tokens[index - 1];
+    if (before?.kind === 'iri' || before?.kind === 'prefixed-name' || isSymbol(before, ')')
+      || (before?.kind === 'word' && before.logicalValue === 'a' && isSparqlKeyword(tokens, index - 1, 'A'))) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether the group between these braces has a triple pattern of its own, not
+ * only in nested groups, that needs a stored triple to match. A path with `*` or
+ * `?` matches its endpoints without one, so a group that has one counts as having
+ * no pattern of its own.
+ */
 function hasOwnTriplePattern(scope: PreparedSparqlQuery, opening: number, closing: number): boolean {
   const { tokens } = scope.prepared;
   // A group that is a subquery has no pattern of its own; the subquery's are nested.
-  if (isSubqueryGroup(scope, opening)) return false;
+  if (isSubqueryGroup(scope, opening) || hasOwnZeroLengthPath(scope, opening, closing)) return false;
   const depth = scope.structure.braces.depthBefore[opening] + 1;
   for (let index = opening + 1; index < closing; index++) {
     if (scope.structure.braces.depthBefore[index] !== depth) continue;

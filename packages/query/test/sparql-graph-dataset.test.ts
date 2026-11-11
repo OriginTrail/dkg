@@ -26,7 +26,7 @@ import {
   wrapWithDeduplicatedGraphValues,
   wrapWithGraphValues,
 } from '../src/sparql-graph-scope.js';
-import { callerGraphBranchesFit } from '../src/sparql-caller-graph-read.js';
+import { callerGraphBranchesFit, isolateCallerGraphAssignments } from '../src/sparql-caller-graph-read.js';
 
 const graphs = ['urn:g:1', 'urn:g:2'];
 const NAMED = 'FROM NAMED <urn:g:1> FROM NAMED <urn:g:2>';
@@ -125,7 +125,7 @@ describe('planGraphDataset', () => {
     ['SELECT ?s WITH { SELECT ?s { ?s ?p ?o } } AS %x { INCLUDE %x }', expected('named', both, { preservePattern: true }), expected('dataset', both, { preservePattern: true })],
     ['SELECT * WHERE { GRAPH ?g { ?s (<urn:a>|<urn:b>)+ ?o } }', expected('named', named), expected('dataset', both, { bindCallerGraphs: true })],
     ['SELECT * WHERE { GRAPH ?g { ?s <urn:p>+ ?o } }', expected('named', named), expected('dataset', both)],
-    ['SELECT * WHERE { GRAPH ?g { BIND(<urn:g> AS ?g) ?s <urn:p>+ ?o } }', expected('named', named, { bindCallerGraphs: true }), expected('dataset', both, { bindCallerGraphs: true })],
+    ['SELECT * WHERE { GRAPH ?g { BIND(<urn:g> AS ?g) ?s <urn:p>+ ?o } }', expected('named', named), expected('dataset', both, { bindCallerGraphs: true })],
     ['SELECT ?s (EXISTS { ?s <urn:f> ?f } AS ?x) WHERE { ?s ?p ?o }', expected('named', both), expected('values', both)],
     ['SELECT ?s WHERE { GRAPH <urn:g:1> { ?s ?p ?o } ?s <urn:f> ?f }', expected('named', both), expected('values', both)],
     // On Oxigraph a GRAPH block without a triple pattern of its own that holds a subquery,
@@ -139,18 +139,34 @@ describe('planGraphDataset', () => {
     ['SELECT ?g WHERE { GRAPH ?g { BIND(<urn:x> AS ?x) } }', expected('named', named), expected('values', both)],
     // A subquery that fills the GRAPH block keeps the list too.
     ['SELECT ?g ?s WHERE { GRAPH ?g { SELECT ?s WHERE { ?s ?p ?o } } }', expected('dataset', named), expected('dataset', both)],
-    // A block that assigns its graph variable reads one constant branch per graph on Oxigraph.
-    ['SELECT ?g ?s WHERE { GRAPH ?g { BIND(<urn:g:1> AS ?g) ?s ?p ?o } }', expected('named', named, { bindCallerGraphs: true }), expected('values', both)],
-    ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o OPTIONAL { BIND(<urn:g:1> AS ?g) } } }', expected('named', named, { bindCallerGraphs: true }), expected('values', both)],
+    // On Oxigraph a block that assigns its graph variable reads the assignment under another name
+    // (isolateCallerGraphAssignments); one with a subquery reads one constant branch per graph.
+    ['SELECT ?g ?s WHERE { GRAPH ?g { BIND(<urn:g:1> AS ?g) ?s ?p ?o } }', expected('named', named), expected('values', both)],
+    ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o OPTIONAL { BIND(<urn:g:1> AS ?g) } } }', expected('named', named), expected('values', both)],
     ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o { SELECT (<urn:g:1> AS ?g) WHERE {} } } }', expected('named', named, { bindCallerGraphs: true }), expected('dataset', both)],
     ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o VALUES ?g { <urn:g:1> } } }', expected('named', named), expected('values', both)],
-    // An assignment of an expression, which may fail and leave ?g unbound, keeps the graph list instead.
-    ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o BIND(IF(?x, <urn:g:1>, <urn:g:2>) AS ?g) } }', expected('values', named), expected('values', both)],
-    ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o BIND(<urn:g:1> AS ?k) BIND(COALESCE(?k, <urn:g:2>) AS ?g) } }', expected('values', named), expected('values', both)],
+    ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o BIND(IF(?x, <urn:g:1>, <urn:g:2>) AS ?g) } }', expected('named', named), expected('values', both)],
+    // With a subquery, an assignment of an expression, which may fail and leave ?g unbound, keeps the graph list.
+    ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o { SELECT (COALESCE(?k, <urn:g:2>) AS ?g) WHERE { BIND(<urn:g:1> AS ?k) } } } }', expected('dataset', named), expected('dataset', both)],
     ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o FILTER(?g != <urn:g:2>) } }', expected('named', named), expected('values', both)],
   ] as const)('fully plans %s', (query, oxigraph, other) => {
     expect(planGraphDataset(scope(query), 'oxigraph')).toEqual(oxigraph);
     expect(planGraphDataset(scope(query), null)).toEqual(other);
+  });
+
+  it('reads the assignment of a block\'s own graph variable under another name, and keeps rows whose value is that graph', () => {
+    const isolated = isolateCallerGraphAssignments(scope('SELECT ?g ?s WHERE { GRAPH ?g { BIND(<urn:g:1> AS ?g) ?s ?p ?o FILTER(?g != <urn:g:2>) } }'));
+    expect(isolated.source).toBe('SELECT ?g ?s WHERE { { SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { BIND(<urn:g:1> AS ?__dkgAssignedg) ?s ?p ?o '
+      + 'FILTER(?__dkgAssignedg != <urn:g:2>) } FILTER(COALESCE(sameTerm(?__dkgAssignedg, ?g), true)) } } }');
+    expect(() => scope(isolated.source)).not.toThrow();
+    // Only the outer of two nested blocks that assign their variables; none without an assignment or with a subquery.
+    const nested = isolateCallerGraphAssignments(scope('SELECT * WHERE { GRAPH ?g { BIND(<urn:g:1> AS ?g) GRAPH ?h { BIND(<urn:g:2> AS ?h) ?s ?p ?o } } }'));
+    expect(nested.source.match(/SELECT \?g/g)).toHaveLength(1);
+    expect(nested.source).toContain('BIND(<urn:g:2> AS ?h)');
+    for (const query of ['SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }', 'SELECT * WHERE { GRAPH ?g { ?s ?p ?o { SELECT (<urn:g:1> AS ?g) WHERE {} } } }']) {
+      const unchanged = scope(query);
+      expect(isolateCallerGraphAssignments(unchanged), query).toBe(unchanged);
+    }
   });
 
   it('guards a GRAPH block that needs no triple of its own, and only such a block', () => {
@@ -166,6 +182,14 @@ describe('planGraphDataset', () => {
     ]) expect(guardGraphBlocksWithoutTriples(scope(query)).source, query).toContain('FILTER EXISTS');
     const path = scope('SELECT * WHERE { GRAPH ?g { <urn:s> (<urn:p>|<urn:q>) ?o } }');
     expect(guardGraphBlocksWithoutTriples(path)).toBe(path);
+    // A path with * or ? matches its endpoints without a triple; one with + needs one.
+    for (const query of [
+      'ASK { GRAPH <urn:g:1> { <urn:x> <urn:p>* <urn:x> } }',
+      'SELECT ?o WHERE { GRAPH <urn:g:1> { <urn:x> <urn:p>? ?o } }',
+      'SELECT ?o WHERE { GRAPH <urn:g:1> { <urn:x> (<urn:p>/<urn:q>)* ?o } }',
+    ]) expect(guardGraphBlocksWithoutTriples(scope(query)).source, query).toContain('FILTER EXISTS');
+    const oneOrMore = scope('SELECT ?o WHERE { GRAPH <urn:g:1> { <urn:x> <urn:p>+ ?o } }');
+    expect(guardGraphBlocksWithoutTriples(oneOrMore)).toBe(oneOrMore);
     // A subquery that fills its group moves into a group of its own, which the guard follows.
     const subquery = guardGraphBlocksWithoutTriples(scope('SELECT ?g ?s WHERE { GRAPH ?g { SELECT ?s WHERE { ?s ?p ?o } } }'));
     expect(subquery.source).toMatch(/GRAPH \?g \{ \{ SELECT \?s WHERE \{ \?s \?p \?o \}\s+\} FILTER EXISTS \{ [^}]+ \} \}/);
@@ -176,7 +200,7 @@ describe('planGraphDataset', () => {
   });
 
   it('keeps the graph list for a constant graph assignment over more graphs than the branches allow', () => {
-    const query = scope('SELECT ?s WHERE { VALUES ?g { <urn:wide:1> } GRAPH ?g { BIND(<urn:wide:1> AS ?g) ?s <urn:p> ?o } }');
+    const query = scope('SELECT ?s WHERE { VALUES ?g { <urn:wide:1> } GRAPH ?g { ?s <urn:p> ?o { SELECT (<urn:wide:1> AS ?g) WHERE {} } } }');
     const fits = Array.from({ length: 128 }, (_, i) => `urn:wide:${i + 1}`);
     const wide = [...fits, 'urn:wide:129'];
     expect(callerGraphBranchesFit(query, fits)).toBe(true);
@@ -658,8 +682,11 @@ describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind,
       expect(rows(scoped.bindings), body).toEqual(rows(labelled));
     }
     const plain = await engine.query('SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:label> ?l } }', shared);
-    // An assignment of an expression reads as with the view's graph list: one whose expression
-    // fails leaves ?g to the graph, so every graph keeps its own rows.
+    // A graph the store does not hold contributes nothing, also when the block assigns its variable.
+    const counted = await engine.query(`SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { BIND(IRI("${SHARED[0]}") AS ?g) } }`, shared);
+    expect(counted.bindings[0]?.n).toMatch(/^"?1"?/);
+    // An assignment whose expression fails leaves ?g to the graph: every graph keeps its own rows,
+    // as the read with the view's graph list gives them.
     const viewGraphs = [`${ROOT}/_shared_memory`, ...SHARED];
     const asListed = async (body: string) => {
       const listed = await opened.store.query(`SELECT ?g ?s ${viewGraphs.map(graph => `FROM NAMED <${graph}>`).join(' ')} `
@@ -672,10 +699,10 @@ describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind,
     expect(rows(failing.bindings)).toEqual(await asListed(failingBody));
     const perRowBody = `?s <urn:label> ?l BIND(IF(?s = <urn:shared>, <${SHARED[0]}>, <${DATA[1]}>) AS ?g)`;
     const perRow = await engine.query(`SELECT ?g ?s WHERE { GRAPH ?g { ${perRowBody} } }`, shared);
-    expect(perRow.bindings.length).toBeGreaterThan(0);
-    expect(rows(perRow.bindings)).toEqual(await asListed(perRowBody));
+    // Only the rows whose assigned value is the graph that holds them.
+    expect(rows(perRow.bindings)).toEqual(rows([{ g: SHARED[0], s: 'urn:shared' }]));
     const optional = await engine.query(`SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:label> ?l OPTIONAL { BIND(<${SHARED[0]}> AS ?g) } } }`, shared);
-    expect(rows(optional.bindings)).toEqual(rows(plain.bindings));
+    expect(rows(optional.bindings)).toEqual(rows(labelled));
     expect(plain.bindings.length).toBeGreaterThan(labelled.length);
   });
 
@@ -685,16 +712,39 @@ describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind,
     const members = Array.from({ length: 130 }, (_, i) => `${wideRoot}/_verifiable_memory/0xa/${i + 1}`);
     await opened.store.insert(members.map((graph, i) => ({ subject: `urn:wide:s${i + 1}`, predicate: 'urn:p', object: `"w${i + 1}"`, graph })));
     const engine = new DKGQueryEngine(opened.store);
-    const result = await engine.query(`SELECT ?s WHERE { VALUES ?g { <${members[0]}> } GRAPH ?g { BIND(<${members[0]}> AS ?g) ?s <urn:p> ?o } }`,
-      { contextGraphId: wide, view: 'verifiable-memory' });
-    expect(result.bindings.length).toBeGreaterThan(0);
-    expect(new Set(result.bindings.map(row => row.s))).toEqual(new Set(['urn:wide:s1']));
+    const view: QueryOptions = { contextGraphId: wide, view: 'verifiable-memory' };
+    // An assignment without a subquery reads under another name: the one match, once, with or without caller VALUES.
+    for (const values of [`VALUES ?g { <${members[0]}> }`, '']) {
+      const result = await engine.query(`SELECT ?s WHERE { ${values} GRAPH ?g { BIND(<${members[0]}> AS ?g) ?s <urn:p> ?o } }`, view);
+      expect(result.bindings, values).toEqual([{ s: 'urn:wide:s1' }]);
+    }
+    // One in a subquery, over more graphs than the branches allow, keeps the graph list the engine writes:
+    // every row as the read with that list gives it, each as often.
+    const body = `GRAPH ?g { ?s <urn:p> ?o { SELECT (<${members[0]}> AS ?g) WHERE {} } }`;
+    const query = vi.spyOn(opened.store, 'query');
+    let sent: string[] = [];
+    try {
+      const result = await engine.query(`SELECT ?s WHERE { ${body} }`, view);
+      sent = query.mock.calls.map(([text]) => text).filter(text => text.includes(`<${members[0]}> AS ?g`));
+      expect(sent).toHaveLength(1);
+      const listed = /VALUES \?g \{([^}]*)\}/.exec(sent[0]!)?.[1]?.trim().split(/\s+/) ?? [];
+      expect(listed.length).toBeGreaterThan(128);
+      const named = listed.map(graph => `FROM NAMED ${graph}`).join(' ');
+      const expected = await opened.store.query(`SELECT ?s ${named} WHERE { VALUES ?g { ${listed.join(' ')} } ${body} }`);
+      const counted = (bindings: readonly Record<string, string>[]) => bindings.map(row => row.s).sort();
+      expect(counted(result.bindings)).toEqual(counted(expected.type === 'bindings' ? expected.bindings : []));
+      expect(result.bindings.length).toBeGreaterThan(0);
+    } finally {
+      query.mockRestore();
+    }
   });
 
   it('leaves graphs the store does not hold out of patterns that need no triple', async () => {
     const engine = new DKGQueryEngine(opened.store);
     // The data route allows its metadata graphs and the shared-memory view its bucket; this store holds neither.
     expect((await engine.query(`ASK { GRAPH <${ROOT}/_meta> {} }`, { contextGraphId: ID })).bindings).toEqual([{ result: 'false' }]);
+    // A path that can match without a triple does not make a graph the store lacks present.
+    expect((await engine.query(`ASK { GRAPH <${ROOT}/_meta> { <urn:x> <urn:p>* <urn:x> } }`, { contextGraphId: ID })).bindings).toEqual([{ result: 'false' }]);
     for (const filter of ['<http://www.w3.org/2001/XMLSchema#boolean>(1)', 'xsd:boolean(1)']) {
       const ask = `PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ASK { GRAPH <${ROOT}/_meta> { FILTER ${filter} } }`;
       expect((await engine.query(ask, { contextGraphId: ID })).bindings, filter).toEqual([{ result: 'false' }]);

@@ -74,7 +74,9 @@ import {
 } from './sparql-graph-scope.js';
 import { injectMinTrustFilter } from './sparql-min-trust.js';
 import { guardGraphBlocksWithoutTriples, needsCallerGraphBinding, readsNeedGraphList } from './sparql-graph-dataset.js';
-import { bindCallerGraphsBeforeRead, callerGraphBranchesFit, hasCallerGraphAssignmentsInside } from './sparql-caller-graph-read.js';
+import {
+  bindCallerGraphsBeforeRead, callerGraphBranchesFit, hasCallerGraphAssignmentsInside, isolateCallerGraphAssignments,
+} from './sparql-caller-graph-read.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 import {
@@ -430,9 +432,13 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
   }
 
-  /** On Oxigraph a graph in the dataset counts as present without triples, so blocks that need none get a guard. */
+  /**
+   * On Oxigraph a graph in the dataset counts as present without triples, so blocks that need
+   * none get a guard. A block that assigns its graph variable first reads its assignment under
+   * another name, so the guard and the block's patterns read the graph the block iterates.
+   */
   private guardHeldGraphs(scope: PreparedGraphScope): PreparedGraphScope {
-    return this.sparqlEngine === 'oxigraph' ? guardGraphBlocksWithoutTriples(scope) : scope;
+    return this.sparqlEngine === 'oxigraph' ? guardGraphBlocksWithoutTriples(isolateCallerGraphAssignments(scope)) : scope;
   }
 
   /**
