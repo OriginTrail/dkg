@@ -83,9 +83,12 @@ import {
   type StoreReadLane,
 } from './query-store-read-context.js';
 import {
-  assertNoMergedSemanticsWithoutView, assertValidViewMinTrust, isViewDatasetPlanCurrent, planViewDataset, ViewNotReadyError,
-  withMergedViewDataset, type MergedViewDatasetPlan, type ViewReadGraphs,
+  assertNoMergedSemanticsWithoutView, assertValidViewMinTrust, isViewDatasetPlanCurrent, mergedViewDatasetPlan, planViewDataset,
+  ViewNotReadyError, withMergedViewDataset, type MergedViewDatasetPlan, type ViewReadGraphs,
 } from './view-dataset-plan.js';
+import {
+  VIEW_SEMANTICS_DELTA_SOURCE, type ViewSemanticsDeltaSampler, type ViewSemanticsDeltaSummary,
+} from './view-semantics-delta.js';
 
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { assertWithheldGraphQuery } from './withheld-graph-scope.js';
@@ -307,6 +310,10 @@ export function resolveViewGraphs(
 
 type ScopedQueryReadPlan = Extract<QueryReadPlan, { kind: 'scoped' }>;
 
+/** Carries a sample's merged plan into the engine's own read; private to this module, so no caller sets it. */
+const SAMPLED_MERGED_PLAN = Symbol('sampled merged plan');
+type SampleReadOptions = QueryOptions & { readonly [SAMPLED_MERGED_PLAN]?: MergedViewDatasetPlan };
+
 /**
  * Local-only query engine that executes SPARQL against this node's own
  * triple store. No remote query capability — by design (Spec §1.6 Store
@@ -321,10 +328,16 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
   /** The node's read graphs, for merged view queries; none when the node keeps none. */
   private readonly readGraphs: ViewReadGraphs | undefined;
+  /** Samples view queries that could be answered merged, and runs them both ways. */
+  private readonly viewSemanticsDelta: ViewSemanticsDeltaSampler | undefined;
 
-  constructor(store: TripleStore, options: { readonly readGraphs?: ViewReadGraphs } = {}) {
+  constructor(store: TripleStore, options: {
+    readonly readGraphs?: ViewReadGraphs;
+    readonly viewSemanticsDelta?: ViewSemanticsDeltaSampler;
+  } = {}) {
     this.store = store;
     this.readGraphs = options.readGraphs;
+    this.viewSemanticsDelta = options.viewSemanticsDelta;
     this.sparqlEngine = sparqlEngineOf(store);
     this.graphManager = new GraphManager(store);
     this.scopedContentGraphDiscoveryMemo = new ScopedContentGraphDiscoveryMemo(
@@ -480,15 +493,48 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     catalogReads: StoreReadLane,
   ): Promise<QueryResult> {
     const { view, contextGraphId } = options;
-    let plan = planViewDataset(view, contextGraphId, options, this.readGraphs);
+    const sampled = (options as SampleReadOptions)[SAMPLED_MERGED_PLAN];
+    let plan = sampled ?? planViewDataset(view, contextGraphId, options, this.readGraphs);
     for (let attempt = 1; plan.kind === 'merged'; attempt += 1) {
       const result = await this.queryMergedView(scope, plan, options, reads, catalogReads);
-      if (this.readGraphs && isViewDatasetPlanCurrent(plan, this.readGraphs)) return { ...result, semantics: 'merged' };
-      // The read graph changed while the query ran: its answer is dropped and the query planned once more.
-      if (attempt === 2) throw new ViewNotReadyError();
+      if (this.readGraphs && isViewDatasetPlanCurrent(plan, this.readGraphs)) {
+        this.offerViewSemanticsSample(scope, options);
+        return { ...result, semantics: 'merged' };
+      }
+      // The read graph changed while the query ran: its answer is dropped and the query planned
+      // once more. A sample's answer is only dropped.
+      if (sampled || attempt === 2) throw new ViewNotReadyError();
       plan = planViewDataset(view, contextGraphId, options, this.readGraphs);
     }
-    return this.queryWithView(scope, view, contextGraphId, options, reads, catalogReads);
+    const result = await this.queryWithView(scope, view, contextGraphId, options, reads, catalogReads);
+    this.offerViewSemanticsSample(scope, options);
+    return result;
+  }
+
+  /** Offer an answered view query to the semantic-delta sampler, when it could be answered merged. */
+  private offerViewSemanticsSample(scope: PreparedGraphScope, options: QueryOptions & { contextGraphId: string; view: GetView }): void {
+    const { viewSemanticsDelta: sampler, readGraphs } = this;
+    // The sampler's own reads are not offered again.
+    if (!sampler || !readGraphs || options.source === VIEW_SEMANTICS_DELTA_SOURCE) return;
+    const plan = mergedViewDatasetPlan(options.view, options.contextGraphId, options, readGraphs);
+    if (!plan) return;
+    // The caller's request is over: its signal and budget do not carry over to the sample.
+    const sampleOptions: QueryOptions = {
+      ...options, signal: undefined, materializationBudget: undefined, source: VIEW_SEMANTICS_DELTA_SOURCE, priority: 'background',
+    };
+    sampler.offer({
+      contextGraphId: options.contextGraphId, view: options.view, sparql: scope.source,
+      // The merged read keeps the plan the sample was offered with, also where requests are not answered merged yet.
+      run: semantics => this.query(scope.source, semantics === 'merged'
+        ? { ...sampleOptions, semantics, [SAMPLED_MERGED_PLAN]: plan } as SampleReadOptions : { ...sampleOptions, semantics }),
+      isCurrent: () => isViewDatasetPlanCurrent(plan, readGraphs),
+      withWriteLock: readGraphs.withWriteLock ? work => readGraphs.withWriteLock!(plan.readGraph, work) : undefined,
+    });
+  }
+
+  /** What sampled view queries of these context graphs (or all) would have answered merged. Shapes only, never values. */
+  viewSemanticsDeltaReport(contextGraphIds?: readonly string[]): ViewSemanticsDeltaSummary[] {
+    return this.viewSemanticsDelta?.report(contextGraphIds) ?? [];
   }
 
   /**

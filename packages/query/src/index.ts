@@ -18,6 +18,10 @@ export {
   type ViewReadGraphs,
 } from './view-dataset-plan.js';
 export {
+  VIEW_SEMANTICS_DELTA_KINDS, ViewSemanticsDeltaSampler,
+  type ViewSemanticsDeltaKind, type ViewSemanticsDeltaSamplerOptions, type ViewSemanticsDeltaShape, type ViewSemanticsDeltaSummary,
+} from './view-semantics-delta.js';
+export {
   CALLER_SPARQL_REJECTED_CODE,
   CallerSparqlRejectedError,
   isCallerSparqlRejectedError,
