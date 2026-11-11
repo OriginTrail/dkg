@@ -1334,7 +1334,7 @@ export const PARTIAL_PUBLISH_STATUS_SUFFIX = 'binding incomplete';
  */
 export function partialPublishWarning(contextGraphError?: string): string {
   const base =
-    'Published on-chain, but linking it into the Context Graph did not complete, ' +
+    'Published on-chain, but linking it into the context graph did not complete, ' +
     'so context-graph views may be incomplete.';
   return contextGraphError ? `${base} (${contextGraphError})` : base;
 }

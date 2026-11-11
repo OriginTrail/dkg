@@ -201,15 +201,15 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     failed.mockRejectedValueOnce(new Error(`${endpoint} unavailable`));
     const { container } = await renderPanel({ graphs: [], stage: 1 });
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('unavailable');
-    expect(container.textContent).not.toContain('No Context Graphs yet');
-    expect(container.textContent).not.toContain('No Context Graphs in this view yet.');
-    expect(container.textContent).not.toContain('Public Context Graphs appear here');
+    expect(container.textContent).not.toContain('No context graphs yet');
+    expect(container.textContent).not.toContain('No context graphs in this view yet.');
+    expect(container.textContent).not.toContain('Public context graphs appear here');
     const retry = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Retry');
     expect(retry).toBeTruthy();
     await act(async () => { retry!.click(); });
     await flush();
     expect(container.querySelector('[role="alert"]')).toBeNull();
-    expect(container.textContent).toContain('No Context Graphs yet');
+    expect(container.textContent).toContain('No context graphs yet');
   });
 
   it('keeps the last graph list visible and marks it stale after refresh failure', async () => {
@@ -222,9 +222,9 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
   it('does not show empty onboarding while the list is still loading', async () => {
     apiFetchContextGraphsMock.mockImplementationOnce(() => new Promise(() => {}));
     const { container } = await renderPanel({ graphs: [], stage: 1 });
-    expect(container.textContent).toContain('Loading Context Graphs');
+    expect(container.textContent).toContain('Loading context graphs');
     expect(container.querySelector('[role="alert"]')).toBeNull();
-    expect(container.textContent).not.toContain('No Context Graphs yet');
+    expect(container.textContent).not.toContain('No context graphs yet');
   });
 
   it('does not render the in-panel ◂ collapse button (global header toggle is the sole control)', async () => {
@@ -255,7 +255,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     const headers = container.querySelectorAll('.v10-peer-group-header');
     expect(headers.length).toBe(3);
     const labels = Array.from(container.querySelectorAll('.v10-peer-group-label')).map((el) => el.textContent);
-    expect(labels).toEqual(['My Context Graphs', 'Public Context Graphs', 'Integrations']);
+    expect(labels).toEqual(['My context graphs', 'Public context graphs', 'Integrations']);
   });
 
   it('expands "My Context Graphs" by default and keeps "Integrations" collapsed', async () => {
@@ -333,8 +333,8 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     await flush();
 
     const labels = Array.from(container.querySelectorAll('.v10-peer-group-label')).map((el) => el.textContent);
-    expect(labels).toContain('My Context Graphs');
-    expect(container.textContent).toContain('No Context Graphs in this view yet.');
+    expect(labels).toContain('My context graphs');
+    expect(container.textContent).toContain('No context graphs in this view yet.');
     // The catalog-only CG should NOT render as a row in this section.
     expect(container.textContent).not.toContain('Catalog Only CG');
   });
@@ -342,7 +342,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
   it('explains that discovered public graphs are browseable before subscription', async () => {
     const { container } = await renderPanel();
 
-    expect(container.textContent).toContain('Public Context Graphs appear here as your node discovers them');
+    expect(container.textContent).toContain('Public context graphs appear here as your node discovers them');
     expect(container.textContent).toContain('subscribe by ID');
   });
 

@@ -139,13 +139,13 @@ describe('classifyActionError', () => {
   });
 
   it('flags the owner-assertion error as a role error', () => {
-    const r = classifyActionError(new Error('Only the Context Graph creator can manage invitations'));
+    const r = classifyActionError(new Error('Only the context graph creator can manage invitations'));
     expect(r.ok).toBe(false);
     expect(r.ok === false && r.roleError).toBe(true);
   });
 
   it('flags the reject owner-assertion (G1) variant as a role error', () => {
-    const r = classifyActionError(new Error('Only the Context Graph creator can manage join requests'));
+    const r = classifyActionError(new Error('Only the context graph creator can manage join requests'));
     expect(r.ok === false && r.roleError).toBe(true);
   });
 

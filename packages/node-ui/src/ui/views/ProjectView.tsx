@@ -690,8 +690,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             {cgError
               ? cgAuthError
                 ? cgError
-                : 'Couldn’t load Context Graph.'
-              : 'Context Graph not found.'}
+                : 'Couldn’t load context graph.'
+              : 'Context graph not found.'}
           </p>
           {cgAuthError ? (
             <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={() => window.location.reload()}>
@@ -707,7 +707,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     }
     return (
       <div className="v10-view-placeholder">
-        <Loading label="Loading Context Graph…" />
+        <Loading label="Loading context graph…" />
       </div>
     );
   }
@@ -900,7 +900,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
               title="Recent activity"
               limit={40}
               includeUndated={false}
-              emptyHint="Once knowledge starts being added and managed in this Context Graph, activities will show up here as a live feed."
+              emptyHint="Once knowledge starts being added and managed in this context graph, activities will show up here as a live feed."
               className="v10-overview-activity"
             />
           </div>

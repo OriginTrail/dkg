@@ -38,7 +38,7 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     // Only the Public Context Graphs group counts: its disclosed body shows
     // either discovered public Context Graphs or the empty hint, depending on
     // what the node has synced. My Context Graphs rows don't satisfy it.
-    const header = leftPanel.root.getByRole('button', { name: 'Public Context Graphs', exact: true });
+    const header = leftPanel.root.getByRole('button', { name: 'Public context graphs', exact: true });
     await expect(header).toBeVisible();
     if ((await header.getAttribute('aria-expanded')) !== 'true') await header.click();
     await expect(header).toHaveAttribute('aria-expanded', 'true');

@@ -75,7 +75,7 @@ const PHASE_DESCRIPTIONS: Record<string, string> = {
 
 
 const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
-  publish:        'Publish a Knowledge Asset on-chain to a Context Graph',
+  publish:        'Publish a Knowledge Asset on-chain to a context graph',
   publishFromSWM: 'Publish a Knowledge Asset derived from Shared Working Memory',
   update:         'Update an existing Knowledge Asset on-chain',
   'ka-update':    'Incremental Knowledge Asset update (ka-update path)',
@@ -242,7 +242,7 @@ function ReplicationTab() {
       {/* Timeline */}
       <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>
-          Confirmation timeline{selectedCg ? ` — ${selectedCg}` : ' — all Context Graphs'}
+          Confirmation timeline{selectedCg ? ` — ${selectedCg}` : ' — all context graphs'}
         </div>
         {buckets.length === 0 ? (
           <EmptyState compact inline title="No confirmation activity" description="No chain-driven Verifiable Memory promotions recorded in this period." />
@@ -266,13 +266,13 @@ function ReplicationTab() {
       <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>Cursor inspector</div>
         <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', marginBottom: 12 }}>
-          How far each Context Graph has been promoted to Verifiable Memory, compared with the latest chain head.
+          How far each context graph has been promoted to Verifiable Memory, compared with the latest chain head.
         </p>
         {cursors.length === 0 ? (
           <EmptyState compact inline title="No subscriptions" />
         ) : (
           <div className="ds-table-scroll"><table className="data-table">
-            <thead><tr><th>Context Graph</th><th>On-chain id</th><th>Role</th><th className="ds-num">Watermark</th><th className="ds-num">Chain head</th><th className="ds-num">Lag</th><th>Last event</th></tr></thead>
+            <thead><tr><th>Context graph</th><th>On-chain id</th><th>Role</th><th className="ds-num">Watermark</th><th className="ds-num">Chain head</th><th className="ds-num">Lag</th><th>Last event</th></tr></thead>
             <tbody>
               {cursors.map((c) => {
                 const wm = c.last_reconciled_ordinal ?? 0;
@@ -282,7 +282,7 @@ function ReplicationTab() {
                   <tr key={c.context_graph_id}>
                     <td className="mono">{c.context_graph_id}</td>
                     <td className="mono">{c.on_chain_id ?? '—'}</td>
-                    <td>{c.core_hosted ? <Badge size="sm" title="Core hosts this public Context Graph and fills its own gaps from the chain">Host</Badge> : <Badge size="sm">Member</Badge>}</td>
+                    <td>{c.core_hosted ? <Badge size="sm" title="Core hosts this public context graph and fills its own gaps from the chain">Host</Badge> : <Badge size="sm">Member</Badge>}</td>
                     <td className="ds-num">{wm}</td>
                     <td className="ds-num">{head ?? '—'}</td>
                     <td className="ds-num">{lag == null ? '—' : <Badge tone={lag === 0 ? 'success' : 'warning'} size="sm">{lag}</Badge>}</td>
@@ -297,13 +297,13 @@ function ReplicationTab() {
 
       {/* Per-CG activity */}
       <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
-        <div className="card-title" style={{ marginBottom: 8 }}>Activity by Context Graph</div>
+        <div className="card-title" style={{ marginBottom: 8 }}>Activity by context graph</div>
         <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', marginBottom: 12 }}>Click a row to scope the timeline + open its event stream.</p>
         {perCg.length === 0 ? (
           <EmptyState compact inline title="No activity in this period" />
         ) : (
           <div className="ds-table-scroll"><table className="data-table">
-            <thead><tr><th>Context Graph</th><th className="ds-num">Promotes</th><th className="ds-num">Fetches</th><th className="ds-num">Defers</th><th className="ds-num">Cursor moves</th><th className="ds-num">Watermark</th><th>Last event</th></tr></thead>
+            <thead><tr><th>Context graph</th><th className="ds-num">Promotes</th><th className="ds-num">Fetches</th><th className="ds-num">Defers</th><th className="ds-num">Cursor moves</th><th className="ds-num">Watermark</th><th>Last event</th></tr></thead>
             <tbody>
               {perCg.map((r) => (
                 <tr
@@ -1255,7 +1255,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
         </div>
         <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 'var(--fs-control)', color: 'var(--text-secondary)' }}>
           <span><b style={{ color: 'var(--text-secondary)' }}>Started</b> {formatDateTime(op.started_at, { seconds: true })}</span>
-          {op.contextGraph_id && <span><b style={{ color: 'var(--text-secondary)' }}>Context Graph</b> {op.contextGraph_id}</span>}
+          {op.contextGraph_id && <span><b style={{ color: 'var(--text-secondary)' }}>Context graph</b> {op.contextGraph_id}</span>}
           {op.triple_count != null && <span><b style={{ color: 'var(--text-secondary)' }}>Triples</b> {op.triple_count}</span>}
           {op.peer_id && <span><b style={{ color: 'var(--text-secondary)' }}>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
           {op.gas_cost_eth != null && <span><b style={{ color: 'var(--text-secondary)' }}>Gas</b> {op.gas_cost_eth.toFixed(6)} ETH</span>}

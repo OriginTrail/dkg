@@ -31,7 +31,7 @@ describe('StatTile', () => {
 
   it('takes an icon, rich content between value and context, and extra classes', () => {
     const card = html(React.createElement(StatTile, {
-      label: 'Context Graph size',
+      label: 'Context graph size',
       icon: React.createElement('svg', { 'data-icon': 'trend' }),
       className: 'v10-anim-mount',
       sub: 'across graphs',

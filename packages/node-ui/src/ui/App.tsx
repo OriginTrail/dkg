@@ -166,7 +166,7 @@ function AppShell() {
             (ContextGraphDialogs) and agent conversations (stores/agentConversations). */}
         {leftOpen && (
           <>
-            <div className="v10-panel-left" role="complementary" aria-label="Context Graphs and node" style={{ width: leftWidth }}>
+            <div className="v10-panel-left" role="complementary" aria-label="Context graphs and node" style={{ width: leftWidth }}>
               <PanelLeft />
             </div>
             <div className="v10-resize-handle-h" ref={leftHandle} />

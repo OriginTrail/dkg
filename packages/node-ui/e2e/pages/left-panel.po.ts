@@ -116,7 +116,7 @@ export class LeftPanelPage {
     const names: string[] = [];
     for (let i = 0; i < count; i++) {
       const text = await labels.nth(i).textContent();
-      if (text && !text.includes('No Context Graphs')) names.push(text.trim());
+      if (text && !text.includes('No context graphs')) names.push(text.trim());
     }
     return names;
   }

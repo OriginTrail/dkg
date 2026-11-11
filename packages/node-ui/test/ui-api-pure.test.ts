@@ -653,7 +653,7 @@ describe('UI API tests', () => {
       // the copy must NOT tell the user to republish/retry.
       expect(withDetail).not.toMatch(/republish|re-publish|try again|retry/i);
       expect(withDetail).toMatch(/on-chain/i);
-      expect(withDetail).toMatch(/Context Graph/i);
+      expect(withDetail).toMatch(/Context graph/i);
       expect(withDetail).toContain('binding failed'); // appends the daemon detail
       // Works without a detail string too.
       expect(partialPublishWarning()).not.toMatch(/republish|re-publish|retry/i);

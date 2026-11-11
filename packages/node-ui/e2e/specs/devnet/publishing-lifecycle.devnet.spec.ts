@@ -34,7 +34,7 @@ test.describe('Publishing lifecycle (devnet)', () => {
     expect(cgs.ok).toBe(true);
     const body = (await cgs.json()) as { contextGraphs: Array<{ id: string; name: string }> };
     const cg = body.contextGraphs[0];
-    requireDevnetPrecondition(test, !cg, 'No Context Graphs on devnet');
+    requireDevnetPrecondition(test, !cg, 'No context graphs on devnet');
 
     const stamp = Date.now();
     const res = await devnetApiFetch('/api/knowledge-assets', {

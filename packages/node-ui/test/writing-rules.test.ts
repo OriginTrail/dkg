@@ -27,6 +27,7 @@ const WORDS: [RegExp, string][] = [
   [/\boutcome not confirmed\b/i, 'Outcome unknown'],
   [/\bcarried out\b/i, 'Done'],
   [/\bnot admitted\b/i, 'Refused'],
+  [/\bContext Graphs?\b/, 'context graph'],
   [/\bSPEC_[A-Z]/, 'no spec notes on screen'],
   [/^\d+ · /, 'a label and its detail take a colon'],
 ];
@@ -362,7 +363,7 @@ describe('writing rules', () => {
   it('finds real text in the UI', () => {
     // Two are kept in constants (walletSurfaceCopy, ownerNote) and one comes from a helper (formatJoinRequestError).
     for (const known of [
-      'Retry loading agent', 'Copy UAL', 'Context Graph', 'Your connected wallet isn’t needed here', 'Managed by this node',
+      'Retry loading agent', 'Copy UAL', 'Context graph', 'Your connected wallet isn’t needed here', 'Managed by this node',
       'out-of-date network setting',
     ]) {
       expect([...allText].some((line) => line.includes(known)), known).toBe(true);
@@ -372,7 +373,8 @@ describe('writing rules', () => {
   it('fails a listed word', () => {
     expect(problemsIn(asLines(['Check the daemon'])).map((problem) => problem.use)).toEqual(['node']);
     expect(problemsIn(asLines(['2 · Commitment'])).map((problem) => problem.use)).toEqual(['a label and its detail take a colon']);
-    expect(problemsIn(asLines(['PDF · 8.4 MB', 'Check the node']))).toEqual([]);
+    expect(problemsIn(asLines(['Open the Context Graph'])).map((problem) => problem.use)).toEqual(['context graph']);
+    expect(problemsIn(asLines(['PDF · 8.4 MB', 'Check the node', 'Context graph size', 'My context graphs']))).toEqual([]);
   });
 
   it('keeps UI text to the word list', () => {

@@ -49,7 +49,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
   onSelectEntity,
   onOpenAgent,
   onBack,
-  contextGraphName = 'Context Graph',
+  contextGraphName = 'Context graph',
 }) => {
   const agents = useAgentsContext();
   const profile = useProjectProfileContext();

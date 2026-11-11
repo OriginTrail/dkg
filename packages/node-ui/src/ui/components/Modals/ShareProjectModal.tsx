@@ -241,7 +241,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
           style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}
         >
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div id="dkg-share-modal-title" className="v10-modal-title">Share Context Graph</div>
+            <div id="dkg-share-modal-title" className="v10-modal-title">Share context graph</div>
             <div className="v10-modal-subtitle">
               Invite agents to collaborate on <strong>{contextGraphName}</strong>.
             </div>
@@ -293,7 +293,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
               <div className="v10-form-group">
                 <label className="v10-form-label">Allowed agents</label>
                 <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginBottom: 8 }}>
-                  Only agents on this list can read and write to the Context Graph. To add someone, share the Invite code below — they'll send a signed join request you can approve in the <strong>Join requests</strong> tab.
+                  Only agents on this list can read and write to the context graph. To add someone, share the Invite code below — they'll send a signed join request you can approve in the <strong>Join requests</strong> tab.
                 </div>
 
                 {allowedAgents.length > 0 && (
@@ -336,7 +336,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                     color: 'var(--text-tertiary)', background: 'var(--bg-surface)',
                     border: '1px dashed var(--border-default)', marginBottom: 8,
                   }}>
-                    No agents on this list yet: the Context Graph is open to anyone who subscribes.
+                    No agents on this list yet: the context graph is open to anyone who subscribes.
                   </div>
                 )}
               </div>
@@ -384,7 +384,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
             <div className="v10-form-group">
               <label className="v10-form-label">Pending join requests</label>
               <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginBottom: 8 }}>
-                Agents who submitted a signed request to join this Context Graph. Approve to add them to the allowlist.
+                Agents who submitted a signed request to join this context graph. Approve to add them to the allowlist.
               </div>
 
               {pendingRequests.length === 0 && (

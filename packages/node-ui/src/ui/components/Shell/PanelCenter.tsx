@@ -154,7 +154,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType, contextGraph
         flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10,
         padding: '8px 16px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-panel)',
       }}>
-        <Breadcrumbs items={[contextGraphId ? graph : { label: 'Context Graph' }, { label: docLabel }]} />
+        <Breadcrumbs items={[contextGraphId ? graph : { label: 'Context graph' }, { label: docLabel }]} />
         {showToggle && (
           <div
             role="group"

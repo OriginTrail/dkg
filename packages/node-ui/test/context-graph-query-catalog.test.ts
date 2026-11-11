@@ -151,7 +151,7 @@ describe('ContextGraphQueryView', () => {
     expect(buttonLabels.some(label => label?.startsWith('Graphs'))).toBe(true);
     expect(buttonLabels.some(label => label?.startsWith('Types'))).toBe(true);
     expect(buttonLabels).toEqual(expect.arrayContaining(['Run', 'Save', 'Reset']));
-    expect(container.textContent).toContain('Reusable SPARQL for searching in this Context Graph');
+    expect(container.textContent).toContain('Reusable SPARQL for searching in this context graph');
     expect(container.textContent).toContain('Load a preset or saved query into the editor below.');
     expect(container.textContent).toContain('Built-in presets');
     expect(container.textContent).not.toContain('Catalogue scope');
@@ -253,7 +253,7 @@ describe('ContextGraphQueryView', () => {
     const { container, root } = await renderWithProfile(savedProfile);
 
     await waitForText(container, 'Saved queries');
-    expect(container.textContent).toContain('User-created SPARQL saved in this node profile for this Context Graph.');
+    expect(container.textContent).toContain('User-created SPARQL saved in this node profile for this context graph.');
     expect(container.textContent).not.toContain('Queries saved from the Query tab.');
     expect(container.textContent).not.toContain('Profile-saved queries');
     expect(container.textContent).toContain('Personal research');
@@ -437,14 +437,14 @@ describe('ContextGraphQueryView', () => {
         slug: 'ui-saved-queries',
         subGraph: '__context_graph',
         name: 'Saved queries',
-        description: 'User-created SPARQL saved in this node profile for this Context Graph.',
+        description: 'User-created SPARQL saved in this node profile for this context graph.',
         rank: 50,
         queries: [{
           slug: 'existing-query',
           subGraph: '__context_graph',
           catalogSlug: 'ui-saved-queries',
           catalogName: 'Saved queries',
-          catalogDescription: 'User-created SPARQL saved in this node profile for this Context Graph.',
+          catalogDescription: 'User-created SPARQL saved in this node profile for this context graph.',
           catalogRank: 50,
           name: 'Existing saved query',
           description: 'Already persisted.',

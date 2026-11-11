@@ -76,7 +76,7 @@ test.describe('KNOWN BUG: views stick on "Loading…" with no error state when a
 
     // ...and the view must NOT be stuck on the perpetual loading placeholder.
     await expect(
-      center.locator('.v10-view-placeholder').filter({ hasText: /Loading Context Graph/i }),
+      center.locator('.v10-view-placeholder').filter({ hasText: /Loading context graph/i }),
     ).toHaveCount(0);
   });
 });

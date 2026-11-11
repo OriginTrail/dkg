@@ -387,8 +387,8 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
                just like the named chips so a click from a layer
                page keeps the layer scope when entering Root. */
             onClick={() => onSelect(ROOT_SLUG_SENTINEL, layer)}
-            title={`Entities not in any subgraph (Context Graph root) · ${displayCount} entities${scopeSuffix}`}
-            aria-label="Entities not in any subgraph (Context Graph root)"
+            title={`Entities not in any subgraph (context graph root) · ${displayCount} entities${scopeSuffix}`}
+            aria-label="Entities not in any subgraph (context graph root)"
           >
             <span className="v10-subgraph-chip-icon">⊘</span>
             <span className="v10-subgraph-chip-label">Root</span>
