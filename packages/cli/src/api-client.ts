@@ -39,6 +39,8 @@ import {
 } from './finalized-publish-options.js';
 import { parseRegisterPcaAgentResult, type RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { CPU_PROFILE_PATH, cpuProfileRequestTimeoutMs, type CpuProfileResult } from './cpu-profile-wire.js';
+import { DaemonOutcomeUnknownError } from './daemon-outcome-unknown-error.js';
+import { READ_GRAPHS_PATH, READ_GRAPHS_REQUEST_TIMEOUT_MS, readGraphsStatusPath, type ReadGraphsAction, type ReadGraphsRequest } from './read-graphs-wire.js';
 import {
   serializeStatusQuery,
   type StatusQueryOptions,
@@ -70,28 +72,7 @@ export type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contrac
 const VERIFY_DEFAULT_COLLECTION_TIMEOUT_MS = 30 * 60_000;
 const REQUEST_CARRIED_TIMEOUT_MARGIN_MS = 30_000;
 
-/**
- * A long Knowledge Asset mutation (`vm/publish`, `swm/share`, `wm/import-file`,
- * or a create that also shares or publishes) reached the daemon but no response
- * arrived before the client deadline. The daemon keeps working after the client
- * disconnects, so the operation may still complete, and a blind retry can 409.
- */
-export class DaemonOutcomeUnknownError extends Error {
-  readonly code = 'OUTCOME_UNKNOWN';
-  readonly method: string;
-  readonly path: string;
-  readonly timeoutMs: number;
-  constructor(method: string, path: string, timeoutMs: number, historyHint: string) {
-    super(
-      `Outcome unknown: the daemon did not answer ${method} ${path} within ${Math.round(timeoutMs / 1000)}s. ` +
-      `It keeps working after the client disconnects, so the operation may still complete. ${historyHint}`,
-    );
-    this.name = 'DaemonOutcomeUnknownError';
-    this.method = method;
-    this.path = path;
-    this.timeoutMs = timeoutMs;
-  }
-}
+export { DaemonOutcomeUnknownError };
 
 interface RequestDeadline {
   /** Overrides the method's default deadline. */
@@ -2426,6 +2407,15 @@ export class ApiClient {
   async recordCpuProfile(seconds?: number): Promise<CpuProfileResult> {
     return this.post(CPU_PROFILE_PATH, seconds === undefined ? {} : { seconds },
       { timeoutMs: cpuProfileRequestTimeoutMs(seconds) });
+  }
+
+  /**
+   * Node-admin token only: the node's read graphs (`dkg store read-graphs`).
+   * `status` lists them; `check`, `rebuild` and `drop` act on them.
+   */
+  async readGraphs<T>(action: ReadGraphsAction, request: ReadGraphsRequest = {}): Promise<T> {
+    if (action === 'status') return this.get<T>(readGraphsStatusPath(request));
+    return this.post<T>(`${READ_GRAPHS_PATH}/${action}`, request, { timeoutMs: READ_GRAPHS_REQUEST_TIMEOUT_MS });
   }
 
   async shutdown(): Promise<void> {
