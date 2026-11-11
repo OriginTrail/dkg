@@ -2,7 +2,6 @@
 // visibleLines reads one source file; shownLines is every piece of shown text in src/ui,
 // with the file and line it is on. Checks that look at code syntax read the source instead.
 import ts from 'typescript';
-import { COPY } from '../../src/ui/marketplace/copy.generated';
 import { codeFiles, read, where } from './source.js';
 
 /**
@@ -169,8 +168,14 @@ const literals = (node: ts.Node, add: Add, checker: ts.TypeChecker, following: F
   }
 };
 
+/**
+ * A table of shown text: an object whose every property value is text a person reads, looked up by key
+ * elsewhere. `skip` leaves out keys whose text never reaches a person using a node.
+ */
+export type ShownTable = { name: string; skip?: (key: string) => boolean };
+
 /** The text a person can read in one source file, with the line each piece is on. */
-export const visibleLines = (source: string, fileName = 'file.tsx'): Line[] => {
+export const visibleLines = (source: string, fileName = 'file.tsx', table?: ShownTable): Line[] => {
   const lines: Line[] = [];
   const seen = new Set<string>();
   const { file, checker } = parse(fileName, source);
@@ -187,7 +192,14 @@ export const visibleLines = (source: string, fileName = 'file.tsx'): Line[] => {
   };
   const read = (node: ts.Node) => literals(node, add, checker);
   const visit = (node: ts.Node) => {
-    if (ts.isJsxText(node)) add(node.text, node);
+    // The table's value may be wrapped, as in `{ … } as const satisfies Record<string, string>`.
+    const tableObject = table && ts.isVariableDeclaration(node) && node.name.getText(file) === table.name && node.initializer
+      ? unwrap(node.initializer) : undefined;
+    if (tableObject && ts.isObjectLiteralExpression(tableObject)) {
+      for (const property of tableObject.properties) {
+        if (ts.isPropertyAssignment(property) && !table.skip?.(propertyName(property))) read(property.initializer);
+      }
+    } else if (ts.isJsxText(node)) add(node.text, node);
     else if (ts.isJsxExpression(node) && node.expression && !ts.isJsxAttribute(node.parent)) read(node.expression);
     else if (ts.isJsxAttribute(node) && node.initializer && VISIBLE_ATTRIBUTES.has(node.name.getText(file))) read(node.initializer);
     else if (isProperty(node)) read(node.initializer);
@@ -208,15 +220,8 @@ const fromPackage = (file: string) => `src/ui/${where(file)}`;
 const sources = codeFiles.filter((file) => !/^(mocks|design-system)\b/.test(where(file)));
 // The Marketplace keeps its text in one table that components read by key, so every value in it is shown.
 // The development-only component gallery is left out, like the reference page above.
-const copySource = read('marketplace/copy.generated.ts').split('\n');
-const copyLines: Line[] = Object.entries(COPY)
-  .filter(([key]) => !key.startsWith('gallery.'))
-  .map(([key, text]) => ({
-    text: clean(String(text)),
-    where: `src/ui/marketplace/copy.generated.ts:${copySource.findIndex((line) => line.includes(`"${key}":`)) + 1}`,
-  }));
-export const shownLines: Line[] = [
-  ...sources.flatMap((file) => visibleLines(read(file), fromPackage(file))),
-  ...copyLines,
-];
+const SHOWN_TABLES: Record<string, ShownTable> = {
+  'marketplace/copy.generated.ts': { name: 'COPY', skip: (key) => key.startsWith('gallery.') },
+};
+export const shownLines: Line[] = sources.flatMap((file) => visibleLines(read(file), fromPackage(file), SHOWN_TABLES[where(file)]));
 export const shownText = new Set(shownLines.map((line) => line.text));
