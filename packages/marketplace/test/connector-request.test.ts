@@ -3,8 +3,9 @@
  * How the OpenAI-compatible backend is sent a call's output limit and
  * temperature: by its host (OpenAI's own API gets `max_completion_tokens` and
  * no temperature, which its reasoning models need; any other backend
- * `max_tokens` and 0, as in 10.1.0) or by the service's settings; and what a
- * refusal says: the backend's own words, on one line, cut short, never a key.
+ * `max_tokens` and 0, as in 10.1.0) or by the service's settings; the
+ * reasoning effort a call with tools carries, when the settings name one; and
+ * what a refusal says: the backend's own words, on one line, cut short, never a key.
  * `fetch` is stubbed, so no request leaves the process.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -68,6 +69,38 @@ describe("a backend's output limit and temperature", () => {
       [{ temperature: '0' }, /temperature must be a number from 0 to 2, or null/],
     ] as const) {
       expect(() => resolveSellerConfig({ seller: { enabled: true, services: [{ ...service, backend: { ...service.backend, ...backend } as never }] } })).toThrow(message);
+    }
+  });
+});
+
+describe("a backend's reasoning effort with tools", () => {
+  const TOOLS = [{ type: 'function' as const, function: { name: 'get_weather', parameters: { type: 'object', properties: { city: { type: 'string' } } } } }];
+  const SOL = { kind: 'openai' as const, baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.6-sol' };
+
+  it('is sent as the settings name it with a call that carries tools, and with no other', async () => {
+    const seen = stubFetch(200, OK);
+    const backend = connectorOf({ ...SOL, reasoningEffortWithTools: 'none' });
+    await backend.complete({ ...CALL, tools: TOOLS, toolChoice: 'auto' });
+    expect(seen[0]!.body).toEqual({
+      model: 'gpt-5.6-sol', messages: CALL.messages, max_completion_tokens: 7, stream: false, tools: TOOLS, tool_choice: 'auto', reasoning_effort: 'none',
+    });
+    await backend.complete(CALL);
+    expect(seen[1]!.body).toEqual({ model: 'gpt-5.6-sol', messages: CALL.messages, max_completion_tokens: 7, stream: false });
+  });
+
+  it('is not sent when the settings name none, so the model keeps its own', async () => {
+    const seen = stubFetch(200, OK);
+    await connectorOf(SOL).complete({ ...CALL, tools: TOOLS });
+    expect(seen[0]!.body).toEqual({ model: 'gpt-5.6-sol', messages: CALL.messages, max_completion_tokens: 7, stream: false, tools: TOOLS });
+  });
+
+  it('is checked in the seller settings', () => {
+    const service = { model: 'urn:test:model:a', pricePerUnit: '1000', backend: SOL };
+    const resolved = resolveSellerConfig({ seller: { enabled: true, services: [{ ...service, backend: { ...SOL, reasoningEffortWithTools: 'none' } }] } });
+    expect(resolved!.services[0]!.backend).toMatchObject({ reasoningEffortWithTools: 'none' });
+    for (const effort of ['', 'None', 'very high', 'x'.repeat(17), 3, null]) {
+      expect(() => resolveSellerConfig({ seller: { enabled: true, services: [{ ...service, backend: { ...SOL, reasoningEffortWithTools: effort } as never }] } }))
+        .toThrow(/reasoningEffortWithTools must be a reasoning effort, such as none or low/);
     }
   });
 });
