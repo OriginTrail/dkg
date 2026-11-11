@@ -46,7 +46,8 @@ import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
 import { matchesGraphNameTest, readGraphMembership, workingMemoryIdentityRule, type GraphNameTest } from './membership.js';
 import { readGraphLayerOf, readGraphRuntimeOf } from './read-graph-store.js';
-import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry } from './registry-recognition.js';
+import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry, type ReadGraphRegistryFact } from './registry-recognition.js';
+import { noteUnstoredReadGraphMark } from './mark-journal.js';
 import { recordReadGraphRegistry } from './registry-record.js';
 import { ReadGraphLocks, type InMemoryReadGraphStateMirror, type ReadGraphBackendRuntime } from './runtime.js';
 import {
@@ -308,7 +309,9 @@ export function withReadGraphBackgroundSlot<T>(runtime: ReadGraphBackendRuntime,
  * that change, and they are read again. When the cache held another snapshot,
  * every one of those read graphs is marked dirty before the new one is
  * installed: the layer maintained it under the old membership, and nothing
- * may be built or served from the two mixed. The registry it ends with is
+ * may be built or served from the two mixed. Facts that changed under the
+ * same membership are installed the same way, without marks: the layer
+ * predicts later writes from them. The registry it ends with is
  * recorded (`./registry-record.ts`) before it returns, so nothing is built
  * under a registry that a start-up would not find recorded. Returns whether
  * the cached snapshot changed.
@@ -324,7 +327,9 @@ export async function refreshReadGraphRegistry(context: ReadGraphJobContext, con
     const fresh = registrySnapshotOfFacts(contextGraphId, facts);
     const cached = runtime.registries.get(contextGraphId);
     const changed = cached !== undefined && !sameRegistry(cached, fresh);
-    if (cached !== undefined && !changed && runtime.registries.facts(contextGraphId) !== undefined) {
+    // The same membership can come from other facts, and the layer predicts later writes from the facts.
+    const cachedFacts = runtime.registries.facts(contextGraphId);
+    if (cached !== undefined && !changed && cachedFacts !== undefined && sameFacts(cachedFacts, facts)) {
       await recordReadGraphRegistry(target, runtime, fresh, jobOptions(context));
       return false;
     }
@@ -341,6 +346,13 @@ export async function refreshReadGraphRegistry(context: ReadGraphJobContext, con
     if (installed) return changed;
   }
   throw new ReadGraphJobError(`The registry of ${contextGraphId} kept changing while it was read`);
+}
+
+/** Two lists of registry facts hold the same facts, in any order. */
+function sameFacts(left: readonly ReadGraphRegistryFact[], right: readonly ReadGraphRegistryFact[]): boolean {
+  const keys = (facts: readonly ReadGraphRegistryFact[]) => new Set(facts.map((fact) => JSON.stringify([fact.graph, fact.subject, fact.predicate, fact.object])));
+  const [a, b] = [keys(left), keys(right)];
+  return a.size === b.size && [...b].every((key) => a.has(key));
 }
 
 const INSTALLED_IDENTITIES = new WeakMap<ReadGraphBackendRuntime, string>();
@@ -478,6 +490,7 @@ class ReadGraphJob {
     if (stored.damaged) throw new ReadGraphJobError(`The state row of ${this.readGraph} is damaged`);
     if (failure && !sameRow(stored.row, to)) {
       if (to?.state === 'ready' || stored.row?.state !== 'ready') setMirror(this.runtime.mirror, this.readGraph, stored.row);
+      else noteUnstoredReadGraphMark(this.runtime, this.readGraph, stored.row!.generation);
       throw failure.error;
     }
     setMirror(this.runtime.mirror, this.readGraph, stored.row);

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -8,6 +8,14 @@ import { mayHoldReadGraphPartitions } from '../src/read-graph-partition-marker.j
 import { missingReadGraphMethods } from '../src/read-graph/adapter-contract.js';
 import { guardReadGraphPartition, storeMayHoldReadGraphPartitions } from '../src/read-graph-partition-store.js';
 import { ReadGraphBuilder } from '../src/read-graph/builder.js';
+import { checkReadGraph } from '../src/read-graph/check.js';
+import {
+  clearUnstoredReadGraphMarks,
+  noteUnstoredReadGraphMark,
+  readGraphMarkJournalPath,
+  readUnstoredReadGraphMarks,
+  useReadGraphMarkJournal,
+} from '../src/read-graph/mark-journal.js';
 import { matchesGraphNameTest, readGraphMembership, type GraphNameTest } from '../src/read-graph/membership.js';
 import { wrapReadGraphLayer, type ReadGraphStore } from '../src/read-graph/read-graph-store.js';
 import {
@@ -218,6 +226,19 @@ INSERT DATA { GRAPH <${stateGraph}> { <${stateGraph}> <http://dkg.io/ontology/re
     expect(records).toEqual(new Map([[fixture.contextGraphId, undefined], [`${fixture.contextGraphId}-other`, undefined]]));
     await expect(recordReadGraphRegistry({ query: async () => ({ type: 'bindings', bindings: [] }) } as unknown as TripleStore, layer.runtime, fixture.registry))
       .rejects.toThrow(/no update\(\)/);
+  });
+
+  it('reads only well-formed marks from the journal, and notes none it cannot write', async () => {
+    const { fixture, layer, dataDir } = await open();
+    const { wholeVm, codeVm } = fixture.readGraphs;
+    writeFileSync(readGraphMarkJournalPath(dataDir), `3 ${wholeVm}\nnot a line\nx ${codeVm}\n4 ${wholeVm}\n5 urn:not:a:read:graph\n6 ${codeVm} extra\n`);
+    expect(readUnstoredReadGraphMarks(dataDir)).toEqual(new Map([[wholeVm, new Set([3, 4])]]));
+    clearUnstoredReadGraphMarks(dataDir);
+    expect(readUnstoredReadGraphMarks(dataDir)).toEqual(new Map());
+    // A data directory that cannot be written keeps nothing, and the mark goes on.
+    useReadGraphMarkJournal(layer.runtime, join(dataDir, 'missing'));
+    expect(() => noteUnstoredReadGraphMark(layer.runtime, wholeVm, 7)).not.toThrow();
+    expect(readUnstoredReadGraphMarks(join(dataDir, 'missing'))).toEqual(new Map());
   });
 
   it('asks whether a read graph holds a triple', async () => {
@@ -461,6 +482,28 @@ describe('building a read graph', () => {
     expect(await triplesOf(adapter, fixture.readGraphs.wholeVm)).toContain(`urn:s:docs ${P} "d"`);
   });
 
+  it('takes the facts a refresh reads when the membership stays the same, so a later exact delete is predicted from them', async () => {
+    const { adapter, fixture, layer, store, context } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    const meta = `${fixture.root}/_meta`;
+    const type = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+    const subGraph = 'http://dkg.io/ontology/SubGraph';
+    // A second subject registers `code` too.
+    await adapter.insert([
+      { subject: 'urn:sub:b', predicate: type, object: subGraph, graph: meta },
+      { subject: 'urn:sub:b', predicate: 'http://schema.org/name', object: '"code"', graph: meta },
+    ]);
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    // A writer outside the layer removes the first registration; `code` stays registered by the second.
+    await adapter.update(`DELETE DATA { GRAPH <${meta}> { ${SUB_GRAPH_TYPE(fixture, 'code')} } }`);
+    expect(await refreshReadGraphRegistry(context, fixture.contextGraphId)).toBe(false);
+    expect(layer.runtime.registries.facts(fixture.contextGraphId)?.some((fact) => fact.subject === `${fixture.root}/code` && fact.predicate === type)).toBe(false);
+    // Removing the second, through the layer, now ends the registration: the read graph is marked before it is sent.
+    await store.delete([{ subject: 'urn:sub:b', predicate: type, object: subGraph, graph: meta }]);
+    expect(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)?.state).toBe('dirty');
+    expect((await storedRows(adapter))[fixture.readGraphs.wholeVm]).toMatch(/^dirty@/);
+  });
+
   it('reads the registry again when a write through the layer changed the cached one while the refresh read it', async () => {
     const { adapter, fixture, layer, store, context } = await open();
     const [vm] = fixture.keys as [ReadGraphKey];
@@ -691,9 +734,10 @@ describe('marking a read graph dirty', () => {
   });
 
   it('keeps a read graph out of service while its dirty mark is not stored, until a build lands', async () => {
-    const { adapter, fixture, layer, context } = await open();
+    const { adapter, fixture, layer, context, dataDir } = await open();
     const [key] = fixture.keys as [ReadGraphKey];
     const readGraph = readGraphIri(key);
+    useReadGraphMarkJournal(layer.runtime, dataDir);
     expect(await buildReadGraph(context, key)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
     const built = layer.runtime.mirror.get(readGraph)!;
     // A check found a mismatch and marked the mirror, and its mark did not reach the store.
@@ -712,6 +756,8 @@ describe('marking a read graph dirty', () => {
     await expect(markReadGraphDirty(context, readGraph)).rejects.toThrow('connection reset');
     expect(layer.runtime.mirror.get(readGraph)?.state).toBe('dirty');
     expect((await readStoredReadGraphRow(adapter, readGraph)).row).toEqual(built);
+    // The data directory keeps the mark for a start-up, at the generation the store still holds.
+    expect(readUnstoredReadGraphMarks(dataDir)).toEqual(new Map([[readGraph, new Set([built.generation])]]));
     // Once a mark lands, the build rebuilds the read graph, and it serves again.
     expect(await buildReadGraph(context, key)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
     expect(servingReadGraphGeneration(layer.runtime.mirror.get(readGraph))).toBe(layer.runtime.mirror.get(readGraph)!.generation);
@@ -898,6 +944,31 @@ describe('read-graph start-up', () => {
     expect(await startReadGraphs(second, { maintains: () => true })).toEqual({ marked: 2, maintained: 2 });
     expect((await storedRows(adapter))[codeVm]).toMatch(/^dirty@/);
     expect((await storedRecords(adapter)).get(fixture.contextGraphId)).toEqual({ ...fixture.registry, subGraphNames: ['code', 'docs'] });
+  });
+
+  it('marks a ready row dirty at start when its dirty mark never reached the store, as the data directory keeps it', async () => {
+    const { adapter, fixture, layer, store, context, dataDir } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    const { wholeVm } = fixture.readGraphs;
+    expect(await startReadGraphs(store, { dataDir, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    const built = (await buildReadGraph(context, vm)).row!;
+    // A full check finds a triple no member holds, and the store refuses its dirty mark.
+    await adapter.insert([q('urn:s:stray', '"stray"', wholeVm)]);
+    adapter.onUpdate = (sparql) => { if (sparql.includes('"dirty"')) throw new Error('connection reset'); };
+    expect(await checkReadGraph(store, wholeVm, 'full', { alert: () => undefined })).toMatchObject({ outcome: 'mismatch', direction: 'unheld' });
+    adapter.onUpdate = undefined;
+    expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
+    expect((await readStoredReadGraphRow(adapter, wholeVm)).row).toEqual(built);
+    // The next process over the same store: the stored row and the registry record agree, the journal does not.
+    const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    expect(await startReadGraphs(restarted, { dataDir, maintains: () => true })).toEqual({ marked: 1, maintained: 1 });
+    expect((await storedRows(adapter))[wholeVm]).toBe(`dirty@${built.generation + 1}`);
+    expect(readUnstoredReadGraphMarks(dataDir)).toEqual(new Map());
+    // A mark for a generation the row has left keeps nothing out.
+    expect(await buildReadGraph({ ...context, store: restarted }, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    writeFileSync(readGraphMarkJournalPath(dataDir), `${built.generation} ${wholeVm}\n`);
+    const third = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    expect(await startReadGraphs(third, { dataDir, maintains: () => true })).toEqual({ marked: 0, maintained: 1 });
   });
 
   it('replaces damaged rows and rows whose generation cannot grow, and notes nothing without rows', async () => {
