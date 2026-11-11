@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { mkdir } from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, readGraphIri, readScope, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
@@ -14,6 +15,7 @@ import {
   noteUnstoredReadGraphMark,
   readGraphMarkJournalPath,
   readUnstoredReadGraphMarks,
+  unstoredReadGraphMarksText,
   useReadGraphMarkJournal,
 } from '../src/read-graph/mark-journal.js';
 import { matchesGraphNameTest, readGraphMembership, type GraphNameTest } from '../src/read-graph/membership.js';
@@ -1253,6 +1255,39 @@ describe('read-graph start-up', () => {
     expect((await storedRows(adapter))[wholeVm]).toBe(`dirty@${built.generation + 1}`);
   });
 
+  it('fails a start-up whose data directory holds a journal it cannot read, rather than take it for an empty one', async () => {
+    const { store, other, first, second } = await sharedBackend();
+    // A directory where the journal's file belongs: reading it fails, as it does without permission.
+    await mkdir(readGraphMarkJournalPath(first));
+    expect(() => readUnstoredReadGraphMarks(first)).toThrow(/EISDIR/);
+    expect(() => unstoredReadGraphMarksText(first)).toThrow(/EISDIR/);
+    await expect(startReadGraphs(store, { dataDir: first, maintains: () => true })).rejects.toThrow(/EISDIR/);
+    rmSync(readGraphMarkJournalPath(first), { recursive: true });
+    expect(await startReadGraphs(store, { dataDir: first, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    // A start-up that joins the loaded mirror fails the same way.
+    await mkdir(readGraphMarkJournalPath(second));
+    await expect(startReadGraphs(other, { dataDir: second, maintains: () => true })).rejects.toThrow(/EISDIR/);
+  });
+
+  it('notes read-graph partitions in the data directory of every start-up over the backend, whenever they appear', async () => {
+    // A rollback drops the partitions only from a data directory that notes them.
+    const partitions = (...dirs: string[]) => dirs.map((dataDir) => mayHoldReadGraphPartitions(dataDir));
+    // Partitions built after both start-ups: every directory notes them.
+    const later = await sharedBackend();
+    expect(await startReadGraphs(later.store, { dataDir: later.first, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    expect(await startReadGraphs(later.other, { dataDir: later.second, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    expect(partitions(later.first, later.second)).toEqual([false, false]);
+    await buildReadGraph(later.context, later.fixture.keys[0]!);
+    expect(partitions(later.first, later.second)).toEqual([true, true]);
+    // Partitions there before a start-up joins: its directory notes them as it joins.
+    const earlier = await sharedBackend();
+    expect(await startReadGraphs(earlier.store, { dataDir: earlier.first, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    await buildReadGraph(earlier.context, earlier.fixture.keys[0]!);
+    expect(partitions(earlier.second)).toEqual([false]);
+    expect(await startReadGraphs(earlier.other, { dataDir: earlier.second, maintains: () => true })).toEqual({ marked: 0, maintained: 1 });
+    expect(partitions(earlier.second)).toEqual([true]);
+  });
+
   it('replaces damaged rows and rows whose generation cannot grow, and notes nothing without rows', async () => {
     const empty = await open();
     expect(await startReadGraphs(empty.store, { dataDir: empty.dataDir, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
@@ -1356,6 +1391,27 @@ describe('a store restored to an earlier state', () => {
     expect(readUnstoredReadGraphMarks(dataDir)).toEqual(new Map([[wholeVm, new Set([stored.generation])]]));
   });
 
+  it('ends a build whose publication a reported restore overlaps, and keeps the published row for a start-up mark', async () => {
+    const { adapter, fixture, layer, store, context, dataDir } = await open();
+    useReadGraphMarkJournal(layer.runtime, dataDir);
+    const [vm] = fixture.keys as [ReadGraphKey];
+    const { wholeVm } = fixture.readGraphs;
+    const publishing = `<${wholeVm}> <${READ_GRAPH_STATE_PREDICATES.state}> "ready"`;
+    adapter.onUpdate = (sparql) => {
+      // The restore is reported while the publication's request is on its way: no recovery generation tells it.
+      if (sparql.split('\n').some((line) => line.startsWith('INSERT {') && line.includes(publishing))) noteReadGraphStoreRestored(store);
+    };
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'lost' });
+    adapter.onUpdate = undefined;
+    const stored = (await readStoredReadGraphRow(adapter, wholeVm)).row!;
+    expect(stored.state).toBe('ready');
+    expect(servingReadGraphGeneration(layer.runtime.mirror.get(wholeVm))).toBeUndefined();
+    expect(readUnstoredReadGraphMarks(dataDir)).toEqual(new Map([[wholeVm, new Set([stored.generation])]]));
+    // The next process marks that row dirty rather than trust what the restore may have cut short.
+    const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    expect(await startReadGraphs(restarted, { dataDir, maintains: () => true })).toMatchObject({ marked: 1 });
+  });
+
   it('takes every read graph out of service once a supervised backend tells of a restart, before the next query is served', async () => {
     const { adapter, fixture, layer, store, context } = await open();
     let recovery = { generation: 1, ready: true };
@@ -1455,6 +1511,27 @@ describe('the read-graph builder', () => {
     expect(builder.status().retrying).toEqual([]);
     expect(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)?.state).toBe('ready');
     await builder.close();
+  });
+
+  it('runs a pass at each interval after the first, which builds what is wanted since, and none once closed', async () => {
+    const { fixture, layer, store, dataDir } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    let wanted: ReadGraphKey[] = [];
+    let passes = 0;
+    const builder = new ReadGraphBuilder({ store, dataDir, wanted: () => { passes += 1; return wanted; }, batching: { pauseRatio: 0 }, intervalMs: 20 });
+    builder.start();
+    await builder.whenIdle();
+    expect(layer.runtime.mirror.get(readGraphIri(vm))).toBeUndefined();
+    // Wanted after the first pass: a later one builds it, with no request.
+    wanted = [vm];
+    for (let wait = 0; wait < 200 && layer.runtime.mirror.get(readGraphIri(vm))?.state !== 'ready'; wait += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(layer.runtime.mirror.get(readGraphIri(vm))?.state).toBe('ready');
+    await builder.close();
+    const closed = passes;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(passes).toBe(closed);
   });
 
   it('aborts the build in progress on close, and leaves the read graph out of service', async () => {
