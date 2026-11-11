@@ -249,6 +249,45 @@ describe('registry recognition in the read-graph layer', () => {
     expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code']);
   });
 
+  it('puts back what it fenced for one context graph when another\'s registry cannot be read before the write, and sends nothing', async () => {
+    const { adapter, store, fixture, layer, states } = await layered();
+    const kid = `${fixture.contextGraphId}/kid`;
+    const kidVm = readGraphIri({ scope: readScope(kid), layer: MemoryLayer.VerifiableMemory });
+    layer.runtime.mirror.set(readyRow(kidVm));
+    const kidMeta = `${fixture.root}/kid/_meta`;
+    // The child's registry is known without its facts, as after a write that could not be settled.
+    layer.runtime.registries.set({ contextGraphId: kid, subGraphNames: [], childContextGraphRoots: [] });
+    // In the write, the parent's facts are read and its read graphs fenced; then reading the child's facts fails once.
+    const query = adapter.query.bind(adapter);
+    let failures = 1;
+    let during: Record<string, string> | undefined;
+    adapter.query = async (sparql, options) => {
+      if (failures > 0 && options?.source === 'storage.readGraphRegistry' && sparql.includes(`<${kidMeta}>`)) {
+        failures -= 1;
+        during = states();
+        throw new Error('connection reset');
+      }
+      return query(sparql, options);
+    };
+    const update = adapter.update.bind(adapter);
+    let sent = 0;
+    adapter.update = async (sparql, options) => {
+      if (sparql.includes('urn:test:p')) sent += 1;
+      return update(sparql, options);
+    };
+    const write = `INSERT DATA { GRAPH <${kidMeta}> { <urn:asset:1> <urn:test:p> "m" } }`;
+    await expect(store.update!(write, { writtenGraphs: [kidMeta] })).rejects.toThrow('connection reset');
+    expect(sent).toBe(0);
+    expect(during).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'dirty@2', agentWm: 'dirty@2' });
+    const ready = { wholeVm: 'ready@1', wholeSwm: 'ready@1', codeVm: 'ready@1', agentWm: 'ready@1' };
+    expect(states()).toEqual(ready);
+    expect(layer.runtime.mirror.get(kidVm)).toMatchObject({ state: 'ready', generation: 1 });
+    // The next attempt is sent, and leaves them in service as well.
+    await store.update!(write, { writtenGraphs: [kidMeta] });
+    expect(sent).toBe(1);
+    expect(states()).toEqual(ready);
+  });
+
   it('follows a registration in an asset group\'s metadata, in and out', async () => {
     const { adapter, store, meta, fixture, layer, states } = await layered();
     // The asset's data graph is in no read graph, so only its metadata matters here.
