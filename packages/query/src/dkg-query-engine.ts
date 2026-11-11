@@ -73,13 +73,20 @@ import {
   type PreparedGraphScope,
 } from './sparql-graph-scope.js';
 import { injectMinTrustFilter } from './sparql-min-trust.js';
+import { needsCallerGraphBinding } from './sparql-graph-dataset.js';
+import { bindCallerGraphsBeforeRead } from './sparql-caller-graph-read.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 import {
   createQueryStoreReadContext,
+  requireQueryDataset,
   type QueryStoreReadContext,
   type StoreReadLane,
 } from './query-store-read-context.js';
+import {
+  assertNoMergedSemanticsWithoutView, assertValidViewMinTrust, isViewDatasetPlanCurrent, planViewDataset, ViewNotReadyError,
+  withMergedViewDataset, type MergedViewDatasetPlan, type ViewReadGraphs,
+} from './view-dataset-plan.js';
 
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { assertWithheldGraphQuery } from './withheld-graph-scope.js';
@@ -243,25 +250,7 @@ export function resolveViewGraphs(
       // a 400 on `working-memory`/`shared-working-memory` too,
       // where the option is documented as ignored. Keep the
       // validation here so only verifiable-memory consumers see it.
-      if (opts?.minTrust !== undefined) {
-        const mt: unknown = opts.minTrust;
-        const validLevels = [
-          TrustLevel.SelfAttested,
-          TrustLevel.Endorsed,
-          TrustLevel.PartiallyVerified,
-          TrustLevel.ConsensusVerified,
-        ];
-        if (typeof mt !== 'number' || !Number.isInteger(mt) || !validLevels.includes(mt as TrustLevel)) {
-          // "minTrust" + "must be one of" mirrors the daemon's 400
-          // classifier wording so the HTTP path maps to a client error.
-          throw new Error(
-            `Invalid minTrust ${JSON.stringify(mt)}: must be one of TrustLevel.SelfAttested (0), ` +
-            `Endorsed (1), PartiallyVerified (2), ConsensusVerified (3). The HTTP /api/query route ` +
-            `accepts the string forms "SelfAttested" | "Endorsed" | "PartiallyVerified" | ` +
-            `"ConsensusVerified" and normalises them; in-process callers must pass the numeric enum.`,
-          );
-        }
-      }
+      assertValidViewMinTrust(opts?.minTrust);
 
       if (opts?.verifiedGraph) {
         return {
@@ -331,8 +320,12 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   private readonly graphManager: GraphManager;
   private readonly scopedContentGraphDiscoveryMemo: ScopedContentGraphDiscoveryMemo;
 
-  constructor(store: TripleStore) {
+  /** The node's read graphs, for merged view queries; none when the node keeps none. */
+  private readonly readGraphs: ViewReadGraphs | undefined;
+
+  constructor(store: TripleStore, options: { readonly readGraphs?: ViewReadGraphs } = {}) {
     this.store = store;
+    this.readGraphs = options.readGraphs;
     this.sparqlEngine = sparqlEngineOf(store);
     this.graphManager = new GraphManager(store);
     this.scopedContentGraphDiscoveryMemo = new ScopedContentGraphDiscoveryMemo(
@@ -389,10 +382,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     if (options?.withheldGraphRoots?.length && plan.kind !== 'unscoped') {
       throw new Error('withheldGraphRoots applies only to queries without a contextGraphId');
     }
+    if (plan.kind !== 'view') assertNoMergedSemanticsWithoutView(options);
     switch (plan.kind) {
-      case 'scoped': return this.queryScoped(initialGraphScope, options, plan, reads);
-      case 'view': return this.queryWithView(initialGraphScope, plan.options.view,
-        plan.options.contextGraphId, plan.options, reads, reads.catalog);
+      case 'scoped': return this.queryScoped(initialGraphScope, options, plan, this.requireReadDatasets(reads));
+      case 'view': return this.queryView(initialGraphScope, plan.options, this.requireReadDatasets(reads), reads.catalog);
       case 'unscoped': {
         // The store answers over its dataset without the withheld graphs. While
         // it may hold read-graph partitions, every unscoped query runs over its
@@ -411,6 +404,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         });
       }
     }
+  }
+
+  /** On Oxigraph a scoped read selects its graphs through its dataset, so a read without one is refused. */
+  private requireReadDatasets(reads: QueryStoreReadContext): QueryStoreReadContext {
+    return this.sparqlEngine === 'oxigraph' ? requireQueryDataset(reads) : reads;
   }
 
   private queryScoped(scope: PreparedGraphScope, options: QueryOptions | undefined,
@@ -447,7 +445,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // Explicit IRIs retain static route authority; only opted-in variables gain
     // classified same-CG content selected for this caller and sub-graph.
     assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
-    const routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(initialGraphScope, variableAllowedGraphs));
+    const routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(initialGraphScope, variableAllowedGraphs,
+      { boundByDataset: this.sparqlEngine === 'oxigraph' }));
     const resolve = (target: { root: string; family: 'data' | 'shared-memory' }) => resolveLegacyRouteScope(
       routedScope, { ...target, discover: prefix => this.discoverGraphsByPrefix(prefix, reads),
         fallbackPolicy: plan.fallbackPolicy, engine: this.sparqlEngine, authorizedDatasetGraphs: variableAllowedGraphs });
@@ -487,18 +486,56 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     return { ...result, bindings: filtered };
   }
 
+  /** A view query: per asset, or merged from its scope's read graph, which is checked again after the read. */
+  private async queryView(
+    scope: PreparedGraphScope,
+    options: QueryOptions & { contextGraphId: string; view: GetView },
+    reads: StoreReadLane,
+    catalogReads: StoreReadLane,
+  ): Promise<QueryResult> {
+    const { view, contextGraphId } = options;
+    let plan = planViewDataset(view, contextGraphId, options, this.readGraphs);
+    for (let attempt = 1; plan.kind === 'merged'; attempt += 1) {
+      const result = await this.queryMergedView(scope, plan, options, reads, catalogReads);
+      if (this.readGraphs && isViewDatasetPlanCurrent(plan, this.readGraphs)) return { ...result, semantics: 'merged' };
+      // The read graph changed while the query ran: its answer is dropped and the query planned once more.
+      if (attempt === 2) throw new ViewNotReadyError();
+      plan = planViewDataset(view, contextGraphId, options, this.readGraphs);
+    }
+    return this.queryWithView(scope, view, contextGraphId, options, reads, catalogReads);
+  }
+
   /**
-   * Execute a SPARQL query scoped to a declared V10 state view.
+   * A merged view query: the read graph is its default graph. GRAPH portions read the graphs
+   * the per-asset route would, as named graphs, with explicit graph IRIs checked and graph
+   * variables constrained as there; patterns outside GRAPH may stand beside them.
    */
-  private async queryWithView(
-    initialScope: PreparedGraphScope,
+  private async queryMergedView(
+    scope: PreparedGraphScope,
+    plan: MergedViewDatasetPlan,
+    options: QueryOptions & { contextGraphId: string; view: GetView },
+    reads: StoreReadLane,
+    catalogReads: StoreReadLane,
+  ): Promise<QueryResult> {
+    if (!scope.hasGraphClause) return this.execAndNormalize(withMergedViewDataset(scope, plan.readGraph, []), reads);
+    const graphs = await this.resolveViewGraphSet(options.view, options.contextGraphId, options, reads, catalogReads);
+    assertExplicitGraphIrisAllowed(scope, graphs);
+    const constrained = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(scope, graphs,
+      { boundByDataset: this.sparqlEngine === 'oxigraph', allowDefaultGraphPatterns: true }));
+    // As on the per-asset route, some GRAPH portions keep their graph only with constant targets.
+    const bound = needsCallerGraphBinding(constrained, this.sparqlEngine)
+      ? transitionGraphScope(constrained, bindCallerGraphsBeforeRead(constrained, graphs).source) : constrained;
+    return this.execAndNormalize(withMergedViewDataset(bound, plan.readGraph, graphs), reads);
+  }
+
+  /** The graphs a view reads per asset: its families, sub-graph fan-out and per-cgId graphs, without child context graphs. */
+  private async resolveViewGraphSet(
     view: GetView,
     contextGraphId: string,
     options: QueryOptions,
     reads: StoreReadLane,
     catalogReads: StoreReadLane,
-  ): Promise<QueryResult> {
-    const sparql = initialScope.source;
+  ): Promise<string[]> {
     const fanOut = !options.subGraphName && !options.verifiedGraph
       && !(view === 'working-memory' && options.assertionName);
     const subGraphs = fanOut ? await readRegisteredViewSubGraphs(contextGraphId, catalogReads.query) : [];
@@ -593,9 +630,22 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
     // Parent authorization never grants access to a registered child context graph.
     const children = await readChildContextGraphAuthority(contextGraphId, catalogReads.query);
-    const dedupedGraphs = [...new Set(allGraphs)].filter(graph => !isKnownChildContextGraphPartition(graph, children));
-    allGraphs.length = 0;
-    allGraphs.push(...dedupedGraphs);
+    return [...new Set(allGraphs)].filter(graph => !isKnownChildContextGraphPartition(graph, children));
+  }
+
+  /**
+   * Execute a SPARQL query scoped to a declared V10 state view.
+   */
+  private async queryWithView(
+    initialScope: PreparedGraphScope,
+    view: GetView,
+    contextGraphId: string,
+    options: QueryOptions,
+    reads: StoreReadLane,
+    catalogReads: StoreReadLane,
+  ): Promise<QueryResult> {
+    const sparql = initialScope.source;
+    const allGraphs = await this.resolveViewGraphSet(view, contextGraphId, options, reads, catalogReads);
 
     if (allGraphs.length === 0) {
       // PR #239 / r17-2: a zero-graph resolution (e.g. a `verifiable-memory`
@@ -610,7 +660,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
     assertExplicitGraphIrisAllowed(initialScope, allGraphs);
     const constrainedScope = requireGraphScopeRewrite(
-      constrainGraphVariablesToAllowedSet(initialScope, allGraphs),
+      constrainGraphVariablesToAllowedSet(initialScope, allGraphs, { boundByDataset: this.sparqlEngine === 'oxigraph' }),
     );
 
     // Spec §14 trust-gradient filter — only enforced on verifiable-memory
@@ -953,7 +1003,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   private async execCallerQuery(scope: PreparedGraphScope, reads: StoreReadLane) {
     const sparql = materializePreparedSparql(scope.prepared);
     try {
-      return await reads.query(sparql);
+      return await reads.query(sparql, scope.hasDatasetClause);
     } catch (err) {
       if (err instanceof StoreResponseTooLargeError) throw new QueryResultTooLargeError(err);
       if (isSparqlHttpResponseError(err) && MALFORMED_CALLER_QUERY_STATUSES.has(err.status)) {

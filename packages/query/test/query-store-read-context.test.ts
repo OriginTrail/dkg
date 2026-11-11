@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ChangelogStore, GraphManager, GraphSetIndexStore, SharedMemoryLiteralBlobStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { createQueryStoreReadContext, QueryMaterializationBudget } from '../src/query-store-read-context.js';
+import { createQueryStoreReadContext, QueryMaterializationBudget, requireQueryDataset } from '../src/query-store-read-context.js';
+import { ScopedQueryViolationError } from '../src/scoped-query-error.js';
 
 describe('query store-read materialization budget', () => {
   it('charges graph enumeration even when no SPARQL result is materialized', async () => {
@@ -110,4 +111,18 @@ describe('decorated inventory materialization', () => {
       await expect(new GraphManager(store).listStoredContextGraphOwnerCandidates({}, budget)).resolves.toEqual([]);
       expect(() => budget.consume(result)).toThrow(expect.objectContaining({ actualBytes: inventoryBytes + resultBytes }));
     });
+});
+
+describe('requireQueryDataset', () => {
+  it('passes a read that sets its own dataset and refuses one that does not', async () => {
+    const sent: string[] = [];
+    const answer = { type: 'bindings' as const, bindings: [] };
+    const store = { async query(sparql: string) { sent.push(sparql); return answer; } } as unknown as TripleStore;
+    const reads = requireQueryDataset(createQueryStoreReadContext(store, undefined));
+    const withDataset = 'SELECT ?s FROM NAMED <urn:g> WHERE { GRAPH ?g { ?s ?p ?o } }';
+
+    await expect(reads.query(withDataset, true)).resolves.toEqual(answer);
+    await expect(reads.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toBeInstanceOf(ScopedQueryViolationError);
+    expect(sent).toEqual([withDataset]);
+  });
 });

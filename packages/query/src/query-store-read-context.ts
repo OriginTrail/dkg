@@ -4,6 +4,7 @@ import type { TripleStore, QueryResult as StoreQueryResult, QueryOptions as Stor
 import type { QueryOptions } from './query-engine.js';
 import { storeOptions } from './query-store-options.js';
 import { QueryMaterializationTooLargeError } from './query-materialization-error.js';
+import { ScopedQueryViolationError } from './scoped-query-error.js';
 interface MaterializationMeter {
   consumeBytes(bytes: number): void;
 }
@@ -49,7 +50,8 @@ function sharedDiscoveryStoreOptions(
 }
 
 export interface StoreReadLane {
-  query(sparql: string): Promise<StoreQueryResult>;
+  /** `withDataset`: the query sets its own dataset (FROM / FROM NAMED); a scoped lane can require it. */
+  query(sparql: string, withDataset?: boolean): Promise<StoreQueryResult>;
   listGraphsByPrefix(prefix: string): Promise<string[]>;
 }
 
@@ -87,6 +89,12 @@ export function createStoreReadLane(
       return [...graphs.graphs];
     },
   };
+}
+
+/** Reads that must set their own dataset: one without it is refused before it reaches the store. */
+export function requireQueryDataset(reads: QueryStoreReadContext): QueryStoreReadContext {
+  return { ...reads, query: (sparql, withDataset) => withDataset ? reads.query(sparql, withDataset)
+    : Promise.reject(new ScopedQueryViolationError('a scoped read must carry its dataset')) };
 }
 
 export function createQueryStoreReadContext(
