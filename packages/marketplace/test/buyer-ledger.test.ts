@@ -93,6 +93,18 @@ describe('the journals the ledger replaces', () => {
     expect((await ledgerLines()).filter((l) => l.type === 'revoke')).toEqual([]);
   });
 
+  it('keep one revocation of a key revoked more than once, its last', async () => {
+    await writeFile(join(dir, 'access-keys.jsonl'), jsonl([
+      { type: 'make', ...KEY },
+      { type: 'revoke', keyId: KEY.keyId, at: 2 },
+      { type: 'revoke', keyId: KEY.keyId, at: 3 },
+    ]));
+    const ledger = new BuyerLedger(dir);
+    expect(await ledger.keyList()).toEqual([expect.objectContaining({ keyId: KEY.keyId, revoked: true })]);
+    expect((await ledgerLines()).filter((l) => l.type === 'revoke')).toEqual([{ type: 'revoke', keyId: KEY.keyId, at: 3 }]);
+    expect(await new BuyerLedger(dir).keyList()).toEqual(await ledger.keyList());
+  });
+
   it('leave no journal of the ledger when there is nothing in them', async () => {
     const ledger = new BuyerLedger(dir);
     await ledger.load();
@@ -177,6 +189,29 @@ describe("the ledger's compaction", () => {
     const restarted = new BuyerLedger(dir);
     expect(await restarted.keyList()).toEqual(await ledger.keyList());
     expect(restarted.calls.callsOf(2)).toEqual([callOf(2, SUB(2), 0, 7n)]);
+  });
+
+  it('keeps one revocation of each key, its last, however often the key was revoked', async () => {
+    const ledger = new BuyerLedger(dir);
+    const OTHER = 'dkgmk_00000002';
+    await ledger.makeKey(KEY);
+    await ledger.makeKey({ ...KEY, keyId: OTHER });
+    const revokes = async () => (await ledgerLines()).filter((l) => l.type === 'revoke');
+    // A key revoked again is written down again, until the next compaction folds it.
+    await ledger.revokeKey(KEY.keyId, 2);
+    await ledger.revokeKey(OTHER, 3);
+    await ledger.revokeKey(KEY.keyId, 4);
+    expect(await revokes()).toHaveLength(3);
+    await ledger.finalize(1, SUB(1), [], []);
+    expect(await revokes()).toEqual([{ type: 'revoke', keyId: KEY.keyId, at: 4 }, { type: 'revoke', keyId: OTHER, at: 3 }]);
+    await ledger.revokeKey(KEY.keyId, 5);
+    await ledger.finalize(2, SUB(2), [], []);
+    expect(await revokes()).toEqual([{ type: 'revoke', keyId: KEY.keyId, at: 5 }, { type: 'revoke', keyId: OTHER, at: 3 }]);
+    const reopened = new BuyerLedger(dir);
+    expect(await reopened.keyList()).toEqual([
+      expect.objectContaining({ keyId: KEY.keyId, revoked: true }),
+      expect.objectContaining({ keyId: OTHER, revoked: true }),
+    ]);
   });
 
   it('keeps what another ledger over the same journal wrote', async () => {

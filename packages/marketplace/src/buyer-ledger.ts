@@ -319,14 +319,14 @@ export class BuyerLedger {
   }
 
   /**
-   * The journal read back, as `fold` reads it: each key, then the revocations,
-   * each epoch made final, each nonce counter, and each call from its last
-   * record, oldest epoch first, its charge counted once.
+   * The journal read back, as `fold` reads it: each key, then each key's
+   * revocation, each epoch made final, each nonce counter, and each call from
+   * its last record, oldest epoch first, its charge counted once.
    */
   private replay(entries: readonly Entry[]): void {
     const held = fold(entries);
     for (const k of held.keys.values()) this.apply(k);
-    for (const r of held.revokes) this.apply(r);
+    for (const r of held.revokes.values()) this.apply(r);
     for (const [epoch, rows] of held.finals) this.finals.set(epoch, rows);
     for (const [counter, n] of held.nonces) {
       this.nonces.set(counter, BigInt(n.nonce));
@@ -355,10 +355,11 @@ export class BuyerLedger {
   }
 }
 
-/** A journal as it is read: one record of each key, nonce counter, call and epoch made final, and every revocation, each in the order first written. */
+/** A journal as it is read: one record of each key, nonce counter, call and epoch made final, and each key's last revocation, each in the order first written. */
 interface Folded {
   keys: Map<string, KeyEntry>;
-  revokes: RevokeEntry[];
+  /** Key id => its last revocation. */
+  revokes: Map<string, RevokeEntry>;
   finals: Map<number, ReconciledRow[]>;
   /** Counter => the record of the highest nonce it took. */
   nonces: Map<string, NonceRecord>;
@@ -369,17 +370,18 @@ interface Folded {
 /**
  * The one reading of the journal, which the replay restores and the
  * compaction rewrites: each key's and each call's last record, each epoch's
- * last reconciliation, each counter's highest nonce, and every revocation.
+ * last reconciliation, each counter's highest nonce, and each key's last
+ * revocation.
  */
 function fold(entries: readonly Entry[]): Folded {
-  const folded: Folded = { keys: new Map(), revokes: [], finals: new Map(), nonces: new Map(), calls: new Map() };
+  const folded: Folded = { keys: new Map(), revokes: new Map(), finals: new Map(), nonces: new Map(), calls: new Map() };
   for (const e of entries) {
     switch (e.type) {
       case 'key':
         folded.keys.set(e.keyId, e);
         break;
       case 'revoke':
-        folded.revokes.push(e);
+        folded.revokes.set(e.keyId, e);
         break;
       case 'nonce': {
         const kept = folded.nonces.get(counterOf(e));
@@ -397,11 +399,11 @@ function fold(entries: readonly Entry[]): Folded {
   return folded;
 }
 
-/** A folded journal written out whole: the keys, the revocations, the epochs made final, the nonce counters, then the calls. */
+/** A folded journal written out whole: the keys, each revoked key's revocation, the epochs made final, the nonce counters, then the calls. */
 function entriesOf(folded: Folded): Entry[] {
   return [
     ...folded.keys.values(),
-    ...folded.revokes,
+    ...folded.revokes.values(),
     ...[...folded.finals].map(([epoch, rows]) => ({ type: 'final' as const, epoch, rows })),
     ...folded.nonces.values(),
     ...folded.calls.values(),
