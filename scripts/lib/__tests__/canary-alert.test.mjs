@@ -1,15 +1,15 @@
-// The red-canary alert: its issue state machine (canary-alert.mjs), the
-// script that applies it (scripts/ci/canary-alert.mjs), and the ci.yml job
+// The red-canary alert: its per-profile issue state machine (canary-alert.mjs),
+// the script that applies it (scripts/ci/canary-alert.mjs), and the ci.yml job
 // that runs it.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
-import { ALERT_LABEL, ALERT_MARKER, ALERT_TITLE, planAlert, PROFILES, readAlertState, renderFailure } from '../canary-alert.mjs';
+import { ALERT_ISSUES, ALERT_LABEL, alertIssue, planAlert, PROFILES, readAlertState, renderFailure } from '../canary-alert.mjs';
 import { CANARY_ALERT_JOB, CI_GATE_JOB, PROFILE_JOB } from '../ci-health.mjs';
 import { createGitHubClient } from '../github-rest.mjs';
-import { runCanaryAlert } from '../../ci/canary-alert.mjs';
+import { runCanaryAlert, runProfile } from '../../ci/canary-alert.mjs';
 import { REPO_ROOT } from './ci-plan-fixtures.mjs';
 import { importClosure } from './script-imports.mjs';
 
@@ -37,19 +37,23 @@ const redJobs = [
   job(CI_GATE_JOB, 'failure', [step('Verify selected lanes completed', 'failure', 5)]),
 ];
 const greenJobs = [job('Build packages'), job(CI_GATE_JOB)];
+const open = (run, jobs = redJobs) => planAlert({ issue: null, run, gateResult: 'failure', jobs });
 
-test('a red run opens the alert with its state, run, commit, actor, and failed jobs and steps', () => {
-  const plan = planAlert({ issue: null, run: reference(101), gateResult: 'failure', jobs: redJobs });
+test('a red run opens its own profile\'s alert with the state, run, commit, actor, and failed jobs and steps', () => {
+  const plan = open(reference(101));
   assert.equal(plan.action, 'open');
-  assert.equal(plan.title, ALERT_TITLE);
+  assert.equal(plan.title, 'testnet-canary CI is red');
   assert.deepEqual(plan.labels, [ALERT_LABEL.name]);
-  assert.deepEqual(readAlertState(plan.body), { version: 1, failing: { standard: { since: at(0), run: {
+  assert.ok(plan.body.startsWith(ALERT_ISSUES.standard.marker));
+  assert.deepEqual(readAlertState(plan.body, 'standard'), { version: 1, profile: 'standard', since: at(0), run: {
     id: 101, attempt: 1, createdAt: at(0), url: 'https://github.com/OriginTrail/dkg/actions/runs/101',
     sha: '1010000000000000000000000000000000000000', commitUrl: 'https://github.com/OriginTrail/dkg/commit/1010000000000000000000000000000000000000',
-  } } } });
-  assert.ok(plan.body.startsWith(ALERT_MARKER));
+  } });
+  assert.equal(readAlertState(plan.body, 'nightly-equivalent'), undefined, 'one profile cannot read another\'s issue');
   for (const expected of [
-    '| standard | 2026-11-11 10:00 UTC | [CI #101](https://github.com/OriginTrail/dkg/actions/runs/101) |',
+    '**testnet-canary CI is red** for the standard profile (pushes and manual standard dispatches). This issue closes itself when a later standard run passes; the nightly-equivalent profile has its own issue.',
+    '- **Red since:** 2026-11-11 10:00 UTC',
+    '- **Latest red run:** [CI #101](https://github.com/OriginTrail/dkg/actions/runs/101) at [`1010000000`](https://github.com/OriginTrail/dkg/commit/1010000000000000000000000000000000000000)',
     '- **Run:** [CI #101](https://github.com/OriginTrail/dkg/actions/runs/101), `push`, standard profile, finished 2026-11-11 10:45 UTC',
     // The title cannot break the line or notify anyone.
     'Merge pull request #3815 from OriginTrail/fix \\| cc @​someone',
@@ -60,70 +64,65 @@ test('a red run opens the alert with its state, run, commit, actor, and failed j
     '- Kosava: node-ui e2e [1/7] (Playwright real-node devnet) (failure): Install Playwright Chromium; Record first-attempt browser failures',
   ]) assert.ok(plan.body.includes(expected), `missing: ${expected}\n${plan.body}`);
   assert.doesNotMatch(plan.body.split('\n').slice(1).join('\n'), /<!--/, 'only the first line is a comment');
+
+  const nightly = open(reference(102, { profile: 'nightly-equivalent', event: 'workflow_dispatch' }));
+  assert.equal(nightly.title, 'testnet-canary nightly is red');
+  assert.ok(nightly.body.startsWith(ALERT_ISSUES['nightly-equivalent'].marker));
+  assert.match(nightly.body, /for the nightly-equivalent profile \(the nightly and manual nightly-equivalent dispatches\)\. This issue closes itself when a later nightly-equivalent run passes; the standard profile has its own issue\./);
+  assert.equal(readAlertState(nightly.body, 'standard'), undefined);
+  // A run the alert cannot place is an error, not a guess.
+  assert.throws(() => open(reference(103, { profile: 'nightly' })), /unknown CI profile: nightly/);
+  assert.throws(() => alertIssue('toString'), /unknown CI profile/);
 });
 
-test('later runs comment while red, clear the profiles a pass covers, and close once none is red', () => {
-  const opened = planAlert({ issue: null, run: reference(101, { created: 0 }), gateResult: 'failure', jobs: redJobs });
+test('later runs of a profile comment while it stays red, and its next pass closes it', () => {
+  const opened = open(reference(101, { created: 0 }));
   const issue = (plan) => ({ number: 7, body: plan.body });
-
-  // Still red: a comment, the same start, the latest run recorded.
   const again = planAlert({ issue: issue(opened), run: reference(102, { created: 60 }), gateResult: 'failure', jobs: redJobs });
   assert.equal(again.action, 'comment');
   assert.match(again.comment, /^### Still red: \[CI #102\]/);
-  assert.deepEqual([again.state.failing.standard.since, again.state.failing.standard.run.id], [at(0), 102]);
-
-  // The nightly fails too: both profiles are red.
-  const nightly = planAlert({ issue: issue(again), run: reference(103, { created: 120, profile: 'nightly-equivalent', event: 'workflow_dispatch' }), gateResult: 'cancelled', jobs: redJobs });
-  assert.deepEqual(Object.keys(nightly.state.failing), ['standard', 'nightly-equivalent']);
-
-  // A standard pass clears only the standard profile, and keeps the details.
-  const pushGreen = planAlert({ issue: issue(nightly), run: reference(104, { created: 180 }), gateResult: 'success', jobs: greenJobs });
-  assert.equal(pushGreen.action, 'update');
-  assert.deepEqual(Object.keys(pushGreen.state.failing), ['nightly-equivalent']);
-  assert.match(pushGreen.comment, /That clears standard; nightly-equivalent \(red since 2026-11-11 12:00 UTC/);
-  assert.ok(pushGreen.body.includes('### Latest failure') && pushGreen.body.includes('[CI #103]'));
-  assert.equal(pushGreen.body.match(/_Opened, commented on/g).length, 1);
-
-  // Another standard pass has nothing left to clear.
-  const quiet = planAlert({ issue: issue(pushGreen), run: reference(105, { created: 240 }), gateResult: 'success', jobs: greenJobs });
-  assert.equal(quiet.action, 'none');
-  assert.match(quiet.reason, /nightly-equivalent stays red/);
-
-  // A nightly-equivalent pass covers both.
-  const closed = planAlert({ issue: issue(nightly), run: reference(106, { created: 1440, profile: 'nightly-equivalent', event: 'workflow_dispatch' }), gateResult: 'success', jobs: greenJobs });
+  assert.deepEqual([again.state.since, again.state.run.id], [at(0), 102]);
+  assert.ok(again.body.includes('- **Latest red run:** [CI #102]') && again.body.includes('- **Run:** [CI #102]'));
+  assert.equal(again.body.match(/_Opened, commented on/g).length, 1);
+  // A timed-out gate is red too.
+  assert.equal(planAlert({ issue: issue(again), run: reference(103, { created: 90 }), gateResult: 'cancelled', jobs: redJobs }).action, 'comment');
+  const closed = planAlert({ issue: issue(again), run: reference(104, { created: 120 }), gateResult: 'success', jobs: greenJobs });
   assert.equal(closed.action, 'close');
-  assert.match(closed.comment, /^\*\*Green again:\*\* \[CI #106\]\(.+\) \(`workflow_dispatch`, nightly-equivalent profile\) passed at .+ Closing\.$/);
+  assert.match(closed.comment, /^\*\*Green again:\*\* \[CI #104\]\(.+\) \(`push`, standard profile\) passed at .+ Closing\.$/);
 });
 
-test('a pass from an older run proves nothing about a newer red one, and a late old failure keeps the newer run', () => {
-  const opened = planAlert({ issue: null, run: reference(201, { created: 100 }), gateResult: 'failure', jobs: redJobs });
+test('within a profile, an older run\'s pass proves nothing about a newer red one, and a late old failure keeps the newer run', () => {
+  const opened = open(reference(201, { created: 100 }));
   const issue = { number: 8, body: opened.body };
-  assert.equal(planAlert({ issue, run: reference(200, { created: 50 }), gateResult: 'success', jobs: greenJobs }).action, 'none');
+  const stale = planAlert({ issue, run: reference(200, { created: 50 }), gateResult: 'success', jobs: greenJobs });
+  assert.equal(stale.action, 'none');
+  assert.match(stale.reason, /#8 records a newer red run \(#201\)/);
   // A re-run attempt of the same red run that passes clears it.
   assert.equal(planAlert({ issue, run: reference(201, { created: 100, attempt: 2 }), gateResult: 'success', jobs: greenJobs }).action, 'close');
   const late = planAlert({ issue, run: reference(199, { created: 20 }), gateResult: 'failure', jobs: redJobs });
   assert.equal(late.action, 'comment');
-  assert.deepEqual([late.state.failing.standard.since, late.state.failing.standard.run.id], [at(20), 201]);
-  assert.ok(late.body.includes('[CI #201]') && !late.body.includes('### Latest failure\n\n- **Run:** [CI #199]'));
+  assert.deepEqual([late.state.since, late.state.run.id], [at(20), 201]);
+  assert.ok(late.body.includes('- **Run:** [CI #201]') && !late.body.includes('- **Run:** [CI #199]'), 'the details stay on the newer run');
+  assert.match(late.comment, /^### Still red: \[CI #199\]/);
 });
 
-test('a skipped or missing gate does nothing, and an issue whose state is unreadable closes on any pass', () => {
+test('a skipped or missing gate does nothing, and an issue whose state is unreadable closes on any pass of its profile', () => {
   for (const gateResult of ['skipped', '', undefined]) {
     assert.equal(planAlert({ issue: null, run: reference(1), gateResult, jobs: [] }).action, 'none', String(gateResult));
   }
   assert.equal(planAlert({ issue: null, run: reference(1), gateResult: 'success', jobs: greenJobs }).action, 'none');
-  const broken = { number: 9, body: `${ALERT_MARKER}{not json} -->\nsomeone edited this` };
-  assert.equal(readAlertState(broken.body), undefined);
+  const marker = ALERT_ISSUES.standard.marker;
+  const broken = { number: 9, body: `${marker}{not json} -->\nsomeone edited this` };
+  assert.equal(readAlertState(broken.body, 'standard'), undefined);
   assert.equal(planAlert({ issue: broken, run: reference(2), gateResult: 'success', jobs: greenJobs }).action, 'close');
   const rebuilt = planAlert({ issue: broken, run: reference(3), gateResult: 'failure', jobs: redJobs });
-  assert.deepEqual(Object.keys(rebuilt.state.failing), ['standard']);
-  // A hand-edited entry without readable times is dropped; with none left, a pass closes.
-  const edited = { number: 10, body: `${ALERT_MARKER}${JSON.stringify({ version: 1, failing: { standard: { since: 'soon' }, other: {} } })} -->` };
-  assert.deepEqual(readAlertState(edited.body), { version: 1, failing: {} });
-  assert.equal(planAlert({ issue: edited, run: reference(4), gateResult: 'success', jobs: greenJobs }).action, 'close');
+  assert.deepEqual([rebuilt.action, rebuilt.state.since, rebuilt.state.run.id], ['comment', at(0), 3]);
+  for (const state of [{ version: 1, profile: 'standard', since: 'soon', run: { createdAt: at(0) } }, { version: 1, profile: 'nightly-equivalent', since: at(0), run: { createdAt: at(0) } }]) {
+    assert.equal(readAlertState(`${marker}${JSON.stringify(state)} -->`, 'standard'), undefined, JSON.stringify(state));
+  }
   // No recorded value can end the state comment early.
-  const hostile = planAlert({ issue: null, run: { ...reference(4), url: 'https://github.com/x --> <img>' }, gateResult: 'failure', jobs: redJobs });
-  assert.equal(readAlertState(hostile.body).failing.standard.run.url, 'https://github.com/x --> <img>');
+  const hostile = open({ ...reference(4), url: 'https://github.com/x --> <img>' });
+  assert.equal(readAlertState(hostile.body, 'standard').run.url, 'https://github.com/x --> <img>');
   assert.equal(hostile.body.split('\n')[0].indexOf(' -->'), hostile.body.split('\n')[0].length - 4);
 });
 
@@ -138,85 +137,238 @@ test('a timed-out lane is reported as cancelled, and a run without failed jobs s
   assert.match(renderFailure(reference(6), []), /No failed job in the jobs API; see the run\./);
 });
 
-// A fake GitHub for one canary run, recording every request.
-function fakeGitHub({ run, jobs, issues = [], newerRuns = [] }) {
-  const calls = [];
-  const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
-  const fetch = async (url, init) => {
-    const { pathname, searchParams } = new URL(url);
-    calls.push({ call: `${init.method} ${pathname}`, query: Object.fromEntries(searchParams), body: init.body && JSON.parse(init.body) });
-    if (pathname === `/repos/OriginTrail/dkg/actions/runs/${run.id}`) return json(run);
-    if (pathname.startsWith(`/repos/OriginTrail/dkg/actions/runs/${run.id}/attempts/`)) return json({ total_count: jobs.length, jobs });
-    if (pathname === '/repos/OriginTrail/dkg/actions/workflows/ci.yml/runs') return json({ total_count: newerRuns.length + 1, workflow_runs: [run, ...newerRuns] });
-    if (pathname === '/repos/OriginTrail/dkg/issues' && init.method === 'GET') return json(issues);
-    if (pathname === '/repos/OriginTrail/dkg/labels/ci-alert') return json({ message: 'Not Found' }, 404);
-    if (pathname === '/repos/OriginTrail/dkg/labels') return json({}, 201);
-    if (pathname.startsWith('/repos/OriginTrail/dkg/issues')) return json({ number: 12 }, init.method === 'POST' ? 201 : 200);
-    throw new Error(`unexpected ${init.method} ${url}`);
-  };
-  return { client: createGitHubClient({ token: 't', fetch, sleep: async () => {} }), calls, writes: () => calls.filter(({ call }) => !call.startsWith('GET ')) };
-}
 const apiRun = (overrides = {}) => ({
-  id: 43031937922, run_attempt: 1, event: 'push', head_branch: 'testnet-canary', path: '.github/workflows/ci.yml',
-  created_at: '2026-11-11T13:45:01Z', html_url: 'https://github.com/OriginTrail/dkg/actions/runs/43031937922',
+  id: 43031937922, run_attempt: 1, event: 'push', head_branch: 'testnet-canary', status: 'in_progress', conclusion: null,
+  path: '.github/workflows/ci.yml', created_at: '2026-11-11T13:45:01Z', html_url: 'https://github.com/OriginTrail/dkg/actions/runs/43031937922',
   head_sha: 'a6d986be9b691b4f39f43188214249a519cf1294', head_commit: { message: 'Merge pull request #3815\n\nbody' },
   actor: { login: 'branarakic' }, triggering_actor: { login: 'branarakic' }, repository: { full_name: 'OriginTrail/dkg' },
   ...overrides,
 });
-const env = (overrides = {}) => ({ GITHUB_TOKEN: 't', GITHUB_REPOSITORY: 'OriginTrail/dkg', GITHUB_RUN_ID: '43031937922', GITHUB_RUN_ATTEMPT: '1', ...overrides });
+const nightlyRun = (overrides = {}) => apiRun({
+  id: 42551086687, event: 'workflow_dispatch', created_at: '2026-11-11T02:27:58Z', html_url: 'https://github.com/OriginTrail/dkg/actions/runs/42551086687',
+  actor: { login: 'github-actions[bot]' }, triggering_actor: { login: 'github-actions[bot]' }, head_commit: { message: 'Merge pull request #3719' },
+  ...overrides,
+});
+const env = (run, overrides = {}) => ({ GITHUB_TOKEN: 't', GITHUB_REPOSITORY: 'OriginTrail/dkg', GITHUB_RUN_ID: String(run.id), GITHUB_RUN_ATTEMPT: String(run.run_attempt), ...overrides });
 const quiet = () => {};
 
-test('the alert script opens the issue for a red canary run and closes it on a green one', async () => {
-  const gateJob = { ...job(CI_GATE_JOB, 'failure'), completed_at: '2026-11-11T14:34:53Z' };
-  const red = fakeGitHub({ run: apiRun(), jobs: [...redJobs.slice(0, -1), gateJob] });
-  const plan = await runCanaryAlert({ argv: [], env: env({ CI_GATE_RESULT: 'failure', CI_PROFILE: 'standard' }), client: red.client, log: quiet });
-  assert.equal(plan.action, 'open');
-  assert.deepEqual(red.writes().map(({ call }) => call), ['POST /repos/OriginTrail/dkg/labels', 'POST /repos/OriginTrail/dkg/issues']);
-  const created = red.writes()[1].body;
-  assert.equal(created.title, ALERT_TITLE);
-  assert.match(created.body, /\) Merge pull request #3815\n/, 'the commit headline, without its body');
-  // Newer canary runs are looked up from this run's creation on.
-  assert.equal(red.calls.find(({ call }) => call.endsWith('/workflows/ci.yml/runs')).query.created, '>=2026-11-11T13:45:01Z');
+// A GitHub whose runs, jobs, issues, comments and labels every caller shares.
+// Each caller gets its own client, so each request is attributed to it, and
+// `beforeIssueList` can hold the open-issue listing (to make callers overlap).
+// The listing answers with the issues open when it is answered.
+function sharedGitHub({ runs, issues = [], labels = [], beforeIssueList }) {
+  const state = {
+    issues: issues.map((issue) => ({ state: 'open', labels: [{ name: ALERT_LABEL.name }], comments: [], ...issue })),
+    labels: new Set(labels),
+    next: 100,
+  };
+  const requests = [];
+  const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
+  const answer = async (caller, method, pathname, body) => {
+    const route = `${method} ${pathname.replace('/repos/OriginTrail/dkg', '')}`;
+    requests.push({ caller, route, body });
+    let match;
+    if ((match = /^GET \/actions\/runs\/(\d+)$/.exec(route))) return json(runs[match[1]].run);
+    if ((match = /^GET \/actions\/runs\/(\d+)\/attempts\/(\d+)$/.exec(route))) return json(runs[match[1]].attempts?.[match[2]] ?? runs[match[1]].run);
+    if ((match = /^GET \/actions\/runs\/(\d+)\/attempts\/\d+\/jobs$/.exec(route))) return json({ total_count: runs[match[1]].jobs.length, jobs: runs[match[1]].jobs });
+    if (route === 'GET /issues') {
+      await beforeIssueList?.(caller);
+      return json(state.issues.filter((issue) => issue.state === 'open').map(({ number, title, body, labels: names }) => ({ number, title, body, labels: names })));
+    }
+    if (route === `GET /labels/${ALERT_LABEL.name}`) return state.labels.has(ALERT_LABEL.name) ? json({ name: ALERT_LABEL.name }) : json({ message: 'Not Found' }, 404);
+    if (route === 'POST /labels') {
+      if (state.labels.has(body.name)) return json({ message: 'Validation Failed' }, 422);
+      state.labels.add(body.name);
+      return json(body, 201);
+    }
+    if (route === 'POST /issues') {
+      const issue = { number: state.next++, title: body.title, body: body.body, labels: body.labels.map((name) => ({ name })), state: 'open', comments: [], openedBy: caller };
+      state.issues.push(issue);
+      return json(issue, 201);
+    }
+    const issue = state.issues.find(({ number }) => number === Number(/^\w+ \/issues\/(\d+)/.exec(route)?.[1]));
+    if (issue && /^PATCH \/issues\/\d+$/.test(route)) return json(Object.assign(issue, body));
+    if (issue && /^POST \/issues\/\d+\/comments$/.test(route)) {
+      issue.comments.push(body.body);
+      return json({}, 201);
+    }
+    throw new Error(`unexpected ${route}`);
+  };
+  const clientFor = (caller) => createGitHubClient({
+    token: 't',
+    sleep: async () => {},
+    fetch: async (url, init) => answer(caller, init.method, new URL(url).pathname, init.body && JSON.parse(init.body)),
+  });
+  const writes = (caller) => requests.filter((request) => request.caller === caller && !request.route.startsWith('GET ')).map(({ route }) => route);
+  return { state, requests, clientFor, writes, openIssues: () => state.issues.filter((issue) => issue.state === 'open') };
+}
 
-  const green = fakeGitHub({ run: apiRun({ id: 43031937922 }), jobs: greenJobs, issues: [{ number: 12, body: created.body }] });
-  assert.equal((await runCanaryAlert({ argv: [], env: env({ CI_GATE_RESULT: 'success' }), client: green.client, log: quiet })).action, 'close');
-  assert.deepEqual(green.writes().map(({ call, body }) => `${call} ${body.state ?? ''}`.trim()), [
-    'POST /repos/OriginTrail/dkg/issues/12/comments',
-    'PATCH /repos/OriginTrail/dkg/issues/12 closed',
-  ]);
+// Both callers listed the open issues before either wrote anything.
+function assertOverlapped(api) {
+  const firstWrite = api.requests.findIndex(({ route }) => !route.startsWith('GET '));
+  const listings = api.requests.flatMap(({ route }, index) => (route === 'GET /issues' ? [index] : []));
+  assert.equal(listings.length, 2);
+  assert.ok(firstWrite > Math.max(...listings), 'both read before either wrote');
+}
+
+// Holds each caller until `count` have arrived, so all have read before any
+// writes; fails, rather than hangs, if one never arrives.
+function barrier(count) {
+  let arrived = 0;
+  let release;
+  const all = new Promise((resolve) => { release = resolve; });
+  return async () => {
+    arrived += 1;
+    if (arrived === count) release();
+    let timer;
+    const late = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${arrived} of ${count} callers reached the barrier`)), 2000); });
+    try {
+      await Promise.race([all, late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
+
+const gate = (conclusion, completedAt = '2026-11-11T14:34:53Z') => ({ ...job(CI_GATE_JOB, conclusion), completed_at: completedAt });
+
+test('the alert script opens its profile\'s issue for a red canary run and closes it on a green one, with no look at other runs', async () => {
+  const red = apiRun();
+  const api = sharedGitHub({ runs: { [red.id]: { run: red, jobs: [...redJobs.slice(0, -1), gate('failure')] } } });
+  const plan = await runCanaryAlert({ argv: [], env: env(red, { CI_GATE_RESULT: 'failure', CI_PROFILE: 'standard' }), client: api.clientFor('red'), log: quiet });
+  assert.equal(plan.action, 'open');
+  assert.deepEqual(api.writes('red'), ['POST /labels', 'POST /issues']);
+  const [created] = api.openIssues();
+  assert.equal(created.title, 'testnet-canary CI is red');
+  assert.match(created.body, /\) Merge pull request #3815\n/, 'the commit headline, without its body');
+  assert.equal(readAlertState(created.body, 'standard').run.id, red.id);
+  // No supersede check: a red push alerts even with newer runs queued behind it.
+  assert.ok(api.requests.every(({ route }) => !route.includes('/workflows/')), 'other runs are never listed');
+
+  const green = apiRun({ id: 43031937999, created_at: '2026-11-11T15:00:00Z' });
+  const greenApi = sharedGitHub({ runs: { [green.id]: { run: green, jobs: greenJobs } }, issues: [{ number: 12, title: created.title, body: created.body }], labels: [ALERT_LABEL.name] });
+  assert.equal((await runCanaryAlert({ argv: [], env: env(green, { CI_GATE_RESULT: 'success', CI_PROFILE: 'standard' }), client: greenApi.clientFor('green'), log: quiet })).action, 'close');
+  assert.deepEqual(greenApi.writes('green'), ['POST /issues/12/comments', 'PATCH /issues/12']);
+  assert.equal(greenApi.state.issues[0].state, 'closed');
 });
 
-test('the alert script leaves superseded runs, other branches and dry runs without a write', async () => {
-  const gateJob = { ...job(CI_GATE_JOB, 'failure'), completed_at: '2026-11-11T13:45:25Z' };
-  const newer = { id: 43031937923, event: 'push', created_at: '2026-11-11T13:45:10Z', actor: { login: 'branarakic' }, html_url: 'x' };
-  const superseded = fakeGitHub({ run: apiRun(), jobs: [gateJob], newerRuns: [newer] });
-  assert.equal((await runCanaryAlert({ argv: [], env: env({ CI_GATE_RESULT: 'failure' }), client: superseded.client, log: quiet })).superseded, newer.id);
-  assert.deepEqual(superseded.writes(), []);
-  // A newer nightly is in another concurrency group, and a run created after the gate finished did not cancel it.
-  const unrelated = fakeGitHub({ run: apiRun(), jobs: [gateJob], newerRuns: [
-    { ...newer, event: 'workflow_dispatch', actor: { login: 'github-actions[bot]' } },
-    { ...newer, id: 43031937924, created_at: '2026-11-11T13:46:00Z' },
-  ] });
-  assert.equal((await runCanaryAlert({ argv: [], env: env({ CI_GATE_RESULT: 'failure' }), client: unrelated.client, log: quiet })).action, 'open');
+test('a pass closes only its own profile\'s issue: a green nightly leaves a red push open, and the other way round', async () => {
+  const standardBody = open(reference(301, { created: 0 })).body;
+  const nightlyBody = open(reference(302, { created: 0, profile: 'nightly-equivalent', event: 'workflow_dispatch' })).body;
+  // Both issues open, in a fresh API each time.
+  const issues = [{ number: 1, title: 'testnet-canary CI is red', body: standardBody }, { number: 2, title: 'testnet-canary nightly is red', body: nightlyBody }];
+  const pass = async (run, profile) => {
+    const api = sharedGitHub({ runs: { [run.id]: { run, jobs: greenJobs } }, issues, labels: [ALERT_LABEL.name] });
+    await runCanaryAlert({ argv: [], env: env(run, { CI_GATE_RESULT: 'success', CI_PROFILE: profile }), client: api.clientFor(profile), log: quiet });
+    return api.state.issues.map(({ number, state }) => `${number} ${state}`);
+  };
+  assert.deepEqual(await pass(nightlyRun({ id: 303, created_at: at(60) }), 'nightly-equivalent'), ['1 open', '2 closed']);
+  assert.deepEqual(await pass(apiRun({ id: 304, created_at: at(90) }), 'standard'), ['1 closed', '2 open']);
+});
 
-  const feature = fakeGitHub({ run: apiRun({ head_branch: 'feature/x', event: 'workflow_dispatch' }), jobs: [] });
-  assert.equal((await runCanaryAlert({ argv: [], env: env({ CI_GATE_RESULT: 'failure' }), client: feature.client, log: quiet })).action, 'none');
-  assert.deepEqual(feature.writes(), []);
+test('overlapping standard and nightly alert jobs, both reading before either writes, each keep to their own issue', async () => {
+  // A standard issue is open. A standard pass and a nightly failure finish
+  // together: different concurrency groups, so their alert jobs overlap.
+  const standardBody = open(reference(401, { created: 0 })).body;
+  const pass = apiRun({ id: 402, created_at: at(60) });
+  const fail = nightlyRun({ id: 403, created_at: at(30) });
+  const runs = { 402: { run: pass, jobs: greenJobs }, 403: { run: fail, jobs: [...redJobs.slice(0, -1), gate('failure')] } };
+  const api = sharedGitHub({ runs, issues: [{ number: 1, title: 'testnet-canary CI is red', body: standardBody }], labels: [ALERT_LABEL.name], beforeIssueList: barrier(2) });
+  const [standard, nightly] = await Promise.all([
+    runCanaryAlert({ argv: [], env: env(pass, { CI_GATE_RESULT: 'success', CI_PROFILE: 'standard' }), client: api.clientFor('standard'), log: quiet }),
+    runCanaryAlert({ argv: [], env: env(fail, { CI_GATE_RESULT: 'failure', CI_PROFILE: 'nightly-equivalent' }), client: api.clientFor('nightly'), log: quiet }),
+  ]);
+  assertOverlapped(api);
+  assert.deepEqual([standard.action, nightly.action], ['close', 'open']);
+  const [standardIssue, ...rest] = api.state.issues;
+  assert.equal(standardIssue.state, 'closed');
+  assert.match(standardIssue.comments.at(-1), /^\*\*Green again:\*\* \[CI #402\]/);
+  assert.equal(rest.length, 1, 'one new issue');
+  const [nightlyIssue] = api.openIssues();
+  assert.equal(nightlyIssue.title, 'testnet-canary nightly is red');
+  assert.equal(readAlertState(nightlyIssue.body, 'nightly-equivalent').run.id, 403);
+  // Neither job wrote the other's issue.
+  assert.deepEqual(api.writes('standard'), ['POST /issues/1/comments', 'PATCH /issues/1']);
+  assert.deepEqual(api.writes('nightly'), ['POST /issues']);
+  assert.equal(nightlyIssue.openedBy, 'nightly');
+});
 
-  // A dry run reads the gate and profile from the past run, never from the environment.
-  const logs = [];
-  const dry = fakeGitHub({ run: apiRun({ event: 'workflow_dispatch', actor: { login: 'github-actions[bot]' }, run_attempt: 2 }), jobs: [...redJobs.slice(0, -1), gateJob] });
-  const plan = await runCanaryAlert({
-    argv: ['--dry-run', '--repo', 'OriginTrail/dkg', '--run-id', '43031937922'],
-    env: { GITHUB_TOKEN: 't', CI_GATE_RESULT: 'success', CI_PROFILE: 'standard', GITHUB_RUN_ATTEMPT: '9' },
-    client: dry.client,
-    log: (message) => logs.push(message),
+test('two profiles opening at once, both reading before either writes, open two issues and lose neither', async () => {
+  const push = apiRun({ id: 501, created_at: at(0) });
+  const night = nightlyRun({ id: 502, created_at: at(5) });
+  const runs = { 501: { run: push, jobs: [...redJobs.slice(0, -1), gate('failure')] }, 502: { run: night, jobs: [...redJobs.slice(0, -1), gate('cancelled')] } };
+  const api = sharedGitHub({ runs, beforeIssueList: barrier(2) });
+  const plans = await Promise.all([
+    runCanaryAlert({ argv: [], env: env(push, { CI_GATE_RESULT: 'failure', CI_PROFILE: 'standard' }), client: api.clientFor('standard'), log: quiet }),
+    runCanaryAlert({ argv: [], env: env(night, { CI_GATE_RESULT: 'cancelled', CI_PROFILE: 'nightly-equivalent' }), client: api.clientFor('nightly'), log: quiet }),
+  ]);
+  assertOverlapped(api);
+  assert.deepEqual(plans.map(({ action }) => action), ['open', 'open']);
+  const issues = api.openIssues();
+  assert.equal(issues.length, 2);
+  assert.notEqual(issues[0].number, issues[1].number);
+  const byProfile = Object.fromEntries(PROFILES.map((profile) => [profile, issues.filter(({ body }) => readAlertState(body, profile))]));
+  assert.deepEqual(Object.fromEntries(Object.entries(byProfile).map(([profile, found]) => [profile, found.map(({ title, openedBy, body }) => [title, openedBy, readAlertState(body, profile).run.id])])), {
+    standard: [['testnet-canary CI is red', 'standard', 501]],
+    'nightly-equivalent': [['testnet-canary nightly is red', 'nightly', 502]],
   });
-  assert.equal(plan.action, 'open');
-  assert.deepEqual(readAlertState(plan.body).failing['nightly-equivalent'].run.attempt, 2);
-  assert.deepEqual(dry.writes(), []);
-  assert.ok(logs.some((message) => message.startsWith('--- Body (open) ---')));
-  await assert.rejects(runCanaryAlert({ argv: [], env: { GITHUB_TOKEN: 't' }, client: dry.client, log: quiet }), /needs GITHUB_REPOSITORY and GITHUB_RUN_ID/);
+  // Both may try to create the missing label; one wins and the other's 422 is fine.
+  assert.ok(api.state.labels.has(ALERT_LABEL.name));
+});
+
+test('the alert script skips other branches, and a dry run skips a cancelled run and writes nothing', async () => {
+  const feature = apiRun({ head_branch: 'feature/x', event: 'workflow_dispatch' });
+  const featureApi = sharedGitHub({ runs: { [feature.id]: { run: feature, jobs: [] } } });
+  assert.equal((await runCanaryAlert({ argv: [], env: env(feature, { CI_GATE_RESULT: 'failure', CI_PROFILE: 'standard' }), client: featureApi.clientFor('x'), log: quiet })).action, 'none');
+  assert.deepEqual(featureApi.writes('x'), []);
+
+  const dry = (run, argv = [], extra = {}) => {
+    const api = sharedGitHub({ runs: { [run.id]: { run, jobs: [...redJobs.slice(0, -1), gate('failure')], attempts: extra.attempts } } });
+    const logs = [];
+    return runCanaryAlert({
+      argv: ['--dry-run', '--repo', 'OriginTrail/dkg', '--run-id', String(run.id), ...argv],
+      env: { GITHUB_TOKEN: 't', CI_GATE_RESULT: 'success', GITHUB_RUN_ATTEMPT: '9', ...extra.env },
+      client: api.clientFor('dry'),
+      log: (message) => logs.push(message),
+    }).then((plan) => ({ plan, logs, api }));
+  };
+  // The live job skips a cancelled run (`!cancelled()`), so a dry run of one does nothing.
+  const cancelled = await dry(apiRun({ status: 'completed', conclusion: 'cancelled' }));
+  assert.equal(cancelled.plan.action, 'none');
+  assert.match(cancelled.logs[0], /was cancelled: a dry run of a cancelled run does nothing/);
+  assert.ok(cancelled.api.requests.every(({ route }) => !route.endsWith('/jobs')));
+  // The attempt asked for is the one whose conclusion counts.
+  const rerun = apiRun({ status: 'completed', conclusion: 'success', run_attempt: 2 });
+  assert.equal((await dry(rerun, ['--attempt', '1'], { attempts: { 1: { ...rerun, run_attempt: 1, conclusion: 'cancelled' } } })).plan.action, 'none');
+
+  // A dry run reads the gate from the past run (red here), not this shell's
+  // CI_GATE_RESULT, and guesses the profile from the run only without
+  // --profile or CI_PROFILE.
+  const night = await dry(nightlyRun({ status: 'completed', conclusion: 'failure' }));
+  assert.equal(night.plan.action, 'open');
+  assert.equal(night.plan.title, 'testnet-canary nightly is red');
+  assert.deepEqual(night.api.writes('dry'), []);
+  assert.ok(night.logs.some((message) => message.startsWith('--- Body (open) ---')));
+  assert.equal((await dry(nightlyRun({ status: 'completed', conclusion: 'failure' }), ['--profile', 'standard'])).plan.title, 'testnet-canary CI is red');
+  assert.equal((await dry(nightlyRun({ status: 'completed', conclusion: 'failure' }), [], { env: { CI_PROFILE: 'standard' } })).plan.title, 'testnet-canary CI is red');
+  await assert.rejects(runCanaryAlert({ argv: [], env: { GITHUB_TOKEN: 't' }, client: featureApi.clientFor('x'), log: quiet }), /needs GITHUB_REPOSITORY and GITHUB_RUN_ID/);
+});
+
+test('the live job takes its profile from ci.yml and never guesses one; a dry run guesses as the report does', () => {
+  const push = apiRun();
+  const manualNightly = nightlyRun({ actor: { login: 'dev' }, triggering_actor: { login: 'dev' } });
+  assert.equal(runProfile({ option: undefined, env: { CI_PROFILE: 'nightly-equivalent' }, live: true, run: manualNightly }), 'nightly-equivalent');
+  assert.equal(runProfile({ option: 'standard', env: { CI_PROFILE: 'nightly-equivalent' }, live: true, run: push }), 'standard');
+  for (const env of [{}, { CI_PROFILE: '' }]) {
+    assert.throws(() => runProfile({ option: undefined, env, live: true, run: nightlyRun() }), /needs --profile or CI_PROFILE/);
+  }
+  assert.throws(() => runProfile({ option: 'nightly', env: {}, live: true, run: push }), /not nightly/);
+  // The dry-run guess is the report's runKind: a nightly-ci.yml dispatch,
+  // by actor or by triggering actor.
+  assert.equal(runProfile({ option: undefined, env: {}, live: false, run: nightlyRun() }), 'nightly-equivalent');
+  assert.equal(runProfile({ option: undefined, env: {}, live: false, run: nightlyRun({ actor: { login: 'dev' } }) }), 'nightly-equivalent');
+  assert.equal(runProfile({ option: undefined, env: {}, live: false, run: manualNightly }), 'standard');
+  assert.equal(runProfile({ option: undefined, env: {}, live: false, run: push }), 'standard');
 });
 
 test('the ci.yml alert job runs after the gate on protected canary runs only, with its own narrow token', () => {
@@ -230,10 +382,21 @@ test('the ci.yml alert job runs after the gate on protected canary runs only, wi
   assert.deepEqual(alert.permissions, { contents: 'read', actions: 'read', issues: 'write' });
   assert.equal(alert['continue-on-error'], true);
   assert.ok(alert['timeout-minutes'] <= 10);
-  // A concurrency group would cancel a pending alert job, which turns the run cancelled.
+  // Runs of one profile share the workflow's concurrency group, one at a time,
+  // and each profile has its own issue, so no job lock is needed; one would
+  // cancel a pending alert job, which turns the run cancelled.
   assert.equal(alert.concurrency, undefined);
-  // The profiles the alert tracks are the ones ci.yml resolves.
+  assert.match(workflow.concurrency.group, /'nightly-equivalent' \|\| 'standard'/, 'the workflow groups runs by profile');
+  // The profiles the alert files under are the ones ci.yml resolves, each with
+  // its own title and a marker no other profile's issue can contain.
   assert.deepEqual(PROFILES, workflow.on.workflow_dispatch.inputs.profile.options);
+  assert.deepEqual(Object.keys(ALERT_ISSUES), PROFILES);
+  for (const profile of PROFILES) {
+    for (const other of PROFILES.filter((name) => name !== profile)) {
+      assert.equal(ALERT_ISSUES[profile].marker.includes(ALERT_ISSUES[other].marker), false, `${profile} ${other}`);
+      assert.notEqual(ALERT_ISSUES[profile].title, ALERT_ISSUES[other].title);
+    }
+  }
 
   // Evaluate the job's condition over the events ci.yml takes.
   const expression = alert.if.trim().replace(/^\$\{\{/, '').replace(/\}\}$/, '').replace(/cancelled\(\)/g, 'cancelled');
@@ -241,7 +404,7 @@ test('the ci.yml alert job runs after the gate on protected canary runs only, wi
     { event_name: event, ref, repository }, cancelled);
   assert.equal(runs('push', 'refs/heads/testnet-canary'), true);
   assert.equal(runs('workflow_dispatch', 'refs/heads/testnet-canary'), true);
-  assert.equal(runs('push', 'refs/heads/testnet-canary', { cancelled: true }), false, 'a superseded run is skipped');
+  assert.equal(runs('push', 'refs/heads/testnet-canary', { cancelled: true }), false, 'a cancelled run is skipped');
   assert.equal(runs('push', 'refs/heads/testnet-canary', { repository: 'someone/fork' }), false);
   for (const [event, ref] of [
     ['pull_request', 'refs/pull/1/merge'],

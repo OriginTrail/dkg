@@ -1,40 +1,32 @@
 #!/usr/bin/env node
-// Opens, comments on or closes the `ci-alert` issue for a finished ci.yml run
-// on testnet-canary (scripts/lib/canary-alert.mjs decides which). The
+// Opens, comments on or closes the `ci-alert` issue of a finished ci.yml run's
+// profile on testnet-canary (scripts/lib/canary-alert.mjs decides which). The
 // canary-alert job in .github/workflows/ci.yml runs it after the CI gate of
 // every push and dispatched run there, the nightly included, with the gate's
-// result in CI_GATE_RESULT and the resolved profile in CI_PROFILE.
+// result in CI_GATE_RESULT and the profile ci.yml resolved in CI_PROFILE.
 //
-// --dry-run prints the decision and the issue text for any run without writing
-// to GitHub, reading the gate result and profile from the run itself:
+// --dry-run prints the decision and the issue text for a past run without
+// writing to GitHub, reading the gate result from the run itself:
 //   GITHUB_TOKEN=$(gh auth token) node scripts/ci/canary-alert.mjs --dry-run --repo OriginTrail/dkg --run-id <id>
 import path from 'node:path';
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { ALERT_LABEL, ALERT_MARKER, planAlert } from '../lib/canary-alert.mjs';
-import { CANARY_ALERT_JOB, CANARY_BRANCH, CI_GATE_JOB } from '../lib/ci-health.mjs';
+import { ALERT_LABEL, alertIssue, planAlert, PROFILES } from '../lib/canary-alert.mjs';
+import { CANARY_ALERT_JOB, CANARY_BRANCH, CI_GATE_JOB, runKind } from '../lib/ci-health.mjs';
 import { createGitHubClient, ensureLabel, findOpenIssue, listRunJobs } from '../lib/github-rest.mjs';
 
-const NIGHTLY_ACTOR = 'github-actions[bot]';
-const RED = new Set(['failure', 'cancelled', 'timed_out']);
-
-// The newer run of this run's concurrency group that was created before this
-// run's gate finished, and so cancelled it (ci.yml cancels in progress): its
-// red gate is churn, not a verdict. The job's `!cancelled()` condition already
-// skips such runs; this also covers a past one in a dry run. A standard run
-// shares its group with pushes and manual dispatches, a nightly with nightlies.
-export async function findSupersedingRun(client, { repo, run, profile, gateCompletedAt }) {
-  const workflow = path.posix.basename(run.path ?? '.github/workflows/ci.yml');
-  const { items } = await client.paginate(`repos/${repo}/actions/workflows/${workflow}/runs`, {
-    query: { branch: CANARY_BRANCH, created: `>=${run.created_at}` },
-    itemsKey: 'workflow_runs',
-  });
-  const nightly = (other) => other.event === 'workflow_dispatch' && other.actor?.login === NIGHTLY_ACTOR;
-  return items.find((other) => other.id !== run.id
-    && Date.parse(other.created_at) > Date.parse(run.created_at)
-    && Date.parse(other.created_at) < gateCompletedAt
-    && (profile === 'nightly-equivalent' ? nightly(other) : other.event === 'push' || (other.event === 'workflow_dispatch' && !nightly(other))));
+// The profile the run executed, whose issue it writes. The live job passes the
+// one ci.yml resolved (CI_PROFILE), and --profile overrides it. Only a dry run
+// of a past run without either guesses from the run (runKind in ci-health.mjs:
+// the dispatch nightly-ci.yml makes is the nightly, anything else standard),
+// a guess blind to a manual nightly-equivalent dispatch, so the live job never
+// relies on it.
+export function runProfile({ option, env, live, run }) {
+  const guess = live ? undefined : runKind(run) === 'nightly' ? 'nightly-equivalent' : 'standard';
+  const profile = option ?? (env.CI_PROFILE || undefined) ?? guess;
+  if (!PROFILES.includes(profile)) throw new Error(`needs --profile or CI_PROFILE set to ${PROFILES.join(' or ')}, not ${profile ?? 'nothing'}`);
+  return profile;
 }
 
 function runReference(run, { attempt, profile, finishedAt, serverUrl, repo }) {
@@ -62,10 +54,9 @@ export async function applyAlertPlan(client, repo, plan) {
       return `opened #${issue.number}`;
     }
     case 'comment':
-    case 'update':
       await client.request('PATCH', `repos/${repo}/issues/${plan.issue.number}`, { body: { body: plan.body } });
       await client.request('POST', `repos/${repo}/issues/${plan.issue.number}/comments`, { body: { body: plan.comment } });
-      return `${plan.action === 'comment' ? 'commented on' : 'updated'} #${plan.issue.number}`;
+      return `commented on #${plan.issue.number}`;
     case 'close':
       await client.request('POST', `repos/${repo}/issues/${plan.issue.number}/comments`, { body: { body: plan.comment } });
       await client.request('PATCH', `repos/${repo}/issues/${plan.issue.number}`, { body: { state: 'closed', state_reason: 'completed' } });
@@ -94,8 +85,6 @@ export async function runCanaryAlert({ argv = process.argv.slice(2), env = proce
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? '') || !/^\d+$/.test(runId ?? '')) {
     throw new Error('needs GITHUB_REPOSITORY and GITHUB_RUN_ID, or --repo and --run-id');
   }
-  // A dry run reads a past run: its gate result and profile come from the run
-  // itself, never from this shell's environment.
   const live = !options['dry-run'];
   const github = client ?? createGitHubClient({ token: env.GITHUB_TOKEN ?? env.GH_TOKEN, log });
   const run = await github.request('GET', `repos/${repo}/actions/runs/${runId}`);
@@ -105,20 +94,23 @@ export async function runCanaryAlert({ argv = process.argv.slice(2), env = proce
   }
   const attempt = Number(options.attempt ?? (live ? env.GITHUB_RUN_ATTEMPT : undefined) ?? run.run_attempt);
   if (!Number.isInteger(attempt) || attempt < 1) throw new Error(`invalid run attempt: ${attempt}`);
-  const jobs = (await listRunJobs(github, { repo, runId, attempt, log })).filter((job) => job.name !== CANARY_ALERT_JOB);
-  const gate = jobs.find((job) => job.name === CI_GATE_JOB);
-  const gateResult = options['gate-result'] ?? (live ? env.CI_GATE_RESULT : undefined) ?? gate?.conclusion ?? '';
-  const inferred = run.event === 'workflow_dispatch' && run.actor?.login === NIGHTLY_ACTOR ? 'nightly-equivalent' : 'standard';
-  const profile = options.profile ?? ((live && env.CI_PROFILE) || inferred);
-  if (RED.has(gateResult)) {
-    const gateCompletedAt = Date.parse(gate?.completed_at ?? '') || Date.now();
-    const newer = await findSupersedingRun(github, { repo, run, profile, gateCompletedAt });
-    if (newer) {
-      log(`Run ${runId} was superseded by run ${newer.id} (${newer.html_url}) before its gate finished: the newer run decides.`);
-      return { action: 'none', superseded: newer.id };
+  if (!live) {
+    // The live job runs only while its run is not cancelled (`!cancelled()`).
+    // A past run that concluded cancelled may have been cancelled by a newer
+    // run or have had a job time out; a dry run cannot tell which, so it does
+    // nothing for either, as the live job does for the first.
+    const ran = attempt === run.run_attempt ? run : await github.request('GET', `repos/${repo}/actions/runs/${runId}/attempts/${attempt}`);
+    if (ran.conclusion === 'cancelled') {
+      log(`Run ${runId} attempt ${attempt} was cancelled: a dry run of a cancelled run does nothing.`);
+      return { action: 'none', reason: 'the run was cancelled' };
     }
   }
-  const issue = await findOpenIssue(github, repo, { label: ALERT_LABEL.name, marker: ALERT_MARKER });
+  const profile = runProfile({ option: options.profile, env, live, run });
+  const jobs = (await listRunJobs(github, { repo, runId, attempt, log })).filter((job) => job.name !== CANARY_ALERT_JOB);
+  const gate = jobs.find((job) => job.name === CI_GATE_JOB);
+  // A dry run reads the gate from the past run, never from this shell.
+  const gateResult = options['gate-result'] ?? (live ? env.CI_GATE_RESULT : undefined) ?? gate?.conclusion ?? '';
+  const issue = await findOpenIssue(github, repo, { label: ALERT_LABEL.name, marker: alertIssue(profile).marker });
   const plan = planAlert({
     issue,
     run: runReference(run, {
@@ -140,7 +132,7 @@ export async function runCanaryAlert({ argv = process.argv.slice(2), env = proce
   }
   const done = await applyAlertPlan(github, repo, plan);
   log(`Alert: ${done}.`);
-  if (env.GITHUB_STEP_SUMMARY) fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `testnet-canary alert: ${done} (${plan.reason}).\n`);
+  if (env.GITHUB_STEP_SUMMARY) fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `testnet-canary ${profile} alert: ${done} (${plan.reason}).\n`);
   return plan;
 }
 

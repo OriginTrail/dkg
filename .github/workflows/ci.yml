@@ -48,7 +48,7 @@ concurrency:
 # any step needs to write to the repo or push a release tag. Locking it down
 # here is the single highest-leverage defence-in-depth control. The one
 # exception is the canary-alert job at the end, which also reads this run's
-# jobs and writes the `ci-alert` issue under its own job-level grant, and
+# jobs and writes the `ci-alert` issues under its own job-level grant, and
 # runs only for protected testnet-canary pushes and dispatches.
 permissions:
   contents: read
@@ -1844,18 +1844,22 @@ jobs:
   # ------------------------------------------------------------------
   # Red-canary alert. When the CI gate of a finished push or dispatched run
   # (the nightly included) on testnet-canary is red, open the `ci-alert`
-  # issue, or comment on it while it stays red; close it once a later run
-  # passes (scripts/ci/canary-alert.mjs). It is a job here, not a
-  # `workflow_run` workflow, because GitHub fires `workflow_run` and
-  # `schedule` only from the default branch (main), which takes
-  # testnet-canary at releases.
+  # issue of the run's profile, or comment on it while it stays red; close it
+  # once a later run of that profile passes (scripts/ci/canary-alert.mjs).
+  # The standard profile (pushes, standard dispatches) and the
+  # nightly-equivalent one (the nightly) each have their own issue, written
+  # only by runs of that profile. Those runs share one concurrency group
+  # above, which runs them one at a time, so no two alert jobs write the
+  # same issue at once. It is a job here, not a `workflow_run` workflow,
+  # because GitHub fires `workflow_run` and `schedule` only from the default
+  # branch (main), which takes testnet-canary at releases.
   #
-  # `!cancelled()` runs it after a red gate, but not in a run a newer push
-  # cancelled (the gate still runs there, and fails). It never runs for
-  # pull_request or merge_group runs, whose code is the candidate's: only
-  # for the protected commit this run tested, of which it checks out the
-  # alert script alone. It is not part of the gate, and its own failure
-  # cannot turn a run red.
+  # `!cancelled()` runs it after a red gate, but not in a run that was
+  # cancelled, by a newer run or by hand (the gate still runs there, and
+  # fails). It never runs for pull_request or merge_group runs, whose code is
+  # the candidate's: only for the protected commit this run tested, of which
+  # it checks out the alert script alone. It is not part of the gate, and its
+  # own failure cannot turn a run red.
   # ------------------------------------------------------------------
   canary-alert:
     name: Alert on red testnet-canary CI
@@ -1868,12 +1872,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     continue-on-error: true
-    # No concurrency group: one would cancel a pending alert job, and a
+    # No job concurrency group: it would cancel a pending alert job, and a
     # cancelled job turns the whole run `cancelled`, a green nightly included.
     permissions:
       contents: read # check out the alert script at this run's commit
-      actions: read # read this run's jobs and failed steps, and newer canary runs
-      issues: write # create the ci-alert label, open, comment on and close the alert issue
+      actions: read # read this run and its jobs' failed steps
+      issues: write # create the ci-alert label; open, comment on and close the profile's alert issue
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:

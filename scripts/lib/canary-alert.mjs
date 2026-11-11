@@ -1,9 +1,12 @@
 // The red-canary alert's decisions; scripts/ci/canary-alert.mjs reads the run
-// and applies them. One open `ci-alert` issue stands for testnet-canary CI
-// being red. Its body carries a hidden state marker that records which
-// execution profile is red, because a passing push run (the standard profile)
-// does not prove a red nightly (the nightly-equivalent profile) green. Pure, so
-// the tests drive every transition.
+// and applies them. Each execution profile has its own `ci-alert` issue, open
+// while that profile's CI gate is red on testnet-canary, and only runs of that
+// profile write it. Runs of one profile share a ci.yml concurrency group, which
+// GitHub runs one at a time, so no two alert jobs ever write one issue at once,
+// and no job-level lock is needed (one would cancel pending jobs). A pass closes
+// its own profile's issue only: a green push says nothing about a red nightly,
+// nor a green nightly about a red push. Pure, so the tests drive every
+// transition.
 import { CANARY_ALERT_JOB, failuresByLane, inline, rootFailures } from './ci-health.mjs';
 
 export const ALERT_LABEL = Object.freeze({
@@ -11,12 +14,20 @@ export const ALERT_LABEL = Object.freeze({
   color: 'b60205',
   description: 'testnet-canary CI is red; opened and closed by the CI workflow',
 });
-export const ALERT_TITLE = 'testnet-canary CI is red';
-export const ALERT_MARKER = '<!-- ci-alert-state ';
+// The profiles ci.yml resolves (resolve-ci-profile.mjs), each with its issue.
 export const PROFILES = Object.freeze(['standard', 'nightly-equivalent']);
-// What a passing run of each profile proves green: the nightly-equivalent
-// profile runs every lane the standard one does, and more.
-const CLEARS = Object.freeze({ standard: ['standard'], 'nightly-equivalent': ['standard', 'nightly-equivalent'] });
+export const ALERT_ISSUES = Object.freeze({
+  standard: Object.freeze({
+    title: 'testnet-canary CI is red',
+    marker: '<!-- ci-alert-state:standard ',
+    runs: 'pushes and manual standard dispatches',
+  }),
+  'nightly-equivalent': Object.freeze({
+    title: 'testnet-canary nightly is red',
+    marker: '<!-- ci-alert-state:nightly-equivalent ',
+    runs: 'the nightly and manual nightly-equivalent dispatches',
+  }),
+});
 // A red CI gate; a skipped or missing one says nothing.
 const RED = new Set(['failure', 'cancelled', 'timed_out']);
 const STEP_FAILED = new Set(['failure', 'timed_out', 'cancelled']);
@@ -24,9 +35,19 @@ const DETAILS = '### Latest failure';
 const FOOTER = '_Opened, commented on and closed by';
 
 const time = (value) => Date.parse(value);
+const stamp = (value) => `${String(value).slice(0, 16).replace('T', ' ')} UTC`;
+const runLink = (run) => `[CI #${run.id}${run.attempt > 1 ? `, attempt ${run.attempt}` : ''}](${run.url})`;
+const commitLink = (run) => `[\`${String(run.sha).slice(0, 10)}\`](${run.commitUrl})`;
 
-// The failure details an earlier body showed, kept when a run changes only
-// the state (a partial pass, or a late failure of an older commit).
+// A profile's issue: its title, state marker and the runs that write it. An
+// unknown profile throws rather than file a run under the wrong issue.
+export function alertIssue(profile) {
+  if (!Object.hasOwn(ALERT_ISSUES, profile)) throw new Error(`unknown CI profile: ${profile}`);
+  return ALERT_ISSUES[profile];
+}
+
+// The failure details an earlier body showed, kept when a late failure of an
+// older commit changes only the state.
 function keptDetails(body) {
   const text = String(body ?? '');
   const start = text.indexOf(DETAILS);
@@ -34,31 +55,27 @@ function keptDetails(body) {
   const end = text.indexOf(`\n${FOOTER}`, start);
   return text.slice(start, end === -1 ? undefined : end).trimEnd();
 }
-const stamp = (value) => `${String(value).slice(0, 16).replace('T', ' ')} UTC`;
-const runLink = (run) => `[CI #${run.id}${run.attempt > 1 ? `, attempt ${run.attempt}` : ''}](${run.url})`;
-const commitLink = (run) => `[\`${String(run.sha).slice(0, 10)}\`](${run.commitUrl})`;
 
-// The state in an alert issue's body: { version: 1, failing: { <profile>:
-// { since, run } } }, or undefined when there is none to read. A profile
-// entry without readable times (a hand edit) is dropped.
-export function readAlertState(body) {
+// The state in a profile's alert issue body: { version: 1, profile, since,
+// run }, or undefined when there is none to read (a hand edit included).
+export function readAlertState(body, profile) {
+  const { marker } = alertIssue(profile);
   const text = String(body ?? '');
-  const start = text.indexOf(ALERT_MARKER);
+  const start = text.indexOf(marker);
   if (start === -1) return undefined;
   const end = text.indexOf(' -->', start);
   let state;
   try {
-    state = JSON.parse(text.slice(start + ALERT_MARKER.length, end === -1 ? undefined : end));
+    state = JSON.parse(text.slice(start + marker.length, end === -1 ? undefined : end));
   } catch {
     return undefined;
   }
-  if (state?.version !== 1 || !state.failing || typeof state.failing !== 'object') return undefined;
-  const readable = (entry) => Number.isFinite(time(entry?.since)) && Number.isFinite(time(entry?.run?.createdAt));
-  return { version: 1, failing: Object.fromEntries(PROFILES.filter((profile) => readable(state.failing[profile])).map((profile) => [profile, state.failing[profile]])) };
+  if (state?.version !== 1 || state.profile !== profile) return undefined;
+  return Number.isFinite(time(state.since)) && Number.isFinite(time(state.run?.createdAt)) ? state : undefined;
 }
 
 // `>` is escaped so no value can close the comment early.
-const stateMarker = (state) => `${ALERT_MARKER}${JSON.stringify(state).replace(/>/g, '\\u003e')} -->`;
+const stateMarker = (state) => `${alertIssue(state.profile).marker}${JSON.stringify(state).replace(/>/g, '\\u003e')} -->`;
 
 // The run as the issue records it.
 const recorded = ({ id, attempt, createdAt, url, sha, commitUrl }) => ({ id, attempt, createdAt, url, sha, commitUrl });
@@ -104,17 +121,14 @@ export function renderFailure(run, jobs) {
 }
 
 export function renderAlertBody(state, details) {
-  const rows = PROFILES.filter((profile) => state.failing[profile]).map((profile) => {
-    const { since, run } = state.failing[profile];
-    return `| ${profile} | ${stamp(since)} | ${runLink(run)} | ${commitLink(run)} |`;
-  });
+  const { title, runs } = alertIssue(state.profile);
+  const other = PROFILES.find((profile) => profile !== state.profile);
   return [
     stateMarker(state),
-    `**testnet-canary CI is red.** This issue closes itself when a later run passes: a \`standard\` pass (a push, or a manual dispatch) clears the standard profile, and a \`nightly-equivalent\` pass (the nightly) clears both.`,
+    `**${title}** for the ${state.profile} profile (${runs}). This issue closes itself when a later ${state.profile} run passes; the ${other} profile has its own issue.`,
     '',
-    '| Profile | Red since | Latest red run | Commit |',
-    '|---|---|---|---|',
-    ...rows,
+    `- **Red since:** ${stamp(state.since)}`,
+    `- **Latest red run:** ${runLink(state.run)} at ${commitLink(state.run)}`,
     '',
     details,
     '',
@@ -122,63 +136,56 @@ export function renderAlertBody(state, details) {
   ].join('\n');
 }
 
-// What to do with the alert issue for one finished run of testnet-canary CI:
-// `open` (with title, labels and body), `comment` (and rewrite the body),
-// `update` (a pass cleared some profiles, others stay red), `close` (with a
-// comment) or `none`, with the reason.
+// What to do with a profile's alert issue for one finished testnet-canary run
+// of that profile: `open` (with title, labels and body), `comment` (and
+// rewrite the body), `close` (with a comment) or `none`, with the reason.
 // - run: { id, attempt, profile, createdAt, finishedAt, url, sha, commitUrl,
 //   event, actor, triggeringActor, title }
 // - gateResult: the CI gate job's result in this run
 // - jobs: this attempt's jobs, from the jobs API
-// - issue: the open alert issue ({ number, body }), or null
+// - issue: the open alert issue of run.profile ({ number, body }), or null
 export function planAlert({ issue, run, gateResult, jobs }) {
-  const profile = PROFILES.includes(run.profile) ? run.profile : 'standard';
-  const current = { ...run, profile };
-  const state = issue ? readAlertState(issue.body) : undefined;
+  const { title } = alertIssue(run.profile);
+  const state = issue ? readAlertState(issue.body, run.profile) : undefined;
   if (gateResult === 'success') {
-    if (!issue) return { action: 'none', reason: `CI gate passed and no ${ALERT_LABEL.name} issue is open` };
-    const failing = { ...state?.failing };
-    // A pass clears a red profile it covers, from a run no newer than itself:
-    // an older commit passing late proves nothing about a newer red one.
-    const cleared = CLEARS[profile].filter((name) => failing[name] && time(failing[name].run.createdAt) <= time(run.createdAt));
-    if (Object.keys(failing).length > 0 && cleared.length === 0) {
-      return { action: 'none', reason: `CI gate passed, but ${Object.keys(failing).join(' and ')} stays red until a run covering it passes` };
+    if (!issue) return { action: 'none', reason: `CI gate passed and no ${run.profile} alert is open` };
+    // An older commit passing late proves nothing about a newer red one. An
+    // issue whose state is unreadable closes on any pass of its profile.
+    if (state && time(state.run.createdAt) > time(run.createdAt)) {
+      return { action: 'none', reason: `CI gate passed, but #${issue.number} records a newer red run (#${state.run.id})` };
     }
-    for (const name of cleared) delete failing[name];
-    const remaining = PROFILES.filter((name) => failing[name]);
-    const passed = `**Green again:** ${runLink(current)} (\`${run.event}\`, ${profile} profile) passed at ${commitLink(current)}.`;
-    if (!state || remaining.length === 0) {
-      return { action: 'close', issue, comment: `${passed} Closing.`, reason: `CI gate passed; closing #${issue.number}` };
-    }
-    const next = { version: 1, failing };
-    const still = remaining.map((name) => `${name} (red since ${stamp(failing[name].since)}, latest ${runLink(failing[name].run)})`).join(' and ');
     return {
-      action: 'update',
+      action: 'close',
       issue,
-      state: next,
-      body: renderAlertBody(next, keptDetails(issue.body)),
-      comment: `${passed} That clears ${cleared.join(' and ')}; ${still} is still red, so this stays open until a run covering it passes.`,
-      reason: `CI gate passed; ${cleared.join(' and ')} cleared, ${remaining.join(' and ')} still red`,
+      comment: `**Green again:** ${runLink(run)} (\`${run.event}\`, ${run.profile} profile) passed at ${commitLink(run)}. Closing.`,
+      reason: `CI gate passed; closing #${issue.number}`,
     };
   }
   if (!RED.has(gateResult)) return { action: 'none', reason: `CI gate result is ${gateResult || 'missing'}` };
-  const failing = { ...state?.failing };
-  const previous = failing[profile];
-  const newer = !previous || time(run.createdAt) >= time(previous.run.createdAt);
-  failing[profile] = {
-    since: previous && time(previous.since) <= time(run.createdAt) ? previous.since : run.createdAt,
-    run: newer ? recorded(current) : previous.run,
+  const newer = !state || time(run.createdAt) >= time(state.run.createdAt);
+  const next = {
+    version: 1,
+    profile: run.profile,
+    since: state && time(state.since) <= time(run.createdAt) ? state.since : run.createdAt,
+    run: newer ? recorded(run) : state.run,
   };
-  const next = { version: 1, failing };
-  const failure = renderFailure(current, jobs);
-  const body = renderAlertBody(next, `${DETAILS}\n\n${failure}`);
-  if (!issue) return { action: 'open', title: ALERT_TITLE, labels: [ALERT_LABEL.name], state: next, body, reason: `CI gate ${gateResult}; opening the alert` };
+  const failure = renderFailure(run, jobs);
+  if (!issue) {
+    return {
+      action: 'open',
+      title,
+      labels: [ALERT_LABEL.name],
+      state: next,
+      body: renderAlertBody(next, `${DETAILS}\n\n${failure}`),
+      reason: `CI gate ${gateResult}; opening the ${run.profile} alert`,
+    };
+  }
   return {
     action: 'comment',
     issue,
     state: next,
-    body: newer ? body : renderAlertBody(next, keptDetails(issue.body)),
-    comment: `### Still red: ${runLink(current)}\n\n${failure}`,
+    body: renderAlertBody(next, newer ? `${DETAILS}\n\n${failure}` : keptDetails(issue.body)),
+    comment: `### Still red: ${runLink(run)}\n\n${failure}`,
     reason: `CI gate ${gateResult}; commenting on #${issue.number}`,
   };
 }
