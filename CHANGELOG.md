@@ -4,8 +4,29 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Changed
+
+- Core nodes send fewer RPC requests for Knowledge Assets that wait to reach
+  Verifiable Memory. The VM reconcile pass and the StorageACK promotion lanes
+  read an asset's latest Merkle root and then its publisher, a request each,
+  and an asset that stays pending is read again on every sweep. The two
+  reads now go out together, so the node's read batching sends them as one
+  request. On the mainnet Core nodes measured, that is up to about 14,000
+  fewer requests a day on Gnosis and 24,000 on Base, depending on how many
+  assets are pending.
+
 ### Fixed
 
+- A Core node no longer spends a large share of its RPC on context graphs
+  that peers announced but nobody registered on chain. A Core node subscribes
+  to every graph it hears of over gossip. For one that was never registered,
+  every reconcile attempt paid for a live chain scan and then failed with
+  "has no resolved on-chain id", and the node asked about such graphs every
+  minute, up to eight a minute, for as long as it ran. On a Base mainnet Core
+  node that came to about 80,000 requests a day. The node now waits before
+  asking again about a graph whose name the chain holds no id for: a minute
+  at first, doubling up to an hour. A graph that does get registered is
+  picked up as soon as the node sees it on chain, as before.
 - An error from one service's backend no longer takes a seller's other
   services away from buyers. When the backend refuses a call as made (400,
   404, 413, 415 or 422), the seller refuses it with a code buyers don't

@@ -4,10 +4,15 @@ import {
   VmReconcileLocalAdmissionWait,
   type LocalAdmissionWaitOptions,
 } from './internal/vm-reconcile-local-admission-wait.js';
+import {
+  VmReconcileAbsentTargetBackoff,
+  type VmReconcileAbsentTargetBackoffOptions,
+} from './internal/vm-reconcile-absent-target-backoff.js';
 import { VmReconcileLocalRpcRefusalWindow } from './internal/vm-reconcile-local-rpc-refusal.js';
 import type { VmReconcileSweepAdmission } from './internal/vm-reconcile-sweep-admission.js';
 import { VmReconcileSweepPlanner } from './internal/vm-reconcile-sweep.js';
 import {
+  ContextGraphNameAbsentError,
   VmReconcileQueueClosedError,
   VmReconcileQueueFullError,
   type VmReconcileSource,
@@ -64,6 +69,8 @@ export interface VmReconcileDispatcherOptions {
 export interface VmReconcileSchedulingOptions extends VmReconcileDispatcherOptions {
   discoveryBatchSize?: number;
   periodicBoundBatchSize?: number;
+  /** How long the sweep's unbound lane leaves a graph the chain does not hold. */
+  absentTargetBackoff?: VmReconcileAbsentTargetBackoffOptions;
 }
 
 function vmReconcileSourceRank(source: VmReconcileSource): number {
@@ -543,6 +550,7 @@ export class VmReconcileSchedulingRuntime<T> {
   private readonly sweepAdmission: VmReconcileSweepAdmission<T>;
   private readonly localAdmissionWait: VmReconcileLocalAdmissionWait;
   private readonly localRpcRefusals: VmReconcileLocalRpcRefusalWindow;
+  private readonly absentTargets: VmReconcileAbsentTargetBackoff;
 
   constructor(
     run: (key: string, source: VmReconcileSource) => Promise<T>,
@@ -557,7 +565,11 @@ export class VmReconcileSchedulingRuntime<T> {
         try {
           const result = await run(key, source);
           succeeded = true;
+          this.absentTargets.clear(key);
           return result;
+        } catch (error) {
+          if (error instanceof ContextGraphNameAbsentError) this.absentTargets.noteAbsent(key);
+          throw error;
         } finally {
           this.localRpcRefusals.passEnded(key, succeeded);
           this.localAdmissionWait.passEnded(pass);
@@ -585,6 +597,7 @@ export class VmReconcileSchedulingRuntime<T> {
       maxWaiters: options.maxPending ?? 256,
     });
     this.localRpcRefusals = new VmReconcileLocalRpcRefusalWindow(options.maxPending ?? 256);
+    this.absentTargets = new VmReconcileAbsentTargetBackoff(options.absentTargetBackoff);
     this.planner = new VmReconcileSweepPlanner({
       discoveryBatchSize: options.discoveryBatchSize ?? 8,
       periodicBoundBatchSize: options.periodicBoundBatchSize ?? 8,
@@ -670,7 +683,11 @@ export class VmReconcileSchedulingRuntime<T> {
   ): 'parked' | 'again' | undefined {
     return this.deferForLocalRpcRefusal(key, options);
   }
-  releaseLiveHold(key: string): void { this.dispatcher.releaseLiveHold(key); }
+  /** Fresh evidence for the graph, such as a new binding: no earlier failure holds it back. */
+  releaseLiveHold(key: string): void {
+    this.absentTargets.clear(key);
+    this.dispatcher.releaseLiveHold(key);
+  }
   triggerPeriodic(key: string): void { this.dispatcher.triggerPeriodic(key); }
   tryTriggerPeriodic(key: string): boolean { return this.dispatcher.tryTriggerPeriodic(key); }
   triggerManual(key: string): Promise<T> { return this.dispatcher.triggerManual(key); }
@@ -693,7 +710,7 @@ export class VmReconcileSchedulingRuntime<T> {
   ): void {
     this.planner.admit(
       boundKeys,
-      unboundKeys,
+      this.absentTargets.due(unboundKeys),
       {
         tryAdmit: key => isCurrent() ? this.sweepAdmission.tryAdmit(key) : undefined,
         tryAdmitBoundTimer: key => isCurrent()
@@ -710,7 +727,7 @@ export class VmReconcileSchedulingRuntime<T> {
   ): Promise<void> {
     return this.planner.complete(
       boundKeys,
-      unboundKeys,
+      this.absentTargets.due(unboundKeys),
       this.sweepAdmission,
       isCurrent,
       signal,

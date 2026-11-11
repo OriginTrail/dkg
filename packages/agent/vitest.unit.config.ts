@@ -430,10 +430,14 @@ export default defineConfig({
       "test/vm-reconcile-self-prime.test.ts",
       "test/vm-reconcile-self-prime-budget.test.ts",
       "test/vm-reconcile-sweep.test.ts",
+      // The sweep's unbound lane spaces graphs whose name the chain holds no id for.
+      "test/vm-reconcile-absent-target-backoff.test.ts",
       "test/vm-reconcile-lifecycle-timer.test.ts",
       // #2858 — refresh of confirmed VM copies after an on-chain KA update.
       "test/vm-refresh-after-update.test.ts",
       "test/vm-promotion-gate.test.ts",
+      // A KA's latest root and publisher in one batched request; stub and real adapter, no hardhat.
+      "test/ka-latest-root-and-publisher.test.ts",
       "test/vm-recovery-microbatch-planner.test.ts",
       "test/vm-recovery-phase-timing.test.ts",
       // #3081 — where a confirmed publication waits for its catalog placement (observation only).
