@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { isSparqlUpdateOperation, parseReadGraphIri } from '@origintrail-official/dkg-core';
-import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './adapters/graph-enumeration-query.js';
+import { REGISTERED_NAMED_GRAPH_ENUMERATION_QUERY } from './adapters/graph-enumeration-query.js';
 import { legacyStrippedIriValue } from './adapters/sparql-term-policy.js';
 import { composeGraphEnumerationVisibility, isReadGraphPartitionGraph } from './graph-enumeration-visibility.js';
 import { sparqlUpdateReach } from './read-graph-partition-reference.js';
@@ -269,14 +269,15 @@ export function storeMayHoldReadGraphPartitions(store: TripleStore): boolean {
 
 /**
  * Drop every graph of every read-graph partition, with their state. The
- * partition is hidden from enumeration, so this reads the store's own graph
- * list once. State graphs and other graphs that are not read graphs go first,
- * so a drop that stops part way never leaves a state row without its data.
- * Returns the number of graphs dropped.
+ * partition is hidden from enumeration, so this reads the store's own list of
+ * registered graphs once; a read graph emptied by DELETE, which Oxigraph keeps
+ * registered, is dropped too. State graphs and other graphs that are not read
+ * graphs go first, so a drop that stops part way never leaves a state row
+ * without its data. Returns the number of graphs dropped.
  */
 export async function dropReadGraphPartitions(store: TripleStore, options: QueryOptions = {}): Promise<number> {
   const target = readGraphPartitionMaintenanceStore(store);
-  const result = await target.query(NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY,
+  const result = await target.query(REGISTERED_NAMED_GRAPH_ENUMERATION_QUERY,
     { ...options, source: options.source ?? 'storage.readGraphPartitionDrop' });
   if (result.type !== 'bindings') throw new Error('Read-graph partition drop expected graph bindings');
   const graphs = [...new Set(result.bindings.map(row => row.g).filter((graph): graph is string =>

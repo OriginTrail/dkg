@@ -1,4 +1,5 @@
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import {
   clearReadGraphPartitionsNote,
   createTripleStore,
@@ -23,6 +24,44 @@ interface StoppedNodeStore {
 
 export type OpenStoppedNodeStore = (dataDir: string, log: (message: string) => void) => Promise<StoppedNodeStore>;
 
+/** Embedded backends whose store is a file or directory that the configuration names. */
+const EMBEDDED_STORE_BACKENDS: ReadonlySet<string> = new Set(['oxigraph', 'oxigraph-worker', 'oxigraph-persistent']);
+
+/** The configured location of a store this process opens itself: an embedded store's path, a managed server's directory. */
+function configuredStoreLocation(config: TripleStoreConfig): { readonly option: string; readonly location: string } | undefined {
+  const options = config.options as { readonly path?: unknown; readonly location?: unknown } | undefined;
+  if (EMBEDDED_STORE_BACKENDS.has(config.backend) && typeof options?.path === 'string' && options.path !== '') {
+    return { option: 'store.options.path', location: options.path };
+  }
+  if (config.backend === 'oxigraph-server' && typeof options?.location === 'string' && options.location.trim() !== '') {
+    return { option: 'store.options.location', location: options.location };
+  }
+  return undefined;
+}
+
+/**
+ * Refuse a configured store location that this process cannot match to the
+ * daemon's: an embedded store's path, or the directory of the Oxigraph server
+ * the node manages. A relative location resolves against each process's own
+ * working directory, and one with nothing behind it would open a new, empty
+ * store: either way the drop would find no read graph while the node's store
+ * keeps them. A store without a configured location is the data directory's,
+ * or holds nothing once the daemon stops.
+ */
+export function assertStoppedStoreLocation(config: TripleStoreConfig): void {
+  const configured = configuredStoreLocation(config);
+  if (!configured) return;
+  const { option, location } = configured;
+  if (!isAbsolute(location)) {
+    throw new Error(`The configured ${option} "${location}" is relative, so it cannot be matched to the store the node used. `
+      + `Set ${option} to an absolute path in config.json, then run the rollback again.`);
+  }
+  if (!existsSync(location)) {
+    throw new Error(`The configured store ${location} does not exist, so its read graphs cannot be dropped. `
+      + `Set ${option} to the store the node used, then run the rollback again.`);
+  }
+}
+
 /**
  * Open this node's triple store with the daemon stopped, the way the daemon
  * opens it: a managed Oxigraph server runs only for the duration, and the
@@ -30,6 +69,10 @@ export type OpenStoppedNodeStore = (dataDir: string, log: (message: string) => v
  */
 export const openStoppedNodeStore: OpenStoppedNodeStore = async (dataDir, log) => {
   const config = await loadConfig();
+  // A store section with only settings (no backend) keeps the default store, with those settings, as the daemon does.
+  const configured = config.store?.backend ? config.store as TripleStoreConfig : undefined;
+  // Before anything is started or opened: a location this process cannot match to the node's is refused.
+  if (configured) assertStoppedStoreLocation(configured);
   const managed = await startManagedOxigraph({ config, dataDir, log });
   if (managed) {
     try {
@@ -40,8 +83,6 @@ export const openStoppedNodeStore: OpenStoppedNodeStore = async (dataDir, log) =
       throw error;
     }
   }
-  // A store section with only settings (no backend) keeps the default store, with those settings, as the daemon does.
-  const configured = config.store?.backend ? config.store as TripleStoreConfig : undefined;
   const store = await createTripleStore({
     ...(configured ?? { backend: 'oxigraph-worker', options: { path: join(dataDir, 'store.nq') }, graphCatalog: config.store?.graphCatalog }),
     changelog: false,

@@ -368,15 +368,17 @@ describe('the read-graph partition guard', () => {
     const base = new OxigraphStore();
     opened.push(base);
     await base.insert([...memberQuads, ...plantedQuads]);
+    // Exactly the member graphs: a list that keeps any one partition graph differs.
+    const members = memberQuads.map(member => member.graph).sort();
     const indexed = new GraphSetIndexStore(new ReadGraphPartitionStore(base), { revalidateMs: 0 });
-    expect(await indexed.listGraphs()).toEqual(expect.not.arrayContaining(PARTITION_GRAPHS));
+    expect([...await indexed.listGraphs()].sort()).toEqual(members);
     expect(await indexed.listGraphsByPrefix(`${ROOT}/${READ_GRAPH_SEGMENT}`)).toEqual([]);
     expect((await indexed.listGraphsByPrefix(`${ROOT}/_read/`)).sort()).toEqual([LEGACY_ASSET, LEGACY_SHARED].sort());
     expect(await indexed.hasGraph(VM_READ)).toBe(false);
     expect(indexed.graphEnumerationVisibility?.(VM_READ)).toBe(false);
     expect(indexed.graphEnumerationVisibility?.(ASSET)).toBe(true);
     const passthrough = new GraphSetIndexStore(base, { enabled: false });
-    expect(await passthrough.listGraphsByPrefix(ROOT)).toEqual(expect.not.arrayContaining(PARTITION_GRAPHS));
+    expect([...await passthrough.listGraphsByPrefix(ROOT)].sort()).toEqual(members);
   });
 });
 
@@ -412,6 +414,21 @@ describe('dropping read-graph partitions', () => {
     for (const graph of [LEGACY_ASSET, LEGACY_SHARED]) expect(await adapter.countQuads(graph), graph).toBe(1);
     expect((await adapter.listGraphs()).sort()).toEqual((await readGraphPartitionMaintenanceStore(plain).listGraphs()).sort());
     expect(await dropReadGraphPartitions(plain)).toBe(0);
+  });
+
+  it('drops a read graph emptied by DELETE, which the store keeps registered', async () => {
+    const { plain, planted } = await storePair();
+    opened.push(plain, planted);
+    const adapter = readGraphPartitionMaintenanceStore(planted);
+    const registered = async () => {
+      const result = await adapter.query('SELECT ?g WHERE { GRAPH ?g {} }');
+      return result.type === 'bindings' ? result.bindings.map(row => row.g).filter(isReadGraphPartitionGraph) : [];
+    };
+    await adapter.delete([quad(VM_READ)]);
+    expect(await adapter.countQuads(VM_READ)).toBe(0);
+    expect(await registered()).toContain(VM_READ);
+    expect(await dropReadGraphPartitions(planted)).toBe(PARTITION_GRAPHS.length);
+    expect(await registered()).toEqual([]);
   });
 
   it('refuses an enumeration that is not a graph list', async () => {
