@@ -7,7 +7,9 @@
 # Phases, in this order (READ_GRAPHS_RUN_PHASES picks a subset):
 #   seed      with read graphs still off, run READ_GRAPHS_SEED_CMD (default
 #             scripts/v10-rc-validation.sh) so the nodes hold data in every
-#             layer before the read graphs are built;
+#             layer before the read graphs are built; then have each node's
+#             own agent write one working-memory draft into a context graph
+#             the node creates for it;
 #   setup     check that no node holds a ready read graph yet, so the
 #             backfill is fresh; then set query.readGraphs to
 #             READ_GRAPHS_SETTING (default "build": every context graph and
@@ -18,8 +20,9 @@
 #             must also list the read graphs it is expected to keep, worked
 #             out without its status: for each context graph it subscribes
 #             to that can have read graphs, and each sub-graph registered in
-#             it, the read graph of each shared layer its setting keeps, by
-#             the build's own rules;
+#             it, the read graph of each shared layer its setting keeps, and
+#             the working-memory read graph of the seeded draft, by the
+#             build's own rules;
 #   measure   record read graphs by state, triples per read graph and copies
 #             per triple (scripts/read-graph-store-report.mjs), and the size of
 #             each node's directory before and after;
@@ -223,10 +226,11 @@ context_graph_count() {
 }
 # expected_read_graphs <n>: the read graphs node <n> must keep, worked out without its status: for each context
 # graph it subscribes to that can have read graphs, and for each sub-graph registered in it, the read graph of each
-# shared layer whose mode under the node's setting is not off, by the build's own rules. Working-memory read graphs
-# are required as status lists them (the kill drill requires its own).
+# shared layer whose mode under the node's setting is not off, and the working-memory read graph of the draft the seed
+# phase wrote, by the build's own rules. Other working-memory read graphs are required as status lists them (the kill
+# drill requires its own).
 expected_read_graphs() {
-  local setting frames cg i=0
+  local setting frames cg agent i=0
   setting="$(read_graphs_setting "$1")"
   frames="$RESULTS/rows/expected-input.node$1"
   # The node's listing, then one sub-graph listing per context graph it subscribes to (frame <i>, named in the index).
@@ -277,7 +281,12 @@ expected_read_graphs() {
         console.log(core.readGraphIri(key));
       }
     }
-  ' "$frames.listing"
+  ' "$frames.listing" || return 1
+  # The working-memory read graph of the draft the seed phase wrote, when the node's setting keeps it.
+  if [ -s "$RESULTS/rows/seed-wm.node$1" ]; then
+    read -r cg agent < "$RESULTS/rows/seed-wm.node$1"
+    wm_read_graph "$1" "$cg" "$agent" || return 1
+  fi
 }
 # wm_read_graph <n> <context graph> <agent address>: the IRI of that agent's working-memory read graph in the context
 # graph, by the build's own rules, when node <n>'s setting keeps it; nothing when the setting does not.
@@ -517,15 +526,37 @@ trap 'exit 130' INT
 
 # ── phases ─────────────────────────────────────────────────────────────────
 phase_seed() {
-  local started n count total=0
+  local started n count total=0 missing=""
   started="$(now)"
-  if "$SEED_CMD" > "$RESULTS/seed.log" 2>&1; then
-    for n in $NODES; do count="$(context_graph_count "$n")" && total=$((total + count)); done
-    if [ "$total" -gt 0 ]; then record seed PASS "$(( $(now) - started ))" "$total subscriptions to context graphs that can have read graphs, across the nodes"
-    else record seed INCONCLUSIVE "$(( $(now) - started ))" "no node subscribes to a context graph that can have read graphs: the backfill would build nothing"; fi
+  "$SEED_CMD" > "$RESULTS/seed.log" 2>&1 || { record seed FAIL "$(( $(now) - started ))" "$(basename "$SEED_CMD") failed (seed.log)"; return; }
+  for n in $NODES; do seed_working_memory "$n" || missing="$missing node$n"; done
+  for n in $NODES; do count="$(context_graph_count "$n")" && total=$((total + count)); done
+  if [ "$total" -eq 0 ]; then
+    record seed INCONCLUSIVE "$(( $(now) - started ))" "no node subscribes to a context graph that can have read graphs: the backfill would build nothing"
+  elif [ -n "$missing" ]; then
+    record seed INCONCLUSIVE "$(( $(now) - started ))" "no working-memory draft could be written on$missing, so the backfill of working memory is not checked there (seed-wm.log)"
   else
-    record seed FAIL "$(( $(now) - started ))" "$(basename "$SEED_CMD") failed (seed.log)"
+    record seed PASS "$(( $(now) - started ))" "$total subscriptions to context graphs that can have read graphs, across the nodes; a working-memory draft on each node"
   fi
+}
+# seed_working_memory <n>: node <n>'s own agent writes one working-memory draft into a context graph the node creates
+# for it, with read graphs still off. rows/seed-wm.node<n> then holds "<context graph> <agent address>", and the
+# backfill must build that agent's working-memory read graph from the draft (expected_read_graphs).
+seed_working_memory() {
+  local n="$1" agent cg body resp
+  agent="$(field "$(body_of "$(api "$n" GET /api/agent/identity)")" agentAddress)"
+  [ -n "$agent" ] || { echo "node$n: no agent address" >> "$RESULTS/seed-wm.log"; return 1; }
+  cg="read-graphs-seed-$(echo "$RUN_ID" | tr 'A-Z' 'a-z')-n$n"
+  # Bodies go into variables first (bash 3.2 brace expansion, see the kill drill).
+  body="{\"id\":\"$cg\",\"name\":\"Read-graph seed\"}"
+  resp="$(api "$n" POST /api/context-graph/create "$body")"
+  case "$(code_of "$resp")" in 200|201|409) ;; *) echo "node$n: context graph $cg: HTTP $(code_of "$resp")" >> "$RESULTS/seed-wm.log"; return 1 ;; esac
+  body="{\"contextGraphId\":\"$cg\",\"name\":\"seed-1\"}"
+  api "$n" POST /api/knowledge-assets "$body" > /dev/null
+  body="{\"contextGraphId\":\"$cg\",\"quads\":[{\"subject\":\"urn:read-graphs-seed:$n\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"seed $n\\\"\"}]}"
+  resp="$(api "$n" POST /api/knowledge-assets/seed-1/wm/write "$body")"
+  case "$(code_of "$resp")" in 2??) ;; *) echo "node$n: working-memory write: HTTP $(code_of "$resp")" >> "$RESULTS/seed-wm.log"; return 1 ;; esac
+  echo "$cg $agent" > "$RESULTS/rows/seed-wm.node$n"
 }
 
 phase_setup() {
@@ -685,19 +716,21 @@ drill_restart_during_rebuild() {
   started="$(now)"; before="$RESULTS/rows/restart.before.node$n"
   read_graph_rows "$n" > "$before" && all_ready "$before" || { record drill-restart INCONCLUSIVE 0 "node$n had no ready read graph to rebuild"; return; }
   read_graph_rebuild "$n" || { record drill-restart FAIL "$(( $(now) - started ))" "rebuild refused on node$n (cli.log)"; return; }
-  # `rebuild` marks the read graphs dirty; the builder's next pass rebuilds them. Restart while one is being rebuilt.
+  # `rebuild` marks the read graphs dirty; the builder's next pass rebuilds them. Restart while a shared-layer one is
+  # being rebuilt. Working-memory read graphs are left out: every start renews them, so they prove nothing here.
   for i in $(seq 1 150); do
     read_graph_rows "$n" > "$RESULTS/rows/restart.caught.node$n" 2>/dev/null || true
-    if grep -qE '^(rebuilding|building) ' "$RESULTS/rows/restart.caught.node$n"; then caught=1; break; fi
+    if grep -E '^(rebuilding|building) ' "$RESULTS/rows/restart.caught.node$n" | grep -qv '/_working_memory/'; then caught=1; break; fi
     sleep 0.2
   done
-  [ -n "$caught" ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "no read graph on node$n was seen being rebuilt, so no restart could land during one"; return; }
+  [ -n "$caught" ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "no shared-layer read graph on node$n was seen being rebuilt, so no restart could land during one"; return; }
   restart_node "$n" || { record drill-restart FAIL "$(( $(now) - started ))" "node$n did not come back"; return; }
   if ! wait_all_ready drill-restart "$READY_TIMEOUT" "$n"; then record drill-restart FAIL "$(( $(now) - started ))" "node$n's read graphs not ready after the restart"; return; fi
   # A read graph the restart caught unfinished gets a new generation at start. One whose rebuild ended in
   # the moment before the daemon stopped keeps its generation; that is fine, but proves nothing.
   while read -r state gen_before graph; do
     [ "$state" = ready ] && continue
+    case "$graph" in */_working_memory/*) continue ;; esac
     gen_after="$(generation_of "$RESULTS/rows/drill-restart.node$n" "$graph")"
     if [ -z "$gen_after" ]; then gone="$gone <$graph>"
     elif [ "$gen_after" != "$gen_before" ]; then renewed=$((renewed + 1))
@@ -706,7 +739,7 @@ drill_restart_during_rebuild() {
   [ -z "$gone" ] || { record drill-restart FAIL "$(( $(now) - started ))" "read graphs gone after the restart:$gone"; return; }
   [ "$renewed" -gt 0 ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "every rebuild seen on node$n ended before the restart stopped the daemon"; return; }
   [ -z "$finished" ] || note "drill-restart: rebuilt before the daemon stopped, so they kept their generation:$finished"
-  drill_end drill-restart "$n" "$started" "$renewed read graphs the restart caught unfinished got a new generation and were rebuilt"
+  drill_end drill-restart "$n" "$started" "$renewed shared-layer read graphs the restart caught unfinished got a new generation and were rebuilt"
 }
 
 # acked_count <file>: lines in a file of acknowledged writes.
