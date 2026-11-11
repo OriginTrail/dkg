@@ -29,7 +29,7 @@
  */
 
 import { compareCodePoint, isSparqlUpdateOperation, readGraphIri, type ReadGraphKey } from '@origintrail-official/dkg-core';
-import { ADAPTER_SPARQL_TERM_POLICY, type SparqlTermRenderer, type SparqlTermSite } from '../adapters/sparql-term-policy.js';
+import { ADAPTER_SPARQL_TERM_POLICY, legacyStrippedIriValue, type SparqlTermRenderer, type SparqlTermSite } from '../adapters/sparql-term-policy.js';
 import type { AtomicAssetReplacement } from '../atomic-asset-group.js';
 import { describeRfc64AuthorCommitCasV1 } from '../rfc64-author-commit-mutation.js';
 import type { Rfc64AuthorCommitCasInputV1 } from '../rfc64-author-commit-cas.js';
@@ -159,7 +159,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
     if (this.runtime.mirror.size === 0) return this.innerStore.insert(quads, options);
     const write: ReadGraphWrite = { kind: 'insert', quads };
-    refuseWrappedGraphNames('insert', write);
+    refuseRewrittenGraphNames('insert', write);
     return this.withMaintainedReadGraphs(write, options, (maintained) => {
       const added = joinReadGraphWriteChanges(maintained.map(({ target, members }) =>
         readGraphWriteChange(write, target, members, this.renderer('insert')))).insertQuads;
@@ -241,7 +241,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
     send: (options: O | undefined) => Promise<T>,
   ): Promise<T> {
     if (this.runtime.mirror.size === 0) return send(options);
-    refuseWrappedGraphNames(method, write);
+    refuseRewrittenGraphNames(method, write);
     return this.withMaintainedReadGraphs(write, options, (maintained) => {
       const change = joinReadGraphWriteChanges(maintained.map(({ target, members }) =>
         readGraphWriteChange(write, target, members, this.renderer(method))));
@@ -369,13 +369,15 @@ function termSiteOf(backend: TripleStoreConfig['backend']): SparqlTermSite['adap
 }
 
 /**
- * Refuse a write that names a graph in angle brackets. An adapter that accepts
- * one writes the graph inside them, which no read graph would know as its
- * member, so the write would skip maintenance.
+ * Refuse a write that names a graph its adapter would write under another
+ * name. The adapter's renderer deletes the characters that break an IRI from a
+ * name that fails validation (`legacyStrippedIriValue`), angle brackets among
+ * them. No read graph would know the graph it writes as a member, so the write
+ * would skip maintenance.
  */
-function refuseWrappedGraphNames(method: ReadGraphPlannedMethod | 'insert', write: ReadGraphWrite): void {
-  if (readGraphWriteGraphs(write).some((graph) => graph.startsWith('<') || graph.endsWith('>'))) {
-    throw new ReadGraphWriteRefusedError(storeOperationOf(method), 'a graph name must be a bare IRI, without angle brackets');
+function refuseRewrittenGraphNames(method: ReadGraphPlannedMethod | 'insert', write: ReadGraphWrite): void {
+  if (readGraphWriteGraphs(write).some((graph) => legacyStrippedIriValue(graph) !== graph)) {
+    throw new ReadGraphWriteRefusedError(storeOperationOf(method), 'a graph name must be an IRI its adapter writes as given');
   }
 }
 
