@@ -14,16 +14,24 @@ function store(graphs: readonly string[], options: { byPrefix?: boolean } = {}) 
 }
 
 describe('whether the store holds any graph of a context graph', () => {
-  it('counts the root graph and any graph under it, such as an asset graph', async () => {
+  it('counts the root graph and any graph in its reserved partitions, such as an asset graph', async () => {
     await expect(holdsContextGraphGraphs(store([ROOT]), '0xab/products')).resolves.toBe(true);
     await expect(holdsContextGraphGraphs(store([`${ROOT}/_verifiable_memory/0xaa/1`]), '0xab/products')).resolves.toBe(true);
     await expect(holdsContextGraphGraphs(store([]), '0xab/products')).resolves.toBe(false);
   });
 
-  it('does not count a context graph whose id only extends this one', async () => {
-    const other = store([`${ROOT}-archive/_verifiable_memory/0xaa/1`, `${ROOT}s`]);
+  it('does not count graphs under context/ or assertion/, which a child context graph may own under the same names', async () => {
+    // A child context graph `<id>/context/7` with its _meta: one IRI with a per-context-ID graph and its _meta.
+    const child = store([`${ROOT}/context/7`, `${ROOT}/context/7/_meta`, `${ROOT}/assertion/0xaa/notes`]);
+    await expect(holdsContextGraphGraphs(child, '0xab/products')).resolves.toBe(false);
+    await expect(holdsContextGraphGraphs(store([`${ROOT}/context/7`], { byPrefix: false }), '0xab/products')).resolves.toBe(false);
+  });
+
+  it('does not count another context graph whose id extends this one, a child included', async () => {
+    const other = store([`${ROOT}-archive/_verifiable_memory/0xaa/1`, `${ROOT}s`, `${ROOT}/child/_verifiable_memory/0xaa/1`, `${ROOT}/child`]);
     await expect(holdsContextGraphGraphs(other, '0xab/products')).resolves.toBe(false);
-    expect(other.listGraphsByPrefix).toHaveBeenCalledWith(`${ROOT}/`, { signal: undefined });
+    expect(other.listGraphsByPrefix).toHaveBeenCalledWith(`${ROOT}/_`, { signal: undefined });
+    await expect(holdsContextGraphGraphs(store([`${ROOT}/_~read/vm`]), '0xab/products')).resolves.toBe(true);
   });
 
   it('lists all graphs where the store cannot list by prefix, and passes the signal on', async () => {

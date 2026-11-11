@@ -4,7 +4,7 @@ import type { ViewQuerySemantics } from '@origintrail-official/dkg-core';
 import { activeDefaultStoreWorkPriority, withDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
 import type { QueryResult } from '../src/query-engine.js';
 import {
-  ViewSemanticsDeltaSampler, classifyViewSemanticsDelta, viewQueryShape, type ViewSemanticsDeltaSample,
+  ViewSemanticsDeltaSampler, classifyViewSemanticsDelta, generatesValuesInEvaluation, viewQueryShape, type ViewSemanticsDeltaSample,
 } from '../src/view-semantics-delta.js';
 
 const SELECT = 'SELECT ?s ?o WHERE { ?s ?p ?o }';
@@ -41,6 +41,91 @@ describe('classifying the merged answer against the per-asset answer', () => {
       .toBe('copies-removed');
     expect(classifyViewSemanticsDelta(construct, quads(), quads(['urn:a', 'urn:o']))).toBe('rows-added');
     expect(classifyViewSemanticsDelta(construct, quads(['urn:a', 'urn:o']), quads())).toBe('rows-removed-or-changed');
+  });
+
+  it('compares answers whose blank nodes keep their rows, and does not compare those where nodes gain, lose or swap rows', () => {
+    const construct = 'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }';
+    const graph = (...items: Array<[string, string, string]>): QueryResult => ({ bindings: [],
+      quads: items.map(([subject, predicate, object]) => ({ subject, predicate, object, graph: '' })) });
+    // Two nodes become one.
+    expect(classifyViewSemanticsDelta(construct, graph(['_:a', 'urn:p', 'urn:x'], ['_:b', 'urn:q', 'urn:y']),
+      graph(['_:z', 'urn:p', 'urn:x'], ['_:z', 'urn:q', 'urn:y']))).toBeUndefined();
+    // One node becomes two.
+    expect(classifyViewSemanticsDelta(construct, graph(['_:a', 'urn:p', 'urn:x'], ['_:a', 'urn:p', 'urn:y']),
+      graph(['_:b', 'urn:p', 'urn:x'], ['_:c', 'urn:p', 'urn:y']))).toBeUndefined();
+    // A node gains a row; its first row is still there under the node's new name.
+    expect(classifyViewSemanticsDelta(construct, graph(['_:a', 'urn:p', 'urn:x']),
+      graph(['_:b', 'urn:p', 'urn:x'], ['_:b', 'urn:q', 'urn:y']))).toBeUndefined();
+    // The same structure under other labels, with nodes linked to each other.
+    expect(classifyViewSemanticsDelta(construct,
+      graph(['_:a', 'urn:next', '_:b'], ['_:b', 'urn:next', '_:c'], ['_:c', 'urn:value', '"1"']),
+      graph(['_:z', 'urn:value', '"1"'], ['_:x', 'urn:next', '_:y'], ['_:y', 'urn:next', '_:z']))).toBe('none');
+    // A link reversed is another structure.
+    expect(classifyViewSemanticsDelta(construct, graph(['_:a', 'urn:next', '_:b'], ['_:b', 'urn:value', '"1"']),
+      graph(['_:a', 'urn:next', '_:b'], ['_:a', 'urn:value', '"1"']))).toBeUndefined();
+    // A row without blank nodes that is gone is a removal, beside blank-node rows that kept theirs.
+    expect(classifyViewSemanticsDelta(construct, graph(['urn:s', 'urn:p', 'urn:x'], ['_:a', 'urn:q', '"_:not-a-node"']),
+      graph(['_:b', 'urn:q', '"_:not-a-node"']))).toBe('rows-removed-or-changed');
+  });
+
+  it('counts copies of rows with blank nodes as copies', () => {
+    const select = 'SELECT ?s ?o WHERE { ?s ?p ?o }';
+    expect(classifyViewSemanticsDelta(select, { bindings: [{ s: '_:a', o: 'urn:x' }, { s: '_:a', o: 'urn:x' }] },
+      { bindings: [{ s: '_:b', o: 'urn:x' }] })).toBe('copies-removed');
+    const construct = 'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }';
+    const graph = (...items: Array<[string, string, string]>): QueryResult => ({ bindings: [],
+      quads: items.map(([subject, predicate, object]) => ({ subject, predicate, object, graph: '' })) });
+    expect(classifyViewSemanticsDelta(construct, graph(['_:a', 'urn:p', 'urn:x'], ['_:a', 'urn:p', 'urn:x'], ['_:b', 'urn:q', 'urn:y']),
+      graph(['_:c', 'urn:p', 'urn:x'], ['_:d', 'urn:q', 'urn:y']))).toBe('copies-removed');
+    expect(classifyViewSemanticsDelta(construct, graph(['_:c', 'urn:p', 'urn:x'], ['_:d', 'urn:q', 'urn:y']),
+      graph(['_:a', 'urn:p', 'urn:x'], ['_:a', 'urn:p', 'urn:x'], ['_:b', 'urn:q', 'urn:y']))).toBe('rows-added');
+  });
+
+  it('does not compare answers whose blank nodes their structure cannot tell apart', () => {
+    const construct = 'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }';
+    const cycle = (...nodes: string[]): Array<[string, string, string]> =>
+      nodes.map((node, index) => [node, 'urn:next', nodes[(index + 1) % nodes.length]!]);
+    const graph = (...items: Array<[string, string, string]>): QueryResult => ({ bindings: [],
+      quads: items.map(([subject, predicate, object]) => ({ subject, predicate, object, graph: '' })) });
+    // One six-node cycle against two three-node cycles: every node looks the same.
+    expect(classifyViewSemanticsDelta(construct, graph(...cycle('_:a', '_:b', '_:c', '_:d', '_:e', '_:f')),
+      graph(...cycle('_:u', '_:v', '_:w'), ...cycle('_:x', '_:y', '_:z')))).toBeUndefined();
+    // Two nodes with the same rows, in one answer only.
+    expect(classifyViewSemanticsDelta(construct, graph(['_:a', 'urn:p', 'urn:x'], ['_:b', 'urn:p', 'urn:x']),
+      graph(['_:c', 'urn:p', 'urn:x']))).toBeUndefined();
+  });
+
+  it('keeps which bindings share a blank node across variables and rows', () => {
+    const select = 'SELECT ?a ?b WHERE { ?a ?p ?b }';
+    const shared: QueryResult = { bindings: [{ a: '_:n', b: '_:n' }, { a: '_:m', b: 'urn:x' }] };
+    expect(classifyViewSemanticsDelta(select, shared, { bindings: [{ a: '_:k', b: 'urn:x' }, { a: '_:j', b: '_:j' }] })).toBe('none');
+    expect(classifyViewSemanticsDelta(select, shared, { bindings: [{ a: '_:k', b: '_:j' }, { a: '_:m', b: 'urn:x' }] }))
+      .toBeUndefined();
+    // A row added beside unchanged blank-node rows.
+    expect(classifyViewSemanticsDelta(select, shared, { bindings: [...shared.bindings, { a: 'urn:y', b: 'urn:z' }] }))
+      .toBe('rows-added');
+  });
+});
+
+describe('queries that generate values during evaluation', () => {
+  it('are found by the functions they call, in any case and spacing', () => {
+    for (const sparql of [
+      'SELECT ?s (NOW() AS ?t) WHERE { ?s ?p ?o }',
+      'SELECT ?s WHERE { ?s ?p ?o FILTER(rand () < 0.5) }',
+      'SELECT (UUID() AS ?id) WHERE { ?s ?p ?o }',
+      'SELECT (STRUUID() AS ?id) WHERE { ?s ?p ?o }',
+      'PREFIX ex: <urn:ex:> CONSTRUCT { ?s ex:at ?t } WHERE { ?s ?p ?o BIND(NOW() AS ?t) }',
+    ]) expect(generatesValuesInEvaluation(sparql), sparql).toBe(true);
+  });
+
+  it('are not found in names, strings, IRIs or language tags', () => {
+    for (const sparql of [
+      'SELECT ?now ?rand WHERE { ?now <urn:uuid> ?rand }',
+      'SELECT ?s WHERE { ?s <urn:p> "NOW()" }',
+      'SELECT ?s WHERE { ?s <urn:NOW> ?o }',
+      'PREFIX ex: <urn:ex:> SELECT ?s WHERE { ?s ex:now ?o }',
+      'SELECT ?s WHERE { ?s ?p "x"@now }',
+    ]) expect(generatesValuesInEvaluation(sparql), sparql).toBe(false);
   });
 });
 
@@ -101,7 +186,7 @@ describe('the semantic-delta sampler', () => {
     expect(first!.aborted).toBe(false);
     expect(onDelta).toHaveBeenCalledWith('rows-added');
     expect(sampler.report()).toEqual([{
-      contextGraphId: 'cg-a', since: '2026-11-11T02:05:00.000Z', samples: 1, skipped: 0,
+      contextGraphId: 'cg-a', since: '2026-11-11T02:05:00.000Z', samples: 1, skipped: 0, uncomparable: 0,
       kinds: { 'none': 0, 'copies-removed': 0, 'rows-added': 1, 'rows-removed-or-changed': 0 },
       shapes: [{ shape: 'SELECT ?s ?o WHERE { ?s ?p ?o }', view: 'verifiable-memory', samples: 1, lastSampledAt: '2026-11-11T02:05:00.000Z',
         kinds: { 'none': 0, 'copies-removed': 0, 'rows-added': 1, 'rows-removed-or-changed': 0 } }],
@@ -131,6 +216,26 @@ describe('the semantic-delta sampler', () => {
     sampler.offer(sample({ perAsset: rows('1'), merged: rows('1') }, { isCurrent: () => { throw new Error('state unavailable'); } }).offered);
     await sampler.idle();
     expect(sampler.report()[0]).toMatchObject({ samples: 0, skipped: 3 });
+  });
+
+  it('counts a sampled query that generates values during evaluation as not compared, and never runs it', async () => {
+    const sampler = new ViewSemanticsDeltaSampler({ sampleRate: 1, maxQueued: 1 });
+    const { offered, run } = sample({ perAsset: rows('1'), merged: rows('1') }, { sparql: 'SELECT ?s (NOW() AS ?t) WHERE { ?s ?p ?o }' });
+    sampler.offer(offered);
+    sampler.offer(offered);
+    // A text that cannot be read is not compared either.
+    sampler.offer({ ...offered, sparql: undefined as unknown as string });
+    await sampler.idle();
+    expect(run).not.toHaveBeenCalled();
+    expect(sampler.report()).toMatchObject([{ contextGraphId: 'cg-a', samples: 0, skipped: 0, uncomparable: 3 }]);
+  });
+
+  it('counts a sample whose answers cannot be compared as not compared', async () => {
+    const sampler = new ViewSemanticsDeltaSampler({ sampleRate: 1 });
+    const symmetric: QueryResult = { bindings: [{ s: '_:a', o: 'urn:x' }, { s: '_:b', o: 'urn:x' }] };
+    sampler.offer(sample({ perAsset: symmetric, merged: { bindings: [{ s: '_:c', o: 'urn:x' }] } }).offered);
+    await sampler.idle();
+    expect(sampler.report()).toMatchObject([{ samples: 0, skipped: 0, uncomparable: 1, shapes: [] }]);
   });
 
   it('keeps a sample when counting it elsewhere fails', async () => {

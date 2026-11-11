@@ -17,6 +17,8 @@ export interface ViewSemanticsDeltaReportEntry {
   readonly since: string;
   readonly samples: number;
   readonly skipped: number;
+  /** Sampled queries not compared: values generated during evaluation, or blank nodes their structure cannot tell apart. */
+  readonly uncomparable: number;
   readonly kinds: Readonly<Record<ViewSemanticsDeltaKind, number>>;
   readonly shapes: readonly ViewSemanticsDeltaShapeEntry[];
 }
@@ -51,7 +53,12 @@ export function formatViewSemanticsDeltaReport(
   const lines: string[] = ['How sampled view queries would answer with semantics "merged" instead of "per-asset":'];
   for (const graph of response.contextGraphs) {
     lines.push('', `${graph.contextGraphId}: ${graph.samples} sampled since ${minute(graph.since)}`
-      + (graph.skipped ? `, ${graph.skipped} skipped (the read graph changed, or a read failed)` : ''));
+      + (graph.skipped ? `, ${graph.skipped} skipped (the read graph changed, or a read failed)` : '')
+      + (graph.uncomparable ? `, ${graph.uncomparable} not compared (values generated during evaluation, or blank nodes their structure cannot tell apart)` : ''));
+    if (graph.samples === 0) {
+      lines.push('  No sampled query has been compared yet.');
+      continue;
+    }
     for (const [kind, label] of KIND_LABELS) {
       lines.push(`  ${label.padEnd(30)} ${String(graph.kinds[kind]).padStart(7)}  ${percent(graph.kinds[kind], graph.samples).padStart(6)}`);
     }

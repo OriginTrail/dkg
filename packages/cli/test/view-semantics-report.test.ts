@@ -11,7 +11,7 @@ import {
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const ENTRY: ViewSemanticsDeltaReportEntry = {
-  contextGraphId: 'cg-products', since: '2026-11-11T02:00:00.000Z', samples: 40, skipped: 2,
+  contextGraphId: 'cg-products', since: '2026-11-11T02:00:00.000Z', samples: 40, skipped: 2, uncomparable: 0,
   kinds: { 'none': 30, 'copies-removed': 4, 'rows-added': 5, 'rows-removed-or-changed': 1 },
   shapes: [
     { shape: 'SELECT ?p ?x WHERE { ?p a <…> . ?p <…> ?x }', view: 'verifiable-memory', samples: 8, lastSampledAt: '2026-11-11T02:30:00.000Z',
@@ -106,6 +106,15 @@ describe('the printed report', () => {
     expect(formatViewSemanticsDeltaReport({ contextGraphs: [same] }))
       .toContain('Every sampled query gets the same rows merged, at most without duplicate copies.');
     expect(formatViewSemanticsDeltaReport({ contextGraphs: [] })).toMatch(/^No view queries have been sampled yet\./);
+  });
+
+  it('says when no sampled query could be compared, and how many were not', () => {
+    const none = { ...ENTRY, samples: 0, skipped: 1, uncomparable: 3, kinds: { 'none': 0, 'copies-removed': 0, 'rows-added': 0, 'rows-removed-or-changed': 0 }, shapes: [] };
+    expect(formatViewSemanticsDeltaReport({ contextGraphs: [none] }).split('\n').slice(2)).toEqual([
+      'cg-products: 0 sampled since 2026-11-11 02:00 UTC, 1 skipped (the read graph changed, or a read failed), '
+        + '3 not compared (values generated during evaluation, or blank nodes their structure cannot tell apart)',
+      '  No sampled query has been compared yet.',
+    ]);
   });
 });
 

@@ -16,6 +16,8 @@ const PRIVATE_CG = `${OWNER}/semantics-order-private`;
 const MISSING_CG = `${OWNER}/semantics-order-never-created`;
 // Asset graphs and a read graph, without a declaration, subscription or local create.
 const UNDECLARED_CG = `${OWNER}/semantics-order-undeclared`;
+// A parent the node holds nothing of, beside a private child context graph `<parent>/context/7`.
+const CHILD_ONLY_PARENT = `${OWNER}/semantics-order-parent`;
 const READ_GRAPH = readGraphIri({ scope: readScope(PRIVATE_CG), layer: MemoryLayer.VerifiableMemory });
 const UNDECLARED_READ_GRAPH = readGraphIri({ scope: readScope(UNDECLARED_CG), layer: MemoryLayer.VerifiableMemory });
 const MARKER = 'urn:semantics-order:marker';
@@ -65,7 +67,8 @@ describe('view semantics for a caller who may not read the context graph', () =>
     await created.createContextGraph({ id: PRIVATE_CG, name: 'Private graph', accessPolicy: 1, callerAgentAddress: OWNER });
     registered = true;
     const marker = (graph: string) => ({ subject: MARKER, predicate: DKG_ONTOLOGY.RDF_TYPE, object: MARKER_CLASS, graph });
-    await created.store.insert([READ_GRAPH, UNDECLARED_READ_GRAPH, `did:dkg:context-graph:${UNDECLARED_CG}/_verifiable_memory/${OWNER}/1`].map(marker));
+    await created.store.insert([READ_GRAPH, UNDECLARED_READ_GRAPH, `did:dkg:context-graph:${UNDECLARED_CG}/_verifiable_memory/${OWNER}/1`,
+      `did:dkg:context-graph:${CHILD_ONLY_PARENT}/context/7`, `did:dkg:context-graph:${CHILD_ONLY_PARENT}/context/7/_meta`].map(marker));
 
     // The node keeps read graphs for every context graph; this one's is in the given state.
     const readGraphs = {
@@ -139,8 +142,12 @@ describe('view semantics for a caller who may not read the context graph', () =>
     const { agent: target } = await fixture('ready', 'per-asset');
     // Readable without a local policy; its asset graphs count as held, so its read graph is read.
     await expect(ask(target, UNDECLARED_CG, 'merged')).resolves.toEqual({ bindings: [{ s: MARKER }], semantics: 'merged' });
+    // A child context graph's graphs under the parent's root do not change the parent's answer.
+    await expect(ask(target, CHILD_ONLY_PARENT, 'merged')).resolves.toEqual({ bindings: [] });
     // An id that only begins like it holds nothing.
     await expect(ask(target, UNDECLARED_CG.slice(0, -1), 'merged')).resolves.toEqual({ bindings: [] });
+    // So does a parent that is not itself a context graph here, whatever its children hold.
+    await expect(ask(target, OWNER, 'merged')).resolves.toEqual({ bindings: [] });
   });
 
   it('consults the read graph for a caller who may read the context graph (control)', async () => {

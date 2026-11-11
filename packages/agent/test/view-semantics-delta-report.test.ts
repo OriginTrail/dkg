@@ -3,7 +3,7 @@ import type { ViewSemanticsDeltaSummary } from '@origintrail-official/dkg-query'
 import { readableViewSemanticsDeltaReport } from '../src/view-semantics-delta-report.js';
 
 const summary = (contextGraphId: string): ViewSemanticsDeltaSummary => ({
-  contextGraphId, since: '2026-11-11T02:00:00.000Z', samples: 3, skipped: 0,
+  contextGraphId, since: '2026-11-11T02:00:00.000Z', samples: 3, skipped: 0, uncomparable: 0,
   kinds: { 'none': 3, 'copies-removed': 0, 'rows-added': 0, 'rows-removed-or-changed': 0 }, shapes: [],
 });
 

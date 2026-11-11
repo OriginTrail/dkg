@@ -107,6 +107,16 @@ describe('read-graph partition names in storage', () => {
     for (const graph of [`<${ASSET}>`, `${LEGACY_SHARED}|`, `<${ROOT}/${READ_GRAPH_SEGMENT}er>`]) {
       expect(isReadGraphPartitionWriteTarget(graph), graph).toBe(false);
     }
+    // And as a parser reads it, with its escapes decoded, an escape decoded into another one too.
+    for (const graph of [
+      STATE.replace(READ_GRAPH_SEGMENT, String.raw`_\u007Eread`),
+      VM_READ.replace(READ_GRAPH_SEGMENT, String.raw`\u005F\U0000007Eread`),
+      STATE.replace(READ_GRAPH_SEGMENT, String.raw`_\u005Cu007Eread`),
+      `<${SWM_READ.replace(READ_GRAPH_SEGMENT, String.raw`_\u007Eread`)}>`,
+    ]) expect(isReadGraphPartitionWriteTarget(graph), graph).toBe(true);
+    for (const graph of [String.raw`${ROOT}/\u005Fread/state`, String.raw`${ASSET}\u0031`, String.raw`${ROOT}/\u007Eread/x`]) {
+      expect(isReadGraphPartitionWriteTarget(graph), graph).toBe(false);
+    }
     // One parse names the owner, and tells state graphs from read graphs.
     expect(PARTITION_GRAPHS.map(readGraphPartitionOwner)).toEqual([CG, CG, CG, CG]);
     expect(readGraphPartitionOwner(`did:dkg:context-graph:a/b/${READ_GRAPH_SEGMENT}/state`)).toBe('a/b');
@@ -246,6 +256,11 @@ describe('the read-graph partition guard', () => {
       ['replaceGraph', () => store.replaceGraph!(`${STATE}|`, [])],
       ['dropGraph', () => store.dropGraph(STATE.replace(READ_GRAPH_SEGMENT, '_~re^ad'))],
       ['update', () => store.update!('CLEAR SILENT DEFAULT', { touchedGraphs: [`<${VM_READ}>`] })],
+      // A name whose escapes the store's parser decodes to that graph.
+      ['insert', () => store.insert([quad(STATE.replace(READ_GRAPH_SEGMENT, String.raw`_\u007Eread`))])],
+      ['dropGraph', () => store.dropGraph(VM_READ.replace(READ_GRAPH_SEGMENT, String.raw`\u005F~read`))],
+      ['deleteByPattern', () => store.deleteByPattern({ graph: SWM_READ.replace(READ_GRAPH_SEGMENT, String.raw`_\U0000007Eread`) })],
+      ['replaceGraph', () => store.replaceGraph!(ASSET, [quad(STATE.replace(READ_GRAPH_SEGMENT, String.raw`_\u005Cu007Eread`))])],
     ];
     for (const [operation, write] of refusals) {
       const error = await write().then(() => undefined, (caught: unknown) => caught);
@@ -257,6 +272,18 @@ describe('the read-graph partition guard', () => {
     for (const spy of writes) expect(spy).not.toHaveBeenCalled();
     expect(reads.mock.calls.filter(([sparql]) => /\b(INSERT|DELETE|DROP|CLEAR)\b/i.test(sparql))).toEqual([]);
     expect(await stored()).toEqual(before);
+  });
+
+  it('refuses a name whose escapes the adapter decodes into the partition, which an insert below the guard reaches', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    opened.push(store);
+    const adapter = readGraphPartitionMaintenanceStore(store);
+    const escaped = STATE.replace(READ_GRAPH_SEGMENT, String.raw`_\u007Eread`);
+    // Below the guard, the adapter writes the escaped name into the state graph itself.
+    await adapter.insert([quad(escaped, 'urn:below')]);
+    expect(await adapter.countQuads(STATE)).toBe(1);
+    await expect(store.insert([quad(escaped, 'urn:above')])).rejects.toBeInstanceOf(ReadGraphPartitionWriteError);
+    expect(await adapter.countQuads(STATE)).toBe(1);
   });
 
   it('refuses writes that reach every graph while the store may hold partitions', async () => {

@@ -7,9 +7,18 @@ import {
 import type { SparqlEngineFamily } from '@origintrail-official/dkg-storage';
 import type { GraphAccessMode } from './sparql-graph-access.js';
 import { hasOuterDefaultGraphPattern, hasTopLevelDefaultGraphPattern } from './sparql-default-graph-pattern.js';
-import { bindCallerGraphsBeforeRead, hasCallerGraphAssignments } from './sparql-caller-graph-read.js';
+import {
+  bindCallerGraphsBeforeRead,
+  callerGraphBranchesFit,
+  hasCallerGraphAssignments,
+  hasCallerGraphAssignmentsInside,
+  hasCallerGraphExpressionAssignments,
+} from './sparql-caller-graph-read.js';
 import { transitionGraphScope } from './sparql-query-transition.js';
+import { createVariableAllocator } from './sparql-rewrite-names.js';
 import { isReadGraphPartitionGraph } from '@origintrail-official/dkg-storage';
+import { heldGraphGuard } from './sparql-held-graph-guard.js';
+import { graphBlockNeedsList, hasOwnTriplePattern, isSubqueryGroup } from './sparql-graph-block.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { sparqlRewriteReady, sparqlRewriteUnsupported, type SparqlRewriteResult } from './sparql-rewrite-result.js';
 
@@ -73,12 +82,115 @@ function needsConstantCallerGraphs(scope: PreparedSparqlQuery): boolean {
 
 /**
  * Whether a read must bind its caller's GRAPH variables to constant graph targets before
- * evaluation (`bindCallerGraphsBeforeRead`): on a store other than Oxigraph, for a repeated
- * compound path, a nested SELECT or a caller assignment of the graph variable.
+ * evaluation (`bindCallerGraphsBeforeRead`). On Oxigraph: a GRAPH ?var block that assigns ?var
+ * a constant at any depth. On another store, outside DESCRIBE: a repeated compound path, a
+ * nested SELECT or a caller assignment of the graph variable.
  */
 export function needsCallerGraphBinding(scope: PreparedSparqlQuery, engine: SparqlEngineFamily | null): boolean {
-  return engine !== 'oxigraph' && scope.operation !== 'DESCRIBE' && scope.graphVariables.length > 0
-    && hasRepeatedPath(scope) && needsConstantCallerGraphs(scope);
+  if (scope.graphVariables.length === 0) return false;
+  if (engine === 'oxigraph') return hasCallerGraphAssignmentsInside(scope);
+  return scope.operation !== 'DESCRIBE' && hasRepeatedPath(scope) && needsConstantCallerGraphs(scope);
+}
+
+/**
+ * Oxigraph does not evaluate `GRAPH ?var { P }` once per graph of the dataset
+ * when P has no triple pattern of its own and holds a VALUES, a subquery or a
+ * nested GRAPH, or when P assigns ?var an expression: such a read binds ?var
+ * differently or repeats rows differently than with a graph list. Those reads
+ * keep the list next to their dataset. (A constant graph branch would drop the
+ * rows whose assignment fails.) P is a caller's GRAPH ?var block, or the whole
+ * pattern when the rewrite wraps it.
+ */
+export function readsNeedGraphList(scope: PreparedSparqlQuery): boolean {
+  if (scope.hasGraphClause && hasCallerGraphExpressionAssignments(scope)) return true;
+  const groups: Array<readonly [number, number]> = scope.hasGraphClause
+    ? scope.graphTargets.flatMap(target => target.kind === 'variable'
+      ? [[target.targetTokenIndex + 1, scope.structure.braces.matchingTokenIndexes[target.targetTokenIndex + 1] ?? -1] as const] : [])
+    : scope.where ? [[scope.where.openingTokenIndex, scope.where.closingTokenIndex] as const] : [];
+  return groups.some(([opening, closing]) => closing >= 0 && graphBlockNeedsList(scope, opening, closing));
+}
+
+/** Groups nested deeper than this are not read for a stored triple; their block keeps its guard. */
+const MAX_STORED_TRIPLE_DEPTH = 16;
+
+/** Whether the `{` at `index` opens a plain nested group (or the first branch of a UNION), not a group of another construct. */
+function opensPlainGroup(scope: PreparedSparqlQuery, index: number): boolean {
+  const { tokens } = scope.prepared;
+  const before = tokens[index - 1];
+  if (isSymbol(before, '{') || isSymbol(before, '}') || isSymbol(before, '.')) return true;
+  // `)` ends a BIND, a FILTER or a collection, or the variables of VALUES, whose data follow.
+  if (isSymbol(before, ')')) return !isSparqlKeyword(tokens, (scope.structure.parentheses.matchingTokenIndexes[index - 1] ?? 0) - 1, 'VALUES');
+  // OPTIONAL, MINUS, EXISTS, UNION and SILENT come before a group that is read on other terms.
+  if (!before || before.kind === 'word') return false;
+  // A term ends a triples block, unless it names a GRAPH, a SERVICE or a VALUES variable.
+  return !['GRAPH', 'SERVICE', 'SILENT', 'VALUES'].some(keyword => isSparqlKeyword(tokens, index - 2, keyword));
+}
+
+/**
+ * Whether every solution of the group between these braces reads a stored triple
+ * of the graph it is read in: a triple pattern of its own, or a nested group, or
+ * every branch of a UNION, that does. OPTIONAL, MINUS, EXISTS, a nested GRAPH
+ * (another graph) and a subquery prove nothing for it.
+ */
+function readsStoredTriple(scope: PreparedSparqlQuery, opening: number, closing: number, depth = 0): boolean {
+  if (hasOwnTriplePattern(scope, opening, closing)) return true;
+  if (depth >= MAX_STORED_TRIPLE_DEPTH || isSubqueryGroup(scope, opening)) return false;
+  const { tokens } = scope.prepared;
+  const braces = scope.structure.braces.matchingTokenIndexes;
+  const own = scope.structure.braces.depthBefore[opening] + 1;
+  for (let index = opening + 1; index < closing; index++) {
+    if (scope.structure.braces.depthBefore[index] !== own || !isSymbol(tokens[index], '{') || !opensPlainGroup(scope, index)) continue;
+    let everyBranch = true;
+    for (let branch = index; ; branch = index + 2) {
+      const end = braces[branch] ?? -1;
+      if (end <= branch || end >= closing) return false;
+      everyBranch = readsStoredTriple(scope, branch, end, depth + 1) && everyBranch;
+      index = end;
+      if (!isSparqlKeyword(tokens, index + 1, 'UNION') || !isSymbol(tokens[index + 2], '{')) break;
+    }
+    if (everyBranch) return true;
+  }
+  return false;
+}
+
+/**
+ * On Oxigraph a graph named in FROM NAMED counts as present even where the store
+ * holds none of its triples, so a GRAPH block whose pattern can match without a
+ * triple would match it. Each such block, and the whole pattern when the rewrite
+ * wraps it, gets a guard that its graph holds a triple. A block every solution of
+ * which reads a triple of its graph needs none.
+ */
+export function guardGraphBlocksWithoutTriples(scope: PreparedSparqlQuery): PreparedSparqlQuery {
+  const { tokens } = scope.prepared;
+  const closings = new Set<number>();
+  if (scope.hasGraphClause) {
+    for (const target of scope.graphTargets) {
+      if (target.kind === 'invalid') continue;
+      const opening = target.targetTokenIndex + 1;
+      const closing = scope.structure.braces.matchingTokenIndexes[opening] ?? -1;
+      if (closing > opening && !readsStoredTriple(scope, opening, closing)) closings.add(closing);
+    }
+  } else if (scope.where && !readsStoredTriple(scope, scope.where.openingTokenIndex, scope.where.closingTokenIndex)) {
+    closings.add(scope.where.closingTokenIndex);
+  }
+  if (closings.size === 0) return scope;
+  const guard = heldGraphGuard(createVariableAllocator(scope));
+  // Insertions go from the end of the text, so earlier offsets stay valid.
+  const insertions: Array<readonly [number, string]> = [];
+  for (const closing of closings) {
+    const opening = scope.structure.braces.matchingTokenIndexes[closing] ?? -1;
+    // A subquery fills its group; it moves into a group of its own, which the guard follows.
+    if (opening >= 0 && isSubqueryGroup(scope, opening)) {
+      insertions.push([tokens[opening].end, ' {'], [tokens[closing].start, ` } ${guard} `]);
+    } else {
+      insertions.push([tokens[closing].start, ` ${guard} `]);
+    }
+  }
+  let source = scope.source;
+  for (const [at, text] of insertions.sort(([left], [right]) => right - left)) {
+    source = `${source.slice(0, at)}${text}${source.slice(at)}`;
+  }
+  return transitionGraphScope(scope, source);
 }
 
 export function planGraphDataset(
@@ -94,8 +206,10 @@ export function planGraphDataset(
   const repeatedPath = hasRepeatedPath(scope);
   const oxigraph = engine === 'oxigraph';
   // On Oxigraph the dataset's named graphs alone select the read's graphs: a list
-  // beside them would cost a dataset lookup per listed graph.
-  const graphAccess = oxigraph ? 'named'
+  // beside them would cost a dataset lookup per listed graph. Only the reads that
+  // Oxigraph evaluates differently without a list keep one.
+  const graphAccess = oxigraph
+    ? readsNeedGraphList(scope) ? nestedSelect ? 'dataset' : 'values' : 'named'
     : scopedDescription || nestedSelect || repeatedPath ? 'dataset' : 'values';
   // The dataset also scopes reads outside the graph wrapper: descriptions,
   // default and mixed expressions. Graphless descriptions need only FROM.
@@ -106,7 +220,9 @@ export function planGraphDataset(
     datasetClauses: graphlessDescription ? ['FROM']
       : !oxigraph || readsDefaultGraph ? ['FROM', 'FROM NAMED'] : ['FROM NAMED'],
     preservePattern: graphlessDescription || scope.readsOnlyDeclaredNamedSet,
-    bindCallerGraphs: !scopedDescription && graphAccess === 'dataset' && needsCallerGraphBinding(scope, engine),
+    // Oxigraph repeats the rows of a GRAPH ?var block that assigns ?var a constant, at any
+    // depth, once per graph it iterates; a constant branch per graph keeps one row per match.
+    bindCallerGraphs: !scopedDescription && (oxigraph || graphAccess === 'dataset') && needsCallerGraphBinding(scope, engine),
     wrapDescriptionPattern: scopedDescription && scope.where !== null,
   };
 }
@@ -147,7 +263,11 @@ export function applyGraphDataset<Reason extends string>(
   const result = plan.preservePattern ? sparqlRewriteReady(scope) : rewrite(plan.graphAccess);
   if (result.kind !== 'ready') return result;
   let rewritten = result.value;
-  if (plan.bindCallerGraphs) rewritten = bindCallerGraphsBeforeRead(rewritten, graphs);
+  // On Oxigraph a constant graph assignment over more graphs than the branches allow keeps
+  // the graph list the engine left in place, as the read did before, instead of failing.
+  if (plan.bindCallerGraphs && (engine !== 'oxigraph' || callerGraphBranchesFit(rewritten, graphs))) {
+    rewritten = bindCallerGraphsBeforeRead(rewritten, graphs);
+  }
   if (plan.wrapDescriptionPattern && rewritten.where) {
     const { openEnd, close } = rewritten.where;
     const source = `${rewritten.source.slice(0, openEnd)} { SELECT * WHERE { ${rewritten.source.slice(openEnd, close)} } } ${rewritten.source.slice(close)}`;
