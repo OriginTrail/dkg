@@ -117,7 +117,7 @@
   height: var(--h-control-md);
   min-width: var(--h-control-sm);
   flex-shrink: 0;
-  padding: 0 14px;
+  padding: 0 var(--space-16);
   border: 1px solid var(--border-control);
   border-radius: var(--radius-control);
   background: var(--bg-surface);
@@ -152,7 +152,7 @@
 /* Sizes */
 .ds-btn.ds-sm {
   height: var(--h-control-sm);
-  padding: 0 10px;
+  padding: 0 var(--space-12);
   gap: var(--space-4);
   font-size: var(--fs-label);
 }
@@ -290,7 +290,7 @@
   gap: var(--space-6);
   height: 24px;
   min-width: 24px;
-  padding: 0 10px;
+  padding: 0 var(--space-12);
   border: 0;
   border-radius: var(--radius-xs);
   background: transparent;
@@ -324,7 +324,7 @@
   align-items: center;
   gap: var(--space-6);
   height: 28px;
-  padding: 0 10px;
+  padding: 0 var(--space-12);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-control);
   background: transparent;
@@ -382,7 +382,8 @@
 .ds-entity-chip.interactive:is(:focus-visible, .dsp-focus) { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 /* Light: the selected segment is the white surface lifted off a grey track. */
-body.light .ds-seg-item.active {
+body.light .ds-seg-item.active,
+body.light .ds-seg-item[aria-pressed="true"] {
   background: var(--bg-surface);
   box-shadow: 0 0 0 1px var(--border-default), var(--shadow-xs);
 }
@@ -495,7 +496,7 @@ button.ds-crumb:hover { color: var(--text-primary); text-decoration: underline; 
 
 .ds-skip-link {
   position: fixed; top: 8px; left: 8px; z-index: var(--z-skip);
-  height: var(--h-control-md); padding: 0 14px;
+  height: var(--h-control-md); padding: 0 var(--space-16);
   border: 1px solid var(--border-default); border-radius: var(--radius-control);
   background: var(--bg-surface); color: var(--text-primary); font-size: var(--fs-control);
   transform: translateY(-200%);
@@ -513,6 +514,12 @@ button.ds-crumb:hover { color: var(--text-primary); text-decoration: underline; 
 button:not(.ds-btn) > .lucide-refresh-cw { margin-right: var(--space-6); }
 .ds-spin { animation: ds-spin 1s linear infinite; }
 @keyframes ds-spin { to { transform: rotate(360deg); } }
+
+/* Action outcome: what a promote or publish came to (lib/actionOutcome.ts).
+   The one place its tones are set; each consumer keeps its own spacing. */
+.action-outcome { font-size: var(--fs-label); color: var(--text-success); }
+.action-outcome[data-tone="warning"] { color: var(--text-warning); }
+.action-outcome[data-tone="danger"] { color: var(--text-danger); }
 
 /* Operation tone: the layer an operation writes to (op-type-colors.ts picks
    the tone). The one place these colours are set; Observability and the

@@ -5,8 +5,9 @@ import { cssFiles as css, findAll, read, tsxFiles as tsx, withoutCssComments as 
 
 const matches = (list: string[], pattern: RegExp, keep: (m: RegExpMatchArray) => boolean = () => true) => findAll(list, pattern, { prepare: strip, keep });
 
-const OFF_SCALE_SPACING = 208;
-const INLINE_STYLES = 314;
+const OFF_SCALE_SPACING = 0;
+// Values from data only: colours, sizes and positions the code works out at runtime.
+const INLINE_STYLES = 40; // 37, plus the Marketplace meter bars' worked-out widths and heights (marketplace/purchase/Meters.tsx).
 const INLINE_FONT_SIZES = 0; // Canvas options take numbers and sit outside style attributes.
 
 describe('layout tokens', () => {
@@ -36,7 +37,7 @@ describe('layout tokens', () => {
     expect(matches(tsx, /style=\{\{[^}]*\bfontSize:\s*\d/g).length).toBeLessThanOrEqual(INLINE_FONT_SIZES);
   });
 
-  // 10 and 14 stay for now, inside nested padding. Only ever lower these.
+  // 10 and 14 stay inside the nested padding tokens in 00-theme.css, and nowhere else.
   it('does not add spacing outside the scale', () => {
     const sheets = css.filter((f) => !f.endsWith('00-theme.css'));
     const spacing = /(?:padding|margin|gap)[a-z-]*\s*:[^;}]*/g;

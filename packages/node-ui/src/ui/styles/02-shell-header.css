@@ -21,7 +21,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-8);
-  padding: var(--space-6) 14px;
+  padding: var(--space-6) var(--space-16);
   font-size: var(--fs-control);
   line-height: var(--lh-snug);
   color: var(--text-warning);
@@ -61,7 +61,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-8);
   padding: var(--space-4) var(--space-12);
   font-size: var(--fs-label);
   color: var(--text-warning);
@@ -187,7 +187,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 14px;
+  padding: var(--pad-nested);
   border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
@@ -205,14 +205,14 @@
 /* States */
 .v10-notif-pane-state,
 .v10-notif-pane-error {
-  padding: var(--space-16) 14px;
+  padding: var(--space-16) var(--space-16);
   text-align: center;
   font-size: var(--fs-control);
   color: var(--text-tertiary);
 }
 .v10-notif-pane-error { color: var(--text-secondary); }
 .v10-notif-pane-error-inline {
-  padding: var(--space-8) 14px;
+  padding: var(--space-8) var(--space-16);
   text-align: left;
   font-size: var(--fs-label);
 }
@@ -239,7 +239,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-8);
-  padding: var(--space-6) 14px var(--space-4);
+  padding: var(--space-6) var(--space-16) var(--space-4);
 }
 .v10-notif-section-label {
   font-size: var(--fs-micro);
@@ -249,7 +249,7 @@
   color: var(--text-tertiary);
 }
 .v10-notif-section-rows { display: flex; flex-direction: column; }
-.v10-notif-section-empty { padding: var(--space-6) 14px 10px; font-size: var(--fs-label); color: var(--text-tertiary); font-style: italic; }
+.v10-notif-section-empty { padding: var(--space-6) var(--space-16) var(--space-12); font-size: var(--fs-label); color: var(--text-tertiary); font-style: italic; }
 
 /* Rows (shared) */
 .v10-notif-row {
@@ -258,7 +258,7 @@
   gap: var(--space-8);
   width: 100%;
   text-align: left;
-  padding: var(--space-8) 14px;
+  padding: var(--space-8) var(--space-16);
   font-family: var(--font-sans);
   background: none;
   border: none;

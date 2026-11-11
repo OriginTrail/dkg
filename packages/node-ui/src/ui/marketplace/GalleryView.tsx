@@ -54,14 +54,7 @@ export function MarketplaceGalleryView(): React.ReactElement {
 
   return (
     <div className="mktx mktx--page">
-      <div style={{
-        position: 'sticky', top: 0, zIndex: 10,
-        background: 'color-mix(in srgb, var(--state-pending) 14%, var(--surface-0))',
-        color: 'var(--state-pending)', borderBottom: '1px solid var(--border-subtle)',
-        fontSize: 'var(--fs-xs)', fontWeight: 'var(--fw-semibold)' as unknown as number,
-        letterSpacing: '0.06em', textTransform: 'uppercase',
-        padding: 'var(--sp-2) var(--sp-4)',
-      }}>
+      <div className="mkt-gallery-banner">
         {copy('gallery.banner')}
       </div>
       <div className="frame mkt-frame">
@@ -125,7 +118,7 @@ export function MarketplaceGalleryView(): React.ReactElement {
         <Sect title={copy('gallery.sect.states')}>
           <OffCard /><OffCard selling /><OffCard absent /><AdminCard what="admin.access" />
           {(['empty.activity', 'empty.keys', 'recon.none', 'catalog.empty.offers'] as const).map((k) => (
-            <div key={k} className="ds-card mkt-card mkt-muted" style={{ textAlign: 'center' }}>{copy(k)}</div>
+            <div key={k} className="ds-card mkt-card mkt-card-centred mkt-muted">{copy(k)}</div>
           ))}
         </Sect>
       </div>

@@ -1,7 +1,7 @@
 /* ── GenUI Panel / Loading / Error ── */
 .v10-genui-panel { display: flex; flex-direction: column; gap: var(--space-8); }
 .v10-genui-loading {
-  padding: 10px var(--space-12);
+  padding: var(--space-12) var(--space-12);
   font-size: var(--fs-control);
   color: var(--text-tertiary);
   font-style: italic;
@@ -20,7 +20,7 @@
   color: var(--text-primary);
   background: var(--warning-bg);
   border-color: var(--warning-border);
-  padding: 14px var(--space-16);
+  padding: var(--space-16) var(--space-16);
   display: flex;
   flex-direction: column;
   gap: var(--space-12);
@@ -58,18 +58,18 @@
    stacked text. Neutral surfaces; the kind's data-palette colour (--kind,
    set per card) only on the icon tile. Status chips use signal colours
    for real states only; layer purple is reserved for the VM panel. */
-.v10-genui-root { display: flex; flex-direction: column; gap: 10px; }
+.v10-genui-root { display: flex; flex-direction: column; gap: var(--space-8); }
 .v10-genui-root-title { font-size: var(--fs-label); font-weight: 700; text-transform: uppercase; letter-spacing: var(--ls-caps); color: var(--text-tertiary); }
 
 .v10-genui-card {
   --kind: var(--text-tertiary);
-  display: flex; flex-direction: column; gap: 10px;
+  display: flex; flex-direction: column; gap: var(--space-8);
   padding: var(--pad-compact);
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   min-width: 0;
 }
-.v10-genui-card-head { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
+.v10-genui-card-head { display: flex; align-items: center; gap: var(--space-8); min-width: 0; flex-wrap: wrap; }
 .v10-genui-card-icon {
   flex: none; width: 26px; height: 26px; border-radius: var(--radius-control);
   display: inline-flex; align-items: center; justify-content: center;
@@ -120,7 +120,7 @@ a.v10-genui-chip:hover { border-color: var(--border-strong); }
 .v10-genui-section-heading { display: flex; gap: var(--space-6); align-items: baseline; font-size: var(--fs-label); font-weight: 700; text-transform: uppercase; letter-spacing: var(--ls-caps); color: var(--text-tertiary); }
 .v10-genui-section-sub { font: 500 11px var(--font-mono); text-transform: none; letter-spacing: 0; }
 .v10-genui-triple-table { border: 1px solid var(--border-subtle); overflow: hidden; }
-.v10-genui-triple-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 10px; padding: var(--space-6) 10px; font-size: var(--fs-control); }
+.v10-genui-triple-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: var(--space-8); padding: var(--space-6) var(--space-12); font-size: var(--fs-control); }
 .v10-genui-triple-row + .v10-genui-triple-row { border-top: 1px solid var(--border-subtle); }
 .v10-genui-triple-predicate { font-family: var(--font-mono); color: var(--text-tertiary); overflow-wrap: anywhere; }
 .v10-genui-triple-object { color: var(--text-primary); overflow-wrap: anywhere; }
@@ -137,12 +137,12 @@ a.v10-genui-chip:hover { border-color: var(--border-strong); }
 
 /* Verifiable Memory provenance panel: the one card that is VM purple */
 .v10-genui-vm-panel {
-  display: flex; flex-direction: column; gap: var(--space-12); padding: var(--space-12) 14px;
+  display: flex; flex-direction: column; gap: var(--space-12); padding: var(--space-12) var(--space-16);
   background: var(--layer-verified-bg); border: 1px solid var(--layer-verified-border);
 }
-.v10-genui-vm-panel-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.v10-genui-vm-panel-head { display: flex; align-items: center; gap: var(--space-8); flex-wrap: wrap; }
 .v10-genui-vm-title { font-size: var(--fs-body); font-weight: 600; color: var(--text-primary); }
-.v10-genui-vm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+.v10-genui-vm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-8); }
 .v10-genui-vm-block { display: flex; flex-direction: column; gap: var(--space-4); padding: var(--pad-nested-sm); background: var(--bg-surface); min-width: 0; }
 .v10-genui-vm-block-heading { display: flex; align-items: center; gap: var(--space-6); font-size: var(--fs-micro); font-weight: 700; text-transform: uppercase; letter-spacing: var(--ls-caps); color: var(--text-tertiary); }
 .v10-genui-vm-quorum { font: 600 10px var(--font-mono); color: var(--layer-verified-text); text-transform: none; letter-spacing: 0; }
@@ -160,3 +160,5 @@ a.v10-genui-chip:hover { border-color: var(--border-strong); }
 .v10-genui-vm-timeline-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--layer-verified); }
 .v10-genui-vm-timeline-label { color: var(--text-primary); }
 .v10-genui-vm-timeline-at { font: 11px var(--font-mono); color: var(--text-tertiary); }
+
+.v10-graph-fill { position: absolute; inset: 0; }

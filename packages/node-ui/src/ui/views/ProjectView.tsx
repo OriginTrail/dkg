@@ -706,7 +706,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     if (cgError || (cgData && !cgLoading)) {
       return (
         <div className="v10-view-placeholder">
-          <p style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-control)', marginBottom: 10 }}>
+          <p className="v10-project-note">
             {cgError
               ? cgAuthError
                 ? cgError

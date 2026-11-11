@@ -81,7 +81,7 @@ export function Meters({ subscription: s, catalog, plan, calls, onTopUp, nowMs =
             <div className={`mkt-bar${hit ? ' hit' : usedPct + heldPct >= 85 ? ' warn' : ''}`} role="img" aria-label={copy('meter.bar', { landed: Math.round(usedPct), held: Math.round(heldPct) })}>
               <i style={{ width: `${Math.min(100, usedPct)}%` }} />
               <i className="held" style={{ width: `${Math.min(100 - Math.min(100, usedPct), heldPct)}%` }} />
-              <b className="mark" style={{ left: '95%' }} />
+              <b className="mark" />
             </div>
             <div className="mkt-muted mkt-xs" data-copy="meter.amounts">
               {copy('meter.amounts', { used: fmtTrac(b.used), held: fmtTrac(b.held), left: fmtTrac(freeOf(b)), value: fmtTrac(b.value) })}

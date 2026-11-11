@@ -122,22 +122,20 @@ function PublicCatalogueItem({
   );
 }
 
-// Maps local-agent integration status → status-dot color. Kept inline (vs new
-// CSS classes) because the four states map 1:1 to existing semantic palette
-// vars and there's no shared status-dot component to extend.
-function localAgentDotColor(status: LocalAgentIntegrationStatus): string {
+// Maps local-agent integration status to its status-dot class.
+function localAgentDotClass(status: LocalAgentIntegrationStatus): string {
   switch (status) {
     case 'chat_ready':
-      return 'var(--accent-green)';
+      return 'v10-local-agent-dot v10-local-agent-dot-ready';
     case 'connecting':
-      return 'var(--accent-amber)';
+      return 'v10-local-agent-dot v10-local-agent-dot-warn';
     case 'degraded':
     case 'bridge_offline':
-      return 'var(--accent-red)';
+      return 'v10-local-agent-dot v10-local-agent-dot-down';
     case 'available':
     case 'coming_soon':
     default:
-      return 'var(--text-tertiary)';
+      return 'v10-local-agent-dot';
   }
 }
 
@@ -162,39 +160,32 @@ function IntegrationsSectionBody() {
   useVisibilityPolling(loadLocal, 30_000);
 
   return (
-    <div className="v10-tree-items" style={{ display: 'block' }}>
-      <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '6px 12px 2px 24px' }}>
+    <div className="v10-tree-items v10-tree-items-block">
+      <div className="v10-tree-group-label">
         Agents
       </div>
       {localAgentsError && (
-        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-danger)', padding: '4px 12px 4px 24px' }}>
+        <div className="v10-tree-error">
           {localAgentsError}
         </div>
       )}
       {!localAgentsError && localAgents.length === 0 && (
-        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', padding: '4px 12px 4px 24px', fontStyle: 'italic' }}>
+        <div className="v10-tree-note">
           No agents detected.
         </div>
       )}
       {localAgents.map((a) => (
         <div
           key={a.id}
-          className="v10-tree-item"
+          className="v10-tree-item v10-tree-item-static"
           title={a.detail}
-          style={{ cursor: 'default' }}
         >
           <span
             aria-label={a.statusLabel}
-            style={{
-              width: 7,
-              height: 7,
-              borderRadius: '50%',
-              background: localAgentDotColor(a.status),
-              flexShrink: 0,
-            }}
+            className={localAgentDotClass(a.status)}
           />
           <span className="v10-tree-item-label">{a.name}</span>
-          <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginLeft: 4 }}>
+          <span className="v10-tree-item-meta">
             {a.statusLabel}
           </span>
         </div>

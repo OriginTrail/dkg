@@ -75,7 +75,7 @@ function isTextContentType(ct: string) { return TEXT_CONTENT_TYPES.some(t => ct.
 // headers. `docRef` is the full `urn:dkg:file:keccak256:<hex>` urn, or — when
 // the document has no source file — the entity uri, which does not start with
 // `urn:dkg:file:` and drives the "source not available" empty state.
-function DocumentViewer({ docRef, contentType: expectedContentType, contextGraphId }: { docRef: string; contentType: string; contextGraphId?: string }) {
+export function DocumentViewer({ docRef, contentType: expectedContentType, contextGraphId }: { docRef: string; contentType: string; contextGraphId?: string }) {
   const { tabs, activeTabId } = useTabsStore();
   const [content, setContent] = useState<string | null>(null);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
@@ -166,21 +166,14 @@ function DocumentViewer({ docRef, contentType: expectedContentType, contextGraph
   const showToggle = !loading && !error && hasFileRef && isMarkdown && content !== null;
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      <div style={{
-        flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10,
-        padding: '8px 16px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-panel)',
-      }}>
+    <div className="v10-doc-view">
+      <div className="v10-doc-bar">
         <Breadcrumbs items={[contextGraphId ? graph : { label: 'Context graph' }, { label: docLabel }]} />
         {showToggle && (
           <div
             role="group"
             aria-label="Document view mode"
-            style={{
-              marginLeft: 'auto', display: 'flex', gap: 2, padding: 2,
-              border: '1px solid var(--border-default)', borderRadius: 'var(--radius-control)',
-              background: 'var(--bg-surface)',
-            }}
+            className="v10-doc-modes ds-seg"
           >
             {(['formatted', 'raw'] as const).map(mode => {
               const active = viewMode === mode;
@@ -190,13 +183,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType, contextGraph
                   type="button"
                   aria-pressed={active}
                   onClick={() => setViewMode(mode)}
-                  style={{
-                    border: 'none', borderRadius: 'var(--radius-xs)', cursor: 'pointer',
-                    padding: '3px 12px', fontSize: 'var(--fs-label)', fontWeight: 600,
-                    fontFamily: 'var(--font-sans)',
-                    color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
-                    background: active ? 'var(--bg-elevated)' : 'transparent',
-                  }}
+                  className="ds-seg-item"
                 >
                   {mode === 'formatted' ? 'Formatted' : 'Raw'}
                 </button>
@@ -205,18 +192,14 @@ function DocumentViewer({ docRef, contentType: expectedContentType, contextGraph
           </div>
         )}
       </div>
-      <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px' }}>
+      <div className="v10-doc-body">
         {!hasFileRef ? (
-          <div style={{
-            display: 'flex', flexDirection: 'column', alignItems: 'center',
-            justifyContent: 'center', gap: 10, height: '100%',
-            color: 'var(--text-tertiary)', textAlign: 'center',
-          }}>
-            <FileText size={28} style={{ opacity: 0.6 }} />
-            <span style={{ fontSize: 'var(--fs-body)', fontWeight: 600, color: 'var(--text-secondary)' }}>
+          <div className="v10-doc-empty">
+            <FileText size={28} className="v10-doc-empty-icon" />
+            <span className="v10-doc-empty-title">
               Source file not available for this document
             </span>
-            <span style={{ fontSize: 'var(--fs-control)', maxWidth: 360, lineHeight: 'var(--lh-loose)' }}>
+            <span className="v10-doc-empty-text">
               This document was indexed into the graph without a stored source
               file, so there is nothing to preview here. You can still explore
               its extracted entities and relationships in the graph.
@@ -225,28 +208,20 @@ function DocumentViewer({ docRef, contentType: expectedContentType, contextGraph
         ) : (
           <>
             {loading && <Loading label="Loading document…" />}
-            {error && <div style={{ color: 'var(--text-danger)', fontSize: 'var(--fs-control)' }}>Couldn&apos;t load: {error}</div>}
+            {error && <div className="v10-doc-error">Couldn&apos;t load: {error}</div>}
             {!loading && isImage && blobUrl && (
-              <img src={blobUrl} alt={docLabel} style={{ maxWidth: '100%', borderRadius: 'var(--radius-nested)' }} />
+              <img src={blobUrl} alt={docLabel} className="v10-doc-img" />
             )}
             {!loading && isPdf && blobUrl && (
-              <iframe src={blobUrl} title={docLabel} style={{ width: '100%', height: '100%', border: 'none', borderRadius: 'var(--radius-nested)' }} />
+              <iframe src={blobUrl} title={docLabel} className="v10-doc-frame" />
             )}
             {content !== null && !isImage && !isPdf && isMarkdown && viewMode === 'formatted' && (
-              <div style={{
-                background: 'var(--bg-surface)', borderRadius: 'var(--radius-nested)', padding: '16px 20px',
-                border: '1px solid var(--border-default)', color: 'var(--text-primary)',
-              }}>
+              <div className="v10-doc-markdown">
                 <MarkdownMessage content={content} />
               </div>
             )}
             {content !== null && !isImage && !isPdf && !(isMarkdown && viewMode === 'formatted') && (
-              <pre style={{
-                fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-control)', lineHeight: 'var(--lh-loose)',
-                color: 'var(--text-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                background: 'var(--bg-surface)', borderRadius: 'var(--radius-nested)', padding: 16,
-                border: '1px solid var(--border-default)', margin: 0,
-              }}>
+              <pre className="v10-doc-source">
                 {content}
               </pre>
             )}
@@ -300,7 +275,7 @@ function ViewContainer() {
 
   return (
     <div className="v10-view-placeholder">
-      <p style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-control)' }}>
+      <p className="v10-center-note">
         View "{activeTabId}" coming soon.
       </p>
     </div>

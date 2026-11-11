@@ -22,13 +22,13 @@
   font-size: var(--fs-control);
   font-weight: 700;
   color: var(--text-primary);
-  margin: 0 0 10px;
+  margin: 0 0 var(--space-8);
 }
 .v10-pca-create-balance { font-size: var(--fs-label); color: var(--text-secondary); margin: var(--space-6) 0 0; }
 .v10-pca-create-err { color: var(--text-danger); }
 .v10-pca-create-hint { font-size: var(--fs-label); color: var(--text-tertiary); margin: var(--space-6) 0 0; line-height: var(--lh-body); }
 .v10-pca-create-warn {
-  margin: 10px 0 0;
+  margin: var(--space-8) 0 0;
   padding: var(--pad-nested-sm);
   font-size: var(--fs-label);
   line-height: var(--lh-body);
@@ -42,7 +42,7 @@
 .v10-pca-create-review strong { color: var(--text-primary); }
 .v10-pca-create-owner { display: flex; align-items: center; gap: var(--space-8); margin-top: var(--space-12); }
 .v10-pca-create-owner-note { font-size: var(--fs-label); color: var(--text-tertiary); margin: var(--space-6) 0 0; line-height: var(--lh-body); }
-.v10-pca-create-success-stats { display: flex; flex-direction: column; gap: var(--space-4); font-size: var(--fs-body); color: var(--text-secondary); margin-bottom: 10px; }
+.v10-pca-create-success-stats { display: flex; flex-direction: column; gap: var(--space-4); font-size: var(--fs-body); color: var(--text-secondary); margin-bottom: var(--space-8); }
 .v10-pca-create-recon { font-size: var(--fs-control); color: var(--text-secondary); line-height: var(--lh-body); }
 .v10-pca-create-recon code { word-break: break-all; }
 .v10-pca-create-recon-actions { margin: var(--space-8) 0 0; padding-left: var(--space-16); }
@@ -56,14 +56,14 @@
 .v10-pca-owner-key-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 10px;
+  gap: var(--space-8);
 }
 .v10-pca-owner-key-card {
   display: grid;
   grid-template-columns: auto 1fr;
   align-items: flex-start;
   gap: var(--space-8);
-  padding: 10px;
+  padding: var(--space-12);
   border: 1px solid var(--border-subtle);
   background: var(--bg-surface);
   min-width: 0;
@@ -86,17 +86,17 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-8);
-  margin-top: 10px;
+  margin-top: var(--space-8);
 }
 
 /* ----- S4 Approve modal (C2) ----- */
-.v10-pca-approve-checklist { display: flex; flex-direction: column; gap: var(--space-6); margin: 10px 0; }
+.v10-pca-approve-checklist { display: flex; flex-direction: column; gap: var(--space-6); margin: var(--space-8) 0; }
 .v10-pca-approve-self-row { display: flex; align-items: center; gap: var(--space-8); }
 .v10-pca-approve-self-row .v10-wallet-row { flex: 1; }
 .v10-pca-approve-counts { font-size: var(--fs-label); color: var(--text-secondary); margin: var(--space-8) 0; display: flex; align-items: center; gap: var(--space-6); flex-wrap: wrap; }
-.v10-pca-approve-results { display: flex; flex-direction: column; gap: var(--space-6); margin-top: 14px; }
+.v10-pca-approve-results { display: flex; flex-direction: column; gap: var(--space-6); margin-top: var(--space-12); }
 .v10-pca-approve-summary { font-size: var(--fs-control); font-weight: 600; color: var(--text-primary); margin: var(--space-4) 0 0; }
-.v10-pca-approve-handoff { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+.v10-pca-approve-handoff { margin-top: var(--space-12); display: flex; flex-direction: column; gap: var(--space-8); }
 
 /* ----- S3 Detail (D1) ----- */
 .v10-pca-detail-section { margin-top: var(--space-16); padding-top: var(--space-16); border-top: 1px solid var(--border-subtle); }
@@ -110,7 +110,7 @@
 .v10-pca-detail-result { font-size: var(--fs-label); color: var(--text-success); margin: var(--space-8) 0 0; line-height: var(--lh-body); }
 .v10-pca-detail-agentlist { display: flex; flex-direction: column; gap: var(--space-8); }
 .v10-pca-detail-agentlist + .v10-pca-card-btn,
-.v10-pca-detail-subhead + .v10-pca-detail-agentlist + .v10-pca-card-btn { margin-top: 10px; }
+.v10-pca-detail-subhead + .v10-pca-detail-agentlist + .v10-pca-card-btn { margin-top: var(--space-8); }
 .v10-pca-agent-row { display: flex; }
 .v10-pca-agent-row .v10-wallet-row { flex: 1; }
 .v10-pca-agent-confirm {

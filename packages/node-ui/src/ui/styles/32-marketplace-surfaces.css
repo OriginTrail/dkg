@@ -4,6 +4,9 @@
 .mkt-frame { max-width: 1040px; padding: var(--sp-6) var(--sp-5); display: grid; gap: var(--sp-5); }
 .mkt-card { background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: var(--radius-card); padding: var(--sp-6); display: grid; gap: var(--sp-4); }
 .mkt-muted { color: var(--text-tertiary); }
+/* The component gallery: a sticky "fixture data" banner, and centred placeholder cards. */
+.mkt-gallery-banner { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--state-pending) 14%, var(--surface-0)); color: var(--state-pending); border-bottom: 1px solid var(--border-subtle); font-size: var(--fs-xs); font-weight: var(--fw-semibold); letter-spacing: var(--ls-caps); text-transform: uppercase; padding: var(--sp-2) var(--sp-4); }
+.mkt-card.mkt-card-centred { text-align: center; }
 .mkt-sec { color: var(--text-secondary); }
 .mkt-xs { font-size: var(--fs-xs); }
 .mkt-sm { font-size: var(--fs-sm); }
@@ -19,7 +22,7 @@
 .mkt-bar.warn i { background: var(--gauge-mid); }
 .mkt-bar.hit i { background: var(--gauge-over); }
 .mkt-sparkrow { display: flex; align-items: center; gap: var(--sp-3); }
-.mkt-spark { display: flex; align-items: flex-end; gap: 2px; height: var(--sp-5); }
+.mkt-spark { display: flex; align-items: flex-end; gap: var(--space-2); height: var(--sp-5); }
 .mkt-spark i { width: 4px; background: var(--gauge-spark); border-radius: var(--radius-hair); display: block; }
 .mkt-pace { font-size: var(--fs-xs); }
 .mkt-pace.warn { color: var(--gauge-mid); }

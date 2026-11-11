@@ -120,7 +120,7 @@
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-6);
-  padding: 10px var(--space-12);
+  padding: var(--space-12) var(--space-12);
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-panel);
   flex-shrink: 0;
@@ -146,7 +146,7 @@
   align-items: center;
   gap: var(--space-8);
   min-height: 32px;
-  padding: 0 14px;
+  padding: 0 var(--space-16);
   border-radius: var(--radius-xs);
   border: 1px solid transparent;
   background: transparent;
@@ -313,3 +313,5 @@
 }
 
 .v10-agents-details + .v10-agents-refresh { margin-left: 0; }
+
+.v10-panel-right.v10-panel-right-expanded { flex: 1; min-width: 0; }

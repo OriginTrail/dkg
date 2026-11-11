@@ -9,7 +9,6 @@ import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
 import { chooseTab as openTab } from '../../../lib/shellNavigation.js';
 import type { SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
-import { LAYER_VAR } from '../../../layer-colors.js';
 import { LayerGlyph, StatusGlyph } from '../../../components/ds/Badge.js';
 import { LAYER_CONFIG, VM_TRIPLE_STAT, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
@@ -21,6 +20,7 @@ import { kindColorForType } from '../../../entity-kind-colors.js';
 import { humanizeTypeName } from '../../../lib/formatLabels.js';
 import { FileText } from 'lucide-react';
 import { formatDateTime, formatNumber } from '../../../lib/format.js';
+
 export { AssertionsList } from './assertions.js';
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
@@ -471,7 +471,7 @@ export function LayerDetailView({
   return (
     <div className="v10-layer-detail">
       <div className="v10-layer-detail-header">
-        <span className="v10-layer-detail-icon" style={{ color: LAYER_VAR[config.trustLevel] }}><LayerGlyph layer={layer} /></span>
+        <span className={`v10-layer-detail-icon v10-layer-tone-text layer-tone-${layer}`}><LayerGlyph layer={layer} /></span>
         <div>
           <div className="v10-layer-detail-title">{config.title}</div>
           <div className="v10-layer-detail-desc">{config.desc}</div>
@@ -544,7 +544,7 @@ export function DocumentsList({
 
   if (docs.length === 0) {
     return (
-      <div className="v10-docs-placeholder v10-layer-empty-shell" style={{ flex: 1 }} data-cg-scroll-key={scrollKey}>
+      <div className="v10-docs-placeholder v10-layer-empty-shell v10-layer-empty-fill" data-cg-scroll-key={scrollKey}>
         <EmptyState
           compact
           title="No documents in this layer yet."

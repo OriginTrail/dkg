@@ -70,7 +70,7 @@
   overflow-y: auto;
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
-  padding: 14px var(--space-16);
+  padding: var(--space-16) var(--space-16);
   box-shadow: var(--shadow-menu);
   z-index: var(--z-raised);
   font-size: var(--fs-control);
@@ -92,3 +92,22 @@
 }
 
 /* ── Project overview graph (ProjectView) ── */
+
+/* ── Memory layer view ── */
+.v10-mlv-status.v10-mlv-status-error { color: var(--text-danger); }
+.v10-mlv-detail { font-size: var(--fs-label); margin-top: var(--space-4); }
+.v10-publish-result-gap { margin-bottom: var(--space-6); }
+
+/* ── Query results ── */
+.v10-mlv-status.v10-mlv-status-success { color: var(--text-success); }
+.v10-mlv-status.v10-mlv-status-failed { color: var(--text-danger); }
+
+.v10-layer-action-result { margin-bottom: var(--space-8); }
+.v10-decision-btn[aria-disabled="true"] { opacity: var(--opacity-disabled); }
+
+/* Layer colours by class: a layer's colour is known from its name, not from data. */
+.layer-tone-wm { --layer-tone: var(--layer-working); }
+.layer-tone-swm { --layer-tone: var(--layer-shared); }
+.layer-tone-vm { --layer-tone: var(--layer-verified); }
+.v10-layer-tone-text { color: var(--layer-tone); }
+.v10-layer-tone-fill { background: var(--layer-tone); }

@@ -106,9 +106,9 @@
   --v10-vm-surface: var(--layer-verified-bg);
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--space-12);
   padding: var(--space-16);
-  margin-bottom: 10px;
+  margin-bottom: var(--space-8);
   /* Banner sits above the scrollable EntityList inside a fixed-height
      (70vh) flex-column. Without flex-shrink:0 it competes with the list
      for vertical space and squeezes the list below the visible region,
@@ -168,7 +168,7 @@
   flex-wrap: wrap;
   gap: var(--space-6) var(--space-24);
   margin: 0;
-  padding-top: 10px;
+  padding-top: var(--space-12);
   border-top: 1px solid color-mix(in srgb, var(--layer-verified) 22%, transparent);
 }
 .v10-vm-hero-fact { display: flex; gap: var(--space-6); align-items: baseline; font-size: var(--fs-control); }
@@ -179,7 +179,7 @@
 .v10-vm-hero-fact-icon { margin-left: var(--space-4); }
 /* Light values come from the --layer-verified-* light tokens. */
 .v10-layer-expand-body.entities-tab > .v10-vm-hero {
-  margin: var(--space-16) var(--space-16) 10px;
+  margin: var(--space-16) var(--space-16) var(--space-8);
 }
 .v10-vm-hero-empty {
   gap: var(--space-16);
@@ -206,7 +206,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
-  padding: 10px;
+  padding: var(--space-12);
   width: 100%;
   background: color-mix(in srgb, var(--layer-verified) 5%, transparent);
   border: 1px solid color-mix(in srgb, var(--layer-verified) 30%, transparent);
@@ -243,6 +243,7 @@
   box-shadow: 0 0 10px -2px currentColor;
 }
 .v10-vm-legend-swatch-agent { border-radius: 50%; }
+.v10-vm-legend-swatch-anchor { color: var(--text-on-identity); box-shadow: 0 0 0 2px var(--swatch-ring); }
 .v10-vm-legend-label {
   color: var(--text-primary);
   font-size: var(--fs-label);
@@ -266,7 +267,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
-  padding: 10px;
+  padding: var(--space-12);
   width: 100%;
   background: color-mix(in srgb, var(--layer-shared) 5%, transparent);
   border: 1px solid color-mix(in srgb, var(--layer-shared) 30%, transparent);

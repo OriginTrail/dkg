@@ -706,7 +706,6 @@ export function SubGraphMiniCard({
         ? undefined
         : {
             '--sg-color': card.color,
-            borderColor: card.color + '55',
           } as React.CSSProperties}
     >
       <div className="v10-sgov-card-head">
@@ -808,7 +807,7 @@ export function SubGraphMiniCard({
               format="triples"
               options={graphOptions}
               viewConfig={miniViewConfig}
-              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
+              className="v10-graph-fill"
               onNodeClick={onNodeClick}
               initialFit
             />
@@ -1604,9 +1603,8 @@ export function SubGraphDetailView({
           {queryCatalogs.map(catalog => (
             <React.Fragment key={catalog.slug}>
               <span
-                className="v10-subgraph-savedqueries-label"
+                className="v10-subgraph-savedqueries-label v10-subgraph-savedqueries-count"
                 title={catalog.description || catalog.name}
-                style={{ marginLeft: 8, opacity: 0.8 }}
               >
                 {catalog.name}
               </span>

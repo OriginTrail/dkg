@@ -12,7 +12,7 @@ import { truncateMiddle } from '../../../lib/truncate.js';
 import { EmptyState, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { FileText, RefreshCw } from 'lucide-react';
 import { StatusGlyph } from '../../../components/ds/Badge.js';
-import { failed, outcomeColor, succeeded, succeededWithWarning, type ActionOutcome } from '../../../lib/actionOutcome.js';
+import { failed, succeeded, succeededWithWarning, type ActionOutcome } from '../../../lib/actionOutcome.js';
 
 export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = false, onComplete, scrollKey }: {
   contextGraphId: string;
@@ -157,11 +157,10 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
     }
   }, [contextGraphId, layer, refresh, onComplete]);
 
-  const scrollRootStyle = { flex: 1, overflow: 'auto' } as const;
 
   if (loading) {
     return (
-      <div className="v10-layer-empty-shell" style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
+      <div className="v10-layer-empty-shell v10-assertion-scroll" data-cg-scroll-key={scrollKey}>
         <EmptyState
           busy
           compact
@@ -172,11 +171,11 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
     );
   }
 
-  if (loadError) return <div role="alert" style={scrollRootStyle}>Could not load assertions: {loadError} <button onClick={refresh}><RefreshCw size={12} />Retry</button></div>;
+  if (loadError) return <div role="alert" className="v10-assertion-scroll">Could not load assertions: {loadError} <button onClick={refresh}><RefreshCw size={12} />Retry</button></div>;
 
   if (!assertions.length && !page?.nextCursor && pageIndex === 0) {
     return (
-      <div className="v10-layer-empty-shell" style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
+      <div className="v10-layer-empty-shell v10-assertion-scroll" data-cg-scroll-key={scrollKey}>
         <EmptyState
           tone={toneForLayer(layer)}
           icon={<LayerGlyph layer={layer} />}
@@ -198,16 +197,15 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
   ).length;
 
   return (
-    <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
-      <div style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-subtle)' }}>
-        <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)' }}>Page {pageIndex + 1} · {assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
+    <div className="v10-assertion-scroll" data-cg-scroll-key={scrollKey}>
+      <div className="v10-wm-bar">
+        <span className="v10-wm-bar-label">Page {pageIndex + 1} · {assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
         {bulkVisibleAssertionCount > 0 && (
           <button
             className={`v10-layer-expand-footer-btn ds-btn ds-sm ${layer === 'wm' ? 'promote ds-swm' : 'publish ds-vm'}`}
             title="Applies to all assertions in this layer across every page. Query catalog assertions are excluded."
             disabled={busy !== null}
             onClick={handlePromoteAll}
-            style={{ opacity: busy === '__all__' ? 0.5 : 1 }}
           >
             {busy === '__all__' ? '...' : actionAllLabel}
           </button>
@@ -216,8 +214,8 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
       {outcome && (
         <div
           data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
+          className="action-outcome v10-assertion-result"
           data-tone={outcome.tone}
-          style={{ padding: '6px 16px', fontSize: 'var(--fs-label)', color: outcomeColor(outcome.tone) }}
         >
           <StatusGlyph tone={outcome.tone} /> {outcome.text}
         </div>
@@ -226,11 +224,10 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         <div key={a.graphUri} className="v10-item-row" data-testid="assertion-list-row">
           <span className="v10-item-icon"><FileText size={14} /></span>
           <div className="v10-item-info">
-            <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-label)' }}>{a.name}</div>
+            <div className="v10-item-name v10-wm-item-mono">{a.name}</div>
             {a.reservedUal && (
               <div
-                className="v10-item-ual"
-                style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', opacity: 0.7, wordBreak: 'break-all', marginTop: 1 }}
+                className="v10-item-ual v10-wm-item-ual"
                 title={a.reservedUal}
               >
                 {a.reservedUal}
@@ -253,13 +250,12 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
             className={`v10-layer-expand-footer-btn ds-btn ds-sm ${layer === 'wm' ? 'promote ds-swm' : 'publish ds-vm'}`}
             disabled={busy !== null}
             onClick={ev => { ev.stopPropagation(); handlePromote(a); }}
-            style={{ opacity: busy === a.graphUri ? 0.5 : 1, flexShrink: 0 }}
           >
             {busy === a.graphUri ? '...' : actionLabel}
           </button>
         </div>
       ))}
-      <nav aria-label="Assertion pages" style={{ display: 'flex', gap: 12, padding: 16 }}>
+      <nav aria-label="Assertion pages" className="v10-wm-nav">
         <button disabled={pageIndex === 0 || busy !== null} onClick={() => setPaging({ scope, cursors, index: pageIndex - 1 })}>Previous assertions</button>
         <button disabled={!page?.nextCursor || busy !== null} onClick={() => {
           setPaging({ scope, cursors: [...cursors.slice(0, pageIndex + 1), page!.nextCursor], index: pageIndex + 1 });

@@ -11,8 +11,8 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--space-16);
-  margin: 0 0 14px;
-  padding: 0 0 14px;
+  margin: 0 0 var(--space-12);
+  padding: 0 0 var(--space-16);
   border-bottom: 1px solid var(--border-subtle);
 }
 .v10-po-identity-pairs {
@@ -108,7 +108,7 @@
 .v10-po-participants-list { display: flex; flex-wrap: wrap; gap: var(--space-6); }
 .v10-po-participant {
   display: inline-flex; align-items: center; gap: var(--space-6);
-  padding: var(--space-4) 10px var(--space-4) var(--space-4); border-radius: var(--radius-overlay); font-size: var(--fs-label); font-weight: 600;
+  padding: var(--space-4) var(--space-12) var(--space-4) var(--space-4); border-radius: var(--radius-overlay); font-size: var(--fs-label); font-weight: 600;
   background: var(--bg-surface); border: 1px solid var(--border-default); color: var(--text-primary);
 }
 /* Each participant leads with its agent avatar (AgentDot), the same
@@ -167,7 +167,7 @@
 .v10-po-pipeline {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-8);
   margin: var(--space-12) 0 var(--space-12);
   padding-top: var(--space-12);
   border-top: 1px solid var(--border-subtle);
@@ -227,7 +227,7 @@
   min-height: 58px;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-8);
   padding: var(--pad-nested);
   border: 1px solid var(--po-layer-border, color-mix(in srgb, var(--po-layer-color) 28%, var(--border-default)));
   background: var(--po-layer-bg, color-mix(in srgb, var(--po-layer-color) 6%, var(--bg-surface)));
@@ -295,7 +295,7 @@
   flex-wrap: wrap;
   align-items: baseline;
   gap: var(--space-8);
-  padding: 14px var(--space-16);
+  padding: var(--space-16) var(--space-16);
   margin-top: var(--space-12);
   border-top: 1px solid var(--border-subtle);
   color: var(--text-tertiary);
@@ -368,3 +368,8 @@
 .v10-center-content[data-narrow] .v10-po-primer-footer {
     flex-direction: row;
     flex-wrap: wrap; }
+
+/* ── Project view ── */
+.v10-project-note { color: var(--text-tertiary); font-size: var(--fs-control); margin-bottom: var(--space-8); }
+
+.v10-po-pipeline-step.layer-tone-wm, .v10-po-pipeline-step.layer-tone-swm, .v10-po-pipeline-step.layer-tone-vm { --po-layer-color: var(--layer-tone); }

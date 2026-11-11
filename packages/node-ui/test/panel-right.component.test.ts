@@ -1088,7 +1088,7 @@ describe('PanelRight component', () => {
     ]);
 
     await waitForAssertion(() => {
-      expect(container.querySelector('.v10-local-agent-attachment-list')).toBeNull();
+      expect(container.querySelector('.v10-local-agent-attachment-row')).toBeNull();
     });
     expect(container.textContent).toContain('Attachment import result: notes.epub.');
 

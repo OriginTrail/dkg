@@ -9,7 +9,7 @@
   color: var(--text-danger); font-size: var(--fs-control);
 }
 .v10-file-preview-meta {
-  display: flex; flex-wrap: wrap; gap: var(--space-6); padding: 10px var(--space-24);
+  display: flex; flex-wrap: wrap; gap: var(--space-6); padding: var(--space-12) var(--space-24);
   border-bottom: 1px solid var(--border-subtle);
 }
 .v10-file-preview-meta-item {
@@ -190,7 +190,7 @@ body.light .v10-modal-box {
 .v10-import-file-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-8);
   padding: var(--space-8) var(--space-12);
   font-size: var(--fs-control);
   border-bottom: 1px solid var(--border-subtle);
@@ -253,7 +253,7 @@ body.light .v10-modal-box {
   margin-top: var(--space-6);
 }
 .v10-import-result {
-  padding: 10px 14px;
+  padding: var(--pad-nested);
   border-radius: var(--radius-control);
   font-size: var(--fs-control);
   line-height: var(--lh-loose);
@@ -273,3 +273,97 @@ body.light .v10-modal-box {
 body.light .v10-import-dropzone { border-color: var(--border-default); }
 body.light .v10-import-dropzone:hover,
 body.light .v10-import-dropzone.drag-over { border-color: var(--border-strong); background: var(--bg-hover); }
+
+/* ── Shared modal chrome ── */
+/* A close button pinned to the dialog's corner; its look is the ghost icon button. */
+.v10-modal-close-corner { position: absolute; top: var(--space-12); right: var(--space-12); z-index: 1; }
+/* A header that puts the title block and the close button on one row. */
+.v10-modal-header-row { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-12); }
+.v10-modal-header-row > .v10-modal-close { flex-shrink: 0; }
+.v10-modal-heading { flex: 1; min-width: 0; }
+
+/* ── Create Context Graph modal ── */
+.v10-create-hint { margin-top: var(--space-6); font-size: var(--fs-label); color: var(--text-tertiary); }
+.v10-form-radio.v10-create-radio { display: flex; align-items: flex-start; gap: var(--space-8); }
+.v10-create-radio-input { margin-top: var(--space-2); }
+.v10-create-radio-note { font-size: var(--fs-label); color: var(--text-tertiary); margin-top: var(--space-4); }
+.v10-create-radio-indent, .v10-form-radio-desc.v10-create-radio-indent { margin-left: var(--space-24); margin-top: var(--space-4); margin-bottom: var(--space-8); }
+.v10-create-radio-off { opacity: 0.5; }
+.v10-create-tag { font-size: var(--fs-micro); font-weight: 400; color: var(--text-tertiary); }
+.v10-create-advanced-off { opacity: 0.5; pointer-events: none; }
+.v10-form-group.v10-create-group-last { margin-bottom: 0; }
+
+/* ── Import modal ── */
+.v10-import-box { max-width: 560px; }
+.v10-import-hint-gap { margin-top: var(--space-4); }
+.v10-import-hint-wide { margin-top: var(--space-8); }
+.v10-import-file-input { display: none; }
+.v10-import-lead { font-size: var(--fs-label); color: var(--text-tertiary); margin-bottom: var(--space-12); }
+.v10-form-label.v10-import-label { margin-bottom: var(--space-8); }
+.v10-import-label-tag { font-size: var(--fs-micro); font-weight: 400; color: var(--text-tertiary); }
+.v10-import-option-off { opacity: 0.5; pointer-events: none; }
+.v10-import-status { font-size: var(--fs-control); color: var(--text-secondary); font-weight: 500; }
+.v10-import-status-note { font-size: var(--fs-label); color: var(--text-tertiary); margin-top: var(--space-4); }
+.v10-import-file-list.v10-import-list-gap { margin-top: var(--space-12); }
+
+/* ── Join modal ── */
+/* Join banners: one box, three tones. */
+.v10-join-info, .v10-join-success, .v10-join-warning { padding: var(--pad-nested); border-radius: var(--radius-nested); margin-bottom: var(--space-16); font-size: var(--fs-control); }
+.v10-join-info, .v10-wire-info { background: var(--tint-subtle); border: 1px solid var(--border-default); color: var(--accent-primary); }
+.v10-join-success, .v10-wire-success { background: var(--success-bg); border: 1px solid var(--success-border); color: var(--text-success); }
+.v10-join-warning { background: var(--warning-bg); border: 1px solid var(--warning-border); color: var(--text-warning); }
+.v10-form-textarea.ds-input.v10-join-input { font-family: var(--font-mono); font-size: var(--fs-label); }
+.v10-join-note { display: block; color: var(--text-tertiary); margin-top: var(--space-2); }
+
+/* ── File preview ── */
+.v10-file-preview-note { font-size: var(--fs-label); margin-top: var(--space-4); }
+
+/* ── Share modal ── */
+.v10-share-box { max-width: 560px; }
+.v10-share-tabs { display: flex; gap: var(--space-16); margin-bottom: var(--space-16); border-bottom: 1px solid var(--border-default); }
+.ds-tab.v10-share-tab { height: var(--h-control-md); }
+.v10-share-hint { font-size: var(--fs-micro); color: var(--text-tertiary); margin-bottom: var(--space-8); }
+.v10-share-list { margin-bottom: var(--space-8); display: flex; flex-direction: column; gap: var(--space-4); }
+.v10-share-peer { display: flex; align-items: center; justify-content: space-between; padding: var(--space-6) var(--space-12); border-radius: var(--radius-control); font-size: var(--fs-label); font-family: var(--font-mono); background: var(--bg-surface); border: 1px solid var(--border-default); }
+.v10-share-name { color: var(--text-primary); }
+.v10-share-role { font-family: var(--font-sans); font-weight: 500; }
+.v10-share-you { color: var(--text-tertiary); font-size: var(--fs-micro); }
+.v10-share-empty, .v10-share-empty-row { padding: var(--space-8) var(--space-12); border-radius: var(--radius-control); font-size: var(--fs-label); color: var(--text-tertiary); background: var(--bg-surface); border: 1px dashed var(--border-default); }
+.v10-share-empty-row { margin-bottom: var(--space-8); }
+.v10-share-code { position: relative; }
+.v10-share-code-text { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-control); padding: var(--space-12) var(--space-12); font-size: var(--fs-label); line-height: var(--lh-loose); font-family: var(--font-mono); color: var(--text-primary); overflow: auto; margin: 0; white-space: pre-wrap; word-break: break-all; }
+.v10-share-copy { position: absolute; top: var(--space-6); right: var(--space-6); }
+.v10-share-none { padding: var(--space-16) var(--space-12); border-radius: var(--radius-control); font-size: var(--fs-label); text-align: center; color: var(--text-tertiary); background: var(--bg-surface); border: 1px dashed var(--border-default); }
+.v10-share-request { display: flex; align-items: center; justify-content: space-between; padding: var(--pad-nested-sm); border-radius: var(--radius-control); font-size: var(--fs-label); background: var(--bg-surface); border: 1px solid var(--border-default); margin-bottom: var(--space-4); }
+.v10-share-request-text { display: flex; flex-direction: column; gap: var(--space-2); }
+.v10-share-request-name { color: var(--text-primary); font-weight: 500; }
+.v10-share-request-id { color: var(--text-tertiary); font-family: var(--font-mono); font-size: var(--fs-micro); }
+.v10-share-request-time { font-size: var(--fs-micro); color: var(--text-tertiary); }
+.v10-share-request-actions { display: flex; gap: var(--space-6); }
+.v10-share-error { font-size: var(--fs-micro); color: var(--text-danger); margin-top: var(--space-4); }
+
+/* ── Wire workspace panel ── */
+.v10-wire-success { padding: var(--space-12) var(--space-16); border-radius: var(--radius-nested); margin-bottom: var(--space-12); font-size: var(--fs-control); }
+.v10-wire-title { font-weight: 600; margin-bottom: var(--space-6); }
+.v10-wire-code { font-family: var(--font-mono); }
+.v10-wire-text { font-size: var(--fs-label); color: var(--text-secondary); margin-bottom: var(--space-8); }
+/* Workspace output: one surface, two heights. */
+.v10-wire-pre, .v10-wire-pre-tall { font-size: var(--fs-micro); font-family: var(--font-mono); overflow: auto; padding: var(--space-12); border-radius: var(--radius-control); background: var(--bg-elevated); border: 1px solid var(--border-default); margin: 0; }
+.v10-wire-pre { max-height: 200px; }
+.v10-wire-end { display: flex; justify-content: flex-end; margin-top: var(--space-12); }
+.ds-card-nested.v10-modal-error.v10-wire-error { margin-bottom: var(--space-12); }
+.v10-wire-intro { margin-bottom: var(--space-8); font-size: var(--fs-label); color: var(--text-secondary); }
+.v10-wire-pre-tall { max-height: 320px; white-space: pre-wrap; }
+.v10-wire-actions { display: flex; justify-content: space-between; align-items: center; margin-top: var(--space-12); gap: var(--space-8); }
+.v10-wire-action-group { display: flex; gap: var(--space-8); }
+.v10-wire-info { padding: var(--pad-nested); border-radius: var(--radius-nested); margin-bottom: var(--space-12); font-size: var(--fs-control); }
+.v10-wire-info-title { font-weight: 600; margin-bottom: var(--space-4); }
+.v10-form-input.ds-input.v10-wire-input { font-family: var(--font-mono); font-size: var(--fs-control); }
+.v10-wire-hint { font-size: var(--fs-micro); color: var(--text-tertiary); margin-top: var(--space-4); }
+.v10-form-input.ds-input.v10-wire-input-readonly { font-family: var(--font-mono); font-size: var(--fs-label); opacity: 0.75; }
+
+.v10-cg-name-help { margin-top: var(--space-4); font-family: var(--font-mono); font-size: var(--fs-label); color: var(--text-tertiary); }
+.v10-cg-name-help-error { color: var(--text-danger); }
+.v10-import-file-size-error { color: var(--text-danger); }
+.v10-join-sync { display: flex; align-items: flex-start; gap: var(--space-8); font-size: var(--fs-control); color: var(--text-secondary); cursor: pointer; }
+.v10-join-sync-busy { cursor: default; }

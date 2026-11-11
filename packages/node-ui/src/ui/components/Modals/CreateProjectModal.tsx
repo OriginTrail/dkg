@@ -304,11 +304,10 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
         >
           <button
             type="button"
-            className="v10-modal-close ds-btn ds-ghost ds-icon"
+            className="v10-modal-close ds-btn ds-ghost ds-icon v10-modal-close-corner"
             onClick={handleWireDone}
             aria-label="Close wire workspace dialog"
             title="Close (Esc)"
-            style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4 }}
           >
             <X size={14} />
           </button>
@@ -352,11 +351,10 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       >
         <button
           type="button"
-          className="v10-modal-close ds-btn ds-ghost ds-icon"
+          className="v10-modal-close ds-btn ds-ghost ds-icon v10-modal-close-corner"
           onClick={onClose}
           aria-label="Close create context graph dialog"
           title="Close (Esc)"
-          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4, zIndex: 1 }}
         >
           <X size={14} />
         </button>
@@ -407,7 +405,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             />
             <div
               id="dkg-cg-name-help"
-              style={{ marginTop: 4, fontSize: 'var(--fs-label)', color: nameValidationError ? 'var(--accent-red)' : 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}
+              className={nameValidationError ? 'v10-cg-name-help v10-cg-name-help-error' : 'v10-cg-name-help'}
             >
               {nameValidationError
                 ? nameValidationError
@@ -459,7 +457,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               </label>
             </div>
             {access === 'curated' && publishPolicy === 'open' && (
-              <div style={{ marginTop: 6, fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)' }}>
+              <div className="v10-create-hint">
                 Note: invites control who can read this graph, not who can publish. With open contribution, any wallet can publish to Verifiable Memory.
               </div>
             )}
@@ -467,16 +465,16 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
 
           <div className="v10-form-group">
             <label className="v10-form-label">On-chain registration</label>
-            <label className="v10-form-radio" style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+            <label className="v10-form-radio v10-create-radio">
               <input
                 type="checkbox"
                 checked={registerOnChain}
                 onChange={(e) => setRegisterOnChain(e.target.checked)}
-                style={{ marginTop: 3 }}
+                className="v10-create-radio-input"
               />
               <span>
                 Register on chain now (required for Verifiable Memory publishing)
-                <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginTop: 4 }}>
+                <div className="v10-create-radio-note">
                   Off by default: the project is created locally and can be registered later
                   from its Settings tab when your wallet is funded and a working RPC is configured.
                 </div>
@@ -492,7 +490,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 Choose a starter: install one of the bundled context-graph-type ontologies
               </label>
               {ontology === 'community' && (
-                <div style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
+                <div className="v10-create-radio-indent">
                   <select aria-label="Community ontology"
                     className="v10-form-select ds-input"
                     value={starterSlug}
@@ -502,7 +500,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                       <option key={s.slug} value={s.slug}>{s.displayName}</option>
                     ))}
                   </select>
-                  <div style={{ marginTop: 6, fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)' }}>
+                  <div className="v10-create-hint">
                     {starters.find((s) => s.slug === starterSlug)?.description}
                   </div>
                 </div>
@@ -512,15 +510,15 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 Let agent decide: defaults to the closest starter (v1)
               </label>
               {ontology === 'agent' && (
-                <div className="v10-form-radio-desc" style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
+                <div className="v10-form-radio-desc v10-create-radio-indent">
                   v1 installs the <code>{starterSlug}</code> starter as a sensible default. A future
                   release will have the agent draft a context-graph-specific ontology by extending the closest
                   starter from the context graph description.
                 </div>
               )}
-              <label className="v10-form-radio" style={{ opacity: 0.5 }}>
+              <label className="v10-form-radio v10-create-radio-off">
                 <input type="radio" checked={ontology === 'upload'} onChange={() => setOntology('upload')} disabled />
-                Upload an ontology file (.ttl, .owl, .rdf) <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span>
+                Upload an ontology file (.ttl, .owl, .rdf) <span className="v10-create-tag">(coming soon)</span>
               </label>
             </div>
           </div>
@@ -531,9 +529,9 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           </button>
 
           {showAdvanced && (
-            <div className="v10-form-advanced-body ds-card-nested" style={{ opacity: 0.5, pointerEvents: 'none' }}>
+            <div className="v10-form-advanced-body ds-card-nested v10-create-advanced-off">
               <div className="v10-form-group">
-                <label className="v10-form-label">Consensus quorum <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+                <label className="v10-form-label">Consensus quorum <span className="v10-create-tag">(coming soon)</span></label>
                 <select aria-label="Consensus quorum" className="v10-form-select ds-input" value={quorum} disabled>
                   <option value="off">Off: no consensus verification required</option>
                   <option value="2of3">2 of 3: lightweight consensus</option>
@@ -542,7 +540,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 </select>
               </div>
               <div className="v10-form-group">
-                <label className="v10-form-label">Shared Working Memory lifetime <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+                <label className="v10-form-label">Shared Working Memory lifetime <span className="v10-create-tag">(coming soon)</span></label>
                 <select aria-label="SWM TTL" className="v10-form-select ds-input" value={swmTtl} disabled>
                   <option value="7d">7 days (default)</option>
                   <option value="1h">1 hour</option>
@@ -550,8 +548,8 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                   <option value="30d">30 days</option>
                 </select>
               </div>
-              <div className="v10-form-group" style={{ marginBottom: 0 }}>
-                <label className="v10-form-label">Shared Working Memory size limit <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+              <div className="v10-form-group v10-create-group-last">
+                <label className="v10-form-label">Shared Working Memory size limit <span className="v10-create-tag">(coming soon)</span></label>
                 <select aria-label="Shared Working Memory size limit" className="v10-form-select ds-input" value={swmCap} disabled>
                   <option value="100k">100K triples (default)</option>
                   <option value="10k">10K triples</option>

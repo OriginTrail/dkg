@@ -15,7 +15,7 @@
 .v10-md-h4, .v10-md-h5, .v10-md-h6 {
   font-weight: 600;
   line-height: var(--lh-snug);
-  margin: 10px 0 var(--space-6);
+  margin: var(--space-8) 0 var(--space-6);
   color: var(--text-primary);
 }
 .v10-md-h1 { font-size: var(--fs-heading); }
@@ -124,7 +124,7 @@
   background: var(--bg-elevated);
 }
 .v10-md-th {
-  padding: var(--space-6) 10px;
+  padding: var(--space-6) var(--space-12);
   text-align: left;
   font-weight: 600;
   color: var(--text-primary);
@@ -135,7 +135,7 @@
   /* Table data is primary content, not metadata — `--text-secondary`
      read as dim/unreadable on the no-bubble dark panel (same root
      cause as `.v10-md-p`). Match the header (`--text-primary`). */
-  padding: var(--space-6) 10px;
+  padding: var(--space-6) var(--space-12);
   border-bottom: 1px solid var(--border-subtle);
   color: var(--text-primary);
   vertical-align: top;
@@ -218,7 +218,7 @@
 .v10-md-pre-rendered,
 .v10-md-pre-fallback {
   margin: 0;
-  padding: 28px var(--space-12) 10px;
+  padding: var(--space-32) var(--space-12) var(--space-12);
   overflow-x: auto;
 }
 .v10-md-pre-rendered pre,
@@ -311,6 +311,8 @@
 }
 
 .v10-chat-thinking-orb {
+  width: 28px;
+  height: 28px;
   flex: 0 0 28px;
   opacity: 0.86;
 }

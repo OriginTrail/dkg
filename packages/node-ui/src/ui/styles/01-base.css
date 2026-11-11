@@ -40,7 +40,7 @@ input, textarea {
   border: 1px solid var(--border-default);
   color: var(--text-primary);
   border-radius: var(--radius-control);
-  padding: var(--space-6) 10px;
+  padding: var(--space-6) var(--space-12);
   outline: none;
 }
 /* .dsp-focus: the reference page previews this look (design-system-states.tsx). */

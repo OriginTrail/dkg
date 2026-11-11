@@ -46,7 +46,6 @@ export function renderMessageContent(
           className="v10-chat-thinking-orb"
           state="connecting"
           size={64}
-          style={{ width: 28, height: 28 }}
           theme="auto"
         />
         <span>Connecting dots...</span>

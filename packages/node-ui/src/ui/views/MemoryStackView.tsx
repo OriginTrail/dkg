@@ -34,13 +34,12 @@ const LAYERS: Array<{
   title: string;
   short: string;
   icon: React.ReactNode;
-  color: string;
   desc: string;
   tabPrefix: 'wm' | 'swm' | 'vm';
 }> = [
-  { key: 'working',  title: 'Working Memory',        short: 'WM',  icon: <LayerGlyph layer="wm" />, color: 'var(--layer-working)', desc: 'Private agent drafts', tabPrefix: 'wm' },
-  { key: 'shared',   title: 'Shared Working Memory', short: 'SWM', icon: <LayerGlyph layer="swm" />, color: 'var(--layer-shared)', desc: 'Team proposals',       tabPrefix: 'swm' },
-  { key: 'verified', title: 'Verifiable Memory',     short: 'VM',  icon: <LayerGlyph layer="vm" />, color: 'var(--layer-verified)', desc: 'On-chain knowledge',   tabPrefix: 'vm' },
+  { key: 'working',  title: 'Working Memory',        short: 'WM',  icon: <LayerGlyph layer="wm" />, desc: 'Private agent drafts', tabPrefix: 'wm' },
+  { key: 'shared',   title: 'Shared Working Memory', short: 'SWM', icon: <LayerGlyph layer="swm" />, desc: 'Team proposals',       tabPrefix: 'swm' },
+  { key: 'verified', title: 'Verifiable Memory',     short: 'VM',  icon: <LayerGlyph layer="vm" />, desc: 'On-chain knowledge',   tabPrefix: 'vm' },
 ];
 
 const TS_PREDS = [
@@ -82,7 +81,7 @@ export function MemoryStackView() {
           <div className="v10-memstack-colheads">
             <div className="v10-memstack-colhead project" />
             {LAYERS.map(L => (
-              <div key={L.key} className="v10-memstack-colhead" style={{ color: L.color }}>
+              <div key={L.key} className={`v10-memstack-colhead v10-layer-tone-text layer-tone-${L.tabPrefix}`}>
                 <span className="v10-memstack-colhead-icon">{L.icon}</span>
                 <span className="v10-memstack-colhead-title">{L.title}</span>
                 <span className="v10-memstack-colhead-desc">{L.desc}</span>
@@ -171,7 +170,6 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
           <LayerCell
             key={L.key}
             cgId={cg.id}
-            color={L.color}
             layerTitle={L.title}
             tabPrefix={L.tabPrefix}
             entityCount={bucket.entities.length}
@@ -194,7 +192,6 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
 
 function LayerCell({
   cgId: _cgId,
-  color,
   layerTitle,
   tabPrefix,
   entityCount,
@@ -204,7 +201,6 @@ function LayerCell({
   onOpenLayer,
 }: {
   cgId: string;
-  color: string;
   layerTitle: string;
   tabPrefix: 'wm' | 'swm' | 'vm';
   entityCount: number;
@@ -216,8 +212,7 @@ function LayerCell({
   const isEmpty = entityCount === 0;
   return (
     <div
-      className={`v10-memstack-cell ds-card-nested${isEmpty ? ' empty' : ''}`}
-      style={{ '--cell-color': color } as React.CSSProperties}
+      className={`v10-memstack-cell ds-card-nested layer-tone-${tabPrefix}${isEmpty ? ' empty' : ''}`}
     >
       <div className="v10-memstack-cell-stats">
         <span className="v10-memstack-cell-n">{entityCount}</span>

@@ -11,5 +11,3 @@ export const succeeded = (text: string): ActionOutcome => ({ tone: 'success', te
 export const succeededWithWarning = (text: string, warn: boolean): ActionOutcome => ({ tone: warn ? 'warning' : 'success', text });
 export const failed = (text: string): ActionOutcome => ({ tone: 'danger', text });
 
-/** The text colour for an outcome's tone. */
-export const outcomeColor = (tone: OutcomeTone): string => `var(--text-${tone})`;

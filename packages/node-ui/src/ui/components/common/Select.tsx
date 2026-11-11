@@ -178,9 +178,7 @@ export function Select({
   const rootClassName = ['v10-select', className, disabled ? 'disabled' : '', open ? 'open' : ''].filter(Boolean).join(' ');
 
   const menuStyle: React.CSSProperties | undefined = position
-    ? position.placement === 'below'
-      ? { position: 'fixed', left: position.left, top: position.top, width: position.width }
-      : { position: 'fixed', left: position.left, top: position.top, width: position.width, transform: 'translateY(-100%)' }
+    ? { left: position.left, top: position.top, width: position.width }
     : undefined;
 
   return (

@@ -16,7 +16,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-8);
-  padding: var(--space-12) 14px;
+  padding: var(--space-12) var(--space-16);
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   box-shadow: var(--shadow-lift);
@@ -101,3 +101,6 @@
 .v10-graph-prov-link:hover {
   text-decoration-color: currentColor;
 }
+
+/* ── Provenance card ── */
+.v10-vm-identity.ds-card.v10-vm-identity-flat { margin: 0; background: none; border: none; padding: 0; }

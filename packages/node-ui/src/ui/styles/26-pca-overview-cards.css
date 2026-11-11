@@ -36,6 +36,10 @@
   font-weight: 700;
   color: var(--text-primary);
 }
+.v10-pca-coverage-summary {
+  padding: var(--space-16) 0 var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
 .v10-pca-overview-cta-group {
   display: flex;
   align-items: center;
@@ -76,16 +80,15 @@
 .v10-pca-card-owner-lbl { font-size: var(--fs-label); color: var(--text-tertiary); min-width: 44px; }
 
 .v10-pca-card-warn {
-  margin: 10px 0 0;
+  margin: var(--space-8) 0 0;
   padding: var(--pad-nested-sm);
   font-size: var(--fs-label);
   line-height: var(--lh-body);
   color: var(--text-warning);
   background: var(--warning-bg);
 }
-
 .v10-pca-card-btn:disabled { opacity: var(--opacity-disabled); }
-.v10-pca-card-error { display: flex; flex-direction: column; gap: 10px; font-size: var(--fs-control); color: var(--text-secondary); }
+.v10-pca-card-error { display: flex; flex-direction: column; gap: var(--space-8); font-size: var(--fs-control); color: var(--text-secondary); }
 .v10-pca-card-skeleton { min-height: 180px; opacity: 0.5; }
 
 

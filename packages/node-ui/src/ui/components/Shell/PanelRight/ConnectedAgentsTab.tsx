@@ -577,24 +577,11 @@ export function ConnectedAgentsTab(props: {
                     )}
                   </div>
                   {message.attachments && message.attachments.length > 0 && (
-                    <div className="v10-local-agent-attachment-row" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                    <div className="v10-local-agent-attachment-row">
                       {message.attachments.map((attachment) => (
                         <span
                           key={attachment.id ?? attachment.assertionUri ?? attachment.fileHash}
                           className="v10-local-agent-attachment-chip"
-                          style={{
-                            padding: '2px 8px',
-                            borderRadius: 'var(--radius-pill)',
-                            // `--panel-elevated` is undefined in styles.css —
-                            // the token is `--bg-elevated`. Pre-existing typo
-                            // surfaced by UI-lead's PR4 audit (Task #69):
-                            // when the bubble was removed, the silent
-                            // fallback used to land near `--bg-surface` and
-                            // happened to look right; now it falls back to
-                            // `--bg-panel` and the chip blends in.
-                            background: 'var(--bg-elevated)',
-                            fontSize: 'var(--fs-label)',
-                          }}
                         >
                           {attachment.fileName}
                         </span>
@@ -639,7 +626,7 @@ export function ConnectedAgentsTab(props: {
               </button>
             </div>
             <div className="v10-agent-input-area">
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
+              <div className="v10-local-agent-stack">
                 {selectedAttachmentDrafts.length > 0 && (
                   <div className="v10-attachment-chips" role="list" aria-label="Attached files">
                     {selectedAttachmentDrafts.map((attachment) => {
@@ -692,7 +679,7 @@ export function ConnectedAgentsTab(props: {
                 )}
 
                 {hasMismatchedAttachmentTargets && (
-                  <div className="v10-local-agent-copy" style={{ margin: 0, color: 'var(--text-tertiary)' }}>
+                  <div className="v10-local-agent-copy v10-local-agent-copy-flat">
                     {attachmentTargetIds.length > 1
                       ? 'Queued files keep their stored targets and may span multiple projects.'
                       : `Queued files keep their stored target (${getProjectDisplayName(availableProjects, attachmentTargetIds[0]!)}), not the active project.`}
@@ -703,7 +690,7 @@ export function ConnectedAgentsTab(props: {
                   ref={attachmentInputRef}
                   type="file"
                   multiple
-                  style={{ display: 'none' }}
+                  className="v10-local-agent-file-input"
                   onChange={(e) => {
                     if (e.target.files) {
                       onAddAttachments(e.target.files);

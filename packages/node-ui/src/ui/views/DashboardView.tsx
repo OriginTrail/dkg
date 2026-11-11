@@ -38,11 +38,11 @@ const CG_DEFINITION =
 // the shared CSS-var tokens (NOT raw hex) so they remap in light theme;
 // kept in sync with MemoryStackView so the dashboard reads as one system.
 const LAYERS = [
-  { key: 'wm', label: 'Working Memory', short: 'WM', color: 'var(--layer-working)',
+  { key: 'wm', label: 'Working Memory', short: 'WM',
     desc: 'Private agent drafts — free, self-attested, persists locally.' },
-  { key: 'swm', label: 'Shared Working Memory', short: 'SWM', color: 'var(--layer-shared)',
+  { key: 'swm', label: 'Shared Working Memory', short: 'SWM',
     desc: 'Team proposals — free, gossip-replicated across context-graph peers.' },
-  { key: 'vm', label: 'Verifiable Memory', short: 'VM', color: 'var(--layer-verified)',
+  { key: 'vm', label: 'Verifiable Memory', short: 'VM',
     desc: 'On-chain knowledge — permanent, verifiable, requires TRAC to publish.' },
 ] as const;
 
@@ -123,9 +123,9 @@ function LayerBar({ counts }: { counts: LayerCounts }) {
           return (
             <span
               key={l.key}
-              className="v10-layerbar-seg"
+              className={`v10-layerbar-seg v10-layer-tone-fill layer-tone-${l.key}`}
               title={`${l.label} (${counts[l.key]}) — ${l.desc}`}
-              style={{ width: `${pct}%`, background: l.color }}
+              style={{ width: `${pct}%` }}
             />
           );
         })
@@ -139,7 +139,7 @@ function LayerLegend() {
     <div className="v10-layer-legend">
       {LAYERS.map((l) => (
         <span key={l.key} className="v10-layer-legend-item" title={`${l.label} — ${l.desc}`}>
-          <span className="v10-layer-legend-dot" style={{ background: l.color }} />
+          <span className={`v10-layer-legend-dot v10-layer-tone-fill layer-tone-${l.key}`} />
           {l.short}
         </span>
       ))}
@@ -153,8 +153,6 @@ function LayerLegend() {
 function RoleBar({ curator, joined, refreshing }: { curator: number; joined: number; refreshing?: boolean }) {
   const sum = curator + joined;
   const summary = `Curator ${curator} · Joined ${joined}`;
-  const CUR = 'var(--role)';
-  const JOIN = 'var(--text-secondary)';
   return (
     <div
       className={`v10-cg-rolesplit${refreshing ? ' is-refreshing' : ''}`}
@@ -171,16 +169,16 @@ function RoleBar({ curator, joined, refreshing }: { curator: number; joined: num
           <>
             {curator > 0 && (
               <span
-                className="v10-layerbar-seg"
+                className="v10-layerbar-seg v10-role-fill-curator"
                 title={`Curator (${curator}): context graphs you created and curate`}
-                style={{ width: `${(curator / sum) * 100}%`, background: CUR }}
+                style={{ width: `${(curator / sum) * 100}%` }}
               />
             )}
             {joined > 0 && (
               <span
-                className="v10-layerbar-seg"
+                className="v10-layerbar-seg v10-role-fill-joined"
                 title={`Joined (${joined}): context graphs you joined as a member`}
-                style={{ width: `${(joined / sum) * 100}%`, background: JOIN }}
+                style={{ width: `${(joined / sum) * 100}%` }}
               />
             )}
           </>
@@ -191,13 +189,13 @@ function RoleBar({ curator, joined, refreshing }: { curator: number; joined: num
           className="v10-layer-legend-item"
           title="Curator: context graphs you created and curate"
         >
-          <span className="v10-layer-legend-dot" style={{ background: CUR }} />Curator {curator}
+          <span className="v10-layer-legend-dot v10-role-fill-curator" />Curator {curator}
         </span>
         <span
           className="v10-layer-legend-item"
           title="Joined: context graphs you joined as a member"
         >
-          <span className="v10-layer-legend-dot" style={{ background: JOIN }} />Joined {joined}
+          <span className="v10-layer-legend-dot v10-role-fill-joined" />Joined {joined}
         </span>
       </div>
     </div>

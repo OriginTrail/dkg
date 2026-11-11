@@ -96,7 +96,7 @@
 
 /* ----- EligibilityVerdictBanner ----- */
 .v10-pca-verdict-banner {
-  padding: 10px 14px;
+  padding: var(--pad-nested);
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
 }
@@ -236,7 +236,7 @@
   background: var(--bg-surface);
   color: var(--text-secondary);
   font-size: var(--fs-label);
-  padding: var(--space-4) 10px;
+  padding: var(--space-4) var(--space-12);
   border-radius: var(--radius-control);
   cursor: pointer;
 }

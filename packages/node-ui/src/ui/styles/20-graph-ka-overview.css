@@ -26,8 +26,8 @@
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 10px;
+  gap: var(--space-8);
+  padding: var(--space-12);
   border-left: 1px solid var(--border-subtle);
   background: color-mix(in srgb, var(--bg-panel) 86%, transparent);
 }
@@ -62,7 +62,7 @@
 .v10-graph-singleton-head {
   display: flex;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-8);
   padding: var(--space-8) var(--space-8);
   border-bottom: 1px solid var(--border-subtle);
   font-size: var(--fs-micro);
@@ -121,7 +121,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-16);
-  padding: var(--space-12) 14px;
+  padding: var(--space-12) var(--space-16);
   border-bottom: 1px solid var(--border-subtle);
 }
 .v10-graph-expanded-title {
@@ -221,7 +221,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-ka-event-dot.created { border-color: var(--layer-working); background: color-mix(in srgb, var(--layer-working) 15%, transparent); }
 .v10-ka-event-dot.shared { border-color: var(--layer-shared); background: color-mix(in srgb, var(--layer-shared) 15%, transparent); }
 .v10-ka-event-dot.verified { border-color: var(--layer-verified); background: color-mix(in srgb, var(--layer-verified) 15%, transparent); }
-.v10-ka-event-header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: var(--space-2); }
+.v10-ka-event-header { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-8); margin-bottom: var(--space-2); }
 .v10-ka-event-title { font-size: var(--fs-label); font-weight: 600; color: var(--text-primary); }
 .v10-ka-event-time { font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--text-tertiary); white-space: nowrap; margin-left: auto; }
 
@@ -259,6 +259,10 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   overflow: hidden;
   transition: border-color var(--motion-base) ease, transform var(--motion-base) ease, box-shadow var(--motion-base) ease;
 }
+/* A named sub-graph card's border is its colour at a third strength. */
+.v10-sgov-card:not(.root) {
+  border-color: color-mix(in srgb, var(--sg-color) 33.3%, transparent);
+}
 .v10-sgov-card:hover {
   transform: translateY(-1px);
   box-shadow: 0 8px 24px -12px var(--sg-color, var(--identity-fallback));
@@ -290,8 +294,8 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   color: var(--text-tertiary);
 }
 .v10-sgov-card-head {
-  display: flex; align-items: flex-start; gap: 10px;
-  padding: 10px var(--space-12) var(--space-8) var(--space-12);
+  display: flex; align-items: flex-start; gap: var(--space-8);
+  padding: var(--space-12) var(--space-12) var(--space-8) var(--space-12);
   border-bottom: 1px solid var(--border-subtle);
 }
 .v10-sgov-card-icon { font-size: var(--fs-heading); line-height: 1; margin-top: 1px; }
@@ -340,7 +344,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   font-size: var(--fs-label); color: var(--text-tertiary);
 }
 .v10-sgov-card-pyramid {
-  padding: 0 10px var(--space-6);
+  padding: 0 var(--space-12) var(--space-6);
 }
 
 /* ── Mini layer pyramid (WM/SWM/VM segmented bar + legend) ── */
@@ -382,3 +386,18 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 }
 .v10-minibar-short { letter-spacing: 0; }
 .v10-minibar-count { font-variant-numeric: tabular-nums; color: var(--text-tertiary); }
+
+/* ── Graph legend ── */
+.v10-swm-legend-swatch-amber { background: var(--accent-amber); }
+
+/* ── Knowledge Asset detail ── */
+.v10-ka-verify-hint.v10-ka-verify-hint-gap { margin-top: var(--space-6); }
+.v10-content-tabs.v10-ka-tabs-flush { margin: 0 -20px; padding: 0 var(--space-20); background: transparent; }
+.v10-ka-table-wrap { margin-top: var(--space-8); overflow-x: auto; border: 1px solid var(--border-default); border-radius: var(--radius-control); }
+.v10-ka-table-note { font-size: var(--fs-micro); color: var(--text-tertiary); font-family: var(--font-mono); padding: var(--space-6) var(--space-8); }
+.v10-ka-meta-line { margin-top: var(--space-16); padding: var(--space-12) var(--space-12); border-radius: var(--radius-control); background: var(--bg-surface); border: 1px solid var(--border-subtle); }
+.v10-ka-section-title.v10-ka-meta-title { margin-bottom: var(--space-6); }
+.v10-ka-meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); font-size: var(--fs-micro); }
+.v10-ka-meta-row { display: flex; justify-content: space-between; }
+.v10-ka-meta-label { color: var(--text-tertiary); }
+.v10-ka-meta-value { color: var(--text-primary); font-weight: 600; font-family: var(--font-mono); }

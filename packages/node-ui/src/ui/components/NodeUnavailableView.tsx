@@ -5,8 +5,8 @@ import { RefreshCw } from 'lucide-react';
 export function NodeUnavailableView() {
 
   return (
-    <main className="v10-app" style={{ alignItems: 'center', justifyContent: 'center', padding: 24 }}>
-      <section role="alert" style={{ maxWidth: 480, lineHeight: 'var(--lh-loose)' }}>
+    <main className="v10-app v10-unavailable">
+      <section role="alert" className="v10-unavailable-card">
         <h1>Node unavailable</h1>
         <p>Live node data could not be loaded. The node may be stopped, timing out or returning errors.</p>
         <p>Node status, balances, graphs and integration readiness are unavailable. Check that the node is running, then reload the page.</p>

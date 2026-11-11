@@ -54,7 +54,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-8);
-  padding: var(--space-8) 10px;
+  padding: var(--pad-nested-sm);
   font-size: var(--fs-label);
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-subtle);
@@ -63,7 +63,7 @@
 .v10-agent-tab-menu-item {
   display: block;
   width: 100%;
-  padding: var(--space-8) 10px;
+  padding: var(--pad-nested-sm);
   background: transparent;
   border: 0;
   text-align: left;
@@ -145,6 +145,7 @@
   transform: rotate(180deg);
 }
 .v10-select-menu {
+  position: fixed;
   max-height: 240px;
   overflow-y: auto;
   list-style: none;
@@ -157,13 +158,14 @@
 }
 .v10-select-menu:focus { outline: none; }
 .v10-select-menu-above {
+  transform: translateY(-100%);
   margin-top: -4px;
 }
 .v10-select-menu-below {
   margin-top: var(--space-4);
 }
 .v10-select-option {
-  padding: var(--space-8) 10px;
+  padding: var(--pad-nested-sm);
   font-size: var(--fs-control);
   color: var(--text-primary);
   border-radius: var(--radius-xs);
@@ -192,7 +194,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--space-12) 14px;
+  padding: var(--space-12) var(--space-16);
 }
 
 /* Floating "scroll to latest" pill — sticks to the bottom-center of the
@@ -320,3 +322,10 @@
   align-items: stretch;
   gap: var(--space-8);
 }
+
+/* ── Connected agents ── */
+.v10-local-agent-attachment-row { display: flex; flex-wrap: wrap; gap: var(--space-6); margin-top: var(--space-6); }
+.v10-local-agent-attachment-chip { padding: var(--space-2) var(--space-8); border-radius: var(--radius-pill); background: var(--bg-elevated); font-size: var(--fs-label); }
+.v10-local-agent-stack { display: flex; flex-direction: column; gap: var(--space-8); width: 100%; }
+.v10-local-agent-copy.v10-local-agent-copy-flat { margin: 0; color: var(--text-tertiary); }
+.v10-local-agent-file-input { display: none; }

@@ -71,7 +71,7 @@
    label, each over its WM/SWM/VM bar; tightened so the card is compact. */
 /* The two metrics carry the panel — give them air now they're large
    (ui-lead: 14px between metrics, 6px number→bar). */
-.v10-cg-size-detail { margin-top: var(--space-2); display: flex; flex-direction: column; gap: 14px; }
+.v10-cg-size-detail { margin-top: var(--space-2); display: flex; flex-direction: column; gap: var(--space-12); }
 .v10-cg-size-metric { display: flex; flex-direction: column; gap: var(--space-6); }
 .v10-cg-size-num { display: flex; align-items: baseline; gap: var(--space-6); }
 .v10-cg-size-big {
@@ -263,7 +263,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) 5.5em 5em;
   align-items: baseline;
-  gap: 10px;
+  gap: var(--space-8);
   font-size: var(--fs-body);
 }
 .v10-ws-wrow .v10-ws-bal,
@@ -323,7 +323,7 @@
      (round-2 feedback). */
   grid-template-columns: minmax(0, 1fr) 7em 5em;
   align-items: baseline;
-  gap: 10px;
+  gap: var(--space-8);
   font-size: var(--fs-body);
 }
 .v10-ws-spend-head {
@@ -348,3 +348,6 @@
 
 /* Collaborating agents: the agents themselves as avatars under the count. */
 .v10-stat-agents { margin: var(--space-2) 0 var(--space-6); }
+
+.v10-role-fill-curator { background: var(--role); }
+.v10-role-fill-joined { background: var(--text-secondary); }

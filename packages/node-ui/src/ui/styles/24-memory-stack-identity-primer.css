@@ -5,7 +5,7 @@
 }
 .v10-memstack-empty {
   font-size: var(--fs-control); color: var(--text-tertiary);
-  padding: 40px 0;
+  padding: var(--space-32) 0;
   text-align: center;
   border: 1px dashed var(--border-subtle);
 }
@@ -13,12 +13,12 @@
   /* Wider than a phone: the page scrolls sideways, so no layer column is cut off. */
   min-width: 720px;
   display: flex; flex-direction: column;
-  gap: 10px;
+  gap: var(--space-8);
 }
 .v10-memstack-colheads {
   display: grid;
   grid-template-columns: 220px repeat(3, 1fr);
-  gap: 10px;
+  gap: var(--space-8);
   padding: 0 var(--space-2) var(--space-4);
 }
 .v10-memstack-colhead {
@@ -42,12 +42,12 @@
 .v10-memstack-row {
   display: grid;
   grid-template-columns: 220px repeat(3, 1fr);
-  gap: 10px;
+  gap: var(--space-8);
   align-items: stretch;
 }
 .v10-memstack-project {
   display: flex; flex-direction: column;
-  padding: var(--space-12) 10px;
+  padding: var(--space-12) var(--space-12);
   border-right: 1px solid var(--border-subtle);
 }
 .v10-memstack-project-btn {
@@ -79,7 +79,7 @@
 
 .v10-memstack-cell {
   display: flex; flex-direction: column; gap: var(--space-6);
-  padding: 10px var(--space-12);
+  padding: var(--space-12) var(--space-12);
   border: 1px solid color-mix(in srgb, var(--cell-color, var(--identity-fallback)) 20%, var(--border-subtle));
   background: color-mix(in srgb, var(--cell-color, var(--identity-fallback)) 3%, transparent);
   min-height: 130px;
@@ -149,7 +149,7 @@
 }
 .v10-memstack-cell-open {
   align-self: flex-start;
-  padding: var(--space-4) 10px;
+  padding: var(--space-4) var(--space-12);
   background: none;
   border: 1px solid color-mix(in srgb, var(--cell-color, var(--identity-fallback)) 30%, var(--border-subtle));
   border-radius: var(--radius-control);
@@ -169,7 +169,7 @@
 /* ── Verifiable Memory on-chain identity banner (KA detail, right pane) ── */
 .v10-vm-identity {
   margin-bottom: var(--space-16);
-  padding: var(--space-12) 14px;
+  padding: var(--space-12) var(--space-16);
   background: var(--layer-verified-bg);
   border: 1px solid var(--layer-verified-border);
   display: flex; flex-direction: column; gap: var(--space-8);
@@ -265,7 +265,7 @@
 
 /* ── Persistent project header strip ── */
 .v10-project-strip {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: var(--space-8);
   flex-shrink: 0;
   padding: var(--space-8) var(--space-16);
   border-bottom: 1px solid var(--border-subtle);
@@ -313,7 +313,7 @@
 .v10-project-strip-desc {
   font-size: var(--fs-control); color: var(--text-secondary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  margin-left: 14px;
+  margin-left: var(--space-12);
   max-width: 720px;
   padding-left: 0;
   flex: 0 1 auto;
@@ -323,7 +323,7 @@
 .v10-primer-view {
   height: 100%;
   overflow: auto;
-  padding: 28px var(--space-32);
+  padding: var(--space-32) var(--space-32);
   background: var(--bg-panel);
   color: var(--text-primary);
 }
@@ -346,12 +346,12 @@
   grid-template-columns: minmax(0, 1fr) 32px minmax(0, 1fr) 32px minmax(0, 1fr);
   align-items: center;
   max-width: 980px;
-  gap: 10px;
+  gap: var(--space-8);
   padding: var(--space-24) 0;
 }
 .v10-primer-pipeline span:not(.connector) {
   min-width: 0;
-  padding: var(--space-12) 14px;
+  padding: var(--space-12) var(--space-16);
   border-radius: var(--radius-nested);
   border: 1px solid var(--border-default);
   color: var(--text-primary);
@@ -410,7 +410,7 @@
     border-left: 0;
     border-top: 1px solid var(--border-subtle); }
 .v10-center-content[data-narrow] .v10-graph-expanded-backdrop {
-    padding: 10px; }
+    padding: var(--space-12); }
 .v10-center-content[data-narrow] .v10-graph-singleton-shelf {
     max-height: 26%; }
 .v10-center-content[data-narrow] .v10-primer-view { padding: var(--space-24) var(--space-16); }
@@ -420,3 +420,5 @@
     width: 1px;
     height: 18px;
     justify-self: center; }
+
+.v10-memstack-cell { --cell-color: var(--layer-tone); }

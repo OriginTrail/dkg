@@ -109,7 +109,9 @@ The same rules as nOS, so the two products read alike. Write for someone who run
 
 ### Spacing
 
-Padding, margins and gaps use `--space-2`, `--space-4`, `--space-6`, `--space-8`, `--space-12`, `--space-16`, `--space-20`, `--space-24` and `--space-32`. 10 and 14 only appear inside the nested padding tokens and older rules, and a test stops that number growing.
+Padding, margins and gaps use `--space-2`, `--space-4`, `--space-6`, `--space-8`, `--space-12`, `--space-16`, `--space-20`, `--space-24` and `--space-32`. 10 and 14 only appear inside the nested padding tokens. A value that lands between two steps rounds up for padding and down for gaps and margins, so density stays about the same.
+
+Styles belong in a stylesheet. A `style` attribute is only for a value worked out from data at runtime, such as a bar's width, a Context Graph's colour or a panel's dragged size, and it carries only that value. A value known from a name, such as a layer's colour, is a class (`layer-tone-wm`, `layer-tone-swm`, `layer-tone-vm`).
 
 ### Card padding
 
@@ -227,7 +229,7 @@ Every token in `00-theme.css` is listed in this file, and `test/design-docs.test
 | Group | Tokens | Use |
 |---|---|---|
 | Layer colours | `--layer-shared-bg`, `--layer-shared-border`, `--layer-shared-text`, `--layer-verified-bg`, `--layer-verified-border`, `--layer-verified-text`, `--layer-working-bg`, `--layer-working-border`, `--layer-working-text` | Fills, outlines and text for the memory layers |
-| Signal variants | `--accent-amber`, `--accent-red`, `--danger-bg-strong`, `--danger-border`, `--danger-stripe`, `--success-bg-strong`, `--success-border`, `--text-danger-hover`, `--text-on-accent`, `--warning-bg-strong`, `--warning-border` | Stronger washes, outlines and text for the signals |
+| Signal variants | `--accent-amber`, `--accent-red`, `--danger-bg-strong`, `--danger-border`, `--danger-stripe`, `--success-border`, `--text-danger-hover`, `--text-on-accent`, `--warning-bg-strong`, `--warning-border` | Stronger washes, outlines and text for the signals |
 | Layout and scale | `--accent-vm-hover`, `--font-mono`, `--font-sans`, `--fs-layer`, `--header-h`, `--tab-h` | Fixed shell heights and the remaining scale steps |
 
 ## Changing the system

@@ -50,12 +50,11 @@ export function PcaModalShell({
       >
         <button
           type="button"
-          className="v10-modal-close ds-btn ds-ghost ds-icon"
+          className="v10-modal-close ds-btn ds-ghost ds-icon v10-modal-close-corner"
           onClick={handleClose}
           aria-label={dismissDisabled ? 'Close disabled while signing' : 'Close dialog'}
           title={dismissDisabled ? 'Finish or reject the wallet prompt first' : 'Close (Esc)'}
           disabled={dismissDisabled}
-          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: dismissDisabled ? 'not-allowed' : 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4, zIndex: 1, opacity: dismissDisabled ? 0.45 : 1 }}
         >
           <X size={14} />
         </button>

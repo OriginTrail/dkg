@@ -122,7 +122,7 @@
   align-items: center;
   gap: var(--space-8);
   flex-wrap: wrap;
-  padding: var(--space-4) var(--space-6) var(--space-4) 10px;
+  padding: var(--space-4) var(--space-6) var(--space-4) var(--space-12);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-nested);
   background: var(--bg-surface);

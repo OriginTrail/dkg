@@ -132,7 +132,7 @@
 .v10-entity-list-sort-select:focus { outline: 1px solid var(--focus-ring); outline-offset: 1px; }
 .v10-entity-card {
   display: flex; align-items: center; gap: var(--space-12);
-  padding: 10px var(--space-16);
+  padding: var(--space-12) var(--space-16);
   border-bottom: 1px solid var(--border-subtle);
   cursor: pointer; transition: background var(--motion-fast);
 }
@@ -159,7 +159,7 @@
 }
 .v10-layer-expand-tabs {
   display: flex; align-items: stretch; gap: var(--space-2);
-  padding: 0 10px; border-bottom: 1px solid var(--border-subtle);
+  padding: 0 var(--space-12); border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-panel); height: var(--h-control-md); min-height: var(--h-control-md);
   flex-shrink: 0;
 }
@@ -172,7 +172,7 @@
 
 /* ── Item rows (shared by layer views) ── */
 .v10-item-row {
-  display: flex; align-items: center; gap: 10px; padding: var(--space-8) var(--space-16);
+  display: flex; align-items: center; gap: var(--space-8); padding: var(--space-8) var(--space-16);
   border-bottom: 1px solid var(--border-subtle); cursor: pointer; transition: background var(--motion-fast);
 }
 .v10-item-row:hover { background: var(--bg-hover); }
@@ -191,7 +191,7 @@
 .v10-layer-detail { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .v10-layer-detail-header {
   padding: var(--space-12) var(--space-16); border-bottom: 1px solid var(--border-subtle);
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: var(--space-8);
 }
 .v10-layer-detail-icon { font-size: var(--fs-heading); }
 .v10-layer-detail-title { font-size: var(--fs-title); font-weight: 600; color: var(--text-primary); }
@@ -221,10 +221,10 @@
 @keyframes v10SlideUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 .v10-gen-widget-header {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 14px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-elevated);
+  padding: var(--pad-nested); border-bottom: 1px solid var(--border-subtle); background: var(--bg-elevated);
 }
 .v10-gen-widget-title { font-size: var(--fs-body); font-weight: 600; color: var(--text-primary); }
-.v10-gen-widget-right { display: flex; align-items: center; gap: 10px; }
+.v10-gen-widget-right { display: flex; align-items: center; gap: var(--space-8); }
 .v10-gen-widget-agent { display: flex; align-items: center; gap: var(--space-4); font-size: var(--fs-micro); color: var(--text-tertiary); font-family: var(--font-mono); }
 .v10-gen-widget-agent-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--role); }
 .v10-gen-widget-dismiss {
@@ -232,12 +232,12 @@
   transition: all var(--motion-base); cursor: pointer; border: none; background: none;
 }
 .v10-gen-widget-dismiss:hover { color: var(--text-secondary); background: var(--bg-hover); }
-.v10-gen-widget-body { padding: 14px; }
-.v10-gen-widget-footnote { padding: 10px 14px; border-top: 1px solid var(--border-subtle); font-size: var(--fs-micro); color: var(--text-tertiary); line-height: var(--lh-body); }
+.v10-gen-widget-body { padding: var(--space-16); }
+.v10-gen-widget-footnote { padding: var(--pad-nested); border-top: 1px solid var(--border-subtle); font-size: var(--fs-micro); color: var(--text-tertiary); line-height: var(--lh-body); }
 .v10-gen-widget.dissolved { opacity: 0.3; filter: blur(1px); pointer-events: none; max-height: 40px; overflow: hidden; transition: all var(--motion-slow); }
 
 /* Decision card widget */
-.v10-decision-context { font-size: var(--fs-control); color: var(--text-secondary); line-height: var(--lh-loose); margin-bottom: 14px; }
+.v10-decision-context { font-size: var(--fs-control); color: var(--text-secondary); line-height: var(--lh-loose); margin-bottom: var(--space-12); }
 .v10-decision-actions { display: flex; gap: var(--space-8); }
 .v10-decision-btn { flex: 1; }
 
@@ -278,8 +278,8 @@
   min-height: 34px;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: var(--space-8) 10px var(--space-8) var(--space-12);
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-12) var(--space-8) var(--space-12);
   border-bottom: 1px solid var(--border-subtle);
   background: color-mix(in srgb, var(--bg-surface) 80%, transparent);
 }
@@ -319,3 +319,9 @@
   /* Below the shelf in the canvas stacking context. */
   z-index: 0;
 }
+
+/* ── Entities list ── */
+.v10-docs-placeholder.v10-layer-empty-fill { flex: 1; }
+
+/* ── Layer decision widgets ── */
+.v10-decision-context.v10-decision-context-gap { margin-bottom: var(--space-8); }

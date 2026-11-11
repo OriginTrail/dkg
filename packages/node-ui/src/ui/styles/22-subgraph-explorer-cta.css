@@ -50,12 +50,12 @@
   letter-spacing: 0;
   /* #11 polish (ui-locked) — +2px below the lede so the count
      strip sits cleanly beneath. */
-  margin-bottom: 10px;
+  margin-bottom: var(--space-8);
 }
 .v10-subgraph-cross-layer-strip {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-8);
   flex-wrap: wrap;
 }
 .v10-subgraph-cross-layer-cell {
@@ -167,7 +167,7 @@
    visually anticipates the destination layer. */
 .v10-ka-verify {
   margin-top: var(--space-16);
-  padding: 14px;
+  padding: var(--space-16);
   border-radius: var(--radius-nested);
   display: flex;
   flex-direction: column;

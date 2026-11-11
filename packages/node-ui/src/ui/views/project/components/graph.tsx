@@ -611,7 +611,7 @@ export function LayerGraphPanel({
               format="triples"
               options={graphOptions}
               viewConfig={graphViewConfig}
-              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
+              className="v10-graph-fill"
               onNodeClick={nodeLayerContext
                 ? (node: any) => onNodeClick?.({ ...node, trustLayer: nodeLayerContext })
                 : onNodeClick}
@@ -648,7 +648,7 @@ export function SwmAttributionLegend({ palette, conflicts }: { palette: AgentPal
       ))}
       {conflicts > 0 && (
         <div className="v10-swm-legend-row v10-swm-legend-conflict">
-          <span className="v10-swm-legend-swatch" style={{ background: 'var(--accent-amber)' }}>!</span>
+          <span className="v10-swm-legend-swatch v10-swm-legend-swatch-amber">!</span>
           <span className="v10-swm-legend-label">In review</span>
           <span className="v10-swm-legend-metric">{conflicts}</span>
         </div>
@@ -686,7 +686,7 @@ export function VerifiedGraphLegend({ anchors }: { anchors: readonly VmReceipt[]
         <Badge size="sm" tone="vm" className="v10-vm-legend-count">{anchors.length} anchor{anchors.length === 1 ? '' : 's'}</Badge>
       </div>
       <div className="v10-vm-legend-row">
-        <span className="v10-vm-legend-swatch" style={{ background: palette.anchor.fill, color: 'var(--text-on-identity)', boxShadow: `0 0 0 2px ${palette.anchor.ring}` }}><Anchor size={12} /></span>
+        <span className="v10-vm-legend-swatch v10-vm-legend-swatch-anchor" style={{ background: palette.anchor.fill, '--swatch-ring': palette.anchor.ring } as React.CSSProperties}><Anchor size={12} /></span>
         <span className="v10-vm-legend-label">On-chain anchor</span>
       </div>
       <div className="v10-vm-legend-row">

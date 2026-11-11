@@ -233,7 +233,7 @@ export function VerifyOnDkgButton({
               <StatusGlyph tone="success" /> {result.promotedCount} triple{result.promotedCount === 1 ? '' : 's'} now in Shared Memory
             </span>
           </div>
-          <div className="v10-ka-verify-hint" style={{ marginTop: 6 }}>
+          <div className="v10-ka-verify-hint v10-ka-verify-hint-gap">
             Refresh the entity to see the next step appear.
           </div>
         </div>
@@ -264,7 +264,7 @@ export function VerifyOnDkgButton({
               </span>
             </div>
             {partial && (
-              <div className="v10-ka-verify-hint" style={{ marginTop: 6 }}>
+              <div className="v10-ka-verify-hint v10-ka-verify-hint-gap">
                 {partialPublishWarning(result.contextGraphError)}
               </div>
             )}
@@ -457,7 +457,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
       <div className="v10-ka-split">
         {/* Left pane: Content / Triples / Graph */}
         <div className="v10-ka-left">
-          <div className="v10-content-tabs" style={{ margin: '0 -20px', padding: '0 20px', background: 'transparent' }}>
+          <div className="v10-content-tabs v10-ka-tabs-flush">
             <button className={`v10-content-tab ds-tab ${pane === 'content' ? 'active' : ''}`} onClick={() => setPane('content')}>Content</button>
             <button className={`v10-content-tab ds-tab ${pane === 'triples' ? 'active' : ''}`} onClick={() => setPane('triples')}>Triples</button>
             <button className={`v10-content-tab ds-tab ${pane === 'graph' ? 'active' : ''}`} onClick={() => setPane('graph')}>Graph</button>
@@ -539,7 +539,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
           )}
 
           {pane === 'triples' && (
-            <div style={{ marginTop: 8, overflowX: 'auto', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-control)' }}>
+            <div className="v10-ka-table-wrap">
               <div className="ds-table-scroll"><table className="v10-ka-triples-table">
                 <thead>
                   <tr><th className="ds-table-head">Subject</th><th className="ds-table-head">Predicate</th><th className="ds-table-head">Object</th></tr>
@@ -554,7 +554,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
                   ))}
                 </tbody>
               </table></div>
-              <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', padding: '6px 8px' }}>
+              <div className="v10-ka-table-note">
                 {Math.min(entityTriples.length, 50)} of {entityTriples.length} triples shown
               </div>
             </div>
@@ -575,7 +575,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
                       format="triples"
                       options={graphOptions}
                       viewConfig={entityViewConfig}
-                      style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
+                      className="v10-graph-fill"
                       onNodeClick={(n: any) => n?.id && n.id !== entity.uri && onNavigate(n.id)}
                       initialFit
                       initialFocus={entity.uri}
@@ -610,24 +610,24 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
           />
 
           {/* Trust Summary */}
-          <div style={{ marginTop: 16, padding: '10px 12px', borderRadius: 'var(--radius-control)', background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)' }}>
-            <div className="v10-ka-section-title" style={{ marginBottom: 6 }}>Entity summary</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 'var(--fs-micro)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-tertiary)' }}>Type</span>
-                <span style={{ color: 'var(--text-primary)', fontWeight: 600, fontFamily: 'var(--font-mono)' }}>{type}</span>
+          <div className="v10-ka-meta-line">
+            <div className="v10-ka-section-title v10-ka-meta-title">Entity summary</div>
+            <div className="v10-ka-meta-grid">
+              <div className="v10-ka-meta-row">
+                <span className="v10-ka-meta-label">Type</span>
+                <span className="v10-ka-meta-value">{type}</span>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-tertiary)' }}>Triples</span>
-                <span style={{ color: 'var(--text-primary)', fontWeight: 600, fontFamily: 'var(--font-mono)' }}>{tripleCount}</span>
+              <div className="v10-ka-meta-row">
+                <span className="v10-ka-meta-label">Triples</span>
+                <span className="v10-ka-meta-value">{tripleCount}</span>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-tertiary)' }}>Links</span>
-                <span style={{ color: 'var(--text-primary)', fontWeight: 600, fontFamily: 'var(--font-mono)' }}>{entity.connections.length}</span>
+              <div className="v10-ka-meta-row">
+                <span className="v10-ka-meta-label">Links</span>
+                <span className="v10-ka-meta-value">{entity.connections.length}</span>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-tertiary)' }}>Layer</span>
-                <span style={{ color: 'var(--text-primary)', fontWeight: 600, fontFamily: 'var(--font-mono)' }}>{layerLabel.split(' ')[0]}</span>
+              <div className="v10-ka-meta-row">
+                <span className="v10-ka-meta-label">Layer</span>
+                <span className="v10-ka-meta-value">{layerLabel.split(' ')[0]}</span>
               </div>
             </div>
           </div>

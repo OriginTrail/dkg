@@ -30,10 +30,10 @@ const OnChainProvenanceCard = lazy(() =>
 type MemoryLayer = 'wm' | 'swm' | 'vm';
 type ViewMode = 'table' | 'graph';
 
-const LAYER_META: Record<MemoryLayer, { label: string; color: string; description: string }> = {
-  wm: { label: 'Working Memory', color: 'var(--layer-working)', description: 'Private agent drafts. Fast local storage.' },
-  swm: { label: 'Shared Working Memory', color: 'var(--layer-shared)', description: 'Shared proposals with collaborators. TTL-bounded.' },
-  vm: { label: 'Verifiable Memory', color: 'var(--layer-verified)', description: 'Endorsed, published, on-chain knowledge.' },
+const LAYER_META: Record<MemoryLayer, { label: string; description: string }> = {
+  wm: { label: 'Working Memory', description: 'Private agent drafts. Fast local storage.' },
+  swm: { label: 'Shared Working Memory', description: 'Shared proposals with collaborators. TTL-bounded.' },
+  vm: { label: 'Verifiable Memory', description: 'Endorsed, published, on-chain knowledge.' },
 };
 
 const TABLE_ICON = (
@@ -224,7 +224,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
   return (
     <div className="v10-memory-layer-view">
       <div className="v10-mlv-header">
-        <span className="v10-mlv-icon" style={{ color: meta.color }}><LayerGlyph layer={layer} /></span>
+        <span className={`v10-mlv-icon v10-layer-tone-text layer-tone-${layer}`}><LayerGlyph layer={layer} /></span>
         <PageHeader title={meta.label} description={meta.description} />
       </div>
 
@@ -352,12 +352,12 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       )}
 
       {loading && <Loading label="Loading…" />}
-      {error && <p className="v10-mlv-status" style={{ color: 'var(--text-danger)' }}>Error: {error}</p>}
+      {error && <p className="v10-mlv-status v10-mlv-status-error">Error: {error}</p>}
 
       {!loading && results.length === 0 && (
         <div className="v10-mlv-empty">
           <p>No triples found in {meta.label.toLowerCase()}.</p>
-          <p style={{ fontSize: 'var(--fs-label)', marginTop: 4 }}>
+          <p className="v10-mlv-detail">
             {layer === 'wm' && 'Import files or chat with your agent to generate working memory.'}
             {layer === 'swm' && 'Promote assertions from working memory to share with collaborators.'}
             {layer === 'vm' && 'Publish shared memory to create verified on-chain knowledge.'}
@@ -401,7 +401,6 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
               format="triples"
               options={graphOptionsForView}
               viewConfig={graphViewConfig}
-              style={{ width: '100%', height: '100%' }}
               onNodeClick={handleNodeClick}
               initialFit
             >
@@ -800,18 +799,18 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
                   : 'NOT published to Verifiable Memory'}
             </div>
             {partial > 0 && (
-              <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
+              <div className="v10-publish-result-details v10-publish-result-gap">
                 <StatusGlyph tone="warning" /> {partial} asset{partial === 1 ? '' : 's'}: {partialPublishWarning(partialError)}
               </div>
             )}
             {failures.length > 0 && (
-              <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
+              <div className="v10-publish-result-details v10-publish-result-gap">
                 {failures.length} asset{failures.length === 1 ? '' : 's'} could not be published — {failures[0].name}: {failures[0].error}
                 {failures.length > 1 ? ` (+${failures.length - 1} more)` : ''}
               </div>
             )}
             {unknownNote && (
-              <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
+              <div className="v10-publish-result-details v10-publish-result-gap">
                 <StatusGlyph tone="warning" /> {unknownNote}
               </div>
             )}

@@ -233,31 +233,23 @@ export function WireWorkspacePanel({
   if (installResult) {
     return (
       <div>
-        <div style={{
-          padding: '12px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 14, fontSize: 'var(--fs-control)',
-          background: 'var(--success-bg)', border: '1px solid var(--success-border)',
-          color: 'var(--text-success)',
-        }}>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>Workspace wired.</div>
-          Open <code style={{ fontFamily: 'var(--font-mono)' }}>{workspaceRoot}</code> in {toolSelection === 'claude-code' ? 'Claude Code' : (toolSelection === 'both' ? 'Cursor or Claude Code' : 'Cursor')}.
+        <div className="v10-wire-success">
+          <div className="v10-wire-title">Workspace wired.</div>
+          Open <code className="v10-wire-code">{workspaceRoot}</code> in {toolSelection === 'claude-code' ? 'Claude Code' : (toolSelection === 'both' ? 'Cursor or Claude Code' : 'Cursor')}.
           On the first chat, your agent will see the project ontology
           {variant === 'join' ? ', tasks, and decisions' : ' you publish'}.
         </div>
 
-        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', marginBottom: 8 }}>
+        <div className="v10-wire-text">
           Files written:
         </div>
-        <pre style={{
-          fontSize: 'var(--fs-micro)', fontFamily: 'var(--font-mono)', maxHeight: 200, overflow: 'auto',
-          padding: 10, borderRadius: 'var(--radius-control)', background: 'var(--bg-elevated)',
-          border: '1px solid var(--border-default)', margin: 0,
-        }}>
+        <pre className="v10-wire-pre">
           {installResult.written.map((w) => `${w.action.padEnd(9)} ${w.absPath} (${formatNumber(w.bytesWritten)} bytes)`).join('\n')}
           {installResult.skipped.length ? '\n\nSkipped:\n' + installResult.skipped.map((s) => `  - ${s}`).join('\n') : ''}
           {installResult.warnings.length ? '\n\nWarnings:\n' + installResult.warnings.map((w) => `  - ${w}`).join('\n') : ''}
         </pre>
 
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
+        <div className="v10-wire-end">
           <button className="v10-modal-btn primary ds-btn ds-primary" onClick={onDone}>Done</button>
         </div>
       </div>
@@ -268,21 +260,17 @@ export function WireWorkspacePanel({
   if (planResult) {
     return (
       <div>
-        {error && <div role="alert" className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
+        {error && <div role="alert" className="v10-modal-error ds-card-nested v10-wire-error">{error}</div>}
 
-        <div style={{ marginBottom: 10, fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>
+        <div className="v10-wire-intro">
           Review the install plan. Files are only written when you click Install.
         </div>
 
-        <pre style={{
-          fontSize: 'var(--fs-micro)', fontFamily: 'var(--font-mono)', maxHeight: 320, overflow: 'auto',
-          padding: 12, borderRadius: 'var(--radius-control)', background: 'var(--bg-elevated)',
-          border: '1px solid var(--border-default)', margin: 0, whiteSpace: 'pre-wrap',
-        }}>
+        <pre className="v10-wire-pre-tall">
           {planResult.markdown}
         </pre>
 
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 14, gap: 10 }}>
+        <div className="v10-wire-actions">
           <button
             className="v10-modal-btn ds-btn"
             onClick={() => { setPlanResult(null); setError(null); }}
@@ -290,7 +278,7 @@ export function WireWorkspacePanel({
           >
             ← Back
           </button>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div className="v10-wire-action-group">
             <button className="v10-modal-btn ds-btn" onClick={onDone} disabled={busy}>Skip for now</button>
             <button
               className="v10-modal-btn primary ds-btn ds-primary"
@@ -311,12 +299,8 @@ export function WireWorkspacePanel({
 
   return (
     <div>
-      <div style={{
-        padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 14, fontSize: 'var(--fs-control)',
-        background: 'var(--tint-subtle)', border: '1px solid var(--border-default)',
-        color: 'var(--accent-primary)',
-      }}>
-        <div style={{ fontWeight: 600, marginBottom: 4 }}>
+      <div className="v10-wire-info">
+        <div className="v10-wire-info-title">
           {variant === 'create' ? 'Wire your local workspace' : 'Wire this project locally'}
         </div>
         {variant === 'create'
@@ -324,20 +308,19 @@ export function WireWorkspacePanel({
           : 'Choose a folder for this project and the coding tool you’ll use. The node adds the setup files your agent needs, so it can work on this project.'}
       </div>
 
-      {error && <div role="alert" className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
+      {error && <div role="alert" className="v10-modal-error ds-card-nested v10-wire-error">{error}</div>}
 
       <div className="v10-form-group">
         <label className="v10-form-label">Workspace path</label>
         <input aria-label="Workspace path"
-          className="v10-form-input ds-input"
+          className="v10-form-input ds-input v10-wire-input"
           type="text"
           value={workspaceRoot}
           onChange={(e) => setWorkspaceRoot(e.target.value)}
           placeholder={host ? `${host.defaultWorkspaceParent}/${slug}` : '/Users/you/code/project'}
           spellCheck={false}
-          style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-control)' }}
         />
-        <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 4 }}>
+        <div className="v10-wire-hint">
           Use a full path. The folder is created if it doesn't exist. The node writes only to this folder, and to <code>~/.claude/settings.json</code> if you choose Claude Code.
           {host && <> Defaulted from your <code>$HOME</code> = <code>{host.homedir}</code>.</>}
         </div>
@@ -360,7 +343,7 @@ export function WireWorkspacePanel({
             </option>
           ))}
         </select>
-        <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 4 }}>
+        <div className="v10-wire-hint">
           {toolDescription}
         </div>
       </div>
@@ -368,14 +351,13 @@ export function WireWorkspacePanel({
       <div className="v10-form-group">
         <label className="v10-form-label">Your agent identity</label>
         <input aria-label="Your agent identity"
-          className="v10-form-input ds-input"
+          className="v10-form-input ds-input v10-wire-input-readonly"
           type="text"
           value={agent ? `urn:dkg:agent:${agent.agentAddress.toLowerCase()}` : 'fetching…'}
           disabled
           spellCheck={false}
-          style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-label)', opacity: 0.75 }}
         />
-        <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 4 }}>
+        <div className="v10-wire-hint">
           Cryptographic URI derived from this node's wallet address. Same on every project on this machine. Attribution
           (<code>prov:wasAttributedTo</code>) on every chat turn uses this URI.
         </div>
@@ -392,13 +374,13 @@ export function WireWorkspacePanel({
           spellCheck={false}
           maxLength={80}
         />
-        <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 4 }}>
+        <div className="v10-wire-hint">
           Your agent's name in the node UI, and in the data it writes.
           Doesn't affect attribution — only changes how you appear to others.
         </div>
       </div>
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 14, gap: 10 }}>
+      <div className="v10-wire-actions">
         {onCancel
           ? <button className="v10-modal-btn ds-btn" onClick={onCancel} disabled={busy}>Cancel</button>
           : <button className="v10-modal-btn ds-btn" onClick={onDone} disabled={busy}>Skip for now</button>}

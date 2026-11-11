@@ -151,8 +151,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
   return (
     <div className="v10-modal-overlay" onClick={onBackdropClick} role="presentation">
       <div
-        className="v10-modal-box ds-overlay"
-        style={{ maxWidth: 560 }}
+        className="v10-modal-box ds-overlay v10-import-box"
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
@@ -163,10 +162,9 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
             so an absolutely-positioned button would anchor to the overlay
             viewport instead of the modal; see #959 Codex review). */}
         <div
-          className="v10-modal-header"
-          style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}
+          className="v10-modal-header v10-modal-header-row"
         >
-          <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="v10-modal-heading">
             <div id="dkg-import-modal-title" className="v10-modal-title">Import to Working Memory</div>
             <div className="v10-modal-subtitle">
               {contextGraphName
@@ -182,7 +180,6 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
             disabled={status === 'uploading'}
             aria-label="Close import dialog"
             title="Close (Esc)"
-            style={{ flexShrink: 0, cursor: status === 'uploading' ? 'not-allowed' : 'pointer' }}
           >
             <X size={14} />
           </button>
@@ -203,17 +200,17 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                 <div className="v10-import-dropzone-label">
                   Drag files here, or click to browse
                 </div>
-                <div className="v10-import-dropzone-hint" style={{ marginTop: 4 }}>
+                <div className="v10-import-dropzone-hint v10-import-hint-gap">
                   Your agent will extract structured knowledge and add it to working memory.
                 </div>
-                <div className="v10-import-dropzone-hint" style={{ marginTop: 8 }}>
+                <div className="v10-import-dropzone-hint v10-import-hint-wide">
                   Supported: {SUPPORTED_EXTENSIONS}
                 </div>
                 <input
                   ref={inputRef}
                   type="file"
                   multiple
-                  style={{ display: 'none' }}
+                  className="v10-import-file-input"
                   onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }}
                 />
               </div>
@@ -230,19 +227,19 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                       </div>
                     ))}
                   </div>
-                  <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginBottom: 12 }}>
+                  <div className="v10-import-lead">
                     {files.length} file{files.length !== 1 ? 's' : ''} selected · {formatBytes(files.reduce((s, f) => s + f.file.size, 0))} total
                   </div>
                 </>
               )}
 
               <div className="v10-form-divider" />
-              <div className="v10-form-label" style={{ marginBottom: 8 }}>Import options <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></div>
-              <label className="v10-import-option" style={{ opacity: 0.5, pointerEvents: 'none' }}>
+              <div className="v10-form-label v10-import-label">Import options <span className="v10-import-label-tag">(coming soon)</span></div>
+              <label className="v10-import-option v10-import-option-off">
                 <input type="checkbox" checked={storeOriginals} disabled readOnly />
                 Store original files as Knowledge Assets
               </label>
-              <label className="v10-import-option" style={{ opacity: 0.5, pointerEvents: 'none' }}>
+              <label className="v10-import-option v10-import-option-off">
                 <input type="checkbox" checked={extractKnowledge} disabled readOnly />
                 Let agent extract structured knowledge from content
               </label>
@@ -251,10 +248,10 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
 
           {status === 'uploading' && (
             <div className="v10-import-progress ds-card-nested">
-              <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', fontWeight: 500 }}>
+              <div className="v10-import-status">
                 Importing files… ({currentFile + 1} of {files.length})
               </div>
-              <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginTop: 4 }}>
+              <div className="v10-import-status-note">
                 {files[currentFile]?.file.name ?? '…'}
               </div>
               <div className="v10-import-progress-bar">
@@ -303,14 +300,14 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
               </div>
 
               {results.length > 0 && (
-                <div className="v10-import-file-list ds-card-nested" style={{ marginTop: 12 }}>
+                <div className="v10-import-file-list ds-card-nested v10-import-list-gap">
                   {results.map((r, i) => (
                     <div key={i} className="v10-import-file-item">
                       <span className="v10-import-file-icon">
                         {r.status === 'success' ? <Check size={14} /> : r.status === 'skipped' ? <Minus size={14} /> : <X size={14} />}
                       </span>
                       <span className="v10-import-file-name">{r.fileName}</span>
-                      <span className="v10-import-file-size" style={r.status === 'error' ? { color: 'var(--text-danger)' } : undefined}>
+                      <span className={r.status === 'error' ? 'v10-import-file-size v10-import-file-size-error' : 'v10-import-file-size'}>
                         {r.status === 'success' && r.triplesWritten != null ? `${r.triplesWritten} triples` :
                          r.status === 'skipped' ? 'stored (no extraction)' :
                          r.error ?? 'failed'}
