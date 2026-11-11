@@ -9,6 +9,7 @@ import {
   writePid,
 } from '../config.js';
 import { writeFileAtomic } from './fs-utils.js';
+import { assertStoreMigrationInactive } from './store-maintenance-gate.js';
 import { SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS } from './shutdown.js';
 import {
   MAX_SHUTDOWN_HARD_TIMEOUT_MS,
@@ -72,6 +73,7 @@ export const daemonRuntimeState = {
   async claim(pid: number, policy: ShutdownPolicy): Promise<void> {
     const validated = resolveShutdownPolicy(String(policy.hardTimeoutMs));
     await ensureDkgDir();
+    await assertStoreMigrationInactive(dkgDir());
     await writeFileAtomic(daemonShutdownPolicyStatePath(), JSON.stringify({
       version: 1,
       pid,
@@ -79,7 +81,9 @@ export const daemonRuntimeState = {
     }));
     try {
       await writePid(pid);
+      await assertStoreMigrationInactive(dkgDir());
     } catch (error) {
+      if (await readPid() === pid) await removePid().catch(() => {});
       await removeShutdownPolicyState(pid).catch(() => {});
       throw error;
     }

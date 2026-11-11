@@ -31,6 +31,7 @@ import { registerMaintenanceCommands } from './commands/maintenance.js';
 import { registerRandomSamplingCommand } from './commands/random-sampling.js';
 import { registerOkfCommand } from './commands/okf.js';
 import { registerLlmCommand } from './commands/llm.js';
+import { registerStoreCommand } from './commands/store.js';
 import { registerDebugCommand } from './commands/debug.js';
 
 const program = new Command();
@@ -82,6 +83,7 @@ registerMarketplaceCommand(program);
 registerPublisherCommand(program);
 registerEpcisCommand(program);
 registerNodeOpsCommands(program);
+registerStoreCommand(program);
 registerQueryCatalogCommand(program);
 registerEntitiesCommand(program);
 registerMaintenanceCommands(program);
