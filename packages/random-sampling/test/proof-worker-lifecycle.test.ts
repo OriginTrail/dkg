@@ -29,6 +29,14 @@ afterEach(async () => {
 });
 
 describe('real proof-worker lifecycle', () => {
+  it('starts the thread with the environment that keeps the native addon out', async () => {
+    const file = fixture(() => `const { parentPort } = require('node:worker_threads');
+parentPort.on('message', ({ taskId }) => parentPort.postMessage({
+  taskId, ok: false, errorName: 'Probe', message: 'addon switch: ' + process.env.WS_NO_BUFFER_UTIL,
+}));`);
+    await expect(builder(file).build(proofRequest('catalog'))).rejects.toThrow('addon switch: 1');
+  });
+
   it.each(['catalog', 'public'] as const)('builds concurrent %s challenges without mutating or detaching caller buffers', async kind => {
     const worker = builder();
     const request = proofRequest(kind);

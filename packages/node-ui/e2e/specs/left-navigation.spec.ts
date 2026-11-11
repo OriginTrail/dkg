@@ -8,6 +8,11 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     await leftPanel.waitForProjectsLoaded();
   });
 
+  test('My Context Graphs is expanded by default, and Public graphs collapsed', async ({ leftPanel }) => {
+    await expect(leftPanel.sectionHeader('My Context Graphs')).toHaveAttribute('aria-expanded', 'true');
+    await expect(leftPanel.sectionHeader('Public graphs')).toHaveAttribute('aria-expanded', 'false');
+  });
+
   test('Dashboard row is visible', async ({ leftPanel }) => {
     await expect(leftPanel.root.locator(sel.leftPanel.dashboard).filter({ hasText: 'Dashboard' })).toBeVisible();
   });
@@ -34,26 +39,50 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     expect(await importFilesModal.isOpen()).toBe(true);
   });
 
-  test('Public Context Graphs renders the catalogue', async ({ leftPanel, page }) => {
-    // Only the Public Context Graphs group counts: its disclosed body shows
-    // either discovered public Context Graphs or the empty hint, depending on
-    // what the node has synced. My Context Graphs rows don't satisfy it.
-    const header = leftPanel.root.getByRole('button', { name: 'Public Context Graphs', exact: true });
-    await expect(header).toBeVisible();
-    if ((await header.getAttribute('aria-expanded')) !== 'true') await header.click();
-    await expect(header).toHaveAttribute('aria-expanded', 'true');
-    const bodyId = await header.getAttribute('aria-controls');
-    expect(bodyId).toBeTruthy();
-    const body = page.locator(`[id="${bodyId}"]`);
-    const content = body.locator('.v10-tree-section-label, .v10-tree-hint');
-    await expect(content.first()).toBeVisible();
+  test('Public graphs expands and renders the catalogue', async ({ leftPanel }) => {
+    await leftPanel.expandSection('Public graphs');
+    expect(await leftPanel.isSectionExpanded('Public graphs')).toBe(true);
+    // The catalogue renders EITHER discovered public CGs OR the empty-state
+    // hint — both are valid on a real node depending on what's been synced.
+    // Only the Public graphs section counts: My Context Graphs' rows share
+    // the row class.
+    const section = leftPanel.publicGraphsSection();
+    const body = section.locator(sel.leftPanel.peerGroupBody);
+    const rows = body.locator(sel.leftPanel.section);
+    const emptyState = body.locator(sel.leftPanel.emptyCard);
+    const count = section.locator(sel.leftPanel.peerGroupCount);
+    // As many rows as the header counts, or, with none, the empty state alone.
+    await expect
+      .poll(async () => {
+        const [counted, listed, empty] = await Promise.all([count.textContent(), rows.count(), emptyState.count()]);
+        return Number(counted) === listed && (listed > 0 ? empty === 0 : empty === 1);
+      })
+      .toBe(true);
+    if ((await rows.count()) > 0) {
+      for (const row of await rows.all()) await expect(row).toBeVisible();
+    } else {
+      await expect(emptyState).toBeVisible();
+      await expect(emptyState).toContainText(/Discovered public graphs will appear here/i);
+    }
   });
 
-  test('switching back to Context Graphs mode restores project list', async ({ leftPanel }) => {
-    expect((await leftPanel.getProjectNames()).length).toBeGreaterThanOrEqual(2);
+  test('expanding Public graphs leaves My Context Graphs expanded, with both lists on show', async ({ leftPanel }) => {
+    const mine = leftPanel.section('My Context Graphs');
+    const discovered = leftPanel.section('Public graphs');
+    await expect(leftPanel.sectionHeader('My Context Graphs')).toHaveAttribute('aria-expanded', 'true');
+    await expect(leftPanel.sectionHeader('Public graphs')).toHaveAttribute('aria-expanded', 'false');
+    await leftPanel.expandSection('Public graphs');
+    // Nothing is opened again: both sections stay as that one click left them.
+    await expect(leftPanel.sectionHeader('Public graphs')).toHaveAttribute('aria-expanded', 'true');
+    await expect(leftPanel.sectionHeader('My Context Graphs')).toHaveAttribute('aria-expanded', 'true');
+    const myRows = mine.locator(sel.leftPanel.peerGroupBody).locator(sel.leftPanel.section);
+    for (const name of [PRIMARY_CG, SECONDARY_CG]) await expect(myRows.filter({ hasText: name }).first()).toBeVisible();
+    // Public graphs lists the graphs the node discovered, or says there are none yet.
+    const discoveredBody = discovered.locator(sel.leftPanel.peerGroupBody);
+    await expect(discoveredBody.locator(`${sel.leftPanel.section}, ${sel.leftPanel.emptyCard}`).first()).toBeVisible();
   });
 
-  test('+ New Context Graph button opens create modal', async ({ leftPanel, createProjectModal }) => {
+  test('New button opens create modal', async ({ leftPanel, createProjectModal }) => {
     await leftPanel.clickNewProject();
     expect(await createProjectModal.isOpen()).toBe(true);
   });
@@ -64,8 +93,8 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     expect((await centerPanel.getActiveTabName())?.trim()).toBe('Dashboard');
   });
 
-  test('Join Context Graph button opens join modal', async ({ page }) => {
-    await page.locator('.v10-new-project-btn').filter({ hasText: /^Join$/ }).click();
+  test('Join button opens join modal', async ({ page }) => {
+    await page.locator('.v10-sidebar-inline-actions button').filter({ hasText: /^Join$/ }).click();
     await expect(page.locator('.v10-modal-overlay')).toBeVisible();
   });
 });

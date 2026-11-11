@@ -303,9 +303,11 @@ describe('OT-RFC-49 WS-D — catalog producer↔extractor↔chain parity', () =>
     // Recipient resolution is revision-fenced: background metadata activity
     // may correctly withhold a publish until the private authority is stable.
     // Exercise that outcome deterministically, then use the queue's canonical
-    // retry lane rather than assuming every first claim must finalize.
+    // retry lane rather than assuming every first claim must finalize. The
+    // publish reads the recipients again within a short bound (#3044), so the
+    // authority keeps moving for the whole first attempt.
     const recipientResolver = vi.spyOn(publisher as any, 'resolveWorkspaceAgentRecipientsForCurrentAuthority')
-      .mockRejectedValueOnce(createContextGraphAuthorityError('private recipient authority changed during resolution', {
+      .mockRejectedValue(createContextGraphAuthorityError('private recipient authority changed during resolution', {
         reason: 'chain-participant-authority-unavailable',
         detail: 'retry recipient resolution against the current private authority',
       }));
@@ -317,6 +319,8 @@ describe('OT-RFC-49 WS-D — catalog producer↔extractor↔chain parity', () =>
         resolution: 'reset_to_accepted',
       } });
       expect(queuedResult).toBeUndefined();
+      expect(recipientResolver.mock.calls.length).toBeGreaterThan(1);
+      recipientResolver.mockRestore();
       for (let retry = 0; processed?.status === 'failed' && retry < 3; retry += 1) {
         // Only the known pre-broadcast retryable authority result may retry.
         // Any other failure, exhausted retry budget, or missing job still fails.

@@ -297,7 +297,7 @@ select.input {
 .obs-hw-card { transition: opacity var(--motion-slow); }
 .obs-hw-waiting { opacity: var(--opacity-disabled); }
 .obs-hw-label { margin-bottom: var(--space-4); font-size: var(--fs-micro); font-weight: 700; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: var(--ls-caps); }
-.obs-hw-value { font-size: var(--fs-title); font-weight: 700; line-height: 1; color: var(--obs-level-text); }
+.obs-hw-value { font-size: var(--fs-heading); font-weight: 700; line-height: 1; color: var(--obs-level-text); }
 .obs-hw-waiting .obs-hw-value { color: var(--text-tertiary); }
 .obs-hw-value-gap { margin-bottom: var(--space-4); }
 .obs-hw-warn { margin-left: var(--space-6); }
@@ -451,7 +451,7 @@ select.input {
   background: var(--log-bg);
   border-radius: var(--radius-control);
   font-family: var(--font-mono);
-  font-size: var(--fs-label);
+  font-size: var(--fs-micro);
   line-height: var(--lh-body);
 }
 .obs-log-sm { max-height: 200px; }

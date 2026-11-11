@@ -293,6 +293,11 @@ export function mapPublishExceptionToLiftJobFailure(
  * deliberately EXCLUDED: a nonce error can follow a competing tx already propagating, and a
  * revert means the tx was mined. Widen only with a per-error pre-mempool proof.
  *
+ * ONE ENDPOINT'S REFUSAL SPEAKS FOR EVERY ATTEMPT ONLY BECAUSE THE ADAPTER SAYS SO: an endpoint can
+ * accept a transaction and lose its answer, and the next one can still refuse the same bytes. The
+ * chain adapter's broadcast therefore surfaces a refusal only when no earlier attempt at that signed
+ * transaction may have been accepted, and reports an unknown outcome otherwise (#3591).
+ *
  * REVERTS ARE NEVER PRE-ACCEPTANCE: a `revert`/`reverted` message means the tx was mined
  * (post-mempool), so it is excluded even when its (caller-controlled) revert string contains
  * "insufficient funds". This keeps ALL reverts uniformly on the recovery track — consistent
@@ -327,7 +332,10 @@ function classifyPublishFailureCode(
   if (lowerMessage.includes('timeout') || lowerMessage.includes('timed out')) {
     return failedFromState === 'included' ? 'finality_timeout' : 'tx_submit_timeout';
   }
-  if (lowerMessage.includes('insufficient funds')) {
+  if (lowerMessage.includes('insufficient funds') && !lowerMessage.includes('revert')) {
+    // #3591 — `insufficient_funds` is retried automatically, so it must mean a refusal. A revert
+    // that mentions funds was mined or simulated: it is a revert, as
+    // `isDefinitivePreAcceptanceSendFailure` also reads it.
     return 'insufficient_funds';
   }
   if (lowerMessage.includes('nonce')) {

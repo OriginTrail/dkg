@@ -5,14 +5,17 @@
 // Against an anvil fork of a V8-stake-holding chain, this impersonates the Hub
 // owner and performs the cutover-deploy steps so the sweep driver can then run
 // against REAL forked state:
-//   1. deploy + register + initialize CSS / StakingV10 / DKGStakingConvictionNFT
-//      onto the EXISTING forked Hub (shared StakingStorage / IdentityStorage);
+//   1. deploy + register CSS / ConvictionWithdrawalStorage / StakingV10Ledger /
+//      StakingV10 / DKGStakingConvictionNFT onto the EXISTING forked Hub
+//      (shared StakingStorage / IdentityStorage), and initialize all but
+//      ConvictionWithdrawalStorage, which has no initialize();
 //   2. set convictionCreditSeconds;
 //   3. FREEZE-FIRST: removeContractByName('Staking') so the live V8 Staking can
 //      no longer mutate StakingStorage mid-sweep (the driver asserts this).
 //
-// Idempotent-ish: if the V10 contracts are already Hub-registered (a prior run
-// on the same fork), it resolves + reuses them instead of redeploying.
+// Every run deploys fresh contracts and overwrites their Hub registrations, so
+// it can run again on the same fork. An initialize() that reverts stops the
+// run: the sweep driver must never run against contracts wired to nothing.
 //
 //   anvil --fork-url <rpc> --port 8545 &
 //   HUB=0x<forkedHub> npx hardhat run scripts/fork-setup.ts --network localhost
@@ -69,25 +72,34 @@ async function main() {
 
   console.log('\nDeploying migration contracts onto the forked Hub:');
   const cssAddr = await ensure('ConvictionStakingStorage');
+  // StakingV10Ledger wires ConvictionWithdrawalStorage at initialize(), as
+  // the hardhat deploy registers it first (054b before 054a). It has no
+  // initialize() of its own.
+  await ensure('ConvictionWithdrawalStorage');
+  // StakingV10 forwards its operator-fee withdrawal and V8 drains here, and
+  // resolves it at initialize().
+  const ledgerAddr = await ensure('StakingV10Ledger');
   const stakingV10Addr = await ensure('StakingV10');
   const wrapperAddr = await ensure('DKGStakingConvictionNFT');
 
-  // ---- 2. initialize (idempotent: skip if already initialized) ----
-  console.log('\nInitializing (skips if already done):');
+  // ---- 2. initialize, every contract just deployed: a revert stops the run ----
+  console.log('\nInitializing:');
   const css = await ethers.getContractAt('ConvictionStakingStorage', cssAddr);
+  const ledger = await ethers.getContractAt('StakingV10Ledger', ledgerAddr);
   const stakingV10 = await ethers.getContractAt('StakingV10', stakingV10Addr);
   const wrapper = await ethers.getContractAt('DKGStakingConvictionNFT', wrapperAddr);
   for (const [n, c] of [
     ['ConvictionStakingStorage', css],
+    ['StakingV10Ledger', ledger],
     ['StakingV10', stakingV10],
     ['DKGStakingConvictionNFT', wrapper],
   ] as const) {
     try {
       await (await (c as any).connect(owner).initialize()).wait();
-      console.log(`  ${n}.initialize ✓`);
     } catch (e: any) {
-      console.log(`  ${n}.initialize skipped (${e?.shortMessage ?? 'already initialized'})`);
+      throw new Error(`${n}.initialize() reverted: ${e?.shortMessage ?? e?.message ?? e}`);
     }
+    console.log(`  ${n}.initialize ✓`);
   }
 
   // ---- 2b. re-point the CSS consumers at the freshly-deployed CSS ----

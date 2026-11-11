@@ -333,6 +333,7 @@ const blockedRfc64Modules = [
   'inventory-v1/exact-record.js',
   'inventory-persistence-failure.js',
   'inventory-v1/open-error.js',
+  'inventory-v1/sqlite-header.js',
   'inventory-v1/swm-author-inventory-auth-v1.js',
   'inventory-v1/swm-author-inventory-commit-plan.js',
   'inventory-v1/swm-author-inventory-contracts.js',

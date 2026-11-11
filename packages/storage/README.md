@@ -87,9 +87,27 @@ are in-memory stores and provide no restart durability.
   flush. The atomic snapshot protocol protects the previously persisted file
   from a torn overwrite; it cannot make unflushed memory durable.
 
+### Read-only open
+
+`readOnly: true` in the adapter options (`{ readOnly: true }` as the second
+`OxigraphStore` constructor argument) opens the persistence file for reading
+only. It is for a process that reads a store another process owns, such as the
+CLI's offline `dkg publisher jobs`, `job` and `stats`.
+
+- Construction loads the file as above.
+- A write that would change the data rejects with `OxigraphStoreReadOnlyError`
+  (code `DKG_STORE_READ_ONLY`, also across the worker boundary) before the
+  in-memory data changes.
+- `flush()` and `close()` write nothing. What the reader loaded can be older
+  than the file by then, and writing it back would replace the owner's newer
+  data.
+- A file that fails to parse stays where it is, unchanged, and construction
+  throws.
+
 The executable regression contract is in
-[`test/oxigraph-persistence.test.ts`](test/oxigraph-persistence.test.ts) and
-[`test/oxigraph-large-persistence.test.ts`](test/oxigraph-large-persistence.test.ts).
+[`test/oxigraph-persistence.test.ts`](test/oxigraph-persistence.test.ts),
+[`test/oxigraph-large-persistence.test.ts`](test/oxigraph-large-persistence.test.ts) and
+[`test/oxigraph-read-only.test.ts`](test/oxigraph-read-only.test.ts).
 After building the storage dependency closure, run
 `node scripts/repro/oxigraph-large-snapshot.mjs` from the repository root for
 the larger native-worker check. It writes about 558 MB, verifies every value,
@@ -160,6 +178,18 @@ families per scheduler, then `other`). `takeStoreSchedulerStatsReports()` return
 for each registered scheduler, the queue waits of each lane since the previous
 call (`queueWaits`) and the cumulative rejections by lane, family and reason. A
 lane's figures are its longest wait and the count of its waits in fixed buckets.
+
+The existing rate-limited queue-wait warning can also include a locally minted
+async-admission request ID and phase for the waiter and up to three active
+admission operations. These IDs appear only in local diagnostics, never metrics,
+pressure snapshots or public errors. Join them to the bounded
+`async_admission_slow_or_failed` warning to distinguish client close from a later
+answer. Diagnostics are sampled, not an admission ledger. `queueWaitMs` ends at
+dispatch; `activeAgeMs` is time holding a scheduler slot, including transport and
+decoding, not CPU time or proof that the operation caused another request's wait.
+Unscoped work and worker IPC do not acquire a request identity. A timeout or a
+missing diagnostic remains insufficient evidence to retry a publication.
+
 Every started operation counts, including one that starts at once, as a wait of
 about 0 ms; so do those that time out in the queue or are cancelled there. A
 rejection on a full queue never queued, so it adds no wait. The buckets
@@ -218,6 +248,11 @@ whose configured slots are above 0, once per process, with every capacity
 option explicit (no ACK, health, normal or background reserve; the shared
 scheduler's normal-lane queue limit and its queue wait as values; the same
 timeout diagnostics).
+
+The async VM publisher also uses its control scheduler for the assertion-seal
+point metadata read that gates job admission. When enabled, this keeps shared-lane
+bulk reads from starving that lookup before enqueueing. Full publication snapshot
+and payload reads keep their existing scheduling and validation.
 
 A call reaches its queue's scheduler by naming the queue and nothing else:
 

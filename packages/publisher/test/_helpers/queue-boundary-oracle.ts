@@ -214,8 +214,8 @@ export const PUBLISHER_TAGGING_ROWS: readonly TaggingRow[] = [
       'writeJob', 'writeJobRequest', 'deleteJob', 'deleteJobRequest',
       'walletLock.write', 'walletLock.delete', 'walletLock.read', 'walletLock.ownership', 'walletLock.sweep',
       'appendJournalEntry', 'allocateJournalSeq',
-      // P11: bulk clear's sibling read (under the claim lock and the job lock) and retention's verify, wallet-lock and sibling reads (inside the claim transaction).
-      'clear.siblings', 'retention.siblings', 'retention.verify', 'retention.walletLocks',
+      // P11: bulk clear's sibling and stored-key reads (under the claim lock and the job lock) and retention's verify, wallet-lock and sibling reads (inside the claim transaction).
+      'clear.siblings', 'clear.keys', 'retention.siblings', 'retention.verify', 'retention.walletLocks',
     ].map((name) => `${LIFT}${name}`),
   },
   {
@@ -337,10 +337,10 @@ export const LABEL_TO_BASE: Readonly<Record<string, string>> = Object.freeze({
 });
 
 /**
- * Labels of calls the base SHA never made at all: P11's bulk clear reads the lifecycle siblings of each job it removes. They are additions to the workload, not
- * relabelled base calls, so the AC2 traces leave them out (the boundary oracle still audits their lane and tag).
+ * Labels of calls the base SHA never made at all: P11's bulk clear reads the lifecycle siblings of each job it removes, and (#3562) the lifecycle-key triples stored
+ * for it. They are additions to the workload, not relabelled base calls, so the AC2 traces leave them out (the boundary oracle still audits their lane and tag).
  */
-export const ADDED_LABELS: ReadonlySet<string> = new Set(['publisher.asyncLift.clear.siblings']);
+export const ADDED_LABELS: ReadonlySet<string> = new Set(['publisher.asyncLift.clear.siblings', 'publisher.asyncLift.clear.keys']);
 
 /** A call's source label with the labels this PR adds mapped back to the base label of the same operation. */
 const baseSourceOf = (call: Pick<RecordedStoreCall, 'source'>): string | undefined =>

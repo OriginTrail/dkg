@@ -614,7 +614,7 @@ describe('PanelRight component', () => {
     }
   }, 20_000);
 
-  it('a reply that streams and finishes while the panel is closed is there, once, when it reopens', async () => {
+  it('a reply that streams while the panel is closed keeps its text, and later deltas and the finish add to it once', async () => {
     let options: any;
     let finish: (value: unknown) => void = () => {};
     streamLocalAgentChatMock.mockImplementation((_id: string, _text: string, opts: any) => {
@@ -638,22 +638,41 @@ describe('PanelRight component', () => {
     });
     await waitForAssertion(() => expect(options).toBeTruthy());
 
-    // Close the panel, then the reply streams in and finishes.
+    // Close the panel; part of the reply streams in while it is closed.
     await act(async () => { root.unmount(); });
-    const reply = 'Streamed and finished while the panel was closed';
+    const partial = 'Streamed while the panel was closed';
     await act(async () => {
-      options.onEvent?.({ type: 'text_delta', delta: 'Streamed and finished ' });
-      options.onEvent?.({ type: 'text_delta', delta: 'while the panel was closed' });
-      finish({ text: reply, correlationId: 'corr-closed' });
+      options.onEvent?.({ type: 'text_delta', delta: partial });
       await Promise.resolve();
     });
 
+    // Reopen while the request is still pending: only the stream can have
+    // put the partial text there, because no final text has arrived.
     root = createRoot(container);
     await act(async () => { root.render(React.createElement(PanelRight)); });
+    const count = (s: string) => container.textContent!.split(s).length - 1;
     try {
+      await waitForAssertion(() => expect(container.textContent).toContain(partial));
+      expect(container.querySelector('button[aria-label="Stop reply"]')).toBeTruthy();
+
+      // A later delta reaches the reopened panel and appears once.
+      const rest = ', and kept streaming once it reopened';
+      await act(async () => {
+        options.onEvent?.({ type: 'text_delta', delta: rest });
+        await Promise.resolve();
+      });
+      const reply = partial + rest;
       await waitForAssertion(() => expect(container.textContent).toContain(reply));
-      expect(container.textContent!.split(reply).length - 1).toBe(1);
-      expect(container.querySelector('button[aria-label="Send message"]')).toBeTruthy();
+      expect(count(reply)).toBe(1);
+
+      // Finishing keeps the transcript: the reply once, and the panel ready to send.
+      await act(async () => {
+        finish({ text: reply, correlationId: 'corr-closed' });
+        await Promise.resolve();
+      });
+      await waitForAssertion(() => expect(container.querySelector('button[aria-label="Send message"]')).toBeTruthy());
+      expect(count(reply)).toBe(1);
+      expect(count('Answer while I look away')).toBe(1);
       expect(container.querySelector('button[aria-label="Stop reply"]')).toBeNull();
     } finally {
       await act(async () => { root.unmount(); });

@@ -1,3 +1,9 @@
+import { createServer } from 'node:http';
+import { once } from 'node:events';
+import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
+import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
+import { ListContextGraphsBudgetExceeded } from '@origintrail-official/dkg-agent/context-graph-list-budget-error';
 import type { ServerResponse } from 'node:http';
 import { describe, expect, it } from 'vitest';
 import {
@@ -222,4 +228,68 @@ describe('respondWithDaemonError store fallback', () => {
       operation: 'insert',
     });
   });
+});
+
+
+describe('context graph listing scan deadline', () => {
+  it.each(['instance', 'structural'])('renders a retryable 503 for the %s budget error', representation => {
+    const error = new ListContextGraphsBudgetExceeded('private internal scan detail', 5000);
+    const res = mockResponse();
+    respondWithDaemonError(res, representation === 'instance' ? error : { ...error });
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    expect(JSON.parse(res.body!)).toEqual({
+      error: 'Context graph listing is temporarily busy; retry the request',
+      code: 'CONTEXT_GRAPH_LIST_BUDGET_EXCEEDED', retryable: true,
+    });
+    expect(res.body).not.toContain('private internal scan');
+  });
+  it('keeps an unrelated error and a malformed budget error as server failures', () => {
+    for (const error of [new Error('unrelated listing failure'), {
+      code: 'CONTEXT_GRAPH_LIST_BUDGET_EXCEEDED', retryable: true, timeoutMs: NaN,
+    }]) {
+      const res = mockResponse();
+      respondWithDaemonError(res, error);
+      expect(res.statusCode).toBe(500);
+      expect(res.headers['Retry-After']).toBeUndefined();
+    }
+  });
+});
+
+
+it('GET /api/context-graph/list returns 503 during a bounded scan and 200 on the next read', async () => {
+  let calls = 0;
+  const seenOptions: unknown[] = [];
+  const rows = [{ id: 'example', name: 'Example graph' }];
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url!, 'http://localhost');
+    const ctx = { req, res, path: url.pathname, url,
+      authentication: requestAuthentication({ kind: 'nodeOperator' }),
+      agent: { listContextGraphs: async (options: unknown) => {
+        seenOptions.push(options);
+        if (++calls === 1) throw new ListContextGraphsBudgetExceeded('ontology/agents definition scan', 5000);
+        return rows;
+      } },
+    } as unknown as RequestContext;
+    try { await handleContextGraphRoutes(ctx); }
+    catch (error) { respondWithDaemonError(res, error); }
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/context-graph/list`;
+  try {
+    const busy = await fetch(url);
+    expect(busy.status).toBe(503);
+    expect(busy.headers.get('Retry-After')).toBe('1');
+    expect(await busy.json()).toMatchObject({ code: 'CONTEXT_GRAPH_LIST_BUDGET_EXCEEDED', retryable: true });
+    const retry = await fetch(url);
+    expect(retry.status).toBe(200);
+    expect(retry.headers.get('Retry-After')).toBeNull();
+    expect(await retry.json()).toEqual({ contextGraphs: rows });
+    expect(calls).toBe(2);
+    expect(seenOptions).toEqual([{ callerAgentAddress: null }, { callerAgentAddress: null }]);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 });

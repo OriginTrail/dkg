@@ -8226,6 +8226,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       authorAddress: AUTHOR,
     })).toMatchObject({ head: { payload: { totalRows: '1' } } });
     expect(failedPlacementAttempts).toBe(1);
+    const [owedRepair] = (author as any).rfc64PersistenceV1.finalizedPrivatePlacementRepairs.list();
+    const failure = (author as any).rfc64PersistenceV1.finalizedPrivatePlacementRepairs.readFailure(owedRepair);
+    expect(failure).toMatchObject({ kind: 'unknown', consecutiveFailures: 1, parked: false });
+    expect(failure.nextAttemptAtMs).toBeGreaterThan(Date.now());
 
     await author.stop();
     agents.splice(agents.indexOf(author), 1);
@@ -8252,6 +8256,20 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     await author.awaitInFlightRfc64SwmInventoryObserversV1();
+    // Restart retains the transient cooldown. Advance only the retry clock past
+    // its durable deadline, then request the same owed marker without resetting it.
+    expect((author as any).rfc64PersistenceV1.finalizedPrivatePlacementRepairs.readFailure(owedRepair))
+      .toEqual(failure);
+    expect((author as any).rfc64PersistenceV1.finalizedPrivatePlacementRepairs.list()).toHaveLength(1);
+    const retryClock = vi.spyOn(Date, 'now').mockReturnValue(failure.nextAttemptAtMs + 1);
+    try {
+      const retry = author.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair: owedRepair });
+      expect(retry.accepted).toBe(true);
+      await retry.whenAttempted;
+      await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    } finally {
+      retryClock.mockRestore();
+    }
     const publishedHead = author.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,

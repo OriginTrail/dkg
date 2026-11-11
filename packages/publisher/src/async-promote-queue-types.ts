@@ -288,7 +288,7 @@ export interface AsyncPromoteQueue {
    */
   readonly effectiveLeaseMs: number;
   // RFC §3.1
-  enqueue(request: PromoteRequest): Promise<string>;
+  enqueue(request: PromoteRequest, options?: { signal?: AbortSignal }): Promise<string>;
   /** Persist ownership and the inline lease together, before content mutation. */
   enqueueAndClaim?(request: BoundPromoteRequest, workerId: string): Promise<BoundPromoteJob>;
   /** Bind a claimed, unstarted job under the publisher lifecycle fence. Never HTTP supplied. */

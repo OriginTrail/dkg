@@ -11,6 +11,7 @@ import {
   skolemizeByEntity,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import { appendInPlace } from './append-in-place.js';
 import { compareCodePoint } from './code-point-order.js';
 import { createGraphScopedDurablePrefix } from './durable-prefix.js';
@@ -1544,8 +1545,7 @@ function hexToBytes(hex: string): Uint8Array {
 }
 
 function stripLiteral(raw: string): string {
-  const match = raw.match(/^"(.*)"(?:\^\^.*|@.*)?$/);
-  return match ? match[1]! : raw;
+  return rdfLiteralBody(raw) ?? raw;
 }
 
 function findLegacyRootOwner(subject: string, roots: ReadonlySet<string>): string | undefined {

@@ -1,0 +1,115 @@
+/* Marketplace surfaces: catalog, model page, playground, plans and the
+   purchase flow, access and operate. Tokens only (30-marketplace-tokens.css). */
+.mkt-mono { font-family: var(--font-mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.mkt-frame { max-width: 1040px; padding: var(--sp-6) var(--sp-5); display: grid; gap: var(--sp-5); }
+.mkt-card { background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: var(--r-lg); padding: var(--sp-6); display: grid; gap: var(--sp-4); }
+.mkt-muted { color: var(--text-muted); }
+/* The component gallery: a sticky "fixture data" banner, and centred placeholder cards. */
+.mkt-gallery-banner { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--state-pending) 14%, var(--surface-0)); color: var(--state-pending); border-bottom: 1px solid var(--border-subtle); font-size: var(--fs-xs); font-weight: var(--fw-semibold); letter-spacing: var(--ls-caps); text-transform: uppercase; padding: var(--sp-2) var(--sp-4); }
+.mkt-card.mkt-card-centred { text-align: center; }
+.mkt-sec { color: var(--text-secondary); }
+.mkt-xs { font-size: var(--fs-xs); }
+.mkt-sm { font-size: var(--fs-sm); }
+.mkt-planhead { display: flex; justify-content: space-between; align-items: baseline; gap: var(--sp-3); flex-wrap: wrap; }
+.mkt-planhead h1 { font-size: var(--fs-xl); font-weight: var(--fw-semibold); margin: 0; }
+.mkt-mrow { display: grid; gap: var(--sp-2); padding: var(--sp-4) 0; border-top: 1px solid var(--border-subtle); }
+.mkt-mhead { display: flex; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; font-size: var(--fs-sm); align-items: baseline; }
+.mkt-mhead h2 { font-size: var(--fs-lg); margin: 0; }
+.mkt-bar { position: relative; display: flex; height: var(--sp-3); border-radius: var(--r-full); background: var(--gauge-track); overflow: hidden; }
+.mkt-bar i { display: block; height: 100%; background: var(--interactive); }
+.mkt-bar i.held { opacity: .45; }
+.mkt-bar b.mark { position: absolute; top: 0; bottom: 0; left: 95%; width: 2px; background: var(--text-muted); }
+.mkt-bar.warn i { background: var(--gauge-mid); }
+.mkt-bar.hit i { background: var(--gauge-over); }
+.mkt-sparkrow { display: flex; align-items: center; gap: var(--sp-3); }
+.mkt-spark { display: flex; align-items: flex-end; gap: var(--space-2); height: var(--sp-5); }
+.mkt-spark i { width: 4px; background: var(--gray-5); border-radius: var(--radius-hair); display: block; }
+.mkt-pace { font-size: var(--fs-xs); }
+.mkt-pace.warn { color: var(--gauge-mid); }
+.mkt-pace.quiet { color: var(--text-muted); }
+.mkt-fork { display: flex; gap: var(--sp-3); align-items: center; flex-wrap: wrap; }
+.mkt-btn { border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--text-primary); border-radius: var(--r-sm); padding: var(--sp-2) var(--sp-4); font-size: var(--fs-sm); cursor: pointer; }
+.mkt-btn--primary { background: var(--interactive); border-color: var(--interactive); color: var(--text-on-accent); }
+.mkt-stmtline { color: var(--state-verified); font-size: var(--fs-sm); border-top: 1px solid var(--border-subtle); padding-top: var(--sp-3); }
+.mkt-fchips { display: flex; gap: var(--sp-2); }
+.mkt-fchips button { border: 1px solid var(--border-strong); border-radius: var(--r-full); padding: var(--sp-1) var(--sp-3); font-size: var(--fs-xs); background: transparent; color: var(--text-secondary); cursor: pointer; }
+.mkt-fchips button.on { border-color: var(--interactive); color: var(--interactive); }
+.mkt-act { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); }
+.mkt-act td { padding: var(--sp-2) var(--sp-3); border-top: 1px solid var(--border-subtle); color: var(--text-secondary); }
+/* catalog / model page / playground */
+.mkt-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: var(--sp-4); }
+.mkt-mcard { gap: var(--sp-2); }
+.mkt-mcard h3 { font-size: var(--fs-md); }
+.mkt-chipleft { font-size: var(--fs-xs); border-radius: var(--r-full); padding: var(--sp-1) var(--sp-3); background: color-mix(in srgb, var(--state-verified) 16%, var(--surface-1)); color: var(--state-verified); white-space: nowrap; }
+.mkt-chipadd { font-size: var(--fs-xs); border-radius: var(--r-full); padding: var(--sp-1) var(--sp-3); border: 1px solid var(--interactive); color: var(--interactive); white-space: nowrap; }
+.mkt-yours { color: var(--state-verified); font-size: var(--fs-xs); }
+.mkt-chat { display: grid; gap: var(--sp-3); min-height: 120px; }
+.mkt-bubble { border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4); max-width: 56ch; font-size: var(--fs-sm); }
+.mkt-bubble.user { background: var(--surface-3); margin-left: auto; }
+.mkt-bubble.assistant { background: var(--surface-1); border: 1px solid var(--border-subtle); }
+.mkt-forkinline { border: 1px solid var(--gauge-over); border-radius: var(--r-md); padding: var(--sp-4); display: grid; gap: var(--sp-3); }
+.mkt-inputrow { display: flex; gap: var(--sp-2); }
+.mkt-inputrow input { flex: 1; background: var(--surface-0); border: 1px solid var(--border-strong); border-radius: var(--r-sm); color: var(--text-primary); padding: var(--sp-2) var(--sp-3); font-size: var(--fs-sm); }
+.mkt-krow { display: grid; grid-template-columns: 1fr auto auto; gap: var(--sp-3); align-items: center; padding: var(--sp-3) 0; border-top: 1px solid var(--border-subtle); font-size: var(--fs-sm); }
+.mkt-snippet { background: var(--surface-0); border: 1px solid var(--border-strong); border-radius: var(--r-sm); padding: var(--sp-3); font-family: var(--font-mono); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.mkt-warnonce { color: var(--state-pending); font-size: var(--fs-sm); }
+.mkt-wallet { border: 1px solid var(--border-strong); border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4); }
+/* ── purchase flow · degraded catalog · access form · operate ── */
+.mkt-card h2, .mkt-card h3 { margin: 0; }
+.mkt-card h2 { font-size: var(--fs-lg); }
+.mkt-card h3 { font-size: var(--fs-md); }
+.mkt-flow { display: grid; gap: var(--sp-4); }
+.mkt-wrap { flex-wrap: wrap; }
+.mkt-linkbtn { background: none; border: 0; padding: 0; color: var(--interactive); cursor: pointer; font-size: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.mkt-chipbtn { border: 1px solid var(--interactive); border-radius: var(--r-full); padding: var(--sp-1) var(--sp-3); font-size: var(--fs-xs); background: transparent; color: var(--interactive); cursor: pointer; }
+button.mkt-chipadd { background: transparent; cursor: pointer; }
+.mkt-chipwarn { font-size: var(--fs-xs); border-radius: var(--r-full); padding: var(--sp-1) var(--sp-3); background: color-mix(in srgb, var(--state-pending) 16%, var(--surface-1)); color: var(--state-pending); white-space: nowrap; }
+.mkt-chipblock { font-size: var(--fs-xs); border-radius: var(--r-full); padding: var(--sp-1) var(--sp-3); background: color-mix(in srgb, var(--state-blocked) 16%, var(--surface-1)); color: var(--state-blocked); white-space: nowrap; }
+.mkt-errline { color: var(--state-blocked); }
+/* steps */
+.mkt-steps { display: flex; gap: var(--sp-5); list-style: none; margin: 0; padding: 0; flex-wrap: wrap; }
+.mkt-step { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--text-muted); }
+.mkt-step.now { color: var(--text-primary); font-weight: var(--fw-semibold); }
+.mkt-step.done { color: var(--state-verified); }
+.mkt-step-n { display: inline-flex; width: var(--chip-h); height: var(--chip-h); align-items: center; justify-content: center; border-radius: var(--r-full); border: 1px solid var(--border-strong); font-size: var(--fs-xs); }
+.mkt-step.now .mkt-step-n { border-color: var(--interactive); color: var(--interactive); }
+.mkt-step.done .mkt-step-n { border-color: var(--state-verified); }
+.mkt-step-sub { font-weight: var(--fw-regular); }
+/* error card / notice */
+.mkt-errcard { border: 1px solid var(--state-blocked); border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4); display: grid; gap: var(--sp-2); font-size: var(--fs-sm); }
+.mkt-notice { border: 1px solid var(--state-pending); border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4); font-size: var(--fs-sm); display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
+/* composer */
+.mkt-orow { display: grid; gap: var(--sp-1); padding: var(--sp-2) 0; font-size: var(--fs-sm); }
+.mkt-orow.off { opacity: .55; }
+.mkt-orow-main { display: flex; gap: var(--sp-2); align-items: baseline; flex-wrap: wrap; cursor: pointer; }
+.mkt-alloc { display: flex; gap: var(--sp-3); align-items: center; flex-wrap: wrap; padding-left: calc(var(--sp-5) + var(--sp-1)); }
+.mkt-input, .mkt-alloc input, .mkt-card select { background: var(--surface-0); border: 1px solid var(--border-strong); border-radius: var(--r-sm); color: var(--text-primary); padding: var(--sp-1) var(--sp-2); font-size: var(--fs-sm); }
+.mkt-alloc input { width: 8ch; }
+.mkt-input--short { width: 7ch; }
+/* gate */
+.mkt-gate { border-color: var(--interactive); }
+.mkt-gate-actions { justify-content: flex-end; }
+/* a key's secret, shown once */
+.mkt-once { background: var(--surface-2); }
+/* catalog degraded rows */
+.mkt-sellerstrip { padding: var(--sp-3) var(--sp-4); gap: var(--sp-2); }
+.mkt-sellerchip { display: inline-flex; gap: var(--sp-2); align-items: center; font-size: var(--fs-xs); }
+button.mkt-sellerchip, button.mkt-sellerlink { background: none; border: 0; padding: 0; color: inherit; font: inherit; cursor: pointer; }
+button.mkt-sellerchip { font-size: var(--fs-xs); }
+button.mkt-sellerlink:hover, button.mkt-sellerchip:hover .mkt-mono { text-decoration: underline; }
+.mkt-mcard.off { opacity: .6; }
+.mkt-mcard:focus-visible { outline: 2px solid var(--interactive); outline-offset: var(--sp-1); }
+.mkt-prow { border-top: 1px solid var(--border-subtle); padding-top: var(--sp-3); }
+.mkt-prow.off { opacity: .6; }
+.mkt-prov { color: var(--prov-pinned); }
+.mkt-tabs { padding-left: var(--sp-1); }
+.mkt-bubble.error { border-color: var(--state-blocked); color: var(--state-blocked); }
+/* access form */
+.mkt-form { background: var(--surface-2); }
+.mkt-field { display: grid; grid-template-columns: minmax(12ch, 18ch) 1fr; gap: var(--sp-3); align-items: center; font-size: var(--fs-sm); border: 0; margin: 0; padding: 0; }
+.mkt-field legend { padding: 0; }
+.mkt-krow.revoked { opacity: .6; }
+.mkt-seatcard { border-color: var(--state-pending); }
+.mkt-askedit { display: inline-flex; gap: var(--sp-2); align-items: center; }
+/* One line of an error card: long node messages wrap instead of widening the card. */
+.mkt-errcard-line { overflow-wrap: anywhere; }

@@ -320,7 +320,7 @@
   color: var(--text-primary);
 }
 .v10-agent-profile-stat-val {
-  font-size: var(--fs-title); font-weight: 700;
+  font-size: var(--fs-heading); font-weight: 700;
   font-family: var(--font-mono);
   line-height: 1;
   color: var(--stat-color, var(--text-primary));

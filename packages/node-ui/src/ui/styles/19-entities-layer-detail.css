@@ -193,7 +193,7 @@
   padding: var(--space-12) var(--space-16); border-bottom: 1px solid var(--border-subtle);
   display: flex; align-items: center; gap: var(--space-8);
 }
-.v10-layer-detail-icon { font-size: var(--fs-title); }
+.v10-layer-detail-icon { font-size: var(--fs-heading); }
 .v10-layer-detail-title { font-size: var(--fs-title); font-weight: 600; color: var(--text-primary); }
 .v10-layer-detail-desc { font-size: var(--fs-label); color: var(--text-tertiary); margin-top: 1px; }
 .v10-layer-detail-actions { margin-left: auto; display: flex; gap: var(--space-6); }

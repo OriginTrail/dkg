@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { RpcUsageTracker, withRpcUsageConsumer } from '@origintrail-official/dkg-chain';
-import { authorizePrivateSyncRequest } from '../src/sync/auth/request-authorize.js';
+import { authorizePrivateSyncRequest, syncAgentGateOf, type SyncAgentGate } from '../src/sync/auth/request-authorize.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 
 /**
@@ -97,6 +97,10 @@ interface AuthCallParams {
   remotePeerId: string;
   participants?: string[] | null;
   agentGateAddresses?: string[] | null;
+  /** The addresses are the graph's authoritative roster. */
+  agentGateConclusive?: boolean;
+  /** A gate as given, in place of the two fields above. */
+  agentGate?: SyncAgentGate;
   allowedPeers?: string[] | null;
   /**
    * Per-agent map of delegated peer-ids. Test helper accepts either
@@ -119,6 +123,14 @@ function toMap(input: Map<string, string[]> | Record<string, string[]> | undefin
   return new Map(Object.entries(input).map(([k, v]) => [k.toLowerCase(), v]));
 }
 
+/** The gate a call describes: no addresses is no gate. */
+function agentGateOf(params: AuthCallParams): SyncAgentGate {
+  if (params.agentGate) return params.agentGate;
+  const addresses = params.agentGateAddresses ?? null;
+  if (addresses === null) return { kind: 'ungated' };
+  return params.agentGateConclusive ? { kind: 'roster', addresses } : { kind: 'listed', addresses };
+}
+
 async function callAuth(params: AuthCallParams): Promise<{ allowed: boolean; logs: string[] }> {
   const logs: string[] = [];
   const ctx = { agentId: 'sync', operationId: 'test' } as any;
@@ -135,9 +147,9 @@ async function callAuth(params: AuthCallParams): Promise<{ allowed: boolean; log
     verifyIdentity: params.verifyIdentity ?? (async () => true),
     getParticipants: async () => params.participants ?? null,
     getAllowedPeers: async () => params.allowedPeers ?? null,
-    getAgentGateAddresses: async () => {
+    getAgentGate: async () => {
       params.onAgentGateRead?.();
-      return params.agentGateAddresses ?? null;
+      return agentGateOf(params);
     },
     getAllowedDelegateePeers: async () => peersMap,
     getAllowedDelegateeKeys: async () => keysMap,
@@ -382,7 +394,7 @@ describe('authorizePrivateSyncRequest — agent-delegation path', () => {
       verifyIdentity: async () => true,
       getParticipants: async () => null,
       getAllowedPeers: async () => null,
-      getAgentGateAddresses: async () => null,
+      getAgentGate: async () => ({ kind: 'ungated' }),
       getAllowedDelegateePeers: async () => new Map<string, string[]>(),
       getAllowedDelegateeKeys: async () => new Map([[agentAddress.toLowerCase(), [nodeOpKey.address.toLowerCase()]]]),
       getMemberRecoveryGate: async () => null,
@@ -415,7 +427,7 @@ describe('authorizePrivateSyncRequest — agent-delegation path', () => {
       verifyIdentity: async () => true,
       getParticipants: async () => null,
       getAllowedPeers: async () => null,
-      getAgentGateAddresses: async () => null,
+      getAgentGate: async () => ({ kind: 'ungated' }),
       getAllowedDelegateePeers: async () => new Map<string, string[]>(),
       getAllowedDelegateeKeys: async () => {
         callsToGetKeys.push(refreshed ? 'after-refresh' : 'before-refresh');
@@ -463,9 +475,9 @@ describe('authorizePrivateSyncRequest — agent-delegation path', () => {
         if (options?.signal) seenSignals.push(options.signal);
         return null;
       },
-      getAgentGateAddresses: async (_contextGraphId, options) => {
+      getAgentGate: async (_contextGraphId, options) => {
         if (options?.signal) seenSignals.push(options.signal);
-        return [agentAddress];
+        return { kind: 'listed', addresses: [agentAddress] };
       },
       getAllowedDelegateePeers: async (_contextGraphId, options) => {
         if (options?.signal) seenSignals.push(options.signal);
@@ -520,7 +532,7 @@ describe('authorizePrivateSyncRequest — agent-delegation path', () => {
         return participantsGate.promise;
       },
       getAllowedPeers: async () => null,
-      getAgentGateAddresses: async () => null,
+      getAgentGate: async () => ({ kind: 'ungated' }),
       getAllowedDelegateePeers: async () => new Map<string, string[]>(),
       getAllowedDelegateeKeys: async () => new Map<string, string[]>(),
       getMemberRecoveryGate: async () => null,
@@ -612,6 +624,183 @@ describe('authorizePrivateSyncRequest — agent-delegation path', () => {
   // strict members-only `isMemberRecoveryAuthorized` on a FRESH `_meta` gate,
   // hard-denying on null/empty, and MUST NOT fall through to the weaker
   // participant/peer fallback.
+  describe('an authoritative roster', () => {
+    const signedBy = (signer: ethers.Wallet, options: Partial<BuildEnvelopeOptions> = {}) => buildSignedEnvelope({
+      signer,
+      requesterAgentAddress: signer.address,
+      ...options,
+    });
+
+    it('admits a wallet on it, with no peer list', async () => {
+      const wallet = ethers.Wallet.createRandom();
+      const { allowed } = await callAuth({
+        ...await signedBy(wallet),
+        participants: null,
+        agentGateAddresses: [wallet.address.toLowerCase()],
+        agentGateConclusive: true,
+        allowedPeers: null,
+      });
+      expect(allowed).toBe(true);
+    });
+
+    it('does not admit a wallet that only the local lists name', async () => {
+      const wallet = ethers.Wallet.createRandom();
+      const { allowed } = await callAuth({
+        ...await signedBy(wallet),
+        participants: [wallet.address],
+        agentGateAddresses: [ethers.Wallet.createRandom().address],
+        agentGateConclusive: true,
+        allowedPeers: null,
+      });
+      expect(allowed).toBe(false);
+    });
+
+    it('does not admit anyone when it is empty', async () => {
+      const wallet = ethers.Wallet.createRandom();
+      const { allowed } = await callAuth({
+        ...await signedBy(wallet),
+        participants: [wallet.address],
+        agentGateAddresses: [],
+        agentGateConclusive: true,
+        allowedPeers: null,
+      });
+      expect(allowed).toBe(false);
+    });
+
+    it('still needs the peer on a peer list beside it', async () => {
+      const wallet = ethers.Wallet.createRandom();
+      const onRoster = { agentGateAddresses: [wallet.address], agentGateConclusive: true } as const;
+      const { allowed: elsewhere } = await callAuth({ ...await signedBy(wallet), ...onRoster, allowedPeers: ['12D3KooWNotThisPeer'] });
+      const { allowed: listed } = await callAuth({ ...await signedBy(wallet), ...onRoster, allowedPeers: [REMOTE_PEER] });
+      expect(elsewhere).toBe(false);
+      expect(listed).toBe(true);
+    });
+
+    it('takes a delegation only of an agent on it', async () => {
+      const delegated = { allowedDelegateeKeys: { [agentAddress.toLowerCase()]: [nodeOpKey.address.toLowerCase()] } };
+      const envelope = () => signedBy(nodeOpKey, { identityId: '5', requesterAgentAddress: agentAddress });
+
+      const { allowed: onRoster } = await callAuth({
+        ...await envelope(), ...delegated, participants: null, agentGateAddresses: [agentAddress], agentGateConclusive: true,
+      });
+      const { allowed: offRoster } = await callAuth({
+        ...await envelope(), ...delegated, participants: [agentAddress], agentGateAddresses: [ethers.Wallet.createRandom().address], agentGateConclusive: true,
+      });
+      const { allowed: peerOffRoster } = await callAuth({
+        ...await envelope(), allowedDelegateePeers: { [agentAddress.toLowerCase()]: [REMOTE_PEER] }, agentGateAddresses: [], agentGateConclusive: true,
+      });
+      expect(onRoster).toBe(true);
+      expect(offRoster).toBe(false);
+      expect(peerOffRoster).toBe(false);
+    });
+
+    it('leaves a legacy identity-id participant admitted once the chain verified the identity', async () => {
+      const { allowed: listed } = await callAuth({
+        ...await signedBy(nodeOpKey, { identityId: '5', requesterAgentAddress: agentAddress }),
+        participants: ['5'], agentGateAddresses: [agentAddress], agentGateConclusive: true,
+      });
+      const { allowed: otherIdentity } = await callAuth({
+        ...await signedBy(nodeOpKey, { identityId: '6', requesterAgentAddress: agentAddress }),
+        participants: ['5'], agentGateAddresses: [agentAddress], agentGateConclusive: true,
+      });
+      const { allowed: unverified } = await callAuth({
+        ...await signedBy(nodeOpKey, { identityId: '5', requesterAgentAddress: agentAddress }),
+        participants: ['5'], agentGateAddresses: [agentAddress], agentGateConclusive: true,
+        verifyIdentity: async () => false,
+      });
+      expect(listed).toBe(true);
+      expect(otherIdentity).toBe(false);
+      expect(unverified).toBe(false);
+    });
+
+    it('is read again after a metadata refresh', async () => {
+      const wallet = ethers.Wallet.createRandom();
+      const { envelope, remotePeerId } = await signedBy(wallet);
+      let refreshed = false;
+      const allowed = await authorizePrivateSyncRequest({
+        ctx: {} as any,
+        request: envelope,
+        remotePeerId,
+        localPeerId: LOCAL_PEER,
+        syncAuthMaxAgeMs: 90_000,
+        seenRequestIds: new Map(),
+        computeSyncDigest: computeDigestStub,
+        verifyIdentity: async () => true,
+        getParticipants: async () => null,
+        getAllowedPeers: async () => null,
+        getAgentGate: async () => ({ kind: 'roster', addresses: refreshed ? [wallet.address] : [] }),
+        getAllowedDelegateePeers: async () => new Map<string, string[]>(),
+        getAllowedDelegateeKeys: async () => new Map<string, string[]>(),
+        getMemberRecoveryGate: async () => null,
+        refreshMetaFromCurator: async () => {
+          refreshed = true;
+          return true;
+        },
+        logWarn: () => {},
+        logInfo: () => {},
+      });
+      expect(allowed).toBe(true);
+    });
+
+    it('does not take a number in the local lists for an identity on an agent-signed request', async () => {
+      const wallet = ethers.Wallet.createRandom();
+      const { allowed } = await callAuth({
+        ...await signedBy(wallet),
+        participants: ['0'], agentGateAddresses: [agentAddress], agentGateConclusive: true,
+      });
+      expect(allowed).toBe(false);
+    });
+  });
+
+  describe('a gate that is no authoritative roster', () => {
+    it('leaves the local lists to decide when its authority is unavailable', async () => {
+      const wallet = ethers.Wallet.createRandom();
+      const signed = () => buildSignedEnvelope({ signer: wallet, requesterAgentAddress: wallet.address });
+      const unavailable = syncAgentGateOf({ kind: 'unavailable', reason: 'chain-access-policy-timeout' }, [wallet.address]);
+      expect(unavailable).toEqual({ kind: 'unavailable' });
+
+      const { allowed: listed } = await callAuth({ ...await signed(), participants: [wallet.address], agentGate: unavailable });
+      const { allowed: unlisted } = await callAuth({ ...await signed(), participants: [agentAddress], agentGate: unavailable });
+      expect(listed).toBe(true);
+      expect(unlisted).toBe(false);
+    });
+
+    it('admits nobody when its authority is unavailable and the graph lists peers', async () => {
+      const wallet = ethers.Wallet.createRandom();
+      const signed = await buildSignedEnvelope({ signer: wallet, requesterAgentAddress: wallet.address });
+      const { allowed } = await callAuth({
+        ...signed, participants: [wallet.address], allowedPeers: [signed.remotePeerId], agentGate: { kind: 'unavailable' },
+      });
+      expect(allowed).toBe(false);
+    });
+
+    it('reads as what the gate authority says', () => {
+      expect(syncAgentGateOf({ kind: 'ungated' }, [agentAddress])).toEqual({ kind: 'ungated' });
+      expect(syncAgentGateOf({ kind: 'available', agentAddresses: [agentAddress] }, []))
+        .toEqual({ kind: 'listed', addresses: [agentAddress] });
+      expect(syncAgentGateOf({ kind: 'available', agentAddresses: [agentAddress], conclusive: true }, []))
+        .toEqual({ kind: 'roster', addresses: [agentAddress] });
+    });
+
+    it('takes a local revocation off a roster, whatever the case of its address', () => {
+      const other = ethers.Wallet.createRandom().address;
+      expect(syncAgentGateOf(
+        { kind: 'available', agentAddresses: [agentAddress, other], conclusive: true },
+        [agentAddress.toLowerCase()],
+      )).toEqual({ kind: 'roster', addresses: [other] });
+    });
+
+    it('takes a delegation the local metadata holds', async () => {
+      const { allowed } = await callAuth({
+        ...await buildSignedEnvelope({ signer: nodeOpKey, identityId: '5', requesterAgentAddress: agentAddress }),
+        participants: null,
+        agentGateAddresses: [ethers.Wallet.createRandom().address],
+        allowedDelegateeKeys: { [agentAddress.toLowerCase()]: [nodeOpKey.address.toLowerCase()] },
+      });
+      expect(allowed).toBe(true);
+    });
+  });
+
   describe('member-recovery (request.recovery) branch', () => {
     it('HARD-DENIES recovery on a null gate even though the participant/peer fallback would allow', async () => {
       const member = ethers.Wallet.createRandom();

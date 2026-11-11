@@ -18,7 +18,7 @@ const matches = (list: string[], pattern: RegExp, keep: (m: RegExpMatchArray) =>
 
 const OFF_SCALE_SPACING = 0;
 // Values from data only: colours, sizes and positions the code works out at runtime.
-const INLINE_STYLES = 37;
+const INLINE_STYLES = 40; // 37, plus the Marketplace meter bars' worked-out widths and heights (marketplace/purchase/Meters.tsx).
 const INLINE_FONT_SIZES = 0; // Canvas options take numbers and sit outside style attributes.
 
 describe('layout tokens', () => {

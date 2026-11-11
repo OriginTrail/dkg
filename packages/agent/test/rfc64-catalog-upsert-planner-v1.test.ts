@@ -93,6 +93,15 @@ describe('RFC-64 exact-set bounded planner v1', () => {
     expect(exact).toEqual([refreshedInventory]);
   });
 
+  it('carries the intended same-version replacement through withdrawal and insertion', async () => {
+    const original = await plannerAsset(7n);
+    const replacement = { ...original, projectionBytes: new Uint8Array([99]) };
+    const withdrawal = planNextRfc64CatalogExactSetV1([original], [replacement]);
+    expect(withdrawal).toEqual({ nextAssets: [], currentAsset: original, targetAsset: replacement });
+    const insertion = planNextRfc64CatalogExactSetV1(withdrawal.nextAssets, [replacement]);
+    expect(insertion).toEqual({ nextAssets: [replacement], currentAsset: undefined, targetAsset: replacement });
+  });
+
   it('frees one current-only slot before inserting into a full 1,024-row set', async () => {
     const current = await Promise.all(Array.from(
       { length: MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 },
@@ -103,13 +112,19 @@ describe('RFC-64 exact-set bounded planner v1', () => {
       (_value, index) => plannerAsset(BigInt(index)),
     ));
 
-    const freed = planNextRfc64CatalogExactSetV1(current, target);
+    const removal = planNextRfc64CatalogExactSetV1(current, target);
+    expect(removal.currentAsset).toBe(current.at(-1));
+    expect(removal.targetAsset).toBeUndefined();
+    const freed = removal.nextAssets;
     expect(freed).toHaveLength(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 - 1);
     expect(freed.some(
       (asset) => asset.seal.reservedKaId === current.at(-1)?.seal.reservedKaId,
     )).toBe(false);
 
-    const inserted = planNextRfc64CatalogExactSetV1(freed, target);
+    const insertion = planNextRfc64CatalogExactSetV1(freed, target);
+    expect(insertion.currentAsset).toBeUndefined();
+    expect(insertion.targetAsset).toBe(target[0]);
+    const inserted = insertion.nextAssets;
     expect(inserted).toHaveLength(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1);
     expect(inserted[0]?.seal.reservedKaId).toBe(target[0]?.seal.reservedKaId);
     expect(Math.max(freed.length, inserted.length)).toBe(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1);
@@ -133,7 +148,7 @@ describe('RFC-64 exact-set bounded planner v1', () => {
     expect(union.filter((asset) => asset.seal.reservedKaId === newerVersion.seal.reservedKaId))
       .toEqual([expect.objectContaining({ projectionBytes: newerVersion.projectionBytes })]);
     // One replacement is one successor: the planner swaps the row in place.
-    const next = planNextRfc64CatalogExactSetV1(current, union);
+    const next = planNextRfc64CatalogExactSetV1(current, union).nextAssets;
     expect(next).toHaveLength(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1);
     expect(next[6]?.seal.assertionVersion).toBe('2');
   });
