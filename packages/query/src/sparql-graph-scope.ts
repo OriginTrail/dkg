@@ -309,13 +309,20 @@ export function rewriteGraphRoute(
   policy: GraphSetRoutingPolicy,
   fallbackPolicy: 'compatibility' | 'preserve-scope' = 'compatibility',
   engine: SparqlEngineFamily | null = null,
+  /** Receives the graphs the rewrite it returns reads: the set, or the fallback graph alone. */
+  routed?: (graphs: readonly string[]) => void,
 ): GraphScopeRewriteResult {
   if (graphUris.length > 0) {
     const selected = rewriteGraphSet(scope, graphUris, policy, engine);
-    if (selected.kind === 'ready') return selected;
+    if (selected.kind === 'ready') {
+      routed?.(graphUris);
+      return selected;
+    }
     if (fallbackPolicy === 'preserve-scope' && graphUris.some(graph => graph !== fallbackGraphUri)) return selected;
   }
-  return rewriteSingleGraph(scope, fallbackGraphUri, engine);
+  const single = rewriteSingleGraph(scope, fallbackGraphUri, engine);
+  if (single.kind === 'ready') routed?.([fallbackGraphUri]);
+  return single;
 }
 
 /**

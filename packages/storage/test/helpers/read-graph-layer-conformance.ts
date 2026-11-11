@@ -67,16 +67,21 @@ export function isLayerMember(layer: ReadGraphStore, fixture: LayerFixture, key:
   return matchesGraphNameTest(readGraphMembership(key, fixture.registry, layer.runtime.workingMemoryIdentity), graph);
 }
 
-/** A store as `createTripleStore` composes it over `adapter`, with the fixture's data and every read graph built and in the mirror. */
-export async function layeredStore(adapter: TripleStore, config: TripleStoreConfig, fixture: LayerFixture) {
-  const layer = wrapReadGraphLayer(adapter, config);
-  const store = guardReadGraphPartition(layer);
-  await adapter.insert([
+/** The fixture's data: its registry facts, three triples in each graph, and a blank node in one member graph. */
+export function fixtureData(fixture: LayerFixture): Quad[] {
+  return [
     ...fixture.facts,
     ...fixture.graphs.flatMap((graph, i) => [q('urn:s:shared', '"both"', graph), q(`urn:s:${i}`, `"v${i}"`, graph), q(`urn:s:${i}`, 'urn:o:iri', graph)]),
     // A blank node anchored in one member graph, which only the reference procedure can retract.
     q('_:anchor', '"anchored"', fixture.graphs[2]!),
-  ]);
+  ];
+}
+
+/** A store as `createTripleStore` composes it over `adapter`, with the fixture's data and every read graph built and in the mirror. */
+export async function layeredStore(adapter: TripleStore, config: TripleStoreConfig, fixture: LayerFixture) {
+  const layer = wrapReadGraphLayer(adapter, config);
+  const store = guardReadGraphPartition(layer);
+  await adapter.insert(fixtureData(fixture));
   for (const key of fixture.keys) {
     const readGraph = readGraphIri(key);
     for (const graph of fixture.graphs) if (isLayerMember(layer, fixture, key, graph)) await adapter.update!(readGraphCopy(readGraph, graph));
@@ -98,6 +103,25 @@ export async function expectLayerUnions(adapter: TripleStore, layer: ReadGraphSt
   }
 }
 
+/**
+ * The fixture's graphs hold what the same writes leave in a reference fixture
+ * written through the bare adapter, with no read graph: so a write the layer
+ * changed or dropped shows, whatever its read graphs hold.
+ */
+export async function expectSameMembers(
+  adapter: TripleStore, fixture: LayerFixture, reference: TripleStore, referenceFixture: LayerFixture, after: string,
+): Promise<void> {
+  const triples = async (store: TripleStore, graph: string) => {
+    const result = await store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
+    // Blank-node labels differ between stores; one stands for any.
+    const term = (value: string | undefined) => (value?.startsWith('_:') ? '_:b' : value);
+    return (result.type === 'bindings' ? result.bindings : []).map((row) => `${term(row.s)} ${row.p} ${term(row.o)}`).sort();
+  };
+  for (const [i, graph] of fixture.graphs.entries()) {
+    expect(await triples(adapter, graph), `${graph} after ${after}`).toEqual(await triples(reference, referenceFixture.graphs[i]!));
+  }
+}
+
 /** The layer's maintenance on one engine: every write method, random writes, and the locks. */
 export function readGraphLayerConformance(backend: 'oxigraph' | 'blazegraph') {
   describe(`read-graph layer maintenance (${backend})`, () => {
@@ -111,6 +135,13 @@ export function readGraphLayerConformance(backend: 'oxigraph' | 'blazegraph') {
     const open = async (fixture: LayerFixture) => {
       const { adapter, config } = shared ?? { adapter: new PlanningOxigraphStore(), config: { backend: 'oxigraph' } as TripleStoreConfig };
       return { adapter, ...(await layeredStore(adapter, config, fixture)), close: shared ? async () => {} : () => adapter.close() };
+    };
+    /** A fixture with the same data, written through the bare adapter (a context graph of its own on Blazegraph). */
+    const openReference = async () => {
+      const fixture = freshFixture();
+      const adapter = shared?.adapter ?? new PlanningOxigraphStore();
+      await adapter.insert(fixtureData(fixture));
+      return { fixture, store: adapter, close: shared ? async () => {} : () => adapter.close() };
     };
 
     beforeAll(async () => {
@@ -129,44 +160,47 @@ export function readGraphLayerConformance(backend: 'oxigraph' | 'blazegraph') {
     it('keeps every read graph a write touches equal to its members, for every write method', async () => {
       const fixture = freshFixture();
       const { adapter, layer, store, close } = await open(fixture);
-      const [root, vm1, vm2, , code, swm, swm4, wm, child] = fixture.graphs as [string, string, string, string, string, string, string, string, string];
-      const meta = `${fixture.root}/_meta`;
+      const reference = await openReference();
       const declares = (method: string) => (layer.adapterCapabilities?.methods as readonly string[] | undefined)?.includes(method) ?? false;
-      const steps: Array<[string, () => Promise<unknown>]> = [
-        ['insert', () => store.insert([q('urn:s:new', '"n"', vm1), q('urn:s:new', '"n"', code), q('urn:s:new', '"n"', child)])],
-        ['delete', () => store.delete([q('urn:s:1', '"v1"', vm1), q('urn:s:shared', '"both"', vm1)])],
-        ['delete with a blank node', async () => {
-          const held = async (graph: string) => {
-            const result = await adapter.query(`ASK { GRAPH <${graph}> { ?b <${P}> "anchored" FILTER(isBlank(?b)) } }`);
-            return result.type === 'boolean' ? result.value : undefined;
-          };
-          expect([await held(vm2), await held(fixture.readGraphs.wholeVm)]).toEqual([true, true]);
-          await store.delete([q('_:anchor', '"anchored"', vm2)]);
-          expect([await held(vm2), await held(fixture.readGraphs.wholeVm)]).toEqual([false, false]);
-        }],
-        ['deleteByPattern', () => store.deleteByPattern({ graph: code, subject: 'urn:s:4' })],
-        ['deleteByPatternWithoutCount', () => store.deleteByPatternWithoutCount!({ graph: swm4, object: 'urn:o:iri' })],
-        ['deleteBySubjectPrefix', () => store.deleteBySubjectPrefix(wm, 'urn:s:')],
-        ['dropGraph', () => store.dropGraph(vm2)],
-        ['replaceGraph', () => store.replaceGraph!(root, [q('urn:s:r', '"r"', root)])],
-        ['replaceSubject', () => store.replaceSubject!(swm, 'urn:s:5', [q('urn:s:5', '"w"', swm)])],
-        ['replaceSubjectAndInsert', () => store.replaceSubjectAndInsert!(code, 'urn:s:shared', [q('urn:s:shared', '"x"', code)],
-          [q('urn:s:companion', '"c"', code)])],
-        ['update', () => store.update!(`INSERT DATA { GRAPH <${vm1}> { <urn:s:u> <${P}> "u" } }`,
-          { writtenGraphs: [vm1] })],
-        ['an update that writes no member graph', () => store.update!(`INSERT DATA { GRAPH <${child}> { <urn:s:u> <${P}> "u" } }`,
-          { writtenGraphs: [child] })],
-        ...(declares('replaceAssetGroup') ? [['replaceAssetGroup', () => store.replaceAssetGroup!([{
-          graphUri: vm2, graphQuads: [q('urn:s:ag', '"ag"', vm2)], metaGraphUri: meta, metadataSubject: 'urn:asset:ag', metadataQuads: [q('urn:asset:ag', '"m"', meta)],
-        }])] as [string, () => Promise<unknown>]] : []),
-        ...(declares('replaceGraphAndSubject') ? [['replaceGraphAndSubject', () => store.replaceGraphAndSubject!(
-          vm1, [q('urn:s:gs', '"gs"', vm1)], meta, 'urn:asset:gs', [q('urn:asset:gs', '"m2"', meta)])] as [string, () => Promise<unknown>]] : []),
+      type Step = readonly [string, (target: TripleStore, f: LayerFixture) => Promise<unknown>];
+      const steps = (): Step[] => [
+        ['insert', (t, f) => t.insert([q('urn:s:new', '"n"', f.graphs[1]!), q('urn:s:new', '"n"', f.graphs[4]!), q('urn:s:new', '"n"', f.graphs[8]!)])],
+        ['delete', (t, f) => t.delete([q('urn:s:1', '"v1"', f.graphs[1]!), q('urn:s:shared', '"both"', f.graphs[1]!)])],
+        ['delete with a blank node', (t, f) => t.delete([q('_:anchor', '"anchored"', f.graphs[2]!)])],
+        ['deleteByPattern', (t, f) => t.deleteByPattern({ graph: f.graphs[4]!, subject: 'urn:s:4' })],
+        ['deleteByPatternWithoutCount', (t, f) => t.deleteByPatternWithoutCount!({ graph: f.graphs[6]!, object: 'urn:o:iri' })],
+        ['deleteBySubjectPrefix', (t, f) => t.deleteBySubjectPrefix(f.graphs[7]!, 'urn:s:')],
+        ['dropGraph', (t, f) => t.dropGraph(f.graphs[2]!)],
+        ['replaceGraph', (t, f) => t.replaceGraph!(f.graphs[0]!, [q('urn:s:r', '"r"', f.graphs[0]!)])],
+        ['replaceSubject', (t, f) => t.replaceSubject!(f.graphs[5]!, 'urn:s:5', [q('urn:s:5', '"w"', f.graphs[5]!)])],
+        ['replaceSubjectAndInsert', (t, f) => t.replaceSubjectAndInsert!(f.graphs[4]!, 'urn:s:shared', [q('urn:s:shared', '"x"', f.graphs[4]!)],
+          [q('urn:s:companion', '"c"', f.graphs[4]!)])],
+        ['update', (t, f) => t.update!(`INSERT DATA { GRAPH <${f.graphs[1]!}> { <urn:s:u> <${P}> "u" } }`, { writtenGraphs: [f.graphs[1]!] })],
+        ['an update that writes no member graph', (t, f) => t.update!(`INSERT DATA { GRAPH <${f.graphs[8]!}> { <urn:s:u> <${P}> "u" } }`,
+          { writtenGraphs: [f.graphs[8]!] })],
+        ...(declares('replaceAssetGroup') ? [['replaceAssetGroup', (t, f) => t.replaceAssetGroup!([{
+          graphUri: f.graphs[2]!, graphQuads: [q('urn:s:ag', '"ag"', f.graphs[2]!)], metaGraphUri: `${f.root}/_meta`, metadataSubject: 'urn:asset:ag',
+          metadataQuads: [q('urn:asset:ag', '"m"', `${f.root}/_meta`)],
+        }])] as Step] : []),
+        ...(declares('replaceGraphAndSubject') ? [['replaceGraphAndSubject', (t, f) => t.replaceGraphAndSubject!(
+          f.graphs[1]!, [q('urn:s:gs', '"gs"', f.graphs[1]!)], `${f.root}/_meta`, 'urn:asset:gs', [q('urn:asset:gs', '"m2"', `${f.root}/_meta`)])] as Step] : []),
       ];
-      for (const [name, step] of steps) {
-        await step();
+      const held = async (graph: string) => {
+        const result = await adapter.query(`ASK { GRAPH <${graph}> { ?b <${P}> "anchored" FILTER(isBlank(?b)) } }`);
+        return result.type === 'boolean' ? result.value : undefined;
+      };
+      expect([await held(fixture.graphs[2]!), await held(fixture.readGraphs.wholeVm)]).toEqual([true, true]);
+      for (const [name, step] of steps()) {
+        await step(store, fixture);
+        await step(reference.store, reference.fixture);
         await expectLayerUnions(adapter, layer, fixture, name);
+        await expectSameMembers(adapter, fixture, reference.store, reference.fixture, name);
+        if (name === 'delete with a blank node') {
+          expect([await held(fixture.graphs[2]!), await held(fixture.readGraphs.wholeVm)]).toEqual([false, false]);
+        }
       }
       expect(await adapter.countQuads(fixture.readGraphs.wholeVm)).toBeGreaterThan(0);
+      await reference.close();
       await close();
     }, 120_000);
 
@@ -208,13 +242,32 @@ export function readGraphLayerConformance(backend: 'oxigraph' | 'blazegraph') {
       await fc.assert(fc.asyncProperty(fc.array(write, { minLength: 1, maxLength: 6 }), async (writes) => {
         const fixture = freshFixture();
         const { adapter, layer, store, close } = await open(fixture);
+        const reference = await openReference();
         for (const { name, run: apply } of writes) {
           await apply(store, fixture);
+          await apply(reference.store, reference.fixture);
           await expectLayerUnions(adapter, layer, fixture, name);
+          await expectSameMembers(adapter, fixture, reference.store, reference.fixture, name);
         }
+        await reference.close();
         await close();
       }), { ...propertyOptions(), numRuns: runs });
     }, 300_000);
+
+    it('marks the read graphs whose members a sub-graph registration changes dirty, and leaves the others', async () => {
+      const fixture = freshFixture();
+      const { layer, store, close } = await open(fixture);
+      const meta = `${fixture.root}/_meta`;
+      await store.insert([
+        { subject: `${fixture.root}/docs`, predicate: RDF_TYPE, object: 'http://dkg.io/ontology/SubGraph', graph: meta },
+        { subject: `${fixture.root}/docs`, predicate: 'http://schema.org/name', object: '"docs"', graph: meta },
+      ]);
+      const state = (readGraph: string) => layer.runtime.mirror.get(readGraph)!.state;
+      expect([state(fixture.readGraphs.wholeVm), state(fixture.readGraphs.wholeSwm), state(fixture.readGraphs.agentWm)]).toEqual(['dirty', 'dirty', 'dirty']);
+      expect(state(fixture.readGraphs.codeVm)).toBe('ready');
+      expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
+      await close();
+    }, 60_000);
 
     it('waits for the locks of the read graphs it maintains, and maintains one whose row appears while it waits', async () => {
       const fixture = freshFixture();

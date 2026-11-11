@@ -15,6 +15,17 @@
  * read-graph quads in the same call instead. A backend whose mirror holds no
  * row gets exactly the requests it gets without the layer.
  *
+ * A write to a `_meta` graph can register or unregister a sub-graph or a
+ * child context graph, which changes membership (`./registry-recognition.ts`).
+ * The layer works out the registry a write leaves from the write's own
+ * arguments and marks the read graphs whose membership changes dirty, under
+ * their locks, before the write is sent; a mark the store does not take
+ * refuses the write. An `update` names only the graphs it writes, so for one
+ * that writes a `_meta` graph the registry is read again after it, under the
+ * same locks, and so it is after a delete whose effect depends on how the
+ * store compares literals. If that reading fails, every read graph of the
+ * context graph is marked dirty.
+ *
  * While its backend holds read graphs the layer refuses, before anything is
  * sent, every write it cannot maintain: an `update` that does not declare the
  * graphs it writes, a SPARQL UPDATE sent through `query`, a pattern delete
@@ -30,7 +41,7 @@
  * its row existed (`runtime.writes.settled()`): they were sent unmaintained.
  */
 
-import { compareCodePoint, isSparqlUpdateOperation, readGraphIri, SparqlTermValidationError, type ReadGraphKey } from '@origintrail-official/dkg-core';
+import { compareCodePoint, isSparqlUpdateOperation, parseReadGraphIri, readGraphIri, SparqlTermValidationError, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import { createSparqlTermPolicy, legacyStrippedIriValue, type SparqlTermRenderer, type SparqlTermSite } from '../adapters/sparql-term-policy.js';
 import type { AtomicAssetReplacement } from '../atomic-asset-group.js';
 import { describeRfc64AuthorCommitCasV1 } from '../rfc64-author-commit-mutation.js';
@@ -61,11 +72,22 @@ import {
   type ReadGraphWriteOptions,
   type ReadGraphWritePlan,
 } from './adapter-contract.js';
-import { readGraphMembership, readGraphsOfMemberGraph, type WorkingMemoryIdentityRule } from './membership.js';
-import { readReadGraphRegistry } from './registry.js';
+import { readGraphMembership, readGraphsOfMemberGraph, type ReadGraphRegistrySnapshot, type WorkingMemoryIdentityRule } from './membership.js';
+import {
+  isExactRegistryWrite,
+  readNamesOfNewSubGraphs,
+  readReadGraphRegistryFacts,
+  registryFactsAfter,
+  registryGraphsOfWrite,
+  registryOwnersOfGraph,
+  registrySnapshotOfFacts,
+  sameRegistry,
+  type ReadGraphRegistryFact,
+  type ReadGraphRegistryWrite,
+} from './registry-recognition.js';
 import { readGraphBackendIdentity, readGraphBackendRuntime, type ReadGraphBackendRuntime } from './runtime.js';
 import { keepsAnyReadGraph, type ReadGraphModes, type ViewSemanticsSettings } from './settings.js';
-import { nextReadGraphState, readGraphStateCompareAndSet } from './state.js';
+import { nextReadGraphState, readGraphStateMarkDirty } from './state.js';
 import type { ReadGraphTarget } from './statements.js';
 import {
   joinReadGraphWriteChanges,
@@ -150,20 +172,36 @@ export class ReadGraphStore implements TripleStoreDecorator {
     if (inner.deleteByPatternWithoutCount) this.deleteByPatternWithoutCount = (pattern, options) =>
       this.deleteMatching('deleteByPatternWithoutCount', pattern, options, (sent) => deleteByPatternWithoutCount(inner, pattern, sent));
     if (inner.replaceGraph) this.replaceGraph = (graphUri, quads, options) =>
-      this.maintain('replaceGraph', replaceOf([graphUri], quads), options, (sent) => inner.replaceGraph!(graphUri, quads, sent));
+      this.maintain('replaceGraph', replaceOf([graphUri], quads), options, (sent) => inner.replaceGraph!(graphUri, quads, sent),
+        { kind: 'graph', graph: graphUri, quads });
     if (inner.replaceAssetGroup) this.replaceAssetGroup = (assets, options) =>
-      this.maintain('replaceAssetGroup', replaceOf(assetGroupGraphs(assets), []), options, (sent) => inner.replaceAssetGroup!(assets, sent));
+      this.maintain('replaceAssetGroup', replaceOf(assetGroupGraphs(assets), []), options, (sent) => inner.replaceAssetGroup!(assets, sent), {
+        kind: 'all',
+        parts: assets.flatMap((asset): ReadGraphRegistryWrite[] => [
+          { kind: 'graph', graph: asset.graphUri, quads: asset.graphQuads },
+          { kind: 'subject', graph: asset.metaGraphUri, subject: asset.metadataSubject, quads: asset.metadataQuads },
+        ]),
+      });
     if (inner.replaceGraphAndSubject) this.replaceGraphAndSubject = (graphUri, graphQuads, metaGraphUri, subject, metadataQuads, options) =>
       this.maintain('replaceGraphAndSubject', replaceOf([graphUri, metaGraphUri], [...graphQuads, ...metadataQuads]), options,
-        (sent) => inner.replaceGraphAndSubject!(graphUri, graphQuads, metaGraphUri, subject, metadataQuads, sent));
+        (sent) => inner.replaceGraphAndSubject!(graphUri, graphQuads, metaGraphUri, subject, metadataQuads, sent), {
+          kind: 'all',
+          // The adapters replace the subject first and the graph last, which wins when both are one graph.
+          parts: [{ kind: 'subject', graph: metaGraphUri, subject, quads: metadataQuads }, { kind: 'graph', graph: graphUri, quads: graphQuads }],
+        });
     if (inner.replaceSubject) this.replaceSubject = (graphUri, subject, quads, options) =>
       this.maintain('replaceSubject', { kind: 'replace-subject', graph: graphUri, subject }, options,
-        (sent) => inner.replaceSubject!(graphUri, subject, quads, sent));
+        (sent) => inner.replaceSubject!(graphUri, subject, quads, sent), { kind: 'subject', graph: graphUri, subject, quads });
     if (inner.replaceSubjectAndInsert) this.replaceSubjectAndInsert = (graphUri, subject, replacement, inserts, options) =>
       this.maintain('replaceSubjectAndInsert', { kind: 'replace-subject', graph: graphUri, subject, companions: inserts.map((quad) => quad.subject) },
-        options, (sent) => inner.replaceSubjectAndInsert!(graphUri, subject, replacement, inserts, sent));
+        options, (sent) => inner.replaceSubjectAndInsert!(graphUri, subject, replacement, inserts, sent), {
+          kind: 'all',
+          parts: [{ kind: 'subject', graph: graphUri, subject, quads: replacement }, { kind: 'quads', added: inserts, removed: [] }],
+        });
+    // A commit can lose its guard and change nothing, so its registry effect is read after it.
     if (inner.rfc64AuthorCommitCasV1) this.rfc64AuthorCommitCasV1 = (input, options) =>
-      this.maintain('rfc64AuthorCommitCasV1', replaceOf(authorCommitGraphs(input), []), options, (sent) => inner.rfc64AuthorCommitCasV1!(input, sent));
+      this.maintain('rfc64AuthorCommitCasV1', replaceOf(authorCommitGraphs(input), []), options, (sent) => inner.rfc64AuthorCommitCasV1!(input, sent),
+        { kind: 'opaque', graphs: authorCommitGraphs(input) });
     if (inner.update) this.update = (sparql, options) => this.declaredUpdate(options, (sent) => inner.update!(sparql, sent));
     if (inner.readGraphInventory) this.readGraphInventory = (prefix, options) => inner.readGraphInventory!(prefix, options);
     if (inner.listGraphsByPrefix) this.listGraphsByPrefix = (prefix, options) => inner.listGraphsByPrefix!(prefix, options);
@@ -186,14 +224,15 @@ export class ReadGraphStore implements TripleStoreDecorator {
     if (this.runtime.mirror.size === 0) return this.innerStore.insert(quads, options);
     const write: ReadGraphWrite = { kind: 'insert', quads };
     refuseRewrittenGraphNames('insert', write);
-    return this.withMaintainedReadGraphs(write, options, (maintained) => {
+    return this.withMaintainedReadGraphs('insert', write, options, (maintained) => {
       const added = this.changeOf('insert', write, maintained).insertQuads;
       return this.dispatch('insert', maintained, () => this.innerStore.insert(added.length === 0 ? quads : [...quads, ...added], options));
-    });
+    }, { kind: 'quads', added: quads, removed: [] });
   }
 
   delete(quads: Quad[], options?: QueryOptions): Promise<void> {
-    return this.maintain('delete', { kind: 'delete', quads }, options, (sent) => this.innerStore.delete(quads, sent));
+    return this.maintain('delete', { kind: 'delete', quads }, options, (sent) => this.innerStore.delete(quads, sent),
+      { kind: 'quads', added: [], removed: quads });
   }
 
   deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number> {
@@ -218,7 +257,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
 
   dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
     return this.maintain('dropGraph', { kind: 'replace', graphs: [graphUri], dropped: true }, options,
-      (sent) => this.innerStore.dropGraph(graphUri, sent));
+      (sent) => this.innerStore.dropGraph(graphUri, sent), { kind: 'graph', graph: graphUri, quads: [] });
   }
 
   listGraphs(options?: QueryOptions): Promise<string[]> {
@@ -227,7 +266,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
 
   deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
     return this.maintain('deleteBySubjectPrefix', { kind: 'delete-prefix', graph: graphUri, prefix }, options,
-      (sent) => this.innerStore.deleteBySubjectPrefix(graphUri, prefix, sent));
+      (sent) => this.innerStore.deleteBySubjectPrefix(graphUri, prefix, sent), { kind: 'prefix', graph: graphUri, prefix });
   }
 
   countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
@@ -247,7 +286,8 @@ export class ReadGraphStore implements TripleStoreDecorator {
     if (this.runtime.mirror.size === 0) return this.runtime.writes.track(send(options));
     if (!pattern.graph) return Promise.reject(new ReadGraphWriteRefusedError('deleteByPattern', 'a pattern delete must name its graph'));
     const { subject, predicate, object } = pattern;
-    return this.maintain(method, { kind: 'delete-matching', graph: pattern.graph, pattern: { subject, predicate, object } }, options, send);
+    return this.maintain(method, { kind: 'delete-matching', graph: pattern.graph, pattern: { subject, predicate, object } }, options, send,
+      { kind: 'match', graph: pattern.graph, ...(subject ? { subject } : {}), ...(predicate ? { predicate } : {}), ...(object ? { object } : {}) });
   }
 
   private declaredUpdate(options: UpdateOptions | undefined, send: (options: UpdateOptions | undefined) => Promise<void>): Promise<void> {
@@ -256,7 +296,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
     if (written === undefined) {
       return Promise.reject(new ReadGraphWriteRefusedError('update', 'it does not declare the graphs it writes (writtenGraphs)'));
     }
-    return this.maintain('update', { kind: 'replace', graphs: written }, options, send);
+    return this.maintain('update', { kind: 'replace', graphs: written }, options, send, { kind: 'opaque', graphs: written });
   }
 
   /**
@@ -268,8 +308,9 @@ export class ReadGraphStore implements TripleStoreDecorator {
     write: ReadGraphWrite,
     options: O | undefined,
     send: (options: O | undefined) => Promise<T>,
+    registry?: ReadGraphRegistryWrite,
   ): Promise<T> {
-    return this.runtime.writes.track(this.sendMaintained(method, write, options, send));
+    return this.runtime.writes.track(this.sendMaintained(method, write, options, send, registry));
   }
 
   private async sendMaintained<T, O extends QueryOptions>(
@@ -277,10 +318,11 @@ export class ReadGraphStore implements TripleStoreDecorator {
     write: ReadGraphWrite,
     options: O | undefined,
     send: (options: O | undefined) => Promise<T>,
+    registry?: ReadGraphRegistryWrite,
   ): Promise<T> {
     if (this.runtime.mirror.size === 0) return send(options);
     refuseRewrittenGraphNames(method, write);
-    return this.withMaintainedReadGraphs(write, options, (maintained) => {
+    return this.withMaintainedReadGraphs(storeOperationOf(method), write, options, (maintained) => {
       const change = this.changeOf(method, write, maintained);
       if (change.before.length + change.after.length === 0) return send(options);
       if (!this.adapterCapabilities?.methods.includes(method)) {
@@ -292,28 +334,36 @@ export class ReadGraphStore implements TripleStoreDecorator {
         after: change.after,
       };
       return this.dispatch(method, maintained, () => send({ ...options, readGraphPlan: plan } as O & ReadGraphWriteOptions));
-    });
+    }, registry);
   }
 
   /**
    * Run `work` with the read graphs whose member graphs a write touches, under
-   * their locks. The read graphs are found again after the locks are taken; a
-   * row created while the write waited adds its lock, and the write tries
-   * again.
+   * their locks, together with the locks of every read graph of a context
+   * graph whose registry the write may change. The read graphs are found again
+   * after the locks are taken; a row created while the write waited adds its
+   * lock, and the write tries again.
    */
   private async withMaintainedReadGraphs<T>(
+    operation: StoreOperation,
     write: ReadGraphWrite,
     options: QueryOptions | undefined,
     work: (maintained: readonly MaintainedReadGraph[]) => Promise<T>,
+    registry?: ReadGraphRegistryWrite,
   ): Promise<T> {
     const graphs = readGraphWriteGraphs(write);
+    const registryGraphs = registry ? registryGraphsOfWrite(registry) : [];
     const locked = new Set<string>();
     for (let attempt = 0; attempt < 8; attempt += 1) {
       await this.loadRegistries(options);
       const outcome = await this.runtime.locks.withLocks(locked, async (): Promise<{ readonly missing: readonly string[] } | { readonly done: T }> => {
         const maintained = this.maintainedReadGraphs(graphs);
-        const missing = maintained.map(({ target }) => target.readGraph).filter((readGraph) => !locked.has(readGraph));
-        return missing.length > 0 ? { missing } : { done: await work(maintained) };
+        const owners = this.registryOwnersWithRows(registryGraphs);
+        const missing = [...maintained.map(({ target }) => target.readGraph), ...owners.flatMap((owner) => this.readGraphsOf(owner))]
+          .filter((readGraph) => !locked.has(readGraph));
+        if (missing.length > 0) return { missing };
+        const run = () => work(maintained);
+        return { done: await (owners.length === 0 ? run() : this.withRecognizedRegistry(operation, owners, registry!, options, run)) };
       });
       if ('done' in outcome) return outcome.done;
       for (const readGraph of outcome.missing) locked.add(readGraph);
@@ -321,11 +371,154 @@ export class ReadGraphStore implements TripleStoreDecorator {
     throw new Error('The read graphs of a write kept changing while it waited for their locks');
   }
 
-  /** Read the registry of every context graph with read graphs that has no snapshot yet. */
+  /**
+   * Read the registry of every context graph with read graphs that has no
+   * snapshot yet. It runs without locks, so what it read is installed only if
+   * no write set or forgot the entry meanwhile: that write's entry is newer.
+   * Facts forgotten under a snapshot are read again under the locks, by the
+   * next write that may change the registry.
+   */
   private async loadRegistries(options: QueryOptions | undefined): Promise<void> {
     for (const contextGraphId of this.runtime.mirror.contextGraphIds()) {
       if (this.runtime.registries.get(contextGraphId)) continue;
-      this.runtime.registries.set(await readReadGraphRegistry(this.innerStore, contextGraphId, options));
+      const version = this.runtime.registries.version(contextGraphId);
+      const facts = await readReadGraphRegistryFacts(this.innerStore, contextGraphId, options);
+      if (this.runtime.registries.version(contextGraphId) === version) {
+        this.runtime.registries.set(registrySnapshotOfFacts(contextGraphId, facts), facts);
+      }
+    }
+  }
+
+  /**
+   * Read a context graph's registry facts again, under the locks of its read
+   * graphs, mark the read graphs whose membership they change, and keep them.
+   * If a mark is not stored, this throws before they are kept: the cached
+   * registry stays the one the marks were measured against.
+   */
+  private async refreshRegistry(contextGraphId: string, options: QueryOptions | undefined): Promise<readonly ReadGraphRegistryFact[]> {
+    const facts = await readReadGraphRegistryFacts(this.innerStore, contextGraphId, options);
+    const snapshot = registrySnapshotOfFacts(contextGraphId, facts);
+    await this.markMembershipChange(contextGraphId, snapshot);
+    this.runtime.registries.set(snapshot, facts);
+    return facts;
+  }
+
+  /** The context graphs with read graphs whose registry facts can sit in one of `graphs`. */
+  private registryOwnersWithRows(graphs: readonly string[]): string[] {
+    if (graphs.length === 0) return [];
+    const withRows = new Set(this.runtime.mirror.contextGraphIds());
+    return [...new Set(graphs.flatMap(registryOwnersOfGraph))].filter((owner) => withRows.has(owner)).sort(compareCodePoint);
+  }
+
+  /** The read graphs of one context graph that have a row. */
+  private readGraphsOf(contextGraphId: string): string[] {
+    return this.runtime.mirror.rows().map((row) => row.readGraph)
+      .filter((readGraph) => parseReadGraphIri(readGraph)?.scope.contextGraphId === contextGraphId);
+  }
+
+  /**
+   * Send a write that may change the registry of context graphs with read
+   * graphs. Where its arguments show the registry it leaves, the read graphs
+   * whose membership changes are marked dirty before it is sent, and the
+   * write is refused if the store does not take a mark. Where they do not,
+   * the registry is read again after it, whether it succeeded or not, and
+   * they are marked then.
+   */
+  private async withRecognizedRegistry<T>(
+    operation: StoreOperation,
+    owners: readonly string[],
+    registry: ReadGraphRegistryWrite,
+    options: QueryOptions | undefined,
+    send: () => Promise<T>,
+  ): Promise<T> {
+    const predicted = new Map<string, ReadGraphRegistryFact[]>();
+    for (const owner of owners) {
+      let cached: readonly ReadGraphRegistryFact[];
+      let names: ReadGraphRegistryFact[] | undefined;
+      try {
+        cached = this.runtime.registries.facts(owner) ?? await this.refreshRegistry(owner, options);
+        names = await readNamesOfNewSubGraphs(this.innerStore, owner, cached, registry, options);
+      } catch (error) {
+        if (error instanceof ReadGraphWriteRefusedError) throw error;
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new ReadGraphWriteRefusedError(operation, `the registry it changes could not be read and settled: ${reason}`);
+      }
+      const after = registryFactsAfter(owner, [...cached, ...(names ?? [])], registry);
+      if (after === undefined) continue;
+      // Marked from the prediction either way; one that may over-count, or lacks a name, is read again after the write.
+      if (names !== undefined && isExactRegistryWrite(owner, registry)) predicted.set(owner, after);
+      await this.markMembershipChange(owner, registrySnapshotOfFacts(owner, after), operation);
+    }
+    const settle = async (succeeded: boolean) => {
+      let failure: { readonly error: unknown } | undefined;
+      for (const owner of owners) {
+        const after = predicted.get(owner);
+        if (succeeded && after !== undefined) {
+          this.runtime.registries.set(registrySnapshotOfFacts(owner, after), after);
+          continue;
+        }
+        // Opaque, or not exactly predicted, or failed and so may or may not have run: read the facts again.
+        try {
+          await this.refreshRegistry(owner, options);
+        } catch (error) {
+          // What the write did to this registry is unknown: every read graph of the context graph goes dirty,
+          // and the facts are read again before the next write that may change it. The other owners settle all the same.
+          await this.markDirty(this.readGraphsOf(owner));
+          this.runtime.registries.forgetFacts(owner);
+          failure ??= { error };
+        }
+      }
+      if (succeeded && failure) throw failure.error;
+    };
+    let result: T;
+    try {
+      result = await send();
+    } catch (error) {
+      await settle(false);
+      // On an engine that may run it beside later requests, a write whose outcome is unknown can still change the
+      // registry after any reading of it: every read graph of its context graphs goes dirty, and the facts are read
+      // again before the next write that may change them.
+      if (!this.adapterCapabilities?.serialUpdates && !hasStoreOperationOutcome(error, operation, 'not_started')) {
+        for (const owner of owners) {
+          await this.markDirty(this.readGraphsOf(owner));
+          this.runtime.registries.forgetFacts(owner);
+        }
+      }
+      throw error;
+    }
+    await settle(true);
+    return result;
+  }
+
+  /**
+   * Mark dirty the read graphs of a context graph whose membership the
+   * registry `next` changes: in the mirror, then in the store from whatever
+   * row it holds, so a mark an earlier attempt could not store is sent again.
+   * A mark the store does not take throws. Before the write (`unsent`, its
+   * operation) the write is refused; after it, the caller leaves the registry
+   * unsettled, so the next write that may change it reads it and marks again.
+   * No stored `ready` row then outlives a change it misses.
+   */
+  private async markMembershipChange(contextGraphId: string, next: ReadGraphRegistrySnapshot, unsent?: StoreOperation): Promise<void> {
+    const current = this.runtime.registries.get(contextGraphId);
+    if (!current || sameRegistry(current, next)) return;
+    const identity = this.runtime.workingMemoryIdentity;
+    const changed = this.readGraphsOf(contextGraphId).filter((readGraph) => {
+      const key = parseReadGraphIri(readGraph);
+      return key !== undefined
+        && JSON.stringify(readGraphMembership(key, current, identity)) !== JSON.stringify(readGraphMembership(key, next, identity));
+    });
+    const rows = changed.flatMap((readGraph) => this.runtime.mirror.get(readGraph) ?? []);
+    for (const row of rows) if (row.state !== 'dirty') this.runtime.mirror.set(nextReadGraphState(row, { kind: 'mark-dirty' })!);
+    for (const { readGraph } of rows) {
+      try {
+        if (!this.innerStore.update) throw new Error('its adapter has no update()');
+        await this.innerStore.update(readGraphStateMarkDirty(readGraph), { source: 'storage.readGraphDirtyMark' });
+      } catch (error) {
+        if (unsent === undefined) throw error;
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new ReadGraphWriteRefusedError(unsent, `a read graph whose membership it changes could not be marked dirty: ${reason}`);
+      }
     }
   }
 
@@ -369,12 +562,11 @@ export class ReadGraphStore implements TripleStoreDecorator {
   private async markDirty(readGraphs: readonly string[]): Promise<void> {
     for (const readGraph of readGraphs) {
       const row = this.runtime.mirror.get(readGraph);
-      if (!row || row.state === 'dirty') continue;
-      const dirty = nextReadGraphState(row, { kind: 'mark-dirty' })!;
-      this.runtime.mirror.set(dirty);
-      // If this request fails as well, the stored row is older than the mirror's;
-      // a rebuild then starts from the stored row.
-      await this.innerStore.update?.(readGraphStateCompareAndSet(row, dirty), { source: 'storage.readGraphDirtyMark' })
+      if (!row) continue;
+      if (row.state !== 'dirty') this.runtime.mirror.set(nextReadGraphState(row, { kind: 'mark-dirty' })!);
+      // From whatever row is stored, and even when the mirror already says dirty: an earlier mark may not have
+      // reached the store. If this request fails as well, a rebuild starts from the stored row.
+      await this.innerStore.update?.(readGraphStateMarkDirty(readGraph), { source: 'storage.readGraphDirtyMark' })
         .catch(() => undefined);
     }
   }

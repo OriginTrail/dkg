@@ -3,11 +3,12 @@ import { createScopedContentGraphRoutePolicy, selectScopedRoutePartitions, selec
 import { normalizeContextGraphPartitionReadOptions, readPartitionStatistics, type NamedGraphStatsBatchGate } from './named-graph-statistics.js';
 import { QueryResultTooLargeError } from './query-result-size-error.js';
 import { type ContentPartition } from './content-partition-policy.js';
-import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
+import { classifyScopedContentGraph, isKnownChildContextGraphPartition, queryOptionNamingReadGraphPartition } from './scoped-content-partition.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog, readRegisteredViewSubGraphs, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
 import { resolveLegacyRouteScope } from './legacy-route-scope.js';
 import { resolveQueryReadPlan, type QueryReadPlan } from './query-read-plan.js';
+import { classifyMeteredQuery, meterQueryScope, reportRoutedGraphs, startRoutedRead } from './query-scope-meters.js';
 import { storeOptions } from './query-store-options.js';
 import {
   asGraphWriteRevisionSource, asQueryReadAdmissionCapability,
@@ -364,6 +365,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    return meterQueryScope(() => this.runQuery(sparql, options));
+  }
+
+  private async runQuery(sparql: string, options?: QueryOptions): Promise<QueryResult> {
     const prepared = prepareSparql(sparql);
     if (prepared.status === 'malformed-uchar') {
       throw new Error('SPARQL rejected: malformed Unicode code-point escape');
@@ -376,9 +381,13 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     if (!guard.safe) {
       throw new Error(`SPARQL rejected: ${guard.reason}`);
     }
-    // Read-graph partitions belong to storage: no caller query may name one.
+    // Read-graph partitions belong to storage: no caller query may name one, in its text or its options.
     if (preparedSparqlNamesReadGraphPartition(prepared)) {
       throw new ScopedQueryViolationError('the query names a graph in a read-graph partition');
+    }
+    const partitionOption = queryOptionNamingReadGraphPartition(options);
+    if (partitionOption !== undefined) {
+      throw new ScopedQueryViolationError(`the query option ${partitionOption} names a read-graph partition`);
     }
     // Policy checks and rewrites retain the prepared source/logical views.
     // Active UCHAR syntax is materialized once, immediately before the final
@@ -391,6 +400,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const admission = asQueryReadAdmissionCapability(this.store);
     const plan = resolveQueryReadPlan(initialGraphScope, options,
       this.store.graphEnumerationVisibility ? admission : null);
+    classifyMeteredQuery(initialGraphScope, plan, options);
     const reads = createQueryStoreReadContext(this.store, options);
     if (options?.withheldGraphRoots?.length && plan.kind !== 'unscoped') {
       throw new Error('withheldGraphRoots applies only to queries without a contextGraphId');
@@ -693,6 +703,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const sparql = initialScope.source;
     const allGraphs = await this.resolveViewGraphSet(view, contextGraphId, options, reads, catalogReads);
 
+    // The scope meter counts the graphs this view routes per asset.
+    reportRoutedGraphs(allGraphs);
     if (allGraphs.length === 0) {
       // PR #239 / r17-2: a zero-graph resolution (e.g. a `verifiable-memory`
       // query with `minTrust=Endorsed` on a context graph that has not
@@ -1048,6 +1060,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
    */
   private async execCallerQuery(scope: PreparedGraphScope, reads: StoreReadLane) {
     const sparql = materializePreparedSparql(scope.prepared);
+    const endRead = startRoutedRead();
     try {
       return await reads.query(sparql, scope.hasDatasetClause);
     } catch (err) {
@@ -1056,6 +1069,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         throw new CallerSparqlRejectedError(err.message, err.status, { cause: err });
       }
       throw err;
+    } finally {
+      endRead?.();
     }
   }
 

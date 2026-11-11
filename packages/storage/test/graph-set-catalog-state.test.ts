@@ -3,6 +3,7 @@ import { measureGraphCatalogBytes } from '../src/graph-catalog-response-limit.js
 import { createSortedUniqueStringCatalog } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
 import { GraphSetCatalogState } from '../src/graph-set-catalog-state.js';
+import { STORE_GRAPH_CATALOG_MAX_BYTES_ENV, StoreInternalLimitError } from '../src/graph-catalog-internal-limit.js';
 
 vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@origintrail-official/dkg-core')>();
@@ -106,59 +107,45 @@ describe('GraphSetCatalogState', () => {
   });
 });
 
-it('measures each immutable catalog once across caller ceilings and invalidates on membership changes', () => {
+it('measures each immutable catalog once, bounds it by the internal ceiling only, and invalidates on membership changes', () => {
   const measure = vi.mocked(measureGraphCatalogBytes); measure.mockClear();
   const state = new GraphSetCatalogState(); state.replace(new Set(['urn:a']));
   const members = state.current!;
   const bytes = Buffer.byteLength(JSON.stringify(['urn:a']));
-  expect(state.sortedFor(members, bytes)).toEqual(['urn:a']);
-  expect(() => state.sortedFor(members, bytes - 1)).toThrow(/byte limit/);
-  expect(state.sortedFor(members, bytes + 1)).toEqual(['urn:a']);
-  for (let i = 0; i < 3; i++) expect(state.measuredFor(members, bytes))
-    .toEqual({ graphs: ['urn:a'], materializedBytes: bytes });
-  expect(measure).toHaveBeenCalledOnce();
-  state.reconcile([{ graph: 'urn:b', present: true }]);
-  expect(() => state.sortedFor(members, bytes)).toThrow(/byte limit/);
-  const updatedBytes = Buffer.byteLength(JSON.stringify(['urn:a', 'urn:b']));
-  for (let i = 0; i < 3; i++) expect(state.measuredFor(members, updatedBytes))
-    .toEqual({ graphs: ['urn:a', 'urn:b'], materializedBytes: updatedBytes });
-  expect(measure).toHaveBeenCalledTimes(2);
-  state.replace(new Set(['urn:c']));
-  expect(state.sortedFor(state.current!, bytes)).toEqual(['urn:c']);
-  expect(measure).toHaveBeenCalledTimes(3);
+  try {
+    for (let i = 0; i < 3; i++) expect(state.measuredFor(members))
+      .toEqual({ graphs: ['urn:a'], materializedBytes: bytes });
+    expect(measure).toHaveBeenCalledOnce();
+    vi.stubEnv(STORE_GRAPH_CATALOG_MAX_BYTES_ENV, String(bytes));
+    expect(state.sortedFor(members)).toEqual(['urn:a']);
+    vi.stubEnv(STORE_GRAPH_CATALOG_MAX_BYTES_ENV, String(bytes - 1));
+    expect(() => state.sortedFor(members)).toThrow(StoreInternalLimitError);
+    vi.unstubAllEnvs();
+    state.reconcile([{ graph: 'urn:b', present: true }]);
+    const updatedBytes = Buffer.byteLength(JSON.stringify(['urn:a', 'urn:b']));
+    for (let i = 0; i < 3; i++) expect(state.measuredFor(members))
+      .toEqual({ graphs: ['urn:a', 'urn:b'], materializedBytes: updatedBytes });
+    expect(measure).toHaveBeenCalledTimes(2);
+    state.reconcile([{ graph: 'urn:b', present: true }]);
+    expect(state.measuredFor(members)?.materializedBytes).toBe(updatedBytes);
+    expect(measure).toHaveBeenCalledTimes(2);
+    state.replace(new Set(['urn:c']));
+    expect(state.measuredFor(state.current!)?.materializedBytes).toBe(bytes);
+    expect(measure).toHaveBeenCalledTimes(3);
+  } finally { vi.unstubAllEnvs(); }
 });
 
 
-it('keeps raw inventory cost explicit through filtering, copies, sorting, and cache replay', () => {
+it('charges a projection for the graphs it keeps, through filtering, copies, sorting, and cache replay', () => {
   const raw = measureGraphInventory(['urn:z', 'urn:hidden:' + 'x'.repeat(1000), 'urn:a']);
   const visible = filterGraphInventory(raw, graph => !graph.startsWith('urn:hidden:'));
-  const copied = { ...visible, graphs: visible.graphs.slice().sort() };
-  expect(copied.graphs).toEqual(['urn:a', 'urn:z']);
-  expect(copied.materializedBytes).toBe(raw.materializedBytes);
-  expect(copied.materializedBytes).toBeGreaterThan(measureGraphCatalogBytes(copied.graphs));
+  expect(visible).toEqual({ graphs: ['urn:z', 'urn:a'], materializedBytes: measureGraphCatalogBytes(['urn:z', 'urn:a']) });
+  expect(visible.materializedBytes).toBeLessThan(raw.materializedBytes);
   const cache = new GraphSetCatalogState();
-  cache.replace(new Set(copied.graphs), copied.materializedBytes);
+  cache.replace(new Set(visible.graphs));
   for (let request = 0; request < 2; request++) {
     const replay = cache.measuredFor(cache.current!)!;
-    expect([...replay.graphs]).toEqual(copied.graphs);
-    expect(replay.materializedBytes).toBe(raw.materializedBytes);
+    expect([...replay.graphs]).toEqual(['urn:a', 'urn:z']);
+    expect(replay.materializedBytes).toBe(visible.materializedBytes);
   }
-});
-
-
-it('measures a reconciled projection once after the distinct source cost is invalidated', () => {
-  const measure = vi.mocked(measureGraphCatalogBytes); measure.mockClear();
-  const state = new GraphSetCatalogState();
-  state.replace(new Set(['urn:a']), 1000);
-  expect(state.measuredFor(state.current!)?.materializedBytes).toBe(1000);
-  expect(measure).not.toHaveBeenCalled();
-  state.reconcile([{ graph: 'urn:b', present: true }]);
-  const graphs = ['urn:a', 'urn:b'], bytes = Buffer.byteLength(JSON.stringify(graphs));
-  for (const limit of [undefined, bytes, bytes + 1]) {
-    expect(state.measuredFor(state.current!, limit)).toEqual({ graphs, materializedBytes: bytes });
-  }
-  expect(measure).toHaveBeenCalledOnce();
-  state.reconcile([{ graph: 'urn:b', present: true }]);
-  expect(state.measuredFor(state.current!, bytes)?.materializedBytes).toBe(bytes);
-  expect(measure).toHaveBeenCalledOnce();
 });

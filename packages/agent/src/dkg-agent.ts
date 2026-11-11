@@ -119,7 +119,7 @@ import {
   isAllocatableKaAuthorV1,
   applyMixins,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, markReadGraphsDirtyAtStart, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, startReadGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
 import {
   normalizeContextGraphDiscoveryScan,
@@ -1163,7 +1163,7 @@ export class DKGAgent extends DKGAgentBase {
         close: () => this.closeRfc64PublicCatalogMutationPersistenceV1(),
       },
       publicCatalog: this.rfc64PublicCatalogOwnerV1,
-      workloads: [bootstrapOwner, projectionOwner, this.createRfc64OwedShareInventoryOwnerV1(resolveCatalogPartition)],
+      workloads: [bootstrapOwner, projectionOwner, this.createRfc64OwedShareInventoryOwnerV1(resolveCatalogPartition), this.createReadGraphWorkloadV1()],
     });
   }
 
@@ -1424,7 +1424,7 @@ export class DKGAgent extends DKGAgentBase {
       store = await createTripleStore({ backend: 'oxigraph' });
       log.warn(ctx, `No dataDir — triple store is in-memory (data will be lost on restart)`);
     }
-    await markReadGraphsDirtyAtStart(store, { dataDir: config.dataDir, log: message => log.info(ctx, message) });
+    await startReadGraphs(store, { dataDir: config.dataDir, log: message => log.info(ctx, message) });
 
     const nodeRole = config.nodeRole ?? 'edge';
     const eventBus = new TypedEventBus();

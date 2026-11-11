@@ -425,7 +425,9 @@ export {
   readGraphStateFencePattern,
   readGraphStateMarkAllDirty,
   readGraphStateMarkDirty,
+  readGraphStateMarkDirtyAtStart,
   readGraphStateReset,
+  readGraphStateRowQuery,
   readGraphStateRowsQuery,
   servingReadGraphGeneration,
   type ReadGraphState,
@@ -457,6 +459,7 @@ export {
   readGraphDeltaDeleteMatching,
   readGraphFencedDrop,
   readGraphFirstHolderCountQuery,
+  readGraphHoldsTripleAsk,
   readGraphInsertQuads,
   readGraphMissingTripleAsk,
   readGraphReferenceProcedure,
@@ -501,4 +504,53 @@ export {
   type ViewSemantics,
   type ViewSemanticsSettings,
 } from './read-graph/settings.js';
+export {
+  DEFAULT_READ_GRAPH_BATCHING,
+  ReadGraphJobError,
+  buildReadGraph,
+  installWorkingMemoryIdentity,
+  markReadGraphDirty,
+  refreshReadGraphRegistry,
+  withReadGraphBackgroundSlot,
+  readGraphEnumerationRoots,
+  readStoredReadGraphRow,
+  removeReadGraph,
+  repairReadGraph,
+  type ReadGraphBatching,
+  type ReadGraphJobContext,
+  type ReadGraphJobKind,
+  type ReadGraphJobResult,
+  type ReadGraphRepairInput,
+} from './read-graph/rebuild.js';
+export { startReadGraphs, type ReadGraphStartOptions, type ReadGraphStartResult } from './read-graph/startup.js';
+export {
+  DEFAULT_READ_GRAPH_BUILD_INTERVAL_MS,
+  ReadGraphBuilder,
+  type ReadGraphBuilderOptions,
+  type ReadGraphBuilderStatus,
+} from './read-graph/builder.js';
+export {
+  checkReadGraph,
+  type ReadGraphCheckDirection,
+  type ReadGraphCheckMode,
+  type ReadGraphCheckOptions,
+  type ReadGraphCheckOutcome,
+  type ReadGraphCheckResult,
+} from './read-graph/check.js';
+export {
+  READ_GRAPH_CHECK_DEFAULTS,
+  ReadGraphCheckSchedule,
+  startReadGraphChecks,
+  type ReadGraphCheckScheduleOptions,
+} from './read-graph/check-schedule.js';
+export {
+  DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
+  STORE_GRAPH_CATALOG_LIMIT_NAME,
+  STORE_GRAPH_CATALOG_MAX_BYTES_ENV,
+  STORE_INTERNAL_LIMIT,
+  StoreInternalLimitError,
+  isStoreInternalLimitError,
+  storeGraphCatalogMaxBytes,
+  type StoreInternalLimitErrorLike,
+} from './graph-catalog-internal-limit.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';
