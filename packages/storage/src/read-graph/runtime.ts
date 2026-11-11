@@ -151,6 +151,12 @@ export interface ReadGraphBackendRuntime {
   modes: ReadGraphModes;
   /** What a view query without `semantics` gets; `per-asset` until a store configuration sets it. */
   viewSemantics: ViewSemanticsSettings;
+  /**
+   * Whether the backend may hold read-graph partitions, as recorded by
+   * `noteStoreMayHoldReadGraphPartitions` through any store object over it.
+   * Unset means not recorded.
+   */
+  mayHoldPartitions?: boolean;
 }
 
 const SHARED_RUNTIMES = new Map<string, ReadGraphBackendRuntime>();

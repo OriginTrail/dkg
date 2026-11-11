@@ -252,13 +252,18 @@ function backendOf(store: TripleStore): TripleStore {
  * Record, for this process, that a store may hold read-graph partitions. Its
  * unscoped queries leave hidden graphs out only then, so a store that cannot
  * hold any pays nothing. Whatever creates or finds read graphs records it.
+ * The record belongs to the backend: through the read-graph layer's runtime,
+ * every store object over the same backend sees it, and a store without the
+ * layer keeps it on its own adapter object.
  */
 export function noteStoreMayHoldReadGraphPartitions(store: TripleStore): void {
   MAY_HOLD_PARTITIONS.add(backendOf(store));
+  const runtime = readGraphLayerOf(store)?.runtime;
+  if (runtime) runtime.mayHoldPartitions = true;
 }
 
 export function storeMayHoldReadGraphPartitions(store: TripleStore): boolean {
-  return MAY_HOLD_PARTITIONS.has(backendOf(store));
+  return MAY_HOLD_PARTITIONS.has(backendOf(store)) || readGraphLayerOf(store)?.runtime.mayHoldPartitions === true;
 }
 
 /**
