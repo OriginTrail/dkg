@@ -8,7 +8,7 @@ import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog, readRegisteredViewSubGraphs, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
 import { resolveLegacyRouteScope } from './legacy-route-scope.js';
 import { resolveQueryReadPlan, type QueryReadPlan } from './query-read-plan.js';
-import { classifyQueryScope, QueryScopeMeter } from './query-scope-meters.js';
+import { classifyMeteredQuery, meterQueryScope, reportRoutedGraphs, startRoutedRead } from './query-scope-meters.js';
 import { storeOptions } from './query-store-options.js';
 import {
   asGraphWriteRevisionSource, asQueryReadAdmissionCapability,
@@ -359,6 +359,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    return meterQueryScope(() => this.runQuery(sparql, options));
+  }
+
+  private async runQuery(sparql: string, options?: QueryOptions): Promise<QueryResult> {
     const prepared = prepareSparql(sparql);
     if (prepared.status === 'malformed-uchar') {
       throw new Error('SPARQL rejected: malformed Unicode code-point escape');
@@ -386,15 +390,15 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const admission = asQueryReadAdmissionCapability(this.store);
     const plan = resolveQueryReadPlan(initialGraphScope, options,
       this.store.graphEnumerationVisibility ? admission : null);
-    const meter = new QueryScopeMeter(classifyQueryScope(initialGraphScope, plan, options));
-    const reads = meter.observe(createQueryStoreReadContext(this.store, options));
+    classifyMeteredQuery(initialGraphScope, plan, options);
+    const reads = createQueryStoreReadContext(this.store, options);
     if (options?.withheldGraphRoots?.length && plan.kind !== 'unscoped') {
       throw new Error('withheldGraphRoots applies only to queries without a contextGraphId');
     }
     switch (plan.kind) {
-      case 'scoped': return meter.settle(this.queryScoped(initialGraphScope, options, plan, reads, meter));
-      case 'view': return meter.settle(this.queryWithView(initialGraphScope, plan.options.view,
-        plan.options.contextGraphId, plan.options, reads, reads.catalog, meter));
+      case 'scoped': return this.queryScoped(initialGraphScope, options, plan, reads);
+      case 'view': return this.queryWithView(initialGraphScope, plan.options.view,
+        plan.options.contextGraphId, plan.options, reads, reads.catalog);
       case 'unscoped': {
         // The store answers over its dataset without the withheld graphs. While
         // it may hold read-graph partitions, every unscoped query runs over its
@@ -405,24 +409,24 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         const scopeRequired = () => new ScopedQueryViolationError(
           'this store cannot answer that query without a context graph now; give the query a context graph');
         if (hidesReadGraphs && initialGraphScope.hasDatasetClause) throw scopeRequired();
-        return meter.settle(this.execWithExclusions(initialGraphScope, withheld.length > 0 || hidesReadGraphs
+        return this.execWithExclusions(initialGraphScope, withheld.length > 0 || hidesReadGraphs
           ? reads.withWithheldGraphRoots(withheld) : reads,
         options?.excludeGraphPrefixes).catch((error: unknown) => {
           if (hidesReadGraphs && isQueryDatasetUnrestrictedError(error)) throw scopeRequired();
           throw error;
-        }));
+        });
       }
     }
   }
 
   private queryScoped(scope: PreparedGraphScope, options: QueryOptions | undefined,
-    plan: ScopedQueryReadPlan, reads: QueryStoreReadContext, meter: QueryScopeMeter): Promise<QueryResult> {
+    plan: ScopedQueryReadPlan, reads: QueryStoreReadContext): Promise<QueryResult> {
     const execute = (discovery: ScopedContentGraphDiscoverySnapshot | null) => {
       const lane = discovery ? { query: reads.query,
         listGraphsByPrefix: async (prefix: string) => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads;
       const { policy } = plan;
       const variableContentGraphs = discovery ? selectScopedRouteGraphs(policy, discovery.partitions) : [];
-      return this.executeScoped(scope, plan, lane, variableContentGraphs, reads.catalog, meter);
+      return this.executeScoped(scope, plan, lane, variableContentGraphs, reads.catalog);
     };
     switch (plan.discovery.catalog.kind) {
       case 'none': return execute(null);
@@ -433,8 +437,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   }
 
   private async executeScoped(initialGraphScope: PreparedGraphScope,
-    plan: ScopedQueryReadPlan, reads: StoreReadLane, variableContentGraphs: readonly string[], catalogReads: StoreReadLane,
-    meter: QueryScopeMeter): Promise<QueryResult> {
+    plan: ScopedQueryReadPlan, reads: StoreReadLane, variableContentGraphs: readonly string[], catalogReads: StoreReadLane): Promise<QueryResult> {
     const { subGraphName, staticPrivateAllowList } = plan.policy;
     const partitions = new Map<string, string[]>();
     for (const { root, prefix } of plan.discovery.contentPrefixes) {
@@ -453,8 +456,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(initialGraphScope, variableAllowedGraphs));
     const resolve = (target: { root: string; family: 'data' | 'shared-memory' }) => resolveLegacyRouteScope(
       routedScope, { ...target, discover: prefix => this.discoverGraphsByPrefix(prefix, reads),
-        fallbackPolicy: plan.fallbackPolicy, engine: this.sparqlEngine, authorizedDatasetGraphs: variableAllowedGraphs,
-        onRoute: graphs => meter.route(graphs) });
+        fallbackPolicy: plan.fallbackPolicy, engine: this.sparqlEngine, authorizedDatasetGraphs: variableAllowedGraphs });
     const route = plan.policy.execution;
     if (route.kind === 'combined') {
       const dataScope = await resolve(route.data);
@@ -501,7 +503,6 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     options: QueryOptions,
     reads: StoreReadLane,
     catalogReads: StoreReadLane,
-    meter: QueryScopeMeter,
   ): Promise<QueryResult> {
     const sparql = initialScope.source;
     const fanOut = !options.subGraphName && !options.verifiedGraph
@@ -601,7 +602,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const dedupedGraphs = [...new Set(allGraphs)].filter(graph => !isKnownChildContextGraphPartition(graph, children));
     allGraphs.length = 0;
     allGraphs.push(...dedupedGraphs);
-    meter.route(allGraphs);
+    reportRoutedGraphs(allGraphs);
 
     if (allGraphs.length === 0) {
       // PR #239 / r17-2: a zero-graph resolution (e.g. a `verifiable-memory`
@@ -958,6 +959,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
    */
   private async execCallerQuery(scope: PreparedGraphScope, reads: StoreReadLane) {
     const sparql = materializePreparedSparql(scope.prepared);
+    const endRead = startRoutedRead();
     try {
       return await reads.query(sparql);
     } catch (err) {
@@ -966,6 +968,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         throw new CallerSparqlRejectedError(err.message, err.status, { cause: err });
       }
       throw err;
+    } finally {
+      endRead?.();
     }
   }
 
