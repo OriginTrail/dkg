@@ -3,7 +3,6 @@ import { useFetch } from '../hooks.js';
 import { useMemoryEntityDetails } from '../hooks/useMemoryEntityDetails.js';
 import { api } from '../api-wrapper.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
-import { VmReceiptsProvider, useVmReceiptsResource } from '../hooks/useVmReceipts.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
@@ -104,8 +103,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     [],
     30_000,
   );
-  // One receipt load per graph, shared by the VM header facts and graph anchors.
-  const vmReceipts = useVmReceiptsResource(contextGraphId);
   const [showImport, setShowImport] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [activeLayer, setActiveLayer] = useState<LayerView>('overview');
@@ -705,7 +702,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     if (cgError || (cgData && !cgLoading)) {
       return (
         <div className="v10-view-placeholder">
-          <p style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-control)', marginBottom: 10 }}>
+          <p style={{ color: 'var(--text-tertiary)', fontSize: 'var(--font-size-label)', marginBottom: 10 }}>
             {cgError
               ? cgAuthError
                 ? cgError
@@ -713,11 +710,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
               : 'Context graph not found.'}
           </p>
           {cgAuthError ? (
-            <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={() => window.location.reload()}>
+            <button type="button" className="v10-retry-btn" onClick={() => window.location.reload()}>
               Refresh page
             </button>
           ) : (
-            <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={refreshContextGraphs}>
+            <button type="button" className="v10-retry-btn" onClick={refreshContextGraphs}>
               Retry
             </button>
           )}
@@ -726,7 +723,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     }
     return (
       <div className="v10-view-placeholder">
-        <p style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-control)' }}>Loading context graph...</p>
+        <p style={{ color: 'var(--text-tertiary)', fontSize: 'var(--font-size-label)' }}>Loading context graph...</p>
       </div>
     );
   }
@@ -762,7 +759,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
 
   return (
     <ProjectProfileContext.Provider value={profile}>
-    <VmReceiptsProvider value={vmReceipts}>
     <AgentsContext.Provider value={agentsContextValue}>
     <div className="v10-memory-explorer">
       <MemoryReadStatus memory={rawMemory} />
@@ -776,14 +772,14 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           {cgAuthError ? (
             <>
               <span>{cgError}</span>
-              <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={() => window.location.reload()}>
+              <button type="button" className="v10-retry-btn" onClick={() => window.location.reload()}>
                 Refresh page
               </button>
             </>
           ) : (
             <>
               <span>Couldn’t refresh context-graph data — showing last known values.</span>
-              <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={refreshContextGraphs}>
+              <button type="button" className="v10-retry-btn" onClick={refreshContextGraphs}>
                 Retry
               </button>
             </>
@@ -809,7 +805,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         onSwitch={handleLayerSwitch}
         onShare={() => setShowShare(true)}
         onImport={() => setShowImport(true)}
-        onRefresh={() => { rawMemory.refresh(); vmReceipts.refresh(); }}
+        onRefresh={rawMemory.refresh}
       />
 
       <main className="v10-memory-explorer-page v10-context-page-enter" data-view={activePage} data-cg-scroll-key="page" ref={pageRef}>
@@ -831,7 +827,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           onNavigate={handleNavigate}
           onClose={handleDetailClose}
           contextGraphId={contextGraphId}
-          onRefresh={() => { rawMemory.refresh(); detailRead.refresh(); vmReceipts.refresh(); }}
+          onRefresh={() => { rawMemory.refresh(); detailRead.refresh(); }}
         />
       )}
 
@@ -996,7 +992,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       />
     </div>
     </AgentsContext.Provider>
-    </VmReceiptsProvider>
     </ProjectProfileContext.Provider>
   );
 }

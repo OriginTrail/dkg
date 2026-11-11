@@ -5,11 +5,7 @@ type OverviewRoleState = {
   label: string;
   title: string;
   tone: 'curator' | 'participant' | 'viewer' | 'unknown';
-  /** Step on the role ladder (strongest → weakest). Drives the pill's
-   *  weight and glyph; `tone` stays the coarse semantic group. */
-  rank: OverviewRoleRank;
 };
-export type OverviewRoleRank = 'curator' | 'joined' | 'subscriber' | 'viewer' | 'not-joined' | 'unknown';
 export type OverviewAgentStatus = 'loading' | 'ok' | 'error';
 export type OverviewParticipantsStatus = 'loading' | 'ok' | 'error';
 export type OverviewAgentIdentity = Pick<AgentIdentity, 'agentDid'> & Partial<Pick<AgentIdentity, 'agentAddress'>>;
@@ -39,7 +35,6 @@ export function overviewRoleState(
       label: 'Curator',
       title: 'This agent is the curator for this Context Graph.',
       tone: 'curator',
-      rank: 'curator',
     };
   }
   if (cg?.callerInvolved === true) {
@@ -48,7 +43,6 @@ export function overviewRoleState(
         label: 'Role checking',
         title: 'This agent is involved in this Context Graph; curator status is still loading.',
         tone: 'unknown',
-        rank: 'unknown',
       };
     }
     if (curator && !hasIdentity && currentAgentStatus === 'error') {
@@ -56,14 +50,12 @@ export function overviewRoleState(
         label: 'Role unknown',
         title: 'This agent is involved in this Context Graph, but curator status could not be confirmed.',
         tone: 'unknown',
-        rank: 'unknown',
       };
     }
     return {
       label: 'Joined',
       title: 'This agent is involved in this Context Graph; curator status is shown only when identity metadata confirms it.',
       tone: 'participant',
-      rank: 'joined',
     };
   }
   if (cg?.callerInvolved === false) {
@@ -74,14 +66,12 @@ export function overviewRoleState(
           ? 'This node subscribes to this public Context Graph. This agent is not listed as a curator or participant; public access is separate from membership.'
           : 'This Context Graph is public. This agent can browse it without being listed as a curator or participant; subscribe from Context Oracle to follow updates.',
         tone: 'viewer',
-        rank: cg.subscribed === true ? 'subscriber' : 'viewer',
       };
     }
     return {
       label: 'Not joined',
       title: 'This agent is not listed as curator or participant for this Context Graph.',
       tone: 'viewer',
-      rank: 'not-joined',
     };
   }
   const isListedParticipant = participantsStatus === 'ok' && participants
@@ -93,14 +83,12 @@ export function overviewRoleState(
       label: 'Joined',
       title: 'This agent is listed as a participant for this Context Graph.',
       tone: 'participant',
-      rank: 'joined',
     };
   }
   return {
     label: 'Role unknown',
     title: 'The node did not provide enough role metadata for this Context Graph.',
     tone: 'unknown',
-    rank: 'unknown',
   };
 }
 

@@ -17,9 +17,6 @@ import { formatEth, formatEthTooltip } from '../lib/formatEth.js';
 import { nativeGasSymbol } from '../lib/nativeGasSymbol.js';
 import { PcaDashboardRow } from '../pages/conviction/PcaDashboardRow.js';
 import { dashboardSizePresentation } from './dashboard-size-presentation.js';
-import { ContextGraphMark } from '../context-graph-colors.js';
-import { AgentDotStack } from '../components/AgentDot.js';
-import { Count } from '../components/ds/Badge.js';
 
 // Single user-facing description shown inside the My Context Graphs
 // card (one line, no separate footnote — round-2 feedback: the split
@@ -110,7 +107,7 @@ function StatCard({
   className?: string;
 }) {
   return (
-    <div className={`stat-card ds-card v10-anim-mount${className ? ` ${className}` : ''}`}>
+    <div className={`stat-card v10-anim-mount${className ? ` ${className}` : ''}`}>
       {accentColor && <div className="accent" style={{ background: accentColor }} />}
       <div className="stat-label">{icon}{label}</div>
       {value != null && value !== '' && <div className="stat-value">{value}</div>}
@@ -171,7 +168,7 @@ function LayerLegend() {
 function RoleBar({ curator, joined, refreshing }: { curator: number; joined: number; refreshing?: boolean }) {
   const sum = curator + joined;
   const summary = `Curator ${curator} · Joined ${joined}`;
-  const CUR = 'var(--role)';
+  const CUR = 'var(--accent-green)';
   const JOIN = 'var(--text-secondary)';
   return (
     <div
@@ -413,7 +410,7 @@ function CgRow({
 
   return (
     <button className="v10-cg-row" onClick={() => onOpen(cg)}>
-      <span className="v10-cg-cell v10-cg-name"><ContextGraphMark id={cg.id} name={cg.name} />{cg.name || cg.id.slice(0, 16)}</span>
+      <span className="v10-cg-cell v10-cg-name">{cg.name || cg.id.slice(0, 16)}</span>
       <span
         className="v10-cg-cell v10-cg-type"
         title={`${typeLabel} context graph`}
@@ -459,7 +456,7 @@ function CgRow({
       </span>
       <span className="v10-cg-cell v10-cg-role">
         <span className={`v10-cg-badge v10-cg-badge-${isCurator ? 'curator' : 'joined'}`}>
-          {isCurator ? 'Curator' : 'Joined'}
+          {isCurator ? 'CURATOR' : 'JOINED'}
         </span>
       </span>
     </button>
@@ -544,7 +541,6 @@ export function DashboardView() {
     return {
       entities, triples,
       agentCount: agentSet.size,
-      agentList: [...agentSet],
       sizeLoading: hasCgs && sizeLoading,
       agentsLoading: hasCgs && agentsLoading,
       sizePartial,
@@ -632,6 +628,7 @@ export function DashboardView() {
           className="v10-stat-tight"
           icon={<Share2 size={13} aria-hidden />}
           value={cgsResolving ? <span className="v10-stat-loading">loading…</span> : graphCount}
+          accentColor="var(--accent-blue)"
           sub={CG_DEFINITION}
         >
           {agg.hasCgs && !cgsResolving ? (
@@ -646,6 +643,7 @@ export function DashboardView() {
           label="Context Graph Size"
           icon={<TrendingUp size={13} aria-hidden />}
           className="v10-stat-tight"
+          accentColor="var(--accent-green)"
         >
           {!agg.hasCgs ? (
             <div className="v10-stat-empty">—</div>
@@ -700,23 +698,18 @@ export function DashboardView() {
             : agg.agentsPartial
               ? 'Some context graphs could not report agents; count is partial.'
               : "Unique agents — your own and others' — allow-listed and collaborating across your context graphs."}
-        >
-          {agg.hasCgs && !agg.agentsLoading && agg.agentList.length > 0 && (
-            <div className="v10-stat-agents">
-              <AgentDotStack agents={agg.agentList.map(uri => ({ uri }))} max={8} size={22} />
-            </div>
-          )}
-        </StatCard>
+          accentColor="var(--purple)"
+        />
       </div>
 
       <div className="v10-dash-grid v10-dash-grid-2">
-        <div className="v10-dash-section ds-card v10-dash-section-wide v10-anim-mount">
+        <div className="v10-dash-section v10-dash-section-wide v10-anim-mount">
           <div className="v10-dash-section-header">
             <div className="v10-dash-section-title">
               <Share2 size={13} aria-hidden />
               <h3>My Context Graphs</h3>
             </div>
-            <Count value={cgsResolving ? '…' : graphCount} className="v10-dash-section-badge" />
+            <span className="v10-dash-section-badge">{cgsResolving ? '…' : graphCount}</span>
           </div>
           {cgsResolving ? (
             <p className="v10-cg-empty">Loading context graphs…</p>
@@ -758,7 +751,7 @@ export function DashboardView() {
           )}
         </div>
 
-        <div className="v10-dash-section ds-card v10-anim-mount">
+        <div className="v10-dash-section v10-anim-mount">
           <div className="v10-dash-section-header">
             <div className="v10-dash-section-title">
               <Wallet size={13} aria-hidden />

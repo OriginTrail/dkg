@@ -19,8 +19,6 @@ import type {
   ActivityItem,
   ActionResult,
 } from '../../hooks/useNotificationsFeed.js';
-import { AgentDot } from '../AgentDot.js';
-import { ContextGraphChip } from '../ds/ContextGraphChip.js';
 
 /** `shortId` — never render a blank CG name (ui-brief §3 / UX §3). */
 function cgLabel(name: string | undefined, cgId: string): string {
@@ -99,9 +97,15 @@ export function JoinRequestRow({
       <div className="v10-notif-row-body">
         <div className="v10-notif-row-title">Join request</div>
         <div className="v10-notif-row-detail">
-          <AgentDot uri={item.agentAddress} label={item.agentName?.trim() || item.agentAddress} size={16} className="v10-notif-agent" />
           <span className="v10-notif-actor">{who}</span> wants to join{' '}
-          <ContextGraphChip id={item.cgId} name={cg} onOpen={onOpen} title={`Open ${cg}`} className="v10-notif-cg-link" />
+          <button
+            type="button"
+            className="v10-notif-cg-link"
+            onClick={() => onOpen(item.cgId)}
+            title={`Open ${cg}`}
+          >
+            {cg}
+          </button>
         </div>
         <div className="v10-notif-row-sub">
           <span className="v10-notif-addr" title={item.agentAddress}>{shortAddr(item.agentAddress)}</span>
@@ -151,7 +155,7 @@ export function JoinRequestRow({
             <span className="v10-notif-deny-confirm-label">Deny?</span>
             <button
               type="button"
-              className="v10-notif-btn v10-notif-btn-deny ds-btn ds-danger ds-sm"
+              className="v10-notif-btn v10-notif-btn-deny"
               onClick={() => run('deny')}
               aria-label={`Confirm deny join request from ${who} for ${cg}`}
             >
@@ -159,7 +163,7 @@ export function JoinRequestRow({
             </button>
             <button
               type="button"
-              className="v10-notif-btn v10-notif-btn-ghost ds-btn ds-ghost ds-sm"
+              className="v10-notif-btn v10-notif-btn-ghost"
               onClick={() => setPhase({ kind: 'idle' })}
               autoFocus
             >
@@ -170,7 +174,7 @@ export function JoinRequestRow({
           <>
             <button
               type="button"
-              className="v10-notif-btn v10-notif-btn-approve ds-btn ds-primary ds-sm"
+              className="v10-notif-btn v10-notif-btn-approve"
               onClick={() => run('approve')}
               disabled={working}
               aria-label={`Approve join request from ${who} for ${cg}`}
@@ -179,7 +183,7 @@ export function JoinRequestRow({
             </button>
             <button
               type="button"
-              className="v10-notif-btn v10-notif-btn-ghost ds-btn ds-ghost ds-sm"
+              className="v10-notif-btn v10-notif-btn-ghost"
               onClick={() => setPhase({ kind: 'confirming-deny' })}
               disabled={working}
               aria-label={`Deny join request from ${who} for ${cg}`}
@@ -247,12 +251,7 @@ export function ActivityDigestRow({
         {ACTIVITY_GLYPH[item.event]}
       </span>
       <span className="v10-notif-row-body" aria-hidden="true">
-        <span className="v10-notif-row-detail">
-          {item.actorAgentDid && !item.bySelf && (
-            <AgentDot uri={item.actorAgentDid} label={item.actorAgentName?.trim() || item.actorAgentDid} size={16} className="v10-notif-agent" />
-          )}
-          {text} in <ContextGraphChip id={item.cgId} name={cg} className="v10-notif-cg-name" />
-        </span>
+        <span className="v10-notif-row-detail">{text} in <span className="v10-notif-cg-name">{cg}</span></span>
       </span>
       <span className="v10-notif-time" aria-hidden="true" title={new Date(item.ts).toLocaleString()}>
         {when}
@@ -285,8 +284,8 @@ export function ConfirmationRow({
         <span className="v10-notif-row-title">{approved ? 'Request approved' : 'Request declined'}</span>
         <span className="v10-notif-row-detail">
           {approved
-            ? <>You can now access <ContextGraphChip id={item.cgId} name={cg} className="v10-notif-cg-name" /></>
-            : <>Your request to join <ContextGraphChip id={item.cgId} name={cg} className="v10-notif-cg-name" /> wasn’t approved</>}
+            ? <>You can now access <span className="v10-notif-cg-name">{cg}</span></>
+            : <>Your request to join <span className="v10-notif-cg-name">{cg}</span> wasn’t approved</>}
         </span>
       </span>
       <span className="v10-notif-time" title={new Date(item.ts).toLocaleString()}>

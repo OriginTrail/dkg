@@ -32,7 +32,6 @@ export { PrefixManager } from './core/prefix-manager.js';
 export { LabelResolver } from './core/label-resolver.js';
 export { StyleEngine } from './core/style-engine.js';
 export { HexagonPainter } from './core/hexagon-painter.js';
-export { agentInitials } from './agent-initials.js';
 export { FocusFilter } from './core/focus-filter.js';
 export { ReificationCollapser } from './core/reification-collapser.js';
 export { MetadataExtractor } from './core/metadata-extractor.js';
@@ -59,7 +58,6 @@ export type {
   LabelConfig,
   HexagonConfig,
   StyleConfig,
-  ClassAppearance,
   FocusConfig,
   ReificationConfig,
   ReificationPattern,

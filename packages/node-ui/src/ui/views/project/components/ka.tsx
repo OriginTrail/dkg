@@ -9,10 +9,9 @@ import { AgentChip } from '../../../components/AgentChip.js';
 import { VerifiedIdentityBanner } from '../../../components/VerifiedIdentityBanner.js';
 import { GenUIEntityPanel } from '../../../genui/index.js';
 import { memoryGraphLabels } from '../../../lib/memoryLabels.js';
-import { trustColors, entityAuthorUri, transitionAgentUri, transitionAtISO, shortPred, entityMeta, getDescription, neighborhoodTriples, neutraliseBuiltinNamespaces, layerNoun, filterTriplesToEntities, formatTrailTimestamp, type KAPane } from '../helpers.js';
+import { useLayoutStore } from '../../../stores/layout.js';
+import { TRUST_COLORS, entityAuthorUri, transitionAgentUri, transitionAtISO, shortPred, entityMeta, getDescription, neighborhoodTriples, neutraliseBuiltinNamespaces, layerNoun, filterTriplesToEntities, formatTrailTimestamp, type KAPane } from '../helpers.js';
 import { GraphSurface, RdfGraph } from './graph.js';
-import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
-import { LayerBadge } from '../../../components/ds/Badge.js';
 
 // ─── KA Detail View (split-pane: content+triples+graph | provenance) ─────
 
@@ -37,7 +36,7 @@ export function SubGraphBadge({
   }, [entity.subGraphs]);
   if (!slug || !profile) return null;
   const binding = profile.forSubGraph(slug);
-  const color = binding?.color ?? 'var(--text-tertiary)';
+  const color = binding?.color ?? '#64748b';
   const icon = binding?.icon ?? '•';
   const label = binding?.displayName ?? slug;
   return (
@@ -215,7 +214,7 @@ export function VerifyOnDkgButton({
       )}
       {!result && (
         <button
-          className={`v10-ka-verify-btn ${action.kind} ds-btn ${action.kind === 'publish' ? 'ds-vm' : 'ds-swm'}`}
+          className={`v10-ka-verify-btn ${action.kind}`}
           onClick={handle}
           disabled={busy || action.disabled}
         >
@@ -309,8 +308,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   onOpenAgent?: (uri: string) => void;
 }) {
   const [pane, setPane] = useState<KAPane>('content');
-  const palette = useGraphPalette();
-  const theme = palette.theme;
+  const theme = useLayoutStore(s => s.theme);
   const profile = useProjectProfileContext();
   const agents = useAgentsContext();
   const { icon, type } = entityMeta(entity, profile);
@@ -388,7 +386,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   );
 
   const graphOptions = useMemo(() => {
-    const focalColor = trustColors(palette)[entity.trustLevel];
+    const focalColor = TRUST_COLORS[entity.trustLevel];
     return {
       labelMode: 'humanized' as const,
       renderer: '2d' as const,
@@ -396,14 +394,14 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
       style: {
         namespaceColors: neutraliseBuiltinNamespaces(focalColor),
         defaultNodeColor: focalColor,
-        defaultEdgeColor: palette.neutral.edge,
+        defaultEdgeColor: '#475569',
         edgeWidth: 1.0,
         fontSize: 11 /* px: the canvas renderer takes a number */,
       },
       hexagon: { baseSize: 7, minSize: 4, maxSize: 10, scaleWithDegree: true },
       focus: { maxNodes: 500, hops: 999 },
     };
-  }, [entity.trustLevel, palette]);
+  }, [entity.trustLevel]);
 
   // ViewConfig makes the opened entity visually focal (bigger hexagon)
   // and drives the `<CenterOnEntity>` child to pan the camera to it
@@ -433,7 +431,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
           <div className="v10-ka-label">{detailNoun}</div>
           <div className="v10-ka-name">
             {icon} {entity.label}
-            <LayerBadge layer={layerBadge} label={layerLabel} size="sm" className={`v10-trust-badge ${layerBadge}`} />
+            <span className={`v10-trust-badge ${layerBadge}`}>{layerLabel}</span>
           </div>
           <div className="v10-ka-ual">{entity.uri} · {type} · {tripleCount} triples</div>
         </div>
@@ -455,9 +453,9 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
         {/* Left pane: Content / Triples / Graph */}
         <div className="v10-ka-left">
           <div className="v10-content-tabs" style={{ margin: '0 -20px', padding: '0 20px', background: 'transparent' }}>
-            <button className={`v10-content-tab ds-tab ${pane === 'content' ? 'active' : ''}`} onClick={() => setPane('content')}>Content</button>
-            <button className={`v10-content-tab ds-tab ${pane === 'triples' ? 'active' : ''}`} onClick={() => setPane('triples')}>Triples</button>
-            <button className={`v10-content-tab ds-tab ${pane === 'graph' ? 'active' : ''}`} onClick={() => setPane('graph')}>Graph</button>
+            <button className={`v10-content-tab ${pane === 'content' ? 'active' : ''}`} onClick={() => setPane('content')}>Content</button>
+            <button className={`v10-content-tab ${pane === 'triples' ? 'active' : ''}`} onClick={() => setPane('triples')}>Triples</button>
+            <button className={`v10-content-tab ${pane === 'graph' ? 'active' : ''}`} onClick={() => setPane('graph')}>Graph</button>
           </div>
 
           {pane === 'content' && (
@@ -536,7 +534,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
           )}
 
           {pane === 'triples' && (
-            <div style={{ marginTop: 8, overflowX: 'auto', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-control)' }}>
+            <div style={{ marginTop: 8, overflowX: 'auto', border: '1px solid var(--border-default)', borderRadius: 6 }}>
               <table className="v10-ka-triples-table">
                 <thead>
                   <tr><th>Subject</th><th>Predicate</th><th>Object</th></tr>
@@ -551,7 +549,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
                   ))}
                 </tbody>
               </table>
-              <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', padding: '6px 8px' }}>
+              <div style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', padding: '6px 8px' }}>
                 {Math.min(entityTriples.length, 50)} of {entityTriples.length} triples shown
               </div>
             </div>
@@ -607,9 +605,9 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
           />
 
           {/* Trust Summary */}
-          <div style={{ marginTop: 16, padding: '10px 12px', borderRadius: 'var(--radius-control)', background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)' }}>
+          <div style={{ marginTop: 16, padding: '10px 12px', borderRadius: 6, background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)' }}>
             <div className="v10-ka-section-title" style={{ marginBottom: 6 }}>Entity Summary</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 'var(--fs-micro)' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 'var(--font-size-meta)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                 <span style={{ color: 'var(--text-tertiary)' }}>Type</span>
                 <span style={{ color: 'var(--text-primary)', fontWeight: 600, fontFamily: 'var(--font-mono)' }}>{type}</span>

@@ -2,13 +2,7 @@
 
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
-// The hero's facts line reads publish receipts; keep this test offline.
-vi.mock('../src/ui/hooks/useVmReceiptSummary.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/ui/hooks/useVmReceiptSummary.js')>()),
-  useVmReceiptSummary: () => ({ summary: null, loading: false, error: null }),
-}));
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { LayerContent, VerifiableMemoryHeroBanner } from '../src/ui/views/project/components.js';
 import type { MemoryEntity } from '../src/ui/hooks/useMemoryEntities.js';
 
@@ -34,10 +28,8 @@ async function renderVmHero(props: {
   document.body.appendChild(container);
   const root = createRoot(container);
 
-  // The banner takes Verifiable Memory's own triples; here only their count matters.
-  const vmTriples = Array.from({ length: props.tripleCount }, (_, i) => ({ subject: `urn:t:${i}`, predicate: 'urn:p', object: 'urn:o' }));
   await act(async () => {
-    root.render(React.createElement(VerifiableMemoryHeroBanner, { entities: props.entities, vmTriples, contextGraphId: props.contextGraphId }));
+    root.render(React.createElement(VerifiableMemoryHeroBanner, props));
   });
 
   return {

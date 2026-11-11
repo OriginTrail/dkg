@@ -8,16 +8,17 @@
   min-width: 0;
   padding: 6px 8px;
   border: 1px solid var(--border-subtle);
+  border-radius: 7px;
   background: var(--bg-surface);
 }
 .v10-wallet-addr {
   font-family: var(--font-mono);
-  font-size: var(--fs-control);
+  font-size: var(--font-size-label);
   color: var(--text-primary);
   min-width: 0;
 }
 .v10-wallet-status {
-  font-size: var(--fs-label);
+  font-size: var(--font-size-caption);
   font-weight: 600;
   color: var(--text-secondary);
   min-width: 0;
@@ -28,7 +29,7 @@
 .v10-wallet-status[data-tone='danger'] { color: var(--text-danger); }
 .v10-wallet-gas {
   font-family: var(--font-mono);
-  font-size: var(--fs-label);
+  font-size: var(--font-size-caption);
   color: var(--text-tertiary);
   margin-left: auto;
 }
@@ -51,24 +52,35 @@
   justify-content: center;
   gap: 6px;
 }
-.v10-wallet-connect-btn { align-self: flex-start; }
+.v10-wallet-connect-btn {
+  align-self: flex-start;
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: var(--font-size-label);
+  font-weight: 700;
+  padding: 6px 12px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.v10-wallet-connect-btn:hover { background: var(--bg-hover); }
 .v10-wallet-connect-btn:focus-visible,
 .v10-wallet-provider:focus-visible,
 .v10-wallet-pill-btn:focus-visible,
 .v10-wallet-pill-link:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid var(--text-link);
   outline-offset: 1px;
 }
 .v10-wallet-note {
   margin: 0;
-  font-size: var(--fs-label);
+  font-size: var(--font-size-caption);
   line-height: 1.45;
   color: var(--text-tertiary);
   max-width: 520px;
 }
 .v10-wallet-error {
   margin: 0;
-  font-size: var(--fs-label);
+  font-size: var(--font-size-caption);
   line-height: 1.45;
   color: var(--text-danger);
 }
@@ -80,6 +92,7 @@
   width: min(320px, 90vw);
   padding: 8px;
   border: 1px solid var(--border-strong);
+  border-radius: 8px;
   background: var(--bg-surface);
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
   display: flex;
@@ -91,9 +104,10 @@
   border: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
   color: var(--text-secondary);
-  font-size: var(--fs-control);
+  font-size: var(--font-size-label);
   font-weight: 600;
   padding: 7px 10px;
+  border-radius: 6px;
   cursor: pointer;
 }
 .v10-wallet-provider:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
@@ -101,11 +115,11 @@
 .v10-wallet-provider-icon {
   width: 16px;
   height: 16px;
-  border-radius: var(--radius-xs);
+  border-radius: 4px;
 }
 .v10-wallet-picker-empty {
   margin: 0;
-  font-size: var(--fs-label);
+  font-size: var(--font-size-caption);
   line-height: 1.45;
   color: var(--text-tertiary);
 }
@@ -121,7 +135,7 @@
   flex-wrap: wrap;
   padding: 5px 6px 5px 10px;
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-nested);
+  border-radius: 8px;
   background: var(--bg-surface);
 }
 .v10-wallet-pill[data-state='wrong-network'] {
@@ -130,30 +144,37 @@
 }
 .v10-wallet-pill-main {
   font-family: var(--font-mono);
-  font-size: var(--fs-control);
+  font-size: var(--font-size-label);
   color: var(--text-primary);
 }
 .v10-wallet-pill-provider {
-  font-size: var(--fs-label);
+  font-size: var(--font-size-caption);
   color: var(--text-tertiary);
 }
+.v10-wallet-pill-btn {
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: var(--font-size-caption);
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.v10-wallet-pill-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
 .v10-wallet-pill-sub {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  font-size: var(--fs-label);
+  font-size: var(--font-size-caption);
   line-height: 1.45;
   color: var(--text-warning);
 }
 .v10-wallet-pill-link {
-  text-decoration: underline;
-  text-decoration-color: var(--link-underline);
-  text-underline-offset: 3px;
   border: none;
   background: transparent;
   color: var(--text-link);
-  font-size: var(--fs-label);
+  font-size: var(--font-size-caption);
   padding: 0;
   cursor: pointer;
 }
