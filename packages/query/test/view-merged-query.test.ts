@@ -139,6 +139,24 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     expect(described.semantics).toBe('merged');
   });
 
+  it('combines DESCRIBE with GRAPH where the per-asset route does, and refuses it where that route does', async () => {
+    fresh();
+    for (const target of [`<${G1}>`, '?g']) {
+      const describe = `DESCRIBE ?s WHERE { GRAPH ${target} { ?s a <urn:Product> } }`;
+      if (endpoint) {
+        for (const options of [MERGED, VM]) {
+          await expect(engine.query(describe, options)).rejects.toThrow('DESCRIBE cannot be combined with a GRAPH clause on this store');
+        }
+        continue;
+      }
+      const merged = await engine.query(describe, MERGED);
+      // The description comes from the read graph, and never from another context graph.
+      expect(merged.quads?.map(q => [q.subject, q.predicate, q.object]).sort())
+        .toEqual([['urn:p1', RDF_TYPE, 'urn:Product'], ['urn:p1', 'urn:price', '"5"']].sort());
+      expect(merged.semantics).toBe('merged');
+    }
+  });
+
   it('reads only the read graph for a query without GRAPH', async () => {
     fresh();
     const sent = vi.spyOn(store, 'query');
@@ -155,7 +173,8 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     const sent = vi.spyOn(store, 'query');
     const mixed = await engine.query(MIXED, MERGED);
     expect(mixed.bindings).toEqual([{ g: G2, x: '"5"' }]);
-    const sparql = sent.mock.calls.at(-1)![0];
+    // The merged read is the one that carries the read graph as its default graph.
+    const sparql = sent.mock.calls.map(([query]) => query).find(query => query.includes(`FROM <${READ}>`))!;
     expect(sparql).toContain(`FROM <${READ}>`);
     expect(sparql).toContain(`FROM NAMED <${G1}>`);
     expect(sparql).toContain(`FROM NAMED <${G2}>`);
@@ -171,6 +190,38 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     const merged = await engine.query(REPEATED, MERGED);
     expect(sortedRows(merged.bindings)).toEqual(sortedRows(REPEATED_ROWS));
     expect(sortedRows(merged.bindings)).toEqual(sortedRows((await engine.query(REPEATED, VM)).bindings));
+  });
+
+  it('answers GRAPH portions that assign their graph, or hold no triple pattern of their own, as per asset', async () => {
+    fresh();
+    // One row per match, in the graph the block names.
+    const assigned = [
+      `SELECT ?g ?s WHERE { GRAPH ?g { BIND(<${G2}> AS ?g) ?s <urn:in> ?o } }`,
+      `SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:in> ?o { SELECT (<${G1}> AS ?g) WHERE {} } } }`,
+    ];
+    expect((await engine.query(assigned[0]!, MERGED)).bindings).toEqual([{ g: G2, s: 'urn:shared' }]);
+    expect((await engine.query(assigned[1]!, MERGED)).bindings).toEqual([{ g: G1, s: 'urn:shared' }]);
+    const perAsset: QueryOptions = { ...VM, semantics: 'per-asset' };
+    // On Oxigraph the view's root graph, which the store does not hold, adds no row, also to a block
+    // that assigns its graph variable.
+    if (!endpoint) {
+      const counted = `SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { BIND(IRI("${G1}") AS ?g) } }`;
+      for (const options of [MERGED, perAsset]) {
+        const n = (await engine.query(counted, options)).bindings[0]!.n!;
+        expect(Number.parseInt(n.replace(/^"(\d+)".*$/, '$1'), 10), options.semantics).toBe(1);
+      }
+    }
+    for (const sparql of [
+      ...assigned,
+      'SELECT ?g ?x WHERE { GRAPH ?g { VALUES ?x { <urn:x:1> <urn:x:2> } } }',
+      'SELECT ?g WHERE { GRAPH ?g {} }',
+      'SELECT ?g ?s WHERE { GRAPH ?g { { SELECT ?s WHERE { ?s <urn:in> ?o } } } }',
+    ]) {
+      const merged = (await engine.query(sparql, MERGED)).bindings;
+      // Blazegraph's answers to GRAPH blocks without a triple pattern differ from Oxigraph's; on both, merged equals per asset.
+      if (!endpoint) expect(merged.length, sparql).toBeGreaterThan(0);
+      expect(sortedRows(merged), sparql).toEqual(sortedRows((await engine.query(sparql, perAsset)).bindings));
+    }
   });
 
   it('never shows the read graph, or another context graph, to a GRAPH portion', async () => {
@@ -198,7 +249,7 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     // A repeated compound path gets constant graph targets, as on the per-asset route.
     const sent = vi.spyOn(store, 'query');
     expect(sortedRows((await viaFacade.query(REPEATED, MERGED)).bindings)).toEqual(sortedRows(REPEATED_ROWS));
-    expect(sent.mock.calls.at(-1)![0]).toContain(`GRAPH <${G1}> { VALUES ?g { <${G1}> }`);
+    expect(sent.mock.calls.some(([query]) => query.includes(`GRAPH <${G1}> { VALUES ?g { <${G1}> }`))).toBe(true);
   });
 
   it('reads working memory from the read graph of the agent that owns the address', async () => {
@@ -251,6 +302,36 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
       sent.mockRestore();
       await store.delete([newPrice]);
       await store.insert([oldPrice]);
+    }
+  });
+
+  it('drops an answer whose member graphs changed after they were listed, and plans once more', async () => {
+    fresh();
+    const G3 = `${ROOT}/_verifiable_memory/0xaa/3`;
+    const added = [quad('urn:p3', RDF_TYPE, 'urn:Product', G3), quad('urn:p3', 'urn:price', '"7"', G3)];
+    const maintained = added.map(row => ({ ...row, graph: READ }));
+    let written = false;
+    // A writer adds a member graph, and the read graph takes it in, right after the first listing.
+    type Listing = (...args: unknown[]) => Promise<unknown>;
+    const lister = store as unknown as Record<'readGraphInventory' | 'listGraphsByPrefix' | 'listGraphs', Listing | undefined>;
+    // Discovery lists graphs through the first of these that the store has.
+    const method = (['readGraphInventory', 'listGraphsByPrefix', 'listGraphs'] as const).find(name => lister[name])!;
+    const list = lister[method]!.bind(store);
+    vi.spyOn(lister as Record<typeof method, Listing>, method).mockImplementation(async (...args) => {
+      const listed = await list(...args);
+      if (!written) {
+        written = true;
+        await store.insert([...added, ...maintained]);
+      }
+      return listed;
+    });
+    try {
+      const result = await engine.query(MIXED, MERGED);
+      expect(sortedRows(result.bindings)).toEqual(sortedRows([{ g: G2, x: '"5"' }, { g: G3, x: '"7"' }]));
+      expect(result.semantics).toBe('merged');
+      expect(written).toBe(true);
+    } finally {
+      await store.delete([...added, ...maintained]);
     }
   });
 
@@ -312,13 +393,15 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     await sampling.query(unpriced, MERGED);
     // Merged does not apply here, so there is nothing to compare.
     await sampling.query(JOIN, { ...VM, minTrust: TrustLevel.Endorsed });
+    // A query that generates values during evaluation is counted, not compared.
+    await sampling.query('SELECT ?p (STRUUID() AS ?id) WHERE { ?p a <urn:Product> }', VM);
     await sampler.idle();
     expect(locked).toEqual([READ, READ]);
     expect(sampleReads.length).toBeGreaterThanOrEqual(4);
     expect(sampleReads.every(Boolean)).toBe(true);
     const [summary, ...others] = sampling.viewSemanticsDeltaReport([id]);
     expect(others).toEqual([]);
-    expect(summary).toMatchObject({ contextGraphId: id, samples: 2, skipped: 0,
+    expect(summary).toMatchObject({ contextGraphId: id, samples: 2, skipped: 0, uncomparable: 1,
       kinds: { 'none': 0, 'copies-removed': 0, 'rows-added': 1, 'rows-removed-or-changed': 1 } });
     expect(summary!.shapes.map(shape => [shape.view, shape.shape]).sort()).toEqual([
       ['verifiable-memory', 'SELECT ?p ?x WHERE { ?p a <…> . ?p <…> ?x }'],

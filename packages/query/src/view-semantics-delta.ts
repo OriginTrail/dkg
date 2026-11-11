@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { AsyncResource } from 'node:async_hooks';
-import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
+import { createHash } from 'node:crypto';
+import { isSparqlKeyword, prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import type { GetView, ViewQuerySemantics } from '@origintrail-official/dkg-core';
 import { withDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
 import type { QueryResult } from './query-engine.js';
@@ -22,28 +23,115 @@ export const VIEW_SEMANTICS_DELTA_SOURCE = 'view-semantics-delta';
 
 const MAX_SHAPE_LENGTH = 400;
 
-/** How often each row of a result occurs: bindings, or a quad's terms, with blank node labels hidden. */
-function rowCounts(result: QueryResult): Map<string, number> {
-  const blank = (term: string) => (term.startsWith('_:') ? '_:' : term);
-  const keys = result.quads?.length
-    ? result.quads.map(quad => JSON.stringify([blank(quad.subject), quad.predicate, blank(quad.object)]))
-    : result.bindings.map(row => JSON.stringify(Object.entries(row).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([name, value]) => [name, blank(value)])));
-  const counts = new Map<string, number>();
-  for (const key of keys) counts.set(key, (counts.get(key) ?? 0) + 1);
-  return counts;
+/** Built-in functions whose value differs between two evaluations of one query over the same data. */
+const VOLATILE_FUNCTIONS = ['NOW', 'RAND', 'UUID', 'STRUUID'];
+
+/**
+ * Whether a query calls a function whose value differs between evaluations (`NOW()`, `RAND()`,
+ * `UUID()`, `STRUUID()`). Its two answers would differ whatever the semantics, so they are not compared.
+ */
+export function generatesValuesInEvaluation(sparql: string): boolean {
+  const { tokens } = prepareSparql(sparql);
+  return tokens.some((token, index) => {
+    const next = tokens[index + 1];
+    return next?.kind === 'symbol' && next.logicalValue === '('
+      && VOLATILE_FUNCTIONS.some(name => isSparqlKeyword(tokens, index, name));
+  });
 }
 
-/** Classify the difference between the two answers of one query. Row order is ignored. */
-export function classifyViewSemanticsDelta(sparql: string, perAsset: QueryResult, merged: QueryResult): ViewSemanticsDeltaKind {
+/** A row's terms in a fixed order: each binding's name and value, or a quad's subject, predicate and object. */
+function rowsOf(result: QueryResult): string[][] {
+  if (result.quads?.length) return result.quads.map(quad => [quad.subject, quad.predicate, quad.object]);
+  return result.bindings.map(row => Object.entries(row).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .flatMap(([name, value]) => [`?${name}`, value]));
+}
+
+const isBlankNode = (term: string) => term.startsWith('_:');
+const MAX_NAMING_ROUNDS = 8;
+
+/**
+ * Names for the blank nodes of one answer that do not depend on their labels. Each round names a
+ * node by its name so far and the distinct rows it occurs in, with every other blank node written
+ * by its own name so far; how often a row occurs is left to the comparison of rows. Two answers
+ * that differ only in labels get the same names, and a node that is one in one answer and two in
+ * the other does not. Nodes that end with the same name are not told apart by their structure.
+ */
+class BlankNodeNaming {
+  private readonly occurrences = new Map<string, number[]>();
+  private names = new Map<string, string>();
+  private classes: number;
+  stable: boolean;
+
+  constructor(private readonly rows: readonly string[][]) {
+    rows.forEach((row, index) => {
+      for (const term of row) {
+        if (!isBlankNode(term)) continue;
+        const at = this.occurrences.get(term) ?? [];
+        if (at[at.length - 1] !== index) at.push(index);
+        this.occurrences.set(term, at);
+      }
+    });
+    for (const node of this.occurrences.keys()) this.names.set(node, '_:');
+    this.classes = this.occurrences.size === 0 ? 0 : 1;
+    this.stable = this.occurrences.size === 0;
+  }
+
+  /** One round. Once a round splits no class of nodes, no later round does. */
+  step(): void {
+    const next = new Map<string, string>();
+    for (const [node, at] of this.occurrences) {
+      const rows = [...new Set(at.map(index => JSON.stringify(this.rows[index]!.map(term => (
+        term === node ? '_:self' : isBlankNode(term) ? this.names.get(term)! : term)))))].sort();
+      next.set(node, `_:${createHash('sha256').update(`${this.names.get(node)}\n${rows.join('\n')}`).digest('base64url').slice(0, 22)}`);
+    }
+    const classes = new Set(next.values()).size;
+    this.stable = classes === this.classes;
+    this.classes = classes;
+    this.names = next;
+  }
+
+  /** Whether every blank node has a name of its own, so the names identify the nodes. */
+  namesEachNode(): boolean {
+    return this.classes === this.occurrences.size;
+  }
+
+  /** How often each row occurs, with its blank nodes written by their names, and which rows hold blank nodes. */
+  rowCounts(): { readonly counts: Map<string, number>; readonly withBlankNodes: Set<string> } {
+    const counts = new Map<string, number>();
+    const withBlankNodes = new Set<string>();
+    for (const row of this.rows) {
+      const key = JSON.stringify(row.map(term => this.names.get(term) ?? term));
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      if (row.some(isBlankNode)) withBlankNodes.add(key);
+    }
+    return { counts, withBlankNodes };
+  }
+}
+
+/**
+ * Classify the difference between the two answers of one query. Row order and blank node labels are
+ * ignored. `undefined` when the answers cannot be compared reliably: when blank nodes in either one
+ * are not told apart by their structure, such as the nodes of a cycle, or when a row with a blank
+ * node is missing from the merged answer, since a node that gains or loses rows is named anew.
+ */
+export function classifyViewSemanticsDelta(sparql: string, perAsset: QueryResult, merged: QueryResult): ViewSemanticsDeltaKind | undefined {
   if (detectSparqlQueryForm(sparql) === 'ASK') {
     const [before, after] = [perAsset, merged].map(result => result.bindings[0]?.result === 'true');
     return before === after ? 'none' : after ? 'rows-added' : 'rows-removed-or-changed';
   }
-  const [before, after] = [rowCounts(perAsset), rowCounts(merged)];
-  if ([...before.keys()].some(key => !after.has(key))) return 'rows-removed-or-changed';
-  if ([...after].some(([key, count]) => count > (before.get(key) ?? 0))) return 'rows-added';
-  return [...before].some(([key, count]) => count > (after.get(key) ?? 0)) ? 'copies-removed' : 'none';
+  // Both answers are named in the same number of rounds, so equal structure gets equal names.
+  const namings = [new BlankNodeNaming(rowsOf(perAsset)), new BlankNodeNaming(rowsOf(merged))];
+  for (let round = 0; round < MAX_NAMING_ROUNDS && namings.some(naming => !naming.stable); round += 1) {
+    for (const naming of namings) naming.step();
+  }
+  if (namings.some(naming => !naming.namesEachNode())) return undefined;
+  const [before, after] = namings.map(naming => naming.rowCounts());
+  const missing = [...before.counts.keys()].filter(key => !after.counts.has(key));
+  // A missing row of a blank node may still be there under the node's new name: not compared.
+  if (missing.some(key => before.withBlankNodes.has(key))) return undefined;
+  if (missing.length > 0) return 'rows-removed-or-changed';
+  if ([...after.counts].some(([key, count]) => count > (before.counts.get(key) ?? 0))) return 'rows-added';
+  return [...before.counts].some(([key, count]) => count > (after.counts.get(key) ?? 0)) ? 'copies-removed' : 'none';
 }
 
 /**
@@ -100,6 +188,11 @@ export interface ViewSemanticsDeltaSummary {
   readonly samples: number;
   /** Samples whose read graph changed while they ran, or whose reads failed. */
   readonly skipped: number;
+  /**
+   * Sampled queries not compared: they generate values during evaluation, such as `NOW()`, or their
+   * answers hold blank nodes that their structure does not tell apart.
+   */
+  readonly uncomparable: number;
   readonly kinds: Readonly<KindCounts>;
   /** Query shapes, those with the most changed answers first. */
   readonly shapes: readonly ViewSemanticsDeltaShape[];
@@ -126,7 +219,10 @@ export interface ViewSemanticsDeltaSamplerOptions {
 }
 
 interface MutableShape { shape: string; view: GetView; samples: number; kinds: KindCounts; lastSampledAt: string }
-interface MutableSummary { contextGraphId: string; since: string; lastSampledAt: string; samples: number; skipped: number; kinds: KindCounts; shapes: Map<string, MutableShape> }
+interface MutableSummary {
+  contextGraphId: string; since: string; lastSampledAt: string; samples: number; skipped: number; uncomparable: number;
+  kinds: KindCounts; shapes: Map<string, MutableShape>;
+}
 
 const noKinds = (): KindCounts => ({ 'none': 0, 'copies-removed': 0, 'rows-added': 0, 'rows-removed-or-changed': 0 });
 const changed = (kinds: KindCounts) => kinds['rows-added'] + kinds['rows-removed-or-changed'];
@@ -162,9 +258,20 @@ export class ViewSemanticsDeltaSampler {
     this.now = options.now ?? (() => new Date());
   }
 
-  /** Take a sample of this query, at the sample rate, while there is room. Never throws. */
+  /**
+   * Take a sample of this query, at the sample rate, while there is room. One that generates values
+   * during evaluation is only counted as not compared. Never throws.
+   */
   offer(sample: ViewSemanticsDeltaSample): void {
-    if (this.closed || this.queue.length >= this.maxQueued || this.random() >= this.sampleRate) return;
+    if (this.closed || this.random() >= this.sampleRate) return;
+    if (this.generatesValues(sample.sparql)) {
+      // Its two answers would differ whatever the semantics: it is counted, and never run.
+      const summary = this.summaryOf(sample.contextGraphId);
+      summary.uncomparable += 1;
+      summary.lastSampledAt = this.now().toISOString();
+      return;
+    }
+    if (this.queue.length >= this.maxQueued) return;
     this.queue.push(sample);
     // A sample never fails the drain, so nothing here is left unhandled.
     this.draining ??= this.scope.runInAsyncScope(() => this.drain()).catch(() => undefined).finally(() => { this.draining = undefined; });
@@ -189,7 +296,7 @@ export class ViewSemanticsDeltaSampler {
       .sort((a, b) => b.samples - a.samples)
       .map(summary => ({
         contextGraphId: summary.contextGraphId, since: summary.since, samples: summary.samples,
-        skipped: summary.skipped, kinds: { ...summary.kinds },
+        skipped: summary.skipped, uncomparable: summary.uncomparable, kinds: { ...summary.kinds },
         shapes: [...summary.shapes.values()]
           .sort((a, b) => changed(b.kinds) - changed(a.kinds) || b.samples - a.samples)
           .map(shape => ({ ...shape, kinds: { ...shape.kinds } })),
@@ -203,14 +310,17 @@ export class ViewSemanticsDeltaSampler {
       const sample = this.queue.shift()!;
       const measured = await this.measure(sample).catch(() => undefined);
       const summary = this.summaryOf(sample.contextGraphId);
-      if (measured) this.record(summary, sample.view, measured.shape, measured.kind);
-      else summary.skipped += 1;
+      if (measured === undefined) summary.skipped += 1;
+      else if (measured.kind === undefined) {
+        summary.uncomparable += 1;
+        summary.lastSampledAt = this.now().toISOString();
+      } else this.record(summary, sample.view, measured.shape, measured.kind);
       await yieldToForeground();
     }
   }
 
-  /** Both answers and their difference, or `undefined` when the read graph changed meanwhile. */
-  private async measure(sample: ViewSemanticsDeltaSample): Promise<{ kind: ViewSemanticsDeltaKind; shape: string } | undefined> {
+  /** Both answers and their difference (none when they cannot be compared), or `undefined` when the read graph changed meanwhile. */
+  private async measure(sample: ViewSemanticsDeltaSample): Promise<{ kind: ViewSemanticsDeltaKind | undefined; shape: string } | undefined> {
     const deadline = new AbortController();
     const timer = setTimeout(() => deadline.abort(new Error('The sample ran past its deadline')), this.maxSampleMs);
     try {
@@ -252,12 +362,21 @@ export class ViewSemanticsDeltaSampler {
     }
   }
 
+  /** A query whose text cannot be read is not compared either. */
+  private generatesValues(sparql: string): boolean {
+    try {
+      return generatesValuesInEvaluation(sparql);
+    } catch {
+      return true;
+    }
+  }
+
   private summaryOf(contextGraphId: string): MutableSummary {
     let summary = this.summaries.get(contextGraphId);
     if (!summary) {
       if (this.summaries.size >= this.maxContextGraphs) this.summaries.delete(leastRecentKey(this.summaries));
       const at = this.now().toISOString();
-      summary = { contextGraphId, since: at, lastSampledAt: at, samples: 0, skipped: 0, kinds: noKinds(), shapes: new Map() };
+      summary = { contextGraphId, since: at, lastSampledAt: at, samples: 0, skipped: 0, uncomparable: 0, kinds: noKinds(), shapes: new Map() };
       this.summaries.set(contextGraphId, summary);
     }
     return summary;
