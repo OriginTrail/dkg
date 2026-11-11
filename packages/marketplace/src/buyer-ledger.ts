@@ -28,7 +28,9 @@
  * (`buyer-receipts.jsonl`, `buyer-nonces.jsonl`, `access-keys.jsonl`) has
  * them read once, on its first start with the ledger: the ledger's journal is
  * written from them, on disk before anything is read from it, and they stay
- * where they are. Once the ledger's journal exists, it alone is read.
+ * where they are. Once the ledger's journal exists, it alone is read, so
+ * nothing is written to it before that first read: every change waits for
+ * `load`, and fails with it, until the journals it replaces are in.
  */
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -199,6 +201,7 @@ export class BuyerLedger {
 
   /** A call's first record: on disk before it is sent, and counted only then. A call that cannot be written down is not sent. */
   async recordSent(r: HeldReceipt): Promise<void> {
+    await this.load();
     await this.append({ type: 'call', ...r });
     this.calls.record(r);
   }
@@ -212,6 +215,7 @@ export class BuyerLedger {
    * counted, its key not charged, and the reservation held.
    */
   async recordAccepted(r: KeptReceipt, at: number): Promise<void> {
+    await this.load();
     // Read before the record takes the call's place: a call kept with its receipt no longer holds its key.
     const reserved = this.calls.isKeyHeld(r.callId) ? BigInt(r.request.maxValueWei) : 0n;
     const value = BigInt(r.receipt.valueWei);
@@ -230,6 +234,7 @@ export class BuyerLedger {
    * the node runs.
    */
   async recordUnresolved(r: HeldReceipt): Promise<void> {
+    await this.load();
     this.epochs.add(r.epoch);
     this.calls.record(r);
     await this.append({ type: 'call', ...r });
@@ -261,6 +266,7 @@ export class BuyerLedger {
    * here; a rewrite that fails leaves both as they were.
    */
   async finalize(epoch: number, subscriptionId: string, rows: ReconciledRow[], charges: readonly KeyCharge[]): Promise<void> {
+    await this.load();
     await this.lock.run('journal', async () => {
       await this.journal.replace(compacted(await this.journal.read(), epoch, rows, charges));
     });

@@ -5,7 +5,7 @@
  * key it does not hold. The gateway's and the keys' behaviour over it is in
  * gateway-durability, gateway-legacy-journals and gateway-keys.
  */
-import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -32,6 +32,18 @@ function callOf(epoch: number, sub: string, nonce: number, value?: bigint, keyId
 }
 /** The same call accepted with its receipt, worth `value`. */
 const keptOf = (epoch: number, sub: string, nonce: number, value: bigint, keyId = KEY.keyId) => callOf(epoch, sub, nonce, value, keyId) as KeptReceipt;
+
+/** The journals the ledger replaces, the fixture's subscription of epoch 3, and its two keys. */
+const LEGACY = ['buyer-receipts.jsonl', 'buyer-nonces.jsonl', 'access-keys.jsonl'];
+const legacyFiles = () => Promise.all(LEGACY.map((f) => readFile(join(dir, f), 'utf8')));
+const SUB3 = '0x90bce2dfb937aa3522f61d7260c286bdf54514237c905ed2bbb09999be9cf38c';
+const MAIN = 'dkgmk_a37cad0b';
+const REVOKED = 'dkgmk_03953501';
+/** What a ledger holds: its keys, what each reserves, and how many calls of epoch 3 it keeps. */
+async function stateOf(ledger: BuyerLedger) {
+  const keys = await ledger.keyList();
+  return { keys, reserved: Object.fromEntries(keys.map((k) => [k.keyId, ledger.reservedOf(k.keyId)])), calls: ledger.calls.callsOf(3).length };
+}
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'marketplace-buyer-ledger-'));
@@ -91,6 +103,51 @@ describe('the journals the ledger replaces', () => {
     const file = join(dir, 'not-a-directory');
     await writeFile(file, '');
     await expect(new BuyerLedger(file).load()).rejects.toMatchObject({ code: 'ENOTDIR' });
+  });
+
+  it('are read again in full when the ledger cannot be written from them, taking no change meanwhile, and imported once', async () => {
+    await cp(FIXTURE, dir, { recursive: true });
+    const before = await legacyFiles();
+    // A full disk: the ledger's journal cannot be written until there is room again.
+    const full = Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
+    const replace = vi.spyOn(Journal.prototype, 'replace').mockRejectedValue(full);
+    const ledger = new BuyerLedger(dir);
+    await expect(ledger.load()).rejects.toBe(full);
+    // While it cannot load, every change is refused: none is applied, and none is written down.
+    await expect(ledger.makeKey({ ...KEY, keyId: 'dkgmk_0000000000000009' })).rejects.toBe(full);
+    await expect(ledger.revokeKey(MAIN, 6)).rejects.toBe(full);
+    await expect(ledger.reserve(MAIN, 1n)).rejects.toBe(full);
+    await expect(ledger.takeNonce(3, SUB3, 1n)).rejects.toBe(full);
+    await expect(ledger.recordSent(callOf(3, SUB3, 9, undefined, MAIN))).rejects.toBe(full);
+    await expect(ledger.recordAccepted(keptOf(3, SUB3, 9, 5n, MAIN), 7)).rejects.toBe(full);
+    await expect(ledger.recordUnresolved({ ...callOf(3, SUB3, 9, undefined, MAIN), problem: 'unanswered' })).rejects.toBe(full);
+    await expect(ledger.finalize(3, SUB3, [], [])).rejects.toBe(full);
+    expect(ledger.calls.callsOf(3)).toEqual([]);
+    expect(ledger.reservedOf(MAIN)).toBe(0n);
+    // No ledger journal, nothing set aside, and the old journals as they were.
+    expect((await readdir(dir)).sort()).toEqual((await readdir(FIXTURE)).sort());
+    expect(await legacyFiles()).toEqual(before);
+
+    // Room again: the next use reads them and writes the ledger, once.
+    replace.mockRestore();
+    await ledger.load();
+    const imported = await stateOf(ledger);
+    expect(imported).toEqual({
+      keys: [
+        expect.objectContaining({ keyId: MAIN, spent: '860', revoked: false, lastUsedAt: 1_799_432_137 }),
+        expect.objectContaining({ keyId: REVOKED, spent: '7', revoked: true, lastUsedAt: 4 }),
+      ],
+      // The four calls of epoch 3 whose cost is not known hold their most value.
+      reserved: { [MAIN]: 4n * 620n, [REVOKED]: 0n },
+      calls: 5,
+    });
+    expect(await ledger.takeNonce(3, SUB3, 1n)).toBe(5n);
+    const restarted = new BuyerLedger(dir);
+    await restarted.load();
+    expect(await stateOf(restarted)).toEqual(imported);
+    expect(await restarted.takeNonce(3, SUB3, 1n)).toBe(6n);
+    expect((await ledgerLines()).map((l) => l.type)).toEqual(['key', 'key', 'revoke', 'final', 'nonce', 'call', 'call', 'call', 'call', 'call', 'nonce', 'nonce']);
+    expect(await legacyFiles()).toEqual(before);
   });
 });
 
