@@ -21,7 +21,9 @@
 //
 // With `--partition-graphs` it prints instead every graph the store holds in a
 // context graph's read-graph partition (its read graphs, its state graph and
-// anything else under it), as { endpoint, graphs: [...] }.
+// anything else under it), as { endpoint, graphs: [...] }. With
+// `--member-graphs` it prints every other graph of a context graph with its
+// triple count, as { endpoint, graphs: { "<graph>": <triples> } }.
 //
 // Exit codes: 0 when the report is complete, 1 when the store could not be read.
 
@@ -34,8 +36,9 @@ const endpoint = option('--endpoint');
 const sample = Number(option('--sample', '10000'));
 const timeoutMs = Number(option('--timeout-ms', '600000'));
 const partitionGraphsOnly = args.includes('--partition-graphs');
+const memberGraphsOnly = args.includes('--member-graphs');
 if (!endpoint || !/^https?:\/\//.test(endpoint) || !Number.isSafeInteger(sample) || sample < 1 || !(timeoutMs > 0)) {
-  console.error('usage: read-graph-store-report.mjs --endpoint <SPARQL query URL> [--sample <n>] [--timeout-ms <ms>] [--partition-graphs]');
+  console.error('usage: read-graph-store-report.mjs --endpoint <SPARQL query URL> [--sample <n>] [--timeout-ms <ms>] [--partition-graphs | --member-graphs]');
   process.exit(2);
 }
 
@@ -78,8 +81,22 @@ async function partitionGraphs() {
   console.log(JSON.stringify({ endpoint, graphs }, null, 2));
 }
 
+async function memberGraphs() {
+  const rows = await select(`SELECT ?g (COUNT(*) AS ?n) WHERE {
+    # sparql-scan-allow: R2 -- a check a drill runs by hand on a devnet store with its daemon down, off any request path
+    GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ${literal(CONTEXT_GRAPH_PREFIX)}))
+  } GROUP BY ?g`);
+  const graphs = {};
+  for (const row of rows) {
+    const iri = row.g?.value;
+    if (typeof iri === 'string' && !inPartition(iri)) graphs[iri] = Number(row.n?.value ?? 0);
+  }
+  console.log(JSON.stringify({ endpoint, graphs }, null, 2));
+}
+
 async function main() {
   if (partitionGraphsOnly) return partitionGraphs();
+  if (memberGraphsOnly) return memberGraphs();
   const graphs = await select(`SELECT DISTINCT ?g WHERE {
     # sparql-scan-allow: R2 -- a report an operator runs by hand, off any request path; it reads the read-graph names once
     GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), ${literal(`${PARTITION}/`)}))
