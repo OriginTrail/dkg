@@ -199,7 +199,8 @@ export function registryFactsAfter(
  * It does not when the write removes facts it names by a literal (which facts
  * go then depends on how the store compares literals, and the lexical
  * prediction can only over-count them) or by a blank node (whose label in a
- * write is not the store's). IRIs compare exactly, and never equal a literal.
+ * write is not the store's), nor when it inserts facts on a blank node, which
+ * the store makes a fresh node. IRIs compare exactly, and never equal a literal.
  */
 export function isExactRegistryWrite(contextGraphId: string, write: ReadGraphRegistryWrite): boolean {
   // A literal that does not parse cannot be put in the form the store reports.
@@ -209,9 +210,12 @@ export function isExactRegistryWrite(contextGraphId: string, write: ReadGraphReg
   // so a type removal whose object is a blank node can remove a registration type.
   const removesLoosely = (quads: readonly Quad[]) => quads.some((quad) => registryOwnersOfGraph(quad.graph).includes(contextGraphId)
     && REGISTRY_PREDICATES.has(unwrapIri(quad.predicate)) && (isComparedLoosely(unwrapIri(quad.subject)) || isComparedLoosely(storedTerm(quad.object))));
+  // A store makes every inserted blank node a fresh one, whatever its label, so an added fact on a blank node
+  // never joins a cached subject with the same label: only reading the facts after the write tells.
+  const addsBlankNode = (quads: readonly Quad[]) => ownerFactsAmong(contextGraphId, quads).some((fact) => fact.subject.startsWith('_:'));
   switch (write.kind) {
     case 'quads':
-      return !removesLoosely(write.removed) && !unreadable(write.added);
+      return !removesLoosely(write.removed) && !unreadable(write.added) && !addsBlankNode(write.added);
     case 'match': return ![write.subject, write.object].some((term) => term !== undefined && isComparedLoosely(term));
     case 'subject': return !isComparedLoosely(write.subject) && !unreadable(write.quads);
     case 'graph': return !unreadable(write.quads);

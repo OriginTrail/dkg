@@ -323,6 +323,16 @@ describe('registry recognition in the read-graph layer', () => {
     expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
   });
 
+  it('reads the registry again after an insert on a blank node, which the store makes a fresh node', async () => {
+    const { adapter, store, meta, fixture, layer } = await layered();
+    await store.insert([fact(meta, '_:b', R.type, R.subGraphClass), fact(meta, '_:b', R.name, '"blank"')]);
+    // The label the store reports for that sub-graph's subject, as the cached facts hold it.
+    const label = layer.runtime.registries.facts(fixture.contextGraphId)!.find((cached) => cached.subject.startsWith('_:'))!.subject;
+    await store.insert([fact(meta, label, R.name, '"docs"')]);
+    expect((await readReadGraphRegistry(adapter, fixture.contextGraphId)).subGraphNames).toEqual(['blank', 'code']);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['blank', 'code']);
+  });
+
   it('marks the read graphs a sub-graph leaves dirty when its name goes', async () => {
     const { store, meta, fixture, states } = await layered();
     await store.delete([fact(meta, `${fixture.root}/code`, R.name, '"code"')]);
