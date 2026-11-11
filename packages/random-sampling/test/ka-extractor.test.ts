@@ -443,11 +443,18 @@ describe('extractV10KCFromStore — happy path / publisher round-trip parity', (
     };
     await seedKC(store, fixture);
     const before = await extractV10KCFromStore(store, fixture.cgId, fixture.kaId);
-    // Read graphs are node-local copies of member triples; sampling must not see them.
+    // Read graphs are node-local copies of member triples. A stale one may also hold a value and a triple of its own,
+    // which a read of every graph would add to the KC; sampling must not see them.
+    const ownToReadGraphs = [
+      { subject: 'urn:entity:alpha', predicate: 'urn:p:name', object: '"alpha-old"' },
+      { subject: 'urn:entity:alpha', predicate: 'urn:p:extra', object: '"only-in-a-read-graph"' },
+    ];
     const scopes = [readScope('cg-9'), readScope('cg-9', 'code')];
     await store.insert(scopes.flatMap(scope => ([MemoryLayer.VerifiableMemory, MemoryLayer.SharedWorkingMemory] as const)
-      .flatMap(layer => fixture.publicTriples.map(triple => ({ ...triple, graph: readGraphIri({ scope, layer }) })))));
-    expect(await extractV10KCFromStore(store, fixture.cgId, fixture.kaId)).toEqual(before);
+      .flatMap(layer => [...fixture.publicTriples, ...ownToReadGraphs].map(triple => ({ ...triple, graph: readGraphIri({ scope, layer }) })))));
+    const after = await extractV10KCFromStore(store, fixture.cgId, fixture.kaId);
+    expect(after).toEqual(before);
+    expect(after.triples.map(triple => triple.object)).not.toContain('"alpha-old"');
   });
 
   it('handles skolemized blank-node descendants (.well-known/genid/) bound to a root entity', async () => {

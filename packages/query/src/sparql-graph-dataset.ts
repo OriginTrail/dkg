@@ -17,6 +17,7 @@ import {
 import { transitionGraphScope } from './sparql-query-transition.js';
 import { createVariableAllocator } from './sparql-rewrite-names.js';
 import { isReadGraphPartitionGraph } from '@origintrail-official/dkg-storage';
+import { heldGraphGuard } from './sparql-held-graph-guard.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { sparqlRewriteReady, sparqlRewriteUnsupported, type SparqlRewriteResult } from './sparql-rewrite-result.js';
 
@@ -169,11 +170,55 @@ export function readsNeedGraphList(scope: PreparedSparqlQuery): boolean {
   });
 }
 
+/** Groups nested deeper than this are not read for a stored triple; their block keeps its guard. */
+const MAX_STORED_TRIPLE_DEPTH = 16;
+
+/** Whether the `{` at `index` opens a plain nested group (or the first branch of a UNION), not a group of another construct. */
+function opensPlainGroup(scope: PreparedSparqlQuery, index: number): boolean {
+  const { tokens } = scope.prepared;
+  const before = tokens[index - 1];
+  if (isSymbol(before, '{') || isSymbol(before, '}') || isSymbol(before, '.')) return true;
+  // `)` ends a BIND, a FILTER or a collection, or the variables of VALUES, whose data follow.
+  if (isSymbol(before, ')')) return !isSparqlKeyword(tokens, (scope.structure.parentheses.matchingTokenIndexes[index - 1] ?? 0) - 1, 'VALUES');
+  // OPTIONAL, MINUS, EXISTS, UNION and SILENT come before a group that is read on other terms.
+  if (!before || before.kind === 'word') return false;
+  // A term ends a triples block, unless it names a GRAPH, a SERVICE or a VALUES variable.
+  return !['GRAPH', 'SERVICE', 'SILENT', 'VALUES'].some(keyword => isSparqlKeyword(tokens, index - 2, keyword));
+}
+
+/**
+ * Whether every solution of the group between these braces reads a stored triple
+ * of the graph it is read in: a triple pattern of its own, or a nested group, or
+ * every branch of a UNION, that does. OPTIONAL, MINUS, EXISTS, a nested GRAPH
+ * (another graph) and a subquery prove nothing for it.
+ */
+function readsStoredTriple(scope: PreparedSparqlQuery, opening: number, closing: number, depth = 0): boolean {
+  if (hasOwnTriplePattern(scope, opening, closing)) return true;
+  if (depth >= MAX_STORED_TRIPLE_DEPTH || isSubqueryGroup(scope, opening)) return false;
+  const { tokens } = scope.prepared;
+  const braces = scope.structure.braces.matchingTokenIndexes;
+  const own = scope.structure.braces.depthBefore[opening] + 1;
+  for (let index = opening + 1; index < closing; index++) {
+    if (scope.structure.braces.depthBefore[index] !== own || !isSymbol(tokens[index], '{') || !opensPlainGroup(scope, index)) continue;
+    let everyBranch = true;
+    for (let branch = index; ; branch = index + 2) {
+      const end = braces[branch] ?? -1;
+      if (end <= branch || end >= closing) return false;
+      everyBranch = readsStoredTriple(scope, branch, end, depth + 1) && everyBranch;
+      index = end;
+      if (!isSparqlKeyword(tokens, index + 1, 'UNION') || !isSymbol(tokens[index + 2], '{')) break;
+    }
+    if (everyBranch) return true;
+  }
+  return false;
+}
+
 /**
  * On Oxigraph a graph named in FROM NAMED counts as present even where the store
- * holds none of its triples, so a GRAPH block whose pattern needs no triple of its
- * own would match it. Each such block, and the whole pattern when the rewrite wraps
- * it, gets a guard that its graph holds a triple.
+ * holds none of its triples, so a GRAPH block whose pattern can match without a
+ * triple would match it. Each such block, and the whole pattern when the rewrite
+ * wraps it, gets a guard that its graph holds a triple. A block every solution of
+ * which reads a triple of its graph needs none.
  */
 export function guardGraphBlocksWithoutTriples(scope: PreparedSparqlQuery): PreparedSparqlQuery {
   const { tokens } = scope.prepared;
@@ -183,14 +228,13 @@ export function guardGraphBlocksWithoutTriples(scope: PreparedSparqlQuery): Prep
       if (target.kind === 'invalid') continue;
       const opening = target.targetTokenIndex + 1;
       const closing = scope.structure.braces.matchingTokenIndexes[opening] ?? -1;
-      if (closing > opening && !hasOwnTriplePattern(scope, opening, closing)) closings.add(closing);
+      if (closing > opening && !readsStoredTriple(scope, opening, closing)) closings.add(closing);
     }
-  } else if (scope.where && !hasOwnTriplePattern(scope, scope.where.openingTokenIndex, scope.where.closingTokenIndex)) {
+  } else if (scope.where && !readsStoredTriple(scope, scope.where.openingTokenIndex, scope.where.closingTokenIndex)) {
     closings.add(scope.where.closingTokenIndex);
   }
   if (closings.size === 0) return scope;
-  const allocate = createVariableAllocator(scope);
-  const guard = `FILTER EXISTS { ${allocate('__dkgHeldS')} ${allocate('__dkgHeldP')} ${allocate('__dkgHeldO')} }`;
+  const guard = heldGraphGuard(createVariableAllocator(scope));
   // Insertions go from the end of the text, so earlier offsets stay valid.
   const insertions: Array<readonly [number, string]> = [];
   for (const closing of closings) {

@@ -10,7 +10,8 @@
  * membership the registry recorded for its context graph still gives
  * (`./registry-record.ts`): the layer maintained every write since it was
  * published, no registry change went unmarked, and no dirty mark of it
- * stayed unstored (`./mark-journal.ts`). Every other row of
+ * stayed unstored (`./mark-journal.ts`); without a data directory, where no
+ * journal can keep such a mark, none stays ready. Every other row of
  * theirs gets a new generation and the state `dirty`, whatever its state, so
  * nothing an earlier process left in flight passes a fence; a damaged row, or
  * one whose generation cannot grow, is replaced by a dirty row at a new random
@@ -105,8 +106,11 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
   for (const row of mirror.rows()) mirror.remove(row.readGraph);
 
   const found = await stateRows(target, queryOptions);
-  if (found.count > 0 && options.dataDir !== undefined) noteReadGraphPartitions(options.dataDir);
-  if (found.count > 0 || (options.dataDir !== undefined && mayHoldReadGraphPartitions(options.dataDir))) {
+  // A registry record can outlive the last state row of its context graph: the partition exists all the same.
+  const records = await registryRecords(target, queryOptions);
+  const holdsPartitions = found.count > 0 || records.size > 0;
+  if (holdsPartitions && options.dataDir !== undefined) noteReadGraphPartitions(options.dataDir);
+  if (holdsPartitions || (options.dataDir !== undefined && mayHoldReadGraphPartitions(options.dataDir))) {
     noteStoreMayHoldReadGraphPartitions(target);
   }
   // The marks a process could not store from here on go to the data directory's journal.
@@ -129,11 +133,11 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
     }
     return read;
   };
-  // A maintained row that may stay ready, if its registry did not move.
-  const mayKeep = (row: ReadGraphStateRow) => maintained(row.readGraph) && keepsReady(row, versions, recorded !== undefined)
+  // A maintained row that may stay ready, if its registry did not move. Without a data directory, no journal kept
+  // the dirty marks the store refused, so no ready row can be trusted across a start.
+  const mayKeep = (row: ReadGraphStateRow) => options.dataDir !== undefined && maintained(row.readGraph) && keepsReady(row, versions, recorded !== undefined)
     && journaled.get(row.readGraph)?.has(row.generation) !== true;
   for (const row of found.rows) if (mayKeep(row)) await readRegistry(parseReadGraphIri(row.readGraph)!.scope.contextGraphId);
-  const records = await registryRecords(target, queryOptions);
   const followsRecord = (row: ReadGraphStateRow) => {
     const key = parseReadGraphIri(row.readGraph)!;
     const record = records.get(key.scope.contextGraphId);

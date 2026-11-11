@@ -1213,7 +1213,7 @@ describe('read-graph start-up', () => {
   });
 
   it('keeps a ready row whose membership the change did not move, and marks every ready row without a record', async () => {
-    const { adapter, fixture, context } = await open();
+    const { adapter, fixture, context, dataDir } = await open();
     const [vm, , code] = fixture.keys as [ReadGraphKey, ReadGraphKey, ReadGraphKey];
     for (const key of [vm, code]) expect(await buildReadGraph(context, key)).toMatchObject({ outcome: 'done' });
     const { wholeVm, codeVm } = fixture.readGraphs;
@@ -1221,14 +1221,14 @@ describe('read-graph start-up', () => {
     // A new sub-graph moves the whole graph's members, not those of `code`.
     await adapter.update(`INSERT DATA { GRAPH <${fixture.root}/_meta> { ${SUB_GRAPH_TYPE(fixture, 'docs')} ; <http://schema.org/name> "docs" } }`);
     const first = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
-    expect(await startReadGraphs(first, { maintains: () => true })).toEqual({ marked: 1, maintained: 2 });
+    expect(await startReadGraphs(first, { dataDir, maintains: () => true })).toEqual({ marked: 1, maintained: 2 });
     expect((await storedRows(adapter))[codeVm]).toBe(before[codeVm]);
     expect((await storedRows(adapter))[wholeVm]).toMatch(/^dirty@/);
     // Without a record, nothing tells which registry a ready row follows.
     const stateGraph = `${fixture.root}/_~read/state`;
     await adapter.update(`DELETE WHERE { GRAPH <${stateGraph}> { <${stateGraph}> <http://dkg.io/ontology/readGraphRegistry> ?o } }`);
     const second = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
-    expect(await startReadGraphs(second, { maintains: () => true })).toEqual({ marked: 2, maintained: 2 });
+    expect(await startReadGraphs(second, { dataDir, maintains: () => true })).toEqual({ marked: 2, maintained: 2 });
     expect((await storedRows(adapter))[codeVm]).toMatch(/^dirty@/);
     expect((await storedRecords(adapter)).get(fixture.contextGraphId)).toEqual({ ...fixture.registry, subGraphNames: ['code', 'docs'] });
   });
@@ -1273,6 +1273,30 @@ describe('read-graph start-up', () => {
     writeFileSync(readGraphMarkJournalPath(dataDir), `${built.generation} ${wholeVm}\n`);
     const third = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
     expect(await startReadGraphs(third, { dataDir, maintains: () => true })).toEqual({ marked: 0, maintained: 1 });
+  });
+
+  it('keeps no ready row across a start without a data directory, where no journal kept a refused mark', async () => {
+    const { adapter, fixture, context } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    const built = (await buildReadGraph(context, vm)).row!;
+    const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    expect(await startReadGraphs(restarted, { maintains: () => true })).toEqual({ marked: 1, maintained: 1 });
+    expect((await storedRows(adapter))[fixture.readGraphs.wholeVm]).toBe(`dirty@${built.generation + 1}`);
+  });
+
+  it('notes that the store holds read-graph partitions when a start finds only a registry record', async () => {
+    const { adapter, fixture, context } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done' });
+    // The last read graph goes; its context graph's registry record stays.
+    expect(await removeReadGraph(context, fixture.readGraphs.wholeVm)).toMatchObject({ outcome: 'done' });
+    expect(await storedRows(adapter)).toEqual({});
+    expect((await storedRecords(adapter)).size).toBe(1);
+    const fresh = mkdtempSync(join(tmpdir(), 'read-graph-builder-'));
+    dirs.push(fresh);
+    const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    expect(await startReadGraphs(restarted, { dataDir: fresh, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    expect(mayHoldReadGraphPartitions(fresh)).toBe(true);
   });
 
   it('replaces damaged rows and rows whose generation cannot grow, and notes nothing without rows', async () => {

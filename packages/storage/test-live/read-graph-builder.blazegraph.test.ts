@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MemoryLayer, readGraphIri, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
@@ -63,7 +66,13 @@ describe('read-graph builds on a live Blazegraph', () => {
     // A start keeps the ready rows it maintains, outside working memory.
     const { wholeVm, codeVm, agentWm } = fixture.readGraphs;
     const ready = layer.runtime.mirror.get(wholeVm)!;
-    expect(await startReadGraphs(store, { maintains: (key) => key.scope.contextGraphId === fixture.contextGraphId })).toMatchObject({ marked: 1 });
+    // With a data directory, where refused dirty marks would have been kept.
+    const dataDir = mkdtempSync(join(tmpdir(), 'read-graph-builder-live-'));
+    try {
+      expect(await startReadGraphs(store, { dataDir, maintains: (key) => key.scope.contextGraphId === fixture.contextGraphId })).toMatchObject({ marked: 1 });
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
     expect(layer.runtime.mirror.get(wholeVm)).toEqual(ready);
     expect(layer.runtime.mirror.get(agentWm)).toMatchObject({ state: 'dirty' });
 
