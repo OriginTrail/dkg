@@ -8,7 +8,8 @@
 //
 //   load <blazegraph|oxigraph-server> <store url>     insert the fixture into the store
 //   remove <blazegraph|oxigraph-server> <store url>   delete the graphs of the unrelated context graphs
-//   check <api url> <token file>                      every read answers 200 with the fixture's rows
+//   check <api url> <token file>                      every read answers 200 with the fixture's rows, once
+//                                                     shared memory answers (it waits up to three minutes)
 //   node-limit <api url> <token file>                 a read past the node-side ceiling answers 503 STORE_INTERNAL_LIMIT
 //
 // Exit status: 0 when the command did what it says, 1 otherwise.
@@ -68,6 +69,35 @@ const readBody = (sparql, read) => ({
 const readName = read => [read.view ?? 'legacy route', read.subGraphName && `sub-graph ${read.subGraphName}`,
   read.minTrust !== undefined && `minTrust ${read.minTrust}`].filter(Boolean).join(', ');
 
+/**
+ * After a restart a node answers a shared-memory read of a context graph as a
+ * denied one, empty, until it has accepted the graph's authority again, which
+ * on a devnet takes up to a minute or so. Wait, at most this long, for the
+ * small graph's shared memory to answer, so that the reads check the catalog
+ * rather than that window. A read that still fails afterwards fails the check.
+ */
+const SHARED_MEMORY_WAIT_MS = 180_000;
+
+async function waitForSharedMemory(api, token, assets) {
+  const read = FIXTURE_READS.find(candidate => candidate.view === 'shared-working-memory'
+    && candidate.subGraphName === undefined && candidate.minTrust === undefined);
+  const wanted = JSON.stringify(expectedSubjects(assets, read));
+  const started = Date.now();
+  for (;;) {
+    const reply = await apiQuery(api, token, readBody(FIXTURE_QUERIES.SELECT, read));
+    const seconds = Math.round((Date.now() - started) / 1000);
+    if (reply.status === 200 && JSON.stringify(answer('SELECT', reply.json?.result)) === wanted) {
+      console.log(`shared memory answers ${seconds} s after the first read`);
+      return;
+    }
+    if (Date.now() - started >= SHARED_MEMORY_WAIT_MS) {
+      console.log(`shared memory did not answer within ${seconds} s; the reads below show how it answers`);
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 2_000));
+  }
+}
+
 const commands = {
   async load(kind, url) {
     const { load, loadType } = storeEndpoints(kind, url);
@@ -100,6 +130,7 @@ const commands = {
   async check(api, tokenFile) {
     const token = readToken(tokenFile);
     const assets = fixtureAssets();
+    await waitForSharedMemory(api, token, assets);
     let failed = 0;
     for (const read of FIXTURE_READS) {
       const subjects = expectedSubjects(assets, read);
