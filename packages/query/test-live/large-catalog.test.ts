@@ -232,11 +232,15 @@ describe(`a graph catalog larger than any caller limit, on ${engine}`, () => {
       // Before the catalog is due, the read is answered from it without a store read.
       expect(answer('SELECT', await withCeiling(ceiling, read))).toEqual(expected('SELECT', vm));
       expect(counter.reads).toBe(1);
-      // Once it is due, the read is still answered from it while one background read revalidates it.
-      // That read fails closed at the ceiling, and the next read fails as a cold seed does.
+      // Once it is due, one background read revalidates it. That read fails closed at the ceiling, and
+      // reads after it fail as a cold seed does. The read that found it due is answered from the warm
+      // catalog, unless the store failed the revalidation before that read finished, as an embedded
+      // store's synchronous reads can.
       now = 30_001;
       await withCeiling(ceiling, async () => {
-        expect(answer('SELECT', await read())).toEqual(expected('SELECT', vm));
+        const due = await read().then((result) => ({ result }), (error: unknown) => ({ error }));
+        if ('error' in due) expectNodeSideLimit(due.error, ceiling);
+        else expect(answer('SELECT', due.result)).toEqual(expected('SELECT', vm));
         await vi.waitFor(async () => expectNodeSideLimit(await failure(read()), ceiling), { timeout: 60_000, interval: 50 });
       });
       expect(counter.reads).toBeGreaterThanOrEqual(3);
