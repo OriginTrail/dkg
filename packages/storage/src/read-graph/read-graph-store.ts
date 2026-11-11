@@ -92,6 +92,7 @@ import { readGraphBackendIdentity, readGraphBackendRuntime, type ReadGraphBacken
 import { keepsAnyReadGraph, type ReadGraphModes, type ViewSemanticsSettings } from './settings.js';
 import { noteUnstoredReadGraphMark } from './mark-journal.js';
 import { syncReadGraphRuntimeWithRecovery } from './recovery.js';
+import { ReadGraphsUnsupportedError } from './read-graphs-unsupported.js';
 import { nextReadGraphState, readGraphStateMarkDirty, type ReadGraphStateRow } from './state.js';
 import type { ReadGraphTarget } from './statements.js';
 import {
@@ -706,17 +707,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
   }
 }
 
-export const READ_GRAPHS_UNSUPPORTED_CODE = 'READ_GRAPHS_UNSUPPORTED';
-
-/** Settings that keep read graphs, for a store whose adapter does not send read-graph operations with every write it implements. */
-export class ReadGraphsUnsupportedError extends Error {
-  readonly code = READ_GRAPHS_UNSUPPORTED_CODE;
-
-  constructor(readonly backend: string, readonly missingMethods: readonly ReadGraphPlannedMethod[]) {
-    super(`Read graphs are on, but the ${backend} adapter does not send read-graph operations with ${missingMethods.join(', ')}`);
-    this.name = 'ReadGraphsUnsupportedError';
-  }
-}
+export { READ_GRAPHS_UNSUPPORTED_CODE, ReadGraphsUnsupportedError } from './read-graphs-unsupported.js';
 
 /**
  * Put the read-graph layer directly above an adapter. Store objects whose
