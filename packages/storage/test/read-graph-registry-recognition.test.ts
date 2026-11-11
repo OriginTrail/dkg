@@ -11,6 +11,7 @@ import { readStoredReadGraphRow } from '../src/read-graph/rebuild.js';
 import { READ_GRAPH_REGISTRY_PREDICATES as R, readReadGraphRegistry } from '../src/read-graph/registry.js';
 import { readGraphRegistryRecordUpdate } from '../src/read-graph/registry-record.js';
 import { startReadGraphs } from '../src/read-graph/startup.js';
+import { noteReadGraphStoreRestored } from '../src/read-graph/store-restored.js';
 import {
   isExactRegistryWrite,
   readReadGraphRegistryFacts,
@@ -680,6 +681,19 @@ describe('registry recognition in the read-graph layer', () => {
     await store.update!(`INSERT DATA { GRAPH <${meta}> { <${fixture.root}/notes> <${R.type}> <${R.subGraphClass}> ; <${R.name}> "notes" } }`, written);
     expect(during[1]).toEqual(fencedAll);
     expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
+  });
+
+  it('leaves the read graphs it fenced out of service when a restore lands while the write runs', async () => {
+    const { adapter, store, meta, states } = await layered();
+    const update = adapter.update.bind(adapter);
+    adapter.update = async (sparql, options) => {
+      // The store is restored to an earlier state while the write is on its way.
+      if (sparql.includes('urn:test:p')) noteReadGraphStoreRestored(store);
+      return update(sparql, options);
+    };
+    await store.update!(`INSERT DATA { GRAPH <${meta}> { <urn:asset:1> <urn:test:p> "m" } }`, { writtenGraphs: [meta] });
+    // The write changed no registry fact, but the restore ended the fences: nothing comes back before a rebuild.
+    expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'dirty@2', agentWm: 'dirty@2' });
   });
 
   it('follows an authenticated sub-graph name in a metadata subject replace, in and out', async () => {

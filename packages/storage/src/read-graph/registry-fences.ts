@@ -75,3 +75,12 @@ export function liftReadGraphFences(
 export function endReadGraphFences(runtime: ReadGraphBackendRuntime, readGraphs: Iterable<string>): void {
   for (const readGraph of readGraphs) activeFences(runtime).delete(readGraph);
 }
+
+/**
+ * End every fence on the runtime's read graphs, as when its store went back
+ * to an earlier state: none of the rows the fences saved may come back into
+ * service.
+ */
+export function endAllReadGraphFences(runtime: ReadGraphBackendRuntime): void {
+  ACTIVE_FENCES.delete(runtime);
+}
