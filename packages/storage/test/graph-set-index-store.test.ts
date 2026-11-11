@@ -1683,20 +1683,20 @@ describe('GraphSetIndexStore', () => {
     await optedInStore.close();
   });
 
-  it('indexes a Blazegraph configured by hand by default, and not when graphSetIndex is false', async () => {
+  it('indexes a Blazegraph configured by hand only when graphSetIndex switches it on', async () => {
     const url = 'http://example.invalid/blazegraph/namespace/kb/sparql';
     const byHand = await createTripleStore({ backend: 'blazegraph', options: { url, managedByDkg: false } });
-    expect(byHand).toBeInstanceOf(GraphSetIndexStore);
+    expect(byHand).not.toBeInstanceOf(GraphSetIndexStore);
+    expect(byHand.listGraphsByPrefix).toBeUndefined();
     await byHand.close();
 
-    const shared = await createTripleStore({ backend: 'blazegraph', options: { url }, graphSetIndex: false });
-    expect(shared).not.toBeInstanceOf(GraphSetIndexStore);
-    expect(shared.listGraphsByPrefix).toBeUndefined();
-    await shared.close();
+    const soleWriter = await createTripleStore({ backend: 'blazegraph', options: { url }, graphSetIndex: true });
+    expect(soleWriter).toBeInstanceOf(GraphSetIndexStore);
+    await soleWriter.close();
 
-    const disabled = await createTripleStore({ backend: 'blazegraph', options: { url }, graphSetIndex: { enabled: false } });
-    expect(disabled).not.toBeInstanceOf(GraphSetIndexStore);
-    await disabled.close();
+    const managed = await createTripleStore({ backend: 'blazegraph', options: { url, managedByDkg: true } });
+    expect(managed).toBeInstanceOf(GraphSetIndexStore);
+    await managed.close();
   });
 
   it('preserves atomic graph replacement when a managed SPARQL store is index-wrapped', async () => {

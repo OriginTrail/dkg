@@ -93,16 +93,15 @@ function shouldEnableGraphSetIndex(config: TripleStoreConfig): boolean {
 }
 
 /**
- * Backends indexed unless `graphSetIndex` is false: local Oxigraph, and Blazegraph,
- * also a URL configured by hand. The index assumes this node is the store's only
- * writer, so a Blazegraph namespace that other nodes or processes write to needs
- * `graphSetIndex: false`. Without the index every discovery reads the full graph list.
+ * Backends indexed unless `graphSetIndex` is false: local Oxigraph only. The index
+ * assumes this node is the store's only writer. That holds for local Oxigraph and for
+ * stores the DKG manages; for a store configured by hand only its operator knows, so
+ * `graphSetIndex: true` switches the index on there.
  */
 function isDefaultGraphSetIndexBackend(backend: TripleStoreBackend): boolean {
   return backend === 'oxigraph'
     || backend === 'oxigraph-persistent'
-    || backend === 'oxigraph-worker'
-    || backend === 'blazegraph';
+    || backend === 'oxigraph-worker';
 }
 
 export function resolveLargeLiteralStorageOptions(
