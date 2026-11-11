@@ -524,6 +524,7 @@
   "estimatedBodyWeightsMs": {
     "test/knowledge-asset-cli-smoke-lifecycle.test.ts": 49861,
     "test/knowledge-asset-cli-smoke-mapping.test.ts": 47741,
-    "test/knowledge-asset-cli-smoke-validation.test.ts": 49816
+    "test/knowledge-asset-cli-smoke-validation.test.ts": 49816,
+    "test/semantic-runtime-configuration-api.test.ts": 479323
   }
 }
