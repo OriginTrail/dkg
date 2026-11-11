@@ -1195,26 +1195,30 @@ members_lost() {
 # It prints one line of four fields, outcome, detail, dropped and version, separated by the ASCII unit separator
 # (a field may be empty): an empty outcome means every step held. The caller restores the node whatever it prints.
 # asset_probe_record <n> <probe>: known assets to read through the earlier release, with what the build under test
-# answers for them now: node <n>'s seeded working-memory draft, which must hold the value written, and one triple
-# pattern of a verifiable-memory asset. Each probe is a line of <probe> (what, context graph, view, query and variable,
-# \037 between), and its answer is <probe>.<line number>. Fails when no probe could be recorded.
+# answers for them now. Both are required: node <n>'s seeded working-memory draft, which must hold the value written,
+# and one triple pattern of a verifiable-memory asset. Each probe is a line of <probe> (what, context graph, view,
+# query and variable, \037 between), and its answer is <probe>.<line number>. Prints why and returns 1 when a
+# prerequisite is missing (no seeded draft on the node, no verifiable-memory triple to name), 2 when the build under
+# test cannot read one of them.
 asset_probe_record() {
-  local n="$1" probe="$2" k=0 cg agent graph sp sparql
+  local n="$1" probe="$2" cg agent graph sp sparql why got i found=""
   : > "$probe"
-  if [ -s "$RESULTS/rows/seed-wm.node$n" ]; then
-    read -r cg agent < "$RESULTS/rows/seed-wm.node$n"
-    sparql="SELECT ?name WHERE { <urn:read-graphs-seed:$n> <http://schema.org/name> ?name }"
-    if query_rows "$probe.1" "$n" "$cg" working-memory "$sparql" name > /dev/null && grep -Fxq "[\"seed $n\"]" "$probe.1"; then
-      k=1; printf 'the seeded working-memory draft\037%s\037working-memory\037%s\037name\n' "$cg" "$sparql" >> "$probe"
-    else
-      note "drill-rollback: the build under test did not answer node$n's seeded working-memory draft with the value written, so the draft is not read through the earlier release"
-    fi
+  [ -s "$RESULTS/rows/seed-wm.node$n" ] || { echo "node$n has no seeded working-memory draft (the seed phase wrote none there)"; return 1; }
+  read -r cg agent < "$RESULTS/rows/seed-wm.node$n"
+  sparql="SELECT ?name WHERE { <urn:read-graphs-seed:$n> <http://schema.org/name> ?name }"
+  for i in $(seq 1 15); do why="$(query_rows "$probe.1" "$n" "$cg" working-memory "$sparql" name)" && break; sleep 2; done
+  [ -z "$why" ] || { echo "the build under test could not read node$n's seeded working-memory draft ($why)"; return 2; }
+  if ! grep -Fxq "[\"seed $n\"]" "$probe.1"; then
+    got="$(tr '\n' ' ' < "$probe.1" | sed 's/ $//')"
+    echo "the build under test answered ${got:-nothing} for node$n's seeded working-memory draft, not [\"seed $n\"]"; return 2
   fi
+  printf 'the seeded working-memory draft\037%s\037working-memory\037%s\037name\n' "$cg" "$sparql" >> "$probe"
   # A verifiable-memory triple of one of the node's context graphs, by subject and predicate (IRIs that a query can
   # name as they are), and every object the build under test answers for that pair.
   for graph in $(awk '{ print $3 }' "$RESULTS/rows/rollback.before.node$n" | grep '/_~read/cg/_verifiable_memory$' | head -5); do
     cg="${graph#did:dkg:context-graph:}"; cg="${cg%/_~read/cg/_verifiable_memory}"
-    query_rows "$probe.sample" "$n" "$cg" verifiable-memory "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20" s p o > /dev/null || continue
+    why="$(query_rows "$probe.sample" "$n" "$cg" verifiable-memory "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20" s p o)" \
+      || { echo "the build under test could not query the verifiable memory of $cg on node$n ($why)"; return 2; }
     sp="$(node -e '
       const named = (v) => /^[A-Za-z][A-Za-z0-9+.-]*:[^\s<>"{}|^`\\]+$/.test(v);
       const rows = require("fs").readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
@@ -1222,12 +1226,14 @@ asset_probe_record() {
       if (row) console.log(`${row[0]} ${row[1]}`);' "$probe.sample")"
     [ -n "$sp" ] || continue
     sparql="SELECT ?o WHERE { <${sp% *}> <${sp#* }> ?o }"
-    query_rows "$probe.$((k + 1))" "$n" "$cg" verifiable-memory "$sparql" o > /dev/null && [ -s "$probe.$((k + 1))" ] || continue
-    k=$((k + 1)); printf 'verifiable memory <%s> <%s> of %s\037%s\037verifiable-memory\037%s\037o\n' "${sp% *}" "${sp#* }" "$cg" "$cg" "$sparql" >> "$probe"
-    break
+    why="$(query_rows "$probe.2" "$n" "$cg" verifiable-memory "$sparql" o)" \
+      || { echo "the build under test could not read <${sp% *}> <${sp#* }> in the verifiable memory of $cg on node$n ($why)"; return 2; }
+    [ -s "$probe.2" ] || { echo "the build under test answered nothing for <${sp% *}> <${sp#* }> in the verifiable memory of $cg on node$n, though it had just listed that triple"; return 2; }
+    printf 'verifiable memory <%s> <%s> of %s\037%s\037verifiable-memory\037%s\037o\n' "${sp% *}" "${sp#* }" "$cg" "$cg" "$sparql" >> "$probe"
+    found=1; break
   done
   rm -f "$probe.sample"
-  [ "$k" -gt 0 ]
+  [ -n "$found" ] || { echo "node$n's verifiable memory holds no triple that a query can name, in the first five context graphs with a read graph"; return 1; }
 }
 # asset_probe_check <n> <probe>: within a minute, node <n> answers every probe of <probe> as the build under test did
 # (the same distinct rows). Prints the first difference and fails.
@@ -1289,16 +1295,20 @@ rollback_steps() {
 }
 
 drill_rollback_and_forward() {
-  local n="$ROLLBACK_NODE" started endpoint restore result outcome detail dropped version lost rc version_dir target_version probe read_through
+  local n="$ROLLBACK_NODE" started endpoint restore result outcome detail dropped version lost rc version_dir target_version probe read_through why
   started="$(now)"; probe="$RESULTS/rows/rollback.probe.node$n"
   [ "$ROLLBACK_FROM" != none ] || { record drill-rollback INCONCLUSIVE 0 "not run (READ_GRAPHS_ROLLBACK_FROM=none)"; return; }
   endpoint="$(store_endpoint "$n")"
   [ -n "$endpoint" ] || { record drill-rollback INCONCLUSIVE 0 "node$n's store cannot be read from outside its daemon, so the rollback cannot be checked: use a node on Blazegraph or an external SPARQL endpoint"; return; }
   read_graph_rows "$n" > "$RESULTS/rows/rollback.before.node$n" && [ -s "$RESULTS/rows/rollback.before.node$n" ] \
     || { record drill-rollback INCONCLUSIVE 0 "node$n has no read graph to drop"; return; }
-  # Known assets to read through the earlier release, as the build under test answers them now.
-  asset_probe_record "$n" "$probe" \
-    || { record drill-rollback INCONCLUSIVE "$(( $(now) - started ))" "the build under test answered no known asset of node$n (no seeded working-memory draft, no verifiable-memory triple), so reading assets through $ROLLBACK_FROM cannot be checked"; return; }
+  # Known assets to read through the earlier release, as the build under test answers them now: both are required.
+  why="$(asset_probe_record "$n" "$probe")"; rc=$?
+  case "$rc" in
+    0) ;;
+    1) record drill-rollback INCONCLUSIVE "$(( $(now) - started ))" "$why, so reading assets through $ROLLBACK_FROM cannot be checked"; return ;;
+    *) record drill-rollback FAIL "$(( $(now) - started ))" "before the rollback, $why"; return ;;
+  esac
   read_through="$(cut -d "$(printf '\037')" -f1 "$probe" | awk '{ printf "%s%s", (NR > 1 ? " and " : ""), $0 }')"
   # Build the earlier release first, while nothing has changed yet. Its node needs only the ABIs the repository holds,
   # not compiled contracts (the devnet's chain runs from this checkout), so the contract compile is skipped.
