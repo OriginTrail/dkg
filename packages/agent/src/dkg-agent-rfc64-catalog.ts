@@ -46,10 +46,11 @@ import { type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64Catal
 import { evaluateRfc64CatalogCompletionV1 } from './rfc64/catalog-completion-evidence-v1.js';
 export { RFC64_CATALOG_TARGET_MAX_ENTRIES_V1, RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1, type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64CatalogTargetExactIdentityKeyV1, projectRfc64OperationalRowCountsV1 } from './rfc64/catalog-operational-targets-v1.js';
 import { SYSTEM_CONTEXT_GRAPHS, DKGEvent, ZERO_DIGEST32_V1, MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1, contextGraphDataGraphUri, contextGraphMetaGraphUri, assertContextGraphIdV1, assertNetworkIdV1, assertSignedAuthorCatalogBucketEnvelopeV1, assertSignedAuthorCatalogDirectoryNodeEnvelopeV1, assertSignedAuthorCatalogHeadEnvelopeV1, assertSignedAuthorCatalogIssuerDelegationEnvelopeV1, computeAuthorCatalogScopeDigestV1, computeControlSignatureVariantDigestHex, createOperationContext, deriveAuthorCatalogScopeFromHeadV1, type AssertionCoordinateV1, type ByteLengthV1, type CanonicalGraphScopedAuthorSealV1, type CatalogSealDeploymentProfileV1, type OperationContext, type ContextGraphIdV1, type Digest32V1, type EvmAddressV1, type KaIdV1, type NetworkIdV1, type SubGraphNameV1, type TimestampMsV1, type DecimalU64V1, type AuthorCatalogScopeV1, type CountV1, type SignedAuthorCatalogBucketEnvelopeV1, type SignedAuthorCatalogDirectoryNodeEnvelopeV1, type SignedAuthorCatalogHeadEnvelopeV1 } from '@origintrail-official/dkg-core';
-import { assertContextGraphAuthorityIndexId, resolveRpcUrls, verifyControlEnvelopeIssuerSignatureV1, withRpcRequestContext, type ContextGraphAuthorityIndexId, type ContextGraphAuthorityIndexRevisionReader, type ContextGraphAuthoritySnapshot, type ContextGraphAuthorityReader, type ContextGraphAuthorityReaderCapability } from '@origintrail-official/dkg-chain';
+import { assertContextGraphAuthorityIndexId, verifyControlEnvelopeIssuerSignatureV1, withRpcRequestContext, type ContextGraphAuthorityIndexId, type ContextGraphAuthorityIndexRevisionReader, type ContextGraphAuthoritySnapshot, type ContextGraphAuthorityReader, type ContextGraphAuthorityReaderCapability } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { resolveChainFinalityConfirmationsV1 } from './chain-finality-confirmations-v1.js';
+import { resolveChainRpcEndpointsV1 } from './chain-rpc-endpoints-v1.js';
 import type { DKGAgent } from './dkg-agent.js';
 import { answerRfc64CatalogHeadReplayRequestV1, rfc64CatalogReplayPeerFailureV1 } from './internal/catalog-head-replay-peers.js';
 import { yieldMainThread } from './main-thread-time-slice.js';
@@ -5029,9 +5030,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             .acceptedPolicySnapshotForCatalogScope(scope);
         const finalizedPolicyPrecommit = createRfc64FinalizedPolicyAgentPrecommitV1({
           acceptedPolicySnapshotForCatalogScope,
-          rpcEndpoints: chainConfig === undefined
-            ? null
-            : resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
+          rpcEndpoints: resolveChainRpcEndpointsV1(this.chain, chainConfig),
           // The ADAPTER's resolved depth, not the raw config: `DKGAgent`
           // accepts a pre-built `chainAdapter`, and in that mode
           // `chainConfig` is ignored, so reading it here would pin the
@@ -5045,9 +5044,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         });
         const finalizedVmPrecommit = createRfc64FinalizedVmAgentPrecommitV1({
           acceptedPolicySnapshotForCatalogScope,
-          rpcEndpoints: chainConfig === undefined
-            ? null
-            : resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
+          rpcEndpoints: resolveChainRpcEndpointsV1(this.chain, chainConfig),
           // The ADAPTER's resolved depth, not the raw config: `DKGAgent`
           // accepts a pre-built `chainAdapter`, and in that mode
           // `chainConfig` is ignored, so reading it here would pin the

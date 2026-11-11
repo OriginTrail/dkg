@@ -41,12 +41,7 @@ type ListContextGraphsUncachedResult = {
   cacheable: boolean;
 };
 type ListContextGraphsPrivacy = 'public' | 'private' | 'unknown';
-class ListContextGraphsBudgetExceeded extends Error {
-  constructor(label: string) {
-    super(`${label} exceeded listContextGraphs budget`);
-    this.name = 'ListContextGraphsBudgetExceeded';
-  }
-}
+import { ListContextGraphsBudgetExceeded } from './context-graph-list-budget-error.js';
 import { stripLiteral } from './dkg-agent-utils.js';
 import { SYNC_PAGE_SIZE, SYNC_AUTH_MAX_AGE_MS } from './dkg-agent-constants.js';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
@@ -2140,7 +2135,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     ): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const controller = new AbortController();
-      const timeoutError = new ListContextGraphsBudgetExceeded(label);
+      const timeoutError = new ListContextGraphsBudgetExceeded(label, budgetMs);
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => {

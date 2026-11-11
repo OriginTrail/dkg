@@ -57,7 +57,7 @@ type Json = Record<string, unknown>;
  * `control.holdKeys`, a key is made when it is asked for, but the answer that
  * names it waits for `releaseKeys()`.
  */
-function keyBudgetNode() {
+function keyBudgetNode(idDigits: 8 | 16 = 8) {
   const node = fixtureFetch('active');
   const calls: string[] = [];
   const keys = new Map<string, { keyId: string; budget: bigint; spent: bigint; revoked: boolean }>();
@@ -73,9 +73,9 @@ function keyBudgetNode() {
     calls.push(method === 'POST' && url === '/api/marketplace/keys' ? `${method} ${url} ${String(body.budget)}` : `${method} ${url}`);
     const reply = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'Content-Type': 'application/json' } });
     if (method === 'POST' && url === '/api/marketplace/keys') {
-      // Each key its own id (its first 14 characters) and secret.
-      const secret = `dkgmk_${(keys.size + 1).toString(16).padStart(8, '0')}${'7'.repeat(40)}`;
-      const keyId = secret.slice(0, 14);
+      // Each key its own id (the prefix and its first `idDigits` hex digits, 8 as 10.1.0 made them, 16 since) and secret.
+      const secret = `dkgmk_${(keys.size + 1).toString(16).padStart(idDigits, '0')}${'7'.repeat(48 - idDigits)}`;
+      const keyId = secret.slice(0, 6 + idDigits);
       keys.set(secret, { keyId, budget: BigInt(String(body.budget)), spent: 0n, revoked: false });
       secrets.push(secret);
       if (control.holdKeys) await new Promise<void>((resolve) => { heldKeys.push(resolve); });
@@ -149,15 +149,35 @@ describe('marketplace playground key', () => {
     expect(stored.some((v) => v.includes(FIXTURE_SECRET))).toBe(false);
   });
 
-  it('revokes the key an earlier page made before it makes a new one', async () => {
-    localStorage.setItem(PLAYGROUND_KEY_STORAGE, 'dkgmk_1a2b3c4d');
+  it.each([
+    ['as 10.1.0 made its id, of 8 hex digits', 'dkgmk_1a2b3c4d'],
+    ['as a node makes its id now, of 16', 'dkgmk_0123456789abcdef'],
+  ])('revokes the key an earlier page made before it makes a new one, %s', async (_how, earlier) => {
+    localStorage.setItem(PLAYGROUND_KEY_STORAGE, earlier);
     forgetPlaygroundKey();
     const calls = recordCalls();
     const c = await openPlayground();
     await send(c, 'hello');
-    expect(keyCalls(calls)).toEqual(['POST /api/marketplace/keys/dkgmk_1a2b3c4d/revoke', 'POST /api/marketplace/keys']);
+    expect(keyCalls(calls)).toEqual([`POST /api/marketplace/keys/${earlier}/revoke`, 'POST /api/marketplace/keys']);
     expect(calls.indexOf('POST /api/marketplace/v1/chat/completions')).toBeGreaterThan(calls.indexOf('POST /api/marketplace/keys'));
     expect(localStorage.getItem(PLAYGROUND_KEY_STORAGE)).toBe(FIXTURE_SECRET.slice(0, 14));
+  });
+
+  it('revokes its 16-digit key after a reload before it makes the next, so one playground key stays live', async () => {
+    const node = keyBudgetNode(16);
+    const c = await openPlayground();
+    await send(c, 'first');
+    const [first] = node.madeKeyIds();
+    expect(first).toMatch(/^dkgmk_[0-9a-f]{16}$/);
+    expect(localStorage.getItem(PLAYGROUND_KEY_STORAGE)).toBe(first);
+    // A reload: the page's key is gone from memory, as a new page has none; its id stays in storage.
+    forgetPlaygroundKey();
+    await type(byTestId(c, 'mkt-play-input'), 'second');
+    await click(byTestId(c, 'mkt-play-send'));
+    await waitUntilAnswers(c, 2);
+    expect(node.calls.filter((x) => x.endsWith('/revoke'))).toEqual([`POST /api/marketplace/keys/${first}/revoke`]);
+    expect(node.liveKeyIds()).toEqual([node.madeKeyIds()[1]]);
+    expect(localStorage.getItem(PLAYGROUND_KEY_STORAGE)).toBe(node.madeKeyIds()[1]);
   });
 
   it('still makes a key and answers when that revoke fails', async () => {

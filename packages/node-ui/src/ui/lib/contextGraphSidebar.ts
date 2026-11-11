@@ -5,6 +5,8 @@
  * Node-level `subscribed` is not "my project" — subscription is sync plumbing, not membership.
  */
 
+import { canonicalContextGraphAgentDid, contextGraphBelongsToAgent } from '@origintrail-official/dkg-core/dist/context-graph-membership.js';
+
 import type { ContextGraph } from '../stores/projects.js';
 
 export interface AgentSidebarIdentity {
@@ -34,35 +36,11 @@ export function normalizeAccessPolicy(raw?: string): 'public' | 'private' | 'unk
  * Canonical `did:dkg:agent:…` for comparison.
  * Ethereum addresses normalise to lowercase; non-EVM suffix is case-preserving.
  */
-export function canonicalAgentDid(did: string): string {
-  let t = did.trim().replace(/^["']|["']$/g, '');
-  if (t.startsWith('<') && t.endsWith('>')) t = t.slice(1, -1);
-  const PREFIX = 'did:dkg:agent:';
-  if (t.length >= PREFIX.length && t.slice(0, PREFIX.length).toLowerCase() === PREFIX.toLowerCase()) {
-    const rest = t.slice(PREFIX.length);
-    const evm = /^(0x[a-fA-F0-9]{40})$/i.exec(rest);
-    if (evm) return `${PREFIX}${evm[1].toLowerCase()}`;
-    return `${PREFIX}${rest}`;
-  }
-  // A bare EVM address and its `did:dkg:agent:<addr>` form are the same
-  // agent. `/participants` returns bare addresses while `cg.curator` is
-  // a DID URI; without converging them here the same curator is counted
-  // twice when the two sources are unioned (Codex).
-  const bareEvm = /^0x[a-fA-F0-9]{40}$/.exec(t);
-  if (bareEvm) return `${PREFIX}${t.toLowerCase()}`;
-  return t.toLowerCase();
-}
+export const canonicalAgentDid = canonicalContextGraphAgentDid;
 
-/** Bearer agent is curator or explicitly allowlisted participant (`callerInvolved` from daemon). */
+/** Bearer agent is curator or explicitly allowlisted participant. */
 export function belongsInMyProjectsSidebar(cg: ContextGraph, identity: AgentSidebarIdentity | null): boolean {
-  if (cg.callerInvolved === true) return true;
-  if (cg.callerInvolved === false) return false;
-  // Older daemons without `callerInvolved`: curator match only (no subscribed / creator heuristic).
-  if (!identity?.agentDid?.trim()) return false;
-  if (cg.curator?.trim() && canonicalAgentDid(cg.curator) === canonicalAgentDid(identity.agentDid)) {
-    return true;
-  }
-  return false;
+  return contextGraphBelongsToAgent(cg, identity?.agentDid);
 }
 
 /**

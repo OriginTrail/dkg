@@ -11,7 +11,8 @@
  * `EVMChainAdapter` with `applyMixins` (evm-adapter.ts). A receipt batch is
  * sent as a random-sampling proof is, from any registered operational wallet,
  * preferring an idle one, and again from the primary wallet on
- * `ProfileDoesntExist`, with a hook of the caller's before its broadcast.
+ * `ProfileDoesntExist` (`sendFromRegisteredSigner`), with a hook of the
+ * caller's before its broadcast.
  *
  * - Every address comes from the Hub by name on each call, through
  *   `resolveContract`'s address memo, which a Hub rotation clears.
@@ -25,8 +26,10 @@ import { ethers, type Contract, type JsonRpcProvider } from 'ethers';
 import type { TxResult } from './chain-adapter.js';
 import { loadAbi } from './evm-adapter-abi.js';
 import { enrichEvmError } from './evm-adapter-errors.js';
-import { EVMChainAdapterBase } from './evm-adapter-base.js';
+import { EVMChainAdapterBase, type ScanProvider } from './evm-adapter-base.js';
+import { BUYER_SCAN_PAGE_BLOCKS } from './evm-adapter-constants.js';
 import type { EvmSigner } from './evm-signer.js';
+import type { ScannedEvent } from './incremental-event-scan.js';
 import {
   BUYER_GRANT_TYPES,
   compactSignature,
@@ -61,9 +64,6 @@ import {
 } from './marketplace.js';
 
 type Log = { address: string; topics: ReadonlyArray<string>; data: string };
-
-/** Blocks per `eth_getLogs` page of the `BuyerAdded` scan; the reader fits a page to each RPC's span cap. */
-const BUYER_SCAN_PAGE_BLOCKS = 10_000;
 
 const interfaces = new Map<string, ethers.Interface>();
 
@@ -409,24 +409,46 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     return buyers;
   }
 
-  /** Read in pages from the deployment of the Hub's `ServiceSubscriptions` to the head; nothing is cached. */
+  /**
+   * Read in pages from the deployment of the Hub's `ServiceSubscriptions` to the head. The first read
+   * for a buyer covers the whole range; later reads cover only the blocks since the last one (and a
+   * reorg tail), and overlapping reads share one scan.
+   */
   async listBuyerAccounts(buyer: string): Promise<bigint[]> {
     await this.init();
     const ss = await this.resolveContract('ServiceSubscriptions');
+    const address = await ss.getAddress();
     const label = 'listBuyerAccounts';
-    const { fromBlock, head, scanProviders } = await this.resolveContractDeployBlock(await ss.getAddress(), label, 'ServiceSubscriptions');
     const filter = ss.filters.BuyerAdded(null, buyer);
-    const connected = new Map<JsonRpcProvider, Contract>();
-    const accounts = new Set<bigint>();
-    let preferred: JsonRpcProvider | undefined;
-    for (let lo = fromBlock; lo <= head; lo += BUYER_SCAN_PAGE_BLOCKS) {
-      const page = await this.queryEventLogsPage(
-        ss, filter, lo, Math.min(lo + BUYER_SCAN_PAGE_BLOCKS - 1, head), scanProviders, connected, `${label} BuyerAdded`, preferred,
-      );
-      preferred = page.provider;
-      // topics: the event, the indexed accountId, the indexed buyer.
-      for (const log of page.logs) accounts.add(BigInt(log.topics[1]!));
-    }
+    const accounts = await this.buyerAccountScan.read(
+      `${address.toLowerCase()}:${buyer.toLowerCase()}`,
+      async (progress) => {
+        // Once the scan has read from its anchor, a later read only needs the head. That also keeps a deploy-block
+        // search that fell back to genesis (which is not cached) from running again on every read.
+        let anchor: number;
+        let head: number;
+        let scanProviders: ReadonlyArray<ScanProvider>;
+        if (progress) {
+          ({ head, scanProviders } = await this.resolveLogScanHead(label));
+          anchor = progress.anchor;
+        } else {
+          const resolved = await this.resolveContractDeployBlock(address, label, 'ServiceSubscriptions');
+          ({ head, scanProviders } = resolved);
+          anchor = resolved.fromBlock;
+        }
+        // The page reader of this read, on the backends it resolved, keeping to the one that last answered.
+        const connected = new Map<JsonRpcProvider, Contract>();
+        let preferred: JsonRpcProvider | undefined;
+        const readPage = async (lo: number, hi: number): Promise<ScannedEvent<bigint>[]> => {
+          const page = await this.queryEventLogsPage(ss, filter, lo, hi, scanProviders, connected, `${label} BuyerAdded`, preferred);
+          preferred = page.provider;
+          // topics: the event, the indexed accountId, the indexed buyer.
+          return page.logs.map((log) => ({ item: BigInt(log.topics[1]!), block: log.blockNumber }));
+        };
+        return { anchor, head, readPage };
+      },
+      (accountId) => accountId.toString(),
+    );
     return [...accounts].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   }
 
@@ -463,15 +485,9 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
       );
     };
     const receipt = await this.withHubStaleRetryAny(async () => {
-      const signer = await this.nextRandomSamplingSigner();
       try {
-        return await sendFrom(signer);
+        return await this.sendFromRegisteredSigner(sendFrom);
       } catch (err) {
-        if (signer.address.toLowerCase() !== this.signer.address.toLowerCase() && enrichEvmError(err) === 'ProfileDoesntExist') {
-          this.registeredOperationalAddresses.delete(signer.address.toLowerCase());
-          this.clearIdentityIdForAddress(signer.address);
-          return sendFrom(this.signer);
-        }
         enrichEvmError(err);
         throw err;
       }

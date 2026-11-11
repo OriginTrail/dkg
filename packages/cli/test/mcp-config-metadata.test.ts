@@ -67,7 +67,7 @@ it.each(signals.flatMap(signal => destinations.map(destination => ({ signal, des
     Object.defineProperty(process, 'platform', { value: 'linux' });
     expect(detectMcpRuntime()).toBe('wsl');
     const discoverWindowsPath = vi.fn(() => null);
-    detectClients(discoverWindowsPath);
+    detectClients({ resolveWslWindowsEnvPath: discoverWindowsPath });
     expect(discoverWindowsPath).toHaveBeenCalledWith('USERPROFILE');
     expect(mcpConfigPersistenceStrategy(path).kind).toBe(destination.kind);
     expect(execFileSync).toHaveBeenCalledWith('/usr/bin/wslpath', ['-w', path], expect.any(Object));

@@ -36,7 +36,7 @@ import { parseJobListPagingOptions, readJobList, type JobListPage } from '../job
 import { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-command-options.js';
-import { printAsyncJobFailure } from './async-job-failure.js';
+import { printAsyncJobFailure, printClearJobFailure } from './async-job-failure.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
@@ -438,6 +438,23 @@ publisherCmd
       );
     } catch (err) {
       console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('clear-job <job-id>')
+  .description('Remove one finished publisher job through the running daemon')
+  .option('--allow-pending-transaction', 'Abandon tracking of a pending transaction; check its outcome on chain first (does not cancel it)')
+  .action(async (jobId: string, opts: { allowPendingTransaction?: boolean }) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.publisherClearJob(jobId, {
+        allowPendingTransaction: opts.allowPendingTransaction === true,
+      });
+      console.log(`Publisher job ${result.jobId}: ${result.outcome}`);
+    } catch (err) {
+      printClearJobFailure(err);
       process.exit(1);
     }
   });

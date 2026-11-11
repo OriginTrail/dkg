@@ -626,4 +626,59 @@ describe('RFC-64 catalog applied-head coordinator', () => {
       retire: async ({ swmGraph }) => store.dropGraph(swmGraph),
     })).resolves.toBe('retired');
   });
+
+  it('asks the row-independent half of the precommit each plan reaches, and only that one', async () => {
+    const plan = rfc64FinalizedVmPrecommitPlan();
+    const admission = Object.freeze({
+      catalogScope: plan.catalogScope,
+      policyDigest: plan.policyDigest,
+      catalogHeadDigest: plan.catalogHeadDigest,
+    });
+    const signal = new AbortController().signal;
+    const refusal = new Error('the node has no trusted RPC endpoint');
+    const policyAdmit = vi.fn(async () => {});
+    const vmAdmit = vi.fn(async () => { throw refusal; });
+    const finalizedPolicyPrecommit = Object.assign(vi.fn(async () => undefined), {
+      admit: policyAdmit,
+    });
+    const finalizedVmPrecommit = Object.assign(vi.fn(async () => finalizedTransaction(plan)), {
+      admit: vmAdmit,
+    });
+    let accepted = privateSnapshot(acceptedRfc64VmPolicySnapshot().policy.source);
+    const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
+      acceptedPolicySnapshotForCatalogScope: () => accepted,
+      finalizedPolicyPrecommit,
+      finalizedVmPrecommit,
+      store: new OxigraphStore(),
+      writeLocks: new Map(),
+      retire: vi.fn(async () => {}),
+    });
+
+    await expect(handler.admit!(admission, signal)).rejects.toBe(refusal);
+    expect(vmAdmit).toHaveBeenCalledWith(admission, signal);
+    expect(policyAdmit).not.toHaveBeenCalled();
+
+    accepted = acceptedRfc64VmPolicySnapshot();
+    await expect(handler.admit!(admission, signal)).resolves.toBeUndefined();
+    expect(policyAdmit).toHaveBeenCalledWith(admission, signal);
+    expect(vmAdmit).toHaveBeenCalledOnce();
+    expect(finalizedPolicyPrecommit).not.toHaveBeenCalled();
+    expect(finalizedVmPrecommit).not.toHaveBeenCalled();
+  });
+
+  it('admits every head when the precommit a plan reaches has no row-independent half', async () => {
+    const plan = rfc64FinalizedVmPrecommitPlan();
+    const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
+      acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
+        acceptedRfc64VmPolicySnapshot().policy.source,
+      ),
+      finalizedPolicyPrecommit: vi.fn(async () => undefined),
+      finalizedVmPrecommit: vi.fn(async () => finalizedTransaction(plan)),
+      store: new OxigraphStore(),
+      writeLocks: new Map(),
+      retire: vi.fn(async () => {}),
+    });
+
+    await expect(handler.admit!(plan, new AbortController().signal)).resolves.toBeUndefined();
+  });
 });

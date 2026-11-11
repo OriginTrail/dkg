@@ -346,9 +346,17 @@ describe('serving between two nodes on Hardhat', () => {
     const rows = await offersInVm(buyerAgent);
     expect(rows.map((o) => o.serviceId).sort()).toEqual([A, B].sort());
     expect(rows.every((o) => serviceOfferSignerOf(domain, o) === SELLER_WALLET)).toBe(true);
-    const shared = await buyerAgent.query(serviceOffersQuery(), { contextGraphId: contextGraph, graphSuffix: '_shared_memory' });
+    // None in shared memory, once the buyer's catalog has caught up. The buyer applies the seller's
+    // catalog heads, and the ones from before the publish still name the offers' rows until the next
+    // head replaces them; a head whose precommit refuses late (when the chain's finalized snapshot
+    // read is busy) is taken out again and retried. So a query can meet one of those rows for several
+    // seconds. A row that stays fails after a minute.
+    const shared = await until(
+      () => buyerAgent.query(serviceOffersQuery(), { contextGraphId: contextGraph, graphSuffix: '_shared_memory' }),
+      (result) => result.bindings.length === 0,
+    );
     expect(shared.bindings).toEqual([]);
-  }, 120_000);
+  }, 180_000);
 
   it('quotes over the messenger, and serves a call with a receipt a Core Node key signed', async () => {
     const quoted = decodeMessage(await buyerAgent.sendMarketplaceMessage(sellerAgent.peerId, 'quote', encodeMessage({ services: [A, B] }), {

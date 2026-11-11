@@ -467,6 +467,7 @@ export {
   readDaemonPid,
   isProcessAlive,
   readDkgApiPort,
+  readDkgApiPortSync,
   loadAuthTokenSync,
   loadAuthToken,
   toEip55Checksum,
@@ -551,3 +552,4 @@ export * from './async-admission-diagnostic-context.js';
 
 // Exact store readback form; unlike the hash canonicalizer, rejects precision loss.
 export { canonicalizeAuthorSealStoreXsdDateTimeValue as canonicalizeExactStoreDateTime } from './xsd-date-time.js';
+export { canonicalContextGraphAgentDid, contextGraphBelongsToAgent, type ContextGraphMembership } from './context-graph-membership.js';

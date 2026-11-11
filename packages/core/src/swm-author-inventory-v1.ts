@@ -43,7 +43,9 @@ import {
   type Digest32V1,
   type TimestampMsV1,
 } from './sync-wire-scalars.js';
-import { assertExactKeys, isPlainRecord } from './sync-wire-objects.js';
+import {
+  assertExactKeys, isPlainRecord, snapshotDenseDataArray, snapshotExactDataRecord,
+} from './sync-wire-objects.js';
 
 export const SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1 =
   'SwmAuthorInventoryHeadV1' as const;
@@ -62,6 +64,33 @@ declare const SWM_AUTHOR_INVENTORY_SHARE_OPERATION_ID_V1_BRAND: unique symbol;
 export type SwmAuthorInventoryShareOperationIdV1 = string & {
   readonly [SWM_AUTHOR_INVENTORY_SHARE_OPERATION_ID_V1_BRAND]: true;
 };
+
+const ROW_KEYS = [
+  'assertionCoordinate',
+  'assertionVersion',
+  'kaUal',
+  'shareOperationId',
+  'projectionDigest',
+  'publicTripleCount',
+  'privateTripleCount',
+  'sealDigest',
+  'sharedAt',
+  'expiresAt',
+] as const;
+const ownedRows = new WeakSet<object>();
+const ownedRowSets = new WeakSet<object>();
+// Cache only derived data for owned scalar records, never database results.
+let rowEncodingCache = new WeakMap<SwmAuthorInventoryRowV1, {
+  text: string; bytes: number; identity: ReturnType<typeof assertCanonicalDeterministicUalV1>;
+}>();
+
+function isOwnedRow(value: unknown): value is SwmAuthorInventoryRowV1 {
+  return typeof value === 'object' && value !== null && ownedRows.has(value);
+}
+
+function isOwnedRowSet(value: unknown): value is readonly SwmAuthorInventoryRowV1[] {
+  return typeof value === 'object' && value !== null && ownedRowSets.has(value);
+}
 
 const UTF8 = new TextEncoder();
 const UTF8_FATAL = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
@@ -106,6 +135,7 @@ export interface SwmAuthorInventoryRowV1 {
 const MAX_CACHED_ROWS_BYTES_V1 = 2 * MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1;
 let immutableRowsBytesV1 = new WeakMap<readonly SwmAuthorInventoryRowV1[], Uint8Array>();
 let allocatedRowsBytesV1 = 0;
+let immutableRowsDigestsV1 = new WeakMap<readonly SwmAuthorInventoryRowV1[], Digest32V1>();
 
 /** Constant-size signed exact-set commitment. The rows remain a separate blob. */
 export interface SwmAuthorInventoryHeadV1 extends SwmAuthorInventoryScopeV1 {
@@ -180,19 +210,9 @@ export function computeSwmAuthorInventoryScopeDigestV1(
 export function assertSwmAuthorInventoryRowV1(
   value: unknown,
 ): asserts value is SwmAuthorInventoryRowV1 {
+  if (isOwnedRow(value)) return;
   if (!isPlainRecord(value)) fail('swm-inventory-schema', 'row must be a plain object');
-  assertExactKeysAdapted(value, [
-    'assertionCoordinate',
-    'assertionVersion',
-    'kaUal',
-    'shareOperationId',
-    'projectionDigest',
-    'publicTripleCount',
-    'privateTripleCount',
-    'sealDigest',
-    'sharedAt',
-    'expiresAt',
-  ], 'row');
+  assertExactKeysAdapted(value, ROW_KEYS, 'row');
   adaptScalars(() => {
     assertAssertionCoordinateV1(value.assertionCoordinate);
     const assertionVersion = parseCanonicalDecimalU64(value.assertionVersion, 'assertionVersion');
@@ -202,11 +222,11 @@ export function assertSwmAuthorInventoryRowV1(
     assertCanonicalDigest(value.projectionDigest, 'projectionDigest');
     const publicTripleCount = parseCanonicalDecimalU64(
       value.publicTripleCount,
-      'publicTripleCount',
+    'publicTripleCount',
     );
     const privateTripleCount = parseCanonicalDecimalU64(
       value.privateTripleCount,
-      'privateTripleCount',
+    'privateTripleCount',
     );
     if (
       publicTripleCount > MAX_SEAL_TRIPLE_COUNT_V1
@@ -238,8 +258,8 @@ export function compareSwmAuthorInventoryRowsV1(
   left: SwmAuthorInventoryRowV1,
   right: SwmAuthorInventoryRowV1,
 ): number {
-  const leftIdentity = assertCanonicalDeterministicUalV1(left.kaUal);
-  const rightIdentity = assertCanonicalDeterministicUalV1(right.kaUal);
+  const leftIdentity = rowIdentity(left);
+  const rightIdentity = rowIdentity(right);
   if (leftIdentity.chainId !== rightIdentity.chainId) {
     return leftIdentity.chainId < rightIdentity.chainId ? -1 : 1;
   }
@@ -259,6 +279,11 @@ export function canonicalizeSwmAuthorInventoryRowsBytesV1(
   if (cached !== undefined) return cached.slice();
   assertSwmAuthorInventoryRowsV1(rows);
   try {
+    if (ownedRowSets.has(rows)) {
+      const bytes = composeOwnedRowsBytes(rows);
+      rememberRowsBytes(rows, bytes);
+      return bytes.slice();
+    }
     return UTF8.encode(canonicalizeJson(rows as unknown as CanonicalJsonValue, {
       maxBytes: MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1,
       maxDepth: 2,
@@ -282,6 +307,78 @@ export function assertEncodableSwmAuthorInventoryRowV1(
   } catch (cause) {
     fail('swm-inventory-too-large', 'row set exceeds the canonical v1 byte limit', cause);
   }
+}
+
+/** Copy caller data once; only codec-owned scalar records can be reused. */
+export function snapshotSwmAuthorInventoryRowV1(
+  input: unknown,
+): SwmAuthorInventoryRowV1 {
+  if (isOwnedRow(input)) return input;
+  const row = snapshotExactDataRecord(
+    input, ROW_KEYS, 'SWM inventory row',
+  );
+  assertSwmAuthorInventoryRowV1(row);
+  // Preserve the singleton wire codec's rejection contract as well as its bytes.
+  try {
+    ownedRowEncoding(row);
+  } catch (cause) {
+    fail('swm-inventory-too-large', 'row set exceeds the canonical v1 byte limit', cause);
+  }
+  ownedRows.add(row);
+  return row;
+}
+
+function rowIdentity(row: SwmAuthorInventoryRowV1) {
+  return rowEncodingCache.get(row)?.identity ?? assertCanonicalDeterministicUalV1(row.kaUal);
+}
+
+function ownedRowEncoding(row: SwmAuthorInventoryRowV1) {
+  const cached = rowEncodingCache.get(row);
+  if (cached) return cached;
+  const text = canonicalizeJson([row] as unknown as CanonicalJsonValue, {
+    maxBytes: MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1, maxDepth: 2,
+  }).slice(1, -1);
+  const bytes = UTF8.encode(text).byteLength;
+  const encoded = { text, bytes, identity: assertCanonicalDeterministicUalV1(row.kaUal) };
+  reserveRowsCacheBytes(bytes);
+  rowEncodingCache.set(row, encoded);
+  return encoded;
+}
+
+/** Validate an exact set without serializing it into the wire parser again. */
+export function snapshotSwmAuthorInventoryRowsV1(
+  input: unknown,
+): readonly SwmAuthorInventoryRowV1[] {
+  if (isOwnedRowSet(input)) return input;
+  if (!Array.isArray(input) || input.length > MAX_SWM_AUTHOR_INVENTORY_ROWS_V1) {
+    fail('swm-inventory-too-large', 'row set exceeds the v1 row limit');
+  }
+  const rows = Object.freeze(snapshotDenseDataArray(input, 'SWM inventory rows')
+    .map((row) => snapshotSwmAuthorInventoryRowV1(row)));
+  assertSwmAuthorInventoryRowsV1(rows);
+  let bytes: Uint8Array;
+  try {
+    bytes = composeOwnedRowsBytes(rows);
+  } catch (cause) {
+    fail('swm-inventory-too-large', 'row set exceeds the canonical v1 byte limit', cause);
+  }
+  // Ownership records validation, independently of optional cached derivations.
+  ownedRowSets.add(rows);
+  rememberRowsBytes(rows, bytes);
+  return rows;
+}
+
+/** Only called after full set validation on codec-owned immutable rows. */
+function composeOwnedRowsBytes(rows: readonly SwmAuthorInventoryRowV1[]): Uint8Array {
+  const parts: string[] = [];
+  let bytes = 2;
+  for (const row of rows) {
+    const encoded = ownedRowEncoding(row);
+    bytes += encoded.bytes + (parts.length ? 1 : 0);
+    if (bytes > MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1) throw new Error('row bytes exceed limit');
+    parts.push(encoded.text);
+  }
+  return UTF8.encode(`[${parts.join(',')}]`);
 }
 
 export function parseCanonicalSwmAuthorInventoryRowsV1(
@@ -311,22 +408,37 @@ export function parseCanonicalSwmAuthorInventoryRowsV1(
   }
   assertSwmAuthorInventoryRowsV1(parsed);
   const rows = Object.freeze(parsed.map((row) => Object.freeze({ ...row })));
-  const bytes = UTF8.encode(text);
-  // Weak keys avoid retaining dead snapshots. This conservative allocation
-  // budget also bounds stored bytes while many snapshots remain live.
-  if (allocatedRowsBytesV1 + bytes.byteLength > MAX_CACHED_ROWS_BYTES_V1) {
+  rows.forEach((row) => ownedRows.add(row));
+  ownedRowSets.add(rows);
+  rememberRowsBytes(rows, UTF8.encode(text));
+  return rows;
+}
+
+function rememberRowsBytes(rows: readonly SwmAuthorInventoryRowV1[], bytes: Uint8Array): void {
+  reserveRowsCacheBytes(bytes.byteLength);
+  immutableRowsBytesV1.set(rows, bytes);
+}
+
+function reserveRowsCacheBytes(bytes: number): void {
+  // One conservative allocation budget covers row strings and full-set bytes.
+  // Weak keys do not retain dead snapshots; reset all derived data at the bound.
+  if (allocatedRowsBytesV1 + bytes > MAX_CACHED_ROWS_BYTES_V1) {
     immutableRowsBytesV1 = new WeakMap();
+    immutableRowsDigestsV1 = new WeakMap();
+    rowEncodingCache = new WeakMap();
     allocatedRowsBytesV1 = 0;
   }
-  immutableRowsBytesV1.set(rows, bytes);
-  allocatedRowsBytesV1 += bytes.byteLength;
-  return rows;
+  allocatedRowsBytesV1 += bytes;
 }
 
 export function computeSwmAuthorInventoryRowsDigestV1(
   rows: readonly SwmAuthorInventoryRowV1[],
 ): Digest32V1 {
-  return digestWithDomain(ROWS_DOMAIN_BYTES, canonicalizeSwmAuthorInventoryRowsBytesV1(rows));
+  const cached = immutableRowsDigestsV1.get(rows);
+  if (cached) return cached;
+  const digest = digestWithDomain(ROWS_DOMAIN_BYTES, canonicalizeSwmAuthorInventoryRowsBytesV1(rows));
+  if (immutableRowsBytesV1.has(rows)) immutableRowsDigestsV1.set(rows, digest);
+  return digest;
 }
 
 export function assertSwmAuthorInventoryHeadV1(
@@ -467,7 +579,7 @@ export function assertSwmAuthorInventorySnapshotBindingV1(
     fail('swm-inventory-binding', 'head rowsDigest does not commit to the exact row set');
   }
   for (const row of snapshot.rows) {
-    const parsedUal = assertCanonicalDeterministicUalV1(row.kaUal);
+    const parsedUal = rowIdentity(row);
     if (parsedUal.chainId !== snapshot.head.payload.networkId) {
       fail('swm-inventory-binding', 'row kaUal network does not equal the scoped networkId');
     }
@@ -489,6 +601,7 @@ export function assertSwmAuthorInventorySnapshotBindingV1(
 function assertSwmAuthorInventoryRowsV1(
   value: unknown,
 ): asserts value is SwmAuthorInventoryRowV1[] {
+  if (isOwnedRowSet(value)) return;
   if (!Array.isArray(value)) fail('swm-inventory-schema', 'rows must be an array');
   if (value.length > MAX_SWM_AUTHOR_INVENTORY_ROWS_V1) {
     fail('swm-inventory-too-large', 'row set exceeds the v1 row limit');

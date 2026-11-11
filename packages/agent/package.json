@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-agent",
-  "version": "10.1.0",
+  "version": "10.1.1",
   "type": "module",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
@@ -161,6 +161,7 @@
     "./dist/rfc64/public-catalog-inventory-completeness-v1.js": null,
     "./dist/rfc64/public-catalog-native-receiver-v1.js": null,
     "./dist/rfc64/public-catalog-native-committed-head-token-v1.js": null,
+    "./dist/rfc64/public-catalog-native-precommit-v1.js": null,
     "./dist/rfc64/public-catalog-native-reconciler-v1.js": null,
     "./dist/rfc64/public-catalog-native-transport-v1.js": null,
     "./dist/rfc64/public-open-catalog-scope-v1.js": null,
@@ -190,7 +191,12 @@
     "./dist/rfc64/inventory-v1/finalized-private-repair-persistence.js": null,
     "./dist/rfc64/inventory-v1/schema-migrations.js": null,
     "./dist/rfc64/inventory-v1/pre-migration-copy.js": null,
-    "./dist/rfc64/inventory-v1/rollback.js": null
+    "./dist/rfc64/inventory-v1/rollback.js": null,
+    "./context-graph-list-budget-error": {
+      "types": "./dist/context-graph-list-budget-error.d.ts",
+      "import": "./dist/context-graph-list-budget-error.js",
+      "default": "./dist/context-graph-list-budget-error.js"
+    }
   },
   "scripts": {
     "build": "tsc && pnpm run test:types && pnpm run test:package-root",
