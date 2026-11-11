@@ -291,7 +291,7 @@ export const sel = {
     createTokensInput: '[data-testid="pca-create-tokens"]',
     createPrimaryNode: '[data-testid="pca-create-primary-node"]',
     createSubmit: '[data-testid="pca-create-submit"]',
-    createSuccess: '[data-testid="pca-create-success"]',    // invariant 11: "0/100 wallets approved — discounts nothing yet"
+    createSuccess: '[data-testid="pca-create-success"]',    // invariant 11: "No wallets are approved yet, so no publishes get the discount"
     approveOwnWalletsCta: '[data-testid="pca-approve-own-wallets"]',
     // S3 manage (conviction:<id> detail tab)
     detail: '[data-testid="pca-detail"]',                   // S3 detail root

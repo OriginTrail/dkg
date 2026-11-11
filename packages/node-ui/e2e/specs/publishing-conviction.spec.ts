@@ -133,7 +133,7 @@ test.describe('Publisher Conviction tab (PCA) — P0', () => {
     // free); the local testnet-core config grepInverts /@mutating/ so it never
     // spends on the real network. CI is its first verification (devnet can't boot
     // on this Windows box).
-    test('INVARIANT 11: a fresh PCA leads with "0/100 wallets approved" + self-approve CTA @mutating', async ({ conviction }) => {
+    test('INVARIANT 11: a fresh PCA says no wallets are approved and no publishes get the discount, + self-approve CTA @mutating', async ({ conviction }) => {
       // A fresh PCA grants ZERO self-discount until the owner approves its own
       // wallets (agentToAccountId[owner]==0 at mint). The success state must NOT
       // be a generic "Done — discounted" and MUST surface the approve-own-wallets CTA.
@@ -143,8 +143,11 @@ test.describe('Publisher Conviction tab (PCA) — P0', () => {
       await prepareDaemonCreateForm(conviction); // CI devnet signs through the daemon hot wallet.
       await conviction.createSubmit.click();
       await expect(conviction.createSuccess).toBeVisible({ timeout: 120_000 }); // on-chain createAccount
-      await expect(conviction.createSuccess).toContainText(/0\s*\/\s*100 wallets approved/i);
+      // The zero-approved state, in the success copy's words: no wallet is on it yet, so nothing is discounted.
+      await expect(conviction.createSuccess).toContainText(/No wallets are approved yet/i);
+      await expect(conviction.createSuccess).toContainText(/no publishes get the discount/i);
       await expect(conviction.approveOwnWalletsCta).toBeVisible();
+      await expect(conviction.approveOwnWalletsCta).toContainText(/Approve this node’s publishing \(operational\) wallets/);
     });
   });
 
