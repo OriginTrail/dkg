@@ -8,7 +8,7 @@ import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog, readRegisteredViewSubGraphs, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
 import { resolveLegacyRouteScope } from './legacy-route-scope.js';
 import { resolveQueryReadPlan, type QueryReadPlan } from './query-read-plan.js';
-import { classifyMeteredQuery, meterQueryScope, reportGraphsRead, startRoutedRead } from './query-scope-meters.js';
+import { classifyMeteredQuery, meterQueryScope, reportRoutedGraphs, startRoutedRead } from './query-scope-meters.js';
 import { storeOptions } from './query-store-options.js';
 import {
   asGraphWriteRevisionSource, asQueryReadAdmissionCapability,
@@ -608,7 +608,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     allGraphs.push(...dedupedGraphs);
 
     // The scope meter counts the graphs this view routes per asset.
-    reportGraphsRead(initialScope, allGraphs, this.sparqlEngine);
+    reportRoutedGraphs(allGraphs);
     if (allGraphs.length === 0) {
       // PR #239 / r17-2: a zero-graph resolution (e.g. a `verifiable-memory`
       // query with `minTrust=Endorsed` on a context graph that has not

@@ -3,8 +3,6 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { getMetrics, TrustLevel } from '@origintrail-official/dkg-core';
 import type { QueryOptions } from './query-engine.js';
 import type { QueryReadPlan } from './query-read-plan.js';
-import type { SparqlEngineFamily } from '@origintrail-official/dkg-storage';
-import { graphsReadBy } from './sparql-graph-dataset.js';
 import type { PreparedGraphScope } from './sparql-graph-scope.js';
 
 /**
@@ -66,10 +64,9 @@ export function sliceClass(graphs: number): string {
  * records its slice size, its store time by slice size, and each candidate
  * limit it exceeds. A query rejected before its plan is not counted.
  *
- * The slice is the set of graphs the route binds the query to, as VALUES,
- * UNION branches or a dataset. A read that names only explicit GRAPH IRIs and
- * gets no dataset, as on Oxigraph, reads just the graphs it names, and those
- * are its slice. The `graph` label keeps explicit reads apart in every series.
+ * The slice is the set the route authorizes the query for and binds it to, as
+ * VALUES, UNION branches or a dataset. The `graph` label keeps reads of
+ * explicit graphs apart in every series.
  *
  * The meter lives in the query's async context ({@link meterQueryScope}), the
  * way the default store-work priority does, so the engine's route functions
@@ -144,11 +141,6 @@ export function classifyMeteredQuery(scope: PreparedGraphScope, plan: QueryReadP
 /** A graph list the running query is routed over, one asset graph at a time. */
 export function reportRoutedGraphs(graphs: readonly string[]): void {
   runningMeters.getStore()?.route(graphs);
-}
-
-/** The graphs a read scoped to `graphs` reads on this engine ({@link graphsReadBy}), as the running query's graph list. */
-export function reportGraphsRead(scope: PreparedGraphScope, graphs: readonly string[], engine: SparqlEngineFamily | null): void {
-  runningMeters.getStore()?.route(graphsReadBy(scope, graphs, engine));
 }
 
 /** Start timing one store read of the running query's caller query; call the result when the read ends. */
