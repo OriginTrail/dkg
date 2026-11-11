@@ -94,6 +94,17 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
     if (store) await store.dropGraph(GRAPH).catch(() => {});
   });
 
+  it('lists graphs whose names need escapes, from its streamed one-graph-per-line answer', async () => {
+    const root = `urn:graph-list:${randomUUID()}`;
+    const graphs = [`${root}:café`, `${root}:smile-😀`, `${root}:a%20b`, `${root}:plain`];
+    try {
+      await store.insert(graphs.map((graph, i) => ({ subject: `${root}:s${i}`, predicate: 'urn:p', object: '"x"', graph })));
+      expect((await store.listGraphs()).filter((graph) => graph.startsWith(root)).sort()).toEqual([...graphs].sort());
+    } finally {
+      for (const graph of graphs) await store.dropGraph(graph);
+    }
+  });
+
   it('replaces values and preserves exact content on replay', async () => {
     const store = new BlazegraphStore(BLAZEGRAPH_URL!, { timeout: 10_000 });
     const root = `urn:group-test:${randomUUID()}`, meta = `${root}:meta`;
