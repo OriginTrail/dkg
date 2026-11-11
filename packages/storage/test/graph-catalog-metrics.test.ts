@@ -79,9 +79,26 @@ describe('graph catalog metrics', () => {
       vi.stubEnv(STORE_GRAPH_CATALOG_MAX_BYTES_ENV, String(measureGraphCatalogBytes([`${CG}small/a`])));
       await inner.insert([q(`${CG}${'large'.repeat(30)}`)]);
       now += 100;
-      const recorded = await captureMetrics(async () => {
+      const records: LogRecord[] = [];
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      Logger.setSink(record => { records.push(record); });
+      let recorded: Recorded[];
+      try {
+        recorded = await captureMetrics(async () => {
+          await expect(store.listGraphsByPrefix(`${CG}small/`)).rejects.toMatchObject({ code: 'STORE_INTERNAL_LIMIT' });
+        });
+        // The next refused read within the hour logs nothing more.
+        now += 100;
         await expect(store.listGraphsByPrefix(`${CG}small/`)).rejects.toMatchObject({ code: 'STORE_INTERNAL_LIMIT' });
-      });
+      } finally {
+        Logger.setSink(null);
+        stderr.mockRestore();
+      }
+      // The refused read logs the warning the 80 % alert matches, so the alert stays raised over the limit.
+      expect(records).toEqual([expect.objectContaining({
+        level: 'warn', module: 'graph-catalog',
+        message: expect.stringMatching(/^The graph catalog has reached 80% of its internal limit STORE_GRAPH_CATALOG_MAX_BYTES, and is over it: at least \d+ of \d+ bytes\./),
+      })]);
       expect(named(recorded, 'dkg.store.graph_catalog_refresh_failures_total')).toEqual([{
         metric: 'dkg.store.graph_catalog_refresh_failures_total', value: 1,
         attributes: { kind: 'revalidate', reason: 'internal_limit' },

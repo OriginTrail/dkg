@@ -30,9 +30,16 @@ The graph catalog has reached 80% of its internal limit STORE_GRAPH_CATALOG_MAX_
 It logs once when the catalog reaches a level, and again every hour while the
 catalog stays there.
 
+Past the limit, the node logs a warning that starts the same way when the limit
+refuses a catalog read, and again every hour while reads are still refused:
+
+```text
+The graph catalog has reached 80% of its internal limit STORE_GRAPH_CATALOG_MAX_BYTES, and is over it: at least 270532608 of 268435456 bytes. Catalog reads fail with STORE_INTERNAL_LIMIT until the limit is raised: store.graphCatalog.maxBytes or DKG_STORE_GRAPH_CATALOG_MAX_BYTES.
+```
+
 The alert set in `tools/observability` has a rule on the 80 % warning:
 "Graph catalog at 80% of its limit on a node". It fires while the warning keeps
-coming, and resolves about 80 minutes after the last one.
+coming, over the limit too, and resolves about 80 minutes after the last one.
 
 When the node exports metrics, the same numbers are there:
 

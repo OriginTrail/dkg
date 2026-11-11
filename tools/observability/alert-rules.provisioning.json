@@ -915,7 +915,7 @@
         "signal": "logs"
       },
       "annotations": {
-        "summary": "Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) reports its graph catalog at 80% or more of DKG_STORE_GRAPH_CATALOG_MAX_BYTES. At the limit its catalog reads fail with STORE_INTERNAL_LIMIT. Raise the limit and restart the node: docs/use-dkg/graph-catalog-limit.md. The node repeats the warning hourly, so the rule clears about 80 minutes after the last one."
+        "summary": "Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) reports its graph catalog at 80% or more of DKG_STORE_GRAPH_CATALOG_MAX_BYTES. At the limit its catalog reads fail with STORE_INTERNAL_LIMIT. Raise the limit and restart the node: docs/use-dkg/graph-catalog-limit.md. The node repeats the warning hourly, and keeps logging it while the limit refuses catalog reads, so the rule clears about 80 minutes after the catalog is back under 80%."
       }
     }
   ]
