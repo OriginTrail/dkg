@@ -2,6 +2,7 @@
 // seller, the receipts this node holds against those landed and counted,
 // with the batch transactions; final once the epoch has ended), and the
 // gateway's recent calls, by key.
+import { Badge } from '../../components/ds/Badge.js';
 import React, { useState } from 'react';
 import { copy } from '../copy.generated.js';
 import { marketplaceApi, needsNodeAdmin } from '../api/client.js';
@@ -92,7 +93,7 @@ export function Activity({ catalog, calls, err }: { catalog: CatalogAnswer; call
               <td data-copy="_data">{label(c.serviceId)}</td>
               <td className="mkt-muted" data-copy="_data">{sellerName(c.seller)}</td>
               <td data-copy="activity.units">{copy('activity.units', { n: c.units.toLocaleString('en-US'), trac: fmtTrac(c.value) })}</td>
-              <td data-copy={`activity.state.${c.state}`}><span className={c.state === 'missed' ? 'ds-badge ds-tone-danger' : c.state === 'held' ? 'ds-badge ds-tone-warning' : 'ds-badge ds-tone-success'}>{copy(`activity.state.${c.state}`)}</span></td>
+              <td data-copy={`activity.state.${c.state}`}><Badge tone={c.state === 'missed' ? 'danger' : c.state === 'held' ? 'warning' : 'success'}>{copy(`activity.state.${c.state}`)}</Badge></td>
               <td className="mkt-muted mkt-mono" data-copy="_data">{c.keyId}</td>
             </tr>
           ))}

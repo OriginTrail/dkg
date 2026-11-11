@@ -4,6 +4,7 @@
 // landing, with Land now; recent batches with their gas; this epoch's served
 // and weighted value and the pool so far, each ended epoch's gross; and the
 // operational wallets' ETH. Selling switched off is an explicit card.
+import { Badge } from '../../components/ds/Badge.js';
 import React, { useState } from 'react';
 import { copy, type CopyKey } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi } from '../api/client.js';
@@ -123,7 +124,7 @@ export function OperateView(): React.ReactElement {
                 <strong title={o.serviceId} data-copy="_data">{label(o.serviceId)}</strong>{' '}
                 {o.connector === 'up'
                   ? <span className="mkt-yours" data-copy="operate.connector.up">{copy('operate.connector.up')}</span>
-                  : <span className="ds-badge ds-tone-danger" data-copy="operate.connector.down">{copy('operate.connector.down')}</span>}
+                  : <Badge tone="danger" data-copy="operate.connector.down">{copy('operate.connector.down')}</Badge>}
                 <div className="mkt-muted mkt-xs" data-copy={changed ? 'operate.price.queued' : 'operate.price.none'}>
                   {changed ? copy('operate.price.queued', { price: fmtMicro(o.nextPrice) }) : copy('operate.price.none')}
                 </div>

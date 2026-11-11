@@ -3,6 +3,7 @@
 // catalog routes: this epoch's offers from sellers in the sharding table,
 // and what this epoch's subscription has left for each service it funds.
 // "Add to plan" hands the service to Plans.
+import { Badge } from '../../components/ds/Badge.js';
 import React, { useMemo, useState } from 'react';
 import { Check, Cloud, ShieldCheck } from 'lucide-react';
 import { PageHeader } from '../../components/ds/PageHeader.js';
@@ -30,9 +31,9 @@ export function PriceLine({ min, max, fx }: { min: string; max?: string; fx: Fx 
 
 /** A seller's availability as this node last saw it. */
 export function SellerChip({ available }: { available: boolean | null }): React.ReactElement {
-  if (available === true) return <span className="ds-badge ds-tone-success" data-copy="catalog.online">{copy('catalog.online')}</span>;
-  if (available === false) return <span className="ds-badge ds-tone-danger" data-copy="catalog.unavailable.seller">{copy('catalog.unavailable.seller')}</span>;
-  return <span className="ds-badge ds-tone-warning" data-copy="catalog.unquoted">{copy('catalog.unquoted')}</span>;
+  if (available === true) return <Badge tone="success" data-copy="catalog.online">{copy('catalog.online')}</Badge>;
+  if (available === false) return <Badge tone="danger" data-copy="catalog.unavailable.seller">{copy('catalog.unavailable.seller')}</Badge>;
+  return <Badge tone="warning" data-copy="catalog.unquoted">{copy('catalog.unquoted')}</Badge>;
 }
 
 export function ProvBadge({ offers }: { offers: Offer[] }): React.ReactElement {
@@ -128,7 +129,7 @@ function ServicePage({ service, catalog, onBack, onSeller }: { service: Service;
     <div className="mkt-frame" data-testid="mkt-model-page" data-service={service.serviceId}>
       <button type="button" className="mkt-linkbtn mkt-xs" data-copy="catalog.back" onClick={onBack}>{copy('catalog.back')}</button>
       <PageHeader title={modelName(service.label)}
-        badge={covered && <span className="ds-badge ds-tone-success" data-copy="catalog.covered">{copy('catalog.covered', { trac: fmtTrac(covered.left) })}</span>} />
+        badge={covered && <Badge tone="success" data-copy="catalog.covered">{copy('catalog.covered', { trac: fmtTrac(covered.left) })}</Badge>} />
       <div className="ds-card mkt-card">
         <p className="mkt-muted mkt-xs mkt-mono" data-copy="_data">{service.label}</p>
         {d.err && !detail ? <ErrorCard err={d.err} onRetry={d.reload} /> : null}
@@ -256,7 +257,7 @@ export function MarketplaceView(): React.ReactElement {
                   <div className="mkt-mhead">
                     <span><PriceLine min={s.priceMin} max={s.priceMax} fx={catalog.fx} /></span>
                     {s.covered
-                      ? <span className="ds-badge ds-tone-success" data-testid={`mkt-covered-${s.serviceId}`} data-copy="catalog.covered">{copy('catalog.covered', { trac: fmtTrac(s.covered.left) })}</span>
+                      ? <Badge tone="success" data-testid={`mkt-covered-${s.serviceId}`} data-copy="catalog.covered">{copy('catalog.covered', { trac: fmtTrac(s.covered.left) })}</Badge>
                       : <button type="button" className="ds-btn ds-sm" data-testid={`mkt-add-${s.serviceId}`} data-copy="catalog.add" disabled={off} title={off ? copy('catalog.unavailable.all') : undefined}
                           onClick={(e) => { e.stopPropagation(); addToPlan(s.serviceId); }}>{copy('catalog.add')}</button>}
                   </div>

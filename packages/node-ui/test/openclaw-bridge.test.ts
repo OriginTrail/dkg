@@ -27,6 +27,8 @@ function readPanelRightSources(): string {
     readUiTree('components/Shell/PanelRight'),
     // The panel's chat (send, stop, history, attachments) runs in this store.
     readUiFile('stores/agentConversations.ts'),
+    // ...using the shared conversation model.
+    readUiTree('conversations'),
   ].join('\n');
 }
 

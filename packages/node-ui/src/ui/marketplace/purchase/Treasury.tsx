@@ -5,6 +5,7 @@
 // publisher wallets as two lists. On an account this node owns, the owner's
 // actions go through the node; another owner adds the buyer wallet from
 // their own wallet, with the consent the node signs here.
+import { Badge } from '../../components/ds/Badge.js';
 import React, { useState } from 'react';
 import { copy } from '../copy.generated.js';
 import { marketplaceApi } from '../api/client.js';
@@ -80,8 +81,8 @@ function AccountRow({ a, buyerWallet, onChanged }: { a: Account; buyerWallet: st
           <span className="mkt-muted mkt-xs" data-copy={a.ownedByNode ? 'treasury.owned' : 'treasury.owned.other'}>{copy(a.ownedByNode ? 'treasury.owned' : 'treasury.owned.other')}</span>
         </span>
         {a.serviceCapable
-          ? <span className="ds-badge ds-tone-success" data-copy="treasury.capable">{copy('treasury.capable', { pct: a.discountBps / 100 })}</span>
-          : <span className="ds-badge ds-tone-danger" data-copy={refusalKey(a.refusal)}>{copy(refusalKey(a.refusal))}</span>}
+          ? <Badge tone="success" data-copy="treasury.capable">{copy('treasury.capable', { pct: a.discountBps / 100 })}</Badge>
+          : <Badge tone="danger" data-copy={refusalKey(a.refusal)}>{copy(refusalKey(a.refusal))}</Badge>}
       </div>
       <div className="mkt-muted mkt-xs" data-copy={w.expired ? 'treasury.window.expired' : 'treasury.window'}>
         {copy(w.expired ? 'treasury.window.expired' : 'treasury.window', { n: w.index, base: fmtTrac(w.baseRemaining), buffer: fmtTrac(w.topUpBuffer) })}

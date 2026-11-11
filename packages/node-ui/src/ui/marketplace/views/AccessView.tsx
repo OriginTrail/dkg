@@ -3,6 +3,7 @@
 // its rate, expiry and last use, and which service its calls mostly went to.
 // Minting shows the secret once; revoking stops the key at its next call.
 // Keys are the node admin's alone.
+import { Badge } from '../../components/ds/Badge.js';
 import React, { useMemo, useState } from 'react';
 import { copy } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi, needsNodeAdmin } from '../api/client.js';
@@ -152,9 +153,9 @@ export function AccessView(): React.ReactElement {
                 <div className="mkt-muted mkt-xs" data-copy="access.scopes">{scopeOf(k)}</div>
                 {revokeErr?.keyId === k.keyId ? <ErrorCard err={revokeErr.err} onRetry={() => revoke(k.keyId)}><span className="mkt-muted mkt-xs" data-copy="access.error.revoke">{copy('access.error.revoke')}</span></ErrorCard> : null}
               </span>
-              <span className="ds-badge ds-tone-success" data-copy="access.cap">{copy('access.cap', { pct: Math.round(pctOf(committed, k.budget)) })}</span>
+              <Badge tone="success" data-copy="access.cap">{copy('access.cap', { pct: Math.round(pctOf(committed, k.budget)) })}</Badge>
               {k.revoked
-                ? <span className="ds-badge ds-tone-danger" data-copy="key.revoked">{copy('key.revoked')}</span>
+                ? <Badge tone="danger" data-copy="key.revoked">{copy('key.revoked')}</Badge>
                 : <button type="button" className="ds-btn ds-danger" data-testid={`mkt-revoke-${k.keyId}`} data-copy="access.revoke.btn" onClick={() => revoke(k.keyId)} disabled={busy === k.keyId}>{busy === k.keyId ? copy('state.working') : copy('access.revoke.btn')}</button>}
             </div>
           );

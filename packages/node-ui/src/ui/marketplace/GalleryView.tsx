@@ -1,6 +1,7 @@
 // /dev/gallery: the marketplace's building blocks in their states, fed by the
 // fixture node's answers (api/fixtures.ts), never by a live node, and
 // labeled as such. Nothing on this page sends a request.
+import { Badge } from '../components/ds/Badge.js';
 import React, { useState } from 'react';
 import { PageHeader } from '../components/ds/PageHeader.js';
 import { copy } from './copy.generated.js';
@@ -63,7 +64,7 @@ export function MarketplaceGalleryView(): React.ReactElement {
         <Sect title={copy('gallery.sect.calls')}>
           <div className="mkt-fchips mkt-wrap" data-testid="mkt-gallery-calls">
             {(['held', 'landed', 'missed'] as const).map((s) => (
-              <span key={s} className={s === 'missed' ? 'ds-badge ds-tone-danger' : s === 'held' ? 'ds-badge ds-tone-warning' : 'ds-badge ds-tone-success'}>{copy(`activity.state.${s}`)}</span>
+              <Badge key={s} tone={s === 'missed' ? 'danger' : s === 'held' ? 'warning' : 'success'}>{copy(`activity.state.${s}`)}</Badge>
             ))}
           </div>
         </Sect>
@@ -79,7 +80,7 @@ export function MarketplaceGalleryView(): React.ReactElement {
           <div className="ds-card mkt-card">
             <div><strong>{modelName(qwen.label)}</strong>{' '}<PriceLine min={qwen.priceMin} max={qwen.priceMax} fx={catalog.fx} /></div>
             <div><strong>{modelName(qwen.label)}</strong>{' '}<PriceLine min={qwen.priceMin} max={qwen.priceMax} fx={noFx} /></div>
-            <span className="ds-badge ds-tone-success">{copy('catalog.covered', { trac: fmtTrac(qwen.covered!.left) })}</span>
+            <Badge tone="success">{copy('catalog.covered', { trac: fmtTrac(qwen.covered!.left) })}</Badge>
           </div>
         </Sect>
 
