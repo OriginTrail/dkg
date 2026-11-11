@@ -50,23 +50,13 @@ export function framedGlyph(framework: string | undefined, kind: 'human' | 'ai')
 // and the graph's agent nodes.
 const initials = agentInitials;
 
-/**
- * N6 polish (item 4) — when we fall back to a raw identifier (no
- * resolved agent profile available), truncate so libp2p peer ids
- * (`12D3K…b9a3`) and eth addresses (`0xaaaa…bbbb`) don't blow the
- * pill layout. Use head 6 + ellipsis + tail 4. Short
- * identifiers (<= head+tail+1) render unchanged so we never insert
- * an ellipsis that hides nothing.
- */
-function truncateFallbackId(raw: string): string {
-  return truncateAddress(raw);
-}
-
 const agentColorVar = (color: string) => ({ '--agent-color': color }) as React.CSSProperties;
 
 function agentIdentity(agent: AgentSummary | null | undefined, fallbackUri?: string) {
+  // With no resolved profile, a peer id or address stands in for the name, shortened so it
+  // fits the pill. Short ids stay whole.
   const name = agent?.name
-    ?? (fallbackUri ? truncateFallbackId(fallbackUri.split(':').pop() ?? fallbackUri) : 'unknown');
+    ?? (fallbackUri ? truncateAddress(fallbackUri.split(':').pop() ?? fallbackUri) : 'unknown');
   const kind = agent?.kind ?? 'ai';
   const framework = agent?.framework;
   return { name, kind, framework, Glyph: framedGlyph(framework, kind), color: agent?.color ?? 'var(--identity-fallback)' };

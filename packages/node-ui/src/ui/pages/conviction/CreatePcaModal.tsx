@@ -38,10 +38,6 @@ import { ExternalMark } from '../../components/ds/ExternalMark.js';
 
 type Phase = 'form' | 'creating' | 'success' | 'reconcile';
 
-function pctFromBps(bps: number): string {
-  return formatBps(bps);
-}
-
 const AMOUNT_RE = /^\d+(\.\d+)?$/;
 
 /**
@@ -419,13 +415,13 @@ export function CreatePcaModal({
             <div className="v10-pca-create-success-stats">
               <span>Account <strong>#{result.accountId}</strong></span>
               {typeof realBps === 'number' && (
-                <span>Discount tier <strong>{pctFromBps(realBps)}</strong></span>
+                <span>Discount tier <strong>{formatBps(realBps)}</strong></span>
               )}
               <span>Committed <strong>{formatPcaTrac(result.committedTokens)} TRAC</strong></span>
             </div>
             {delta && (
               <p className="v10-pca-create-warn ds-card-nested">
-                Heads up: the created account returned a {pctFromBps(realBps!)} discount tier instead of the previewed {pctFromBps(estBps)} tier.
+                Heads up: the created account returned a {formatBps(realBps!)} discount tier instead of the previewed {formatBps(estBps)} tier.
               </p>
             )}
             {result.txHash && (
@@ -658,7 +654,7 @@ export function CreatePcaModal({
           <h3 className="v10-pca-create-section-title">4 · Review</h3>
           <div className="v10-pca-create-review">
             <div><span>Commit</span><strong>{amountValid ? `${formatPcaTrac(tokens)} TRAC` : '—'}</strong></div>
-            <div><span>Discount tier</span><strong>{pctFromBps(estTier.bps)}</strong></div>
+            <div><span>Discount tier</span><strong>{formatBps(estTier.bps)}</strong></div>
             <div><span>Primary node</span><strong>{primaryValid ? `#${primaryNode.trim()}` : '—'}</strong></div>
           </div>
           {createOwnerAddress && (

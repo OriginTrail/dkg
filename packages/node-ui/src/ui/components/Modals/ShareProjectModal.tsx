@@ -24,10 +24,6 @@ interface ShareProjectModalProps {
   contextGraphName: string;
 }
 
-function truncAddr(addr: string): string {
-  return truncateAddress(addr);
-}
-
 /**
  * Reject DNS hostnames that no remote peer could resolve to a public
  * address: `localhost`, mDNS `.local`, RFC 6761 reserved TLDs (`.test`,
@@ -311,7 +307,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                         }}>
                           <span style={{ color: 'var(--text-primary)' }}>
                             {peer ? (
-                              <><span style={{ fontFamily: 'var(--font-sans)', fontWeight: 500 }}>{peer.name}</span>{' '}<span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-micro)' }}>{truncAddr(addr)}</span></>
+                              <><span style={{ fontFamily: 'var(--font-sans)', fontWeight: 500 }}>{peer.name}</span>{' '}<span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-micro)' }}>{truncateAddress(addr)}</span></>
                             ) : addr}
                           </span>
                           <button

@@ -31,10 +31,6 @@ function cgLabel(name: string | undefined, cgId: string): string {
   return cgId.length > 20 ? `${cgId.slice(0, 16)}…` : cgId;
 }
 
-function shortAddr(addr: string): string {
-  return truncateAddress(addr);
-}
-
 // ─── Join request (actionable) ──────────────────────────────────────────────
 
 /** Per-row interaction state machine. `idle` → `confirming-deny` (two-tap) →
@@ -60,7 +56,7 @@ export function JoinRequestRow({
 }) {
   const [phase, setPhase] = useState<JoinRowPhase>({ kind: 'idle' });
   const cg = cgLabel(item.contextGraphName, item.cgId);
-  const who = item.agentName?.trim() || shortAddr(item.agentAddress);
+  const who = item.agentName?.trim() || truncateAddress(item.agentAddress);
 
   const run = async (action: 'approve' | 'deny') => {
     setPhase({ kind: 'working', action });
@@ -107,7 +103,7 @@ export function JoinRequestRow({
           <ContextGraphChip id={item.cgId} name={cg} onOpen={onOpen} title={`Open ${cg}`} className="v10-notif-cg-link" />
         </div>
         <div className="v10-notif-row-sub">
-          <span className="v10-notif-addr" title={item.agentAddress}>{shortAddr(item.agentAddress)}</span>
+          <span className="v10-notif-addr" title={item.agentAddress}>{truncateAddress(item.agentAddress)}</span>
           <span className="v10-notif-dot">·</span>
           <span className="v10-notif-time" title={formatDateTime(item.ts)}>
             {formatNotificationTimestamp(item.ts)}
