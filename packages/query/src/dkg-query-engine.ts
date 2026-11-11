@@ -75,6 +75,8 @@ import {
   type PreparedGraphScope,
 } from './sparql-graph-scope.js';
 import { injectMinTrustFilter } from './sparql-min-trust.js';
+import { ExplicitGraphMembershipCheck, explicitGraphTargets, laneOverNamedGraphs,
+  type ExplicitGraphMembershipCounts } from './explicit-graph-membership.js';
 import { guardGraphBlocksWithoutTriples, needsCallerGraphBinding, readsNeedGraphList } from './sparql-graph-dataset.js';
 import {
   bindCallerGraphsBeforeRead, callerGraphBranchesFit, hasCallerGraphAssignmentsInside, isolateCallerGraphAssignments,
@@ -83,11 +85,14 @@ import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 import {
   createQueryStoreReadContext,
+  createStoreReadLane,
+  QUERY_CATALOG_MAX_RESPONSE_BYTES,
   estimateMaterializedBytes,
   requireQueryDataset,
   type QueryStoreReadContext,
   type StoreReadLane,
 } from './query-store-read-context.js';
+import { callerAbortReason, raceAgainstCallerAbort } from './caller-abort.js';
 import {
   assertNoMergedSemanticsWithoutView, assertValidViewMinTrust, isViewDatasetPlanCurrent, mergedViewDatasetPlan, planViewDataset,
   ViewNotReadyError, withMergedViewDataset, type MergedViewDatasetPlan, type ViewReadGraphs,
@@ -316,6 +321,11 @@ export function resolveViewGraphs(
 }
 
 type ScopedQueryReadPlan = Extract<QueryReadPlan, { kind: 'scoped' }>;
+interface ViewRoutingFacts {
+  readonly fanOut: boolean;
+  readonly subGraphs: Iterable<string>;
+  readonly kaNumber?: bigint;
+}
 
 /** Carries a sample's merged plan into the engine's own read; private to this module, so no caller sets it. */
 const SAMPLED_MERGED_PLAN = Symbol('sampled merged plan');
@@ -338,6 +348,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   private readonly sparqlEngine: SparqlEngineFamily | null;
   private readonly graphManager: GraphManager;
   private readonly scopedContentGraphDiscoveryMemo: ScopedContentGraphDiscoveryMemo;
+  private readonly explicitGraphMembership = new ExplicitGraphMembershipCheck();
 
   /** The node's read graphs, for merged view queries; none when the node keeps none. */
   private readonly readGraphs: ViewReadGraphs | undefined;
@@ -356,6 +367,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     this.scopedContentGraphDiscoveryMemo = new ScopedContentGraphDiscoveryMemo(
       asGraphWriteRevisionSource(store),
     );
+  }
+
+  /** Counts of the explicit-graph membership check, which runs beside the enumeration. */
+  explicitGraphMembershipCounts(): ExplicitGraphMembershipCounts {
+    return this.explicitGraphMembership.snapshot();
   }
 
   /** Carry admission requirements with the authorized inventory across caller boundaries. */
@@ -476,7 +492,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         listGraphsByPrefix: async (prefix: string) => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads;
       const { policy } = plan;
       const variableContentGraphs = discovery ? selectScopedRouteGraphs(policy, discovery.partitions) : [];
-      return this.executeScoped(scope, plan, lane, variableContentGraphs, reads.catalog);
+      return this.executeScoped(scope, plan, lane, variableContentGraphs, reads.catalog, options);
     };
     switch (plan.discovery.catalog.kind) {
       case 'none': return execute(null);
@@ -492,18 +508,19 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   }
 
   private async executeScoped(initialGraphScope: PreparedGraphScope,
-    plan: ScopedQueryReadPlan, reads: StoreReadLane, variableContentGraphs: readonly string[], catalogReads: StoreReadLane): Promise<QueryResult> {
+    plan: ScopedQueryReadPlan, reads: StoreReadLane, variableContentGraphs: readonly string[], catalogReads: StoreReadLane,
+    options: QueryOptions | undefined): Promise<QueryResult> {
     const { subGraphName, staticPrivateAllowList } = plan.policy;
-    const partitions = new Map<string, string[]>();
-    for (const { root, prefix } of plan.discovery.contentPrefixes) {
-      partitions.set(root, await this.discoverGraphsByPrefix(prefix, reads));
-    }
-    const { policy } = plan;
-    const allowedGraphs = selectLegacyScopedRouteGraphs(policy, partitions);
+    const allowedGraphs = await this.discoverLegacyRouteGraphs(plan, reads);
     const privateAllowList = plan.discovery.privatePartitions
       ? [...staticPrivateAllowList, ...(await this.discoverGraphScopedPrivateGraphs(plan.policy.contextGraphId, catalogReads, subGraphName))]
       : staticPrivateAllowList;
     const explicitAllowedGraphs = [...allowedGraphs, ...privateAllowList];
+    const named = plan.discovery.contentPrefixes.length > 0 ? explicitGraphTargets(initialGraphScope) : null;
+    if (named) {
+      await this.compareExplicitGraphMembership('legacy route', named, explicitAllowedGraphs, options,
+        async listing => [...(await this.discoverLegacyRouteGraphs(plan, listing)), ...privateAllowList]);
+    }
     const variableAllowedGraphs = [...new Set([...explicitAllowedGraphs, ...variableContentGraphs])];
     // Explicit IRIs retain static route authority; only opted-in variables gain
     // classified same-CG content selected for this caller and sub-graph.
@@ -522,6 +539,34 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       return mergeSharedMemoryAndDataResults(dataResult, smResult);
     }
     return this.execWithExclusions(await resolve(route.target), reads, plan.excludedGraphPrefixes);
+  }
+
+  /** The legacy route's graphs: its static graphs and the listed graphs under its content prefixes. */
+  private async discoverLegacyRouteGraphs(plan: ScopedQueryReadPlan, reads: StoreReadLane): Promise<string[]> {
+    const partitions = new Map<string, string[]>();
+    for (const { root, prefix } of plan.discovery.contentPrefixes) {
+      partitions.set(root, await this.discoverGraphsByPrefix(prefix, reads));
+    }
+    return selectLegacyScopedRouteGraphs(plan.policy, partitions);
+  }
+
+  /**
+   * Counting mode: the enumeration decides. Beside it, the route's own graph rule
+   * judges the named graphs over a catalog of just those the store holds, which
+   * it finds by looking each one up instead of listing a prefix. The check's reads
+   * are not charged to the caller's budget, so the check cannot change an answer,
+   * and they carry the caller's signal, so its abort ends them.
+   */
+  private compareExplicitGraphMembership(route: string, named: readonly string[], enumerated: readonly string[],
+    options: QueryOptions | undefined, collect: (listing: StoreReadLane, catalog: StoreReadLane) => Promise<readonly string[]>): Promise<void> {
+    const visible = this.store.graphEnumerationVisibility?.bind(this.store);
+    const reads = createStoreReadLane(this.store, { ...storeOptions(options),
+      maxResponseBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES, maxLiteralHydrationBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES });
+    const signal = options?.signal;
+    return this.explicitGraphMembership.compare(route, named, enumerated, () => signal?.aborted
+      // A caller that has already aborted starts no lookup.
+      ? Promise.reject(callerAbortReason(signal))
+      : raceAgainstCallerAbort(collect(laneOverNamedGraphs(named, reads, visible), reads), signal), signal);
   }
 
   private async execWithExclusions(scope: PreparedGraphScope, reads: StoreReadLane, excludedGraphPrefixes: readonly string[] = []): Promise<QueryResult> {
@@ -647,6 +692,21 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     reads: StoreReadLane,
     catalogReads: StoreReadLane,
   ): Promise<string[]> {
+    const facts = await this.readViewRoutingFacts(view, contextGraphId, options, catalogReads);
+    return this.collectViewGraphs(view, contextGraphId, options, facts, reads, catalogReads);
+  }
+
+  /**
+   * The registry facts a view's graphs depend on, read once per request: whether
+   * the view fans out over registered sub-graphs, those sub-graphs, and the KA
+   * number of a by-name working-memory read.
+   */
+  private async readViewRoutingFacts(
+    view: GetView,
+    contextGraphId: string,
+    options: QueryOptions,
+    catalogReads: StoreReadLane,
+  ): Promise<ViewRoutingFacts> {
     const fanOut = !options.subGraphName && !options.verifiedGraph
       && !(view === 'working-memory' && options.assertionName);
     const subGraphs = fanOut ? await readRegisteredViewSubGraphs(contextGraphId, catalogReads.query) : [];
@@ -665,7 +725,22 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         options.subGraphName,
       );
     }
+    return { fanOut, subGraphs, kaNumber };
+  }
 
+  /**
+   * A view's graphs: its fixed graphs, and the graphs `reads` lists under its
+   * prefixes. Graphs of a registered child context graph are left out. That fence
+   * is read after the listing, so a child registered meanwhile is left out too.
+   */
+  private async collectViewGraphs(
+    view: GetView,
+    contextGraphId: string,
+    options: QueryOptions,
+    { fanOut, subGraphs, kaNumber }: ViewRoutingFacts,
+    reads: StoreReadLane,
+    catalogReads: StoreReadLane,
+  ): Promise<string[]> {
     const resolution = resolveViewGraphs(view, contextGraphId, {
       agentAddress: options.agentAddress,
       agentAddressAliases: options.agentAddressAliases,
@@ -756,7 +831,14 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     catalogReads: StoreReadLane,
   ): Promise<QueryResult> {
     const sparql = initialScope.source;
-    const allGraphs = await this.resolveViewGraphSet(view, contextGraphId, options, reads, catalogReads);
+    const facts = await this.readViewRoutingFacts(view, contextGraphId, options, catalogReads);
+    const allGraphs = await this.collectViewGraphs(view, contextGraphId, options, facts, reads, catalogReads);
+    const named = explicitGraphTargets(initialScope);
+    if (named) {
+      // Both sides share the registry facts; each reads the child fence after its own listing.
+      await this.compareExplicitGraphMembership(`${view} view`, named, allGraphs, options,
+        (listing, catalog) => this.collectViewGraphs(view, contextGraphId, options, facts, listing, catalog));
+    }
 
     // The scope meter counts the graphs this view routes per asset.
     reportRoutedGraphs(allGraphs);
