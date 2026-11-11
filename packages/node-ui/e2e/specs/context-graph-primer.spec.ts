@@ -16,7 +16,9 @@ const PRIMER_SECTIONS = [
   'Memory layers',
   'Subgraphs',
   'Entities and Knowledge Assets',
+  'Triples',
   'Assertions',
+  'Ontology',
   'Roles',
 ];
 
@@ -35,7 +37,7 @@ async function expectPrimerRendered(page: Page) {
   await expect(pipeline.locator('.swm')).toHaveText('Shared Working Memory');
   await expect(pipeline.locator('.vm')).toHaveText('Verifiable Memory');
 
-  // Exactly the five primer sections, in order — the headings are the structural
+  // Exactly the seven primer sections, in order — the headings are the structural
   // contract worth pinning.
   const headings = view.locator('.v10-primer-section h2');
   await expect(headings).toHaveCount(PRIMER_SECTIONS.length);
