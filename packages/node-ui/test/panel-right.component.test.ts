@@ -80,7 +80,9 @@ async function waitForAssertion(assertion: () => void): Promise<void> {
 
 describe('PanelRight component', () => {
   afterEach(() => vi.unstubAllGlobals());
-  beforeEach(() => {
+  beforeEach(async () => {
+    // Conversations live in a store that outlives the panel, so each test starts clean.
+    (await import('../src/ui/stores/agentConversations.js')).resetAgentConversations();
     vi.clearAllMocks();
     fetchContextGraphsMock.mockImplementation(async () => {
       const { useProjectsStore } = await import('../src/ui/stores/projects.js');
@@ -569,6 +571,114 @@ describe('PanelRight component', () => {
     });
     container.remove();
   });
+
+  it('a reply in flight survives closing the panel, and Stop in the reopened panel aborts it', async () => {
+    let signal: AbortSignal | undefined;
+    streamLocalAgentChatMock.mockImplementation((_id: string, _text: string, options: any) => {
+      signal = options.signal;
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      });
+    });
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    await act(async () => { await Promise.resolve(); });
+
+    const textarea = container.querySelector('textarea');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, 'Keep going while closed');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      (container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement).click();
+    });
+    await waitForAssertion(() => expect(container.querySelector('button[aria-label="Stop reply"]')).toBeTruthy());
+
+    // Close the panel (unmount) and open it again (a new instance).
+    await act(async () => { root.unmount(); });
+    root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    try {
+      await waitForAssertion(() => expect(container.textContent).toContain('Keep going while closed'));
+      const stop = container.querySelector('button[aria-label="Stop reply"]') as HTMLButtonElement | null;
+      expect(stop).toBeTruthy();
+      await act(async () => { stop!.click(); });
+      expect(signal?.aborted).toBe(true);
+      await waitForAssertion(() => expect(container.querySelector('button[aria-label="Send message"]')).toBeTruthy());
+    } finally {
+      await act(async () => { root.unmount(); });
+      container.remove();
+    }
+  }, 20_000);
+
+  it('a reply that streams while the panel is closed keeps its text, and later deltas and the finish add to it once', async () => {
+    let options: any;
+    let finish: (value: unknown) => void = () => {};
+    streamLocalAgentChatMock.mockImplementation((_id: string, _text: string, opts: any) => {
+      options = opts;
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    await act(async () => { await Promise.resolve(); });
+
+    const textarea = container.querySelector('textarea');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, 'Answer while I look away');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      (container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement).click();
+    });
+    await waitForAssertion(() => expect(options).toBeTruthy());
+
+    // Close the panel; part of the reply streams in while it is closed.
+    await act(async () => { root.unmount(); });
+    const partial = 'Streamed while the panel was closed';
+    await act(async () => {
+      options.onEvent?.({ type: 'text_delta', delta: partial });
+      await Promise.resolve();
+    });
+
+    // Reopen while the request is still pending: only the stream can have
+    // put the partial text there, because no final text has arrived.
+    root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    const count = (s: string) => container.textContent!.split(s).length - 1;
+    try {
+      await waitForAssertion(() => expect(container.textContent).toContain(partial));
+      expect(container.querySelector('button[aria-label="Stop reply"]')).toBeTruthy();
+
+      // A later delta reaches the reopened panel and appears once.
+      const rest = ', and kept streaming once it reopened';
+      await act(async () => {
+        options.onEvent?.({ type: 'text_delta', delta: rest });
+        await Promise.resolve();
+      });
+      const reply = partial + rest;
+      await waitForAssertion(() => expect(container.textContent).toContain(reply));
+      expect(count(reply)).toBe(1);
+
+      // Finishing keeps the transcript: the reply once, and the panel ready to send.
+      await act(async () => {
+        finish({ text: reply, correlationId: 'corr-closed' });
+        await Promise.resolve();
+      });
+      await waitForAssertion(() => expect(container.querySelector('button[aria-label="Send message"]')).toBeTruthy());
+      expect(count(reply)).toBe(1);
+      expect(count('Answer while I look away')).toBe(1);
+      expect(container.querySelector('button[aria-label="Stop reply"]')).toBeNull();
+    } finally {
+      await act(async () => { root.unmount(); });
+      container.remove();
+    }
+  }, 20_000);
 
   it('persists failed Hermes turns so timeout sessions survive refresh', async () => {
     fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
@@ -1088,6 +1198,94 @@ describe('PanelRight component', () => {
     });
     container.remove();
   });
+
+  it('a queued file survives closing the panel, and its upload can finish while the panel is closed', async () => {
+    let finishImport: (value: unknown) => void = () => {};
+    importFileMock.mockImplementation(() => new Promise((resolve) => { finishImport = resolve; }));
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    act(() => {
+      useProjectsStore.setState({
+        contextGraphs: [{ id: 'testing', name: 'Testing' }],
+        loading: false,
+        activeProjectId: 'testing',
+      });
+    });
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let root = createRoot(container);
+    const open = async () => {
+      root = createRoot(container);
+      await act(async () => { root.render(React.createElement(PanelRight)); });
+      await act(async () => { await Promise.resolve(); });
+    };
+    const close = async () => { await act(async () => { root.unmount(); }); };
+    const chipNames = () => Array.from(container.querySelectorAll('.v10-attachment-chip'))
+      .map((chip) => chip.textContent ?? '');
+
+    try {
+      await act(async () => { root.render(React.createElement(PanelRight)); });
+      await act(async () => { await Promise.resolve(); });
+
+      // Pick the context graph, then queue a file through the attach button's input.
+      const projectTrigger = container.querySelector('.v10-local-agent-target-select .v10-select-trigger') as HTMLButtonElement | null;
+      await act(async () => { projectTrigger!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+      const testingOption = Array.from(document.body.querySelectorAll('.v10-select-option'))
+        .find((opt) => opt.textContent?.trim() === 'Testing') as HTMLElement | undefined;
+      await act(async () => { testingOption!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+      const attachInput = Array.from(container.querySelectorAll('input[type="file"]'))
+        .find((el) => !el.hasAttribute('tabindex')) as HTMLInputElement | null;
+      const file = new File(['# Draft'], 'draft.md', { type: 'text/markdown', lastModified: 789 });
+      await act(async () => {
+        Object.defineProperty(attachInput, 'files', { configurable: true, value: [file] });
+        attachInput!.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      await waitForAssertion(() => expect(chipNames().some((name) => name.includes('draft.md'))).toBe(true));
+
+      // Close and reopen, as switching panels on a narrow screen does: the file is still queued.
+      await close();
+      await open();
+      await waitForAssertion(() => expect(chipNames().some((name) => name.includes('draft.md'))).toBe(true));
+      expect(importFileMock).not.toHaveBeenCalled();
+
+      // Send from the reopened panel, then close it while the upload is still running.
+      await act(async () => {
+        (container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement).click();
+      });
+      await waitForAssertion(() => expect(importFileMock).toHaveBeenCalledTimes(1));
+      expect(importFileMock).toHaveBeenCalledWith(expect.any(String), 'testing', file);
+      await close();
+
+      await act(async () => {
+        finishImport({
+          assertionUri: 'urn:dkg:assertion:draft',
+          fileHash: 'sha256:draft',
+          detectedContentType: 'text/markdown',
+          rootEntity: 'urn:dkg:assertion:draft#root',
+          extraction: { status: 'completed', tripleCount: 2, pipelineUsed: 'markdown' },
+        });
+        await Promise.resolve();
+      });
+
+      // The send carries on while the panel is closed, with the original file and context graph.
+      await waitForAssertion(() => expect(streamLocalAgentChatMock).toHaveBeenCalled());
+      const [, , options] = streamLocalAgentChatMock.mock.calls.at(-1) ?? [];
+      expect(options.attachments).toEqual([
+        expect.objectContaining({ fileName: 'draft.md', contextGraphId: 'testing', assertionUri: 'urn:dkg:assertion:draft' }),
+      ]);
+      expect(importFileMock).toHaveBeenCalledTimes(1);
+
+      // Reopened, the sent file is no longer queued and was imported once.
+      await open();
+      await waitForAssertion(() => expect(chipNames().some((name) => name.includes('draft.md'))).toBe(false));
+      expect(importFileMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await close();
+      container.remove();
+    }
+  }, 20_000);
 
   it('keeps skipped-import-only transport text blank while showing the import summary locally', async () => {
     importFileMock.mockResolvedValue({

@@ -7,9 +7,9 @@
  */
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import fc from 'fast-check';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncLiftPublisher } from '../src/index.js';
-import { CONTROL_LIFECYCLE_KEY, CONTROL_PAYLOAD, CONTROL_STATUS, DEFAULT_CONTROL_GRAPH_URI, jobSubject } from '../src/async-lift-control-plane.js';
+import { CONTROL_LIFECYCLE_KEY, CONTROL_PAYLOAD, CONTROL_STATUS, DEFAULT_CONTROL_GRAPH_URI, jobSubject, requestSubject } from '../src/async-lift-control-plane.js';
 import { propertyOptions } from '../../../scripts/testing/property-options.js';
 import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 import {
@@ -23,6 +23,7 @@ const stores: OxigraphStore[] = [];
 afterEach(async () => { await Promise.all(stores.splice(0).map((store) => store.close())); });
 
 const CLEAR_SIBLINGS = 'publisher.asyncLift.clear.siblings';
+const LIFT_CLEAR_KEYS = 'publisher.asyncLift.clear.keys';
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 async function setup(specs: readonly KeyedSpec[], hooks: Parameters<typeof spyStore>[1] = {}) {
@@ -145,6 +146,66 @@ describe('a key it cannot read', () => {
     const t = await setup([fin('f1', 'k', 10), fin('g1', 'g', 20)], { before: (entry) => { if (entry.source === CLEAR_SIBLINGS) throw new Error(message); } });
     await expect(t.publisher.clear('finalized')).rejects.toThrow(message);
     expect(await present(t.raw, 'f1')).not.toBe('');
+  });
+});
+
+describe('every key whose admission reads the job (#3562)', () => {
+  /** The lifecycle-key triple a record of key `name` carries, as the serializer writes it. */
+  const keyTriple = (subjectId: string, name: string): Quad => ({
+    ...keyedQuads(templates, fin('probe', name, 1)).find((quad) => quad.predicate === CONTROL_LIFECYCLE_KEY)!,
+    subject: jobSubject(subjectId),
+  });
+  /** `spec`'s quads written under the subjects of job `subjectId`: a payload stored under another job's subject. */
+  const storedUnder = (spec: KeyedSpec, subjectId: string): Quad[] => keyedQuads(templates, spec).map((quad) => ({
+    ...quad,
+    subject: quad.subject === jobSubject(spec.id) ? jobSubject(subjectId) : quad.subject === requestSubject(spec.id) ? requestSubject(subjectId) : quad.subject,
+    object: quad.object === `<${requestSubject(spec.id)}>` ? `<${requestSubject(subjectId)}>` : quad.object,
+  }));
+  /** A re-submit of the key named `other`: admission reads every record stored under its key triple. */
+  const resubmitOther = (p: TripleStoreAsyncLiftPublisher): Promise<string> => p.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'other' }));
+  const REFUSED = /lifecycle index does not match/;
+
+  it('clear(finalized) keeps a finalized job stored with a second key triple: the other key\'s admission still refuses, and does not admit its old failed job', async () => {
+    const t = await setup([fin('a', 'k', 10), fin('b', 'k', 20), at('x', 'other', 'retryable', 5)]);
+    await t.raw.insert([keyTriple('a', 'other')]);
+    await expect(resubmitOther(t.other)).rejects.toThrow(REFUSED);
+    expect(await t.publisher.clear('finalized')).toBe(1);                          // b; a is read by the other key too
+    expect(await idsLeft(t.other)).toEqual(['a', 'x']);
+    await expect(resubmitOther(t.other)).rejects.toThrow(REFUSED);
+    expect((await t.other.getStatus('x'))?.status).toBe('failed');                 // not re-accepted
+  });
+
+  it('clear(failed) keeps a failed job stored with a second key triple, and the other key\'s failed job, whose key cannot be read', async () => {
+    const t = await setup([at('y', 'k', 'terminal', 10), at('z', 'other', 'retryable', 5)]);
+    await t.raw.insert([keyTriple('y', 'other')]);
+    await expect(resubmitOther(t.other)).rejects.toThrow(REFUSED);
+    expect(await t.publisher.clear('failed')).toBe(0);
+    expect(await idsLeft(t.other)).toEqual(['y', 'z']);
+    await expect(resubmitOther(t.other)).rejects.toThrow(REFUSED);
+  });
+
+  it('keeps a job whose one key triple names another key, and a job without a key that carries a key triple', async () => {
+    const own = keyTriple('a', 'k');
+    const t = await setup([fin('a', 'k', 10), { ...fin('raw', 'r', 12), kind: 'raw' }, fin('g', 'good', 20)]);
+    await t.raw.delete([own]);
+    await t.raw.insert([keyTriple('a', 'other'), keyTriple('raw', 'other')]);
+    await expect(resubmitOther(t.other)).rejects.toThrow(REFUSED);
+    expect(await t.publisher.clear('finalized')).toBe(1);                          // g alone
+    expect(await idsLeft(t.other)).toEqual(['a', 'raw']);
+    await expect(resubmitOther(t.other)).rejects.toThrow(REFUSED);
+  });
+
+  it('keeps a key whose records hold one job id twice: a failed payload of f under subject z, the finalized f under its own subject', async () => {
+    // Admission collapses the key's records by job id, so the engine's row order decides whether it sees f finalized (binding nothing) or f failed. clear(finalized) would
+    // remove the finalized f and leave z's failed f to bind; clear(failed) lists z's payload but re-reads subject f, the finalized record, and would remove that.
+    const t = await setup([fin('f', 'k', 10)]);
+    await t.raw.insert(storedUnder(at('f', 'k', 'retryable', 5), 'z'));
+    const fBefore = await present(t.raw, 'f');
+    const zBefore = await present(t.raw, 'z');
+    expect(await t.publisher.clear('finalized')).toBe(0);
+    expect(await t.publisher.clear('failed')).toBe(0);
+    expect([await present(t.raw, 'f'), await present(t.raw, 'z')]).toEqual([fBefore, zBefore]);
+    expect(bySource(t.log, LIFT_CLEAR_KEYS)).toHaveLength(1);                     // clear(failed) stopped at the status of the record it re-read, before any key read
   });
 });
 

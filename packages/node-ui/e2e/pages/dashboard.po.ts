@@ -16,7 +16,7 @@ import { sel } from '../helpers/selectors.js';
  * The PO surface still exposes `clickQuickAction(label)` as a shim so
  * specs that just need to *open the create-project modal* as a
  * precondition keep working — the shim delegates to the left panel's
- * "+ New Context Graph" button. Methods that have no replacement in
+ * "New" button under My Context Graphs. Methods that have no replacement in
  * the new UI (project cards, recent ops, "view all" link) have been
  * removed.
  */
@@ -72,16 +72,17 @@ export class DashboardPage {
   async clickQuickAction(label: string) {
     // The legacy `.v10-quick-action` row on the dashboard was removed in
     // the rc11 redesign — the entry points moved into the left panel
-    // ("+ New Context Graph") and into the project view ("Import files"
-    // hub). Rather than ripping every spec that opens these modals as a
-    // precondition, this method now resolves to the still-extant entry
-    // point per label so the *modal-under-test* is what gets asserted,
+    // (the "New" button under My Context Graphs) and into the project view
+    // ("Import files" hub). Rather than ripping every spec that opens these
+    // modals as a precondition, this method now resolves to the still-extant
+    // entry point per label so the *modal-under-test* is what gets asserted,
     // not the obsolete dashboard row.
     const entryByLabel: Record<string, () => Promise<void>> = {
       'Create Project': async () => {
         await this.page
-          .locator('.v10-new-project-btn')
-          .filter({ hasText: /^New$/ })
+          .locator(sel.leftPanel.root)
+          .locator(sel.leftPanel.newProjectBtn)
+          .filter({ hasText: /^New$/i })
           .first()
           .click();
       },

@@ -101,4 +101,26 @@ describe('AgentChip — fallback id truncation', () => {
     });
     expect(nameOf()).toBe('Alice Researcher');
   });
+
+  it('opens the agent from Enter and Space when it can open one, and not from other keys', () => {
+    const opened: string[] = [];
+    act(() => {
+      root.render(React.createElement(AgentChip, {
+        agent: { uri: 'did:dkg:agent:alice', name: 'Alice', kind: 'ai', color: '#888888' },
+        onOpenAgent: (uri: string) => opened.push(uri),
+      }));
+    });
+    const chip = container.querySelector<HTMLElement>('.v10-agent-chip')!;
+    expect(chip.getAttribute('role')).toBe('button');
+    expect(chip.tabIndex).toBe(0);
+    const press = (key: string) => {
+      const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+      act(() => { chip.dispatchEvent(event); });
+      return event.defaultPrevented;
+    };
+    expect(press('Enter')).toBe(true);
+    expect(press(' ')).toBe(true);
+    expect(press('a')).toBe(false);
+    expect(opened).toEqual(['did:dkg:agent:alice', 'did:dkg:agent:alice']);
+  });
 });

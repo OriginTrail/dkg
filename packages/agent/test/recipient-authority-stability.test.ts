@@ -695,8 +695,9 @@ describe('recipient stability loop under sustained authority churn (GH#3067)', (
   });
 
   it('lets the VM publish key context resolve its recipients while unrelated writes move the node-wide revision', async () => {
-    // `_resolveCuratedChainKeyContext` runs the same resolver, twice per
-    // publish attempt, with no bounded repeat. The sender is deliberately not
+    // `_resolveCuratedChainKeyContext` runs the same resolver twice per publish
+    // attempt, each read with the share's bounded repeat (#3044), which a
+    // stable read never needs. The sender is deliberately not
     // a member, so a successful resolution ends in the recipient-set check
     // that follows it.
     const { host, ready } = churningHost({ seed: profileKeys, unrelated: true });

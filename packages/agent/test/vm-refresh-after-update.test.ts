@@ -55,7 +55,7 @@ import {
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
-import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, StoreSchedulerBusyError, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { resolveConfirmedGraphScopedVm } from '../src/confirmed-graph-scoped-vm-resolver.js';
@@ -118,6 +118,8 @@ interface RefreshInternals {
     source?: 'live' | 'periodic' | 'manual',
   ): Promise<ContextGraphReconcileResult>;
   vmRefreshPersistCeiling(): number | undefined;
+  chainPoller: ChainEventPoller | null;
+  getVmRefreshStatus(): { heldTargets: number; storeBusyScansTotal: number };
   reconcileChainOrdinal(
     localCgId: string,
     onChainCgId: bigint,
@@ -820,6 +822,63 @@ describe('KnowledgeAssetUpdated nudge (#2858)', () => {
     query.mockRestore();
     await expect(internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx, nudgeOptions({ blockNumber: 150 })))
       .resolves.toHaveLength(1);
+  });
+
+  it('warns and scans the range again when a busy store refuses the holders read, and counts it (#3578)', async () => {
+    const { internals, kas, updateOnChain } = await bootMember();
+    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    const events: ChainEvent[] = [{
+      type: 'KnowledgeAssetUpdated',
+      blockNumber: 150,
+      data: { batchId: kas[0]!.kaId.toString(), merkleRoot: ethers.hexlify(rootB), txHash: `0x${'96'.padStart(64, '0')}` },
+    }];
+    const eventChain = {
+      chainId: 'mock:31337',
+      getBlockNumber: async () => 200,
+      listenForEvents: async function* (filter: EventFilter): AsyncIterable<ChainEvent> {
+        for (const event of events) {
+          if (filter.eventTypes.includes(event.type) && event.blockNumber >= (filter.fromBlock ?? 0)
+            && event.blockNumber <= (filter.toBlock ?? Number.MAX_SAFE_INTEGER)) yield event;
+        }
+      },
+    } as unknown as ChainAdapter;
+    let now = 0;
+    const poller = new ChainEventPoller({
+      chain: eventChain,
+      publishHandler: new PublishHandler(new OxigraphStore(), new TypedEventBus()),
+      intervalMs: 12_000,
+      clock: () => now,
+      onCollectionUpdated: async ({ batchId, merkleRoot, eventIdentity, signal }) => {
+        await internals.handleKAUpdatedNudge(batchId, merkleRoot, ctx, { eventIdentity, signal });
+      },
+    });
+    internals.chainPoller = poller;
+    const pollerLog = (poller as unknown as { log: { warn(...args: unknown[]): void; error(...args: unknown[]): void } }).log;
+    const warn = vi.spyOn(pollerLog, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(pollerLog, 'error').mockImplementation(() => {});
+    const query = internals.store.query.bind(internals.store);
+    let refusals = 1;
+    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql, options) => {
+      if (options?.source === 'agent.vmRefresh.holders' && refusals > 0) {
+        refusals -= 1;
+        throw new StoreSchedulerBusyError('queue_wait_timeout', 'background', 'agent.vmRefresh.holders');
+      }
+      return query(sparql, options);
+    });
+    const poll = () => (poller as unknown as { poll(): Promise<void> }).poll();
+
+    await poll();
+    expect(error).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.anything(), expect.stringMatching(
+      /^Poll lane collectionUpdates: store busy, blocks \d+-200 will be scanned again \(1 in a row\): VM refresh: could not read which local graphs hold KA /,
+    ));
+    expect(internals.getVmRefreshStatus()).toMatchObject({ heldTargets: 0, storeBusyScansTotal: 1 });
+
+    // After the lane's failure backoff the range is scanned again and the update is held.
+    now = 60_000;
+    await poll();
+    expect(error).not.toHaveBeenCalled();
+    expect(internals.getVmRefreshStatus()).toMatchObject({ heldTargets: 1, storeBusyScansTotal: 1 });
   });
 
   it('fails the dispatch, so the lane holds the event, when the target set is full', async () => {

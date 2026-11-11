@@ -331,6 +331,7 @@ import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
 import { insertWithOversizeGuard } from './sync/oversize-filter.js';
+import { storeAgentProfileQuads } from './agent-profile-updates.js';
 import { compactSyncedPrivateRosterGenerations } from './private-roster-version.js';
 import { OversizeTombstoneLog } from './sync/oversize-tombstones.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore, MemoryChangelogCursorStore } from './sync/checkpoint/state.js';
@@ -1599,12 +1600,12 @@ export class DKGAgentBase {
    * offset cursor can pass poison-literal pages without an endless retry.
    */
   protected async insertSyncedQuadsAndInvalidateListCache(quads: Quad[], options?: QueryOptions): Promise<void> {
-    const inserted = await insertWithOversizeGuard(
+    const inserted = await storeAgentProfileQuads(this.store, quads, (writes) => insertWithOversizeGuard(
       (kept) => this.store.insert(kept, options),
-      quads,
+      writes,
       { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
       'durable-sync',
-    );
+    ), { ...options, syncPage: true });
     if (inserted.length > 0) {
       try { await compactSyncedPrivateRosterGenerations(this.store, inserted, options); }
       finally { this.invalidateListContextGraphsCache(); }

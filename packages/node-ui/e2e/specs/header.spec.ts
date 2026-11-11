@@ -7,9 +7,10 @@ test.describe('Header', () => {
     await page.locator('.v10-header-meta').waitFor({ state: 'visible', timeout: 10_000 });
   });
 
-  test('displays DKG logo with v10 version badge', async ({ header }) => {
+  test('displays the OriginTrail logo', async ({ header }) => {
     await expect(header.logo).toBeVisible();
-    await expect(header.version).toHaveText('v10');
+    await expect(header.logo).toHaveAttribute('aria-label', 'OriginTrail');
+    await expect(header.logoText.locator('svg')).toBeVisible();
   });
 
   test('shows agent name', async ({ header }) => {

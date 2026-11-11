@@ -1,5 +1,4 @@
 import { FinalizedPrivateRepairPersistenceV1 } from './finalized-private-repair-persistence.js';
-import type { Rfc64PrivatePlacementFailureWriteV1 } from '../finalized-private-placement-repair-store-v1.js';
 import { inventoryPersistenceFailure, inheritInventoryPersistenceFailure } from '../inventory-persistence-failure.js';
 import { type Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
 export { createRfc64SwmAuthorInventoryOperationsViewV1, type Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
@@ -85,7 +84,6 @@ import {
 } from './swm-author-inventory-commit-plan.js';
 import { SwmAuthorInventoryPersistenceV1 } from './swm-author-inventory-persistence.js';
 import {
-  type Rfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairOperationsV1,
 } from '../finalized-private-placement-repair-store-v1.js';
 import {
@@ -1332,28 +1330,24 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     }
   }
 
-  private finalizedRepairPersistence(): FinalizedPrivateRepairPersistenceV1 {
-    return new FinalizedPrivateRepairPersistenceV1({
-      assertOpen: () => this.assertOpen(), prepare: (sql) => this.prepare(sql),
-      statement: (run) => this.statement(run), read: (run) => this.readTransaction(run),
-      write: (label, run, strategy) => this.writeTransaction(label, run, strategy),
-      corrupt: (message) => new InventoryV1CandidateError('candidate-database-corrupt', message),
-    });
-  }
-
-  listFinalizedPrivatePlacementRepairs() { return this.finalizedRepairPersistence().listFinalizedPrivatePlacementRepairs(); }
-  putFinalizedPrivatePlacementRepair(repair: Rfc64FinalizedPrivatePlacementRepairV1): void {
-    this.finalizedRepairPersistence().putFinalizedPrivatePlacementRepair(repair);
-  }
-  deleteFinalizedPrivatePlacementRepair(repair: Rfc64FinalizedPrivatePlacementRepairV1): void {
-    this.finalizedRepairPersistence().deleteFinalizedPrivatePlacementRepair(repair);
-  }
-  readFinalizedPrivatePlacementFailure(repair: Rfc64FinalizedPrivatePlacementRepairV1) {
-    return this.finalizedRepairPersistence().readFinalizedPrivatePlacementFailure(repair);
-  }
-  writeFinalizedPrivatePlacementFailures(entries: readonly Rfc64PrivatePlacementFailureWriteV1[]): void {
-    this.finalizedRepairPersistence().writeFinalizedPrivatePlacementFailures(entries);
-  }
+  private readonly finalizedRepairPersistence = new FinalizedPrivateRepairPersistenceV1({
+    assertOpen: () => this.assertOpen(), prepare: (sql) => this.prepare(sql),
+    statement: (run) => this.statement(run), read: (run) => this.readTransaction(run),
+    write: (label, run, strategy) => this.writeTransaction(label, run, strategy),
+    corrupt: (message) => new InventoryV1CandidateError('candidate-database-corrupt', message),
+  });
+  readonly listFinalizedPrivatePlacementRepairsAsync =
+    this.finalizedRepairPersistence.listFinalizedPrivatePlacementRepairsAsync.bind(this.finalizedRepairPersistence);
+  readonly listFinalizedPrivatePlacementRepairs =
+    this.finalizedRepairPersistence.listFinalizedPrivatePlacementRepairs.bind(this.finalizedRepairPersistence);
+  readonly putFinalizedPrivatePlacementRepair =
+    this.finalizedRepairPersistence.putFinalizedPrivatePlacementRepair.bind(this.finalizedRepairPersistence);
+  readonly deleteFinalizedPrivatePlacementRepair =
+    this.finalizedRepairPersistence.deleteFinalizedPrivatePlacementRepair.bind(this.finalizedRepairPersistence);
+  readonly readFinalizedPrivatePlacementFailure =
+    this.finalizedRepairPersistence.readFinalizedPrivatePlacementFailure.bind(this.finalizedRepairPersistence);
+  readonly writeFinalizedPrivatePlacementFailures =
+    this.finalizedRepairPersistence.writeFinalizedPrivatePlacementFailures.bind(this.finalizedRepairPersistence);
 
   readUnregisteredAuthoritySeedV1(
     networkId: NetworkIdV1,

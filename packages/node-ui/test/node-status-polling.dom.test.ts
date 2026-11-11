@@ -70,6 +70,43 @@ describe('node status polling', () => {
     expect(word).toBe('Connected');
   });
 
+  it('keeps counting under Strict Mode, which runs effects twice', async () => {
+    let answer: () => Promise<unknown> = up;
+    fetchStatusMock.mockImplementation(() => answer());
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(React.StrictMode, null, React.createElement(StatusWord)));
+    });
+    expect(container.textContent).toBe('Connected');
+
+    answer = down;
+    for (let i = 0; i < NODE_UNAVAILABLE_AFTER_FAILURES; i++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(NODE_STATUS_POLL_MS); });
+    }
+    expect(container.textContent).toBe('Unavailable');
+
+    answer = up;
+    await act(async () => { await vi.advanceTimersByTimeAsync(NODE_STATUS_POLL_MS); });
+    expect(container.textContent).toBe('Connected');
+  });
+
+  it('ignores older failed checks that finish after a newer good one', async () => {
+    const pending: Array<{ resolve: (v: unknown) => void; reject: (e: unknown) => void }> = [];
+    fetchStatusMock.mockImplementation(() => new Promise((resolve, reject) => { pending.push({ resolve, reject }); }));
+    await act(async () => { root = createRoot(container); root.render(React.createElement(StatusWord)); });
+    // Four checks in flight: the mount, then three more ticks.
+    for (let i = 0; i < NODE_UNAVAILABLE_AFTER_FAILURES; i++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(NODE_STATUS_POLL_MS); });
+    }
+    expect(pending).toHaveLength(NODE_UNAVAILABLE_AFTER_FAILURES + 1);
+
+    await act(async () => { pending.at(-1)!.resolve({ connectedPeers: 2 }); });
+    expect(container.textContent).toBe('Connected');
+    await act(async () => { for (const p of pending.slice(0, -1)) p.reject({ status: 503 }); });
+    expect(useAgentsStore.getState().nodeStatusFailures).toBe(0);
+    expect(container.textContent).toBe('Connected');
+  });
+
   describe('through the real status request', () => {
     // A hung node never answers. Each request stays open until its deadline
     // aborts it, which the fake clock drives here.

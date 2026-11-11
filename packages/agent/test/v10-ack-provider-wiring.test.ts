@@ -68,6 +68,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/index.js';
 import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
+import type { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 
 /**
  * Capture every `ACKCollector` constructor call so each test can
@@ -128,10 +129,10 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
 interface ACKCollectorDepsCapture {
   sendP2P?: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
   getConnectedCorePeers?: (protocol?: string) => string[] | Promise<string[]>;
-  verifyIdentity?: (recoveredAddress: string, identityId: bigint) => Promise<boolean>;
+  verifyIdentity?: (recoveredAddress: string, identityId: bigint, options?: { signal?: AbortSignal }) => Promise<boolean>;
   verifyIdentityDetailed?: (
     recoveredAddress: string,
-    identityId: bigint,
+    identityId: bigint, options?: { signal?: AbortSignal },
   ) => Promise<VerifyACKIdentityResult>;
 }
 
@@ -184,10 +185,10 @@ interface ProviderInternals {
     nodeRole?: string;
   };
   chain: MockChainAdapter & {
-    verifyACKIdentity?: (recoveredAddress: string, identityId: bigint) => Promise<boolean>;
+    verifyACKIdentity?: (recoveredAddress: string, identityId: bigint, options?: { signal?: AbortSignal }) => Promise<boolean>;
     verifyACKIdentityDetailed?: (
       recoveredAddress: string,
-      identityId: bigint,
+      identityId: bigint, options?: { signal?: AbortSignal },
     ) => Promise<VerifyACKIdentityResult>;
   };
   node: {
@@ -512,6 +513,61 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     }
     expect(await first).toBe('cancelled');
     expect(entered).toBe(1);
+  });
+
+  it.each(['publish', 'update'] as const)('cancels active native %s collection when its lifetime closes', async operation => {
+    const boot = await bootProviderAgent(); agent = boot.agent;
+    const lifetime = (agent as unknown as { workLifetime: AgentWorkLifetime }).workLifetime;
+    let entered!: () => void, release!: () => void;
+    let signal: AbortSignal | undefined;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const hook = () => {
+      const params = (operation === 'publish' ? capturedPublishCollectParams : capturedUpdateCollectParams).at(-1) as { signal?: AbortSignal };
+      signal = params.signal;
+      return new Promise<{ acks: [] }>((resolve, reject) => {
+        release = () => resolve({ acks: [] });
+        signal?.addEventListener('abort', () => reject(signal!.reason), { once: true });
+        entered();
+      });
+    };
+    publishCollectHook = hook; updateCollectHook = hook;
+    const run = operation === 'publish'
+      ? (boot.internals.createV10ACKProvider('test-cg') as V10ACKProviderObject)({
+          merkleRoot: new Uint8Array(32), contextGraphId: '42', kaCount: 1,
+          rootEntities: [], publicByteSize: 10n, merkleLeafCount: 1, ackMode: { kind: 'public' },
+        })
+      : (boot.internals.createV10UpdateACKProvider('test-cg') as V10UpdateACKProvider)({
+          kaId: 1n, contextGraphId: '42', preUpdateMerkleRootCount: 1n,
+          newMerkleRoot: new Uint8Array(32), newByteSize: 10n, newTokenAmount: 1n,
+          mintAmount: 0n, burnTokenIds: [], newMerkleLeafCount: 1,
+        });
+    let outcome = 'pending', rejection: unknown;
+    const observed = run.then(() => { outcome = 'succeeded'; }, error => { outcome = 'cancelled'; rejection = error; });
+    try {
+      await ready;
+      const reason = new Error('native provider shutdown'); lifetime.close(reason);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(signal).toBe(lifetime.signal); expect(signal?.aborted).toBe(true);
+      expect(outcome).toBe('cancelled'); expect(rejection).toBe(reason);
+      await lifetime.drain(); expect(lifetime.physicalRuns.size).toBe(0);
+    } finally {
+      // Cleanup only: the retirement assertions above must pass before this release.
+      release?.(); await observed;
+    }
+  });
+
+  it.each(['publish', 'update'] as const)('forwards identity cancellation through native %s verifier closures', async operation => {
+    const boot = await bootProviderAgent(); agent = boot.agent;
+    const legacy = vi.fn(async () => true), detailed = vi.fn(async () => ({ valid: true }));
+    boot.internals.chain.verifyACKIdentity = legacy; boot.internals.chain.verifyACKIdentityDetailed = detailed;
+    if (operation === 'publish') boot.internals.createV10ACKProvider('test-cg');
+    else boot.internals.createV10UpdateACKProvider('test-cg');
+    const deps = capturedAckCollectorDeps.at(-1) as ACKCollectorDepsCapture;
+    const signal = new AbortController().signal;
+    await deps.verifyIdentity!('signer', 7n, { signal });
+    await deps.verifyIdentityDetailed!('signer', 7n, { signal });
+    expect(legacy).toHaveBeenCalledWith('signer', 7n, { signal });
+    expect(detailed).toHaveBeenCalledWith('signer', 7n, { signal });
   });
 
   it('preflights confirmed cores and exposes newly admitted cores to publish, update, and async pools', async () => {

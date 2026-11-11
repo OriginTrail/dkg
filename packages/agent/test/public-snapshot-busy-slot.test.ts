@@ -1,3 +1,4 @@
+import { PublicSnapshotSessionMethods } from '../src/public-snapshot-session.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -31,6 +32,7 @@ function makeAgent(assets: Asset[]) {
   // A fresh observation on every read, so a long wait never meets an expired snapshot.
   const snapshot = () => sealSnapshotOf(graph, assets);
   const agent: any = {
+    withPublicSnapshotSession: PublicSnapshotSessionMethods.prototype.withPublicSnapshotSession,
     started: true, workLifetime: new AgentWorkLifetime(), store, node: {},
     contextGraphSubscriptionDormancyById: new Map(),
     waitForContextGraphSubscriptionActivation: LifecycleSyncMethods.prototype.waitForContextGraphSubscriptionActivation,

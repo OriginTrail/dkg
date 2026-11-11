@@ -1,5 +1,6 @@
 import { type Page, type Locator } from '@playwright/test';
 import { sel } from '../helpers/selectors.js';
+import { fetchApiInPage } from '../helpers/page-api.js';
 
 /**
  * Page object for the GREENFIELD Publisher Conviction (PCA) tab
@@ -121,6 +122,24 @@ export class PublishingConvictionPage {
     if (await add.isVisible()) await add.click();
     await dialog.getByRole('button', { name: 'Close', exact: true }).click();
     await this.accountCard.first().waitFor({ state: 'visible', timeout: 15_000 });
+  }
+
+  /**
+   * Put PCA IDs in this browser's tracked list directly, without checking them on chain,
+   * then reload so the app reads them. For tests that only need "a PCA is tracked" (the
+   * chip's mount gate) and mustn't depend on another test having minted one. The key
+   * matches stores/pca.ts: `dkg-pca:` + pcaStorageScopeForContracts(contracts).
+   */
+  async seedTrackedIds(ids: string[]) {
+    const res = await fetchApiInPage<{ chainId: string | number; nft: string; token: string }>(this.page, '/api/pca/contracts');
+    if (!res.ok || !res.json) throw new Error(`seedTrackedIds: /api/pca/contracts returned ${res.status}`);
+    const { chainId, nft, token } = res.json;
+    const key = `dkg-pca:${[String(chainId), nft, token].map((p) => p.toLowerCase()).join(':')}`;
+    await this.page.evaluate(
+      ({ key, ids }) => localStorage.setItem(key, JSON.stringify({ trackedIds: ids, createPending: null, topUpPending: {} })),
+      { key, ids },
+    );
+    await this.page.reload();
   }
 
   /**

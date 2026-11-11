@@ -63,19 +63,19 @@ export function MemoryStackView() {
   return (
     <div className="ds-page v10-memstack">
       <PageHeader title="Memory stack" description={<>
-          Every layer across every Context Graph, at a glance.
-          {(!inventoryLoading && !inventoryError || contextGraphs.length > 0) && <> {visible.length} visible Context Graph{visible.length === 1 ? '' : 's'} · hidden Context Graphs are skipped.</>}
+          Every layer across every context graph, at a glance.
+          {(!inventoryLoading && !inventoryError || contextGraphs.length > 0) && <> {visible.length} visible context graph{visible.length === 1 ? '' : 's'} · hidden context graphs are skipped.</>}
       </>} />
 
       {inventoryError && <div className="v10-stale-banner" role="alert">
-        <span>{listError ? 'Context Graphs unavailable. ' : ''}{identity.error ? 'Agent identity unavailable. ' : ''}
-          {contextGraphs.length > 0 ? 'Showing the last available Context Graphs.' : 'Context Graph inventory is unknown.'}</span>
-        <button type="button" className="v10-retry-btn ds-btn ds-sm" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}><RefreshCw size={12} />Retry Context Graphs</button>
+        <span>{listError ? 'Context graphs unavailable. ' : ''}{identity.error ? 'Agent identity unavailable. ' : ''}
+          {contextGraphs.length > 0 ? 'Showing the last available context graphs.' : 'Context graph inventory is unknown.'}</span>
+        <button type="button" className="v10-retry-btn ds-btn ds-sm" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}><RefreshCw size={12} />Retry context graphs</button>
       </div>}
-      {inventoryLoading && contextGraphs.length === 0 && <Loading label="Loading Context Graphs…" />}
+      {inventoryLoading && contextGraphs.length === 0 && <Loading label="Loading context graphs…" />}
       {visible.length === 0 ? (!inventoryError && !inventoryLoading && (
         <div className="v10-memstack-empty ds-card-nested">
-          No visible Context Graphs. Create one from the sidebar or un-hide dismissed ones.
+          No visible context graphs. Create one from the sidebar or un-hide dismissed ones.
         </div>
       )) : (
         <div className="v10-memstack-table">

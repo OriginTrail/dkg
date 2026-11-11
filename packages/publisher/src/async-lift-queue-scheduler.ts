@@ -1,4 +1,5 @@
 import { findTripleStoreCapability, type TripleStore } from '@origintrail-official/dkg-storage';
+import { withoutAsyncAdmissionDiagnosticContext } from '@origintrail-official/dkg-core';
 import type { AsyncLiftPublisher } from './async-lift-publisher-types.js';
 
 type Scheduler = Parameters<NonNullable<AsyncLiftPublisher['reconciliationScheduling']>['attachScheduler']>[0];
@@ -32,15 +33,15 @@ export class AsyncLiftQueueScheduler {
   }
 
   reconciliationDemand(): void {
-    try { this.scheduler?.onReconciliationDemand(); } catch { /* Scheduling hints cannot change job outcomes. */ }
+    try { withoutAsyncAdmissionDiagnosticContext(() => this.scheduler?.onReconciliationDemand()); } catch { /* Scheduling hints cannot change job outcomes. */ }
   }
 
   walletRelease(walletId: string): void {
-    try { this.scheduler?.onWalletRelease(walletId); } catch { /* Durable ownership remains authoritative. */ }
+    try { withoutAsyncAdmissionDiagnosticContext(() => this.scheduler?.onWalletRelease(walletId)); } catch { /* Durable ownership remains authoritative. */ }
   }
 
   workAvailable(): void {
-    try { this.scheduler?.onWorkAvailable?.(); } catch { /* A failed observer cannot undo accepted work. */ }
+    try { withoutAsyncAdmissionDiagnosticContext(() => this.scheduler?.onWorkAvailable?.()); } catch { /* A failed observer cannot undo accepted work. */ }
   }
 
   private get scheduler(): Scheduler | undefined {

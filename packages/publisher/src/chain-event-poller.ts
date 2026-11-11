@@ -10,6 +10,7 @@ import type { PublishHandler } from './publish-handler.js';
 import { ethers } from 'ethers';
 import {
   ChainEventLaneRunner,
+  type ChainEventPollerLane,
   type ChainEventPollerLaneSpec,
 } from './chain-event-lane-runner.js';
 import type { CursorPersistence as RunnerCursorPersistence } from './chain-event-lane-cursor-store.js';
@@ -256,6 +257,14 @@ export class ChainEventPoller {
     this.inFlightPoll = this.poll()
       .catch(() => {})
       .finally(() => { this.inFlightPoll = null; });
+  }
+
+  /**
+   * Scans of a lane that the store was too busy to serve since start. The lane
+   * kept its cursor and scanned each such range again.
+   */
+  storeBusyScans(lane: ChainEventPollerLane): number {
+    return this.laneRunner.storeBusyScans(lane);
   }
 
   /** Wait for the startup/current poll without exposing poller internals. */

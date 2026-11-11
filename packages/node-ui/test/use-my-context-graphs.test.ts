@@ -274,7 +274,7 @@ describe('useMyContextGraphs (sidebar/dashboard membership parity)', () => {
       const contextGraphs = [cg('new-session', { callerInvolved: true })];
       fetchContextGraphsMock.mockResolvedValue({ contextGraphs });
       await act(async () => { await refreshContextGraphInventory(true); });
-      expect(await mutation).toEqual({ ok: false, error: 'Credentials changed while refreshing Context Graphs' });
+      expect(await mutation).toEqual({ ok: false, error: 'Credentials changed while refreshing context graphs' });
       expect(useProjectsStore.getState().contextGraphs).toEqual(contextGraphs);
       await act(async () => { old({ contextGraphs: [cg('old-session')] }); });
       expect(useProjectsStore.getState().contextGraphs).toEqual(contextGraphs);

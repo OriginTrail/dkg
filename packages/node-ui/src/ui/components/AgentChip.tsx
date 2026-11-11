@@ -53,8 +53,7 @@ const initials = agentInitials;
  * N6 polish (item 4) — when we fall back to a raw identifier (no
  * resolved agent profile available), truncate so libp2p peer ids
  * (`12D3K…b9a3`) and eth addresses (`0xaaaa…bbbb`) don't blow the
- * pill layout. Pattern matches plan S13 (`agent-docs/context-graph-
- * implementation-plan.md`): head 6 + ellipsis + tail 4. Short
+ * pill layout. Use head 6 + ellipsis + tail 4. Short
  * identifiers (<= head+tail+1) render unchanged so we never insert
  * an ellipsis that hides nothing.
  */
@@ -140,6 +139,12 @@ export const AgentChip: React.FC<AgentChipProps> = ({
       className={`v10-agent-chip v10-agent-chip-${size}${interactive ? ' interactive' : ''} ${className}`}
       style={agentColorVar(color)}
       onClick={handle ? (e) => { e.stopPropagation(); handle(); } : undefined}
+      onKeyDown={handle ? (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        e.stopPropagation();
+        handle();
+      } : undefined}
       title={title}
       role={interactive ? 'button' : undefined}
       tabIndex={interactive ? 0 : undefined}

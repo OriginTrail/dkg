@@ -174,7 +174,7 @@ async function warmInviteCuratorConnection(invite: ParsedInvite): Promise<void> 
   }
   if (invite.legacyMultiaddr) {
     console.warn(
-      '[DKG] This invite uses a legacy multiaddr (deprecated). Ask the curator to regenerate using the current Share Context Graph modal — V10 invites carry a peer id and resolve via DHT, so they survive relay rotations.',
+      '[DKG] This invite uses a legacy multiaddr (deprecated). Ask the curator to regenerate using the current Share context graph modal — V10 invites carry a peer id and resolve via DHT, so they survive relay rotations.',
     );
     await connectToPeerWithTimeout(invite.legacyMultiaddr).catch(() => {});
   }
@@ -184,7 +184,7 @@ export function validateInvite(
   invite: ParsedInvite,
   options: { allowBareContextGraphId?: boolean } = {},
 ): string | null {
-  if (!invite.cgId) return 'Missing Context Graph ID';
+  if (!invite.cgId) return 'Missing context graph ID';
   if (invite.hasUnparsedExtra) {
     return 'Invite contains a second line that is not a valid peer ID (12D3Koo…) or multiaddr (/ip4/…). Check for typos.';
   }
@@ -193,7 +193,7 @@ export function validateInvite(
   // `forwardJoinRequest`). A discovered graph whose explicit access policy is
   // public uses `/api/subscribe` instead and deliberately needs no invite.
   if (!invite.curatorPeerId && !invite.legacyMultiaddr && !options.allowBareContextGraphId) {
-    return 'This invite is missing the curator peer id. Ask the curator to regenerate the invite from the Share Context Graph dialog.';
+    return 'This invite is missing the curator peer id. Ask the curator to regenerate the invite from the Share context graph dialog.';
   }
   if (invite.legacyMultiaddr) {
     if (!invite.legacyMultiaddr.startsWith('/')) return 'Invalid curator multiaddr';
@@ -302,7 +302,7 @@ function hintForJoinRejectReasons(reasons: string, reachedAndRejected: boolean):
         'pull the latest release (or `git pull && pnpm install && pnpm run build:runtime`) and try again.';
     }
     if (/unknown CG/i.test(reasons)) {
-      return 'The curator doesn\'t recognise this Context Graph id — double-check the invite, ' +
+      return 'The curator doesn\'t recognise this context graph id — double-check the invite, ' +
         'or ask the curator to share an updated one.';
     }
     return null;
@@ -313,7 +313,7 @@ function hintForJoinRejectReasons(reasons: string, reachedAndRejected: boolean):
   // the most actionable advice is "make sure the curator's daemon is
   // online and the invite carries the right peer id".
   if (/not curator/i.test(reasons)) {
-    return 'Your node reached other peers, but none of them curate this Context Graph. ' +
+    return 'Your node reached other peers, but none of them curate this context graph. ' +
       'Make sure the curator\'s daemon is online and the invite carries the right curator peer id.';
   }
   return null;
@@ -443,7 +443,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         await refreshAndOpenContextGraph(cgId, existing);
         onClose();
       } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : 'Could not subscribe to this public Context Graph.');
+        setError(err instanceof Error ? err.message : 'Could not subscribe to this public context graph.');
         setPhase('idle');
       }
       return;
@@ -528,14 +528,14 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
             onClick={handleWireDone}
             aria-label="Close wire workspace dialog"
             title="Close (Esc)"
-            style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-title)', lineHeight: 1, padding: 4, zIndex: 1 }}
+            style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4, zIndex: 1 }}
           >
             <X size={14} />
           </button>
           <div className="v10-modal-header">
             <div id="dkg-join-wire-title" className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
             <div className="v10-modal-subtitle">
-              Curator approved. Now wire a local workspace so this Cursor can collaborate on the Context Graph.
+              Curator approved. Now wire a local workspace so this Cursor can collaborate on the context graph.
             </div>
           </div>
           <div className="v10-modal-body">
@@ -575,16 +575,16 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           type="button"
           className="v10-modal-close ds-btn ds-ghost ds-icon"
           onClick={onClose}
-          aria-label="Close join Context Graph dialog"
+          aria-label="Close join context graph dialog"
           title="Close (Esc)"
-          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-title)', lineHeight: 1, padding: 4, zIndex: 1 }}
+          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4, zIndex: 1 }}
         >
           <X size={14} />
         </button>
         <div className="v10-modal-header">
-          <div id="dkg-join-cg-title" className="v10-modal-title">Join a Context Graph</div>
+          <div id="dkg-join-cg-title" className="v10-modal-title">Join a context graph</div>
           <div id="dkg-join-cg-subtitle" className="v10-modal-subtitle">
-            Enter a discovered public Context Graph ID to subscribe, or paste a curator invite for a private graph.
+            Enter a discovered public context graph ID to subscribe, or paste a curator invite for a private graph.
           </div>
         </div>
 
@@ -607,7 +607,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
               background: 'var(--success-bg)', border: '1px solid var(--success-border)',
               color: 'var(--text-success)',
             }}>
-              Approved! Loading Context Graph…
+              Approved! Loading context graph…
             </div>
           )}
 
@@ -622,19 +622,19 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           )}
 
           <div className="v10-form-group">
-            <label className="v10-form-label" htmlFor="dkg-cg-invite">Context Graph ID or Invite code</label>
+            <label className="v10-form-label" htmlFor="dkg-cg-invite">Context graph ID or invite code</label>
             <textarea
               id="dkg-cg-invite"
               name="dkg-cg-invite"
               className="v10-form-textarea ds-input"
-              placeholder={"Public: paste a Context Graph ID\n\nPrivate: paste the curator invite\nmy-context-graph-abc123\n12D3KooW..."}
+              placeholder={"Public: paste a context graph ID\n\nPrivate: paste the curator invite\nmy-context-graph-abc123\n12D3KooW..."}
               value={inviteCode}
               onChange={(e) => setInviteCode(e.target.value)}
               autoFocus
               rows={3}
               disabled={sending || pending || approved}
               style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-label)' }}
-              aria-label="Context Graph invite code"
+              aria-label="Context graph invite code"
               autoComplete="off"
               spellCheck={false}
             />
@@ -650,7 +650,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
                 checked={keepSynced}
                 onChange={(event) => setKeepSynced(event.target.checked)}
                 disabled={sending}
-                aria-label="Keep this Context Graph synchronized after restart"
+                aria-label="Keep this context graph synchronized after restart"
               />
               <span>
                 Keep synchronized after restart

@@ -117,17 +117,25 @@ async function procfsListenOwnerPid(pids: ReadonlySet<number>, port: number): Pr
   }
 }
 
+/** Match the expected child against the local endpoint in Windows' TCP table. */
+export function windowsTcpOwnerPid(stdout: string, pid: number, port: number): number | null {
+  const suffix = `:${port}`;
+  for (const line of stdout.split('\n')) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length !== 5 || parts[0] !== 'TCP') continue;
+    const [, localEndpoint, , state, owner] = parts;
+    // A successful HTTP readiness probe can leave only the server's accepted
+    // socket visible. A remote endpoint match is never ownership evidence.
+    if (Number(owner) === pid && localEndpoint.endsWith(suffix)
+      && (state === 'LISTENING' || state === 'ESTABLISHED')) return pid;
+  }
+  return null;
+}
+
 async function windowsListenOwnerPid(pid: number, port: number): Promise<number | null> {
   try {
     const { stdout } = await execFileAsync('netstat', ['-ano'], { timeout: 3_000 });
-    const suffix = `:${port}`;
-    for (const line of stdout.split('\n')) {
-      if (!line.includes('LISTENING') || !line.includes(suffix)) continue;
-      const parts = line.trim().split(/\s+/);
-      const rowPid = Number(parts[parts.length - 1]);
-      if (rowPid === pid) return pid;
-    }
-    return null;
+    return windowsTcpOwnerPid(stdout, pid, port);
   } catch {
     return null;
   }

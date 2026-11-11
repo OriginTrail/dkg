@@ -32,7 +32,7 @@
 }
 .v10-pca-section-title {
   margin: 0;
-  font-size: var(--fs-title);
+  font-size: var(--fs-body);
   font-weight: 700;
   color: var(--text-primary);
 }

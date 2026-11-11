@@ -10,6 +10,9 @@
   height: 100dvh;
   width: 100vw;
   overflow: hidden;
+  /* `clip`, not only `hidden`: a hidden box can still be scrolled by focus
+     or scrollIntoView, which shifted the whole app up on Settings. */
+  overflow: clip;
 }
 
 /* ── API token entry, shown when the node rejects the page's credentials ── */
@@ -88,20 +91,6 @@
   user-select: none;
 }
 .v10-header-ot-mark { display: none; flex: none; color: var(--text-primary); line-height: 0; }
-.v10-header-logo-ot {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  margin-left: 10px;
-  padding-left: 10px;
-  border-left: 1px solid var(--border-default);
-}
-.v10-header-logo-ot-by {
-  font-size: var(--fs-micro);
-  color: var(--text-tertiary);
-  letter-spacing: 0;
-  white-space: nowrap;
-}
 .v10-header-ot-wordmark {
   display: block;
   color: var(--text-secondary);
@@ -112,13 +101,6 @@
   stroke: none;
   fill: currentColor;
 }
-.v10-header-logo-text {
-  font-family: var(--font-mono);
-  font-weight: 600;
-  font-size: var(--fs-body);
-  letter-spacing: 0;
-}
-.v10-header-logo-version { color: var(--text-tertiary); font-weight: 400; }
 .v10-header-sep {
   width: 1px;
   height: 20px;
@@ -397,10 +379,6 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
    reachable (and dismissable) via its existing toggle.
      · ≤ 860px  float the side rails as overlay drawers; center goes full-width
      · ≤ 600px  let the header scroll horizontally instead of clipping */
-/* A closed side panel stays mounted so it keeps its state; it just isn't shown. */
-.v10-app-body > .v10-panel-left[hidden],
-.v10-app-body > .v10-panel-right[hidden] { display: none; }
-
 @media (max-width: 860px) {
   .v10-app-body { position: relative; }
   .v10-app-body > .v10-panel-left,
@@ -429,8 +407,7 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
   }
   /* The OriginTrail mark stands in for the wordmark, so the brand stays in view. */
   .v10-header-ot-mark { display: inline-flex; }
-  .v10-header-logo-ot,
-  .v10-header-logo-version,
+  .v10-header-ot-wordmark,
   .v10-header-agent-addr { display: none; }
   .v10-header-meta { margin-right: var(--space-8); }
   .v10-header-actions { flex: none; }

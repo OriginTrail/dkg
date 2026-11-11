@@ -7,9 +7,9 @@
 
 import { randomBytes, createHmac, timingSafeEqual, createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
-import { readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { existsSync } from 'node:fs';
+import { isMarketplaceGatewayRoute } from './daemon/routes/marketplace-gateway-paths.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { DkgHomeFiles } from './config.js';
 
@@ -969,7 +969,7 @@ function evaluateHttpCredential(
   }
 
   const pathname = new URL(req.url ?? '/', `http://${req.headers.host}`).pathname;
-  if (isPublicPath(req.method ?? '', pathname)) {
+  if (isPublicPath(req.method ?? '', pathname) || isMarketplaceGatewayRoute(req.method, pathname)) {
     const acceptedToken = verifyToken(headerToken, validTokens) ? headerToken : undefined;
     return {
       allowed: true,

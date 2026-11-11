@@ -51,6 +51,7 @@ export type {
   ContextGraphAutomaticApprovalCommitInput,
   ContextGraphAutomaticApprovalRepairInput,
   ContextGraphAutomaticApprovalRepairRecord,
+  ContextGraphAutomaticApprovalReleaseInput,
   ContextGraphMemberPrincipalType,
   ContextGraphMemberStatus,
   ContextGraphMemberRow,

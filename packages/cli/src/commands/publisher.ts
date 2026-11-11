@@ -31,11 +31,12 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
-import { assertNoDaemonForOfflineWrite } from '../offline-publisher-guard.js';
+import { assertNoDaemonForOfflineRead, assertNoDaemonForOfflineWrite } from '../offline-publisher-guard.js';
 import { parseJobListPagingOptions, readJobList, type JobListPage } from '../job-list-paging.js';
 import { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-command-options.js';
+import { printAsyncJobFailure, printClearJobFailure } from './async-job-failure.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
@@ -231,7 +232,7 @@ addFinalizedPublishOptions(publisherCmd
       console.log(`  Name:       ${name}`);
       console.log(`  Status:     ${result.status}`);
     } catch (err) {
-      console.error(toErrorMessage(err));
+      printAsyncJobFailure(err, 'publish');
       process.exit(1);
     }
   });
@@ -264,9 +265,10 @@ publisherCmd
         );
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
+        await assertNoDaemonForOfflineRead('jobs');
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
-        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config, readOnly: true });
         try {
           const filter = {
             ...(status ? { status: status as any } : {}),
@@ -312,9 +314,10 @@ publisherCmd
         }
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
+        await assertNoDaemonForOfflineRead('job');
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
-        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config, readOnly: true });
         try {
           const job = await inspector.publisher.getStatus(jobId);
           if (!job) {
@@ -353,9 +356,10 @@ publisherCmd
         stats = await client.publisherStats();
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
+        await assertNoDaemonForOfflineRead('stats');
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
-        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config, readOnly: true });
         try {
           stats = await inspector.publisher.getStats();
         } finally {
@@ -434,6 +438,23 @@ publisherCmd
       );
     } catch (err) {
       console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('clear-job <job-id>')
+  .description('Remove one finished publisher job through the running daemon')
+  .option('--allow-pending-transaction', 'Abandon tracking of a pending transaction; check its outcome on chain first (does not cancel it)')
+  .action(async (jobId: string, opts: { allowPendingTransaction?: boolean }) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.publisherClearJob(jobId, {
+        allowPendingTransaction: opts.allowPendingTransaction === true,
+      });
+      console.log(`Publisher job ${result.jobId}: ${result.outcome}`);
+    } catch (err) {
+      printClearJobFailure(err);
       process.exit(1);
     }
   });

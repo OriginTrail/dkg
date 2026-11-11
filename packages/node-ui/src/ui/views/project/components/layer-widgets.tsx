@@ -1,9 +1,10 @@
 import React, { useId, useMemo, useState, useCallback } from 'react';
 import type { ReactNode } from 'react';
+import { LayerGlyph } from '../../../components/ds/Badge.js';
 import { listAssertions, promoteAssertion, describePromoteError, publishAssertionsToVm, partialPublishWarning, outcomeUnknownPublishNote, type ConvictionCostCovered } from '../../../api.js';
 import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
-import { LAYER_CONFIG, entityMeta, layerNoun, VM_TRIPLE_STAT } from '../helpers.js';
+import { entityMeta, layerNoun, VM_TRIPLE_STAT } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { useVmPublishGate } from '../../../pages/conviction/useVmPublishGate.js';
 import { PublishEligibilityChipView } from '../../../pages/conviction/PublishEligibilityChip.js';
@@ -244,7 +245,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
     <LayerActionShell
       title="Share complete Knowledge Assets"
       footnote="Shares each complete owning Knowledge Asset atomically to Shared Working Memory."
-      context={<>Shares all eligible complete Working Memory Knowledge Assets in this Context Graph, including assets outside the loaded preview.</>}
+      context={<>Shares all eligible complete Working Memory Knowledge Assets in this context graph, including assets outside the loaded preview.</>}
       outcome={outcome}
     >
       <button
@@ -327,7 +328,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
   return (
     <LayerActionShell
       title="Publish"
-      footnote="Publishes all eligible complete Shared Working Memory Knowledge Assets in this Context Graph on-chain."
+      footnote="Publishes all eligible complete Shared Working Memory Knowledge Assets in this context graph on-chain."
       context={<>Publishes all eligible complete Shared Working Memory Knowledge Assets, including assets outside the loaded preview. On-chain publishing incurs a cost.</>}
       outcome={outcome}
       extras={
@@ -389,7 +390,7 @@ export function LayerWidgetStrip({ layer, entities, entityCount, actionEntityCou
         <EmptyState
           compact
           tone={toneForLayer(layer)}
-          icon={LAYER_CONFIG[layer].icon}
+          icon={<LayerGlyph layer={layer} />}
           title={`No ${layerNoun(layer, 2).toLowerCase()} yet`}
           description={
             layer === 'wm'

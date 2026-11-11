@@ -460,3 +460,63 @@ describe('GetSponsoredPanel — a balance error with known wallet addresses', ()
     await unmount();
   });
 });
+
+describe('GetSponsoredPanel — adding a partially checked PCA', () => {
+  it('keeps coverage uncertain when one wallet is unregistered and the other wallet’s check failed', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0, W1],
+      balances: [
+        { address: W0, eth: '0.08', trac: '0', symbol: 'TRAC' },
+        { address: W1, eth: '0.08', trac: '0', symbol: 'TRAC' },
+      ],
+      chainId: '84532',
+      rpcUrl: null,
+    });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      if (key && key.toLowerCase() === W1.toLowerCase()) throw new Error('rpc down'); // W1: failed check
+      return { ...makePcaSnapshot({ accountId: id }), probedKey: key ? { key, registered: false, adapterSupported: true } : undefined };
+    });
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn(), initialAccountId: '7' }));
+    await waitForText(container, 'Approved on PCA #7: 0 of 2 wallets');
+    await act(async () => {
+      (container.querySelector('[data-testid="pca-sponsor-track"]') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await waitForText(container, 'PCA #7 is in your list. This node couldn’t check every wallet, so it may already cover some.');
+    expect(container.textContent).not.toContain('until the owner approves these wallets');
+    await unmount();
+  });
+
+  it('says owner approval is needed only when every wallet is confirmed unregistered', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0, W1], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => (
+      { ...makePcaSnapshot({ accountId: id }), probedKey: key ? { key, registered: false, adapterSupported: true } : undefined }
+    ));
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn(), initialAccountId: '7' }));
+    await waitForText(container, 'Approved on PCA #7: 0 of 2 wallets');
+    await act(async () => {
+      (container.querySelector('[data-testid="pca-sponsor-track"]') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await waitForText(container, 'PCA #7 is in your list. It gives no discount until the owner approves these wallets.');
+    await unmount();
+  });
+});
+
+describe('GetSponsoredPanel — a failed chain lookup of the PCA', () => {
+  it('treats 503 PCA_LOOKUP_READ_FAILED as temporary with Retry, not as PCAs being unavailable', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    let lookupFails = true;
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      if (!key && lookupFails) throw new HttpError(503, 'Service Unavailable', { code: 'PCA_LOOKUP_READ_FAILED' });
+      return { ...makePcaSnapshot({ accountId: id }), probedKey: key ? { key, registered: true, adapterSupported: true } : undefined };
+    });
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn(), initialAccountId: '7' }));
+    await waitForText(container, 'Couldn’t check PCA #7 right now.');
+    expect(container.textContent).not.toContain('aren\'t available on this network');
+    const retry = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Retry');
+    expect(retry).toBeTruthy();
+    lookupFails = false;
+    await act(async () => { retry!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'Approved on PCA #7: 1 of 1 wallets');
+    await unmount();
+  });
+});

@@ -27,7 +27,7 @@ export function buildVmFacts(
 ): VmFact[] {
   const consensus: VmFact = {
     id: 'consensus', label: 'Consensus', value: 'not set up', tone: 'muted',
-    tooltip: 'Consensus quorums for Context Graphs are coming soon.',
+    tooltip: 'Consensus quorums for context graphs are coming soon.',
   };
   if (!summary) {
     if (state.error) return [{ id: 'onchain', label: 'On-chain', value: "couldn't load", tone: 'muted', tooltip: state.error }, consensus];
@@ -44,7 +44,7 @@ export function buildVmFacts(
   // A capped read may have left receipts out: never call those entities unanchored.
   const facts: VmFact[] = [missing > 0 && !summary.complete ? {
     id: 'onchain', label: 'On-chain', value: `at least ${anchored} / ${total} anchored`, tone: 'muted',
-    tooltip: 'This Context Graph has more publish receipts than could be read at once, so Knowledge Assets without a listed receipt may still be anchored.',
+    tooltip: 'This context graph has more publish receipts than could be read at once, so Knowledge Assets without a listed receipt may still be anchored.',
   } : {
     id: 'onchain', label: 'On-chain', value: `${anchored} / ${total} anchored`, tone: missing > 0 ? 'warn' : 'ok',
     tooltip: missing > 0
@@ -54,7 +54,7 @@ export function buildVmFacts(
   const n = summary.signers.size;
   if (n > 0) {
     facts.push({ id: 'signers', label: 'Signed by', value: `${n} agent${n === 1 ? '' : 's'}`, tone: 'ok',
-      tooltip: 'Distinct agents that published to Verifiable Memory in this Context Graph.' });
+      tooltip: 'Distinct agents that published to Verifiable Memory in this context graph.' });
   }
   if (summary.lastFinalizedAt !== null) {
     facts.push({ id: 'last', label: 'Last finalized', value: formatRelativeTime(summary.lastFinalizedAt), tone: 'ok',

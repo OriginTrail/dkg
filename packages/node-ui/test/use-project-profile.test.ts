@@ -209,7 +209,7 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
     expect(binding!.slug).toBe(ROOT_SLUG_SENTINEL);
     expect(binding!.displayName).toBe('Root');
     expect(binding!.icon).toBe('⊘');
-    expect(binding!.description).toBe('Entities not in any subgraph (Context Graph root)');
+    expect(binding!.description).toBe('Entities not in any subgraph (context graph root)');
   });
 
   it('keeps the daemon-resolved binding path intact for non-Root slugs', async () => {

@@ -320,8 +320,12 @@ Per-turn state is kept in `~/.cache/dkg-mcp/sessions/*.json`; safe to delete at 
 
 ## Historical recovery
 
-Ten V9-era and coding-project tools were dropped from the V10 surface during consolidation. The annotated git tag `pre-v10-tool-drop` preserves them — recover any individual handler with `git show pre-v10-tool-drop:packages/mcp-dkg/src/tools/<file>`. Design rationale and reintroduction-pointers for each drop are in [`agent-docs/dkg-v10-mcp-consolidation/v9-design-archive.md`](../../agent-docs/dkg-v10-mcp-consolidation/v9-design-archive.md).
+Ten V9-era and coding-project tools were dropped from the V10 surface during consolidation. The annotated git tag `pre-v10-tool-drop` preserves them — recover any individual handler with `git show pre-v10-tool-drop:packages/mcp-dkg/src/tools/<file>`.
 
 ### Large tool responses
 
 The stdio server limits each serialized JSON-RPC response to 8 MiB, below the MCP SDK client's default 10 MiB receive buffer. JSON escaping can make an artifact response larger than its original file. An oversized result returns an error without closing the session: narrow/paginate a query, or retrieve large artifacts through the daemon HTTP API. Markdown reads return the whole file; `maxBytes` is an acceptance cap, so lowering it returns HTTP 413 rather than a smaller result. For partial artifact retrieval outside MCP, use the daemon `/api/knowledge-assets/import-artifact/read` endpoint with `offset` and `maxBytes`. The daemon's 5 MiB artifact-read maximum is a source-byte limit, not a guarantee that the fully formatted result fits over MCP.
+
+### Relocated Claude Desktop data on Windows
+
+Setup also detects `%LOCALAPPDATA%\Claude-Data\claude_*\claude_desktop_config.json`, including Windows-side profiles from WSL. With several existing configs, it selects the most recently modified one; check the displayed path with `--dry-run`. Uninstall inspects all supported profiles to remove older DKG registrations too. For a custom location, use Claude Desktop **Settings → Developer → Edit Config** and the entry from `dkg mcp setup --print-only`; preserve `env.DKG_HOME` and restart the client.

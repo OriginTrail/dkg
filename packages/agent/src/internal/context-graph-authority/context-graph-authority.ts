@@ -68,7 +68,11 @@ export function isRetryableContextGraphAuthorityUnavailableReason(
 
 export type ContextGraphAgentGateAuthority =
   | { kind: 'ungated' }
-  | { kind: 'available'; agentAddresses: string[] }
+  /**
+   * `conclusive`: the addresses are the graph's authoritative roster (its chain
+   * roster, or an accepted owner-signed one), which local metadata cannot widen.
+   */
+  | { kind: 'available'; agentAddresses: string[]; conclusive?: true }
   | {
       kind: 'unavailable';
       reason: ContextGraphAgentGateUnavailableReason;
@@ -129,6 +133,15 @@ export function isContextGraphAuthorityUnavailableMarker(
   } catch {
     return false;
   }
+}
+
+/**
+ * An authority failure that can heal on its own, so the same request may be
+ * sent again: the shared retry classification applied to a thrown value.
+ */
+export function isRetryableContextGraphAuthorityUnavailableError(error: unknown): boolean {
+  return isContextGraphAuthorityUnavailableMarker(error)
+    && isRetryableContextGraphAuthorityUnavailableReason(error.reason);
 }
 
 export function createContextGraphAuthorityError(

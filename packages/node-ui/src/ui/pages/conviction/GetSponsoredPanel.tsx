@@ -1,9 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useFetch } from '../../hooks.js';
-import { fetchWalletsBalances, fetchPca, pcaAgentAccount, describePcaError } from '../../api.js';
+import { fetchWalletsBalances, pcaAgentAccount, describePcaError, isPcaReadFailed } from '../../api.js';
 import { formatEth, formatEthTooltip } from '../../lib/formatEth.js';
 import { usePcaStore } from '../../stores/pca.js';
-import { classifyCoverage, type PcaCoverageResult } from '../../pca/coverage.js';
+import type { PcaCoverageResult } from '../../pca/coverage.js';
+import { readPcaAccount } from '../../pca/readAccount.js';
+import type { CoverageProbe } from '../../pca/walletCoverage.js';
 import { PcaModalShell } from './PcaModalShell.js';
 import {
   WalletRow,
@@ -57,18 +59,12 @@ function AddToListAction({ accountId, trackedNote }: { accountId: string; tracke
   );
 }
 
-interface ProbeRow {
-  wallet: string;
-  /**
-   * The CANONICAL coverage result for this wallet on the probed account — carried as the
-   * discriminated union (#1344), NOT flattened into parallel `registered`/`covers`/
-   * `adapterUnsupported` flags that could express impossible states. Every derived signal
-   * (approved count, N1 coverage, S6 "Ready", the #1356 capability-gap split) reads the
-   * single `.outcome` discriminant. A transport failure maps to the `inconclusive`
-   * variant with `adapterUnsupported:false` (couldn't read ≠ capability gap).
-   */
-  coverage: PcaCoverageResult;
-}
+/**
+ * One wallet's canonical coverage on the checked PCA (#1344). Every derived signal
+ * (approved count, N1 coverage, S6 "Ready", the #1356 capability-gap split) reads the
+ * single `.outcome` discriminant.
+ */
+type ProbeRow = CoverageProbe;
 
 /** The S6 approval-row status derived from the single coverage discriminant. */
 function sponsorRowStatus(c: PcaCoverageResult): { text: string; tone: 'success' | 'warn' | 'danger' | 'neutral' } {
@@ -158,15 +154,18 @@ export function GetSponsoredPanel({
 
   /** Read the PCA, then probe each wallet. Tracks the PCA when a wallet is approved. */
   const runCheck = async (id: string): Promise<CheckResult> => {
-    try {
-      // Read the PCA itself first: nothing is offered for an ID that doesn't exist.
-      await fetchPca(id);
-    } catch (err) {
+    // The PCA itself is read first: nothing is offered for an ID that doesn't exist.
+    const read = await readPcaAccount(id, wallets);
+    if (!read.ok) {
+      const temporary: CheckResult = { kind: 'failed', message: `Couldn’t check PCA #${id} right now.`, retry: true };
+      // A 503 PCA_LOOKUP_READ_FAILED is a chain read that failed, not a network without
+      // PCAs, so it's temporary (Retry) before any capability reading of the 503.
+      if (isPcaReadFailed(read.error)) return temporary;
       // A known daemon error says what happened (a missing PCA among them); anything else is a transient read failure.
-      const described = describePcaError(err, { accountId: id });
+      const described = describePcaError(read.error, { accountId: id });
       return described
         ? { kind: 'failed', message: described.message, retry: described.code === 'ServerError' }
-        : { kind: 'failed', message: `Couldn’t check PCA #${id} right now.`, retry: true };
+        : temporary;
     }
     // From here the PCA exists, so it can always be added read-only, whatever approval shows.
     // Approval needs only the wallet addresses: a balance-read error (gas unknown) still
@@ -182,18 +181,7 @@ export function GetSponsoredPanel({
         retry: false,
       };
     }
-    const rows = await Promise.all(
-      wallets.map((w) =>
-        fetchPca(id, w, { extended: true })
-          // #1344 - single canonical classifier (reads snap.probedKey); the row keeps the
-          // whole discriminated result. S2 adapterSupported===false -> inconclusive
-          // (neutral "unknown" row, not a false not-approved); N1 "Ready" == outcome 'covers'.
-          .then((snap): ProbeRow => ({ wallet: w, coverage: classifyCoverage(snap) }))
-          // A transport failure couldn't determine coverage -> inconclusive, NOT a
-          // capability gap (retry may resolve it).
-          .catch((): ProbeRow => ({ wallet: w, coverage: { outcome: 'inconclusive', registered: null, adapterUnsupported: false } })),
-      ),
-    );
+    const rows: ProbeRow[] = read.probes;
     // L4: every probe inconclusive means approval couldn't be checked at all, never a
     // false "0 of N approved". #1356: only a capability gap on every probe says "not
     // supported" (Retry won't help); anything else is transient (Retry).
@@ -250,10 +238,18 @@ export function GetSponsoredPanel({
   // N1: Ready requires actual COVERAGE (spendable PCA), not bare registration.
   const ready = !!checked && checked.rows.some((r) => r.coverage.outcome === 'covers' && isFunded(r.wallet));
   // A PCA that was read but covers nothing here, or couldn't be checked, can still go in the list.
+  // "Needs approval" only when every wallet is confirmed unregistered; a wallet whose probe
+  // failed might already be approved, so then coverage stays unknown.
+  const allUnregistered = !!checked && checked.rows.every((r) => r.coverage.outcome === 'unregistered');
   const addable = result?.kind === 'unverifiable'
     ? { accountId: result.accountId, note: `PCA #${result.accountId} is in your list. This node can’t check whether it covers your wallets.` }
     : checked && approvedCount === 0
-      ? { accountId: checked.accountId, note: `PCA #${checked.accountId} is in your list. It gives no discount until the owner approves these wallets.` }
+      ? {
+        accountId: checked.accountId,
+        note: allUnregistered
+          ? `PCA #${checked.accountId} is in your list. It gives no discount until the owner approves these wallets.`
+          : `PCA #${checked.accountId} is in your list. This node couldn’t check every wallet, so it may already cover some.`,
+      }
       : null;
 
   return (
@@ -388,7 +384,7 @@ export function GetSponsoredPanel({
             Ready. At least 1 wallet is approved and has gas, so this node can publish with PCA #{checked!.accountId}.{' '}
             {/* L9: no global publish target — the discount applies at any per-CG
                 publish. Guidance hint, not an inert "Go to publish →" button. */}
-            Publish from any Context Graph. The discount applies automatically to approved wallets.
+            Publish from any context graph. The discount applies automatically to approved wallets.
           </div>
         )}
       </div>

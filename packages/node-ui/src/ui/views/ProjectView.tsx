@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
+import { useMemo, useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { useFetch } from '../hooks.js';
 import { useMemoryEntityDetails } from '../hooks/useMemoryEntityDetails.js';
 import { api } from '../api-wrapper.js';
@@ -473,6 +473,26 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const detailRead = useMemoryEntityDetails(contextGraphId, selectedUri, selectedLayerContext, includeQueryCatalogInMemory, rawMemory);
   const { entity: selectedEntity, entities: detailEntities, triples: detailTriples } = detailRead;
 
+  // Context Graph navigation happens inside one persistent ProjectView, so the
+  // shell-level page transition cannot distinguish its layers, subgraphs,
+  // entities, or content tabs. Replay a scoped animation on the existing page
+  // element instead of keying/remounting it; graph state and scroll restoration
+  // remain intact while each internal destination gets a visual transition.
+  const contextPageTransitionKey = selectedEntity
+    ? `entity:${selectedUri ?? selectedEntity.uri}`
+    : activeSubGraph
+      ? `subgraph:${activeSubGraph}:${subGraphTabs[activeSubGraph] ?? 'items'}`
+      : isMemoryLayerView(activeLayer)
+        ? `layer:${activeLayer}:${layerContentTabs[activeLayer]}`
+        : `layer:${activeLayer}`;
+  useLayoutEffect(() => {
+    const page = pageRef.current;
+    if (!page) return;
+    page.classList.remove('v10-context-page-enter');
+    void page.offsetWidth;
+    page.classList.add('v10-context-page-enter');
+  }, [contextPageTransitionKey]);
+
   // Route a sub-graph chip click to the sub-graph page. Selecting "All"
   // (null) exits the page back to the current layer view, or overview if
   // we were already on one. The optional `originatingLayer` carries the
@@ -690,8 +710,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             {cgError
               ? cgAuthError
                 ? cgError
-                : 'Failed to load Context Graph.'
-              : 'Context Graph not found.'}
+                : 'Failed to load context graph.'
+              : 'Context graph not found.'}
           </p>
           {cgAuthError ? (
             <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={() => window.location.reload()}>
@@ -707,7 +727,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     }
     return (
       <div className="v10-view-placeholder">
-        <Loading label="Loading Context Graph…" />
+        <Loading label="Loading context graph…" />
       </div>
     );
   }
@@ -793,7 +813,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         onRefresh={() => { rawMemory.refresh(); vmReceipts.refresh(); }}
       />
 
-      <div className="v10-memory-explorer-page" data-view={activePage} data-cg-scroll-key="page" ref={pageRef}>
+      <div className="v10-memory-explorer-page v10-context-page-enter" data-view={activePage} data-cg-scroll-key="page" ref={pageRef}>
       {selectedUri && (detailRead.loading || detailRead.error || detailRead.partial || !selectedEntity) && (
         <div className="v10-layer-action-note" role="status">
           {detailRead.loading ? 'Loading resource details…' : detailRead.error ?? (detailRead.partial
@@ -900,7 +920,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
               title="Recent activity"
               limit={40}
               includeUndated={false}
-              emptyHint="Once knowledge starts being added and managed in this Context Graph, activities will show up here as a live feed."
+              emptyHint="Once knowledge starts being added and managed in this context graph, activities will show up here as a live feed."
               className="v10-overview-activity"
             />
           </div>

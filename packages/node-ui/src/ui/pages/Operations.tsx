@@ -75,7 +75,7 @@ const PHASE_DESCRIPTIONS: Record<string, string> = {
 
 
 const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
-  publish:        'Publish a Knowledge Asset on-chain to a Context Graph',
+  publish:        'Publish a Knowledge Asset on-chain to a context graph',
   publishFromSWM: 'Publish a Knowledge Asset derived from Shared Working Memory',
   update:         'Update an existing Knowledge Asset on-chain',
   'ka-update':    'Incremental Knowledge Asset update (ka-update path)',
@@ -242,7 +242,7 @@ function ReplicationTab() {
       {/* Timeline */}
       <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>
-          Reconciliation timeline{selectedCg ? ` — ${selectedCg}` : ' — all Context Graphs'}
+          Reconciliation timeline{selectedCg ? ` — ${selectedCg}` : ' — all context graphs'}
         </div>
         {buckets.length === 0 ? (
           <EmptyState compact inline title="No reconciliation activity" description="No chain-driven Verifiable Memory promotions recorded in this period." />
@@ -250,8 +250,8 @@ function ReplicationTab() {
           <ResponsiveContainer width="100%" height={220}>
             <AreaChart data={buckets}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
-              <XAxis dataKey="t" tick={{ fontSize: 11 }} />
-              <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
+              <XAxis dataKey="t" tick={{ fontSize: 'var(--fs-label)' }} />
+              <YAxis allowDecimals={false} tick={{ fontSize: 'var(--fs-label)' }} />
               <Tooltip />
               <Legend />
               <Area type="monotone" dataKey="promotes" stackId="1" stroke="var(--layer-verified)" fill="var(--layer-verified)" fillOpacity={0.55} name="promotes" />
@@ -266,13 +266,13 @@ function ReplicationTab() {
       <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>Cursor inspector</div>
         <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', marginBottom: 12 }}>
-          How far each Context Graph has been promoted to Verifiable Memory, compared with the latest chain head.
+          How far each context graph has been promoted to Verifiable Memory, compared with the latest chain head.
         </p>
         {cursors.length === 0 ? (
           <EmptyState compact inline title="No subscriptions" />
         ) : (
           <div className="ds-table-scroll"><table className="data-table">
-            <thead><tr><th>Context Graph</th><th>On-chain id</th><th>Role</th><th className="ds-num">Watermark</th><th className="ds-num">Chain head</th><th className="ds-num">Lag</th><th>Last event</th></tr></thead>
+            <thead><tr><th>Context graph</th><th>On-chain id</th><th>Role</th><th className="ds-num">Watermark</th><th className="ds-num">Chain head</th><th className="ds-num">Lag</th><th>Last event</th></tr></thead>
             <tbody>
               {cursors.map((c) => {
                 const wm = c.last_reconciled_ordinal ?? 0;
@@ -282,7 +282,7 @@ function ReplicationTab() {
                   <tr key={c.context_graph_id}>
                     <td className="mono">{c.context_graph_id}</td>
                     <td className="mono">{c.on_chain_id ?? '—'}</td>
-                    <td>{c.core_hosted ? <Badge size="sm" title="Core hosts this public Context Graph and fills its own gaps from the chain">Host</Badge> : <Badge size="sm">Member</Badge>}</td>
+                    <td>{c.core_hosted ? <Badge size="sm" title="Core hosts this public context graph and fills its own gaps from the chain">Host</Badge> : <Badge size="sm">Member</Badge>}</td>
                     <td className="ds-num">{wm}</td>
                     <td className="ds-num">{head ?? '—'}</td>
                     <td className="ds-num">{lag == null ? '—' : <Badge tone={lag === 0 ? 'success' : 'warning'} size="sm">{lag}</Badge>}</td>
@@ -297,13 +297,13 @@ function ReplicationTab() {
 
       {/* Per-CG activity */}
       <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
-        <div className="card-title" style={{ marginBottom: 8 }}>Activity by Context Graph</div>
+        <div className="card-title" style={{ marginBottom: 8 }}>Activity by context graph</div>
         <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', marginBottom: 12 }}>Click a row to scope the timeline + open its event stream.</p>
         {perCg.length === 0 ? (
           <EmptyState compact inline title="No activity in this period" />
         ) : (
           <div className="ds-table-scroll"><table className="data-table">
-            <thead><tr><th>Context Graph</th><th className="ds-num">Promotes</th><th className="ds-num">Fetches</th><th className="ds-num">Defers</th><th className="ds-num">Cursor moves</th><th className="ds-num">Watermark</th><th>Last event</th></tr></thead>
+            <thead><tr><th>Context graph</th><th className="ds-num">Promotes</th><th className="ds-num">Fetches</th><th className="ds-num">Defers</th><th className="ds-num">Cursor moves</th><th className="ds-num">Watermark</th><th>Last event</th></tr></thead>
             <tbody>
               {perCg.map((r) => (
                 <tr
@@ -639,8 +639,8 @@ function OperationStatsSection() {
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
-                    <YAxis tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={28} />
+                    <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} />
+                    <YAxis tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'var(--tint-strong)' }} />
                     <Legend wrapperStyle={{ fontSize: 'var(--fs-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
@@ -655,8 +655,8 @@ function OperationStatsSection() {
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
-                    <YAxis tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={32} />
+                    <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} />
+                    <YAxis tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
                     <Legend wrapperStyle={{ fontSize: 'var(--fs-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
@@ -671,8 +671,8 @@ function OperationStatsSection() {
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
-                    <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={28} />
+                    <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} />
+                    <YAxis domain={[0, 100]} tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
                     <Legend wrapperStyle={{ fontSize: 'var(--fs-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
@@ -687,8 +687,8 @@ function OperationStatsSection() {
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
-                    <YAxis tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={32} />
+                    <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} />
+                    <YAxis tick={{ fontSize: 'var(--fs-micro)', fill: 'var(--text-tertiary)' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'var(--tint-strong)' }} />
                     <Legend wrapperStyle={{ fontSize: 'var(--fs-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
@@ -762,7 +762,7 @@ export function HardwareTab() {
         {statCards.map(stat => (
           <div key={stat.label} className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
             <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
-            <div style={{ fontSize: 'var(--fs-title)', fontWeight: 700, color: hw ? LEVEL_TEXT[stat.lv] : IDLE, lineHeight: 1, marginBottom: 3 }}>{stat.value}{warnIcon(stat.lv)}</div>
+            <div style={{ fontSize: 'var(--fs-heading)', fontWeight: 700, color: hw ? LEVEL_TEXT[stat.lv] : IDLE, lineHeight: 1, marginBottom: 3 }}>{stat.value}{warnIcon(stat.lv)}</div>
             {stat.pct !== null ? (
               <div style={{ height: 3, background: 'var(--bg-elevated)', borderRadius: 'var(--radius-hair)', margin: '5px 0 3px' }}>
                 <div style={{ height: 3, width: `${Math.min(stat.pct, 100)}%`, background: LEVEL_COLOR[stat.lv], borderRadius: 'var(--radius-hair)', transition: 'width .4s ease' }} />
@@ -776,12 +776,12 @@ export function HardwareTab() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 12 }}>
         <div className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
           <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>Peers</div>
-          <div style={{ fontSize: 'var(--fs-title)', fontWeight: 700, color: hw ? LEVEL_TEXT[peersLv] : IDLE, lineHeight: 1 }}>{hw ? hw.peers : '—'}{warnIcon(peersLv)}</div>
+          <div style={{ fontSize: 'var(--fs-heading)', fontWeight: 700, color: hw ? LEVEL_TEXT[peersLv] : IDLE, lineHeight: 1 }}>{hw ? hw.peers : '—'}{warnIcon(peersLv)}</div>
           <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 3 }}>{hw ? 'connected' : 'waiting…'}</div>
         </div>
         <div className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
           <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>RPC Latency</div>
-          <div style={{ fontSize: 'var(--fs-title)', fontWeight: 700, color: hw ? LEVEL_TEXT[rpcLv] : IDLE, lineHeight: 1 }}>
+          <div style={{ fontSize: 'var(--fs-heading)', fontWeight: 700, color: hw ? LEVEL_TEXT[rpcLv] : IDLE, lineHeight: 1 }}>
             {hw ? (hw.rpcMs !== null ? `${hw.rpcMs} ms` : '—') : '—'}{warnIcon(rpcLv)}
           </div>
           <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 3 }}>{hw ? 'last measurement' : 'waiting…'}</div>
@@ -798,8 +798,8 @@ export function HardwareTab() {
               <ResponsiveContainer width="100%" height={140}>
                 <AreaChart data={hwChartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke={grid} />
-                  <XAxis dataKey="time" tick={{ fontSize: 10, fill: tick }} minTickGap={24} />
-                  <YAxis domain={c.pct ? [0, 100] : [0, 'auto']} allowDecimals={c.key !== 'peers'} tick={{ fontSize: 10, fill: tick }} width={32} />
+                  <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: tick }} minTickGap={24} />
+                  <YAxis domain={c.pct ? [0, 100] : [0, 'auto']} allowDecimals={c.key !== 'peers'} tick={{ fontSize: 'var(--fs-micro)', fill: tick }} width={32} />
                   <Tooltip contentStyle={TOOLTIP_STYLE} />
                   {c.warn != null && <ReferenceLine y={c.warn} stroke={warnLine} strokeDasharray="4 4" strokeOpacity={0.6} />}
                   {c.crit != null && <ReferenceLine y={c.crit} stroke={critLine} strokeDasharray="4 4" strokeOpacity={0.6} />}
@@ -1255,7 +1255,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
         </div>
         <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 'var(--fs-control)', color: 'var(--text-secondary)' }}>
           <span><b style={{ color: 'var(--text-secondary)' }}>Started</b> {formatDateTime(op.started_at, { seconds: true })}</span>
-          {op.contextGraph_id && <span><b style={{ color: 'var(--text-secondary)' }}>Context Graph</b> {op.contextGraph_id}</span>}
+          {op.contextGraph_id && <span><b style={{ color: 'var(--text-secondary)' }}>Context graph</b> {op.contextGraph_id}</span>}
           {op.triple_count != null && <span><b style={{ color: 'var(--text-secondary)' }}>Triples</b> {op.triple_count}</span>}
           {op.peer_id && <span><b style={{ color: 'var(--text-secondary)' }}>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
           {op.gas_cost_eth != null && <span><b style={{ color: 'var(--text-secondary)' }}>Gas</b> {op.gas_cost_eth.toFixed(6)} ETH</span>}
@@ -1499,7 +1499,7 @@ function LogsTab() {
             padding: '8px 0',
             background: 'var(--log-bg)',
             fontFamily: LOG_FONT,
-            fontSize: 'var(--fs-label)',
+            fontSize: 'var(--fs-micro)',
             lineHeight: 'var(--lh-body)',
           }}
         >
@@ -1552,7 +1552,7 @@ function LogContainer({ children, maxHeight = 300 }: { children: React.ReactNode
   return (
     <div style={{
       maxHeight, overflowY: 'auto', background: LOG_COLORS.bg, borderRadius: 'var(--radius-control)', padding: '6px 0',
-      fontFamily: LOG_FONT, fontSize: 'var(--fs-label)', lineHeight: 'var(--lh-body)',
+      fontFamily: LOG_FONT, fontSize: 'var(--fs-micro)', lineHeight: 'var(--lh-body)',
     }}>
       {children}
     </div>

@@ -125,7 +125,7 @@
   border-bottom: 1px solid var(--border-subtle);
 }
 .v10-graph-expanded-title {
-  font-size: var(--fs-title);
+  font-size: var(--fs-body);
   font-weight: 700;
   color: var(--text-primary);
 }
@@ -294,7 +294,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   padding: 10px var(--space-12) var(--space-8) var(--space-12);
   border-bottom: 1px solid var(--border-subtle);
 }
-.v10-sgov-card-icon { font-size: var(--fs-title); line-height: 1; margin-top: 1px; }
+.v10-sgov-card-icon { font-size: var(--fs-heading); line-height: 1; margin-top: 1px; }
 .v10-sgov-card-title-wrap { flex: 1; min-width: 0; }
 .v10-sgov-card-title {
   font-size: var(--fs-body); font-weight: 600; color: var(--text-primary);
