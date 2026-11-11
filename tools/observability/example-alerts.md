@@ -4,7 +4,7 @@
 
 # Grafana alerting — live setup on the observability server
 
-> **Status (2026-07-02):** everything below is **provisioned and healthy** on the
+> **Status (2026-07-02):** everything below, except rules marked as added since, is **provisioned and healthy** on the
 > production observability Grafana (the dedicated server, Loki 3.x native-OTLP
 > stack — see RUNBOOK.md). This file documents it so it can be recreated from
 > scratch. Webhook URLs are **secrets** — they live only in Grafana contact
@@ -29,7 +29,7 @@ The webhooks belong to the Slack app **"DKG Grafana Alerts"** (workspace
 OriginTrail) — manage/rotate them at *api.slack.com/apps → DKG Grafana Alerts →
 Incoming Webhooks*.
 
-## The 10 rules (folder "DKG V10 Node Observability", group `dkg-node-telemetry`)
+## The 11 rules (folder "DKG V10 Node Observability", group `dkg-node-telemetry`)
 
 > **Machine-importable copy:** `alert-rules.provisioning.json` in this directory
 > holds the exact provisioning-API payloads (rules, contact-point templates with
@@ -57,6 +57,7 @@ reached`; range+reduce avoids that class of failure entirely.
 | 8 | Publish failures on a node (armed — needs node metrics enabled) | #node-metrics | VictoriaMetrics | `> 0.02` | 5m | OK |
 | 9 | Chain RPC failover exhausted on a node (armed — needs node metrics enabled) | #node-metrics | VictoriaMetrics | `> 0` | 5m | OK |
 | 10 | Errored spans rate (armed — needs traces + spanmetrics enabled) | #node-traces | VictoriaMetrics | `> 0.05` | 5m | OK |
+| 11 | Graph catalog at 80% of its limit on a node (added 2026-11-11, not yet provisioned) | #node-logs | Loki | `> 0` | 5m | OK |
 
 **Queries** (range queries, reduced with `last`, evaluated against the condition above):
 
@@ -120,6 +121,12 @@ sum by (instance) (rate(dkg_chain_rpc_failover_total{reason="exhausted"}[15m]))
 sum(rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[15m]))
 ```
 
+11. Graph catalog at 80% of its limit on a node
+
+```
+sum by (service_instance_id, deployment_environment) (count_over_time({service_name="dkg-node"} | severity_text=`WARN` |= `The graph catalog has reached 80% of its internal limit` [70m]))
+```
+
 ### Design notes (the "why" behind the table)
 
 - **Node silent** keeps **node identity**: the `unless` form returns one series
@@ -130,6 +137,14 @@ sum(rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[15m]))
 - **Fleet blackout** complements it: the per-node `unless` form cannot fire
   when *both* sides are empty, so total-outage detection (pipeline down, Loki
   down, zero nodes) lives in its own rule with **noData = Alerting**.
+- **Graph catalog at 80%** matches the node's WARN log line for that level
+  (`graphCatalogLimitWarning` in lib/queries.mjs). The node repeats it hourly
+  while the catalog stays there, so the 70-minute count keeps the rule firing
+  between warnings. The query range is 10 minutes, like the other rules', so
+  the `last` reducer reads only current counts: the rule clears about 80
+  minutes after the last warning. The storage test
+  `graph-catalog-alert-contract.test.ts` runs the node's real warnings
+  through this rule's filter. Operator steps: docs/use-dkg/graph-catalog-limit.md.
 - **RPC credit burn** reads the `rpc_usage` log lines (delta counts, so
   `sum_over_time` is exact) — needs nodes on a post-#1409 build.
 - **Failover exhausted** filters `reason="exhausted"`: the metric contract also

@@ -460,6 +460,12 @@ export const PATH_TRIGGERS = Object.freeze([
     reason: 'the Core stream transport tests import the Agent production codec',
   },
   {
+    patterns: [/^tools\/observability\/lib\/(?:alerts|profile|queries)\.mjs$/],
+    lanes: ['tornado_core', 'tornado_blazegraph'],
+    evmScopes: [],
+    reason: 'the storage graph-catalog alert contract test loads the observability alert specs',
+  },
+  {
     patterns: [/^packages\/cli\/src\/extraction\/markdown-extractor\.ts$/],
     lanes: ['tornado_agent'],
     evmScopes: [],

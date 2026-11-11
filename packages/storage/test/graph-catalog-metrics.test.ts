@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { metrics as otelMetrics } from '@opentelemetry/api';
-import { rebuildMetrics } from '@origintrail-official/dkg-core';
+import { Logger, rebuildMetrics, type LogRecord } from '@origintrail-official/dkg-core';
 import {
   GraphSetIndexStore,
   OxigraphStore,
@@ -142,7 +142,7 @@ describe('graph catalog size warnings', () => {
     record({ graphs: 2, bytes: 500 });
     record({ graphs: 2, bytes: 600 });
     expect(warnings).toEqual([
-      '[graph-catalog] The graph catalog has reached 50% of its internal limit STORE_GRAPH_CATALOG_MAX_BYTES: 500 of 1000 bytes, 2 graphs. At the limit, catalog reads fail with STORE_INTERNAL_LIMIT; raise DKG_STORE_GRAPH_CATALOG_MAX_BYTES before then.',
+      'The graph catalog has reached 50% of its internal limit STORE_GRAPH_CATALOG_MAX_BYTES: 500 of 1000 bytes, 2 graphs. At the limit, catalog reads fail with STORE_INTERNAL_LIMIT; raise store.graphCatalog.maxBytes or DKG_STORE_GRAPH_CATALOG_MAX_BYTES before then.',
     ]);
     record({ graphs: 3, bytes: 800 });
     expect(warnings).toHaveLength(2);
@@ -157,5 +157,22 @@ describe('graph catalog size warnings', () => {
     record({ graphs: 2, bytes: 500 });
     expect(warnings).toHaveLength(4);
     expect(warnings[3]).toContain('reached 50%');
+  });
+
+  it('logs the warning through the node logger at WARN, from the graph-catalog module', () => {
+    vi.stubEnv(STORE_GRAPH_CATALOG_MAX_BYTES_ENV, '1000');
+    const records: LogRecord[] = [];
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    Logger.setSink(record => { records.push(record); });
+    try {
+      createGraphCatalogSizeRecorder()({ graphs: 3, bytes: 800 });
+    } finally {
+      Logger.setSink(null);
+      stderr.mockRestore();
+    }
+    expect(records).toEqual([expect.objectContaining({
+      level: 'warn', module: 'graph-catalog',
+      message: expect.stringMatching(/^The graph catalog has reached 80% of its internal limit STORE_GRAPH_CATALOG_MAX_BYTES: 800 of 1000 bytes, 3 graphs\./),
+    })]);
   });
 });

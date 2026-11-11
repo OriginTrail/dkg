@@ -24,6 +24,12 @@ export const severityMatches = (regex) => ` | severity_text=~\`${regex}\``;
  *  callers append the range selector directly: `...${RPC_USAGE_PIPELINE}[1h]`. */
 export const RPC_USAGE_PIPELINE = ' |= `rpc_usage` | logfmt | method != `` | unwrap count ';
 
+/** Line filter for the node's graph catalog size warning at one level (50 or 80):
+ *  the start of the message packages/storage/src/graph-catalog-metrics.ts logs
+ *  at WARN, pinned by its test. */
+export const graphCatalogLimitWarning = (percent) =>
+  ` |= \`The graph catalog has reached ${percent}% of its internal limit\``;
+
 /** Loki-side node identity: the label pair every per-node log aggregation
  *  groups by (Tempo's equivalent is resource.service.instance.id). */
 export const LOKI_NODE_GROUP = 'service_instance_id, deployment_environment';
