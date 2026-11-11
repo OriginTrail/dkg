@@ -14,6 +14,10 @@ export {
 } from './query-materialization-error.js';
 export { DKGQueryEngine, resolveViewGraphs, type ViewResolution } from './dkg-query-engine.js';
 export {
+  SemanticsUnsupportedError, VIEW_NOT_READY_RETRY_AFTER_SECONDS, ViewNotReadyError,
+  type ViewReadGraphs,
+} from './view-dataset-plan.js';
+export {
   CALLER_SPARQL_REJECTED_CODE,
   CallerSparqlRejectedError,
   isCallerSparqlRejectedError,

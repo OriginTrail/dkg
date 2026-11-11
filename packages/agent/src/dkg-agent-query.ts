@@ -650,7 +650,7 @@ export class QueryMethods extends DKGAgentBase {
       maxResponseBytes: opts.maxResponseBytes,
       ...budget,
       maxLiteralHydrationBytes: opts.maxLiteralHydrationBytes,
-      view: opts.view,
+      view: opts.view, semantics: opts.semantics,
       agentAddress: effectiveWmAddress,
       agentAddressAliases: wmAddressAliases,
       verifiedGraph: opts.verifiedGraph,
