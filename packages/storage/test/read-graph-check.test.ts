@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { nonEmptyNamedGraphEnumerationPattern } from '../src/adapters/graph-enumeration-query.js';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
@@ -273,5 +273,26 @@ describe('the read-graph check schedule', () => {
     expect(schedule!.requestSampledCheck()).toBe(false);
     expect(schedule!.requestFullCheck()).toBe(false);
     await adapter.close();
+  });
+
+  it('runs both passes on its own once started, with no request', async () => {
+    const { adapter, store } = await hooked();
+    const passes = new Set<string>();
+    // A full pass counts each read graph's size; a sampled pass takes subjects from member graphs.
+    adapter.hook = {
+      matches: (sparql) => {
+        if (isSizeQuery(sparql)) passes.add('full');
+        if (sparql.startsWith('SELECT DISTINCT ?s WHERE { GRAPH <')) passes.add('sampled');
+        return false;
+      },
+      before: async () => {},
+    };
+    const schedule = startReadGraphChecks(store, { sampledIntervalMs: 20, fullIntervalMs: 40 });
+    try {
+      await vi.waitFor(() => expect([...passes].sort()).toEqual(['full', 'sampled']), { timeout: 10_000, interval: 20 });
+    } finally {
+      await schedule.close();
+      await adapter.close();
+    }
   });
 });
