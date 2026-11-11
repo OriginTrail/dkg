@@ -1,7 +1,8 @@
 /**
  * Client-side deadlines for daemon HTTP requests, shared by the CLI and MCP
  * clients so both give every route the same deadline and read the same
- * environment overrides.
+ * environment overrides. Below them, how long a client waits before it repeats
+ * a request the daemon answered with its retryable authority 503.
  */
 
 import { MAX_NODE_TIMER_DELAY_MS } from './node-timer.js';
@@ -130,3 +131,15 @@ export function resolveDaemonRequestDeadlines(
     timeoutMsFor: (route: DaemonRequestRoute) => byClass[classifyDaemonRequestDeadline(route)],
   });
 }
+
+// Preserve the public client API while scripts execute this same build-free policy.
+export {
+  READ_AUTHORITY_CODE as DAEMON_READ_AUTHORITY_UNAVAILABLE_CODE,
+  AUTHORITY_CODE as DAEMON_AUTHORITY_UNAVAILABLE_CODE,
+  RETRYABLE_AUTHORITY_CODES as DAEMON_RETRYABLE_AUTHORITY_CODES,
+  AUTHORITY_RETRY_DELAYS_MS as DAEMON_AUTHORITY_RETRY_DELAYS_MS,
+  AUTHORITY_RETRY_MAX_DELAY_MS as DAEMON_AUTHORITY_RETRY_MAX_DELAY_MS,
+  isRetryableAuthorityAnswer as isRetryableDaemonAuthorityAnswer,
+  retryAfterMs as parseDaemonRetryAfterMs,
+  authorityRetryDelayMs as daemonAuthorityRetryDelayMs,
+} from '../runtime/daemon-authority-retry.mjs';
