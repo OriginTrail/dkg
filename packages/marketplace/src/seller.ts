@@ -44,9 +44,12 @@
  *   retry: it tries other sellers first for a while, and still routes this
  *   seller's other services. Any other failure (no answer in time, or 401,
  *   403, 408, 409, 429 or 5xx, about the seller's key, quota or load) is
- *   `UpstreamError`, to retry. A service whose backend refuses a call with
- *   tools (400 or 422) and has served none since the node started takes no
- *   tool calls until the node restarts: its quotes stop saying it takes them.
+ *   `UpstreamError`, to retry. When the backend refuses a call with tools as
+ *   made (400 or 422) and has shown nothing of tools since the node started,
+ *   the seller asks it a minimal call with tools of its own, which no buyer's
+ *   content is in. Refused as made too, the service takes no tool calls until
+ *   the node restarts, and its quotes stop saying it takes them; served, the
+ *   refusal was that call's own, and the service keeps its tools.
  * - **The end of the epoch.** Within `stopServingSeconds` of it, new calls are
  *   refused: their receipts could not land in time.
  * - **The job.** Ticks every `tickSeconds` from the epoch's start, and once
@@ -70,7 +73,7 @@ import {
   type ServiceRequest,
 } from '@origintrail-official/dkg-chain';
 import { MarketplaceRefusal } from './buyer.js';
-import { UpstreamError, type Completion, type Connector } from './connector.js';
+import { UpstreamError, type Completion, type CompletionCall, type Connector } from './connector.js';
 import { KeyedLock, setAside, writeDurably } from './journal.js';
 import { DEFAULT_LANDING, Lander, nextLandingAt, secondsToNextTick, secondsToRetry, type LandingReport, type LandingSettings } from './landing.js';
 import { SellerLedger, type ServedCall } from './ledger.js';
@@ -114,6 +117,15 @@ const FAILED_CALLS_KEPT = 10_000;
 const CALL_REFUSED: ReadonlySet<number> = new Set([400, 404, 413, 415, 422]);
 /** Of those, the ones that say the backend cannot take what the call carries: for a call with tools, maybe its tools. */
 const CALL_INVALID: ReadonlySet<number> = new Set([400, 422]);
+/**
+ * The seller's own call with tools, a few tokens long and with no buyer's content in it, that tells whether a
+ * backend takes tools once it has refused a buyer's call with them (`Seller.checkTools`).
+ */
+const TOOLS_CHECK: CompletionCall = {
+  messages: [{ role: 'user', content: 'Reply with OK.' }],
+  maxTokens: 16,
+  tools: [{ type: 'function', function: { name: 'noop', description: 'Does nothing.', parameters: { type: 'object', properties: {} } } }],
+};
 
 export interface SellerService {
   /** The model's URN; `serviceId` is its keccak256. */
@@ -129,7 +141,7 @@ export interface SellerService {
   backendTimeoutMs?: number;
   /**
    * Whether it takes tool calls: said in its quotes. Off unless set; off too, until the node restarts, once its
-   * backend refuses a call with tools as made (400 or 422) and has served none.
+   * backend refuses the seller's own minimal call with tools as made (`Seller.checkTools`).
    */
   tools?: boolean;
 }
@@ -172,10 +184,13 @@ export class Seller {
   private domain: MarketplaceDomain | undefined;
   /** service id => whether its backend answered the last call. */
   private readonly backends = new Map<string, 'up' | 'down'>();
-  /** The services whose backend has served a call with tools since the node started: it takes them. */
-  private readonly toolsServed = new Set<string>();
-  /** The services whose backend refused a call with tools as made and has served none: they take no tool calls now. */
-  private readonly toolsOff = new Set<string>();
+  /**
+   * service id => what its backend has shown of tools since the node started: it served a call with tools, or it
+   * refused the seller's own minimal one as made (`checkTools`). Nothing is known while it is absent.
+   */
+  private readonly toolSupport = new Map<string, 'served' | 'refused'>();
+  /** service id => the seller's own call with tools to its backend, while one is out. */
+  private readonly toolChecks = new Map<string, Promise<void>>();
   /** The chain's time as the last tick read it, and when, by this host's clock. */
   private lastTimes: { times: EpochTimes; at: number } | undefined;
   /** request digest => the refusal of a call whose backend ran but gave nothing to sign, oldest first. */
@@ -466,7 +481,7 @@ export class Seller {
         ...(tools && parallelToolCalls !== undefined ? { parallelToolCalls } : {}),
       });
       this.backends.set(service.serviceId, 'up');
-      if (call.body.tools) this.toolsServedBy(service);
+      if (call.body.tools) this.toolSupport.set(service.serviceId, 'served');
     } catch (err) {
       this.backends.set(service.serviceId, 'down');
       // The backend's detail (a missing key's variable, an address, its own words) stays in the log.
@@ -474,7 +489,8 @@ export class Seller {
       const status = err instanceof UpstreamError ? err.status : undefined;
       // No answer, or one about the seller's key, quota or load: the call may be served later.
       if (status === undefined || !CALL_REFUSED.has(status)) return this.failedOnce(requestDigest, refusal('UpstreamError'));
-      if (call.body.tools && CALL_INVALID.has(status)) this.toolsRefusedBy(service, status);
+      // Maybe its tools, maybe what the call put in them: the seller's own call with tools tells which, before the answer.
+      if (call.body.tools && CALL_INVALID.has(status)) await this.checkTools(service);
       return this.failedOnce(requestDigest, refusal('BadRequest', `the service's backend refused the call (${status})`));
     }
     try {
@@ -537,26 +553,40 @@ export class Seller {
     return refused;
   }
 
-  /** Whether a service takes tool calls now: its settings say so, and its backend has not refused them (`toolsRefusedBy`). */
+  /** Whether a service takes tool calls now: its settings say so, and its backend has not refused them (`checkTools`). */
   private takesTools(service: SellerService): boolean {
-    return service.tools === true && !this.toolsOff.has(service.serviceId);
-  }
-
-  /** A call with tools served: the backend takes them, so a refusal of one is that call's own. */
-  private toolsServedBy(service: SellerService): void {
-    this.toolsServed.add(service.serviceId);
-    this.toolsOff.delete(service.serviceId);
+    return service.tools === true && this.toolSupport.get(service.serviceId) !== 'refused';
   }
 
   /**
-   * A call with tools refused as made (400 or 422) by a backend that has served none since the node started: it may
-   * take no tools as this service sends them, so the service takes no tool calls until the node restarts, and buyers
-   * stop sending it calls it would only refuse. Once its backend has served one, a refusal is that call's own.
+   * After its backend refused a buyer's call with tools as made (400 or 422): while the backend has shown nothing of
+   * tools since the node started, ask it the seller's own minimal call with tools (`TOOLS_CHECK`), one at a time.
+   *   - Served: the backend takes tools, and the refusal was that call's own.
+   *   - Refused as made too: the backend takes no tools as this service sends them. The service takes no tool calls
+   *     until the node restarts, so buyers stop sending it calls it would only refuse.
+   *   - Anything else, such as no answer: nothing is known, and the next such refusal asks again.
+   * It costs the seller a few tokens, and only until the backend has shown whether it takes tools.
    */
-  private toolsRefusedBy(service: SellerService, status: number): void {
-    if (this.toolsServed.has(service.serviceId) || this.toolsOff.has(service.serviceId)) return;
-    this.toolsOff.add(service.serviceId);
-    this.deps.log?.(`[marketplace] ${service.model} takes no tool calls until the node restarts: its backend refused one (${status}) and has served none`);
+  private checkTools(service: SellerService): Promise<void> {
+    const id = service.serviceId;
+    if (this.toolSupport.has(id)) return Promise.resolve();
+    const out = this.toolChecks.get(id);
+    if (out) return out;
+    const check = Promise.resolve()
+      .then(() => service.connector.complete(TOOLS_CHECK))
+      .then(
+        () => { this.toolSupport.set(id, 'served'); },
+        (err: unknown) => {
+          const status = err instanceof UpstreamError ? err.status : undefined;
+          // Nothing known, or a buyer's call with tools was served meanwhile: the tools stay.
+          if (status === undefined || !CALL_INVALID.has(status) || this.toolSupport.has(id)) return;
+          this.toolSupport.set(id, 'refused');
+          this.deps.log?.(`[marketplace] ${service.model} takes no tool calls until the node restarts: its backend refused a minimal call with tools too: ${messageOf(err)}`);
+        },
+      )
+      .finally(() => { this.toolChecks.delete(id); });
+    this.toolChecks.set(id, check);
+    return check;
   }
 
   /** Whether `request` expires before the service's backend could answer and its receipt be signed, at chain time `now`. */

@@ -18,10 +18,11 @@ All notable changes to the DKG V10 node are documented here. The format is based
   retry. Buyers then try other sellers first for ten minutes and still route
   the seller's other services, where before they left the seller out of
   every service for ten minutes. No answer, timeouts, and 401, 403, 408,
-  409, 429 and 5xx answers are handled as before. A service whose backend
-  refuses a call with tools before serving one stops offering tools until
-  the node restarts, so buyers answer such calls with `tools_unsupported`
-  instead of sending them.
+  409, 429 and 5xx answers are handled as before. When a service's backend
+  refuses a call with tools, the seller checks with a minimal call with
+  tools of its own. If the backend refuses that too, the service stops
+  offering tools until the node restarts, so buyers answer such calls with
+  `tools_unsupported` instead of sending them.
 
 ## [10.1.0] - Unreleased
 

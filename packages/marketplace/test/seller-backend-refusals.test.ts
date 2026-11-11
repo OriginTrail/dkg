@@ -10,10 +10,12 @@
  *   - no answer, a timeout, and 401, 403, 408, 409, 429 and 5xx are
  *     `UpstreamError`, to retry, as before: the buyer leaves the seller out of
  *     every service for ten minutes;
- *   - a service whose backend refuses a call with tools (400 or 422) and has
- *     served none stops saying it takes tools until the node restarts, so the
- *     buyer answers its calls with tools itself, and they hold nothing; one
- *     whose backend has served a call with tools keeps them.
+ *   - when the backend refuses a call with tools (400 or 422) and has shown
+ *     nothing of tools, the seller checks with a minimal call with tools of
+ *     its own: refused too, the service stops saying it takes tools until the
+ *     node restarts, so the buyer answers its calls with tools itself, and
+ *     they hold nothing; served, the refusal was that call's own. A service
+ *     whose backend has served a call with tools keeps them, unchecked.
  */
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -59,6 +61,8 @@ const NO_TOOLS = { error: { message: 'Function tools are not supported for this 
 
 /** What the stubbed backend answers: a status and its body, `hang` until the connector's time limit, or `down`, no answer. */
 type Reply = { status: number; body?: unknown } | 'hang' | 'down';
+/** A reply, or what picks one for the request sent. */
+type Answer = Reply | ((sent: Record<string, unknown>) => Reply);
 
 let dir: string;
 let mock: MockChainAdapter;
@@ -68,7 +72,7 @@ let router: Router;
 let gateway: Gateway;
 let caller: { key: AccessKey };
 /** backend model => what it answers a call with tools, and one without. */
-let replies: Record<string, { tools: Reply; text: Reply }>;
+let replies: Record<string, { tools: Answer; text: Answer }>;
 /** Every request a backend got. */
 let requests: Array<Record<string, unknown>>;
 /** What the seller answered each `serve` the gateway sent. */
@@ -82,13 +86,18 @@ const chat = (model: string, extra: Record<string, unknown> = {}) => ({ model, m
 const withTools = (model: string) => chat(model, { tools: TOOLS });
 const call = (c: unknown) => gateway.chatCompletion(caller, c);
 const quoted = async (s: Seller, model: string) => (await s.quote({ services: [serviceIdOf(model)] })).offers[0]!;
+/** Whether a backend request is the seller's own check of its tools: one with tools that are not the buyer's. */
+const isCheck = (sent: Record<string, unknown>) =>
+  Array.isArray(sent.tools) && !(sent.tools as ToolSpec[]).some((t) => t.function.name === TOOLS[0].function.name);
+const checks = () => requests.filter(isCheck).length;
 
 /** `fetch` as the backends answer it: by the request's model, and whether it carries tools. */
 function stubBackends(): void {
   vi.stubGlobal('fetch', vi.fn(async (_url: string | URL, init?: RequestInit) => {
     const sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
     requests.push(sent);
-    const reply = replies[String(sent.model)]![sent.tools ? 'tools' : 'text'];
+    const answer = replies[String(sent.model)]![sent.tools ? 'tools' : 'text'];
+    const reply = typeof answer === 'function' ? answer(sent) : answer;
     if (reply === 'down') throw new TypeError('fetch failed');
     if (reply === 'hang') return new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason)));
     const said = reply.body ?? (reply.status < 300 ? OK : { error: { message: 'synthetic refusal' } });
@@ -173,9 +182,12 @@ describe('a call its backend refuses about the call itself', () => {
     expect(answers).toEqual([{ ok: false, code: 'BadRequest', retry: false, message: "the service's backend refused the call (400)" }]);
     expect(demote).toHaveBeenCalledWith(seller.gate.identityId);
     expect(unreachable).not.toHaveBeenCalled();
-    // The backend's words stay in the seller's log, beside the service's tools turned off.
+    // The seller checked with its own minimal call with tools, refused too, before it answered: the tools are off.
+    expect(checks()).toBe(1);
     expect(logs).toContain(`[marketplace] the backend of ${A.model} failed: the backend answered 400: ${NO_TOOLS.error.message}`);
-    expect(logs).toContain(`[marketplace] ${A.model} takes no tool calls until the node restarts: its backend refused one (400) and has served none`);
+    expect(logs).toContain(
+      `[marketplace] ${A.model} takes no tool calls until the node restarts: its backend refused a minimal call with tools too: the backend answered 400: ${NO_TOOLS.error.message}`,
+    );
     expect(await quoted(seller, A.model)).not.toHaveProperty('tools');
     expect(await quoted(seller, B.model)).toMatchObject({ tools: true });
 
@@ -208,9 +220,11 @@ describe('a call its backend refuses about the call itself', () => {
     // A call without tools leaves the service's tools on.
     expect(await quoted(seller, A.model)).toMatchObject({ tools: true });
     expect(body(await call(withTools(A.model)))).toMatchObject({ sellerCode: 'BadRequest', retry: false });
-    // 400 and 422 say the backend cannot take what the call carries; 404, 413 and 415 are about the model, the size or the form.
+    // 400 and 422 say the backend cannot take what the call carries, so the seller checks, and its own call is refused
+    // too; 404, 413 and 415 are about the model, the size or the form, with no check.
     if (status === 400 || status === 422) expect(await quoted(seller, A.model)).not.toHaveProperty('tools');
     else expect(await quoted(seller, A.model)).toMatchObject({ tools: true });
+    expect(checks()).toBe(status === 400 || status === 422 ? 1 : 0);
     expect(unreachable).not.toHaveBeenCalled();
   });
 
@@ -227,13 +241,43 @@ describe('a call its backend refuses about the call itself', () => {
 });
 
 describe("a service's tools", () => {
-  it("stay on once its backend has served a call with tools: a later refusal is that call's own", async () => {
+  it("stay on when a buyer's call with tools was refused for what it carries: the seller's own call is served, and the next valid call reaches the backend", async () => {
+    await setUp();
+    // The backend refuses a tool whose parameters are not an object schema; the wire takes any object there.
+    const invalid = [{ type: 'function', function: { name: 'list_deployments', parameters: { type: 'invalid-type' } } }];
+    replies[A.backend]!.tools = (sent) => ((sent.tools as ToolSpec[]).every((t) => t.function.parameters?.type === 'object') ? { status: 200 } : { status: 400 });
+    expect(body(await call(chat(A.model, { tools: invalid })))).toMatchObject({ sellerCode: 'BadRequest', retry: false });
+    expect(checks()).toBe(1);
+    expect(await quoted(seller, A.model)).toMatchObject({ tools: true });
+    expect(logs.filter((l) => l.includes('takes no tool calls'))).toEqual([]);
+    const before = requests.length;
+    expect((await call(withTools(A.model))).status).toBe(200);
+    expect(requests).toHaveLength(before + 1);
+    // Its backend has shown it takes tools: a refusal after that is the call's own, and is not checked again.
+    expect(body(await call(chat(A.model, { tools: invalid })))).toMatchObject({ sellerCode: 'BadRequest', retry: false });
+    expect(checks()).toBe(1);
+    expect(await quoted(seller, A.model)).toMatchObject({ tools: true });
+  });
+
+  it('stay on when the check says nothing, and the next such refusal checks again', async () => {
+    await setUp();
+    const checkReplies: Reply[] = [{ status: 503 }, { status: 400, body: NO_TOOLS }];
+    replies[A.backend]!.tools = (sent) => (isCheck(sent) ? checkReplies.shift()! : { status: 400, body: NO_TOOLS });
+    expect(body(await call(withTools(A.model)))).toMatchObject({ sellerCode: 'BadRequest', retry: false });
+    expect(await quoted(seller, A.model)).toMatchObject({ tools: true });
+    expect(body(await call(withTools(A.model)))).toMatchObject({ sellerCode: 'BadRequest', retry: false });
+    expect(await quoted(seller, A.model)).not.toHaveProperty('tools');
+    expect(checks()).toBe(2);
+  });
+
+  it("stay on once its backend has served a call with tools: a later refusal is that call's own, and is not checked", async () => {
     await setUp();
     expect((await call(withTools(A.model))).status).toBe(200);
     // Say the next call is longer than the model takes.
     replies[A.backend]!.tools = { status: 400, body: { error: { message: 'synthetic: the input is too long' } } };
     expect(body(await call(withTools(A.model)))).toMatchObject({ sellerCode: 'BadRequest', retry: false });
     expect(await quoted(seller, A.model)).toMatchObject({ tools: true });
+    expect(checks()).toBe(0);
     expect(logs.filter((l) => l.includes('takes no tool calls'))).toEqual([]);
     replies[A.backend]!.tools = { status: 200 };
     expect((await call(withTools(A.model))).status).toBe(200);
@@ -272,8 +316,9 @@ describe("a call whose backend fails for the seller's key, quota or load, or doe
     expect(answers).toEqual([{ ok: false, code: 'UpstreamError', retry: true }]);
     expect(unreachable).toHaveBeenCalledWith(seller.gate.identityId);
     expect(demote).not.toHaveBeenCalled();
-    // Out of every service for now, the other one too, as before; and the service still takes tools.
+    // Out of every service for now, the other one too, as before; and the service still takes tools, unchecked.
     expect(body(await call(chat(B.model))).error?.code).toBe('no_seller');
     expect(await quoted(seller, A.model)).toMatchObject({ tools: true });
+    expect(checks()).toBe(0);
   });
 });
