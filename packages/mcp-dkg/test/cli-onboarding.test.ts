@@ -143,7 +143,7 @@ describe('join through the real client and filesystem installer', () => {
       expect(contextGraphId).toBe('team');
       return manifest;
     });
-    expect(await join(['--daemon=http://daemon.test:1234'])).toBe(0);
+    expect(await join(['--daemon=http://daemon.test:1234', `--token-file=${path.join(home, '.dkg/auth.token')}`])).toBe(0);
     expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).toBe(
       `urn:dkg:agent:${wallet.toLowerCase()} alice team`,
     );
