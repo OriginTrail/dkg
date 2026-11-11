@@ -1001,6 +1001,44 @@ describe('installing the working-memory identity rule', () => {
     expect(recordedWorkingMemoryIdentity(dataDir)).toEqual({ peerId: 'peer-1' });
   });
 
+  it('owes again a mark that a backend restart undid before a flush made it durable, and records the identity only once it is stored again', async () => {
+    const { adapter, fixture, layer, context, dataDir } = await open();
+    const { agentWm } = fixture.readGraphs;
+    let recovery = { generation: 1, ready: true };
+    registerStoreRecoveryGeneration(adapter, () => recovery);
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(agentWm, 4)));
+    layer.runtime.mirror.set(readyRow(agentWm, 4));
+    const identity = { defaultAgentAddress: AGENT, peerId: 'peer-1' };
+    // The worker exits after it took the mark and before the flush, and its replacement reloads a snapshot from before it.
+    adapter.onFlush = async () => {
+      adapter.onFlush = undefined;
+      await adapter.update!(readGraphStateCompareAndSet(row(agentWm, 'dirty', 5), readyRow(agentWm, 4)));
+      recovery = { generation: 2, ready: true };
+      throw new Error('the store worker exited');
+    };
+    expect(await installWorkingMemoryIdentity(context, identity)).toEqual({ marked: [agentWm], recorded: false });
+    expect((await storedRows(adapter))[agentWm]).toBe('ready@4');
+    // The same identity again stores the mark again before it records.
+    expect(await installWorkingMemoryIdentity(context, identity)).toEqual({ marked: [], recorded: true });
+    expect((await storedRows(adapter))[agentWm]).toBe('dirty@5');
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(identity);
+    // A restart that the flush outlives, on the replacement, undoes the mark too.
+    const next = { peerId: 'peer-1' };
+    await adapter.update!(readGraphStateCompareAndSet(row(agentWm, 'dirty', 5), readyRow(agentWm, 5)));
+    layer.runtime.mirror.set(readyRow(agentWm, 5));
+    adapter.onFlush = async () => {
+      adapter.onFlush = undefined;
+      await adapter.update!(readGraphStateCompareAndSet(row(agentWm, 'dirty', 6), readyRow(agentWm, 5)));
+      recovery = { generation: 3, ready: true };
+    };
+    expect(await installWorkingMemoryIdentity(context, next)).toEqual({ marked: [agentWm], recorded: false });
+    expect((await storedRows(adapter))[agentWm]).toBe('ready@5');
+    expect(recordedWorkingMemoryIdentity(dataDir)).toBeUndefined();
+    expect(await installWorkingMemoryIdentity(context, next)).toEqual({ marked: [], recorded: true });
+    expect((await storedRows(adapter))[agentWm]).toBe('dirty@6');
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(next);
+  });
+
   it('records only the last of two overlapping installations, once its marks are stored and flushed', async () => {
     const { adapter, fixture, layer, context, dataDir } = await open();
     const { agentWm } = fixture.readGraphs;
@@ -1387,6 +1425,19 @@ describe('read-graph start-up', () => {
     expect(await installWorkingMemoryIdentity({ store }, { peerId: 'peer-1' })).toEqual({ marked: [], recorded: true });
     expect(recordedWorkingMemoryIdentity(first)).toEqual({ peerId: 'peer-1' });
     expect(recordedWorkingMemoryIdentity(second)).toEqual({ defaultAgentAddress: other, peerId: 'peer-1' });
+  });
+
+  it('records a change of identity in the data directory its backend started from, whichever directory the installation names', async () => {
+    const { store, dataDir } = await open();
+    const other = mkdtempSync(join(tmpdir(), 'read-graph-builder-'));
+    dirs.push(other);
+    writeFileSync(join(dataDir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE), JSON.stringify({ defaultAgentAddress: AGENT, peerId: 'peer-1' }));
+    expect(await startReadGraphs(store, { dataDir, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    // A workload over the same backend that names another data directory changes the identity: the record start-up
+    // reads is the one that changes.
+    expect(await installWorkingMemoryIdentity({ store, dataDir: other }, { defaultAgentAddress: AGENT, peerId: 'peer-2' })).toEqual({ marked: [], recorded: true });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual({ defaultAgentAddress: AGENT, peerId: 'peer-2' });
+    expect(recordedWorkingMemoryIdentity(other)).toBeUndefined();
   });
 
   /** Two agents of one process over the same backend: two layers that share its runtime. */
