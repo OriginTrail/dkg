@@ -74,14 +74,37 @@ export const RUN_KINDS = Object.freeze([
 ]);
 const SHORT_KINDS = new Map([['pr', 'PR'], ['queue', 'queue'], ['canary-push', 'canary'], ['nightly', 'nightly'], ['push', 'push'], ['dispatch', 'dispatch'], ['other', 'other']]);
 
-// ci.yml's concurrency group (ci-CI-<PR number or ref>-<profile>): a newer run
-// in the group cancels an older one still in progress. A pull request is keyed
-// by its head branch, since the run of a merged PR no longer lists its number.
+// ci.yml names a dispatch's run after the profile it was dispatched with.
+const DISPATCH_RUN_NAME = /^CI \((standard|nightly-equivalent)\)$/;
+
+// The execution profile in a run's concurrency group: a dispatch's own, as its
+// run name records it. A dispatch from before ci.yml recorded it falls back to
+// its stream: the nightly's runs are nightly-equivalent, manual ones standard.
+export function runProfile(run) {
+  if (run.event !== 'workflow_dispatch') return 'standard';
+  return DISPATCH_RUN_NAME.exec(run.display_title ?? '')?.[1] ?? (runKind(run) === 'nightly' ? 'nightly-equivalent' : 'standard');
+}
+
+// ci.yml's concurrency group (ci-CI-<PR number or ref>-<profile>): a run
+// entering the group cancels an older one still in progress. A pull request is
+// keyed by its head branch, since the run of a merged PR no longer lists its
+// number.
 export function concurrencyGroup(run) {
   const kind = runKind(run);
   if (kind === 'pr') return `pr ${run.head_repository?.full_name ?? ''} ${run.head_branch}`;
   if (kind === 'queue') return `queue ${run.head_branch}`;
-  return `ref ${run.head_branch} ${kind === 'nightly' ? 'nightly-equivalent' : 'standard'}`;
+  return `ref ${run.head_branch} ${runProfile(run)}`;
+}
+
+// Whether `other` entered `run`'s concurrency group in [start, end]: when it
+// was created, if after `run`, or when its latest re-run started
+// (run_started_at, which a re-run resets). A re-run keeps its creation time,
+// so a retry of an older run cancels a newer one too. Earlier re-runs are not
+// on the run.
+function enteredDuring(other, run, { start, end }) {
+  const created = time(other.created_at);
+  const retried = other.run_attempt > 1 ? time(other.run_started_at) : NaN;
+  return (created > time(run.created_at) && created >= start && created <= end) || (retried >= start && retried <= end);
 }
 
 // When a run's latest attempt executed: from the first start to the last
@@ -103,11 +126,11 @@ export function attemptWindow(run, jobs = []) {
 }
 
 // Each run's stream and outcome: success; failure (failed, timed out or never
-// started); superseded (cancelled because a newer run of its concurrency group
-// was created while its latest attempt ran: churn, not a verdict); cancelled
-// (by a job timeout, by hand or by the merge queue dropping its entry);
-// pending; other (skipped, neutral, ...). `jobsByRun` narrows a cancelled
-// run's latest attempt to when its jobs ran (attemptWindow).
+// started); superseded (cancelled because another run entered its
+// concurrency group while its latest attempt ran: churn, not a verdict);
+// cancelled (by a job timeout, by hand or by the merge queue dropping its
+// entry); pending; other (skipped, neutral, ...). `jobsByRun` narrows a
+// cancelled run's latest attempt to when its jobs ran (attemptWindow).
 export function classifyRuns(runs, jobsByRun = new Map()) {
   const groups = groupBy(runs, concurrencyGroup);
   return runs.map((run) => {
@@ -116,11 +139,8 @@ export function classifyRuns(runs, jobsByRun = new Map()) {
     else if (run.conclusion === 'success') outcome = 'success';
     else if (['failure', 'timed_out', 'startup_failure'].includes(run.conclusion)) outcome = 'failure';
     else if (run.conclusion === 'cancelled') {
-      const { start, end } = attemptWindow(run, jobsByRun.get(run.id));
-      const superseded = groups.get(concurrencyGroup(run)).some((other) => other.id !== run.id
-        && time(other.created_at) > time(run.created_at)
-        && time(other.created_at) >= start
-        && time(other.created_at) <= end);
+      const window = attemptWindow(run, jobsByRun.get(run.id));
+      const superseded = groups.get(concurrencyGroup(run)).some((other) => other.id !== run.id && enteredDuring(other, run, window));
       outcome = superseded ? 'superseded' : 'cancelled';
     }
     return { run, kind: runKind(run), outcome };

@@ -1,4 +1,9 @@
 name: CI
+# A dispatch's run is named after its execution profile, "CI (<profile>)", so
+# the weekly CI health report can place it in its concurrency group. Every
+# other event keeps GitHub's own name: a run-name of only whitespace falls
+# back to it.
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('CI ({0})', inputs.profile) || ' ' }}
 
 # Trigger rules:
 #   * pull_request : fail-closed delta plan for fast iteration. Label changes

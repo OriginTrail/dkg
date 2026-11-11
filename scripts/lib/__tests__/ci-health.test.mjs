@@ -29,6 +29,7 @@ import {
   renderHealthHeadline,
   renderHealthReport,
   rootFailures,
+  runProfile,
   topRootFailures,
 } from '../ci-health.mjs';
 import { inspectTestExceptions } from '../test-exceptions.mjs';
@@ -148,6 +149,50 @@ test('a cancelled retry is judged by when its own attempt ran: a run that finish
   assert.equal(outcome([a, b, c], new Map([[1, aJobs]])), 'superseded');
   // Without a retry, or job times, the run's own span decides as before.
   assert.deepEqual(attemptWindow(b), { start: T0 + 60 * MINUTE, end: T0 + 100 * MINUTE });
+});
+
+test('a retry of an older run cancels a newer run of its group: the newer run is superseded, and its jobs are not read', () => {
+  // A was created yesterday; B starts today at 10:00, and retrying A at 10:10 cancels B.
+  const day = 1440;
+  const a = run({ id: 61, branch: 'feature/retry', attempt: 2, created: 0, started: day + 610, updated: day + 650 });
+  const b = run({ id: 62, branch: 'feature/retry', conclusion: 'cancelled', created: day + 600, updated: day + 610.2 });
+  const bJobs = [
+    job('Build packages', { start: day + 600, minutes: 6 }),
+    job('Tornado: agent [1/11]', { conclusion: 'cancelled', start: day + 606, minutes: 4.2, steps: [['Agent tests (shard 1/11)', 'cancelled']] }),
+  ];
+  const outcome = (runs, jobsByRun) => classifyRuns(runs, jobsByRun).find(({ run: { id } }) => id === 62).outcome;
+  assert.equal(outcome([a, b]), 'superseded');
+  assert.equal(outcome([a, b], new Map([[62, bJobs]])), 'superseded');
+  const end = T0 + 3 * day * MINUTE;
+  const weeks = { window: { start: end - 7 * day * MINUTE, end }, previousWindow: { start: end - 14 * day * MINUTE, end: end - 7 * day * MINUTE } };
+  assert.ok(!runsNeedingJobs(classifyRuns([a, b]), weeks).some(({ id }) => id === 62), 'its interrupted lane is not read as a root failure');
+  // A's first attempt, created before B, explains nothing; nor does a retry started before or after B's attempt ran.
+  assert.equal(outcome([{ ...a, run_attempt: 1, run_started_at: a.created_at }, b]), 'cancelled');
+  assert.equal(outcome([{ ...a, run_started_at: at(day + 590) }, b]), 'cancelled');
+  assert.equal(outcome([{ ...a, run_started_at: at(day + 700) }, b], new Map([[62, bJobs]])), 'cancelled');
+});
+
+test('a dispatch joins the concurrency group of the profile its run name records: a manual nightly-equivalent dispatch never supersedes a standard push', () => {
+  const canary = { branch: 'testnet-canary' };
+  const dispatch = (id, profile) => ({ ...run({ id, event: 'workflow_dispatch', ...canary, created: 10, updated: 90 }), display_title: `CI (${profile})` });
+  const outcome = (runs, id) => classifyRuns(runs).find(({ run: { id: runId } }) => runId === id).outcome;
+  // A canary push times out while a developer runs the nightly-equivalent profile.
+  const push = run({ id: 71, event: 'push', ...canary, conclusion: 'cancelled', created: 0, updated: 45 });
+  assert.equal(outcome([push, dispatch(72, 'nightly-equivalent')], 71), 'cancelled');
+  // A standard dispatch shares the push's group, so it does cancel the push.
+  assert.equal(outcome([push, dispatch(73, 'standard')], 71), 'superseded');
+  // The nightly and a manual nightly-equivalent dispatch share a group.
+  const nightly = run({ id: 74, event: 'workflow_dispatch', ...canary, actor: 'github-actions[bot]', conclusion: 'cancelled', created: 0, updated: 45 });
+  assert.equal(outcome([nightly, dispatch(75, 'nightly-equivalent')], 74), 'superseded');
+  assert.equal(outcome([nightly, dispatch(76, 'standard')], 74), 'cancelled');
+  // A dispatch from before ci.yml named its runs falls back to its stream.
+  assert.deepEqual([runProfile(nightly), runProfile(run({ event: 'workflow_dispatch', ...canary })), runProfile(push)], ['nightly-equivalent', 'standard', 'standard']);
+  // ci.yml names only a dispatch's run, and each profile it offers reads back.
+  const workflow = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
+  assert.match(workflow['run-name'], /^\$\{\{ github\.event_name == 'workflow_dispatch' && format\('[^']*', inputs\.profile\) \|\| ' ' \}\}$/);
+  const [, template] = /format\('([^']*)', inputs\.profile\)/.exec(workflow['run-name']);
+  const offered = workflow.on.workflow_dispatch.inputs.profile.options;
+  assert.deepEqual(offered.map((profile) => runProfile({ event: 'workflow_dispatch', display_title: template.replace('{0}', profile) })), offered);
 });
 
 test('root failures skip the aggregates, treat merged coverage as derivative, and fall back to a cancelled job', () => {
