@@ -20,21 +20,23 @@ function pct(bps: number | null): string {
 export function PcaDashboardRow() {
   usePcaScopeBootstrap();
   const role = useAgentsStore((s) => (s.nodeStatus as { nodeRole?: string } | null)?.nodeRole);
-  const { covered, bestCoveringDiscountBps, walletsInconclusive, refresh } = usePcaOverview();
+  const { covered, bestCoveringDiscountBps, coverage, refresh } = usePcaOverview();
+  // Unreadable wallets: coverage can't be confirmed either way (T2/#9).
+  const walletsUnreadable = coverage.uncertainty === 'wallets-unreadable';
 
   return (
     <div className="v10-ws-pca">
       <span className="v10-ws-pca-label">Publishing discount</span>
       <span className="v10-ws-pca-value" data-covered={covered}>
         {/* T2/#9 — don't assert "None" off unreadable wallets. */}
-        {walletsInconclusive
+        {walletsUnreadable
           ? 'Couldn’t check your wallets'
           : covered
             ? pct(bestCoveringDiscountBps)
             : 'None. Publishing pays the full fee'}
       </span>
       {/* Coverage is unknown, so offer the re-read rather than a way to get a PCA. */}
-      {walletsInconclusive ? (
+      {walletsUnreadable ? (
         <RetryButton className="v10-ws-pca-cta" onClick={() => refresh()} />
       ) : (
         <button

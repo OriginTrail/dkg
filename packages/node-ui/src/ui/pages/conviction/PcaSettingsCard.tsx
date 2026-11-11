@@ -21,10 +21,12 @@ function pct(bps: number | null): string {
 export function PcaSettingsCard() {
   usePcaScopeBootstrap();
   const role = useAgentsStore((s) => (s.nodeStatus as { nodeRole?: string } | null)?.nodeRole);
-  const { accounts, covered, bestCoveringDiscountBps, walletsInconclusive, refresh } = usePcaOverview();
+  const { accounts, covered, bestCoveringDiscountBps, coverage, refresh } = usePcaOverview();
+  // Unreadable wallets: coverage can't be confirmed either way (T2/#9).
+  const walletsUnreadable = coverage.uncertainty === 'wallets-unreadable';
   const tracked = accounts.length;
   // With no PCA there's nothing to manage, so the button matches the dashboard's.
-  const action = tracked === 0 && !covered && !walletsInconclusive
+  const action = tracked === 0 && !covered && !walletsUnreadable
     ? role === 'edge' ? 'Get added to a PCA' : 'Set up PCA'
     : 'Manage PCA';
 
@@ -39,7 +41,7 @@ export function PcaSettingsCard() {
             This node’s approved publishing wallets get a <strong>{pct(bestCoveringDiscountBps)}</strong> discount
             from a Publisher Conviction Account (PCA).
           </p>
-        ) : walletsInconclusive ? (
+        ) : walletsUnreadable ? (
           // T2/#9 — don't assert "none covers" off unreadable wallets.
           <p className="v10-pca-settings-line" role="status">
             Couldn’t check this node’s wallets, so we can’t confirm a Publisher Conviction Account (PCA) discount.
@@ -54,7 +56,7 @@ export function PcaSettingsCard() {
           </p>
         )}
         <div className="v10-pca-settings-actions">
-          {walletsInconclusive && <RetryButton size="md" onClick={() => refresh()} />}
+          {walletsUnreadable && <RetryButton size="md" onClick={() => refresh()} />}
           <button
             type="button"
             className="v10-pca-card-btn ds-btn"

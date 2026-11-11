@@ -36,22 +36,77 @@ export type WalletCoverage =
   | { kind: 'unknown'; wallet: string }
   | { kind: 'uncovered'; wallet: string };
 
+/**
+ * Why coverage can't be fully confirmed, most fundamental first (#9): this node's wallet
+ * list couldn't be read, finding this node's PCAs failed, or a wallet's approval or a
+ * PCA's budget couldn't be read.
+ */
+export type CoverageUncertainty = 'wallets-unreadable' | 'lookup-failed' | 'probe-inconclusive';
+
+/** What gets coverage read again: the PCA lookup's own Retry, or re-reading the wallets and probes. */
+export type CoverageRecovery = 'retry-lookup' | 'retry-read';
+
+/** The reads that can leave coverage unconfirmed, beyond the probes themselves. */
+export interface CoverageSources {
+  /** The wallets read failed and returned no wallets (not a confirmed empty list). */
+  walletsUnreadable: boolean;
+  /** Looking up this node's PCAs failed (the Overview's discovery). */
+  lookupFailed?: boolean;
+}
+
 /** This node's coverage: one state per publishing wallet, plus the best discount among the
- *  PCAs that cover it, both from the same classified probes. The single aggregate the
- *  Overview, Dashboard and Settings all read. */
+ *  PCAs that cover it, both from the same classified probes, and whether it's confirmed.
+ *  The single aggregate the Overview, Dashboard and Settings all read. */
 export interface NodeCoverage {
+  /** covered: a wallet is covered now. uncertain: nothing confirmed covers it, and something couldn't be read. */
+  status: 'covered' | 'uncertain' | 'not-covered';
+  /** The first thing that couldn't be read, whatever the status; null when everything was read. */
+  uncertainty: CoverageUncertainty | null;
+  /** How to read again after an uncertainty; null when there's nothing to retry. */
+  recovery: CoverageRecovery | null;
   wallets: WalletCoverage[];
+  /** How many PCAs were checked, so a confirmed empty wallet list on a tracked PCA can be named. */
+  accountCount: number;
   /** Best discount among PCAs whose probe `covers` at least one of this node's wallets. */
   bestCoveringDiscountBps: number | null;
-  /** At least one publishing wallet is covered right now. */
+  /** At least one publishing wallet is covered right now (status === 'covered'). */
   covered: boolean;
+}
+
+/** Status, uncertainty and recovery from the wallet states and the reads behind them. */
+function withSources(
+  base: Pick<NodeCoverage, 'wallets' | 'accountCount' | 'bestCoveringDiscountBps'>,
+  { walletsUnreadable, lookupFailed = false }: CoverageSources,
+): NodeCoverage {
+  const covered = base.wallets.some((c) => c.kind === 'covered');
+  const probeInconclusive = base.wallets.some((c) => c.kind === 'unknown');
+  const uncertainty: CoverageUncertainty | null = walletsUnreadable
+    ? 'wallets-unreadable'
+    : lookupFailed ? 'lookup-failed' : probeInconclusive ? 'probe-inconclusive' : null;
+  // The lookup notice's Retry re-reads everything, so it's the only one offered then.
+  const recovery: CoverageRecovery | null = lookupFailed
+    ? 'retry-lookup'
+    : walletsUnreadable || probeInconclusive ? 'retry-read' : null;
+  return {
+    ...base,
+    covered,
+    status: covered ? 'covered' : uncertainty ? 'uncertain' : 'not-covered',
+    uncertainty,
+    recovery,
+  };
+}
+
+/** The same coverage with the Overview's PCA lookup outcome folded in. */
+export function withLookupOutcome(node: NodeCoverage, lookupFailed: boolean): NodeCoverage {
+  return withSources(node, { walletsUnreadable: node.uncertainty === 'wallets-unreadable', lookupFailed });
 }
 
 export function nodeCoverage(
   wallets: readonly string[],
   accounts: readonly CoverageAccount[],
-  walletsInconclusive: boolean,
+  sources: CoverageSources,
 ): NodeCoverage {
+  const { walletsUnreadable } = sources;
   let best: number | null = null;
   const states = wallets.map((wallet): WalletCoverage => {
     const results = accounts.flatMap((account) => account.walletProbes
@@ -63,14 +118,14 @@ export function nodeCoverage(
     }
     const covering = results.find((r) => r.coverage.outcome === 'covers');
     if (covering) return { kind: 'covered', wallet, accountId: covering.account.accountId };
-    if (walletsInconclusive || results.some((r) => r.coverage.outcome === 'inconclusive')) return { kind: 'unknown', wallet };
+    if (walletsUnreadable || results.some((r) => r.coverage.outcome === 'inconclusive')) return { kind: 'unknown', wallet };
     const inactive = results.find((r) => r.coverage.outcome === 'uncovered');
     if (inactive && inactive.coverage.outcome === 'uncovered') {
       return { kind: 'inactive', wallet, accountId: inactive.account.accountId, expired: inactive.coverage.dead };
     }
     return { kind: 'uncovered', wallet };
   });
-  return { wallets: states, bestCoveringDiscountBps: best, covered: states.some((c) => c.kind === 'covered') };
+  return withSources({ wallets: states, accountCount: accounts.length, bestCoveringDiscountBps: best }, sources);
 }
 
 export type WalletCoverageTone = 'success' | 'warn' | 'neutral';
@@ -97,14 +152,8 @@ export interface CoverageSummary {
   showWalletRows: boolean;
 }
 
-export function summarizeCoverage(
-  node: NodeCoverage,
-  ctx: {
-    walletsInconclusive: boolean;
-    lookupError: boolean;
-    accountCount: number;
-  },
-): CoverageSummary {
+/** The Overview's headline and line under it, read from the coverage state alone. */
+export function summarizeCoverage(node: NodeCoverage): CoverageSummary {
   const coverage = node.wallets;
   const walletTotal = coverage.length;
   const coveredCount = coverage.filter((c) => c.kind === 'covered').length;
@@ -115,24 +164,22 @@ export function summarizeCoverage(
     ? `PCA #${inactive.accountId}, ${inactive.expired ? 'which has expired' : 'which has no TRAC left in this billing period'}`
     : null;
   // #9 - never say "None" while the wallets, the PCA lookup or any wallet's approval can't be read.
-  const unconfirmed = !hasCoveredWallet && (ctx.walletsInconclusive || ctx.lookupError || anyUnknown);
-
-  const value = hasCoveredWallet
+  const value = node.status === 'covered'
     ? node.bestCoveringDiscountBps != null ? formatBps(node.bestCoveringDiscountBps) : '—'
-    : unconfirmed ? 'Unknown' : inactive ? 'None' : 'None yet';
+    : node.status === 'uncertain' ? 'Unknown' : inactive ? 'None' : 'None yet';
   const sub = hasCoveredWallet
     ? coveredCount === walletTotal
       ? `All ${walletTotal} publishing wallets covered`
       : `${coveredCount} of ${walletTotal} publishing wallets covered`
-    : ctx.walletsInconclusive
+    : node.uncertainty === 'wallets-unreadable'
       ? "Couldn't read this node's wallets, so we can't confirm your discount."
-      : ctx.lookupError
+      : node.uncertainty === 'lookup-failed'
         ? "Couldn't check this node's PCAs. You may still have a discount."
-        : anyUnknown
+        : node.uncertainty === 'probe-inconclusive'
           ? "Couldn't check whether a PCA covers this node's wallets. You may still have a discount."
           : inactiveLabel
             ? `Your wallets are on ${inactiveLabel}. They pay the full fee.`
-            : walletTotal === 0 && ctx.accountCount > 0
+            : walletTotal === 0 && node.accountCount > 0
               ? "This node didn't report any publishing wallets."
               : "This node's publishing wallets pay the full TRAC fee.";
 

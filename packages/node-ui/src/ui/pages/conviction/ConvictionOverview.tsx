@@ -9,7 +9,7 @@ import { useConnectedWalletPcas } from '../../hooks/useConnectedWalletPcas.js';
 import { listPcaContracts } from '../../api.js';
 import { WalletConnectControl, WalletRow } from '../../components/Pca/index.js';
 import { RetryButton } from '../../components/ds/RetryButton.js';
-import { walletCoverageRow, summarizeCoverage } from '../../pca/walletCoverage.js';
+import { walletCoverageRow, summarizeCoverage, withLookupOutcome } from '../../pca/walletCoverage.js';
 import { PcaAccountList, type PcaListAccount } from './PcaAccountList.js';
 import { CreatePcaModal } from './CreatePcaModal.js';
 import { ApproveWalletsModal } from './ApproveWalletsModal.js';
@@ -117,23 +117,21 @@ export function ConvictionOverview() {
   );
 
   const onManage = (id: string) => openTab({ id: `conviction:${id}`, label: `PCA #${id}`, closable: true });
-  // One typed coverage state per publishing wallet (from the overview's single aggregate).
-  const coverage = overview.coverage.wallets;
+  // The overview's single coverage aggregate, with this page's PCA lookup folded in:
+  // status, uncertainty and the Retry to offer all come from it.
+  const node = withLookupOutcome(overview.coverage, !!discoveredLookupError);
+  const coverage = node.wallets;
   const retryWalletBootstrap = useCallback(() => setBootstrapNonce((n) => n + 1), []);
   const switchNetwork = useCallback(() => {
     void switchToExpectedChain();
   }, [switchToExpectedChain]);
 
   const firstLoad = loading && accounts.length === 0 && overview.wallets.length === 0;
-  const summary = summarizeCoverage(overview.coverage, {
-    walletsInconclusive,
-    lookupError: !!discoveredLookupError,
-    accountCount: accounts.length,
-  });
-  const { hasCoveredWallet, anyUnknown, showWalletRows } = summary;
-  const showWaysIn = !hasCoveredWallet && !walletsInconclusive && !firstLoad;
-  // The lookup notice above has its own Retry, which re-reads everything.
-  const showRetry = (walletsInconclusive || anyUnknown) && !discoveredLookupError;
+  const summary = summarizeCoverage(node);
+  const { hasCoveredWallet, showWalletRows } = summary;
+  const showWaysIn = !node.covered && node.uncertainty !== 'wallets-unreadable' && !firstLoad;
+  // A failed lookup has its own Retry in its notice, which re-reads everything.
+  const showRetry = node.recovery === 'retry-read';
   const anyWalletWrongNetwork = enhancedAccounts.some((a) => a.walletWrongNetwork);
 
   const getAddedCard = (

@@ -142,9 +142,11 @@ export function GetSponsoredPanel({
   );
 
   const [sponsorId, setSponsorId] = useState(initialAccountId ?? '');
-  const [checking, setChecking] = useState(false);
-  // The last check's outcome; the message, Retry, results and Add all derive from it.
-  const [result, setResult] = useState<CheckResult | null>(null);
+  // The check that was asked for: the ID from the Overview to start with, then each Check
+  // or Retry. A fresh object per submission, so the same ID can be checked again.
+  const [submitted, setSubmitted] = useState<{ id: string } | null>(() => (initialAccountId ? { id: initialAccountId } : null));
+  const initialSubmission = useRef(submitted);
+  const submit = () => setSubmitted({ id: sponsorId });
 
   const ethFor = (w: string) => balances.find((b) => b.address?.toLowerCase() === w.toLowerCase())?.eth;
   const isFunded = (w: string) => {
@@ -152,8 +154,10 @@ export function GetSponsoredPanel({
     return e != null && Number(e) > 0;
   };
 
-  /** Read the PCA, then probe each wallet. Tracks the PCA when a wallet is approved. */
-  const runCheck = async (id: string): Promise<CheckResult> => {
+  /** Classify one check: read the PCA, then probe each wallet. Says nothing and tracks nothing itself. */
+  const runCheck = async (rawId: string): Promise<CheckResult> => {
+    const id = rawId.trim();
+    if (!/^\d+$/.test(id)) return { kind: 'failed', message: 'Enter the PCA ID as a number.', retry: false };
     // The PCA itself is read first: nothing is offered for an ID that doesn't exist.
     const read = await readPcaAccount(id, wallets);
     if (!read.ok) {
@@ -196,42 +200,36 @@ export function GetSponsoredPanel({
         retry: !allAdapterGap,
       };
     }
-    // N2: persist the sponsor id once a wallet is approved so the overview/chip pick it
-    // up. Downstream re-probes the chain independently, so nothing trusts this result (#9).
-    if (rows.some((r) => r.coverage.registered === true)) trackAccount(id);
     return { kind: 'checked', accountId: id, rows };
   };
 
-  const check = async (idToCheck?: string) => {
-    const id = (idToCheck ?? sponsorId).trim();
-    if (!/^\d+$/.test(id)) { setResult({ kind: 'failed', message: 'Enter the PCA ID as a number.', retry: false }); return; }
-    setChecking(true);
-    setResult(null); // no stale result while the new check runs
-    try {
-      setResult(await runCheck(id));
-    } finally {
-      setChecking(false);
-    }
-  };
+  // A submitted check runs once this node's wallets are known, either way: runCheck reports
+  // no or unreadable wallets itself. The result is scoped to its submission, so a new check
+  // never shows the previous one's result while it runs.
+  const walletsSettled = !walletsLoading && (wb != null || walletsReadError != null);
+  const { data: checkData, error: checkError, loading: checking } = useFetch(
+    () => runCheck(submitted!.id),
+    [submitted],
+    0,
+    { enabled: submitted != null && walletsSettled, scope: submitted, retention: 'scope' },
+  );
+  const result: CheckResult | null = checkData
+    ?? (checkError && submitted ? { kind: 'failed', message: `Couldn’t check PCA #${submitted.id.trim()} right now.`, retry: true } : null);
 
-  // An ID entered on the Overview is checked as soon as this node's wallets are known.
-  const autoChecked = useRef(false);
+  // N2: once a wallet is approved, put the PCA in the list so the Overview and chip pick it
+  // up. Downstream re-probes the chain independently, so nothing trusts this result (#9).
   useEffect(() => {
-    // Wait until the wallet read has finished, either way: check() reports no or unreadable wallets itself.
-    const walletsSettled = !walletsLoading && (wb != null || walletsReadError != null);
-    if (!initialAccountId || autoChecked.current || !walletsSettled) return;
-    autoChecked.current = true;
-    void check(initialAccountId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialAccountId, walletsLoading, walletsKey, wb, walletsReadError]);
-  // Bring that first result into view: it sits below the wallets to share.
+    if (result?.kind === 'checked' && result.rows.some((r) => r.coverage.registered === true)) trackAccount(result.accountId);
+  }, [result, trackAccount]);
+
+  // Bring the Overview ID's result into view: it sits below the wallets to share.
   const resultsRef = useRef<HTMLDivElement>(null);
   const scrolledToResult = useRef(false);
   useEffect(() => {
-    if (!autoChecked.current || scrolledToResult.current || !result) return;
+    if (scrolledToResult.current || !result || submitted == null || submitted !== initialSubmission.current) return;
     scrolledToResult.current = true;
     resultsRef.current?.scrollIntoView?.({ block: 'start' });
-  }, [result]);
+  }, [result, submitted]);
 
   const checked = result?.kind === 'checked' ? result : null;
   const approvedCount = checked?.rows.filter((r) => r.coverage.registered === true).length ?? 0;
@@ -276,7 +274,7 @@ export function GetSponsoredPanel({
                 <RetryButton onClick={() => refreshWallets()} />
               </div>
             ) : wallets.length === 0 ? (
-              <p className="v10-pca-handshake-empty">This node didn't report any publishing wallets.</p>
+              <p className="v10-pca-handshake-empty" data-testid="pca-sponsor-no-wallets">This node didn't report any publishing wallets.</p>
             ) : (
               wallets.map((w) => {
                 const eth = ethFor(w);
@@ -350,7 +348,7 @@ export function GetSponsoredPanel({
               placeholder="PCA ID from owner (e.g. 7)"
               aria-label="PCA ID from owner"
             />
-            <button type="button" className="v10-pca-card-btn primary ds-btn ds-primary" onClick={() => void check()} disabled={checking || walletsLoading}>
+            <button type="button" className="v10-pca-card-btn primary ds-btn ds-primary" onClick={submit} disabled={checking || walletsLoading}>
               {checking ? 'Checking…' : 'Check approval'}
             </button>
           </div>
@@ -358,7 +356,7 @@ export function GetSponsoredPanel({
           {result && result.kind !== 'checked' && (
             <div className="v10-pca-retry-block">
               <p className="v10-modal-error ds-card-nested" role="alert">{result.message}</p>
-              {result.retry && <RetryButton onClick={() => void check()} />}
+              {result.retry && <RetryButton onClick={submit} />}
             </div>
           )}
           {checked && (

@@ -19,7 +19,10 @@ const state = vi.hoisted(() => ({
   bootstrapScope: vi.fn(),
 }));
 
-vi.mock('../src/ui/hooks/usePcaOverview.js', () => ({ usePcaOverview: () => state.overview }));
+// The components read uncertainty from the coverage state; derive it from the test's flag.
+vi.mock('../src/ui/hooks/usePcaOverview.js', () => ({
+  usePcaOverview: () => ({ ...state.overview, coverage: { uncertainty: state.overview.walletsInconclusive ? 'wallets-unreadable' : null } }),
+}));
 vi.mock('../src/ui/hooks/usePcaScopeBootstrap.js', () => ({ usePcaScopeBootstrap: () => state.bootstrapScope() }));
 vi.mock('../src/ui/stores/tabs.js', () => ({
   useTabsStore: Object.assign((sel: (s: unknown) => unknown) => sel({ openTab: state.openTab }), {

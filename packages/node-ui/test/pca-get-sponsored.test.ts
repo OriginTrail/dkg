@@ -355,15 +355,15 @@ describe('GetSponsoredPanel', () => {
     let resolve!: (v: unknown) => void;
     mocks.fetchWalletsBalances.mockReturnValue(new Promise((r) => { resolve = r; }));
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-    // In flight: loading copy, NOT the false "No operational wallets" (the bug).
+    // In flight: loading copy, NOT the false empty state (the bug).
     expect(container.textContent).toContain('Loading your wallets');
-    expect(container.textContent).not.toContain('No operational wallets detected');
+    expect(container.querySelector('[data-testid="pca-sponsor-no-wallets"]')).toBeNull();
     await act(async () => {
       resolve({ wallets: [W0], balances: [{ address: W0, eth: '0.08', trac: '0', symbol: 'TRAC' }], chainId: '84532', rpcUrl: null });
       await new Promise((r) => setTimeout(r, 0));
     });
     await waitForText(container, '0x71D4');
-    expect(container.textContent).not.toContain('No operational wallets detected');
+    expect(container.querySelector('[data-testid="pca-sponsor-no-wallets"]')).toBeNull();
     // The wallet renders in both the list and the handshake half — at least one.
     expect(container.querySelectorAll('.v10-wallet-row').length).toBeGreaterThanOrEqual(1);
     await unmount();
@@ -373,7 +373,16 @@ describe('GetSponsoredPanel', () => {
     mocks.fetchWalletsBalances.mockRejectedValue(new Error('rpc down'));
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
     await waitForText(container, 'Couldn’t load your wallets');
-    expect(container.textContent).not.toContain('No operational wallets detected');
+    expect(container.querySelector('[data-testid="pca-sponsor-no-wallets"]')).toBeNull();
+    await unmount();
+  });
+
+  it('shows the empty state only when the wallets loaded and there are none', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [], balances: [], chainId: '84532', rpcUrl: null });
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
+    await waitForText(container, 'This node didn\'t report any publishing wallets.');
+    expect(container.querySelector('[data-testid="pca-sponsor-no-wallets"]')).not.toBeNull();
+    expect(container.textContent).not.toContain('Couldn’t load your wallets');
     await unmount();
   });
 
@@ -387,7 +396,7 @@ describe('GetSponsoredPanel', () => {
     });
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
     await waitForText(container, 'Couldn’t load your wallets');
-    expect(container.textContent).not.toContain('No operational wallets detected');
+    expect(container.querySelector('[data-testid="pca-sponsor-no-wallets"]')).toBeNull();
     await unmount();
   });
 
