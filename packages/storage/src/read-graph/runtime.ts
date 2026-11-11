@@ -179,7 +179,8 @@ export class ReadGraphWriteTracker {
    * reason; the writes go on.
    */
   settled(signal?: AbortSignal): Promise<void> {
-    const all = Promise.allSettled([...this.inFlight]).then(() => undefined);
+    // allSettled reads the set when called, so writes that start later are not waited for.
+    const all = Promise.allSettled(this.inFlight).then(() => undefined);
     if (!signal) return all;
     if (signal.aborted) return Promise.reject(signal.reason);
     return new Promise<void>((resolve, reject) => {
