@@ -1,5 +1,5 @@
 import type { SparqlEngineFamily } from '@origintrail-official/dkg-storage';
-import { reportRoutedGraphs } from './query-scope-meters.js';
+import { reportGraphsRead, reportRoutedGraphs } from './query-scope-meters.js';
 import { requireGraphScopeRewrite, rewriteGraphRoute, rewriteGraphSet, type PreparedGraphScope } from './sparql-graph-scope.js';
 
 interface LegacyRouteScopeOptions {
@@ -21,7 +21,7 @@ export async function resolveLegacyRouteScope(scope: PreparedGraphScope, {
 }: LegacyRouteScopeOptions): Promise<PreparedGraphScope> {
   if (scope.hasGraphClause) {
     const rewritten = rewriteGraphSet(scope, authorizedDatasetGraphs, 'union-only', engine);
-    if (rewritten.kind === 'ready') reportRoutedGraphs(authorizedDatasetGraphs);
+    if (rewritten.kind === 'ready') reportGraphsRead(scope, authorizedDatasetGraphs, engine);
     return requireGraphScopeRewrite(rewritten);
   }
   const data = family === 'data';
