@@ -133,6 +133,51 @@ export class ReadGraphRegistryCache {
   }
 }
 
+/**
+ * The writes in flight through the read-graph layers over a backend. A write
+ * decides which read graphs it maintains from the rows and registries it sees
+ * when it starts, so one that started before a read graph's row existed can
+ * commit unmaintained after a backfill has copied its graph. Work that starts
+ * on a read graph waits for those writes with {@link settled}.
+ */
+export class ReadGraphWriteTracker {
+  private readonly inFlight = new Set<Promise<unknown>>();
+
+  /** Count a write from now until it settles. The promise returned settles as the write does. */
+  track<T>(write: Promise<T>): Promise<T> {
+    this.inFlight.add(write);
+    return write.finally(() => {
+      this.inFlight.delete(write);
+    });
+  }
+
+  /** The number of writes in flight. */
+  get size(): number {
+    return this.inFlight.size;
+  }
+
+  /**
+   * Resolves once every write in flight now has settled, whether it succeeded
+   * or failed; writes that start later are not waited for. Call it holding no
+   * read-graph lock and outside any write: a write that waits for a lock its
+   * caller holds never settles. An aborted `signal` rejects the wait with its
+   * reason; the writes go on.
+   */
+  settled(signal?: AbortSignal): Promise<void> {
+    const all = Promise.allSettled([...this.inFlight]).then(() => undefined);
+    if (!signal) return all;
+    if (signal.aborted) return Promise.reject(signal.reason);
+    return new Promise<void>((resolve, reject) => {
+      const abort = () => reject(signal.reason);
+      signal.addEventListener('abort', abort, { once: true });
+      void all.then(() => {
+        signal.removeEventListener('abort', abort);
+        resolve();
+      });
+    });
+  }
+}
+
 /** Everything the read-graph layer keeps for one backend, shared by every store object over it. */
 export interface ReadGraphBackendRuntime {
   /** The backend's identity, or `undefined` for a runtime that belongs to one store object. */
@@ -140,6 +185,8 @@ export interface ReadGraphBackendRuntime {
   readonly locks: ReadGraphLocks;
   readonly mirror: InMemoryReadGraphStateMirror;
   readonly registries: ReadGraphRegistryCache;
+  /** The writes in flight through every layer over the backend. */
+  readonly writes: ReadGraphWriteTracker;
   /**
    * The rule that maps a working-memory draft graph to its agent. The agent
    * sets the node's rule; until it does, every agent owns only the drafts
@@ -177,6 +224,7 @@ function newRuntime(backend: string | undefined): ReadGraphBackendRuntime {
     locks: new ReadGraphLocks(),
     mirror: new InMemoryReadGraphStateMirror(),
     registries: new ReadGraphRegistryCache(),
+    writes: new ReadGraphWriteTracker(),
     workingMemoryIdentity: workingMemoryIdentityRule({}),
   };
 }

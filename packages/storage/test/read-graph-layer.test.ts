@@ -6,6 +6,7 @@ import {
   ReadGraphLocks,
   ReadGraphRegistryCache,
   ReadGraphStore,
+  ReadGraphWriteTracker,
   createTripleStore,
   readGraphBackendIdentity,
   readGraphBackendRuntime,
@@ -134,6 +135,36 @@ describe('read-graph backend runtime', () => {
     wrapReadGraphLayer(new OxigraphStore(), { ...config, readGraphs: { workingMemoryIdentity: rule } });
     expect(one.runtime.workingMemoryIdentity).toBe(rule);
   });
+
+  it('waits for the writes in flight when asked, failed ones included, but not for later ones, and stops waiting on abort', async () => {
+    const tracker = new ReadGraphWriteTracker();
+    const first = gate();
+    const failing = gate();
+    const later = gate();
+    const tracked = tracker.track(first.promise);
+    const failed = tracker.track(failing.promise).catch((error: unknown) => error);
+    let settled = false;
+    const waiting = tracker.settled().then(() => { settled = true; });
+    const afterwards = tracker.track(later.promise);
+    expect(tracker.size).toBe(3);
+    first.open();
+    await tracked;
+    await turns();
+    expect(settled).toBe(false);
+    failing.fail(new Error('connection reset'));
+    expect(await failed).toBeInstanceOf(Error);
+    await waiting;
+    expect(tracker.size).toBe(1);
+    const controller = new AbortController();
+    const aborted = tracker.settled(controller.signal);
+    controller.abort(new Error('closing'));
+    await expect(aborted).rejects.toThrow('closing');
+    await expect(tracker.settled(controller.signal)).rejects.toThrow('closing');
+    later.open();
+    await afterwards;
+    expect(tracker.size).toBe(0);
+    await tracker.settled();
+  });
 });
 
 describe('read-graph layer in the store chain', () => {
@@ -186,7 +217,40 @@ describe('read-graph layer in the store chain', () => {
     for (const call of calls) if (call.length > 2) expect(call.at(-1)).toBe(options);
     expect(calls[0]![1]).toEqual([quad]);
   });
+
+  it('tracks every write from its call until it settles, one it sends unmaintained included', async () => {
+    const calls: unknown[][] = [];
+    const inner = minimalStore(calls);
+    const held = gate();
+    const layer = wrapReadGraphLayer({ ...inner, insert: async (quads, options) => { await held.promise; return inner.insert(quads, options); } },
+      { backend: 'oxigraph' });
+    const quad: Quad = { subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' };
+    const insert = layer.insert([quad]);
+    const update = layer.query('INSERT DATA { <urn:s> <urn:p> <urn:o> }');
+    void layer.query('ASK {}');
+    expect(layer.runtime.writes.size).toBe(2);
+    await update;
+    let settled = false;
+    const waiting = layer.runtime.writes.settled().then(() => { settled = true; });
+    await turns();
+    expect(settled).toBe(false);
+    held.open();
+    await Promise.all([insert, waiting]);
+    expect(layer.runtime.writes.size).toBe(0);
+    expect(calls.map(([name]) => name)).toEqual(['query', 'query', 'insert']);
+  });
 });
+
+function gate(): { promise: Promise<void>; open: () => void; fail: (error: Error) => void } {
+  let open!: () => void;
+  let fail!: (error: Error) => void;
+  const promise = new Promise<void>((resolve, reject) => { open = resolve; fail = reject; });
+  return { promise, open, fail };
+}
+
+async function turns(): Promise<void> {
+  for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve));
+}
 
 function minimalStore(calls: unknown[][]): TripleStore {
   const record = (name: string) => async (...args: unknown[]) => {

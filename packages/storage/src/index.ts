@@ -471,6 +471,7 @@ export {
   InMemoryReadGraphStateMirror,
   ReadGraphLocks,
   ReadGraphRegistryCache,
+  ReadGraphWriteTracker,
   readGraphBackendIdentity,
   readGraphBackendRuntime,
   type ReadGraphBackendRuntime,
