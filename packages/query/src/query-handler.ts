@@ -10,6 +10,7 @@ import { isQueryMaterializationTooLargeError } from './query-materialization-err
 import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { validateReadOnlySparql } from './sparql-guard.js';
 import type { DKGQueryEngine } from './dkg-query-engine.js';
+import type { QueryOptions } from './query-engine.js';
 import type {
   QueryRequest,
   QueryResponse,
@@ -26,7 +27,10 @@ const MAX_LIMIT = 1000;
 const DEFAULT_TIMEOUT_MS = 5000;
 const MAX_TIMEOUT_MS = 30000;
 const MAX_RESULT_BYTES = 1_048_576; // 1 MB
-/** What a remote SPARQL lookup may materialize: the HTTP query route's result budget. */
+/**
+ * What a remote lookup may materialize, for SPARQL, entities by type and entity
+ * triples alike: the HTTP query route's result budget.
+ */
 export const REMOTE_SPARQL_MAX_RESULT_BYTES = 10 * 1024 * 1024;
 const STORE_BUSY_RETRY_AFTER_MS = 1_000;
 // PR #1107 review (🔴): cache isContextGraphPublic verdicts so repeated
@@ -199,6 +203,11 @@ export class QueryHandler {
       }
       if (err instanceof UalResolutionError) {
         return errorResponse(opId, 'ERROR', err.message);
+      }
+      const overBudget = resultOverBudget(err);
+      if (overBudget) {
+        return errorResponse(opId, 'ERROR',
+          `Query result exceeds byte limit (${overBudget.actualBytes} > ${overBudget.maxBytes})`);
       }
       return errorResponse(opId, 'ERROR', 'Internal error processing query');
     }
@@ -404,7 +413,7 @@ export class QueryHandler {
     }
 
     const sparql = `SELECT DISTINCT ?entity WHERE { ?entity a <${assertSafeIri(rdfType)}> } LIMIT ${limit}`;
-    const result = await this.queryEngine.query(sparql, { contextGraphId, view: 'verifiable-memory' });
+    const result = await this.queryEngine.query(sparql, remoteLookupOptions(contextGraphId, 'verifiable-memory'));
     const entityUris = result.bindings.map(b => b['entity']);
 
     return {
@@ -426,7 +435,7 @@ export class QueryHandler {
     }
 
     const sparql = `SELECT ?p ?o WHERE { <${assertSafeIri(entityUri)}> ?p ?o }`;
-    const result = await this.queryEngine.query(sparql, { contextGraphId, view: 'verifiable-memory' });
+    const result = await this.queryEngine.query(sparql, remoteLookupOptions(contextGraphId, 'verifiable-memory'));
 
     const ntriples = result.bindings
       .map(b => `<${entityUri}> <${b['p']}> ${formatObject(b['o'])} .`)
@@ -491,11 +500,7 @@ export class QueryHandler {
     let result: Awaited<ReturnType<DKGQueryEngine['query']>>;
     try {
       result = await Promise.race([
-        this.queryEngine.query(sparql, {
-          contextGraphId,
-          maxResponseBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
-          maxMaterializedBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
-        }),
+        this.queryEngine.query(sparql, remoteLookupOptions(contextGraphId)),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error('timeout')), timeout);
         }),
@@ -503,11 +508,6 @@ export class QueryHandler {
     } catch (err) {
       if ((err as { message?: unknown } | null)?.message === 'timeout') {
         return errorResponse(opId, 'GAS_LIMIT_EXCEEDED', `Query exceeded time limit (${timeout}ms)`);
-      }
-      const overBudget = resultOverBudget(err);
-      if (overBudget) {
-        return errorResponse(opId, 'ERROR',
-          `Query result exceeds byte limit (${overBudget.actualBytes} > ${overBudget.maxBytes})`);
       }
       throw err;
     } finally {
@@ -535,6 +535,16 @@ export class QueryHandler {
       bindings: response.bindings?.slice(0, MAX_RESULT_BYTES) ?? response.bindings,
     };
   }
+}
+
+/** The engine options of a remote lookup: its scope, with the result budget every remote lookup gets. */
+function remoteLookupOptions(contextGraphId: string, view?: 'verifiable-memory'): QueryOptions {
+  return {
+    contextGraphId,
+    ...(view === undefined ? {} : { view }),
+    maxResponseBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
+    maxMaterializedBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
+  };
 }
 
 /** A result over the lookup's budget: one store response, or the request's materialized total. */

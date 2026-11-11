@@ -1,4 +1,10 @@
-import { isStoreResponseTooLargeError, readGraphInventoryByPrefix, StoreInternalLimitError } from '@origintrail-official/dkg-storage';
+import {
+  isStoreResponseTooLargeError,
+  QUERY_CATALOG_LIMIT_NAME,
+  readGraphInventoryByPrefix,
+  recordStoreInternalLimit,
+  StoreInternalLimitError,
+} from '@origintrail-official/dkg-storage';
 import { raceAgainstCallerAbort } from './caller-abort.js';
 import type { TripleStore, QueryResult as StoreQueryResult, QueryOptions as StoreQueryOptions } from '@origintrail-official/dkg-storage';
 import type { QueryOptions } from './query-engine.js';
@@ -38,12 +44,16 @@ export function estimateMaterializedBytes(value: unknown): number {
 // authority response. Oversized catalogs fail closed; they are never truncated.
 export const QUERY_CATALOG_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 /** The limit a discovery or authority read over that bound names: the node's, not the caller's. */
-export const QUERY_CATALOG_LIMIT_NAME = 'QUERY_CATALOG_MAX_RESPONSE_BYTES';
+export { QUERY_CATALOG_LIMIT_NAME };
 
-/** A read under the node's catalog bound; going over it raises `StoreInternalLimitError`. */
+/**
+ * A read under the node's catalog bound. Going over it raises `StoreInternalLimitError`
+ * and counts one in `dkg.query.internal_limit_total`, under the bound's name.
+ */
 export async function readWithinCatalogLimit<T>(read: () => Promise<T>): Promise<T> {
   try { return await read(); } catch (error) {
     if (!isStoreResponseTooLargeError(error)) throw error;
+    recordStoreInternalLimit(QUERY_CATALOG_LIMIT_NAME);
     throw new StoreInternalLimitError(QUERY_CATALOG_LIMIT_NAME, error.maxBytes, error.actualBytes);
   }
 }

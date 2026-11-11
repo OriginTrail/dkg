@@ -1,31 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { OxigraphStore, StoreResponseTooLargeError, type Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
-import { QueryHandler, REMOTE_SPARQL_MAX_RESULT_BYTES } from '../src/query-handler.js';
-import { QueryResultTooLargeError } from '../src/query-result-size-error.js';
-import { QueryMaterializationTooLargeError } from '../src/query-materialization-error.js';
-import type { QueryRequest, QueryAccessConfig } from '../src/query-types.js';
-
-const CONTEXT_GRAPH = 'test-contextGraph';
-const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
-const ENTITY_A = 'did:dkg:entity:alice';
-const ENTITY_B = 'did:dkg:entity:bob';
-const SCHEMA_NAME = 'https://schema.org/name';
-const SCHEMA_PERSON = 'https://schema.org/Person';
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-
-function q(s: string, p: string, o: string, g = GRAPH): Quad {
-  return { subject: s, predicate: p, object: o, graph: g };
-}
-
-function makeRequest(overrides: Partial<QueryRequest> = {}): QueryRequest {
-  return {
-    operationId: 'test-op-1',
-    lookupType: 'ENTITY_TRIPLES',
-    contextGraphId: CONTEXT_GRAPH,
-    ...overrides,
-  };
-}
+import { QueryHandler } from '../src/query-handler.js';
+import type { QueryAccessConfig } from '../src/query-types.js';
+import {
+  CONTEXT_GRAPH, ENTITY_A, ENTITY_B, SCHEMA_NAME, SCHEMA_PERSON, insertPeople, makeRequest, q,
+} from './helpers/query-handler-fixture.js';
 
 describe('QueryHandler', () => {
   let store: OxigraphStore;
@@ -35,12 +15,7 @@ describe('QueryHandler', () => {
     store = new OxigraphStore();
     engine = new DKGQueryEngine(store);
 
-    await store.insert([
-      q(ENTITY_A, RDF_TYPE, SCHEMA_PERSON),
-      q(ENTITY_A, SCHEMA_NAME, '"Alice"'),
-      q(ENTITY_B, RDF_TYPE, SCHEMA_PERSON),
-      q(ENTITY_B, SCHEMA_NAME, '"Bob"'),
-    ]);
+    await insertPeople(store);
   });
 
 
@@ -254,105 +229,6 @@ describe('QueryHandler', () => {
       );
 
       expect(response.status).toBe('UNSUPPORTED_LOOKUP');
-    });
-  });
-
-  describe('SPARQL policy limits', () => {
-    it('caps SPARQL results using the context-graph sparqlMaxResults policy', async () => {
-      const handler = new QueryHandler(engine, {
-        defaultPolicy: 'deny',
-        contextGraphs: {
-          [CONTEXT_GRAPH]: {
-            policy: 'public',
-            allowedLookupTypes: ['SPARQL_QUERY'],
-            sparqlEnabled: true,
-            sparqlMaxResults: 1,
-          },
-        },
-      });
-
-      const response = await handler.handle(
-        makeRequest({
-          lookupType: 'SPARQL_QUERY',
-          limit: 100,
-          sparql: `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name } ORDER BY ?name`,
-        }),
-        'peer-1',
-      );
-
-      expect(response.status).toBe('OK');
-      expect(JSON.parse(response.bindings!)).toHaveLength(1);
-      expect(response.resultCount).toBe(2);
-      expect(response.truncated).toBe(true);
-    });
-
-    it('caps SPARQL execution time using the context-graph sparqlTimeout policy', async () => {
-      const slowEngine = {
-        query: () => new Promise((resolve) => {
-          setTimeout(() => resolve({ bindings: [{ s: 'late' }] }), 50);
-        }),
-      } as unknown as DKGQueryEngine;
-      const handler = new QueryHandler(slowEngine, {
-        defaultPolicy: 'deny',
-        contextGraphs: {
-          [CONTEXT_GRAPH]: {
-            policy: 'public',
-            allowedLookupTypes: ['SPARQL_QUERY'],
-            sparqlEnabled: true,
-            sparqlTimeout: 1,
-          },
-        },
-      });
-
-      const response = await handler.handle(
-        makeRequest({
-          lookupType: 'SPARQL_QUERY',
-          timeout: 30_000,
-          sparql: `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name }`,
-        }),
-        'peer-1',
-      );
-
-      expect(response.status).toBe('GAS_LIMIT_EXCEEDED');
-      expect(response.error).toContain('time limit');
-    });
-
-    it('gives a remote SPARQL lookup the result budget of the HTTP query route', async () => {
-      const query = vi.fn(async () => ({ bindings: [{ name: '"Alice"' }] }));
-      const handler = new QueryHandler({ query } as unknown as DKGQueryEngine, { defaultPolicy: 'public' });
-      const sparql = `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name }`;
-      const response = await handler.handle(makeRequest({ lookupType: 'SPARQL_QUERY', sparql }), 'peer-1');
-      expect(response.status).toBe('OK');
-      expect(REMOTE_SPARQL_MAX_RESULT_BYTES).toBe(10 * 1024 * 1024);
-      expect(query).toHaveBeenCalledWith(sparql, {
-        contextGraphId: CONTEXT_GRAPH,
-        maxResponseBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
-        maxMaterializedBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
-      });
-    });
-
-    it.each([
-      ['one store response', () => new QueryResultTooLargeError(new StoreResponseTooLargeError(10, 11))],
-      ['the materialized total', () => new QueryMaterializationTooLargeError(10, 11)],
-    ])('answers ERROR when a remote SPARQL result passes the budget in %s', async (_kind, overBudget) => {
-      const engine = { query: async () => { throw overBudget(); } } as unknown as DKGQueryEngine;
-      const handler = new QueryHandler(engine, { defaultPolicy: 'public' });
-      const response = await handler.handle(makeRequest({
-        lookupType: 'SPARQL_QUERY', sparql: `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name }`,
-      }), 'peer-1');
-      expect(response).toMatchObject({
-        status: 'ERROR', error: 'Query result exceeds byte limit (11 > 10)', resultCount: 0, truncated: false,
-      });
-      expect(response.bindings).toBeUndefined();
-    });
-
-    it('answers an unrelated remote SPARQL failure as an internal error, not as a byte limit', async () => {
-      const engine = { query: async () => { throw new Error('store unavailable'); } } as unknown as DKGQueryEngine;
-      const handler = new QueryHandler(engine, { defaultPolicy: 'public' });
-      const response = await handler.handle(makeRequest({
-        lookupType: 'SPARQL_QUERY', sparql: `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name }`,
-      }), 'peer-1');
-      expect(response).toMatchObject({ status: 'ERROR', error: 'Internal error processing query' });
     });
   });
 

@@ -69,7 +69,14 @@ export function isStoreInternalLimitError(error: unknown): error is StoreInterna
     && typeof candidate.message === 'string';
 }
 
-const KNOWN_LIMIT_NAMES: ReadonlySet<string> = new Set([STORE_GRAPH_CATALOG_LIMIT_NAME]);
+/**
+ * The query package's bound on the discovery, registry and authority reads it
+ * makes for a request (`QUERY_CATALOG_MAX_RESPONSE_BYTES` there). Named here so
+ * that the counter below labels it.
+ */
+export const QUERY_CATALOG_LIMIT_NAME = 'QUERY_CATALOG_MAX_RESPONSE_BYTES';
+
+const KNOWN_LIMIT_NAMES: ReadonlySet<string> = new Set([STORE_GRAPH_CATALOG_LIMIT_NAME, QUERY_CATALOG_LIMIT_NAME]);
 
 /** Count one node-side limit hit. The label is a fixed set of limit names. */
 export function recordStoreInternalLimit(limitName: string): void {
