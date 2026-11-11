@@ -1366,6 +1366,29 @@ describe('read-graph start-up', () => {
     expect(readUnstoredReadGraphMarks(second)).toEqual(new Map());
   });
 
+  it('leaves the working-memory identity of a backend this process already started, and where its changes are recorded, to the start-up that loaded it', async () => {
+    const adapter = new HookedStore();
+    const [first, second] = [mkdtempSync(join(tmpdir(), 'read-graph-builder-')), mkdtempSync(join(tmpdir(), 'read-graph-builder-'))];
+    dirs.push(first, second);
+    const other = `0x${'cd'.repeat(20)}`;
+    writeFileSync(join(first, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE), JSON.stringify({ defaultAgentAddress: AGENT, peerId: 'peer-1' }));
+    writeFileSync(join(second, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE), JSON.stringify({ defaultAgentAddress: other, peerId: 'peer-1' }));
+    // Two agents of one process over the same backend share its runtime.
+    const config = { backend: 'oxigraph-persistent' as const, options: { path: join(first, 'store') } };
+    const layer = wrapReadGraphLayer(adapter, config);
+    const store = guardReadGraphPartition(layer);
+    expect(await startReadGraphs(store, { dataDir: first, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    expect(layer.runtime.workingMemoryIdentity.addressesOf(AGENT)).toEqual([AGENT, 'peer-1']);
+    const later = guardReadGraphPartition(wrapReadGraphLayer(adapter, config));
+    expect(readGraphLayerOf(later)!.runtime).toBe(layer.runtime);
+    expect(await startReadGraphs(later, { dataDir: second, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    // The running rule stays the one the first start-up installed, and its changes are recorded where that start-up noted.
+    expect(layer.runtime.workingMemoryIdentity.addressesOf(AGENT)).toEqual([AGENT, 'peer-1']);
+    expect(await installWorkingMemoryIdentity({ store }, { peerId: 'peer-1' })).toEqual({ marked: [], recorded: true });
+    expect(recordedWorkingMemoryIdentity(first)).toEqual({ peerId: 'peer-1' });
+    expect(recordedWorkingMemoryIdentity(second)).toEqual({ defaultAgentAddress: other, peerId: 'peer-1' });
+  });
+
   it('replaces damaged rows and rows whose generation cannot grow, and notes nothing without rows', async () => {
     const empty = await open();
     expect(await startReadGraphs(empty.store, { dataDir: empty.dataDir, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
