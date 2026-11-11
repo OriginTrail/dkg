@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { BlazegraphNamespaceManager, blazegraphNamespaceApiUrlFromSparqlEndpoint } from '../src/blazegraph-namespace-manager.js';
 import { KILL_POINTS, expectReadGraphEqualsMembers, killWriterAt, type KilledWrite } from '../test/helpers/read-graph-kill-at-commit.js';
+import { killAtCommitKeepsBatch } from '../test/helpers/read-graph-kill-fixture.js';
 
 describe('a writer killed while a maintained write commits (blazegraph)', () => {
   let manager: BlazegraphNamespaceManager;
@@ -31,5 +32,7 @@ describe('a writer killed while a maintained write commits (blazegraph)', () => 
     // The store finishes or drops the interrupted request as a whole: no read graph is left between.
     const triples = await expectReadGraphEqualsMembers(adapter, contextGraphId, `a kill at write ${write}`);
     outcomes.push({ ...killed, triples });
+    // A delete while another member keeps the batch leaves it in the read graph, committed or not.
+    if (killAtCommitKeepsBatch(write)) expect(triples).toBe(2_000);
   }, 180_000);
 });

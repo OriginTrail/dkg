@@ -15,7 +15,7 @@ import { CURRENT_READ_GRAPH_VERSIONS } from '../../src/read-graph/state.js';
 import type { TripleStoreConfig } from '../../src/triple-store-composition.js';
 import type { Quad, TripleStore } from '../../src/triple-store.js';
 import { PlanningOxigraphStore } from './read-graph-planning-store.js';
-import { killAtCommitBatch, killAtCommitMember } from './read-graph-kill-fixture.js';
+import { KILL_AT_COMMIT_CYCLE, killAtCommitBatch, killAtCommitMember } from './read-graph-kill-fixture.js';
 
 const backend = process.env.DKG_KILL_BACKEND;
 const contextGraphId = process.env.DKG_KILL_CG;
@@ -44,12 +44,10 @@ const readGraph = readGraphIri({ scope: readScope(contextGraphId), layer: Memory
 layer.runtime.mirror.set({ readGraph, state: 'ready', generation: 1, ...CURRENT_READ_GRAPH_VERSIONS });
 
 for (let n = 0; ; n += 1) {
-  // Even writes add a batch to one of three members; odd writes take the previous batch out of
-  // its member again, while the other members may still hold the same triples.
-  const insert = n % 2 === 0;
-  const quads: Quad[] = killAtCommitBatch(killAtCommitMember(contextGraphId, insert ? n % 3 : (n - 1) % 3), batchSize);
-  process.stdout.write(`sending ${n} ${insert ? 'insert' : 'delete'}\n`);
-  if (insert) await store.insert(quads);
+  const step = KILL_AT_COMMIT_CYCLE[n % KILL_AT_COMMIT_CYCLE.length]!;
+  const quads: Quad[] = killAtCommitBatch(killAtCommitMember(contextGraphId, step.member), batchSize);
+  process.stdout.write(`sending ${n} ${step.kind}\n`);
+  if (step.kind === 'insert') await store.insert(quads);
   else await store.delete(quads);
   if (backend === 'oxigraph') await adapter.flush?.();
   process.stdout.write(`committed ${n}\n`);
