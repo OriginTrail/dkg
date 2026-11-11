@@ -30,8 +30,8 @@
  * its row existed (`runtime.writes.settled()`): they were sent unmaintained.
  */
 
-import { compareCodePoint, isSparqlUpdateOperation, readGraphIri, type ReadGraphKey } from '@origintrail-official/dkg-core';
-import { ADAPTER_SPARQL_TERM_POLICY, legacyStrippedIriValue, type SparqlTermRenderer, type SparqlTermSite } from '../adapters/sparql-term-policy.js';
+import { compareCodePoint, isSparqlUpdateOperation, readGraphIri, SparqlTermValidationError, type ReadGraphKey } from '@origintrail-official/dkg-core';
+import { createSparqlTermPolicy, legacyStrippedIriValue, type SparqlTermRenderer, type SparqlTermSite } from '../adapters/sparql-term-policy.js';
 import type { AtomicAssetReplacement } from '../atomic-asset-group.js';
 import { describeRfc64AuthorCommitCasV1 } from '../rfc64-author-commit-mutation.js';
 import type { Rfc64AuthorCommitCasInputV1 } from '../rfc64-author-commit-cas.js';
@@ -67,7 +67,13 @@ import { readGraphBackendIdentity, readGraphBackendRuntime, type ReadGraphBacken
 import { keepsAnyReadGraph, type ReadGraphModes, type ViewSemanticsSettings } from './settings.js';
 import { nextReadGraphState, readGraphStateCompareAndSet } from './state.js';
 import type { ReadGraphTarget } from './statements.js';
-import { joinReadGraphWriteChanges, readGraphWriteChange, readGraphWriteGraphs, type ReadGraphWrite } from './write-plan.js';
+import {
+  joinReadGraphWriteChanges,
+  readGraphWriteChange,
+  readGraphWriteGraphs,
+  type ReadGraphWrite,
+  type ReadGraphWriteChange,
+} from './write-plan.js';
 
 /** The read-graph part of a store configuration. */
 export interface ReadGraphStoreConfig {
@@ -83,6 +89,13 @@ export interface ReadGraphStoreConfig {
 }
 
 export const READ_GRAPH_WRITE_REFUSED_CODE = 'READ_GRAPH_WRITE_REFUSED';
+
+/**
+ * The term policy of the read-graph operations. A valid term renders exactly
+ * as in the adapter's own statement; a term that fails validation refuses the
+ * write before anything is sent, whatever the adapter's own policy does.
+ */
+const READ_GRAPH_TERM_POLICY = createSparqlTermPolicy('reject');
 
 /** A write the read-graph layer cannot maintain, refused before anything was sent. */
 export class ReadGraphWriteRefusedError extends Error implements StoreOperationOutcomeErrorLike {
@@ -174,8 +187,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
     const write: ReadGraphWrite = { kind: 'insert', quads };
     refuseRewrittenGraphNames('insert', write);
     return this.withMaintainedReadGraphs(write, options, (maintained) => {
-      const added = joinReadGraphWriteChanges(maintained.map(({ target, members }) =>
-        readGraphWriteChange(write, target, members, this.renderer('insert')))).insertQuads;
+      const added = this.changeOf('insert', write, maintained).insertQuads;
       return this.dispatch('insert', maintained, () => this.innerStore.insert(added.length === 0 ? quads : [...quads, ...added], options));
     });
   }
@@ -269,8 +281,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
     if (this.runtime.mirror.size === 0) return send(options);
     refuseRewrittenGraphNames(method, write);
     return this.withMaintainedReadGraphs(write, options, (maintained) => {
-      const change = joinReadGraphWriteChanges(maintained.map(({ target, members }) =>
-        readGraphWriteChange(write, target, members, this.renderer(method))));
+      const change = this.changeOf(method, write, maintained);
       if (change.before.length + change.after.length === 0) return send(options);
       if (!this.adapterCapabilities?.methods.includes(method)) {
         throw new ReadGraphWriteRefusedError(storeOperationOf(method), 'its adapter cannot send read-graph operations with it');
@@ -368,9 +379,20 @@ export class ReadGraphStore implements TripleStoreDecorator {
     }
   }
 
+  /** The read-graph operations of a write. A term they cannot name refuses the write before anything is sent. */
+  private changeOf(method: ReadGraphPlannedMethod | 'insert', write: ReadGraphWrite, maintained: readonly MaintainedReadGraph[]): ReadGraphWriteChange {
+    try {
+      return joinReadGraphWriteChanges(maintained.map(({ target, members }) =>
+        readGraphWriteChange(write, target, members, this.renderer(method))));
+    } catch (error) {
+      if (!(error instanceof SparqlTermValidationError)) throw error;
+      throw new ReadGraphWriteRefusedError(storeOperationOf(method), 'it has a term its read-graph operations cannot name');
+    }
+  }
+
   private renderer(method: ReadGraphPlannedMethod | 'insert'): SparqlTermRenderer {
     // The adapter reports an invalid term for its own statement; the same term here is not reported twice.
-    return ADAPTER_SPARQL_TERM_POLICY.renderer({ adapter: this.termSite, operation: storeOperationOf(method) }, () => {});
+    return READ_GRAPH_TERM_POLICY.renderer({ adapter: this.termSite, operation: storeOperationOf(method) }, () => {});
   }
 }
 

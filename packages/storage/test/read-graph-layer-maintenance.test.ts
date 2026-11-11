@@ -56,6 +56,16 @@ describe('read-graph layer on embedded Oxigraph', () => {
     await store.deleteByPattern({ subject: 'urn:s:x' });
   });
 
+  it('refuses, while read graphs exist, a write with a term its read-graph operations cannot name, before anything is sent', async () => {
+    const { adapter, fixture, layer, store } = await layered();
+    const planning = adapter as PlanningOxigraphStore;
+    planning.requests.length = 0;
+    const refused = await store.delete([q('urn:s:1', '"a"b"', fixture.graphs[1]!)]).catch((error: unknown) => error);
+    expect(refused).toMatchObject({ code: 'READ_GRAPH_WRITE_REFUSED', outcome: 'not_started', storeOperation: 'delete' });
+    expect(planning.requests).toEqual([]);
+    expect(await layer.innerStore.countQuads(fixture.graphs[1]!)).toBeGreaterThan(0);
+  });
+
   it('marks the read graphs of a write with an unknown outcome dirty, on an engine that may run it beside later requests', async () => {
     class Unsure extends PlanningOxigraphStore {
       override readonly readGraphCapabilities = { ...new PlanningOxigraphStore().readGraphCapabilities, serialUpdates: false };
