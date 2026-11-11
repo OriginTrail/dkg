@@ -179,6 +179,24 @@ describe('usePcaOverview', () => {
     await unmount();
   });
 
+  // The discount follows the wallet probe's own classifyCoverage outcome, not the
+  // account-level read: here the account read still shows allowance, but the probe
+  // (the fresher, per-wallet read) shows none, so nothing is covered and no discount shows.
+  it('takes coverage and the discount from the probe, not the account read, when their budgets differ', async () => {
+    usePcaStore.setState({ trackedIds: ['7'] });
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W1], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation((id: string, wallet?: string) => {
+      const base = { accountId: '7', discountBps: 3000, extendedRequested: true, topUpBuffer: '0' };
+      if (wallet === undefined) return Promise.resolve(snap({ ...base, remainingAllowance: '10' }));
+      return Promise.resolve(snap({ ...base, remainingAllowance: '0', probedKey: { wallet: W1, registered: true } }));
+    });
+    const { unmount } = await render();
+    expect(latest!.coverage.wallets).toEqual([{ kind: 'inactive', wallet: W1, accountId: '7', expired: false }]);
+    expect(latest!.covered).toBe(false);
+    expect(latest!.bestCoveringDiscountBps).toBeNull();
+    await unmount();
+  });
+
   it('M2: two consumers of the same tracked-id set share ONE wallets fetch', async () => {
     usePcaStore.setState({ trackedIds: ['7'] });
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [], balances: [], chainId: '84532', rpcUrl: null });

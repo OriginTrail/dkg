@@ -250,10 +250,18 @@ export function GetSponsoredPanel({
   // N1: Ready requires actual COVERAGE (spendable PCA), not bare registration.
   const ready = !!checked && checked.rows.some((r) => r.coverage.outcome === 'covers' && isFunded(r.wallet));
   // A PCA that was read but covers nothing here, or couldn't be checked, can still go in the list.
+  // "Needs approval" only when every wallet is confirmed unregistered; a wallet whose probe
+  // failed might already be approved, so then coverage stays unknown.
+  const allUnregistered = !!checked && checked.rows.every((r) => r.coverage.outcome === 'unregistered');
   const addable = result?.kind === 'unverifiable'
     ? { accountId: result.accountId, note: `PCA #${result.accountId} is in your list. This node can’t check whether it covers your wallets.` }
     : checked && approvedCount === 0
-      ? { accountId: checked.accountId, note: `PCA #${checked.accountId} is in your list. It gives no discount until the owner approves these wallets.` }
+      ? {
+        accountId: checked.accountId,
+        note: allUnregistered
+          ? `PCA #${checked.accountId} is in your list. It gives no discount until the owner approves these wallets.`
+          : `PCA #${checked.accountId} is in your list. This node couldn’t check every wallet, so it may already cover some.`,
+      }
       : null;
 
   return (
