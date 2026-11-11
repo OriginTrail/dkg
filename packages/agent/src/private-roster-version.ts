@@ -70,6 +70,6 @@ export async function compactSyncedPrivateRosterGenerations(
         GRAPH <${graph}> { <${subject}> <${RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1}> ?old . }
         FILTER(${canonicalGeneration('?old')} && xsd:integer(STR(?old)) < ?newest)
       }
-    `, [graph], { ...options, source: 'agent.rfc64.privateRosterVersion.compact' });
+    `, [graph], { ...options, source: 'agent.rfc64.privateRosterVersion.compact', writtenGraphs: [graph] });
   }
 }

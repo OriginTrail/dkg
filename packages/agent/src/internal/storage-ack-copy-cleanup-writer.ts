@@ -17,7 +17,7 @@ export function createStorageAckCopyCleanupWriter(
     // The query can remove every predicate of a matched operation, including key facts.
     // Observe the whole graph, not just the predicates used to select those operations.
     await executeMutation(
-      () => store.update!(plan.sparql, plan.options), () => true,
+      () => store.update!(plan.sparql, { ...plan.options, writtenGraphs: [plan.graph] }), () => true,
       { removals: [{ graph: plan.graph }] }, 'update',
     );
   };

@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     include: [
       'test/workspace-operation-timestamp.test.ts',
+      'test/read-graph-declared-updates.test.ts',
       'test/access-client-bounds.test.ts',
       'test/assertion-lifecycle-candidates.test.ts',
       'test/wm-lifecycle-integrity.test.ts',

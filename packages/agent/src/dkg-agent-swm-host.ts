@@ -5298,12 +5298,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // index dirty and forcing a full store scan on the next enumeration. Requiring
       // it (not optional) closes the escape hatch: a future `update(sparql)` here that
       // forgot to declare its graph would silently fall back to dirtying the index.
+      // Each update writes exactly the graphs it names, so they are also its written graphs.
       const update = async (sparql: string, touchedGraphs: readonly string[]): Promise<void> => {
         const updated = await tryUpdateWithTouchedGraphs(
           this.store,
           sparql,
           touchedGraphs,
-          rsHealStoreOptions('materialize', signal),
+          { ...rsHealStoreOptions('materialize', signal), writtenGraphs: touchedGraphs },
         );
         if (!updated) throw new Error('RS heal requires server-side update() support');
       };

@@ -111,7 +111,7 @@ export async function clearDischargedStorageAckCopies(
   if (typeof store.update !== 'function') {
     throw new Error('the triple store cannot run an update for the StorageACK copy cleanup');
   }
-  await store.update(plan.sparql, plan.options);
+  await store.update(plan.sparql, { ...plan.options, writtenGraphs: [plan.graph] });
 }
 
 /** Closed query and scope, derived together before any observation or dispatch. */
