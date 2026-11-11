@@ -127,6 +127,8 @@ describe('view semantics for a caller who may not read the context graph', () =>
     await expect(ask(target, UNDECLARED_CG, 'merged')).resolves.toEqual({ bindings: [{ s: MARKER }], semantics: 'merged' });
     // An id that only begins like it holds nothing.
     await expect(ask(target, UNDECLARED_CG.slice(0, -1), 'merged')).resolves.toEqual({ bindings: [] });
+    // So does a parent that is not itself a context graph here, whatever its children hold.
+    await expect(ask(target, OWNER, 'merged')).resolves.toEqual({ bindings: [] });
   });
 
   it('consults the read graph for a caller who may read the context graph (control)', async () => {
