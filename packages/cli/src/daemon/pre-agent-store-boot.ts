@@ -21,7 +21,16 @@ interface PreAgentStoreBootOptions {
   log: (message: string) => void;
 }
 
-/** Fence direct requests before the adapter exists; preserve validate/probe/tag/wipe/re-tag order. */
+/**
+ * Fence direct requests before the adapter exists; preserve validate/probe/tag/wipe/re-tag order.
+ *
+ * These steps send SPARQL to an external store directly, past the read-graph layer, so none of them may leave a read
+ * graph whose state row still says `ready` for member graphs it changed:
+ * - the chain-reset wipe removes every read-graph partition, its state graph included, in the same request as the
+ *   graphs it removes: the scoped delete covers every `did:dkg:context-graph:` graph, and `DROP ALL` everything;
+ * - the identity tag lives in a graph that no context graph holds, and the reachability probe only reads.
+ * `test/direct-store-writers-read-graphs.test.ts` runs both requests of the wipe on a real engine.
+ */
 export async function runPreAgentStoreBootSteps(options: PreAgentStoreBootOptions): Promise<void> {
   const { log } = options;
   const activity = options.managedOxigraph?.registerStoreActivity();
