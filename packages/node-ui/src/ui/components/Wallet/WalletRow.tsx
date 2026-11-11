@@ -37,7 +37,7 @@ export function WalletRow({
 
   return (
     <div
-      className={['v10-wallet-row', className].filter(Boolean).join(' ')}
+      className={['v10-wallet-row ds-card-nested', className].filter(Boolean).join(' ')}
       role="group"
       aria-label={ariaLabel}
     >

@@ -25,6 +25,7 @@ import { LifecycleSection } from './LifecycleSection.js';
 import { eqAddress } from '../../web3/address.js';
 import { resolvePrimaryWalletState, type PcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
+import { Badge } from '../../components/ds/Badge.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
   return formatRelativeExpiry(expiresAtTimestamp).replace(/^Expires in /, '');
@@ -63,10 +64,10 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
   if (error || !snapshot) {
     return (
       <div className="v10-pca-detail">
-        <div className="card">
+        <div className="card ds-card">
           <div className="card-body v10-pca-card-error">
             <p>Couldn’t load PCA #{accountId}.</p>
-            <button type="button" className="v10-pca-card-btn" onClick={() => refresh()}>Retry</button>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refresh()}>Retry</button>
           </div>
         </div>
       </div>
@@ -187,13 +188,13 @@ function DetailBody({
     <div className="v10-pca-detail" data-testid="pca-detail">
       <div className="v10-pca-detail-band">
         <span className="v10-pca-detail-id">PCA #{accountId}</span>
-        <span className="badge badge-info">◉ {pct}% discount</span>
+        <Badge size="sm" icon="◉">{pct}% discount</Badge>
         <span className="v10-pca-detail-committed">{formatPcaTrac(snapshot.committedTRACTrac)} TRAC committed</span>
         <span className="v10-pca-card-spacer" />
         <HealthChip state={health} />
       </div>
 
-      <div className="v10-modal-tip" role="status">
+      <div className="v10-modal-tip ds-card-nested" role="status">
         {walletSurfaceCopy}
         {connectedWallet ? <WalletPill /> : <WalletConnectControl testId="pca-wallet-connect" />}
       </div>
@@ -211,12 +212,12 @@ function DetailBody({
         // load", no Retry (the balances are auto-fetching); owner controls stay disabled for the
         // brief window. FAILED/EXTERNAL/wrong-network keep the warning box (+ Retry when unreadable).
         walletsLoading ? (
-          <div className="v10-modal-tip" role="status">{ownerOnlyReason}</div>
+          <div className="v10-modal-tip ds-card-nested" role="status">{ownerOnlyReason}</div>
         ) : (
-          <div className="v10-modal-warning" role="status">
+          <div className="v10-modal-warning ds-card-nested" role="status">
             ⓘ {ownerOnlyReason}{' '}
             {walletsUnreadable ? (
-              <button type="button" className="v10-pca-card-btn" onClick={onRetryWallets}>Retry</button>
+              <button type="button" className="v10-pca-card-btn ds-btn" onClick={onRetryWallets}>Retry</button>
             ) : (
               'Wallet probe stays available.'
             )}

@@ -225,6 +225,14 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
     expect(binding!.slug).toBe('recipes');
     expect(binding!.displayName).toBe('recipes');
     expect(binding!.icon).toBe('•');
+    // Fallbacks are theme-free data: no colour, and the same result whatever
+    // the document's theme class; consumers apply their own neutral.
+    expect(binding!.color).toBeUndefined();
+    document.documentElement.classList.add('light');
+    try {
+      expect(captured!.forSubGraph('recipes')).toEqual(binding);
+      expect(captured!.forType('urn:type:Unknown').color).toBeUndefined();
+    } finally { document.documentElement.classList.remove('light'); }
   });
 
   it('keeps a hostile context graph id inside one literal at every profile query sink', async () => {

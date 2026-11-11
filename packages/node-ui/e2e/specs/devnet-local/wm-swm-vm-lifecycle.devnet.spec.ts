@@ -117,9 +117,9 @@ test.describe('WM → SWM → VM UI verification', () => {
     await expect(page.getByText(run.label!, { exact: true })).toBeVisible({ timeout: 15_000 });
   });
 
-  test('operations view loads after publish activity', async ({ shell, header, page }) => {
+  test('operations view loads after publish activity', async ({ shell, leftPanel, page }) => {
     await shell.goto();
-    await header.openObservability();
+    await leftPanel.openObservability();
     await expect(page.getByRole('heading', { name: 'Observability' })).toBeVisible({ timeout: 15_000 });
   });
 });

@@ -89,3 +89,11 @@ export type ContextOracleEntryKind = 'catalogue' | 'project';
 export function classifyContextOracleEntry(cg: ContextGraph): ContextOracleEntryKind {
   return cg.subscribed === true || cg.synced === true ? 'project' : 'catalogue';
 }
+
+/** A graph the agent is only browsing from the catalogue: not involved, not
+ *  subscribed, not synced. Viewing it must not make it the chat and
+ *  attachment target (sidebar Browse clears the target). Daemons that don't
+ *  report `callerInvolved` aren't classified, so their graphs stay working. */
+export function isPassiveCatalogueGraph(cg: ContextGraph): boolean {
+  return cg.callerInvolved === false && classifyContextOracleEntry(cg) === 'catalogue';
+}

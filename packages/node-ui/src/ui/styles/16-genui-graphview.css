@@ -2,17 +2,16 @@
 .v10-genui-panel { display: flex; flex-direction: column; gap: 8px; }
 .v10-genui-loading {
   padding: 10px 12px;
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   color: var(--text-tertiary, #94a3b8);
   font-style: italic;
 }
 .v10-genui-error {
   padding: 10px 12px;
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   color: #f87171;
   background: rgba(248,113,113,0.08);
   border: 1px solid rgba(248,113,113,0.25);
-  border-radius: 8px;
 }
 /* When the error is specifically "LLM not configured", we upgrade to a
    call-to-action card: amber tone (info, not error), a head row, and a
@@ -32,7 +31,7 @@
   gap: 12px;
 }
 .v10-genui-error-icon {
-  font-size: 20px;
+  font-size: var(--fs-heading);
   line-height: 1;
   color: #f59e0b;
   flex-shrink: 0;
@@ -41,42 +40,123 @@
 .v10-genui-error-title {
   font-weight: 600;
   color: var(--text-primary);
-  font-size: var(--font-size-ui);
+  font-size: var(--fs-body);
   margin-bottom: 4px;
 }
 .v10-genui-error-desc {
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   color: var(--text-tertiary);
   line-height: 1.55;
 }
-.v10-genui-error-cta-btn {
-  align-self: flex-start;
-  padding: 6px 14px;
-  border-radius: 6px;
-  background: rgba(245,158,11,0.16);
-  color: #f59e0b;
-  border: 1px solid rgba(245,158,11,0.4);
-  font-size: var(--font-size-caption);
-  font-weight: 700;
-  cursor: pointer;
-  font-family: var(--font-sans);
-  transition: background 0.15s, border-color 0.15s;
-}
-.v10-genui-error-cta-btn:hover {
-  background: rgba(245,158,11,0.24);
-  border-color: rgba(245,158,11,0.6);
-}
-.v10-me-error { padding: 12px 16px; font-size: var(--font-size-label); color: var(--accent-red); background: rgba(239,68,68,0.06); }
+.v10-genui-error-cta-btn { align-self: flex-start; }
+.v10-me-error { padding: 12px 16px; font-size: var(--fs-control); color: var(--accent-red); background: rgba(239,68,68,0.06); }
 
 /* ── Graph View (full graph tab) ── */
-.v10-gv-container { flex: 1; position: relative; min-height: 0; background: var(--bg-surface); }
-.v10-me-graph-loading { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-tertiary); font-size: var(--font-size-label); }
-.v10-me-graph-legend {
-  position: absolute; bottom: 10px; left: 10px; z-index: 10;
-  display: flex; gap: 10px; padding: 4px 10px;
-  background: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
-  border-radius: 5px; font-size: var(--font-size-meta); font-family: var(--font-mono); color: var(--text-secondary);
+
+/* ── GenUI cards (C12) ──────────────────────────────────────────
+   These classes were never styled, so generated cards rendered as plain
+   stacked text. Neutral surfaces; the kind's data-palette colour (--kind,
+   set per card) only on the icon tile. Status chips use signal colours
+   for real states only; layer purple is reserved for the VM panel. */
+.v10-genui-root { display: flex; flex-direction: column; gap: 10px; }
+.v10-genui-root-title { font-size: var(--fs-label); font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-tertiary); }
+
+.v10-genui-card {
+  --kind: var(--text-tertiary);
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  min-width: 0;
 }
-body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
-.v10-me-legend-item { display: flex; align-items: center; gap: 4px; }
-.v10-me-legend-dot { width: 7px; height: 7px; border-radius: 50%; }
+.v10-genui-card-head { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
+.v10-genui-card-icon {
+  flex: none; width: 26px; height: 26px; border-radius: 7px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: var(--fs-body); line-height: 1;
+  color: var(--kind);
+  background: color-mix(in srgb, var(--kind) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kind) 35%, transparent);
+}
+.v10-genui-card-title { flex: 1 1 200px; min-width: 0; font-size: var(--fs-body); font-weight: 600; color: var(--text-primary); line-height: 1.35; overflow-wrap: anywhere; }
+.v10-genui-card-type { font: 500 11px var(--font-mono); color: var(--text-tertiary); }
+.v10-genui-card-subtitle { font-size: var(--fs-control); color: var(--text-secondary); line-height: 1.45; overflow-wrap: anywhere; }
+.v10-genui-pr-num { font-family: var(--font-mono); color: var(--text-tertiary); font-weight: 500; margin-right: 6px; }
+.v10-genui-pr-body { font-size: var(--fs-control); color: var(--text-secondary); line-height: 1.5; white-space: pre-wrap; max-height: 9em; overflow: auto; }
+
+/* Stats */
+.v10-genui-stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; }
+.v10-genui-stat { padding: 8px 10px; background: var(--bg-elevated); display: flex; flex-direction: column; gap: 2px; }
+.v10-genui-stat-value { font: 600 16px var(--font-mono); color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.v10-genui-stat-label { font-size: var(--fs-micro); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--text-tertiary); }
+
+/* Label · value chips (neutral; info is neutral per the A2 decision) */
+.v10-genui-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.v10-genui-chip {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  padding: 3px 8px; border-radius: var(--radius-pill); font-size: var(--fs-label);
+  background: var(--bg-elevated); border: 1px solid var(--border-subtle);
+  color: var(--text-secondary); text-decoration: none;
+}
+.v10-genui-chip-label { color: var(--text-tertiary); }
+.v10-genui-chip-value { font-weight: 600; color: var(--text-primary); }
+a.v10-genui-chip .v10-genui-chip-value { text-decoration: underline; text-decoration-color: var(--link-underline); text-underline-offset: 2px; }
+a.v10-genui-chip:hover { border-color: var(--border-strong); }
+.v10-genui-chip.tone-success .v10-genui-chip-value { color: var(--text-success); }
+.v10-genui-chip.tone-warn .v10-genui-chip-value { color: var(--text-warning); }
+.v10-genui-chip.tone-danger .v10-genui-chip-value { color: var(--text-danger); }
+
+/* Status + priority chips: neutral unless the state needs attention or is done */
+.v10-genui-status-chip, .v10-genui-priority-chip { flex: none; }
+.v10-genui-status-chip.status-superseded, .v10-genui-status-chip.pr-state-closed, .v10-genui-status-chip.task-status-cancelled { text-decoration: line-through; }
+
+/* Decision sections */
+.v10-genui-decision-section { display: flex; flex-direction: column; gap: 3px; padding-top: 8px; border-top: 1px solid var(--border-subtle); }
+.v10-genui-decision-section-heading { font-size: var(--fs-micro); font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-tertiary); }
+.v10-genui-decision-section-body { font-size: var(--fs-body); color: var(--text-secondary); line-height: 1.5; }
+
+/* Generic sections: triple table, type groups, cross-refs */
+.v10-genui-section { display: flex; flex-direction: column; gap: 6px; }
+.v10-genui-section-heading { display: flex; gap: 6px; align-items: baseline; font-size: var(--fs-label); font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-tertiary); }
+.v10-genui-section-sub { font: 500 11px var(--font-mono); text-transform: none; letter-spacing: 0; }
+.v10-genui-triple-table { border: 1px solid var(--border-subtle); overflow: hidden; }
+.v10-genui-triple-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 10px; padding: 6px 10px; font-size: var(--fs-control); }
+.v10-genui-triple-row + .v10-genui-triple-row { border-top: 1px solid var(--border-subtle); }
+.v10-genui-triple-predicate { font-family: var(--font-mono); color: var(--text-tertiary); overflow-wrap: anywhere; }
+.v10-genui-triple-object { color: var(--text-primary); overflow-wrap: anywhere; }
+.v10-genui-type-groups { display: flex; flex-direction: column; gap: 8px; }
+.v10-genui-type-group { border: 1px solid var(--border-subtle); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.v10-genui-type-group-head { display: flex; align-items: center; gap: 6px; font-size: var(--fs-control); font-weight: 600; color: var(--text-primary); }
+.v10-genui-type-icon { color: var(--text-tertiary); }
+.v10-genui-type-count { margin-left: auto; font: 500 11px var(--font-mono); color: var(--text-tertiary); }
+.v10-genui-type-items { display: flex; flex-direction: column; gap: 4px; }
+.v10-genui-type-item-label, .v10-genui-crossref-label { font-size: var(--fs-control); color: var(--text-secondary); overflow-wrap: anywhere; }
+.v10-genui-type-item-sub, .v10-genui-crossref-sub { font-size: var(--fs-label); color: var(--text-tertiary); }
+.v10-genui-crossref { display: flex; flex-wrap: wrap; gap: 6px; }
+.v10-genui-crossref-item { display: inline-flex; gap: 6px; align-items: baseline; padding: 3px 8px; border-radius: var(--radius-control); background: var(--bg-elevated); }
+
+/* Verifiable Memory provenance panel: the one card that is VM purple */
+.v10-genui-vm-panel {
+  display: flex; flex-direction: column; gap: 12px; padding: 12px 14px;
+  background: var(--layer-verified-bg); border: 1px solid var(--layer-verified-border);
+}
+.v10-genui-vm-panel-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.v10-genui-vm-title { font-size: var(--fs-body); font-weight: 600; color: var(--text-primary); }
+.v10-genui-vm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+.v10-genui-vm-block { display: flex; flex-direction: column; gap: 5px; padding: 8px 10px; background: var(--bg-surface); min-width: 0; }
+.v10-genui-vm-block-heading { display: flex; align-items: center; gap: 6px; font-size: var(--fs-micro); font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-tertiary); }
+.v10-genui-vm-quorum { font: 600 10px var(--font-mono); color: var(--layer-verified-text); text-transform: none; letter-spacing: 0; }
+.v10-genui-prov-row { display: flex; gap: 8px; font-size: var(--fs-control); min-width: 0; }
+.v10-genui-prov-label { flex: none; width: 42px; color: var(--text-tertiary); }
+.v10-genui-prov-value { color: var(--text-primary); overflow-wrap: anywhere; min-width: 0; }
+.v10-genui-prov-value.mono { font-family: var(--font-mono); }
+.v10-genui-vm-signer { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.v10-genui-vm-signer-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--text-tertiary); }
+.v10-genui-vm-signer-body { min-width: 0; }
+.v10-genui-vm-signer-label { font-size: var(--fs-control); font-weight: 600; color: var(--text-primary); }
+.v10-genui-vm-signer-did { font: 11px var(--font-mono); color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v10-genui-vm-rep { margin-left: auto; font: 500 11px var(--font-mono); color: var(--text-secondary); }
+.v10-genui-vm-timeline-row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: var(--fs-control); }
+.v10-genui-vm-timeline-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--layer-verified); }
+.v10-genui-vm-timeline-label { color: var(--text-primary); }
+.v10-genui-vm-timeline-at { font: 11px var(--font-mono); color: var(--text-tertiary); }

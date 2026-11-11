@@ -4,8 +4,12 @@ import { executeQuery, fetchStatus, listAssertions, promoteAssertion, publishAss
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
 import { DiscountAppliedBadge } from '../components/Pca/index.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
-import { memoryGraphLabels } from '../lib/memoryLabels.js';
+import { VmReceiptsProvider, useVmReceiptsResource } from '../hooks/useVmReceipts.js';
 import { truncateMiddle } from '../lib/truncate.js';
+import { useGraphPalette } from '../hooks/useGraphPalette.js';
+import { dataSlotHex } from '../graph-palette.js';
+import { graphOptions } from './memory-layer-graph-options.js';
+import { schemaTypeColors } from './schema-type-colors.js';
 
 const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -26,28 +30,6 @@ const LAYER_META: Record<MemoryLayer, { label: string; color: string; icon: stri
   wm: { label: 'Working Memory', color: 'var(--layer-working)', icon: '◇', description: 'Private agent drafts. Fast local storage.' },
   swm: { label: 'Shared Working Memory', color: 'var(--layer-shared)', icon: '◈', description: 'Shared proposals with collaborators. TTL-bounded.' },
   vm: { label: 'Verifiable Memory', color: 'var(--layer-verified)', icon: '◉', description: 'Endorsed, published, on-chain knowledge.' },
-};
-
-const GRAPH_OPTIONS = {
-  labelMode: 'humanized' as const,
-  renderer: '2d' as const,
-  labels: memoryGraphLabels({ extraPredicates: ['http://schema.org/text'] }),
-  style: {
-    classColors: {
-      'http://schema.org/Person': '#f472b6',
-      'http://schema.org/Organization': '#fb923c',
-      'http://schema.org/Place': '#34d399',
-      'http://schema.org/Product': '#c084fc',
-      'http://schema.org/Event': '#facc15',
-      'http://schema.org/CreativeWork': '#7dd3fc',
-      'http://schema.org/Thing': '#94a3b8',
-    },
-    defaultNodeColor: '#94a3b8',
-    defaultEdgeColor: '#5f8598',
-    edgeWidth: 0.9,
-  },
-  hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true },
-  focus: { maxNodes: 3000, hops: 999 },
 };
 
 const TABLE_ICON = (
@@ -84,6 +66,9 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
   const [selectedPresetLabel, setSelectedPresetLabel] = useState('');
   const [draftQuery, setDraftQuery] = useState('');
   const [activeQuery, setActiveQuery] = useState('');
+  // The provenance card reads this graph's receipts; they load once a node is first selected.
+  const [receiptsWanted, setReceiptsWanted] = useState(false);
+  const vmReceipts = useVmReceiptsResource(receiptsWanted ? contextGraphId : undefined);
   const [draftSearch, setDraftSearch] = useState('');
   const [draftField, setDraftField] = useState<'any' | 'subject' | 'predicate' | 'object'>('any');
   const [draftLimit, setDraftLimit] = useState(50);
@@ -215,9 +200,19 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
     })).filter((t: any) => t.subject && t.predicate && t.object),
     [results]
   );
+  // C8: the six most common schema.org types get data colours, the rest grey.
+  // Canvas colours and labels follow the app theme through the palette
+  // (dark palette text was unreadable in light mode).
+  const palette = useGraphPalette();
+  const graphViewConfig = useMemo(() => ({ name: `memory-layer:${palette.theme}`, palette: palette.theme }), [palette]);
+  const graphOptionsForView = useMemo(
+    () => graphOptions(palette, schemaTypeColors(triples, slot => dataSlotHex(palette, slot), palette.neutral.node)),
+    [triples, palette],
+  );
 
   const handleNodeClick = useCallback((node: any) => {
     if (node?.id) {
+      setReceiptsWanted(true);
       setActiveQuery(`SELECT (<${node.id}> AS ?s) ?p ?o WHERE { <${node.id}> ?p ?o } LIMIT 100`);
     }
   }, []);
@@ -241,7 +236,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       )}
 
       {layer === 'vm' && (
-        <div className="v10-vm-search-panel">
+        <div className="v10-vm-search-panel ds-card-nested">
           <div className="v10-vm-search-header">
             <div>
               <div className="v10-vm-search-title">Search Verifiable Memory</div>
@@ -261,14 +256,14 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
           <div className="v10-vm-search-controls">
             <input
               type="text"
-              className="v10-mlv-query-input"
+              className="v10-mlv-query-input ds-input"
               placeholder="Search verifiable memory..."
               value={draftSearch}
               onChange={(e) => setDraftSearch(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') runVerifiedSearch(); }}
             />
             <select
-              className="v10-vm-search-select"
+              className="v10-vm-search-select ds-input"
               value={draftField}
               onChange={(e) => setDraftField(e.target.value as 'any' | 'subject' | 'predicate' | 'object')}
             >
@@ -278,7 +273,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
               <option value="object">Object</option>
             </select>
             <select
-              className="v10-vm-search-select"
+              className="v10-vm-search-select ds-input"
               value={String(draftLimit)}
               onChange={(e) => setDraftLimit(Number.parseInt(e.target.value, 10) || 50)}
             >
@@ -287,7 +282,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
               <option value="100">100 rows</option>
               <option value="200">200 rows</option>
             </select>
-            <button className="v10-mlv-run-btn" onClick={runVerifiedSearch}>
+            <button className="v10-mlv-run-btn ds-btn ds-primary" onClick={runVerifiedSearch}>
               Search
             </button>
           </div>
@@ -298,7 +293,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
         <div className="v10-mlv-query-bar">
           {queryPresetOptions?.length ? (
             <select
-              className="v10-vm-search-select"
+              className="v10-vm-search-select ds-input"
               value={selectedPresetLabel}
               onChange={(e) => {
                 const nextLabel = e.target.value;
@@ -317,35 +312,35 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
           ) : (
             <input
               type="text"
-              className="v10-mlv-query-input"
+              className="v10-mlv-query-input ds-input"
               placeholder="Custom SPARQL query..."
               value={draftQuery}
               onChange={(e) => setDraftQuery(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') runQuery(); }}
             />
           )}
-          <button className="v10-mlv-run-btn" onClick={runQuery}>
+          <button className="v10-mlv-run-btn ds-btn ds-primary" onClick={runQuery}>
             Run
           </button>
           {activeQuery && (
             <button
-              className="v10-mlv-clear-btn"
+              className="v10-mlv-clear-btn ds-btn ds-ghost"
               onClick={() => setActiveQuery('')}
               title="Reset to full layer overview"
             >
               Reset
             </button>
           )}
-          <div className="v10-mlv-view-toggle">
+          <div className="v10-mlv-view-toggle ds-seg">
             <button
-              className={`v10-mlv-toggle-btn ${viewMode === 'table' ? 'active' : ''}`}
+              className={`v10-mlv-toggle-btn ds-seg-item ${viewMode === 'table' ? 'active' : ''}`}
               onClick={() => setViewMode('table')}
               title="Table view"
             >
               {TABLE_ICON}
             </button>
             <button
-              className={`v10-mlv-toggle-btn ${viewMode === 'graph' ? 'active' : ''}`}
+              className={`v10-mlv-toggle-btn ds-seg-item ${viewMode === 'graph' ? 'active' : ''}`}
               onClick={() => setViewMode('graph')}
               title="Graph view"
             >
@@ -361,7 +356,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       {!loading && results.length === 0 && (
         <div className="v10-mlv-empty">
           <p>No triples found in {meta.label.toLowerCase()}.</p>
-          <p style={{ fontSize: 'var(--font-size-caption)', marginTop: 4 }}>
+          <p style={{ fontSize: 'var(--fs-label)', marginTop: 4 }}>
             {layer === 'wm' && 'Import files or chat with your agent to generate working memory.'}
             {layer === 'swm' && 'Promote assertions from working memory to share with collaborators.'}
             {layer === 'vm' && 'Publish shared memory to create verified on-chain knowledge.'}
@@ -370,7 +365,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       )}
 
       {!loading && results.length > 0 && viewMode === 'table' && (
-        <div className="v10-mlv-table-wrap">
+        <div className="v10-mlv-table-wrap ds-card-nested">
           <div className="v10-mlv-result-count">{results.length} triples</div>
           <table className="v10-mlv-table">
             <thead>
@@ -394,7 +389,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       )}
 
       {!loading && triples.length > 0 && viewMode === 'graph' && (
-        <div className="v10-mlv-graph-container">
+        <div className="v10-mlv-graph-container ds-card">
           <div className="v10-mlv-graph-info">
             <span>{triples.length} triples</span>
             {activeQuery && <span className="v10-mlv-graph-info-custom">filtered</span>}
@@ -403,24 +398,27 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
             <RdfGraph
               data={triples}
               format="triples"
-              options={GRAPH_OPTIONS}
+              options={graphOptionsForView}
+              viewConfig={graphViewConfig}
               style={{ width: '100%', height: '100%' }}
               onNodeClick={handleNodeClick}
               initialFit
             >
               <NodePanel
-                className="v10-mlv-node-panel"
+                className="v10-mlv-node-panel ds-card-nested"
                 showUri
                 showTypes
                 showProperties
                 showMetadata={false}
                 maxValueLength={150}
               />
-              <OnChainProvenanceCard
-                contextGraphId={contextGraphId}
-                layer={layer}
-                explorerUrl={explorerUrl}
-              />
+              <VmReceiptsProvider value={vmReceipts}>
+                <OnChainProvenanceCard
+                  contextGraphId={contextGraphId}
+                  layer={layer}
+                  explorerUrl={explorerUrl}
+                />
+              </VmReceiptsProvider>
             </RdfGraph>
           </Suspense>
         </div>
@@ -547,11 +545,11 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
   if (!assertions?.length) return null;
 
   return (
-    <div className="v10-assertion-list">
+    <div className="v10-assertion-list ds-card-nested">
       <div className="v10-assertion-list-header">
         <span className="v10-assertion-list-title">Assertions in Working Memory ({assertions.length})</span>
         <button
-          className="v10-btn-promote-all"
+          className="v10-btn-promote-all ds-btn ds-swm"
           disabled={promoting !== null}
           onClick={handlePromoteAll}
         >
@@ -586,7 +584,7 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
               )}
             </div>
             <button
-              className="v10-btn-promote"
+              className="v10-btn-promote ds-btn ds-swm ds-sm"
               disabled={promoting !== null}
               onClick={() => handlePromote(a)}
               title="Share this complete Knowledge Asset to Shared Working Memory"
@@ -711,7 +709,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
   if (loading) return <div className="v10-assertion-list-loading">Loading SWM contents...</div>;
   if (isEmpty) {
     return (
-      <div className="v10-publish-panel">
+      <div className="v10-publish-panel ds-card">
         <div className="v10-publish-panel-header">
           <span className="v10-publish-panel-title">Publish to Verifiable Memory</span>
         </div>
@@ -723,15 +721,15 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
   }
 
   return (
-    <div className="v10-publish-panel">
+    <div className="v10-publish-panel ds-card">
       <div className="v10-publish-panel-header">
         <span className="v10-publish-panel-title">
           Knowledge assets in Shared Working Memory ({assertions!.length} asset{assertions!.length === 1 ? '' : 's'} · {totalTriples} triples)
         </span>
         <div className="v10-publish-panel-header-actions">
-          <button className="v10-publish-panel-refresh" onClick={refresh} title="Refresh">↻</button>
+          <button className="v10-publish-panel-refresh ds-btn ds-ghost ds-sm ds-icon" onClick={refresh} title="Refresh">↻</button>
           <button
-            className="v10-btn-promote-all"
+            className="v10-btn-promote-all ds-btn ds-swm"
             disabled={publishing}
             onClick={handlePublishAll}
           >
@@ -747,7 +745,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
         </label>
         {selected.size > 0 && (
           <button
-            className="v10-btn-publish"
+            className="v10-btn-publish ds-btn ds-vm"
             disabled={publishing}
             onClick={handlePublishSelected}
           >

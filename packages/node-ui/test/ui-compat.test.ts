@@ -108,44 +108,44 @@ describe('V10 CSS layout selectors', () => {
     expect(css).toMatch(/\.v10-agent-input-area\s*\{/);
   });
 
-  it('includes .v10-agent-send-btn selector', () => {
-    expect(css).toMatch(/\.v10-agent-send-btn\s*\{/);
-  });
-
-  it('includes .chat-bubble selector (legacy)', () => {
-    expect(css).toMatch(/\.chat-bubble\s*\{/);
+  it('styles buttons through the design-system variant classes', () => {
+    for (const sel of ['.ds-btn.ds-primary', '.ds-btn.ds-ghost', '.ds-btn.ds-danger', '.ds-btn.ds-swm', '.ds-btn.ds-vm', '.ds-btn.ds-sm', '.ds-btn.ds-lg', '.ds-btn.ds-icon']) {
+      expect(css).toContain(sel);
+    }
   });
 
   it('includes .v10-header-notif selectors', () => {
     expect(css).toMatch(/\.v10-header-notif/);
   });
 
-  it('includes .dkg-btn selector', () => {
-    expect(css).toMatch(/\.dkg-btn\s*\{/);
+  it('includes the design-system .ds-btn selector', () => {
+    expect(css).toMatch(/\.ds-btn[\s,{]/);
   });
 
-  it('includes .v10-modal-btn selector', () => {
-    expect(css).toMatch(/\.v10-modal-btn\s*\{/);
+  it('keeps per-screen button names out of the shared button rules', () => {
+    const buttons = css.slice(css.indexOf('/* ══ Button'), css.indexOf('/* ══ Tabs'));
+    const rules = buttons.replace(/\/\*[\s\S]*?\*\//g, '').split('}').map(r => r.split('{')[0]).filter(sel => sel.includes('.ds-'));
+    for (const sel of rules) expect(sel).not.toMatch(/\.v10-/);
   });
 });
 
-describe('V10 font imports', () => {
-  it('bundles Geist instead of loading runtime Google Fonts', () => {
+describe('V10 fonts and type scale', () => {
+  it('uses Instrument Sans for the interface and JetBrains Mono for identifiers (DESIGN.md · Type)', () => {
     const css = readFile('styles.css');
-    expect(css).toContain("@import '@fontsource-variable/geist/wght.css'");
-    expect(css).toContain("--font-mono: 'SF Mono', ui-monospace, Menlo, monospace");
-    expect(css).not.toContain('fonts.googleapis.com');
+    expect(css).toContain("--font-sans: 'Instrument Sans'");
+    expect(css).toContain("--font-mono: 'JetBrains Mono'");
   });
 
-  it('uses the shared readable type scale for the app body', () => {
+  it('sets the app body on the shared type scale, with an 11px floor', () => {
     const css = readFile('styles.css');
-    expect(css).toContain("--font-sans: 'Geist Variable'");
-    expect(css).toContain('--font-size-body: 16px');
-    expect(css).toMatch(/html, body, #root\s*\{[\s\S]*?font-size:\s*var\(--font-size-body\)/);
+    expect(css).toContain('--fs-micro: 11px');
+    expect(css).toContain('--fs-body: 14px');
+    expect(css).toMatch(/html, body, #root\s*\{[\s\S]*?font-size:\s*var\(--fs-body\)/);
   });
 
-  it('keeps production inline styles on the shared readable type scale', () => {
-    expect(readProductionUiSources()).not.toMatch(/fontSize:\s*(?:9|10|11|12)(?=\s*[,}])/);
+  it('keeps production inline styles on the shared type scale', () => {
+    // Canvas renderer configs take a number and say so in a comment, which this allows.
+    expect(readProductionUiSources()).not.toMatch(/fontSize:\s*\d+(?:\.\d+)?(?=\s*[,}])/);
   });
 });
 
@@ -308,14 +308,14 @@ describe('backward-compatible URL redirects (V10 consolidation)', () => {
   });
 
   it('exposes /observability as a deep-linkable path (BUG-018)', () => {
-    // The mapping table now lives in `hooks/useShellRouting.ts`; the
-    // companion behavioural tests in `use-shell-routing.test.ts`
-    // exercise the deep-link / unmapped-tab reset semantics directly.
-    const shellRouting = readFileSync(
-      resolve(__dirname, '../src/ui/hooks/useShellRouting.ts'),
+    // Places and their addresses live in `lib/tab-target.ts` (one tab model;
+    // `tab-routes.ts` maps them to paths); `use-shell-routing.test.ts`
+    // exercises deep links and Back/Forward directly.
+    const routes = readFileSync(
+      resolve(__dirname, '../src/ui/lib/tab-target.ts'),
       'utf-8',
     );
-    expect(shellRouting).toContain("'/observability'");
+    expect(routes).toContain("'/observability'");
   });
 });
 
@@ -497,7 +497,7 @@ describe('memory layer custom query execution', () => {
     expect(memoryLayerView).toContain('const runQuery = useCallback(() => {');
     expect(memoryLayerView).toContain('onChange={(e) => setDraftQuery(e.target.value)}');
     expect(memoryLayerView).toContain("onKeyDown={(e) => { if (e.key === 'Enter') runQuery(); }}");
-    expect(memoryLayerView).toContain('<button className="v10-mlv-run-btn" onClick={runQuery}>');
+    expect(memoryLayerView).toContain('<button className="v10-mlv-run-btn ds-btn ds-primary" onClick={runQuery}>');
   });
 
   it('keeps the WM default query GRAPH variable top-level AND WM-scoped (scoped-query guard #749 + Codex #944)', () => {
@@ -580,7 +580,7 @@ describe('MemoryLayerView graph visualization', () => {
 
   it('renders NodePanel inside RdfGraph for detail overlay', () => {
     expect(mlv).toContain('<NodePanel');
-    expect(mlv).toContain('className="v10-mlv-node-panel"');
+    expect(mlv).toContain('className="v10-mlv-node-panel ds-card-nested"');
   });
 
   it('has a Reset button that clears custom queries', () => {
@@ -766,9 +766,9 @@ describe('Graph visualization CSS', () => {
     expect(css).toMatch(/\.v10-mlv-view-toggle\s*\{/);
   });
 
-  it('has .v10-mlv-toggle-btn and active state', () => {
+  it('has .v10-mlv-toggle-btn; the active state comes from the segmented control', () => {
     expect(css).toMatch(/\.v10-mlv-toggle-btn\s*\{/);
-    expect(css).toMatch(/\.v10-mlv-toggle-btn\.active\s*\{/);
+    expect(css).toMatch(/\.ds-seg-item\.active[^{]*\{/);
   });
 
   it('has .v10-mlv-graph-container with height', () => {
@@ -784,10 +784,6 @@ describe('Graph visualization CSS', () => {
   it('has responsive rules for graph containers', () => {
     expect(css).toContain('@media (max-height: 700px)');
     expect(css).toContain('@media (max-width: 700px)');
-  });
-
-  it('has .v10-layer-card-count for triple counts on layer cards', () => {
-    expect(css).toMatch(/\.v10-layer-card-count\s*\{/);
   });
 });
 

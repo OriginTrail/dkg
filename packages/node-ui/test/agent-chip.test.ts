@@ -32,6 +32,16 @@ describe('AgentChip — fallback id truncation', () => {
     return container.querySelector('.v10-agent-chip-name')?.textContent ?? '';
   }
 
+  it('renders a "?" avatar instead of crashing for a separator-only name', () => {
+    act(() => {
+      root.render(React.createElement(AgentChip, {
+        agent: { uri: 'did:dkg:agent:_', name: '_', kind: 'ai', color: '#888888' },
+      }));
+    });
+    expect(container.querySelector('.v10-agent-chip-avatar')?.textContent).toContain('?');
+    expect(nameOf()).toBe('_');
+  });
+
   it('truncates a long libp2p peer id to head6+ellipsis+tail4', () => {
     const peer = '12D3KooWAbcdefghijklmnopqrstuvwxyz1234567890b9a3';
     act(() => {

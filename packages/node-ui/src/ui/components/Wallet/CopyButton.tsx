@@ -58,7 +58,7 @@ export function CopyButton({
     <>
       <button
         type="button"
-        className={['v10-pca-copy-btn', className].filter(Boolean).join(' ')}
+        className={['v10-pca-copy-btn ds-btn ds-ghost ds-sm ds-icon', className].filter(Boolean).join(' ')}
         onClick={() => copy(value)}
         aria-label={accessibleName}
         title={accessibleName}

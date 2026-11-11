@@ -9,6 +9,7 @@ import {
 import { StatStrip } from '../../components/ContextGraphPrimitives.js';
 import type { ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
 import { ownerModeWritesEnabled, type PcaOwnerMode } from '../../pca/ownerAccess.js';
+import { Badge } from '../../components/ds/Badge.js';
 
 /** The owner-mode union — re-exported from the owner-access model (no longer re-declared
  *  here) so existing importers keep a stable name. */
@@ -66,11 +67,11 @@ export function PcaAccountCard({
   // --- Per-card error states ---
   if (notFound) {
     return (
-      <div className="card v10-pca-card" data-state="not-found" data-account={accountId} data-testid="pca-account-card">
+      <div className="card ds-card v10-pca-card" data-state="not-found" data-account={accountId} data-testid="pca-account-card">
         <div className="card-body v10-pca-card-error">
           <p>PCA #{accountId} no longer exists on-chain.</p>
           {onRemove && (
-            <button type="button" className="v10-pca-card-btn" onClick={() => onRemove(accountId)}>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => onRemove(accountId)}>
               Remove from tracked
             </button>
           )}
@@ -80,11 +81,11 @@ export function PcaAccountCard({
   }
   if (!snapshot) {
     return (
-      <div className="card v10-pca-card" data-state="error" data-account={accountId} data-testid="pca-account-card">
+      <div className="card ds-card v10-pca-card" data-state="error" data-account={accountId} data-testid="pca-account-card">
         <div className="card-body v10-pca-card-error">
           <p>Couldn’t load PCA #{accountId}.</p>
           {onRetry && (
-            <button type="button" className="v10-pca-card-btn" onClick={() => onRetry(accountId)}>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => onRetry(accountId)}>
               Retry
             </button>
           )}
@@ -114,9 +115,9 @@ export function PcaAccountCard({
   const titleBand = (
     <div className="v10-pca-card-title">
       <span className="v10-pca-card-id">PCA #{accountId}</span>
-      <span className="badge badge-info v10-pca-card-discount">◉ {pct(snapshot.discountBps)} discount</span>
-      {ownerMode === 'wallet' && <span className="badge badge-info">✎ wallet-managed</span>}
-      {ownerMode === 'external' && <span className="badge badge-warn">tracked external</span>}
+      <Badge size="sm" icon="◉" className="v10-pca-card-discount">{pct(snapshot.discountBps)} discount</Badge>
+      {ownerMode === 'wallet' && <Badge tone="role" size="sm" icon="✎">Wallet-managed</Badge>}
+      {ownerMode === 'external' && <Badge tone="warning" size="sm">Tracked external</Badge>}
       <span className="v10-pca-card-spacer" />
       {account.health && <HealthChip state={account.health} />}
     </div>
@@ -167,7 +168,7 @@ export function PcaAccountCard({
     const inconclusive = account.probesInconclusive;
     return (
       <div
-        className="card v10-pca-card"
+        className="card ds-card v10-pca-card"
         data-state="owned"
         data-owner-mode={ownerMode}
         data-account={accountId}
@@ -195,7 +196,7 @@ export function PcaAccountCard({
               per-wallet probes couldn't be read — caveat instead of a false
               "discounts nothing yet". */}
           {walletWrongNetwork && (
-            <p className="v10-pca-card-warn" role="alert">
+            <p className="v10-pca-card-warn ds-card-nested" role="alert">
               Wrong network. Reads still work, but wallet-owner writes are disabled until the wallet is
               switched.{' '}
               {onSwitchNetwork && (
@@ -206,19 +207,19 @@ export function PcaAccountCard({
             </p>
           )}
           {ownerMode === 'external' && (
-            <p className="v10-pca-card-warn">
+            <p className="v10-pca-card-warn ds-card-nested">
               {connectedAs
                 ? `Connected as ${connectedAs} - switch to ${snapshot.owner} to manage PCA #${accountId}.`
                 : `Connect ${snapshot.owner} to manage PCA #${accountId}.`}
             </p>
           )}
           {inconclusive ? (
-            <p className="v10-pca-card-warn">
+            <p className="v10-pca-card-warn ds-card-nested">
               ⚠ Couldn’t verify which of this node’s wallets are approved — retry. Until then, whether
               this account discounts your publishes is unconfirmed.
             </p>
           ) : !selfCovers ? (
-            <p className="v10-pca-card-warn">
+            <p className="v10-pca-card-warn ds-card-nested">
               ⚠ 0 of this node’s wallets are approved here — it discounts nothing yet. Approve this
               node’s operational wallets to start saving.
             </p>
@@ -232,7 +233,7 @@ export function PcaAccountCard({
             {onManage && (
               <button
                 type="button"
-                className="v10-pca-card-btn primary"
+                className="v10-pca-card-btn primary ds-btn ds-primary"
                 onClick={() => onManage(accountId)}
               >
                 {ownerMode === 'external' ? 'View details' : 'Manage'}
@@ -242,7 +243,7 @@ export function PcaAccountCard({
               onRemove && (
                 <button
                   type="button"
-                  className="v10-pca-card-btn"
+                  className="v10-pca-card-btn ds-btn"
                   onClick={() => onRemove(accountId)}
                 >
                   Stop tracking
@@ -251,7 +252,7 @@ export function PcaAccountCard({
             ) : (
               <button
                 type="button"
-                className="v10-pca-card-btn"
+                className="v10-pca-card-btn ds-btn"
                 onClick={() => onApproveWallets?.(accountId)}
                 disabled={!ownerWritesEnabled || !onApproveWallets}
                 title={ownerActionTitle}
@@ -269,19 +270,19 @@ export function PcaAccountCard({
   const allApproved = account.walletCount > 0 && account.approvedCount === account.walletCount;
   const inconclusive = account.probesInconclusive;
   return (
-    <div className="card v10-pca-card" data-state="approved" data-account={accountId} data-testid="pca-account-card">
+    <div className="card ds-card v10-pca-card" data-state="approved" data-account={accountId} data-testid="pca-account-card">
       <div className="card-body">
         <div className="v10-pca-card-title">
           <span className="v10-pca-card-id">PCA #{accountId}</span>
           <span className="v10-pca-card-sponsor">(approved for this node)</span>
-          <span className="badge badge-info v10-pca-card-discount">◉ {pct(snapshot.discountBps)}</span>
+          <Badge size="sm" icon="◉" className="v10-pca-card-discount">{pct(snapshot.discountBps)}</Badge>
           <span className="v10-pca-card-spacer" />
           {inconclusive ? (
-            <span className="badge badge-warn">⚠ couldn’t verify approvals</span>
+            <Badge tone="warning" size="sm" icon="⚠">Couldn’t verify approvals</Badge>
           ) : !allApproved && account.walletCount > 0 ? (
-            <span className="badge badge-warn">
-              ⚠ {account.approvedCount} of {account.walletCount} wallets approved
-            </span>
+            <Badge tone="warning" size="sm" icon="⚠">
+              {account.approvedCount} of {account.walletCount} wallets approved
+            </Badge>
           ) : null}
         </div>
         {ownerLine}
@@ -296,15 +297,15 @@ export function PcaAccountCard({
             : `${account.approvedCount} of ${account.walletCount} node publishing wallet${account.walletCount === 1 ? '' : 's'} approved.`}
         </p>
         {inconclusive ? (
-          <p className="v10-pca-card-warn">Couldn’t verify which wallets are approved — retry.</p>
+          <p className="v10-pca-card-warn ds-card-nested">Couldn’t verify which wallets are approved — retry.</p>
         ) : !allApproved && account.walletCount > 0 ? (
-          <p className="v10-pca-card-warn">
+          <p className="v10-pca-card-warn ds-card-nested">
             Publishes from the un-approved wallet(s) will quietly pay the direct cost.
           </p>
         ) : null}
         <div className="v10-pca-card-actions">
           {onManage && (
-            <button type="button" className="v10-pca-card-btn primary" onClick={() => onManage(accountId)}>
+            <button type="button" className="v10-pca-card-btn primary ds-btn ds-primary" onClick={() => onManage(accountId)}>
               View details
             </button>
           )}
@@ -312,7 +313,7 @@ export function PcaAccountCard({
               per-CG publish CTA. Guidance hint, not an inert disabled button.
               (If a caller ever wires onUseForPublishing, render the action.) */}
           {onUseForPublishing && (
-            <button type="button" className="v10-pca-card-btn primary" onClick={() => onUseForPublishing(accountId)}>
+            <button type="button" className="v10-pca-card-btn primary ds-btn ds-primary" onClick={() => onUseForPublishing(accountId)}>
               Use for publishing
             </button>
           )}

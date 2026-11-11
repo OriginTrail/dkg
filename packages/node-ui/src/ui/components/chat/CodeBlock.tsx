@@ -80,7 +80,7 @@ export function CodeBlock({ code, lang }: CodeBlockProps) {
     <div className="v10-md-pre">
       <button
         type="button"
-        className="v10-md-copy"
+        className="v10-md-copy ds-btn ds-ghost ds-sm ds-icon"
         onClick={onCopy}
         aria-label={copied ? 'Copied' : 'Copy code'}
         title={copied ? 'Copied' : 'Copy code'}

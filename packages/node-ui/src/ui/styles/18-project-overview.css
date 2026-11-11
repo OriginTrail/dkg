@@ -26,7 +26,7 @@
   gap: 8px;
 }
 .v10-po-identity-label {
-  font-size: var(--font-size-meta);
+  font-size: var(--fs-micro);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -36,67 +36,67 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  min-height: 22px;
-  padding: 2px 10px;
-  border-radius: 999px;
+  height: var(--h-badge-md);
+  padding: 0 9px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
-  font-size: var(--font-size-caption);
-  font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: 0.01em;
-}
-.v10-po-badge[data-role="curator"]::before {
-  content: "◆";
-  margin-right: 4px;
-  font-weight: 700;
-  color: var(--text-success);
-}
-.v10-po-badge[data-role="curator"] {
-  border-color: rgba(34, 197, 94, 0.4);
-  background: rgba(34, 197, 94, 0.1);
-  color: var(--text-success);
-}
-.v10-po-badge[data-role="participant"] {
-  border-color: rgba(59, 130, 246, 0.4);
-  background: rgba(59, 130, 246, 0.1);
+  font-size: var(--fs-label);
+  font-weight: 600;
   color: var(--text-primary);
 }
-.v10-po-badge[data-role="viewer"],
-.v10-po-badge[data-role="unknown"] {
+/* Role ladder: one blue, stronger with the role. Weight (solid → tint →
+   outline → grey → dashed) says how much you can do; the glyph says which
+   role it is, so the pill reads without colour. ◆ stays the canonical
+   curator glyph (also used on participant rows). */
+.v10-po-badge[data-rank]::before { font-weight: 700; margin-right: 2px; }
+.v10-po-badge[data-rank="curator"] {
+  border-color: var(--role);
+  background: var(--role);
+  color: var(--bg-surface);
+}
+.v10-po-badge[data-rank="curator"]::before { content: "◆"; }
+.v10-po-badge[data-rank="joined"] {
+  border-color: var(--role-border);
+  background: var(--role-bg);
+  color: var(--role-text);
+}
+.v10-po-badge[data-rank="joined"]::before { content: "✓"; }
+.v10-po-badge[data-rank="subscriber"] {
+  border-color: var(--role-border);
+  background: transparent;
+  color: var(--role-text);
+}
+.v10-po-badge[data-rank="subscriber"]::before { content: "◉"; }
+.v10-po-badge[data-rank="viewer"] {
+  border-color: color-mix(in srgb, var(--text-tertiary) 70%, transparent);
+  background: transparent;
   color: var(--text-secondary);
 }
-.v10-po-badge[data-cg-type="public"] {
-  border-color: rgba(34, 197, 94, 0.4);
-  background: rgba(34, 197, 94, 0.1);
-  color: var(--text-success);
+.v10-po-badge[data-rank="viewer"]::before { content: "○"; }
+.v10-po-badge[data-rank="not-joined"] {
+  border: 1px dashed color-mix(in srgb, var(--text-tertiary) 70%, transparent);
+  background: transparent;
+  color: var(--text-tertiary);
 }
-.v10-po-badge[data-cg-type="curated"] {
-  border-color: rgba(245, 158, 11, 0.4);
-  background: rgba(245, 158, 11, 0.1);
-  color: var(--text-warning);
+.v10-po-badge[data-rank="unknown"] {
+  border-color: transparent;
+  background: var(--bg-elevated);
+  color: var(--text-tertiary);
+}
+.v10-po-badge[data-rank="unknown"]::before { content: "?"; }
+/* Graph access: blue outline (same hue as role, lighter weight). */
+.v10-po-badge[data-cg-type="public"],
+.v10-po-badge[data-cg-type="curated"],
+.v10-po-badge[data-cg-type="private"] {
+  border-color: var(--role-border);
+  background: transparent;
+  color: var(--role-text);
 }
 .v10-po-badge[data-cg-type="unknown"] {
   color: var(--text-secondary);
 }
-.v10-po-identity-primer {
-  flex: 0 0 auto;
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  background: var(--bg-surface);
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-family: var(--font-sans);
-  font-size: var(--font-size-caption);
-  font-weight: 600;
-  min-height: 28px;
-  padding: 0 12px;
-}
-.v10-po-identity-primer:hover {
-  border-color: var(--border-strong);
-  color: var(--text-primary);
-  background: var(--bg-hover);
-}
+.v10-po-identity-primer { flex: 0 0 auto; }
 .v10-po-stat-strip { margin-bottom: 12px; }
 /* ui-lead item 3 — section title above the At-a-glance grid so it
    matches the structure of the other peer regions (Knowledge
@@ -107,48 +107,30 @@
 .v10-po-people { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid var(--border-subtle); }
 .v10-po-people > .v10-po-section-title { margin-bottom: 8px; }
 .v10-po-people-empty {
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   color: var(--text-tertiary);
   font-style: italic;
 }
 .v10-po-participants-list { display: flex; flex-wrap: wrap; gap: 6px; }
 .v10-po-participant {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 3px 10px; border-radius: 12px; font-size: var(--font-size-caption); font-weight: 600;
+  padding: 3px 10px 3px 3px; border-radius: var(--radius-overlay); font-size: var(--fs-label); font-weight: 600;
   background: var(--bg-surface); border: 1px solid var(--border-default); color: var(--text-primary);
 }
-/* Glyph is rendered in CSS so the data string the test reads stays
-   unambiguous (just the suffix). Default participants get the
-   hollow ◯ glyph in `--text-secondary`. */
-.v10-po-participant::before {
-  content: "◯ ";
-  font-size: var(--font-size-label);
-  line-height: 1;
-  color: var(--text-secondary);
-}
-/* §4.2.1 Delta 1 (locked) — `.is-self` carries TWO signals only:
-   weight (you-ness, paired with the ` · you` suffix in the data
-   string) + the filled ◆ glyph in `--text-info`. No border or
-   background override — three signals for one fact would be the
-   M4 VM-hero regression pattern. */
+/* Each participant leads with its agent avatar (AgentDot), the same
+   circle agents have in the graphs. "You" is bold (plus the ` · you`
+   tag); a curator also carries the canonical ◆ role glyph, rendered in
+   CSS so the data string the tests read stays just the suffix. */
 .v10-po-participant.is-self { font-weight: 700; }
-.v10-po-participant.is-self::before {
-  content: "◆ ";
-  color: var(--text-info);
+.v10-po-participant.is-curator::before {
+  content: "◆";
+  order: 2;
+  font-size: var(--fs-label);
+  line-height: 1;
+  color: var(--role-text);
 }
-/* A non-self curator also carries the filled ◆ glyph (canonical
-   role glyph), tinted with the verified-trust color. No bold, no
-   chip-level tint — the glyph + ` · curator` suffix carry the
-   meaning. */
-.v10-po-participant.is-curator:not(.is-self)::before {
-  content: "◆ ";
-  color: var(--text-success);
-}
-/* When the current user IS the curator, success color wins over
-   info so curator role reads first. The .is-self bold is retained. */
-.v10-po-participant.is-self.is-curator::before {
-  color: var(--text-success);
-}
+.v10-po-participant.is-curator .v10-po-participant-name { order: 3; }
+.v10-po-participant.is-curator .v10-po-participant-tag { order: 4; }
 .v10-po-participant-name {
   white-space: nowrap;
 }
@@ -175,28 +157,8 @@
   gap: 8px;
   margin-bottom: 8px;
 }
-.v10-po-join-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 6px;
-  border-radius: 999px;
-  font-family: var(--font-mono);
-  font-size: var(--font-size-meta);
-  font-weight: 700;
-  background: rgba(245, 158, 11, 0.16);
-  color: var(--text-warning);
-  border: 1px solid rgba(245, 158, 11, 0.4);
-}
-.v10-po-join-count[data-empty="true"] {
-  background: var(--bg-elevated);
-  color: var(--text-tertiary);
-  border-color: var(--border-default);
-}
 .v10-po-join-empty {
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   color: var(--text-tertiary);
   font-style: italic;
 }
@@ -207,27 +169,14 @@
   justify-content: space-between;
   gap: 12px;
   padding: 8px 10px;
-  border-radius: 6px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
 }
 .v10-po-join-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.v10-po-join-name { font-size: var(--font-size-label); font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; }
-.v10-po-join-addr { font-size: var(--font-size-meta); font-family: var(--font-mono); color: var(--text-tertiary); }
+.v10-po-join-name { font-size: var(--fs-control); font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; }
+.v10-po-join-addr { font-size: var(--fs-micro); font-family: var(--font-mono); color: var(--text-tertiary); }
 .v10-po-join-actions { display: flex; gap: 6px; flex-shrink: 0; }
-.v10-po-join-btn {
-  font-family: var(--font-sans);
-  font-size: var(--font-size-caption);
-  font-weight: 600;
-  padding: 4px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-}
-.v10-po-join-btn.approve { background: rgba(34, 197, 94, 0.12); color: var(--text-success); border: 1px solid rgba(34, 197, 94, 0.32); }
-.v10-po-join-btn.approve:hover { background: rgba(34, 197, 94, 0.2); }
-.v10-po-join-btn.reject { background: rgba(239, 68, 68, 0.12); color: var(--text-danger); border: 1px solid rgba(239, 68, 68, 0.32); padding: 4px 8px; }
-.v10-po-join-btn.reject:hover { background: rgba(239, 68, 68, 0.2); }
-.v10-po-join-btn:disabled { opacity: 0.5; cursor: default; }
+.v10-po-join-btn:disabled { opacity: 0.5; }
 .v10-po-pipeline {
   display: flex;
   flex-direction: column;
@@ -254,14 +203,14 @@
 }
 .v10-po-section-title {
   color: var(--text-primary);
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   font-weight: 700;
 }
 .v10-po-section-desc {
   max-width: 760px;
   margin-top: 3px;
   color: var(--text-secondary);
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   line-height: 1.45;
 }
 .v10-po-pipeline-track {
@@ -269,7 +218,7 @@
   width: 100%;
   height: 7px;
   overflow: hidden;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--bg-elevated);
 }
 .v10-po-pipeline-seg {
@@ -292,18 +241,22 @@
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--po-layer-color) 28%, var(--border-default));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--po-layer-color) 6%, var(--bg-surface));
+  border: 1px solid var(--po-layer-border, color-mix(in srgb, var(--po-layer-color) 28%, var(--border-default)));
+  background: var(--po-layer-bg, color-mix(in srgb, var(--po-layer-color) 6%, var(--bg-surface)));
   color: var(--text-secondary);
   cursor: pointer;
   font-family: var(--font-sans);
   text-align: left;
 }
 .v10-po-pipeline-step:hover {
-  border-color: color-mix(in srgb, var(--po-layer-color) 48%, var(--border-strong));
-  background: color-mix(in srgb, var(--po-layer-color) 10%, var(--bg-hover));
+  border-color: color-mix(in srgb, var(--po-layer-color) 60%, var(--border-strong));
+  background: color-mix(in srgb, var(--po-layer-color) 10%, var(--po-layer-bg, var(--bg-hover)));
 }
+/* Each layer card takes its chip tokens, so WM, SWM and VM carry equal
+   weight on true black (a 6% purple mix all but vanished). */
+.v10-po-pipeline-step.wm  { --po-layer-bg: var(--layer-working-bg);  --po-layer-border: var(--layer-working-border); }
+.v10-po-pipeline-step.swm { --po-layer-bg: var(--layer-shared-bg);   --po-layer-border: var(--layer-shared-border); }
+.v10-po-pipeline-step.vm  { --po-layer-bg: var(--layer-verified-bg); --po-layer-border: var(--layer-verified-border); }
 .v10-po-pipeline-step-index {
   display: inline-flex;
   align-items: center;
@@ -311,11 +264,11 @@
   flex: 0 0 24px;
   width: 24px;
   height: 24px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--po-layer-color) 20%, transparent);
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   font-weight: 700;
 }
 .v10-po-pipeline-step-copy {
@@ -327,13 +280,13 @@
 }
 .v10-po-pipeline-step-label {
   color: var(--text-primary);
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   font-weight: 700;
   line-height: 1.25;
 }
 .v10-po-pipeline-step-desc {
   color: var(--text-tertiary);
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   line-height: 1.3;
 }
 .v10-po-pipeline-step-count {
@@ -341,7 +294,7 @@
   max-width: 42%;
   color: var(--text-secondary);
   font-family: var(--font-mono);
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   font-weight: 700;
   overflow-wrap: anywhere;
   text-align: right;
@@ -360,30 +313,33 @@
   color: var(--text-tertiary);
 }
 .v10-po-primer-footer-lede {
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   font-weight: 600;
   color: var(--text-secondary);
 }
 .v10-po-primer-footer-arrow {
   color: var(--text-tertiary);
   font-family: var(--font-mono);
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
 }
 .v10-po-primer-footer-link {
+  text-decoration: underline;
+  text-decoration-color: var(--link-underline);
+  text-underline-offset: 3px;
   background: none;
   border: none;
   padding: 0;
   cursor: pointer;
   color: var(--text-link);
   font-family: var(--font-sans);
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   font-weight: 650;
 }
 .v10-po-primer-footer-link:hover { text-decoration: underline; }
 .v10-po-primer-footer-sub {
   flex: 1 0 100%;
   margin-top: 2px;
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   font-weight: 400;
   color: var(--text-tertiary);
 }
@@ -392,11 +348,6 @@
   .v10-layer-switch-label-full { display: none; }
   .v10-layer-switch-label-compact { display: inline; }
   .v10-layer-action-label { display: none; }
-  .v10-layer-action-btn {
-    min-width: 30px;
-    padding-left: 9px;
-    padding-right: 9px;
-  }
 }
 
 @media (max-width: 1320px) {
@@ -405,30 +356,17 @@
 }
 
 @media (max-width: 1180px) {
-  .v10-layer-switch-btn { padding: 0 9px; gap: 5px; font-size: var(--font-size-caption); }
-  .v10-layer-switch-count { display: none; }
   .v10-layer-switch-separator { margin: 0 4px; }
 }
 
 @media (max-width: 920px) {
   .v10-layer-switcher { padding: 0 2px; }
-  .v10-layer-switch-btn {
-    width: 30px;
-    min-width: 30px;
-    padding: 0;
-    justify-content: center;
-    gap: 0;
-  }
+  .v10-layer-switch-btn { width: 30px; }
   .v10-layer-switch-label { display: none; }
   .v10-layer-switch-separator { margin: 0 2px; }
   .v10-layer-switcher-spacer { flex: 0 0 2px; min-width: 2px; }
   .v10-layer-switcher-actions { gap: 2px; padding-right: 2px; }
-  .v10-layer-action-btn {
-    min-width: 28px;
-    width: 28px;
-    padding-left: 0;
-    padding-right: 0;
-  }
+  .v10-layer-action-btn { width: 28px; }
 }
 
 @media (max-width: 900px) {
@@ -440,9 +378,7 @@
   .v10-po-identity-pairs {
     flex-wrap: wrap;
   }
-  .v10-po-identity-primer {
-    align-self: flex-start;
-  }
+  .v10-po-identity-primer { align-self: flex-start; }
   .v10-po-pipeline-steps {
     grid-template-columns: 1fr;
   }

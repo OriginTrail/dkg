@@ -14,8 +14,6 @@ export class HeaderPage {
   readonly notifDropdown: Locator;
   readonly notifItems: Locator;
   readonly themeToggle: Locator;
-  readonly observabilityBtn: Locator;
-  readonly settingsBtn: Locator;
   readonly rightPanelToggle: Locator;
 
   constructor(page: Page) {
@@ -31,8 +29,6 @@ export class HeaderPage {
     this.notifDropdown = page.locator(sel.header.notifDropdown);
     this.notifItems = page.locator(sel.header.notifItem);
     this.themeToggle = page.locator(sel.header.themeToggle);
-    this.observabilityBtn = page.locator(sel.header.observabilityBtn);
-    this.settingsBtn = page.locator(sel.header.settingsBtn);
     this.rightPanelToggle = page.locator(sel.header.rightPanelToggle);
   }
 
@@ -42,28 +38,6 @@ export class HeaderPage {
 
   async toggleTheme() {
     await this.themeToggle.click();
-  }
-
-  async openObservability() {
-    await this.observabilityBtn.click();
-    // The Observability view is a lazy-loaded centre tab: its <h1> only paints
-    // once the dynamic chunk + initial render settle. Under heavy parallel load
-    // (shared Vite dev server + shared node) that can exceed the default 5s
-    // `expect` budget callers assert with, and a click fired right after
-    // `shell.goto()` can also be missed while the shell is still hydrating.
-    // Confirm the view actually opened, retrying the click once — same missed-
-    // click guard used in clickNewProject — so every caller starts loaded.
-    const heading = this.page.getByRole('heading', { name: 'Observability', level: 1 });
-    try {
-      await heading.waitFor({ state: 'visible', timeout: 8_000 });
-    } catch {
-      await this.observabilityBtn.click();
-      await heading.waitFor({ state: 'visible', timeout: 20_000 });
-    }
-  }
-
-  async openSettings() {
-    await this.settingsBtn.click();
   }
 
   async toggleRightPanel() {

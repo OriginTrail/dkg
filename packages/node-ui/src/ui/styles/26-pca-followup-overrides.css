@@ -12,17 +12,9 @@
 }
 .v10-pca-card-summary {
   margin: 10px 0 0;
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   line-height: 1.45;
   color: var(--text-secondary);
-}
-.v10-pca-overview-owner-actions {
-  display: flex;
-  align-items: flex-start;
-  justify-content: flex-end;
-  gap: 12px;
-  flex-wrap: wrap;
-  max-width: 100%;
 }
 .v10-pca-overview-wallet {
   width: auto;
@@ -84,24 +76,19 @@
 .v10-pca-get-added-body .v10-pca-detail-form .v10-form-input {
   max-width: none;
 }
-.v10-pca-get-added-body .v10-pca-detail-form .v10-pca-card-btn.primary {
-  min-height: 36px;
-  padding-top: 5px;
-  padding-bottom: 5px;
-}
 .v10-pca-discovered-check {
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
   margin: 8px 0;
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   line-height: 1.5;
   color: var(--text-tertiary);
 }
 .v10-pca-create-success {
   margin: 0;
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   line-height: 1.55;
   color: var(--text-secondary);
 }
@@ -147,7 +134,6 @@
   gap: 8px;
   padding: 8px 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: 7px;
   background: var(--bg-surface);
   cursor: pointer;
 }
@@ -181,15 +167,14 @@
   margin-top: 8px;
   padding: 10px 12px;
   border: 1px solid rgba(96, 165, 250, 0.35);
-  border-radius: 8px;
   background: rgba(96, 165, 250, 0.08);
   color: var(--text-secondary);
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   line-height: 1.4;
 }
 .v10-pca-node-picker-selected strong {
   color: var(--text-primary);
-  font-size: var(--font-size-ui);
+  font-size: var(--fs-body);
   font-weight: 800;
 }
 .v10-pca-create-review {
@@ -233,7 +218,7 @@
   .v10-pca-node-picker-option {
     grid-template-columns: auto minmax(0, 1fr);
   }
-  .v10-pca-node-picker-option .badge,
+  .v10-pca-node-picker-option .ds-badge,
   .v10-pca-node-picker-stake,
   .v10-pca-node-picker-own {
     grid-column: 2;

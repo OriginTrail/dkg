@@ -6,6 +6,7 @@ import {
   IDENTITY_WALLET_ACTION_META,
   useIdentityWalletManagement,
 } from './useIdentityWalletManagement.js';
+import { Badge } from '../../components/ds/Badge.js';
 
 /**
  * Hardware-wallet management for the node's on-chain identity keys.
@@ -50,7 +51,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
     : null;
 
   return (
-    <section className="card v10-identity-wallets" data-testid="identity-wallets-section">
+    <section className="card ds-card v10-identity-wallets" data-testid="identity-wallets-section">
       <div className="card-header v10-identity-wallet-header">
         <div>
           <h2 className="card-title">Node Identity Wallets</h2>
@@ -61,14 +62,14 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
           </p>
         </div>
         <div className="v10-identity-wallet-counts" aria-label="Identity wallet counts">
-          <span className="badge badge-info">{summary?.operationalCount ?? '—'} operational</span>
-          <span className="badge badge-info">{summary?.adminCount ?? '—'} admin</span>
+          <Badge tone="role" size="sm">{summary?.operationalCount ?? '—'} operational</Badge>
+          <Badge tone="role" size="sm">{summary?.adminCount ?? '—'} admin</Badge>
         </div>
       </div>
 
       <div className="card-body">
 
-      <div className="v10-identity-wallet-signer">
+      <div className="v10-identity-wallet-signer ds-card-nested">
         {connected ? (
           <WalletPill
             bootstrap={bootstrap ?? undefined}
@@ -82,9 +83,9 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
           />
         )}
         {connected && summaryState.status === 'ready' && (
-          <span className={`badge ${connectedIsAdmin ? 'badge-success' : 'badge-warn'}`}>
-            {connectedIsAdmin ? 'authorized admin signer' : 'not an admin for this identity'}
-          </span>
+          <Badge tone={connectedIsAdmin ? 'success' : 'warning'} size="sm">
+            {connectedIsAdmin ? 'Authorized admin signer' : 'Not an admin for this identity'}
+          </Badge>
         )}
       </div>
 
@@ -92,31 +93,31 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
         <p className="v10-identity-wallet-status" role="status">Loading node identity wallets…</p>
       )}
       {query.status === 'error' && (
-        <p className="v10-modal-warning" role="alert">
+        <p className="v10-modal-warning ds-card-nested" role="alert">
           Couldn&apos;t load identity wallet management: {query.message}.{' '}
-          <button type="button" className="v10-identity-wallet-btn compact" onClick={refreshQuery}>Retry</button>
+          <button type="button" className="v10-identity-wallet-btn compact ds-btn ds-sm" onClick={refreshQuery}>Retry</button>
         </p>
       )}
       {data && !data.hasProfile && (
-        <p className="v10-modal-warning" role="status">This node does not have an on-chain identity profile yet.</p>
+        <p className="v10-modal-warning ds-card-nested" role="status">This node does not have an on-chain identity profile yet.</p>
       )}
       {query.status === 'unavailable' && query.reason === 'operational-wallets' && (
-        <p className="v10-modal-warning" role="status">
+        <p className="v10-modal-warning ds-card-nested" role="status">
           Identity wallet management requires a node version that exposes the operational-wallet snapshot.
         </p>
       )}
       {data?.hasProfile && query.status === 'unavailable' && query.reason === 'identity-contracts' && (
-        <p className="v10-modal-warning" role="status">
+        <p className="v10-modal-warning ds-card-nested" role="status">
           Identity wallet management requires a node version that exposes the Profile, Identity, and IdentityStorage addresses.
         </p>
       )}
       {wrongNetwork && (
-        <p className="v10-modal-warning" role="status">Switch the connected wallet to this node&apos;s network to manage identity keys.</p>
+        <p className="v10-modal-warning ds-card-nested" role="status">Switch the connected wallet to this node&apos;s network to manage identity keys.</p>
       )}
       {summaryState.status === 'error' && (
-        <p className="v10-modal-warning" role="alert">
+        <p className="v10-modal-warning ds-card-nested" role="alert">
           Couldn&apos;t verify identity keys: {summaryState.message}{' '}
-          <button type="button" className="v10-identity-wallet-btn compact" onClick={reloadSummary}>Retry</button>
+          <button type="button" className="v10-identity-wallet-btn compact ds-btn ds-sm" onClick={reloadSummary}>Retry</button>
         </p>
       )}
 
@@ -148,15 +149,15 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
       </div>
 
       {removal && (
-        <div className="v10-modal-warning v10-identity-wallet-confirm" role="alertdialog" aria-label="Confirm key removal">
+        <div className="v10-modal-warning ds-card-nested v10-identity-wallet-confirm" role="alertdialog" aria-label="Confirm key removal">
           <span>
             Remove {removal.address} as an {removal.role} key from identity {data?.identityId}?
             This takes effect on-chain immediately.
           </span>
-          <button type="button" className="v10-identity-wallet-btn" onClick={confirmRemoval} disabled={transactionPending}>
+          <button type="button" className="v10-identity-wallet-btn ds-btn" onClick={confirmRemoval} disabled={transactionPending}>
             Yes, remove
           </button>
-          <button type="button" className="v10-identity-wallet-btn" onClick={cancelRemoval} disabled={transactionPending}>
+          <button type="button" className="v10-identity-wallet-btn ds-btn" onClick={cancelRemoval} disabled={transactionPending}>
             Cancel
           </button>
         </div>
@@ -169,7 +170,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
             : 'Confirm the identity-key transaction on your wallet device…'}
         </p>
       )}
-      {actionErrorMessage && <p className="v10-modal-error" role="alert">{actionErrorMessage}</p>}
+      {actionErrorMessage && <p className="v10-modal-error ds-card-nested" role="alert">{actionErrorMessage}</p>}
       {completed && (
         <div className="v10-identity-wallet-status" role="status" data-testid="identity-wallet-result">
           {completed.confirmed

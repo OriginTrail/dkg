@@ -97,6 +97,7 @@ describe('Context Graph IA and Overview', () => {
     { accessPolicy: 'private', subscribed: true, synced: true, label: 'Not joined' },
     { accessPolicy: undefined, subscribed: true, synced: true, label: 'Not joined' },
   ])('explains $label without claiming membership for a non-participant', async ({ label, ...state }) => {
+    const rank = label === 'Public subscriber' ? 'subscriber' : label === 'Public viewer' ? 'viewer' : 'not-joined';
     const { container, root } = await render(React.createElement(ProjectOverviewCard, {
       cg: { id: 'public-readable', name: 'Readable graph', callerInvolved: false, ...state },
       memory: baseMemory, participants: [], currentAgent: { agentDid: 'did:dkg:agent:viewer' },
@@ -105,6 +106,7 @@ describe('Context Graph IA and Overview', () => {
       const role = container.querySelector('.v10-po-identity-pair .v10-po-badge');
       expect(role?.textContent?.trim()).toBe(label);
       expect(role?.getAttribute('data-role')).toBe('viewer');
+      expect(role?.getAttribute('data-rank')).toBe(rank);
       if (state.accessPolicy === 'public') {
         expect(role?.getAttribute('title')).toContain('public');
         expect(container.textContent).not.toContain('Not joined');

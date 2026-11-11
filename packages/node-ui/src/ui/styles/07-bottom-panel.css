@@ -1,15 +1,7 @@
 /* ── Bottom panel ── */
 .v10-panel-bottom {
-  background-color: var(--app-canvas);
-  background-image:
-    linear-gradient(var(--app-chrome), var(--app-chrome)),
-    var(--app-ambient-gradient);
-  background-attachment: fixed;
-  background-position: 0 0;
-  background-size: 100vw 100vh;
-  border-top: 1px solid var(--app-chrome-border);
-  -webkit-backdrop-filter: blur(28px) saturate(120%);
-  backdrop-filter: blur(28px) saturate(120%);
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -40,37 +32,7 @@
   gap: 0;
   border-bottom: 1px solid var(--border-subtle);
 }
-.v10-bottom-tab {
-  padding: 0 12px;
-  height: 100%;
-  font-size: var(--font-size-label);
-  font-weight: 500;
-  font-family: var(--font-sans);
-  color: var(--text-tertiary);
-  border: none;
-  outline: none;
-  background: none;
-  border-bottom: 2px solid transparent;
-  cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
-}
-.v10-bottom-tab:hover { color: var(--text-secondary); }
-.v10-bottom-tab:focus { outline: none; }
-.v10-bottom-tab.active { color: var(--text-primary); border-bottom-color: var(--accent-blue, #3b82f6); }
-.v10-bottom-toggle {
-  color: var(--text-tertiary);
-  display: flex;
-  align-items: center;
-  padding: 4px 6px;
-  border-radius: 4px;
-  border: none;
-  outline: none;
-  background: none;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.v10-bottom-toggle:hover { color: var(--text-primary); background: var(--bg-hover); }
-.v10-bottom-toggle:focus { outline: none; }
+.v10-bottom-toggle { flex-shrink: 0; }
 .v10-bottom-content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
 
 /* Log viewer */
@@ -87,23 +49,19 @@
   flex: 1;
   min-width: 0;
   padding: 3px 8px;
-  font-size: var(--font-size-caption);
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
   color: var(--text-primary);
   font-family: var(--font-mono);
   outline: none;
 }
-.v10-log-filter:focus { border-color: var(--accent-blue, #3b82f6); }
+.v10-log-filter:focus { border-color: var(--focus-ring); }
 .v10-log-level-select {
   appearance: none;
   -webkit-appearance: none;
   padding: 3px 22px 3px 8px;
-  font-size: var(--font-size-caption);
   background: var(--bg-surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236b7280'/%3E%3C/svg%3E") no-repeat right 6px center;
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
   color: var(--text-secondary);
   font-family: var(--font-sans);
   outline: none;
@@ -112,13 +70,13 @@
   transition: border-color 0.15s;
 }
 .v10-log-level-select:hover { border-color: var(--border-default); color: var(--text-primary); }
-.v10-log-level-select:focus { outline: none; border-color: var(--accent-blue, #3b82f6); }
+.v10-log-level-select:focus { outline: none; border-color: var(--focus-ring); }
 .v10-log-output {
   flex: 1;
   overflow: auto;
   padding: 4px 0;
   font-family: var(--font-mono);
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   line-height: 1.65;
 }
 .v10-log-line {
@@ -145,7 +103,7 @@
 .v10-chat-bubble {
   /* Chat copy is dense; +1 not +2 — keeps the bubble height-economical
      while tracking the body base bump (PR8). */
-  font-size: var(--font-size-ui);
+  font-size: var(--fs-body);
   line-height: 1.55;
   word-break: break-word;
   overflow-wrap: anywhere;
@@ -166,7 +124,7 @@
 .v10-chat-bubble.user {
   /* User pill — right-aligned, capped width, distinct surface. */
   padding: 10px 14px;
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   max-width: 85%;
   background: var(--bg-active);
   border: 1px solid var(--border-default);

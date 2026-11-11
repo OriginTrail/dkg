@@ -9,22 +9,7 @@
    ══════════════════════════════════════════ */
 
 /* ----- Copy button (shared) ----- */
-.v10-pca-copy-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 24px;
-  min-height: 24px;
-  padding: 0;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-tertiary);
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.v10-pca-copy-btn:hover { background: var(--bg-hover); color: var(--text-secondary); }
-.v10-pca-copy-btn:focus-visible { outline: 2px solid var(--text-link); outline-offset: 1px; }
+.v10-pca-copy-btn { flex-shrink: 0; }
 
 /* Visually-hidden live announcement (mirrors the markdown copy announce). */
 .v10-pca-copy-announce {
@@ -43,13 +28,13 @@
 .v10-pca-health-chip {
   gap: 4px;
 }
-.v10-pca-health-glyph { font-size: var(--font-size-meta); line-height: 1; }
+.v10-pca-health-glyph { font-size: var(--fs-micro); line-height: 1; }
 
 /* ----- AddressCrux ----- */
 .v10-pca-address-crux { display: flex; flex-direction: column; gap: 6px; }
 .v10-pca-crux-note {
   margin: 0;
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   line-height: 1.55;
   color: var(--text-secondary);
 }
@@ -57,21 +42,21 @@
 .v10-pca-crux-note code,
 .v10-pca-crux-help code {
   font-family: var(--font-mono);
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   padding: 1px 4px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg-elevated);
 }
 .v10-pca-crux-help {
   margin: 0;
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   line-height: 1.5;
   color: var(--text-tertiary);
 }
 .v10-pca-crux-help abbr { cursor: help; text-decoration-style: dotted; }
 .v10-pca-crux-error {
   margin: 0;
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   color: var(--text-danger);
 }
 
@@ -84,7 +69,6 @@
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
   overflow: hidden;
 }
 .v10-pca-tier-row {
@@ -92,7 +76,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 6px 12px;
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -105,7 +89,7 @@
 .v10-pca-tier-trac { font-family: var(--font-mono); }
 .v10-pca-tier-pct { font-weight: 700; }
 .v10-pca-tier-row.active .v10-pca-tier-pct { color: var(--text-success); }
-.v10-pca-tier-caption { margin: 0; font-size: var(--font-size-caption); color: var(--text-tertiary); }
+.v10-pca-tier-caption { margin: 0; font-size: var(--fs-label); color: var(--text-tertiary); }
 
 /* ----- DiscountAppliedBadge ----- */
 .v10-pca-discount-applied { gap: 3px; }
@@ -113,13 +97,12 @@
 /* ----- EligibilityVerdictBanner ----- */
 .v10-pca-verdict-banner {
   padding: 10px 14px;
-  border-radius: 8px;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
 }
 .v10-pca-verdict-message {
   margin: 0;
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   line-height: 1.55;
   color: var(--text-primary);
 }
@@ -151,7 +134,6 @@
 .v10-pca-device-progress {
   padding: 10px 12px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
   background: var(--bg-surface);
   max-width: 100%;
   min-width: 0;
@@ -159,13 +141,13 @@
 }
 .v10-pca-device-progress-title {
   margin: 0;
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   font-weight: 700;
   color: var(--text-primary);
 }
 .v10-pca-device-progress-note {
   margin: 4px 0 0;
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   line-height: 1.45;
   color: var(--text-tertiary);
 }
@@ -182,7 +164,7 @@
   grid-template-columns: 44px minmax(0, 1fr);
   align-items: start;
   gap: 8px;
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   color: var(--text-secondary);
   min-width: 0;
 }
@@ -195,16 +177,19 @@
 .v10-pca-device-progress-glyph {
   width: 44px;
   font-family: var(--font-mono);
-  font-size: var(--font-size-meta);
+  font-size: var(--fs-micro);
   color: inherit;
   line-height: 1.45;
 }
 .v10-pca-device-progress-tx {
+  text-decoration: underline;
+  text-decoration-color: var(--link-underline);
+  text-underline-offset: 3px;
   grid-column: 2;
   display: block;
   color: var(--text-link);
   font-family: var(--font-mono);
-  font-size: var(--font-size-meta);
+  font-size: var(--fs-micro);
   min-width: 0;
   overflow-wrap: anywhere;
   line-height: 1.45;
@@ -221,34 +206,6 @@
 .v10-pca-device-progress-row[data-state='submitted'] .v10-pca-device-progress-error {
   color: var(--text-warning);
 }
-
-/* Condensed chip on the publish CTA */
-.v10-pca-verdict-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 8px;
-  border-radius: 6px;
-  font-size: var(--font-size-caption);
-  font-weight: 700;
-  font-family: var(--font-mono);
-  border: 1px solid var(--border-default);
-}
-.v10-pca-verdict-chip.v10-pca-verdict-green {
-  color: var(--text-success);
-  border-color: rgba(34, 197, 94, 0.25);
-}
-.v10-pca-verdict-chip.v10-pca-verdict-amber {
-  color: var(--text-warning);
-  border-color: rgba(245, 158, 11, 0.3);
-}
-.v10-pca-verdict-chip.v10-pca-verdict-danger {
-  color: var(--text-danger);
-  border-color: rgba(239, 68, 68, 0.35);
-}
-.v10-pca-verdict-chip.v10-pca-verdict-neutral {
-  color: var(--text-secondary);
-}
 /* ----- SponsorshipHandshake ----- */
 .v10-pca-handshake {
   display: grid;
@@ -264,7 +221,6 @@
   gap: 8px;
   padding: 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
   background: var(--bg-surface);
 }
 .v10-pca-handshake-half[data-emphasis='true'] {
@@ -272,25 +228,25 @@
   background: var(--bg-elevated);
 }
 .v10-pca-handshake-head { display: flex; flex-direction: column; gap: 2px; }
-.v10-pca-handshake-title { font-size: var(--font-size-label); font-weight: 700; color: var(--text-primary); }
-.v10-pca-handshake-sub { font-size: var(--font-size-caption); color: var(--text-tertiary); line-height: 1.45; }
+.v10-pca-handshake-title { font-size: var(--fs-control); font-weight: 700; color: var(--text-primary); }
+.v10-pca-handshake-sub { font-size: var(--fs-label); color: var(--text-tertiary); line-height: 1.45; }
 .v10-pca-handshake-wallets { display: flex; flex-direction: column; gap: 6px; }
 .v10-pca-handshake-copyall {
   align-self: flex-start;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
   color: var(--text-secondary);
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   padding: 4px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   cursor: pointer;
 }
 .v10-pca-handshake-copyall:hover { background: var(--bg-hover); color: var(--text-primary); }
 .v10-pca-handshake-account { display: flex; align-items: center; gap: 8px; }
 .v10-pca-handshake-account-id {
   font-family: var(--font-mono);
-  font-size: var(--font-size-ui);
+  font-size: var(--fs-body);
   font-weight: 700;
   color: var(--text-primary);
 }
-.v10-pca-handshake-empty { margin: 0; font-size: var(--font-size-caption); color: var(--text-tertiary); }
+.v10-pca-handshake-empty { margin: 0; font-size: var(--fs-label); color: var(--text-tertiary); }

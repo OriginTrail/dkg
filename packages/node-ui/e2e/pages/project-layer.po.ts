@@ -19,8 +19,7 @@ export class ProjectLayerPage {
         has: this.page.getByRole('button', { name: projectName }),
       });
     }
-    const activeTab = this.page.locator(`${sel.center.tab}.active`);
-    const label = (await activeTab.locator(sel.center.tabLabel).textContent())?.trim();
+    const label = (await this.page.locator(sel.center.activeTab).getAttribute('title'))?.trim();
     if (label && !label.includes('Dashboard')) {
       return this.page.locator('.v10-center-content .v10-memory-explorer').filter({
         has: this.page.getByRole('button', { name: label }),

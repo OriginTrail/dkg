@@ -13,7 +13,7 @@ export function NodeUnavailableView() {
         <h1>Node unavailable</h1>
         <p>Live node data could not be loaded. The node may be stopped, timing out or returning errors.</p>
         <p>Node status, balances, graphs and integration readiness are unavailable. Check the daemon, then reload to retry the connection.</p>
-        <button type="button" className="v10-modal-btn primary" onClick={() => window.location.reload()}>
+        <button type="button" className="v10-modal-btn primary ds-btn ds-primary" onClick={() => window.location.reload()}>
           Retry connection
         </button>
       </section>

@@ -172,9 +172,9 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
             {walletsLoading && !wb ? (
               <p className="v10-pca-handshake-empty" role="status">Loading your wallets…</p>
             ) : walletsReadError && wallets.length === 0 ? (
-              <p className="v10-modal-error" role="alert">
+              <p className="v10-modal-error ds-card-nested" role="alert">
                 Couldn’t load your wallets.{' '}
-                <button type="button" className="v10-pca-card-btn" onClick={() => refreshWallets()}>Retry</button>
+                <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refreshWallets()}>Retry</button>
               </p>
             ) : wallets.length === 0 ? (
               <p className="v10-pca-handshake-empty">No operational wallets detected on this node.</p>
@@ -215,7 +215,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
         </section>
 
         {/* Gas nudge */}
-        <div className="v10-modal-warning">
+        <div className="v10-modal-warning ds-card-nested">
           ⚠ Gas is always on you. The PCA covers the TRAC publishing fee — never your gas. Fund each
           wallet with native {gasSymbol}.
           {faucet ? (
@@ -236,25 +236,25 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
           {discovered && discovered.length > 0 && (
             <div className="v10-pca-discovered-check" role="status" data-testid="pca-sponsor-discovered">
               ◉ We found your wallet(s) already approved on {discovered.map((id) => `PCA #${id}`).join(', ')}.{' '}
-              <button type="button" className="v10-pca-card-btn compact" onClick={() => setSponsorId(discovered[0])}>
+              <button type="button" className="v10-pca-card-btn compact ds-btn ds-sm" onClick={() => setSponsorId(discovered[0])}>
                 Check PCA #{discovered[0]}
               </button>
             </div>
           )}
           <div className="v10-pca-detail-form">
             <input
-              className="v10-form-input"
+              className="v10-form-input ds-input"
               type="text"
               value={sponsorId}
               onChange={(e) => setSponsorId(e.target.value)}
               placeholder="PCA ID from owner (e.g. 7)"
               aria-label="PCA ID from owner"
             />
-            <button type="button" className="v10-pca-card-btn primary" onClick={check} disabled={checking}>
+            <button type="button" className="v10-pca-card-btn primary ds-btn ds-primary" onClick={check} disabled={checking}>
               {checking ? 'Checking…' : 'Check approval'}
             </button>
           </div>
-          {probeError && <p className="v10-modal-error" role="alert">{probeError}</p>}
+          {probeError && <p className="v10-modal-error ds-card-nested" role="alert">{probeError}</p>}
           {probed && (
             <div className="v10-pca-approve-results" role="status" aria-live="polite">
               <p className="v10-pca-approve-summary">
@@ -279,7 +279,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
       </div>
 
       <div className="v10-modal-footer">
-        <button type="button" className="v10-modal-btn" onClick={onClose}>Close</button>
+        <button type="button" className="v10-modal-btn ds-btn" onClick={onClose}>Close</button>
       </div>
     </PcaModalShell>
   );

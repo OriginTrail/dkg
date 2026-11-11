@@ -1,9 +1,10 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import {
   ResponsiveContainer, LineChart, Line, BarChart, Bar, AreaChart, Area,
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceLine,
 } from 'recharts';
 import { useFetch, formatTime, formatDuration, shortId } from '../hooks.js';
+import { opTypeText, opTypeBg, opTypeRule, opChartColor } from '../op-type-colors.js';
 import {
   fetchOperationsWithPhases, fetchOperation, fetchNodeLog,
   fetchOperationStats, fetchStatus, fetchErrorHotspots, fetchFailedOperations,
@@ -20,8 +21,11 @@ import {
   PHASE_FALLBACK_COLOR,
   PHASE_LEGEND_ENTRIES,
 } from '../phase-colors.js';
+import { humanizeStatus } from '../lib/formatLabels.js';
+import { Badge } from '../components/ds/Badge.js';
+import { HW_THRESHOLDS, hardwareChartRow, hardwareLevels, latestHardwareReading, type MetricLevel, type MetricsSnapshot } from './hardware-metrics.js';
 
-const CANCELLED_COLOR = '#94a3b8';
+const CANCELLED_COLOR = 'var(--border-strong)';
 
 const PHASE_DESCRIPTIONS: Record<string, string> = {
   prepare: 'Partitioning triples, computing Merkle hashes, validating & signing.',
@@ -40,23 +44,6 @@ const PHASE_DESCRIPTIONS: Record<string, string> = {
   verify: 'Verifying Merkle proofs and inserting synced triples.',
 };
 
-const OP_TYPE_COLORS: Record<string, string> = {
-  publish:        '#22c55e',
-  publishFromSWM: '#16a34a',
-  update:         '#14b8a6',
-  'ka-update':    '#0d9488',
-  query:          '#8b5cf6',
-  resolve:        '#a78bfa',
-  workspace:      '#f59e0b',
-  connect:        '#06b6d4',
-  sync:           '#ec4899',
-  share:          '#f472b6',
-  gossip:         '#f97316',
-  reconstruct:    '#fb923c',
-  verify:         '#84cc16',
-  init:           '#94a3b8',
-  system:         '#6b7280',
-};
 
 const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
   publish:        'Publish a Knowledge Asset on-chain to a context graph',
@@ -76,7 +63,7 @@ const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
   system:         'Internal system maintenance operation',
 };
 
-const TOOLTIP_STYLE = { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 'var(--font-size-label)', color: 'var(--text)' };
+const TOOLTIP_STYLE = { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-control)', color: 'var(--text)' };
 
 const TIME_PERIODS = [
   { value: '5m', label: '5 min', ms: 5 * 60_000 },
@@ -145,7 +132,7 @@ function PeriodSelect({ value, onChange }: { value: string; onChange: (v: string
         />
       )}
       {isCustom && (
-        <span style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-dim)' }}>{value}</span>
+        <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)' }}>{value}</span>
       )}
     </div>
   );
@@ -157,11 +144,11 @@ export function ObservabilitySection() {
   return (
     <div>
       <div className="tab-group" style={{ marginBottom: 16 }}>
-        <button className={`tab-item ${tab === 'operations' ? 'active' : ''}`} onClick={() => setTab('operations')}>All Operations</button>
-        <button className={`tab-item ${tab === 'replication' ? 'active' : ''}`} onClick={() => setTab('replication')}>Replication</button>
-        <button className={`tab-item ${tab === 'hardware' ? 'active' : ''}`} onClick={() => setTab('hardware')}>Hardware</button>
-        <button className={`tab-item ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab('logs')}>Logs</button>
-        <button className={`tab-item ${tab === 'errors' ? 'active' : ''}`} onClick={() => setTab('errors')}>Errors</button>
+        <button className={`ds-tab ${tab === 'operations' ? 'active' : ''}`} onClick={() => setTab('operations')}>All Operations</button>
+        <button className={`ds-tab ${tab === 'replication' ? 'active' : ''}`} onClick={() => setTab('replication')}>Replication</button>
+        <button className={`ds-tab ${tab === 'hardware' ? 'active' : ''}`} onClick={() => setTab('hardware')}>Hardware</button>
+        <button className={`ds-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab('logs')}>Logs</button>
+        <button className={`ds-tab ${tab === 'errors' ? 'active' : ''}`} onClick={() => setTab('errors')}>Errors</button>
       </div>
       {tab === 'operations' ? <OperationsTabWithStats /> : tab === 'replication' ? <ReplicationTab /> : tab === 'hardware' ? <HardwareTab /> : tab === 'errors' ? <HealthTab /> : <LogsTab />}
     </div>
@@ -209,37 +196,37 @@ function ReplicationTab() {
     <div>
       <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
         <PeriodSelect value={period} onChange={setPeriod} />
-        <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>
+        <span style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)' }}>
           Chain-anchored publishes reconciled into Verifiable Memory. Auto-refreshes every 5s.
         </span>
       </div>
 
       {/* KPI cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
-        <div className="card" style={{ padding: 16 }}>
+        <div className="card ds-card" style={{ padding: 16 }}>
           <div className="card-title">Promotions</div>
-          <div style={{ fontSize: 28, fontWeight: 600 }}>{summary?.promotes ?? '—'}</div>
-          <div style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>landed in VM this period</div>
+          <div style={{ fontSize: 'var(--fs-display)', fontWeight: 600 }}>{summary?.promotes ?? '—'}</div>
+          <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)' }}>landed in VM this period</div>
         </div>
-        <div className="card" style={{ padding: 16 }}>
+        <div className="card ds-card" style={{ padding: 16 }}>
           <div className="card-title">Success rate</div>
-          <div style={{ fontSize: 28, fontWeight: 600 }}>{successPct}</div>
-          <div style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>promote / (promote + defer)</div>
+          <div style={{ fontSize: 'var(--fs-display)', fontWeight: 600 }}>{successPct}</div>
+          <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)' }}>promote / (promote + defer)</div>
         </div>
-        <div className="card" style={{ padding: 16 }}>
+        <div className="card ds-card" style={{ padding: 16 }}>
           <div className="card-title">Promotion latency</div>
-          <div style={{ fontSize: 28, fontWeight: 600 }}>{fmtMs(summary?.latencyP50Ms)}</div>
-          <div style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>P50 · P95 {fmtMs(summary?.latencyP95Ms)}</div>
+          <div style={{ fontSize: 'var(--fs-display)', fontWeight: 600 }}>{fmtMs(summary?.latencyP50Ms)}</div>
+          <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)' }}>P50 · P95 {fmtMs(summary?.latencyP95Ms)}</div>
         </div>
-        <div className="card" style={{ padding: 16 }}>
+        <div className="card ds-card" style={{ padding: 16 }}>
           <div className="card-title">Active fetches</div>
-          <div style={{ fontSize: 28, fontWeight: 600 }}>{summary?.fetches ?? '—'}</div>
-          <div style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>core-first catch-up pulls</div>
+          <div style={{ fontSize: 'var(--fs-display)', fontWeight: 600 }}>{summary?.fetches ?? '—'}</div>
+          <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)' }}>core-first catch-up pulls</div>
         </div>
       </div>
 
       {/* Timeline */}
-      <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+      <div className="card ds-card" style={{ padding: 16, marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>
           Reconciliation timeline{selectedCg ? ` — ${selectedCg}` : ' — all CGs'}
         </div>
@@ -252,22 +239,22 @@ function ReplicationTab() {
           <ResponsiveContainer width="100%" height={220}>
             <AreaChart data={buckets}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-              <XAxis dataKey="t" tick={{ fontSize: 'var(--font-size-caption)' }} />
-              <YAxis allowDecimals={false} tick={{ fontSize: 'var(--font-size-caption)' }} />
+              <XAxis dataKey="t" tick={{ fontSize: 'var(--fs-label)' }} />
+              <YAxis allowDecimals={false} tick={{ fontSize: 'var(--fs-label)' }} />
               <Tooltip />
               <Legend />
-              <Area type="monotone" dataKey="promotes" stackId="1" stroke="#22c55e" fill="#22c55e" fillOpacity={0.5} name="promotes" />
-              <Area type="monotone" dataKey="fetches" stackId="1" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.4} name="fetches" />
-              <Area type="monotone" dataKey="defers" stackId="1" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.4} name="defers" />
+              <Area type="monotone" dataKey="promotes" stackId="1" stroke="var(--layer-verified)" fill="var(--layer-verified)" fillOpacity={0.55} name="promotes" />
+              <Area type="monotone" dataKey="fetches" stackId="1" stroke="var(--text-tertiary)" fill="var(--text-tertiary)" fillOpacity={0.2} name="fetches" />
+              <Area type="monotone" dataKey="defers" stackId="1" stroke="var(--text-warning)" fill="var(--text-warning)" fillOpacity={0.45} name="defers" />
             </AreaChart>
           </ResponsiveContainer>
         )}
       </div>
 
       {/* Cursor inspector */}
-      <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+      <div className="card ds-card" style={{ padding: 16, marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>Cursor inspector</div>
-        <p style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', marginBottom: 12 }}>
+        <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)', marginBottom: 12 }}>
           Per-CG persisted watermark (contiguous registration ordinal promoted to VM) vs. last observed chain head.
         </p>
         {cursors.length === 0 ? (
@@ -284,10 +271,10 @@ function ReplicationTab() {
                   <tr key={c.context_graph_id}>
                     <td className="mono">{c.context_graph_id}</td>
                     <td className="mono">{c.on_chain_id ?? '—'}</td>
-                    <td>{c.core_hosted ? <span className="badge badge-info" title="Core hosts this public CG; fills its own gaps from chain (Phase D)">host</span> : <span className="badge">member</span>}</td>
+                    <td>{c.core_hosted ? <Badge size="sm" title="Core hosts this public CG; fills its own gaps from chain (Phase D)">Host</Badge> : <Badge size="sm">Member</Badge>}</td>
                     <td>{wm}</td>
                     <td>{head ?? '—'}</td>
-                    <td>{lag == null ? '—' : <span className={`badge ${lag === 0 ? 'badge-success' : 'badge-error'}`}>{lag}</span>}</td>
+                    <td>{lag == null ? '—' : <Badge tone={lag === 0 ? 'success' : 'warning'} size="sm">{lag}</Badge>}</td>
                     <td>{c.last_event_ts ? formatTime(c.last_event_ts) : '—'}</td>
                   </tr>
                 );
@@ -298,9 +285,9 @@ function ReplicationTab() {
       </div>
 
       {/* Per-CG activity */}
-      <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+      <div className="card ds-card" style={{ padding: 16, marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>Per-CG activity</div>
-        <p style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', marginBottom: 12 }}>Click a row to scope the timeline + open its event stream.</p>
+        <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)', marginBottom: 12 }}>Click a row to scope the timeline + open its event stream.</p>
         {perCg.length === 0 ? (
           <div className="empty-state empty-state--compact"><div className="empty-state-title">No activity in this period</div></div>
         ) : (
@@ -329,7 +316,7 @@ function ReplicationTab() {
 
       {/* Event stream drawer */}
       {selectedCg && (
-        <div className="card" style={{ padding: 16 }}>
+        <div className="card ds-card" style={{ padding: 16 }}>
           <div className="card-title" style={{ marginBottom: 8 }}>Event stream — {selectedCg}</div>
           {events.length === 0 ? (
             <div className="empty-state empty-state--compact"><div className="empty-state-title">No events</div></div>
@@ -340,7 +327,7 @@ function ReplicationTab() {
                 {events.map((e, i) => (
                   <tr key={i}>
                     <td>{formatTime(e.ts)}</td>
-                    <td><span className={`badge ${e.action === 'promote' ? 'badge-success' : e.action === 'defer' ? 'badge-error' : ''}`}>{e.action}</span></td>
+                    <td><Badge tone={e.action === 'defer' ? 'warning' : 'neutral'} size="sm" style={e.action === 'promote' ? { background: 'var(--layer-verified-bg)', color: 'var(--layer-verified-text)', boxShadow: 'none' } : undefined}>{humanizeStatus(String(e.action))}</Badge></td>
                     <td>{e.ordinal ?? '—'}</td>
                     <td className="mono">{e.from_watermark != null && e.to_watermark != null ? `${e.from_watermark}->${e.to_watermark}` : '—'}</td>
                     <td className="mono" style={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.ual ?? ''}>{e.ual ?? '—'}</td>
@@ -360,7 +347,7 @@ export function OperationsPage() {
   return (
     <div className="page-section">
       <h1 className="page-title" style={{ marginBottom: 4 }}>Observability</h1>
-      <p style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', marginBottom: 20 }}>Track operation performance, phases, and errors</p>
+      <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)', marginBottom: 20 }}>Track operation performance, phases, and errors</p>
       <ObservabilitySection />
     </div>
   );
@@ -401,9 +388,9 @@ function HealthTab() {
         />
       </div>
 
-      <div className="card" style={{ padding: 16 }}>
+      <div className="card ds-card" style={{ padding: 16 }}>
         <div className="card-title" style={{ marginBottom: 4 }}>Error Hotspots</div>
-        <p style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.5 }}>
+        <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.5 }}>
           Click a phase to see all failed operations. Click an operation to expand its logs.
         </p>
         {hotspots.length === 0 ? (
@@ -428,15 +415,15 @@ function HealthTab() {
                     onClick={() => { setExpandedPhase(p => p === rowKey ? null : rowKey); setExpandedOp(null); }}
                     style={{ cursor: 'pointer', background: expandedPhase === rowKey ? 'rgba(239,68,68,.08)' : undefined }}
                   >
-                    <td style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', padding: '10px 14px' }}>
-                      <span style={{ marginRight: 6, fontSize: 'var(--font-size-meta)' }}>{expandedPhase === rowKey ? '▼' : '▸'}</span>
+                    <td style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)', padding: '10px 14px' }}>
+                      <span style={{ marginRight: 6, fontSize: 'var(--fs-micro)' }}>{expandedPhase === rowKey ? '▼' : '▸'}</span>
                       {h.operation_name}
                     </td>
-                    <td style={{ color: PHASE_COLORS[h.phase] ?? PHASE_FALLBACK_COLOR, fontWeight: 600, padding: '10px 14px' }}>
+                    <td style={{ color: 'var(--text-primary)', fontWeight: 600, padding: '10px 14px' }}>
                       {h.phase}
                     </td>
-                    <td style={{ padding: '10px 14px' }}><span className="badge badge-error">{h.error_count}</span></td>
-                    <td style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', padding: '10px 14px' }} title={h.last_error ?? ''}>{h.last_error ?? '—'}</td>
+                    <td style={{ padding: '10px 14px' }}><Badge tone="danger" size="sm">{h.error_count}</Badge></td>
+                    <td style={{ fontSize: 'var(--fs-control)', color: 'var(--text-muted)', maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', padding: '10px 14px' }} title={h.last_error ?? ''}>{h.last_error ?? '—'}</td>
                     <td style={{ padding: '10px 14px' }}>{h.last_occurred ? formatTime(h.last_occurred) : '—'}</td>
                   </tr>
                   {expandedPhase === rowKey && (
@@ -463,7 +450,7 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
   operations: any[]; expandedOp: string | null; onToggleOp: (id: string) => void;
 }) {
   if (operations.length === 0) {
-    return <div style={{ padding: '12px 16px', fontSize: 'var(--font-size-caption)', color: 'var(--text-muted)' }}>No matching failed operations</div>;
+    return <div style={{ padding: '12px 16px', fontSize: 'var(--fs-label)', color: 'var(--text-muted)' }}>No matching failed operations</div>;
   }
 
   return (
@@ -477,23 +464,23 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
               background: expandedOp === op.operation_id ? 'rgba(239,68,68,.05)' : undefined,
             }}
           >
-            <span style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-dim)' }}>{expandedOp === op.operation_id ? '▼' : '▸'}</span>
-            <span style={{ fontWeight: 600, fontSize: 'var(--font-size-label)', color: OP_TYPE_COLORS[op.operation_name] ?? 'var(--text-muted)' }}>{op.operation_name}</span>
+            <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)' }}>{expandedOp === op.operation_id ? '▼' : '▸'}</span>
+            <span style={{ fontWeight: 600, fontSize: 'var(--fs-control)', color: opTypeText(op.operation_name) }}>{op.operation_name}</span>
             <StatusBadge status={op.status} />
-            <span className="mono" style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-dim)' }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
-            <span style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-dim)', marginLeft: 'auto' }}>{formatTime(op.phase_started_at)}</span>
-            {op.duration_ms != null && <span style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-dim)' }}>{formatDuration(op.duration_ms)}</span>}
+            <span className="mono" style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)' }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
+            <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)', marginLeft: 'auto' }}>{formatTime(op.phase_started_at)}</span>
+            {op.duration_ms != null && <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)' }}>{formatDuration(op.duration_ms)}</span>}
           </div>
 
           {expandedOp === op.operation_id && (
             <div style={{ padding: '4px 20px 16px' }}>
               {op.phase_error && (
-                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'rgba(239,68,68,.1)', borderRadius: 6, border: '1px solid rgba(239,68,68,.2)', fontSize: 'var(--font-size-caption)', color: 'var(--red)' }}>
+                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'rgba(239,68,68,.1)', borderRadius: 'var(--radius-control)', border: '1px solid rgba(239,68,68,.2)', fontSize: 'var(--fs-label)', color: 'var(--red)' }}>
                   {op.phase_error}
                 </div>
               )}
               {op.error_message && op.error_message !== op.phase_error && (
-                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'rgba(239,68,68,.06)', borderRadius: 6, border: '1px solid rgba(239,68,68,.15)', fontSize: 'var(--font-size-caption)', color: 'var(--red)' }}>
+                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'rgba(239,68,68,.06)', borderRadius: 'var(--radius-control)', border: '1px solid rgba(239,68,68,.15)', fontSize: 'var(--fs-label)', color: 'var(--red)' }}>
                   {op.error_message}
                 </div>
               )}
@@ -504,7 +491,7 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
                   ))}
                 </LogContainer>
               ) : (
-                <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-dim)', padding: '4px 0' }}>No logs for this operation</div>
+                <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-dim)', padding: '4px 0' }}>No logs for this operation</div>
               )}
             </div>
           )}
@@ -594,7 +581,7 @@ function OperationStatsSection() {
       <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 16, flexWrap: 'wrap' }}>
         <PeriodSelect value={period} onChange={setPeriod} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}>per</span>
+          <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}>per</span>
           <select className="input" value={granularity} onChange={e => setGranularity(e.target.value)} style={{ width: 'auto' }}>
             {GRANULARITY_OPTIONS.map(g => <option key={g.value} value={g.value}>{g.label}</option>)}
           </select>
@@ -606,29 +593,29 @@ function OperationStatsSection() {
           {rates.length > 0 && (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10, marginBottom: 16 }}>
               {rates.map((r: any) => {
-                const color = OP_TYPE_COLORS[r.type] ?? 'var(--text-muted)';
+                const color = opTypeText(r.type);
                 const rateColor = r.rate >= 0.9 ? 'var(--green-mid)' : r.rate >= 0.7 ? 'var(--amber)' : 'var(--red)';
                 return (
-                  <div key={r.type} style={{ background: 'rgba(255,255,255,.03)', borderRadius: 8, padding: '12px 14px', border: '1px solid var(--border)', borderLeft: `3px solid ${color}` }}>
+                  <div key={r.type} style={{ background: 'rgba(255,255,255,.03)', borderRadius: 'var(--radius-nested)', padding: '12px 14px', border: '1px solid var(--border)', borderLeft: `3px solid ${opTypeRule(r.type)}` }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                      <span style={{ fontSize: 13, fontWeight: 700, color }}>{r.type}</span>
+                      <span style={{ fontSize: 'var(--fs-body)', fontWeight: 700, color }}>{r.type}</span>
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 12px', fontSize: 'var(--font-size-caption)' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 12px', fontSize: 'var(--fs-label)' }}>
                       <div>
-                        <div style={{ color: 'var(--text-dim)', fontSize: 'var(--font-size-micro)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Operations</div>
-                        <div style={{ fontWeight: 700, fontSize: 16 }}>{r.total}</div>
+                        <div style={{ color: 'var(--text-dim)', fontSize: 'var(--fs-micro)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Operations</div>
+                        <div style={{ fontWeight: 700, fontSize: 'var(--fs-title)' }}>{r.total}</div>
                       </div>
                       <div>
-                        <div style={{ color: 'var(--text-dim)', fontSize: 'var(--font-size-micro)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Success</div>
-                        <div style={{ fontWeight: 700, fontSize: 16, color: rateColor }}>{(r.rate * 100).toFixed(0)}%</div>
+                        <div style={{ color: 'var(--text-dim)', fontSize: 'var(--fs-micro)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Success</div>
+                        <div style={{ fontWeight: 700, fontSize: 'var(--fs-title)', color: rateColor }}>{(r.rate * 100).toFixed(0)}%</div>
                       </div>
                       <div>
-                        <div style={{ color: 'var(--text-dim)', fontSize: 'var(--font-size-micro)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Avg Duration</div>
-                        <div style={{ fontWeight: 600, fontSize: 13 }}>{formatDuration(r.avgMs)}</div>
+                        <div style={{ color: 'var(--text-dim)', fontSize: 'var(--fs-micro)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Avg Duration</div>
+                        <div style={{ fontWeight: 600, fontSize: 'var(--fs-body)' }}>{formatDuration(r.avgMs)}</div>
                       </div>
                       <div>
-                        <div style={{ color: 'var(--text-dim)', fontSize: 'var(--font-size-micro)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Errors</div>
-                        <div style={{ fontWeight: 600, fontSize: 13, color: r.error > 0 ? 'var(--red)' : 'var(--text-dim)' }}>{r.error}</div>
+                        <div style={{ color: 'var(--text-dim)', fontSize: 'var(--fs-micro)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Errors</div>
+                        <div style={{ fontWeight: 600, fontSize: 'var(--fs-body)', color: r.error > 0 ? 'var(--red)' : 'var(--text-dim)' }}>{r.error}</div>
                       </div>
                     </div>
                     <div style={{ height: 3, background: 'rgba(255,255,255,.06)', borderRadius: 2, overflow: 'hidden', marginTop: 10 }}>
@@ -643,72 +630,72 @@ function OperationStatsSection() {
           {/* Operation charts */}
           {hasCharts ? (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
-              <div className="card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 'var(--font-size-caption)', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Operations Over Time</div>
+              <div className="card ds-card" style={{ padding: '12px 14px' }}>
+                <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Operations Over Time</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="time" tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} />
-                    <YAxis tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} width={28} />
+                    <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: '#9ca3af' }} />
+                    <YAxis tick={{ fontSize: 'var(--fs-micro)', fill: '#9ca3af' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'rgba(255,255,255,.06)' }} />
-                    <Legend wrapperStyle={{ fontSize: 'var(--font-size-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
+                    <Legend wrapperStyle={{ fontSize: 'var(--fs-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
-                      <Bar key={t} dataKey={`${t}_count`} name={t} stackId="ops" fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.6} hide={hiddenSeries.has(t)} />
+                      <Bar key={t} dataKey={`${t}_count`} name={t} stackId="ops" fill={opChartColor(t, types)} fillOpacity={0.75} hide={hiddenSeries.has(t)} />
                     ))}
                   </BarChart>
                 </ResponsiveContainer>
               </div>
 
-              <div className="card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 'var(--font-size-caption)', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Avg Duration by Operation Type (s)</div>
+              <div className="card ds-card" style={{ padding: '12px 14px' }}>
+                <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Avg Duration by Operation Type (s)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="time" tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} />
-                    <YAxis tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} width={32} />
+                    <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: '#9ca3af' }} />
+                    <YAxis tick={{ fontSize: 'var(--fs-micro)', fill: '#9ca3af' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
-                    <Legend wrapperStyle={{ fontSize: 'var(--font-size-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
+                    <Legend wrapperStyle={{ fontSize: 'var(--fs-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
-                      <Area key={t} type="monotone" dataKey={`${t}_avgMs`} name={t} stroke={OP_TYPE_COLORS[t] ?? '#6b7280'} fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.1} strokeWidth={2} dot={false} hide={hiddenSeries.has(t)} />
+                      <Area key={t} type="monotone" dataKey={`${t}_avgMs`} name={t} stroke={opChartColor(t, types)} fill={opChartColor(t, types)} fillOpacity={0.1} strokeWidth={2} dot={false} hide={hiddenSeries.has(t)} />
                     ))}
                   </AreaChart>
                 </ResponsiveContainer>
               </div>
 
-              <div className="card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 'var(--font-size-caption)', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Success Rate by Operation Type (%)</div>
+              <div className="card ds-card" style={{ padding: '12px 14px' }}>
+                <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Success Rate by Operation Type (%)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="time" tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} />
-                    <YAxis domain={[0, 100]} tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} width={28} />
+                    <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: '#9ca3af' }} />
+                    <YAxis domain={[0, 100]} tick={{ fontSize: 'var(--fs-micro)', fill: '#9ca3af' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
-                    <Legend wrapperStyle={{ fontSize: 'var(--font-size-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
+                    <Legend wrapperStyle={{ fontSize: 'var(--fs-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
-                      <Area key={t} type="monotone" dataKey={`${t}_successPct`} name={t} stroke={OP_TYPE_COLORS[t] ?? '#6b7280'} fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.1} strokeWidth={2} dot={false} hide={hiddenSeries.has(t)} />
+                      <Area key={t} type="monotone" dataKey={`${t}_successPct`} name={t} stroke={opChartColor(t, types)} fill={opChartColor(t, types)} fillOpacity={0.1} strokeWidth={2} dot={false} hide={hiddenSeries.has(t)} />
                     ))}
                   </AreaChart>
                 </ResponsiveContainer>
               </div>
 
-              <div className="card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 'var(--font-size-caption)', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Gas Cost by Operation Type (ETH)</div>
+              <div className="card ds-card" style={{ padding: '12px 14px' }}>
+                <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Gas Cost by Operation Type (ETH)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="time" tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} />
-                    <YAxis tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} width={32} />
+                    <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: '#9ca3af' }} />
+                    <YAxis tick={{ fontSize: 'var(--fs-micro)', fill: '#9ca3af' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'rgba(255,255,255,.06)' }} />
-                    <Legend wrapperStyle={{ fontSize: 'var(--font-size-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
+                    <Legend wrapperStyle={{ fontSize: 'var(--fs-micro)' }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
-                      <Bar key={t} dataKey={`${t}_gas`} name={t} stackId="gas" fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.6} hide={hiddenSeries.has(t)} />
+                      <Bar key={t} dataKey={`${t}_gas`} name={t} stackId="gas" fill={opChartColor(t, types)} fillOpacity={0.75} hide={hiddenSeries.has(t)} />
                     ))}
                   </BarChart>
                 </ResponsiveContainer>
               </div>
             </div>
           ) : (
-            <div className="card" style={{ marginBottom: 14 }}>
+            <div className="card ds-card" style={{ marginBottom: 14 }}>
               <div className="empty-state empty-state--compact">
                 <div className="empty-state-icon">
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
@@ -723,7 +710,7 @@ function OperationStatsSection() {
   );
 }
 
-function HardwareTab() {
+export function HardwareTab() {
   const [period, setPeriod] = useState('3h');
   const pMs = periodToMs(period);
   const timeFmt = useMemo((): Intl.DateTimeFormatOptions => {
@@ -736,40 +723,35 @@ function HardwareTab() {
     [pMs], 10_000,
   );
 
-  const hwChartData = useMemo(() => (hwData?.snapshots ?? []).map((s: any) => ({
-    time: new Date(s.ts).toLocaleString(undefined, timeFmt),
-    cpu: s.cpu_percent ?? 0,
-    memGB: s.mem_used_bytes ? +(s.mem_used_bytes / (1024 ** 3)).toFixed(2) : 0,
-    heapMB: s.heap_used_bytes ? +(s.heap_used_bytes / (1024 ** 2)).toFixed(1) : 0,
-    diskPct: s.disk_total_bytes ? Math.round((s.disk_used_bytes / s.disk_total_bytes) * 100) : 0,
-    peers: s.peer_count ?? 0,
-    rpcMs: s.rpc_latency_ms ?? 0,
-  })), [hwData, timeFmt]);
-
-  const hw = useMemo(() => {
-    const snaps = hwData?.snapshots ?? [];
-    if (!snaps.length) return null;
-    const s = snaps[snaps.length - 1];
-    return {
-      cpu: s.cpu_percent ?? 0,
-      memUsedGB: s.mem_used_bytes ? +(s.mem_used_bytes / (1024 ** 3)).toFixed(1) : 0,
-      memTotalGB: s.mem_total_bytes ? +(s.mem_total_bytes / (1024 ** 3)).toFixed(1) : 0,
-      memPct: s.mem_total_bytes ? Math.round((s.mem_used_bytes / s.mem_total_bytes) * 100) : 0,
-      heapMB: s.heap_used_bytes ? +(s.heap_used_bytes / (1024 ** 2)).toFixed(0) : 0,
-      diskUsedGB: s.disk_used_bytes ? +(s.disk_used_bytes / (1024 ** 3)).toFixed(1) : null,
-      diskTotalGB: s.disk_total_bytes ? +(s.disk_total_bytes / (1024 ** 3)).toFixed(1) : null,
-      diskPct: s.disk_total_bytes ? Math.round((s.disk_used_bytes / s.disk_total_bytes) * 100) : null,
-      peers: s.peer_count ?? 0,
-      rpcMs: s.rpc_latency_ms ?? null,
-    };
-  }, [hwData]);
+  const hwChartData = useMemo(() => (hwData?.snapshots ?? []).map((s: MetricsSnapshot) => hardwareChartRow(s, timeFmt)), [hwData, timeFmt]);
+  const hw = useMemo(() => latestHardwareReading(hwData?.snapshots ?? []), [hwData]);
 
   const loading = !hw;
+  type Level = MetricLevel;
+  const LEVEL_COLOR: Record<Level, string> = { ok: 'var(--data-1)', warn: 'var(--text-warning)', crit: 'var(--text-danger)' };
+  const LEVEL_TEXT: Record<Level, string> = { ok: 'var(--text-primary)', warn: 'var(--text-warning)', crit: 'var(--text-danger)' };
+  const IDLE = 'var(--text-tertiary)';
+  const TH = HW_THRESHOLDS;
+  const levels = hardwareLevels(hw);
   const statCards = [
-    { label: 'CPU', value: hw ? `${hw.cpu.toFixed(1)}%` : '—', sub: hw ? 'utilisation' : 'waiting…', pct: hw ? hw.cpu : null, color: hw ? (hw.cpu > 80 ? '#ef4444' : hw.cpu > 60 ? '#f59e0b' : '#3b82f6') : '#374151' },
-    { label: 'RAM', value: hw ? `${hw.memUsedGB} / ${hw.memTotalGB} GB` : '—', sub: hw ? `${hw.memPct}% used` : 'waiting…', pct: hw ? hw.memPct : null, color: hw ? (hw.memPct > 85 ? '#ef4444' : hw.memPct > 70 ? '#f59e0b' : '#8b5cf6') : '#374151' },
-    { label: 'Heap', value: hw ? `${hw.heapMB} MB` : '—', sub: hw ? 'Node.js heap' : 'waiting…', pct: null, color: hw ? '#06b6d4' : '#374151' },
-    { label: 'Disk', value: hw ? (hw.diskPct !== null ? `${hw.diskUsedGB} / ${hw.diskTotalGB} GB` : 'n/a') : '—', sub: hw ? (hw.diskPct !== null ? `${hw.diskPct}% used` : 'not configured') : 'waiting…', pct: hw ? hw.diskPct : null, color: hw ? (hw.diskPct !== null ? (hw.diskPct > 85 ? '#ef4444' : '#f59e0b') : '#6b7280') : '#374151' },
+    { label: 'CPU', value: hw ? `${hw.cpu.toFixed(1)}%` : '—', sub: hw ? 'utilisation' : 'waiting…', pct: hw ? hw.cpu : null, lv: levels.cpu },
+    { label: 'RAM', value: hw ? (hw.memPct !== null ? `${hw.memUsedGB} / ${hw.memTotalGB} GB` : 'n/a') : '—', sub: hw ? (hw.memPct !== null ? `${hw.memPct}% used` : 'not reported') : 'waiting…', pct: hw ? hw.memPct : null, lv: levels.mem },
+    { label: 'Heap', value: hw ? `${hw.heapMB} MB` : '—', sub: hw ? 'Node.js heap' : 'waiting…', pct: null, lv: 'ok' as Level },
+    { label: 'Disk', value: hw ? (hw.diskPct !== null ? `${hw.diskUsedGB} / ${hw.diskTotalGB} GB` : 'n/a') : '—', sub: hw ? (hw.diskPct !== null ? `${hw.diskPct}% used` : 'not configured') : 'waiting…', pct: hw ? hw.diskPct : null, lv: levels.disk },
+  ];
+  const peersLv = levels.peers;
+  const rpcLv = levels.rpc;
+  const warnIcon = (lv: Level) => lv === 'ok' ? null : <span aria-label={lv === 'crit' ? 'critical' : 'warning'} style={{ marginLeft: 6, fontSize: 'var(--fs-body)' }}>⚠</span>;
+  const s1 = 'var(--data-1)';
+  const grid = 'var(--border-subtle)', tick = 'var(--text-tertiary)';
+  const warnLine = 'var(--text-warning)', critLine = 'var(--text-danger)';
+  const hwCharts: Array<{ key: string; title: string; name: string; pct?: boolean; warn?: number; crit?: number }> = [
+    { key: 'cpu', title: 'CPU usage (%)', name: 'CPU %', pct: true, warn: TH.cpu[0], crit: TH.cpu[1] },
+    { key: 'memPct', title: 'RAM used (%)', name: 'RAM %', pct: true, warn: TH.mem[0], crit: TH.mem[1] },
+    { key: 'diskPct', title: 'Disk used (%)', name: 'Disk %', pct: true, warn: TH.disk[0], crit: TH.disk[1] },
+    { key: 'heapMB', title: 'Node.js heap (MB)', name: 'Heap MB' },
+    { key: 'peers', title: 'Peers', name: 'Peers' },
+    { key: 'rpcMs', title: 'RPC latency (ms)', name: 'RPC ms', crit: TH.rpcMs },
   ];
 
   return (
@@ -780,92 +762,57 @@ function HardwareTab() {
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 12 }}>
         {statCards.map(stat => (
-          <div key={stat.label} className="card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
-            <div style={{ fontSize: 'var(--font-size-meta)', fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
-            <div style={{ fontSize: 18, fontWeight: 700, color: stat.color, lineHeight: 1, marginBottom: 3 }}>{stat.value}</div>
+          <div key={stat.label} className="card ds-card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+            <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
+            <div style={{ fontSize: 'var(--fs-heading)', fontWeight: 700, color: hw ? LEVEL_TEXT[stat.lv] : IDLE, lineHeight: 1, marginBottom: 3 }}>{stat.value}{warnIcon(stat.lv)}</div>
             {stat.pct !== null ? (
-              <div style={{ height: 3, background: 'rgba(255,255,255,.06)', borderRadius: 2, margin: '5px 0 3px' }}>
-                <div style={{ height: 3, width: `${Math.min(stat.pct, 100)}%`, background: stat.color, borderRadius: 2, transition: 'width .4s ease' }} />
+              <div style={{ height: 3, background: 'var(--bg-elevated)', borderRadius: 2, margin: '5px 0 3px' }}>
+                <div style={{ height: 3, width: `${Math.min(stat.pct, 100)}%`, background: LEVEL_COLOR[stat.lv], borderRadius: 2, transition: 'width .4s ease' }} />
               </div>
             ) : <div style={{ height: 3, margin: '5px 0 3px' }} />}
-            <div style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-dim)' }}>{stat.sub}</div>
+            <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)' }}>{stat.sub}</div>
           </div>
         ))}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 12 }}>
-        <div className="card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
-          <div style={{ fontSize: 'var(--font-size-meta)', fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>Peers</div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: hw ? '#22c55e' : '#374151', lineHeight: 1 }}>{hw ? hw.peers : '—'}</div>
-          <div style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-dim)', marginTop: 3 }}>{hw ? 'connected' : 'waiting…'}</div>
+        <div className="card ds-card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+          <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>Peers</div>
+          <div style={{ fontSize: 'var(--fs-heading)', fontWeight: 700, color: hw ? LEVEL_TEXT[peersLv] : IDLE, lineHeight: 1 }}>{hw ? hw.peers : '—'}{warnIcon(peersLv)}</div>
+          <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)', marginTop: 3 }}>{hw ? 'connected' : 'waiting…'}</div>
         </div>
-        <div className="card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
-          <div style={{ fontSize: 'var(--font-size-meta)', fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>RPC Latency</div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: hw ? (hw.rpcMs !== null && hw.rpcMs > 500 ? '#ef4444' : '#22c55e') : '#374151', lineHeight: 1 }}>
-            {hw ? (hw.rpcMs !== null ? `${hw.rpcMs} ms` : '—') : '—'}
+        <div className="card ds-card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+          <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>RPC Latency</div>
+          <div style={{ fontSize: 'var(--fs-heading)', fontWeight: 700, color: hw ? LEVEL_TEXT[rpcLv] : IDLE, lineHeight: 1 }}>
+            {hw ? (hw.rpcMs !== null ? `${hw.rpcMs} ms` : '—') : '—'}{warnIcon(rpcLv)}
           </div>
-          <div style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-dim)', marginTop: 3 }}>{hw ? 'last measurement' : 'waiting…'}</div>
+          <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)', marginTop: 3 }}>{hw ? 'last measurement' : 'waiting…'}</div>
         </div>
       </div>
 
       {hwChartData.length > 1 ? (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <div className="card" style={{ padding: '12px 14px' }}>
-            <div style={{ fontSize: 'var(--font-size-caption)', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>CPU Usage (%)</div>
-            <ResponsiveContainer width="100%" height={150}>
-              <AreaChart data={hwChartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                <XAxis dataKey="time" tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} />
-                <YAxis domain={[0, 100]} tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} width={28} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} />
-                <Area type="monotone" dataKey="cpu" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.12} strokeWidth={1.5} dot={false} name="CPU %" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="card" style={{ padding: '12px 14px' }}>
-            <div style={{ fontSize: 'var(--font-size-caption)', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Memory & Heap</div>
-            <ResponsiveContainer width="100%" height={150}>
-              <AreaChart data={hwChartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                <XAxis dataKey="time" tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} />
-                <YAxis tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} width={32} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} />
-                <Legend wrapperStyle={{ fontSize: 'var(--font-size-micro)' }} />
-                <Area type="monotone" dataKey="memGB" stroke="#8b5cf6" fill="#8b5cf6" fillOpacity={0.1} strokeWidth={1.5} dot={false} name="Sys RAM (GB)" />
-                <Area type="monotone" dataKey="heapMB" stroke="#06b6d4" fill="#06b6d4" fillOpacity={0.1} strokeWidth={1.5} dot={false} name="Heap (MB)" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="card" style={{ padding: '12px 14px' }}>
-            <div style={{ fontSize: 'var(--font-size-caption)', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Disk Usage (%)</div>
-            <ResponsiveContainer width="100%" height={150}>
-              <AreaChart data={hwChartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                <XAxis dataKey="time" tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} />
-                <YAxis domain={[0, 100]} tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} width={28} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} />
-                <Area type="monotone" dataKey="diskPct" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.12} strokeWidth={1.5} dot={false} name="Disk %" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="card" style={{ padding: '12px 14px' }}>
-            <div style={{ fontSize: 'var(--font-size-caption)', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Network & RPC</div>
-            <ResponsiveContainer width="100%" height={150}>
-              <AreaChart data={hwChartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                <XAxis dataKey="time" tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} />
-                <YAxis tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} width={28} yAxisId="left" />
-                <YAxis tick={{ fontSize: 'var(--font-size-micro)', fill: '#9ca3af' }} width={28} yAxisId="right" orientation="right" />
-                <Tooltip contentStyle={TOOLTIP_STYLE} />
-                <Legend wrapperStyle={{ fontSize: 'var(--font-size-micro)' }} />
-                <Area type="monotone" dataKey="peers" stroke="#22c55e" fill="#22c55e" fillOpacity={0.1} strokeWidth={1.5} dot={false} name="Peers" yAxisId="left" />
-                <Area type="monotone" dataKey="rpcMs" stroke="#ef4444" fill="#ef4444" fillOpacity={0.08} strokeWidth={1.5} dot={false} name="RPC (ms)" yAxisId="right" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
+        // One unit per chart (no shared or dual axes). Top row: the three
+        // percentages on the same 0–100 scale, with their warning thresholds.
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
+          {hwCharts.map(c => (
+            <div key={c.key} className="card ds-card" style={{ padding: '12px 14px' }}>
+              <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>{c.title}</div>
+              <ResponsiveContainer width="100%" height={140}>
+                <AreaChart data={hwChartData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={grid} />
+                  <XAxis dataKey="time" tick={{ fontSize: 'var(--fs-micro)', fill: tick }} minTickGap={24} />
+                  <YAxis domain={c.pct ? [0, 100] : [0, 'auto']} allowDecimals={c.key !== 'peers'} tick={{ fontSize: 'var(--fs-micro)', fill: tick }} width={32} />
+                  <Tooltip contentStyle={TOOLTIP_STYLE} />
+                  {c.warn != null && <ReferenceLine y={c.warn} stroke={warnLine} strokeDasharray="4 4" strokeOpacity={0.6} />}
+                  {c.crit != null && <ReferenceLine y={c.crit} stroke={critLine} strokeDasharray="4 4" strokeOpacity={0.6} />}
+                  <Area type="monotone" dataKey={c.key} stroke={s1} fill={s1} fillOpacity={0.12} strokeWidth={1.5} dot={false} name={c.name} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          ))}
         </div>
       ) : (
-        <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-dim)', textAlign: 'center', padding: '8px 0' }}>
+        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-dim)', textAlign: 'center', padding: '8px 0' }}>
           History charts appear after a second snapshot (~30 s)
         </div>
       )}
@@ -880,7 +827,7 @@ function HardwareTab() {
 function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
   const [hover, setHover] = useState<number | null>(null);
 
-  if (!phases?.length) return <span style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-dim)', fontStyle: 'italic' }}>event-based</span>;
+  if (!phases?.length) return <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)', fontStyle: 'italic' }}>event-based</span>;
   if (totalMs <= 0) return <span style={{ color: 'var(--text-dim)' }}>—</span>;
   const phaseTotal = phases.reduce((s: number, p: any) => s + (p.duration_ms ?? 0), 0) || totalMs;
   return (
@@ -895,12 +842,12 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
               : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
           return (
             <span key={`label-${p.phase}-${i}`} style={{
-              fontSize: 'var(--font-size-micro)', fontWeight: 600, color, letterSpacing: '.02em',
+              fontSize: 'var(--fs-micro)', fontWeight: 600, color, letterSpacing: '.02em',
               display: 'inline-flex', alignItems: 'center', gap: 3,
             }}>
               <span style={{ width: 5, height: 5, borderRadius: '50%', background: color, display: 'inline-block', flexShrink: 0 }} />
               {p.phase}
-              <span style={{ fontWeight: 400, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+              <span style={{ fontWeight: 400, color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace" }}>
                 {formatDuration(p.duration_ms)}
               </span>
             </span>
@@ -908,7 +855,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
         })}
       </div>
       {/* Gantt bar */}
-      <div style={{ display: 'flex', height: 10, borderRadius: 3, overflow: 'hidden', background: 'rgba(255,255,255,.04)' }}>
+      <div style={{ display: 'flex', gap: 2, height: 10, borderRadius: 3, overflow: 'hidden', background: 'transparent' }}>
         {phases.map((p: any, i: number) => {
           const pct = Math.max(((p.duration_ms ?? 0) / phaseTotal) * 100, 3);
           const color = p.status === 'error'
@@ -916,7 +863,6 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
             : p.status === 'cancelled'
               ? CANCELLED_COLOR
               : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
-          const isHovered = hover === i;
           return (
             <div
               key={`${p.phase}-${i}`}
@@ -924,7 +870,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
               onMouseLeave={() => setHover(null)}
               style={{
                 width: `${pct}%`, background: color, minWidth: 3,
-                opacity: isHovered ? 1 : 0.65,
+                opacity: 1,
                 transition: 'opacity .15s, width .2s',
                 cursor: 'default',
               }}
@@ -939,10 +885,10 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
         return (
           <div style={{
             position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
-            marginBottom: 6, padding: '5px 10px', borderRadius: 6,
+            marginBottom: 6, padding: '5px 10px', borderRadius: 'var(--radius-control)',
             background: 'var(--surface)', border: '1px solid var(--border)',
             boxShadow: '0 4px 12px rgba(0,0,0,.4)',
-            fontSize: 'var(--font-size-caption)', zIndex: 10, pointerEvents: 'none',
+            fontSize: 'var(--fs-label)', zIndex: 10, pointerEvents: 'none',
             maxWidth: 260,
           }}>
             <div style={{ whiteSpace: 'nowrap' }}>
@@ -950,7 +896,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
                 {hoveredPhase}
               </span>
               <span style={{ color: 'var(--text-muted)', margin: '0 6px' }}>·</span>
-              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text)' }}>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", color: 'var(--text)' }}>
                 {formatDuration(phases[hover].duration_ms)}
               </span>
               <span style={{ color: 'var(--text-dim)', marginLeft: 6 }}>
@@ -964,7 +910,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
               )}
             </div>
             {desc && (
-              <div style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-muted)', marginTop: 3, whiteSpace: 'normal', lineHeight: 1.4 }}>
+              <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-muted)', marginTop: 3, whiteSpace: 'normal', lineHeight: 1.4 }}>
                 {desc}
               </div>
             )}
@@ -1026,30 +972,30 @@ function OperationsTab() {
           onChange={e => setOpIdFilter(e.target.value)}
           style={{ minWidth: 240, flex: 1 }}
         />
-        <span style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-dim)' }}>{total} total</span>
+        <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-dim)' }}>{total} total</span>
       </div>
 
       {/* Phase color legend */}
       <div style={{
         display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 10,
-        padding: '6px 12px', borderRadius: 6,
+        padding: '6px 12px', borderRadius: 'var(--radius-control)',
         background: 'rgba(255,255,255,.02)', border: '1px solid var(--border)',
-        fontSize: 'var(--font-size-meta)', color: 'var(--text-muted)', alignItems: 'center',
+        fontSize: 'var(--fs-micro)', color: 'var(--text-muted)', alignItems: 'center',
       }}>
-        <span style={{ fontSize: 'var(--font-size-micro)', fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--text-dim)', marginRight: 2 }}>Phases</span>
+        <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--text-dim)', marginRight: 2 }}>Phases</span>
         {PHASE_LEGEND_ENTRIES.map(({ phase, label, color }) => (
           <span
             key={phase}
             title={PHASE_DESCRIPTIONS[phase] ?? ''}
             style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'default' }}
           >
-            <span style={{ width: 7, height: 7, borderRadius: 2, background: color, display: 'inline-block', flexShrink: 0 }} />
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: color, display: 'inline-block', flexShrink: 0 }} />
             {label}
           </span>
         ))}
       </div>
 
-      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+      <div className="card ds-card" style={{ padding: 0, overflow: 'hidden' }}>
         {operations.length === 0 ? (
           <div className="empty-state empty-state--rich" style={{ margin: 16 }}>
             <div className="empty-state-icon">
@@ -1080,7 +1026,7 @@ function OperationsTab() {
                   style={{ cursor: 'pointer', background: selectedOp === op.operation_id ? 'rgba(59,130,246,.1)' : undefined }}
                 >
                   <td title={op.started_at ? new Date(op.started_at).toLocaleString() : undefined}>{formatTime(op.started_at)}</td>
-                  <td><span className="badge" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} style={{ background: `${OP_TYPE_COLORS[op.operation_name] ?? 'var(--text-muted)'}22`, color: OP_TYPE_COLORS[op.operation_name] ?? 'var(--text-muted)' }}>{op.operation_name}</span></td>
+                  <td><Badge size="sm" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} style={{ background: opTypeBg(op.operation_name), color: opTypeText(op.operation_name), boxShadow: 'none' }}>{op.operation_name}</Badge></td>
                   <td><StatusBadge status={op.status} /></td>
                   <td><MiniGantt phases={op.phases} totalMs={op.duration_ms} /></td>
                   <td>{formatDuration(op.duration_ms)}</td>
@@ -1104,7 +1050,7 @@ function OperationsTab() {
       {totalPages > 1 && (
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '10px 0', fontSize: 'var(--font-size-caption)', color: 'var(--text-muted)',
+          padding: '10px 0', fontSize: 'var(--fs-label)', color: 'var(--text-muted)',
         }}>
           <span>
             Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of {total}
@@ -1114,7 +1060,7 @@ function OperationsTab() {
               disabled={page === 0}
               onClick={() => setPage(0)}
               style={{
-                padding: '4px 8px', borderRadius: 4, fontSize: 'var(--font-size-caption)', fontWeight: 600, cursor: page === 0 ? 'default' : 'pointer',
+                padding: '4px 8px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-label)', fontWeight: 600, cursor: page === 0 ? 'default' : 'pointer',
                 border: '1px solid var(--border)', background: 'var(--surface)', color: page === 0 ? 'var(--text-dim)' : 'var(--text-muted)',
                 opacity: page === 0 ? 0.4 : 1,
               }}
@@ -1125,21 +1071,21 @@ function OperationsTab() {
               disabled={page === 0}
               onClick={() => setPage(p => Math.max(0, p - 1))}
               style={{
-                padding: '4px 10px', borderRadius: 4, fontSize: 'var(--font-size-caption)', fontWeight: 600, cursor: page === 0 ? 'default' : 'pointer',
+                padding: '4px 10px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-label)', fontWeight: 600, cursor: page === 0 ? 'default' : 'pointer',
                 border: '1px solid var(--border)', background: 'var(--surface)', color: page === 0 ? 'var(--text-dim)' : 'var(--text-muted)',
                 opacity: page === 0 ? 0.4 : 1,
               }}
             >
               ‹ Prev
             </button>
-            <span style={{ padding: '4px 10px', fontSize: 'var(--font-size-caption)', fontWeight: 600 }}>
+            <span style={{ padding: '4px 10px', fontSize: 'var(--fs-label)', fontWeight: 600 }}>
               Page {page + 1} / {totalPages}
             </span>
             <button
               disabled={page >= totalPages - 1}
               onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
               style={{
-                padding: '4px 10px', borderRadius: 4, fontSize: 'var(--font-size-caption)', fontWeight: 600, cursor: page >= totalPages - 1 ? 'default' : 'pointer',
+                padding: '4px 10px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-label)', fontWeight: 600, cursor: page >= totalPages - 1 ? 'default' : 'pointer',
                 border: '1px solid var(--border)', background: 'var(--surface)', color: page >= totalPages - 1 ? 'var(--text-dim)' : 'var(--text-muted)',
                 opacity: page >= totalPages - 1 ? 0.4 : 1,
               }}
@@ -1150,7 +1096,7 @@ function OperationsTab() {
               disabled={page >= totalPages - 1}
               onClick={() => setPage(totalPages - 1)}
               style={{
-                padding: '4px 8px', borderRadius: 4, fontSize: 'var(--font-size-caption)', fontWeight: 600, cursor: page >= totalPages - 1 ? 'default' : 'pointer',
+                padding: '4px 8px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-label)', fontWeight: 600, cursor: page >= totalPages - 1 ? 'default' : 'pointer',
                 border: '1px solid var(--border)', background: 'var(--surface)', color: page >= totalPages - 1 ? 'var(--text-dim)' : 'var(--text-muted)',
                 opacity: page >= totalPages - 1 ? 0.4 : 1,
               }}
@@ -1213,13 +1159,13 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--font-size-micro)', color: 'var(--text-dim)', marginBottom: 4, fontFamily: 'var(--font-mono)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--fs-micro)', color: 'var(--text-dim)', marginBottom: 4, fontFamily: "'JetBrains Mono', monospace" }}>
         <span>{formatAbsTime(opStart)}</span>
         <span>{formatDuration(opDuration)}</span>
         <span>{formatAbsTime(opEnd)}</span>
       </div>
 
-      <div style={{ position: 'relative', background: 'rgba(255,255,255,.03)', borderRadius: 6, border: '1px solid var(--border)', padding: '6px 0' }}>
+      <div style={{ position: 'relative', background: 'rgba(255,255,255,.03)', borderRadius: 'var(--radius-control)', border: '1px solid var(--border)', padding: '6px 0' }}>
         {phases.map((p: any, i: number) => {
           const phaseStart = p.started_at ?? opStart;
           const phaseDuration = p.duration_ms ?? 0;
@@ -1233,12 +1179,12 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
             : isCancelled
               ? CANCELLED_COLOR
               : isInProgress
-                ? '#f59e0b'
+                ? (PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR)
                 : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
 
           return (
             <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', height: 22, padding: '0 8px', position: 'relative' }}>
-              <div style={{ width: 140, minWidth: 140, fontSize: 'var(--font-size-meta)', fontWeight: 600, color, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              <div style={{ width: 140, minWidth: 140, fontSize: 'var(--fs-micro)', fontWeight: 600, color, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                 title={p.phase}>{p.phase}</div>
               <div style={{ flex: 1, position: 'relative', height: 12 }}>
                 <div
@@ -1256,7 +1202,7 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
                   }}
                 />
               </div>
-              <div style={{ width: 55, textAlign: 'right', fontSize: 'var(--font-size-meta)', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', flexShrink: 0, marginLeft: 8 }}>
+              <div style={{ width: 55, textAlign: 'right', fontSize: 'var(--fs-micro)', color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace", flexShrink: 0, marginLeft: 8 }}>
                 {formatDuration(phaseDuration)}
               </div>
             </div>
@@ -1264,7 +1210,7 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
         })}
       </div>
 
-      <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 'var(--font-size-micro)', color: 'var(--text-dim)' }}>
+      <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 'var(--fs-micro)', color: 'var(--text-dim)' }}>
         {phases.some((p: any) => p.status === 'success') && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
             <span style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--green-mid)', display: 'inline-block' }} /> Success
@@ -1296,7 +1242,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)' }}>Operation Detail</span>
+        <span style={{ fontSize: 'var(--fs-body)', fontWeight: 600, color: 'var(--text-muted)' }}>Operation Detail</span>
         <button
           onClick={onBack}
           style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', padding: 4, display: 'flex' }}
@@ -1307,14 +1253,14 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
       </div>
 
       {/* Header: Operation metadata as compact inline badges */}
-      <div className="card" style={{ padding: 16, marginBottom: 12 }}>
+      <div className="card ds-card" style={{ padding: 16, marginBottom: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
-          <span style={{ fontSize: 15, fontWeight: 700 }}>{op.operation_name}</span>
+          <span style={{ fontSize: 'var(--fs-title)', fontWeight: 700 }}>{op.operation_name}</span>
           <StatusBadge status={op.status} />
-          <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-dim)' }}>{formatDuration(op.duration_ms)}</span>
-          <span style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
+          <span style={{ fontSize: 'var(--fs-control)', color: 'var(--text-dim)' }}>{formatDuration(op.duration_ms)}</span>
+          <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace" }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
         </div>
-        <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>
+        <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 'var(--fs-control)', color: 'var(--text-muted)' }}>
           <span><b style={{ color: 'var(--text-muted)' }}>Started</b> {new Date(op.started_at).toLocaleString()}</span>
           {op.contextGraph_id && <span><b style={{ color: 'var(--text-muted)' }}>Context Graph</b> {op.contextGraph_id}</span>}
           {op.triple_count != null && <span><b style={{ color: 'var(--text-muted)' }}>Triples</b> {op.triple_count}</span>}
@@ -1331,7 +1277,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
           )}
         </div>
         {op.error_message && (
-          <div style={{ marginTop: 8, padding: '8px 12px', background: 'rgba(239,68,68,.1)', borderRadius: 6, border: '1px solid rgba(239,68,68,.2)', fontSize: 'var(--font-size-label)', color: 'var(--red)' }}>
+          <div style={{ marginTop: 8, padding: '8px 12px', background: 'rgba(239,68,68,.1)', borderRadius: 'var(--radius-control)', border: '1px solid rgba(239,68,68,.2)', fontSize: 'var(--fs-control)', color: 'var(--red)' }}>
             {op.error_message}
           </div>
         )}
@@ -1340,12 +1286,12 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
       {/* Phase timeline + Phase details */}
       {phases.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 12 }}>
-          <div className="card" style={{ padding: 16 }}>
+          <div className="card ds-card" style={{ padding: 16 }}>
             <div className="card-title" style={{ marginBottom: 10 }}>Phase Timeline</div>
             <PhaseTimeline phases={phases} op={op} />
           </div>
 
-          <div className="card" style={{ padding: 16 }}>
+          <div className="card ds-card" style={{ padding: 16 }}>
             <div className="card-title" style={{ marginBottom: 10 }}>Phase Details</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {phases.map((p: any, i: number) => {
@@ -1363,19 +1309,19 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
                 // to the umbrella `chain` entry.
                 const desc = PHASE_DESCRIPTIONS[p.phase] ?? PHASE_DESCRIPTIONS[topLevel];
                 return (
-                  <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'rgba(255,255,255,.02)', borderRadius: 6, borderLeft: `3px solid ${terminalColor}` }}>
-                    <span style={{ fontWeight: 600, fontSize: 'var(--font-size-label)', color, minWidth: 65 }} title={desc ?? ''}>{p.phase}</span>
+                  <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'rgba(255,255,255,.02)', borderRadius: 'var(--radius-control)', borderLeft: `3px solid ${terminalColor}` }}>
+                    <span style={{ fontWeight: 600, fontSize: 'var(--fs-control)', color, minWidth: 65 }} title={desc ?? ''}>{p.phase}</span>
                     <StatusBadge status={p.status} />
-                    <span style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>{formatDuration(p.duration_ms)}</span>
-                    {desc && <span style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-dim)', fontStyle: 'italic', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desc}</span>}
+                    <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace" }}>{formatDuration(p.duration_ms)}</span>
+                    {desc && <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)', fontStyle: 'italic', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desc}</span>}
                     <span
-                      style={{ fontSize: 'var(--font-size-meta)', color: 'var(--text-dim)', marginLeft: 'auto', flexShrink: 0 }}
+                      style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)', marginLeft: 'auto', flexShrink: 0 }}
                       title={p.started_at ? new Date(p.started_at).toLocaleString() : undefined}
                     >
                       {p.started_at ? formatTime(p.started_at) : ''}
                     </span>
                     {(p.status === 'error' || p.status === 'cancelled') && p.details && (
-                      <span style={{ fontSize: 'var(--font-size-meta)', color: terminalColor, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.details}>
+                      <span style={{ fontSize: 'var(--fs-micro)', color: terminalColor, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.details}>
                         {p.details}
                       </span>
                     )}
@@ -1388,7 +1334,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
       )}
 
       {/* Logs below — full width */}
-      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+      <div className="card ds-card" style={{ padding: 0, overflow: 'hidden' }}>
         <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span className="card-title" style={{ margin: 0 }}>Logs ({logs.length})</span>
         </div>
@@ -1520,8 +1466,8 @@ function LogsTab() {
           title="Refresh now"
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 10px',
-            borderRadius: 6, border: '1px solid var(--border)', background: 'var(--surface)',
-            color: 'var(--text-muted)', fontSize: 'var(--font-size-caption)', fontWeight: 600, cursor: 'pointer',
+            borderRadius: 'var(--radius-control)', border: '1px solid var(--border)', background: 'var(--surface)',
+            color: 'var(--text-muted)', fontSize: 'var(--fs-label)', fontWeight: 600, cursor: 'pointer',
             transition: 'all .15s',
           }}
           onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--green)'; e.currentTarget.style.color = 'var(--green)'; }}
@@ -1537,10 +1483,10 @@ function LogsTab() {
           title={autoScroll ? 'Auto-scroll enabled' : 'Auto-scroll disabled'}
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 10px',
-            borderRadius: 6, border: `1px solid ${autoScroll ? 'rgba(74,222,128,.3)' : 'var(--border)'}`,
+            borderRadius: 'var(--radius-control)', border: `1px solid ${autoScroll ? 'rgba(74,222,128,.3)' : 'var(--border)'}`,
             background: autoScroll ? 'var(--green-dim)' : 'var(--surface)',
             color: autoScroll ? 'var(--green)' : 'var(--text-muted)',
-            fontSize: 'var(--font-size-caption)', fontWeight: 600, cursor: 'pointer', transition: 'all .15s',
+            fontSize: 'var(--fs-label)', fontWeight: 600, cursor: 'pointer', transition: 'all .15s',
           }}
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -1550,18 +1496,18 @@ function LogsTab() {
         </button>
       </div>
 
-      <div style={{ borderRadius: 10, overflow: 'hidden', border: '1px solid rgba(139,92,246,.15)', boxShadow: '0 0 40px rgba(139,92,246,.04)' }}>
+      <div style={{ borderRadius: 'var(--radius-card)', overflow: 'hidden', border: '1px solid rgba(139,92,246,.15)', boxShadow: '0 0 40px rgba(139,92,246,.04)' }}>
         <div style={{
           padding: '8px 16px',
           background: 'linear-gradient(135deg, rgba(139,92,246,.08) 0%, rgba(59,130,246,.05) 100%)',
           borderBottom: '1px solid rgba(139,92,246,.12)',
-          fontSize: 'var(--font-size-caption)', color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          fontSize: 'var(--fs-label)', color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         }}>
           <span>
             {lines.length} lines{debouncedSearch ? ` matching "${debouncedSearch}"` : ''}
-            {loading ? <span style={{ marginLeft: 6, color: 'var(--purple)', fontSize: 'var(--font-size-meta)' }}>refreshing...</span> : ''}
+            {loading ? <span style={{ marginLeft: 6, color: 'var(--purple)', fontSize: 'var(--fs-micro)' }}>refreshing...</span> : ''}
           </span>
-          <span className="mono" style={{ fontSize: 'var(--font-size-meta)', color: 'rgba(139,92,246,.6)' }}>daemon.log {data?.totalSize ? `(${formatSize(data.totalSize)})` : ''}</span>
+          <span className="mono" style={{ fontSize: 'var(--fs-micro)', color: 'rgba(139,92,246,.6)' }}>daemon.log {data?.totalSize ? `(${formatSize(data.totalSize)})` : ''}</span>
         </div>
         <div
           ref={containerRef}
@@ -1573,7 +1519,7 @@ function LogsTab() {
             padding: '8px 0',
             background: 'linear-gradient(180deg, rgba(13,17,23,1) 0%, rgba(20,15,35,1) 50%, rgba(13,17,23,1) 100%)',
             fontFamily: LOG_FONT,
-            fontSize: 10.5,
+            fontSize: 'var(--fs-micro)',
             lineHeight: 1.5,
           }}
         >
@@ -1635,8 +1581,8 @@ function StyledLogEntry({ ts, level, module, message }: { ts: number; level: str
 function LogContainer({ children, maxHeight = 300 }: { children: React.ReactNode; maxHeight?: number }) {
   return (
     <div style={{
-      maxHeight, overflowY: 'auto', background: LOG_COLORS.bg, borderRadius: 6, padding: '6px 0',
-      fontFamily: LOG_FONT, fontSize: 10.5, lineHeight: 1.5,
+      maxHeight, overflowY: 'auto', background: LOG_COLORS.bg, borderRadius: 'var(--radius-control)', padding: '6px 0',
+      fontFamily: LOG_FONT, fontSize: 'var(--fs-micro)', lineHeight: 1.5,
     }}>
       {children}
     </div>
@@ -1666,7 +1612,7 @@ function StyledDaemonLine({ line, lineNum, highlight }: { line: string; lineNum:
     );
   }
 
-  const opColor = OP_TYPE_COLORS[parsed.opName] ?? 'var(--text-muted)';
+  const opColor = opTypeText(parsed.opName);
   return (
     <div style={{ padding: '0 16px', whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: bg }}>
       <span style={{ color: 'var(--text-dim)', userSelect: 'none', marginRight: 8, display: 'inline-block', width: 40, textAlign: 'right' }}>{lineNum}</span>
@@ -1680,15 +1626,15 @@ function StyledDaemonLine({ line, lineNum, highlight }: { line: string; lineNum:
 }
 
 export function operationStatusBadgeClass(status: string): string {
-  if (status === 'success') return 'badge-success';
-  if (status === 'error') return 'badge-error';
-  if (status === 'cancelled') return 'badge-cancelled';
-  return 'badge-warn';
+  if (status === 'success') return 'ds-tone-success';
+  if (status === 'error') return 'ds-tone-danger';
+  if (status === 'cancelled') return 'ds-tone-muted';
+  return 'ds-tone-warning';
 }
 
 export function StatusBadge({ status }: { status: string }) {
   const cls = operationStatusBadgeClass(status);
-  return <span className={`badge ${cls}`}>{status}</span>;
+  return <span className={`ds-badge ds-sm ${cls}`}>{humanizeStatus(status)}</span>;
 }
 
 function CopyButton({ text }: { text: string }) {
@@ -1706,7 +1652,7 @@ function CopyButton({ text }: { text: string }) {
       title="Copy to clipboard"
       style={{
         background: 'none', border: 'none', cursor: 'pointer', padding: '1px 3px',
-        color: copied ? 'var(--green)' : 'var(--text-dim)', fontSize: 'var(--font-size-caption)',
+        color: copied ? 'var(--green)' : 'var(--text-dim)', fontSize: 'var(--fs-label)',
         display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle',
         transition: 'color .15s',
       }}

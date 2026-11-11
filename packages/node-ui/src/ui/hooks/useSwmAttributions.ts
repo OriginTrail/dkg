@@ -27,6 +27,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { authHeaders } from '../api.js';
+import { agentHexForUri } from './useAgents.js';
 
 export interface AgentAttribution {
   /** Canonical agent identifier. Peer-id for libp2p (`12D3…`), `did:dkg:agent:`
@@ -115,26 +116,6 @@ export interface SwmAttributionsResult {
   error: string | null;
 }
 
-/** Deliberately picked for contrast against the existing class palette
- *  (Package purple, Function amber, Decision red, Task cyan, etc.) — these
- *  sit in the gaps so agent identity reads as its own axis.
- *
- *  Also picked so no slot lives in the SWM-family amber range. The
- *  SWM layer default is `#f59e0b` (`LAYER_CONFIG.swm.color`) and any
- *  agent slot in the same hue is visually indistinguishable from a
- *  non-attributed node — the "agent palette ≠ SWM amber" invariant.
- *  Orange `#f97316` previously occupied slot 0 and broke this in
- *  single-agent dev setups; replaced with indigo `#6366f1`. */
-const AGENT_PALETTE = [
-  '#6366f1', // indigo  (replaced orange — was too close to SWM amber)
-  '#14b8a6', // teal
-  '#f43f5e', // rose
-  '#facc15', // yellow
-  '#8b5cf6', // violet
-  '#10b981', // emerald
-  '#0ea5e9', // sky
-  '#d946ef', // fuchsia
-];
 const ATTRIBUTION_QUERY_TIMEOUT_MS = 10_000;
 
 function bv(v: unknown): string | undefined {
@@ -194,62 +175,19 @@ SELECT ?op ?root ?agent ?publishedAt ?g WHERE {
 } ORDER BY DESC(?publishedAt) LIMIT 5000`;
 }
 
-/** Stable hash → preferred palette slot, so a given agent keeps the same
- *  colour across reloads and two nearby agents don't both land on colour 0. */
-function paletteIndex(agent: string): number {
-  let h = 0;
-  for (let i = 0; i < agent.length; i++) {
-    h = (h * 31 + agent.charCodeAt(i)) | 0;
-  }
-  return Math.abs(h) % AGENT_PALETTE.length;
-}
-
 /**
- * GH#1128 — assign distinct colours until the palette is exhausted, then give
- * each overflow agent its preferred slot.
+ * Each agent's graph tint is its agent-chip colour (useAgents), so an agent
+ * reads the same in the chip, the legend and on its nodes. Derived from the
+ * agent ID alone: stable across reloads and independent of who else is in
+ * the graph.
  *
- * The hash above is stable but not injective: over an 8-slot palette, five
- * agents collide with ~70% probability, and two agents rendering the same
- * swatch defeats the only thing the attribution view exists to show. Worse,
- * the legend and the graph tint each called `paletteIndex` independently, so
- * there was no single place a collision could even be observed.
- *
- * The hash stays each agent's *preferred* slot and we linear-probe to the next
- * free one on a collision, so distinctness holds for the first
- * AGENT_PALETTE.length agents. Agents are processed in sorted order, making the
- * result deterministic regardless of arrival order.
- *
- * Past exhaustion reuse is arithmetic, not a policy choice — there are more
- * agents than colours. Those agents take their preferred slot, which keeps the
- * reuse spread across the palette instead of crowding onto one colour, and
- * leaves the already-assigned agents untouched.
- *
- * The trade-off this encodes: distinctness requires coordinating slots across
- * the whole set, so assignment depends on set MEMBERSHIP. Colours are stable
- * for a fixed roster but may permute when it changes. #1128 asked for distinct
- * colours, so distinctness wins.
+ * Trade-off, accepted: the hue hash is not injective, so two agents can land
+ * on the same or a near hue (GH#1128). The legend lists every agent with its
+ * count and hovering a node names it, which is what tells them apart then.
  */
 export function buildAgentColorMap(agents: Iterable<string>): Map<string, string> {
-  const distinct = [...new Set(agents)].sort();
-  const taken = new Set<number>();
   const out = new Map<string, string>();
-  for (const agent of distinct) {
-    const preferred = paletteIndex(agent);
-    let slot = preferred;
-    // Probe for a free slot while ANY remain. Degradation is local to the
-    // agents that actually overflow — PR #2333 review: gating this on the
-    // total set size meant a ninth agent flipped the whole collection back to
-    // raw hashing, collapsing already-distinct agents onto one colour.
-    if (taken.size < AGENT_PALETTE.length) {
-      for (let probe = 0; probe < AGENT_PALETTE.length; probe++) {
-        const candidate = (preferred + probe) % AGENT_PALETTE.length;
-        if (!taken.has(candidate)) { slot = candidate; break; }
-      }
-      taken.add(slot);
-    }
-    // Past exhaustion reuse is unavoidable; the preferred slot keeps it stable.
-    out.set(agent, AGENT_PALETTE[slot]!);
-  }
+  for (const agent of new Set(agents)) out.set(agent, agentHexForUri(agent));
   return out;
 }
 

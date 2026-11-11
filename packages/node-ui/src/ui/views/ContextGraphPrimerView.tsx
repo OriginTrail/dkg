@@ -51,7 +51,7 @@ export function ContextGraphPrimerView() {
       <header className="v10-primer-header">
         <button
           type="button"
-          className="v10-primer-back"
+          className="v10-primer-back ds-btn ds-ghost"
           onClick={dismiss}
           aria-label="Close primer and return to the previous tab"
         >

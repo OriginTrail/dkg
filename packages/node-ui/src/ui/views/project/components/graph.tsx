@@ -3,11 +3,15 @@ import type { ReactNode } from 'react';
 import { useMemoryEntities, canonicalEntityUri, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
 import { MEMORY_LABEL_PREDICATES } from '../../../lib/memoryLabels.js';
-import { useLayoutStore } from '../../../stores/layout.js';
-import { useVerifiableMemoryAnchors, type PublishAnchor } from '../../../hooks/useVerifiableMemoryAnchors.js';
+import { useVerifiableMemoryAnchors } from '../../../hooks/useVerifiableMemoryAnchors.js';
+import type { VmReceipt } from '../../../hooks/useVmReceipts.js';
+import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
 import { useSwmAttributions, type AgentPaletteEntry, type SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
-import { TRUST_COLORS, LAYER_CONFIG, buildLayerGraphOptions, humanizeLabel, useLayerTriples, filterTriplesToEntities } from '../helpers.js';
+import { LAYER_CONFIG, buildLayerGraphOptions, agentNodeColors, humanizeLabel, useLayerTriples, filterTriplesToEntities } from '../helpers.js';
 import { EmptyState, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
+import { AgentDot, AgentDotStack } from '../../../components/AgentDot.js';
+import { agentHexForUri } from '../../../hooks/useAgents.js';
+import { Badge } from '../../../components/ds/Badge.js';
 
 export const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -114,7 +118,7 @@ function GraphSingletonShelf({
 }) {
   if (items.length === 0) return null;
   return (
-    <div className="v10-graph-singleton-shelf" aria-label="Standalone entities without visible links">
+    <div className="v10-graph-singleton-shelf ds-card-nested" aria-label="Standalone entities without visible links">
       <div
         className="v10-graph-singleton-head"
         title="Entities with no visible links are grouped here to keep the graph readable."
@@ -227,7 +231,7 @@ export function GraphSurface({
   const expandButton = (
     <button
       type="button"
-      className={`v10-graph-expand-btn${showScopeLabel ? '' : ' in-canvas'}`}
+      className={`v10-graph-expand-btn ds-btn ds-sm ds-icon${showScopeLabel ? '' : ' in-canvas'}`}
       onClick={() => setExpanded(true)}
       title={`Expand ${title}`}
       aria-label={`Expand ${title}`}
@@ -277,7 +281,7 @@ export function GraphSurface({
             if (event.target === event.currentTarget) setExpanded(false);
           }}
         >
-          <div className={`v10-graph-expanded-panel v10-graph-shell-${tone}`}>
+          <div className={`v10-graph-expanded-panel ds-card v10-graph-shell-${tone}`}>
             <div className="v10-graph-expanded-head">
               <div>
                 <div className="v10-graph-expanded-title">{title}</div>
@@ -285,7 +289,7 @@ export function GraphSurface({
               </div>
               <button
                 type="button"
-                className="v10-graph-expanded-close"
+                className="v10-graph-expanded-close ds-btn ds-ghost ds-icon"
                 onClick={() => setExpanded(false)}
                 aria-label={`Close expanded ${title}`}
               >
@@ -331,7 +335,7 @@ export function LayerGraphPanel({
    * specified URIs while unspecified nodes still inherit the
    * existing class/namespace palette and layer defaults. Used by
    * `SubGraphDetailView` (multi-layer view) to paint per-entity
-   * trust colour (TRUST_COLORS keyed by `entity.trustLevel`) on
+   * trust colour (trustColors(palette) keyed by `entity.trustLevel`) on
    * top of the WM-default-layer fallback (fold-in #6, PR #677
    * follow-up). Omit on the WM/SWM/VM layer tabs — SWM's own
    * attribution palette via `swmAttribution` still runs.
@@ -370,7 +374,8 @@ export function LayerGraphPanel({
 }) {
   const { title: layerTitle } = LAYER_CONFIG[layer];
   const title = titleOverride ?? layerTitle;
-  const theme = useLayoutStore(s => s.theme);
+  const palette = useGraphPalette();
+  const theme = palette.theme;
 
   // All URIs that already appear as subject or object in the base VM triples.
   // We pass this into the anchor hook so synthetic anchor→entity edges only
@@ -461,13 +466,15 @@ export function LayerGraphPanel({
   // caller's override taking precedence — it's the more specific
   // intent. The style engine still falls back to classColors /
   // namespaceColors / `defaultNodeColor` for unspecified URIs.
+  // Agent nodes (VM "signed by", agent profiles) take their chip colour;
+  // lowest priority so attribution and caller overrides still win.
+  const agentColors = useMemo(() => agentNodeColors(renderTriples), [renderTriples]);
   const mergedNodeColors = useMemo(() => {
     const swm = layer === 'swm' ? swmAttr.nodeColors : undefined;
-    if (!swm && !nodeColorsOverride) return undefined;
-    if (!swm) return nodeColorsOverride;
-    if (!nodeColorsOverride) return swm;
-    return { ...swm, ...nodeColorsOverride };
-  }, [layer, swmAttr.nodeColors, nodeColorsOverride]);
+    const hasAgents = Object.keys(agentColors).length > 0;
+    if (!swm && !nodeColorsOverride && !hasAgents) return undefined;
+    return { ...agentColors, ...swm, ...nodeColorsOverride };
+  }, [layer, swmAttr.nodeColors, nodeColorsOverride, agentColors]);
   const { canvasTriples, singletonItems } = useMemo(
     () => splitGraphTriplesForShelf(renderTriples),
     [renderTriples],
@@ -484,10 +491,10 @@ export function LayerGraphPanel({
   const expansionScope = JSON.stringify([contextGraphId, layer, scopeLabel]);
   const showAllLoadedNodes = expandedNodes === expansionScope;
   const graphOptions = useMemo(() => {
-    const options = buildLayerGraphOptions(layer, mergedNodeColors);
+    const options = buildLayerGraphOptions(layer, palette, mergedNodeColors);
     if (showAllLoadedNodes) options.focus = { ...options.focus, maxNodes: Math.max(3000, loadedNodeCount) };
     return options;
-  }, [layer, mergedNodeColors, showAllLoadedNodes, loadedNodeCount]);
+  }, [layer, palette, mergedNodeColors, showAllLoadedNodes, loadedNodeCount]);
 
   // Union `singletonItems` (URIs that are *subjects* of triples but have
   // no resource→resource edges) with any caller-supplied scope entity
@@ -602,6 +609,8 @@ export function LayerGraphPanel({
         canvasTriples.length > 0 ? (
           <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
             <RdfGraph
+              // A theme switch restyles the canvas in place (RdfGraph applies a
+              // changed options.style); the key only covers mount-only options.
               key={`${graphKey}:${expanded ? 'expanded' : 'inline'}:${canvasTriples.length}:${graphOptions.focus?.maxNodes}`}
               data={canvasTriples}
               format="triples"
@@ -630,21 +639,21 @@ export function LayerGraphPanel({
 // the root attribution data already available today.
 export function SwmAttributionLegend({ palette, conflicts }: { palette: AgentPaletteEntry[]; conflicts: number }) {
   return (
-    <div className="v10-swm-legend" aria-label="SWM attribution legend">
+    <div className="v10-swm-legend ds-card-nested" aria-label="SWM attribution legend">
       <div className="v10-swm-legend-row v10-swm-legend-head">
         <span>SWM attribution</span>
-        <span className="v10-swm-legend-count">{palette.length} agent{palette.length === 1 ? '' : 's'}</span>
+        <Badge size="sm" tone="swm" className="v10-swm-legend-count">{palette.length} agent{palette.length === 1 ? '' : 's'}</Badge>
       </div>
       {palette.slice(0, 8).map(p => (
         <div key={p.agent} className="v10-swm-legend-row" title={p.agent}>
-          <span className="v10-swm-legend-swatch" style={{ background: p.color }} />
+          <AgentDot uri={p.agent} label={p.label} color={p.color} size={16} title={p.agent} />
           <span className="v10-swm-legend-label">{p.label}</span>
           <span className="v10-swm-legend-metric">{p.entityCount}</span>
         </div>
       ))}
       {conflicts > 0 && (
         <div className="v10-swm-legend-row v10-swm-legend-conflict">
-          <span className="v10-swm-legend-swatch" style={{ background: '#f59e0b' }}>!</span>
+          <span className="v10-swm-legend-swatch" style={{ background: 'var(--accent-amber)' }}>!</span>
           <span className="v10-swm-legend-label">In review</span>
           <span className="v10-swm-legend-metric">{conflicts}</span>
         </div>
@@ -656,13 +665,16 @@ export function SwmAttributionLegend({ palette, conflicts }: { palette: AgentPal
 // ─── Verifiable Memory graph legend (docked rail) ─────────
 // Explains the synthetic VM anchor and agent decoration triples produced by
 // `useVerifiableMemoryAnchors` without pulling in the later VM metadata work.
-export function VerifiedGraphLegend({ anchors }: { anchors: PublishAnchor[] }) {
-  const signerCount = useMemo(() => {
+export function VerifiedGraphLegend({ anchors }: { anchors: readonly VmReceipt[] }) {
+  const palette = useGraphPalette();
+  const signers = useMemo(() => {
     const s = new Set<string>();
-    for (const a of anchors) for (const g of a.agents) s.add(g);
-    return s.size;
+    for (const a of anchors) for (const g of a.signers) s.add(g);
+    // Same colour as the agent's node in the graph (agentNodeColors).
+    return [...s].map(uri => ({ uri, color: agentHexForUri(uri) }));
   }, [anchors]);
-  const latest = anchors[0]?.publishedAt;
+  const signerCount = signers.length;
+  const latest = anchors[0]?.finalizedAt;
   const latestLabel = (() => {
     if (!latest) return null;
     try {
@@ -673,25 +685,27 @@ export function VerifiedGraphLegend({ anchors }: { anchors: PublishAnchor[] }) {
   })();
 
   return (
-    <div className="v10-vm-legend" aria-label="Verifiable Memory legend">
+    <div className="v10-vm-legend ds-card-nested" aria-label="Verifiable Memory legend">
       <div className="v10-vm-legend-row v10-vm-legend-head">
         <span>VM provenance layer</span>
-        <span className="v10-vm-legend-count">{anchors.length} anchor{anchors.length === 1 ? '' : 's'}</span>
+        <Badge size="sm" tone="vm" className="v10-vm-legend-count">{anchors.length} anchor{anchors.length === 1 ? '' : 's'}</Badge>
       </div>
       <div className="v10-vm-legend-row">
-        <span className="v10-vm-legend-swatch" style={{ background: '#f5a524' }}>◉</span>
+        <span className="v10-vm-legend-swatch" style={{ background: palette.anchor.fill, color: '#fff', boxShadow: `0 0 0 2px ${palette.anchor.ring}` }}>◉</span>
         <span className="v10-vm-legend-label">On-chain anchor</span>
       </div>
       <div className="v10-vm-legend-row">
-        <span className="v10-vm-legend-swatch" style={{ background: '#c084fc' }}>◈</span>
+        {signerCount > 0
+          ? <AgentDotStack agents={signers} max={3} size={18} />
+          : <span className="v10-vm-legend-swatch v10-vm-legend-swatch-agent" style={{ background: palette.neutral.node }} />}
         <span className="v10-vm-legend-label">Agent identity ({signerCount})</span>
       </div>
       <div className="v10-vm-legend-row">
-        <span className="v10-vm-legend-swatch" style={{ background: '#4ade80' }}>—</span>
-        <span className="v10-vm-legend-label">Signed / anchored edge</span>
+        <span className="v10-vm-legend-swatch" style={{ background: palette.layer.verified }}>—</span>
+        <span className="v10-vm-legend-label">Anchored-in edge</span>
       </div>
       {latestLabel && (
-        <div className="v10-vm-legend-foot">Latest: {latestLabel}</div>
+        <div className="v10-vm-legend-foot" title="When the newest anchored assertion was finalized (sealed off-chain)">Latest finalized: {latestLabel}</div>
       )}
     </div>
   );

@@ -4,7 +4,7 @@
   align-items: center;
   gap: 6px;
   padding: 2px 8px 2px 2px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 1px solid color-mix(in srgb, var(--agent-color, #64748b) 30%, var(--border-subtle));
   background: color-mix(in srgb, var(--agent-color, #64748b) 6%, transparent);
   color: var(--text-secondary);
@@ -64,10 +64,10 @@
 .v10-agent-chip-sub {
   display: inline-flex;
   gap: 4px;
-  font-size: var(--font-size-micro);
+  font-size: var(--fs-micro);
   color: var(--text-tertiary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  text-transform: none;
+  letter-spacing: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -77,17 +77,38 @@
 .v10-agent-chip-op { opacity: 0.85; }
 
 /* Size variants */
-.v10-agent-chip-sm { font-size: var(--font-size-meta); padding: 1px 7px 1px 1px; }
-.v10-agent-chip-sm .v10-agent-chip-avatar { width: 16px; height: 16px; font-size: 8px; }
-.v10-agent-chip-sm .v10-agent-chip-glyph { width: 9px; height: 9px; font-size: 7px; bottom: -1px; right: -2px; }
+/* Avatars 20 / 24 / 32 on the shared scale; chip heights match the controls. */
+.v10-agent-chip-sm { height: var(--h-control-sm); box-sizing: border-box; padding: 0 9px 0 2px; font-size: var(--fs-label); }
+.v10-agent-chip-sm .v10-agent-chip-avatar { width: 20px; height: 20px; font-size: var(--fs-micro); }
+.v10-agent-chip-sm .v10-agent-chip-glyph { width: 10px; height: 10px; font-size: 7px; bottom: -2px; right: -4px; }
 
-.v10-agent-chip-md { font-size: var(--font-size-caption); padding: 2px 9px 2px 2px; }
-.v10-agent-chip-md .v10-agent-chip-avatar { width: 22px; height: 22px; font-size: var(--font-size-micro); }
-.v10-agent-chip-md .v10-agent-chip-glyph  { width: 11px; height: 11px; font-size: 8px; }
+.v10-agent-chip-md { height: 28px; box-sizing: border-box; padding: 0 10px 0 2px; font-size: var(--fs-control); }
+.v10-agent-chip-md .v10-agent-chip-avatar { width: 24px; height: 24px; font-size: var(--fs-micro); }
+.v10-agent-chip-md .v10-agent-chip-glyph { width: 12px; height: 12px; font-size: 8px; bottom: -2px; right: -4px; }
 
-.v10-agent-chip-lg { font-size: var(--font-size-ui); padding: 4px 12px 4px 4px; }
-.v10-agent-chip-lg .v10-agent-chip-avatar { width: 30px; height: 30px; font-size: var(--font-size-caption); }
-.v10-agent-chip-lg .v10-agent-chip-glyph  { width: 14px; height: 14px; font-size: var(--font-size-meta); bottom: -2px; right: -4px; }
+.v10-agent-chip-lg { min-height: 40px; box-sizing: border-box; padding: 4px 14px 4px 4px; font-size: var(--fs-body); }
+.v10-agent-chip-lg .v10-agent-chip-avatar { width: 32px; height: 32px; font-size: var(--fs-control); }
+.v10-agent-chip-lg .v10-agent-chip-glyph { width: 14px; height: 14px; font-size: var(--fs-micro); bottom: -2px; right: -4px; }
+
+/* ── Agent dot: the chip's avatar on its own (AgentDot / AgentDotStack).
+   Same circle as agent nodes in the graphs. ── */
+.v10-agent-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 50%;
+  color: #fff;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  vertical-align: middle;
+}
+.v10-agent-dot-stack { display: inline-flex; align-items: center; }
+.v10-agent-dot-stack .v10-agent-dot { box-shadow: 0 0 0 2px var(--bg-surface); }
+.v10-agent-dot-stack .v10-agent-dot + .v10-agent-dot { margin-left: -3px; }
+.v10-agent-dot-more { background: var(--bg-elevated); color: var(--text-secondary); }
 
 /* ── Activity feed ── */
 .v10-activity-feed {
@@ -99,7 +120,7 @@
 }
 .v10-activity-feed-title {
   display: flex; align-items: baseline; gap: 8px;
-  font-size: var(--font-size-label); font-weight: 700;
+  font-size: var(--fs-control); font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.06em;
   color: var(--text-tertiary);
 }
@@ -109,7 +130,7 @@
    * Same mono+tertiary treatment as `.v10-activity-feed-bucket-count`
    * so the two read as the same kind of signal at different scopes. */
   font-family: var(--font-mono); font-weight: 400;
-  font-size: var(--font-size-meta); letter-spacing: 0;
+  font-size: var(--fs-micro); letter-spacing: 0;
   text-transform: none;
   color: var(--text-tertiary);
 }
@@ -121,7 +142,7 @@
    * EmptyState primitive; recedes so the rest of the Overview
    * stays the focal area. */
   margin-top: 8px;
-  font-size: var(--font-size-label); font-weight: 400; line-height: 1.5;
+  font-size: var(--fs-control); font-weight: 400; line-height: 1.5;
   color: var(--text-tertiary);
 }
 .v10-activity-feed-error {
@@ -131,7 +152,7 @@
   margin-top: 8px;
   padding: 6px 8px;
   border-left: 2px solid var(--accent-warn, #f59e0b);
-  font-size: var(--font-size-label); font-weight: 400; line-height: 1.5;
+  font-size: var(--fs-control); font-weight: 400; line-height: 1.5;
   color: var(--text-tertiary);
 }
 .v10-activity-feed-bucket { display: flex; flex-direction: column; gap: 4px; }
@@ -141,13 +162,13 @@
   border-bottom: 1px dashed var(--border-subtle);
 }
 .v10-activity-feed-bucket-label {
-  font-size: var(--font-size-meta); font-weight: 700; letter-spacing: 0.08em;
+  font-size: var(--fs-micro); font-weight: 700; letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-secondary);
 }
 .v10-activity-feed-bucket-count {
   margin-left: auto;
-  font-family: var(--font-mono); font-size: var(--font-size-meta); color: var(--text-tertiary);
+  font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--text-tertiary);
 }
 .v10-activity-feed-items { display: flex; flex-direction: column; }
 
@@ -159,7 +180,7 @@
   padding: 7px 8px;
   border: none;
   background: none;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   text-align: left;
   cursor: pointer;
   color: var(--text-primary);
@@ -185,21 +206,9 @@
 }
 .v10-activity-feed-row-static:hover { background: none; }
 .v10-activity-feed-layer {
-  font-size: var(--font-size-body); line-height: 1;
+  font-size: var(--fs-body); line-height: 1;
   justify-self: center;
 }
-.v10-activity-feed-type {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: var(--font-size-meta); font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.04em;
-  color: var(--text-secondary);
-  background: color-mix(in srgb, var(--type-color, #a855f7) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--type-color, #a855f7) 30%, var(--border-subtle));
-  white-space: nowrap;
-}
-.v10-activity-feed-type-icon { font-size: var(--font-size-caption); color: var(--type-color, #a855f7); }
 .v10-activity-feed-title-text {
   /* Entity / assertion name in each row (e.g.
    * "pharmaceutical-derived-product-metadata"). Was `600` to
@@ -208,26 +217,14 @@
    * body relative to the surrounding chrome (`RECENT ACTIVITY · 7`
    * title, `TODAY` bucket label, agent chips). Dropped one notch
    * to `500` to bring it inline with the chrome's body weight. */
-  font-size: var(--font-size-label); font-weight: 500;
+  font-size: var(--fs-control); font-weight: 500;
   color: var(--text-primary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   min-width: 0;
 }
-.v10-activity-feed-status {
-  font-size: var(--font-size-micro); font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.04em;
-  padding: 1px 6px;
-  border-radius: 8px;
-  border: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
-  background: var(--bg-elevated);
-}
-.v10-activity-feed-status.status-good  { color: var(--text-success); border-color: rgba(34,197,94,0.35); background: rgba(34,197,94,0.08); }
-.v10-activity-feed-status.status-warn  { color: var(--text-warning); border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.08); }
-.v10-activity-feed-status.status-bad   { color: var(--text-danger); border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); }
 .v10-activity-feed-author { display: inline-flex; }
 .v10-activity-feed-time {
-  font-family: var(--font-mono); font-size: var(--font-size-meta);
+  font-family: var(--font-mono); font-size: var(--fs-micro);
   color: var(--text-tertiary);
   white-space: nowrap;
   min-width: 54px; text-align: right;
@@ -254,7 +251,7 @@
   flex-wrap: wrap;
 }
 .v10-agent-profile-reputation {
-  font-size: var(--font-size-ui); color: var(--text-secondary);
+  font-size: var(--fs-body); color: var(--text-secondary);
   line-height: 1.55;
   max-width: 640px;
   flex: 1 1 260px;
@@ -265,17 +262,17 @@
 }
 .v10-agent-profile-meta-row {
   display: flex; gap: 10px; align-items: center;
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
 }
 .v10-agent-profile-meta-lbl {
   text-transform: uppercase;
-  font-size: var(--font-size-micro); font-weight: 700;
+  font-size: var(--fs-micro); font-weight: 700;
   letter-spacing: 0.08em;
   color: var(--text-ghost);
   min-width: 80px;
 }
 .v10-agent-profile-meta-val { color: var(--text-secondary); }
-.v10-agent-profile-meta-val.mono { font-family: var(--font-mono); font-size: var(--font-size-caption); }
+.v10-agent-profile-meta-val.mono { font-family: var(--font-mono); font-size: var(--fs-label); }
 .v10-agent-profile-wallet {
   display: inline-flex; align-items: center; gap: 6px;
   color: var(--text-primary);
@@ -284,9 +281,9 @@
   padding: 1px 6px;
   background: none;
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-ghost);
-  font-size: var(--font-size-meta);
+  font-size: var(--fs-micro);
   cursor: pointer;
   font-family: var(--font-sans);
   transition: border-color 0.15s, color 0.15s;
@@ -302,7 +299,6 @@
   display: inline-flex; flex-direction: column; gap: 2px;
   padding: 6px 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
   background: var(--bg-elevated, rgba(255,255,255,0.03));
   cursor: pointer;
   color: var(--text-secondary);
@@ -319,13 +315,13 @@
   color: var(--text-primary);
 }
 .v10-agent-profile-stat-val {
-  font-size: 17px; font-weight: 700;
+  font-size: var(--fs-heading); font-weight: 700;
   font-family: var(--font-mono);
   line-height: 1;
   color: var(--stat-color, var(--text-primary));
 }
 .v10-agent-profile-stat-lbl {
-  font-size: var(--font-size-meta); text-transform: uppercase;
+  font-size: var(--fs-micro); text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-tertiary);
 }

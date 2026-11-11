@@ -52,13 +52,13 @@ export function IdentityWalletRoleEditor({
   const inputId = `identity-${role}-address`;
   const empty = !value.trim();
   return (
-    <div className="v10-identity-wallet-card" data-testid={`${role}-wallet-editor`}>
+    <div className="v10-identity-wallet-card ds-card" data-testid={`${role}-wallet-editor`}>
       <h4>{meta.title}</h4>
       <p>{meta.description}</p>
       <label htmlFor={inputId}>{meta.label}</label>
       <input
         id={inputId}
-        className="v10-form-input mono"
+        className="v10-form-input ds-input mono"
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder="0x…"
@@ -68,7 +68,7 @@ export function IdentityWalletRoleEditor({
       <div className="v10-identity-wallet-actions">
         <button
           type="button"
-          className="v10-identity-wallet-btn primary"
+          className="v10-identity-wallet-btn primary ds-btn ds-primary"
           data-testid={meta.addAction}
           onClick={() => onSubmit(meta.addAction, value)}
           disabled={!writesEnabled || empty}
@@ -77,7 +77,7 @@ export function IdentityWalletRoleEditor({
         </button>
         <button
           type="button"
-          className="v10-identity-wallet-btn"
+          className="v10-identity-wallet-btn ds-btn"
           data-testid={meta.removeAction}
           onClick={() => onRemove(role, value)}
           disabled={!writesEnabled || empty || Boolean(finalAdmin)}

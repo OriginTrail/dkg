@@ -42,12 +42,6 @@ function customProperties(selector: string): Record<string, string> {
 const rootVars = customProperties(':root');
 const lightVars = { ...rootVars, ...customProperties('body.light') };
 
-function declaration(rule: string, property: string): string {
-  const match = new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+);?`).exec(rule);
-  if (!match) throw new Error(`Missing ${property} declaration in ${rule}`);
-  return match[1].trim();
-}
-
 function resolveColor(value: string, vars = lightVars): string {
   const varMatch = /var\((--[a-z0-9-]+)(?:,\s*([^)]+))?\)/i.exec(value);
   if (varMatch) {
@@ -79,15 +73,49 @@ function contrast(foreground: string, background: string): number {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
-function foregroundFor(selector: string): string {
-  return resolveColor(declaration(ruleFor(selector), 'color'));
+/** Surfaces a badge or count can sit on. */
+const SURFACES = ['--bg-root', '--bg-panel', '--bg-surface', '--bg-elevated'] as const;
+
+/** A component background as rendered: `color-mix(in srgb, <fg> N%, transparent)`
+ *  tints, `transparent`, or a solid colour, composited over `surface`. */
+function compositedBackground(value: string, surface: string, vars: Record<string, string>): string {
+  const v = value.trim();
+  const mix = /^color-mix\(in srgb,\s*(.+?)\s+(\d+(?:\.\d+)?)%,\s*transparent\)$/.exec(v);
+  if (v === 'transparent') return resolveColor(surface, vars);
+  if (!mix) return resolveColor(v, vars);
+  const fg = rgb(resolveColor(mix[1], vars));
+  const bg = rgb(resolveColor(surface, vars));
+  const p = Number(mix[2]) / 100;
+  return '#' + fg.map((c, i) => Math.round((c * p + bg[i] * (1 - p)) * 255).toString(16).padStart(2, '0')).join('');
+}
+
+/** The rule whose selector is exactly `selector` (at the start of a line),
+ *  not a descendant rule that ends with it (the bell's `… .ds-count…`). */
+function ownRule(selector: string): string {
+  const m = new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{`).exec(css);
+  if (!m) throw new Error(`Missing rule ${selector}`);
+  const open = css.indexOf('{', m.index);
+  return css.slice(open + 1, css.indexOf('}', open));
+}
+
+/** Declared value of a property in a rule, without resolving var(). */
+function declared(selector: string, property: string): string {
+  const m = new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+);`).exec(ownRule(selector));
+  if (!m) throw new Error(`Missing ${property} in ${selector}`);
+  return m[1].trim();
+}
+
+function contrastIn(foreground: string, background: string, vars: Record<string, string>): number {
+  const a = luminance(resolveColor(foreground, vars));
+  const b = luminance(background);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
 }
 
 describe('Context Graph contrast tokens', () => {
   it('keeps readable Context Graph text off the decoration-only ghost token', () => {
     const readableSelectors = [
-      '.v10-layer-switch-count',
-      '.v10-entity-list-empty',
+      '.ds-badge',
+      '.ds-count',
       '.v10-entity-list-header',
       '.v10-entity-card-triples',
       '.v10-item-ual',
@@ -104,8 +132,6 @@ describe('Context Graph contrast tokens', () => {
       '.v10-activity-feed-time',
       '.v10-vm-identity-lbl',
       '.v10-gen-widget-footnote',
-      '.v10-evidence-title',
-      '.v10-canvas-empty',
       '.v10-empty-state-title',
       '.v10-empty-state-desc',
       '.v10-stat-strip-label',
@@ -129,47 +155,93 @@ describe('Context Graph contrast tokens', () => {
     }
   });
 
-  it('keeps the trust palette tokens unchanged by the contrast sweep', () => {
-    expect(css).toContain('--layer-working: #64748b;');
-    expect(css).toContain('--layer-shared: #f59e0b;');
-    expect(css).toContain('--layer-verified: #22c55e;');
+  it('pins the layer palette to the shared nOS hues (WM slate, SWM cyan, VM purple)', () => {
+    expect(rootVars['--layer-working']).toBe('#94a3b8');
+    expect(rootVars['--layer-shared']).toBe('#1aded7');
+    expect(rootVars['--layer-verified']).toBe('#8b85f4');
+    expect(lightVars['--layer-working']).toBe('#526173');
+    expect(lightVars['--layer-shared']).toBe('#0f9c96');
+    expect(lightVars['--layer-verified']).toBe('#6344df');
+    // Signals keep their own hues and are no longer aliases of a layer.
+    expect(rootVars['--layer-shared']).not.toBe(rootVars['--accent-amber']);
+    expect(rootVars['--layer-verified']).not.toBe(rootVars['--accent-green']);
+  });
+
+  it('keeps every layer role legible in both themes', () => {
+    for (const [theme, vars] of [['dark', rootVars], ['light', lightVars]] as const) {
+      const surface = theme === 'dark' ? vars['--bg-panel'] : vars['--bg-surface'];
+      for (const layer of ['working', 'shared', 'verified']) {
+        const text = vars[`--layer-${layer}-text`];
+        const bg = vars[`--layer-${layer}-bg`];
+        const icon = vars[`--layer-${layer}`];
+        expect(contrast(text, bg), `${theme} ${layer} text on chip`).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(text, surface), `${theme} ${layer} text on surface`).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(icon, surface), `${theme} ${layer} icon on surface`).toBeGreaterThanOrEqual(3);
+      }
+      expect(contrast(vars['--text-on-vm'], vars['--accent-vm']), `${theme} publish-to-VM label`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(vars['--text-on-primary'], vars['--accent-primary']), `${theme} primary label`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(vars['--focus-ring'], surface), `${theme} focus ring`).toBeGreaterThanOrEqual(3);
+      // Role & access (blue): chip text on its tint and on the surface; bar/dot vs surface.
+      expect(contrast(vars['--role-text'], vars['--role-bg']), `${theme} role chip`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(vars['--role-text'], surface), `${theme} access outline text`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(vars['--role'], surface), `${theme} role bar`).toBeGreaterThanOrEqual(3);
+    }
   });
 
   it('uses light-theme semantic foregrounds with AA contrast for status and action text', () => {
-    const selectorsOnSurface = [
-      '.v10-mlv-save-btn',
-      '.v10-btn-promote',
-      '.v10-trust-badge.trust-verified',
-      '.v10-trust-badge.trust-shared',
-      '.v10-trust-badge.trust-working',
-      '.v10-trust-badge.vm',
-      '.v10-trust-badge.swm',
-      '.v10-trust-badge.wm',
-      '.v10-layer-expand-footer-btn.promote',
-      '.v10-layer-expand-footer-btn.publish',
-      '.v10-layer-action-btn.primary',
-      '.v10-layer-action-btn.promote',
-      '.v10-decision-btn.approve',
-      '.v10-decision-btn.revise',
-      '.v10-subgraph-chip-badge.tone-warn',
-      '.v10-subgraph-chip-badge.tone-danger',
-      '.v10-subgraph-chip-badge.tone-info',
-      '.v10-subgraph-chip-badge.tone-muted',
-      '.v10-activity-feed-type',
-      '.v10-activity-feed-status.status-good',
-      '.v10-activity-feed-status.status-warn',
-      '.v10-activity-feed-status.status-bad',
-      '.v10-po-join-btn.approve',
-      '.v10-po-join-btn.reject',
-    ];
-
-    for (const selector of selectorsOnSurface) {
-      expect(contrast(foregroundFor(selector), lightVars['--bg-surface']), selector).toBeGreaterThanOrEqual(4.5);
+    // Buttons (components/ds/Button + legacy aliases in 27-ds-components.css):
+    // every variant's label clears AA on its own fill, in dark (preferred) and light.
+    for (const [theme, vars] of [['dark', rootVars], ['light', lightVars]] as const) {
+      const c = (fg: string, bg: string) => contrast(resolveColor(vars[fg], vars), resolveColor(vars[bg], vars));
+      expect(c('--text-primary', '--bg-surface'), `${theme} secondary`).toBeGreaterThanOrEqual(4.5);
+      expect(c('--text-on-primary', '--accent-primary'), `${theme} primary`).toBeGreaterThanOrEqual(4.5);
+      expect(c('--text-secondary', '--bg-surface'), `${theme} ghost`).toBeGreaterThanOrEqual(4.5);
+      expect(c('--text-danger', '--bg-surface'), `${theme} danger`).toBeGreaterThanOrEqual(4.5);
+      expect(c('--layer-shared-text', '--layer-shared-bg'), `${theme} share to SWM`).toBeGreaterThanOrEqual(4.5);
+      expect(c('--text-on-vm', '--accent-vm'), `${theme} publish to VM`).toBeGreaterThanOrEqual(4.5);
+      expect(c('--text-on-vm', '--accent-vm-hover'), `${theme} publish to VM hover`).toBeGreaterThanOrEqual(4.5);
+    }
+    // Elements declare their variant: the screens that used these legacy
+    // classes now carry the matching ds-* classes on the element itself.
+    for (const [file, cls] of [
+      ['components/Workspace/WireWorkspacePanel.tsx', 'v10-modal-btn primary ds-btn ds-primary'],
+      ['views/project/components/overview.tsx', 'v10-po-join-btn ds-btn ds-primary ds-sm'],
+      ['views/project/components/overview.tsx', 'v10-po-join-btn ds-btn ds-danger ds-sm'],
+      ['views/MemoryLayerView.tsx', 'v10-btn-publish ds-btn ds-vm'],
+    ] as const) {
+      expect(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/ui', file), 'utf8'), `${file}: ${cls}`).toContain(`"${cls}"`);
     }
 
-    expect(contrast(foregroundFor('.v10-btn-promote-all'), lightVars['--layer-shared'])).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(foregroundFor('.v10-btn-publish'), lightVars['--layer-verified'])).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(foregroundFor('.v10-decision-btn.primary-cta.publish-vm'), '#22c55e')).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(foregroundFor('.v10-decision-btn.primary-cta.publish-vm'), '#16a34a')).toBeGreaterThanOrEqual(4.5);
+    // Badges and counts: text against the background they actually render,
+    // their tint composited over every surface they can sit on, both themes.
+    const BADGE_TONES = ['neutral', 'success', 'warning', 'danger', 'wm', 'swm', 'vm', 'role', 'muted'];
+    for (const [theme, vars] of [['dark', rootVars], ['light', lightVars]] as const) {
+      const base = customProperties('.ds-badge');
+      for (const tone of BADGE_TONES) {
+        const t = tone === 'neutral' ? base : { ...base, ...customProperties(`.ds-badge.ds-tone-${tone}`) };
+        for (const surface of SURFACES) {
+          const bg = compositedBackground(t['--badge-bg'], `var(${surface})`, vars);
+          expect(contrastIn(t['--badge-fg'], bg, vars), `${theme} badge ${tone} on ${surface}`).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+      for (const [tone, selector] of [['neutral', '.ds-count'], ['attention', '.ds-count.ds-tone-attention'], ['quiet', '.ds-count.ds-tone-quiet']] as const) {
+        for (const surface of SURFACES) {
+          const bg = compositedBackground(declared(selector, 'background'), `var(${surface})`, vars);
+          expect(contrastIn(declared(selector, 'color'), bg, vars), `${theme} count ${tone} on ${surface}`).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+    }
+    // Regression: the notification pane's attention count sits on --bg-elevated.
+    // #a35207 rendered 3.94:1 there; the check must fail anything below AA.
+    const attentionOn = (warning: string) => {
+      const vars = { ...lightVars, '--text-warning': warning };
+      return contrastIn('var(--text-warning)', compositedBackground(declared('.ds-count.ds-tone-attention', 'background'), 'var(--bg-elevated)', vars), vars);
+    };
+    console.log('DBG2', JSON.stringify(declared('.ds-count.ds-tone-attention', 'background')), JSON.stringify(ruleFor('.ds-count.ds-tone-attention').slice(0, 120)));
+    expect(attentionOn('#a35207')).toBeLessThan(4.5);
+    expect(attentionOn(lightVars['--text-warning'])).toBeGreaterThanOrEqual(4.5);
+    // The bell's solid disc puts --bg-root on --text-warning.
+    expect(contrast(resolveColor(lightVars['--bg-root']), resolveColor(lightVars['--text-warning'])), 'bell count').toBeGreaterThanOrEqual(4.5);
+
   });
 });

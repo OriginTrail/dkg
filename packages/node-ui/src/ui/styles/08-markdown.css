@@ -1,6 +1,6 @@
 /* ── Markdown rendering (PR3) ── */
 .v10-md {
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   line-height: 1.5;
   color: inherit;
 }
@@ -18,12 +18,12 @@
   margin: 10px 0 6px;
   color: var(--text-primary);
 }
-.v10-md-h1 { font-size: 18px; }
-.v10-md-h2 { font-size: var(--font-size-heading-sm); }
-.v10-md-h3 { font-size: var(--font-size-body); }
-.v10-md-h4 { font-size: var(--font-size-ui); }
-.v10-md-h5 { font-size: var(--font-size-label); }
-.v10-md-h6 { font-size: var(--font-size-caption); color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
+.v10-md-h1 { font-size: var(--fs-heading); }
+.v10-md-h2 { font-size: var(--fs-title); }
+.v10-md-h3 { font-size: var(--fs-body); }
+.v10-md-h4 { font-size: var(--fs-body); }
+.v10-md-h5 { font-size: var(--fs-control); }
+.v10-md-h6 { font-size: var(--fs-label); color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
 /* Explicit `--text-primary` on body-text elements. A global
    `p { color: var(--text-secondary) }` (≈styles.css:2682) would
    otherwise win over these (bare-element specificity 0,0,1 beats
@@ -51,6 +51,7 @@
 .v10-md-link {
   color: var(--text-link);
   text-decoration: underline;
+  text-decoration-color: var(--link-underline);
   text-underline-offset: 2px;
   word-break: break-word;
 }
@@ -112,13 +113,12 @@
      UI-lead Task #66. */
   margin: 8px 0;
   overflow-x: auto;
-  border-radius: 8px;
   border: 1px solid var(--border-prominent);
 }
 .v10-md-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
 }
 .v10-md-thead {
   background: var(--bg-elevated);
@@ -148,10 +148,10 @@
   display: inline-flex;
   align-items: center;
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg-active);
   color: var(--text-secondary);
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   font-style: italic;
   border: 1px solid var(--border-prominent);
   cursor: help;
@@ -159,9 +159,9 @@
 
 .v10-md-code {
   font-family: var(--font-mono);
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   padding: 2px 5px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg-active);
   color: var(--text-primary);
   /* 1px border keeps the chip visible on bubbles whose bg is also --bg-active
@@ -194,25 +194,25 @@
      Task #65. */
   position: relative;
   margin: 8px 0;
-  border-radius: 12px;
+  border-radius: var(--radius-overlay);
   background: var(--bg-elevated);
   border: 1px solid var(--border-prominent);
   overflow: hidden;
   font-family: var(--font-mono);
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
 }
 .v10-md-pre-lang {
   position: absolute;
   top: 6px;
   left: 10px;
   padding: 2px 6px;
-  font-size: var(--font-size-micro);
+  font-size: var(--fs-micro);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-secondary);
   background: var(--bg-elevated);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   pointer-events: none;
 }
 .v10-md-pre-rendered,
@@ -233,36 +233,14 @@
   background: transparent;
   padding: 0;
 }
-.v10-md-copy {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 28px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--bg-active) 75%, transparent);
-  color: var(--text-secondary);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 120ms ease-out, background 0.15s, color 0.15s;
-}
+.v10-md-copy { position: absolute; top: 4px; right: 4px; width: 28px; opacity: 0; }
 .v10-md-pre:hover .v10-md-copy,
-.v10-md-copy:focus-visible {
-  opacity: 1;
-}
-.v10-md-copy:hover {
-  background: var(--bg-active);
-  color: var(--text-primary);
-}
+.v10-md-copy:focus-visible { opacity: 1; }
 @media (hover: none) {
   .v10-md-copy { opacity: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .v10-md-copy { opacity: 1; transition: none; }
+  .v10-md-copy { opacity: 1; }
 }
 .v10-md-copy-announce {
   position: absolute;
@@ -311,7 +289,7 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: var(--font-size-ui);
+  font-size: var(--fs-body);
   line-height: 28px;
   color: var(--text-secondary);
 }

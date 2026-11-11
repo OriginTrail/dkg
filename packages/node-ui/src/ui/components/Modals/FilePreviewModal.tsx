@@ -108,7 +108,7 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId,
   return (
     <div className="v10-modal-overlay" onClick={onBackdropClick} role="presentation">
       <div
-        className="v10-modal-box v10-file-preview-modal"
+        className="v10-modal-box ds-overlay v10-file-preview-modal"
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
@@ -116,15 +116,15 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId,
       >
         <div className="v10-modal-header">
           <div id="dkg-file-preview-title" className="v10-modal-title">{assertionName}</div>
-          <button type="button" className="v10-modal-close" onClick={onClose} aria-label="Close file preview" title="Close (Esc)">×</button>
+          <button type="button" className="v10-modal-close ds-btn ds-ghost ds-icon" onClick={onClose} aria-label="Close file preview" title="Close (Esc)">×</button>
         </div>
 
         {loading && <div className="v10-file-preview-loading">Loading file preview...</div>}
 
         {error && (
-          <div className="v10-file-preview-error">
+          <div className="v10-file-preview-error ds-card-nested">
             <p>{error}</p>
-            <p style={{ fontSize: 'var(--font-size-caption)', marginTop: 4 }}>
+            <p style={{ fontSize: 'var(--fs-label)', marginTop: 4 }}>
               File preview requires the extraction status to still be cached on the node.
               If the node was restarted, the preview metadata may be unavailable.
             </p>

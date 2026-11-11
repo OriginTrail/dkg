@@ -1,10 +1,11 @@
 import type { TrustLevel } from '../../hooks/useMemoryEntities.js';
 
 // ─── Shared layer configuration ─────────────────────────────
-// Single source of truth for the visual identity of WM / SWM / VM.
+// Single source of truth for the identity of WM / SWM / VM. Colours are not
+// here: DOM code uses LAYER_VAR[trustLevel] (CSS variables follow the theme);
+// canvas code uses the explicit GraphPalette (../../graph-palette.ts).
 export const LAYER_CONFIG: Record<'wm' | 'swm' | 'vm', {
   icon: string;
-  color: string;
   title: string;
   desc: string;
   trustLabel: string;
@@ -12,7 +13,6 @@ export const LAYER_CONFIG: Record<'wm' | 'swm' | 'vm', {
 }> = {
   wm: {
     icon: '◇',
-    color: '#64748b',
     title: 'Working Memory',
     desc: 'Private agent scratchpad — ephemeral, fast local storage',
     trustLabel: 'Working',
@@ -20,7 +20,6 @@ export const LAYER_CONFIG: Record<'wm' | 'swm' | 'vm', {
   },
   swm: {
     icon: '◈',
-    color: '#f59e0b',
     title: 'Shared Working Memory',
     desc: 'Team workspace — shared proposals, TTL-bounded',
     trustLabel: 'Shared',
@@ -28,7 +27,6 @@ export const LAYER_CONFIG: Record<'wm' | 'swm' | 'vm', {
   },
   vm: {
     icon: '◉',
-    color: '#22c55e',
     title: 'Verifiable Memory',
     desc: 'Endorsed, published, on-chain knowledge',
     trustLabel: 'Verifiable',

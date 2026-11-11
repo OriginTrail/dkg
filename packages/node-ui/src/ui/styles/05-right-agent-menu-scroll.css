@@ -14,7 +14,7 @@
   border: 0;
   background: transparent;
   color: var(--text-secondary);
-  font-size: var(--font-size-body);
+  font-size: var(--fs-body);
   line-height: 1;
   border-radius: 0 4px 4px 0;
   cursor: pointer;
@@ -38,7 +38,6 @@
   min-width: 200px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   z-index: 200;
   overflow: hidden;
@@ -56,7 +55,7 @@
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-subtle);
   margin-bottom: 4px;
@@ -68,9 +67,9 @@
   background: transparent;
   border: 0;
   text-align: left;
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   color: var(--text-primary);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
   transition: background 0.1s;
 }
@@ -102,13 +101,10 @@
   justify-content: space-between;
   gap: 8px;
   width: 100%;
-  height: 36px;
   padding: 0 12px;
-  border-radius: 8px;
   border: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
   color: var(--text-primary);
-  font-size: var(--font-size-label);
   font-family: inherit;
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
@@ -142,7 +138,7 @@
 }
 .v10-select-caret {
   flex-shrink: 0;
-  font-size: var(--font-size-meta);
+  font-size: var(--fs-micro);
   color: var(--text-tertiary);
   transition: transform 0.15s;
 }
@@ -157,7 +153,6 @@
   padding: 4px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   z-index: 1000;
 }
@@ -170,9 +165,9 @@
 }
 .v10-select-option {
   padding: 8px 10px;
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   color: var(--text-primary);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
@@ -227,7 +222,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border-default);
   background: var(--bg-elevated);
   color: var(--text-secondary);
@@ -260,7 +255,7 @@
      AA fail surfaced by PR4: tertiary clears only 2.31-2.66:1 against
      bg-panel; secondary clears 5.58/7.17. UI-lead Task #68. */
   margin-top: 4px;
-  font-size: var(--font-size-meta);
+  font-size: var(--fs-micro);
   color: var(--text-secondary);
   font-family: var(--font-mono);
   /* Hidden by default, revealed on message hover/focus — same recipe
@@ -288,15 +283,9 @@
 @media (prefers-reduced-motion: reduce) {
   .v10-local-agent-msg-time { opacity: 1; transition: none; }
 }
-.v10-local-agent-setup {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
 .v10-local-agent-warning {
   padding: 10px 12px;
-  border-radius: 6px;
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   line-height: 1.55;
   border: 1px solid var(--border-default);
 }
@@ -311,27 +300,12 @@
   border-color: color-mix(in srgb, #f59e0b 28%, var(--border-subtle));
 }
 .v10-local-agent-copy {
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   color: var(--text-secondary);
   line-height: 1.55;
 }
-.v10-local-agent-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.v10-local-agent-target-picker {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  width: 100%;
-  margin: 0;
-}
 .v10-local-agent-target-label {
-  font-size: var(--font-size-caption);
+  font-size: var(--fs-label);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-tertiary);
@@ -341,11 +315,6 @@
   flex: 1;
   width: 100%;
   min-width: 0;
-}
-.v10-local-agent-toolbar-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 .v10-local-agent-composer-row {
   display: flex;

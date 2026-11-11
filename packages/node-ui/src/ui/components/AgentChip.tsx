@@ -14,6 +14,7 @@
  * 👤 human, ◉ generic AI. Click takes you to the agent's entity detail.
  */
 import React from 'react';
+import { agentInitials } from '@origintrail-official/dkg-graph-viz/agent-initials';
 import { useAgentsContext, type AgentSummary } from '../hooks/useAgents.js';
 
 export interface AgentChipProps {
@@ -39,14 +40,9 @@ function framedGlyph(framework: string | undefined, kind: 'human' | 'ai'): strin
   return kind === 'human' ? '👤' : '◉';
 }
 
-// Compact initials shown inside the avatar disc for quick scanning.
-function initials(name: string): string {
-  const trimmed = name.trim();
-  if (!trimmed) return '?';
-  const parts = trimmed.split(/[\s_-]+/).filter(Boolean);
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + (parts[1][0] ?? '')).toUpperCase();
-}
+// Compact initials shown inside the avatar disc: the same rule as AgentDot
+// and the graph's agent nodes.
+const initials = agentInitials;
 
 /**
  * N6 polish (item 4) — when we fall back to a raw identifier (no

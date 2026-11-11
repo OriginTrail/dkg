@@ -116,19 +116,19 @@ describe('HealthChip', () => {
     await unmount();
   });
 
-  it('renders insolvent in the DANGER tone (badge-error), distinct from warn states (§6.4/G5)', () => {
-    expect(HEALTH_CHIP_META.insolvent.toneClass).toBe('badge-error');
+  it('renders insolvent in the DANGER tone (ds-tone-danger), distinct from warn states (§6.4/G5)', () => {
+    expect(HEALTH_CHIP_META.insolvent.toneClass).toBe('ds-tone-danger');
     // Expiring / cap-near stay warn-toned — insolvent must NOT collapse into them.
-    expect(HEALTH_CHIP_META.expiring.toneClass).toBe('badge-warn');
-    expect(HEALTH_CHIP_META['cap-near'].toneClass).toBe('badge-warn');
-    expect(HEALTH_CHIP_META.expired.toneClass).toBe('badge-error');
+    expect(HEALTH_CHIP_META.expiring.toneClass).toBe('ds-tone-warning');
+    expect(HEALTH_CHIP_META['cap-near'].toneClass).toBe('ds-tone-warning');
+    expect(HEALTH_CHIP_META.expired.toneClass).toBe('ds-tone-danger');
   });
 
-  it('renders the insolvent pill with honest danger copy — "Insolvent" + badge-error (#1349)', async () => {
+  it('renders the insolvent pill with honest danger copy — "Insolvent" + ds-tone-danger (#1349)', async () => {
     const { container, unmount } = await render(React.createElement(HealthChip, { state: 'insolvent' }));
     const chip = container.querySelector('.v10-pca-health-chip')!;
     expect(chip.getAttribute('data-health')).toBe('insolvent');
-    expect(chip.classList.contains('badge-error')).toBe(true);
+    expect(chip.classList.contains('ds-tone-danger')).toBe(true);
     expect(container.querySelector('.v10-pca-health-label')?.textContent).toBe('Insolvent');
     await unmount();
   });

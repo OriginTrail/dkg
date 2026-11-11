@@ -244,7 +244,8 @@ function ContextGraphPrimerRoute() {
     openTab(CONTEXT_GRAPH_PRIMER_TAB);
   }, [openTab]);
 
-  return <Navigate to="/" replace />;
+  // Legacy address: the primer tab now lives at /primer.
+  return <Navigate to="/primer" replace />;
 }
 
 export function App() {

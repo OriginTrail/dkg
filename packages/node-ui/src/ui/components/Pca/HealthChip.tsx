@@ -17,19 +17,19 @@ export const HEALTH_CHIP_META: Record<PcaHealthState, HealthMeta> = {
   healthy: {
     glyph: '✓',
     label: 'Healthy',
-    toneClass: 'badge-success',
+    toneClass: 'ds-tone-success',
     hint: 'Active, solvent, and not expiring soon.',
   },
   expiring: {
     glyph: '⏳',
     label: 'Expiring soon',
-    toneClass: 'badge-warn',
+    toneClass: 'ds-tone-warning',
     hint: 'The lock period ends soon — top-up does NOT extend it; renew to keep the discount.',
   },
   expired: {
     glyph: '✕',
     label: 'Expired',
-    toneClass: 'badge-error',
+    toneClass: 'ds-tone-danger',
     hint: 'The lock period has ended — publishes no longer get this discount. Renew to continue.',
   },
   insolvent: {
@@ -38,19 +38,19 @@ export const HEALTH_CHIP_META: Record<PcaHealthState, HealthMeta> = {
     // Danger tone (§6.4 / G5): insolvency is more severe than the warn-tone
     // Expiring-soon / Cap-near states — a depleted buffer means publishes pay
     // the direct cost (or fail). Distinct from those amber states.
-    toneClass: 'badge-error',
+    toneClass: 'ds-tone-danger',
     hint: 'The spendable buffer is depleted — publishes will quietly pay the direct cost. Top up.',
   },
   swept: {
     glyph: '⊘',
     label: 'Fully swept',
-    toneClass: 'badge',
+    toneClass: 'ds-tone-neutral',
     hint: 'Every epoch budget has been swept to the staker reward pool.',
   },
   'cap-near': {
     glyph: '⚠',
     label: 'Cap near 100',
-    toneClass: 'badge-warn',
+    toneClass: 'ds-tone-warning',
     hint: 'Approaching the 100 approved-publishing-wallet cap.',
   },
 };
@@ -73,7 +73,7 @@ export function HealthChip({
   const text = label ?? meta.label;
   // Dedupe tokens — the `swept` neutral tone reuses the base `.badge` class, so
   // a naive join would emit "badge badge".
-  const classes = [...new Set(['badge', meta.toneClass, 'v10-pca-health-chip', className])]
+  const classes = [...new Set(['ds-badge', 'ds-sm', meta.toneClass, 'v10-pca-health-chip', className])]
     .filter(Boolean)
     .join(' ');
   return (

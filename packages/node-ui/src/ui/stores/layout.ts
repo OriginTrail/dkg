@@ -50,7 +50,7 @@ const DEFAULTS = {
   rightCollapsed: false,
   bottomCollapsed: true,
   // Sidebar sections: Marketplace and My Context Graphs are primary
-  // navigation surfaces, while Public Graphs and Integrations stay
+  // navigation surfaces, while Public graphs and Integrations stay
   // collapsed until the user needs them.
   leftSectionMarketplaceOpen: true,
   leftSectionMyProjectsOpen: true,

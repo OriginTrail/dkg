@@ -54,7 +54,7 @@ export function DiscountAppliedBadge({
     : 'across multiple PCAs';
   return (
     <span
-      className={['badge', 'badge-success', 'v10-pca-discount-applied', className]
+      className={['ds-badge', 'ds-sm', 'ds-tone-success', 'v10-pca-discount-applied', className]
         .filter(Boolean)
         .join(' ')}
       data-testid="pca-discount-badge"

@@ -65,7 +65,7 @@ export function PcaAgentList({
                     </span>
                     <button
                       type="button"
-                      className="v10-pca-card-btn"
+                      className="v10-pca-card-btn ds-btn"
                       data-testid="pca-deregister-btn"
                       aria-label={`Confirm removing ${addr}`}
                       onClick={() => onConfirmRemove(addr)}
@@ -73,7 +73,7 @@ export function PcaAgentList({
                     >
                       {removeBusy ? 'Removing…' : 'Yes, remove'}
                     </button>
-                    <button type="button" className="v10-pca-card-btn" aria-label={`Cancel removing ${addr}`} onClick={onCancelRemove} disabled={removeBusy}>
+                    <button type="button" className="v10-pca-card-btn ds-btn" aria-label={`Cancel removing ${addr}`} onClick={onCancelRemove} disabled={removeBusy}>
                       Cancel
                     </button>
                   </span>
@@ -92,7 +92,7 @@ export function PcaAgentList({
                     )}
                     <button
                       type="button"
-                      className="v10-pca-card-btn"
+                      className="v10-pca-card-btn ds-btn"
                       aria-label={`Remove ${addr}`}
                       onClick={() => onAskRemove(addr)}
                       disabled={!ownerIsPrimary}

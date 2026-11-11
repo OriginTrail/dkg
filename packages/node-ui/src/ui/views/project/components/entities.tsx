@@ -2,16 +2,22 @@ import React, { useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { encodeDocTabId, resolveDocRef } from '../../../lib/doc-tab-id.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
+import { useVmReceiptSummary } from '../../../hooks/useVmReceiptSummary.js';
+import { buildVmFacts, vmSubjectsOf } from '../vm-facts.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
 import { useTabsStore } from '../../../stores/tabs.js';
 import type { SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
+import { LAYER_VAR } from '../../../layer-colors.js';
 import { LAYER_CONFIG, VM_TRIPLE_STAT, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { LayerGraphPanel } from './graph.js';
 import { LayerWidgetStrip } from './layer-widgets.js';
 import { AssertionsList } from './assertions.js';
+import { Badge, LayerBadge } from '../../../components/ds/Badge.js';
+import { kindColorForType } from '../../../entity-kind-colors.js';
+import { humanizeTypeName } from '../../../lib/formatLabels.js';
 export { AssertionsList } from './assertions.js';
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
@@ -131,7 +137,7 @@ export function EntityList({
                   />
                 )}
                 {type && type !== 'Entity' && (
-                  <span className="v10-entity-type-pill">{icon} {type}</span>
+                  <Badge tone="kind" size="sm" kindColor={e.types.map(t => kindColorForType(t)).find(Boolean) ?? undefined} className="v10-entity-type-pill">{humanizeTypeName(type)}</Badge>
                 )}
                 {ts != null && (
                   <span
@@ -147,14 +153,10 @@ export function EntityList({
             {perEntityTrustBadge ? (() => {
               const badge = TRUST_BADGE_CONFIG[e.trustLevel];
               return (
-                <span className={`v10-trust-badge ${badge.layerKey}`} title={`${badge.label} Memory`}>
-                  {badge.icon} {badge.label}
-                </span>
+                <LayerBadge layer={badge.layerKey} label={badge.label} size="sm" className={`v10-trust-badge ${badge.layerKey}`} title={`${badge.label} Memory`} />
               );
             })() : (
-              <span className={`v10-trust-badge ${layerKey}`}>
-                {layerIcon} {trustLabel}
-              </span>
+              <LayerBadge layer={layerKey} label={trustLabel} size="sm" className={`v10-trust-badge ${layerKey}`} />
             )}
           </div>
         );
@@ -226,21 +228,21 @@ export function LayerContent({
     <>
       <div className="v10-layer-expand-tabs">
         <button
-          className={`v10-layer-expand-tab ${activeTab === 'items' ? 'active' : ''}`}
+          className={`v10-layer-expand-tab ds-tab ${activeTab === 'items' ? 'active' : ''}`}
           onClick={handleTab('items')}
         >{itemsLabel}</button>
         {layer !== 'vm' && (
           <button
-            className={`v10-layer-expand-tab ${activeTab === 'assertions' ? 'active' : ''}`}
+            className={`v10-layer-expand-tab ds-tab ${activeTab === 'assertions' ? 'active' : ''}`}
             onClick={handleTab('assertions')}
           >Assertions</button>
         )}
         <button
-          className={`v10-layer-expand-tab ${activeTab === 'graph' ? 'active' : ''}`}
+          className={`v10-layer-expand-tab ds-tab ${activeTab === 'graph' ? 'active' : ''}`}
           onClick={handleTab('graph')}
         >Graph</button>
         <button
-          className={`v10-layer-expand-tab ${activeTab === 'docs' ? 'active' : ''}`}
+          className={`v10-layer-expand-tab ds-tab ${activeTab === 'docs' ? 'active' : ''}`}
           onClick={handleTab('docs')}
         >Documents</button>
         {layer !== 'vm' && onShowQueryCatalogChange && (
@@ -260,7 +262,7 @@ export function LayerContent({
           {layer === 'vm' && !isInitialVerifiableMemoryLoad && !isVerifiableMemoryUnavailable && (
             <VerifiableMemoryHeroBanner
               entities={entities}
-              tripleCount={tripleCount}
+              vmTriples={layerTriples}
               contextGraphId={contextGraphId}
             />
           )}
@@ -349,11 +351,31 @@ export function LayerContent({
 // Sits at the top of the VM tab's "Knowledge Assets" view. Pulls together
 // the DKG "secret sauce" into a compact visual: anchoring, consensus,
 // agent identity — the verifiability elements that justify the VM's cost.
-export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraphId }: {
+const VM_BADGE_TIP = 'Verifiable Memory: Knowledge Assets published to the DKG chain, signed by the publishing agent, and tamper-evident via content hashes.';
+
+function VmHeroFacts({ entities, vmTriples, contextGraphId }: { entities: MemoryEntity[]; vmTriples: Triple[]; contextGraphId: string }) {
+  const { summary, loading, error } = useVmReceiptSummary(contextGraphId);
+  const vmSubjects = useMemo(() => vmSubjectsOf(vmTriples), [vmTriples]);
+  const facts = useMemo(() => buildVmFacts(entities, summary, { loading, error }, vmSubjects), [entities, summary, loading, error, vmSubjects]);
+  return (
+    <dl className="v10-vm-hero-facts" aria-label="Verifiable Memory facts for this context graph">
+      {facts.map(f => (
+        <div key={f.id} className={`v10-vm-hero-fact tone-${f.tone}`} title={f.tooltip} data-fact={f.id}>
+          <dt>{f.label}</dt>
+          <dd>{f.value}{f.tone === 'warn' ? <span aria-label="needs attention" className="v10-vm-hero-fact-icon">⚠</span> : null}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+export function VerifiableMemoryHeroBanner({ entities, vmTriples, contextGraphId }: {
   entities: MemoryEntity[];
-  tripleCount: number;
+  /** Verifiable Memory's own triples (the layer view's triples). */
+  vmTriples: Triple[];
   contextGraphId: string;
 }) {
+  const tripleCount = vmTriples.length;
   const totalAssets = entities.length;
   const typeSet = new Set<string>();
   for (const e of entities) for (const t of e.types) typeSet.add(t);
@@ -361,9 +383,9 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
 
   if (totalAssets === 0) {
     return (
-      <div className="v10-vm-hero v10-vm-hero-empty">
+      <div className="v10-vm-hero ds-card v10-vm-hero-empty">
         <div className="v10-vm-hero-title">
-          <span className="v10-vm-hero-badge">◉ Verifiable Memory</span>
+          <LayerBadge layer="vm" label="Verifiable Memory" className="v10-vm-hero-badge" />
           <div className="v10-vm-hero-heading">
             <span className="v10-vm-hero-headline">Nothing published yet</span>
             <span className="v10-vm-hero-context" title={contextGraphId}>
@@ -384,9 +406,9 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
   }
 
   return (
-    <div className="v10-vm-hero">
+    <div className="v10-vm-hero ds-card">
       <div className="v10-vm-hero-title">
-        <span className="v10-vm-hero-badge">◉ Verifiable Memory</span>
+        <LayerBadge layer="vm" label="Verifiable Memory" className="v10-vm-hero-badge" title={VM_BADGE_TIP} />
         <div className="v10-vm-hero-heading">
           <span className="v10-vm-hero-headline">On-chain anchored · cryptographically signed</span>
           <span className="v10-vm-hero-context" title={contextGraphId}>
@@ -403,24 +425,7 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
           { id: 'types', value: typeCount, label: 'Entity Types' },
         ]}
       />
-      <div className="v10-vm-hero-strip">
-        <div className="v10-vm-hero-chip" title="Multi-agent endorsement">
-          <span className="v10-vm-hero-chip-dot" style={{ background: '#22c55e' }} />
-          Consensus
-        </div>
-        <div className="v10-vm-hero-chip" title="Published to the DKG blockchain anchor">
-          <span className="v10-vm-hero-chip-dot" style={{ background: '#3b82f6' }} />
-          On-chain
-        </div>
-        <div className="v10-vm-hero-chip" title="Each contribution bound to a DID">
-          <span className="v10-vm-hero-chip-dot" style={{ background: '#a855f7' }} />
-          Agent Identity
-        </div>
-        <div className="v10-vm-hero-chip" title="Tamper-evident via content hashing">
-          <span className="v10-vm-hero-chip-dot" style={{ background: '#f59e0b' }} />
-          Content Hash
-        </div>
-      </div>
+      <VmHeroFacts entities={entities} vmTriples={vmTriples} contextGraphId={contextGraphId} />
     </div>
   );
 }
@@ -464,7 +469,7 @@ export function LayerDetailView({
   return (
     <div className="v10-layer-detail">
       <div className="v10-layer-detail-header">
-        <span className="v10-layer-detail-icon" style={{ color: config.color }}>{config.icon}</span>
+        <span className="v10-layer-detail-icon" style={{ color: LAYER_VAR[config.trustLevel] }}>{config.icon}</span>
         <div>
           <div className="v10-layer-detail-title">{config.title}</div>
           <div className="v10-layer-detail-desc">{config.desc}</div>
@@ -567,7 +572,7 @@ export function DocumentsList({
                   {size && <span className="v10-item-count">· {Math.round(parseInt(size) / 1024)}KB</span>}
                 </div>
               </div>
-              <button className="v10-item-promote-btn" onClick={ev => { ev.stopPropagation(); handleOpenDoc(e); }}>Open →</button>
+              <button className="v10-item-promote-btn ds-btn ds-swm ds-sm" onClick={ev => { ev.stopPropagation(); handleOpenDoc(e); }}>Open →</button>
             </div>
           );
         })}

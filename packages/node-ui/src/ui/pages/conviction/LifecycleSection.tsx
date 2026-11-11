@@ -27,7 +27,7 @@ export function LifecycleSection({
       <section className="v10-pca-detail-section">
         <h3 className="v10-pca-detail-section-title">Lifecycle</h3>
         {(health === 'expiring' || health === 'expired') && (
-          <p className="v10-pca-card-warn">
+          <p className="v10-pca-card-warn ds-card-nested">
             {formatRelativeExpiry(snapshot.expiresAtTimestamp)}. The lock period can’t be extended —
             Renew creates a fresh replacement account seeded from this one (the old TRAC stays locked
             until its own expiry).
@@ -37,7 +37,7 @@ export function LifecycleSection({
             account nears/passes expiry. Honest copy lives in the seeded create modal (#9). */}
         <button
           type="button"
-          className={`v10-pca-card-btn${health === 'expiring' || health === 'expired' ? ' primary' : ''}`}
+          className={`v10-pca-card-btn ds-btn${health === 'expiring' || health === 'expired' ? ' primary ds-primary' : ''}`}
           data-testid="pca-renew-btn"
           onClick={() => renewal.openRenew()}
           disabled={!access.writesEnabled}

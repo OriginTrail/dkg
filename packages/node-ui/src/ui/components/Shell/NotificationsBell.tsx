@@ -20,6 +20,7 @@ import { useTabsStore } from '../../stores/tabs.js';
 import { useNotificationsFeed } from '../../hooks/useNotificationsFeed.js';
 import { usePcaAlerts } from '../../hooks/usePcaAlerts.js';
 import { NotificationsPane } from '../Notifications/NotificationsPane.js';
+import { Count } from '../ds/Badge.js';
 
 const BELL_ICON = (
   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -115,7 +116,7 @@ export function NotificationsBell() {
     >
       <button
         ref={bellRef}
-        className="v10-header-icon-btn"
+        className="v10-header-icon-btn ds-btn ds-ghost ds-icon"
         onClick={() => setOpen((v) => !v)}
         title={unread > 0 ? `Notifications (${unread} unread)` : 'Notifications'}
         aria-label={unread > 0 ? `Notifications, ${unread} unread` : 'Notifications'}
@@ -124,7 +125,7 @@ export function NotificationsBell() {
         aria-controls={open ? PANE_ID : undefined}
       >
         {BELL_ICON}
-        {unread > 0 && <span className="v10-header-notif-badge">{unread}</span>}
+        {unread > 0 && <Count value={unread} tone="attention" className="v10-header-notif-badge" />}
       </button>
       {open && (
         <NotificationsPane

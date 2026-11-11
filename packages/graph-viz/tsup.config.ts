@@ -29,4 +29,11 @@ export default defineConfig([
     outDir: 'dist/parsers',
     splitting: true,
   },
+  {
+    entry: ['src/agent-initials.ts'],
+    format: ['esm', 'cjs'],
+    dts: true,
+    sourcemap: true,
+    outDir: 'dist/agent-initials',
+  },
 ]);
