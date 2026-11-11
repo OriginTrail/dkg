@@ -392,11 +392,13 @@ export { readStoreOperationExecutionGeneration, asStoreRecoveryGenerationReader,
 export { readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
 export {
   DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
+  QUERY_CATALOG_LIMIT_NAME,
   STORE_GRAPH_CATALOG_LIMIT_NAME,
   STORE_GRAPH_CATALOG_MAX_BYTES_ENV,
   STORE_INTERNAL_LIMIT,
   StoreInternalLimitError,
   isStoreInternalLimitError,
+  recordStoreInternalLimit,
   storeGraphCatalogMaxBytes,
   type StoreInternalLimitErrorLike,
 } from './graph-catalog-internal-limit.js';

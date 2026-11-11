@@ -4,11 +4,13 @@ import { rebuildMetrics } from '@origintrail-official/dkg-core';
 import {
   GraphSetIndexStore,
   OxigraphStore,
+  QUERY_CATALOG_LIMIT_NAME,
   STORE_GRAPH_CATALOG_LIMIT_NAME,
   STORE_GRAPH_CATALOG_MAX_BYTES_ENV,
   StoreInternalLimitError,
   StoreOperationTimeoutError,
   StoreSchedulerBusyError,
+  recordStoreInternalLimit,
 } from '../src/index.js';
 import { createGraphCatalogSizeRecorder, timeGraphCatalogRefresh } from '../src/graph-catalog-metrics.js';
 import { measureGraphCatalogBytes } from '../src/graph-catalog-response-limit.js';
@@ -118,6 +120,13 @@ describe('graph catalog metrics', () => {
     expect(named(recorded, 'dkg.query.internal_limit_total').map(entry => entry.attributes)).toEqual([
       { limit: STORE_GRAPH_CATALOG_LIMIT_NAME }, { limit: 'other' },
     ]);
+  });
+
+  it('labels a refusal by the query package\'s catalog bound with that bound\'s name', async () => {
+    const recorded = await captureMetrics(() => { recordStoreInternalLimit(QUERY_CATALOG_LIMIT_NAME); });
+    expect(named(recorded, 'dkg.query.internal_limit_total')).toEqual([{
+      metric: 'dkg.query.internal_limit_total', value: 1, attributes: { limit: 'QUERY_CATALOG_MAX_RESPONSE_BYTES' },
+    }]);
   });
 });
 

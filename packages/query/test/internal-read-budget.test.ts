@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { OxigraphStore, StoreResponseTooLargeError, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import { assertionLifecycleUri, contextGraphLayerUri, MemoryLayer } from '@origintrail-official/dkg-core';
+import { assertionLifecycleUri, contextGraphLayerUri, getMetrics, MemoryLayer } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import type { QueryOptions } from '../src/query-engine.js';
 import {
@@ -136,15 +136,21 @@ describe('internal reads leave the caller budget', () => {
     } finally { await inner.close(); }
   });
 
-  it('answers an authority read over the node bound as a node-side limit', async () => {
-    await expect(readWithinCatalogLimit(async () => {
-      throw new StoreResponseTooLargeError(QUERY_CATALOG_MAX_RESPONSE_BYTES, QUERY_CATALOG_MAX_RESPONSE_BYTES + 1);
-    })).rejects.toMatchObject({
-      code: 'STORE_INTERNAL_LIMIT', limitName: QUERY_CATALOG_LIMIT_NAME,
-      limitBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES, actualBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES + 1,
-    });
-    const other = new Error('store unavailable');
-    await expect(readWithinCatalogLimit(async () => { throw other; })).rejects.toBe(other);
-    await expect(readWithinCatalogLimit(async () => 'ok')).resolves.toBe('ok');
+  it('answers an authority read over the node bound as a node-side limit, and counts it under the bound\'s name', async () => {
+    const counted = vi.spyOn(getMetrics().queryInternalLimitTotal, 'add');
+    try {
+      await expect(readWithinCatalogLimit(async () => {
+        throw new StoreResponseTooLargeError(QUERY_CATALOG_MAX_RESPONSE_BYTES, QUERY_CATALOG_MAX_RESPONSE_BYTES + 1);
+      })).rejects.toMatchObject({
+        code: 'STORE_INTERNAL_LIMIT', limitName: QUERY_CATALOG_LIMIT_NAME,
+        limitBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES, actualBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES + 1,
+      });
+      expect(counted.mock.calls).toEqual([[1, { limit: QUERY_CATALOG_LIMIT_NAME }]]);
+      const other = new Error('store unavailable');
+      await expect(readWithinCatalogLimit(async () => { throw other; })).rejects.toBe(other);
+      await expect(readWithinCatalogLimit(async () => 'ok')).resolves.toBe('ok');
+      // Another failure and a read within the bound count nothing.
+      expect(counted).toHaveBeenCalledTimes(1);
+    } finally { counted.mockRestore(); }
   });
 });
