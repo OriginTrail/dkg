@@ -660,30 +660,44 @@ gate_verdict() {
   fi
 }
 
-# watch_mismatches <n> <out> <since>: in the background, append to <out> every read-graph check mismatch line that node
-# <n> logs from now on, following its daemon.log across a trim (a restart trims the log from the front; on re-reading
-# it, lines stamped before <since>, "YYYY-MM-DD HH:MM:SS" in the log's local time, are skipped). Prints the PID.
+# watch_mismatches <n> <out> <lost> <since>: in the background, append to <out> every read-graph check mismatch line
+# that node <n> logs from now on. The daemon rotates daemon.log by renaming it to daemon.log.1: the watcher keeps its
+# file open, so it reads a rotated file to its end before it opens the new one. When the daemon cannot rename, it
+# trims the live file in place, and lines written since the last read may be gone: that is noted in <lost>, and the
+# trimmed file is read again from its start (lines stamped before <since>, the log's local "YYYY-MM-DD HH:MM:SS",
+# skipped). Prints the PID.
 watch_mismatches() {
-  LOG="$DEVNET_DIR/node$1/daemon.log" OUT="$2" SINCE="$3" node -e '
+  LOG="$DEVNET_DIR/node$1/daemon.log" OUT="$2" LOST="$3" SINCE="$4" node -e '
     const fs = require("fs");
-    const { LOG, OUT, SINCE } = process.env;
-    let offset = (() => { try { return fs.statSync(LOG).size; } catch { return 0; } })();
-    let rest = "";
+    const { LOG, OUT, LOST, SINCE } = process.env;
     const stamped = /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d/;
     const keep = (line) => line.includes("[read-graph-check] Read graph <") && !(stamped.test(line) && line.slice(0, 19) < SINCE);
-    const tick = () => {
-      let size;
-      try { size = fs.statSync(LOG).size; } catch { return; }
-      if (size < offset) { offset = 0; rest = ""; }
-      if (size === offset) return;
-      const fd = fs.openSync(LOG, "r"); const buffer = Buffer.alloc(size - offset);
-      fs.readSync(fd, buffer, 0, buffer.length, offset); fs.closeSync(fd); offset = size;
-      const lines = (rest + buffer.toString("utf8")).split("\n"); rest = lines.pop();
-      const hits = lines.filter(keep);
-      if (hits.length > 0) fs.appendFileSync(OUT, hits.join("\n") + "\n");
+    const identity = (stat) => `${stat.dev}:${stat.ino}`;
+    let fd = null, current = null, offset = 0, rest = "";
+    const open = (fromEnd) => {
+      try { fd = fs.openSync(LOG, "r"); } catch { fd = null; return; }
+      const stat = fs.fstatSync(fd); current = identity(stat); offset = fromEnd ? stat.size : 0; rest = "";
     };
+    const emit = (lines) => { const hits = lines.filter(keep); if (hits.length > 0) fs.appendFileSync(OUT, hits.join("\n") + "\n"); };
+    const drain = () => {
+      if (fd === null) return;
+      const size = fs.fstatSync(fd).size;
+      if (size < offset) { fs.appendFileSync(LOST, `${LOG} was trimmed in place at ${new Date().toISOString()}\n`); offset = 0; rest = ""; }
+      if (size === offset) return;
+      const buffer = Buffer.alloc(size - offset);
+      fs.readSync(fd, buffer, 0, buffer.length, offset); offset = size;
+      const lines = (rest + buffer.toString("utf8")).split("\n"); rest = lines.pop(); emit(lines);
+    };
+    const tick = () => {
+      drain();
+      let stat;
+      try { stat = fs.statSync(LOG); } catch { return; }
+      if (fd === null) { open(false); drain(); return; }
+      if (identity(stat) !== current) { emit([rest]); fs.closeSync(fd); open(false); drain(); }
+    };
+    open(true);
     setInterval(tick, 500);
-    process.on("SIGTERM", () => { tick(); process.exit(0); });
+    process.on("SIGTERM", () => { try { tick(); emit([rest]); } finally { process.exit(0); } });
   ' > /dev/null 2>&1 &
   echo $!
 }
@@ -708,8 +722,9 @@ phase_gate() {
   # can be clean although write maintenance failed during the workload. Every mismatch a check logs is kept.
   since="$(date '+%Y-%m-%d %H:%M:%S')"
   for n in $NODES; do
-    : > "$RESULTS/gate/mismatches.node$n"
-    watchers="$watchers $(watch_mismatches "$n" "$RESULTS/gate/mismatches.node$n" "$since")"
+    : > "$RESULTS/gate/mismatches.node$n"; : > "$RESULTS/gate/lost.node$n"
+    w="$(watch_mismatches "$n" "$RESULTS/gate/mismatches.node$n" "$RESULTS/gate/lost.node$n" "$since")"
+    echo "$w" > "$RESULTS/gate/watcher.node$n"; watchers="$watchers $w"
   done
   echo "$watchers" > "$RESULTS/gate/watchers"
   gate_run
@@ -718,7 +733,7 @@ phase_gate() {
 }
 
 gate_run() {
-  local started rc verdict checked n cg lost="" rebuilt="" mismatched
+  local started rc verdict checked n cg lost="" rebuilt="" mismatched unwatched=""
   started="$(now)"
   rm -f "$RESULTS/gate/REPORT.json"
   for n in $NODES; do read_graphs_setting "$n" > "$RESULTS/gate/setting.node$n"; done
@@ -750,12 +765,19 @@ gate_run() {
   full_checks after-gate; checked=$?
   sleep 1
   mismatched="$(gate_mismatches | paste -sd ';' - | sed 's/;/; /g')"
+  # A watcher that stopped, or a log trimmed in place, may have lost a mismatch line: the gate cannot pass then.
+  for n in $NODES; do
+    kill -0 "$(cat "$RESULTS/gate/watcher.node$n" 2>/dev/null)" 2>/dev/null || unwatched="$unwatched node$n (its log watcher stopped)"
+    [ -s "$RESULTS/gate/lost.node$n" ] && unwatched="$unwatched node$n (its log was trimmed in place)"
+  done
   if [ "$checked" = 1 ]; then
     record gate FAIL "$(( $(now) - started ))" "full check not clean after the gate on:$(cat "$RESULTS/checks/after-gate.failed")"
   elif [ -n "$mismatched" ]; then
     record gate FAIL "$(( $(now) - started ))" "a check found read graphs that did not match their member graphs during the workload, though they were rebuilt by the end: $mismatched (gate/mismatches.node<N>)"
   elif [ "$verdict" = FAIL ]; then
     record gate FAIL "$(( $(now) - started ))" "the gate failed (exit $rc; gate/REPORT.md, gate.log)"
+  elif [ -n "$unwatched" ]; then
+    record gate INCONCLUSIVE "$(( $(now) - started ))" "a mismatch logged during the workload may have been missed on:$unwatched"
   elif [ "$checked" = 2 ]; then
     record gate INCONCLUSIVE "$(( $(now) - started ))" "full check incomplete after the gate on:$(cat "$RESULTS/checks/after-gate.failed")"
   elif [ "$verdict" = PASS ]; then
@@ -822,6 +844,7 @@ daemon_worker_pid() {
 
 drill_kill_during_write() {
   local n="$KILL_NODE" started cg pid new_pid writer acked i resp missing body agent wm_graph inflight answers inflight_write overlap
+  local attempt last_write kill_line
   started="$(now)"; cg="read-graphs-drill-$(echo "$RUN_ID" | tr 'A-Z' 'a-z')"
   acked="$RESULTS/drill-kill.acked"; : > "$acked"
   # The writes go to the node's own agent; the read graph they maintain is that agent's working-memory read graph.
@@ -847,8 +870,10 @@ drill_kill_during_write() {
     || { record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "the working-memory read graph <$wm_graph> was not ready before the kill"; return; }
   pid="$(daemon_worker_pid "$n")"
   [ -n "$pid" ] || { record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "node$n's daemon.pid does not name a running daemon worker"; return; }
-  # The writer marks each working-memory write in flight (sent, not yet answered) in $inflight, logs every answer in
-  # $answers in order, and records each acknowledged (HTTP 2xx) write in $acked.
+  # The writer marks each working-memory write in flight in $inflight, logs every outcome in $answers in order, and
+  # records each acknowledged (HTTP 2xx) write in $acked. It sends the write with curl itself, so the outcome says
+  # what the daemon had: exit 52 or 56 with the whole body uploaded means the worker took the request and its
+  # connection was dropped unanswered; exit 7 means the request never reached it; exit 0 means it was answered.
   inflight="$RESULTS/drill-kill.inflight"; answers="$RESULTS/drill-kill.answers"; : > "$inflight"; : > "$answers"
   (
     export DKG_API_MAXTIME=15
@@ -856,50 +881,78 @@ drill_kill_during_write() {
       api "$n" POST /api/knowledge-assets "{\"contextGraphId\":\"$cg\",\"name\":\"drill-$i\"}" > /dev/null 2>&1 || true
       body="{\"contextGraphId\":\"$cg\",\"quads\":[{\"subject\":\"urn:read-graphs-drill:$i\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"drill $i\\\"\"}]}"
       echo "$i" > "$inflight"
-      code="$(code_of "$(api "$n" POST "/api/knowledge-assets/drill-$i/wm/write" "$body")")"
-      echo "write $i $code" >> "$answers"
+      out="$(curl -sS --max-time 15 --connect-timeout 5 -o /dev/null -w '%{http_code} %{size_upload}' -X POST \
+        -H "Authorization: Bearer $(node_token "$n")" -H 'Content-Type: application/json' --data "$body" \
+        "http://127.0.0.1:$(node_port "$n")/api/knowledge-assets/drill-$i/wm/write" 2>/dev/null)"; rc=$?
+      code="${out%% *}"
+      echo "write $i rc=$rc code=${code:-000} sent=${out##* } of ${#body}" >> "$answers"
       : > "$inflight"
       case "$code" in 2??) echo "$i" >> "$acked" ;; esac
     done
   ) &
   writer=$!
-  # The crash must land during a working-memory write: once three were acknowledged, kill the daemon worker while one
-  # is in flight. A writer that is alive but between writes proves nothing.
-  inflight_write=""
-  for i in $(seq 1 600); do
-    kill -0 "$writer" 2>/dev/null || break
-    if [ "$(acked_count "$acked")" -ge 3 ]; then inflight_write="$(tr -d '[:space:]' < "$inflight" 2>/dev/null)"; [ -n "$inflight_write" ] && break; fi
-    sleep 0.1
+  # The crash must land on a working-memory write the worker holds: once three were acknowledged, kill the daemon worker
+  # while one is in flight, then require evidence that the worker held it. The send and the kill race, so up to three
+  # crashes are tried; each one is a full crash with its own recovery.
+  overlap=""; attempt=0; last_write=0
+  while [ -z "$overlap" ] && [ "$attempt" -lt 3 ]; do
+    attempt=$((attempt + 1))
+    inflight_write=""
+    for i in $(seq 1 600); do
+      kill -0 "$writer" 2>/dev/null || break
+      if [ "$(acked_count "$acked")" -ge 3 ]; then
+        inflight_write="$(tr -d '[:space:]' < "$inflight" 2>/dev/null)"
+        # A moment for the request to reach the worker, and still the same write in flight.
+        if [ -n "$inflight_write" ] && [ "$inflight_write" -gt "$last_write" ]; then
+          sleep 0.05
+          [ "$(tr -d '[:space:]' < "$inflight" 2>/dev/null)" = "$inflight_write" ] && break
+        fi
+        inflight_write=""
+      fi
+      sleep 0.1
+    done
+    if [ -z "$inflight_write" ]; then
+      kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+      record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "no working-memory write was seen in flight after three were acknowledged ($(acked_count "$acked") acknowledged; crash $attempt), so no kill landed during one"
+      return
+    fi
+    last_write="$inflight_write"
+    # The crash must happen: SIGKILL delivered to the daemon worker, that worker gone, and a new worker in its place
+    # before anything is checked. A daemon that answered throughout would prove nothing.
+    pid="$(daemon_worker_pid "$n")"
+    if [ -z "$pid" ] || ! kill -9 "$pid" 2>/dev/null; then
+      kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+      record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "SIGKILL could not be sent to node$n's daemon worker (PID ${pid:-none}), so no crash happened"; return
+    fi
+    echo "killed during write $inflight_write" >> "$answers"
+    kill_line="$(wc -l < "$answers" | tr -d ' ')"
+    # Evidence that the worker died holding that write: its whole request was uploaded, and its connection was dropped
+    # unanswered (curl exit 52 or 56), logged after the kill. A write that never connected (it was not sent yet), or
+    # that was answered, did not overlap the crash.
+    for i in $(seq 1 100); do awk -v w="$inflight_write" -v k="$kill_line" 'NR > k && $1 == "write" && $2 == w { found = 1 } END { exit !found }' "$answers" && break; sleep 0.2; done
+    overlap="$(awk -v w="$inflight_write" -v k="$kill_line" 'NR > k && $1 == "write" && $2 == w && !seen { seen = 1; outcome = $0 }
+      END {
+        if (!seen) exit
+        split(outcome, f, " "); rc = f[3]; sent = f[5]; total = f[7]; sub("rc=", "", rc); sub("sent=", "", sent)
+        if ((rc == 52 || rc == 56) && sent == total && total > 0) print "curl exit " rc ", " sent " of " total " bytes sent"
+      }' "$answers")"
+    [ -n "$overlap" ] || note "drill-kill: crash $attempt did not overlap write $inflight_write ($(awk -v w="$inflight_write" -v k="$kill_line" 'NR > k && $1 == "write" && $2 == w { $1 = $2 = ""; print; exit }' "$answers" | sed 's/^ *//'))"
+    for i in $(seq 1 40); do pid_alive "$pid" || break; sleep 0.5; done
+    if pid_alive "$pid"; then
+      kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+      record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "node$n's daemon worker (PID $pid) was still running 20 s after SIGKILL"; return
+    fi
+    # The supervisor starts a new worker; restart the node if it does not.
+    wait_up "$n" 120 || restart_node "$n" || { kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null; record drill-kill FAIL "$(( $(now) - started ))" "node$n did not come back after the kill"; return; }
+    new_pid="$(daemon_worker_pid "$n")"
+    if [ -z "$new_pid" ] || [ "$new_pid" = "$pid" ]; then
+      kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+      record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "node$n answers after the kill, but its daemon.pid names no new daemon worker (PID $pid was killed)"; return
+    fi
   done
-  if [ -z "$inflight_write" ]; then
-    kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
-    record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "no working-memory write was seen in flight after three were acknowledged ($(acked_count "$acked") acknowledged), so no kill landed during one"
-    return
-  fi
-  # The crash must happen: SIGKILL delivered to the daemon worker, that worker gone, and a new worker in its place
-  # before anything is checked. A daemon that answered throughout would prove nothing.
-  if ! kill -9 "$pid" 2>/dev/null; then
-    kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
-    record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "SIGKILL could not be sent to node$n's daemon worker (PID $pid), so no crash happened"; return
-  fi
-  echo "killed during write $inflight_write" >> "$answers"
-  # The write in flight must be answered after the kill (whatever the answer), or it did not overlap the crash.
-  for i in $(seq 1 100); do grep -q "^write $inflight_write " "$answers" && break; sleep 0.2; done
   kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
-  overlap="$(awk -v w="$inflight_write" '$1 == "killed" { killed = NR } $1 == "write" && $2 == w { answered = NR; code = $3 }
-    END { if (killed && answered > killed) print code }' "$answers")"
   if [ -z "$overlap" ]; then
-    record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "working-memory write $inflight_write was answered before the kill landed (or never), so the kill did not overlap a write"; return
-  fi
-  for i in $(seq 1 40); do pid_alive "$pid" || break; sleep 0.5; done
-  if pid_alive "$pid"; then
-    record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "node$n's daemon worker (PID $pid) was still running 20 s after SIGKILL"; return
-  fi
-  # The supervisor starts a new worker; restart the node if it does not.
-  wait_up "$n" 120 || restart_node "$n" || { record drill-kill FAIL "$(( $(now) - started ))" "node$n did not come back after the kill"; return; }
-  new_pid="$(daemon_worker_pid "$n")"
-  if [ -z "$new_pid" ] || [ "$new_pid" = "$pid" ]; then
-    record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "node$n answers after the kill, but its daemon.pid names no new daemon worker (PID $pid was killed)"; return
+    record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "none of $attempt crashes landed on a working-memory write the worker held (drill-kill.answers), so the kill did not overlap a write"; return
   fi
   # Every write the node acknowledged before the kill must be there after it, with the value it wrote.
   body="{\"contextGraphId\":\"$cg\",\"view\":\"working-memory\",\"sparql\":\"SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }\"}"
@@ -934,7 +987,7 @@ drill_kill_during_write() {
   # The read graph those writes maintain must be there and ready; drill_end then checks it with the rest.
   wait_read_graph_ready "$n" "$wm_graph" "$READY_TIMEOUT" "$RESULTS/rows/drill-kill.wm.node$n" \
     || { record drill-kill FAIL "$(( $(now) - started ))" "the working-memory read graph <$wm_graph> was not listed ready after the kill"; return; }
-  drill_end drill-kill "$n" "$started" "killed node$n's daemon worker while working-memory write $inflight_write was in flight (answered HTTP $overlap after the kill), and a new worker took over; all $(acked_count "$acked") acknowledged writes were there after it with the values written, and their read graph was rebuilt and consistent"
+  drill_end drill-kill "$n" "$started" "killed node$n's daemon worker while it held working-memory write $inflight_write ($overlap, its connection dropped unanswered; crash $attempt of at most 3), and a new worker took over; all $(acked_count "$acked") acknowledged writes were there after it with the values written, and their read graph was rebuilt and consistent"
 }
 
 # finalized_jobs <n>: the node's count of finalized publish jobs, or "" when it cannot be read.
