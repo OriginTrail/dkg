@@ -253,6 +253,18 @@ describe('read-graph state statements on embedded Oxigraph', () => {
     expect(await fieldCount()).toBe(4);
   });
 
+  it('changes nothing for an expected row that differs from the stored one only in a version', async () => {
+    const store = new OxigraphStore();
+    const stored = { ...row('rebuilding', 9), ruleVersion: 2 };
+    await store.update(readGraphStateCompareAndSet(undefined, stored));
+    for (const expected of [{ ...stored, ruleVersion: 1 }, { ...stored, builderVersion: 2 }]) {
+      await store.update(readGraphStateCompareAndSet(expected, { ...expected, state: 'ready' }));
+      expect((await storedRows(store)).rows).toEqual([stored]);
+    }
+    await store.update(readGraphStateCompareAndSet(stored, { ...stored, state: 'ready' }));
+    expect((await storedRows(store)).rows).toEqual([{ ...stored, state: 'ready' }]);
+  });
+
   it('marks every read graph dirty in one request, once, leaving dirty rows as they are', async () => {
     const store = new OxigraphStore();
     await store.update(readGraphStateMarkAllDirty());

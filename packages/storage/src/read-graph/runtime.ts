@@ -287,27 +287,40 @@ function newRuntime(backend: string | undefined): ReadGraphBackendRuntime {
   };
 }
 
-const ENDPOINT_OPTIONS = ['updateEndpoint', 'queryEndpoint', 'url'] as const;
-
 /**
- * The backend a store configuration names: its update endpoint (or its only
- * endpoint) for a server, its absolute path for an engine on disk. `undefined`
- * for an engine in memory, which no other store object can reach.
+ * The backend a store configuration names. A built-in adapter is named by the
+ * option it reads its location from (`createTripleStore`): the endpoint it
+ * writes to for a server, the absolute path for an engine on disk; its other
+ * options cannot change which store objects share a runtime. An adapter
+ * registered under another name is named by the first location option it
+ * carries (an update or query endpoint, a URL, a path), so its store objects
+ * over one backend share a runtime too. `undefined` for an engine in memory,
+ * and for a configuration with no location: such a store gets a runtime of its
+ * own.
  */
 export function readGraphBackendIdentity(config: TripleStoreConfig): string | undefined {
-  // The in-memory engine ignores every location option.
-  if (config.backend === 'oxigraph') return undefined;
   const options = config.options ?? {};
   const text = (key: string): string | undefined => {
     const value = options[key];
     return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
   };
-  for (const key of ENDPOINT_OPTIONS) {
-    const endpoint = text(key);
-    if (endpoint !== undefined) return `endpoint:${normalizedUrl(endpoint)}`;
+  const endpoint = (url: string | undefined) => (url === undefined ? undefined : `endpoint:${normalizedUrl(url)}`);
+  switch (config.backend) {
+    case 'blazegraph': return endpoint(text('url'));
+    case 'sparql-http': return endpoint(text('updateEndpoint') ?? text('queryEndpoint'));
+    case 'oxigraph-persistent':
+    case 'oxigraph-worker': {
+      const path = text('path');
+      return path === undefined ? undefined : `path:${resolve(path)}`;
+    }
+    case 'oxigraph': return undefined;
+    default: {
+      const url = text('updateEndpoint') ?? text('queryEndpoint') ?? text('url');
+      if (url !== undefined) return endpoint(url);
+      const path = text('path');
+      return path === undefined ? undefined : `path:${resolve(path)}`;
+    }
   }
-  const path = text('path');
-  return path === undefined ? undefined : `path:${resolve(path)}`;
 }
 
 function normalizedUrl(value: string): string {

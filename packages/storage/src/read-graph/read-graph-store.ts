@@ -30,7 +30,10 @@
  * sent, every write it cannot maintain: an `update` that does not declare the
  * graphs it writes, a SPARQL UPDATE sent through `query`, a pattern delete
  * without a graph, and a write whose adapter has not declared that it can send
- * read-graph operations with it.
+ * read-graph operations with it. A delete that names a blank node, on an
+ * adapter that cannot send those operations with one (its engine deletes a
+ * stored blank node by identity), marks its read graphs dirty under their
+ * locks and goes without them.
  *
  * Its state (locks, state mirror, registry snapshots, the writes in flight)
  * lives in the backend's {@link ReadGraphBackendRuntime}, which every store
@@ -343,7 +346,13 @@ export class ReadGraphStore implements TripleStoreDecorator {
   ): Promise<T> {
     if (this.runtime.mirror.size === 0) return send(options);
     refuseRewrittenGraphNames(method, write);
-    return this.withMaintainedReadGraphs(storeOperationOf(method), write, options, (maintained) => {
+    return this.withMaintainedReadGraphs(storeOperationOf(method), write, options, async (maintained) => {
+      if (maintained.length > 0 && this.adapterCapabilities?.plansBlankNodeDeletes === false && namesBlankNode(write)) {
+        // The adapter deletes a stored blank node by its identity, which no read-graph operation can name: the
+        // read graphs are marked dirty first, and the delete goes without a plan, with its own exact semantics.
+        await this.markDirtyStrict(maintained.map(({ target }) => target.readGraph), storeOperationOf(method));
+        return send(options);
+      }
       const change = this.changeOf(method, write, maintained);
       if (change.before.length + change.after.length === 0) return send(options);
       if (!this.adapterCapabilities?.methods.includes(method)) {
@@ -569,7 +578,17 @@ export class ReadGraphStore implements TripleStoreDecorator {
       return key !== undefined
         && JSON.stringify(readGraphMembership(key, current, identity)) !== JSON.stringify(readGraphMembership(key, next, identity));
     });
-    const rows = changed.flatMap((readGraph) => this.runtime.mirror.get(readGraph) ?? []);
+    await this.markDirtyStrict(changed, unsent);
+  }
+
+  /**
+   * Mark read graphs dirty: in the mirror first, then in the store from
+   * whatever row it holds, so a mark an earlier attempt could not store is
+   * sent again. A mark the store does not take throws; before a write
+   * (`unsent`, its operation) the write is refused instead.
+   */
+  private async markDirtyStrict(readGraphs: readonly string[], unsent?: StoreOperation): Promise<void> {
+    const rows = readGraphs.flatMap((readGraph) => this.runtime.mirror.get(readGraph) ?? []);
     for (const row of rows) if (row.state !== 'dirty') this.runtime.mirror.set(nextReadGraphState(row, { kind: 'mark-dirty' })!);
     for (const { readGraph } of rows) {
       try {
@@ -578,10 +597,11 @@ export class ReadGraphStore implements TripleStoreDecorator {
       } catch (error) {
         if (unsent === undefined) throw error;
         const reason = error instanceof Error ? error.message : String(error);
-        throw new ReadGraphWriteRefusedError(unsent, `a read graph whose membership it changes could not be marked dirty: ${reason}`);
+        throw new ReadGraphWriteRefusedError(unsent, `a read graph it changes could not be marked dirty: ${reason}`);
       }
     }
   }
+
 
   /** The read graphs with a row whose membership holds one of `graphs`, in code-point order. */
   private maintainedReadGraphs(graphs: readonly string[]): MaintainedReadGraph[] {
@@ -695,6 +715,14 @@ function refuseRewrittenGraphNames(method: ReadGraphPlannedMethod | 'insert', wr
   if (readGraphWriteGraphs(write).some((graph) => legacyStrippedIriValue(graph) !== graph)) {
     throw new ReadGraphWriteRefusedError(storeOperationOf(method), 'a graph name must be an IRI its adapter writes as given');
   }
+}
+
+/** A delete that names a blank node, in a quad or in its pattern. */
+function namesBlankNode(write: ReadGraphWrite): boolean {
+  const blank = (term: string | undefined) => term?.startsWith('_:') === true;
+  if (write.kind === 'delete') return write.quads.some((quad) => blank(quad.subject) || blank(quad.object));
+  if (write.kind === 'delete-matching') return blank(write.pattern.subject) || blank(write.pattern.object);
+  return false;
 }
 
 function storeOperationOf(method: ReadGraphPlannedMethod | 'insert'): StoreOperation {
