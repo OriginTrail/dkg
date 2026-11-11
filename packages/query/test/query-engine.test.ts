@@ -1065,8 +1065,8 @@ describe('DKGQueryEngine', () => {
       const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
       store.query = async (...args) => {
         const result = await originalQuery(...args);
+        // Registry and authority answers are node work: only the slices and the content are charged.
         if (args[0].includes('http://ex.org/p1')) content.push(size(result));
-        else discoveryBytes += size(result);
         return result;
       };
       store.listGraphsByPrefix = async (...args) => {
