@@ -18,6 +18,16 @@ All notable changes to the DKG V10 node are documented here. The format is based
   If the backend refuses both, the service stops offering tools until the
   node restarts, so buyers answer such calls with `tools_unsupported`
   instead of sending them.
+- A Core node no longer spends a large share of its RPC on context graphs
+  that peers announced but nobody registered on chain. A Core node subscribes
+  to every graph it hears of over gossip. For one that was never registered,
+  every reconcile attempt paid for a live chain scan and then failed with
+  "has no resolved on-chain id", and the node asked about such graphs every
+  minute, up to eight a minute, for as long as it ran. On a Base mainnet Core
+  node that came to about 80,000 requests a day. The node now waits before
+  asking again about a graph whose name the chain holds no id for: a minute
+  at first, doubling up to an hour. A graph that does get registered is
+  picked up as soon as the node sees it on chain, as before.
 
 ## [10.1.1] - Unreleased
 

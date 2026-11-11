@@ -420,6 +420,8 @@ export default defineConfig({
       "test/vm-reconcile-self-prime.test.ts",
       "test/vm-reconcile-self-prime-budget.test.ts",
       "test/vm-reconcile-sweep.test.ts",
+      // The sweep's unbound lane spaces graphs whose name the chain holds no id for.
+      "test/vm-reconcile-absent-target-backoff.test.ts",
       "test/vm-reconcile-lifecycle-timer.test.ts",
       // #2858 — refresh of confirmed VM copies after an on-chain KA update.
       "test/vm-refresh-after-update.test.ts",
