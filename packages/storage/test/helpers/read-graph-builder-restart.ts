@@ -138,26 +138,35 @@ export const BUILDER_KILL_POINTS: Readonly<Record<'oxigraph' | 'blazegraph', rea
 export function readGraphBuilderRestartSuite(backend: 'oxigraph' | 'blazegraph') {
   describe(`a read-graph build across a restart (${backend})`, () => {
     let manager: BlazegraphNamespaceManager | undefined;
-    let handles: Awaited<ReturnType<BlazegraphNamespaceManager['acquireMany']>> | undefined;
-    let url: string | undefined;
+    const handles: Awaited<ReturnType<BlazegraphNamespaceManager['acquireMany']>>[number][] = [];
     const run = `restart${randomUUID().slice(0, 8)}`;
     let sequence = 0;
 
-    beforeAll(async () => {
+    beforeAll(() => {
       if (backend !== 'blazegraph') return;
       if (!process.env.BLAZEGRAPH_TEST_URL) throw new Error('The live Blazegraph lane requires BLAZEGRAPH_TEST_URL');
       manager = new BlazegraphNamespaceManager({ namespaceApiUrl: blazegraphNamespaceApiUrlFromSparqlEndpoint(process.env.BLAZEGRAPH_TEST_URL) });
-      handles = await manager.acquireMany([`read-graph-builder-restart-${randomUUID()}`]);
-      url = handles[0]!.sparqlUrl;
-    }, 60_000);
+    });
     afterAll(async () => {
-      if (manager && handles) await manager.disposeAll(handles);
+      if (manager && handles.length > 0) await manager.disposeAll(handles);
     }, 60_000);
+
+    /**
+     * A Blazegraph namespace for one case. This process opens the store again after each kill, and a process starts a
+     * backend's read graphs once (`startReadGraphs`). So each case needs a backend this process has not started yet,
+     * as after a real restart; the embedded cases get one from their own file.
+     */
+    const freshNamespace = async (): Promise<string> => {
+      const [handle] = await manager!.acquireMany([`read-graph-builder-restart-${randomUUID()}`]);
+      handles.push(handle!);
+      return handle!.sparqlUrl;
+    };
 
     it.each(BUILDER_KILL_POINTS[backend])('rebuilds to its members after a builder killed at the $after of copy batch $batch, +$delayMs ms', async (point) => {
       // Only Blazegraph has a request in flight: the builder reaches it through a proxy that keeps the answer to the batch.
       if (point.after === 'receipt' && backend !== 'blazegraph') throw new Error('An embedded store has no request in flight to hold');
       const fixture = layerFixture(`${run}-${sequence += 1}`);
+      const url = backend === 'blazegraph' ? await freshNamespace() : undefined;
       const dir = backend === 'oxigraph' ? await mkdtemp(join(tmpdir(), 'read-graph-restart-')) : undefined;
       const path = dir ? join(dir, 'store.nq') : undefined;
       const openAdapter = (): TripleStore => (path ? new OxigraphStore(path) : new BlazegraphStore(url!, { timeout: 120_000 }));
