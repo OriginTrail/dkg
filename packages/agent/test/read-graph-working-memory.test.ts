@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MemoryLayer, createOperationContext, readGraphIri, readScope } from '@origintrail-official/dkg-core';
-import { readGraphRuntimeOf, recordedWorkingMemoryIdentity, type ReadGraphModes } from '@origintrail-official/dkg-storage';
+import { forgetReadGraphBackendRuntimeForTesting, readGraphRuntimeOf, recordedWorkingMemoryIdentity, type ReadGraphModes } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import { ReadGraphWorkloadOwnerV1 } from '../src/read-graph-runtime.js';
 import { LocallySignedMockChain, silentLog } from './_helpers/external-signers.js';
@@ -101,9 +101,13 @@ describe('working-memory read graphs on embedded Oxigraph', () => {
     const shared = await node.query(`SELECT ?o WHERE { ?s <${NOTE}> ?o }`, { contextGraphId: CG, view: 'shared-working-memory', semantics: 'merged' });
     expect(shared.bindings.map((row) => row.o)).toEqual(['"a"']);
 
-    // Restarted under the same identity, the read graphs stay ready and answer at once.
+    // Restarted under the same identity, as a new process with nothing of the old one's read-graph runtime, the read graphs
+    // load from the store and the data directory, stay ready and answer at once.
+    const before = readGraphRuntimeOf(node.store)!;
     await node.stop();
+    forgetReadGraphBackendRuntimeForTesting(before.backend!);
     node = await startNode(dataDir, wallet, allocator);
+    expect(readGraphRuntimeOf(node.store)).not.toBe(before);
     expect([stateOf(node, wm(a)), stateOf(node, wm(b)), stateOf(node, SWM)]).toEqual(['ready', 'ready', 'ready']);
     expect(await notes(node, a, 'merged')).toEqual(['"peer"']);
     expect(await notes(node, b, 'merged')).toEqual(['"b"']);

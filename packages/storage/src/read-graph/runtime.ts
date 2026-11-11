@@ -281,6 +281,17 @@ export function readGraphBackendRuntime(backend: string | undefined): ReadGraphB
   return runtime;
 }
 
+/**
+ * Forget the runtime of `backend`, as a new process does not have it: the next
+ * store object over the backend gets a new one, which a start-up loads from
+ * what the backend and the data directory hold. Store objects still open keep
+ * the one they have.
+ * @internal Test hook, for a node restarted within one process; not part of the package's supported API.
+ */
+export function forgetReadGraphBackendRuntimeForTesting(backend: string): void {
+  SHARED_RUNTIMES.delete(backend);
+}
+
 function newRuntime(backend: string | undefined): ReadGraphBackendRuntime {
   return {
     backend,

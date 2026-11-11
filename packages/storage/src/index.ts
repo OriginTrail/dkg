@@ -477,6 +477,7 @@ export {
   ReadGraphLocks,
   ReadGraphRegistryCache,
   ReadGraphWriteTracker,
+  forgetReadGraphBackendRuntimeForTesting,
   readGraphBackendIdentity,
   readGraphBackendRuntime,
   type ReadGraphBackendRuntime,
