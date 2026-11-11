@@ -827,6 +827,9 @@ importers:
       '@origintrail-official/dkg-local-llm':
         specifier: workspace:*
         version: link:../local-llm
+      '@origintrail-official/dkg-marketplace':
+        specifier: workspace:*
+        version: link:../marketplace
       '@origintrail-official/dkg-mcp':
         specifier: workspace:*
         version: link:../mcp-dkg
@@ -866,6 +869,9 @@ importers:
       jsonc-parser:
         specifier: 3.3.1
         version: 3.3.1
+      jsonld:
+        specifier: ^8.3.3
+        version: 8.3.3(web-streams-polyfill@3.3.3)
       n3:
         specifier: ^2.0.1
         version: 2.0.1
@@ -888,6 +894,9 @@ importers:
       '@types/js-yaml':
         specifier: ^4.0.9
         version: 4.0.9
+      '@types/jsonld':
+        specifier: ^1.5.15
+        version: 1.5.15
       '@types/n3':
         specifier: ^1.26.1
         version: 1.26.1
@@ -1238,6 +1247,25 @@ importers:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)
 
+  packages/marketplace:
+    dependencies:
+      '@origintrail-official/dkg-chain':
+        specifier: workspace:*
+        version: link:../chain
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../core
+      ethers:
+        specifier: ^6
+        version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
+    devDependencies:
+      '@vitest/coverage-v8':
+        specifier: ^4.0.18
+        version: 4.0.18(vitest@4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0))
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)
+
   packages/mcp-dkg:
     dependencies:
       '@modelcontextprotocol/sdk':
@@ -1312,6 +1340,9 @@ importers:
 
   packages/node-ui:
     dependencies:
+      '@fontsource-variable/geist':
+        specifier: 5.3.0
+        version: 5.3.0
       '@opentelemetry/api':
         specifier: ^1.9.1
         version: 1.9.1
@@ -2516,6 +2547,9 @@ packages:
 
   '@ethersproject/wordlists@5.8.0':
     resolution: {integrity: sha512-2df9bbXicZws2Sb5S6ET493uJ0Z84Fjr3pC4tu/qlnZERibZCeUVuqdtt+7Tv9xxhUxHoIekIA7avrKUWHrezg==}
+
+  '@fontsource-variable/geist@5.3.0':
+    resolution: {integrity: sha512-j0m+vLQuG5XAYoHtGCVu0spvlGreR3EzpECUVzkFmI1mTVnAO38l/NEPDCFgZ177JxzYJCLSmTQibIiYPilGrA==}
 
   '@hono/node-server@1.19.17':
     resolution: {integrity: sha512-dSneS5qhiauZWGDCeK4o695Xd9nUNjviSZCMQrj10eetr8Uln1ucn6bbphOM6UynAMMtNIzZNSpL9vnASJwrPQ==}
@@ -3947,6 +3981,9 @@ packages:
 
   '@types/jsesc@2.5.1':
     resolution: {integrity: sha512-9VN+6yxLOPLOav+7PwjZbxiID2bVaeq0ED4qSQmdQTdjnXJSaCVKTR58t15oqH1H5t8Ng2ZX1SabJVoN9Q34bw==}
+
+  '@types/jsonld@1.5.15':
+    resolution: {integrity: sha512-PlAFPZjL+AuGYmwlqwKEL0IMP8M8RexH0NIPGfCVWSQ041H2rR/8OlyZSD7KsCVoN8vCfWdtWDBxX8yBVP+xow==}
 
   '@types/mdast@4.0.4':
     resolution: {integrity: sha512-kGaNbPh1k7AFzgpud/gMdvIm5xuECykRR+JnWKQno9TAXVa6WIVCGTPvYGekIDL4uwCZQSYbUxNBSb1aUo79oA==}
@@ -9019,6 +9056,8 @@ snapshots:
       '@ethersproject/properties': 5.8.0
       '@ethersproject/strings': 5.8.0
 
+  '@fontsource-variable/geist@5.3.0': {}
+
   '@hono/node-server@1.19.17(hono@4.13.13)':
     dependencies:
       hono: 4.13.13
@@ -10545,6 +10584,8 @@ snapshots:
   '@types/js-yaml@4.0.9': {}
 
   '@types/jsesc@2.5.1': {}
+
+  '@types/jsonld@1.5.15': {}
 
   '@types/mdast@4.0.4':
     dependencies:

@@ -120,6 +120,12 @@
     "colour": 1,
     "radius": 1
   },
+  "styles/30-marketplace-tokens.css": {
+    "colour": 16
+  },
+  "styles/32-marketplace-surfaces.css": {
+    "radius": 1
+  },
   "views/project/components/graph.tsx": {
     "colour": 1
   }

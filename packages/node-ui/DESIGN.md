@@ -45,11 +45,13 @@ Instrument Sans for the interface, JetBrains Mono for identifiers (DIDs, UALs, h
 |---|---|---|
 | `--fs-display` | 24 | Page totals, hero numbers |
 | `--fs-heading` | 18 | View titles |
-| `--fs-title` | 15 | Card and section titles |
-| `--fs-body` | 13 | Reading text |
-| `--fs-control` | 12 | Buttons, tabs, inputs, menus |
-| `--fs-label` | 11 | Badges, table headers, metadata |
-| `--fs-micro` | 10 | Small badges and counts; the floor, nothing is smaller |
+| `--fs-title` | 16 | Card and section titles |
+| `--fs-body` | 14 | Reading text |
+| `--fs-control` | 13 | Buttons, tabs, inputs, menus |
+| `--fs-label` | 12 | Badges, table headers, metadata |
+| `--fs-micro` | 11 | Small badges and counts; the floor, no text is smaller |
+
+Every font size is one of these tokens, in CSS and inline styles alike. The only raw sizes are glyphs drawn to fit a fixed-size mark (agent dots and chips, the small context graph mark).
 
 Sentence case everywhere, including buttons, tabs and badges. Uppercase is only for small section kickers.
 

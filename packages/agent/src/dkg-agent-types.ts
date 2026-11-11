@@ -1,5 +1,6 @@
 import type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
 import type { PreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
+import type { ContextGraphJoinPolicyReservationRelease } from './context-graph-join-policy-release.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -71,7 +72,7 @@ import type {
   ExternalAuthorSigners,
   RpcRequestAdmission,
 } from '@origintrail-official/dkg-chain';
-import type { AgentChainSignerSource } from './agent-chain-signer-source.js';
+import type { AgentChainSignerSource, NodeHeldAuthorConfig } from './agent-chain-signer-source.js';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';
@@ -1165,15 +1166,12 @@ export interface ContextGraphJoinPolicyRateReservation {
  * The rate reservation must atomically count and, when allowed, append the
  * reservation row so concurrent admissions cannot overrun either ceiling.
  */
-export interface ContextGraphJoinPolicyStore {
+export interface ContextGraphJoinPolicyStore extends ContextGraphJoinPolicyReservationRelease {
   load(contextGraphId: string): Promise<ContextGraphJoinPolicyRecord | null>;
   save(record: ContextGraphJoinPolicyRecord): Promise<void>;
   appendAudit(event: ContextGraphJoinPolicyAuditEvent): Promise<void>;
   /** Atomically persist a policy transition and its security audit event. */
-  saveWithAudit(
-    record: ContextGraphJoinPolicyRecord,
-    event: ContextGraphJoinPolicyAuditEvent,
-  ): Promise<void>;
+  saveWithAudit(record: ContextGraphJoinPolicyRecord, event: ContextGraphJoinPolicyAuditEvent): Promise<void>;
   getAutomaticApprovalUsage(
     contextGraphId: string,
     timestamp: number,
@@ -1402,7 +1400,7 @@ export interface Rfc64CatalogBootstrapConfigV1 {
 
 export type { FinalizationRecoveryStoreFactory } from './finalization-recovery-store.js';
 
-export interface DKGAgentConfig {
+export interface DKGAgentConfig extends NodeHeldAuthorConfig {
   /** Lower RPC usage by using the DKG Core chain cache. */
   DKG_Core_chain_cache?: boolean;
   /** Trusted local deployment configuration; never taken from a peer response. */

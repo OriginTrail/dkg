@@ -54,7 +54,7 @@ export function PcaModalShell({
           aria-label={dismissDisabled ? 'Close disabled while signing' : 'Close dialog'}
           title={dismissDisabled ? 'Finish or reject the wallet prompt first' : 'Close (Esc)'}
           disabled={dismissDisabled}
-          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: dismissDisabled ? 'not-allowed' : 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1, opacity: dismissDisabled ? 0.45 : 1 }}
+          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: dismissDisabled ? 'not-allowed' : 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4, zIndex: 1, opacity: dismissDisabled ? 0.45 : 1 }}
         >
           ×
         </button>

@@ -139,5 +139,19 @@
     "sources": [
       "docs/how-dkg-works/roadmap-and-convergence.md"
     ]
+  },
+  {
+    "name": "Single-job queue cleanup CLI",
+    "page": "docs/use-dkg/async-publisher-wallets.md",
+    "availability": "source only",
+    "baseline": "testnet-canary",
+    "owner": "DKG maintainers",
+    "reviewedOn": "2026-11-05",
+    "validation": "CLI subprocess and authenticated loopback HTTP regression coverage; daemon refusal and offline-write boundaries covered",
+    "sources": [
+      "packages/cli/src/commands/publisher.ts",
+      "packages/cli/src/commands/knowledge-asset.ts",
+      "packages/cli/test/clear-job-cli.test.ts"
+    ]
   }
 ]

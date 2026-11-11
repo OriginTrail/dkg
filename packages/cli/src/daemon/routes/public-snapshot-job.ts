@@ -1,24 +1,16 @@
 import { normalizePublicSnapshotSyncOptions } from '@origintrail-official/dkg-agent';
 // SPDX-License-Identifier: Apache-2.0
 import { readBody, jsonResponse, isPayloadTooLargeError } from "../http-utils.js";
-import { randomUUID } from "node:crypto";
+import { createSnapshotJobTracker } from './snapshot-job-tracker.js';
 import type {
   DKGAgent,
 } from "@origintrail-official/dkg-agent";
 import type { RequestContext } from "./context.js";
 
 type WithoutSignal<T> = T extends unknown ? Omit<T, 'signal'> : never;
-interface JobBase {
-  id: string;
-  request: WithoutSignal<ReturnType<typeof normalizePublicSnapshotSyncOptions>>;
-  startedAt: number;
-}
-type Job = JobBase & (
-  | { state: 'running' }
-  | { state: 'complete'; finishedAt: number; result: Awaited<ReturnType<DKGAgent['syncPublicGraphSnapshot']>> }
-  | { state: 'failed'; finishedAt: number; error: string }
-);
-const jobs = new WeakMap<DKGAgent, Job>();
+const jobs = createSnapshotJobTracker<Awaited<ReturnType<DKGAgent['syncPublicGraphSnapshot']>>,
+  { request: WithoutSignal<ReturnType<typeof normalizePublicSnapshotSyncOptions>> }, { finishedAt: number }>(
+  () => ({ finishedAt: Date.now() }));
 /** The parent route enforces node-admin authorization for both start and status. */
 export async function handlePublicSnapshotJob({
   req,
@@ -37,7 +29,7 @@ export async function handlePublicSnapshotJob({
     reply(405, { error: "Method not allowed" });
     return;
   }
-  if (jobs.get(agent)?.state === "running") {
+  if (jobs.isRunning(agent)) {
     reply(409, { error: "Snapshot recovery already running" });
     return;
   }
@@ -66,11 +58,7 @@ export async function handlePublicSnapshotJob({
     reply(400, { error: "Invalid snapshot recovery request" });
     return;
   }
-  if (jobs.get(agent)?.state === "running") {
-    reply(409, { error: "Snapshot recovery already running" });
-    return;
-  }
-  const job: Job = {
+  const job = jobs.start(agent, {
     request: {
       contextGraphId: input.contextGraphId,
       onChainId: input.onChainId,
@@ -80,21 +68,7 @@ export async function handlePublicSnapshotJob({
         ? { sourcePolicy: input.sourcePolicy, trustedCorePeerIds: [] as const }
         : { trustedCorePeerIds: [...input.trustedCorePeerIds] }),
     },
-    id: randomUUID(),
-    state: "running",
-    startedAt: Date.now(),
-  };
-  jobs.set(agent, job);
-  void agent
-    .syncPublicGraphSnapshot(input)
-    .then(
-      (result) => {
-        jobs.set(agent, { ...job, state: "complete", result, finishedAt: Date.now() });
-      },
-      (error) => {
-        jobs.set(agent, { ...job, state: "failed", finishedAt: Date.now(),
-          error: error instanceof Error ? error.message : String(error) });
-      },
-    );
+  }, () => agent.syncPublicGraphSnapshot(input));
+  if (!job) { reply(409, { error: "Snapshot recovery already running" }); return; }
   reply(202, job);
 }

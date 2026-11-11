@@ -1,5 +1,13 @@
 /** Maximum peer IDs in one wallet-registry page, excluding one lookahead row. */
 export const MAX_AGENT_PEER_PAGE_SIZE = 1024;
+/** How far ahead of this node's clock an agent's `dkg:lastSeen` may be and still say how old its profile is. */
+export const AGENT_LAST_SEEN_CLOCK_SKEW_MS = 5 * 60_000;
+
+/** Epoch ms of a `dkg:lastSeen`; undefined when it does not parse, or lies further ahead than clocks can differ. */
+export function usableLastSeenMs(lastSeen: string, nowMs: number): number | undefined {
+  const ms = Date.parse(lastSeen);
+  return Number.isFinite(ms) && ms <= nowMs + AGENT_LAST_SEEN_CLOCK_SKEW_MS ? ms : undefined;
+}
 
 export interface AgentPeerPageRequest {
   /** Positive integer, at most MAX_AGENT_PEER_PAGE_SIZE. */

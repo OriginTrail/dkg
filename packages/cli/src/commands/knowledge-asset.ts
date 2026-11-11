@@ -8,18 +8,18 @@ import {
   type KnowledgeAssetPublishResponse,
   type KnowledgeAssetShareJobState,
   type KnowledgeAssetShareResponse,
-  type KnowledgeAssetWritableQuad,
   type PreSignedAuthorAttestationPayload,
 } from '../api-client.js';
 import {
   formatQuadObject,
-  loadQuadsFromInput,
+  loadRdfFromInput,
   loadStructuredFile,
   type ActionOpts,
 } from '../cli-helpers.js';
 import { parseOptionalPositiveInteger } from '../cli-option-parsers.js';
 import { parseJobListPagingOptions, readJobList } from '../job-list-paging.js';
 import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-command-options.js';
+import { printAsyncJobFailure, printClearJobFailure } from './async-job-failure.js';
 
 const SHARE_JOB_STATES: readonly KnowledgeAssetShareJobState[] = [
   'queued',
@@ -55,20 +55,8 @@ function hasQuadInput(opts: ActionOpts): boolean {
   );
 }
 
-async function loadWritableQuads(opts: ActionOpts): Promise<KnowledgeAssetWritableQuad[]> {
-  const quads = await loadQuadsFromInput(
-    {
-      ...opts,
-      file: inputFilePath(opts),
-    },
-    '',
-  );
-  return quads.map((quad) => ({
-    subject: quad.subject,
-    predicate: quad.predicate,
-    object: quad.object,
-    graph: quad.graph ?? '',
-  }));
+async function loadWritableInput(opts: ActionOpts) {
+  return loadRdfFromInput({ ...opts, file: inputFilePath(opts) }, '');
 }
 
 function parsePreSignedAuthorAttestation(raw: unknown): PreSignedAuthorAttestationPayload | undefined {
@@ -233,11 +221,14 @@ function formatLifecycleDetail(value: unknown): string {
   }
 }
 
-async function runAction(action: () => Promise<void>): Promise<void> {
+async function runAction(
+  action: () => Promise<void>,
+  printFailure: (err: unknown) => void = (err) => console.error(toErrorMessage(err)),
+): Promise<void> {
   try {
     await action();
   } catch (err) {
-    console.error(toErrorMessage(err));
+    printFailure(err);
     process.exit(1);
   }
 }
@@ -258,7 +249,14 @@ export function registerKnowledgeAssetCommand(program: Command): void {
   ))))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
       const contextGraphId = requiredContextGraphId(opts);
-      const quads = hasQuadInput(opts) ? await loadWritableQuads(opts) : undefined;
+      const input = hasQuadInput(opts) ? await loadWritableInput(opts) : undefined;
+      const quads = input?.quads;
+      if (opts.finalize !== false && input?.sourceKind === 'jsonld' && quads?.some((quad) => quad.graph !== '')) {
+        throw new Error(
+          'JSON-LD named graphs cannot be finalized yet. Use ka create --no-finalize to keep them in Working Memory, '
+          + 'or rewrite the document into the default graph before finalizing or sharing.',
+        );
+      }
       if (opts.share === true && (!quads || quads.length === 0 || opts.finalize === false)) {
         throw new Error('--share requires non-empty payload quads and finalize enabled');
       }
@@ -295,7 +293,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
   )))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
       const contextGraphId = requiredContextGraphId(opts);
-      const quads = await loadWritableQuads(opts);
+      const { quads } = await loadWritableInput(opts);
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetWrite(contextGraphId, name, quads, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
@@ -417,7 +415,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       console.log('Knowledge asset share job accepted:');
       console.log(`  Job ID:  ${result.jobId}`);
       console.log(`  State:   ${result.state}`);
-    }));
+    }, (err) => printAsyncJobFailure(err, 'share')));
 
   addContextGraphOption(
     kaCmd
@@ -481,6 +479,15 @@ export function registerKnowledgeAssetCommand(program: Command): void {
     }));
 
   kaCmd
+    .command('clear-share-job <job-id>')
+    .description('Remove one finished SWM share job through the running daemon')
+    .action(async (jobId: string) => runAction(async () => {
+      const client = await ApiClient.connect();
+      const result = await client.knowledgeAssetClearShareJob(jobId);
+      console.log(`Share job ${result.jobId}: ${result.outcome}`);
+    }, printClearJobFailure));
+
+  kaCmd
     .command('recover-share-job <job-id>')
     .description('Recover a failed async SWM share job')
     .action(async (jobId: string) => runAction(async () => {
@@ -539,7 +546,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       console.log(`  Status:     ${result.status}`);
       if (result.shareOperationId) console.log(`  Share op:   ${result.shareOperationId}`);
       if (result.intentKey) console.log(`  Intent key: ${result.intentKey}`);
-    }));
+    }, (err) => printAsyncJobFailure(err, 'publish', opts)));
 
   addSubGraphOption(addContextGraphOption(
     kaCmd

@@ -1,3 +1,4 @@
+import { withChallengePeriod, type ChallengeOutcome } from './prover-challenge-error.js';
 /**
  * Random Sampling prover orchestrator.
  *
@@ -50,33 +51,9 @@ import {
 import { InMemoryProverWal } from './wal.js';
 import { SolvedPeriodSkip } from './solved-period-skip.js';
 
-/**
- * Outcome reported by `tick()`. The orchestrator's caller (the
- * agent's epoch loop) uses these to drive observability + retry
- * cadence — never to decide "should I tick again", because the next
- * tick is governed by chain state, not the previous outcome.
- */
-export type TickOutcome =
-  /** Reserved. Currently unreachable — see `tickImpl` for why we no
-   *  longer trust view-side `isValid: false`. Kept in the union so
-   *  downstream consumers (`prover-loop`, `random-sampling-bind`)
-   *  can pattern-match on it without breakage if a stricter
-   *  period-closed gate is reintroduced (e.g. duration == 0). */
-  | { kind: 'period-closed' }
-  | { kind: 'no-challenge'; reason: 'no-eligible-cg' | 'no-eligible-kc' }
-  | { kind: 'already-solved' }
-  | { kind: 'cg-not-found'; kaId: bigint }
-  | { kind: 'kc-not-synced'; kaId: bigint; cgId: bigint }
-  | {
-      kind: 'data-corrupted';
-      kaId: bigint;
-      cgId: bigint;
-      reason: 'root-mismatch' | 'leaf-count-mismatch' | 'meta-graph-bug';
-    }
-  | { kind: 'submit-stale' }
-  | { kind: 'submitted'; txHash: string; kaId: bigint; cgId: bigint; chunkId: bigint }
-  | { kind: 'error'; error: Error };
-
+import type { TickOutcome, ChallengePeriod } from './prover-outcome.js';
+export type { TickOutcome, ChallengePeriod } from './prover-outcome.js';
+export type { TickFailureKind } from './prover-health.js';
 export interface RandomSamplingProverDeps {
   chain: ChainAdapter;
   store: TripleStore;
@@ -496,7 +473,13 @@ export class RandomSamplingProver {
         epoch: solvedPeriodRead.record.challengePeriodEpoch.toString(),
         periodStart: solvedPeriodRead.record.periodStartBlock.toString(),
       });
-      return { kind: 'already-solved' };
+      return {
+        kind: 'already-solved',
+        period: {
+          epoch: solvedPeriodRead.record.challengePeriodEpoch,
+          periodStartBlock: solvedPeriodRead.record.periodStartBlock,
+        },
+      };
     }
     const { status } = solvedPeriodRead.value;
     const currentExisting = solvedPeriodRead.currentChallenge?.challenge ?? null;
@@ -521,7 +504,13 @@ export class RandomSamplingProver {
           epoch: currentExisting.epoch.toString(),
           periodStart: currentExisting.activeProofPeriodStartBlock.toString(),
         });
-        return { kind: 'already-solved' };
+        return {
+          kind: 'already-solved',
+          period: {
+            epoch: currentExisting.epoch,
+            periodStartBlock: currentExisting.activeProofPeriodStartBlock,
+          },
+        };
       }
       // Fall through to createChallenge — period actually rotated on-chain
       // even though the status view hasn't caught up. The chain's
@@ -534,14 +523,8 @@ export class RandomSamplingProver {
       });
     }
 
-    const periodKey: PeriodKey = {
-      epoch: 0n, // filled in once we have a challenge (epoch is on the challenge)
-      periodStartBlock: status.activeProofPeriodStartBlock,
-      identityId: this.identityId,
-    };
-
     let challenge: NodeChallenge;
-    let cgId: bigint;
+    let suppliedContextGraphId: bigint | undefined;
     let observedDurationInBlocks: bigint | undefined;
     // Same wall-clock stale check as the solved branch above. Without
     // it, an unsolved challenge whose period has expired (but whose
@@ -562,7 +545,6 @@ export class RandomSamplingProver {
     if (currentExisting !== null && !currentExisting.solved && !unsolvedStale) {
       challenge = currentExisting;
       observedDurationInBlocks = status.proofingPeriodDurationInBlocks;
-      cgId = await this.chain.getKAContextGraphId(challenge.knowledgeAssetId);
     } else {
       try {
         const created = await this.chain.createChallenge();
@@ -571,7 +553,7 @@ export class RandomSamplingProver {
         // duration. Unlike an older challenge, it cannot carry a duration from
         // a previous epoch's schedule.
         observedDurationInBlocks = challenge.proofingPeriodDurationInBlocks;
-        cgId = created.contextGraphId;
+        suppliedContextGraphId = created.contextGraphId;
       } catch (err) {
         if (err instanceof NoEligibleContextGraphError) {
           this.log.info('rs.tick.no-eligible-cg', {});
@@ -585,8 +567,22 @@ export class RandomSamplingProver {
       }
     }
 
-    periodKey.epoch = challenge.epoch;
-    periodKey.periodStartBlock = challenge.activeProofPeriodStartBlock;
+    return withChallengePeriod(challenge, period => this.processChallenge({
+      challenge, suppliedContextGraphId, observedDurationInBlocks,
+      observationBindingId: solvedPeriodRead.observationBindingId, period,
+    }));
+  }
+
+  /** Process one acquired challenge, including existing-challenge CG resolution, inside its period boundary. */
+  private async processChallenge({ challenge, suppliedContextGraphId, observedDurationInBlocks, observationBindingId, period }: {
+    challenge: NodeChallenge;
+    suppliedContextGraphId?: bigint;
+    observedDurationInBlocks?: bigint;
+    observationBindingId?: string;
+    period: ChallengePeriod;
+  }): Promise<ChallengeOutcome> {
+    const cgId = suppliedContextGraphId ?? await this.chain.getKAContextGraphId!(challenge.knowledgeAssetId);
+    const periodKey: PeriodKey = { ...period, identityId: this.identityId };
     const kaId = challenge.knowledgeAssetId;
     const chunkId = challenge.chunkId;
 
@@ -817,7 +813,7 @@ export class RandomSamplingProver {
 
     let txResult;
     try {
-      txResult = await this.chain.submitProof(material.content, material.proof);
+      txResult = await this.chain.submitProof!(material.content, material.proof);
     } catch (err) {
       if (err instanceof ChallengeNoLongerActiveError) {
         this.pinnedProofMaterial = undefined;
@@ -874,7 +870,7 @@ export class RandomSamplingProver {
       }),
     );
     await this.solvedPeriodSkip.observeSubmittedProof({
-      observationBindingId: solvedPeriodRead.observationBindingId,
+      observationBindingId: observationBindingId,
       challenge,
       durationInBlocks: observedDurationInBlocks,
     });

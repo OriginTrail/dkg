@@ -1,5 +1,5 @@
 import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
-import type { PeerSyncConnection } from '../p2p/peer-connection.js';
+import type { Libp2pConnection, PeerSyncConnection } from '../p2p/peer-connection.js';
 import { NetworkAdmissionProbeError } from '../p2p/network-admission-coordinator.js';
 import type { PeerSyncSession } from './peer-sync-session.js';
 
@@ -29,11 +29,7 @@ export interface PeerConnectionSyncContext {
 }
 
 /** The parts of a libp2p connection {@link isRedundantLimitedConnection} reads. */
-export interface OpenedConnectionView {
-  readonly id?: string;
-  readonly status?: string;
-  readonly limits?: unknown;
-}
+export type OpenedConnectionView = Pick<Libp2pConnection, 'id' | 'status' | 'limits'>;
 
 /**
  * A limited connection to a peer that already holds another open connection
@@ -51,9 +47,7 @@ export function isRedundantLimitedConnection(
   peerConnections: readonly OpenedConnectionView[],
 ): boolean {
   if (connection.limits == null) return false;
-  return peerConnections.some((other) => other !== connection
-    && (other.id === undefined || other.id !== connection.id)
-    && (other.status === undefined || other.status === 'open'));
+  return peerConnections.some((other) => other.id !== connection.id && other.status === 'open');
 }
 
 /** Connection policy belongs to sync; the generic lifetime owns only supervision. */

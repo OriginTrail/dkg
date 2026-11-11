@@ -528,7 +528,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
             onClick={handleWireDone}
             aria-label="Close wire workspace dialog"
             title="Close (Esc)"
-            style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
+            style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4, zIndex: 1 }}
           >
             ×
           </button>
@@ -577,7 +577,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           onClick={onClose}
           aria-label="Close join context graph dialog"
           title="Close (Esc)"
-          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
+          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-heading)', lineHeight: 1, padding: 4, zIndex: 1 }}
         >
           ×
         </button>
@@ -593,7 +593,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
           {pending && (
             <div style={{
-              padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 12,
+              padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 'var(--fs-control)',
               background: 'rgba(59, 130, 246, 0.08)', border: '1px solid rgba(59, 130, 246, 0.25)',
               color: 'var(--accent-primary, #3b82f6)',
             }}>
@@ -603,7 +603,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
           {approved && (
             <div style={{
-              padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 12,
+              padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 'var(--fs-control)',
               background: 'rgba(34, 197, 94, 0.08)', border: '1px solid rgba(34, 197, 94, 0.25)',
               color: 'var(--accent-green)',
             }}>
@@ -613,7 +613,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
           {rejected && (
             <div style={{
-              padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 12,
+              padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 'var(--fs-control)',
               background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.25)',
               color: 'var(--accent-warning, #f59e0b)',
             }}>
@@ -633,7 +633,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
               autoFocus
               rows={3}
               disabled={sending || pending || approved}
-              style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-label)' }}
               aria-label="Context graph invite code"
               autoComplete="off"
               spellCheck={false}
@@ -642,7 +642,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
           {intent.kind === 'publicSubscribe' && (
             <label style={{
-              display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12,
+              display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 'var(--fs-control)',
               color: 'var(--text-secondary)', cursor: sending ? 'default' : 'pointer',
             }}>
               <input

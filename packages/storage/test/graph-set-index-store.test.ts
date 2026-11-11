@@ -674,6 +674,83 @@ describe('GraphSetIndexStore', () => {
     expect(counting.listGraphsCalls).toBe(2);
   });
 
+  it('answers exact presence while a dirty full inventory is unavailable', async () => {
+    const removed = 'did:dkg:context-graph:dirty-removed';
+    const retained = 'did:dkg:context-graph:dirty-retained';
+    const counting = new CountingStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(counting);
+    await store.insert([q(removed, 'urn:remove'), q(retained, 'urn:keep')]);
+    await store.listGraphs();
+    await store.deleteByPattern({ subject: 'urn:remove' });
+    counting.failListGraphs = true;
+    const options = { priority: 'normal' as const, source: 'presence-test', signal: new AbortController().signal };
+
+    await expect(store.hasGraph(removed, options)).resolves.toBe(false);
+    await expect(store.hasGraph(retained, options)).resolves.toBe(true);
+    expect(counting.hasGraphOptions.slice(-2)).toEqual([options, options]);
+    expect(counting.listGraphsCalls).toBe(1);
+    // Point answers cannot certify or clear an otherwise dirty catalog.
+    await expect(store.listGraphs()).rejects.toThrow('listGraphs failed');
+    counting.failListGraphs = false;
+    await expect(store.listGraphs()).resolves.toEqual([retained]);
+  });
+
+  it('propagates exact presence failures while the catalog is dirty', async () => {
+    const inner = new FailingMaintenanceStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(inner);
+    const graph = 'did:dkg:context-graph:dirty-presence-error';
+    await store.insert([q(graph)]);
+    await store.listGraphs();
+    await store.deleteByPattern({ predicate: 'urn:p' });
+    inner.failHasGraph = true;
+
+    await expect(store.hasGraph(graph)).rejects.toThrow('hasGraph failed');
+    expect(inner.listGraphsCalls).toBe(1);
+    inner.failHasGraph = false;
+    await expect(store.listGraphs()).resolves.toEqual([]);
+  });
+
+  it('rejects an aborted dirty presence probe without starting backend work', async () => {
+    const counting = new CountingStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(counting);
+    const graph = 'did:dkg:context-graph:dirty-aborted';
+    await store.insert([q(graph)]);
+    await store.listGraphs();
+    await store.deleteByPattern({ predicate: 'urn:p' });
+    const controller = new AbortController();
+    const reason = new Error('caller stopped');
+    controller.abort(reason);
+
+    await expect(store.hasGraph(graph, { signal: controller.signal })).rejects.toBe(reason);
+    expect(counting.hasGraphOptions).toEqual([]);
+    expect(counting.listGraphsCalls).toBe(1);
+  });
+
+  it('cancels a dirty presence wait without trusting a late backend answer', async () => {
+    const inner = new ControlledProbeStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(inner);
+    const graph = 'did:dkg:context-graph:dirty-late-answer';
+    await store.insert([q(graph)]);
+    await store.listGraphs();
+    await store.deleteByPattern({ predicate: 'urn:p' });
+    inner.enableProbeGates();
+    const controller = new AbortController();
+    const probe = store.hasGraph(graph, { signal: controller.signal });
+    await inner.waitForProbe();
+    const reason = new Error('caller stopped waiting');
+    const rejected = expect(probe).rejects.toBe(reason);
+    controller.abort(reason);
+    try {
+      await rejected;
+      expect(inner.listGraphsCalls).toBe(1);
+    } finally {
+      inner.releaseProbe();
+      inner.disableProbeGates();
+    }
+    await expect(store.listGraphs()).resolves.toEqual([]);
+    expect(inner.listGraphsCalls).toBe(2);
+  });
+
   it('preserves deferred mutation source when hasGraph reads before listGraphs', async () => {
     const graph = 'did:dkg:context-graph:has-before-list';
     const counting = new CountingStore(new OxigraphStore());
@@ -687,7 +764,7 @@ describe('GraphSetIndexStore', () => {
     expect(counting.listGraphsCalls).toBe(1);
 
     await expect(store.hasGraph(graph)).resolves.toBe(false);
-    expect(counting.listGraphsCalls).toBe(2);
+    expect(counting.listGraphsCalls).toBe(1);
     await expect(store.listGraphs()).resolves.toEqual([]);
     expect(counting.listGraphsCalls).toBe(2);
     expect(events).toContainEqual({

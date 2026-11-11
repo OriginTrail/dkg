@@ -1,3 +1,4 @@
+import { admitShareWhileConnected } from '../share-admission-lifetime.js';
 import { classifyPromoteAdmissionError, promoteConflictResponse } from './promote-admission-response.js';
 import { PromoteJobCancellationConflictError } from '@origintrail-official/dkg-publisher';
 import { hasNodeOperatorReadAccess, requireContextGraphReadAuthority } from './context-graph-read-authority.js';
@@ -112,15 +113,17 @@ export async function handleKaShareAsyncEnqueue(ctx: RequestContext, name: strin
     }
   }
   try {
-    const result = await agent.assertion.promoteAsync(
+    const result = await admitShareWhileConnected(res, signal => agent.assertion.promoteAsync(
       resolvedContextGraphId,
       name,
       {
+        signal,
         entities: entities ?? "all",
         subGraphName,
         ...scopedTokenPromoteLane(writePreflightCallerAgentAddress),
       },
-    );
+    ));
+    if (result === undefined) return;
     return jsonResponse(res, 200, {
       jobId: result.jobId,
       state: "queued",

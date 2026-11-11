@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { Parser } from 'n3';
-import { parseRdf } from '../src/rdf-parser.js';
+import { parseRdfInput } from '../src/rdf-parser.js';
 import { batchEntityQuads } from '../src/batching.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -18,7 +18,7 @@ function serializeQuadsToNQuads(batch: Array<{ subject: string; predicate: strin
 describe.skipIf(!existsSync(FINDINGS_FILE))('synthetic findings workspace serialization regression', () => {
   it('serializes every staged workspace batch for the synthetic findings file without parser errors', async () => {
     const raw = readFileSync(FINDINGS_FILE, 'utf-8');
-    const quads = await parseRdf(raw, 'ntriples', 'did:dkg:context-graph:music-social');
+    const { quads } = await parseRdfInput(raw, 'ntriples', 'did:dkg:context-graph:music-social');
 
     const batches = batchEntityQuads(quads, {
       maxBatchQuads: 500,

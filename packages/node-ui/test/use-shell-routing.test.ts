@@ -122,6 +122,37 @@ describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
       const { activeTabId } = useTabsStore.getState();
       expect(activeTabId).toBe('dashboard');
     });
+
+    it('ignores marketplace deep links while the section is disabled', () => {
+      localStorage.removeItem('dkg-marketplace-enabled');
+      const ref = { current: '' };
+      mountAtPath('/marketplace/plans', ref);
+      expect(useTabsStore.getState().activeTabId).toBe('dashboard');
+    });
+
+    it('turns nothing on from routing a deep link with ?marketplace: only the app\'s start-up does', () => {
+      localStorage.removeItem('dkg-marketplace-enabled');
+      window.history.replaceState({}, '', '/ui/marketplace/plans?marketplace');
+      try {
+        const ref = { current: '' };
+        mountAtPath('/marketplace/plans', ref);
+        expect(useTabsStore.getState().activeTabId).toBe('dashboard');
+        expect(localStorage.getItem('dkg-marketplace-enabled')).toBeNull();
+      } finally {
+        window.history.replaceState({}, '', '/');
+      }
+    });
+
+    it('opens a marketplace deep link once the section is enabled', () => {
+      localStorage.setItem('dkg-marketplace-enabled', '1');
+      try {
+        const ref = { current: '' };
+        mountAtPath('/marketplace/plans', ref);
+        expect(useTabsStore.getState().activeTabId).toBe('marketplace-plans');
+      } finally {
+        localStorage.removeItem('dkg-marketplace-enabled');
+      }
+    });
   });
 
   describe('restoring a saved workspace', () => {

@@ -595,7 +595,7 @@ export function ConnectedAgentsTab(props: {
                             // happened to look right; now it falls back to
                             // `--bg-panel` and the chip blends in.
                             background: 'var(--bg-elevated)',
-                            fontSize: 11,
+                            fontSize: 'var(--fs-label)',
                           }}
                         >
                           {attachment.fileName}

@@ -175,8 +175,15 @@ describe('Random Sampling E2E (MockChainAdapter)', () => {
 
     // 8. Calling `tick()` again is idempotent: chain reports the
     //    challenge as solved, prover skips without re-submitting.
+    //    Both outcomes carry the challenge's on-chain period identity.
+    const challenge = await chain.getNodeChallenge(identityId);
+    const challengePeriod = {
+      epoch: challenge!.epoch,
+      periodStartBlock: challenge!.activeProofPeriodStartBlock,
+    };
+    expect(outcome).toMatchObject({ kind: 'submitted', period: challengePeriod });
     const second = await prover.tick();
-    expect(second).toEqual({ kind: 'already-solved' });
+    expect(second).toEqual({ kind: 'already-solved', period: challengePeriod });
 
     await prover.close();
   });
