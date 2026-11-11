@@ -315,6 +315,27 @@ export function readGraphStateMarkAllDirty(): string {
 }
 
 /**
+ * Mark one read graph dirty from whatever row is stored: two operations, in
+ * its context graph's state graph. A row that is not dirty gets a new
+ * generation, then the state `dirty`; a dirty row, or none, stays as it is.
+ * Unlike a compare-and-set it needs no copy of the stored row, so a mark that
+ * may not have landed can be sent again.
+ */
+export function readGraphStateMarkDirty(readGraph: string): string {
+  const p = READ_GRAPH_STATE_PREDICATES;
+  const dirty = sparqlString('dirty');
+  const stateGraph = stateGraphOf(readGraph);
+  const subject = `<${assertSafeIri(readGraph)}>`;
+  return `DELETE { GRAPH <${stateGraph}> { ${subject} <${p.generation}> ?generation } }\n`
+    + `INSERT { GRAPH <${stateGraph}> { ${subject} <${p.generation}> ?nextGeneration } }\n`
+    + `WHERE {\n  GRAPH <${stateGraph}> { ${subject} <${p.state}> ?state . ${subject} <${p.generation}> ?generation }\n`
+    + `  FILTER(!sameTerm(?state, ${dirty}))\n  BIND(?generation + 1 AS ?nextGeneration)\n};\n`
+    + `DELETE { GRAPH <${stateGraph}> { ${subject} <${p.state}> ?state } }\n`
+    + `INSERT { GRAPH <${stateGraph}> { ${subject} <${p.state}> ${dirty} } }\n`
+    + `WHERE {\n  GRAPH <${stateGraph}> { ${subject} <${p.state}> ?state }\n  FILTER(!sameTerm(?state, ${dirty}))\n}`;
+}
+
+/**
  * Replace a read graph's row, whatever it holds, with `row`: two operations.
  * The first removes the read graph's row fields from every state graph, a
  * misplaced copy in another context graph's included; the second inserts
