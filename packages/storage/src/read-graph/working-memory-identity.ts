@@ -34,7 +34,7 @@ import { workingMemoryIdentityRule, type WorkingMemoryIdentityRule } from './mem
 import { readGraphRuntimeOf } from './read-graph-store.js';
 import { addReadGraphDataDirectory, readGraphDataDirectories } from './data-directories.js';
 import { markReadGraphDirty, type ReadGraphJobContext } from './rebuild.js';
-import { readGraphRecoveryGeneration } from './recovery.js';
+import { readGraphRecoveryGeneration, syncReadGraphRuntimeWithRecovery } from './recovery.js';
 import { holdWorkingMemoryReadGraphs } from './working-memory-hold.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
 import { nextReadGraphState } from './state.js';
@@ -57,10 +57,10 @@ interface IdentityRecording {
   /** Working-memory read graphs marked dirty in the mirror for a change of identity, whose stored mark is owed. */
   readonly owed: Set<string>;
   /**
-   * Marks the store took that no flush has made durable yet, each with the backend's recovery generation from before
-   * it was stored. A restart of the backend since may have undone them.
+   * Marks the store took that no flush has made durable yet, each with the runtime's recovery generation
+   * (`./recovery.ts`) from before it was stored. A restart or restore of the backend since may have undone them.
    */
-  readonly unflushed: Map<string, number | undefined>;
+  readonly unflushed: Map<string, number>;
   /** Data directories whose record a change of identity could not remove: the working-memory read graphs are held. */
   readonly stale: Set<string>;
   /** The stored part of the installations, one at a time. */
@@ -285,7 +285,7 @@ async function storeMarksAndRecord(
   recording: IdentityRecording,
 ): Promise<boolean> {
   // A mark the store took before its backend restarted, which no flush made durable, may be undone: it is owed again.
-  const generation = readGraphRecoveryGeneration(context.store, runtime);
+  const generation = recoveryGeneration(context.store, runtime);
   oweUndoneMarks(recording, generation);
   const records = recordingDirectories(runtime, context.dataDir).length > 0;
   // A mark owed by an installation that comes meanwhile is stored here too.
@@ -312,7 +312,7 @@ async function storeMarksAndRecord(
     if (!removeRecordsOrHold(runtime, dirs)) return false;
     await context.store.flush?.();
     // The flush made durable the marks the backend still holds: those stored since its last restart.
-    if (oweUndoneMarks(recording, readGraphRecoveryGeneration(context.store, runtime))) return false;
+    if (oweUndoneMarks(recording, recoveryGeneration(context.store, runtime))) return false;
     recording.unflushed.clear();
     // An installation that came meanwhile records its own identity, once its marks are stored.
     if (recording.node !== node || recording.owed.size > 0) return false;
@@ -325,8 +325,14 @@ async function storeMarksAndRecord(
   return true;
 }
 
+/** The runtime's recovery generation, once it has seen any restart of its backend. */
+function recoveryGeneration(store: TripleStore, runtime: ReadGraphBackendRuntime): number {
+  syncReadGraphRuntimeWithRecovery(store, runtime);
+  return readGraphRecoveryGeneration(store, runtime);
+}
+
 /** Owe again each mark stored at another recovery generation than `generation`. Returns whether there was one. */
-function oweUndoneMarks(recording: IdentityRecording, generation: number | undefined): boolean {
+function oweUndoneMarks(recording: IdentityRecording, generation: number): boolean {
   let undone = false;
   for (const [readGraph, storedAt] of recording.unflushed) {
     if (storedAt === generation) continue;
