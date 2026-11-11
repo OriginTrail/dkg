@@ -4,7 +4,6 @@ import {
   markReadGraphDirty,
   readGraphLayerOf,
   removeReadGraph,
-  withReadGraphBackgroundSlot,
   type ReadGraphJobContext,
 } from '@origintrail-official/dkg-storage';
 import { dkgDir } from '../../config.js';
@@ -51,8 +50,8 @@ interface ReadGraphRow {
  *   workload, which keeps the result for the status;
  * - `POST …/rebuild`: mark each read graph dirty, which the node's builder
  *   rebuilds at its next pass;
- * - `POST …/drop`: remove each read graph, its contents and its state row, in
- *   the background slot.
+ * - `POST …/drop`: remove each read graph, its contents and its state row; a
+ *   removal takes the backend's background slot, as the builder's jobs do.
  *
  * `status`, `rebuild` and `drop` take an optional `contextGraphId` and `layer`
  * (wm, swm, vm), as query parameters for `status` and in the JSON body for the
@@ -103,7 +102,8 @@ export async function handleReadGraphRoutes(ctx: RequestContext, options: { data
         const after = await markReadGraphDirty(job, readGraph);
         answers.push({ readGraph, ...(after ? { state: after.state } : {}) });
       } else {
-        const result = await withReadGraphBackgroundSlot(layer!.runtime, () => removeReadGraph(job, readGraph));
+        // A removal takes the backend's background slot itself.
+        const result = await removeReadGraph(job, readGraph);
         answers.push({ readGraph, outcome: result.outcome });
       }
     } catch (error) {
