@@ -147,7 +147,8 @@ function isOpaqueRegistryWrite(write: ReadGraphRegistryWrite): boolean {
 }
 
 /**
- * A context graph's registry facts after a write, from the facts before it.
+ * A context graph's registry facts after a write, from the facts before it,
+ * once each, as the store keeps a quad however often it is inserted.
  * `undefined` when the write is opaque for these graphs, so only reading the
  * store again tells.
  */
@@ -191,7 +192,13 @@ export function registryFactsAfter(
     }
   };
   apply(write);
-  return next;
+  const seen = new Set<string>();
+  return next.filter((fact) => {
+    const key = JSON.stringify([fact.graph, fact.subject, fact.predicate, fact.object]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /**

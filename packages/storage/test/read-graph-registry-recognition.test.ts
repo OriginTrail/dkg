@@ -101,6 +101,17 @@ describe('registry facts', () => {
     expect(registryFactsAfter('w', code, { kind: 'opaque', graphs: [meta] })).toBeUndefined();
     expect(registryFactsAfter('w', code, { kind: 'opaque', graphs: [`${root}/_shared_memory`] })).toEqual(code);
   });
+
+  it('keep one fact per quad however often a write inserts it, and literals that differ in datatype or language apart', () => {
+    const meta = 'did:dkg:context-graph:w/_meta';
+    const named = (object: string) => ({ kind: 'quads' as const, added: [fact(meta, 'urn:asset:1', R.authenticatedSubGraphName, object)], removed: [] as Quad[] });
+    let facts: ReadGraphRegistryFact[] = [];
+    for (let round = 0; round < 3; round += 1) facts = registryFactsAfter('w', facts, named('"docs"'))!;
+    expect(facts).toHaveLength(1);
+    for (const object of ['"docs"@en', '"docs"@de', '"docs"^^<urn:test:type>', '"docs"@en']) facts = registryFactsAfter('w', facts, named(object))!;
+    expect(facts).toHaveLength(4);
+    expect(new Set(facts.map((each) => each.object)).size).toBe(4);
+  });
 });
 
 describe('registry recognition in the read-graph layer', () => {
