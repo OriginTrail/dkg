@@ -96,7 +96,7 @@ export function createGraphCatalogSizeRecorder(
     // `tools/observability/lib/queries.mjs` (graphCatalogLimitWarning) matches the start of this text.
     warn(`The graph catalog has reached ${percent}% of its internal limit `
       + `${STORE_GRAPH_CATALOG_LIMIT_NAME}: ${size.bytes} of ${ceiling} bytes, ${size.graphs} graphs. `
-      + `At the limit, catalog reads fail with STORE_INTERNAL_LIMIT; raise ${STORE_GRAPH_CATALOG_MAX_BYTES_ENV} before then.`);
+      + `At the limit, catalog reads fail with STORE_INTERNAL_LIMIT; raise store.graphCatalog.maxBytes or ${STORE_GRAPH_CATALOG_MAX_BYTES_ENV} before then.`);
   };
 }
 

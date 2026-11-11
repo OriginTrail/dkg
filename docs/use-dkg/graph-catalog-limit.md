@@ -12,7 +12,7 @@ memory and refreshed from the store. Queries use it to find a context graph's
 graphs without listing the store each time.
 
 One node-side limit bounds every full read of the catalog:
-`DKG_STORE_GRAPH_CATALOG_MAX_BYTES`, 256 MiB by default. The node measures the
+`store.graphCatalog.maxBytes` in the node's config, 256 MiB by default. The node measures the
 catalog as its graph names written as one JSON array. Past the limit, catalog
 reads fail closed with `STORE_INTERNAL_LIMIT`, and the daemon answers the
 queries that need the catalog with a retryable `503`. The node never serves a
@@ -24,7 +24,7 @@ When a refreshed catalog reaches 50 % and then 80 % of the limit, the node logs
 a warning at the `WARN` level, from the `graph-catalog` module:
 
 ```text
-The graph catalog has reached 80% of its internal limit STORE_GRAPH_CATALOG_MAX_BYTES: 214748365 of 268435456 bytes, 1830000 graphs. At the limit, catalog reads fail with STORE_INTERNAL_LIMIT; raise DKG_STORE_GRAPH_CATALOG_MAX_BYTES before then.
+The graph catalog has reached 80% of its internal limit STORE_GRAPH_CATALOG_MAX_BYTES: 214748365 of 268435456 bytes, 1830000 graphs. At the limit, catalog reads fail with STORE_INTERNAL_LIMIT; raise store.graphCatalog.maxBytes or DKG_STORE_GRAPH_CATALOG_MAX_BYTES before then.
 ```
 
 It logs once when the catalog reaches a level, and again every hour while the
@@ -45,9 +45,22 @@ When the node exports metrics, the same numbers are there:
 
 ## Raise the limit
 
-Set `DKG_STORE_GRAPH_CATALOG_MAX_BYTES`, in bytes, in the daemon's environment
-and restart the node. A value that is not a positive whole number keeps the
-default.
+Set `store.graphCatalog.maxBytes`, in bytes, in `~/.dkg/config.json`, and
+restart the node:
+
+```json
+{
+  "store": {
+    "graphCatalog": { "maxBytes": 536870912 }
+  }
+}
+```
+
+On a node with a configured store, put `graphCatalog` next to its `backend`. A
+`store` section that holds only settings keeps the default store.
+`DKG_STORE_GRAPH_CATALOG_MAX_BYTES` in the daemon's environment wins over the
+setting. A value that is not a positive whole number of bytes, in either place,
+stops the node at start with a message that names it.
 
 Size it from the catalog the warning reports:
 

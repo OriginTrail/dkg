@@ -133,7 +133,7 @@ describe('graph catalog size warnings', () => {
     record({ graphs: 2, bytes: 500 });
     record({ graphs: 2, bytes: 600 });
     expect(warnings).toEqual([
-      'The graph catalog has reached 50% of its internal limit STORE_GRAPH_CATALOG_MAX_BYTES: 500 of 1000 bytes, 2 graphs. At the limit, catalog reads fail with STORE_INTERNAL_LIMIT; raise DKG_STORE_GRAPH_CATALOG_MAX_BYTES before then.',
+      'The graph catalog has reached 50% of its internal limit STORE_GRAPH_CATALOG_MAX_BYTES: 500 of 1000 bytes, 2 graphs. At the limit, catalog reads fail with STORE_INTERNAL_LIMIT; raise store.graphCatalog.maxBytes or DKG_STORE_GRAPH_CATALOG_MAX_BYTES before then.',
     ]);
     record({ graphs: 3, bytes: 800 });
     expect(warnings).toHaveLength(2);
