@@ -176,6 +176,22 @@ When you pick the `blazegraph` backend in `dkg init` and leave the URL blank, th
 
 A reused legacy container is never recreated automatically, because doing so could discard its journal. If its volume or log policy does not match the current configuration, the CLI prints explicit backup/migration and unbounded-log warnings instead.
 
+### Blazegraph configured by hand: the graph catalog
+
+The node keeps a catalog of the store's named graphs in memory, so that it can find a context graph's graphs without reading the store's full graph list. It is on by default for the embedded and daemon-managed Oxigraph stores, for a Blazegraph that `dkg init` provisioned, and for a Blazegraph URL you configure yourself (`"backend": "blazegraph"`).
+
+The catalog assumes this node is the only writer of the store. If another node or process writes to the same Blazegraph namespace, switch the catalog off in the `store` block and restart the node:
+
+```json
+"store": {
+  "backend": "blazegraph",
+  "options": { "url": "http://127.0.0.1:9999/blazegraph/namespace/kb/sparql" },
+  "graphSetIndex": false
+}
+```
+
+Without the catalog, every graph discovery reads the store's full graph list, which gets slower as the store grows. Give each node its own namespace where you can.
+
 ## Programmatic (DKGAgent)
 
 When creating an agent in code, pass `storeConfig`:

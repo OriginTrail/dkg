@@ -33,8 +33,8 @@ export interface TripleStoreConfig {
   graphSetIndex?: boolean | GraphSetIndexStoreOptions;
   /**
    * OT-RFC-59 append-only change log (write-side). **Default OFF** — opt-in per
-   * store, independent of backend (unlike `graphSetIndex`, which is gated to
-   * local Oxigraph): the changelog must work on Blazegraph too, and its cost is
+   * store, independent of backend (unlike `graphSetIndex`, whose default
+   * depends on the backend): the changelog must work on Blazegraph too, and its cost is
    * a few marker quads per write. Enable ONLY on a single-writer (daemon) store;
    * see the {@link ChangelogStore} single-writer caveat.
    */
@@ -88,14 +88,21 @@ function isGraphSetIndexExplicitlyDisabled(
 
 function shouldEnableGraphSetIndex(config: TripleStoreConfig): boolean {
   if (config.graphSetIndex === true || typeof config.graphSetIndex === 'object') return true;
-  if (isDefaultLocalGraphSetIndexBackend(config.backend)) return true;
+  if (isDefaultGraphSetIndexBackend(config.backend)) return true;
   return config.options?.managedByDkg === true;
 }
 
-function isDefaultLocalGraphSetIndexBackend(backend: TripleStoreBackend): boolean {
+/**
+ * Backends indexed unless `graphSetIndex` is false: local Oxigraph, and Blazegraph,
+ * also a URL configured by hand. The index assumes this node is the store's only
+ * writer, so a Blazegraph namespace that other nodes or processes write to needs
+ * `graphSetIndex: false`. Without the index every discovery reads the full graph list.
+ */
+function isDefaultGraphSetIndexBackend(backend: TripleStoreBackend): boolean {
   return backend === 'oxigraph'
     || backend === 'oxigraph-persistent'
-    || backend === 'oxigraph-worker';
+    || backend === 'oxigraph-worker'
+    || backend === 'blazegraph';
 }
 
 export function resolveLargeLiteralStorageOptions(
