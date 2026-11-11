@@ -12,6 +12,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 
 import { buildAgentRuntimeStoreConfig } from '../src/daemon/agent-runtime-store-config.js';
+import { readGraphStoreSettings, resolveQueryConfig } from '../src/read-graphs-config.js';
 
 describe('daemon managed Oxigraph store construction', () => {
   it('retains managed RFC-64 authority through the final changelog-wrapped agent config', async () => {
@@ -126,5 +127,11 @@ describe('daemon managed Oxigraph store construction', () => {
       readGraphs,
     });
     expect(buildAgentRuntimeStoreConfig({ ...base, dataDir: '/tmp/dkg-home' })).toBeUndefined();
+    // A query section that keeps no read graph, an empty one included, leaves the default store as it was: a node
+    // that starts from a public checkpoint, which refuses any store configuration, still starts.
+    for (const query of [{}, { readGraphs: 'off', viewSemantics: 'merged' }]) {
+      const settings = readGraphStoreSettings(resolveQueryConfig(query));
+      expect(buildAgentRuntimeStoreConfig({ ...base, readGraphs: settings, dataDir: '/tmp/dkg-home' }), JSON.stringify(query)).toBeUndefined();
+    }
   });
 });
