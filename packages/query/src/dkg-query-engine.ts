@@ -320,6 +320,8 @@ export function resolveViewGraphs(
 }
 
 type ScopedQueryReadPlan = Extract<QueryReadPlan, { kind: 'scoped' }>;
+/** Store reads measured on their own, never charged to the caller's materialization budget. */
+type UnchargedReads = QueryStoreReadContext['shared']['measure'];
 
 /**
  * Local-only query engine that executes SPARQL against this node's own
@@ -420,7 +422,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         listGraphsByPrefix: async (prefix: string) => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads;
       const { policy } = plan;
       const variableContentGraphs = discovery ? selectScopedRouteGraphs(policy, discovery.partitions) : [];
-      return this.executeScoped(scope, plan, lane, variableContentGraphs, reads.catalog);
+      return this.executeScoped(scope, plan, lane, variableContentGraphs, reads.catalog, reads.shared.measure);
     };
     switch (plan.discovery.catalog.kind) {
       case 'none': return execute(null);
@@ -431,7 +433,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   }
 
   private async executeScoped(initialGraphScope: PreparedGraphScope,
-    plan: ScopedQueryReadPlan, reads: StoreReadLane, variableContentGraphs: readonly string[], catalogReads: StoreReadLane): Promise<QueryResult> {
+    plan: ScopedQueryReadPlan, reads: StoreReadLane, variableContentGraphs: readonly string[], catalogReads: StoreReadLane,
+    uncharged: UnchargedReads): Promise<QueryResult> {
     const { subGraphName, staticPrivateAllowList } = plan.policy;
     const allowedGraphs = await this.discoverLegacyRouteGraphs(plan, reads);
     const privateAllowList = plan.discovery.privatePartitions
@@ -440,8 +443,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const explicitAllowedGraphs = [...allowedGraphs, ...privateAllowList];
     const named = plan.discovery.contentPrefixes.length > 0 ? explicitGraphTargets(initialGraphScope) : null;
     if (named) {
-      await this.compareExplicitGraphMembership('legacy route', named, explicitAllowedGraphs, catalogReads,
-        async lane => [...(await this.discoverLegacyRouteGraphs(plan, lane)), ...privateAllowList]);
+      await this.compareExplicitGraphMembership('legacy route', named, explicitAllowedGraphs, uncharged,
+        async listing => [...(await this.discoverLegacyRouteGraphs(plan, listing)), ...privateAllowList]);
     }
     const variableAllowedGraphs = [...new Set([...explicitAllowedGraphs, ...variableContentGraphs])];
     // Explicit IRIs retain static route authority; only opted-in variables gain
@@ -475,13 +478,15 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   /**
    * Counting mode: the enumeration decides. Beside it, the route's own graph rule
    * judges the named graphs over a catalog of just those the store holds, which
-   * it finds by looking each one up instead of listing a prefix.
+   * it finds by looking each one up instead of listing a prefix. Every read of the
+   * check is measured apart from the caller's budget, so the check cannot change
+   * an answer.
    */
   private compareExplicitGraphMembership(route: string, named: readonly string[], enumerated: readonly string[],
-    catalogReads: StoreReadLane, collect: (lane: StoreReadLane) => Promise<readonly string[]>): Promise<void> {
+    uncharged: UnchargedReads, collect: (listing: StoreReadLane, catalog: StoreReadLane) => Promise<readonly string[]>): Promise<void> {
     const visible = this.store.graphEnumerationVisibility?.bind(this.store);
-    return this.explicitGraphMembership.compare(route, named, enumerated,
-      () => collect(laneOverNamedGraphs(named, catalogReads, visible)));
+    return this.explicitGraphMembership.compare(route, named, enumerated, async () =>
+      (await uncharged(reads => collect(laneOverNamedGraphs(named, reads, visible), reads))).snapshot);
   }
 
   private async execWithExclusions(scope: PreparedGraphScope, reads: StoreReadLane, excludedGraphPrefixes: readonly string[] = []): Promise<QueryResult> {
@@ -625,15 +630,15 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     view: GetView,
     contextGraphId: string,
     options: QueryOptions,
-    reads: StoreReadLane,
+    reads: QueryStoreReadContext,
     catalogReads: StoreReadLane,
   ): Promise<QueryResult> {
     const sparql = initialScope.source;
     const allGraphs = await this.collectViewGraphs(view, contextGraphId, options, reads, catalogReads);
     const named = explicitGraphTargets(initialScope);
     if (named) {
-      await this.compareExplicitGraphMembership(`${view} view`, named, allGraphs, catalogReads,
-        lane => this.collectViewGraphs(view, contextGraphId, options, lane, catalogReads));
+      await this.compareExplicitGraphMembership(`${view} view`, named, allGraphs, reads.shared.measure,
+        (listing, catalog) => this.collectViewGraphs(view, contextGraphId, options, listing, catalog));
     }
 
     if (allGraphs.length === 0) {

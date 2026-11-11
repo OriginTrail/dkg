@@ -11,6 +11,7 @@ import {
   ExplicitGraphMembershipCheck, explicitGraphTargets, laneOverNamedGraphs, readStoredGraphs,
 } from '../src/explicit-graph-membership.js';
 import { prepareGraphScope } from '../src/sparql-graph-scope.js';
+import { QueryMaterializationBudget } from '../src/query-store-read-context.js';
 import type { QueryOptions } from '../src/query-engine.js';
 
 // Runs on embedded Oxigraph; set BLAZEGRAPH_TEST_URL to run the same cases on a Blazegraph server.
@@ -325,6 +326,27 @@ describe('the membership check never changes an answer', () => {
     const result = await engine.query(`SELECT ?s WHERE { GRAPH <${GRAPH}> { ?s <urn:p> ?o } }`, options);
     expect(result.bindings).toEqual([{ s: 'urn:held:1' }]);
     expect(engine.explicitGraphMembershipCounts()).toEqual({ checked: 0, disagreed: 0, failed: 1 });
+  });
+
+  it.each([
+    ['the verifiable-memory view', options],
+    ['the data route', { contextGraphId: id }],
+  ] as const)('on %s, when the caller budget has no room to spare', async (_route, routeOptions) => {
+    const engine = new DKGQueryEngine(inner);
+    const sparql = `SELECT ?s WHERE { GRAPH <${GRAPH}> { ?s <urn:p> ?o } }`;
+    const charged = async (check: boolean) => {
+      const off = check ? undefined : vi.spyOn(ExplicitGraphMembershipCheck.prototype, 'compare').mockResolvedValue(undefined);
+      const budget = new QueryMaterializationBudget(Number.MAX_SAFE_INTEGER);
+      await engine.query(sparql, { ...routeOptions, materializationBudget: budget });
+      off?.mockRestore();
+      return (budget as unknown as { usedBytes: number }).usedBytes;
+    };
+    const alone = await charged(false);
+    const before = engine.explicitGraphMembershipCounts().checked;
+    expect(await charged(true)).toBe(alone);
+    expect(engine.explicitGraphMembershipCounts().checked).toBe(before + 1);
+    const result = await engine.query(sparql, { ...routeOptions, maxMaterializedBytes: alone });
+    expect(result.bindings).toEqual([{ s: 'urn:held:1' }]);
   });
 
   it('when it disagrees with the enumeration', async () => {
