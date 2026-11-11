@@ -699,7 +699,9 @@ test('the repository checks run beside the lanes, and the gate requires them whe
   assert.deepEqual(checks.needs, ['changes', 'build']);
   assert.equal(checks.if, jobs.build.if);
   const runs = checks.steps.map(({ run = '' }) => run.trim());
-  const restore = runs.indexOf('tar -xzf /tmp/build-outputs.tgz');
+  // --touch: the outputs were archived before this job's checkout, and the A18
+  // smoke refuses a dist that is older than its source.
+  const restore = runs.indexOf('tar --touch -xzf /tmp/build-outputs.tgz');
   assert.ok(restore !== -1 && restore < runs.indexOf('pnpm run test:scripts'), 'the script tests run on the restored build outputs');
   const scriptRunners = Object.keys(jobs).filter((job) => jobs[job].steps?.some(({ run = '' }) => run.trim() === 'pnpm run test:scripts'));
   assert.deepEqual(scriptRunners, ['repository-checks']);

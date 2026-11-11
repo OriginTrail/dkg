@@ -393,8 +393,11 @@ jobs:
         with:
           name: build-outputs
           path: /tmp
+      # --touch: this run's build of this commit, but archived before this
+      # checkout, so kept mtimes would make every output look older than its
+      # source, and the A18 smoke refuses a dist older than its source.
       - name: Restore build outputs
-        run: tar -xzf /tmp/build-outputs.tgz
+        run: tar --touch -xzf /tmp/build-outputs.tgz
 
       # The controller wiring test checks this workflow's planner flags against
       # the pinned controller's parser, which a depth-1 checkout does not hold.
