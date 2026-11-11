@@ -14,7 +14,13 @@ import {
   type Quad,
   type TripleStore,
 } from '../src/index.js';
-import { ReadGraphPartitionStore, readGraphPartitionMaintenanceStore } from '../src/read-graph-partition-store.js';
+import {
+  ReadGraphPartitionStore,
+  guardReadGraphPartition,
+  noteStoreMayHoldReadGraphPartitions,
+  readGraphPartitionMaintenanceStore,
+  storeMayHoldReadGraphPartitions,
+} from '../src/read-graph-partition-store.js';
 import { workingMemoryIdentityRule } from '../src/read-graph/membership.js';
 
 const R1 = readGraphIri({ scope: readScope('a'), layer: MemoryLayer.VerifiableMemory });
@@ -96,6 +102,22 @@ describe('read-graph backend runtime', () => {
     expect(readGraphBackendIdentity({ backend: 'oxigraph-worker' })).toBeUndefined();
     expect(readGraphBackendIdentity({ backend: 'oxigraph', options: { path: '/tmp/store' } })).toBeUndefined();
     expect(readGraphBackendIdentity({ backend: 'custom', options: { url: 'not a url ' } })).toBe('endpoint:not a url');
+  });
+
+  it('records that a backend may hold partitions for every store object over it, and only over it', () => {
+    const config = { backend: 'blazegraph', options: { url: `http://127.0.0.1:1/${Math.random()}` } };
+    const one = guardReadGraphPartition(wrapReadGraphLayer(new OxigraphStore(), config));
+    const two = guardReadGraphPartition(wrapReadGraphLayer(new OxigraphStore(), { ...config }));
+    const elsewhere = guardReadGraphPartition(wrapReadGraphLayer(new OxigraphStore(), { backend: 'oxigraph' }));
+    expect(storeMayHoldReadGraphPartitions(two)).toBe(false);
+    noteStoreMayHoldReadGraphPartitions(one);
+    expect(storeMayHoldReadGraphPartitions(two)).toBe(true);
+    expect(storeMayHoldReadGraphPartitions(elsewhere)).toBe(false);
+    // A store without the layer keeps the record on its own adapter object.
+    const bare = new OxigraphStore();
+    noteStoreMayHoldReadGraphPartitions(bare);
+    expect(storeMayHoldReadGraphPartitions(bare)).toBe(true);
+    expect(storeMayHoldReadGraphPartitions(new OxigraphStore())).toBe(false);
   });
 
   it('shares one runtime among the store objects of one backend, and none for an engine in memory', () => {
